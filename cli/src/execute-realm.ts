@@ -96,15 +96,83 @@ export const sandboxModules = { path, url, util, crypto, buffer, zlib, events, s
 
 // ---- execute file roots -----------------------------------------------------------------------------
 
+// Each process gets one private directory in TMPDIR, named with its pid: opencode-browser-files-<pid>-XXXXXX. Files
+// stay readable after execute returns (agents read screenshots they saved), so the directory goes when the process
+// exits, and a relay starting up removes the ones whose process is gone (killed, or crashed before its exit hook).
+const filesDirectoryPrefix = "opencode-browser-files-"
+const filesDirectoryPattern = /^opencode-browser-files-(\d+)-[A-Za-z0-9]{6}$/
+
 /** Directory `files.write(name, ...)` uses for relative names. */
 let filesDirectory: string | undefined
+let filesDirectoryExitHook = false
 export function executeFilesDirectory(): string {
-  filesDirectory ??= fs.mkdtempSync(path.join(os.tmpdir(), "opencode-browser-files-"))
+  if (filesDirectory === undefined) {
+    filesDirectory = fs.mkdtempSync(path.join(os.tmpdir(), `${filesDirectoryPrefix}${process.pid}-`))
+    if (!filesDirectoryExitHook) {
+      filesDirectoryExitHook = true
+      process.once("exit", removeExecuteFilesDirectory)
+    }
+  }
   const stat = fs.lstatSync(filesDirectory)
   if (!stat.isDirectory() || stat.isSymbolicLink() || (process.getuid && (stat.uid !== process.getuid() || (stat.mode & 0o777) !== 0o700))) {
     throw new ExecuteFileAccessError("files.dir must be an owned, private directory, not a symlink")
   }
   return fs.realpathSync(filesDirectory)
+}
+
+/** Removes this process's files directory and everything execute code saved in it. */
+export function removeExecuteFilesDirectory(): void {
+  const directory = filesDirectory
+  filesDirectory = undefined
+  if (directory === undefined) return
+  try {
+    const stat = fs.lstatSync(directory)
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return
+    fs.rmSync(directory, { recursive: true, force: true })
+  } catch {
+    // Already gone, or not ours to remove.
+  }
+}
+
+const processAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    // EPERM: the pid exists but belongs to another user.
+    return (error as NodeJS.ErrnoException).code === "EPERM"
+  }
+}
+
+/**
+ * Removes files directories left by processes that are gone: owned by this user, named with a pid that no longer runs.
+ * Directories of live processes (another relay, a running CLI), of other users, and older unnamed ones stay.
+ */
+export function pruneStaleExecuteFilesDirectories(tmp = os.tmpdir()): readonly string[] {
+  const removed: string[] = []
+  let entries: string[]
+  try {
+    entries = fs.readdirSync(tmp)
+  } catch {
+    return removed
+  }
+  for (const entry of entries) {
+    const match = filesDirectoryPattern.exec(entry)
+    if (!match) continue
+    const pid = Number(match[1])
+    if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid || processAlive(pid)) continue
+    const directory = path.join(tmp, entry)
+    try {
+      const stat = fs.lstatSync(directory)
+      if (!stat.isDirectory() || stat.isSymbolicLink()) continue
+      if (process.getuid && stat.uid !== process.getuid()) continue
+      fs.rmSync(directory, { recursive: true, force: true })
+      removed.push(directory)
+    } catch {
+      // Raced with another relay's prune, or not removable; leave it.
+    }
+  }
+  return removed
 }
 
 function realpathOrSelf(target: string): string {

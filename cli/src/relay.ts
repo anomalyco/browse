@@ -69,7 +69,7 @@ import { RootTargetLifecycle } from "./root-target-lifecycle.ts"
 import { boundedToken, runtimeFailureKind, summarizeDiagnosticUrl, summarizeRuntimeEvaluate } from "./runtime-diagnostics.ts"
 import { shouldExposeChildTarget, TargetRegistry, type RootTargetChange, type TargetOwnershipChange } from "./target-registry.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "./version.ts"
-import { handleExecuteRealmException, handleExecuteRealmRejection } from "./execute-realm.ts"
+import { handleExecuteRealmException, handleExecuteRealmRejection, pruneStaleExecuteFilesDirectories } from "./execute-realm.ts"
 
 export const startRelay = Effect.fn("Relay.start")(function* (options: {
   readonly port?: number
@@ -1813,6 +1813,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return yield* Effect.fail(error)
     })
   })
+  // Execute files directories of relays and CLI processes that died without their exit hook.
+  yield* Effect.sync(() => pruneStaleExecuteFilesDirectories())
 
   yield* Effect.catch(
     Effect.gen(function* () {
