@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url"
 import { extensionReconnectAlarmPeriodMs } from "./protocol.ts"
 import * as RelayClient from "./relay-client.ts"
 import { RelayShutdownRequest, type ExtensionStatus, type RelayVersion } from "./relay-schema.ts"
+import { installCommand } from "./paths.ts"
 import { opencodeBrowserBuildId } from "./version.ts"
 
 // From source the CLI entry is main.ts next to this file; the published bundle is a single file, so it is this file.
@@ -244,7 +245,7 @@ export const ensureExtensionConnected = Effect.fn("RelayLifecycle.ensureExtensio
     return status.connected
       ? Effect.succeed(status)
       : Effect.fail(new ExtensionDisconnected({
-        message: "OpenCode Browser extension is not connected. Open the browser with OpenCode Browser installed (`npx opencode-browser-cli install`); it reconnects automatically after relay or browser startup.",
+        message: `OpenCode Browser extension is not connected. Open the browser with OpenCode Browser installed (\`${installCommand()}\`); it reconnects automatically after relay or browser startup.`,
       }))
   }))
   if (!options.waitForReconnect) {

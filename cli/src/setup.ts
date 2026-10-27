@@ -15,7 +15,7 @@ import path from "node:path"
 import { createInterface } from "node:readline/promises"
 import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse } from "jsonc-parser"
-import { dataRoot } from "./paths.ts"
+import { cliCommand, dataRoot, installCommand } from "./paths.ts"
 import { formatPairingCode, pairingCode, relayAuthorization, writeExtensionPairing } from "./relay-secrets.ts"
 import { opencodeBrowserVersion } from "./version.ts"
 
@@ -331,7 +331,7 @@ async function install(args: string[]) {
   }
   // The unpacked extension reads the pairing code from its own folder, so it pairs with the relay without a step.
   pairUnpacked()
-  log("✓ Paired the unpacked extension with the relay (for the Chrome Web Store build, run `opencode-browser pair`)")
+  log(`✓ Paired the unpacked extension with the relay (for the Chrome Web Store build, run \`${cliCommand("pair")}\`)`)
   if (existsSync(bundledExtension)) {
     // A browser already running an older unpacked build keeps its old code until it reloads; ask it to.
     const reload = connected ? await reloadOutdatedExtension(connected) : "current"
@@ -346,7 +346,7 @@ async function install(args: string[]) {
 /** Printed before the relay's status by `opencode-browser status`. */
 export function printSetupStatus() {
   const settings = readJson<Settings>(files.settings)
-  log(settings?.version ? `Setup:     installed` : "Setup:     not installed. Run `npx opencode-browser-cli install`.")
+  log(settings?.version ? `Setup:     installed` : `Setup:     not installed. Run \`${installCommand()}\`.`)
   log(`Version:   ${settings?.version ?? "not installed"}${settings?.entry ? ` (${settings.entry})` : ""}`)
   log(`opencode:  ${settings?.opencode ?? findOpencode([]) ?? "not found"}`)
   log(mcpServers()[MCP_NAME] ? `MCP:       "${MCP_NAME}" configured` : "MCP:       not configured")
@@ -499,7 +499,7 @@ function locateExtension(options: { allowOpen: boolean; connected: boolean }) {
   log(`Install OpenCode Browser from the Chrome Web Store${opened ? ` (opened in ${target.name})` : ""}:`)
   log(`  ${STORE_URL}`)
   if (blocked.length) log(`  Already installed in ${blocked.map((detection) => detection.browser.name).join(", ")}? Then you're set.`)
-  log(`  Or load the unpacked build: npx ${PACKAGE} extension`)
+  log(`  Or load the unpacked build: ${cliCommand("extension")}`)
 }
 
 /** Every browser with user data here, and the profiles that have OpenCode Browser. */
