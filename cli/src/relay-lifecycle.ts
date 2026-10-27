@@ -294,7 +294,7 @@ export function startManagedRelay(
         throw new Error("Cannot locate the opencode-browser CLI entrypoint")
       }
       const launch = managedRelayLaunch(entrypoint, executable, execArgv)
-      const { OPENCODE_BROWSER_RESTART_REQUEST_ID: _inheritedRestartRequestId, ...env } = process.env
+      const { OPENCODE_BROWSER_RESTART_REQUEST_ID: _inheritedRestartRequestId, ...env } = relayEnvironment(process.env)
       const child = spawn(launch.executable, launch.args, {
         detached: true,
         stdio: "ignore",
@@ -304,6 +304,25 @@ export function startManagedRelay(
     },
     catch: (cause) => cause instanceof Error ? cause : new Error("Failed to start OpenCode Browser relay", { cause }),
   })
+}
+
+// The relay runs agent code and child commands; it gets only what it needs to run, never the MCP client's API keys.
+const relayEnvironmentNames = new Set([
+  "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TEMP", "TMP", "LANG", "LANGUAGE", "TZ",
+  "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY",
+  // Windows: process creation, the profile and data directories, and PATH resolution.
+  "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+  "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "HOMEDRIVE", "HOMEPATH", "USERNAME",
+])
+const relayEnvironmentPrefixes = ["OPENCODE_BROWSER_", "LC_"]
+
+/** The allowlisted subset of `env` the managed relay is started with. */
+export function relayEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(env).filter(([name, value]) => {
+    if (value === undefined) return false
+    const upper = name.toUpperCase()
+    return relayEnvironmentNames.has(upper) || relayEnvironmentPrefixes.some((prefix) => upper.startsWith(prefix))
+  }))
 }
 
 export function managedRelayLaunch(
