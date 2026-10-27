@@ -43,7 +43,7 @@ import {
 } from "./relay-helpers.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
 import { ghostCursorMouseActionExpression, ghostCursorRestoreExpression, inputDispatchMouseEventToGhostCursorAction } from "./ghost-cursor.ts"
-import { guardCdpMethod } from "./cdp-guardrails.ts"
+import { guardCdpMethod, scopeCdpResult } from "./cdp-guardrails.ts"
 import {
   awaitHandoffAction,
   HandoffRegistry,
@@ -1258,6 +1258,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       method: message.method,
       readOnly: clientOpenCodeBrowserSessionId ? sessions.isReadOnly(clientOpenCodeBrowserSessionId) : false,
       sessionId: clientOpenCodeBrowserSessionId,
+      params: message.params,
+      pageUrls: () => cdpRouter.visibleRoots(socket).map((target) => target.targetInfo.url),
     })
     if (guardMessage) {
       return yield* Effect.fail(new Error(guardMessage))
@@ -1391,7 +1393,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         })),
         Effect.tap(() => Effect.sync(() => setProtectedUi(tabId, false))),
       )
-    return result
+    return scopeCdpResult({ method: message.method, result, pageUrls: () => cdpRouter.visibleRoots(socket).map((target) => target.targetInfo.url) })
   })
 
   const toggleTab = Effect.fnUntraced(function* (tabId: number) {
