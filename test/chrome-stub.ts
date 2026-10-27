@@ -23,7 +23,7 @@ export class StubEvent {
 
 type Bounds = { left: number; top: number; width: number; height: number }
 type Window = Bounds & { id: number; type: string; state: string; focused: boolean }
-type Tab = { id: number; windowId: number; url: string; active: boolean; index: number }
+type Tab = { id: number; windowId: number; url: string; active: boolean; index: number; groupId: number }
 type CreateWindow = Partial<Bounds> & { url?: string; focused?: boolean; state?: string; type?: string }
 
 /** Chromium's check for chrome.windows.create bounds: at least half the window on some display. */
@@ -99,6 +99,7 @@ export function createChrome() {
     notifications: new Map<string, unknown>(),
   }
   const windowsApi = lenient({
+    WINDOW_ID_NONE: -1,
     onRemoved: new StubEvent(),
     async create(options: CreateWindow = {}) {
       state.created.push(options)
@@ -122,6 +123,18 @@ export function createChrome() {
       if (!window) throw new Error("No last-focused window")
       return { ...window }
     },
+    async update(id: number, change: { focused?: boolean }) {
+      const window = windows.get(id)
+      if (!window) throw new Error(`No window with id: ${id}.`)
+      if (change.focused === true) {
+        for (const other of windows.values()) other.focused = other === window
+        state.focusedWindowId = id
+      } else if (change.focused === false && window.focused) {
+        window.focused = false
+        state.focusedWindowId = undefined
+      }
+      return { ...window }
+    },
     async remove(id: number) {
       if (!windows.delete(id)) throw new Error(`No window with id: ${id}.`)
       for (const tab of tabs.values()) if (tab.windowId === id) tabs.delete(tab.id)
@@ -129,7 +142,7 @@ export function createChrome() {
     },
   })
   const addTab = (windowId: number, url: string, active: boolean) => {
-    const tab: Tab = { id: nextId++, windowId, url, active, index: [...tabs.values()].filter((tab) => tab.windowId === windowId).length }
+    const tab: Tab = { id: nextId++, windowId, url, active, index: [...tabs.values()].filter((tab) => tab.windowId === windowId).length, groupId: -1 }
     tabs.set(tab.id, tab)
     return tab
   }
@@ -162,7 +175,25 @@ export function createChrome() {
         Object.assign(tab, change)
         return { ...tab }
       },
+      async move(id: number, { windowId, index }: { windowId?: number; index: number }) {
+        const tab = tabs.get(id)
+        if (!tab) throw new Error(`No tab with id: ${id}.`)
+        if (windowId !== undefined && !windows.has(windowId)) throw new Error(`No window with id: ${windowId}.`)
+        tab.windowId = windowId ?? tab.windowId
+        tab.index = index === -1 ? [...tabs.values()].filter((other) => other.windowId === tab.windowId).length - 1 : index
+        return { ...tab }
+      },
+      async group({ tabIds, groupId }: { tabIds: number | number[]; groupId?: number }) {
+        const id = groupId ?? nextId++
+        for (const tabId of Array.isArray(tabIds) ? tabIds : [tabIds]) {
+          const tab = tabs.get(tabId)
+          if (!tab) throw new Error(`No tab with id: ${tabId}.`)
+          tab.groupId = id
+        }
+        return id
+      },
     }),
+    tabGroups: lenient({ TAB_GROUP_ID_NONE: -1 }),
     storage: lenient({
       onChanged,
       local: storageArea("local", onChanged),
