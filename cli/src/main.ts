@@ -3,7 +3,7 @@
 //   Setup (setup.ts): install, extension, pair, uninstall.
 //   Driving the browser (cli.ts): serve, relay, execute, session, network, secrets, recording, journal,
 //   doctor, skill, mcp, status. The relay is the local server agents use; the extension connects to it.
-// `opencode-browser-mcp` (or `opencode-browser mcp`) runs the MCP server over stdio.
+// `opencode-browser mcp` runs the MCP server over stdio (as does the bundle invoked as `opencode-browser-mcp`).
 import path from "node:path"
 
 const setupCommands = new Set(["install", "uninstall", "extension", "pair"])

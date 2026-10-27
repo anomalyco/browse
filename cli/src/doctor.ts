@@ -33,7 +33,6 @@ type PackageInfo = {
   readonly version: string
   readonly bin: {
     readonly opencodeBrowser: string | null
-    readonly opencodeBrowserMcp: string | null
   }
 }
 
@@ -65,7 +64,6 @@ export type DoctorReport = {
     readonly version: string | null
     readonly bin: {
       readonly opencodeBrowser: boolean
-      readonly opencodeBrowserMcp: boolean
     }
     readonly error: string | null
   }
@@ -153,7 +151,6 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
       version: metadata.version,
       bin: {
         opencodeBrowser: metadata.bin?.["opencode-browser"] ?? null,
-        opencodeBrowserMcp: metadata.bin?.["opencode-browser-mcp"] ?? null,
       },
     })),
   )
@@ -241,7 +238,6 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
       version: packageResult.ok ? packageResult.value.version : null,
       bin: {
         opencodeBrowser: packageResult.ok ? Boolean(packageResult.value.bin.opencodeBrowser) : false,
-        opencodeBrowserMcp: packageResult.ok ? Boolean(packageResult.value.bin.opencodeBrowserMcp) : false,
       },
       error: packageResult.ok ? null : packageResult.error,
     },
@@ -314,12 +310,6 @@ function buildDoctorChecks(options: {
         label: "opencode-browser bin",
         status: options.packageResult.value.bin.opencodeBrowser ? "ok" : "fail",
         message: options.packageResult.value.bin.opencodeBrowser ?? "missing from package.json bin",
-      },
-      {
-        id: "bin-opencode-browser-mcp",
-        label: "opencode-browser-mcp bin",
-        status: options.packageResult.value.bin.opencodeBrowserMcp ? "ok" : "warn",
-        message: options.packageResult.value.bin.opencodeBrowserMcp ?? "missing from package.json bin",
       },
     ]
     : []
