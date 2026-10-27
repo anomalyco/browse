@@ -14,6 +14,8 @@ type AttachOptions = {
   readonly alreadyAttached?: boolean
   readonly expectedExtensionGeneration?: number
   readonly autoAttachParams?: JsonObject
+  /** The opener page's target id, for a popup: clients see it as targetInfo.openerId and report the popup. */
+  readonly openerTargetId?: string
 }
 
 type Options = {
@@ -259,8 +261,11 @@ export class RootTargetLifecycle {
     }).pipe(Effect.ignore)
     yield* this.check(transition)
     const result = yield* this.command(transition, "Target.getTargetInfo")
-    const targetInfo = getTargetInfo(result.targetInfo)
-    if (!targetInfo) return yield* Effect.fail(new Error("Target.getTargetInfo did not return targetInfo"))
+    const reportedTargetInfo = getTargetInfo(result.targetInfo)
+    if (!reportedTargetInfo) return yield* Effect.fail(new Error("Target.getTargetInfo did not return targetInfo"))
+    const targetInfo = options.openerTargetId && !reportedTargetInfo.openerId
+      ? { ...reportedTargetInfo, openerId: options.openerTargetId }
+      : reportedTargetInfo
     const restored = options.opencodeBrowserSessionId ? undefined : this.options.sessions.persistedTargetOwner(targetInfo.targetId)
     const opencodeBrowserSessionId = options.opencodeBrowserSessionId ?? restored?.sessionId
     const target = this.options.registry.stageRootTarget({

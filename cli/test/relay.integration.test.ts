@@ -241,6 +241,56 @@ describe("relay", () => {
     extension.close()
   }, 20_000)
 
+  test("a popup an agent's page opens becomes the opener session's page, with openerId", async () => {
+    const targetInfo = (tabId: number) => ({ targetId: `TARGET-${tabId}`, type: "page", title: "Example", url: `https://example.com/${tabId}`, attached: true, browserContextId: "CTX" })
+    const extension = new FakeExtension(pairingCode(home))
+      .on("tabs.create", () => ({ tabId: 61 }))
+      .on("Target.getTargetInfo", (command) => ({ targetInfo: targetInfo(Number(command.params?.tabId)) }))
+    expect(await extension.pair()).toBe(true)
+    const socket = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test?opencodeBrowserSessionId=popups`, { authorization: `Bearer ${token}` })
+    if (!(socket instanceof WebSocket)) throw new Error(`CDP connection refused: ${socket}`)
+    const events = collect(socket)
+    expect((await cdpCall(socket, 1, "Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true })).error).toBeUndefined()
+    expect((await cdpCall(socket, 2, "Target.createTarget", { url: "https://example.com/61" })).result?.targetId).toBe("TARGET-61")
+
+    // Chrome auto-attaches the popup to the opener's debuggee as a paused page child.
+    extension.emit("debugger.event", {
+      tabId: 61,
+      method: "Target.attachedToTarget",
+      params: { sessionId: "popup-child", targetInfo: { ...targetInfo(62), openerId: "TARGET-61" }, waitingForDebugger: true },
+    })
+    const released = () => extension.commands.filter((command) => command.params?.sessionId === "popup-child" || (command.params?.params as { sessionId?: string } | undefined)?.sessionId === "popup-child")
+    expect(await until(() => released().some((command) => command.params?.method === "Target.detachFromTarget"))).toBe(true)
+    expect(released().some((command) => command.params?.method === "Runtime.runIfWaitingForDebugger")).toBe(true)
+    // The client never sees it as a child of the opener.
+    expect(events.some((event) => event.method === "Target.attachedToTarget" && (event.params?.sessionId === "popup-child"))).toBe(false)
+
+    // The extension reports the new tab; the relay attaches it as a root of the opener's session.
+    extension.emit("tabs.opened", { tabId: 62, openerTabId: 61 })
+    const announced = () => events.find((event) => event.method === "Target.attachedToTarget" && (event.params?.targetInfo as { targetId?: string } | undefined)?.targetId === "TARGET-62")
+    expect(await until(() => announced() !== undefined)).toBe(true)
+    const info = announced()?.params?.targetInfo as { openerId?: string; type?: string }
+    expect(info.openerId).toBe("TARGET-61")
+    expect(info.type).toBe("page")
+    expect(extension.commands.some((command) => command.method === "debugger.attach" && command.params?.tabId === 62)).toBe(true)
+    const targets = (await cdpCall(socket, 3, "Target.getTargets")).result?.targetInfos as Array<{ targetId: string }>
+    expect(targets.map((target) => target.targetId).sort()).toEqual(["TARGET-61", "TARGET-62"])
+
+    // Another session's client doesn't see it.
+    const other = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test?opencodeBrowserSessionId=someone-else`, { authorization: `Bearer ${token}` })
+    if (!(other instanceof WebSocket)) throw new Error("CDP connection refused")
+    const otherTargets = (await cdpCall(other, 1, "Target.getTargets")).result?.targetInfos as Array<{ targetId: string }>
+    expect(otherTargets.some((target) => target.targetId === "TARGET-62")).toBe(false)
+
+    // A tab opened from a tab no session uses is left alone.
+    extension.emit("tabs.opened", { tabId: 64, openerTabId: 63 })
+    await Bun.sleep(200)
+    expect(extension.commands.some((command) => command.method === "debugger.attach" && command.params?.tabId === 64)).toBe(false)
+    other.close()
+    socket.close()
+    extension.close()
+  }, 20_000)
+
   test("page.goto to a data: URL writes its content into about:blank", async () => {
     const targetInfo = { targetId: "TARGET-71", type: "page", title: "Example", url: "https://example.com/", attached: true, browserContextId: "CTX" }
     const extension = new FakeExtension(pairingCode(home))

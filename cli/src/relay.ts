@@ -972,6 +972,44 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     })
   }
 
+  function releaseOpenedPageSession(tabId: number, parentSessionId: string | undefined, childSessionId: string, params: JsonObject | undefined): void {
+    resumeIfWaitingForDebugger(tabId, childSessionId, params, "Failed to resume opened page")
+    Effect.runPromise(sendDebuggerCommand({
+      tabId,
+      ...(parentSessionId === undefined ? {} : { sessionId: parentSessionId }),
+      method: "Target.detachFromTarget",
+      params: { sessionId: childSessionId },
+    }).pipe(Effect.ignore)).catch(() => {})
+  }
+
+  /**
+   * A tab the page in an attached tab opened. When the opener belongs to a session (an agent's tab, or a lent tab
+   * while its session runs a script, so a user's own click in their tab stays theirs), the new tab joins that session
+   * as a relay-owned page. Clients get it with openerId set to the opener's target, so Playwright reports it as the
+   * opener's popup and lists it in context.pages().
+   */
+  function adoptOpenedTab(tabId: number, openerTabId: number): void {
+    const opener = registry.tabTargets.get(openerTabId)
+    const sessionId = opener?.opencodeBrowserSessionId
+    if (!opener || !sessionId || registry.routingRootTarget(tabId)) return
+    if (opener.owner === "user" && !sessions.isExecuting(sessionId)) return
+    const autoAttachParams = Array.from(cdpClients)
+      .filter((client) => cdpClients.sessionId(client) === sessionId)
+      .map((client) => cdpClients.autoAttachParams(client))
+      .find((params) => params !== undefined)
+    relayLog("tab.opened", { tabId, openerTabId, session: sessionId })
+    currentAnnouncedRootTabIds?.add(tabId)
+    Effect.runPromise(rootLifecycle.attach({
+      tabId,
+      owner: "relay",
+      opencodeBrowserSessionId: sessionId,
+      openerTargetId: opener.targetInfo.targetId,
+      ...(autoAttachParams ? { autoAttachParams } : {}),
+    })).catch((error: unknown) => {
+      relayLog("tab.opened.error", { tabId, error: error instanceof Error ? error.message : String(error) })
+    })
+  }
+
   function handleExtensionMessage(socket: WebSocket, raw: string, generation: number, announcedRootTabIds: Set<number>): void {
     const message = parseJsonObject(raw)
     if (isExtensionResponse(message)) {
@@ -1064,6 +1102,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       }
       return
     }
+    if (extensionMethod === "tabs.opened") {
+      const openerTabId = getNumber(message.params, "openerTabId")
+      if (eventTabId && openerTabId) adoptOpenedTab(eventTabId, openerTabId)
+      return
+    }
     if (extensionMethod === "tabs.removed") {
       if (eventTabId) {
         detachTargetState(eventTabId)
@@ -1129,6 +1172,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
             retractProtectedFrame(target, targetInfo.targetId, targetInfo.url)
           }
           resumeIfWaitingForDebugger(tabId, childSessionId, params, "Failed to resume restricted target")
+          return
+        }
+        if (targetInfo.type === "page") {
+          // A popup or window the page opened (target=_blank, window.open). Clients ignore page children, so it
+          // becomes a root target of its own once the extension reports its tab (tabs.opened). The opener's
+          // auto-attached session lets go of it here, so the new page isn't left paused or shared.
+          suppressedChildSessions.set(childSessionId, tabId)
+          releaseOpenedPageSession(tabId, sourceSessionId, childSessionId, params)
           return
         }
         suppressedChildSessions.delete(childSessionId)

@@ -78,7 +78,10 @@ sessions.
 
 Tabs you open live in a separate agent window that never takes focus, so the
 user keeps working undisturbed; popups your clicks open move there too. Don't
-ask the user to watch a tab unless you hand it off.
+ask the user to watch a tab unless you hand it off. Popups (`target=_blank`,
+`window.open`) are ordinary pages of your session: use
+`page.waitForEvent("popup")` or `context.waitForEvent("page")`, and they show
+up in `context.pages()`.
 
 To render your own HTML, use `page.setContent(html)`. `page.goto("data:...")`
 works too, but Chromium doesn't let an extension open data: URLs, so the

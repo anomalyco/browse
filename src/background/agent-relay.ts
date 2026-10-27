@@ -852,7 +852,13 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     TabCleanup.track(tabId)
   }
   chrome.webNavigation.onCreatedNavigationTarget.addListener(({ sourceTabId, tabId }) => {
-    void adoptOpened(tabId, sourceTabId).catch((error: unknown) => log.add("tab.opened.error", { error: text(error) }))
+    void adoptOpened(tabId, sourceTabId)
+      .catch((error: unknown) => log.add("tab.opened.error", { error: text(error) }))
+      // Once it's moved and grouped: the relay attaches it as a page of the opener's session, so the agent's
+      // Playwright sees it (page.waitForEvent("popup"), context.pages()).
+      .finally(() => {
+        if (relayTabs.has(sourceTabId)) send({ method: "tabs.opened", params: { tabId, openerTabId: sourceTabId } })
+      })
   })
   void chrome.alarms.create(ALARM, { periodInMinutes: extensionReconnectAlarmPeriodMs / 60_000 })
   void DebuggerHub.restore().then(() => {
