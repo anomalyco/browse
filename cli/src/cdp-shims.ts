@@ -5,6 +5,18 @@ import type { ChildTarget } from "./relay-types.ts"
 import { shouldExposeChildTarget, type TargetRegistry } from "./target-registry.ts"
 import type { CdpClientPool } from "./cdp-client-pool.ts"
 
+// Patchright sends Emulation.setEmulatedMedia with its own defaults for these features on every page
+// (light, no-preference, none, no-preference), which hides the user's real settings from the page and makes
+// matchMedia disagree with the rest of the browser. execute marks overrides the agent asked for with
+// __bc_explicit__; values other than the defaults can only come from the agent.
+const patchrightDefaultMediaFeatures: ReadonlyMap<string, string> = new Map([
+  ["prefers-color-scheme", "light"],
+  ["prefers-reduced-motion", "no-preference"],
+  ["forced-colors", "none"],
+  ["prefers-contrast", "no-preference"],
+])
+
+/** Drops Patchright's default media feature overrides unless the agent asked for them. */
 export function removeDefaultLightColorSchemeEmulation(message: CdpRequest): CdpRequest {
   if (message.method !== "Emulation.setEmulatedMedia") {
     return message
@@ -14,33 +26,21 @@ export function removeDefaultLightColorSchemeEmulation(message: CdpRequest): Cdp
     const object = getObject(feature)
     return object?.name === "__bc_explicit__"
   })
-  if (isExplicit) {
-    return {
-      ...message,
-      params: {
-        ...message.params,
-        features: features.filter((feature) => {
-          const object = getObject(feature)
-          return object?.name !== "__bc_explicit__"
-        }),
-      },
-    }
-  }
-  const hasDefaultLightColorScheme = features.some((feature) => {
+  const kept = features.filter((feature) => {
     const object = getObject(feature)
-    return object?.name === "prefers-color-scheme" && object.value === "light"
+    if (object?.name === "__bc_explicit__") return false
+    if (isExplicit) return true
+    const name = getString(object, "name")
+    return name === undefined || patchrightDefaultMediaFeatures.get(name) !== object?.value
   })
-  if (!hasDefaultLightColorScheme) {
+  if (kept.length === features.length) {
     return message
   }
   return {
     ...message,
     params: {
       ...message.params,
-      features: features.filter((feature) => {
-        const object = getObject(feature)
-        return object?.name !== "prefers-color-scheme"
-      }),
+      features: kept,
     },
   }
 }

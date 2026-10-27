@@ -391,6 +391,13 @@ const defaultHandoffTimeoutMs = 10 * 60 * 1_000
 
 const defaultHandoffMessage = "Complete the requested task, then use the in-page continue control."
 
+const explicitMediaOptions = [
+  ["colorScheme", "prefers-color-scheme"],
+  ["reducedMotion", "prefers-reduced-motion"],
+  ["forcedColors", "forced-colors"],
+  ["contrast", "prefers-contrast"],
+] as const
+
 type ShowGhostCursorOptions = GhostCursorClientOptions & {
   readonly page?: Page
 }
@@ -484,7 +491,9 @@ export class ExecuteSandbox {
   private pendingTargetRebind: "replaced" | "repaired" | undefined
   private lastKnownNonBlankUrl: string | undefined
   private recreatedFromClosedUrl: string | undefined
-  private explicitLightColorScheme = false
+  /** Media features the agent set with page.emulateMedia; the relay drops Patchright's defaults otherwise. */
+  private readonly explicitMediaFeatures = new Map<string, string>()
+  private explicitMedia: string | undefined
   private readonly state: Record<string, unknown> = {}
   private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
   private readonly networkCapture = new NetworkCapture.Recorder()
@@ -1080,8 +1089,8 @@ export class ExecuteSandbox {
         this.pageCrashed = false
         this.recordNonBlankUrl(frame.url())
         page.setDefaultTimeout?.(30_000)
-        if (this.explicitLightColorScheme) {
-          void this.applyExplicitLightColorScheme(page)
+        if (this.explicitMediaFeatures.size > 0) {
+          void this.applyExplicitMediaFeatures(page)
         }
       }
     }
@@ -1258,13 +1267,14 @@ export class ExecuteSandbox {
     }
   }
 
-  private async applyExplicitLightColorScheme(page: Page): Promise<void> {
+  private async applyExplicitMediaFeatures(page: Page): Promise<void> {
     try {
       const cdp = await page.context().newCDPSession(page)
       try {
         await cdp.send("Emulation.setEmulatedMedia", {
+          ...(this.explicitMedia ? { media: this.explicitMedia } : {}),
           features: [
-            { name: "prefers-color-scheme", value: "light" },
+            ...Array.from(this.explicitMediaFeatures, ([name, value]) => ({ name, value })),
             { name: "__bc_explicit__", value: "1" },
           ],
         })
@@ -1281,12 +1291,16 @@ export class ExecuteSandbox {
       Object.defineProperty(page, "emulateMedia", {
         configurable: true,
         value: async (options?: Parameters<Page["emulateMedia"]>[0]) => {
-          if (options && "colorScheme" in options) {
-            this.explicitLightColorScheme = options.colorScheme === "light"
+          for (const [option, feature] of explicitMediaOptions) {
+            if (!options || !(option in options)) continue
+            const value = options[option]
+            if (typeof value === "string") this.explicitMediaFeatures.set(feature, value)
+            else this.explicitMediaFeatures.delete(feature)
           }
+          if (options && "media" in options) this.explicitMedia = options.media ?? undefined
           await originalEmulateMedia(options)
-          if (this.explicitLightColorScheme) {
-            await this.applyExplicitLightColorScheme(page)
+          if (this.explicitMediaFeatures.size > 0) {
+            await this.applyExplicitMediaFeatures(page)
           }
         },
       })
