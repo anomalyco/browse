@@ -34,6 +34,13 @@
  * three slices) are stopped too. Native work inside one host call (a large zlib
  * *Sync call, allocating a huge Buffer) and memory use are not bounded this way.
  *
+ * The slice timeout is V8's TerminateExecution: it can land anywhere on the
+ * stack, including inside a host function the sandbox called synchronously
+ * (membrane traps, helpers, timer scheduling). Host functions reachable from
+ * the sandbox must therefore stay short and must not leave relay bookkeeping
+ * half-updated if cut off midway (update state in one step, or so that a
+ * partial update is harmless); a terminated realm is disposed, not resumed.
+ *
  * Residual risk: this is defence in depth, not a security boundary as strong
  * as a separate process. A bug in this membrane or a Playwright API that
  * reaches the host in a way not covered here could still escape, and the
