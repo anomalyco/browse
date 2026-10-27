@@ -5,7 +5,7 @@ import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import WebSocket from "ws"
-import { stableUnpackedExtensionOrigin } from "../src/relay-helpers.ts"
+import { dataUrlDocument, stableUnpackedExtensionOrigin } from "../src/relay-helpers.ts"
 import { pairingCode, pairingProof, relayToken } from "../src/relay-secrets.ts"
 
 // A relay from source on a free port with its own data root, and a fake extension that pairs with it and answers
@@ -41,7 +41,7 @@ class FakeExtension {
    * Resolves true once the relay proved the code and accepted the extension's proof. A real extension stops when
    * the relay's proof is wrong; `answerAnyway` sends the extension's proof regardless, as an impostor would.
    */
-  async pair(options: { readonly answerAnyway?: boolean } = {}): Promise<boolean> {
+  async pair(options: { readonly answerAnyway?: boolean; readonly proofPort?: number } = {}): Promise<boolean> {
     await new Promise<void>((resolve, reject) => {
       this.socket.once("open", () => resolve())
       this.socket.once("error", reject)
@@ -61,9 +61,10 @@ class FakeExtension {
     const params = await challenge
     // The relay must prove it knows the code before the extension obeys it.
     if (!params) return false
-    this.relayProved = params.proof === pairingProof(this.code, "relay", params.nonce, nonce)
+    const proofPort = options.proofPort ?? port
+    this.relayProved = params.proof === pairingProof(this.code, "relay", proofPort, params.nonce, nonce)
     if (!this.relayProved && !options.answerAnyway) return false
-    this.socket.send(JSON.stringify({ method: "auth.response", params: { proof: pairingProof(this.code, "extension", nonce, params.nonce) } }))
+    this.socket.send(JSON.stringify({ method: "auth.response", params: { proof: pairingProof(this.code, "extension", proofPort, nonce, params.nonce) } }))
     this.socket.on("message", (data) => this.answer(JSON.parse(String(data)) as Command))
     this.socket.send(JSON.stringify({ method: "ready" }))
     await Bun.sleep(100)
@@ -82,9 +83,27 @@ class FakeExtension {
     }
   }
 
+  /** Sends an extension event, as the real extension does for debugger events and tab changes. */
+  emit(method: string, params: Record<string, unknown>) {
+    this.socket.send(JSON.stringify({ method, params }))
+  }
+
   close() {
     this.socket.close()
   }
+}
+
+/** Every message a CDP client receives, for asserting on events. */
+function collect(socket: WebSocket): Array<{ method?: string; params?: Record<string, unknown>; sessionId?: string }> {
+  const messages: Array<{ method?: string; params?: Record<string, unknown>; sessionId?: string }> = []
+  socket.on("message", (data) => messages.push(JSON.parse(String(data))))
+  return messages
+}
+
+async function until(condition: () => boolean, timeoutMs = 3_000) {
+  const deadline = Date.now() + timeoutMs
+  while (!condition() && Date.now() < deadline) await Bun.sleep(20)
+  return condition()
 }
 
 async function freePort(): Promise<number> {
@@ -174,6 +193,15 @@ describe("relay", () => {
     expect(status.connected).toBe(false)
   })
 
+  test("a handshake passed through from another port is refused", async () => {
+    // The extension dialled a listener on another port that forwards to this relay: its proofs name that port.
+    const forwarded = new FakeExtension(pairingCode(home))
+    expect(await forwarded.pair({ answerAnyway: true, proofPort: port + 1 })).toBe(false)
+    expect(forwarded.relayProved).toBe(false)
+    await Bun.sleep(100)
+    expect(forwarded.closeCode).toBe(4006)
+  })
+
   test("a paired extension carries an authenticated CDP command", async () => {
     const tabId = 41
     const targetInfo = { targetId: "TARGET-41", type: "page", title: "Example", url: "https://example.com/", attached: true, browserContextId: "CTX" }
@@ -199,7 +227,109 @@ describe("relay", () => {
     // Guardrails apply on the way through.
     const blocked = await cdpCall(socket, 4, "Storage.clearDataForOrigin", { origin: "https://example.com", storageTypes: "all" }, sessionId)
     expect(blocked.error?.message).toContain("blocked Storage.clearDataForOrigin")
+    // Site storage is scoped to the session's page hosts; navigations to local and internal pages are refused.
+    const otherOrigin = await cdpCall(socket, 5, "IndexedDB.requestDatabaseNames", { securityOrigin: "https://bank.test" }, sessionId)
+    expect(otherOrigin.error?.message).toContain("blocked IndexedDB.requestDatabaseNames")
+    const ownOrigin = await cdpCall(socket, 6, "IndexedDB.requestDatabaseNames", { securityOrigin: "https://example.com" }, sessionId)
+    expect(ownOrigin.error).toBeUndefined()
+    const file = await cdpCall(socket, 7, "Page.navigate", { url: "file:///etc/passwd" }, sessionId)
+    expect(file.error?.message).toContain("blocked Page.navigate to a file: URL")
+    const internal = await cdpCall(socket, 8, "Target.createTarget", { url: "chrome://settings" })
+    expect(internal.error?.message).toContain("blocked Target.createTarget")
+    expect(extension.commands.some((command) => command.params?.method === "Page.navigate" || (command.method === "tabs.create" && String(command.params?.url).startsWith("chrome:")))).toBe(false)
     socket.close()
     extension.close()
   }, 20_000)
+
+  test("a popup an agent's page opens becomes the opener session's page, with openerId", async () => {
+    const targetInfo = (tabId: number) => ({ targetId: `TARGET-${tabId}`, type: "page", title: "Example", url: `https://example.com/${tabId}`, attached: true, browserContextId: "CTX" })
+    const extension = new FakeExtension(pairingCode(home))
+      .on("tabs.create", () => ({ tabId: 61 }))
+      .on("Target.getTargetInfo", (command) => ({ targetInfo: targetInfo(Number(command.params?.tabId)) }))
+    expect(await extension.pair()).toBe(true)
+    const socket = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test?opencodeBrowserSessionId=popups`, { authorization: `Bearer ${token}` })
+    if (!(socket instanceof WebSocket)) throw new Error(`CDP connection refused: ${socket}`)
+    const events = collect(socket)
+    expect((await cdpCall(socket, 1, "Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true })).error).toBeUndefined()
+    expect((await cdpCall(socket, 2, "Target.createTarget", { url: "https://example.com/61" })).result?.targetId).toBe("TARGET-61")
+
+    // Chrome auto-attaches the popup to the opener's debuggee as a paused page child.
+    extension.emit("debugger.event", {
+      tabId: 61,
+      method: "Target.attachedToTarget",
+      params: { sessionId: "popup-child", targetInfo: { ...targetInfo(62), openerId: "TARGET-61" }, waitingForDebugger: true },
+    })
+    const released = () => extension.commands.filter((command) => command.params?.sessionId === "popup-child" || (command.params?.params as { sessionId?: string } | undefined)?.sessionId === "popup-child")
+    expect(await until(() => released().some((command) => command.params?.method === "Target.detachFromTarget"))).toBe(true)
+    expect(released().some((command) => command.params?.method === "Runtime.runIfWaitingForDebugger")).toBe(true)
+    // The client never sees it as a child of the opener.
+    expect(events.some((event) => event.method === "Target.attachedToTarget" && (event.params?.sessionId === "popup-child"))).toBe(false)
+
+    // The extension reports the new tab; the relay attaches it as a root of the opener's session.
+    extension.emit("tabs.opened", { tabId: 62, openerTabId: 61 })
+    const announced = () => events.find((event) => event.method === "Target.attachedToTarget" && (event.params?.targetInfo as { targetId?: string } | undefined)?.targetId === "TARGET-62")
+    expect(await until(() => announced() !== undefined)).toBe(true)
+    const info = announced()?.params?.targetInfo as { openerId?: string; type?: string }
+    expect(info.openerId).toBe("TARGET-61")
+    expect(info.type).toBe("page")
+    expect(extension.commands.some((command) => command.method === "debugger.attach" && command.params?.tabId === 62)).toBe(true)
+    const targets = (await cdpCall(socket, 3, "Target.getTargets")).result?.targetInfos as Array<{ targetId: string }>
+    expect(targets.map((target) => target.targetId).sort()).toEqual(["TARGET-61", "TARGET-62"])
+
+    // Another session's client doesn't see it.
+    const other = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test?opencodeBrowserSessionId=someone-else`, { authorization: `Bearer ${token}` })
+    if (!(other instanceof WebSocket)) throw new Error("CDP connection refused")
+    const otherTargets = (await cdpCall(other, 1, "Target.getTargets")).result?.targetInfos as Array<{ targetId: string }>
+    expect(otherTargets.some((target) => target.targetId === "TARGET-62")).toBe(false)
+
+    // A tab opened from a tab no session uses is left alone.
+    extension.emit("tabs.opened", { tabId: 64, openerTabId: 63 })
+    await Bun.sleep(200)
+    expect(extension.commands.some((command) => command.method === "debugger.attach" && command.params?.tabId === 64)).toBe(false)
+    other.close()
+    socket.close()
+    extension.close()
+  }, 20_000)
+
+  test("page.goto to a data: URL writes its content into about:blank", async () => {
+    const targetInfo = { targetId: "TARGET-71", type: "page", title: "Example", url: "https://example.com/", attached: true, browserContextId: "CTX" }
+    const extension = new FakeExtension(pairingCode(home))
+    extension
+      .on("tabs.create", () => ({ tabId: 71 }))
+      .on("Target.getTargetInfo", () => ({ targetInfo }))
+      .on("Page.navigate", (command) => {
+        const url = String((command.params?.params as { url?: string }).url)
+        // Chromium refuses data: navigations from extensions; about:blank commits.
+        if (url.startsWith("data:")) return { frameId: "TARGET-71", loaderId: "REFUSED", errorText: "net::ERR_ABORTED" }
+        extension.emit("debugger.event", { tabId: 71, method: "Page.frameNavigated", params: { frame: { id: "TARGET-71", loaderId: "BLANK-1", url } } })
+        return { frameId: "TARGET-71", loaderId: "BLANK-1" }
+      })
+    expect(await extension.pair()).toBe(true)
+    const socket = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test?opencodeBrowserSessionId=data`, { authorization: `Bearer ${token}` })
+    if (!(socket instanceof WebSocket)) throw new Error("CDP connection refused")
+    await cdpCall(socket, 1, "Target.createTarget", { url: "https://example.com/" })
+    const sessionId = String((await cdpCall(socket, 2, "Target.attachToTarget", { targetId: "TARGET-71", flatten: true })).result?.sessionId)
+    const navigated = await cdpCall(socket, 3, "Page.navigate", { url: "data:text/html,<h1>hi</h1>" }, sessionId)
+    expect(navigated.error).toBeUndefined()
+    expect(navigated.result).toEqual({ frameId: "TARGET-71", loaderId: "BLANK-1" })
+    const sent = extension.commands.filter((command) => command.params?.tabId === 71 && (command.params?.method === "Page.navigate" || command.params?.method === "Page.setDocumentContent"))
+    expect(sent.map((command) => [command.params?.method, command.params?.params])).toEqual([
+      ["Page.navigate", { url: "about:blank", frameId: "TARGET-71" }],
+      ["Page.setDocumentContent", { frameId: "TARGET-71", html: "<h1>hi</h1>" }],
+    ])
+    socket.close()
+    extension.close()
+  }, 20_000)
+})
+
+describe("dataUrlDocument", () => {
+  test("shows HTML as is, text as preformatted text, images as an image", async () => {
+    expect(await dataUrlDocument("data:text/html,<p>x</p>")).toBe("<p>x</p>")
+    expect(await dataUrlDocument(`data:text/html;base64,${Buffer.from("<b>y</b>").toString("base64")}`)).toBe("<b>y</b>")
+    expect(await dataUrlDocument("data:text/plain,a<b")).toContain("<pre")
+    expect(await dataUrlDocument("data:text/plain,a<b")).toContain("a&lt;b")
+    expect(await dataUrlDocument("data:application/json,{\"a\":1}")).toContain("{\"a\":1}")
+    expect(await dataUrlDocument("data:image/png;base64,iVBORw0KGgo=")).toContain('<img src="data:image/png;base64,iVBORw0KGgo=">')
+    expect(await dataUrlDocument("data:application/pdf;base64,JVBERi0=")).toBeUndefined()
+  })
 })

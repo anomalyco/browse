@@ -461,20 +461,20 @@ function handleCliRequest(options: {
       const body = yield* readJsonBody(options.request)
       const request = yield* decodeRequest(SessionIdRequest, body, "session delete")
       const id = requiredSessionId(request.id)
-      const deleted = yield* options.sessions.delete(id)
-      sendJson(options.response, { deleted, id })
+      const { deleted, stopped } = yield* options.sessions.delete(id)
+      sendJson(options.response, { deleted, id, ...(stopped ? { stopped } : {}) })
       return
     }
     if (options.pathname === "/cli/session/reset" && options.request.method === "POST") {
       const body = yield* readJsonBody(options.request)
       const request = yield* decodeRequest(SessionIdRequest, body, "session reset")
       const id = requiredSessionId(request.id)
-      const session = yield* options.sessions.reset(id)
-      if (!session) {
+      const reset = yield* options.sessions.reset(id)
+      if (!reset) {
         sendJson(options.response, { error: `Session not found: ${id}`, code: "session-not-found" }, 404)
         return
       }
-      sendJson(options.response, { session })
+      sendJson(options.response, reset)
       return
     }
     if (options.pathname === "/cli/session/adopt" && options.request.method === "POST") {

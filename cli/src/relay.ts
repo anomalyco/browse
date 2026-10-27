@@ -23,6 +23,7 @@ import { extensionProtocolCompatibility, isCdpRequest, isExtensionEvent, isExten
 import {
   closeHttpServer,
   closeWebSocketServer,
+  dataUrlDocument,
   chromeExtensionOriginForPath,
   defaultHost,
   defaultPort,
@@ -439,6 +440,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         reconcileTargetOwnership(change)
       },
       onReleaseRelayTarget: (targetId) => releaseRelayTarget(targetId),
+      onCancelSessionHandoff: (sessionId) => handoffs.cancelForSession(sessionId) !== undefined,
       onSessionsChanged: async (entries) => {
         if (catalogWritesEnabled) await sessionCatalog?.save(entries)
       },
@@ -631,6 +633,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     ...(contextDebugLog ? { trace: contextDebugLog } : {}),
   })
   const mainFrameIdsByTab = new Map<number, string>()
+  /** Page.navigate to a data: URL waits for its tab's main frame to commit the about:blank document it writes into. */
+  const blankNavigationWaiters = new Map<number, (url: string, loaderId: string | undefined) => void>()
   // Off by default: pages can detect an injected cursor, and recordings should show only the page. A recording or
   // flight recorder started with cursor: true shows it (demo videos), as do showGhostCursor() and the env var.
   const ghostCursorByDefault = yield* Config.Boolean("OPENCODE_BROWSER_GHOST_CURSOR").pipe(Config.withDefault(false))
@@ -773,7 +777,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       let handshaken = false
       let socketGeneration = 0
       const announcedRootTabIds = new Set<number>()
-      currentAnnouncedRootTabIds = announcedRootTabIds
       // Pairing: the extension's hello carries a nonce; the relay answers with its own nonce and an HMAC proving it
       // knows the pairing code; the extension answers with its proof. Only then does the relay treat the socket as the
       // extension (and the extension obey it).
@@ -792,7 +795,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
               return
             }
             const proof = message.method === "auth.response" ? getString(message.params, "proof") : undefined
-            if (!secretsEqual(pairingProof(challenge.code, "extension", challenge.extensionNonce, challenge.relayNonce), proof)) {
+            if (!secretsEqual(pairingProof(challenge.code, "extension", port, challenge.extensionNonce, challenge.relayNonce), proof)) {
               pairingFailures += 1
               relayLog("extension.rejected", { reason: "pairing failed", profile: getString(getObject(challenge.hello.params), "profileName") })
               socket.close(4006, "Pairing failed: the extension's pairing code does not match this relay")
@@ -805,6 +808,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
             }
             socketGeneration = acceptedGeneration
             handshaken = true
+            // Only a paired extension that became the current link names the tabs it announces; an unpaired socket
+            // (or one refused for another active link) must not replace the live inventory.
+            if (extensionRpc.isCurrent(socket)) currentAnnouncedRootTabIds = announcedRootTabIds
             return
           }
           if (!extensionRpc.isCurrent(socket) || !extensionRpc.acceptsEvents) {
@@ -911,7 +917,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     const relayNonce = crypto.randomBytes(32).toString("base64url")
     socket.send(JSON.stringify({
       method: "auth.challenge",
-      params: { nonce: relayNonce, proof: pairingProof(code, "relay", relayNonce, extensionNonce) },
+      params: { nonce: relayNonce, proof: pairingProof(code, "relay", port, relayNonce, extensionNonce) },
     }))
     return { hello: message, extensionNonce, relayNonce, code }
   }
@@ -966,6 +972,44 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       }).pipe(Effect.ignore),
     ).catch((error: unknown) => {
       console.error(label, error)
+    })
+  }
+
+  function releaseOpenedPageSession(tabId: number, parentSessionId: string | undefined, childSessionId: string, params: JsonObject | undefined): void {
+    resumeIfWaitingForDebugger(tabId, childSessionId, params, "Failed to resume opened page")
+    Effect.runPromise(sendDebuggerCommand({
+      tabId,
+      ...(parentSessionId === undefined ? {} : { sessionId: parentSessionId }),
+      method: "Target.detachFromTarget",
+      params: { sessionId: childSessionId },
+    }).pipe(Effect.ignore)).catch(() => {})
+  }
+
+  /**
+   * A tab the page in an attached tab opened. When the opener belongs to a session (an agent's tab, or a lent tab
+   * while its session runs a script, so a user's own click in their tab stays theirs), the new tab joins that session
+   * as a relay-owned page. Clients get it with openerId set to the opener's target, so Playwright reports it as the
+   * opener's popup and lists it in context.pages().
+   */
+  function adoptOpenedTab(tabId: number, openerTabId: number): void {
+    const opener = registry.tabTargets.get(openerTabId)
+    const sessionId = opener?.opencodeBrowserSessionId
+    if (!opener || !sessionId || registry.routingRootTarget(tabId)) return
+    if (opener.owner === "user" && !sessions.isExecuting(sessionId)) return
+    const autoAttachParams = Array.from(cdpClients)
+      .filter((client) => cdpClients.sessionId(client) === sessionId)
+      .map((client) => cdpClients.autoAttachParams(client))
+      .find((params) => params !== undefined)
+    relayLog("tab.opened", { tabId, openerTabId, session: sessionId })
+    currentAnnouncedRootTabIds?.add(tabId)
+    Effect.runPromise(rootLifecycle.attach({
+      tabId,
+      owner: "relay",
+      opencodeBrowserSessionId: sessionId,
+      openerTargetId: opener.targetInfo.targetId,
+      ...(autoAttachParams ? { autoAttachParams } : {}),
+    })).catch((error: unknown) => {
+      relayLog("tab.opened.error", { tabId, error: error instanceof Error ? error.message : String(error) })
     })
   }
 
@@ -1061,6 +1105,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       }
       return
     }
+    if (extensionMethod === "tabs.opened") {
+      const openerTabId = getNumber(message.params, "openerTabId")
+      if (eventTabId && openerTabId) adoptOpenedTab(eventTabId, openerTabId)
+      return
+    }
     if (extensionMethod === "tabs.removed") {
       if (eventTabId) {
         detachTargetState(eventTabId)
@@ -1126,6 +1175,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
             retractProtectedFrame(target, targetInfo.targetId, targetInfo.url)
           }
           resumeIfWaitingForDebugger(tabId, childSessionId, params, "Failed to resume restricted target")
+          return
+        }
+        if (targetInfo.type === "page") {
+          // A popup or window the page opened (target=_blank, window.open). Clients ignore page children, so it
+          // becomes a root target of its own once the extension reports its tab (tabs.opened). The opener's
+          // auto-attached session lets go of it here, so the new page isn't left paused or shared.
+          suppressedChildSessions.set(childSessionId, tabId)
+          releaseOpenedPageSession(tabId, sourceSessionId, childSessionId, params)
           return
         }
         suppressedChildSessions.delete(childSessionId)
@@ -1228,6 +1285,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         Effect.runPromise(Effect.ignore(ghostCursor.documentCreated(tabId))).catch(() => {})
         contextDebugLog?.(`main-frame-navigated frame=${boundedToken(frameId)} loader=${boundedToken(getString(frame, "loaderId"))} ${targetDiagnosticIdentity(target)} ${summarizeDiagnosticUrl(frameUrl)}`)
         registry.updateTargetUrl(tabId, frameUrl)
+        blankNavigationWaiters.get(tabId)?.(frameUrl, getString(frame, "loaderId"))
         // Some Chromium builds drop focus emulation across navigations; without it a background tab is throttled.
         Effect.runPromise(Effect.ignore(sendDebuggerCommand({ tabId, method: "Emulation.setFocusEmulationEnabled", params: { enabled: true } }))).catch(() => {})
       }
@@ -1499,6 +1557,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     })
     const { tabId } = route
     if (message.method === ghostCursorCommandMethod) return yield* ghostCursor.command(tabId, message.params)
+    if (message.method === "Page.navigate" && route.chromeSessionId === undefined) {
+      const dataNavigation = yield* navigateTopFrameToDataUrl(tabId, message.params)
+      if (dataNavigation) return dataNavigation
+    }
     const command = {
       tabId,
       method: normalizedMessage.method,
@@ -1527,6 +1589,47 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         Effect.tap(() => Effect.sync(() => setProtectedUi(tabId, false))),
       )
     return scopeCdpResult({ method: message.method, result, pageUrls: () => cdpRouter.visibleRoots(socket).map((target) => target.targetInfo.url) })
+  })
+
+  /**
+   * Chromium refuses top-frame navigations to data: URLs that an extension starts (chrome.debugger's Page.navigate and
+   * chrome.tabs.update both end in ERR_ABORTED), so page.goto("data:...") would always fail. The relay navigates the
+   * frame to about:blank instead (which extensions may open, giving a fresh opaque origin like a data: document has)
+   * and writes the data URL's content into it with Page.setDocumentContent before answering, with the about:blank
+   * document's loader id, so Playwright's goto waits for that document as usual. HTML is written as is; text and
+   * JSON appear as preformatted text and images as an image, the way the browser shows them. The page URL stays
+   * about:blank. Undefined when this isn't such a navigation or the content type can't be shown; the original
+   * command is then forwarded.
+   */
+  const navigateTopFrameToDataUrl = Effect.fnUntraced(function* (tabId: number, params: JsonObject | undefined) {
+    const url = getString(params, "url")?.trim()
+    if (!url || !/^data:/i.test(url)) return undefined
+    const frameId = mainFrameIdsByTab.get(tabId) ?? registry.tabTargets.get(tabId)?.targetInfo.targetId
+    const requestedFrameId = getString(params, "frameId")
+    if (!frameId || (requestedFrameId !== undefined && requestedFrameId !== frameId) || blankNavigationWaiters.has(tabId)) return undefined
+    const html = yield* Effect.tryPromise(() => dataUrlDocument(url)).pipe(Effect.orElseSucceed(() => undefined))
+    if (html === undefined) return undefined
+    const committedLoaders = new Set<string>()
+    let loaderCommitted: (loaderId: string) => void = () => {}
+    blankNavigationWaiters.set(tabId, (frameUrl, loaderId) => {
+      if (frameUrl !== "about:blank" || loaderId === undefined) return
+      committedLoaders.add(loaderId)
+      loaderCommitted(loaderId)
+    })
+    return yield* Effect.gen(function* () {
+      const navigated = yield* sendDebuggerCommand({ tabId, method: "Page.navigate", params: { url: "about:blank", frameId } })
+      const loaderId = getString(navigated, "loaderId")
+      if (getString(navigated, "errorText") || loaderId === undefined) return navigated
+      if (!committedLoaders.has(loaderId)) {
+        const committed = yield* Effect.promise(() => new Promise<void>((resolve) => {
+          loaderCommitted = (id) => { if (id === loaderId) resolve() }
+        })).pipe(Effect.timeoutOption(10_000))
+        if (committed._tag === "None") return navigated
+      }
+      yield* sendDebuggerCommand({ tabId, method: "Page.setDocumentContent", params: { frameId, html } })
+      relayLog("navigate.data", { tabId, chars: html.length })
+      return { frameId: getString(navigated, "frameId") ?? frameId, loaderId } as JsonObject
+    }).pipe(Effect.ensuring(Effect.sync(() => { blankNavigationWaiters.delete(tabId) })))
   })
 
   const detachTab = Effect.fnUntraced(function* (tabId: number) {

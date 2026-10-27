@@ -100,7 +100,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   /** Sockets whose relay proved it knows the pairing code; nothing else is obeyed. */
   const trusted = new WeakSet<WebSocket>()
   /** The handshake in flight on a socket: this extension's nonce and the code it proves with. */
-  const handshakes = new WeakMap<WebSocket, { nonce: string; code: string }>()
+  const handshakes = new WeakMap<WebSocket, { nonce: string; code: string; port: number }>()
   let pairing: PairingSource = "none"
   let bundledPairing: Promise<string | undefined> | undefined
 
@@ -260,7 +260,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     if (socket !== current || current.readyState !== WebSocket.OPEN) return
     if (code === undefined) return current.close(4006, "Not paired")
     const nonce = randomNonce()
-    handshakes.set(current, { nonce, code })
+    // The proofs are bound to the port this socket dialled (see pairing.ts).
+    handshakes.set(current, { nonce, code, port: Number(new URL(current.url).port) })
     // An older relay waits for commands it never gets; one that doesn't pair in time isn't ours.
     setTimeout(() => {
       if (socket === current && current.readyState === WebSocket.OPEN && !trusted.has(current)) {
@@ -302,7 +303,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       message?.method === "auth.challenge" &&
       relayNonce !== undefined &&
       /^[A-Za-z0-9_-]{22,128}$/.test(relayNonce) &&
-      sameSecret(await pairingProof(pending.code, "relay", relayNonce, pending.nonce), params?.proof)
+      sameSecret(await pairingProof(pending.code, "relay", pending.port, relayNonce, pending.nonce), params?.proof)
     if (socket !== current || current.readyState !== WebSocket.OPEN) return
     if (!ok || !pending || !relayNonce) {
       // An older relay, or a program posing as one on this port: it gets nothing.
@@ -310,7 +311,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       current.close(4006, "Relay failed pairing")
       return
     }
-    current.send(JSON.stringify({ method: "auth.response", params: { proof: await pairingProof(pending.code, "extension", pending.nonce, relayNonce) } }))
+    current.send(JSON.stringify({ method: "auth.response", params: { proof: await pairingProof(pending.code, "extension", pending.port, pending.nonce, relayNonce) } }))
     trusted.add(current)
     log.add("pairing.ok", { source: pairing })
     relayTabs.forEach((tabId) => current.send(JSON.stringify({ method: "debugger.attached", params: { tabId } })))
@@ -855,7 +856,13 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     TabCleanup.track(tabId)
   }
   chrome.webNavigation.onCreatedNavigationTarget.addListener(({ sourceTabId, tabId }) => {
-    void adoptOpened(tabId, sourceTabId).catch((error: unknown) => log.add("tab.opened.error", { error: text(error) }))
+    void adoptOpened(tabId, sourceTabId)
+      .catch((error: unknown) => log.add("tab.opened.error", { error: text(error) }))
+      // Once it's moved and grouped: the relay attaches it as a page of the opener's session, so the agent's
+      // Playwright sees it (page.waitForEvent("popup"), context.pages()).
+      .finally(() => {
+        if (relayTabs.has(sourceTabId)) send({ method: "tabs.opened", params: { tabId, openerTabId: sourceTabId } })
+      })
   })
   void chrome.alarms.create(ALARM, { periodInMinutes: extensionReconnectAlarmPeriodMs / 60_000 })
   void DebuggerHub.restore().then(() => {

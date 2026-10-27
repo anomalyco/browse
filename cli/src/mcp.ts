@@ -158,9 +158,9 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       idempotent: false,
       handle: (input) => Effect.gen(function* () {
         const id = resolveSessionId(input, "id")
-        const session = yield* relay.sessionReset(id)
+        const reset = yield* relay.sessionReset(id)
         establishCurrentSession(id)
-        return { session }
+        return reset
       }),
     },
     {

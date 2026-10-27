@@ -40,6 +40,7 @@ import {
   SessionAdoptResponse,
   SessionContainer,
   SessionDeleted,
+  SessionResetResponse,
   SessionsContainer,
   TargetSummaries,
   type SessionAdoptRequest,
@@ -123,7 +124,7 @@ export interface Interface {
   readonly sessions: Effect.Effect<readonly SessionSummary[], RelayClientError>
   readonly sessionNew: (id?: string | undefined, options?: { readonly readOnly?: boolean }) => Effect.Effect<SessionSummary, RelayClientError>
   readonly sessionEnsure: (id: string, options?: { readonly readOnly?: boolean }) => Effect.Effect<SessionSummary, RelayClientError>
-  readonly sessionReset: (id: string) => Effect.Effect<SessionSummary, RelayClientError>
+  readonly sessionReset: (id: string) => Effect.Effect<SessionResetResponse, RelayClientError>
   readonly sessionAdopt: (request: SessionAdoptRequest) => Effect.Effect<SessionAdoptResponse, RelayClientError>
   readonly sessionDelete: (id: string) => Effect.Effect<SessionDeleted, RelayClientError>
   readonly execute: (request: ExecuteRequest) => Effect.Effect<ExecuteResponse, RelayClientError>
@@ -284,7 +285,7 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: { readonl
         ...(options?.readOnly === undefined ? {} : { readOnly: options.readOnly }),
       }, SessionContainer).pipe(Effect.map((container) => container.session)),
     sessionReset: (id) =>
-      postJson("/cli/session/reset", { id }, SessionContainer).pipe(Effect.map((container) => container.session)),
+      postJson("/cli/session/reset", { id }, SessionResetResponse),
     sessionAdopt: ({ sessionId, ...request }) =>
       postJson("/cli/session/adopt", {
         ...request,

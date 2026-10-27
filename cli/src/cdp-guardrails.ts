@@ -12,6 +12,19 @@
  * profile's cookies for every site. OPENCODE_BROWSER_ALLOW_ALL_COOKIES=1 on
  * the relay lifts the scope.
  *
+ * Site storage is scoped the same way: IndexedDB, Cache Storage, DOM storage,
+ * shared storage, interest groups and the other Storage/ServiceWorker methods
+ * that name an origin or storage key are handled in the browser process for
+ * any origin, so they are refused unless that origin is one of the session's
+ * page hosts (OPENCODE_BROWSER_ALLOW_ALL_STORAGE=1 lifts it). Methods that
+ * observe or read every origin's state at once are refused outright.
+ *
+ * Navigations to browser-internal and local documents (file:, chrome:,
+ * chrome-extension:, devtools:, view-source:, ...) are refused for
+ * Page.navigate and Target.createTarget; OPENCODE_BROWSER_ALLOW_FILE_URLS=1
+ * allows file: only. (Page script can't reach them either: Chromium refuses
+ * renderer-initiated navigations from web pages to those schemes.)
+ *
  * Pure module: given a method and session context, return a rejection message
  * or null. The relay turns a rejection into a normal CDP error response for
  * that command id, so the calling script fails loudly without breaking the
@@ -44,6 +57,113 @@ const allowsAllCookies = (): boolean => process.env[allowAllCookiesEnvironmentVa
 const allowsForeground = (): boolean => process.env.OPENCODE_BROWSER_ALLOW_FOREGROUND === "1"
 
 const cookieReadMethods = new Set(["Storage.getCookies", "Network.getAllCookies", "Network.getCookies"])
+
+export const allowAllStorageEnvironmentVariable = "OPENCODE_BROWSER_ALLOW_ALL_STORAGE"
+const allowsAllStorage = (): boolean => process.env[allowAllStorageEnvironmentVariable] === "1"
+export const allowFileUrlsEnvironmentVariable = "OPENCODE_BROWSER_ALLOW_FILE_URLS"
+const allowsFileUrls = (): boolean => process.env[allowFileUrlsEnvironmentVariable] === "1"
+
+/** Domains whose methods address site storage by origin or storage key. */
+const storageDomains = ["IndexedDB.", "CacheStorage.", "DOMStorage.", "Storage.", "ServiceWorker."] as const
+/** Storage methods that name no origin and touch only the attached page (or nothing site-specific). */
+const storageMethodsWithoutOrigin = new Set([
+  "IndexedDB.enable", "IndexedDB.disable",
+  "CacheStorage.enable", "CacheStorage.disable",
+  "DOMStorage.enable", "DOMStorage.disable",
+  "ServiceWorker.enable", "ServiceWorker.disable", "ServiceWorker.setForceUpdateOnPageLoad",
+  "Storage.getStorageKeyForFrame", "Storage.getStorageKey", "Storage.getRelatedWebsiteSets",
+  "Storage.getAffectedUrlsForThirdPartyCookieMetadata",
+])
+/** Methods that read, observe or reset every origin's state at once. */
+const storageMethodsForAllOrigins = new Map<string, string>([
+  ["Storage.getTrustTokens", "it reads the private state tokens of every site"],
+  ["Storage.setInterestGroupTracking", "it reports every site's interest groups"],
+  ["Storage.setInterestGroupAuctionTracking", "it reports every site's ad auctions"],
+  ["Storage.setSharedStorageTracking", "it reports every site's shared storage"],
+  ["Storage.runBounceTrackingMitigations", "it deletes state of sites in the user's browser"],
+  ["Storage.setProtectedAudienceKAnonymity", "it changes ad state of every site"],
+  ["ServiceWorker.stopAllWorkers", "it stops every site's service workers"],
+])
+/** Parameter names that carry an origin, a storage key (serialized "https://host/^0..."), or a URL in one. */
+const originParamNames = ["securityOrigin", "storageKey", "origin", "ownerOrigin", "issuerOrigin", "scopeURL", "topLevelSite"] as const
+
+/** The host a serialized origin, storage key or URL belongs to; undefined when it can't be read. */
+function storageHost(value: string): string | undefined {
+  // A storage key's first part is its origin; partitioned keys append "^0<top-level site>" and similar.
+  const origin = value.split("^")[0] ?? ""
+  try {
+    const parsed = new URL(origin)
+    return parsed.hostname ? parsed.hostname.toLowerCase() : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Every origin-like value a storage command addresses. */
+function storageOrigins(params: Record<string, unknown> | undefined): string[] {
+  if (!params) return []
+  const values: string[] = []
+  const collect = (object: unknown) => {
+    if (object === null || typeof object !== "object") return
+    for (const name of originParamNames) {
+      const value = (object as Record<string, unknown>)[name]
+      if (typeof value === "string" && value) values.push(value)
+    }
+  }
+  collect(params)
+  // DOMStorage.* storageId, IndexedDB/CacheStorage storageBucket, Storage.deleteStorageBucket bucket.
+  collect(params.storageId)
+  collect(params.storageBucket)
+  collect(params.bucket)
+  // Cache ids are "<storage key>|<cache name>".
+  if (typeof params.cacheId === "string") values.push(params.cacheId.split("|")[0] ?? "")
+  return values
+}
+
+function guardStorageAccess(context: GuardContext): string | null {
+  if (!storageDomains.some((domain) => context.method.startsWith(domain))) return null
+  if (allowsAllStorage()) return null
+  const everyOrigin = storageMethodsForAllOrigins.get(context.method)
+  if (everyOrigin) {
+    return `OpenCode Browser blocked ${context.method}: ${everyOrigin}. Set ${allowAllStorageEnvironmentVariable}=1 on the relay to allow it.`
+  }
+  if (storageMethodsWithoutOrigin.has(context.method)) return null
+  const hosts = pageHosts(context.pageUrls?.() ?? [])
+  const origins = storageOrigins(context.params)
+  const outside = origins.length === 0
+    ? "a request that names no origin or storage key"
+    : origins.find((origin) => {
+        const host = storageHost(origin)
+        return host === undefined || !hosts.includes(host)
+      })
+  if (outside === undefined) return null
+  return `OpenCode Browser blocked ${context.method}: site storage can only be used for the hosts of this session's attached pages (${hosts.length > 0 ? hosts.join(", ") : "none"}), not ${outside}. Set ${allowAllStorageEnvironmentVariable}=1 on the relay to allow it.`
+}
+
+/** Schemes agents can't open: browser-internal pages, other extensions, DevTools, and local files. */
+const restrictedNavigationSchemes = new Set([
+  "file:", "chrome:", "chrome-extension:", "chrome-untrusted:", "chrome-search:", "devtools:", "view-source:",
+  "edge:", "brave:", "opera:", "vivaldi:", "filesystem:",
+])
+
+function guardNavigation(context: GuardContext): string | null {
+  if (context.method !== "Page.navigate" && context.method !== "Target.createTarget") return null
+  const url = context.params?.url
+  if (typeof url !== "string") return null
+  let scheme: string
+  try {
+    // WHATWG parsing strips the whitespace and control characters a browser would ignore too.
+    scheme = new URL(url).protocol.toLowerCase()
+  } catch {
+    return null
+  }
+  if (!restrictedNavigationSchemes.has(scheme)) return null
+  if (scheme === "file:" && allowsFileUrls()) return null
+  const hint = scheme === "file:"
+    ? ` Set ${allowFileUrlsEnvironmentVariable}=1 on the relay to allow file: URLs.`
+    : ""
+  return `OpenCode Browser blocked ${context.method} to a ${scheme} URL: agents can't open browser-internal pages, other extensions, DevTools or local files.${hint}`
+}
 
 function pageHosts(urls: readonly string[]): string[] {
   const hosts: string[] = []
@@ -106,6 +226,21 @@ export function guardCdpMethod(context: GuardContext): string | null {
   if ((context.method === "Storage.setCookies" || context.method === "Network.setCookies" || context.method === "Network.setCookie") && !allowsAllCookies()) {
     const rejection = guardCookieWrite(context)
     if (rejection) return rejection
+  }
+  if (!cookieReadMethods.has(context.method) && context.method !== "Storage.setCookies") {
+    const rejection = guardStorageAccess(context)
+    if (rejection) return rejection
+  }
+  const navigation = guardNavigation(context)
+  if (navigation) return navigation
+  if (context.method === "Network.loadNetworkResource" && !allowsAllStorage()) {
+    // DevTools' resource loader fetches from the browser process with the user's credentials and no same-origin policy.
+    const url = context.params?.url
+    const hosts = pageHosts(context.pageUrls?.() ?? [])
+    const host = typeof url === "string" ? pageHosts([url])[0] : undefined
+    if (host === undefined || !hosts.includes(host)) {
+      return `OpenCode Browser blocked Network.loadNetworkResource: it loads URLs with the user's credentials outside the page's same-origin policy, so only the hosts of this session's attached pages (${hosts.length > 0 ? hosts.join(", ") : "none"}) are allowed. Set ${allowAllStorageEnvironmentVariable}=1 on the relay to allow it.`
+    }
   }
   if (context.readOnly && readOnlyBlockedPrefixes.some((prefix) => context.method.startsWith(prefix))) {
     const session = context.sessionId ? `Session ${context.sessionId}` : "This session"

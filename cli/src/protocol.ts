@@ -122,6 +122,7 @@ const extensionEventMethodValues = [
   "debugger.attached",
   "debugger.detached",
   "tabs.removed",
+  "tabs.opened",
   "pong",
   "log",
   "recording.cancelled",

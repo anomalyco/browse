@@ -7,7 +7,7 @@
  * matching handoff id or the timeout elapses.
  */
 
-export type HandoffCancellationReason = "target-detached" | "target-crashed"
+export type HandoffCancellationReason = "target-detached" | "target-crashed" | "session-stopped"
 
 export type HandoffOutcome =
   | "resolved"
@@ -241,6 +241,15 @@ export class HandoffRegistry {
       pending.resolve({ type: "cancelled", reason: options.reason })
     }
     return cancelled
+  }
+
+  /** Cancel the session's pending handoff (it is stopped, deleted or reset); its waiter fails with the reason. */
+  cancelForSession(sessionId: string, reason: HandoffCancellationReason = "session-stopped"): PendingHandoffView | undefined {
+    const pending = this.pending.get(sessionId)
+    if (!pending) return undefined
+    const view = this.view(pending)
+    pending.resolve({ type: "cancelled", reason })
+    return view
   }
 
   /** Cancel every pending handoff, resolving waiters as timeouts. */

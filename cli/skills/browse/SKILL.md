@@ -78,7 +78,14 @@ sessions.
 
 Tabs you open live in a separate agent window that opens unfocused beside the
 user's window, so the user keeps working undisturbed; popups your clicks open move there too. Don't
-ask the user to watch a tab unless you hand it off.
+ask the user to watch a tab unless you hand it off. Popups (`target=_blank`,
+`window.open`) are ordinary pages of your session: use
+`page.waitForEvent("popup")` or `context.waitForEvent("page")`, and they show
+up in `context.pages()`.
+
+To render your own HTML, use `page.setContent(html)`. `page.goto("data:...")`
+works too, but Chromium doesn't let an extension open data: URLs, so the
+content is written into an `about:blank` page (`page.url()` is `about:blank`).
 
 To work in a tab the user already has open, ask them to click the OpenCode
 Browser toolbar button on it (the badge shows ON; another click takes it back).
@@ -442,7 +449,10 @@ tool immediately before invoking it, so stale registrations fail directly.
 
 OpenCode Browser blocks CDP commands that would destroy shared browser state,
 including browser close and cookie/cache clearing. Never work around those
-guardrails.
+guardrails. Cookies and site storage (IndexedDB, Cache Storage, local storage,
+quota) are limited to the hosts of your session's pages, and navigations to
+`file:`, `chrome:`, `chrome-extension:`, `devtools:` and `view-source:` URLs
+are refused.
 
 For inspect-only work, use a read-only session:
 

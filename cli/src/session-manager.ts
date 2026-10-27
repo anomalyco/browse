@@ -1,4 +1,4 @@
-import { Deferred, Effect, Exit, Fiber, Latch, Result, Schema, Semaphore } from "effect"
+import { Deferred, Effect, Exit, Fiber, Latch, Option, Result, Schema, Semaphore } from "effect"
 import { defaultPageClosedWarning, ExecuteSandbox, hasExplicitTargetSelection, type ExecuteResult, type ExecuteTargetSelection } from "./execute.ts"
 import type { NetworkCaptureOptions, NetworkCaptureResult, NetworkCaptureStatus, NetworkCaptureStopOptions } from "./network-capture.ts"
 import { generateSessionId } from "./relay-helpers.ts"
@@ -46,6 +46,26 @@ export type SessionHooks = {
   readonly onReleaseRelayTarget?: (targetId: string) => Effect.Effect<void, Error>
   /** Persist session identity and target continuity after durable lifecycle changes. */
   readonly onSessionsChanged?: (sessions: readonly PersistedSession[]) => unknown | Promise<unknown>
+  /** Cancel the session's pending handoff so its waiter fails; true when one was pending. */
+  readonly onCancelSessionHandoff?: (sessionId: string) => boolean
+  /** How long a stopped script may take to settle before its sandbox is abandoned and the execute lock released. */
+  readonly stopGraceMs?: number
+}
+
+/** What a stop, delete or reset had to end in the session first. */
+export type SessionStopReport = {
+  /** A running execute was stopped (its caller got an error). */
+  readonly execute: boolean
+  /** A pending handoff was cancelled. */
+  readonly handoff: boolean
+  /** The stopped script didn't settle within the grace period; its sandbox (and execute state) was replaced. */
+  readonly forced: boolean
+}
+
+type RunningExecution = {
+  readonly stop: (message: string, diagnostic: string) => void
+  /** Settles once the execute lock is released, with whether the script had to be abandoned. */
+  readonly released: Deferred.Deferred<{ readonly forced: boolean }>
 }
 
 export class SessionError extends Schema.TaggedError<SessionError>()(
@@ -93,8 +113,8 @@ export class OpenCodeBrowserSessions {
   private readonly createSandbox: (id: string, onDefaultTargetChange: (target: SessionTarget | undefined) => void) => ExecuteSandboxLike
   private readonly hooks: SessionHooks
   private readonly executing = new Set<string>()
-  /** Answers a running execute early with an error (the user stopped it); the script itself settles later. */
-  private readonly executionStoppers = new Map<string, (message: string) => void>()
+  /** Running executes by session: stopping one answers its caller now and ends the script (see execute()). */
+  private readonly runningExecutions = new Map<string, RunningExecution>()
   private readonly adoptSemaphore = Semaphore.makeUnsafe(1)
   private readonly targetOwnership: TargetOwnership
   private persistenceTail = Promise.resolve()
@@ -245,14 +265,47 @@ export class OpenCodeBrowserSessions {
   }
 
   /**
-   * Fails the session's running execute now with `message`. The script keeps the session's execute lock until it
-   * settles (its pages are gone, so it soon does), so the next execute still runs after it.
+   * Stops the session's running execute: its caller gets `message` as an error now, its pending handoff is cancelled,
+   * and the script is ended (its Playwright calls reject, its timers stop). The execute lock is released as soon as
+   * the script settles, or after the stop grace period with the sandbox replaced.
    */
-  stopExecution(id: string, message: string): boolean {
-    const stop = this.executionStoppers.get(id)
-    if (!stop) return false
-    stop(message)
+  stopExecution(id: string, message: string, diagnostic = "user-stopped"): boolean {
+    const running = this.runningExecutions.get(id)
+    if (!running) return false
+    running.stop(message, diagnostic)
     return true
+  }
+
+  /**
+   * Ends whatever holds the session before delete or reset: a running execute and a pending handoff (which can also
+   * belong to an authenticated request). Waits a bounded time for the execute lock to be released.
+   */
+  private stopForLifecycle(id: string, operation: "delete" | "reset"): Effect.Effect<SessionStopReport | undefined> {
+    const manager = this
+    return Effect.gen(function* () {
+      const message = `Session ${id} was ${operation === "delete" ? "deleted" : "reset"} while this ran, so it was stopped.`
+      const handoff = manager.cancelSessionHandoff(id)
+      const running = manager.runningExecutions.get(id)
+      if (!running) return handoff ? { execute: false, handoff, forced: false } : undefined
+      running.stop(message, `session-${operation}`)
+      const released = yield* Deferred.await(running.released).pipe(
+        Effect.timeoutOption(manager.stopGraceMs() + 2_000),
+      )
+      return { execute: true, handoff, forced: Option.isNone(released) || released.value.forced }
+    })
+  }
+
+  private cancelSessionHandoff(id: string): boolean {
+    try {
+      return this.hooks.onCancelSessionHandoff?.(id) ?? false
+    } catch (error) {
+      console.error("Session handoff cancellation hook failed", error)
+      return false
+    }
+  }
+
+  private stopGraceMs(): number {
+    return this.hooks.stopGraceMs ?? 3_000
   }
 
   hasPendingWork(id: string): boolean {
@@ -301,14 +354,15 @@ export class OpenCodeBrowserSessions {
     })
   }
 
-  delete(id: string): Effect.Effect<boolean, Error> {
+  delete(id: string): Effect.Effect<{ readonly deleted: boolean; readonly stopped?: SessionStopReport }, Error> {
     const manager = this
     return this.withAdmission(id, Effect.gen(function* () {
       const session = manager.sessions.get(id)
       if (!session) {
-        return false
+        return { deleted: false }
       }
-      return yield* manager.withLifecyclePermit(session, "delete", manager.withIdentityChange(id, Effect.gen(function* () {
+      const stopped = yield* manager.stopForLifecycle(id, "delete")
+      const deleted = yield* manager.withLifecyclePermit(session, "delete", manager.withIdentityChange(id, Effect.gen(function* () {
         if (manager.sessions.get(id) !== session) {
           return false
         }
@@ -321,17 +375,19 @@ export class OpenCodeBrowserSessions {
         yield* manager.closeOpenCodeBrowserSession(session)
         return true
       })))
+      return { deleted, ...(stopped ? { stopped } : {}) }
     }))
   }
 
-  reset(id: string): Effect.Effect<SessionSummary | undefined, Error> {
+  reset(id: string): Effect.Effect<{ readonly session: SessionSummary; readonly stopped?: SessionStopReport } | undefined, Error> {
     const manager = this
     return this.withAdmission(id, Effect.gen(function* () {
       const existing = manager.sessions.get(id)
       if (!existing) {
         return undefined
       }
-      return yield* manager.withLifecyclePermit(existing, "reset", manager.withIdentityChange(id, Effect.gen(function* () {
+      const stopped = yield* manager.stopForLifecycle(id, "reset")
+      const session = yield* manager.withLifecyclePermit(existing, "reset", manager.withIdentityChange(id, Effect.gen(function* () {
         if (manager.sessions.get(id) !== existing) {
           return yield* sessionError("inactive", `Session is no longer active: ${id}`, id)
         }
@@ -345,6 +401,7 @@ export class OpenCodeBrowserSessions {
         yield* manager.closeOpenCodeBrowserSession(existing)
         return manager.sessionSummary(session)
       })))
+      return { session, ...(stopped ? { stopped } : {}) }
     }))
   }
 
@@ -447,27 +504,47 @@ export class OpenCodeBrowserSessions {
           started = true
           session.updatedAt = new Date().toISOString()
           manager.setExecuting(session.id, true)
-          const stopper = (message: string) => {
-            Effect.runSync(Deferred.succeed(response, {
-              result: {
-                text: message,
-                isError: true,
-                logs: [],
-                logSummary: { totalCount: 0, returnedCount: 0, repeatedCount: 0, omittedCount: 0 },
-                warnings: [],
-                diagnostic: "user-stopped",
-              },
-              session: manager.createdSummary(session, resolved.created),
-            }))
+          const stopSignal = Deferred.makeUnsafe<{ readonly message: string; readonly diagnostic: string }>()
+          const released = Deferred.makeUnsafe<{ readonly forced: boolean }>()
+          const running: RunningExecution = {
+            released,
+            stop: (message, diagnostic) => {
+              Effect.runSync(Deferred.succeed(stopSignal, { message, diagnostic }))
+              Effect.runSync(Deferred.succeed(response, {
+                result: stoppedExecuteResult(message, diagnostic),
+                session: manager.createdSummary(session, resolved.created),
+              }))
+            },
           }
-          manager.executionStoppers.set(session.id, stopper)
+          manager.runningExecutions.set(session.id, running)
+          let forced = false
           const startedAt = Date.now()
-          const result = yield* session.sandbox
-            .execute(options.code, { ...(options.targetSelection ? { targetSelection: options.targetSelection } : {}) })
-            .pipe(Effect.ensuring(Effect.sync(() => {
-              if (manager.executionStoppers.get(session.id) === stopper) manager.executionStoppers.delete(session.id)
-              manager.setExecuting(session.id, false)
-            })))
+          // The script runs in its own fiber so a stop can release the execute lock without waiting for it: a stopped
+          // script that never settles (it awaits a timer the stop cleared) is abandoned, not awaited.
+          const result = yield* Effect.gen(function* () {
+            const script = yield* session.sandbox
+              .execute(options.code, { ...(options.targetSelection ? { targetSelection: options.targetSelection } : {}) })
+              .pipe(Effect.forkDetach({ startImmediately: true }))
+            const first = yield* Effect.raceFirst(
+              Fiber.join(script).pipe(Effect.map((value) => ({ settled: true as const, value }))),
+              Deferred.await(stopSignal).pipe(Effect.map((stop) => ({ settled: false as const, stop }))),
+            )
+            if (first.settled) return first.value
+            yield* manager.endStoppedScript(session)
+            // Its own outcome no longer matters (the caller has the stop); only whether it settled does.
+            const settled = yield* Fiber.join(script).pipe(Effect.exit, Effect.timeoutOption(manager.stopGraceMs()))
+            if (Option.isNone(settled)) {
+              forced = true
+              // Again: a stop during connect lets the script finish connecting after the first abort.
+              yield* manager.endStoppedScript(session)
+              manager.replaceSandbox(session)
+            }
+            return stoppedExecuteResult(first.stop.message, first.stop.diagnostic)
+          }).pipe(Effect.ensuring(Effect.sync(() => {
+            if (manager.runningExecutions.get(session.id) === running) manager.runningExecutions.delete(session.id)
+            manager.setExecuting(session.id, false)
+            Effect.runSync(Deferred.succeed(released, { forced }))
+          })))
           if (resolved.created && result.setupFailed) {
             return yield* sessionError("setup-failed", result.text, session.id)
           }
@@ -724,6 +801,26 @@ export class OpenCodeBrowserSessions {
       executeSemaphore: Semaphore.makeUnsafe(1),
     }
     return session
+  }
+
+  /** Ends a stopped script: its pending handoff fails, its Playwright calls reject and its timers stop. */
+  private endStoppedScript(session: OpenCodeBrowserSession): Effect.Effect<void> {
+    this.cancelSessionHandoff(session.id)
+    return session.sandbox.abortExecution().pipe(
+      Effect.timeoutOption(this.stopGraceMs()),
+      Effect.catchCause((cause) => Effect.sync(() => console.error("Abort stopped execute", cause))),
+      Effect.asVoid,
+    )
+  }
+
+  /**
+   * A stopped script that didn't settle keeps its sandbox (and whatever it still references); the session continues
+   * with a fresh sandbox on the same default tab. Its execute `state` is lost.
+   */
+  private replaceSandbox(session: OpenCodeBrowserSession): void {
+    if (this.sessions.get(session.id) !== session) return
+    session.sandbox = this.createSandbox(session.id, (target) => this.updateTarget(session, target))
+    session.sandbox.restore(session.target, "The previous script was stopped and did not end in time, so this session's JavaScript state and snapshot refs were reset.")
   }
 
   /** Resolve execute/adopt work before any permit; the caller owns cleanup of a created session. */
@@ -1007,6 +1104,17 @@ export class OpenCodeBrowserSessions {
         orElse: () => Effect.fail(sessionError("timeout", `${label} timed out after ${timeoutMs}ms`)),
       }),
     )
+  }
+}
+
+function stoppedExecuteResult(message: string, diagnostic: string): ExecuteResult {
+  return {
+    text: message,
+    isError: true,
+    logs: [],
+    logSummary: { totalCount: 0, returnedCount: 0, repeatedCount: 0, omittedCount: 0 },
+    warnings: [],
+    diagnostic,
   }
 }
 

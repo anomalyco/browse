@@ -16,7 +16,7 @@ export const relayTokenHeader = "authorization"
 export const relayTokenQueryParam = "opencodeBrowserToken"
 /** The pairing file inside an unpacked extension; fetched by the extension with chrome.runtime.getURL. */
 export const extensionPairingFileName = "relay-pairing.json"
-const pairingContext = "opencode-browser-pairing-v1"
+const pairingContext = "opencode-browser-pairing-v2"
 const crockford = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 const pairingCodeLength = 32
 const tokenPattern = /^[A-Za-z0-9_-]{43}$/
@@ -50,9 +50,18 @@ export function formatPairingCode(code: string): string {
   return code.match(/.{1,4}/g)?.join("-") ?? code
 }
 
-/** HMAC-SHA256 proof over the handshake nonces, base64url. `role` is who proves: "relay" or "extension". */
-export function pairingProof(code: string, role: "relay" | "extension", ownNonce: string, peerNonce: string): string {
-  return crypto.createHmac("sha256", code).update(`${pairingContext}|${role}|${peerNonce}|${ownNonce}`).digest("base64url")
+/** The relay link the pairing proofs are bound to (src/background/pairing.ts builds the same string). */
+export function pairingEndpoint(port: number): string {
+  return `127.0.0.1:${port}/extension`
+}
+
+/**
+ * HMAC-SHA256 proof over the handshake nonces and the relay link's endpoint, base64url. `role` is who proves: "relay"
+ * or "extension". Binding the port means a listener on another port can't relay the handshake to this relay: the
+ * extension computes its proofs for the port it dialled.
+ */
+export function pairingProof(code: string, role: "relay" | "extension", port: number, ownNonce: string, peerNonce: string): string {
+  return crypto.createHmac("sha256", code).update(`${pairingContext}|${role}|${pairingEndpoint(port)}|${peerNonce}|${ownNonce}`).digest("base64url")
 }
 
 /** Constant-time comparison of two secrets (or proofs) of any length. */

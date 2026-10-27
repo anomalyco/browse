@@ -477,3 +477,21 @@ export function isRestrictedUrl(url: string | undefined): boolean {
   }
   return restrictedUrlPrefixes.some((prefix) => url.startsWith(prefix))
 }
+
+/**
+ * The HTML that shows a data: URL's content: HTML as is, text and JSON as preformatted text, images as an image.
+ * Undefined for other types (PDF, downloads), which Chromium would not render as a page either.
+ */
+export async function dataUrlDocument(url: string): Promise<string | undefined> {
+  const response = await fetch(url)
+  const type = (response.headers.get("content-type") ?? "text/plain").split(";")[0]?.trim().toLowerCase() ?? "text/plain"
+  if (type === "text/html" || type === "application/xhtml+xml") return await response.text()
+  if (type.startsWith("text/") || type === "application/json" || type.endsWith("+json") || type === "application/javascript") {
+    const text = (await response.text()).replace(/[&<>]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[char] ?? char)
+    return `<html><head><meta name="color-scheme" content="light dark"></head><body><pre style="word-wrap: break-word; white-space: pre-wrap;">${text}</pre></body></html>`
+  }
+  if (type.startsWith("image/")) {
+    return `<html><body style="margin: 0; display: grid; place-items: center; min-height: 100vh;"><img src="${url.replace(/"/g, "%22")}"></body></html>`
+  }
+  return undefined
+}

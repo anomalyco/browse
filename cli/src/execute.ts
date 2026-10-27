@@ -275,6 +275,9 @@ export async function finishHandoff(options: {
   if (options.outcome === "timeout") {
     throw new Error(`Handoff timed out after ${options.timeoutMs}ms waiting for the user: ${options.message}`)
   }
+  if (options.outcome !== "resolved" && options.outcome.reason === "session-stopped") {
+    throw new Error(`Handoff cancelled because its session was stopped, deleted or reset: ${options.message}`)
+  }
   if (options.outcome !== "resolved") {
     const targetEvent = options.outcome.reason === "target-crashed" ? "crashed" : "detached"
     throw new Error(`Handoff cancelled because its target ${targetEvent}: ${options.message}`)
@@ -525,6 +528,7 @@ export class ExecuteSandbox {
           this.state = this.realm.state
           this.pendingWarnings.push("The previous execute realm stopped; JavaScript state and pending callbacks were reset.")
         }
+        this.realm?.resumeTimers()
         const globals = await this.getGlobals(options)
         const { result, logs, logSummary, aftermath } = await runUserCode({ code, globals, ...(this.realm ? { realm: this.realm } : {}) })
         await this.networkCapture.settleForOutput()
@@ -683,6 +687,16 @@ export class ExecuteSandbox {
       endUrl: aftermath.endUrl ? this.networkCapture.redactUrl(aftermath.endUrl) : aftermath.endUrl,
       navigations: aftermath.navigations.map((url) => this.networkCapture.redactUrl(url)),
     }
+  }
+
+  /**
+   * Stops a running script from outside (the toolbar's stop, session delete/reset): closes its browser connection so
+   * every Playwright call it makes rejects, and disposes its realm (pending runs reject, timers are revoked; `state` resets).
+   * The session manager relies on this hook; keep it when the realm changes.
+   */
+  abortExecution(): Effect.Effect<void, Error> {
+    this.realm?.dispose(new Error("Execute stopped: the session was stopped, deleted or reset"))
+    return this.disconnectSettled()
   }
 
   disconnectSettled(): Effect.Effect<void, Error> {
@@ -1082,11 +1096,11 @@ export class ExecuteSandbox {
     return true
   }
 
-  restore(target: SessionTarget | undefined): void {
+  restore(target: SessionTarget | undefined, warning = "The relay restarted; session JavaScript state and snapshot refs were reset."): void {
     if (target) {
       this.unbindDefaultPage(target.id, { ownsPage: target.owner === "relay" })
     }
-    this.pendingWarnings.push("The relay restarted; session JavaScript state and snapshot refs were reset.")
+    this.pendingWarnings.push(warning)
   }
 
   private notifyDefaultTargetChange(): void {
