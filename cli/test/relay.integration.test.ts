@@ -41,7 +41,7 @@ class FakeExtension {
    * Resolves true once the relay proved the code and accepted the extension's proof. A real extension stops when
    * the relay's proof is wrong; `answerAnyway` sends the extension's proof regardless, as an impostor would.
    */
-  async pair(options: { readonly answerAnyway?: boolean } = {}): Promise<boolean> {
+  async pair(options: { readonly answerAnyway?: boolean; readonly proofPort?: number } = {}): Promise<boolean> {
     await new Promise<void>((resolve, reject) => {
       this.socket.once("open", () => resolve())
       this.socket.once("error", reject)
@@ -61,9 +61,10 @@ class FakeExtension {
     const params = await challenge
     // The relay must prove it knows the code before the extension obeys it.
     if (!params) return false
-    this.relayProved = params.proof === pairingProof(this.code, "relay", params.nonce, nonce)
+    const proofPort = options.proofPort ?? port
+    this.relayProved = params.proof === pairingProof(this.code, "relay", proofPort, params.nonce, nonce)
     if (!this.relayProved && !options.answerAnyway) return false
-    this.socket.send(JSON.stringify({ method: "auth.response", params: { proof: pairingProof(this.code, "extension", nonce, params.nonce) } }))
+    this.socket.send(JSON.stringify({ method: "auth.response", params: { proof: pairingProof(this.code, "extension", proofPort, nonce, params.nonce) } }))
     this.socket.on("message", (data) => this.answer(JSON.parse(String(data)) as Command))
     this.socket.send(JSON.stringify({ method: "ready" }))
     await Bun.sleep(100)
@@ -172,6 +173,15 @@ describe("relay", () => {
     expect(impostor.closeCode).toBe(4006)
     const status = await (await fetch(`${base}/extension/status`, { headers: { authorization: `Bearer ${token}` } })).json() as { connected: boolean }
     expect(status.connected).toBe(false)
+  })
+
+  test("a handshake passed through from another port is refused", async () => {
+    // The extension dialled a listener on another port that forwards to this relay: its proofs name that port.
+    const forwarded = new FakeExtension(pairingCode(home))
+    expect(await forwarded.pair({ answerAnyway: true, proofPort: port + 1 })).toBe(false)
+    expect(forwarded.relayProved).toBe(false)
+    await Bun.sleep(100)
+    expect(forwarded.closeCode).toBe(4006)
   })
 
   test("a paired extension carries an authenticated CDP command", async () => {

@@ -100,7 +100,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   /** Sockets whose relay proved it knows the pairing code; nothing else is obeyed. */
   const trusted = new WeakSet<WebSocket>()
   /** The handshake in flight on a socket: this extension's nonce and the code it proves with. */
-  const handshakes = new WeakMap<WebSocket, { nonce: string; code: string }>()
+  const handshakes = new WeakMap<WebSocket, { nonce: string; code: string; port: number }>()
   let pairing: PairingSource = "none"
   let bundledPairing: Promise<string | undefined> | undefined
 
@@ -258,7 +258,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     if (socket !== current || current.readyState !== WebSocket.OPEN) return
     if (code === undefined) return current.close(4006, "Not paired")
     const nonce = randomNonce()
-    handshakes.set(current, { nonce, code })
+    // The proofs are bound to the port this socket dialled (see pairing.ts).
+    handshakes.set(current, { nonce, code, port: Number(new URL(current.url).port) })
     // An older relay waits for commands it never gets; one that doesn't pair in time isn't ours.
     setTimeout(() => {
       if (socket === current && current.readyState === WebSocket.OPEN && !trusted.has(current)) {

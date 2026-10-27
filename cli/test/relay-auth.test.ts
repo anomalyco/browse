@@ -76,6 +76,7 @@ describe("pairing handshake", () => {
   const code = pairingCode(home)
   const relayNonce = ExtensionPairing.randomNonce()
   const extensionNonce = ExtensionPairing.randomNonce()
+  const port = 19988
 
   test("the code is private and formatted for typing", () => {
     expect(code).toMatch(/^[0-9A-HJKMNP-TV-Z]{32}$/)
@@ -85,23 +86,33 @@ describe("pairing handshake", () => {
 
   test("the extension accepts the relay's proof, and the relay the extension's", async () => {
     // Relay → extension: the relay proves it knows the code over both nonces.
-    const relayProof = pairingProof(code, "relay", relayNonce, extensionNonce)
-    expect(ExtensionPairing.sameSecret(await ExtensionPairing.pairingProof(code, "relay", relayNonce, extensionNonce), relayProof)).toBe(true)
+    const relayProof = pairingProof(code, "relay", port, relayNonce, extensionNonce)
+    expect(ExtensionPairing.sameSecret(await ExtensionPairing.pairingProof(code, "relay", port, relayNonce, extensionNonce), relayProof)).toBe(true)
     // Extension → relay.
-    const extensionProof = await ExtensionPairing.pairingProof(code, "extension", extensionNonce, relayNonce)
-    expect(secretsEqual(pairingProof(code, "extension", extensionNonce, relayNonce), extensionProof)).toBe(true)
+    const extensionProof = await ExtensionPairing.pairingProof(code, "extension", port, extensionNonce, relayNonce)
+    expect(secretsEqual(pairingProof(code, "extension", port, extensionNonce, relayNonce), extensionProof)).toBe(true)
   })
 
   test("a wrong code, swapped role or replayed nonce is refused", async () => {
     const other = pairingCode(fs.mkdtempSync(path.join(home, "other-")))
     expect(other).not.toBe(code)
-    const relayProof = pairingProof(other, "relay", relayNonce, extensionNonce)
-    expect(ExtensionPairing.sameSecret(await ExtensionPairing.pairingProof(code, "relay", relayNonce, extensionNonce), relayProof)).toBe(false)
-    const extensionProof = await ExtensionPairing.pairingProof(other, "extension", extensionNonce, relayNonce)
-    expect(secretsEqual(pairingProof(code, "extension", extensionNonce, relayNonce), extensionProof)).toBe(false)
+    const relayProof = pairingProof(other, "relay", port, relayNonce, extensionNonce)
+    expect(ExtensionPairing.sameSecret(await ExtensionPairing.pairingProof(code, "relay", port, relayNonce, extensionNonce), relayProof)).toBe(false)
+    const extensionProof = await ExtensionPairing.pairingProof(other, "extension", port, extensionNonce, relayNonce)
+    expect(secretsEqual(pairingProof(code, "extension", port, extensionNonce, relayNonce), extensionProof)).toBe(false)
     // A relay can't answer the extension with the extension's own proof (reflection) or an old nonce.
-    expect(secretsEqual(pairingProof(code, "relay", relayNonce, extensionNonce), pairingProof(code, "extension", relayNonce, extensionNonce))).toBe(false)
-    expect(secretsEqual(pairingProof(code, "relay", relayNonce, extensionNonce), pairingProof(code, "relay", relayNonce, ExtensionPairing.randomNonce()))).toBe(false)
+    expect(secretsEqual(pairingProof(code, "relay", port, relayNonce, extensionNonce), pairingProof(code, "extension", port, relayNonce, extensionNonce))).toBe(false)
+    expect(secretsEqual(pairingProof(code, "relay", port, relayNonce, extensionNonce), pairingProof(code, "relay", port, relayNonce, ExtensionPairing.randomNonce()))).toBe(false)
+  })
+
+  test("a proof made for another relay port is refused", async () => {
+    // A listener on another port that passes the handshake through to this relay: the extension proves for the port
+    // it dialled, the relay checks against its own.
+    const forwardedExtensionProof = await ExtensionPairing.pairingProof(code, "extension", 19989, extensionNonce, relayNonce)
+    expect(secretsEqual(pairingProof(code, "extension", port, extensionNonce, relayNonce), forwardedExtensionProof)).toBe(false)
+    const forwardedRelayProof = pairingProof(code, "relay", port, relayNonce, extensionNonce)
+    expect(ExtensionPairing.sameSecret(await ExtensionPairing.pairingProof(code, "relay", 19989, relayNonce, extensionNonce), forwardedRelayProof)).toBe(false)
+    expect(ExtensionPairing.pairingEndpoint(port)).toBe("127.0.0.1:19988/extension")
   })
 
   test("install writes the code into an unpacked extension folder", () => {

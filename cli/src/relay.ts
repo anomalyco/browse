@@ -789,7 +789,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
               return
             }
             const proof = message.method === "auth.response" ? getString(message.params, "proof") : undefined
-            if (!secretsEqual(pairingProof(challenge.code, "extension", challenge.extensionNonce, challenge.relayNonce), proof)) {
+            if (!secretsEqual(pairingProof(challenge.code, "extension", port, challenge.extensionNonce, challenge.relayNonce), proof)) {
               pairingFailures += 1
               relayLog("extension.rejected", { reason: "pairing failed", profile: getString(getObject(challenge.hello.params), "profileName") })
               socket.close(4006, "Pairing failed: the extension's pairing code does not match this relay")
@@ -908,7 +908,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     const relayNonce = crypto.randomBytes(32).toString("base64url")
     socket.send(JSON.stringify({
       method: "auth.challenge",
-      params: { nonce: relayNonce, proof: pairingProof(code, "relay", relayNonce, extensionNonce) },
+      params: { nonce: relayNonce, proof: pairingProof(code, "relay", port, relayNonce, extensionNonce) },
     }))
     return { hello: message, extensionNonce, relayNonce, code }
   }
