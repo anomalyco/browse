@@ -248,6 +248,14 @@ export const ExtensionStatus = Schema.Struct({
   protocolCompatible: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
   protocolLegacy: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
   rejectedConnections: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  /** Extension connections refused because the pairing handshake failed. */
+  pairingFailures: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  /** Playwright dispatch faults the relay caught and survived since it started. */
+  processFaults: Schema.optionalKey(Schema.Struct({
+    suppressed: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+    lastAt: Schema.optionalKey(Schema.String),
+    lastMessage: Schema.optionalKey(Schema.String),
+  })),
   activeTargets: Schema.Number,
   childTargets: Schema.optionalKey(Schema.Number),
   cdpClients: Schema.optionalKey(Schema.Number),
@@ -543,6 +551,7 @@ export interface FlightRecorderCancelResponse extends Schema.Schema.Type<typeof 
 
 export const RelayErrorCode = Schema.Literals([
   "invalid-request",
+  "unauthorized",
   "relay-starting",
   "relay-busy",
   "auth-profile-not-found",

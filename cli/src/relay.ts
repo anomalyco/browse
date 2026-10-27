@@ -17,7 +17,7 @@ import { beforeInput, forgetTab } from "./human-input.ts"
 import { CdpRouter } from "./cdp-router.ts"
 import { CdpRuntime } from "./cdp-runtime.ts"
 import { ExtensionRpc } from "./extension-rpc.ts"
-import { createHttpRequestHandler } from "./http-api.ts"
+import { createHttpRequestHandler, hasRelayToken } from "./http-api.ts"
 import type { CdpEvent, CdpRequest, JsonObject, PageStatus } from "./protocol.ts"
 import { extensionProtocolCompatibility, isCdpRequest, isExtensionEvent, isExtensionResponse, makePageStatus, parseJsonObject } from "./protocol.ts"
 import {
@@ -38,9 +38,11 @@ import {
   logCloseError,
   sendCdpEvent,
   sendCdpResponse,
+  stableUnpackedExtensionOrigin,
   validateHostHeader,
   validateWebSocketOrigin,
 } from "./relay-helpers.ts"
+import { ensurePrivateDirectory, pairingCode, pairingProof, relayToken, relayTokenQueryParam, secretsEqual } from "./relay-secrets.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
 import { ghostCursorMouseActionExpression, ghostCursorRestoreExpression, inputDispatchMouseEventToGhostCursorAction } from "./ghost-cursor.ts"
 import { guardCdpMethod } from "./cdp-guardrails.ts"
@@ -101,6 +103,17 @@ const installRelayProcessGuard = Effect.acquireRelease(
   },
 )
 
+/** Playwright dispatch faults the relay swallowed to stay alive; reported by `status` and `doctor`. */
+const suppressedProcessFaults: { count: number; lastAt?: string; lastMessage?: string } = { count: 0 }
+
+export function relayProcessFaultSummary(): { readonly suppressed: number; readonly lastAt?: string; readonly lastMessage?: string } {
+  return {
+    suppressed: suppressedProcessFaults.count,
+    ...(suppressedProcessFaults.lastAt === undefined ? {} : { lastAt: suppressedProcessFaults.lastAt }),
+    ...(suppressedProcessFaults.lastMessage === undefined ? {} : { lastMessage: suppressedProcessFaults.lastMessage }),
+  }
+}
+
 export function shouldSuppressRelayProcessFault(cause: unknown): boolean {
   const errorText = cause instanceof Error ? `${cause.message}\n${cause.stack ?? ""}` : String(cause)
   return /playwright-core|patchright-core|coreBundle|Duplicate target/i.test(errorText)
@@ -113,6 +126,9 @@ export function handleRelayProcessFault(
   options: { readonly rethrow?: (cause: unknown) => never } = {},
 ): void {
   if (shouldSuppressRelayProcessFault(cause)) {
+    suppressedProcessFaults.count += 1
+    suppressedProcessFaults.lastAt = new Date().toISOString()
+    suppressedProcessFaults.lastMessage = (cause instanceof Error ? cause.message : String(cause)).slice(0, 300)
     logProcessFault(kind, cause, detail, "keeping relay alive")
     return
   }
@@ -153,7 +169,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const releaseTargetGraceMs = Math.max(0, options.releaseTargetGraceMs ?? 10_000)
   const browserId = crypto.randomUUID()
   const endpointUrl = `http://${formatHostForUrl(host)}:${port}`
-  const allowAnyChromeExtension = opencodeBrowserVersion === "0.0.0-dev"
+  // Every build, from source too, accepts only the store and unpacked IDs plus OPENCODE_BROWSER_EXTENSION_ORIGINS.
   const additionalChromeExtensionOrigins = new Set(options.additionalExtensionOrigins ?? [])
   const sessionCatalog = options.sessionCatalogPath === null
     ? undefined
@@ -163,8 +179,19 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   type TabGroupingMethod = "tabs.group" | "tabs.ungroup"
   const pendingTabGrouping = new Map<number, TabGroupingMethod>()
   const tabGroupingWorkers = new Map<number, Promise<void>>()
+  const authToken = yield* Effect.try({
+    try: () => {
+      ensurePrivateDirectory()
+      return relayToken()
+    },
+    catch: (cause) => new Error("Create the relay token", { cause }),
+  })
   let extensionGeneration = 0
   let rejectedExtensionConnections = 0
+  /** Extension connections that failed the pairing handshake (wrong code, or an extension without one). */
+  let pairingFailures = 0
+  /** An extension too old to pair is reloaded once, so an unpacked install picks up the new files on disk. */
+  let legacyExtensionReloaded = false
   let extensionBuild: string | undefined
   let extensionOrigin: string | undefined
   const extensionRpc = new ExtensionRpc()
@@ -348,6 +375,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     (id, onDefaultTargetChange) =>
       new ExecuteSandbox({
         endpointUrl,
+        authToken,
         sessionId: id,
         onDefaultTargetChange,
         requestHandoff: ({ message, timeoutMs, target, start, cancelStart }) => requestHandoff({
@@ -516,6 +544,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     host,
     port,
     browserId,
+    authToken,
     relayInstance: { id: browserId, startedAt: new Date().toISOString(), pid: process.pid, managed },
     shutdown: shutdownControl,
     registry,
@@ -535,7 +564,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         protocolCompatible: extensionRpc.protocolCompatible ?? null,
         protocolLegacy: extensionRpc.protocolLegacy ?? null,
         rejectedConnections: rejectedExtensionConnections,
+        pairingFailures,
         cdpClients: cdpClients.size,
+        processFaults: relayProcessFaultSummary(),
       }
     },
   })
@@ -670,10 +701,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     const requestUrl = new URL(request.url ?? "/", endpointUrl)
     const origin = Array.isArray(request.headers.origin) ? request.headers.origin[0] : request.headers.origin
     if (requestUrl.pathname === "/extension") {
+      // The extension proves itself with the pairing handshake once connected; there is no token for it.
       const originError = validateWebSocketOrigin({
         origin,
         requireChromeExtension: true,
-        allowAnyChromeExtension,
         additionalChromeExtensionOrigins,
       })
       if (originError) {
@@ -685,13 +716,17 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       })
       return
     }
+    if (!hasRelayToken(request, authToken) && !secretsEqual(authToken, requestUrl.searchParams.get(relayTokenQueryParam) ?? undefined)) {
+      sendUpgradeError({ socket, status: 401, message: "Missing or invalid OpenCode Browser relay token" })
+      return
+    }
     if (requestUrl.pathname.startsWith("/devtools/browser/")) {
       const sessionId = requestUrl.searchParams.get("opencodeBrowserSessionId") ?? headerValue(request.headers["opencode-browser-session-id"])
       if (!shutdownControl.accepting && (headerValue(request.headers["opencode-browser-client-kind"]) !== "sandbox" || !sessionId || !sessions.hasPendingWork(sessionId))) {
         sendUpgradeError({ socket, status: 503, message: "Relay is draining for an explicit restart" })
         return
       }
-      const originError = validateWebSocketOrigin({ origin, allowAnyChromeExtension, additionalChromeExtensionOrigins })
+      const originError = validateWebSocketOrigin({ origin, additionalChromeExtensionOrigins })
       if (originError) {
         sendUpgradeError({ socket, status: 403, message: originError })
         return
@@ -712,10 +747,31 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       let socketGeneration = 0
       const announcedRootTabIds = new Set<number>()
       currentAnnouncedRootTabIds = announcedRootTabIds
+      // Pairing: the extension's hello carries a nonce; the relay answers with its own nonce and an HMAC proving it
+      // knows the pairing code; the extension answers with its proof. Only then does the relay treat the socket as the
+      // extension (and the extension obey it).
+      let challenge: { readonly hello: JsonObject; readonly extensionNonce: string; readonly relayNonce: string; readonly code: string } | undefined
       socket.on("message", (data, isBinary) => {
         try {
           if (!handshaken) {
-            const acceptedGeneration = isBinary ? undefined : acceptExtensionHello(socket, data.toString(), headerValue(request.headers.origin))
+            if (socket.readyState !== WebSocket.OPEN) return
+            const message = isBinary ? undefined : parseJsonObject(data.toString())
+            if (!message || !isExtensionEvent(message)) {
+              socket.close(4002, "Extension hello required")
+              return
+            }
+            if (!challenge) {
+              challenge = challengeExtension(socket, message, headerValue(request.headers.origin))
+              return
+            }
+            const proof = message.method === "auth.response" ? getString(message.params, "proof") : undefined
+            if (!secretsEqual(pairingProof(challenge.code, "extension", challenge.extensionNonce, challenge.relayNonce), proof)) {
+              pairingFailures += 1
+              relayLog("extension.rejected", { reason: "pairing failed", profile: getString(getObject(challenge.hello.params), "profileName") })
+              socket.close(4006, "Pairing failed: the extension's pairing code does not match this relay")
+              return
+            }
+            const acceptedGeneration = acceptExtensionHello(socket, challenge.hello, headerValue(request.headers.origin))
             if (acceptedGeneration === undefined) {
               socket.close(4002, "Extension hello required")
               return
@@ -792,14 +848,52 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     detachTargetState(target.tabId)
   })
 
-  function acceptExtensionHello(socket: WebSocket, raw: string, origin: string | undefined): number | undefined {
-    const message = parseJsonObject(raw)
+  /** Answers the extension's hello with the relay's pairing proof; undefined when the socket was closed instead. */
+  function challengeExtension(socket: WebSocket, message: JsonObject, origin: string | undefined): { readonly hello: JsonObject; readonly extensionNonce: string; readonly relayNonce: string; readonly code: string } | undefined {
+    if (message.method !== "hello") {
+      socket.close(4002, "Extension hello required")
+      return undefined
+    }
+    const extensionNonce = getString(getObject(getObject(message.params)?.pairing), "nonce")
+    if (extensionNonce === undefined) {
+      pairingFailures += 1
+      relayLog("extension.rejected", { reason: "no pairing (extension too old)", version: getString(getObject(message.params), "version") })
+      // An unpacked extension older than pairing reloads once, picking up the files install just wrote. The command
+      // carries nothing; the relay never trusts this socket.
+      if (!legacyExtensionReloaded && origin === stableUnpackedExtensionOrigin) {
+        legacyExtensionReloaded = true
+        socket.send(JSON.stringify({ id: 0, method: "runtime.reload" }))
+      }
+      socket.close(4005, "Pairing required: update OpenCode Browser")
+      return undefined
+    }
+    if (!/^[A-Za-z0-9_-]{22,128}$/.test(extensionNonce)) {
+      socket.close(4002, "Invalid pairing nonce")
+      return undefined
+    }
+    let code: string
+    try {
+      code = pairingCode()
+    } catch (error) {
+      relayLog("extension.rejected", { reason: "pairing code unavailable", error: error instanceof Error ? error.message : String(error) })
+      socket.close(1011, "Relay pairing code unavailable")
+      return undefined
+    }
+    const relayNonce = crypto.randomBytes(32).toString("base64url")
+    socket.send(JSON.stringify({
+      method: "auth.challenge",
+      params: { nonce: relayNonce, proof: pairingProof(code, "relay", relayNonce, extensionNonce) },
+    }))
+    return { hello: message, extensionNonce, relayNonce, code }
+  }
+
+  function acceptExtensionHello(socket: WebSocket, message: JsonObject, origin: string | undefined): number | undefined {
     if (!isExtensionEvent(message) || message.method !== "hello") {
       return undefined
     }
     const protocol = extensionProtocolCompatibility(message.params?.protocolVersion)
     if (!protocol.compatible && extensionRpc.protocolCompatible === true) {
-      relayLog("extension.rejected", { reason: "incompatible", protocol: protocol.version, version: getString(message.params, "version") })
+      relayLog("extension.rejected", { reason: "incompatible", protocol: protocol.version, version: getString(getObject(message.params), "version") })
       socket.close(4003, "Extension protocol incompatible")
       return extensionGeneration
     }
@@ -1619,7 +1713,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
 
 function sendUpgradeError(options: {
   readonly socket: stream.Duplex
-  readonly status: 400 | 403 | 404 | 503
+  readonly status: 400 | 401 | 403 | 404 | 503
   readonly message: string
 }): void {
   const statusText = http.STATUS_CODES[options.status] ?? "Error"

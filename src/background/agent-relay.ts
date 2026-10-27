@@ -21,10 +21,11 @@ import type {
   OffscreenStatusRecordingResult,
   OffscreenStopRecordingResult,
 } from "../agent-relay/recording-types"
-import type { AgentRelayState, AgentRelayStatus } from "../shared/protocol"
+import type { AgentRelayState, AgentRelayStatus, PairingSource } from "../shared/protocol"
 import { createAgentRelayLog, formatAgentRelayLog } from "./agent-relay-log"
 import { AgentGroups } from "./agent-groups"
 import { DebuggerHub } from "./debugger-hub"
+import { normalizePairingCode, pairingProof, randomNonce, sameSecret } from "./pairing"
 import { TabCleanup } from "./tab-cleanup"
 
 /** Badge text the relay asked for, by tab. */
@@ -34,6 +35,10 @@ const OWNER = "relay"
 /** Overrides the relay port, for development and isolated tests. */
 const PORT_KEY = "agentRelayPort"
 const PROFILE_KEY = "agentRelayProfile"
+/** chrome.storage.local: the pairing code typed on the status page (Chrome Web Store builds). */
+export const PAIRING_KEY = "agentRelayPairingCode"
+/** Written next to the manifest by `install` for unpacked builds (cli/src/relay-secrets.ts). */
+const PAIRING_FILE = "relay-pairing.json"
 const ALARM = "opencode-browser-relay"
 // Relay tab groups end with this marker, which Chrome renders without width: they read like the session
 // groups ("opencode", or the agent session's name) but stay distinguishable for cleanup.
@@ -62,6 +67,8 @@ const CLOSE_CODES: Record<number, string> = {
   4002: "hello missing or liveness probe failed",
   4003: "protocol incompatible",
   4004: "another browser or profile is connected",
+  4005: "relay requires pairing (this extension is too old)",
+  4006: "pairing failed",
 }
 
 export function createAgentRelay(input: { changed: (state: AgentRelayState) => void; badgesChanged: () => void }) {
@@ -87,9 +94,16 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   const badges = new Map<number, AgentBadge>()
   /** Tabs the user let agents use while the relay was not connected; announced once it is. */
   const pendingAttach = new Set<number>()
+  /** Sockets whose relay proved it knows the pairing code; nothing else is obeyed. */
+  const trusted = new WeakSet<WebSocket>()
+  /** The handshake in flight on a socket: this extension's nonce and the code it proves with. */
+  const handshakes = new WeakMap<WebSocket, { nonce: string; code: string }>()
+  let pairing: PairingSource = "none"
+  let bundledPairing: Promise<string | undefined> | undefined
 
   const snapshot = (): AgentRelayState => ({
     status,
+    pairing,
     tabs: Array.from(relayTabs, (tabId) => {
       const page = pageStatuses.get(tabId)
       return page ? { tabId, status: page } : { tabId }
@@ -103,7 +117,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     notify()
   }
 
-  const open = () => (socket?.readyState === WebSocket.OPEN ? socket : undefined)
+  /** The connection, once its relay has paired; events and data never go to an unpaired one. */
+  const open = () => (socket?.readyState === WebSocket.OPEN && trusted.has(socket) ? socket : undefined)
   const send = (message: JsonObject) => {
     const data = serialize(message)
     // The relay drops a connection that sends more than it accepts; a lost event is better than a reconnect loop.
@@ -114,6 +129,25 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     const known = relayTabs.delete(tabId)
     pageStatuses.delete(tabId)
     if (known) notify()
+  }
+
+  /**
+   * The pairing code: the one `install` wrote into this unpacked build, else the one typed on the status page. A store
+   * build has no file; a missing file is only looked for again after the worker restarts.
+   */
+  const pairingCode = async () => {
+    bundledPairing ??= fetch(chrome.runtime.getURL(PAIRING_FILE))
+      .then((response) => (response.ok ? (response.json() as Promise<unknown>) : undefined))
+      .then((value) => normalizePairingCode(isJsonObject(value) ? value.code : undefined))
+      .catch(() => undefined)
+    const bundled = await bundledPairing
+    const stored = bundled === undefined ? normalizePairingCode((await chrome.storage.local.get(PAIRING_KEY))[PAIRING_KEY]) : undefined
+    const source: PairingSource = bundled !== undefined ? "bundled" : stored !== undefined ? "stored" : "none"
+    if (source !== pairing) {
+      pairing = source
+      notify()
+    }
+    return bundled ?? stored
   }
 
   const connect = (reason: string) => {
@@ -128,6 +162,13 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     clearTimeout(retry)
     retry = undefined
     port = Number((await chrome.storage.local.get(PORT_KEY))[PORT_KEY]) || defaultRelayPort
+    if (socket && socket.readyState <= WebSocket.OPEN) return
+    // Without a pairing code there is no relay to trust; wait for one (install, or the status page).
+    if ((await pairingCode()) === undefined) {
+      if (status !== "unpaired") log.add("pairing.missing")
+      setStatus("unpaired")
+      return
+    }
     if (socket && socket.readyState <= WebSocket.OPEN) return
     const url = `ws://127.0.0.1:${port}/extension`
     const mine = ++generation
@@ -153,7 +194,12 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       })
     }
     current.onmessage = (event) => {
-      if (typeof event.data === "string") void handle(current, event.data)
+      if (typeof event.data !== "string") return
+      if (trusted.has(current)) void handle(current, event.data)
+      else void verify(current, event.data).catch((error: unknown) => {
+        log.add("pairing.error", { error: text(error) })
+        current.close(4006, "Relay failed pairing")
+      })
     }
     current.onclose = (event) => {
       clearTimeout(timeout)
@@ -176,6 +222,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       void chrome.runtime.sendMessage({ action: "recording.cancelAll" }).catch(() => undefined)
       if (event.code === 4003) setStatus("incompatible")
       else if (event.code === 4004) setStatus("conflict")
+      else if (event.code === 4006) setStatus("untrusted")
       // A missing relay is normal until an agent's browse tools (or the opencode-browser CLI) start one.
       else setStatus(openedAt === undefined ? "offline" : "connecting")
       schedule(quiet && openedAt === undefined)
@@ -195,11 +242,26 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     }, delay)
   }
 
+  /**
+   * Opens the pairing handshake: the hello carries a fresh nonce, and nothing the relay sends is obeyed until it
+   * answers with a proof over that nonce (`verify`).
+   */
   const hello = async (current: WebSocket) => {
     const stored = (await chrome.storage.local.get(PROFILE_KEY))[PROFILE_KEY] as { id: string; name?: string } | undefined
     const profile = stored ?? { id: crypto.randomUUID() }
     if (!stored) await chrome.storage.local.set({ [PROFILE_KEY]: profile })
+    const code = await pairingCode()
     if (socket !== current || current.readyState !== WebSocket.OPEN) return
+    if (code === undefined) return current.close(4006, "Not paired")
+    const nonce = randomNonce()
+    handshakes.set(current, { nonce, code })
+    // An older relay waits for commands it never gets; one that doesn't pair in time isn't ours.
+    setTimeout(() => {
+      if (socket === current && current.readyState === WebSocket.OPEN && !trusted.has(current)) {
+        log.add("pairing.rejected", { reason: "no challenge" })
+        current.close(4006, "Relay did not pair")
+      }
+    }, CONNECT_TIMEOUT)
     current.send(
       JSON.stringify({
         method: "hello",
@@ -209,9 +271,42 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
           protocolVersion: extensionProtocolVersion,
           profileId: profile.id,
           profileName: profile.name ?? "OpenCode Browser",
+          pairing: { nonce },
         },
       }),
     )
+  }
+
+  /** Checks the relay's proof, answers with this extension's, and only then starts working for it. */
+  const verify = async (current: WebSocket, data: string) => {
+    const pending = handshakes.get(current)
+    handshakes.delete(current)
+    const message = (() => {
+      try {
+        const parsed: unknown = JSON.parse(data)
+        return isJsonObject(parsed) ? parsed : undefined
+      } catch {
+        return undefined
+      }
+    })()
+    const params = isJsonObject(message?.params) ? message.params : undefined
+    const relayNonce = typeof params?.nonce === "string" ? params.nonce : undefined
+    const ok =
+      pending !== undefined &&
+      message?.method === "auth.challenge" &&
+      relayNonce !== undefined &&
+      /^[A-Za-z0-9_-]{22,128}$/.test(relayNonce) &&
+      sameSecret(await pairingProof(pending.code, "relay", relayNonce, pending.nonce), params?.proof)
+    if (socket !== current || current.readyState !== WebSocket.OPEN) return
+    if (!ok || !pending || !relayNonce) {
+      // An older relay, or a program posing as one on this port: it gets nothing.
+      log.add("pairing.rejected", { reason: message?.method === "auth.challenge" ? "wrong proof" : `unexpected ${String(message?.method ?? message?.id ?? "message")}` })
+      current.close(4006, "Relay failed pairing")
+      return
+    }
+    current.send(JSON.stringify({ method: "auth.response", params: { proof: await pairingProof(pending.code, "extension", pending.nonce, relayNonce) } }))
+    trusted.add(current)
+    log.add("pairing.ok", { source: pairing })
     relayTabs.forEach((tabId) => current.send(JSON.stringify({ method: "debugger.attached", params: { tabId } })))
     current.send(JSON.stringify({ method: "ready" }))
     log.add("hello", { tabs: relayTabs.size, protocol: extensionProtocolVersion })
@@ -667,6 +762,16 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === ALARM && !retry) void connect("alarm")
   })
+  // A code typed on the status page (or removed) takes effect on a fresh connection.
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local" || !(PAIRING_KEY in changes)) return
+    log.add("pairing.changed")
+    attempts = 0
+    clearTimeout(retry)
+    retry = undefined
+    socket?.close(1000, "Pairing changed")
+    void connect("pairing")
+  })
   void chrome.alarms.create(ALARM, { periodInMinutes: extensionReconnectAlarmPeriodMs / 60_000 })
   void DebuggerHub.restore().then(() => {
     DebuggerHub.tabsOwnedBy(OWNER).forEach((tabId) => relayTabs.add(tabId))
@@ -738,6 +843,13 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       }
       return undefined
     },
+    /** Stores a pairing code typed on the status page; false when it isn't one. Reconnects through storage.onChanged. */
+    async pair(input: string) {
+      const code = normalizePairingCode(input)
+      if (code === undefined) return false
+      await chrome.storage.local.set({ [PAIRING_KEY]: code })
+      return true
+    },
     /** Reconnects now, for example after the user fixed what blocked the connection. */
     reconnect() {
       log.add("reconnect.requested")
@@ -755,6 +867,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         `extension: ${manifest.version} (${chrome.runtime.id})`,
         `browser: ${navigator.userAgent}`,
         `relay: ws://127.0.0.1:${port}/extension, protocol ${extensionProtocolVersion}`,
+        `pairing: ${pairing}`,
         `status: ${status}${connectedAt ? ` since ${new Date(connectedAt).toISOString()}` : ""}`,
         `reconnect attempts: ${attempts}${retry ? " (retry scheduled)" : ""}`,
         `cdp commands: ${cdp.count} (${cdp.errors} failed)`,

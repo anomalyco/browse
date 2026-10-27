@@ -110,6 +110,7 @@ const extensionCommandMethodValues = [
 
 const extensionEventMethodValues = [
   "hello",
+  "auth.response",
   "ready",
   "toolbar.clicked",
   "handoff.completed",

@@ -46,7 +46,8 @@ await chmod(cli, 0o755)
 
 await cp(path.join(extension, "dist"), path.join(here, "extension"), {
   recursive: true,
-  filter: (file) => !file.endsWith(".map"),
+  // A checkout's pairing code (written by install into public/ and dist/) must never ship in the package.
+  filter: (file) => !file.endsWith(".map") && path.basename(file) !== "relay-pairing.json",
 })
 const manifestFile = path.join(here, "extension", "manifest.json")
 const manifest = await Bun.file(manifestFile).json()

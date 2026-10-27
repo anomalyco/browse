@@ -1,4 +1,5 @@
 import { defaultPort } from "./relay-helpers.ts"
+import { relayAuthorization } from "./relay-secrets.ts"
 import { NodeHttpClient } from "@effect/platform-node"
 import { Config, Context, Effect, Layer, Option, Schema } from "effect"
 import { HttpClient, HttpClientRequest, type HttpClientResponse } from "effect/http"
@@ -213,8 +214,20 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: { readonl
       cause,
     })
 
+  // The relay rejects requests without this install's token (relay-secrets.ts). Read once it exists; a relay
+  // started by this client creates it, so a failed read is retried on the next request.
+  let authorization: string | undefined
+  const authorize = (request: HttpClientRequest.HttpClientRequest): HttpClientRequest.HttpClientRequest => {
+    try {
+      authorization ??= relayAuthorization()
+    } catch {
+      return request
+    }
+    return HttpClientRequest.setHeader(request, "authorization", authorization)
+  }
+
   const getJson = <A>(path: string, schema: Schema.ConstraintDecoder<A>): Effect.Effect<A, RelayClientError> =>
-    httpClient.get(new URL(path, endpoint)).pipe(
+    Effect.suspend(() => httpClient.execute(authorize(HttpClientRequest.get(new URL(path, endpoint))))).pipe(
       Effect.mapError(transportError(path)),
       Effect.flatMap((response) => handleResponse(response, path, schema)),
     )
@@ -230,7 +243,7 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: { readonl
       path,
       cause,
     })),
-    Effect.flatMap((request) => httpClient.execute(request).pipe(
+    Effect.flatMap((request) => httpClient.execute(authorize(request)).pipe(
       Effect.mapError(transportError(path)),
       Effect.flatMap((response) => handleResponse(response, path, schema)),
     )),

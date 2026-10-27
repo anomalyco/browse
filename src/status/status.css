@@ -85,6 +85,15 @@ code {
   white-space: nowrap;
   user-select: all;
 }
+.command input {
+  flex: 1;
+  min-width: 0;
+  font: 12.5px/1.4 ui-monospace, "Berkeley Mono", "SF Mono", Menlo, monospace;
+  color: var(--fg);
+  background: transparent;
+  border: 0;
+  outline: none;
+}
 button {
   font: inherit;
   font-size: 13px;
@@ -121,7 +130,9 @@ button:hover {
   background: var(--ok);
 }
 .status[data-state="conflict"]::before,
-.status[data-state="incompatible"]::before {
+.status[data-state="incompatible"]::before,
+.status[data-state="unpaired"]::before,
+.status[data-state="untrusted"]::before {
   background: var(--warn);
 }
 footer {

@@ -36,6 +36,18 @@
         </div>
       </section>
 
+      <section id="pairing" hidden>
+        <h2>Pair with the relay</h2>
+        <p>
+          The extension only works for the relay on this computer once both know the same pairing code. Run
+          <code>npx opencode-browser-cli pair</code> in a terminal and paste the code it prints.
+        </p>
+        <form class="command" id="pairing-form">
+          <input id="pairing-code" autocomplete="off" spellcheck="false" placeholder="XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX" aria-label="Pairing code" />
+          <button type="submit">Pair</button>
+        </form>
+      </section>
+
       <section>
         <h2>Using it</h2>
         <ul>

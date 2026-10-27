@@ -18,6 +18,11 @@ const connect = () => {
   port = next
   next.onMessage.addListener((message: ToStatusPage) => {
     if (message.type === "agents") render(message.state)
+    if (message.type === "pairing.result") {
+      const button = element<HTMLButtonElement>("pairing-form").querySelector("button")!
+      if (message.ok) element<HTMLInputElement>("pairing-code").value = ""
+      flash(button, message.ok ? "Paired" : "Not a code")
+    }
   })
   // The worker can stop and restart at any time; follow it.
   next.onDisconnect.addListener(() => {
@@ -32,6 +37,8 @@ const send = (message: FromStatusPage) => port?.postMessage(message)
 function render(state: AgentRelayState) {
   status.dataset.state = state.status
   status.textContent = describe(state)
+  // An unpacked build is paired by install; a store build pairs here (and can be paired again).
+  element("pairing").hidden = state.pairing === "bundled" && state.status !== "untrusted"
 }
 
 function describe(state: AgentRelayState) {
@@ -43,6 +50,11 @@ function describe(state: AgentRelayState) {
     return "OpenCode Browser in another browser or profile is connected. Close it there (or quit that browser), then click Reconnect."
   if (state.status === "incompatible")
     return "This extension and the installed CLI don't match. Run the install command again, then click Reconnect."
+  if (state.status === "unpaired") return "Not paired yet. Enter the pairing code below; until then no agent can use this browser."
+  if (state.status === "untrusted")
+    return state.pairing === "bundled"
+      ? "The relay on this computer didn't pair with this extension, so it was refused. Run the install command again (or update the CLI), then click Reconnect."
+      : "The relay on this computer didn't pair with this extension, so it was refused. Check the pairing code below, or update the CLI."
   return "Waiting for an agent. The relay starts the first time an agent uses the browse tools."
 }
 
@@ -55,6 +67,10 @@ const flash = (button: HTMLButtonElement, label: string) => {
 element<HTMLButtonElement>("copy-command").addEventListener("click", (event) => {
   const button = event.currentTarget as HTMLButtonElement
   void navigator.clipboard.writeText(element("install-command").textContent ?? "").then(() => flash(button, "Copied"))
+})
+element<HTMLFormElement>("pairing-form").addEventListener("submit", (event) => {
+  event.preventDefault()
+  send({ type: "pairing.set", code: element<HTMLInputElement>("pairing-code").value })
 })
 element<HTMLButtonElement>("reconnect").addEventListener("click", () => send({ type: "agents.reconnect" }))
 element<HTMLButtonElement>("cleanup").addEventListener("click", (event) => {
