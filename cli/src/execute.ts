@@ -59,13 +59,14 @@ import {
 import { createScreenshotDiff, type ScreenshotDiffOptions, type ScreenshotDiffResult } from "./screenshot-diff.ts"
 import { createWebMcpHelper, type WebMcpHelper } from "./webmcp.ts"
 import { startDemonstrationRecorder, type DemonstrationResult } from "./demonstration.ts"
+import { createExecuteFiles, executeAllowsNode, ExecuteRealm, sandboxModules, type ExecuteFiles } from "./execute-realm.ts"
 
 export { createAriaSnapshotHelper, createSnapshotHelpers, defaultAriaSnapshotTimeoutMs, fillInputs }
 
 tunePatchright()
 
+// Full Node modules, only with OPENCODE_BROWSER_ALLOW_NODE=1. Sandboxed execute code gets sandboxModules.
 const nodeModules = { fs, path, os, crypto, url, util, events, stream, buffer, http, https, zlib }
-const nodeModuleAliases = Object.keys(nodeModules).join(", ")
 
 const playwrightCloseTimeoutMs = 2_000
 const playwrightConnectTimeoutMs = 15_000
@@ -76,7 +77,7 @@ const sessionPageHealthCheckTimeoutMs = 3_000
 const sessionPageHealthRetryDelayMs = 100
 const handoffPageContextTimeoutMs = 15_000
 const timedOut = Symbol("timed-out")
-export const downloadCapabilityErrorMessage = "Downloads are unavailable in OpenCode Browser extension-backed tabs: Chromium blocks Browser.setDownloadBehavior and Page.setDownloadBehavior through chrome.debugger, so Playwright cannot retain an artifact for download.saveAs(). Fetch the response in the page and write the returned bytes with fs when the site exposes them."
+export const downloadCapabilityErrorMessage = "Downloads are unavailable in OpenCode Browser extension-backed tabs: Chromium blocks Browser.setDownloadBehavior and Page.setDownloadBehavior through chrome.debugger, so Playwright cannot retain an artifact for download.saveAs(). Fetch the response in the page and save the returned bytes with files.write() when the site exposes them."
 const downloadGuardedPages = new WeakSet<Page>()
 const downloadGuardedContexts = new WeakSet<BrowserContext>()
 const viewportZoomGuardedPages = new WeakSet<Page>()
@@ -330,7 +331,8 @@ type SandboxGlobals = {
   readonly context: BrowserContext
   readonly page: Page
   readonly state: Record<string, unknown>
-  readonly modules: typeof nodeModules
+  readonly modules: Readonly<Record<string, unknown>>
+  readonly files: ExecuteFiles
   readonly fillInput: (target: InputTarget, value: string) => Promise<void>
   readonly fillInputs: (page: Page, fields: ReadonlyArray<InputField>) => Promise<void>
   readonly screenshotWithLabels: (options?: ScreenshotWithLabelsOptions) => Promise<ScreenshotWithLabelsResult>
@@ -485,7 +487,10 @@ export class ExecuteSandbox {
   private lastKnownNonBlankUrl: string | undefined
   private recreatedFromClosedUrl: string | undefined
   private explicitLightColorScheme = false
-  private readonly state: Record<string, unknown> = {}
+  /** Full Node access for execute code (OPENCODE_BROWSER_ALLOW_NODE=1); otherwise code runs in a vm realm. */
+  private readonly allowNode = executeAllowsNode()
+  private readonly realm = this.allowNode ? undefined : new ExecuteRealm()
+  private readonly state: Record<string, unknown> = this.realm?.state ?? {}
   private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
   private readonly networkCapture = new NetworkCapture.Recorder()
   private pendingWarnings: string[] = []
@@ -501,7 +506,7 @@ export class ExecuteSandbox {
     return Effect.tryPromise({
       try: async () => {
         const globals = await this.getGlobals(options)
-        const { result, logs, logSummary, aftermath } = await runUserCode({ code, globals })
+        const { result, logs, logSummary, aftermath } = await runUserCode({ code, globals, ...(this.realm ? { realm: this.realm } : {}) })
         await this.networkCapture.settleForOutput()
         const extracted = extractExecuteMedia(result)
         const redactedValue = this.networkCapture.redactValue(extracted.value)
@@ -863,6 +868,7 @@ export class ExecuteSandbox {
     }
     const ariaSnapshot = createAriaSnapshotHelper(page)
     const { snapshot, ref } = createSnapshotHelpers(page, this.snapshotRefs)
+    const screenshotDiff = createScreenshotDiff(page)
     const handoffTracker = { count: 0 }
     const requestHandoff = this.options.requestHandoff
     const handoff = async (message?: string, options?: HandoffCallOptions) => {
@@ -922,7 +928,8 @@ export class ExecuteSandbox {
       context,
       page,
       state: this.state,
-      modules: nodeModules,
+      modules: this.realm ? this.realm.proxyAsObject({ ...sandboxModules }) : nodeModules,
+      files: this.realm ? this.realm.proxyAsObject(createExecuteFiles()) : createExecuteFiles(),
       fillInput: (target, value) => fillInput({ page, target, value }),
       fillInputs,
       screenshotWithLabels: (screenshotOptions = {}) => screenshotWithLabels({
@@ -930,7 +937,8 @@ export class ExecuteSandbox {
         page: screenshotOptions.page ?? page,
         registry: this.snapshotRefs,
       }),
-      screenshotDiff: createScreenshotDiff(page),
+      // Named property functions: the execute realm checks their file options by name.
+      screenshotDiff: (diffOptions) => screenshotDiff(diffOptions),
       ariaSnapshot,
       snapshot,
       ref,
@@ -1676,6 +1684,7 @@ function formatLogCompactionWarning(summary: ExecuteLogSummary): string | undefi
   return `Captured ${summary.totalCount} console/page events: returned ${summary.returnedCount}, folded ${summary.repeatedCount} repeated page entries, and omitted ${summary.omittedCount} after limits (page=${maxCapturedPageLogs}, script=${maxCapturedScriptLogs}). Aftermath error counts include all events.`
 }
 
+const nodeOnlyGlobalPattern = /^(process|require|fs|os|http|https|child_process|fetch|module|__dirname|__filename) is not defined$/
 const pageOnlyGlobalPattern = /^(window|document|localStorage|sessionStorage|location|navigator|getComputedStyle) is not defined$/
 
 /** Explain failures caused by treating Node-side execute code as page code. */
@@ -1683,6 +1692,10 @@ export function formatNodeContextWarning(error: Error): string | undefined {
   const pageGlobal = error.name === "ReferenceError" ? pageOnlyGlobalPattern.exec(error.message)?.[1] : undefined
   if (pageGlobal) {
     return `Execute code runs in Node, where \`${pageGlobal}\` is undefined. Read page globals inside page.evaluate(() => ...).`
+  }
+  const nodeGlobal = error.name === "ReferenceError" ? nodeOnlyGlobalPattern.exec(error.message)?.[1] : undefined
+  if (nodeGlobal) {
+    return `Execute code runs in a sandbox without \`${nodeGlobal}\` (no process, require, fs, os, child_process, http/https or Node fetch). Save or read files with files.write(name, data) / files.read(path), fetch through page.evaluate(() => fetch(...)), or ask the user to set OPENCODE_BROWSER_ALLOW_NODE=1 on the relay for full Node access.`
   }
   if (error.name === "TypeError" && error.message.startsWith("Failed to parse URL from ")) {
     return "Execute code runs in Node, so fetch has no page origin or cookies. Use page.evaluate(() => fetch(...)) for same-origin requests."
@@ -1727,7 +1740,7 @@ function formatLocatorFailurePageWarning(
   return "Locator failed on page about:blank. Navigate with page.goto(...) or adopt an attached tab before querying controls."
 }
 
-export async function runUserCode({ code, globals }: { readonly code: string; readonly globals: SandboxGlobals }): Promise<{
+export async function runUserCode({ code, globals, realm }: { readonly code: string; readonly globals: SandboxGlobals; readonly realm?: ExecuteRealm }): Promise<{
   readonly result: unknown
   readonly logs: readonly ExecuteLogEntry[]
   readonly logSummary: ExecuteLogSummary
@@ -1778,9 +1791,20 @@ export async function runUserCode({ code, globals }: { readonly code: string; re
     } satisfies { readonly logs: readonly ExecuteLogEntry[]; readonly logSummary: ExecuteLogSummary; readonly aftermath: ExecuteAftermath }
   }
   try {
+    const values = [sandboxConsole, ...sandboxGlobalKeys.map((key) => globals[key])]
+    if (realm) {
+      const stateIndex = sandboxGlobalKeys.indexOf("state") + 1
+      const result = await realm.run({
+        source: `(async function (console, ${sandboxGlobalKeys.join(", ")}) {\n${wrapCodeWithModuleAliases(code, Object.keys(sandboxModules))}\n})`,
+        filename: "execute.js",
+        args: values,
+        sandboxArgs: new Map([[stateIndex, globals.state]]),
+      })
+      return { result, ...buildResultMetadata() }
+    }
     const AsyncFunction = async function () {}.constructor as new (...args: string[]) => (...args: unknown[]) => Promise<unknown>
-    const fn = new AsyncFunction("console", ...sandboxGlobalKeys, wrapCodeWithModuleAliases(code))
-    const result = await fn(sandboxConsole, ...sandboxGlobalKeys.map((key) => globals[key]))
+    const fn = new AsyncFunction("console", ...sandboxGlobalKeys, wrapCodeWithModuleAliases(code, Object.keys(nodeModules)))
+    const result = await fn(...values)
     return { result, ...buildResultMetadata() }
   } catch (cause) {
     const error = cause instanceof Error ? cause : new Error("execute sandbox code", { cause })
@@ -1800,6 +1824,7 @@ const sandboxGlobalKeys = [
   "page",
   "state",
   "modules",
+  "files",
   "fillInput",
   "fillInputs",
   "screenshotWithLabels",
@@ -1900,8 +1925,8 @@ export function wrapCode(code: string): string {
   return code
 }
 
-function wrapCodeWithModuleAliases(code: string): string {
-  return `const { ${nodeModuleAliases} } = modules;\n{\n${wrapCode(code)}\n}`
+function wrapCodeWithModuleAliases(code: string, aliases: readonly string[]): string {
+  return `const { ${aliases.join(", ")} } = modules;\n{\n${wrapCode(code)}\n}`
 }
 
 function stringifyResult(result: unknown): string {
