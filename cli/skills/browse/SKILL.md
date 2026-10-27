@@ -698,6 +698,28 @@ not a repair.
 Completion: stop the recorder, inspect the resulting media rather than only its
 existence, and report the viewport, state, and interaction path actually tested.
 
+## Changing settings
+
+Use the `settings` tool (CLI: `opencode-browser settings get` / `settings set
+key=value …`) only when the user asks to change how browse behaves: where your
+tabs open (`window`: current, separate), how they're grouped (`grouping`:
+session, shared, none), when untouched agent tabs close (`idleMinutes`: 10, 30,
+60, never), the agent cursor (`cursor`: off, always), human-like input
+(`humanInput`: on, off) and handoff notifications (`handoffNotifications`:
+recording, always). Never change them on your own initiative, for example to
+speed up a task. Without `set` it reports each setting's value, the value in
+effect and the environment variable overriding it, if any.
+
+```js
+// MCP: settings { set: { grouping: "shared" } }
+```
+
+The change applies at once and the options page shows it. Tell the user what you
+changed (the result's `message` says what). A setting a relay environment
+variable fixes isn't changed; pass that on with the variable's name. Security
+switches (`OPENCODE_BROWSER_ALLOW_*`, `OPENCODE_BROWSER_UPDATE_CHECK`) are not
+settings: they exist only in the relay's environment and no tool changes them.
+
 ## Updating browse
 
 When a tool result or `status` says browse has an update, tell the user once,

@@ -79,7 +79,9 @@ proves it knows that code (see [Security](#security)). A Chrome Web Store build 
   - **Human-like input:** on (default), or *off*: faster, but easier for sites to flag as a bot.
   - **Handoff notifications:** only while the tab is recorded (default), or *on every handoff*, as well as the card.
   The relay's environment variables below override the window, cursor and input settings; the options page then
-  shows the value in effect and which variable set it.
+  shows the value in effect and which variable set it. Agents can read and change these settings with the `settings`
+  tool when you ask them to (`node cli/dist/cli.mjs settings get`, `settings set grouping=shared` on the CLI); the
+  options page follows at once. The security switches below are environment-only, never settings.
 - **Hand an agent one of your tabs** by clicking the toolbar button on it. The badge shows **ON**; click again to take
   it back. While an agent works the badge reads **RUN**, and **WAIT** when it needs you. The button always works: a
   click while a script runs takes the tab back and stops the script. Agents can't close a tab you lent them.
@@ -103,6 +105,7 @@ proves it knows that code (see [Security](#security)). A Chrome Web Store build 
 | `flight_recorder_start`, `flight_recorder_save_last`, … | Keep the last minute of video, save it when something breaks |
 | `secrets_status`, `secrets_refresh`, `secrets_run` | Reuse captured credentials while keeping their values out of transcripts and artifacts |
 | `tabs_cleanup` | Close the agent's idle tabs |
+| `settings` | Read or change the settings below when the user asks (never the security switches); the options page updates live |
 | `status`, `skill` | Connection status, and the full agent guide |
 
 The agent guide is [`cli/skills/browse/SKILL.md`](cli/skills/browse/SKILL.md). Everything is also a CLI:
