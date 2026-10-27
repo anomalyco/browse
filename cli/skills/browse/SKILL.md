@@ -62,7 +62,7 @@ timeout does not close or replace the tab.
 A bare CLI execute creates a fresh session-owned page and prints the exact
 `--session <id>` continuation command, or you can pass a descriptive session
 name (including an optional emoji, which appears directly on the browser tab
-group and in-page status pill). Every later CLI call must pass that id or set
+group). Every later CLI call must pass that id or set
 `OPENCODE_BROWSER_SESSION`; bare execute never guesses from human-shell current
 state.
 

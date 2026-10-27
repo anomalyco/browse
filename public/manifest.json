@@ -26,17 +26,6 @@
     "service_worker": "background.js",
     "type": "module"
   },
-  "content_scripts": [
-    {
-      "matches": [
-        "<all_urls>"
-      ],
-      "js": [
-        "content.js"
-      ],
-      "run_at": "document_start"
-    }
-  ],
   "permissions": [
     "debugger",
     "tabs",
@@ -44,7 +33,8 @@
     "storage",
     "alarms",
     "offscreen",
-    "tabCapture"
+    "tabCapture",
+    "scripting"
   ],
   "host_permissions": [
     "<all_urls>"

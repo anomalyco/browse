@@ -25,6 +25,7 @@ import type { AgentRelayState, AgentRelayStatus } from "../shared/protocol"
 import { createAgentRelayLog, formatAgentRelayLog } from "./agent-relay-log"
 import { AgentGroups } from "./agent-groups"
 import { DebuggerHub } from "./debugger-hub"
+import { PageScripts } from "./page-scripts"
 import { TabCleanup } from "./tab-cleanup"
 
 /** Badge text the relay asked for, by tab. */
@@ -362,7 +363,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         // A handoff opens the agent's group so the user can find the tab; it folds up again afterwards.
         if (page.state === "waiting") void AgentGroups.expandTab(tabId)
         else if (wasWaiting) void AgentGroups.settleTab(tabId)
-        await chrome.tabs.sendMessage(tabId, { action: "page-status.set", status: page })
+        await PageScripts.send(tabId, { action: "page-status.set", status: page })
         return {}
       }
       case "pageStatus.clear": {

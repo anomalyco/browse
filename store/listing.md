@@ -34,7 +34,8 @@ Let OpenCode, an AI agent running on the user's computer, use the user's browser
 - `storage`: Remember which tabs agents opened and the agent tab groups across extension restarts.
 - `alarms`: Keep the connection to the local OpenCode relay alive, reconnect, and close agent tabs left idle.
 - `offscreen`, `tabCapture`: Record a tab when the user asks an agent for a screen recording.
-- Host permission `<all_urls>`: Agents work on whatever site the user asks for, and the page shows a banner while an agent works there or waits for the user.
+- `scripting`: Add the extension's handoff card only to tabs agents use (not to every page), so the user can finish a login or payment step and hand the tab back.
+- Host permission `<all_urls>`: Agents work on whatever site the user asks for, and the page shows a card when an agent waits for the user there.
 
 **Remote code:** No. All extension code ships in the package.
 

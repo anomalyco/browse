@@ -1,79 +1,105 @@
-// In-page status for tabs agents use through the OpenCode Browser relay: a small pill while an agent works,
-// and a "your turn" card when it hands the page to the user (logins, 2FA, passkeys, payments). While an
-// agent drives the page it also removes other extensions' injected frames, which make Chrome drop the
-// debugger. Built as a classic script (content scripts cannot import modules) and injected at
-// document_start in top frames.
+// In-page status for tabs agents use through the OpenCode Browser relay: a "your turn" card when an agent hands
+// the page to the user (logins, 2FA, passkeys, payments). While an agent is running it also removes other
+// extensions' injected frames, which make Chrome drop the debugger. The background injects it (a classic
+// script: content scripts cannot import modules) only into the top frame of tabs agents use, again after
+// each navigation (src/background/page-scripts.ts).
+//
+// Pages must not be able to tell that agents use the tab, or to fake the user's answer: the script lives in
+// the extension's isolated world, adds nothing to the page's DOM until a handoff waits for the user, and then
+// shows the card in a closed shadow root on a host element without an id, in the top layer, restoring it when
+// the page removes, hides or restyles it. Only a real click (event.isTrusted) on Continue completes the handoff.
+// The toolbar badge shows the other states (ON, RUN).
 import { pageStatusFromJson, type PageStatus } from "../agent-relay/protocol"
 
-// The relay's ghost cursor (cli/src/ghost-cursor.ts) reads this host's data-waiting attribute.
-const HOST_ID = "__opencode_browser_page_status__"
-const CURSOR_STYLE_ID = "__opencode_browser_cursor_style__"
-const RELAY_CURSOR_ID = "__opencode_browser_ghost_cursor__"
+type Loaded = { __opencodeBrowserPageStatus?: true }
 
 let current: PageStatus | undefined
 let completing: string | undefined
+let host: HTMLElement | undefined
+let root: ShadowRoot | undefined
 let observer: MutationObserver | undefined
 
-chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
-  if (typeof message !== "object" || message === null || !("action" in message)) return
-  if (message.action === "evict-extension-frames") {
-    sendResponse({ removed: evictForeignFrames(document) })
-    return
-  }
-  if (message.action === "page-status.clear") return clear()
-  const status = "status" in message ? pageStatusFromJson(message.status) : undefined
-  if (message.action !== "page-status.set" || !status) return
-  current = status
-  completing = undefined
-  // The user needs their password manager during a handoff; otherwise the agent's debugger comes first.
-  if (status.state !== "waiting") evictForeignFrames(document)
-  render()
-})
+// The background injects again after navigations; a document that already has the script keeps the first copy.
+if (!(globalThis as Loaded).__opencodeBrowserPageStatus) {
+  ;(globalThis as Loaded).__opencodeBrowserPageStatus = true
+  chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+    if (typeof message !== "object" || message === null || !("action" in message)) return
+    if (message.action === "evict-extension-frames") {
+      sendResponse({ removed: evictForeignFrames(document) })
+      return
+    }
+    if (message.action === "page-status.clear") return clear()
+    const status = "status" in message ? pageStatusFromJson(message.status) : undefined
+    if (message.action !== "page-status.set" || !status) return
+    current = status
+    completing = undefined
+    // Password managers stay usable while the tab is only lent or waits for the user; while an agent runs
+    // the debugger comes first.
+    if (status.state === "running") evictForeignFrames(document)
+    render()
+  })
+  void chrome.runtime.sendMessage({ action: "page-status.ready" }).catch(() => undefined)
+}
 
-void chrome.runtime.sendMessage({ action: "page-status.ready" }).catch(() => undefined)
+function waiting() {
+  return current?.state === "waiting" && current.handoffId !== undefined
+}
 
 function render() {
-  if (!current || !document.documentElement) return
-  styleRelayCursor()
-  const host = document.getElementById(HOST_ID) ?? create()
-  const root = host.shadowRoot!
-  const waiting = current.state === "waiting" && current.handoffId !== undefined
-  host.dataset.waiting = String(waiting)
-  const pill = root.getElementById("pill")!
-  const label = root.getElementById("label")!
-  pill.dataset.state = current.readOnly ? "readonly" : current.state
-  label.textContent =
-    current.state === "waiting"
-      ? "Waiting for you"
-      : current.readOnly
-        ? "Watching"
-        : current.state === "running"
-          ? "Working"
-          : "Connected"
-  pill.title = [
-    current.owner === "session" ? "An agent opened this tab" : "You let agents use this tab",
-    current.sessionId ? `Session ${current.sessionId}` : undefined,
-  ]
-    .filter(Boolean)
-    .join(" · ")
-  const card = root.getElementById("card")!
-  card.hidden = !waiting
-  root.getElementById("vignette")!.hidden = !waiting
-  if (waiting) {
-    root.getElementById("message")!.textContent = current.message ?? "Finish this step, then continue."
-    const button = root.getElementById("continue") as HTMLButtonElement
+  if (!current) return
+  const showing = waiting()
+  if (!showing) removeHost()
+  else if (document.documentElement) {
+    const shadow = root ?? create()
+    const pill = shadow.getElementById("pill")!
+    pill.dataset.state = "waiting"
+    shadow.getElementById("label")!.textContent = "Waiting for you"
+    pill.title = [
+      current.owner === "session" ? "An agent opened this tab" : "You let agents use this tab",
+      current.sessionId ? `Session ${current.sessionId}` : undefined,
+    ]
+      .filter(Boolean)
+      .join(" · ")
+    shadow.getElementById("message")!.textContent = current.message ?? "Finish this step, then continue."
+    shadow.getElementById("origin")!.textContent = pageOrigin()
+    const button = shadow.getElementById("continue") as HTMLButtonElement
     button.disabled = completing === current.handoffId
     button.textContent = completing === current.handoffId ? "Continuing…" : "Continue"
-    anchor(host)
+    raise()
   }
+  // The observer sees only this world's view of the DOM; the page can't see or disconnect it.
+  if ((current.state === "running" || showing) && document.documentElement) {
+    observer ??= new MutationObserver((records) => {
+      if (!current) return
+      if (current.state === "running")
+        for (const record of records) for (const node of record.addedNodes) evictForeignFrames(node)
+      if (waiting() && records.some((record) => record.target === host || !host?.isConnected)) raise()
+    })
+    observer.observe(document.documentElement, { childList: true, subtree: true })
+    if (host) observer.observe(host, { attributes: true })
+  } else {
+    observer?.disconnect()
+    observer = undefined
+  }
+}
+
+/** The page's origin as the user should read it: the site asking them to act. */
+function pageOrigin() {
+  const origin = location.origin
+  return origin && origin !== "null" ? origin : location.protocol === "file:" ? location.href : "This page"
+}
+
+/** Puts the host back in the document and the top layer, without attributes a page may have set on it. */
+function raise() {
+  if (!host || !document.documentElement) return
+  for (const name of host.getAttributeNames()) if (name !== "popover") host.removeAttribute(name)
+  if (host.getAttribute("popover") !== "manual") host.setAttribute("popover", "manual")
   if (!host.isConnected) document.documentElement.append(host)
-  observer ??= new MutationObserver((records) => {
-    if (!current) return
-    if (current.state !== "waiting")
-      for (const record of records) for (const node of record.addedNodes) evictForeignFrames(node)
-    if (!document.getElementById(HOST_ID)) render()
-  })
-  observer.observe(document.documentElement, { childList: true, subtree: true })
+  try {
+    if (!host.matches(":popover-open")) host.showPopover()
+  } catch {
+    // Another top-layer element (a modal dialog) can refuse it; the host still shows above the page.
+  }
 }
 
 /**
@@ -121,18 +147,21 @@ function evictForeignFrames(root: Node): number {
 }
 
 function create() {
-  const host = document.createElement("div")
-  host.id = HOST_ID
-  const root = host.attachShadow({ mode: "open" })
+  host = document.createElement("div")
+  host.setAttribute("popover", "manual")
+  root = host.attachShadow({ mode: "closed" })
   root.innerHTML = `<style>${STYLE}</style>
-    <div id="vignette" hidden></div>
-    <div id="card" role="dialog" aria-labelledby="title" aria-describedby="message" hidden>
+    <div id="vignette"></div>
+    <div id="card" role="dialog" aria-labelledby="title" aria-describedby="message">
       <div id="head"><span id="dot"></span><span id="title">Your turn</span><span id="source">${MARK}OpenCode Browser</span></div>
+      <p id="origin"></p>
       <p id="message"></p>
       <div id="actions"><button id="continue" type="button">Continue</button></div>
     </div>
     <div id="pill" role="status" aria-live="polite">${MARK}<span id="label"></span><span id="light"></span></div>`
-  root.getElementById("continue")!.addEventListener("click", () => {
+  root.getElementById("continue")!.addEventListener("click", (event) => {
+    // Page scripts can't reach the closed root, and only the user's own click counts.
+    if (!event.isTrusted) return
     const handoffId = current?.handoffId
     if (!handoffId || completing === handoffId) return
     completing = handoffId
@@ -142,32 +171,17 @@ function create() {
       render()
     })
   })
-  return host
+  // The page can close the popover (hidePopover); open it again while the handoff waits.
+  host.addEventListener("toggle", () => {
+    if (waiting()) queueMicrotask(raise)
+  })
+  return root
 }
 
-/** Places the card next to the agent's cursor when it points at the step to finish. */
-function anchor(host: HTMLElement) {
-  const cursor = document.getElementById(RELAY_CURSOR_ID)
-  const x = Number(cursor?.dataset.targetX)
-  const y = Number(cursor?.dataset.targetY)
-  if (!cursor || !Number.isFinite(x) || !Number.isFinite(y)) {
-    host.removeAttribute("data-anchor")
-    return
-  }
-  const width = 320
-  const height = 140
-  host.style.setProperty("--card-left", `${Math.max(12, Math.min(x + 20, innerWidth - width - 12))}px`)
-  host.style.setProperty("--card-top", `${y + 28 + height <= innerHeight ? y + 28 : Math.max(12, y - height - 20)}px`)
-  host.dataset.anchor = "cursor"
-}
-
-/** The relay draws its own purple ghost cursor; give it the look of the panel's agent cursor. */
-function styleRelayCursor() {
-  if (document.getElementById(CURSOR_STYLE_ID)) return
-  const style = document.createElement("style")
-  style.id = CURSOR_STYLE_ID
-  style.textContent = `#${RELAY_CURSOR_ID} path { fill: #131313 !important; stroke: #fff !important; stroke-width: 1.4px !important; }`
-  ;(document.head ?? document.documentElement).append(style)
+function removeHost() {
+  host?.remove()
+  host = undefined
+  root = undefined
 }
 
 function clear() {
@@ -175,7 +189,7 @@ function clear() {
   completing = undefined
   observer?.disconnect()
   observer = undefined
-  document.getElementById(HOST_ID)?.remove()
+  removeHost()
 }
 
 const MARK = `<svg class="mark" viewBox="0 0 16 20" width="9" height="11" aria-hidden="true"><path d="M12 16H4V8h8v8Z" fill="currentColor" opacity=".45"/><path d="M12 4H4v12h8V4Zm4 16H0V0h16v20Z" fill="currentColor"/></svg>`
@@ -184,32 +198,29 @@ const MARK = `<svg class="mark" viewBox="0 0 16 20" width="9" height="11" aria-h
 // surfaces are opaque enough to read on anything. Fonts are system fonts only: a page's own @font-face
 // rules apply inside the shadow root, so a family like "Inter" could resolve to the site's file.
 const STYLE = `
-  :host { all: initial !important; position: fixed !important; right: 12px !important; bottom: 12px !important;
-    z-index: 2147483647 !important; pointer-events: none !important; }
-  :host([data-waiting="true"]) { inset: 0 !important; }
+  :host { all: initial !important; display: block !important; position: fixed !important; inset: 0 !important;
+    width: auto !important; height: auto !important; margin: 0 !important; padding: 0 !important; border: 0 !important;
+    background: transparent !important; overflow: visible !important; z-index: 2147483647 !important;
+    pointer-events: none !important; }
   * { box-sizing: border-box; }
   #pill, #card { --bg: #161616; --fg: #ededed; --muted: #a0a0a0; --faint: #707070; --ring: rgba(255,255,255,.09);
     --running: #f5a524; --waiting: #4c8dff; --idle: #7a7a7a; --button: #ededed; --button-fg: #111; --button-hover: #fff;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; font-style: normal;
     font-synthesis: none; text-transform: none; text-align: left; -webkit-font-smoothing: antialiased; color: var(--fg); }
-  #pill { position: absolute; right: 0; bottom: 0; display: inline-flex; align-items: center; gap: 7px; height: 26px;
+  #pill { position: absolute; right: 12px; bottom: 12px; display: inline-flex; align-items: center; gap: 7px; height: 26px;
     padding: 0 10px 0 9px; border-radius: 999px; background: color-mix(in srgb, var(--bg) 92%, transparent);
     box-shadow: 0 0 0 1px var(--ring), 0 6px 16px rgba(0,0,0,.22); backdrop-filter: blur(10px);
     font-size: 12px; font-weight: 500; line-height: 26px; letter-spacing: -.01em; white-space: nowrap; }
-  :host([data-waiting="true"]) #pill { right: 12px; bottom: 12px; }
   .mark { flex: none; display: block; }
   #pill .mark { color: var(--fg); }
   #label { display: block; }
   #light { flex: none; width: 6px; height: 6px; border-radius: 999px; background: var(--idle); }
-  #pill[data-state="running"] #light { background: var(--running); box-shadow: 0 0 0 3px color-mix(in srgb, var(--running) 22%, transparent);
-    animation: pulse 1.6s ease-in-out infinite; }
   #pill[data-state="waiting"] #light { background: var(--waiting); box-shadow: 0 0 0 3px color-mix(in srgb, var(--waiting) 24%, transparent); }
   #vignette { position: absolute; inset: 0; pointer-events: none; box-shadow: inset 0 0 0 2px rgba(76,141,255,.55), inset 0 0 80px rgba(76,141,255,.10);
     animation: fade .3s ease-out both; }
   #card { position: absolute; right: 12px; bottom: 48px; width: 320px; max-width: calc(100vw - 24px); padding: 12px 12px 12px 14px;
     border-radius: 12px; background: var(--bg); pointer-events: auto; user-select: text;
     box-shadow: 0 0 0 1px var(--ring), 0 18px 44px rgba(0,0,0,.34); animation: enter .22s cubic-bezier(.2,.8,.2,1) both; }
-  :host([data-anchor="cursor"]) #card { left: var(--card-left); top: var(--card-top); right: auto; bottom: auto; }
   #head { display: flex; align-items: center; gap: 8px; height: 20px; }
   #dot { flex: none; width: 7px; height: 7px; border-radius: 999px; background: var(--waiting);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--waiting) 24%, transparent); }
@@ -217,6 +228,7 @@ const STYLE = `
   #source { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; color: var(--faint); font-size: 11.5px;
     font-weight: 500; line-height: 20px; }
   #source .mark { width: 7px; height: 9px; }
+  #origin { margin: 6px 0 0; color: var(--fg); font-size: 12px; font-weight: 500; line-height: 17px; overflow-wrap: anywhere; }
   #message { margin: 6px 0 12px; color: var(--muted); font-size: 13px; line-height: 19px; overflow-wrap: anywhere; }
   #actions { display: flex; justify-content: flex-end; }
   #continue { all: unset; box-sizing: border-box; cursor: pointer; height: 28px; padding: 0 12px; border-radius: 7px;
@@ -231,7 +243,6 @@ const STYLE = `
     #pill { box-shadow: 0 0 0 1px var(--ring), 0 6px 16px rgba(0,0,0,.10); }
     #card { box-shadow: 0 0 0 1px var(--ring), 0 18px 44px rgba(0,0,0,.14); }
   }
-  @keyframes pulse { 50% { opacity: .45; } }
   @keyframes fade { from { opacity: 0; } }
   @keyframes enter { from { opacity: 0; transform: translateY(6px) scale(.98); } }
   @media (prefers-reduced-motion: reduce) { #light, #card, #vignette { animation: none !important; } }
