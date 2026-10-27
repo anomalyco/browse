@@ -76,8 +76,15 @@ MCP keeps one implicit process session. Omit `session` for that normal path, or
 call `session_new` and pass an explicit id when one MCP process needs multiple
 sessions.
 
+Tabs you open live in a separate agent window that never takes focus, so the
+user keeps working undisturbed; popups your clicks open move there too. Don't
+ask the user to watch a tab unless you hand it off.
+
 To work in a tab the user already has open, ask them to click the OpenCode
 Browser toolbar button on it (the badge shows ON; another click takes it back).
+A click while your script runs takes the tab back and stops the script with an
+error saying so: stop using that tab and ask how to continue. `page.close()` on
+a lent tab only releases it.
 `status` then lists it with `owner=user` and its `tab=` id. Select it for one
 execute, or adopt it for sticky reuse with `session_adopt({ tabId })` (omit the
 selector when only one user tab is attached):
@@ -389,6 +396,10 @@ relay with `OPENCODE_BROWSER_ALLOW_NODE=1` (full Node in execute),
 `OPENCODE_BROWSER_ALLOW_ALL_COOKIES=1` and `OPENCODE_BROWSER_ALLOW_FOREGROUND=1`;
 never ask for them to work around a page.
 
+A waiting `handoff` shows the user a small card with the page's origin (or, on a
+tab being recorded, a system notification) and the WAIT badge. Only the user's
+own click on Continue or the toolbar button completes it; page script can't.
+
 Human CLI output includes logs, warnings, and a concise aftermath. Logs hold your
 own `console.log` output; the page's console messages and uncaught errors are
 off by default, because capturing them lets the page detect a debugger (bot
@@ -686,6 +697,13 @@ Common diagnoses:
   unique URL substring or explicit index.
 - All targets disappeared: dismissing Chromium's debugging banner detaches every
   tab. Ask the user to click the toolbar button on it again.
+- Extension not connecting, status page says "Not paired" or "didn't pair": the
+  extension and relay must share a pairing code. Unpacked installs are paired by
+  `opencode-browser install` (or `bun run setup`); a Chrome Web Store build needs
+  the code from `opencode-browser pair` pasted on its status page.
+- HTTP 401 from the relay: clients need the relay token from the data root
+  (`relay-token`); the CLI and MCP server send it, other CDP clients must add
+  `Authorization: Bearer <token>` or `?opencodeBrowserToken=<token>`.
 - Relay restarted: named sessions reclaim exact targets, but JavaScript `state`
   and snapshot refs reset. Continue after the warning.
 - Reset/delete after an extension update may wait briefly for target

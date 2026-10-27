@@ -19,9 +19,12 @@
 
       <section>
         <h2>Set up</h2>
-        <p>Run this once in a terminal. It adds the <code>browse</code> tools to opencode.</p>
+        <p>
+          Run this once in a terminal (it needs Bun and Node.js 22+). It builds the relay, adds the <code>browse</code>
+          tools to opencode and pairs an unpacked copy of this extension with it.
+        </p>
         <div class="command">
-          <code id="install-command">npx opencode-browser-cli install</code>
+          <code id="install-command">git clone https://github.com/anomalyco/browse.git &amp;&amp; cd browse &amp;&amp; bun run setup</code>
           <button type="button" id="copy-command">Copy</button>
         </div>
       </section>
@@ -39,8 +42,9 @@
       <section id="pairing" hidden>
         <h2>Pair with the relay</h2>
         <p>
-          The extension only works for the relay on this computer once both know the same pairing code. Run
-          <code>npx opencode-browser-cli pair</code> in a terminal and paste the code it prints.
+          The extension only obeys the relay on this computer once both know the same pairing code. Run
+          <code>node cli/dist/cli.mjs pair</code> in your <code>browse</code> folder (or <code>opencode-browser pair</code>)
+          and paste the code it prints.
         </p>
         <form class="command" id="pairing-form">
           <input id="pairing-code" autocomplete="off" spellcheck="false" placeholder="XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX" aria-label="Pairing code" />
@@ -53,7 +57,8 @@
         <ul>
           <li>Agents open their own tabs in a window of their own, which never comes to the front. Tabs nobody uses for 10 minutes close.</li>
           <li>To let agents use a tab you have open, click the OpenCode Browser toolbar button on it. Click again to take it back, even while an agent is running.</li>
-          <li>When an agent needs you (a login, 2FA, a payment), the badge shows WAIT. Finish, then click the toolbar button (or Continue on the page).</li>
+          <li>When an agent needs you (a login, 2FA, a payment), the badge shows WAIT and the page shows a card. Finish, then click Continue or the toolbar button.</li>
+          <li>Recordings show only the page. If an agent needs you while it records a tab, you get a notification instead of the card; click it to go to the tab.</li>
         </ul>
       </section>
 
