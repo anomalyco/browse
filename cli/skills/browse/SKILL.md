@@ -62,7 +62,7 @@ timeout does not close or replace the tab.
 A bare CLI execute creates a fresh session-owned page and prints the exact
 `--session <id>` continuation command, or you can pass a descriptive session
 name (including an optional emoji, which appears directly on the browser tab
-group and in-page status pill). Every later CLI call must pass that id or set
+group). Every later CLI call must pass that id or set
 `OPENCODE_BROWSER_SESSION`; bare execute never guesses from human-shell current
 state.
 
@@ -150,7 +150,10 @@ typing (sign-ups, logins behind bot protection), type with
 `locator.pressSequentially(text)` instead.
 
 If native `locator.fill()` hangs because a browser extension interferes with
-focus, use the explicit input, textarea, or contenteditable fallback:
+focus, use the explicit input, textarea, or contenteditable fallback. It is a
+last resort: it sets the value with synthetic input events (no key presses,
+`isTrusted: false`) that pages can tell apart from typing, and the execute
+result carries a warning saying so:
 
 ```js
 await fillInput(page.getByPlaceholder("Username"), "standard_user")
@@ -586,10 +589,14 @@ values fail instead of silently clamping. The start result reports the chosen ra
 Tab capture can include audio; CDP requires `ffmpeg` and has no audio. Use the
 command's `--help` for format and cursor options.
 
-Playwright mouse actions automatically reveal the on-page Ghost Cursor
-(`distance-glide` motion + `tactile-bloom` click shockwave). When recording a
-user-facing proof or PR walkthrough video, opt into the `ghostCursor` helpers
-inside `execute` to focus attention on key steps and verified postconditions:
+The on-page Ghost Cursor (`distance-glide` motion + `tactile-bloom` click
+shockwave) is off by default, because pages can detect an element added to their
+DOM. It follows Playwright mouse actions automatically while a recording or the
+flight recorder runs on the tab, after `showGhostCursor()` (until
+`hideGhostCursor()`), or on every tab when the relay runs with
+`OPENCODE_BROWSER_GHOST_CURSOR=1`. When recording a user-facing proof or PR
+walkthrough video, opt into the `ghostCursor` helpers inside `execute` to focus
+attention on key steps and verified postconditions:
 
 ```ts
 await showGhostCursor()

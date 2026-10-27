@@ -394,6 +394,13 @@ const defaultHandoffTimeoutMs = 10 * 60 * 1_000
 
 const defaultHandoffMessage = "Complete the requested task, then use the in-page continue control."
 
+const explicitMediaOptions = [
+  ["colorScheme", "prefers-color-scheme"],
+  ["reducedMotion", "prefers-reduced-motion"],
+  ["forcedColors", "forced-colors"],
+  ["contrast", "prefers-contrast"],
+] as const
+
 type ShowGhostCursorOptions = GhostCursorClientOptions & {
   readonly page?: Page
 }
@@ -413,6 +420,7 @@ const defaultPageCrashedWarning = "The session default page target crashed; chec
 export const defaultPageRepairedWarning = "The session default page stopped answering automation; OpenCode Browser reconnected and re-resolved the same tab. References to the old page in state are stale."
 const protectedExtensionUiWarning = "Chromium blocked protected extension UI, possibly a password manager. Ask the user to finish or dismiss it in the browser, then retry."
 const protectedExtensionUiDiagnostic = "target/cross-extension-page"
+const syntheticInputWarning = "fillInput/fillInputs set the value with synthetic input events (isTrusted: false, no key presses), which pages and bot protection can tell apart from typing. Prefer locator.fill() or locator.pressSequentially()."
 
 /**
  * Playwright rewrites Chrome's "Cannot access a chrome-extension:// URL of
@@ -489,7 +497,9 @@ export class ExecuteSandbox {
   private pendingTargetRebind: "replaced" | "repaired" | undefined
   private lastKnownNonBlankUrl: string | undefined
   private recreatedFromClosedUrl: string | undefined
-  private explicitLightColorScheme = false
+  /** Media features the agent set with page.emulateMedia; the relay drops Patchright's defaults otherwise. */
+  private readonly explicitMediaFeatures = new Map<string, string>()
+  private explicitMedia: string | undefined
   /** Full Node access for execute code (OPENCODE_BROWSER_ALLOW_NODE=1); otherwise code runs in a vm realm. */
   private readonly allowNode = executeAllowsNode()
   private readonly realm = this.allowNode ? undefined : new ExecuteRealm()
@@ -936,8 +946,14 @@ export class ExecuteSandbox {
       state: this.state,
       modules: this.realm ? this.realm.proxyAsObject({ ...sandboxModules }) : nodeModules,
       files: this.realm ? this.realm.proxyAsObject(createExecuteFiles()) : createExecuteFiles(),
-      fillInput: (target, value) => fillInput({ page, target, value }),
-      fillInputs,
+      fillInput: async (target, value) => {
+        await fillInput({ page, target, value })
+        this.warnSyntheticInput()
+      },
+      fillInputs: async (targetPage, fields) => {
+        await fillInputs(targetPage, fields)
+        this.warnSyntheticInput()
+      },
       screenshotWithLabels: (screenshotOptions = {}) => screenshotWithLabels({
         ...screenshotOptions,
         page: screenshotOptions.page ?? page,
@@ -1094,8 +1110,8 @@ export class ExecuteSandbox {
         this.pageCrashed = false
         this.recordNonBlankUrl(frame.url())
         page.setDefaultTimeout?.(30_000)
-        if (this.explicitLightColorScheme) {
-          void this.applyExplicitLightColorScheme(page)
+        if (this.explicitMediaFeatures.size > 0) {
+          void this.applyExplicitMediaFeatures(page)
         }
       }
     }
@@ -1272,13 +1288,19 @@ export class ExecuteSandbox {
     }
   }
 
-  private async applyExplicitLightColorScheme(page: Page): Promise<void> {
+  /** fillInput sets values directly: the page sees untrusted input events without key presses. */
+  private warnSyntheticInput(): void {
+    if (!this.pendingWarnings.includes(syntheticInputWarning)) this.pendingWarnings.push(syntheticInputWarning)
+  }
+
+  private async applyExplicitMediaFeatures(page: Page): Promise<void> {
     try {
       const cdp = await page.context().newCDPSession(page)
       try {
         await cdp.send("Emulation.setEmulatedMedia", {
+          ...(this.explicitMedia ? { media: this.explicitMedia } : {}),
           features: [
-            { name: "prefers-color-scheme", value: "light" },
+            ...Array.from(this.explicitMediaFeatures, ([name, value]) => ({ name, value })),
             { name: "__bc_explicit__", value: "1" },
           ],
         })
@@ -1295,12 +1317,16 @@ export class ExecuteSandbox {
       Object.defineProperty(page, "emulateMedia", {
         configurable: true,
         value: async (options?: Parameters<Page["emulateMedia"]>[0]) => {
-          if (options && "colorScheme" in options) {
-            this.explicitLightColorScheme = options.colorScheme === "light"
+          for (const [option, feature] of explicitMediaOptions) {
+            if (!options || !(option in options)) continue
+            const value = options[option]
+            if (typeof value === "string") this.explicitMediaFeatures.set(feature, value)
+            else this.explicitMediaFeatures.delete(feature)
           }
+          if (options && "media" in options) this.explicitMedia = options.media ?? undefined
           await originalEmulateMedia(options)
-          if (this.explicitLightColorScheme) {
-            await this.applyExplicitLightColorScheme(page)
+          if (this.explicitMediaFeatures.size > 0) {
+            await this.applyExplicitMediaFeatures(page)
           }
         },
       })

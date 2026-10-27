@@ -1421,6 +1421,10 @@ export async function screenshotWithLabels(options: ScreenshotWithLabelsOptions 
   }
 }
 
+// Labels are drawn from Patchright's isolated (utility) world into a closed shadow root on a host without an
+// id: the page can't see the script's state, and the host exists only until the screenshot is taken.
+type ScreenshotLabelsWindow = Window & { __opencodeBrowserScreenshotLabels?: { readonly host: HTMLElement; readonly timer: number } }
+
 async function showScreenshotLabels(page: Page): Promise<readonly ScreenshotLabel[]> {
   return await page.evaluate(() => {
     type BrowserLabel = {
@@ -1438,14 +1442,14 @@ async function showScreenshotLabels(page: Page): Promise<readonly ScreenshotLabe
       }
     }
 
-    const containerId = "__opencode_browser_screenshot_labels__"
-    const markerClass = "__opencode_browser_screenshot_label__"
-    const opencodeBrowserWindow = window as Window & { __opencodeBrowserScreenshotLabelsTimer?: number }
-    if (opencodeBrowserWindow.__opencodeBrowserScreenshotLabelsTimer) {
-      window.clearTimeout(opencodeBrowserWindow.__opencodeBrowserScreenshotLabelsTimer)
-      delete opencodeBrowserWindow.__opencodeBrowserScreenshotLabelsTimer
+    const markerClass = "label"
+    const opencodeBrowserWindow = window as ScreenshotLabelsWindow
+    const previous = opencodeBrowserWindow.__opencodeBrowserScreenshotLabels
+    if (previous) {
+      window.clearTimeout(previous.timer)
+      previous.host.remove()
+      delete opencodeBrowserWindow.__opencodeBrowserScreenshotLabels
     }
-    document.getElementById(containerId)?.remove()
 
     const selectors = [
       "button",
@@ -1663,12 +1667,20 @@ async function showScreenshotLabels(page: Page): Promise<readonly ScreenshotLabe
       }
     })
 
-    const container = document.createElement("div")
-    container.id = containerId
-    container.style.cssText = "position:fixed;left:0;top:0;z-index:2147483647;pointer-events:none;font:12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;"
+    const host = document.createElement("div")
+    const container = host.attachShadow({ mode: "closed" })
 
     const style = document.createElement("style")
     style.textContent = `
+      :host {
+        all: initial !important;
+        position: fixed !important;
+        left: 0 !important;
+        top: 0 !important;
+        z-index: 2147483647 !important;
+        pointer-events: none !important;
+        font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace !important;
+      }
       .${markerClass} {
         position: fixed;
         min-width: 18px;
@@ -1696,22 +1708,23 @@ async function showScreenshotLabels(page: Page): Promise<readonly ScreenshotLabe
     })
     container.append(...markers)
 
-    document.documentElement.appendChild(container)
-    opencodeBrowserWindow.__opencodeBrowserScreenshotLabelsTimer = window.setTimeout(() => {
-      document.getElementById(containerId)?.remove()
-      delete opencodeBrowserWindow.__opencodeBrowserScreenshotLabelsTimer
+    document.documentElement.appendChild(host)
+    const timer = window.setTimeout(() => {
+      host.remove()
+      delete opencodeBrowserWindow.__opencodeBrowserScreenshotLabels
     }, 30_000)
+    opencodeBrowserWindow.__opencodeBrowserScreenshotLabels = { host, timer }
     return labels
-  })
+  }, undefined, undefined, true)
 }
 
 async function hideScreenshotLabels(page: Page): Promise<void> {
   await page.evaluate(() => {
-    const opencodeBrowserWindow = window as Window & { __opencodeBrowserScreenshotLabelsTimer?: number }
-    if (opencodeBrowserWindow.__opencodeBrowserScreenshotLabelsTimer) {
-      window.clearTimeout(opencodeBrowserWindow.__opencodeBrowserScreenshotLabelsTimer)
-      delete opencodeBrowserWindow.__opencodeBrowserScreenshotLabelsTimer
-    }
-    document.getElementById("__opencode_browser_screenshot_labels__")?.remove()
-  })
+    const opencodeBrowserWindow = window as ScreenshotLabelsWindow
+    const labels = opencodeBrowserWindow.__opencodeBrowserScreenshotLabels
+    if (!labels) return
+    window.clearTimeout(labels.timer)
+    labels.host.remove()
+    delete opencodeBrowserWindow.__opencodeBrowserScreenshotLabels
+  }, undefined, undefined, true)
 }
