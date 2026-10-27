@@ -704,10 +704,10 @@ Common diagnoses:
   stop; foreground/source or newer relays are never force-killed or downgraded.
   MCP observational tools remain available on a mismatch.
 - Unexpected restart: inspect private endpoint-scoped
-  `~/.opencode-browser/relays/<port>/lifecycle.jsonl` for requester/build/instance
-  metadata. Preparing or selecting a development candidate must not restart the
-  daemon. Use isolated `runtime:prepare` / `runtime:select`, not a live checkout
-  link, when developing OpenCode Browser itself.
+  `~/.local/share/opencode-browser/relays/<port>/lifecycle.jsonl` (under the
+  data root) for requester/build/instance metadata. When developing OpenCode
+  Browser itself, test against an isolated relay (`OPENCODE_BROWSER_PORT` and
+  `OPENCODE_BROWSER_HOME`), not the user's running one.
 - `Target not found`: attach the intended tab, then select or adopt it using a
   unique URL substring or explicit index.
 - All targets disappeared: dismissing Chromium's debugging banner detaches every

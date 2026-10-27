@@ -173,7 +173,7 @@ Escape hatches. Set them in the environment you start opencode (or your MCP clie
 ```sh
 bun install && bun run dev       # rebuilds dist/ on change; reload the extension to pick it up
 bun run typecheck
-bun run test                     # the cli/ test suite (bun test), no browser needed
+bun run test                     # the extension and cli/ test suites (bun test), no browser needed
 cd cli && bun src/main.ts status # the CLI from source
 bun run package                  # release/opencode-browser-<version>.zip for the Chrome Web Store
 ```

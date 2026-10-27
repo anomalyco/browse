@@ -328,7 +328,7 @@ function buildDoctorChecks(options: {
       id: `artifact-${artifact.path}`,
       label: artifact.path,
       status: artifact.exists ? "ok" : "warn",
-      message: artifact.exists ? artifact.version ? `exists (${artifact.version})` : "exists" : "missing; prepare a fresh runtime",
+      message: artifact.exists ? artifact.version ? `exists (${artifact.version})` : "exists" : "missing",
     }
   })
   return [
@@ -533,7 +533,7 @@ function buildDoctorRecommendations(options: {
     : []
   const artifactRecommendations = options.artifacts.some((artifact) => {
     return !artifact.exists
-  }) ? ["Prepare and select a fresh validated runtime with `pnpm runtime:prepare` / `pnpm runtime:select`; do not rebuild the active installation."] : []
+  }) ? [`Rebuild or reinstall the missing files with \`${installCommand()}\`.`] : []
   const connectionConflictRecommendations = options.extensionResult.ok && (options.extensionResult.value.rejectedConnections ?? 0) > 0
     ? ["Keep OpenCode Browser enabled in one browser/profile. To switch, disable it in the current browser before connecting the other; new sessions do not change the active browser."]
     : []
