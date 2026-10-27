@@ -378,6 +378,24 @@ multi-statement scripts need `return`. Use `--file` for longer scripts:
 opencode-browser execute --session github --file ./perform-flow.js
 ```
 
+### Writing execute code
+
+Execute code runs in strict mode (`"use strict"`), so:
+
+- Declare variables with `const`/`let`; assigning an undeclared name
+  (`count = 1`) throws a `ReferenceError` instead of creating a global. Keep
+  values between calls on `state` (`state.count = 1`).
+- Writing a read-only or getter-only property, or adding one to a frozen
+  object, throws instead of being ignored.
+- `with`, octal literals (`010`) and duplicate parameter names are syntax
+  errors, and `this` is `undefined` in plain function calls.
+
+Long synchronous work stalls every session on the relay, so a single run
+without an `await` is stopped after about 2 seconds, and callbacks or timers
+that keep it busy more than half the time are stopped too. Split heavy loops
+with `await new Promise(r => setTimeout(r, 0))`, or do the work in the page
+with `page.evaluate()`.
+
 Execute code runs in a sandbox on the relay, because a page can try to
 prompt-inject the agent writing it. It has no `process`, `require`,
 `import()`, `eval`, `fs`, `os`, `child_process`, `http`/`https` or Node-side
