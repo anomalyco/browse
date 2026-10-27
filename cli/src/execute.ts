@@ -504,8 +504,8 @@ export class ExecuteSandbox {
   private explicitMedia: string | undefined
   /** Full Node access for execute code (OPENCODE_BROWSER_ALLOW_NODE=1); otherwise code runs in a vm realm. */
   private readonly allowNode = executeAllowsNode()
-  private readonly realm = this.allowNode ? undefined : new ExecuteRealm()
-  private readonly state: Record<string, unknown> = this.realm?.state ?? {}
+  private realm = this.allowNode ? undefined : new ExecuteRealm()
+  private state: Record<string, unknown> = this.realm?.state ?? {}
   private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
   private readonly networkCapture = new NetworkCapture.Recorder()
   private pendingWarnings: string[] = []
@@ -683,6 +683,9 @@ export class ExecuteSandbox {
   disconnectSettled(): Effect.Effect<void, Error> {
     const sandbox = this
     return Effect.gen(function* () {
+      sandbox.realm?.dispose()
+      sandbox.realm = sandbox.allowNode ? undefined : new ExecuteRealm()
+      sandbox.state = sandbox.realm?.state ?? {}
       const browser = sandbox.browser
       sandbox.browser = undefined
       sandbox.unbindDefaultPage(sandbox.defaultPageTargetId, {
@@ -703,6 +706,7 @@ export class ExecuteSandbox {
   closeSettled(): Effect.Effect<void, Error> {
     const sandbox = this
     return Effect.gen(function* () {
+      sandbox.realm?.dispose()
       const page = sandbox.page
       const browser = sandbox.browser
       const ownsOpenPage = page !== undefined && sandbox.ownsPage && !page.isClosed()
@@ -1837,7 +1841,7 @@ export async function runUserCode({ code, globals, realm }: { readonly code: str
     if (realm) {
       const stateIndex = sandboxGlobalKeys.indexOf("state") + 1
       const result = await realm.run({
-        source: `(async function (console, ${sandboxGlobalKeys.join(", ")}) {\n${wrapCodeWithModuleAliases(code, Object.keys(sandboxModules))}\n})`,
+        source: `(async function (console, ${sandboxGlobalKeys.join(", ")}) {\n"use strict";\n${wrapCodeWithModuleAliases(code, Object.keys(sandboxModules))}\n})`,
         filename: "execute.js",
         args: values,
         sandboxArgs: new Map([[stateIndex, globals.state]]),
