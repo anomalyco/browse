@@ -1,5 +1,5 @@
 // The status page (welcome.html): opened on install and as the extension's options page. Shows the install command
-// and the relay connection, and offers reconnect, cleanup, and diagnostics.
+// and the relay connection (with the update the relay found, if any), and offers reconnect, cleanup, and diagnostics.
 import {
   AGENT_DIAGNOSTICS,
   STATUS_PORT,
@@ -39,7 +39,12 @@ function render(state: AgentRelayState) {
   status.textContent = describe(state)
   // An unpacked build is paired by install; a store build pairs here (and can be paired again).
   element("pairing").hidden = state.pairing === "bundled" && state.status !== "untrusted"
+  element("update").hidden = !state.update
+  element("update-summary").textContent = state.update ? capitalized(state.update.summary) : ""
+  element("update-command").textContent = state.update?.command ?? ""
 }
+
+const capitalized = (text: string) => text.charAt(0).toUpperCase() + text.slice(1)
 
 function describe(state: AgentRelayState) {
   const tabs = state.tabs.length
@@ -67,6 +72,10 @@ const flash = (button: HTMLButtonElement, label: string) => {
 element<HTMLButtonElement>("copy-command").addEventListener("click", (event) => {
   const button = event.currentTarget as HTMLButtonElement
   void navigator.clipboard.writeText(element("install-command").textContent ?? "").then(() => flash(button, "Copied"))
+})
+element<HTMLButtonElement>("copy-update").addEventListener("click", (event) => {
+  const button = event.currentTarget as HTMLButtonElement
+  void navigator.clipboard.writeText(element("update-command").textContent ?? "").then(() => flash(button, "Copied"))
 })
 element<HTMLFormElement>("pairing-form").addEventListener("submit", (event) => {
   event.preventDefault()

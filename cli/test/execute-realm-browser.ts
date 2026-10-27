@@ -43,7 +43,7 @@ const port = await portFromEnv("BROWSE_TEST_RELAY_PORT")
 const fixturePort = await portFromEnv("BROWSE_TEST_FIXTURE_PORT")
 const fixtureUrl = `http://127.0.0.1:${fixturePort}`
 const base = `http://127.0.0.1:${port}`
-const env: NodeJS.ProcessEnv = { ...process.env, HOME: root, OPENCODE_BROWSER_HOME: home, OPENCODE_BROWSER_PORT: String(port) }
+const env: NodeJS.ProcessEnv = { ...process.env, HOME: root, OPENCODE_BROWSER_HOME: home, OPENCODE_BROWSER_PORT: String(port), OPENCODE_BROWSER_UPDATE_CHECK: "0" }
 delete env.OPENCODE_BROWSER_ALLOW_NODE
 delete env.OPENCODE_BROWSER_ALLOW_FOREGROUND
 fs.mkdirSync(path.join(runtime, "dist"), { recursive: true })

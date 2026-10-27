@@ -68,6 +68,7 @@ import { ProtectedFrameTracker } from "./protected-frames.ts"
 import { RootTargetLifecycle } from "./root-target-lifecycle.ts"
 import { boundedToken, runtimeFailureKind, summarizeDiagnosticUrl, summarizeRuntimeEvaluate } from "./runtime-diagnostics.ts"
 import { shouldExposeChildTarget, TargetRegistry, type RootTargetChange, type TargetOwnershipChange } from "./target-registry.ts"
+import { createUpdateWatcher } from "./update.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "./version.ts"
 import { handleExecuteRealmException, handleExecuteRealmRejection, pruneStaleExecuteFilesDirectories } from "./execute-realm.ts"
 
@@ -277,6 +278,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   })
   const journalBaseDir = defaultJournalBaseDir()
   let stopJournalRetention: (() => void) | undefined
+  // A newer browse on the clone's remote branch, shown on the extension's status page.
+  const updates = createUpdateWatcher({ onChange: () => sendUpdateNotice() })
+  let updateTimer: NodeJS.Timeout | undefined
+  const sendUpdateNotice = () => {
+    if (!extensionRpc.connected) return
+    const notice = updates.current
+    sendExtensionBestEffort({ method: "update.notice", ...(notice ? { params: { summary: notice.summary, command: notice.command } } : {}) })
+  }
   const attachedBadge = { text: "ON", color: "#7c3aed", title: "Detach from OpenCode Browser" }
   const executingBadge = { text: "RUN", color: "#f59e0b", title: "OpenCode Browser is running a script. Click to stop it and take this tab back." }
   const waitingBadge = (message: string) => ({ text: "WAIT", color: "#2563eb", title: `OpenCode Browser is waiting for you: ${message} Click here when you're done.` })
@@ -699,6 +708,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
 
   const cleanup = Effect.fnUntraced(function* () {
     stopJournalRetention?.()
+    clearInterval(updateTimer)
     yield* shutdownControl.close().pipe(Effect.ignore)
     yield* sessions.closeAll()
     yield* rootLifecycle.close()
@@ -1070,6 +1080,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
             if (!announcedRootTabIds.has(target.tabId)) detachTargetState(target.tabId)
           }
           extensionRpc.markReady()
+          if (updates.current) sendUpdateNotice()
           for (const target of registry.listRootTargets()) refreshTabGrouping(target.tabId)
         } else {
           socket.close(1011, "Target inventory reconciliation failed")
@@ -1867,6 +1878,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         isLive: (sessionId) => sessions.sessions.has(sessionId),
         onError: (error) => console.error("Failed to prune session journals", error),
       })
+      void updates.refresh()
+      updateTimer = setInterval(() => void updates.refresh(), 60 * 60 * 1000)
+      updateTimer.unref()
       relayLog("relay.ready", { url: endpointUrl, version: opencodeBrowserVersion, build: opencodeBrowserBuildId, pid: process.pid, managed })
     }),
     (error) => Effect.gen(function* () {

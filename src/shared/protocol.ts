@@ -26,7 +26,11 @@ export type AgentRelayState = {
   pairing: PairingSource
   /** Tabs agents use, with their page status when an agent is working or waiting for the user. */
   tabs: { tabId: number; status?: PageStatus }[]
+  /** A newer browse on the clone's remote branch, as the relay's update check found it, and the command to update. */
+  update?: AgentRelayUpdate
 }
+
+export type AgentRelayUpdate = { summary: string; command: string }
 
 /** chrome.runtime.sendMessage request from an extension page; the worker answers with `{ text }`. */
 export const AGENT_DIAGNOSTICS = "agents.diagnostics"

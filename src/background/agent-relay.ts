@@ -21,7 +21,7 @@ import type {
   OffscreenStatusRecordingResult,
   OffscreenStopRecordingResult,
 } from "../agent-relay/recording-types"
-import type { AgentRelayState, AgentRelayStatus, PairingSource } from "../shared/protocol"
+import type { AgentRelayState, AgentRelayStatus, AgentRelayUpdate, PairingSource } from "../shared/protocol"
 import { createAgentRelayLog, formatAgentRelayLog } from "./agent-relay-log"
 import { AgentGroups } from "./agent-groups"
 import { AgentWindow } from "./agent-window"
@@ -102,6 +102,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   /** The handshake in flight on a socket: this extension's nonce and the code it proves with. */
   const handshakes = new WeakMap<WebSocket, { nonce: string; code: string; port: number }>()
   let pairing: PairingSource = "none"
+  let update: AgentRelayUpdate | undefined
   let bundledPairing: Promise<string | undefined> | undefined
 
   const snapshot = (): AgentRelayState => ({
@@ -111,6 +112,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       const page = pageStatuses.get(tabId)
       return page ? { tabId, status: page } : { tabId }
     }),
+    ...(update ? { update } : {}),
   })
   const notify = () => input.changed(snapshot())
   const setStatus = (next: AgentRelayStatus) => {
@@ -501,6 +503,13 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         const minutes = typeof params?.idleMinutes === "number" ? Math.max(0, params.idleMinutes) : undefined
         const closed = await TabCleanup.cleanup(minutes === undefined ? {} : { minutes })
         return { closed: closed.map((tab) => ({ tabId: tab.tabId, title: tab.title, idleMinutes: tab.idleMinutes })) }
+      }
+      case "update.notice": {
+        const summary = typeof params?.summary === "string" ? params.summary.slice(0, 200) : undefined
+        const command = typeof params?.command === "string" ? params.command.slice(0, 1000) : undefined
+        update = summary && command ? { summary, command } : undefined
+        notify()
+        return {}
       }
       case "recording.start": {
         const result = await startRecording(params)

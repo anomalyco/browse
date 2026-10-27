@@ -146,7 +146,7 @@ beforeAll(async () => {
   port = await freePort()
   base = `http://127.0.0.1:${port}`
   relay = spawn(process.execPath, [path.join(import.meta.dir, "../src/main.ts"), "serve"], {
-    env: { PATH: process.env.PATH ?? "", HOME: home, OPENCODE_BROWSER_HOME: home, OPENCODE_BROWSER_PORT: String(port) },
+    env: { PATH: process.env.PATH ?? "", HOME: home, OPENCODE_BROWSER_HOME: home, OPENCODE_BROWSER_PORT: String(port), OPENCODE_BROWSER_UPDATE_CHECK: "0" },
     stdio: "ignore",
   })
   for (let attempt = 0; attempt < 100; attempt++) {
