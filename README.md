@@ -16,31 +16,32 @@ It works in Chrome, Edge, Brave, Arc, Helium, Vivaldi, Opera and Chromium.
 
 ## Install
 
-You need [Bun](https://bun.sh), Node.js 22+, and [opencode](https://opencode.ai).
-
-**1. Build it and add the `browse` tools to opencode**
-
 ```sh
-git clone https://github.com/anomalyco/browse.git
-cd browse
-bun run setup
+git clone https://github.com/anomalyco/browse.git && cd browse && bun run setup
 ```
 
-**2. Load the extension**
+`setup` builds the extension and the CLI, adds the `browse` MCP server to opencode, and pairs the extension with the
+local relay. Two steps are left for you:
 
-Open `chrome://extensions` (or your browser's extensions page), turn on **Developer mode**, click **Load unpacked**
-and choose the `browse/dist` folder.
-
-**3. Restart opencode**
+1. **Load the extension.** `setup` opens your browser's extensions page, shows the `browse/dist` folder and copies its
+   path. Turn on **Developer mode**, click **Load unpacked** and choose that folder (on macOS, press Cmd+Shift+G in the
+   picker and paste), or drag the folder onto the page. `setup` waits until the extension connects.
+2. **Restart opencode.**
 
 That's it. Ask an agent to *"open news.ycombinator.com and tell me the top story"*.
 
-There's nothing to sign in to. `setup` pairs the unpacked extension with the local relay for you: it writes a pairing
-code into `dist/`, and the extension only obeys a relay that proves it knows that code (see [Security](#security)).
-`bun run setup` is safe to re-run after `git pull`; it updates the tools and reloads the extension for you.
+**Or let your agent do it.** Paste this into opencode: *"Install browse from https://github.com/anomalyco/browse and
+follow its README."* The agent clones it, runs `setup` and tells you which folder to load; you still click
+**Load unpacked** and restart opencode.
 
-A Chrome Web Store build has no pairing file: run `node cli/dist/cli.mjs pair` and paste the code it prints on the
-extension's status page (right-click the toolbar button, then **Options**).
+Requirements: [Bun](https://bun.sh), Node.js 22.19+, a Chromium browser, and [opencode](https://opencode.ai) or another
+MCP client.
+
+**Updating:** `git pull && bun run setup`. It's safe to re-run: it updates the tools and reloads the extension for you.
+
+There's nothing to sign in to. `setup` writes a pairing code into `dist/`, and the extension only obeys a relay that
+proves it knows that code (see [Security](#security)). A Chrome Web Store build has no pairing file: run
+`node cli/dist/cli.mjs pair` and paste the code on its status page (right-click the toolbar button, then **Options**).
 
 > **Coming soon:** a Chrome Web Store listing and an npm package, so you can skip the clone.
 
@@ -167,6 +168,10 @@ Escape hatches. Set them in the environment you start opencode (or your MCP clie
 - Logs: `~/.local/share/opencode-browser/logs/relay.log`.
 - Extension says another browser is connected: only one browser profile can be connected at a time. Close the other
   one, then click **Reconnect** on the status page.
+- Extension says it's not paired (or that the relay was refused): run `bun run setup` again, then reload the extension
+  on your browser's extensions page.
+- **Load unpacked** fails, or the extension shows errors: load the `browse/dist` folder (built by `setup`), not
+  `browse` itself or `browse/public`. `node cli/dist/cli.mjs extension` shows the right folder.
 
 ## Development
 
