@@ -1,8 +1,8 @@
 // Setup for OpenCode Browser, without changing opencode itself:
 //   install    install the runtime, add the browse MCP server to opencode's config, copy the unpacked extension
-//              (reloading a connected one), then check which browsers have the extension and open the Chrome Web
-//              Store listing when none does
-//   extension  open the unpacked extension folder (for "Load unpacked")
+//              (reloading a connected one), then check which browsers have the extension; when none does, guide
+//              loading it unpacked (or, once STORE_LISTED, open the Chrome Web Store listing) and wait for it
+//   extension  show the unpacked extension folder (for "Load unpacked")
 //   pair       print the pairing code a Chrome Web Store build asks for (unpacked builds are paired by install)
 //   uninstall  remove everything install wrote
 // Earlier versions registered a native messaging host and wrote an opencode plugin; install and uninstall
@@ -15,7 +15,7 @@ import path from "node:path"
 import { createInterface } from "node:readline/promises"
 import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse } from "jsonc-parser"
-import { cliCommand, dataRoot, installCommand } from "./paths.ts"
+import { cliCommand, dataRoot, installCommand, STORE_LISTED } from "./paths.ts"
 import { formatPairingCode, pairingCode, relayAuthorization, writeExtensionPairing } from "./relay-secrets.ts"
 import { opencodeBrowserVersion } from "./version.ts"
 
@@ -68,7 +68,7 @@ const checkoutExtensionDirs = (() => {
 
 type Settings = { opencode?: string; entry?: string; version?: string }
 
-type Browser = {
+export type Browser = {
   name: string
   /** The Chromium user data directory: `Local State` and one directory per profile. */
   userData: string
@@ -306,7 +306,23 @@ function windowsNpmCli() {
 
 // ---- commands -------------------------------------------------------------------------------------
 
+/** The MCP server and relay run under the Node.js that runs install, so it must be one the package supports. */
+function checkNode() {
+  // `bun run` stands in a bun shim for a missing node.
+  if (process.versions.bun)
+    fail("OpenCode Browser needs Node.js 22.19 or newer, and `node` isn't installed (Bun ran in its place). Install Node.js from https://nodejs.org, then run setup again.")
+  const [major = 0, minor = 0] = process.versions.node.split(".").map(Number)
+  if (major < 22 || (major === 22 && minor < 19))
+    fail(`OpenCode Browser needs Node.js 22.19 or newer; this is ${process.version} (${process.execPath}). Update Node.js (https://nodejs.org), then run setup again.`)
+}
+
+/** The folder to load unpacked: the checkout's dist/ (which `bun run setup` builds), else the copy in the data root. */
+function unpackedFolder() {
+  return checkoutExtensionDirs[1] ?? files.extension
+}
+
 async function install(args: string[]) {
+  checkNode()
   const opencode = findOpencode(args)
 
   mkdirSync(files.dir, { recursive: true })
@@ -316,8 +332,9 @@ async function install(args: string[]) {
   if (removeLegacyHost()) log("✓ Removed the native messaging host of an earlier version")
 
   const node = process.execPath
-  log(opencode ? `✓ Using opencode at ${opencode}` : "! opencode not found. Install it (https://opencode.ai) to use the browse tools; they're configured for it.")
-  log(`✓ MCP server ${configureMcp(entry)}`)
+  log(opencode ? `✓ Using opencode at ${opencode}` : "! opencode not found. Install it (https://opencode.ai), or add the browse server to another MCP client (see the README).")
+  const mcp = configureMcp(entry)
+  log(`✓ MCP server ${mcp}`)
   const relay = restartOutdatedRelay(entry, node)
   if (relay) log(`${relay.startsWith("restarted") ? "✓" : "!"} Relay ${relay}`)
   const legacy = legacyBrowserControl()
@@ -340,7 +357,48 @@ async function install(args: string[]) {
       log("! OpenCode Browser didn't reload in your browser. Reload it on the browser's extensions page to finish the update.")
   }
   log("")
-  locateExtension({ allowOpen: !args.includes("--no-open"), connected: !!connected })
+  // Over SSH the browsers here aren't the ones the user looks at, so they aren't scanned.
+  const ssh = !!(process.env.SSH_CONNECTION || process.env.SSH_TTY)
+  const detections = ssh ? [] : detectBrowsers()
+  const env = {
+    ssh,
+    display: process.platform !== "linux" || !!(process.env.DISPLAY || process.env.WAYLAND_DISPLAY),
+    tty: !!process.stdout.isTTY,
+    platform: process.platform,
+  }
+  const found = locateExtension({
+    allowOpen: !args.includes("--no-open"),
+    connected: !!connected,
+    folder: unpackedFolder(),
+    detections,
+    preferred: ssh ? undefined : defaultBrowser(detections.map((detection) => detection.browser)),
+    env,
+  })
+  if (found === "guided" && !STORE_LISTED && env.tty && !ssh && !args.includes("--no-wait")) return awaitConnection(entry)
+  // The MCP server entry changed: a running opencode picks it up on restart.
+  if (found === "ready" && !mcp.endsWith("up to date")) log("Restart opencode (if it's running) to load the browse tools.")
+}
+
+/**
+ * After the unpacked steps, starts the relay (so the extension connects the moment it's loaded) and waits up to two
+ * minutes for it. Ctrl+C stops waiting without failing setup.
+ */
+async function awaitConnection(entry: string) {
+  // Any relay-backed command starts the relay in the background; it keeps running for agents afterwards.
+  spawnSync(process.execPath, [entry, "session", "list", "--json"], { stdio: "ignore", timeout: 30_000 })
+  log("")
+  log("Waiting for the extension to connect (up to 2 minutes; Ctrl+C to skip)…")
+  const stop = () => {
+    log("")
+    log(`Stopped waiting. Once it's loaded, \`${cliCommand("status")}\` shows whether it's connected.`)
+    process.exit(0)
+  }
+  process.once("SIGINT", stop)
+  const ok = await waitForExtension({ connected: async () => (await extensionStatus())?.connected === true, timeoutMs: 120_000, intervalMs: 1_000 })
+  process.off("SIGINT", stop)
+  log(ok
+    ? "✓ Connected. Restart opencode, then ask an agent to open a page."
+    : `! Not connected yet. Finish the steps above, then check with \`${cliCommand("status")}\`.`)
 }
 
 /** Printed before the relay's status by `opencode-browser status`. */
@@ -355,15 +413,16 @@ export function printSetupStatus() {
 }
 
 function extension() {
-  if (!existsSync(files.extension)) {
+  if (!checkoutExtensionDirs.length && !existsSync(files.extension)) {
     if (!existsSync(bundledExtension)) fail("This package has no bundled extension.")
     mkdirSync(files.dir, { recursive: true })
     cpSync(bundledExtension, files.extension, { recursive: true })
   }
+  const folder = unpackedFolder()
+  if (!existsSync(path.join(folder, "manifest.json"))) fail(`${folder} has no built extension. Run \`${installCommand()}\` first.`)
   pairUnpacked()
-  const opener = windows ? "explorer" : process.platform === "darwin" ? "open" : "xdg-open"
-  spawnSync(opener, [files.extension])
-  log(`Load unpacked from: ${files.extension}`)
+  revealFolder(folder)
+  log(`Load unpacked from: ${folder}`)
 }
 
 /** Writes the pairing code into every unpacked extension folder this install manages. */
@@ -467,39 +526,132 @@ function findOnPath(name: string) {
 
 // ---- which browsers have the extension -------------------------------------------------------------
 
-type Profile = { dir: string; name: string }
-type Match = { browser: Browser; profile: Profile; id: string }
+export type Profile = { dir: string; name: string }
+export type Match = { browser: Browser; profile: Profile; id: string }
 /** blocked: the OS refused to read the browser's data (macOS privacy protection), so it may have the extension. */
-type Detection = { browser: Browser; blocked: boolean; enabled: Match[]; disabled: Match[] }
+export type Detection = { browser: Browser; blocked: boolean; enabled: Match[]; disabled: Match[] }
+
+/** What locateExtension may do outside the terminal; stubbed in tests so they never open a real browser. */
+export type Effects = {
+  /** Opens a URL in a specific browser; false when it couldn't be handed to one. */
+  open(browser: Browser, url: string): boolean
+  /** Shows the folder in the file manager, selected where the OS can, so it can be dragged. */
+  reveal(folder: string): boolean
+  /** Puts text on the clipboard; false when there is no clipboard tool. */
+  copy(text: string): boolean
+  log(line: string): void
+}
+
+export type LocateOptions = {
+  allowOpen: boolean
+  connected: boolean
+  /** The folder to load unpacked: the checkout's dist/, or the copy in the data root. */
+  folder: string
+  detections: Detection[]
+  preferred: Browser | undefined
+  env: { ssh: boolean; display: boolean; tty: boolean; platform: NodeJS.Platform }
+  storeListed?: boolean
+}
 
 /**
  * Reports the browsers and profiles that have OpenCode Browser. When none does (and none is connected to the relay),
- * opens its Chrome Web Store listing in the default browser, unless there is no browser to open here (SSH, no
- * display, no terminal, --no-open) or a browser couldn't be checked and may already have it.
+ * guides installing it: until the Chrome Web Store listing is live (STORE_LISTED), that's loading the unpacked build,
+ * with the browser's extensions page opened, the folder revealed and its path copied; after, the store listing.
+ * Nothing opens when the browsers here aren't the ones the user looks at (SSH, no display), there is no terminal,
+ * with --no-open, or when a browser couldn't be checked and may already have it.
+ * Returns "ready" when the extension is there, "off" when it's turned off, else "guided".
  */
-function locateExtension(options: { allowOpen: boolean; connected: boolean }) {
+export function locateExtension(options: LocateOptions, effects: Effects = systemEffects): "ready" | "off" | "guided" {
+  const { log } = effects
+  const storeListed = options.storeListed ?? STORE_LISTED
   const ready = "✓ Agents can use OpenCode Browser now. Click its toolbar button on a tab to let them use that tab too."
-  // Over SSH the browsers here aren't the ones the user looks at.
-  if (process.env.SSH_CONNECTION || process.env.SSH_TTY)
-    return log(options.connected ? ready : `Install OpenCode Browser in your browser from the Chrome Web Store: ${STORE_URL}`)
-  const detections = detectBrowsers()
-  const preferred = defaultBrowser(detections.map((detection) => detection.browser))
-  reportDetections(detections, preferred)
+  if (options.env.ssh) {
+    if (options.connected) return log(ready), "ready"
+    if (storeListed) log(`Install OpenCode Browser in your browser from the Chrome Web Store: ${STORE_URL}`)
+    else unpackedSteps({ folder: options.folder, platform: options.env.platform, log })
+    return "guided"
+  }
+  reportDetections(options.detections, options.preferred, log)
   // A connected extension is installed, even somewhere the scan doesn't look (a custom profile directory, a snap).
-  if (options.connected || detections.some((detection) => detection.enabled.length))
-    return log(ready)
-  const off = detections.flatMap((detection) => detection.disabled)
-  if (off.length)
-    return log(`! OpenCode Browser is turned off in ${off.map((match) => `${match.browser.name} (${match.profile.name})`).join(", ")}. Turn it on in the browser's extensions page.`)
-  const blocked = detections.filter((detection) => detection.blocked)
-  const display = process.platform !== "linux" || !!(process.env.DISPLAY || process.env.WAYLAND_DISPLAY)
-  const target = preferred ?? detections.find((detection) => !detection.blocked)?.browser
-  const opened = options.allowOpen && display && !!process.stdout.isTTY && !blocked.length && target !== undefined
-  if (opened) open(target, STORE_URL)
-  log(`Install OpenCode Browser from the Chrome Web Store${opened ? ` (opened in ${target.name})` : ""}:`)
-  log(`  ${STORE_URL}`)
-  if (blocked.length) log(`  Already installed in ${blocked.map((detection) => detection.browser.name).join(", ")}? Then you're set.`)
-  log(`  Or load the unpacked build: ${cliCommand("extension")}`)
+  if (options.connected || options.detections.some((detection) => detection.enabled.length)) return log(ready), "ready"
+  const off = options.detections.flatMap((detection) => detection.disabled)
+  if (off.length) {
+    log(`! OpenCode Browser is turned off in ${off.map((match) => `${match.browser.name} (${match.profile.name})`).join(", ")}. Turn it on in the browser's extensions page.`)
+    return "off"
+  }
+  const blocked = options.detections.filter((detection) => detection.blocked).map((detection) => detection.browser.name)
+  const target = options.preferred ?? options.detections.find((detection) => !detection.blocked)?.browser
+  const interactive = options.allowOpen && options.env.display && options.env.tty
+  if (storeListed) {
+    const opened = interactive && !blocked.length && target !== undefined && effects.open(target, STORE_URL)
+    log(`Install OpenCode Browser from the Chrome Web Store${opened ? ` (opened in ${target.name})` : ""}:`)
+    log(`  ${STORE_URL}`)
+    if (blocked.length) log(`  Already installed in ${blocked.join(", ")}? Then you're set.`)
+    log(`  Or load the unpacked build: ${cliCommand("extension")}`)
+    return "guided"
+  }
+  // A browser that couldn't be checked may already have it: show the steps, but don't open anything over the user's work.
+  const act = interactive && !blocked.length
+  const page = target ? extensionsPage(target) : "chrome://extensions"
+  unpackedSteps({
+    folder: options.folder,
+    platform: options.env.platform,
+    log,
+    browser: target?.name,
+    page,
+    opened: act && target !== undefined && effects.open(target, page),
+    revealed: act && effects.reveal(options.folder),
+    copied: act && effects.copy(options.folder),
+  })
+  if (blocked.length) log(`Already loaded in ${blocked.join(", ")}? Then you're set.`)
+  return "guided"
+}
+
+/** The numbered steps for loading the unpacked build, saying what install already did for each. */
+function unpackedSteps(step: {
+  folder: string
+  platform: NodeJS.Platform
+  log: (line: string) => void
+  browser?: string | undefined
+  page?: string
+  opened?: boolean
+  revealed?: boolean
+  copied?: boolean
+}) {
+  const { log } = step
+  const page = step.page ?? "chrome://extensions"
+  const fileManager = step.platform === "darwin" ? "Finder" : step.platform === "win32" ? "Explorer" : "your file manager"
+  const paste = step.platform === "darwin" ? "press Cmd+Shift+G in the folder picker and paste" : "paste it into the folder picker"
+  log("Load the extension in your browser (one time):")
+  log(`  1. Open ${page}${step.browser ? ` in ${step.browser}` : " (or your browser's extensions page)"}${step.opened ? " (opened)" : ""}`)
+  log("  2. Turn on Developer mode")
+  log(`  3. Click Load unpacked and choose this folder${step.copied ? ` (path copied: ${paste})` : ""}, or drag it onto the page:`)
+  log(`     ${step.folder}${step.revealed ? ` (shown in ${fileManager})` : ""}`)
+  log("  4. Restart opencode")
+}
+
+/** The browser's own extensions page; every Chromium browser also accepts chrome://, these rewrite it to their scheme. */
+export function extensionsPage(browser: Pick<Browser, "name">) {
+  const scheme = ({ "Microsoft Edge": "edge", Brave: "brave", Vivaldi: "vivaldi", Opera: "opera" } as Record<string, string>)[browser.name]
+  return `${scheme ?? "chrome"}://extensions`
+}
+
+/**
+ * Polls until the extension connects to the relay: true when it does, false after timeoutMs. Install waits like
+ * this after printing the unpacked steps, so the user sees the moment Load unpacked worked.
+ */
+export async function waitForExtension(options: {
+  connected: () => Promise<boolean>
+  timeoutMs: number
+  intervalMs: number
+  sleep?: (ms: number) => Promise<void>
+}) {
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+  for (let waited = 0; ; waited += options.intervalMs) {
+    if (await options.connected()) return true
+    if (waited >= options.timeoutMs) return false
+    await sleep(options.intervalMs)
+  }
 }
 
 /** Every browser with user data here, and the profiles that have OpenCode Browser. */
@@ -601,7 +753,7 @@ function defaultBrowserID() {
   return xdg.status === 0 ? xdg.stdout.trim().replace(/\.desktop$/, "") || undefined : undefined
 }
 
-function reportDetections(detections: Detection[], preferred: Browser | undefined) {
+function reportDetections(detections: Detection[], preferred: Browser | undefined, log: (line: string) => void) {
   log(`Default browser: ${preferred?.name ?? "unknown"}`)
   detections.forEach((detection) => {
     const name = detection.browser.name
@@ -615,16 +767,23 @@ function reportDetections(detections: Detection[], preferred: Browser | undefine
 const describe = (match: Match) => `${match.profile.name}${match.id === UNPACKED_ID ? " (unpacked)" : ""}`
 const blockedReason = () => (process.platform === "darwin" ? "macOS privacy protection" : "permission denied")
 
-/** Opens a URL in a specific browser; launching its executable forwards the URL to a running instance. */
-function open(browser: Browser, url: string) {
+/**
+ * Opens a URL in a specific browser by launching its executable with the URL, which forwards it to a running
+ * instance; chrome:// URLs only open this way. Without the executable, an https URL goes through the OS, which on
+ * macOS can still pick the app; a chrome:// URL can't (it isn't a scheme the OS knows), so it's left to the user.
+ */
+function openInBrowser(browser: Browser, url: string) {
   const executable = launcher(browser)?.executable
+  const web = /^https?:/.test(url)
   if (executable) {
     const child = spawn(executable, [url], { detached: true, stdio: "ignore" })
-    child.on("error", () => openWithSystem(browser, url))
+    child.on("error", () => web && openWithSystem(browser, url))
     child.unref()
-    return
+    return true
   }
+  if (!web) return false
   openWithSystem(browser, url)
+  return true
 }
 
 function openWithSystem(browser: Browser, url: string) {
@@ -633,6 +792,38 @@ function openWithSystem(browser: Browser, url: string) {
   if (windows) return void spawnSync("rundll32", ["url.dll,FileProtocolHandler", url])
   spawnSync("xdg-open", [url])
 }
+
+/** Shows the folder selected in its parent (Finder, Explorer), or opens the parent (Linux file managers). */
+function revealFolder(folder: string) {
+  const run = (command: string, args: string[]) => {
+    const result = spawnSync(command, args, { stdio: "ignore", timeout: 10_000 })
+    // explorer exits 1 even when it opened the window.
+    return !result.error && (windows || result.status === 0)
+  }
+  if (process.platform === "darwin") return run("open", ["-R", folder])
+  if (windows) return run("explorer", [`/select,${folder}`])
+  return run("xdg-open", [path.dirname(folder)])
+}
+
+/** Copies text with the platform's clipboard tool: pbcopy, clip, or wl-copy / xclip / xsel. */
+function copyToClipboard(text: string) {
+  const tools: [string, string[]][] =
+    process.platform === "darwin"
+      ? [["pbcopy", []]]
+      : windows
+        ? [["clip", []]]
+        : [
+            ...(process.env.WAYLAND_DISPLAY ? [["wl-copy", []] as [string, string[]]] : []),
+            ["xclip", ["-selection", "clipboard"]],
+            ["xsel", ["--clipboard", "--input"]],
+          ]
+  return tools.some(([command, args]) => {
+    const result = spawnSync(command, args, { input: text, stdio: ["pipe", "ignore", "ignore"], timeout: 5_000 })
+    return !result.error && result.status === 0
+  })
+}
+
+const systemEffects: Effects = { open: openInBrowser, reveal: revealFolder, copy: copyToClipboard, log }
 
 /** The browser's executable, or (macOS) just its app bundle when the executable can't be read. */
 function launcher(browser: Browser): { executable?: string } | undefined {

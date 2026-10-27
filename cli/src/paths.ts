@@ -37,6 +37,12 @@ export function cliCommand(args: string): string {
     : `npx opencode-browser-cli ${args}`
 }
 
+/**
+ * Whether the Chrome Web Store listing is live. Until it is, install guides loading the unpacked build instead of
+ * opening the listing; set it to true when the listing is published to restore the store flow.
+ */
+export const STORE_LISTED = false
+
 /** How to tell the user to install (or update) OpenCode Browser. */
 export function installCommand(): string {
   return fromCheckout() ? `cd ${quoted(path.dirname(packageRoot()))} && bun run setup` : "npx opencode-browser-cli install"

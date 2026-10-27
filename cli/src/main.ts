@@ -20,11 +20,12 @@ if (invokedAs === "opencode-browser-mcp") {
 } else {
   if (!command || command === "--help" || command === "-h") {
     process.stdout.write(`SETUP
-  install [--opencode <path>]    Install OpenCode Browser: add the browse MCP server to opencode, copy
-                                 the extension, and check which browsers have it (opening its Chrome
-                                 Web Store listing when none does)
-    --no-open                    Print the store link instead of opening it
-  extension                      Open the unpacked extension folder (for "Load unpacked")
+  install [--opencode <path>]    Install OpenCode Browser: add the browse MCP server to opencode, pair
+                                 the extension, and check which browsers have it (when none does, open
+                                 the extensions page, show the folder to load unpacked and wait for it)
+    --no-open                    Print the steps without opening anything or copying the path
+    --no-wait                    Don't wait for the extension to connect
+  extension                      Show the unpacked extension folder (for "Load unpacked")
   pair                           Print the pairing code the Chrome Web Store extension asks for
   uninstall [--yes]              Remove everything install set up (--yes skips confirming that stored
                                  secret profiles are deleted)
