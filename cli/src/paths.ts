@@ -25,6 +25,11 @@ export function fromCheckout(): boolean {
   return fs.existsSync(path.join(packageRoot(), "src", "main.ts"))
 }
 
+/** The git clone this runs from (the folder above cli/), or undefined for the published package. */
+export function checkoutRoot(): string | undefined {
+  return fromCheckout() ? path.dirname(packageRoot()) : undefined
+}
+
 const quoted = (value: string) => (/^[\w@%+=:,./-]+$/.test(value) ? value : JSON.stringify(value))
 
 /**

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // opencode-browser: one command for OpenCode Browser.
-//   Setup (setup.ts): install, extension, pair, uninstall.
+//   Setup (setup.ts): install, extension, pair, uninstall. Updating (update.ts): update.
 //   Driving the browser (cli.ts): serve, relay, execute, session, network, secrets, recording, journal,
 //   doctor, skill, mcp, status. The relay is the local server agents use; the extension connects to it.
 // `opencode-browser mcp` runs the MCP server over stdio (as does the bundle invoked as `opencode-browser-mcp`).
@@ -14,6 +14,9 @@ if (invokedAs === "opencode-browser-mcp") {
   const { NodeRuntime } = await import("@effect/platform-node")
   const { runMcpServer } = await import("./mcp.ts")
   runMcpServer.pipe(NodeRuntime.runMain)
+} else if (command === "update") {
+  const { runUpdateCommand } = await import("./update.ts")
+  await runUpdateCommand(process.argv.slice(3))
 } else if (command && setupCommands.has(command)) {
   const { runSetup } = await import("./setup.ts")
   await runSetup(command, process.argv.slice(3))
@@ -27,6 +30,8 @@ if (invokedAs === "opencode-browser-mcp") {
     --no-wait                    Don't wait for the extension to connect
   extension                      Show the unpacked extension folder (for "Load unpacked")
   pair                           Print the pairing code the Chrome Web Store extension asks for
+  update [--check]               Update a git clone install: pull the newer commits (fast-forward only) and
+                                 run setup again; --check only says whether there's an update
   uninstall [--yes]              Remove everything install set up (--yes skips confirming that stored
                                  secret profiles are deleted)
 
