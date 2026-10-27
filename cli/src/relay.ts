@@ -770,7 +770,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       let handshaken = false
       let socketGeneration = 0
       const announcedRootTabIds = new Set<number>()
-      currentAnnouncedRootTabIds = announcedRootTabIds
       // Pairing: the extension's hello carries a nonce; the relay answers with its own nonce and an HMAC proving it
       // knows the pairing code; the extension answers with its proof. Only then does the relay treat the socket as the
       // extension (and the extension obey it).
@@ -802,6 +801,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
             }
             socketGeneration = acceptedGeneration
             handshaken = true
+            // Only a paired extension that became the current link names the tabs it announces; an unpaired socket
+            // (or one refused for another active link) must not replace the live inventory.
+            if (extensionRpc.isCurrent(socket)) currentAnnouncedRootTabIds = announcedRootTabIds
             return
           }
           if (!extensionRpc.isCurrent(socket) || !extensionRpc.acceptsEvents) {
