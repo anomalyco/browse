@@ -9,6 +9,7 @@ import {
   findByRecordingTarget,
   prepareCdpScreencastViewport,
   startFfmpegVideoEncoder,
+  startScreenshotFallback,
   type RecordingTargetOptions,
   type SendDebuggerCommand,
   type StartVideoEncoder,
@@ -39,6 +40,9 @@ type ActiveFlightRecorder = {
   sourceFrameCount: number
   droppedFrameCount: number
   savePromise?: Promise<FlightRecorderSaveReceipt>
+  /** A real screencast frame arrived; screenshot polling (for a tab Chrome doesn't paint) stops then. */
+  screencastFrameSeen?: boolean
+  stopFallback?: () => void
 }
 
 export type FlightRecorderTarget = RecordingTargetOptions
@@ -108,6 +112,17 @@ export class FlightRecorderRelay {
         tabId: options.tabId,
         method: "Page.startScreencast",
         params: { format: "jpeg", quality: 90, everyNthFrame: 1 },
+      })
+      recorder.stopFallback = startScreenshotFallback({
+        sendDebuggerCommand: this.options.sendDebuggerCommand,
+        tabId: options.tabId,
+        frameRate,
+        quality: 90,
+        hasScreencastFrames: () => recorder.screencastFrameSeen === true,
+        active: () => this.active.get(options.tabId) === recorder,
+        onFrame: (params) => {
+          this.handleDebuggerEvent({ tabId: options.tabId, method: "Page.screencastFrame", params })
+        },
       })
       return this.statusFor(recorder)
     } catch (error) {
@@ -190,6 +205,7 @@ export class FlightRecorderRelay {
     const recorder = this.find(target)
     if (!recorder) return { cancelled: false }
     await recorder.savePromise?.catch(() => {})
+    recorder.stopFallback?.()
     this.active.delete(recorder.tabId)
     await this.options.sendDebuggerCommand({ tabId: recorder.tabId, method: "Page.stopScreencast", params: {} }).catch(() => {})
     return { cancelled: true }
@@ -205,6 +221,7 @@ export class FlightRecorderRelay {
     if (!recorder) return false
     const frameSessionId = getNumber(options.params, "sessionId")
     if (frameSessionId !== undefined) {
+      recorder.screencastFrameSeen = true
       void this.options.sendDebuggerCommand({
         tabId: recorder.tabId,
         method: "Page.screencastFrameAck",

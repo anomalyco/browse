@@ -137,7 +137,11 @@ export class ExtensionRpc {
       const id = this.nextRequestId++
       const message: ExtensionCommand = { ...command, id }
       let completed = false
-      const timeoutMs = command.method === "debugger.sendCommand"
+      // A page.evaluate that awaits a promise runs as long as the page's work does; Playwright's own timeouts
+      // govern it, so the relay adds none.
+      const timeoutMs = awaitsPagePromise(command)
+        ? undefined
+        : command.method === "debugger.sendCommand"
         ? this.timeouts.debuggerCommandTimeoutMs ?? 60_000
         : this.timeouts.commandTimeoutMs ?? 15_000
       const finish = (effect: Effect.Effect<JsonObject, Error>) => {
@@ -149,7 +153,7 @@ export class ExtensionRpc {
         this.pendingRequests.delete(id)
         resume(effect)
       }
-      const timeout = setTimeout(() => {
+      const timeout = timeoutMs === undefined ? undefined : setTimeout(() => {
         // Fail only this command. Close the socket only if the websocket
         // itself is unresponsive to a protocol-level ping.
         this.probeLiveness(socket)
@@ -215,4 +219,12 @@ export class ExtensionRpc {
       this.livenessProbe = undefined
     }
   }
+}
+
+function awaitsPagePromise(command: Omit<ExtensionCommand, "id">): boolean {
+  if (command.method !== "debugger.sendCommand") return false
+  const method = command.params?.method
+  const params = command.params?.params
+  return (method === "Runtime.evaluate" || method === "Runtime.callFunctionOn") &&
+    Predicate.isObject(params) && (params as JsonObject).awaitPromise === true
 }

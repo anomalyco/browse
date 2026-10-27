@@ -1197,6 +1197,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         forgetProtectedFrames(tabId)
         contextDebugLog?.(`main-frame-navigated frame=${boundedToken(frameId)} loader=${boundedToken(getString(frame, "loaderId"))} ${targetDiagnosticIdentity(target)} ${summarizeDiagnosticUrl(frameUrl)}`)
         registry.updateTargetUrl(tabId, frameUrl)
+        // Some Chromium builds drop focus emulation across navigations; without it a background tab is throttled.
+        Effect.runPromise(Effect.ignore(sendDebuggerCommand({ tabId, method: "Emulation.setFocusEmulationEnabled", params: { enabled: true } }))).catch(() => {})
       }
       if (frameId !== undefined && frameParentId !== undefined && params) {
         registry.rememberFrameEvent({ tabId, frameId, navigated: params })

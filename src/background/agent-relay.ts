@@ -24,6 +24,7 @@ import type {
 import type { AgentRelayState, AgentRelayStatus, PairingSource } from "../shared/protocol"
 import { createAgentRelayLog, formatAgentRelayLog } from "./agent-relay-log"
 import { AgentGroups } from "./agent-groups"
+import { AgentWindow } from "./agent-window"
 import { DebuggerHub } from "./debugger-hub"
 import { normalizePairingCode, pairingProof, randomNonce, sameSecret } from "./pairing"
 import { TabCleanup } from "./tab-cleanup"
@@ -401,12 +402,14 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         TabCleanup.touch(number(params, "tabId"))
         return sendCommand(params)
       case "tabs.create": {
-        const tab = await chrome.tabs.create({
-          url: typeof params?.url === "string" ? params.url : "about:blank",
+        // In the agents' own unfocused window, never over the user's tabs.
+        const tab = await AgentWindow.openTab(typeof params?.url === "string" ? params.url : "about:blank", {
           active: params?.active === true,
         })
         if (tab.id === undefined) throw new Error("Created tab has no id")
         TabCleanup.track(tab.id)
+        // A discarded tab loses the debugger and the agent's page.
+        await chrome.tabs.update(tab.id, { autoDiscardable: false }).catch(() => undefined)
         return { tabId: tab.id }
       }
       case "tabs.remove":
@@ -453,6 +456,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         if (!page) throw new Error("Invalid page status")
         const wasWaiting = pageStatuses.get(tabId)?.state === "waiting"
         pageStatuses.set(tabId, page)
+        // An execute starting or ending counts as use, so idle time runs from the end of the last one.
+        TabCleanup.touch(tabId)
         notify()
         // A handoff opens the agent's group so the user can find the tab; it folds up again afterwards.
         if (page.state === "waiting") void AgentGroups.expandTab(tabId)
@@ -553,6 +558,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   const reattach = (tabId: number) =>
     DebuggerHub.attach(tabId, OWNER).then(
       () => {
+        // A new attachment starts without the relay's focus emulation, which keeps a background tab from throttling.
+        void chrome.debugger.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => undefined)
         if (!relayTabs.has(tabId)) {
           relayTabs.add(tabId)
           notify()
@@ -748,7 +755,11 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   chrome.tabs.onUpdated.addListener((tabId, change) => {
     if (change.url && relayTabs.has(tabId)) void renameForPage(tabId, change.url)
   })
-  TabCleanup.guard((tabId) => recordingTabs.has(tabId) || pageStatuses.get(tabId)?.state === "waiting")
+  // Never close a tab while its agent runs a script on it, waits for the user there, or records it.
+  TabCleanup.guard((tabId) => {
+    const state = pageStatuses.get(tabId)?.state
+    return recordingTabs.has(tabId) || state === "waiting" || state === "running"
+  })
   AgentGroups.keepOpenWhile((tabId) => pageStatuses.get(tabId)?.state === "waiting")
   chrome.tabs.onRemoved.addListener((tabId) => {
     recordingTabs.delete(tabId)
@@ -771,6 +782,70 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     retry = undefined
     socket?.close(1000, "Pairing changed")
     void connect("pairing")
+  })
+  /** The active tab of each window and the one before it, to give a window back its tab after an agent popup. */
+  const activeTabs = new Map<number, { current: number; previous?: number }>()
+  chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+    const entry = activeTabs.get(windowId)
+    if (entry?.current !== tabId) activeTabs.set(windowId, { current: tabId, ...(entry ? { previous: entry.current } : {}) })
+  })
+  chrome.windows.onRemoved.addListener((windowId) => activeTabs.delete(windowId))
+  /** The focused window and the one focused before it, to tell whether an agent's popup took focus. */
+  const focus: { current?: number; previous?: number; at: number } = { at: 0 }
+  chrome.windows.onFocusChanged.addListener((windowId) => {
+    if (windowId === chrome.windows.WINDOW_ID_NONE || windowId === focus.current) return
+    focus.previous = focus.current
+    focus.current = windowId
+    focus.at = Date.now()
+  })
+  void chrome.tabs.query({ active: true }).then((tabs) => {
+    for (const tab of tabs) if (tab.id !== undefined && !activeTabs.has(tab.windowId)) activeTabs.set(tab.windowId, { current: tab.id })
+  })
+  /**
+   * A tab an agent's page opened (target=_blank, window.open): it belongs with the agent's tabs. It closes when idle
+   * like them, joins the opener's group, and moves to the agent window; if it took over the user's window, the user
+   * gets their tab back there. A popup window can't be moved, so it only gives up focus, as does the agent window
+   * when the popup's activation focused it. (The opener comes from webNavigation: a tab's openerTabId names the
+   * window's active tab, not the background agent tab that clicked the link.)
+   */
+  const adoptOpened = async (tabId: number, opener: number) => {
+    if (!(await TabCleanup.isTracked(opener))) return
+    const tab = await chrome.tabs.get(tabId).catch(() => undefined)
+    if (!tab) return
+    void chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => undefined)
+    const agentWindow = await AgentWindow.id()
+    const window = await chrome.windows.get(tab.windowId).catch(() => undefined)
+    log.add("tab.opened", { tabId, opener, window: window?.type, agentWindow: tab.windowId === agentWindow })
+    // Focus that just moved to the agent window came from the popup, not from the user going there.
+    const justFocused = focus.current !== agentWindow || Date.now() - focus.at < 2_000
+    if (window?.focused && tab.windowId === agentWindow && justFocused) {
+      await chrome.windows.update(tab.windowId, { focused: false }).catch(() => undefined)
+    }
+    if (window && tab.windowId !== agentWindow) {
+      if (window.type === "normal") {
+        const entry = activeTabs.get(tab.windowId)
+        const previous = entry?.current === tabId ? entry.previous : entry?.current
+        if (agentWindow !== undefined) await chrome.tabs.move(tabId, { windowId: agentWindow, index: -1 }).catch(() => undefined)
+        if (tab.active && previous !== undefined && previous !== tabId)
+          await chrome.tabs.update(previous, { active: true }).catch(() => undefined)
+      } else if (window.focused) {
+        await chrome.windows.update(tab.windowId, { focused: false }).catch(() => undefined)
+      }
+    }
+    const [current, openerTab] = await Promise.all([chrome.tabs.get(tabId).catch(() => undefined), chrome.tabs.get(opener).catch(() => undefined)])
+    if (
+      current &&
+      openerTab &&
+      openerTab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE &&
+      openerTab.windowId === current.windowId &&
+      current.groupId !== openerTab.groupId
+    )
+      await chrome.tabs.group({ tabIds: [tabId], groupId: openerTab.groupId }).catch(() => undefined)
+    // After the move and grouping, which would otherwise read as the user claiming the tab.
+    TabCleanup.track(tabId)
+  }
+  chrome.webNavigation.onCreatedNavigationTarget.addListener(({ sourceTabId, tabId }) => {
+    void adoptOpened(tabId, sourceTabId).catch((error: unknown) => log.add("tab.opened.error", { error: text(error) }))
   })
   void chrome.alarms.create(ALARM, { periodInMinutes: extensionReconnectAlarmPeriodMs / 60_000 })
   void DebuggerHub.restore().then(() => {

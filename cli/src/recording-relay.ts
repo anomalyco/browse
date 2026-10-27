@@ -136,6 +136,11 @@ type CdpRecording = ActiveRecordingBase & {
   stopPromise?: Promise<RecordingStopResult>
   writePromise: Promise<void>
   writeError?: Error
+  /** A real Page.screencastFrame arrived (it carries a sessionId to acknowledge); screenshots stop then. */
+  screencastFrameSeen?: boolean
+  /** Frames taken with Page.captureScreenshot because the screencast sent none. */
+  fallbackFrameCount: number
+  stopFallback?: () => void
 }
 
 type CdpVideoFrame = {
@@ -450,6 +455,7 @@ export class RecordingRelay {
     }
     const frameSessionId = getNumber(options.params, "sessionId")
     if (frameSessionId !== undefined) {
+      recording.screencastFrameSeen = true
       void this.options.sendDebuggerCommand({
         tabId: recording.tabId,
         method: "Page.screencastFrameAck",
@@ -740,6 +746,7 @@ export class RecordingRelay {
       stopping: false,
       startedMonotonicAt,
       writePromise: Promise.resolve(),
+      fallbackFrameCount: 0,
     }
     this.activeRecordings.set(options.tabId, recording)
     try {
@@ -760,6 +767,18 @@ export class RecordingRelay {
       await this.cleanupCdpRecording(recording)
       return { success: false, error: "Recording was cancelled while starting" }
     }
+    recording.stopFallback = startScreenshotFallback({
+      sendDebuggerCommand: this.options.sendDebuggerCommand,
+      tabId: recording.tabId,
+      frameRate,
+      quality: cdpJpegQuality,
+      hasScreencastFrames: () => recording.screencastFrameSeen === true,
+      active: () => this.activeRecordings.get(recording.tabId) === recording && !recording.stopped && !recording.stopping,
+      onFrame: (params) => {
+        recording.fallbackFrameCount += 1
+        this.handleDebuggerEvent({ tabId: recording.tabId, method: "Page.screencastFrame", params })
+      },
+    })
     this.armMaxDuration(recording, options.maxDurationMs)
     return {
       success: true,
@@ -776,6 +795,7 @@ export class RecordingRelay {
   private async stopCdpRecording(recording: CdpRecording): Promise<RecordingStopResult> {
     if (recording.stopPromise) return recording.stopPromise
     recording.stopping = true
+    recording.stopFallback?.()
     if (recording.maxDurationTimer) clearTimeout(recording.maxDurationTimer)
     const stopPromise = this.finishCdpRecording(recording).finally(() => {
       if (this.activeRecordings.get(recording.tabId) === recording) {
@@ -872,6 +892,7 @@ export class RecordingRelay {
   private cleanupCdpRecording(recording: CdpRecording): Promise<void> {
     if (recording.cleanupPromise) return recording.cleanupPromise
     recording.stopped = true
+    recording.stopFallback?.()
     if (recording.maxDurationTimer) clearTimeout(recording.maxDurationTimer)
     recording.cleanupPromise = (async () => {
       await Promise.all([
@@ -1000,19 +1021,69 @@ function recordingQuality(recording: CdpRecording, durationMs: number): Recordin
     droppedFrameCount: recording.droppedFrameCount,
     achievedSourceFrameRate: recording.sourceFrameCount / seconds,
     achievedEncodedSourceFrameRate: recording.encodedSourceFrameCount / seconds,
-    screenshotFallback: recording.sourceFrameCount === 0 && recording.encodedSourceFrameCount > 0,
+    screenshotFallback: recording.fallbackFrameCount > 0 || (recording.sourceFrameCount === 0 && recording.encodedSourceFrameCount > 0),
     ...(recording.sourceWidth === undefined ? {} : { sourceWidth: recording.sourceWidth }),
     ...(recording.sourceHeight === undefined ? {} : { sourceHeight: recording.sourceHeight }),
   }
 }
 
+/**
+ * The size to record at. Never brings the tab to the front: that raises the browser window over the user's work.
+ * A background tab keeps rendering through focus emulation (set at attach); when the screencast still sends no
+ * frames, startScreenshotFallback fills in.
+ */
 export async function prepareCdpScreencastViewport(
   sendDebuggerCommand: SendDebuggerCommand,
   tabId: number,
 ): Promise<{ readonly width: number; readonly height: number }> {
-  await sendDebuggerCommand({ tabId, method: "Page.bringToFront", params: {} })
   const metrics = await sendDebuggerCommand({ tabId, method: "Page.getLayoutMetrics", params: {} })
   return cdpRecordingSize(metrics)
+}
+
+/** How long a screencast may stay silent before screenshots stand in for it. */
+const screencastFallbackGraceMs = 1_500
+/** Screenshots are slower than screencast frames; this many per second at most. */
+const maxFallbackFrameRate = 10
+
+/**
+ * Chrome sends no screencast frames for a tab it doesn't paint (a background tab in some builds, an occluded window).
+ * Once a screencast has been silent for a moment, polls Page.captureScreenshot and hands each image to `onFrame` as
+ * screencast frame params (without a sessionId, so nothing is acknowledged), until a real frame arrives or the
+ * recording ends. Returns a stop function.
+ */
+export function startScreenshotFallback(options: {
+  readonly sendDebuggerCommand: SendDebuggerCommand
+  readonly tabId: number
+  readonly frameRate: number
+  readonly quality: number
+  readonly hasScreencastFrames: () => boolean
+  readonly active: () => boolean
+  readonly onFrame: (params: JsonObject) => void
+}): () => void {
+  let stopped = false
+  const running = () => !stopped && options.active() && !options.hasScreencastFrames()
+  const intervalMs = Math.round(1_000 / Math.max(1, Math.min(options.frameRate, maxFallbackFrameRate)))
+  void (async () => {
+    await sleep(screencastFallbackGraceMs)
+    while (running()) {
+      const started = performance.now()
+      const screenshot = await options.sendDebuggerCommand({
+        tabId: options.tabId,
+        method: "Page.captureScreenshot",
+        params: { format: "jpeg", quality: options.quality, fromSurface: true, captureBeyondViewport: false },
+      }).catch(() => undefined)
+      const data = screenshot ? getString(screenshot, "data") : undefined
+      if (data !== undefined && running()) options.onFrame({ data, metadata: {} })
+      await sleep(Math.max(0, intervalMs - (performance.now() - started)))
+    }
+  })()
+  return () => {
+    stopped = true
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function cdpRecordingSize(metrics: JsonObject): { readonly width: number; readonly height: number } {
