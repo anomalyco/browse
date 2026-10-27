@@ -310,7 +310,7 @@ function windowsNpmCli() {
 function checkNode() {
   // `bun run` stands in a bun shim for a missing node.
   if (process.versions.bun)
-    fail("OpenCode Browser needs Node.js 22.19 or newer, and `node` isn't installed (Bun ran in its place). Install Node.js from https://nodejs.org, then run setup again.")
+    fail("OpenCode Browser runs on Node.js 22.19 or newer, but this ran under Bun (`bun run` uses Bun when `node` isn't on PATH). Install Node.js from https://nodejs.org, then run setup again.")
   const [major = 0, minor = 0] = process.versions.node.split(".").map(Number)
   if (major < 22 || (major === 22 && minor < 19))
     fail(`OpenCode Browser needs Node.js 22.19 or newer; this is ${process.version} (${process.execPath}). Update Node.js (https://nodejs.org), then run setup again.`)
@@ -348,7 +348,7 @@ async function install(args: string[]) {
   }
   // The unpacked extension reads the pairing code from its own folder, so it pairs with the relay without a step.
   pairUnpacked()
-  log(`✓ Paired the unpacked extension with the relay (for the Chrome Web Store build, run \`${cliCommand("pair")}\`)`)
+  log(`✓ Paired the unpacked extension with the relay${STORE_LISTED ? ` (for the Chrome Web Store build, run \`${cliCommand("pair")}\`)` : ""}`)
   if (existsSync(bundledExtension)) {
     // A browser already running an older unpacked build keeps its old code until it reloads; ask it to.
     const reload = connected ? await reloadOutdatedExtension(connected) : "current"
