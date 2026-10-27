@@ -49,6 +49,8 @@ export const commandMethods = [
   "tabs.cleanup",
   "update.notice",
   "relay.settings",
+  "settings.get",
+  "settings.set",
 ] as const
 
 export type ExtensionCommand = {

@@ -29,6 +29,8 @@ import {
   NetworkStopResponse,
   RecordingCancelResponse,
   TabsCleanupResponse,
+  SettingsGetResponse,
+  SettingsSetResponse,
   type RecordingStartRequest,
   RecordingStartResponse,
   RecordingStatusResponse,
@@ -142,6 +144,10 @@ export interface Interface {
   readonly recordingStatus: (target: RecordingTargetRequest) => Effect.Effect<RecordingStatusResponse, RelayClientError>
   readonly recordingCancel: (target: RecordingTargetRequest) => Effect.Effect<RecordingCancelResponse, RelayClientError>
   readonly tabsCleanup: (idleMinutes?: number) => Effect.Effect<TabsCleanupResponse, RelayClientError>
+  /** The user's settings (the extension's options page), with env overrides. */
+  readonly settingsGet: Effect.Effect<SettingsGetResponse, RelayClientError>
+  /** Changes settings; validated strictly by the relay. */
+  readonly settingsSet: (changes: Record<string, unknown>) => Effect.Effect<SettingsSetResponse, RelayClientError>
   readonly flightRecorderStart: (request: FlightRecorderStartRequest) => Effect.Effect<FlightRecorderStatusResponse, RelayClientError>
   readonly flightRecorderStatus: (target: RecordingTargetRequest) => Effect.Effect<FlightRecorderStatusResponse, RelayClientError>
   readonly flightRecorderSaveLast: (request: FlightRecorderSaveRequest) => Effect.Effect<FlightRecorderSaveResponse, RelayClientError>
@@ -312,6 +318,8 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: { readonl
     recordingStatus: (target) => getJson(`/recording/status${recordingTargetQuery(target)}`, RecordingStatusResponse),
     recordingCancel: (target) => postJson("/recording/cancel", recordingTargetBody(target), RecordingCancelResponse),
     tabsCleanup: (idleMinutes) => postJson("/tabs/cleanup", idleMinutes === undefined ? {} : { idleMinutes }, TabsCleanupResponse),
+    settingsGet: getJson("/settings", SettingsGetResponse),
+    settingsSet: (changes) => postJson("/settings", { set: changes }, SettingsSetResponse),
     flightRecorderStart: ({ sessionId, tabId, ...request }) =>
       postJson("/flight-recorder/start", { ...recordingTargetBody({ sessionId, tabId }), ...request }, FlightRecorderStatusResponse),
     flightRecorderStatus: (target) => getJson(`/flight-recorder/status${recordingTargetQuery(target)}`, FlightRecorderStatusResponse),

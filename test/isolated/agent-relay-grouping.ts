@@ -5,7 +5,8 @@ import { installChrome, settle, type StubEvent } from "../chrome-stub"
 // The status page's Grouping setting (agent-relay.ts group, agent-groups.ts): one group per session (the default), one
 // shared "Agents · N" group for every agent, or none; with popups, handoffs, the toolbar's kill switch (the relay
 // detaching a tab) and both window modes. Also the relay-side settings the extension sends (cursor, human input) and
-// the environment overrides the relay reports back. Run by ../isolated.test.ts in a process of its own.
+// the environment overrides the relay reports back, and the relay's settings tool reading and writing them
+// (settings.get / settings.set). Run by ../isolated.test.ts in a process of its own.
 
 const stub = installChrome()
 ;(globalThis as { __OPENCODE_BROWSER_BUILD__?: string }).__OPENCODE_BROWSER_BUILD__ = "test"
@@ -101,7 +102,7 @@ beforeEach(async () => {
   stub.state.activations.length = 0
   stub.state.focusedWindowId = undefined
   socket().received.length = 0
-  await stub.chrome.storage.local.remove(["agentTabsWindow", "agentTabsGrouping", "agentCursor", "humanInput"])
+  await stub.chrome.storage.local.remove(["agentTabsWindow", "agentTabsGrouping", "agentCursor", "humanInput", "tabCleanupIdleMinutes", "handoffNotifications"])
   await stub.chrome.storage.session.remove("agentWindowId")
 })
 
@@ -274,5 +275,46 @@ describe("relay settings", () => {
     await until(() => socket() !== first && relay.state().status === "connected")
     // The new connection gets the settings right after pairing.
     await until(() => settings().length >= 1)
+  })
+})
+
+describe("the relay's settings tool", () => {
+  // What the status page listens to (status.ts bindChoice): every storage change, as it arrives.
+  const pageSaw: Record<string, unknown>[] = []
+  stub.chrome.storage.onChanged.addListener((changes: Record<string, { newValue?: unknown }>, area: string) => {
+    if (area === "local") pageSaw.push(Object.fromEntries(Object.entries(changes).map(([key, change]) => [key, change.newValue])))
+  })
+
+  test("settings.get reads every setting, defaults for what was never set", async () => {
+    expect(await command("settings.get", {})).toEqual({
+      settings: { window: "current", grouping: "session", idleMinutes: 10, cursor: "off", humanInput: "on", handoffNotifications: "recording" },
+    })
+  })
+
+  test("settings.set writes storage, which the page and the relay follow, and new tabs use it", async () => {
+    pageSaw.length = 0
+    const result = await command("settings.set", { values: { grouping: "shared", cursor: "always", idleMinutes: 0, handoffNotifications: "always" } })
+    expect(result.settings).toEqual({ window: "current", grouping: "shared", idleMinutes: 0, cursor: "always", humanInput: "on", handoffNotifications: "always" })
+    expect(await stub.chrome.storage.local.get(["agentTabsGrouping", "agentCursor", "tabCleanupIdleMinutes", "handoffNotifications"])).toEqual({
+      agentTabsGrouping: "shared", agentCursor: "always", tabCleanupIdleMinutes: 0, handoffNotifications: "always",
+    })
+    expect(pageSaw).toEqual([{ agentTabsGrouping: "shared", agentCursor: "always", tabCleanupIdleMinutes: 0, handoffNotifications: "always" }])
+    await until(() => settings().length === 1)
+    expect(settings()[0]).toEqual({ cursor: "always", humanInput: "on" })
+    await userWindow()
+    const agent = await agentTab("github")
+    expect(group(agent.groupId)!.title).toBe(`Agents · 1${MARKER}${MARKER}`)
+  })
+
+  test("settings.set refuses an unknown setting or value and writes nothing", async () => {
+    pageSaw.length = 0
+    for (const values of [{ grouping: "Shared" }, { idleMinutes: 45 }, { grouping: "none", allowNode: true }]) {
+      const id = nextCommand++
+      socket().deliver({ id, method: "settings.set", params: { values } })
+      await until(() => socket().received.some((message) => message.id === id))
+      expect(socket().received.find((message) => message.id === id)!.error).toBeDefined()
+    }
+    expect(pageSaw).toEqual([])
+    expect((await command("settings.get", {})).settings).toMatchObject({ grouping: "session" })
   })
 })

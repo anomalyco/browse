@@ -11,11 +11,12 @@ import { cliCommand } from "./paths.ts"
 import * as RelayClient from "./relay-client.ts"
 import { parseAdditionalExtensionOrigins } from "./relay-helpers.ts"
 import * as RelayLifecycle from "./relay-lifecycle.ts"
-import type { ExecuteAftermath, ExecuteLogEntry, ExecuteResponse, NetworkStatusResponse, NetworkStopResponse, RecordingQuality } from "./relay-schema.ts"
+import type { ExecuteAftermath, ExecuteLogEntry, ExecuteResponse, NetworkStatusResponse, NetworkStopResponse, RecordingQuality, SettingsGetResponse } from "./relay-schema.ts"
 import { startRelay } from "./relay.ts"
 import { defaultJournalBaseDir, formatJournalEntry, readJournalEntries } from "./session-journal.ts"
 import * as SessionStore from "./session-store.ts"
 import { formatUpdateNotice, updateJson, updateNotice } from "./update.ts"
+import { formatSettings, settingKeys, type SettingKey, type SettingReport } from "./user-settings.ts"
 import { opencodeBrowserVersion } from "./version.ts"
 
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
@@ -1093,6 +1094,49 @@ const tabs = Command.make("tabs").pipe(
   Command.withSubcommands([tabsCleanup]),
 )
 
+const printSettings = (settings: SettingsGetResponse["settings"]) =>
+  Effect.forEach(formatSettings(settings as Record<SettingKey, SettingReport>), (line) => Console.log(line), { discard: true })
+
+const settingsGet = Command.make(
+  "get",
+  { json: jsonFlag },
+  Effect.fn("Cli.settingsGet")(function* ({ json }) {
+    const relay = yield* RelayClient.Service
+    yield* ensureCliRelay()
+    const result = yield* relay.settingsGet
+    if (json) return yield* Console.log(JSON.stringify(result, null, 2))
+    yield* printSettings(result.settings)
+    yield* Console.log(result.note)
+  }),
+).pipe(Command.withDescription("Show each setting's value, the value in effect, and any relay environment variable overriding it"))
+
+const settingsSet = Command.make(
+  "set",
+  {
+    assignments: Argument.String("key=value").pipe(Argument.variadic({ min: 1 }), Argument.withDescription(`Settings to change: ${settingKeys.join(", ")}`)),
+    json: jsonFlag,
+  },
+  Effect.fn("Cli.settingsSet")(function* ({ assignments, json }) {
+    const changes: Record<string, string> = {}
+    for (const assignment of assignments) {
+      const index = assignment.indexOf("=")
+      if (index <= 0) return yield* Effect.fail(new Error(`Expected key=value, got "${assignment}". Settings: ${settingKeys.join(", ")}.`))
+      changes[assignment.slice(0, index)] = assignment.slice(index + 1)
+    }
+    const relay = yield* RelayClient.Service
+    yield* ensureCliRelay()
+    const result = yield* relay.settingsSet(changes)
+    if (json) return yield* Console.log(JSON.stringify(result, null, 2))
+    yield* Console.log(result.message)
+    yield* printSettings(result.settings)
+  }),
+).pipe(Command.withDescription("Change settings (validated strictly; the extension's options page updates live)"))
+
+const settings = Command.make("settings").pipe(
+  Command.withDescription("Read or change the user's settings (the extension's options page). Security switches are environment-only"),
+  Command.withSubcommands([settingsGet, settingsSet]),
+)
+
 const mcp = Command.make(
   "mcp",
   {},
@@ -1103,7 +1147,7 @@ const mcp = Command.make(
 
 export const opencodeBrowser = Command.make("opencode-browser").pipe(
   Command.withDescription("Control the user's existing browser through the OpenCode Browser extension"),
-  Command.withSubcommands([serve, relay, execute, session, tabs, status, network, secrets, recording, flightRecorder, journal, doctor, skill, mcp]),
+  Command.withSubcommands([serve, relay, execute, session, tabs, settings, status, network, secrets, recording, flightRecorder, journal, doctor, skill, mcp]),
 )
 
 const mainLayer = Layer.mergeAll(RelayClient.layerFetch, SessionStore.layer).pipe(

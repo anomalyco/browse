@@ -65,6 +65,11 @@ export function createHttpRequestHandler(options: {
   readonly cleanupTabs: (idleMinutes: number | undefined) => Effect.Effect<JsonObject, Error>
   /** Reloads the extension so an unpacked install picks up files `install` just replaced. */
   readonly reloadExtension: () => Effect.Effect<JsonObject, Error>
+  /** The user's settings (user-settings.ts), read and written through the extension. */
+  readonly settings: {
+    readonly get: () => Effect.Effect<object, Error>
+    readonly set: (changes: unknown) => Effect.Effect<object, Error>
+  }
 }): (request: http.IncomingMessage, response: http.ServerResponse) => void {
   options.sessions.setUserAttachedPageUrlsProvider(() =>
     options.registry.listRootTargets()
@@ -142,6 +147,19 @@ export function createHttpRequestHandler(options: {
           ? Math.max(0, body.idleMinutes)
           : undefined
         sendJson(response, yield* options.cleanupTabs(idleMinutes))
+      }))
+      return
+    }
+    if (pathname === "/settings" && request.method === "GET") {
+      run(Effect.gen(function* () {
+        sendJson(response, yield* options.settings.get())
+      }))
+      return
+    }
+    if (pathname === "/settings" && request.method === "POST") {
+      run(Effect.gen(function* () {
+        const body = yield* readJsonBody(request)
+        sendJson(response, yield* options.settings.set(typeof body === "object" && body !== null && "set" in body ? body.set : undefined))
       }))
       return
     }

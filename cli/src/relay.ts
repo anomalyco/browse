@@ -34,6 +34,7 @@ import {
   getString,
   getTargetInfo,
   headerValue,
+  HttpRouteError,
   isRestrictedTarget,
   listenHttpServer,
   logCloseError,
@@ -69,6 +70,8 @@ import { RootTargetLifecycle } from "./root-target-lifecycle.ts"
 import { boundedToken, runtimeFailureKind, summarizeDiagnosticUrl, summarizeRuntimeEvaluate } from "./runtime-diagnostics.ts"
 import { shouldExposeChildTarget, TargetRegistry, type RootTargetChange, type TargetOwnershipChange } from "./target-registry.ts"
 import { createUpdateWatcher } from "./update.ts"
+import { describeChanges, describeSettings, parseSettingChanges, settingsFromExtension, SettingsInputError, settingsToExtension, type SettingOverrides } from "./user-settings.ts"
+import { installCommand } from "./paths.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "./version.ts"
 import { handleExecuteRealmException, handleExecuteRealmRejection, pruneStaleExecuteFilesDirectories } from "./execute-realm.ts"
 
@@ -586,6 +589,24 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     reloadExtension: () => sendToExtension({ method: "runtime.reload" }),
     cleanupTabs: (idleMinutes) =>
       sendToExtension({ method: "tabs.cleanup", ...(idleMinutes === undefined ? {} : { params: { idleMinutes } }) }),
+    settings: {
+      get: () => extensionSettings("settings.get").pipe(Effect.map((stored) => describeSettings(stored, userSettingOverrides()))),
+      set: (input) => Effect.gen(function* () {
+        const requested = yield* Effect.try({
+          try: () => parseSettingChanges(input),
+          catch: (error) => error instanceof SettingsInputError
+            ? new HttpRouteError({ message: error.message, status: 400, code: "invalid-request" })
+            : new Error(String(error)),
+        })
+        const overrides = userSettingOverrides()
+        // A setting the environment fixes isn't written: it would have no effect, and the answer says so instead.
+        const writable = Object.fromEntries(Object.entries(requested).filter(([key]) => !(key in overrides)))
+        const before = yield* extensionSettings("settings.get")
+        const after = Object.keys(writable).length ? yield* extensionSettings("settings.set", settingsToExtension(writable)) : before
+        relayLog("settings.set", { changes: Object.keys(writable).join(",") || undefined, overridden: Object.keys(requested).filter((key) => key in overrides).join(",") || undefined })
+        return describeChanges({ before, after, requested, overrides })
+      }),
+    },
     extensionStatus: () => {
       return {
         connected: extensionRpc.connected,
@@ -664,6 +685,30 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     shownByDefault: (tabId) =>
       isTabRecorded(tabId) ? recordingRelay.showsGhostCursor(tabId) || flightRecorder.showsGhostCursor(tabId) : ghostCursorAlways(),
   })
+  /** The same, for the settings tool: by setting, with the variable that fixes it and the value in effect. */
+  const userSettingOverrides = (): SettingOverrides => {
+    const human = humanInputOverride()
+    return {
+      ...(agentWindow ? { window: { variable: "OPENCODE_BROWSER_AGENT_WINDOW", value: agentWindow } } : {}),
+      ...(ghostCursorEnv === undefined ? {} : { cursor: { variable: "OPENCODE_BROWSER_GHOST_CURSOR", value: ghostCursorEnv ? "always" : "off" } }),
+      ...(human === undefined ? {} : { humanInput: { variable: "OPENCODE_BROWSER_HUMAN_INPUT", value: human ? "on" : "off" } }),
+    }
+  }
+  /**
+   * Reads (settings.get) or writes (settings.set) the user's settings in the extension, which owns them; the options
+   * page follows the change live. A missing or older extension gets an error that says what to do.
+   */
+  const extensionSettings = (method: "settings.get" | "settings.set", values?: JsonObject) =>
+    Effect.gen(function* () {
+      if (!extensionRpc.connected)
+        return yield* Effect.fail(new Error("The OpenCode Browser extension isn't connected, so its settings can't be read or changed. Ask the user to open the browser with the extension; its options page shows whether it's connected."))
+      const result = yield* sendToExtension({ method, ...(values ? { params: { values } } : {}) }).pipe(
+        Effect.mapError((error) => /Invalid extension command/.test(error.message)
+          ? new Error(`The connected OpenCode Browser extension is too old to read or change settings from here. Update browse (\`${installCommand()}\`) and reload the extension, or change them on its options page.`)
+          : error),
+      )
+      return settingsFromExtension(result)
+    })
   /** The settings the relay's environment fixes, for the extension's status page. */
   const settingOverrides = (): JsonObject => {
     const human = humanInputOverride()

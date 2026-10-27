@@ -10,6 +10,7 @@ import * as RelayClient from "./relay-client.ts"
 import * as RelayLifecycle from "./relay-lifecycle.ts"
 import type { TargetSelection } from "./relay-schema.ts"
 import { createUpdateWatcher, updateJson, type UpdateNotice } from "./update.ts"
+import { securityVariables, settingKeys, settingSpecs } from "./user-settings.ts"
 import { opencodeBrowserVersion } from "./version.ts"
 
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
@@ -360,6 +361,27 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       handle: (input) => {
         const value = typeof input === "object" && input !== null && "idleMinutes" in input ? input.idleMinutes : undefined
         return relay.tabsCleanup(typeof value === "number" && value >= 0 ? value : undefined)
+      },
+    },
+    {
+      name: "settings",
+      description: `Read or change the user's OpenCode Browser settings, the same ones as the extension's options page: where agent tabs open (window), how they're grouped (grouping), when untouched agent tabs close (idleMinutes), the agent cursor (cursor), human-like input (humanInput) and handoff notifications (handoffNotifications). Use it only when the user asks to change how browse behaves, never on your own initiative. Without \`set\` it returns each setting's stored value, the value in effect, and the relay environment variable that overrides it, if any. With \`set\` it validates every value strictly, applies the change at once (the options page updates live) and returns what changed: tell the user what you changed. A setting an environment variable fixes is not changed, and the result says so. Security switches (${securityVariables.join(", ")}) are environment-only and can never be read or changed here.`,
+      inputSchema: objectSchema({
+        set: {
+          type: "object",
+          description: "Settings to change; omit to only read them.",
+          properties: Object.fromEntries(settingKeys.map((key) => [key, { enum: [...settingSpecs[key].values], description: settingSpecs[key].label }])),
+          additionalProperties: false,
+        },
+      }),
+      readOnly: false,
+      destructive: false,
+      idempotent: true,
+      handle: (input) => {
+        const set = getObject(input)?.set
+        if (set === undefined) return relay.settingsGet
+        const changes = getObject(set)
+        return changes ? relay.settingsSet(changes) : Effect.fail(new Error("set must be an object, for example { \"grouping\": \"shared\" }"))
       },
     },
     {

@@ -112,6 +112,8 @@ const extensionCommandMethodValues = [
   "tabs.cleanup",
   "update.notice",
   "relay.settings",
+  "settings.get",
+  "settings.set",
 ] as const
 
 const extensionEventMethodValues = [

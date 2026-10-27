@@ -41,6 +41,7 @@ import { HandoffNotice } from "./handoff-notice"
 import { normalizePairingCode, pairingProof, randomNonce, sameSecret } from "./pairing"
 import { PageScripts } from "./page-scripts"
 import { TabCleanup } from "./tab-cleanup"
+import { UserSettings } from "./user-settings"
 
 /** Badge text the relay asked for, by tab. */
 export type AgentBadge = { text: string; title?: string }
@@ -537,6 +538,11 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         notify()
         return {}
       }
+      // The relay's settings tool: the status page's settings, read or written through storage like the page's own.
+      case "settings.get":
+        return UserSettings.read()
+      case "settings.set":
+        return UserSettings.write(isJsonObject(params?.values) ? params.values : undefined)
       case "update.notice": {
         const summary = typeof params?.summary === "string" ? params.summary.slice(0, 200) : undefined
         const command = typeof params?.command === "string" ? params.command.slice(0, 1000) : undefined

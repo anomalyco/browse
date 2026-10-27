@@ -518,6 +518,29 @@ export const TabsCleanupResponse = Schema.Struct({
 })
 export type TabsCleanupResponse = typeof TabsCleanupResponse.Type
 
+/** A user setting as the settings tool reports it (user-settings.ts). */
+const SettingValue = Schema.Union([Schema.String, Schema.Number])
+const SettingReport = Schema.Struct({
+  value: SettingValue,
+  effective: SettingValue,
+  allowed: Schema.Array(SettingValue),
+  description: Schema.String,
+  overriddenBy: Schema.optionalKey(Schema.String),
+})
+export const SettingsGetResponse = Schema.Struct({
+  settings: Schema.Record(Schema.String, SettingReport),
+  note: Schema.String,
+})
+export type SettingsGetResponse = typeof SettingsGetResponse.Type
+export const SettingsSetResponse = Schema.Struct({
+  changed: Schema.Array(Schema.Struct({ key: Schema.String, from: SettingValue, to: SettingValue })),
+  unchanged: Schema.Array(Schema.String),
+  overridden: Schema.Array(Schema.Struct({ key: Schema.String, requested: SettingValue, variable: Schema.String, effective: SettingValue })),
+  settings: Schema.Record(Schema.String, SettingReport),
+  message: Schema.String,
+})
+export type SettingsSetResponse = typeof SettingsSetResponse.Type
+
 export const RecordingCancelResponse = Schema.Struct({
   success: Schema.Boolean,
   error: Schema.optionalKey(Schema.String),

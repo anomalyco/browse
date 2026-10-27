@@ -481,6 +481,107 @@ describe("settings from the extension", () => {
   }, 30_000)
 })
 
+/** A fake extension holding settings the way the real one does (settings.get / settings.set over its storage). */
+function settingsExtension(code: string, relayPort = port) {
+  const stored: Record<string, unknown> = { window: "current", grouping: "session", idleMinutes: 10, cursor: "off", humanInput: "on", handoffNotifications: "recording" }
+  const extension = new FakeExtension(code, relayPort)
+    .on("settings.get", () => ({ settings: { ...stored } }))
+    .on("settings.set", (command) => {
+      Object.assign(stored, command.params?.values as Record<string, unknown>)
+      return { settings: { ...stored } }
+    })
+  return { extension, stored, sets: () => extension.commands.filter((command) => command.method === "settings.set").map((command) => command.params?.values) }
+}
+
+async function settingsRequest(relayBase: string, relayToken: string, set?: Record<string, unknown>) {
+  const response = await fetch(`${relayBase}/settings`, {
+    method: set ? "POST" : "GET",
+    headers: { authorization: `Bearer ${relayToken}`, "content-type": "application/json" },
+    ...(set ? { body: JSON.stringify({ set }) } : {}),
+  })
+  return { status: response.status, body: await response.json() as Record<string, any> }
+}
+
+describe("the settings tool's relay API", () => {
+  test("get and set round-trip through the extension, strictly validated", async () => {
+    const { extension, stored, sets } = settingsExtension(pairingCode(home))
+    expect(await extension.pair()).toBe(true)
+    const got = await settingsRequest(base, token)
+    expect(got.status).toBe(200)
+    expect(got.body.settings.grouping).toMatchObject({ value: "session", effective: "session", allowed: ["session", "shared", "none"] })
+    expect(got.body.settings.cursor.overriddenBy).toBeUndefined()
+    expect(got.body.note).toContain("OPENCODE_BROWSER_ALLOW_NODE")
+
+    const set = await settingsRequest(base, token, { grouping: "shared", cursor: "always", idleMinutes: "never", humanInput: "on" })
+    expect(set.status).toBe(200)
+    expect(sets()).toEqual([{ grouping: "shared", cursor: "always", idleMinutes: 0, humanInput: "on" }])
+    expect(stored).toMatchObject({ grouping: "shared", cursor: "always", idleMinutes: 0 })
+    expect(set.body.changed).toEqual([
+      { key: "grouping", from: "session", to: "shared" },
+      { key: "cursor", from: "off", to: "always" },
+      { key: "idleMinutes", from: 10, to: "never" },
+    ])
+    expect(set.body.unchanged).toEqual(["humanInput"])
+    expect(set.body.message).toContain("Tell the user what you changed")
+    expect((await settingsRequest(base, token)).body.settings.idleMinutes.value).toBe("never")
+
+    // Invalid values, unknown keys and security switches are refused before anything reaches the extension.
+    for (const [request, expected] of [
+      [{ grouping: "Shared" }, "grouping must be one of session, shared, none"],
+      [{ idleMinutes: 45 }, "idleMinutes must be one of 10, 30, 60, never"],
+      [{ cursor: true }, "cursor must be one of off, always"],
+      [{ colour: "blue" }, "Unknown setting \"colour\""],
+      [{ OPENCODE_BROWSER_ALLOW_NODE: "1" }, "security switches"],
+      [{ grouping: "none", allowAllCookies: true }, "security switches"],
+      [{}, "Nothing to change"],
+    ] as const) {
+      const refused = await settingsRequest(base, token, request)
+      expect(refused.status).toBe(400)
+      expect(String(refused.body.error)).toContain(expected)
+    }
+    expect(sets()).toHaveLength(1)
+    extension.close()
+    await Bun.sleep(200)
+  }, 20_000)
+
+  test("without an extension, or with one too old for settings, the answer says what to do", async () => {
+    const missing = await settingsRequest(base, token)
+    expect(missing.status).toBeGreaterThanOrEqual(400)
+    expect(String(missing.body.error)).toContain("extension isn't connected")
+    const older = new FakeExtension(pairingCode(home))
+      .on("settings.get", () => { throw new Error("Invalid extension command") })
+    expect(await older.pair()).toBe(true)
+    const tooOld = await settingsRequest(base, token, { grouping: "shared" })
+    expect(String(tooOld.body.error)).toContain("too old to read or change settings")
+    older.close()
+    await Bun.sleep(200)
+  }, 20_000)
+
+  test("a setting an environment variable fixes is reported, and not written", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "browse-relay-settings-env-"))
+    const started = await startRelay(root, { OPENCODE_BROWSER_GHOST_CURSOR: "0", OPENCODE_BROWSER_AGENT_WINDOW: "separate" })
+    try {
+      const { extension, sets } = settingsExtension(pairingCode(root), started.port)
+      expect(await extension.pair()).toBe(true)
+      const relayBase = `http://127.0.0.1:${started.port}`
+      const got = await settingsRequest(relayBase, started.token)
+      expect(got.body.settings.cursor).toMatchObject({ value: "off", effective: "off", overriddenBy: "OPENCODE_BROWSER_GHOST_CURSOR" })
+      expect(got.body.settings.window).toMatchObject({ value: "current", effective: "separate", overriddenBy: "OPENCODE_BROWSER_AGENT_WINDOW" })
+      expect(got.body.settings.humanInput.overriddenBy).toBeUndefined()
+      const set = await settingsRequest(relayBase, started.token, { cursor: "always", grouping: "none" })
+      expect(set.status).toBe(200)
+      expect(sets()).toEqual([{ grouping: "none" }])
+      expect(set.body.overridden).toEqual([{ key: "cursor", requested: "always", variable: "OPENCODE_BROWSER_GHOST_CURSOR", effective: "off" }])
+      expect(set.body.message).toContain("Not changed: cursor is fixed to off by OPENCODE_BROWSER_GHOST_CURSOR")
+      expect(set.body.message).toContain("relay restart")
+      extension.close()
+    } finally {
+      await stopRelay(started.child)
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  }, 30_000)
+})
+
 describe("dataUrlDocument", () => {
   test("shows HTML as is, text as preformatted text, images as an image", async () => {
     expect(await dataUrlDocument("data:text/html,<p>x</p>")).toBe("<p>x</p>")
