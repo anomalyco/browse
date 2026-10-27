@@ -301,7 +301,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       message?.method === "auth.challenge" &&
       relayNonce !== undefined &&
       /^[A-Za-z0-9_-]{22,128}$/.test(relayNonce) &&
-      sameSecret(await pairingProof(pending.code, "relay", relayNonce, pending.nonce), params?.proof)
+      sameSecret(await pairingProof(pending.code, "relay", pending.port, relayNonce, pending.nonce), params?.proof)
     if (socket !== current || current.readyState !== WebSocket.OPEN) return
     if (!ok || !pending || !relayNonce) {
       // An older relay, or a program posing as one on this port: it gets nothing.
@@ -309,7 +309,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       current.close(4006, "Relay failed pairing")
       return
     }
-    current.send(JSON.stringify({ method: "auth.response", params: { proof: await pairingProof(pending.code, "extension", pending.nonce, relayNonce) } }))
+    current.send(JSON.stringify({ method: "auth.response", params: { proof: await pairingProof(pending.code, "extension", pending.port, pending.nonce, relayNonce) } }))
     trusted.add(current)
     log.add("pairing.ok", { source: pairing })
     relayTabs.forEach((tabId) => current.send(JSON.stringify({ method: "debugger.attached", params: { tabId } })))
