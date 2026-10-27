@@ -137,14 +137,16 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
 
   /**
    * The pairing code: the one `install` wrote into this unpacked build, else the one typed on the status page. A store
-   * build has no file; a missing file is only looked for again after the worker restarts.
+   * build has no file. A missing file is looked for again on every connection attempt (install may write it while the
+   * worker runs), and a found one again on Reconnect or a pairing change (install may have written a new code).
    */
   const pairingCode = async () => {
-    bundledPairing ??= fetch(chrome.runtime.getURL(PAIRING_FILE))
+    const reading = (bundledPairing ??= fetch(chrome.runtime.getURL(PAIRING_FILE))
       .then((response) => (response.ok ? (response.json() as Promise<unknown>) : undefined))
       .then((value) => normalizePairingCode(isJsonObject(value) ? value.code : undefined))
-      .catch(() => undefined)
-    const bundled = await bundledPairing
+      .catch(() => undefined))
+    const bundled = await reading
+    if (bundled === undefined && bundledPairing === reading) bundledPairing = undefined
     const stored = bundled === undefined ? normalizePairingCode((await chrome.storage.local.get(PAIRING_KEY))[PAIRING_KEY]) : undefined
     const source: PairingSource = bundled !== undefined ? "bundled" : stored !== undefined ? "stored" : "none"
     if (source !== pairing) {
@@ -465,9 +467,10 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         // A handoff opens the agent's group so the user can find the tab; it folds up again afterwards.
         if (page.state === "waiting") void AgentGroups.expandTab(tabId)
         else if (wasWaiting) void AgentGroups.settleTab(tabId)
-        // A recorded tab gets no card; the user hears about the handoff from a notification instead.
-        void HandoffNotice.sync(tabId, page, sessionName)
-        await PageScripts.send(tabId, { action: "page-status.set", status: HandoffNotice.forPage(page) })
+        // A recorded tab gets no card; the user hears about the handoff from a notification instead (or sees the
+        // card after all when no notification can be shown).
+        await HandoffNotice.sync(tabId, page, sessionName)
+        await PageScripts.send(tabId, { action: "page-status.set", status: HandoffNotice.forPage(tabId, page) })
         return {}
       }
       case "pageStatus.clear": {
@@ -783,6 +786,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== "local" || !(PAIRING_KEY in changes)) return
     log.add("pairing.changed")
+    bundledPairing = undefined
     attempts = 0
     clearTimeout(retry)
     retry = undefined
@@ -885,7 +889,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
           const page = pageStatuses.get(tabId)
           if (page)
             void chrome.tabs
-              .sendMessage(tabId, { action: "page-status.set", status: HandoffNotice.forPage(page) })
+              .sendMessage(tabId, { action: "page-status.set", status: HandoffNotice.forPage(tabId, page) })
               .catch(() => undefined)
           send({ method: "pageStatus.requested", params: { tabId } })
         }
@@ -937,6 +941,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     /** Reconnects now, for example after the user fixed what blocked the connection. */
     reconnect() {
       log.add("reconnect.requested")
+      bundledPairing = undefined
       attempts = 0
       clearTimeout(retry)
       retry = undefined

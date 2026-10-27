@@ -5,12 +5,13 @@
   "private": true,
   "type": "module",
   "license": "MIT",
+  "packageManager": "bun@1.4.4",
   "scripts": {
     "setup": "bun install && cd cli && bun install && bun run build && node dist/cli.mjs install",
     "build": "vite build && vite build -c vite.content.config.ts",
     "dev": "vite build -c vite.content.config.ts --mode development && (vite build -c vite.content.config.ts --watch --mode development & vite build --watch --mode development)",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "cd cli && bun test",
+    "test": "bun test ./test && cd cli && bun test",
     "package": "bun scripts/package.ts"
   },
   "devDependencies": {

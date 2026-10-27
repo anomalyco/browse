@@ -15,7 +15,7 @@ import path from "node:path"
 import { createInterface } from "node:readline/promises"
 import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse } from "jsonc-parser"
-import { dataRoot } from "./paths.ts"
+import { cliCommand, dataRoot, installCommand } from "./paths.ts"
 import { formatPairingCode, pairingCode, relayAuthorization, writeExtensionPairing } from "./relay-secrets.ts"
 import { opencodeBrowserVersion } from "./version.ts"
 
@@ -41,7 +41,10 @@ const files = {
   settings: path.join(root, "settings.json"),
   extension: path.join(root, "extension"),
 }
-/** Files the native messaging host of earlier versions left behind. */
+/**
+ * Files the native messaging host of earlier versions left behind. Not session.json: it has only ever been at
+ * <data root>/session.json, which is the current CLI's current-session store (session-store.ts), not a leftover.
+ */
 const legacyFiles = [
   path.join(root, "host"),
   path.join(root, "host.bat"),
@@ -172,7 +175,7 @@ function configFile() {
   return candidates.find((file) => existsSync(file) && statSync(file).isFile()) ?? candidates[0]!
 }
 
-type Servers = Record<string, { type?: unknown; command?: unknown; environment?: unknown }>
+type Servers = Record<string, { type?: unknown; command?: unknown; environment?: unknown; [key: string]: unknown }>
 
 /** Changes whenever the installed runtime does. */
 function fingerprint(entry: string) {
@@ -194,15 +197,27 @@ function mcpServers() {
   return ((parse(readFileOr(configFile(), "{}")) ?? {}) as { mcp?: { servers?: Servers } }).mcp?.servers ?? {}
 }
 
-/** Writes (or rewrites) the browse MCP server so it runs the installed runtime, replacing the old entry. */
+/**
+ * The browse MCP server entry: the existing one with its command and runtime fingerprint updated, so environment
+ * variables and other settings the user added (`enabled`, `timeout`) stay.
+ */
+function mergedMcpServer(existing: Servers[string] | undefined, command: string[], runtime: string) {
+  const environment =
+    typeof existing?.environment === "object" && existing.environment !== null && !Array.isArray(existing.environment)
+      ? existing.environment
+      : {}
+  return { ...existing, type: "local", command, environment: { ...environment, OPENCODE_BROWSER_RUNTIME: runtime } }
+}
+
+/** Writes (or updates) the browse MCP server so it runs the installed runtime, keeping the user's settings. */
 function configureMcp(entry: string) {
   const file = configFile()
   // A running MCP server keeps its old code after an update, and its relay calls then fail on the build check.
   // Stamping the runtime's fingerprint into the entry changes the config whenever the runtime changes, which
   // makes opencode restart the server with the new code.
-  const server = { type: "local", command: [process.execPath, entry, "mcp"], environment: { OPENCODE_BROWSER_RUNTIME: fingerprint(entry) } }
   const renamed = removeMcp(LEGACY_MCP_NAME)
   const existing = mcpServers()[MCP_NAME]
+  const server = mergedMcpServer(existing, [process.execPath, entry, "mcp"], fingerprint(entry))
   if (existing && JSON.stringify(existing) === JSON.stringify(server)) return `"${MCP_NAME}" is up to date`
   const text = readFileOr(file, "{}")
   const edits = modify(text, ["mcp", "servers", MCP_NAME], server, { formattingOptions: { tabSize: 2, insertSpaces: true } })
@@ -316,7 +331,7 @@ async function install(args: string[]) {
   }
   // The unpacked extension reads the pairing code from its own folder, so it pairs with the relay without a step.
   pairUnpacked()
-  log("✓ Paired the unpacked extension with the relay (for the Chrome Web Store build, run `opencode-browser pair`)")
+  log(`✓ Paired the unpacked extension with the relay (for the Chrome Web Store build, run \`${cliCommand("pair")}\`)`)
   if (existsSync(bundledExtension)) {
     // A browser already running an older unpacked build keeps its old code until it reloads; ask it to.
     const reload = connected ? await reloadOutdatedExtension(connected) : "current"
@@ -331,7 +346,7 @@ async function install(args: string[]) {
 /** Printed before the relay's status by `opencode-browser status`. */
 export function printSetupStatus() {
   const settings = readJson<Settings>(files.settings)
-  log(settings?.version ? `Setup:     installed` : "Setup:     not installed. Run `npx opencode-browser-cli install`.")
+  log(settings?.version ? `Setup:     installed` : `Setup:     not installed. Run \`${installCommand()}\`.`)
   log(`Version:   ${settings?.version ?? "not installed"}${settings?.entry ? ` (${settings.entry})` : ""}`)
   log(`opencode:  ${settings?.opencode ?? findOpencode([]) ?? "not found"}`)
   log(mcpServers()[MCP_NAME] ? `MCP:       "${MCP_NAME}" configured` : "MCP:       not configured")
@@ -484,7 +499,7 @@ function locateExtension(options: { allowOpen: boolean; connected: boolean }) {
   log(`Install OpenCode Browser from the Chrome Web Store${opened ? ` (opened in ${target.name})` : ""}:`)
   log(`  ${STORE_URL}`)
   if (blocked.length) log(`  Already installed in ${blocked.map((detection) => detection.browser.name).join(", ")}? Then you're set.`)
-  log(`  Or load the unpacked build: npx ${PACKAGE} extension`)
+  log(`  Or load the unpacked build: ${cliCommand("extension")}`)
 }
 
 /** Every browser with user data here, and the profiles that have OpenCode Browser. */

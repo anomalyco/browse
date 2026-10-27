@@ -3,6 +3,7 @@ import * as RelayClient from "./relay-client.ts"
 import { relayBuildProblem } from "./relay-lifecycle.ts"
 import type { ExtensionStatus, RelayVersion, SessionSummary, TargetSummary } from "./relay-schema.ts"
 import { extensionProtocolVersion } from "./protocol.ts"
+import { installCommand } from "./paths.ts"
 import * as SessionStore from "./session-store.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "./version.ts"
 
@@ -528,7 +529,7 @@ function buildDoctorRecommendations(options: {
   const extensionRecommendations = options.relayResult.ok && options.extensionResult.ok && !options.extensionResult.value.connected
     ? options.extensionResult.value.protocolCompatible === false
       ? ["Update the OpenCode Browser extension or npm package so their extension protocols are compatible."]
-      : ["Run `npx opencode-browser-cli install`, and install OpenCode Browser from the Chrome Web Store (or load the unpacked extension it copies)."]
+      : [`Run \`${installCommand()}\`, and install OpenCode Browser from the Chrome Web Store (or load the unpacked extension it copies).`]
     : []
   const artifactRecommendations = options.artifacts.some((artifact) => {
     return !artifact.exists

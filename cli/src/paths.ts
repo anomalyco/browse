@@ -3,8 +3,10 @@
 //   macOS/Linux: $XDG_DATA_HOME/opencode-browser, else ~/.local/share/opencode-browser
 //   Windows:     %LOCALAPPDATA%\opencode-browser
 // OPENCODE_BROWSER_HOME overrides it (isolated test relays).
+import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { fileURLToPath } from "node:url"
 
 export function dataRoot(home = os.homedir()): string {
   const override = process.env.OPENCODE_BROWSER_HOME
@@ -13,4 +15,29 @@ export function dataRoot(home = os.homedir()): string {
     return path.join(process.env.LOCALAPPDATA ?? path.join(home, "AppData", "Local"), "opencode-browser")
   const xdg = home === os.homedir() ? process.env.XDG_DATA_HOME : undefined
   return path.join(xdg ?? path.join(home, ".local", "share"), "opencode-browser")
+}
+
+/** This package's root: cli/ in a checkout (src/paths.ts, or the dist/cli.mjs bundle), else the installed package. */
+const packageRoot = () => path.dirname(path.dirname(fileURLToPath(import.meta.url)))
+
+/** Running from a source checkout (the sources are next to the bundle), not the published npm package. */
+export function fromCheckout(): boolean {
+  return fs.existsSync(path.join(packageRoot(), "src", "main.ts"))
+}
+
+const quoted = (value: string) => (/^[\w@%+=:,./-]+$/.test(value) ? value : JSON.stringify(value))
+
+/**
+ * How to tell the user to run `opencode-browser <args>`: through npx from the published package, and with this
+ * checkout's bundle from a checkout (where nothing is on PATH and the package may not be published).
+ */
+export function cliCommand(args: string): string {
+  return fromCheckout()
+    ? `node ${quoted(path.join(packageRoot(), "dist", "cli.mjs"))} ${args}`
+    : `npx opencode-browser-cli ${args}`
+}
+
+/** How to tell the user to install (or update) OpenCode Browser. */
+export function installCommand(): string {
+  return fromCheckout() ? `cd ${quoted(path.dirname(packageRoot()))} && bun run setup` : "npx opencode-browser-cli install"
 }

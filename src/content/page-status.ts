@@ -7,7 +7,8 @@
 // Pages must not be able to tell that agents use the tab, or to fake the user's answer: the script lives in
 // the extension's isolated world, adds nothing to the page's DOM until a handoff waits for the user, and then
 // shows the card in a closed shadow root on a host element without an id, in the top layer, restoring it when
-// the page removes, hides or restyles it. Only a real click (event.isTrusted) on Continue completes the handoff.
+// the page removes, hides or restyles it, and back on top when the page opens a dialog, popover or fullscreen
+// element after it. Only a real click (event.isTrusted) on Continue completes the handoff.
 // The toolbar badge shows the other states (ON, RUN).
 import { pageStatusFromJson, type PageStatus } from "../agent-relay/protocol"
 
@@ -74,14 +75,65 @@ function render() {
       if (!current) return
       if (current.state === "running")
         for (const record of records) for (const node of record.addedNodes) evictForeignFrames(node)
-      if (waiting() && records.some((record) => record.target === host || !host?.isConnected)) raise()
+      if (!waiting()) return
+      // A dialog the page opens (showModal sets `open`) goes into the top layer above the card.
+      if (records.some((record) => record.attributeName === "open" && record.target !== host && opened(record.target)))
+        retop()
+      else if (records.some((record) => record.target === host || !host?.isConnected)) raise()
     })
-    observer.observe(document.documentElement, { childList: true, subtree: true })
+    observer.observe(document.documentElement, { childList: true, subtree: true, attributeFilter: ["open"] })
     if (host) observer.observe(host, { attributes: true })
   } else {
     observer?.disconnect()
     observer = undefined
   }
+  watchTopLayer(showing)
+}
+
+/** Whether `node` is an open dialog, which may be modal and so above the card. */
+function opened(node: Node) {
+  return node instanceof HTMLDialogElement && node.open
+}
+
+let watching = false
+/**
+ * While the card shows, puts it back on top when the page puts something in the top layer after it: a popover or
+ * modal dialog (toggle events, which don't bubble but reach a capturing listener; dialogs fire them in recent
+ * Chrome, the observer above catches them in older ones) or a fullscreen element. Event-driven, so it costs nothing
+ * while the page does neither. Over a modal dialog or a fullscreen element the card shows but Chrome makes it inert
+ * like the rest of the page, so Continue takes clicks again once the dialog closes; the toolbar button works anyway.
+ */
+function watchTopLayer(on: boolean) {
+  if (on === watching) return
+  watching = on
+  const method = on ? "addEventListener" : "removeEventListener"
+  document[method]("toggle", onTopLayer, true)
+  document[method]("fullscreenchange", onTopLayer, true)
+}
+
+function onTopLayer(event: Event) {
+  if (!waiting() || event.target === host) return
+  if (event.type === "toggle" && (event as ToggleEvent).newState !== "open") return
+  if (event.type === "fullscreenchange" && !document.fullscreenElement) return
+  retop()
+}
+
+/** Re-tops at most this often per second, so a page that keeps re-opening its own element can't loop with the card. */
+const RETOPS_PER_SECOND = 10
+let retops = { second: 0, count: 0 }
+
+/** Moves the card to the top of the top layer: closing and opening a popover puts it last. */
+function retop() {
+  if (!host?.isConnected) return raise()
+  const second = Math.floor(performance.now() / 1000)
+  if (retops.second !== second) retops = { second, count: 0 }
+  if (++retops.count > RETOPS_PER_SECOND) return
+  try {
+    if (host.matches(":popover-open")) host.hidePopover()
+  } catch {
+    // Not open; raise() opens it.
+  }
+  raise()
 }
 
 /** The page's origin as the user should read it: the site asking them to act. */
@@ -190,6 +242,7 @@ function clear() {
   completing = undefined
   observer?.disconnect()
   observer = undefined
+  watchTopLayer(false)
   removeHost()
 }
 
