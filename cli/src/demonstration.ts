@@ -43,22 +43,39 @@ type PageRecorderState = {
   active?: { readonly id: string; readonly startedUrl: string; readonly steps: DemonstrationStep[] }
 }
 
-const demonstrationBindingName = "__opencodeBrowserDemonstration__"
 const pageRecorders = new WeakMap<Page, PageRecorderState>()
 let nextRecorder = 0
+/** Longest a step request waits in the page; the relay fails debugger commands that take a minute. */
+const stepWaitMs = 15_000
 
+// The listeners run in Patchright's isolated (utility) world, so the page sees no globals, bindings or patched
+// functions. Each frame's steps come back through a pending evaluate that resolves as soon as a step is
+// recorded, before a navigation can discard them.
 export async function startDemonstrationRecorder(page: Page): Promise<{ readonly stop: () => Promise<DemonstrationResult> }> {
-  const state = await recorderState(page)
+  const state = recorderState(page)
   if (state.active) throw new Error("A human demonstration is already being recorded on this page")
   const id = `demo-${++nextRecorder}`
   const active = { id, startedUrl: page.url(), steps: [] as DemonstrationStep[] }
   state.active = active
+  let stopped = false
+  const pumps = new Map<Frame, Promise<void>>()
+  const pump = async (frame: Frame) => {
+    while (!stopped && !frame.isDetached()) {
+      const steps = await frame.evaluate(takeDemonstrationSteps, { recorderId: id, waitMs: stepWaitMs }, undefined, true).catch(() => null)
+      if (steps === null) {
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        continue
+      }
+      for (const step of steps) if (isDemonstrationStep(step)) appendStep(active.steps, step)
+    }
+  }
   const pendingInstalls = new Set<Promise<void>>()
   const install = (frame: Frame): Promise<void> => {
-    const pending = frame.evaluate(installDemonstrationListeners, { recorderId: id })
+    const pending = frame.evaluate(installDemonstrationListeners, { recorderId: id }, undefined, true)
       .then(() => {}, () => {})
       .finally(() => pendingInstalls.delete(pending))
     pendingInstalls.add(pending)
+    if (!pumps.has(frame)) pumps.set(frame, pump(frame).finally(() => pumps.delete(frame)))
     return pending
   }
   const onFrameNavigated = (frame: Frame) => {
@@ -67,14 +84,15 @@ export async function startDemonstrationRecorder(page: Page): Promise<{ readonly
   }
   page.on("framenavigated", onFrameNavigated)
   await Promise.all(page.frames().map(install))
-  let stopped = false
   return {
     stop: async () => {
       if (stopped) throw new Error("Human demonstration recording has already stopped")
       stopped = true
       page.off("framenavigated", onFrameNavigated)
       await Promise.all([...pendingInstalls])
-      await Promise.all(page.frames().map((frame) => frame.evaluate(removeDemonstrationListeners, { recorderId: id }).catch(() => {})))
+      // Removing the listeners releases each frame's pending request with the steps it still holds.
+      await Promise.all(page.frames().map((frame) => frame.evaluate(removeDemonstrationListeners, { recorderId: id }, undefined, true).catch(() => {})))
+      await Promise.race([Promise.all([...pumps.values()]), new Promise((resolve) => setTimeout(resolve, 2_000))])
       if (state.active?.id === id) delete state.active
       const steps = [...active.steps]
       const endedUrl = page.isClosed() ? active.startedUrl : page.url()
@@ -117,16 +135,11 @@ export function formatDemonstrationCode(options: {
   return lines.join("\n")
 }
 
-async function recorderState(page: Page): Promise<PageRecorderState> {
+function recorderState(page: Page): PageRecorderState {
   const existing = pageRecorders.get(page)
   if (existing) return existing
   const state: PageRecorderState = {}
   pageRecorders.set(page, state)
-  await page.exposeBinding(demonstrationBindingName, (_source, value: unknown) => {
-    const active = state.active
-    if (!active || !isDemonstrationStep(value)) return
-    appendStep(active.steps, value)
-  })
   return state
 }
 
@@ -142,16 +155,23 @@ function appendStep(steps: DemonstrationStep[], next: DemonstrationStep): void {
 
 const isDemonstrationStep = Schema.is(DemonstrationStep)
 
-function installDemonstrationListeners(options: { readonly recorderId: string }): void {
-  type BrowserState = { readonly id: string; readonly cleanup: () => void }
-  const browserWindow = window as Window & {
-    __opencodeBrowserDemonstration__?: (step: DemonstrationStep) => unknown
-    __opencodeBrowserDemonstrationListeners__?: BrowserState
+type DemonstrationWorld = {
+  __opencodeBrowserDemonstration?: {
+    readonly id: string
+    readonly steps: DemonstrationStep[]
+    wake?: (() => void) | undefined
+    readonly cleanup: () => void
   }
-  browserWindow.__opencodeBrowserDemonstrationListeners__?.cleanup()
+}
+
+function installDemonstrationListeners(options: { readonly recorderId: string }): void {
+  const world = globalThis as DemonstrationWorld
+  if (world.__opencodeBrowserDemonstration?.id === options.recorderId) return
+  world.__opencodeBrowserDemonstration?.cleanup()
+  const steps: DemonstrationStep[] = []
   const send = (step: DemonstrationStep) => {
-    const binding = browserWindow.__opencodeBrowserDemonstration__
-    if (binding instanceof Function) void Promise.resolve(binding(step)).catch(() => {})
+    steps.push(step)
+    world.__opencodeBrowserDemonstration?.wake?.()
   }
   const cssPath = (element: Element): string => {
     const id = element.getAttribute("id")
@@ -229,18 +249,34 @@ function installDemonstrationListeners(options: { readonly recorderId: string })
     document.removeEventListener("click", onClick, true)
     document.removeEventListener("input", onInput, true)
     document.removeEventListener("change", onChange, true)
-    if (browserWindow.__opencodeBrowserDemonstrationListeners__?.id === options.recorderId) {
-      delete browserWindow.__opencodeBrowserDemonstrationListeners__
+    const current = world.__opencodeBrowserDemonstration
+    if (current?.id === options.recorderId) {
+      delete world.__opencodeBrowserDemonstration
+      current.wake?.()
     }
   }
-  browserWindow.__opencodeBrowserDemonstrationListeners__ = { id: options.recorderId, cleanup }
+  world.__opencodeBrowserDemonstration = { id: options.recorderId, steps, cleanup }
+}
+
+/** Resolves with the frame's recorded steps once there are any (or after `waitMs`); null when nothing listens. */
+function takeDemonstrationSteps(options: { readonly recorderId: string; readonly waitMs: number }): Promise<DemonstrationStep[] | null> {
+  const state = (globalThis as DemonstrationWorld).__opencodeBrowserDemonstration
+  if (!state || state.id !== options.recorderId) return Promise.resolve(null)
+  if (state.steps.length > 0) return Promise.resolve(state.steps.splice(0))
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      state.wake = undefined
+      resolve([])
+    }, options.waitMs)
+    state.wake = () => {
+      clearTimeout(timer)
+      state.wake = undefined
+      resolve(state.steps.splice(0))
+    }
+  })
 }
 
 function removeDemonstrationListeners(options: { readonly recorderId: string }): void {
-  const browserWindow = window as Window & {
-    __opencodeBrowserDemonstrationListeners__?: { readonly id: string; readonly cleanup: () => void }
-  }
-  if (browserWindow.__opencodeBrowserDemonstrationListeners__?.id === options.recorderId) {
-    browserWindow.__opencodeBrowserDemonstrationListeners__.cleanup()
-  }
+  const state = (globalThis as DemonstrationWorld).__opencodeBrowserDemonstration
+  if (state?.id === options.recorderId) state.cleanup()
 }
