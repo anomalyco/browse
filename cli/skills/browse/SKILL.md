@@ -692,6 +692,16 @@ not a repair.
 Completion: stop the recorder, inspect the resulting media rather than only its
 existence, and report the viewport, state, and interaction path actually tested.
 
+## Updating browse
+
+When a tool result or `status` says browse has an update, tell the user once,
+with the command it names. If the user asks you to update browse, run that
+command yourself (`node <browse>/cli/dist/cli.mjs update`): it fast-forwards the
+git clone and reruns setup, and refuses with the fix when the clone has local
+changes or has diverged. Pass its refusal on rather than resolving git state
+yourself. The update takes effect after the user restarts opencode, so finish
+browser work first and tell them to restart.
+
 ## Troubleshooting
 
 1. Run `opencode-browser doctor`; it checks package metadata, CLI/relay build

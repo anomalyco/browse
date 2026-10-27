@@ -37,7 +37,11 @@ follow its README."* The agent clones it, runs `setup` and tells you which folde
 Requirements: [Bun](https://bun.sh), Node.js 22.19+, a Chromium browser, and [opencode](https://opencode.ai) or another
 MCP client.
 
-**Updating:** `git pull && bun run setup`. It's safe to re-run: it updates the tools and reloads the extension for you.
+**Updating:** run `node cli/dist/cli.mjs update` in your `browse` folder (or ask your agent to update browse), then
+restart opencode. It pulls the new commits (fast-forward only, and never over local changes), rebuilds, and reloads the
+extension for you. The manual equivalent is `git pull && bun run setup`. When there's an update, `status`, `doctor`, the
+extension's status page and the agent (once per session) say so; browse checks the clone's remote at most every six
+hours. Set `OPENCODE_BROWSER_UPDATE_CHECK=0` to turn the check off.
 
 There's nothing to sign in to. `setup` writes a pairing code into `dist/`, and the extension only obeys a relay that
 proves it knows that code (see [Security](#security)). A Chrome Web Store build has no pairing file: run
