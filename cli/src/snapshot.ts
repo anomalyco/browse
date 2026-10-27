@@ -1,5 +1,7 @@
+import fs from "node:fs/promises"
 import path from "node:path"
 import { Effect, Predicate } from "effect"
+import { PNG } from "pngjs"
 import type { ElementHandle, Frame, Locator, Page } from "patchright-core"
 import { ariaSnapshotWithoutTextControlValues } from "./aria-snapshot.ts"
 import { runPlaywrightOperation } from "./execute.ts"
@@ -84,6 +86,11 @@ export type ScreenshotWithLabelsOptions = {
   readonly page?: Page
   readonly path?: string
   readonly registry?: SnapshotRefRegistry
+  /**
+   * Draw the labels onto the screenshot image instead of into the page, so a recording of the tab never shows them.
+   * The relay sets it while the tab is recorded.
+   */
+  readonly offPage?: boolean
 }
 
 export type ScreenshotWithLabelsResult = {
@@ -1387,7 +1394,8 @@ export async function screenshotWithLabels(options: ScreenshotWithLabelsOptions 
   }
 
   const page = options.page
-  const labels = await showScreenshotLabels(page)
+  const offPage = options.offPage === true
+  const { labels, viewportWidth } = await showScreenshotLabels(page, !offPage)
   if (options.registry) {
     const registry = options.registry
     registry.removeNavigationListener?.()
@@ -1409,7 +1417,10 @@ export async function screenshotWithLabels(options: ScreenshotWithLabelsOptions 
     registry.removeNavigationListener = removeNavigationListener
   }
   try {
-    const screenshot = await page.screenshot(options.path ? { path: options.path } : {})
+    const screenshot = offPage
+      ? drawScreenshotLabels(await page.screenshot(), labels, viewportWidth)
+      : await page.screenshot(options.path ? { path: options.path } : {})
+    if (offPage && options.path) await fs.writeFile(options.path, screenshot)
     return {
       ...(options.path ? { path: options.path } : { image: screenshot }),
       size: screenshot.byteLength,
@@ -1417,7 +1428,7 @@ export async function screenshotWithLabels(options: ScreenshotWithLabelsOptions 
       labels,
     }
   } finally {
-    await hideScreenshotLabels(page)
+    if (!offPage) await hideScreenshotLabels(page)
   }
 }
 
@@ -1425,8 +1436,8 @@ export async function screenshotWithLabels(options: ScreenshotWithLabelsOptions 
 // id: the page can't see the script's state, and the host exists only until the screenshot is taken.
 type ScreenshotLabelsWindow = Window & { __opencodeBrowserScreenshotLabels?: { readonly host: HTMLElement; readonly timer: number } }
 
-async function showScreenshotLabels(page: Page): Promise<readonly ScreenshotLabel[]> {
-  return await page.evaluate(() => {
+async function showScreenshotLabels(page: Page, draw: boolean): Promise<{ readonly labels: readonly ScreenshotLabel[]; readonly viewportWidth: number }> {
+  return await page.evaluate(({ draw }) => {
     type BrowserLabel = {
       readonly ref: string
       readonly selector: string
@@ -1667,6 +1678,7 @@ async function showScreenshotLabels(page: Page): Promise<readonly ScreenshotLabe
       }
     })
 
+    if (!draw) return { labels, viewportWidth: window.innerWidth }
     const host = document.createElement("div")
     const container = host.attachShadow({ mode: "closed" })
 
@@ -1714,8 +1726,62 @@ async function showScreenshotLabels(page: Page): Promise<readonly ScreenshotLabe
       delete opencodeBrowserWindow.__opencodeBrowserScreenshotLabels
     }, 30_000)
     opencodeBrowserWindow.__opencodeBrowserScreenshotLabels = { host, timer }
-    return labels
-  }, undefined, undefined, true)
+    return { labels, viewportWidth: window.innerWidth }
+  }, { draw }, undefined, true)
+}
+
+// 5x7 glyphs for label refs (e1, e2, ...), one row per string, "#" lit.
+const labelGlyphs: Record<string, readonly string[]> = {
+  e: ["     ", "     ", " ### ", "#   #", "#####", "#    ", " ####"],
+  "0": [" ### ", "#   #", "#  ##", "# # #", "##  #", "#   #", " ### "],
+  "1": ["  #  ", " ##  ", "  #  ", "  #  ", "  #  ", "  #  ", " ### "],
+  "2": [" ### ", "#   #", "    #", "   # ", "  #  ", " #   ", "#####"],
+  "3": ["#####", "   # ", "  #  ", "   # ", "    #", "#   #", " ### "],
+  "4": ["   # ", "  ## ", " # # ", "#  # ", "#####", "   # ", "   # "],
+  "5": ["#####", "#    ", "#### ", "    #", "    #", "#   #", " ### "],
+  "6": ["  ## ", " #   ", "#    ", "#### ", "#   #", "#   #", " ### "],
+  "7": ["#####", "    #", "   # ", "  #  ", " #   ", " #   ", " #   "],
+  "8": [" ### ", "#   #", "#   #", " ### ", "#   #", "#   #", " ### "],
+  "9": [" ### ", "#   #", "#   #", " ####", "    #", "   # ", " ##  "],
+}
+
+/** Draws the label markers onto a PNG screenshot, where showScreenshotLabels would have put them in the page. */
+function drawScreenshotLabels(image: Buffer, labels: readonly ScreenshotLabel[], viewportWidth: number): Buffer {
+  const png = PNG.sync.read(image)
+  const scale = viewportWidth > 0 ? png.width / viewportWidth : 1
+  const fill = (x0: number, y0: number, width: number, height: number, [r, g, b]: readonly [number, number, number]) => {
+    for (let y = Math.max(0, Math.round(y0)); y < Math.min(png.height, Math.round(y0 + height)); y++) {
+      for (let x = Math.max(0, Math.round(x0)); x < Math.min(png.width, Math.round(x0 + width)); x++) {
+        const offset = (y * png.width + x) * 4
+        png.data[offset] = r
+        png.data[offset + 1] = g
+        png.data[offset + 2] = b
+        png.data[offset + 3] = 255
+      }
+    }
+  }
+  const dot = Math.max(1, Math.round(1.6 * scale))
+  for (const label of labels) {
+    const glyphs = Array.from(label.ref, (char) => labelGlyphs[char]).filter((glyph) => glyph !== undefined)
+    const textWidth = glyphs.length * 6 * dot - dot
+    const height = 18 * scale
+    const width = Math.max(18 * scale, textWidth + 8 * scale)
+    const x = Math.max(0, label.rect.x) * scale
+    const y = Math.max(0, label.rect.y - 18) * scale
+    fill(x, y, width, height, [0x7c, 0x3a, 0xed])
+    fill(x + scale, y + scale, width - 2 * scale, height - 2 * scale, [0xa7, 0x8b, 0xfa])
+    let penX = x + (width - textWidth) / 2
+    const penY = y + (height - 7 * dot) / 2
+    for (const glyph of glyphs) {
+      glyph.forEach((row, rowIndex) => {
+        for (let column = 0; column < row.length; column++) {
+          if (row[column] === "#") fill(penX + column * dot, penY + rowIndex * dot, dot, dot, [0x11, 0x18, 0x27])
+        }
+      })
+      penX += 6 * dot
+    }
+  }
+  return PNG.sync.write(png)
 }
 
 async function hideScreenshotLabels(page: Page): Promise<void> {

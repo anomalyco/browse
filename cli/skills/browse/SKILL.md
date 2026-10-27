@@ -569,7 +569,7 @@ in source or output.
 Record an attached or session-owned tab with:
 
 ```bash
-opencode-browser recording start ./tmp/demo.mp4 --session github --mode cdp
+opencode-browser recording start ./tmp/demo.mp4 --session github --mode cdp   # add --cursor for a demo video
 opencode-browser recording status --session github
 opencode-browser recording stop --session github
 ```
@@ -587,16 +587,24 @@ values fail instead of silently clamping. The start result reports the chosen ra
 
 `--mode auto` uses tab capture for user-owned tabs and CDP for relay-owned tabs.
 Tab capture can include audio; CDP requires `ffmpeg` and has no audio. Use the
-command's `--help` for format and cursor options.
+command's `--help` for format options.
+
+Recordings are clean by default: nothing from OpenCode Browser is drawn in the
+recorded page. The ghost cursor stays off, `screenshotWithLabels` draws its
+labels onto the returned image instead of the page, and a handoff on a tab being
+recorded shows no in-page card: the user gets a system notification and the
+toolbar badge says WAIT (the card appears if the recording stops first).
 
 The on-page Ghost Cursor (`distance-glide` motion + `tactile-bloom` click
 shockwave) is off by default, because pages can detect an element added to their
-DOM. It follows Playwright mouse actions automatically while a recording or the
-flight recorder runs on the tab, after `showGhostCursor()` (until
-`hideGhostCursor()`), or on every tab when the relay runs with
-`OPENCODE_BROWSER_GHOST_CURSOR=1`. When recording a user-facing proof or PR
-walkthrough video, opt into the `ghostCursor` helpers inside `execute` to focus
-attention on key steps and verified postconditions:
+DOM. Turn it on for demo videos with `--cursor` (`cursor: true` on the
+`recording_start` and `flight_recorder_start` tools); it then follows Playwright
+mouse actions while that recording runs. `showGhostCursor()` shows it on a tab
+until `hideGhostCursor()`, and `OPENCODE_BROWSER_GHOST_CURSOR=1` on the relay
+shows it on every tab. When recording a user-facing proof or PR walkthrough
+video, opt into the `ghostCursor` helpers inside `execute` to focus attention on
+key steps and verified postconditions (captions, zoom and spotlights are drawn
+only when you call them):
 
 ```ts
 await showGhostCursor()

@@ -227,12 +227,22 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return extensionRpc.connected
     },
     isTabUnavailable: (tabId) => flightRecorder.isActiveTab(tabId),
+    onTabRecordingChanged: (tabId) => recordingChanged(tabId),
   })
   const flightRecorder = new FlightRecorderRelay({
     sendDebuggerCommand: (command) => Effect.runPromise(sendDebuggerCommand(command)),
     isExtensionConnected: () => extensionRpc.connected,
     isTabRecording: (tabId) => recordingRelay.isRecordingTab(tabId),
+    onTabRecordingChanged: (tabId) => recordingChanged(tabId),
   })
+  const isTabRecorded = (tabId: number) => recordingRelay.isRecordingTab(tabId) || flightRecorder.isActiveTab(tabId)
+  /** A waiting handoff's card leaves the page while it is recorded (the extension notifies instead), and returns after. */
+  const recordingChanged = async (tabId: number): Promise<void> => {
+    const pending = handoffs.pendingForTab(tabId)
+    const target = registry.tabTargets.get(tabId)
+    if (!pending || !target) return
+    await Effect.runPromise(Effect.ignore(sendPageStatusEffect(target, "waiting", { sessionId: pending.sessionId, message: pending.message, handoffId: pending.id })))
+  }
   const handoffs = new HandoffRegistry()
   const activeHandoffTabs = new Map<string, Set<number>>()
   const clearLiveExtensionState = (reason: string) => {
@@ -379,6 +389,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         authToken,
         sessionId: id,
         onDefaultTargetChange,
+        isRecordingTarget: (targetId) => {
+          const target = registry.targetsByTargetId.get(targetId)
+          return target !== undefined && isTabRecorded(target.tabId)
+        },
         requestHandoff: ({ message, timeoutMs, target, start, cancelStart }) => requestHandoff({
           sessionId: id,
           message,
@@ -456,6 +470,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       ...(sessionId ? { sessionId, readOnly: sessions.isReadOnly(sessionId) } : {}),
       ...(options.message ? { message: options.message } : {}),
       ...(options.handoffId ? { handoffId: options.handoffId } : {}),
+      recording: isTabRecorded(target.tabId),
     })
     return sendToExtension({
       method: "pageStatus.set",
@@ -613,12 +628,13 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     ...(contextDebugLog ? { trace: contextDebugLog } : {}),
   })
   const mainFrameIdsByTab = new Map<number, string>()
-  // Off by default: pages can detect an injected cursor. Recordings and the flight recorder show it.
+  // Off by default: pages can detect an injected cursor, and recordings should show only the page. A recording or
+  // flight recorder started with cursor: true shows it (demo videos), as do showGhostCursor() and the env var.
   const ghostCursorByDefault = yield* Config.Boolean("OPENCODE_BROWSER_GHOST_CURSOR").pipe(Config.withDefault(false))
   const ghostCursor = new GhostCursorTabs({
     send: sendDebuggerCommand,
     mainFrameId: (tabId) => mainFrameIdsByTab.get(tabId),
-    shownByDefault: (tabId) => ghostCursorByDefault || recordingRelay.isRecordingTab(tabId) || flightRecorder.isActiveTab(tabId),
+    shownByDefault: (tabId) => ghostCursorByDefault || recordingRelay.showsGhostCursor(tabId) || flightRecorder.showsGhostCursor(tabId),
   })
   const suppressedChildSessions = new Map<string, number>()
   const protectedFrames = new ProtectedFrameTracker()

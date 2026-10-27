@@ -43,6 +43,8 @@ type ActiveFlightRecorder = {
   /** A real screencast frame arrived; screenshot polling (for a tab Chrome doesn't paint) stops then. */
   screencastFrameSeen?: boolean
   stopFallback?: () => void
+  /** Draw the ghost cursor in the buffered page (flight_recorder_start cursor: true). */
+  readonly cursor: boolean
 }
 
 export type FlightRecorderTarget = RecordingTargetOptions
@@ -52,6 +54,7 @@ export type FlightRecorderStartOptions = {
   readonly sessionId?: string
   readonly retentionMs?: number
   readonly frameRate?: number
+  readonly cursor?: boolean
 }
 
 export type FlightRecorderStatus = FlightRecorderStatusResponse
@@ -66,6 +69,8 @@ export class FlightRecorderRelay {
     readonly sendDebuggerCommand: SendDebuggerCommand
     readonly isExtensionConnected: () => boolean
     readonly isTabRecording?: (tabId: number) => boolean
+    /** A tab started or stopped buffering; awaited before capture starts (see RecordingRelay). */
+    readonly onTabRecordingChanged?: (tabId: number) => void | Promise<void>
     readonly startVideoEncoder?: StartVideoEncoder
     readonly now?: () => number
     readonly monotonicNow?: () => number
@@ -77,6 +82,15 @@ export class FlightRecorderRelay {
 
   isActiveTab(tabId: number): boolean {
     return this.active.has(tabId) || this.starting.has(tabId)
+  }
+
+  /** Whether the tab's flight recorder asked for the ghost cursor. */
+  showsGhostCursor(tabId: number): boolean {
+    return this.active.get(tabId)?.cursor === true
+  }
+
+  private recordingChanged(tabId: number): void {
+    void Promise.resolve(this.options.onTabRecordingChanged?.(tabId)).catch(() => {})
   }
 
   async start(options: FlightRecorderStartOptions): Promise<FlightRecorderStatus> {
@@ -92,6 +106,7 @@ export class FlightRecorderRelay {
       throw new Error("Flight recorder frameRate must be an integer from 1 to 60")
     }
     this.starting.add(options.tabId)
+    await Promise.resolve(this.options.onTabRecordingChanged?.(options.tabId)).catch(() => {})
     try {
       const { width, height } = await prepareCdpScreencastViewport(this.options.sendDebuggerCommand, options.tabId)
       const recorder: ActiveFlightRecorder = {
@@ -106,6 +121,7 @@ export class FlightRecorderRelay {
         bufferedBytes: 0,
         sourceFrameCount: 0,
         droppedFrameCount: 0,
+        cursor: options.cursor === true,
       }
       this.active.set(options.tabId, recorder)
       await this.options.sendDebuggerCommand({
@@ -130,6 +146,7 @@ export class FlightRecorderRelay {
       throw error
     } finally {
       this.starting.delete(options.tabId)
+      if (!this.isActiveTab(options.tabId)) this.recordingChanged(options.tabId)
     }
   }
 
@@ -207,6 +224,7 @@ export class FlightRecorderRelay {
     await recorder.savePromise?.catch(() => {})
     recorder.stopFallback?.()
     this.active.delete(recorder.tabId)
+    this.recordingChanged(recorder.tabId)
     await this.options.sendDebuggerCommand({ tabId: recorder.tabId, method: "Page.stopScreencast", params: {} }).catch(() => {})
     return { cancelled: true }
   }

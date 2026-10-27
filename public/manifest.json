@@ -35,7 +35,8 @@
     "offscreen",
     "tabCapture",
     "webNavigation",
-    "scripting"
+    "scripting",
+    "notifications"
   ],
   "host_permissions": [
     "<all_urls>"

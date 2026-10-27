@@ -452,6 +452,8 @@ type ExecuteSandboxOptions = {
   readonly onDefaultTargetChange?: (target: SessionTarget | undefined) => void
   /** Health-check budget per attempt for a page that failed with an execution-context error. */
   readonly pageHealthCheckTimeoutMs?: number
+  /** Whether the page with this target id is being recorded; helpers then draw nothing into it. */
+  readonly isRecordingTarget?: (targetId: string) => boolean
 }
 
 export type ExecuteResult = {
@@ -954,11 +956,19 @@ export class ExecuteSandbox {
         await fillInputs(targetPage, fields)
         this.warnSyntheticInput()
       },
-      screenshotWithLabels: (screenshotOptions = {}) => screenshotWithLabels({
-        ...screenshotOptions,
-        page: screenshotOptions.page ?? page,
-        registry: this.snapshotRefs,
-      }),
+      screenshotWithLabels: async (screenshotOptions = {}) => {
+        const labelsPage = screenshotOptions.page ?? page
+        // A recorded tab must not show the labels: they go onto the image instead.
+        const recorded = this.options.isRecordingTarget
+          ? this.options.isRecordingTarget(await pageTargetId(labelsPage).catch(() => ""))
+          : false
+        return await screenshotWithLabels({
+          ...screenshotOptions,
+          page: labelsPage,
+          registry: this.snapshotRefs,
+          ...(recorded ? { offPage: true } : {}),
+        })
+      },
       // Named property functions: the execute realm checks their file options by name.
       screenshotDiff: (diffOptions) => screenshotDiff(diffOptions),
       ariaSnapshot,

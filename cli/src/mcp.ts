@@ -310,6 +310,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         audio: { type: "boolean", description: "Capture tab audio in tab-capture mode." },
         frameRate: { type: "integer", minimum: 1, maximum: 60, description: "Requested frame rate." },
         maxDurationMs: { type: "integer", minimum: 1, description: "Maximum recording duration in milliseconds." },
+        cursor: { type: "boolean", description: "Draw the ghost cursor in the recording, for demo videos. Off by default: recordings show only the page, with nothing from OpenCode Browser in the frame." },
       }, ["outputPath"]),
       readOnly: false,
       destructive: false,
@@ -324,6 +325,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         if (frameRate !== undefined && frameRate > 60) return Effect.fail(new Error("frameRate must be at most 60"))
         const maxDurationMs = optionalPositiveIntegerField(object, "maxDurationMs")
         const audio = optionalBooleanField(object, "audio")
+        const cursor = optionalBooleanField(object, "cursor")
         return relay.recordingStart({
           sessionId: resolveSessionId(object),
           outputPath: path.resolve(requiredStringField(object, "outputPath")),
@@ -331,6 +333,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
           ...(audio === undefined ? {} : { audio }),
           ...(frameRate === undefined ? {} : { frameRate }),
           ...(maxDurationMs === undefined ? {} : { maxDurationMs }),
+          ...(cursor === undefined ? {} : { cursor }),
         })
       },
     },
@@ -382,6 +385,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         session: sessionSchemaProperty,
         retentionMs: { type: "integer", minimum: 1000, maximum: 120000, description: "Rolling retention window. Defaults to 60000." },
         frameRate: { type: "integer", minimum: 1, maximum: 60, description: "Saved clip frame rate. Defaults to 60." },
+        cursor: { type: "boolean", description: "Draw the ghost cursor in the buffered video. Off by default." },
       }),
       readOnly: false,
       destructive: false,
@@ -390,10 +394,12 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         const object = requireObject(input)
         const retentionMs = optionalPositiveIntegerField(object, "retentionMs")
         const frameRate = optionalPositiveIntegerField(object, "frameRate")
+        const cursor = optionalBooleanField(object, "cursor")
         return relay.flightRecorderStart({
           sessionId: resolveSessionId(object),
           ...(retentionMs === undefined ? {} : { retentionMs }),
           ...(frameRate === undefined ? {} : { frameRate }),
+          ...(cursor === undefined ? {} : { cursor }),
         })
       },
     },

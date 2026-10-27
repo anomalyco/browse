@@ -26,6 +26,7 @@ import { createAgentRelayLog, formatAgentRelayLog } from "./agent-relay-log"
 import { AgentGroups } from "./agent-groups"
 import { AgentWindow } from "./agent-window"
 import { DebuggerHub } from "./debugger-hub"
+import { HandoffNotice } from "./handoff-notice"
 import { normalizePairingCode, pairingProof, randomNonce, sameSecret } from "./pairing"
 import { PageScripts } from "./page-scripts"
 import { TabCleanup } from "./tab-cleanup"
@@ -130,6 +131,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   const forget = (tabId: number) => {
     const known = relayTabs.delete(tabId)
     pageStatuses.delete(tabId)
+    void HandoffNotice.clear(tabId)
     if (known) notify()
   }
 
@@ -463,7 +465,9 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         // A handoff opens the agent's group so the user can find the tab; it folds up again afterwards.
         if (page.state === "waiting") void AgentGroups.expandTab(tabId)
         else if (wasWaiting) void AgentGroups.settleTab(tabId)
-        await PageScripts.send(tabId, { action: "page-status.set", status: page })
+        // A recorded tab gets no card; the user hears about the handoff from a notification instead.
+        void HandoffNotice.sync(tabId, page, sessionName)
+        await PageScripts.send(tabId, { action: "page-status.set", status: HandoffNotice.forPage(page) })
         return {}
       }
       case "pageStatus.clear": {
@@ -471,6 +475,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         const wasWaiting = pageStatuses.get(tabId)?.state === "waiting"
         pageStatuses.delete(tabId)
         if (wasWaiting) void AgentGroups.settleTab(tabId)
+        void HandoffNotice.clear(tabId)
         notify()
         // Restricted pages have no content script; the status is best-effort there.
         await chrome.tabs.sendMessage(tabId, { action: "page-status.clear" }).catch(() => undefined)
@@ -878,7 +883,10 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       if (message.action === "page-status.ready") {
         if (typeof tabId === "number" && relayTabs.has(tabId)) {
           const page = pageStatuses.get(tabId)
-          if (page) void chrome.tabs.sendMessage(tabId, { action: "page-status.set", status: page }).catch(() => undefined)
+          if (page)
+            void chrome.tabs
+              .sendMessage(tabId, { action: "page-status.set", status: HandoffNotice.forPage(page) })
+              .catch(() => undefined)
           send({ method: "pageStatus.requested", params: { tabId } })
         }
         return false
@@ -984,6 +992,11 @@ function serialize(message: JsonObject) {
 }
 
 const ATTACHED_TITLE = "OpenCode Browser · Agents can use this tab. Click to stop."
+
+/** How a handoff notification names the agent: its session's chosen name, else "An agent". */
+function sessionName(sessionId?: string) {
+  return autoNamed(sessionId) ? "An agent" : `Agent “${sessionId!.trim()}”`
+}
 
 /** Session ids the relay or MCP server made up (mcp-1a2b3c4d, quiet-falcon-333), rather than an agent's chosen name. */
 function autoNamed(sessionId: string | undefined) {

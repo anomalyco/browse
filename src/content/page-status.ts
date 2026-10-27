@@ -41,8 +41,9 @@ if (!(globalThis as Loaded).__opencodeBrowserPageStatus) {
   void chrome.runtime.sendMessage({ action: "page-status.ready" }).catch(() => undefined)
 }
 
+// A recorded tab never shows the card (the background sends it without one, and a notification instead).
 function waiting() {
-  return current?.state === "waiting" && current.handoffId !== undefined
+  return current?.state === "waiting" && current.handoffId !== undefined && !current.recording
 }
 
 function render() {

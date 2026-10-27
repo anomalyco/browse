@@ -45,6 +45,8 @@ export type RecordingStartOptions = {
   readonly videoBitsPerSecond?: number
   readonly audioBitsPerSecond?: number
   readonly maxDurationMs?: number
+  /** Draw the ghost cursor in the recorded page (demo videos). Off by default: recordings show only the page. */
+  readonly cursor?: boolean
 }
 
 export type RecordingTargetOptions = RecordingTargetRequest
@@ -204,12 +206,19 @@ type ExtensionStatusResult = {
 export class RecordingRelay {
   private readonly activeRecordings = new Map<number, ActiveRecording>()
   private readonly startingRecordings = new Map<number, StartingRecording>()
+  /** Tabs whose recording asked for the ghost cursor. */
+  private readonly cursorTabs = new Set<number>()
 
   constructor(readonly options: {
     readonly sendToExtension: (command: Omit<ExtensionCommand, "id">) => Promise<JsonObject>
     readonly sendDebuggerCommand: SendDebuggerCommand
     readonly isExtensionConnected: () => boolean
     readonly isTabUnavailable?: (tabId: number) => boolean
+    /**
+     * A tab started or stopped being recorded. Awaited before capture starts, so in-page UI the recording must not
+     * show (the handoff card) is gone by the first frame.
+     */
+    readonly onTabRecordingChanged?: (tabId: number) => void | Promise<void>
     readonly startVideoEncoder?: StartVideoEncoder
     readonly now?: () => number
     readonly monotonicNow?: () => number
@@ -221,6 +230,16 @@ export class RecordingRelay {
 
   isRecordingTab(tabId: number): boolean {
     return this.activeRecordings.has(tabId) || this.startingRecordings.has(tabId)
+  }
+
+  /** Whether the tab's recording asked for the ghost cursor (recording_start cursor: true). */
+  showsGhostCursor(tabId: number): boolean {
+    return this.cursorTabs.has(tabId) && this.isRecordingTab(tabId)
+  }
+
+  private recordingChanged(tabId: number): void {
+    if (!this.isRecordingTab(tabId)) this.cursorTabs.delete(tabId)
+    void Promise.resolve(this.options.onTabRecordingChanged?.(tabId)).catch(() => {})
   }
 
   async startRecording(options: RecordingStartOptions): Promise<RecordingStartResult> {
@@ -242,6 +261,9 @@ export class RecordingRelay {
       cancelled: false,
     }
     this.startingRecordings.set(options.tabId, starting)
+    if (options.cursor === true) this.cursorTabs.add(options.tabId)
+    else this.cursorTabs.delete(options.tabId)
+    await Promise.resolve(this.options.onTabRecordingChanged?.(options.tabId)).catch(() => {})
     const promise = this.startReservedRecording(options, starting)
     starting.promise = promise
     try {
@@ -250,6 +272,7 @@ export class RecordingRelay {
       if (this.startingRecordings.get(options.tabId) === starting) {
         this.startingRecordings.delete(options.tabId)
       }
+      if (!this.isRecordingTab(options.tabId)) this.recordingChanged(options.tabId)
     }
   }
 
@@ -607,6 +630,7 @@ export class RecordingRelay {
       if (!recording.finalized) await fs.rm(recording.temporaryPath, { force: true }).catch(() => {})
       if (this.activeRecordings.get(recording.tabId) === recording) {
         this.activeRecordings.delete(recording.tabId)
+        this.recordingChanged(recording.tabId)
       }
     })()
     return recording.cleanupPromise
@@ -800,6 +824,7 @@ export class RecordingRelay {
     const stopPromise = this.finishCdpRecording(recording).finally(() => {
       if (this.activeRecordings.get(recording.tabId) === recording) {
         this.activeRecordings.delete(recording.tabId)
+        this.recordingChanged(recording.tabId)
       }
       recording.stopped = true
     })
@@ -902,6 +927,7 @@ export class RecordingRelay {
       await recording.writePromise.catch(() => {})
       if (this.activeRecordings.get(recording.tabId) === recording) {
         this.activeRecordings.delete(recording.tabId)
+        this.recordingChanged(recording.tabId)
       }
     })()
     return recording.cleanupPromise

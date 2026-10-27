@@ -67,6 +67,8 @@ export type PageStatus = {
   readonly readOnly?: boolean
   readonly message?: string
   readonly handoffId?: string
+  /** The tab is being recorded: nothing may be drawn in the page, so a handoff notifies instead of showing a card. */
+  readonly recording?: boolean
 }
 
 export function makePageStatus(options: {
@@ -76,6 +78,7 @@ export function makePageStatus(options: {
   readonly readOnly?: boolean
   readonly message?: string
   readonly handoffId?: string
+  readonly recording?: boolean
 }): PageStatus {
   return {
     state: options.state,
@@ -84,6 +87,7 @@ export function makePageStatus(options: {
     ...(options.sessionId && options.readOnly ? { readOnly: true } : {}),
     ...(options.message ? { message: options.message } : {}),
     ...(options.handoffId ? { handoffId: options.handoffId } : {}),
+    ...(options.recording ? { recording: true } : {}),
   }
 }
 

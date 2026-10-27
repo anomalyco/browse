@@ -24,6 +24,8 @@ export type PageStatus = {
   readonly readOnly?: boolean
   readonly message?: string
   readonly handoffId?: string
+  /** The tab is being recorded: nothing may be drawn in the page, so a handoff notifies instead of showing a card. */
+  readonly recording?: boolean
 }
 
 export const commandMethods = [
@@ -86,6 +88,7 @@ export function pageStatusFromJson(value: unknown): PageStatus | undefined {
     ...(value.readOnly === true ? { readOnly: true } : {}),
     ...(typeof message === "string" ? { message } : {}),
     ...(typeof handoffId === "string" ? { handoffId } : {}),
+    ...(value.recording === true ? { recording: true } : {}),
   }
 }
 

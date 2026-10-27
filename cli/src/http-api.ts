@@ -390,6 +390,7 @@ function handleFlightRecorderRequest(options: {
         ...(target.sessionId ? { sessionId: target.sessionId } : {}),
         ...(request.retentionMs === undefined ? {} : { retentionMs: request.retentionMs }),
         ...(request.frameRate === undefined ? {} : { frameRate: request.frameRate }),
+        ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
       }))
       sendJson(options.response, result)
       return

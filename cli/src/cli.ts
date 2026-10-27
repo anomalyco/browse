@@ -628,9 +628,10 @@ const recordingStart = Command.make(
     audio: Flag.Boolean("audio").pipe(Flag.withDefault(false), Flag.withDescription("Include tab audio")),
     frameRate: Flag.Int("frame-rate").pipe(Flag.optional, Flag.withDescription("Output frame rate, integer 1..60; defaults to 30 for tab-capture and 60 for CDP")),
     maxDurationMs: Flag.Int("max-duration-ms").pipe(Flag.optional, Flag.withDescription("Auto-stop guard in milliseconds, defaults to 900000")),
+    cursor: Flag.Boolean("cursor").pipe(Flag.withDefault(false), Flag.withDescription("Draw the ghost cursor in the recording (off by default: only the page is recorded)")),
     json: jsonFlag,
   },
-  Effect.fn("Cli.recordingStart")(function* ({ outputPath, session, tabId, mode, audio, frameRate, maxDurationMs, json }) {
+  Effect.fn("Cli.recordingStart")(function* ({ outputPath, session, tabId, mode, audio, frameRate, maxDurationMs, cursor, json }) {
     if (Option.isSome(frameRate) && (frameRate.value < 1 || frameRate.value > 60)) {
       return yield* Effect.fail(new Error("Recording frameRate must be an integer from 1 to 60"))
     }
@@ -646,6 +647,7 @@ const recordingStart = Command.make(
       audio,
       ...(Option.isSome(frameRate) ? { frameRate: frameRate.value } : {}),
       ...(Option.isSome(maxDurationMs) ? { maxDurationMs: maxDurationMs.value } : {}),
+      ...(cursor ? { cursor } : {}),
     })
     if (!result.success) {
       return yield* Effect.fail(new Error(result.error ?? "Failed to start recording"))
@@ -732,9 +734,10 @@ const flightRecorderStart = Command.make(
     tabId: tabIdFlag("Buffer this attached Chrome tab id"),
     retentionMs: Flag.Int("retention-ms").pipe(Flag.optional, Flag.withDescription("Ring-buffer duration in milliseconds (1000..120000; default 60000)")),
     frameRate: Flag.Int("frame-rate").pipe(Flag.optional, Flag.withDescription("Output frame rate from 1 to 60")),
+    cursor: Flag.Boolean("cursor").pipe(Flag.withDefault(false), Flag.withDescription("Draw the ghost cursor in the buffered video (off by default)")),
     json: jsonFlag,
   },
-  Effect.fn("Cli.flightRecorderStart")(function* ({ session, tabId, retentionMs, frameRate, json }) {
+  Effect.fn("Cli.flightRecorderStart")(function* ({ session, tabId, retentionMs, frameRate, cursor, json }) {
     const relay = yield* RelayClient.Service
     yield* ensureCliRelayAndExtension()
     const target = yield* recordingTarget({ session, tabId })
@@ -742,6 +745,7 @@ const flightRecorderStart = Command.make(
       ...target,
       ...(Option.isSome(retentionMs) ? { retentionMs: retentionMs.value } : {}),
       ...(Option.isSome(frameRate) ? { frameRate: frameRate.value } : {}),
+      ...(cursor ? { cursor } : {}),
     })
     yield* Console.log(json ? JSON.stringify(result) : `Flight recorder buffering tab ${result.tabId}; retention=${result.retentionMs}ms`)
   }),

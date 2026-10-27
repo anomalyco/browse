@@ -448,6 +448,7 @@ export const RecordingStartRequest = RecordingTargetRequest.pipe(Schema.fieldsAs
   videoBitsPerSecond: Schema.optionalKey(Schema.Number),
   audioBitsPerSecond: Schema.optionalKey(Schema.Number),
   maxDurationMs: Schema.optionalKey(Schema.Number),
+  cursor: Schema.optionalKey(Schema.Boolean),
 }))
 
 export interface RecordingStartRequest extends Schema.Schema.Type<typeof RecordingStartRequest> {}
@@ -512,6 +513,7 @@ export interface RecordingCancelResponse extends Schema.Schema.Type<typeof Recor
 export const FlightRecorderStartRequest = RecordingTargetRequest.pipe(Schema.fieldsAssign({
   retentionMs: Schema.optionalKey(Schema.Number.check(Schema.isInt(), Schema.isBetween({ minimum: 1_000, maximum: 120_000 }))),
   frameRate: Schema.optionalKey(RecordingFrameRate),
+  cursor: Schema.optionalKey(Schema.Boolean),
 }))
 export interface FlightRecorderStartRequest extends Schema.Schema.Type<typeof FlightRecorderStartRequest> {}
 
