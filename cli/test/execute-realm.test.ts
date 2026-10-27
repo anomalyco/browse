@@ -303,7 +303,22 @@ describe("Node escape corpus", () => {
     ], "", { OPENCODE_BROWSER_EXECUTE_SLICE_MS: String(sliceMs) })
     expect(outcome?.error).toMatch(/sustained CPU budget/)
     expect(outcome!.maxStallMs!).toBeLessThan(sliceMs + 250)
-    expect(outcome!.elapsedMs!).toBeLessThan(sliceMs * 30)
+    // Stopped within a couple of slices (the window is three slice lengths), not after a long burst allowance.
+    expect(outcome!.elapsedMs!).toBeLessThan(sliceMs * 6)
+  }, 30_000)
+
+  test("a few heavy operations back to back stay under the sustained budget", () => {
+    const sliceMs = 200
+    const busy = (fraction: number) => `{ const end = performance.now() + ${sliceMs * fraction}; while (performance.now() < end) {} }`
+    const pause = (ms: number) => `await new Promise(r => setTimeout(r, ${ms}));`
+    const [outcome] = runInNode([
+      // One near-full slice, then a burst of three heavy operations, a rest, and another burst.
+      `${busy(0.8)} ${pause(0)} ${busy(0.3)} ${pause(4 * sliceMs)}` +
+      `for (let i = 0; i < 3; i++) { ${busy(0.4)} ${pause(0)} } ${pause(4 * sliceMs)}` +
+      `for (let i = 0; i < 3; i++) { ${busy(0.4)} ${pause(0)} } return "done"`,
+    ], "", { OPENCODE_BROWSER_EXECUTE_SLICE_MS: String(sliceMs) })
+    expect(outcome?.error).toBeUndefined()
+    expect(outcome?.value).toBe("done")
   }, 30_000)
 
   test("the default slice fits heavy but legitimate execute code", () => {
