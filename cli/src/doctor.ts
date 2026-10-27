@@ -5,6 +5,7 @@ import type { ExtensionStatus, RelayVersion, SessionSummary, TargetSummary } fro
 import { extensionProtocolVersion } from "./protocol.ts"
 import { installCommand, STORE_LISTED } from "./paths.ts"
 import * as SessionStore from "./session-store.ts"
+import type { UpdateJson } from "./update.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "./version.ts"
 
 /**
@@ -102,6 +103,8 @@ export type DoctorReport = {
     readonly error: string | null
   }
   readonly artifacts: readonly DoctorArtifact[]
+  /** A newer version on the clone's remote branch, from the update check; null when there's none or no check. */
+  readonly update: UpdateJson | null
   readonly checks: readonly DoctorCheck[]
   readonly recommendations: readonly string[]
 }
@@ -123,6 +126,7 @@ const errorMessage = (error: unknown): string => {
 
 export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (options: {
   readonly packageRoot: string
+  readonly update?: UpdateJson | null
 }) {
   const relay = yield* RelayClient.Service
   const store = yield* SessionStore.Service
@@ -227,6 +231,7 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
     possibleLeakedSessions,
     targetsResult,
     sessionsResult,
+    update: options.update ?? null,
   })
   const report: DoctorReport = {
     status: summarizeCheckStatus(checks),
@@ -276,8 +281,10 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
       error: sessionsResult.ok ? currentResult.ok ? null : currentResult.error : sessionsResult.error,
     },
     artifacts,
+    update: options.update ?? null,
     checks,
     recommendations: buildDoctorRecommendations({
+      update: options.update ?? null,
       relayResult,
       extensionResult,
       artifacts,
@@ -302,6 +309,7 @@ function buildDoctorChecks(options: {
   readonly possibleLeakedSessions: readonly SessionSummary[]
   readonly targetsResult: ProbeResult<readonly TargetSummary[]>
   readonly sessionsResult: ProbeResult<readonly SessionSummary[]>
+  readonly update: UpdateJson | null
 }): readonly DoctorCheck[] {
   const packageBinChecks: readonly DoctorCheck[] = options.packageResult.ok
     ? [
@@ -412,6 +420,12 @@ function buildDoctorChecks(options: {
       message: options.possibleLeakedSessions.length ? `${options.possibleLeakedSessions.length} connected non-current session(s)` : "none",
     },
     ...artifactChecks,
+    ...(options.update ? [{
+      id: "update",
+      label: "update",
+      status: "ok" as const,
+      message: `available: ${options.update.summary}`,
+    }] : []),
   ]
 }
 
@@ -503,6 +517,7 @@ export function extensionProtocolCheck(extensionResult: ProbeResult<ExtensionSta
 }
 
 function buildDoctorRecommendations(options: {
+  readonly update: UpdateJson | null
   readonly relayResult: ProbeResult<RelayVersion>
   readonly extensionResult: ProbeResult<ExtensionStatus>
   readonly artifacts: readonly DoctorArtifact[]
@@ -536,6 +551,7 @@ function buildDoctorRecommendations(options: {
     "A target is crashed or showing a browser error page. Run the owning session once to trigger relay-owned recovery, or reset/re-adopt a user-owned tab.",
   ] : []
   return [
+    ...(options.update ? [options.update.notice] : []),
     ...relayRecommendations,
     ...relayBuildRecommendations,
     ...extensionRecommendations,

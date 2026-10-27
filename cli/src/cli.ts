@@ -14,6 +14,7 @@ import type { ExecuteAftermath, ExecuteLogEntry, ExecuteResponse, NetworkStatusR
 import { startRelay } from "./relay.ts"
 import { defaultJournalBaseDir, formatJournalEntry, readJournalEntries } from "./session-journal.ts"
 import * as SessionStore from "./session-store.ts"
+import { formatUpdateNotice, updateJson, updateNotice } from "./update.ts"
 import { opencodeBrowserVersion } from "./version.ts"
 
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
@@ -522,7 +523,8 @@ const status = Command.make(
   Effect.fn("Cli.status")(function* ({ json }) {
     const relay = yield* RelayClient.Service
     const store = yield* SessionStore.Service
-    const relayResult = yield* Effect.result(relay.version)
+    const [relayResult, update] = yield* Effect.all([Effect.result(relay.version), Effect.promise(() => updateNotice())], { concurrency: 2 })
+    const updateLine = update ? formatUpdateNotice(update) : undefined
     if (Result.isFailure(relayResult)) {
       if (!(relayResult.failure instanceof RelayClient.RelayUnreachable)) {
         if (json) {
@@ -532,6 +534,7 @@ const status = Command.make(
             extension: null,
             sessions: [],
             targets: [],
+            update: updateJson(update),
           }, null, 2))
         } else {
           yield* Console.error(`Relay status failed: ${relayResult.failure.message}`)
@@ -541,10 +544,11 @@ const status = Command.make(
       }
       const stopped = RelayLifecycle.stoppedRelayStatus(relay.endpoint)
       if (json) {
-        yield* Console.log(JSON.stringify(stopped, null, 2))
+        yield* Console.log(JSON.stringify({ ...stopped, update: updateJson(update) }, null, 2))
       } else {
         yield* Console.log(`Relay: stopped (${relay.endpoint})`)
         yield* Console.log("Run opencode-browser execute to start it automatically.")
+        if (updateLine) yield* Console.log(updateLine)
       }
       yield* failExit
       return
@@ -564,12 +568,14 @@ const status = Command.make(
         currentSession: current ?? null,
         sessions,
         targets,
+        update: updateJson(update),
       }, null, 2))
       if (buildProblem) {
         yield* failExit
       }
       return
     }
+    if (updateLine) yield* Console.log(updateLine)
     yield* Console.log(`Relay: ${relay.endpoint} (${version.version})`)
     if (buildProblem) {
       yield* Console.log(`Warning: ${buildProblem}`)
@@ -1037,7 +1043,8 @@ const doctor = Command.make(
     json: jsonFlag,
   },
   Effect.fn("Cli.doctor")(function* ({ json }) {
-    const report = yield* createDoctorReport({ packageRoot })
+    const update = yield* Effect.promise(() => updateNotice())
+    const report = yield* createDoctorReport({ packageRoot, update: updateJson(update) })
     if (json) {
       yield* Console.log(JSON.stringify(report, null, 2))
     } else {

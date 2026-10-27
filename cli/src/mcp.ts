@@ -9,6 +9,7 @@ import { getObject, getString, parseTargetSelection } from "./relay-helpers.ts"
 import * as RelayClient from "./relay-client.ts"
 import * as RelayLifecycle from "./relay-lifecycle.ts"
 import type { TargetSelection } from "./relay-schema.ts"
+import { createUpdateWatcher, updateJson, type UpdateNotice } from "./update.ts"
 import { opencodeBrowserVersion } from "./version.ts"
 
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
@@ -45,7 +46,7 @@ const sessionOnlyInputSchema = objectSchema({
   session: sessionSchemaProperty,
 })
 
-function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSession): readonly ToolSpec[] {
+function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSession, update: () => UpdateNotice | undefined = () => undefined): readonly ToolSpec[] {
   const resolveSessionId = (input: unknown, field = "session") => optionalStringField(input, field) ?? currentSession.id
   const establishCurrentSession = (id: string) => {
     currentSession.id = id
@@ -92,7 +93,8 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       handle: () => Effect.gen(function* () {
         const [version, status] = yield* Effect.all([relay.version, relay.extensionStatus])
         const buildProblem = RelayLifecycle.relayBuildProblem(version)
-        return { endpoint: relay.endpoint, currentSession: currentSession.id, version, status, ...(buildProblem ? { buildProblem } : {}) }
+        const available = updateJson(update())
+        return { endpoint: relay.endpoint, currentSession: currentSession.id, version, status, ...(buildProblem ? { buildProblem } : {}), ...(available ? { update: available } : {}) }
       }),
     },
     {
@@ -525,7 +527,23 @@ const registerTools = Effect.gen(function* () {
     id: configuredSession || `mcp-${crypto.randomUUID().slice(0, 8)}`,
     established: Boolean(configuredSession),
   }
-  yield* Effect.forEach(makeToolSpecs(relay, currentSession), (spec) => {
+  // Checks for a newer browse in the background (cached; never delays a tool call). The first tool result after one
+  // is found carries a note for the agent to pass on, once per MCP server, i.e. once per opencode session.
+  const updates = createUpdateWatcher()
+  void updates.refresh()
+  let updateNoted = false
+  const withUpdateNote = (name: string, result: McpSchema.CallToolResult) => {
+    void updates.refresh()
+    const notice = updates.current
+    if (!notice || updateNoted) return result
+    updateNoted = true
+    if (name === "status") return result
+    return new McpSchema.CallToolResult({
+      ...result,
+      content: [...result.content, McpSchema.TextContent.make({ text: mcpUpdateNote(notice) })],
+    })
+  }
+  yield* Effect.forEach(makeToolSpecs(relay, currentSession, () => updates.current), (spec) => {
     return server.addTool({
       tool: new McpSchema.Tool({
         name: spec.name,
@@ -552,11 +570,17 @@ const registerTools = Effect.gen(function* () {
             onFailure: (error) => toolResult({ text: mcpErrorMessage(spec.name, error.message), isError: true }),
             onSuccess: (value) => toolResultForValue(value),
           }),
+          Effect.map((result) => withUpdateNote(spec.name, result)),
         )
       },
     })
   }, { discard: true })
 })
+
+/** The one-time note on a tool result: what to tell the user, and that the agent may run the update itself. */
+export function mcpUpdateNote(notice: Pick<UpdateNotice, "summary" | "command">): string {
+  return `Note: browse (OpenCode Browser) has an update: ${notice.summary}. Tell the user they can run \`${notice.command}\` and then restart opencode, or ask you to run it for them.`
+}
 
 export function mcpToolRequiresRelayCompatibility(name: string): boolean {
   return !["status", "session_list", "session_current", "network_status", "recording_status", "flight_recorder_status", "secrets_status", "skill"].includes(name)
