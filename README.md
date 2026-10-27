@@ -65,10 +65,21 @@ proves it knows that code (see [Security](#security)). A Chrome Web Store build 
   under the agent's session name and collapsed unless you're looking at one. Agents can't switch you to their tabs or
   bring a window to the front; popups an agent opens join its group, and if one takes over your window you get your
   tab back. Tabs nobody touches for 10 minutes close by themselves (never while a script runs on them).
-- **Prefer a separate window?** On the status page, set **Agent tabs** to *In a separate window*: agents then open
-  their tabs in a window of their own that opens unfocused beside yours (on another display when there's no room on
-  yours), and their popups move there too. It applies to new tabs. `OPENCODE_BROWSER_AGENT_WINDOW=separate` (or
-  `current`) on the relay overrides the setting.
+- **Settings** (the extension's options page; each applies right away, to new tabs for window and grouping):
+  - **Where agents open their tabs:** in your window (default), or *in a separate window* of their own that opens
+    unfocused beside yours (on another display when there's no room on yours); their popups move there too.
+  - **Grouping:** one collapsed group per agent session (default), *one shared group* for every agent ("Agents · 3",
+    one per window, popups included; a handoff opens it), or *don't group* (agent tabs sit in the background of your
+    tab strip; pin one to keep it). Tabs already grouped stay where they are when you switch.
+  - **Close tabs agents haven't touched for:** 10 minutes (default), 30, 60, or *never*. Tabs a script runs on, a
+    handoff waits on or a recording records stay open regardless. With *never*, an agent's `tabs_cleanup` without a
+    time still closes only tabs idle for 10 minutes.
+  - **Agent cursor:** off (default) or *always show* it on agent tabs. Pages can detect it while it's shown.
+    Recordings still leave it out unless they ask for it (`cursor: true`).
+  - **Human-like input:** on (default), or *off*: faster, but easier for sites to flag as a bot.
+  - **Handoff notifications:** only while the tab is recorded (default), or *on every handoff*, as well as the card.
+  The relay's environment variables below override the window, cursor and input settings; the options page then
+  shows the value in effect and which variable set it.
 - **Hand an agent one of your tabs** by clicking the toolbar button on it. The badge shows **ON**; click again to take
   it back. While an agent works the badge reads **RUN**, and **WAIT** when it needs you. The button always works: a
   click while a script runs takes the tab back and stops the script. Agents can't close a tab you lent them.
@@ -117,7 +128,7 @@ The agent talks to the `browse` MCP server over stdio. The server hands each com
   emulation overrides. The extension adds nothing to pages you browse; in agent tabs it adds nothing to the DOM except
   the handoff card while a handoff waits (and the ghost cursor when asked for). Both live in a closed shadow root on an
   anonymous element, drawn from an isolated world. Input moves like a person: curved mouse paths, paced typing,
-  gliding scroll (`OPENCODE_BROWSER_HUMAN_INPUT=0` for full speed). This makes an agent hard to spot, not impossible: the
+  gliding scroll (turn *Human-like input* off on the options page, or `OPENCODE_BROWSER_HUMAN_INPUT=0`, for full speed). This makes an agent hard to spot, not impossible: the
   browser shows its "started debugging" bar while the debugger is attached, focus emulation keeps background agent tabs
   "visible", the card and cursor elements exist while shown, and `fillInput`'s fallback dispatches synthetic events
   (it warns when it does).
@@ -166,10 +177,10 @@ Escape hatches. Set them in the environment you start opencode (or your MCP clie
 | `OPENCODE_BROWSER_ALLOW_NODE=1` | Run `execute` code with full Node access (`process`, `fs`, `import()`, any file path) |
 | `OPENCODE_BROWSER_ALLOW_ALL_COOKIES=1` | Let sessions read and write every cookie in the profile |
 | `OPENCODE_BROWSER_ALLOW_FOREGROUND=1` | Allow `page.bringToFront()` |
-| `OPENCODE_BROWSER_AGENT_WINDOW=separate` | Open agent tabs in a separate window (`current`: in the user's window), whatever the status page says |
+| `OPENCODE_BROWSER_AGENT_WINDOW=separate` | Open agent tabs in a separate window (`current`: in the user's window), overriding the options page's *Where agents open their tabs* |
 | `OPENCODE_BROWSER_EXECUTE_SLICE_MS=2000` | Longest `execute` JavaScript may run without yielding before it is stopped (50 to 60000; every session waits meanwhile) |
-| `OPENCODE_BROWSER_GHOST_CURSOR=1` | Show the ghost cursor on every agent tab (pages can see it) |
-| `OPENCODE_BROWSER_HUMAN_INPUT=0` | Send input at full speed instead of human-like paths and pacing |
+| `OPENCODE_BROWSER_GHOST_CURSOR=1` | Show the agent cursor on every agent tab outside recordings (pages can see it); `0` keeps it off. Overrides the options page's *Agent cursor* |
+| `OPENCODE_BROWSER_HUMAN_INPUT=0` | Send input at full speed instead of human-like paths and pacing; `1` keeps them on. Overrides the options page's *Human-like input* |
 
 ## Troubleshooting
 

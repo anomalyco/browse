@@ -77,9 +77,11 @@ call `session_new` and pass an explicit id when one MCP process needs multiple
 sessions.
 
 Tabs you open live in the background of the user's window, in your session's
-tab group, collapsed at the start of their tab strip (or in a separate agent
-window that opens unfocused beside theirs, if they chose that), so the user
-keeps working undisturbed; popups your clicks open join your group. Don't
+tab group, collapsed at the start of their tab strip, so the user keeps working
+undisturbed; popups your clicks open join your group. The user can change this
+on the extension's options page: a separate agent window that opens unfocused
+beside theirs, one shared "Agents" group for every agent's tabs, or no groups at
+all. Nothing you do depends on which. Don't
 ask the user to watch a tab unless you hand it off. Popups (`target=_blank`,
 `window.open`) are ordinary pages of your session: use
 `page.waitForEvent("popup")` or `context.waitForEvent("page")`, and they show
@@ -161,7 +163,8 @@ an in-progress form.
 
 Clicks, hovers and key presses already move and pace like a person (curved
 mouse paths, a short settle before pressing, human key gaps), so don't add your
-own `steps` or delays. `fill()` pastes text in one go; on sites that watch
+own `steps` or delays. (The user can turn this off on the options page, or with
+`OPENCODE_BROWSER_HUMAN_INPUT=0`, for speed; don't ask them to.) `fill()` pastes text in one go; on sites that watch
 typing (sign-ups, logins behind bot protection), type with
 `locator.pressSequentially(text)` instead.
 
@@ -195,12 +198,12 @@ Deletion is idempotent for an explicit session id, so cleanup can be safely
 retried when that session is already absent.
 
 Give a session a short, meaningful id (`github`, `checkout-test`): the tabs it
-opens are grouped in the browser under that name. Unnamed sessions are grouped as
-"Agent · <site>".
+opens are grouped in the browser under that name (unless the user chose one
+shared group, or none). Unnamed sessions are grouped as "Agent · <site>".
 
 Tabs agents open close by themselves after about 10 minutes without use (no
-command and not visited by the user); tabs the user shared, pinned, or is
-looking at stay open. When a task is done, tidy up right away:
+command and not visited by the user; the user can set 30 or 60 minutes, or
+never); tabs the user shared, pinned, or is looking at stay open. When a task is done, tidy up right away:
 
 ```bash
 opencode-browser tabs cleanup --idle-minutes 0   # MCP: tabs_cleanup { idleMinutes: 0 }
@@ -646,8 +649,9 @@ shockwave) is off by default, because pages can detect an element added to their
 DOM. Turn it on for demo videos with `--cursor` (`cursor: true` on the
 `recording_start` and `flight_recorder_start` tools); it then follows Playwright
 mouse actions while that recording runs. `showGhostCursor()` shows it on a tab
-until `hideGhostCursor()`, and `OPENCODE_BROWSER_GHOST_CURSOR=1` on the relay
-shows it on every tab. When recording a user-facing proof or PR walkthrough
+until `hideGhostCursor()`. The user's *Agent cursor* setting on the options page
+(or `OPENCODE_BROWSER_GHOST_CURSOR=1` on the relay) shows it on every agent tab
+outside recordings; a recording without `cursor: true` still leaves it out. When recording a user-facing proof or PR walkthrough
 video, opt into the `ghostCursor` helpers inside `execute` to focus attention on
 key steps and verified postconditions (captions, zoom and spotlights are drawn
 only when you call them):
