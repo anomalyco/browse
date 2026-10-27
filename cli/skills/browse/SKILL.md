@@ -76,8 +76,10 @@ MCP keeps one implicit process session. Omit `session` for that normal path, or
 call `session_new` and pass an explicit id when one MCP process needs multiple
 sessions.
 
-Tabs you open live in a separate agent window that opens unfocused beside the
-user's window, so the user keeps working undisturbed; popups your clicks open move there too. Don't
+Tabs you open live in the background of the user's window, in your session's
+tab group, collapsed at the start of their tab strip (or in a separate agent
+window that opens unfocused beside theirs, if they chose that), so the user
+keeps working undisturbed; popups your clicks open join your group. Don't
 ask the user to watch a tab unless you hand it off. Popups (`target=_blank`,
 `window.open`) are ordinary pages of your session: use
 `page.waitForEvent("popup")` or `context.waitForEvent("page")`, and they show

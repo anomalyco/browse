@@ -9,7 +9,7 @@ extension, for [opencode](https://opencode.ai) and any other MCP client.
 ---
 
 Agents get a `browse` MCP server. They open and drive tabs with Playwright, take screenshots, capture network
-traffic and record the screen, in a browser window of their own that opens unfocused, beside yours. When it's your turn (a login,
+traffic and record the screen, in background tabs grouped out of your way. When it's your turn (a login,
 a 2FA prompt, a payment), they hand the tab back to you and continue once you click **Continue**.
 
 It works in Chrome, Edge, Brave, Arc, Helium, Vivaldi, Opera and Chromium.
@@ -61,9 +61,14 @@ proves it knows that code (see [Security](#security)). A Chrome Web Store build 
 
 ## Using it
 
-- **Agents open their own tabs** in a separate browser window that opens unfocused, placed beside the window you last
-  used (on another display when there's no room on yours), and agents can't bring it to the front. Tabs are grouped under the agent's session name; popups an agent opens move into its window. Tabs nobody
-  touches for 10 minutes close by themselves (never while a script runs on them).
+- **Agents open their own tabs** in the background of the window you last used, grouped at the start of your tab strip
+  under the agent's session name and collapsed unless you're looking at one. Agents can't switch you to their tabs or
+  bring a window to the front; popups an agent opens join its group, and if one takes over your window you get your
+  tab back. Tabs nobody touches for 10 minutes close by themselves (never while a script runs on them).
+- **Prefer a separate window?** On the status page, set **Agent tabs** to *In a separate window*: agents then open
+  their tabs in a window of their own that opens unfocused beside yours (on another display when there's no room on
+  yours), and their popups move there too. It applies to new tabs. `OPENCODE_BROWSER_AGENT_WINDOW=separate` (or
+  `current`) on the relay overrides the setting.
 - **Hand an agent one of your tabs** by clicking the toolbar button on it. The badge shows **ON**; click again to take
   it back. While an agent works the badge reads **RUN**, and **WAIT** when it needs you. The button always works: a
   click while a script runs takes the tab back and stops the script. Agents can't close a tab you lent them.
@@ -106,7 +111,7 @@ The agent talks to the `browse` MCP server over stdio. The server hands each com
 - **The relay** (`cli/`) is a local Chrome DevTools endpoint backed by the extension. It keeps named sessions,
   handoffs, recordings, network capture and a journal, and starts on demand.
 - **The extension** (`src/`) connects to the relay and runs its commands through `chrome.debugger`. It keeps agent
-  tabs in their own window and groups, closes idle ones, and shows the toolbar badge and the handoff card.
+  tabs in collapsed groups (or their own window), closes idle ones, and shows the toolbar badge and the handoff card.
 - **Quiet in the page.** `execute` uses [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright), which hides
   the usual automation tells (`navigator.webdriver`, the `Runtime.enable` leak), and the relay drops Patchright's media
   emulation overrides. The extension adds nothing to pages you browse; in agent tabs it adds nothing to the DOM except
@@ -118,8 +123,8 @@ The agent talks to the `browse` MCP server over stdio. The server hands each com
   (it warns when it does).
 
 Permissions: `debugger`, `tabs`, `tabGroups`, `storage`, `alarms`, `offscreen` and `tabCapture` (recordings),
-`scripting` (to add the handoff script only to tabs agents use, never to every page), `webNavigation` (to move popups
-agents open into their window), `notifications` (to tell you an agent needs you while it records a tab), and access to
+`scripting` (to add the handoff script only to tabs agents use, never to every page), `webNavigation` (to keep popups
+agents open with their other tabs), `notifications` (to tell you an agent needs you while it records a tab), and access to
 all sites so agents can work wherever you ask. Nothing leaves your computer except what your agent sends to its model
 provider; see the [privacy policy](store/privacy-policy.md).
 
@@ -161,6 +166,7 @@ Escape hatches. Set them in the environment you start opencode (or your MCP clie
 | `OPENCODE_BROWSER_ALLOW_NODE=1` | Run `execute` code with full Node access (`process`, `fs`, `import()`, any file path) |
 | `OPENCODE_BROWSER_ALLOW_ALL_COOKIES=1` | Let sessions read and write every cookie in the profile |
 | `OPENCODE_BROWSER_ALLOW_FOREGROUND=1` | Allow `page.bringToFront()` |
+| `OPENCODE_BROWSER_AGENT_WINDOW=separate` | Open agent tabs in a separate window (`current`: in the user's window), whatever the status page says |
 | `OPENCODE_BROWSER_EXECUTE_SLICE_MS=2000` | Longest `execute` JavaScript may run without yielding before it is stopped (50 to 60000; every session waits meanwhile) |
 | `OPENCODE_BROWSER_GHOST_CURSOR=1` | Show the ghost cursor on every agent tab (pages can see it) |
 | `OPENCODE_BROWSER_HUMAN_INPUT=0` | Send input at full speed instead of human-like paths and pacing |
