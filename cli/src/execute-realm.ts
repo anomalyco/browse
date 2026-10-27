@@ -597,7 +597,6 @@ export class ExecuteRealm {
   private readonly forceProxy = new WeakSet<object>()
   private readonly timers = new Map<number, ReturnType<typeof setTimeout>>()
   private nextTimer = 0
-  private timersAborted = false
   private entryDepth = 0
   private readonly sliceMs = executeSliceMs()
   // Sliding window of VM time: the realm's slices may use at most half of the last three slice
@@ -681,7 +680,7 @@ export class ExecuteRealm {
       // A string callback would be code generation; refuse it rather than failing later.
       if (typeof callback !== "function") throw new TypeError("The timer callback must be a function")
       const id = ++this.nextTimer
-      if (this.timersAborted || this.stopped) return id
+      if (this.stopped) return id
       const fire = () => {
         if (!repeat) this.timers.delete(id)
         if (this.stopped) return
@@ -710,20 +709,6 @@ export class ExecuteRealm {
       Reflect.defineProperty(global, name, { value: this.toSandbox(value), writable: true, configurable: true, enumerable: false })
     }
     new vm.Script("{ const then = Promise.prototype.then; const ready = Promise.resolve(); globalThis.queueMicrotask = callback => Reflect.apply(then, ready, [callback]); }").runInContext(this.context)
-  }
-
-  /**
-   * Clear every pending realm timer and park new ones (they never fire) until resumeTimers(),
-   * keeping JavaScript state. For a user stop that should not reset `state`; dispose() is the full stop.
-   */
-  abortTimers(): void {
-    this.timersAborted = true
-    for (const timer of this.timers.values()) clearTimeout(timer)
-    this.timers.clear()
-  }
-
-  resumeTimers(): void {
-    this.timersAborted = false
   }
 
   /** Pending realm timers, for tests and diagnostics. */

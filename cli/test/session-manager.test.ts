@@ -188,8 +188,8 @@ describe("delete and reset while busy", () => {
   })
 })
 
-describe("abortable realm timers", () => {
-  test("abort clears pending timers and parks new ones until resume", async () => {
+describe("realm timers", () => {
+  test("dispose clears pending timers and refuses new ones", async () => {
     const realm = new ExecuteRealm()
     const fired: string[] = []
     const record = realm.toSandbox((name: string) => fired.push(name))
@@ -199,18 +199,13 @@ describe("abortable realm timers", () => {
       args: [record],
     })
     expect(realm.pendingTimers).toBe(3)
-    await Bun.sleep(1)
-    realm.abortTimers()
+    realm.dispose()
     expect(realm.pendingTimers).toBe(0)
-    const before = fired.length
-    await realm.run({ source: "(async function (record) { setTimeout(() => record('late'), 1) })", filename: "late.js", args: [record] })
+    expect(realm.isStopped).toBe(true)
     await Bun.sleep(60)
-    // Nothing fired after the abort, including the timer created after it.
-    expect(fired.length).toBe(before)
-    expect(fired).not.toContain("late")
-    realm.resumeTimers()
-    await realm.run({ source: "(async function (record) { await new Promise((resolve) => setTimeout(resolve, 5)); record('resumed') })", filename: "resumed.js", args: [record] })
-    expect(fired).toContain("resumed")
-    expect(realm.pendingTimers).toBe(0)
+    expect(fired).toEqual([])
+    await expect(realm.run({ source: "(async function (record) { setTimeout(() => record('late'), 1) })", filename: "late.js", args: [record] })).rejects.toThrow("Execute stopped")
+    await Bun.sleep(20)
+    expect(fired).toEqual([])
   })
 })

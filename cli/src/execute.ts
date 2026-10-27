@@ -528,7 +528,6 @@ export class ExecuteSandbox {
           this.state = this.realm.state
           this.pendingWarnings.push("The previous execute realm stopped; JavaScript state and pending callbacks were reset.")
         }
-        this.realm?.resumeTimers()
         const globals = await this.getGlobals(options)
         const { result, logs, logSummary, aftermath } = await runUserCode({ code, globals, ...(this.realm ? { realm: this.realm } : {}) })
         await this.networkCapture.settleForOutput()
