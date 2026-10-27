@@ -66,7 +66,7 @@ const checkoutExtensionDirs = (() => {
   return [path.join(repo, "public"), path.join(repo, "dist")]
 })()
 
-type Settings = { opencode?: string; entry?: string; version?: string }
+export type Settings = { opencode?: string; entry?: string; version?: string }
 
 export type Browser = {
   name: string
@@ -175,7 +175,7 @@ function configFile() {
   return candidates.find((file) => existsSync(file) && statSync(file).isFile()) ?? candidates[0]!
 }
 
-type Servers = Record<string, { type?: unknown; command?: unknown; environment?: unknown; [key: string]: unknown }>
+export type Servers = Record<string, { type?: unknown; command?: unknown; environment?: unknown; [key: string]: unknown }>
 
 /** Changes whenever the installed runtime does. */
 function fingerprint(entry: string) {
@@ -401,11 +401,29 @@ async function awaitConnection(entry: string) {
     : `! Not connected yet. Finish the steps above, then check with \`${cliCommand("status")}\`.`)
 }
 
+/**
+ * What install set up: the runtime the browse MCP server runs and its version. Read from settings.json, else from
+ * the MCP server entry itself (a checkout install from an earlier version wrote no version there).
+ */
+export function installedRuntime(settings: Settings | undefined, server: Servers[string] | undefined) {
+  const command = Array.isArray(server?.command) ? server.command.filter((part): part is string => typeof part === "string") : []
+  const entry = settings?.entry ?? command.find((part) => /cli\.m?js$/.test(part))
+  if (!entry || (!settings?.version && !existsSync(entry))) return undefined
+  // A bundle with the sources beside it is a checkout's build: cli/dist/cli.mjs next to cli/src/main.ts.
+  const packageDir = path.dirname(path.dirname(entry))
+  const source = existsSync(path.join(packageDir, "src", "main.ts"))
+  const version =
+    settings?.version ??
+    (path.resolve(entry) === path.join(packageRoot, "dist", "cli.mjs") ? opencodeBrowserVersion : readJson<{ version?: string }>(path.join(packageDir, "package.json"))?.version)
+  return { entry, version, source }
+}
+
 /** Printed before the relay's status by `opencode-browser status`. */
 export function printSetupStatus() {
   const settings = readJson<Settings>(files.settings)
-  log(settings?.version ? `Setup:     installed` : `Setup:     not installed. Run \`${installCommand()}\`.`)
-  log(`Version:   ${settings?.version ?? "not installed"}${settings?.entry ? ` (${settings.entry})` : ""}`)
+  const runtime = installedRuntime(settings, mcpServers()[MCP_NAME])
+  log(runtime ? `Setup:     installed${runtime.source ? " (from source)" : ""}` : `Setup:     not installed. Run \`${installCommand()}\`.`)
+  log(`Version:   ${runtime ? `${runtime.version ?? "unknown"} (${runtime.entry})` : "not installed"}`)
   log(`opencode:  ${settings?.opencode ?? findOpencode([]) ?? "not found"}`)
   log(mcpServers()[MCP_NAME] ? `MCP:       "${MCP_NAME}" configured` : "MCP:       not configured")
   log(`Logs:      ${path.join(files.dir, "logs")}`)

@@ -1,5 +1,8 @@
-import { describe, expect, test } from "bun:test"
-import { locateExtension, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
+import { afterAll, describe, expect, test } from "bun:test"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import { installedRuntime, locateExtension, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
 
 const browser = (name: string): Browser => ({ name, userData: `/data/${name}`, manifests: [], defaultIDs: [], executables: [] })
 const chrome = browser("Google Chrome")
@@ -140,5 +143,31 @@ describe("waiting for the extension", () => {
     const connected = await waitForExtension({ connected: async () => (polls++, false), timeoutMs: 5_000, intervalMs: 1_000, sleep: instant })
     expect(connected).toBe(false)
     expect(polls).toBe(6)
+  })
+})
+
+describe("status recognises the install", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "browse-setup-"))
+  afterAll(() => fs.rmSync(root, { recursive: true, force: true }))
+  const checkout = path.join(root, "browse", "cli")
+  const entry = path.join(checkout, "dist", "cli.mjs")
+  fs.mkdirSync(path.join(checkout, "dist"), { recursive: true })
+  fs.mkdirSync(path.join(checkout, "src"), { recursive: true })
+  fs.writeFileSync(entry, "")
+  fs.writeFileSync(path.join(checkout, "src", "main.ts"), "")
+  fs.writeFileSync(path.join(checkout, "package.json"), JSON.stringify({ version: "1.2.3" }))
+  const server = { type: "local", command: ["/usr/bin/node", entry, "mcp"] }
+
+  test("a checkout whose settings have no version, from the MCP server entry", () => {
+    expect(installedRuntime({ opencode: "/bin/opencode" }, server)).toEqual({ entry, version: "1.2.3", source: true })
+  })
+
+  test("the version install recorded", () => {
+    expect(installedRuntime({ entry, version: "0.0.9" }, undefined)).toEqual({ entry, version: "0.0.9", source: true })
+  })
+
+  test("nothing installed", () => {
+    expect(installedRuntime(undefined, undefined)).toBeUndefined()
+    expect(installedRuntime({ opencode: "/bin/opencode" }, { command: ["/usr/bin/node", path.join(root, "gone", "cli.mjs"), "mcp"] })).toBeUndefined()
   })
 })
