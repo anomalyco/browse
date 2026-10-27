@@ -1154,8 +1154,9 @@ type SendDebuggerCommand = (command: {
 }) => Effect.Effect<unknown, Error>
 
 /**
- * The relay's ghost cursor, per tab. It is off unless a recording or the flight recorder runs on the tab,
- * OPENCODE_BROWSER_GHOST_CURSOR=1 is set, or the agent calls showGhostCursor(). While it is off the relay sends
+ * The relay's ghost cursor, per tab. It is off unless the default says so (`shownByDefault`: the status page's
+ * "Agent cursor" setting or OPENCODE_BROWSER_GHOST_CURSOR outside recordings, a recording's cursor: true on a recorded
+ * tab), or the agent calls showGhostCursor(). While it is off the relay sends
  * nothing to the page for it. While it is on it runs in an isolated world (Page.createIsolatedWorld, which
  * returns the same world for the same name until the document changes), so the page's own scripts can't see
  * it. Position and caption live here, in the relay, and are restored on the next document.
@@ -1251,23 +1252,31 @@ export class GhostCursorTabs {
     if (state.mode === "persistent") return
     this.shownByDefault.add(tabId)
     // Recordings end in their own modules; check once a second and take the cursor away when one has.
-    this.watchTimer ??= setInterval(() => {
-      for (const id of this.shownByDefault) {
-        if (this.visible(id)) continue
-        this.shownByDefault.delete(id)
-        const current = this.tabs.get(id)
-        if (current) {
-          current.drawn = false
-          delete current.caption
-        }
-        Effect.runPromise(Effect.ignore(this.call(id, "hide", null, false, false))).catch(() => {})
-      }
-      if (this.shownByDefault.size === 0) {
-        clearInterval(this.watchTimer)
-        this.watchTimer = undefined
-      }
-    }, 1_000)
+    this.watchTimer ??= setInterval(() => void this.refresh(), 1_000)
     this.watchTimer.unref?.()
+  }
+
+  /**
+   * Takes the cursor away now from tabs (all by default) that showed it only by default and no longer should: the
+   * setting turned off, or a recording without the cursor started.
+   */
+  refresh(tabIds: Iterable<number> = this.shownByDefault): Promise<void> {
+    const hides: Promise<void>[] = []
+    for (const id of Array.from(tabIds)) {
+      if (!this.shownByDefault.has(id) || this.visible(id)) continue
+      this.shownByDefault.delete(id)
+      const current = this.tabs.get(id)
+      if (current) {
+        current.drawn = false
+        delete current.caption
+      }
+      hides.push(Effect.runPromise(Effect.ignore(this.call(id, "hide", null, false, false).pipe(Effect.timeout("2 seconds")))).catch(() => {}))
+    }
+    if (this.shownByDefault.size === 0 && this.watchTimer) {
+      clearInterval(this.watchTimer)
+      this.watchTimer = undefined
+    }
+    return Promise.all(hides).then(() => undefined)
   }
 
   private state(tabId: number): GhostCursorTabState {

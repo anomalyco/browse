@@ -13,7 +13,7 @@ import {
   replayTargetCreated,
 } from "./cdp-shims.ts"
 import { CdpClientPool } from "./cdp-client-pool.ts"
-import { beforeInput, forgetTab } from "./human-input.ts"
+import { beforeInput, forgetTab, humanInputEnabled, humanInputOverride, setHumanInput } from "./human-input.ts"
 import { CdpRouter } from "./cdp-router.ts"
 import { CdpRuntime } from "./cdp-runtime.ts"
 import { ExtensionRpc } from "./extension-rpc.ts"
@@ -243,6 +243,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const isTabRecorded = (tabId: number) => recordingRelay.isRecordingTab(tabId) || flightRecorder.isActiveTab(tabId)
   /** A waiting handoff's card leaves the page while it is recorded (the extension notifies instead), and returns after. */
   const recordingChanged = async (tabId: number): Promise<void> => {
+    // The agent cursor leaves a tab whose recording didn't ask for it before the first frame.
+    await ghostCursor.refresh([tabId])
     const pending = handoffs.pendingForTab(tabId)
     const target = registry.tabTargets.get(tabId)
     if (!pending || !target) return
@@ -644,9 +646,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const mainFrameIdsByTab = new Map<number, string>()
   /** Page.navigate to a data: URL waits for its tab's main frame to commit the about:blank document it writes into. */
   const blankNavigationWaiters = new Map<number, (url: string, loaderId: string | undefined) => void>()
-  // Off by default: pages can detect an injected cursor, and recordings should show only the page. A recording or
-  // flight recorder started with cursor: true shows it (demo videos), as do showGhostCursor() and the env var.
-  const ghostCursorByDefault = yield* Config.Boolean("OPENCODE_BROWSER_GHOST_CURSOR").pipe(Config.withDefault(false))
+  // The agent cursor. Outside recordings, the status page's "Agent cursor" setting decides: off by default, since pages
+  // can detect an injected cursor; OPENCODE_BROWSER_GHOST_CURSOR (1 or 0) overrides it. A recorded tab (a recording or
+  // the flight recorder) shows it only when that recording was started with cursor: true (demo videos), so recordings
+  // show only the page whatever the setting. showGhostCursor() shows it anywhere.
+  const ghostCursorEnv = Option.getOrUndefined(yield* Config.option(Config.Boolean("OPENCODE_BROWSER_GHOST_CURSOR")))
+  /** The extension's setting; an older extension sends none, which leaves it off. */
+  let ghostCursorSetting = false
+  const ghostCursorAlways = () => ghostCursorEnv ?? ghostCursorSetting
   // Where new agent tabs open: "current" (the user's window) or "separate" (the agents' own window). Unset, the
   // extension's status page setting decides; so does any other value.
   const agentWindowSetting = Option.getOrUndefined(yield* Config.option(Config.String("OPENCODE_BROWSER_AGENT_WINDOW")))?.trim().toLowerCase()
@@ -654,8 +661,32 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const ghostCursor = new GhostCursorTabs({
     send: sendDebuggerCommand,
     mainFrameId: (tabId) => mainFrameIdsByTab.get(tabId),
-    shownByDefault: (tabId) => ghostCursorByDefault || recordingRelay.showsGhostCursor(tabId) || flightRecorder.showsGhostCursor(tabId),
+    shownByDefault: (tabId) =>
+      isTabRecorded(tabId) ? recordingRelay.showsGhostCursor(tabId) || flightRecorder.showsGhostCursor(tabId) : ghostCursorAlways(),
   })
+  /** The settings the relay's environment fixes, for the extension's status page. */
+  const settingOverrides = (): JsonObject => {
+    const human = humanInputOverride()
+    return {
+      ...(agentWindow ? { agentWindow } : {}),
+      ...(ghostCursorEnv === undefined ? {} : { cursor: ghostCursorEnv ? "always" : "off" }),
+      ...(human === undefined ? {} : { humanInput: human ? "on" : "off" }),
+    }
+  }
+  /**
+   * The extension's status page settings (its `settings` event, sent after pairing and on every change). Only the
+   * known values count; anything else leaves that setting as it was. Environment variables still win. The answer tells
+   * the status page which settings the environment fixes.
+   */
+  const applyExtensionSettings = (params: JsonObject | undefined): void => {
+    const cursor = params?.cursor
+    if (cursor === "off" || cursor === "always") ghostCursorSetting = cursor === "always"
+    const human = params?.humanInput
+    if (human === "on" || human === "off") setHumanInput(human === "on")
+    relayLog("extension.settings", { cursor: ghostCursorAlways() ? "always" : "off", humanInput: humanInputEnabled() ? "on" : "off" })
+    void ghostCursor.refresh()
+    sendExtensionBestEffort({ method: "relay.settings", params: { overrides: settingOverrides() } })
+  }
   const suppressedChildSessions = new Map<string, number>()
   const protectedFrames = new ProtectedFrameTracker()
 
@@ -958,6 +989,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     extensionGeneration += 1
     rejectedExtensionConnections = 0
     clearLiveExtensionState("Extension replaced")
+    // A new extension starts from the defaults until it sends its settings (an older one never does).
+    ghostCursorSetting = false
+    setHumanInput(undefined)
     extensionRpc.replaceSocket(socket)
     extensionRpc.markHandshake(
       getString(message.params, "version"),
@@ -1067,6 +1101,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     const extensionMethod = message.method as string
     const eventTabId = getNumber(message.params, "tabId")
     if (extensionMethod === "hello") {
+      return
+    }
+    if (extensionMethod === "settings") {
+      applyExtensionSettings(message.params)
       return
     }
     if (extensionMethod === "log") {

@@ -111,6 +111,7 @@ const extensionCommandMethodValues = [
   "recording.cancel",
   "tabs.cleanup",
   "update.notice",
+  "relay.settings",
 ] as const
 
 const extensionEventMethodValues = [
@@ -128,6 +129,7 @@ const extensionEventMethodValues = [
   "log",
   "recording.cancelled",
   "pageStatus.requested",
+  "settings",
 ] as const
 
 type ExtensionCommandMethod = typeof extensionCommandMethodValues[number]

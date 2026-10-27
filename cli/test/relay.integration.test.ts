@@ -27,8 +27,8 @@ class FakeExtension {
   relayProved = false
   private readonly handlers = new Map<string, (command: Command) => unknown>()
 
-  constructor(private readonly code: string) {
-    this.socket = new WebSocket(`ws://127.0.0.1:${port}/extension`, { origin: stableUnpackedExtensionOrigin })
+  constructor(private readonly code: string, private readonly relayPort = port) {
+    this.socket = new WebSocket(`ws://127.0.0.1:${relayPort}/extension`, { origin: stableUnpackedExtensionOrigin })
     this.socket.on("close", (code) => { this.closeCode = code })
   }
 
@@ -41,7 +41,7 @@ class FakeExtension {
    * Resolves true once the relay proved the code and accepted the extension's proof. A real extension stops when
    * the relay's proof is wrong; `answerAnyway` sends the extension's proof regardless, as an impostor would.
    */
-  async pair(options: { readonly answerAnyway?: boolean; readonly proofPort?: number } = {}): Promise<boolean> {
+  async pair(options: { readonly answerAnyway?: boolean; readonly proofPort?: number; readonly settings?: Record<string, unknown> } = {}): Promise<boolean> {
     await new Promise<void>((resolve, reject) => {
       this.socket.once("open", () => resolve())
       this.socket.once("error", reject)
@@ -61,12 +61,14 @@ class FakeExtension {
     const params = await challenge
     // The relay must prove it knows the code before the extension obeys it.
     if (!params) return false
-    const proofPort = options.proofPort ?? port
+    const proofPort = options.proofPort ?? this.relayPort
     this.relayProved = params.proof === pairingProof(this.code, "relay", proofPort, params.nonce, nonce)
     if (!this.relayProved && !options.answerAnyway) return false
     this.socket.send(JSON.stringify({ method: "auth.response", params: { proof: pairingProof(this.code, "extension", proofPort, nonce, params.nonce) } }))
     this.socket.on("message", (data) => this.answer(JSON.parse(String(data)) as Command))
     this.socket.send(JSON.stringify({ method: "ready" }))
+    // A current extension sends its status page settings right after; an older one sends none.
+    if (options.settings) this.emit("settings", options.settings)
     await Bun.sleep(100)
     return this.relayProved && this.socket.readyState === WebSocket.OPEN
   }
@@ -142,25 +144,37 @@ function cdpCall(socket: WebSocket, id: number, method: string, params: Record<s
   })
 }
 
-beforeAll(async () => {
-  port = await freePort()
-  base = `http://127.0.0.1:${port}`
-  relay = spawn(process.execPath, [path.join(import.meta.dir, "../src/main.ts"), "serve"], {
-    env: { PATH: process.env.PATH ?? "", HOME: home, OPENCODE_BROWSER_HOME: home, OPENCODE_BROWSER_PORT: String(port), OPENCODE_BROWSER_UPDATE_CHECK: "0" },
+/** Starts a relay from source on a free port with the given data root and extra environment; resolves once it answers. */
+async function startRelay(root: string, env: Record<string, string> = {}) {
+  const relayPort = await freePort()
+  const child = spawn(process.execPath, [path.join(import.meta.dir, "../src/main.ts"), "serve"], {
+    env: { PATH: process.env.PATH ?? "", HOME: root, OPENCODE_BROWSER_HOME: root, OPENCODE_BROWSER_PORT: String(relayPort), OPENCODE_BROWSER_UPDATE_CHECK: "0", ...env },
     stdio: "ignore",
   })
   for (let attempt = 0; attempt < 100; attempt++) {
-    const ready = await fetch(`${base}/version`).then((response) => response.ok, () => false)
+    const ready = await fetch(`http://127.0.0.1:${relayPort}/version`).then((response) => response.ok, () => false)
     if (ready) break
     await Bun.sleep(100)
   }
-  token = relayToken(home)
+  return { child, port: relayPort, token: relayToken(root) }
+}
+
+async function stopRelay(child: ChildProcess | undefined) {
+  child?.kill("SIGTERM")
+  await Bun.sleep(200)
+  child?.kill("SIGKILL")
+}
+
+beforeAll(async () => {
+  const started = await startRelay(home)
+  relay = started.child
+  port = started.port
+  base = `http://127.0.0.1:${port}`
+  token = started.token
 }, 20_000)
 
 afterAll(async () => {
-  relay?.kill("SIGTERM")
-  await Bun.sleep(200)
-  relay?.kill("SIGKILL")
+  await stopRelay(relay)
   fs.rmSync(home, { recursive: true, force: true })
 })
 
@@ -360,6 +374,111 @@ describe("relay", () => {
     socket.close()
     extension.close()
   }, 20_000)
+})
+
+/**
+ * A paired fake extension with one agent tab (`tabId`) attached to a CDP session; `mouse()` sends one pointer move
+ * through the relay and reports what reached the extension for it: the Input events (one when human-like input is off,
+ * a path when it's on) and whether the relay drew the agent cursor (it calls into an isolated world to do so).
+ */
+async function settingsScene(options: { readonly relayPort: number; readonly relayToken: string; readonly code: string; readonly tabId: number; readonly settings?: Record<string, unknown> }) {
+  const targetInfo = { targetId: `TARGET-${options.tabId}`, type: "page", title: "Example", url: "https://example.com/", attached: true, browserContextId: "CTX" }
+  const extension = new FakeExtension(options.code, options.relayPort)
+    .on("tabs.create", () => ({ tabId: options.tabId }))
+    .on("Target.getTargetInfo", () => ({ targetInfo }))
+    .on("Page.createIsolatedWorld", () => ({ executionContextId: 7 }))
+  expect(await extension.pair(options.settings ? { settings: options.settings } : {})).toBe(true)
+  const socket = await connectCdp(`ws://127.0.0.1:${options.relayPort}/devtools/browser/test?opencodeBrowserSessionId=settings-${options.tabId}`, { authorization: `Bearer ${options.relayToken}` })
+  if (!(socket instanceof WebSocket)) throw new Error(`CDP connection refused: ${socket}`)
+  await cdpCall(socket, 1, "Target.createTarget", { url: "https://example.com/" })
+  const sessionId = String((await cdpCall(socket, 2, "Target.attachToTarget", { targetId: targetInfo.targetId, flatten: true })).result?.sessionId)
+  let id = 10
+  let x = 100
+  const sentFor = (method: string) => extension.commands.filter((command) => command.method === "debugger.sendCommand" && command.params?.method === method).length
+  return {
+    extension,
+    socket,
+    /** The relay's `relay.settings` answers: what its environment fixes. */
+    overrides: () => extension.commands.filter((command) => command.method === "relay.settings").map((command) => command.params?.overrides),
+    async mouse() {
+      const inputs = sentFor("Input.dispatchMouseEvent")
+      const worlds = sentFor("Page.createIsolatedWorld")
+      x = x === 100 ? 700 : 100
+      const result = await cdpCall(socket, id++, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y: 300 }, sessionId)
+      expect(result.error).toBeUndefined()
+      await Bun.sleep(150)
+      return { inputs: sentFor("Input.dispatchMouseEvent") - inputs, cursor: sentFor("Page.createIsolatedWorld") > worlds }
+    },
+    close() {
+      socket.close()
+      extension.close()
+    },
+  }
+}
+
+describe("settings from the extension", () => {
+  test("cursor and human input follow the extension's settings at runtime; invalid values change nothing", async () => {
+    const scene = await settingsScene({ relayPort: port, relayToken: token, code: pairingCode(home), tabId: 81, settings: { cursor: "always", humanInput: "off" } })
+    expect(await until(() => scene.overrides().length === 1)).toBe(true)
+    expect(scene.overrides()[0]).toEqual({})
+    expect(await scene.mouse()).toEqual({ inputs: 1, cursor: true })
+    scene.extension.emit("settings", { cursor: "sometimes", humanInput: 0 })
+    expect(await until(() => scene.overrides().length === 2)).toBe(true)
+    expect(await scene.mouse()).toEqual({ inputs: 1, cursor: true })
+    scene.extension.emit("settings", { cursor: "off", humanInput: "on" })
+    expect(await until(() => scene.overrides().length === 3)).toBe(true)
+    await Bun.sleep(200)
+    const paced = await scene.mouse()
+    expect(paced.inputs).toBeGreaterThan(1)
+    expect(paced.cursor).toBe(false)
+    scene.close()
+  }, 20_000)
+
+  test("with the cursor always shown, a recording without cursor: true still leaves it out", async () => {
+    const scene = await settingsScene({ relayPort: port, relayToken: token, code: pairingCode(home), tabId: 84, settings: { cursor: "always", humanInput: "off" } })
+    expect(await until(() => scene.overrides().length === 1)).toBe(true)
+    expect((await scene.mouse()).cursor).toBe(true)
+    const post = (pathname: string, body: unknown) =>
+      fetch(`${base}${pathname}`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body) })
+    expect((await post("/flight-recorder/start", { tabId: 84 })).ok).toBe(true)
+    expect((await scene.mouse()).cursor).toBe(false)
+    await post("/flight-recorder/cancel", { tabId: 84 })
+    expect((await scene.mouse()).cursor).toBe(true)
+    expect((await post("/flight-recorder/start", { tabId: 84, cursor: true })).ok).toBe(true)
+    expect((await scene.mouse()).cursor).toBe(true)
+    await post("/flight-recorder/cancel", { tabId: 84 })
+    scene.close()
+  }, 20_000)
+
+  test("an older extension that sends no settings gets the defaults (human input on, no cursor), not the last extension's", async () => {
+    const first = await settingsScene({ relayPort: port, relayToken: token, code: pairingCode(home), tabId: 82, settings: { cursor: "always", humanInput: "off" } })
+    expect(await until(() => first.overrides().length === 1)).toBe(true)
+    first.close()
+    await Bun.sleep(200)
+    const older = await settingsScene({ relayPort: port, relayToken: token, code: pairingCode(home), tabId: 83 })
+    const moved = await older.mouse()
+    expect(moved.inputs).toBeGreaterThan(1)
+    expect(moved.cursor).toBe(false)
+    // It never hears of settings it doesn't know.
+    expect(older.overrides()).toEqual([])
+    older.close()
+  }, 20_000)
+
+  test("environment variables override the settings, and the relay reports them", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "browse-relay-env-"))
+    const started = await startRelay(root, { OPENCODE_BROWSER_GHOST_CURSOR: "1", OPENCODE_BROWSER_HUMAN_INPUT: "0", OPENCODE_BROWSER_AGENT_WINDOW: "separate" })
+    try {
+      const scene = await settingsScene({ relayPort: started.port, relayToken: started.token, code: pairingCode(root), tabId: 91, settings: { cursor: "off", humanInput: "on" } })
+      expect(await until(() => scene.overrides().length === 1)).toBe(true)
+      expect(scene.overrides()[0]).toEqual({ agentWindow: "separate", cursor: "always", humanInput: "off" })
+      expect(await scene.mouse()).toEqual({ inputs: 1, cursor: true })
+      expect(scene.extension.commands.find((command) => command.method === "tabs.create")?.params?.window).toBe("separate")
+      scene.close()
+    } finally {
+      await stopRelay(started.child)
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  }, 30_000)
 })
 
 describe("dataUrlDocument", () => {

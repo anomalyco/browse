@@ -10,14 +10,33 @@
 // glides: each wheel event becomes an eased ~60 Hz burst, and scrolling an element into view happens in wheel
 // flicks instead of a one-frame jump.
 //
-// Off with OPENCODE_BROWSER_HUMAN_INPUT=0 (for example for fast test runs).
+// On by default. The extension's status page can turn it off ("Human-like input": off, faster but easier for sites to
+// flag); the setting applies from the next input, without a relay restart. OPENCODE_BROWSER_HUMAN_INPUT on the relay
+// overrides it (0/false/off/no: off, anything else: on; for example 0 for fast test runs).
 import type { JsonObject } from "./protocol.ts"
 import { relayLog } from "./relay-log.ts"
 
 type Point = { x: number; y: number }
 type Send = (method: string, params: JsonObject) => Promise<unknown>
 
-const enabled = !/^(0|false|off|no)$/i.test(process.env.OPENCODE_BROWSER_HUMAN_INPUT ?? "")
+/** The extension's setting; undefined until one arrives (an older extension sends none), which means on. */
+let setting: boolean | undefined
+
+/** OPENCODE_BROWSER_HUMAN_INPUT, when set: it wins over the extension's setting. */
+export function humanInputOverride(): boolean | undefined {
+  const value = process.env.OPENCODE_BROWSER_HUMAN_INPUT?.trim()
+  if (!value) return undefined
+  return !/^(0|false|off|no)$/i.test(value)
+}
+
+/** Applies the extension's setting (undefined: back to the default, on). */
+export function setHumanInput(value: boolean | undefined) {
+  setting = value
+}
+
+export function humanInputEnabled(): boolean {
+  return humanInputOverride() ?? setting ?? true
+}
 
 type TabState = { pointer?: Point; aim?: Point & { dx: number; dy: number }; arrivedAt: number; pressedAt?: number; lastKeyAt: number; queue: Promise<void> }
 const tabs = new Map<number, TabState>()
@@ -97,7 +116,7 @@ export function trajectory(from: Point, to: Point): { point: Point; delay: numbe
  * is false for commands to a child frame, whose coordinates aren't the page's.
  */
 export function beforeInput(tabId: number, method: string, params: JsonObject, root: boolean, send: Send): Promise<void> {
-  if (!enabled || !paced.has(method) || (method === "DOM.scrollIntoViewIfNeeded" && !root)) return Promise.resolve()
+  if (!humanInputEnabled() || !paced.has(method) || (method === "DOM.scrollIntoViewIfNeeded" && !root)) return Promise.resolve()
   // Playwright doesn't always wait for a move before pressing, so one tab's input runs in order: the press
   // waits for the movement before it to land.
   const tab = state(tabId)
