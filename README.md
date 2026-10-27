@@ -21,7 +21,7 @@ You need [Bun](https://bun.sh), Node.js 22+, and [opencode](https://opencode.ai)
 **1. Build it and add the `browse` tools to opencode**
 
 ```sh
-git clone https://github.com/R44VC0RP/browse.git
+git clone https://github.com/anomalyco/browse.git
 cd browse
 bun run setup
 ```

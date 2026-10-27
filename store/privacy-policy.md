@@ -20,4 +20,4 @@ Anomaly, the maker of OpenCode, doesn't run a server for this extension and does
 - Remove the extension and run `npx opencode-browser-cli uninstall` to delete everything it set up.
 
 ## Contact
-Questions: open an issue at https://github.com/R44VC0RP/browse.
+Questions: open an issue at https://github.com/anomalyco/browse.
