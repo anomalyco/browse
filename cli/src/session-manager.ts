@@ -1,6 +1,7 @@
 import { Deferred, Effect, Exit, Fiber, Latch, Option, Result, Schema, Semaphore } from "effect"
 import { defaultPageClosedWarning, ExecuteSandbox, hasExplicitTargetSelection, type ExecuteResult, type ExecuteTargetSelection } from "./execute.ts"
 import type { NetworkCaptureOptions, NetworkCaptureResult, NetworkCaptureStatus, NetworkCaptureStopOptions } from "./network-capture.ts"
+import { cliCommand } from "./paths.ts"
 import { generateSessionId } from "./relay-helpers.ts"
 import type { OpenCodeBrowserSession, ExecuteSandboxLike, SessionSummary, SessionTarget } from "./relay-types.ts"
 import type { AuthenticatedJsonOutcome, AuthenticatedJsonRequest } from "./relay-schema.ts"
@@ -93,7 +94,7 @@ const sessionError = (
 
 export const adoptionTipForUrl = (url: string): string => {
   const selector = targetUrlHintSelector(url)
-  return `Tip: an attached tab is open (${url}). Use opencode-browser session adopt --target-url '${selector}' to drive it instead of this new tab.`
+  return `Tip: an attached tab is open (${url}). Use session_adopt with targetUrl '${selector}' (CLI: ${cliCommand(`session adopt --target-url '${selector}'`)}) to drive it instead of this new tab.`
 }
 
 export const shouldAppendAdoptionTip = (options: {

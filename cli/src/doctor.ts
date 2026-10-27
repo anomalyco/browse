@@ -3,7 +3,7 @@ import * as RelayClient from "./relay-client.ts"
 import { relayBuildProblem } from "./relay-lifecycle.ts"
 import type { ExtensionStatus, RelayVersion, SessionSummary, TargetSummary } from "./relay-schema.ts"
 import { extensionProtocolVersion } from "./protocol.ts"
-import { installCommand, STORE_LISTED } from "./paths.ts"
+import { cliCommand, installCommand, STORE_LISTED } from "./paths.ts"
 import * as SessionStore from "./session-store.ts"
 import type { UpdateJson } from "./update.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "./version.ts"
@@ -368,7 +368,7 @@ function buildDoctorChecks(options: {
       label: "extension pairing",
       status: options.extensionResult.value.pairingFailures > 0 && !options.extensionResult.value.connected ? "warn" as const : "ok" as const,
       message: options.extensionResult.value.pairingFailures > 0
-        ? `${options.extensionResult.value.pairingFailures} connection(s) failed pairing${options.extensionResult.value.connected ? "; a paired extension is connected" : "; update the extension, or run `opencode-browser pair` and enter the code on its status page"}`
+        ? `${options.extensionResult.value.pairingFailures} connection(s) failed pairing${options.extensionResult.value.connected ? "; a paired extension is connected" : `; update the extension, or run \`${cliCommand("pair")}\` and enter the code on its status page`}`
         : "no failed pairing attempts",
     }] : []),
     ...(options.extensionResult.ok && options.extensionResult.value.processFaults !== undefined ? [{
@@ -526,7 +526,7 @@ function buildDoctorRecommendations(options: {
   readonly unhealthyTargets: readonly TargetSummary[]
 }): readonly string[] {
   const relayRecommendations = options.relayResult.ok ? [] : [
-    "Run a relay-backed command to start the detached relay automatically; use `opencode-browser serve` only for foreground debugging.",
+    `Run a relay-backed command to start the detached relay automatically; use \`${cliCommand("serve")}\` only for foreground debugging.`,
   ]
   const relayBuildRecommendations = options.relayResult.ok
     ? [relayBuildProblem(options.relayResult.value)].filter((message) => message !== undefined)
@@ -545,7 +545,7 @@ function buildDoctorRecommendations(options: {
     ? ["Keep OpenCode Browser enabled in one browser/profile. To switch, disable it in the current browser before connecting the other; new sessions do not change the active browser."]
     : []
   const staleSessionRecommendations = options.staleCurrent && options.current ? [
-    `Current session ${options.current} is stale; run \`opencode-browser session new\` or \`opencode-browser session use <id>\` after the relay is running.`,
+    `Current session ${options.current} is stale; run \`${cliCommand("session new")}\` or \`${cliCommand("session use <id>")}\` after the relay is running.`,
   ] : []
   const unhealthyTargetRecommendations = options.unhealthyTargets.length ? [
     "A target is crashed or showing a browser error page. Run the owning session once to trigger relay-owned recovery, or reset/re-adopt a user-owned tab.",

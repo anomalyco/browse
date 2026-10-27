@@ -7,6 +7,7 @@ import process from "node:process"
 import { fileURLToPath } from "node:url"
 import { createDoctorReport, formatDoctorReport, formatTargetSummary } from "./doctor.ts"
 import { runMcpServer } from "./mcp.ts"
+import { cliCommand } from "./paths.ts"
 import * as RelayClient from "./relay-client.ts"
 import { parseAdditionalExtensionOrigins } from "./relay-helpers.ts"
 import * as RelayLifecycle from "./relay-lifecycle.ts"
@@ -247,7 +248,7 @@ const serve = Command.make(
       Effect.gen(function* () {
         const relay = yield* startRelay({ port, additionalExtensionOrigins })
         yield* Console.log(`opencode-browser relay listening at ${relay.url}`)
-        yield* Console.log("OpenCode Browser connects automatically while the browser runs. Run `opencode-browser status` to check.")
+        yield* Console.log(`OpenCode Browser connects automatically while the browser runs. Run \`${cliCommand("status")}\` to check.`)
         yield* Effect.never
       }),
     )
@@ -547,7 +548,7 @@ const status = Command.make(
         yield* Console.log(JSON.stringify({ ...stopped, update: updateJson(update) }, null, 2))
       } else {
         yield* Console.log(`Relay: stopped (${relay.endpoint})`)
-        yield* Console.log("Run opencode-browser execute to start it automatically.")
+        yield* Console.log(`Run \`${cliCommand("execute")}\` (or any relay-backed command) to start it automatically.`)
         if (updateLine) yield* Console.log(updateLine)
       }
       yield* failExit
@@ -585,7 +586,7 @@ const status = Command.make(
       yield* Console.log(`Warning: ${extensionStatus.rejectedConnections} competing browser/profile connection attempt(s) rejected; the active connection was preserved. Use OpenCode Browser in one browser/profile at a time.`)
     }
     if ((extensionStatus.pairingFailures ?? 0) > 0 && !extensionStatus.connected) {
-      yield* Console.log(`Warning: ${extensionStatus.pairingFailures} extension connection(s) failed pairing. Update the extension, or run \`opencode-browser pair\` and enter the code on its status page.`)
+      yield* Console.log(`Warning: ${extensionStatus.pairingFailures} extension connection(s) failed pairing. Update the extension, or run \`${cliCommand("pair")}\` and enter the code on its status page.`)
     }
     if ((extensionStatus.processFaults?.suppressed ?? 0) > 0) {
       const faults = extensionStatus.processFaults!
@@ -617,7 +618,7 @@ const status = Command.make(
         return Console.log(`${marker} ${item.id} ${item.pageUrl ?? "no page yet"}`)
       })
       if (omittedIdleCount > 0) {
-        yield* Console.log(`  (${omittedIdleCount} idle session(s) with no page omitted; run opencode-browser session list to view all)`)
+        yield* Console.log(`  (${omittedIdleCount} idle session(s) with no page omitted; run ${cliCommand("session list")} to view all)`)
       }
     }
     if (targets.length === 0) {

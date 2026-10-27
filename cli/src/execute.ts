@@ -34,6 +34,7 @@ import * as AuthProfile from "./auth-profile.ts"
 import * as AuthenticatedOrigin from "./authenticated-origin.ts"
 import * as NetworkCapture from "./network-capture.ts"
 import { PageConsole } from "./page-console.ts"
+import { cliCommand } from "./paths.ts"
 import { tunePatchright } from "./patchright-tuning.ts"
 import { AuthenticatedJsonOutcome, type AuthenticatedJsonRequest, type ExecuteAftermath, type ExecuteLogEntry, type ExecuteLogSummary, type ExecuteMedia } from "./relay-schema.ts"
 import type { SessionTarget } from "./relay-types.ts"
@@ -113,7 +114,7 @@ const unresponsivePageDiagnosis = (options: { readonly ownsPage: boolean; readon
   `The ${options.ownsPage ? "relay-owned" : "adopted"} session page is unresponsive: the tab is open but its execution context did not answer automation within the health-check budget`,
   options.repaired ? " even after reconnecting to the relay" : "",
   ". The tab was kept and was not replaced. This usually means the page is mid-navigation or its main world is stalled for automation (for example, bot protection). ",
-  "Retry after the page settles, navigate the tab with page.goto(), open a fresh tab with context.newPage(), or release it with `opencode-browser session reset`.",
+  `Retry after the page settles, navigate the tab with page.goto(), open a fresh tab with context.newPage(), or release it with session_reset (CLI: \`${cliCommand("session reset")}\`).`,
 ].join("")
 
 export class TargetSelectionError extends Schema.TaggedError<TargetSelectionError>()(
@@ -221,7 +222,7 @@ export const recoverSessionPage = Effect.fn("Execute.recoverSessionPage")(functi
   )
   if (closeFailure) {
     return yield* new SessionPageRecoveryError({
-      message: "The unhealthy relay-owned session page could not be closed. Run `opencode-browser session reset` before continuing.",
+      message: `The unhealthy relay-owned session page could not be closed. Reset the session (session_reset, or \`${cliCommand("session reset")}\`) before continuing.`,
       reason: "close-failed",
       cause: closeFailure,
     })

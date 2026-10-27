@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { installedRuntime, locateExtension, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
+import { installedRuntime, locateExtension, relayNotRestarted, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
 
 const browser = (name: string): Browser => ({ name, userData: `/data/${name}`, manifests: [], defaultIDs: [], executables: [] })
 const chrome = browser("Google Chrome")
@@ -169,5 +169,25 @@ describe("status recognises the install", () => {
   test("nothing installed", () => {
     expect(installedRuntime(undefined, undefined)).toBeUndefined()
     expect(installedRuntime({ opencode: "/bin/opencode" }, { command: ["/usr/bin/node", path.join(root, "gone", "cli.mjs"), "mcp"] })).toBeUndefined()
+  })
+})
+
+describe("relayNotRestarted", () => {
+  const output = "Restarting the relay leaves browser tabs open but resets in-memory JavaScript state.\nRelay has raw CDP clients attached; disconnect them before restarting\n"
+  const status = (sessions: { id: string; connected: boolean }[]) => JSON.stringify({ relay: { stale: true }, sessions })
+
+  test("names the active agent sessions, says the old version stays, and gives the restart command", () => {
+    expect(relayNotRestarted(status([{ id: "github", connected: true }, { id: "idle", connected: false }]), output, "node /x/cli.mjs relay restart")).toEqual([
+      "! Relay not restarted: an agent session is active (github) (Relay has raw CDP clients attached; disconnect them before restarting).",
+      "  It keeps running the previous version, so agents get this update only after it restarts.",
+      "  When no agent is using the browser, run: node /x/cli.mjs relay restart",
+    ])
+    expect(relayNotRestarted(status([{ id: "a", connected: true }, { id: "b", connected: true }]), output, "cmd")[0]).toStartWith("! Relay not restarted: 2 agent sessions are active (a, b)")
+  })
+
+  test("without a connected session it gives the relay's reason, and by default the command for this checkout", () => {
+    const lines = relayNotRestarted("not json", output)
+    expect(lines[0]).toBe("! Relay not restarted: Relay has raw CDP clients attached; disconnect them before restarting.")
+    expect(lines[2]).toMatch(/run: node .*cli[/\\]dist[/\\]cli\.mjs relay restart$/)
   })
 })

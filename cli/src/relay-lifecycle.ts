@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url"
 import { extensionReconnectAlarmPeriodMs } from "./protocol.ts"
 import * as RelayClient from "./relay-client.ts"
 import { RelayShutdownRequest, type ExtensionStatus, type RelayVersion } from "./relay-schema.ts"
-import { installCommand } from "./paths.ts"
+import { cliCommand, installCommand } from "./paths.ts"
 import { opencodeBrowserBuildId } from "./version.ts"
 
 // From source the CLI entry is main.ts next to this file; the published bundle is a single file, so it is this file.
@@ -59,13 +59,13 @@ export class ExtensionProtocolIncompatible extends Schema.TaggedError<ExtensionP
 
 export function relayBuildProblem(version: RelayVersion, buildId = opencodeBrowserBuildId): string | undefined {
   if (!version.buildId) {
-    return `Running relay does not report a build id; use \`opencode-browser relay restart\` for upgrade guidance (${buildId}).`
+    return `Running relay does not report a build id; use \`${cliCommand("relay restart")}\` for upgrade guidance (${buildId}).`
   }
   if (version.buildId !== buildId) {
     if (isNewerBuild(version.buildId, buildId)) {
-      return `Running relay build ${version.buildId} is newer than CLI build ${buildId}; refresh or restart this CLI or MCP client. Only use \`opencode-browser relay restart\` from the current installation.`
+      return `Running relay build ${version.buildId} is newer than CLI build ${buildId}; refresh or restart this CLI or MCP client. Only use \`${cliCommand("relay restart")}\` from the current installation.`
     }
-    return `Running relay build ${version.buildId} does not match CLI build ${buildId}; run \`opencode-browser relay restart\` explicitly. This leaves browser tabs open but resets in-memory JavaScript state.`
+    return `Running relay build ${version.buildId} does not match CLI build ${buildId}; run \`${cliCommand("relay restart")}\` when no agent is using the browser. This leaves browser tabs open but resets in-memory JavaScript state.`
   }
   return undefined
 }
@@ -137,10 +137,10 @@ export const restartRelay = Effect.fn("RelayLifecycle.restartRelay")(function* (
 
   if (original) {
     if (original.managed !== true || !original.instanceId) {
-      return yield* Effect.fail(new Error("Cannot restart a foreground or unidentified relay. Stop it manually, then run `opencode-browser relay restart`."))
+      return yield* Effect.fail(new Error(`Cannot restart a foreground or unidentified relay. Stop it manually, then run \`${cliCommand("relay restart")}\`.`))
     }
     if (original.shutdownProtocol !== 2) {
-      return yield* Effect.fail(new Error("This legacy relay does not support safe shutdown protocol 2. Stop it manually once, then run `opencode-browser relay restart` to upgrade; no shutdown request was sent."))
+      return yield* Effect.fail(new Error(`This legacy relay does not support safe shutdown protocol 2. Stop it manually once, then run \`${cliCommand("relay restart")}\` to upgrade; no shutdown request was sent.`))
     }
     if (!Number.isFinite(Date.parse(buildId)) || !original.buildId || !Number.isFinite(Date.parse(original.buildId))) {
       return yield* Effect.fail(new Error("Cannot explicitly replace a source or unorderable relay build. Stop it manually, then launch the intended build."))

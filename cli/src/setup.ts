@@ -184,13 +184,40 @@ function fingerprint(entry: string) {
 
 /**
  * After an update, a relay still running the old build refuses the new CLI and MCP server; restart it from
- * the new runtime. Restarting keeps browser tabs open but ends in-flight agent work, so it's announced.
+ * the new runtime. Restarting keeps browser tabs open but ends in-flight agent work, so it's announced. The relay
+ * declines while agents use it (a connected session, a recording); then it keeps the old version, and the lines say
+ * so and how to restart it later.
  */
-function restartOutdatedRelay(entry: string, node: string) {
+function restartOutdatedRelay(entry: string, node: string): string[] | undefined {
   const status = spawnSync(node, [entry, "status", "--json"], { encoding: "utf8", timeout: 15_000 })
   if (!/"stale":\s*true/.test(status.stdout ?? "")) return undefined
   const restart = spawnSync(node, [entry, "relay", "restart"], { encoding: "utf8", timeout: 60_000 })
-  return restart.status === 0 ? "restarted with the new version" : `could not restart: ${(restart.stderr || restart.stdout).trim()}`
+  if (restart.status === 0) return ["✓ Relay restarted with the new version"]
+  return relayNotRestarted(status.stdout ?? "", `${restart.stderr ?? ""}\n${restart.stdout ?? ""}`)
+}
+
+/** What to say when the relay declined to restart: who is using it, that it runs the old version, and the command. */
+export function relayNotRestarted(statusJson: string, output: string, command = cliCommand("relay restart")): string[] {
+  const sessions = (() => {
+    try {
+      const parsed = JSON.parse(statusJson) as { sessions?: { id?: unknown; connected?: unknown }[] }
+      return (parsed.sessions ?? []).filter((item) => item.connected === true && typeof item.id === "string").map((item) => item.id as string)
+    } catch {
+      return []
+    }
+  })()
+  // The relay's reason, without the restart command's own preamble.
+  const reason = output.split("\n").map((line) => line.trim()).filter((line) => line && !line.startsWith("Restarting the relay leaves")).join(" ")
+  const who = sessions.length === 1
+    ? `an agent session is active (${sessions[0]})`
+    : sessions.length > 1
+      ? `${sessions.length} agent sessions are active (${sessions.slice(0, 5).join(", ")}${sessions.length > 5 ? ", …" : ""})`
+      : undefined
+  return [
+    `! Relay not restarted: ${who ?? (reason || "it declined")}${who && reason ? ` (${reason})` : ""}.`,
+    "  It keeps running the previous version, so agents get this update only after it restarts.",
+    `  When no agent is using the browser, run: ${command}`,
+  ]
 }
 
 function mcpServers() {
@@ -335,8 +362,7 @@ async function install(args: string[]) {
   log(opencode ? `✓ Using opencode at ${opencode}` : "! opencode not found. Install it (https://opencode.ai), or add the browse server to another MCP client (see the README).")
   const mcp = configureMcp(entry)
   log(`✓ MCP server ${mcp}`)
-  const relay = restartOutdatedRelay(entry, node)
-  if (relay) log(`${relay.startsWith("restarted") ? "✓" : "!"} Relay ${relay}`)
+  for (const line of restartOutdatedRelay(entry, node) ?? []) log(line)
   const legacy = legacyBrowserControl()
   if (legacy.length)
     log(`! Browser Control MCP server${legacy.length === 1 ? "" : "s"} ${legacy.map((name) => `"${name}"`).join(", ")} also configured. OpenCode Browser replaces it; remove ${legacy.length === 1 ? "it" : "them"} from ${configFile()} to avoid two sets of browser tools.`)
