@@ -1,12 +1,25 @@
 // The status page (welcome.html): opened on install and as the extension's options page. Shows the install command
 // and the relay connection (with the update the relay found, if any), offers reconnect, cleanup, and diagnostics, and
-// sets where agents open their tabs.
+// holds the settings: where agent tabs open and how they're grouped and closed, the agent cursor, human-like input,
+// and handoff notifications. Each is a chrome.storage.local key the background reads when it needs it (or sends to the
+// relay, for the cursor and input); a setting the relay's environment fixes is shown as such.
 import {
+  AGENT_CURSOR_KEY,
   AGENT_DIAGNOSTICS,
-  AGENT_WINDOW_KEY as PLACEMENT_KEY,
+  AGENT_GROUPING_KEY,
+  AGENT_WINDOW_KEY,
+  DEFAULT_IDLE_MINUTES,
+  HANDOFF_NOTIFICATIONS_KEY,
+  HUMAN_INPUT_KEY,
+  IDLE_MINUTES_KEY,
   STATUS_PORT,
+  agentCursor,
+  agentGrouping,
+  handoffNotifications,
+  humanInput,
   type AgentRelayState,
   type FromStatusPage,
+  type RelayOverrides,
   type ToStatusPage,
 } from "../shared/protocol"
 
@@ -44,6 +57,7 @@ function render(state: AgentRelayState) {
   element("update").hidden = !state.update
   element("update-summary").textContent = state.update ? capitalized(state.update.summary) : ""
   element("update-command").textContent = state.update?.command ?? ""
+  showOverrides(state.overrides)
 }
 
 const capitalized = (text: string) => text.charAt(0).toUpperCase() + text.slice(1)
@@ -71,20 +85,58 @@ const flash = (button: HTMLButtonElement, label: string) => {
   setTimeout(() => (button.textContent = original), 1500)
 }
 
-// Where agents open new tabs (agent-window.ts reads it when an agent opens one).
-const placements = Array.from(element("agent-window").querySelectorAll<HTMLInputElement>("input[name=agent-window]"))
-const showPlacement = (value: unknown) => {
-  const chosen = value === "separate" ? "separate" : "current"
-  for (const input of placements) input.checked = input.value === chosen
-}
-void chrome.storage.local.get(PLACEMENT_KEY).then((stored) => showPlacement(stored[PLACEMENT_KEY]))
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && PLACEMENT_KEY in changes) showPlacement(changes[PLACEMENT_KEY]?.newValue)
-})
-for (const input of placements)
-  input.addEventListener("change", () => {
-    if (input.checked) void chrome.storage.local.set({ [PLACEMENT_KEY]: input.value })
+/**
+ * Binds a group of radio buttons (fieldset `name`, inputs `name=name`) to a storage key: `read` turns the stored value
+ * into the radio value to check (unknown values read as the default), `write` a chosen radio value into what's stored.
+ */
+function bindChoice(name: string, key: string, read: (stored: unknown) => string, write: (value: string) => unknown = (value) => value) {
+  const inputs = Array.from(element(name).querySelectorAll<HTMLInputElement>(`input[name=${name}]`))
+  const show = (value: unknown) => {
+    const chosen = read(value)
+    for (const input of inputs) input.checked = input.value === chosen
+  }
+  void chrome.storage.local.get(key).then((stored) => show(stored[key]))
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && key in changes) show(changes[key]?.newValue)
   })
+  for (const input of inputs)
+    input.addEventListener("change", () => {
+      if (input.checked) void chrome.storage.local.set({ [key]: write(input.value) })
+    })
+}
+// Where agents open new tabs (agent-window.ts) and how they're grouped (agent-relay.ts), read when an agent opens one.
+bindChoice("agent-window", AGENT_WINDOW_KEY, (value) => (value === "separate" ? "separate" : "current"))
+bindChoice("agent-grouping", AGENT_GROUPING_KEY, agentGrouping)
+// Minutes before an untouched agent tab closes, 0 for never (tab-cleanup.ts).
+bindChoice(
+  "idle-minutes",
+  IDLE_MINUTES_KEY,
+  (value) => String(typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : DEFAULT_IDLE_MINUTES),
+  Number,
+)
+// Sent to the relay, which applies them from the next input.
+bindChoice("agent-cursor", AGENT_CURSOR_KEY, agentCursor)
+bindChoice("human-input", HUMAN_INPUT_KEY, humanInput)
+bindChoice("handoff-notifications", HANDOFF_NOTIFICATIONS_KEY, handoffNotifications)
+
+// A setting the relay's environment fixes wins over the page's; say so, with the value in effect.
+const overrideNotes: { [Key in keyof RelayOverrides]-?: { variable: string; labels: Record<NonNullable<RelayOverrides[Key]>, string> } } = {
+  agentWindow: { variable: "OPENCODE_BROWSER_AGENT_WINDOW", labels: { current: "in your window", separate: "in a separate window" } },
+  cursor: { variable: "OPENCODE_BROWSER_GHOST_CURSOR", labels: { off: "off", always: "always shown" } },
+  humanInput: { variable: "OPENCODE_BROWSER_HUMAN_INPUT", labels: { on: "on", off: "off" } },
+}
+function showOverrides(overrides: RelayOverrides | undefined) {
+  for (const note of Array.from(document.querySelectorAll<HTMLElement>("[data-override]"))) {
+    const key = note.dataset.override as keyof RelayOverrides
+    const value = overrides?.[key]
+    const known = overrideNotes[key]
+    note.hidden = value === undefined || !known
+    if (value === undefined || !known) continue
+    const variable = document.createElement("code")
+    variable.textContent = known.variable
+    note.replaceChildren(`In effect: ${(known.labels as Record<string, string>)[value]}. Set by `, variable, " on the relay.")
+  }
+}
 
 element<HTMLButtonElement>("copy-command").addEventListener("click", (event) => {
   const button = event.currentTarget as HTMLButtonElement

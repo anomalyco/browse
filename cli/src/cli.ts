@@ -1073,7 +1073,7 @@ const tabsCleanup = Command.make(
   {
     idleMinutes: Flag.Int("idle-minutes").pipe(
       Flag.optional,
-      Flag.withDescription("Close agent tabs idle at least this long; 0 closes every eligible agent tab (default: the extension's setting, 10)"),
+      Flag.withDescription("Close agent tabs idle at least this long; 0 closes every eligible agent tab (default: the extension's setting, 10; still 10 when it is set to never)"),
     ),
     json: jsonFlag,
   },

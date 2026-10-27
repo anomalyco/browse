@@ -165,5 +165,25 @@ footer {
 }
 .note {
   margin-top: 8px;
-  font-size: 12.5px;
+  /* Relative: Chrome's default stylesheet for extension pages sets the body's text to 75%. */
+  font-size: 0.9em;
+}
+.choices + .choices,
+.note + .choices {
+  margin-top: 16px;
+}
+.choices.inline {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 18px;
+  row-gap: 4px;
+}
+.choices.inline label + label {
+  margin-top: 0;
+}
+.note.override {
+  color: var(--fg);
+}
+.note code {
+  font-size: 1em;
 }

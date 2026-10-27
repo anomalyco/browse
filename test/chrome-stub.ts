@@ -210,6 +210,14 @@ export function createChrome() {
         if (!groups.has(id)) groups.set(id, { id, windowId: tabs.get(ids[0]!)!.windowId, title: "", color: "grey", collapsed: false })
         return id
       },
+      async remove(tabIds: number | number[]) {
+        for (const tabId of Array.isArray(tabIds) ? tabIds : [tabIds]) {
+          const tab = tabs.get(tabId)
+          if (!tab) throw new Error(`No tab with id: ${tabId}.`)
+          tabs.delete(tabId)
+          ;((chrome.tabs as unknown as { onRemoved: StubEvent }).onRemoved).emit(tabId, { windowId: tab.windowId, isWindowClosing: false })
+        }
+      },
       async ungroup(tabIds: number | number[]) {
         for (const tabId of Array.isArray(tabIds) ? tabIds : [tabIds]) {
           const tab = tabs.get(tabId)
@@ -224,8 +232,8 @@ export function createChrome() {
         if (!group) throw new Error(`No group with id: ${id}.`)
         return { ...group }
       },
-      async query() {
-        return [...groups.values()].map((group) => ({ ...group }))
+      async query(query: { windowId?: number } = {}) {
+        return [...groups.values()].filter((group) => query.windowId === undefined || group.windowId === query.windowId).map((group) => ({ ...group }))
       },
       async update(id: number, change: Partial<Group>) {
         const group = groups.get(id)

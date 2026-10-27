@@ -1,4 +1,5 @@
 export * as TabCleanup from "./tab-cleanup"
+import { DEFAULT_IDLE_MINUTES, IDLE_MINUTES_KEY } from "../shared/protocol"
 
 // Closes tabs agents opened once nobody has touched them for a while, so agent work doesn't leave a trail of
 // tabs behind. Only tabs an agent created are tracked (the relay's
@@ -9,9 +10,8 @@ export * as TabCleanup from "./tab-cleanup"
 type Tracked = { touched: number }
 
 const STORAGE_KEY = "tabCleanup"
-/** chrome.storage.local: minutes a tracked tab may sit unused before it closes; 0 turns automatic cleanup off. */
-export const IDLE_MINUTES_KEY = "tabCleanupIdleMinutes"
-export const DEFAULT_IDLE_MINUTES = 10
+/** chrome.storage.local (the status page's "Close idle agent tabs"): minutes a tracked tab may sit unused before it closes; 0 never. */
+export { DEFAULT_IDLE_MINUTES, IDLE_MINUTES_KEY }
 const ALARM = "opencode-browser-tab-cleanup"
 
 const tracked = new Map<number, Tracked>()
@@ -49,19 +49,20 @@ export function guard(check: (tabId: number) => boolean) {
   guards.push(check)
 }
 
-/** Called with the tabs each cleanup closed. */
+/** The setting: minutes before an untouched agent tab closes, 0 for never. */
 export async function idleMinutes() {
   const value = (await chrome.storage.local.get(IDLE_MINUTES_KEY))[IDLE_MINUTES_KEY]
-  return typeof value === "number" && value >= 0 ? value : DEFAULT_IDLE_MINUTES
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : DEFAULT_IDLE_MINUTES
 }
 
 /**
- * Closes tracked tabs idle for at least `minutes` (the setting by default). Skips a tab that is the active tab
+ * Closes tracked tabs idle for at least `minutes` (the setting by default; with the setting at never, an agent's
+ * cleanup without a time still closes only tabs idle for the default 10 minutes). Skips a tab that is the active tab
  * of the focused window, is playing audio, or is guarded. `minutes: 0` closes every unguarded tracked tab.
  */
 export async function cleanup(options: { minutes?: number } = {}) {
   await restore()
-  const minutes = options.minutes ?? (await idleMinutes())
+  const minutes = options.minutes ?? ((await idleMinutes()) || DEFAULT_IDLE_MINUTES)
   const now = Date.now()
   const focused = await chrome.windows.getLastFocused().catch(() => undefined)
   const closed: Closed[] = []
@@ -122,6 +123,7 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
 })
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== ALARM) return
+  // Never (0) leaves agent tabs open until their agent or the user closes them.
   void idleMinutes().then((minutes) => {
     if (minutes > 0) return cleanup({ minutes })
   })

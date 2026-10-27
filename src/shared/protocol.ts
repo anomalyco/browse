@@ -28,6 +28,8 @@ export type AgentRelayState = {
   tabs: { tabId: number; status?: PageStatus }[]
   /** A newer browse on the clone's remote branch, as the relay's update check found it, and the command to update. */
   update?: AgentRelayUpdate
+  /** Settings the connected relay's environment variables fix (OPENCODE_BROWSER_AGENT_WINDOW, …). */
+  overrides?: RelayOverrides
 }
 
 export type AgentRelayUpdate = { summary: string; command: string }
@@ -37,6 +39,39 @@ export const AGENT_DIAGNOSTICS = "agents.diagnostics"
 
 /** chrome.storage.local, set on the status page: where agents open new tabs, "current" (default) or "separate". */
 export const AGENT_WINDOW_KEY = "agentTabsWindow"
+
+// The status page's other settings, all in chrome.storage.local. Each applies from the moment it changes (new tabs,
+// the next cleanup, the next handoff or input); a missing or unknown value reads as the default.
+
+/** How agent tabs are grouped: one group per agent session (default), one shared group for every agent, or none. */
+export const AGENT_GROUPING_KEY = "agentTabsGrouping"
+export type AgentGrouping = "session" | "shared" | "none"
+export const agentGrouping = (value: unknown): AgentGrouping => (value === "shared" || value === "none" ? value : "session")
+
+/** Minutes an agent tab may sit untouched before it closes; 0 never closes them automatically. */
+export const IDLE_MINUTES_KEY = "tabCleanupIdleMinutes"
+export const DEFAULT_IDLE_MINUTES = 10
+
+/** Whether the relay draws the agent (ghost) cursor on agent tabs outside recordings: "off" (default) or "always". */
+export const AGENT_CURSOR_KEY = "agentCursor"
+export type AgentCursor = "off" | "always"
+export const agentCursor = (value: unknown): AgentCursor => (value === "always" ? "always" : "off")
+
+/** Whether the relay sends human-like input (curved paths, paced keys): "on" (default) or "off". */
+export const HUMAN_INPUT_KEY = "humanInput"
+export type HumanInput = "on" | "off"
+export const humanInput = (value: unknown): HumanInput => (value === "off" ? "off" : "on")
+
+/** When a handoff shows a system notification: only on a recorded tab (default), or on every handoff. */
+export const HANDOFF_NOTIFICATIONS_KEY = "handoffNotifications"
+export type HandoffNotifications = "recording" | "always"
+export const handoffNotifications = (value: unknown): HandoffNotifications => (value === "always" ? "always" : "recording")
+
+/** The settings the relay applies, sent to it after pairing and whenever they change (the `settings` event). */
+export type RelaySettings = { cursor: AgentCursor; humanInput: HumanInput }
+
+/** Settings the relay's environment fixes, whatever the status page says (the relay's `relay.settings` answer). */
+export type RelayOverrides = { agentWindow?: "current" | "separate"; cursor?: AgentCursor; humanInput?: HumanInput }
 
 export const STATUS_PORT = "opencode-browser.status"
 

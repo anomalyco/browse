@@ -1,6 +1,7 @@
 export * as HandoffNotice from "./handoff-notice"
 
 import type { PageStatus } from "../agent-relay/protocol"
+import { HANDOFF_NOTIFICATIONS_KEY, handoffNotifications } from "../shared/protocol"
 
 // A recording must show only the page, so a handoff on a tab being recorded draws no card there. The toolbar badge
 // says WAIT, and a system notification tells the user which agent needs them where; clicking it shows the tab
@@ -10,6 +11,9 @@ import type { PageStatus } from "../agent-relay/protocol"
 // card is drawn after all, and the recording shows it: a handoff nobody hears about would keep the agent waiting
 // until it times out, which is worse than a card in the video. A notification the OS hides after Chrome showed it
 // (macOS Focus, Chrome's notifications turned off in System Settings) can't be detected; the badge still says WAIT.
+//
+// The status page's "Handoff notifications" setting can ask for a notification on every handoff instead. A tab that
+// isn't recorded still shows its card then; the notification is extra, and clicking it shows the tab the same way.
 
 const PREFIX = "opencode-browser-handoff:"
 /** The handoff each notification is for, by tab, so a repeated status (or one the user dismissed) doesn't notify twice. */
@@ -38,8 +42,8 @@ export function forPage(tabId: number, page: PageStatus): PageStatus {
  * page its status: when no notification can be shown, `forPage` then gives the page its card.
  */
 export async function sync(tabId: number, page: PageStatus | undefined, sessionName: (sessionId?: string) => string) {
-  const handoffId = page?.state === "waiting" && page.recording ? page.handoffId : undefined
-  if (!handoffId) return clear(tabId)
+  const handoffId = page?.state === "waiting" ? page.handoffId : undefined
+  if (!handoffId || (!page?.recording && (await mode()) !== "always")) return clear(tabId)
   if (shown.get(tabId) === handoffId) return
   shown.set(tabId, handoffId)
   unnotified.delete(tabId)
@@ -61,6 +65,11 @@ export async function sync(tabId: number, page: PageStatus | undefined, sessionN
       priority: 2,
     })
     .catch(() => unnotified.add(tabId))
+}
+
+/** The setting: "recording" (notify only while the tab is recorded, the default) or "always". */
+export async function mode() {
+  return handoffNotifications((await chrome.storage.local.get(HANDOFF_NOTIFICATIONS_KEY))[HANDOFF_NOTIFICATIONS_KEY])
 }
 
 export async function clear(tabId: number) {

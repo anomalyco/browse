@@ -21,7 +21,18 @@ import type {
   OffscreenStatusRecordingResult,
   OffscreenStopRecordingResult,
 } from "../agent-relay/recording-types"
-import type { AgentRelayState, AgentRelayStatus, AgentRelayUpdate, PairingSource } from "../shared/protocol"
+import {
+  AGENT_CURSOR_KEY,
+  agentCursor,
+  HUMAN_INPUT_KEY,
+  humanInput,
+  type AgentRelayState,
+  type AgentRelayStatus,
+  type AgentRelayUpdate,
+  type PairingSource,
+  type RelayOverrides,
+  type RelaySettings,
+} from "../shared/protocol"
 import { createAgentRelayLog, formatAgentRelayLog } from "./agent-relay-log"
 import { AgentGroups } from "./agent-groups"
 import { AgentWindow } from "./agent-window"
@@ -44,8 +55,10 @@ export const PAIRING_KEY = "agentRelayPairingCode"
 const PAIRING_FILE = "relay-pairing.json"
 const ALARM = "opencode-browser-relay"
 // Relay tab groups end with this marker, which Chrome renders without width: they read like the session
-// groups ("opencode", or the agent session's name) but stay distinguishable for cleanup.
+// groups ("opencode", or the agent session's name) but stay distinguishable for cleanup. The shared group (the
+// "One shared group for all agents" setting) ends with it twice.
 const GROUP_MARKER = "\u2063"
+const SHARED_MARKER = GROUP_MARKER + GROUP_MARKER
 const GROUP_COLOR = "grey"
 const MAX_RECORDING_BUFFER = 16 * 1024 * 1024
 /** The largest message the relay accepts, in bytes (256 MiB, as Playwright's CDP client); kept a little under. */
@@ -103,6 +116,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   const handshakes = new WeakMap<WebSocket, { nonce: string; code: string; port: number }>()
   let pairing: PairingSource = "none"
   let update: AgentRelayUpdate | undefined
+  /** Settings the connected relay's environment fixes, as it reported them (`relay.settings`). */
+  let overrides: RelayOverrides | undefined
   let bundledPairing: Promise<string | undefined> | undefined
 
   const snapshot = (): AgentRelayState => ({
@@ -113,6 +128,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       return page ? { tabId, status: page } : { tabId }
     }),
     ...(update ? { update } : {}),
+    ...(overrides ? { overrides } : {}),
   })
   const notify = () => input.changed(snapshot())
   const setStatus = (next: AgentRelayStatus) => {
@@ -228,6 +244,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         ms: lasted,
       })
       void chrome.runtime.sendMessage({ action: "recording.cancelAll" }).catch(() => undefined)
+      overrides = undefined
       if (event.code === 4003) setStatus("incompatible")
       else if (event.code === 4004) setStatus("conflict")
       else if (event.code === 4006) setStatus("untrusted")
@@ -319,6 +336,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     relayTabs.forEach((tabId) => current.send(JSON.stringify({ method: "debugger.attached", params: { tabId } })))
     current.send(JSON.stringify({ method: "ready" }))
     log.add("hello", { tabs: relayTabs.size, protocol: extensionProtocolVersion })
+    // The status page's relay-side settings; an older relay ignores the event and keeps its defaults.
+    void sendSettings()
     clearInterval(keepalive)
     keepalive = setInterval(() => {
       if (socket === current) send({ method: "pong" })
@@ -403,7 +422,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         const tabId = number(params, "tabId")
         forget(tabId)
         await DebuggerHub.detach(tabId, OWNER)
-        await ungroup(tabId)
+        await ungroup(tabId, { finished: true })
         return {}
       }
       case "debugger.sendCommand":
@@ -505,6 +524,18 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         const minutes = typeof params?.idleMinutes === "number" ? Math.max(0, params.idleMinutes) : undefined
         const closed = await TabCleanup.cleanup(minutes === undefined ? {} : { minutes })
         return { closed: closed.map((tab) => ({ tabId: tab.tabId, title: tab.title, idleMinutes: tab.idleMinutes })) }
+      }
+      case "relay.settings": {
+        // What the relay's environment fixes, shown on the status page. Only known values; anything else is dropped.
+        const fixed = isJsonObject(params?.overrides) ? params.overrides : {}
+        const next: RelayOverrides = {
+          ...(fixed.agentWindow === "current" || fixed.agentWindow === "separate" ? { agentWindow: fixed.agentWindow } : {}),
+          ...(fixed.cursor === "off" || fixed.cursor === "always" ? { cursor: fixed.cursor } : {}),
+          ...(fixed.humanInput === "on" || fixed.humanInput === "off" ? { humanInput: fixed.humanInput } : {}),
+        }
+        overrides = Object.keys(next).length ? next : undefined
+        notify()
+        return {}
       }
       case "update.notice": {
         const summary = typeof params?.summary === "string" ? params.summary.slice(0, 200) : undefined
@@ -677,8 +708,21 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     current.send(new Uint8Array(data))
   }
 
+  /**
+   * Puts an agent's tab in its group, by the Grouping setting: the session's group (the default), the window's shared
+   * group, or none. A tab already in an agent group of another kind (the setting changed since) stays where it is:
+   * new tabs follow the new setting, and tabs aren't moved around under the user.
+   */
   const group = async (tabId: number, sessionId: string | undefined, current: WebSocket) => {
     const tab = await chrome.tabs.get(tabId)
+    const mode = await AgentGroups.mode()
+    const existing = tab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE ? undefined : await chrome.tabGroups.get(tab.groupId).catch(() => undefined)
+    if (existing && ownedGroup(existing.title) && (mode === "none" || sharedGroup(existing.title) !== (mode === "shared"))) {
+      await AgentGroups.adopt(existing.id)
+      return existing.id
+    }
+    if (mode === "none") return chrome.tabGroups.TAB_GROUP_ID_NONE
+    if (mode === "shared") return serially(() => groupShared(tabId, current))
     const title = groupTitle(sessionId, tab.url)
     const key = sessionId ?? ""
     const known = sessionGroups.get(key)
@@ -702,6 +746,56 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     return groupId
   }
 
+  /**
+   * The shared group: one per window ("Agents · 3"), for every agent session's tabs, collapsed like a session's group.
+   * Run one at a time so concurrent sessions find the group the first one made instead of each making one.
+   */
+  const groupShared = async (tabId: number, current: WebSocket) => {
+    const tab = await chrome.tabs.get(tabId)
+    const target = (await chrome.tabGroups.query({ windowId: tab.windowId })).find(
+      (item) => item.windowId === tab.windowId && sharedGroup(item.title),
+    )
+    let groupId = target?.id
+    if (groupId !== undefined) {
+      if (tab.groupId !== groupId) await chrome.tabs.group({ tabIds: [tabId], groupId })
+    } else {
+      if (socket !== current) throw new Error("The relay reconnected while grouping the tab")
+      groupId = await chrome.tabs.group({ tabIds: [tabId], createProperties: { windowId: tab.windowId } })
+      if (socket !== current) {
+        await chrome.tabs.ungroup(tabId).catch(() => undefined)
+        throw new Error("The relay reconnected while grouping the tab")
+      }
+      await chrome.tabGroups.update(groupId, { title: sharedTitle(1), color: GROUP_COLOR })
+    }
+    await countShared(groupId)
+    await AgentGroups.adopt(groupId)
+    return groupId
+  }
+  let groupQueue: Promise<unknown> = Promise.resolve()
+  const serially = <T>(run: () => Promise<T>): Promise<T> => {
+    const next = groupQueue.then(run, run)
+    groupQueue = next.catch(() => undefined)
+    return next
+  }
+
+  /** Keeps a shared group's title counting its tabs. */
+  const countShared = async (groupId: number) => {
+    const item = await chrome.tabGroups.get(groupId).catch(() => undefined)
+    if (!item || !sharedGroup(item.title)) return
+    const count = (await chrome.tabs.query({ groupId }).catch(() => [])).length
+    if (count && item.title !== sharedTitle(count)) await chrome.tabGroups.update(groupId, { title: sharedTitle(count) }).catch(() => undefined)
+  }
+  let recount: ReturnType<typeof setTimeout> | undefined
+  /** Recounts every shared group soon: tabs closed, moved, or left or joined a group. */
+  const recountShared = () => {
+    clearTimeout(recount)
+    recount = setTimeout(() => {
+      void chrome.tabGroups.query({}).then(async (groups) => {
+        for (const item of groups) if (sharedGroup(item.title)) await countShared(item.id)
+      }).catch(() => undefined)
+    }, 100)
+  }
+
   /** Auto-named sessions take their group name from the site the agent is on, so it follows navigation. */
   const renameForPage = async (tabId: number, url: string | undefined) => {
     const tab = await chrome.tabs.get(tabId).catch(() => undefined)
@@ -716,19 +810,23 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
 
   /**
    * The relay is done with a tab. A tab an agent opened closes with its group rather than spilling into the
-   * user's tabs; a tab the user lent an agent just leaves the group.
+   * user's tabs; a tab the user lent an agent just leaves the group. With grouping off an agent's tab has no group:
+   * it closes when the relay detaches it (`finished`, the toolbar button on it) like a grouped one does. A tab in a
+   * group of the user's own is theirs and stays.
    */
-  const ungroup = async (tabId: number) => {
+  const ungroup = async (tabId: number, options: { finished?: boolean } = {}) => {
     const tab = await chrome.tabs.get(tabId).catch(() => undefined)
-    if (!tab || tab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) return
-    const current = await chrome.tabGroups.get(tab.groupId).catch(() => undefined)
-    if (!ownedGroup(current?.title)) return
+    if (!tab) return
+    const grouped = tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE
+    if (!grouped && !options.finished) return
+    const current = grouped ? await chrome.tabGroups.get(tab.groupId).catch(() => undefined) : undefined
+    if (grouped && !ownedGroup(current?.title)) return
     if (!reloading && (await TabCleanup.isTracked(tabId))) {
       log.add("tab.closed", { tabId, reason: "agent finished with it" })
       await chrome.tabs.remove(tabId).catch(() => undefined)
       return
     }
-    await chrome.tabs.ungroup(tabId).catch(() => undefined)
+    if (grouped) await chrome.tabs.ungroup(tabId).catch(() => undefined)
   }
 
   /**
@@ -775,7 +873,10 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   })
   chrome.tabs.onUpdated.addListener((tabId, change) => {
     if (change.url && relayTabs.has(tabId)) void renameForPage(tabId, change.url)
+    if (change.groupId !== undefined) recountShared()
   })
+  chrome.tabs.onAttached.addListener(() => recountShared())
+  chrome.tabs.onDetached.addListener(() => recountShared())
   // Never close a tab while its agent runs a script on it, waits for the user there, or records it.
   TabCleanup.guard((tabId) => {
     const state = pageStatuses.get(tabId)?.state
@@ -790,9 +891,21 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     pendingAttach.delete(tabId)
     if (badges.delete(tabId)) input.badgesChanged()
     send({ method: "tabs.removed", params: { tabId } })
+    recountShared()
   })
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === ALARM && !retry) void connect("alarm")
+  })
+  // The relay-side settings apply as soon as they change; the relay answers with what its environment fixes.
+  const sendSettings = async () => {
+    if (!open()) return
+    const stored = await chrome.storage.local.get([AGENT_CURSOR_KEY, HUMAN_INPUT_KEY])
+    const settings: RelaySettings = { cursor: agentCursor(stored[AGENT_CURSOR_KEY]), humanInput: humanInput(stored[HUMAN_INPUT_KEY]) }
+    log.add("settings", settings)
+    send({ method: "settings", params: settings })
+  }
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && (AGENT_CURSOR_KEY in changes || HUMAN_INPUT_KEY in changes)) void sendSettings()
   })
   // A code typed on the status page (or removed) takes effect on a fresh connection.
   chrome.storage.onChanged.addListener((changes, area) => {
@@ -867,7 +980,10 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       openerTab.windowId === current.windowId &&
       current.groupId !== openerTab.groupId
     )
-      await chrome.tabs.group({ tabIds: [tabId], groupId: openerTab.groupId }).catch(() => undefined)
+      await chrome.tabs.group({ tabIds: [tabId], groupId: openerTab.groupId }).then(
+        () => countShared(openerTab.groupId),
+        () => undefined,
+      )
     // After the move and grouping, which would otherwise read as the user claiming the tab.
     TabCleanup.track(tabId)
   }
@@ -1037,12 +1153,22 @@ function autoNamed(sessionId: string | undefined) {
  */
 function groupTitle(sessionId: string | undefined, url?: string) {
   const host = url && /^https?:/.test(url) ? new URL(url).hostname.replace(/^www\./, "") : undefined
-  const name = autoNamed(sessionId) ? (host ? `Agent · ${host}` : "Agent") : sessionId!.trim()
+  // Never ending in the marker itself, which would read as the shared group.
+  const name = autoNamed(sessionId) ? (host ? `Agent · ${host}` : "Agent") : sessionId!.trim().replace(/\u2063+$/, "")
   return `${name.length > 28 ? `${name.slice(0, 27)}…` : name}${GROUP_MARKER}`
 }
 
 function ownedGroup(title: string | undefined) {
   return !!title?.endsWith(GROUP_MARKER)
+}
+
+/** The shared group's title: "Agents · 3", for every agent's tabs in its window. */
+function sharedTitle(count: number) {
+  return `Agents · ${count}${SHARED_MARKER}`
+}
+
+function sharedGroup(title: string | undefined) {
+  return !!title?.endsWith(SHARED_MARKER)
 }
 
 function sleep(ms: number) {

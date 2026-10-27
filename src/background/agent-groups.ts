@@ -1,4 +1,5 @@
 export * as AgentGroups from "./agent-groups"
+import { AGENT_GROUPING_KEY, agentGrouping, type AgentGrouping } from "../shared/protocol"
 
 // Agent tab groups stay out of the way: at the start of the tab strip, right after pinned tabs (the top of a
 // vertical strip), and
@@ -7,12 +8,21 @@ export * as AgentGroups from "./agent-groups"
 // user picks it), and collapsing a group that holds the active tab would switch the user to another tab, so a
 // group collapses as soon as its window's active tab is elsewhere. `expand` opens one when an agent hands a step
 // to the user.
+//
+// Which groups agents get is the status page's "Grouping" setting (`mode`): one per agent session (the default), one
+// shared group for every agent's tabs, or none. agent-relay.ts makes and names the groups; this module only keeps
+// them out of the way.
 
 const STORAGE_KEY = "agentGroups"
 const groups = new Set<number>()
 let restored: Promise<void> | undefined
 /** Tabs that keep their group open, for example while a handoff waits for the user. */
 const keepers: ((tabId: number) => boolean)[] = []
+
+/** The setting: "session" (one group per agent session, the default), "shared" (one for every agent) or "none". */
+export async function mode(): Promise<AgentGrouping> {
+  return agentGrouping((await chrome.storage.local.get(AGENT_GROUPING_KEY))[AGENT_GROUPING_KEY])
+}
 
 export function keepOpenWhile(check: (tabId: number) => boolean) {
   keepers.push(check)

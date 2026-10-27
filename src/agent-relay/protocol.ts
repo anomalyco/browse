@@ -48,6 +48,7 @@ export const commandMethods = [
   "recording.cancel",
   "tabs.cleanup",
   "update.notice",
+  "relay.settings",
 ] as const
 
 export type ExtensionCommand = {
