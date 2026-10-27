@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck, build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Bun from package.json's packageManager field.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+
+      # The MCP server and relay run under Node (cli/package.json engines), and the execute sandbox tests run in it too.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install (extension)
+        run: bun install --frozen-lockfile
+
+      - name: Install (cli)
+        run: bun install --frozen-lockfile
+        working-directory: cli
+
+      - name: Typecheck (extension)
+        run: bun run typecheck
+
+      - name: Typecheck (cli)
+        run: bun run typecheck
+        working-directory: cli
+
+      - name: Build (extension)
+        run: bun run build
+
+      - name: Build (cli)
+        run: bun build.ts
+        working-directory: cli
+
+      - name: Test (extension)
+        run: bun test ./test
+
+      - name: Test (cli)
+        run: bun run test
+        working-directory: cli
