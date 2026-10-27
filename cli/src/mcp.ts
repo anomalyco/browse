@@ -54,9 +54,9 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
   return [
     {
       name: "execute",
-      description: "Execute trusted Playwright JavaScript against the OpenCode Browser session. The result includes console logs, warnings, a bounded execution-context diagnostic when relevant, and an aftermath summary (URL movement, navigations, error counts, handoffs).",
+      description: "Execute Playwright JavaScript against the OpenCode Browser session. Code runs in a sandbox on the relay without process, require, import(), fs, child_process, http/https or Node fetch; save and read files with the files helper inside the execute file roots, and cookie access is limited to the session's pages. The result includes console logs, warnings, a bounded execution-context diagnostic when relevant, and an aftermath summary (URL movement, navigations, error counts, handoffs).",
       inputSchema: objectSchema({
-        code: { type: "string", description: "JavaScript code to execute. It receives browser, context, page, state, modules, fillInput, fillInputs, snapshot(options?) for compact semantic outlines, search, explicit diffs, or automatic deltas, persistent compatible ref(id) locators, webmcp (list/call), screenshot helpers, ariaSnapshot, ghostCursor, handoff, demonstrate, network capture, and pageConsole (start/stop capturing the page's own console messages and errors, off by default because pages can detect it)." },
+        code: { type: "string", description: "JavaScript code to execute. It receives browser, context, page, state, modules (path, url, util, crypto, buffer, zlib, events, stream), files (dir, path, write, read), fillInput, fillInputs, snapshot(options?) for compact semantic outlines, search, explicit diffs, or automatic deltas, persistent compatible ref(id) locators, webmcp (list/call), screenshot helpers, ariaSnapshot, ghostCursor, handoff, demonstrate, network capture, and pageConsole (start/stop capturing the page's own console messages and errors, off by default because pages can detect it)." },
         session: { type: "string", description: "Optional existing OpenCode Browser session id. Explicit ids must already exist; omit this field to use the MCP server's current session, which is created when needed." },
         targetUrl: { type: "string", description: "Optional URL substring selecting an existing attached page. This does not navigate or open a URL; use page.goto() for that." },
         targetIndex: { type: "integer", minimum: 0, description: "Optional zero-based attached page index selector." },
@@ -271,7 +271,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       description: "Stop network capture. Optionally write a credential-redacted HAR and store lossless credential values in a reusable secret profile. At least one of outputPath or secrets is required.",
       inputSchema: objectSchema({
         session: sessionSchemaProperty,
-        outputPath: { type: "string", description: "Optional artifact path, resolved against the MCP process working directory. The HAR contains stable ${BC_SECRET_N} references, not captured values." },
+        outputPath: { type: "string", description: "Optional artifact path, resolved against the MCP process working directory. The HAR contains stable ${BC_SECRET_N} references (and redaction-only ${BC_REDACTED_N} for passwords, one-time codes and token-like URL path segments), not captured values." },
         secrets: { type: "string", description: "Optional reusable profile name for captured credential values." },
       }),
       readOnly: false,
@@ -471,7 +471,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "secrets_run",
-      description: "Run a local command with a captured profile injected as BC_SECRET_N environment variables. Known values are replaced with their references in stdout and stderr.",
+      description: "Run a local command with a captured profile injected as BC_SECRET_N environment variables. Known values are replaced with their references in stdout and stderr, which keeps them out of transcripts. The command receives the real values, so redaction does not protect them from a command that deliberately sends or encodes them: run only commands you wrote or trust.",
       inputSchema: objectSchema({
         name: { type: "string", description: "Secret profile name." },
         command: { type: "string", description: "Executable path or command name." },

@@ -97,8 +97,9 @@ export const make = Effect.fn("SessionStore.make")(function* (options?: {
   }
 
   const writeStore = (entries: Record<string, { readonly id: string }>) =>
-    fs.makeDirectory(path.dirname(filePath), { recursive: true }).pipe(
-      Effect.andThen(fs.writeFileString(filePath, `${JSON.stringify({ endpoints: entries }, null, 2)}\n`)),
+    fs.makeDirectory(path.dirname(filePath), { recursive: true, mode: 0o700 }).pipe(
+      Effect.andThen(fs.writeFileString(filePath, `${JSON.stringify({ endpoints: entries }, null, 2)}\n`, { mode: 0o600 })),
+      Effect.andThen(fs.chmod(filePath, 0o600)),
       Effect.mapError(storeError("write")),
     )
 

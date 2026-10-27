@@ -12,6 +12,7 @@ import { createHash } from "node:crypto"
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
+import { createInterface } from "node:readline/promises"
 import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse } from "jsonc-parser"
 import { dataRoot } from "./paths.ts"
@@ -47,6 +48,7 @@ const legacyFiles = [
   path.join(root, `${LEGACY_HOST_NAME}.json`),
   path.join(root, "state.json"),
   path.join(root, "logs", "host.log"),
+  path.join(root, "cli.mjs"),
   path.join(configRoot, "opencode", "plugins", "opencode-browser.ts"),
 ]
 /** This package's root: dist/cli.mjs when published, src/setup.ts from source. */
@@ -265,14 +267,26 @@ function installRuntime() {
     return bundle
   }
   const spec = process.env.OPENCODE_BROWSER_PACKAGE ?? `${PACKAGE}@${opencodeBrowserVersion}`
+  // A package name, name@version, tarball path or URL: never an npm flag, and nothing a shell would interpret.
+  if (spec.startsWith("-") || /[\s"'`&|<>^%!;]/.test(spec)) fail(`Invalid OPENCODE_BROWSER_PACKAGE: ${JSON.stringify(spec)}`)
   mkdirSync(files.runtime, { recursive: true })
   if (!existsSync(path.join(files.runtime, "package.json"))) writeFileSync(path.join(files.runtime, "package.json"), "{\"private\":true}\n")
-  const npm = spawnSync(windows ? "npm.cmd" : "npm", ["install", "--prefix", files.runtime, "--no-audit", "--no-fund", "--loglevel=error", spec], {
-    encoding: "utf8",
-    shell: windows,
-  })
+  const npmArgs = ["install", "--prefix", files.runtime, "--no-audit", "--no-fund", "--loglevel=error", spec]
+  // On Windows npm is a .cmd script, which Node only runs through a shell; run npm's own entry with node instead.
+  const npmCli = windows ? windowsNpmCli() : undefined
+  const npm = spawnSync(npmCli ? process.execPath : "npm", npmCli ? [npmCli, ...npmArgs] : npmArgs, { encoding: "utf8" })
   if (npm.status !== 0) fail(`Could not install ${spec}: ${(npm.stderr || npm.stdout || "npm failed").trim()}`)
   return path.join(files.runtime, "node_modules", PACKAGE, "dist", "cli.mjs")
+}
+
+/** npm's JavaScript entry next to node.exe, or next to the npm.cmd on PATH. */
+function windowsNpmCli() {
+  const besideNode = path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js")
+  if (existsSync(besideNode)) return besideNode
+  const npmCmd = spawnSync("where", ["npm.cmd"], { encoding: "utf8" }).stdout?.split(/\r?\n/).find((line) => line.trim())
+  const besideCmd = npmCmd ? path.join(path.dirname(npmCmd.trim()), "node_modules", "npm", "bin", "npm-cli.js") : undefined
+  if (besideCmd && existsSync(besideCmd)) return besideCmd
+  fail("Could not find npm (node_modules\\npm\\bin\\npm-cli.js next to node.exe or npm.cmd). Install Node.js with npm and retry.")
 }
 
 // ---- commands -------------------------------------------------------------------------------------
@@ -354,7 +368,20 @@ function pair() {
   log("Keep it private: with it, a program could pose as the relay to your browser.")
 }
 
-function uninstall() {
+/** Stored secret profiles are the one thing uninstall deletes that can't be recaptured without the user. */
+async function confirmSecretRemoval(args: string[]) {
+  const secrets = path.join(files.dir, "secrets")
+  const profiles = existsSync(secrets) ? readdirSync(secrets).filter((name) => name.endsWith(".json")) : []
+  if (profiles.length === 0 || args.includes("--yes") || args.includes("-y")) return
+  const notice = `Uninstalling deletes ${profiles.length} stored secret profile${profiles.length === 1 ? "" : "s"} in ${secrets}.`
+  if (!process.stdin.isTTY) fail(`${notice} Re-run with --yes to confirm.`)
+  const prompt = createInterface({ input: process.stdin, output: process.stdout })
+  const answer = await prompt.question(`${notice} Continue? [y/N] `).finally(() => prompt.close())
+  if (!/^y(es)?$/i.test(answer.trim())) fail("Uninstall cancelled; nothing was removed.")
+}
+
+async function uninstall(args: string[]) {
+  await confirmSecretRemoval(args)
   const host = removeLegacyHost()
   const mcp = [MCP_NAME, LEGACY_MCP_NAME].filter((name) => removeMcp(name))
   rmSync(files.dir, { recursive: true, force: true })
@@ -617,6 +644,6 @@ function fail(message: string): never {
 export async function runSetup(command: string, args: string[]) {
   if (command === "install") return install(args)
   if (command === "extension") return extension()
-  if (command === "uninstall") return uninstall()
+  if (command === "uninstall") return uninstall(args)
   if (command === "pair") return pair()
 }

@@ -45,7 +45,7 @@ import {
 import { ensurePrivateDirectory, pairingCode, pairingProof, relayToken, relayTokenQueryParam, secretsEqual } from "./relay-secrets.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
 import { ghostCursorMouseActionExpression, ghostCursorRestoreExpression, inputDispatchMouseEventToGhostCursorAction } from "./ghost-cursor.ts"
-import { guardCdpMethod } from "./cdp-guardrails.ts"
+import { guardCdpMethod, scopeCdpResult } from "./cdp-guardrails.ts"
 import {
   awaitHandoffAction,
   HandoffRegistry,
@@ -55,7 +55,7 @@ import {
   type HandoffOutcome,
 } from "./handoff.ts"
 import { ExecuteSandbox, type HandoffPageTarget } from "./execute.ts"
-import { appendJournalEntry, defaultJournalBaseDir, makeJournalEntry } from "./session-journal.ts"
+import { appendJournalEntry, defaultJournalBaseDir, makeJournalEntry, startJournalRetention } from "./session-journal.ts"
 import { defaultSessionCatalogPath, SessionCatalog } from "./session-catalog.ts"
 import { OpenCodeBrowserSessions } from "./session-manager.ts"
 import { RecordingRelay } from "./recording-relay.ts"
@@ -262,6 +262,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
   })
   const journalBaseDir = defaultJournalBaseDir()
+  let stopJournalRetention: (() => void) | undefined
   const attachedBadge = { text: "ON", color: "#7c3aed", title: "Detach from OpenCode Browser" }
   const executingBadge = { text: "RUN", color: "#f59e0b", title: "OpenCode Browser is running a script. Click to stop it and take this tab back." }
   const waitingBadge = (message: string) => ({ text: "WAIT", color: "#2563eb", title: `OpenCode Browser is waiting for you: ${message} Click here when you're done.` })
@@ -668,6 +669,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   }
 
   const cleanup = Effect.fnUntraced(function* () {
+    stopJournalRetention?.()
     yield* shutdownControl.close().pipe(Effect.ignore)
     yield* sessions.closeAll()
     yield* rootLifecycle.close()
@@ -1363,6 +1365,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       method: message.method,
       readOnly: clientOpenCodeBrowserSessionId ? sessions.isReadOnly(clientOpenCodeBrowserSessionId) : false,
       sessionId: clientOpenCodeBrowserSessionId,
+      params: message.params,
+      pageUrls: () => cdpRouter.visibleRoots(socket).map((target) => target.targetInfo.url),
     })
     if (guardMessage) {
       return yield* Effect.fail(new Error(guardMessage))
@@ -1502,7 +1506,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         })),
         Effect.tap(() => Effect.sync(() => setProtectedUi(tabId, false))),
       )
-    return result
+    return scopeCdpResult({ method: message.method, result, pageUrls: () => cdpRouter.visibleRoots(socket).map((target) => target.targetInfo.url) })
   })
 
   const detachTab = Effect.fnUntraced(function* (tabId: number) {
@@ -1715,6 +1719,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         }))
       }
       relayReady = true
+      stopJournalRetention = startJournalRetention({
+        baseDir: journalBaseDir,
+        isLive: (sessionId) => sessions.sessions.has(sessionId),
+        onError: (error) => console.error("Failed to prune session journals", error),
+      })
       relayLog("relay.ready", { url: endpointUrl, version: opencodeBrowserVersion, build: opencodeBrowserBuildId, pid: process.pid, managed })
     }),
     (error) => Effect.gen(function* () {

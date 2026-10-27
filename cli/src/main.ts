@@ -26,7 +26,8 @@ if (invokedAs === "opencode-browser-mcp") {
     --no-open                    Print the store link instead of opening it
   extension                      Open the unpacked extension folder (for "Load unpacked")
   pair                           Print the pairing code the Chrome Web Store extension asks for
-  uninstall                      Remove everything install set up
+  uninstall [--yes]              Remove everything install set up (--yes skips confirming that stored
+                                 secret profiles are deleted)
 
 `)
   }

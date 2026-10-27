@@ -11,6 +11,9 @@ type RedactionSlot = Pick<CredentialSlot, "ref" | "value">
 type MutableCredentialSlot = Omit<CredentialSlot, "sources"> & { readonly sources: string[] }
 
 const secretNamePattern = /auth(?:orization)?|cookie|credential|csrf|xsrf|token|secret|session|password|passwd|pwd|passcode|otp|(?:^|[-_.])code(?:$|[-_.])|(?:api|access|refresh)[-_.]?key|signature|(?:^|[-_.])sig(?:$|[-_.])/i
+// Values typed into these fields (passwords, one-time codes) are redacted but never stored as reusable slots.
+const oneTimeFieldPattern = /pass(?:word|wd|code|phrase)|(?:^|[-_.])pwd(?:$|[-_.])|otp|totp|(?:^|[-_.])(?:mfa_?|2fa_?|verification_?|auth_?)?code(?:$|[-_.])|(?:^|[-_.])pin(?:$|[-_.])/i
+const referencePattern = String.raw`BC_(?:SECRET|REDACTED)_\d+`
 const secretHeaders = new Set([
   "authorization",
   "proxy-authorization",
@@ -27,6 +30,9 @@ export class SecretCollector {
   private readonly refsBySource = new Map<string, string>()
   // Retired values are redaction-only: never include them in persisted profile slots.
   private readonly retiredRefsByValue = new Map<string, string>()
+  // Redaction-only references (BC_REDACTED_N) for one-time values and token-like URL path segments.
+  private readonly redactedRefsByValue = new Map<string, string>()
+  private nextRedactedRef = 1
   private nextRef = 1
   private updated = new Set<string>()
   private observed = new Set<string>()
@@ -69,13 +75,15 @@ export class SecretCollector {
       value,
       sourceName(requestScope, `query.${name}`, occurrence),
     )
+    const protectPath = (pathname: string) => protectPathSegments(pathname, (segment) => this.redactionReference(segment))
     let protectedUrl: string
     try {
       const url = new URL(base)
+      url.pathname = protectPath(url.pathname)
       url.search = protectSearchParams(url.searchParams, protectQuery).toString()
       protectedUrl = restoreReferencePlaceholders(url.toString())
     } catch {
-      protectedUrl = protectRelativeUrl(base, protectQuery)
+      protectedUrl = protectRelativeUrl(base, protectQuery, protectPath)
     }
     if (fragmentStart < 0) return protectedUrl
     const fragment = protectFragment(rawUrl.slice(fragmentStart + 1), (name, value, occurrence) => this.reference(
@@ -131,12 +139,45 @@ export class SecretCollector {
     if (!Predicate.isString(value) && !Predicate.isNumber(value) && !Predicate.isBoolean(value)) return value
     const serialized = String(value)
     if (serialized.length < minimumLength) return value
-    const ref = this.refsByValue.get(serialized) ?? this.retiredRefsByValue.get(serialized)
+    const ref = this.refsByValue.get(serialized) ?? this.retiredRefsByValue.get(serialized) ?? this.redactedRefsByValue.get(serialized)
     return ref ? `\${${ref}}` : value
   }
 
+  /**
+   * Replace known values of at least `minimumLength` characters anywhere in
+   * `text` (raw or percent-encoded), for URLs and headers where a credential
+   * can appear under a name that does not look secret.
+   */
+  redactKnownSubstrings(text: string, minimumLength: number): string {
+    const slots = this.redactionSlots().filter((slot) => slot.value.length >= minimumLength)
+    const encoded = slots.flatMap((slot) => {
+      const variant = encodeURIComponent(slot.value)
+      return variant === slot.value ? [] : [{ ref: slot.ref, value: variant }]
+    })
+    return redactKnownValues(text, [...slots, ...encoded])
+  }
+
   private redactionSlots(): readonly RedactionSlot[] {
-    return [...this.slotsByRef.values(), ...Array.from(this.retiredRefsByValue, ([value, ref]) => ({ ref, value }))]
+    return [
+      ...this.slotsByRef.values(),
+      ...Array.from(this.retiredRefsByValue, ([value, ref]) => ({ ref, value })),
+      ...Array.from(this.redactedRefsByValue, ([value, ref]) => ({ ref, value })),
+    ]
+  }
+
+  /** A stable redaction-only reference: kept out of slots() so it is never persisted to a profile. */
+  private redactionReference(value: string): string {
+    const persisted = this.refsByValue.get(value)
+    if (persisted) {
+      this.observed.add(persisted)
+      return `\${${persisted}}`
+    }
+    let ref = this.redactedRefsByValue.get(value)
+    if (!ref) {
+      ref = `BC_REDACTED_${this.nextRedactedRef++}`
+      this.redactedRefsByValue.set(value, ref)
+    }
+    return `\${${ref}}`
   }
 
   private protectHeader(name: string, value: string, source: string): string {
@@ -215,6 +256,7 @@ export class SecretCollector {
   }
 
   private reference(value: string, source: string): string {
+    if (oneTimeFieldPattern.test(sourceFieldName(source))) return this.redactionReference(value)
     const sourceRef = this.refsBySource.get(source)
     if (sourceRef) {
       const slot = this.slotsByRef.get(sourceRef)
@@ -272,18 +314,57 @@ export class SecretCollector {
 }
 
 function restoreReferencePlaceholders(value: string): string {
-  return value.replace(/(?:%24|\$)%7B(BC_SECRET_\d+)%7D/gi, (_match, ref: string) => `\${${ref}}`)
+  return value.replace(/(?:%24|\$)%7B(BC_(?:SECRET|REDACTED)_\d+)%7D/gi, (_match, ref: string) => `\${${ref}}`)
+}
+
+/** The field a source names: its last segment that is not an occurrence index. */
+function sourceFieldName(source: string): string {
+  const segments = source.split(".")
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const segment = segments[index] ?? ""
+    if (!/^\d+$/.test(segment)) return segment
+  }
+  return ""
+}
+
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** Path segments that look like credentials: JWTs, long hex, and long high-entropy base64/base64url. */
+export function looksLikeTokenSegment(segment: string): boolean {
+  if (segment.length < 24 || uuidPattern.test(segment) || segment.includes("${")) return false
+  if (/^eyJ[\w-]+\.[\w-]+\.[\w-]*$/.test(segment)) return true
+  if (/^[0-9a-f]{32,}$/i.test(segment)) return true
+  if (!/^[A-Za-z0-9_~+/-]+={0,2}$/.test(segment)) return false
+  // Slugs such as "how-to-install-the-extension" are words, not tokens.
+  if (/^[a-z]+(?:[-_][a-z]+)+$/i.test(segment)) return false
+  const hasDigit = /\d/.test(segment)
+  const hasLower = /[a-z]/.test(segment)
+  const hasUpper = /[A-Z]/.test(segment)
+  return new Set(segment).size >= 12 && hasDigit && (hasLower || hasUpper) && (hasLower && hasUpper || segment.length >= 32)
+}
+
+function protectPathSegments(pathname: string, protect: (segment: string) => string): string {
+  return pathname.split("/").map((segment) => {
+    let decoded: string
+    try {
+      decoded = decodeURIComponent(segment)
+    } catch {
+      decoded = segment
+    }
+    return looksLikeTokenSegment(decoded) ? protect(decoded) : segment
+  }).join("/")
 }
 
 /** Protect the query of a fragment-free URL that `new URL` cannot parse. */
 function protectRelativeUrl(
   rawUrl: string,
   protect: (name: string, value: string, occurrence: number) => string,
+  protectPath: (pathname: string) => string,
 ): string {
   const queryStart = rawUrl.indexOf("?")
-  if (queryStart < 0) return rawUrl
+  if (queryStart < 0) return protectPath(rawUrl)
   const protectedQuery = protectSearchParams(new URLSearchParams(rawUrl.slice(queryStart + 1)), protect).toString()
-  return restoreReferencePlaceholders(`${rawUrl.slice(0, queryStart)}?${protectedQuery}`)
+  return restoreReferencePlaceholders(`${protectPath(rawUrl.slice(0, queryStart))}?${protectedQuery}`)
 }
 
 function protectSearchParams(
@@ -354,10 +435,10 @@ function redactSecretValue(value: unknown): unknown {
 
 function replaceOutsideReferences(text: string, value: string, replacement: string): string {
   if (!value) return text
-  const referencePattern = /\$\{BC_SECRET_\d+\}/g
+  const references = new RegExp(String.raw`\$\{${referencePattern}\}`, "g")
   let output = ""
   let offset = 0
-  for (const match of text.matchAll(referencePattern)) {
+  for (const match of text.matchAll(references)) {
     const index = match.index ?? 0
     output += text.slice(offset, index).split(value).join(replacement)
     output += match[0]

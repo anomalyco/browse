@@ -314,7 +314,8 @@ Use the least expensive view that answers the question:
 - `screenshotWithLabels({ page?, path? })` adds visual labels and metadata when
   layout matters, and registers its `e1..eN` labels for `ref()`.
 - `screenshotDiff({ baseline, path?, threshold?, fullPage? })` compares a saved
-  PNG (absolute path or Buffer) with the current session page at CSS-pixel scale.
+  PNG (absolute path inside the execute file roots, or Buffer) with the current
+  session page at CSS-pixel scale.
   It returns `matches`, `changedPixels`, `changedRatio` (0..1), dimensions, and a
   red-highlighted PNG. Omit `path` to return the image as execute media; otherwise
   supply a fresh absolute `.png` path. Existing output files are never overwritten.
@@ -333,9 +334,9 @@ correctness. Return screenshot buffers through MCP when visual evidence matters.
 For visual regression checks, save a baseline before changing the UI:
 
 ```ts
-await page.screenshot({ path: "/absolute/before.png", scale: "css" })
+await page.screenshot({ path: files.path("before.png"), scale: "css" })
 // After the intended UI change, in the same viewport:
-return await screenshotDiff({ baseline: "/absolute/before.png" })
+return await screenshotDiff({ baseline: files.path("before.png") })
 ```
 
 The threshold defaults to 0.1 and controls per-pixel color tolerance, not the
@@ -347,9 +348,11 @@ diffs include visible page content: inspect for private information before shari
 
 ## Execute Interface
 
-Execute code can use `page`, `context`, `browser`, persistent `state`, selected
-Node modules through `modules` and aliases such as `fs` and `path`, plus the
-OpenCode Browser helpers documented here. Execute code runs in Node. Use
+Execute code can use `page`, `context`, `browser`, persistent `state`, the
+`files` helper, compute-only Node modules through `modules` and the aliases
+`path`, `url`, `util`, `crypto`, `buffer`, `zlib`, `events` and `stream`, plus
+the OpenCode Browser helpers documented here. Timers, `URL`, `TextEncoder`,
+`Buffer`, `structuredClone` and `crypto.randomUUID()` are available. Use
 `page.evaluate` for `window`, `document`, storage, and same-origin `fetch`
 with page cookies. Single expressions auto-return;
 multi-statement scripts need `return`. Use `--file` for longer scripts:
@@ -357,6 +360,31 @@ multi-statement scripts need `return`. Use `--file` for longer scripts:
 ```bash
 opencode-browser execute --session github --file ./perform-flow.js
 ```
+
+Execute code runs in a sandbox on the relay, because a page can try to
+prompt-inject the agent writing it. It has no `process`, `require`,
+`import()`, `eval`, `fs`, `os`, `child_process`, `http`/`https` or Node-side
+`fetch`, and Playwright internals (`_`-prefixed members), `page.request`,
+`context.request` and `browser.browserType()` are unavailable. Files go through
+`files` and Playwright file options (`path`, `setInputFiles`, `saveAs`, ...),
+which accept only absolute paths inside the execute file roots: the system
+temp directory, `/tmp`, and directories listed in
+`OPENCODE_BROWSER_FILE_ROOTS`:
+
+```js
+const saved = await files.write("report.csv", csvText)  // relative names go to files.dir
+const bytes = await files.read(saved)                     // Buffer; files.read(p, "utf8") for text
+await page.screenshot({ path: files.path("page.png") })   // absolute path inside a root
+```
+
+Cookie access through CDP is limited to the hosts of the session's pages:
+`context.cookies()` returns only their cookies, `context.addCookies()` accepts
+only cookies for them, and clearing or deleting cookies is refused.
+`page.bringToFront()` is refused because it raises the user's window; use
+`handoff()` when the user needs to act. The user can lift these limits on the
+relay with `OPENCODE_BROWSER_ALLOW_NODE=1` (full Node in execute),
+`OPENCODE_BROWSER_ALLOW_ALL_COOKIES=1` and `OPENCODE_BROWSER_ALLOW_FOREGROUND=1`;
+never ask for them to work around a page.
 
 Human CLI output includes logs, warnings, and a concise aftermath. Logs hold your
 own `console.log` output; the page's console messages and uncaught errors are
@@ -380,7 +408,7 @@ opencode-browser execute --json --session github '({ url: page.url() })' | jq .v
 Playwright downloads are unavailable through extension-backed tabs because
 Chromium blocks download artifact control through `chrome.debugger`. If the
 page exposes the payload through fetch or an API response, read the bytes in the
-page and write them with `fs`. Do not retry `page.waitForEvent("download")`.
+page and save them with `files.write()`. Do not retry `page.waitForEvent("download")`.
 
 Pages with WebMCP enabled can expose structured page tools. Discover and call
 them through the execute helper; names, descriptions, schemas, and results come
@@ -484,12 +512,14 @@ opencode-browser network stop --session github \
 Written artifacts replace credential-bearing headers, cookies, query fields,
 OAuth fragment fields, and structured body fields with stable references such as `${BC_SECRET_1}`.
 `--secrets github` stores lossless values separately in a mode-`0600` Secret
-Profile. Never copy profile values into source, output, diagnostics, or journals,
-and never deliberately return or log credentials.
+Profile. Passwords and one-time codes typed during capture are redacted as
+`${BC_REDACTED_N}` and never stored. Never copy profile values into source,
+output, diagnostics, or journals, and never deliberately return or log
+credentials.
 
 Inspect the redacted artifact offline, generate one typed function per observed
 flow, then verify each function with a harmless live request. Run generated
-clients without exposing values:
+clients with the values injected, so they stay out of the transcript:
 
 ```bash
 opencode-browser secrets status github
@@ -512,6 +542,10 @@ const result = await Effect.runPromise(SecretProfile.run({
 
 The trusted worker receives `BC_SECRET_N` variables and its bounded output is
 redacted. The public SDK exposes profile metadata but never raw profile values.
+Redaction keeps values out of transcripts and artifacts by accident; it does not
+protect them from a command that deliberately sends, encodes or writes them,
+because that command receives the real values. Only run commands you wrote or
+trust. Execute code cannot read Secret Profile files.
 
 Refresh credentials normally renewed by a page reload with:
 
@@ -666,7 +700,7 @@ Common diagnoses:
 - Hidden checkbox/radio input: click its visible associated label or wrapper,
   then verify `isChecked()`. Do not force-click an invisible input or infer an
   arbitrary ancestor.
-- Download wait fails: use fetch plus `fs`; extension-backed Playwright cannot
+- Download wait fails: use fetch plus `files.write()`; extension-backed Playwright cannot
   retain a native download artifact.
 - Hover on an infinitely animated target: Playwright may never consider the
   element stable. Read its current `getBoundingClientRect()` and use
