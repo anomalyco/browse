@@ -978,7 +978,7 @@ const secretsRun = Command.make(
 ).pipe(Command.withDescription("Run a command with profile values injected as BC_SECRET_* environment variables"))
 
 const secrets = Command.make("secrets").pipe(
-  Command.withDescription("Inspect, refresh, and use captured credentials without revealing their values"),
+  Command.withDescription("Inspect, refresh, and use captured credentials while keeping their values out of output"),
   Command.withSubcommands([secretsStatus, secretsRefresh, secretsRun]),
 )
 

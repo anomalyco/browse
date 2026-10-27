@@ -512,12 +512,14 @@ opencode-browser network stop --session github \
 Written artifacts replace credential-bearing headers, cookies, query fields,
 OAuth fragment fields, and structured body fields with stable references such as `${BC_SECRET_1}`.
 `--secrets github` stores lossless values separately in a mode-`0600` Secret
-Profile. Never copy profile values into source, output, diagnostics, or journals,
-and never deliberately return or log credentials.
+Profile. Passwords and one-time codes typed during capture are redacted as
+`${BC_REDACTED_N}` and never stored. Never copy profile values into source,
+output, diagnostics, or journals, and never deliberately return or log
+credentials.
 
 Inspect the redacted artifact offline, generate one typed function per observed
 flow, then verify each function with a harmless live request. Run generated
-clients without exposing values:
+clients with the values injected, so they stay out of the transcript:
 
 ```bash
 opencode-browser secrets status github
@@ -540,6 +542,10 @@ const result = await Effect.runPromise(SecretProfile.run({
 
 The trusted worker receives `BC_SECRET_N` variables and its bounded output is
 redacted. The public SDK exposes profile metadata but never raw profile values.
+Redaction keeps values out of transcripts and artifacts by accident; it does not
+protect them from a command that deliberately sends, encodes or writes them,
+because that command receives the real values. Only run commands you wrote or
+trust. Execute code cannot read Secret Profile files.
 
 Refresh credentials normally renewed by a page reload with:
 
