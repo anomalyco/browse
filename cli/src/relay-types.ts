@@ -57,6 +57,8 @@ export interface ExecuteSandboxLike {
   execute(code: string, options?: ExecuteOptions): Effect.Effect<ExecuteResult>
   authenticatedJson(request: Omit<AuthenticatedJsonRequest, "sessionId">): Effect.Effect<AuthenticatedJsonOutcome, Error>
   adoptPage(targetId: string): Effect.Effect<void, Error>
+  /** Stop a running script: its Playwright calls reject and its timers stop; the default tab is kept. */
+  abortExecution(): Effect.Effect<void, Error>
   /** Shutdown and handoff cancellation await disconnection without closing or forgetting the default tab. */
   disconnectSettled(): Effect.Effect<void, Error>
   /** Adoption rollback cleanup does not settle before started Playwright close promises settle. */
@@ -84,7 +86,8 @@ export type OpenCodeBrowserSession = {
   readonly id: string
   readonly createdAt: string
   readonly readOnly: boolean
-  readonly sandbox: ExecuteSandboxLike
+  /** Replaced when a stopped script does not settle in time (session-manager.ts). */
+  sandbox: ExecuteSandboxLike
   readonly executeSemaphore: Semaphore.Semaphore
   /** Durable default-target identity. Authoritative live ownership remains in TargetRegistry. */
   target?: SessionTarget

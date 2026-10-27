@@ -39,10 +39,25 @@ export const SessionsContainer = Schema.Struct({
 
 export interface SessionsContainer extends Schema.Schema.Type<typeof SessionsContainer> {}
 
+/** What delete or reset had to end first: a running execute, a pending handoff, and whether the script was abandoned. */
+export const SessionStopReport = Schema.Struct({
+  execute: Schema.Boolean,
+  handoff: Schema.Boolean,
+  forced: Schema.Boolean,
+})
+
 export const SessionDeleted = Schema.Struct({
   deleted: Schema.Boolean,
   id: Schema.String,
+  stopped: Schema.optionalKey(SessionStopReport),
 })
+
+export const SessionResetResponse = Schema.Struct({
+  session: SessionSummary,
+  stopped: Schema.optionalKey(SessionStopReport),
+})
+
+export interface SessionResetResponse extends Schema.Schema.Type<typeof SessionResetResponse> {}
 
 export interface SessionDeleted extends Schema.Schema.Type<typeof SessionDeleted> {}
 

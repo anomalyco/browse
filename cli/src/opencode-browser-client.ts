@@ -211,7 +211,7 @@ export const make = Effect.fn("OpenCodeBrowserClient.make")(function* (options: 
   })
 
   const resetSession = Effect.fn("OpenCodeBrowserClient.resetSession")(function* (id: string) {
-    const summary = yield* relay.sessionReset(id).pipe(
+    const { session: summary } = yield* relay.sessionReset(id).pipe(
       Effect.mapError((error) => clientError("session", error)),
     )
     return makeSession(relay, summary)

@@ -433,8 +433,9 @@ const sessionReset = Command.make(
     const relay = yield* RelayClient.Service
     const sessionId = yield* resolvePositionalOrFlagSessionId(id, session)
     yield* ensureCliRelay()
-    const resetSession = yield* relay.sessionReset(sessionId)
-    yield* Console.log(resetSession.id)
+    const reset = yield* relay.sessionReset(sessionId)
+    if (reset.stopped) yield* Console.error(`Stopped first: ${describeStop(reset.stopped)}`)
+    yield* Console.log(reset.session.id)
   }),
 ).pipe(Command.withDescription("Reset a OpenCode Browser session state and page"))
 
@@ -479,6 +480,14 @@ const sessionAdopt = Command.make(
   }),
 ).pipe(Command.withDescription("Make an attached tab the session's default page"))
 
+/** One line for what delete or reset had to end first. */
+function describeStop(stopped: { readonly execute: boolean; readonly handoff: boolean; readonly forced: boolean }): string {
+  return [
+    stopped.execute ? "a running execute" : undefined,
+    stopped.handoff ? "a pending handoff" : undefined,
+  ].filter(Boolean).join(" and ") + (stopped.forced ? " (the script did not stop in time and was abandoned with its state)" : "")
+}
+
 const sessionDelete = Command.make(
   "delete",
   {
@@ -490,7 +499,8 @@ const sessionDelete = Command.make(
     const store = yield* SessionStore.Service
     const sessionId = yield* resolvePositionalOrFlagSessionId(id, session)
     yield* ensureCliRelay()
-    yield* relay.sessionDelete(sessionId)
+    const deleted = yield* relay.sessionDelete(sessionId)
+    if (deleted.stopped) yield* Console.error(`Stopped first: ${describeStop(deleted.stopped)}`)
     const current = yield* store.read
     if (current === sessionId) {
       yield* store.clear

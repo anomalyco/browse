@@ -61,6 +61,7 @@ import { createWebMcpHelper, type WebMcpHelper } from "./webmcp.ts"
 import { startDemonstrationRecorder, type DemonstrationResult } from "./demonstration.ts"
 import { relayToken } from "./relay-secrets.ts"
 import { createExecuteFiles, executeAllowsNode, ExecuteRealm, sandboxModules, type ExecuteFiles } from "./execute-realm.ts"
+import { installAbortableTimers } from "./execute-abort.ts"
 
 export { createAriaSnapshotHelper, createSnapshotHelpers, defaultAriaSnapshotTimeoutMs, fillInputs }
 
@@ -274,6 +275,9 @@ export async function finishHandoff(options: {
 }): Promise<void> {
   if (options.outcome === "timeout") {
     throw new Error(`Handoff timed out after ${options.timeoutMs}ms waiting for the user: ${options.message}`)
+  }
+  if (options.outcome !== "resolved" && options.outcome.reason === "session-stopped") {
+    throw new Error(`Handoff cancelled because its session was stopped, deleted or reset: ${options.message}`)
   }
   if (options.outcome !== "resolved") {
     const targetEvent = options.outcome.reason === "target-crashed" ? "crashed" : "detached"
@@ -505,6 +509,8 @@ export class ExecuteSandbox {
   /** Full Node access for execute code (OPENCODE_BROWSER_ALLOW_NODE=1); otherwise code runs in a vm realm. */
   private readonly allowNode = executeAllowsNode()
   private readonly realm = this.allowNode ? undefined : new ExecuteRealm()
+  /** The realm's timers, which abortExecution() clears (execute-abort.ts). */
+  private readonly timers = this.realm ? installAbortableTimers(this.realm) : undefined
   private readonly state: Record<string, unknown> = this.realm?.state ?? {}
   private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
   private readonly networkCapture = new NetworkCapture.Recorder()
@@ -520,6 +526,7 @@ export class ExecuteSandbox {
   execute(code: string, options: ExecuteOptions = {}): Effect.Effect<ExecuteResult> {
     return Effect.tryPromise({
       try: async () => {
+        this.timers?.resume()
         const globals = await this.getGlobals(options)
         const { result, logs, logSummary, aftermath } = await runUserCode({ code, globals, ...(this.realm ? { realm: this.realm } : {}) })
         await this.networkCapture.settleForOutput()
@@ -678,6 +685,16 @@ export class ExecuteSandbox {
       endUrl: aftermath.endUrl ? this.networkCapture.redactUrl(aftermath.endUrl) : aftermath.endUrl,
       navigations: aftermath.navigations.map((url) => this.networkCapture.redactUrl(url)),
     }
+  }
+
+  /**
+   * Stops a running script from outside (the toolbar's stop, session delete/reset): closes its browser connection so
+   * every Playwright call it makes rejects, and clears its timers (new ones never fire until the next execute starts).
+   * The session manager relies on this hook; keep it when the realm changes.
+   */
+  abortExecution(): Effect.Effect<void, Error> {
+    this.timers?.abort()
+    return this.disconnectSettled()
   }
 
   disconnectSettled(): Effect.Effect<void, Error> {
