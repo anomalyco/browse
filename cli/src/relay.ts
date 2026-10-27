@@ -53,7 +53,7 @@ import {
   type HandoffOutcome,
 } from "./handoff.ts"
 import { ExecuteSandbox, type HandoffPageTarget } from "./execute.ts"
-import { appendJournalEntry, defaultJournalBaseDir, makeJournalEntry } from "./session-journal.ts"
+import { appendJournalEntry, defaultJournalBaseDir, makeJournalEntry, startJournalRetention } from "./session-journal.ts"
 import { defaultSessionCatalogPath, SessionCatalog } from "./session-catalog.ts"
 import { OpenCodeBrowserSessions } from "./session-manager.ts"
 import { RecordingRelay } from "./recording-relay.ts"
@@ -235,6 +235,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
   })
   const journalBaseDir = defaultJournalBaseDir()
+  let stopJournalRetention: (() => void) | undefined
   const attachedBadge = { text: "ON", color: "#7c3aed", title: "Detach from OpenCode Browser" }
   const executingBadge = { text: "RUN", color: "#f59e0b", title: "OpenCode Browser is running a script" }
   const waitingBadge = (message: string) => ({ text: "WAIT", color: "#2563eb", title: `OpenCode Browser is waiting for you: ${message}` })
@@ -637,6 +638,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   }
 
   const cleanup = Effect.fnUntraced(function* () {
+    stopJournalRetention?.()
     yield* shutdownControl.close().pipe(Effect.ignore)
     yield* sessions.closeAll()
     yield* rootLifecycle.close()
@@ -1603,6 +1605,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         }))
       }
       relayReady = true
+      stopJournalRetention = startJournalRetention({
+        baseDir: journalBaseDir,
+        isLive: (sessionId) => sessions.sessions.has(sessionId),
+        onError: (error) => console.error("Failed to prune session journals", error),
+      })
       relayLog("relay.ready", { url: endpointUrl, version: opencodeBrowserVersion, build: opencodeBrowserBuildId, pid: process.pid, managed })
     }),
     (error) => Effect.gen(function* () {
