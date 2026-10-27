@@ -150,7 +150,10 @@ typing (sign-ups, logins behind bot protection), type with
 `locator.pressSequentially(text)` instead.
 
 If native `locator.fill()` hangs because a browser extension interferes with
-focus, use the explicit input, textarea, or contenteditable fallback:
+focus, use the explicit input, textarea, or contenteditable fallback. It is a
+last resort: it sets the value with synthetic input events (no key presses,
+`isTrusted: false`) that pages can tell apart from typing, and the execute
+result carries a warning saying so:
 
 ```js
 await fillInput(page.getByPlaceholder("Username"), "standard_user")

@@ -417,6 +417,7 @@ const defaultPageCrashedWarning = "The session default page target crashed; chec
 export const defaultPageRepairedWarning = "The session default page stopped answering automation; OpenCode Browser reconnected and re-resolved the same tab. References to the old page in state are stale."
 const protectedExtensionUiWarning = "Chromium blocked protected extension UI, possibly a password manager. Ask the user to finish or dismiss it in the browser, then retry."
 const protectedExtensionUiDiagnostic = "target/cross-extension-page"
+const syntheticInputWarning = "fillInput/fillInputs set the value with synthetic input events (isTrusted: false, no key presses), which pages and bot protection can tell apart from typing. Prefer locator.fill() or locator.pressSequentially()."
 
 /**
  * Playwright rewrites Chrome's "Cannot access a chrome-extension:// URL of
@@ -932,8 +933,14 @@ export class ExecuteSandbox {
       page,
       state: this.state,
       modules: nodeModules,
-      fillInput: (target, value) => fillInput({ page, target, value }),
-      fillInputs,
+      fillInput: async (target, value) => {
+        await fillInput({ page, target, value })
+        this.warnSyntheticInput()
+      },
+      fillInputs: async (targetPage, fields) => {
+        await fillInputs(targetPage, fields)
+        this.warnSyntheticInput()
+      },
       screenshotWithLabels: (screenshotOptions = {}) => screenshotWithLabels({
         ...screenshotOptions,
         page: screenshotOptions.page ?? page,
@@ -1265,6 +1272,11 @@ export class ExecuteSandbox {
         },
       })
     }
+  }
+
+  /** fillInput sets values directly: the page sees untrusted input events without key presses. */
+  private warnSyntheticInput(): void {
+    if (!this.pendingWarnings.includes(syntheticInputWarning)) this.pendingWarnings.push(syntheticInputWarning)
   }
 
   private async applyExplicitMediaFeatures(page: Page): Promise<void> {
