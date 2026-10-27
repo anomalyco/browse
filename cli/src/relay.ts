@@ -263,8 +263,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   })
   const journalBaseDir = defaultJournalBaseDir()
   const attachedBadge = { text: "ON", color: "#7c3aed", title: "Detach from OpenCode Browser" }
-  const executingBadge = { text: "RUN", color: "#f59e0b", title: "OpenCode Browser is running a script" }
-  const waitingBadge = (message: string) => ({ text: "WAIT", color: "#2563eb", title: `OpenCode Browser is waiting for you: ${message}` })
+  const executingBadge = { text: "RUN", color: "#f59e0b", title: "OpenCode Browser is running a script. Click to stop it and take this tab back." }
+  const waitingBadge = (message: string) => ({ text: "WAIT", color: "#2563eb", title: `OpenCode Browser is waiting for you: ${message} Click here when you're done.` })
   const executionBadge = (sessionId: string, executing: boolean) => executing && !sessions.isReadOnly(sessionId) ? executingBadge : attachedBadge
   const setActivityForSessionTabs = (
     opencodeBrowserSessionId: string,
@@ -844,6 +844,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (!target) {
       return
     }
+    // Only tabs agents opened close; a user's tab is released.
+    if (target.owner === "user") return yield* detachTab(target.tabId)
     yield* sendToExtension({ method: "tabs.remove", params: { tabId: target.tabId } })
     detachTargetState(target.tabId)
   })
@@ -1273,15 +1275,22 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     const target = registry.tabTargets.get(tabId)
     if (target) {
       const sessionId = pageStatusSessionId(target) ?? activeHandoffSessionIdForTab(tabId)
+      const pending = handoffs.pendingForTab(tabId)
       const action = toolbarClickAction({
-        handoffPending: handoffs.pendingForTab(tabId) !== undefined,
+        handoffPending: pending !== undefined,
         sessionExecuting: sessionId !== undefined && sessions.isExecuting(sessionId),
       })
-      if (action === "ignore") {
-        if (sessionId) {
-          console.error(`Ignored toolbar detach for tab ${tabId}: session ${sessionId} is executing`)
+      if (action === "complete-handoff" && pending) {
+        // A click on the browser's own toolbar is the trusted way to say "done": page script can't make one.
+        relayLog("handoff.completed", { tabId, from: "toolbar" })
+        if (handoffs.complete({ id: pending.id, tabId, targetId: target.targetInfo.targetId, targetSessionId: target.sessionId })) {
+          refreshPageStatus(tabId)
         }
         return
+      }
+      if (action === "stop-execution" && sessionId) {
+        relayLog("execute.stopped", { tabId, session: sessionId, from: "toolbar" })
+        sessions.stopExecution(sessionId, `The user took tab ${tabId} back (OpenCode Browser toolbar button) while this script ran, so it was stopped. Don't use that tab again unless the user lends it back; ask the user how to continue.`)
       }
     }
     Effect.runPromise(toggleTab(tabId)).catch((error: unknown) => {
@@ -1446,6 +1455,12 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       if (!target || !("owner" in target)) {
         return { success: false }
       }
+      if (target.owner === "user") {
+        // page.close() on a tab the user lent: give it back instead of closing it. Clients see the page close.
+        yield* detachTab(target.tabId)
+        relayLog("target.released", { tabId: target.tabId, reason: "Target.closeTarget on a user tab" })
+        return { success: true, released: true, message: "This tab belongs to the user, so it was released to them instead of closed." }
+      }
       yield* closeTargetByTargetId(targetId)
       return { success: true }
     }
@@ -1490,12 +1505,15 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     return result
   })
 
+  const detachTab = Effect.fnUntraced(function* (tabId: number) {
+    yield* sendToExtension({ method: "debugger.detach", params: { tabId } })
+    detachTargetState(tabId)
+    yield* Effect.ignore(sendToExtension({ method: "action.setAttached", params: { tabId, attached: false } }))
+  })
+
   const toggleTab = Effect.fnUntraced(function* (tabId: number) {
     if (registry.tabTargets.has(tabId)) {
-      yield* sendToExtension({ method: "debugger.detach", params: { tabId } })
-      detachTargetState(tabId)
-      yield* Effect.ignore(sendToExtension({ method: "action.setAttached", params: { tabId, attached: false } }))
-      return
+      return yield* detachTab(tabId)
     }
     currentAnnouncedRootTabIds?.add(tabId)
     yield* rootLifecycle.attach({ tabId, owner: "user" })

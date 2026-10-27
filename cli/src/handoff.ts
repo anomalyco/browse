@@ -87,13 +87,18 @@ export type PendingHandoffView = {
   readonly message: string
 }
 
-export type ToolbarClickAction = "ignore" | "toggle"
+/**
+ * What the toolbar button does on an attached tab. It always does something: it is the user's way to finish a
+ * handoff from outside the page (which page script can't fake), and to take a tab back from a running agent.
+ */
+export type ToolbarClickAction = "complete-handoff" | "stop-execution" | "toggle"
 
 export function toolbarClickAction(options: {
   readonly handoffPending: boolean
   readonly sessionExecuting: boolean
 }): ToolbarClickAction {
-  return options.handoffPending || options.sessionExecuting ? "ignore" : "toggle"
+  if (options.handoffPending) return "complete-handoff"
+  return options.sessionExecuting ? "stop-execution" : "toggle"
 }
 
 export class HandoffRegistry {
