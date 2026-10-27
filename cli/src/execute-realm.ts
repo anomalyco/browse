@@ -27,6 +27,13 @@
  *   Playwright file options (`path`, `setInputFiles`, `saveAs`, ...) must stay
  *   inside the execute file roots.
  *
+ * Execute JavaScript shares the relay's event loop with every session, so each
+ * synchronous slice (initial code, callback, timer, promise continuation and the
+ * microtasks it queues) is cut off after OPENCODE_BROWSER_EXECUTE_SLICE_MS, and
+ * callbacks that keep the loop busy more than half the time are stopped too.
+ * Native work inside one host call (a large zlib *Sync call, allocating a huge
+ * Buffer) and memory use are not bounded this way.
+ *
  * Residual risk: this is defence in depth, not a security boundary as strong
  * as a separate process. A bug in this membrane or a Playwright API that
  * reaches the host in a way not covered here could still escape, and the
@@ -66,6 +73,19 @@ export const allowNodeEnvironmentVariable = "OPENCODE_BROWSER_ALLOW_NODE"
 export const allowForegroundEnvironmentVariable = "OPENCODE_BROWSER_ALLOW_FOREGROUND"
 export const fileRootsEnvironmentVariable = "OPENCODE_BROWSER_FILE_ROOTS"
 
+export const executeSliceEnvironmentVariable = "OPENCODE_BROWSER_EXECUTE_SLICE_MS"
+
+/**
+ * Longest synchronous run of execute JavaScript (one VM entry: the initial code, a callback,
+ * a timer, a promise continuation, plus its microtasks) before the realm is stopped. Every
+ * session shares the relay's event loop, so this is how long a runaway loop can stall them.
+ * 2s fits multi-MB JSON, large sorts and returning ~10 MB of data with headroom on slower machines.
+ */
+export function executeSliceMs(): number {
+  const configured = Number.parseInt(process.env[executeSliceEnvironmentVariable] ?? "", 10)
+  return Number.isFinite(configured) ? Math.min(Math.max(configured, 50), 60_000) : 2_000
+}
+
 export const executeAllowsNode = (): boolean => process.env[allowNodeEnvironmentVariable] === "1"
 export const executeAllowsForeground = (): boolean => process.env[allowForegroundEnvironmentVariable] === "1"
 
@@ -77,8 +97,14 @@ export const sandboxModules = { path, url, util, crypto, buffer, zlib, events, s
 // ---- execute file roots -----------------------------------------------------------------------------
 
 /** Directory `files.write(name, ...)` uses for relative names. */
+let filesDirectory: string | undefined
 export function executeFilesDirectory(): string {
-  return path.join(os.tmpdir(), "opencode-browser-files")
+  filesDirectory ??= fs.mkdtempSync(path.join(os.tmpdir(), "opencode-browser-files-"))
+  const stat = fs.lstatSync(filesDirectory)
+  if (!stat.isDirectory() || stat.isSymbolicLink() || (process.getuid && (stat.uid !== process.getuid() || (stat.mode & 0o777) !== 0o700))) {
+    throw new ExecuteFileAccessError("files.dir must be an owned, private directory, not a symlink")
+  }
+  return fs.realpathSync(filesDirectory)
 }
 
 function realpathOrSelf(target: string): string {
@@ -139,7 +165,79 @@ export function assertExecuteFilePath(target: unknown, operation: string): strin
   if (!roots.some((root) => isInside(resolved, root))) {
     throw new ExecuteFileAccessError(`${operation}: ${target} is outside the execute file roots ${describeRoots()}. Set ${allowNodeEnvironmentVariable}=1 for unrestricted file access.`)
   }
+  // Playwright reopens file paths itself. Only allow private, owned directories so
+  // another OS user cannot replace a component between this check and its open.
+  const root = roots.filter((root) => isInside(resolved, root)).sort((a, b) => b.length - a.length)[0]!
+  const rootStat = fs.statSync(root)
+  if (process.getuid && (rootStat.mode & 0o022) !== 0 && (rootStat.mode & 0o1000) === 0) {
+    throw new ExecuteFileAccessError(`${operation}: shared writable roots must have the sticky bit set`)
+  }
+  let spelling = path.resolve(target)
+  for (;;) {
+    try {
+      const stat = fs.lstatSync(spelling)
+      if (stat.isSymbolicLink()) {
+        const real = fs.realpathSync(spelling)
+        // macOS's root-owned /tmp and /var aliases are not attacker-controlled.
+        if (stat.uid !== 0 || !roots.some((root) => isInside(root, real))) {
+          throw new ExecuteFileAccessError(`${operation}: symlink paths are not available in execute code`)
+        }
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    }
+    const parent = path.dirname(spelling)
+    if (parent === spelling) break
+    spelling = parent
+  }
+  let current = resolved
+  while (isInside(current, root)) {
+    let stat: fs.Stats | undefined
+    try { stat = fs.lstatSync(current) } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    }
+    if (stat?.isSymbolicLink()) throw new ExecuteFileAccessError(`${operation}: symlink paths are not available in execute code`)
+    if (stat && current !== root && process.getuid && (stat.uid !== process.getuid() || (stat.mode & 0o022) !== 0)) {
+      throw new ExecuteFileAccessError(`${operation}: file paths must use owned directories and files without group/world write access`)
+    }
+    if (stat && !stat.isDirectory() && (!stat.isFile() || stat.nlink !== 1)) {
+      throw new ExecuteFileAccessError(`${operation}: expected a regular file with no hard links`)
+    }
+    if (current === root) break
+    current = path.dirname(current)
+  }
+  const parent = path.dirname(resolved)
+  if (parent === root && process.getuid) {
+    const stat = fs.statSync(parent)
+    if (stat.uid !== process.getuid() || (stat.mode & 0o022) !== 0) {
+      throw new ExecuteFileAccessError(`${operation}: use a private subdirectory such as files.dir, not a shared temporary directory`)
+    }
+  }
   return resolved
+}
+
+async function openExecuteFile(target: string, write: boolean): Promise<fsPromises.FileHandle> {
+  const operation = write ? "files.write" : "files.read"
+  const resolved = assertExecuteFilePath(target, operation)
+  if (write) await fsPromises.mkdir(path.dirname(resolved), { recursive: true, mode: 0o700 })
+  assertExecuteFilePath(resolved, operation)
+  // Never truncate until the open descriptor has been checked. O_NOFOLLOW closes
+  // the final-component symlink race; inode comparison detects parent replacement.
+  const handle = await fsPromises.open(resolved, fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK | (write ? fs.constants.O_WRONLY | fs.constants.O_CREAT : fs.constants.O_RDONLY), 0o600)
+  try {
+    const stat = await handle.stat()
+    const current = await fsPromises.lstat(resolved)
+    assertExecuteFilePath(resolved, operation)
+    if (!stat.isFile() || stat.nlink !== 1 || current.isSymbolicLink() || stat.ino !== current.ino || stat.dev !== current.dev || (process.getuid && stat.uid !== process.getuid())) {
+      throw new ExecuteFileAccessError(`${operation}: file changed while opening it`)
+    }
+    // Linux exposes the actual descriptor destination, independent of path races.
+    if (process.platform === "linux") assertExecuteFilePath(await fsPromises.realpath(`/proc/self/fd/${handle.fd}`), operation)
+    return handle
+  } catch (error) {
+    await handle.close()
+    throw error
+  }
 }
 
 export type ExecuteFiles = {
@@ -159,21 +257,28 @@ export function createExecuteFiles(): ExecuteFiles {
     roots: executeFileRoots(),
     path: (name) => {
       const resolved = resolveTarget(name)
-      assertExecuteFilePath(resolved, "files.path")
-      return resolved
+      return assertExecuteFilePath(resolved, "files.path")
     },
     write: async (target, data) => {
       const resolved = resolveTarget(target)
-      assertExecuteFilePath(resolved, "files.write")
-      await fsPromises.mkdir(path.dirname(resolved), { recursive: true, mode: 0o700 })
       const bytes = typeof data === "string" ? data : data instanceof ArrayBuffer ? Buffer.from(data) : Buffer.from(data.buffer, data.byteOffset, data.byteLength)
-      await fsPromises.writeFile(resolved, bytes, { mode: 0o600 })
+      const handle = await openExecuteFile(resolved, true)
+      try {
+        await handle.truncate(0)
+        await handle.writeFile(bytes)
+      } finally {
+        await handle.close()
+      }
       return resolved
     },
     read: async (target, encoding) => {
       const resolved = resolveTarget(target)
-      assertExecuteFilePath(resolved, "files.read")
-      return encoding ? await fsPromises.readFile(resolved, encoding) : await fsPromises.readFile(resolved)
+      const handle = await openExecuteFile(resolved, false)
+      try {
+        return encoding ? await handle.readFile(encoding) : await handle.readFile()
+      } finally {
+        await handle.close()
+      }
     },
   }
 }
@@ -187,7 +292,7 @@ const fileOptionMethods = new Set([
 const fileOptionKeys = new Set(["path", "dir", "har", "storageState"])
 // Keys that name files wherever they appear.
 const alwaysFileOptionKeys = new Set(["outputPath", "baseline", "certPath", "keyPath", "pfxPath", "tracesDir", "downloadsPath"])
-const forbiddenOptionKeys = new Set(["executablePath"])
+const forbiddenOptionKeys = new Set(["executablePath", "recordHar", "recordVideo"])
 
 function checkFileOptions(value: unknown, method: string, includeMethodKeys: boolean, depth = 0): void {
   if (depth > 4 || value === null || typeof value !== "object") return
@@ -201,7 +306,7 @@ function checkFileOptions(value: unknown, method: string, includeMethodKeys: boo
   for (const [key, item] of Object.entries(value)) {
     if (forbiddenOptionKeys.has(key)) throw new ExecuteFileAccessError(`${method}: the ${key} option is not available in execute code`)
     if (typeof item === "string" && (alwaysFileOptionKeys.has(key) || (includeMethodKeys && fileOptionKeys.has(key)))) {
-      assertExecuteFilePath(item, `${method}({ ${key} })`)
+      Reflect.set(value, key, assertExecuteFilePath(item, `${method}({ ${key} })`))
     } else {
       checkFileOptions(item, method, includeMethodKeys, depth + 1)
     }
@@ -222,6 +327,15 @@ function returnsPromise(fn: Function): boolean {
 /** Enforce the execute file roots and refused APIs for one host call made by sandboxed code. */
 export function checkHostCall(fn: Function, receiver: unknown, args: readonly unknown[]): void {
   const name = typeof fn.name === "string" ? fn.name.replace(/^bound /, "") : ""
+  if (receiver !== null && typeof receiver === "object") {
+    const constructor = Reflect.getOwnPropertyDescriptor(receiver, "constructor")?.value
+    if (typeof constructor === "function" && constructor.prototype === receiver) {
+      throw new Error("Calling host methods on a shared prototype is not available in execute code")
+    }
+  }
+  if (name === "fetch" || name === "routeFromHAR" || (name === "fulfill" && args.some((arg) => arg !== null && typeof arg === "object" && "response" in arg))) {
+    throw new Error(`${name}: Node-side requests and response/HAR replay are not available in execute code; use browser requests or route.fulfill({ body })`)
+  }
   if ((name === "bringToFront" || (name === "send" && args[0] === "Page.bringToFront")) && !executeAllowsForeground()) {
     throw new Error(bringToFrontBlockedMessage)
   }
@@ -260,11 +374,24 @@ const deniedHostValues = new Map<unknown, string>([
   [workerThreads, "worker_threads"],
   [globalThis.fetch, "Node fetch"],
   [eval, "eval"],
+  [util.inspect, "host object inspection"],
+  [util.format, "host object formatting"],
+  [util.formatWithOptions, "host object formatting"],
+  [crypto.setEngine, "loading native crypto engines"],
+  [events.setMaxListeners, "changing shared event-emitter defaults or prototypes"],
+  // Native work the CPU budget cannot interrupt until it returns; the async versions run off the event loop.
+  ...[crypto.pbkdf2Sync, crypto.scryptSync, crypto.hkdfSync, crypto.generateKeyPairSync, crypto.generateKeySync, crypto.generatePrimeSync, crypto.checkPrimeSync]
+    .map((fn) => [fn, `crypto.${fn.name} (blocks the relay; use the async version)`] as const),
 ])
 
 // Playwright classes that launch local processes or make Node-side HTTP requests.
 const deniedHostClasses = new Map<string, string>([
+  ["APIRequest", "Playwright's Node-side HTTP client is not available in execute code"],
+  ["APIResponse", "Playwright's Node-side HTTP responses are not available in execute code"],
   ["APIRequestContext", "Playwright's Node-side HTTP client (page.request / context.request) is not available in execute code; use page.evaluate(() => fetch(...)) for requests with the page's cookies"],
+  ["Tracing", "Playwright tracing performs Node-side file I/O and is not available in execute code"],
+  ["Download", "Playwright download file access is not available in execute code; use browser fetch and files.write()"],
+  ["Video", "Playwright video file access is not available in execute code"],
   ["BrowserType", "browser.browserType() can launch local processes and is not available in execute code"],
   ["Playwright", "the Playwright root object is not available in execute code"],
   ["Android", "Playwright Android is not available in execute code"],
@@ -326,6 +453,49 @@ function isObjectLike(value: unknown): value is object {
 
 const isHiddenKey = (key: PropertyKey): boolean => typeof key === "string" && key.startsWith("_")
 
+// Promise rejections originating in execute must not become relay process faults.
+// Creation is tracked without inspecting attacker-controlled promise prototypes.
+let activeRealm: ExecuteRealm | undefined
+const promiseRealms = new WeakMap<Promise<unknown>, ExecuteRealm>()
+// The hook is installed only while execute JavaScript runs: promise hooks slow every await in the
+// process. The relay runs under Node; Bun runs the outer tests and has no promiseHooks.
+let stopPromiseHook: (() => void) | undefined
+
+function trackPromisesOf(realm: ExecuteRealm): () => void {
+  const previous = activeRealm
+  activeRealm = realm
+  if (!stopPromiseHook && !process.versions.bun) {
+    stopPromiseHook = v8.promiseHooks.createHook({ init(promise: Promise<unknown>) {
+      if (activeRealm) promiseRealms.set(promise, activeRealm)
+    } }) as () => void
+  }
+  return () => {
+    activeRealm = previous
+    if (!activeRealm && stopPromiseHook) {
+      stopPromiseHook()
+      stopPromiseHook = undefined
+    }
+  }
+}
+
+export function handleExecuteRealmRejection(promise: Promise<unknown>): boolean {
+  const realm = promiseRealms.get(promise)
+  if (!realm) return false
+  realm.dispose(new Error("Unhandled execute rejection; JavaScript state will reset before the next execute"))
+  return true
+}
+
+// Errors execute callbacks throw into host code. A host caller that does not catch them
+// (a timer or event emitter outside the realm's own wrappers) would otherwise crash the relay.
+const thrownByRealm = new WeakMap<object, ExecuteRealm>()
+
+export function handleExecuteRealmException(error: unknown): boolean {
+  const realm = isObjectLike(error) ? thrownByRealm.get(error) : undefined
+  if (!realm) return false
+  realm.dispose(new Error("Uncaught exception in an execute callback; JavaScript state will reset before the next execute"))
+  return true
+}
+
 /** A shadow target with no non-configurable own properties, so the proxy can report the host object's shape freely. */
 function shadowFor(value: object): object {
   if (typeof value === "function") return (function () {}).bind(undefined)
@@ -341,15 +511,29 @@ export class ExecuteRealm {
   private readonly sandboxArrayPrototype: object
   private readonly SandboxPromise: PromiseConstructor
   private readonly SandboxError: ErrorConstructor
-  private readonly sandboxPromiseThen: Function
+  private readonly sandboxAwait: Function
   private readonly sandboxIntrinsics: Record<string, unknown>
   private readonly hostToSandboxIntrinsic = new Map<unknown, unknown>()
-  private readonly sandboxToHostIntrinsic = new Map<unknown, unknown>()
   private readonly sandboxProxyByHost = new WeakMap<object, object>()
   private readonly hostBySandboxProxy = new WeakMap<object, object>()
   private readonly hostProxyBySandbox = new WeakMap<object, object>()
   private readonly sandboxByHostProxy = new WeakMap<object, object>()
+  private readonly guardedHostFunctions = new WeakMap<Function, Function>()
   private readonly forceProxy = new WeakSet<object>()
+  private readonly timers = new Map<number, ReturnType<typeof setTimeout>>()
+  private nextTimer = 0
+  private timersAborted = false
+  private entryDepth = 0
+  private readonly sliceMs = executeSliceMs()
+  // Leaky bucket of VM time: repeated near-limit slices (a busy setInterval) may use at most
+  // half of the relay's time, with a burst allowance of five slices, before the realm stops.
+  private busyDebtMs = 0
+  private busyCheckedAt = performance.now()
+  private stopped: Error | undefined
+  private readonly pendingRuns = new Set<(error: Error) => void>()
+  private readonly entryKey = `__execute_${crypto.randomUUID().replaceAll("-", "")}`
+  private readonly entryScript: vm.Script
+  private readonly global: Record<string, unknown>
 
   constructor() {
     const importModuleDynamically = () => {
@@ -360,6 +544,8 @@ export class ExecuteRealm {
       name: "opencode-browser-execute",
       // No eval/new Function in the sandbox, so the static import() check in run() sees all code.
       codeGeneration: { strings: false, wasm: false },
+      // Async continuations must drain under runInContext's CPU timeout too.
+      microtaskMode: "afterEvaluate",
       ...({ importModuleDynamically } as object),
     })
     const sandboxIntrinsics = new vm.Script(intrinsicSource, { importModuleDynamically } as vm.ScriptOptions).runInContext(this.context) as Record<string, unknown>
@@ -370,12 +556,25 @@ export class ExecuteRealm {
       const sandboxValue = sandboxIntrinsics[name]
       if (!isObjectLike(hostValue) || !isObjectLike(sandboxValue)) continue
       this.hostToSandboxIntrinsic.set(hostValue, sandboxValue)
-      this.sandboxToHostIntrinsic.set(sandboxValue, hostValue)
       const hostPrototype = (hostValue as { prototype?: unknown }).prototype
       const sandboxPrototype = (sandboxValue as { prototype?: unknown }).prototype
       if (typeof hostValue === "function" && isObjectLike(hostPrototype) && isObjectLike(sandboxPrototype)) {
         this.hostToSandboxIntrinsic.set(hostPrototype, sandboxPrototype)
-        this.sandboxToHostIntrinsic.set(sandboxPrototype, hostPrototype)
+      }
+      // Intrinsic invocation must retain the sandbox proxy as its target. In particular,
+      // a host Function.prototype.call/apply/bind would otherwise unwrap the function
+      // and invoke it without the membrane's apply trap (and checkHostCall).
+      // Brand-checking intrinsics (e.g. TypedArray.prototype.every on Buffer)
+      // need their host receiver; callback arguments still get guarded below.
+      for (const [from, to] of ["Object", "Function", "Reflect"].includes(name) ? [[hostValue, sandboxValue], [hostPrototype, sandboxPrototype]] : []) {
+        if (!isObjectLike(from) || !isObjectLike(to)) continue
+        for (const key of Reflect.ownKeys(from)) {
+          const source = Reflect.getOwnPropertyDescriptor(from, key)?.value
+          const destination = Reflect.getOwnPropertyDescriptor(to, key)?.value
+          if (typeof source === "function" && typeof destination === "function") {
+            this.hostToSandboxIntrinsic.set(source, destination)
+          }
+        }
       }
     }
     const sandboxObject = sandboxIntrinsics.Object as ObjectConstructor
@@ -384,25 +583,139 @@ export class ExecuteRealm {
     this.sandboxArrayPrototype = (sandboxIntrinsics.Array as ArrayConstructor).prototype
     this.SandboxPromise = sandboxIntrinsics.Promise as PromiseConstructor
     this.SandboxError = sandboxIntrinsics.Error as ErrorConstructor
-    this.sandboxPromiseThen = this.SandboxPromise.prototype.then
+    // Await handles hostile Promise subclasses/species without leaving a rejected
+    // original promise unobserved if `.then()` itself throws during conversion.
+    this.sandboxAwait = new vm.Script("(async (value, resolve, reject) => { try { resolve(await value) } catch (error) { reject(error) } })").runInContext(this.context) as Function
     this.state = Object.create(this.sandboxObjectPrototype) as Record<string, unknown>
+    this.global = new vm.Script("globalThis").runInContext(this.context) as Record<string, unknown>
+    // Remove the host entry function before running any untrusted code. It is
+    // never exposed to the realm, even while callbacks re-enter it.
+    this.entryScript = new vm.Script(`(() => { "use strict"; const entry = this[${JSON.stringify(this.entryKey)}]; delete this[${JSON.stringify(this.entryKey)}]; return entry(); })()`)
     // Stack-trace callbacks receive call sites that can expose functions of sloppy host frames.
     new vm.Script(
-      "Object.defineProperty(Error, 'prepareStackTrace', { value: undefined, writable: false, configurable: false })",
+      "Object.defineProperty(Error, 'prepareStackTrace', { value: undefined, writable: false, configurable: false }); globalThis.SharedArrayBuffer = undefined; globalThis.Atomics = undefined; globalThis.WeakRef = undefined; globalThis.FinalizationRegistry = undefined",
     ).runInContext(this.context)
     this.installGlobals()
+    for (const module of Object.values(sandboxModules)) this.forceProxy.add(module)
   }
 
   private installGlobals(): void {
-    const global = new vm.Script("globalThis").runInContext(this.context) as Record<string, unknown>
+    const global = this.global
+    const schedule = (repeat: boolean, callback: (...args: unknown[]) => unknown, delay = 0, ...args: unknown[]) => {
+      // A string callback would be code generation; refuse it rather than failing later.
+      if (typeof callback !== "function") throw new TypeError("The timer callback must be a function")
+      const id = ++this.nextTimer
+      if (this.timersAborted || this.stopped) return id
+      const fire = () => {
+        if (!repeat) this.timers.delete(id)
+        if (this.stopped) return
+        try { callback(...args) } catch {
+          this.dispose(new Error("Execute timer callback failed; JavaScript state will reset before the next execute"))
+        }
+      }
+      this.timers.set(id, (repeat ? setInterval : setTimeout)(fire, delay))
+      return id
+    }
+    const clear = (id: number) => {
+      const timer = this.timers.get(id)
+      if (timer) clearTimeout(timer)
+      this.timers.delete(id)
+    }
     const hostGlobals: Record<string, unknown> = {
-      setTimeout, clearTimeout, setInterval, clearInterval, setImmediate, clearImmediate, queueMicrotask,
-      structuredClone, atob, btoa, URL, URLSearchParams, TextEncoder, TextDecoder, Buffer, AbortController,
+      setTimeout: (callback: (...args: unknown[]) => unknown, delay?: number, ...args: unknown[]) => schedule(false, callback, delay, ...args),
+      setInterval: (callback: (...args: unknown[]) => unknown, delay?: number, ...args: unknown[]) => schedule(true, callback, delay, ...args),
+      setImmediate: (callback: (...args: unknown[]) => unknown, ...args: unknown[]) => schedule(false, callback, 0, ...args),
+      clearTimeout: clear, clearInterval: clear, clearImmediate: clear,
+      atob, btoa, URL, URLSearchParams, TextEncoder, TextDecoder, Buffer, AbortController,
       AbortSignal, Blob, Event, EventTarget, performance, crypto: globalThis.crypto,
     }
     for (const [name, value] of Object.entries(hostGlobals)) {
       if (value === undefined) continue
       Reflect.defineProperty(global, name, { value: this.toSandbox(value), writable: true, configurable: true, enumerable: false })
+    }
+    new vm.Script("{ const then = Promise.prototype.then; const ready = Promise.resolve(); globalThis.queueMicrotask = callback => Reflect.apply(then, ready, [callback]); }").runInContext(this.context)
+  }
+
+  /**
+   * Clear every pending realm timer and park new ones (they never fire) until resumeTimers(),
+   * keeping JavaScript state. For a user stop that should not reset `state`; dispose() is the full stop.
+   */
+  abortTimers(): void {
+    this.timersAborted = true
+    for (const timer of this.timers.values()) clearTimeout(timer)
+    this.timers.clear()
+  }
+
+  resumeTimers(): void {
+    this.timersAborted = false
+  }
+
+  /** Pending realm timers, for tests and diagnostics. */
+  get pendingTimers(): number {
+    return this.timers.size
+  }
+
+  /** Revoke callbacks and timers when execution is stopped or its CPU budget is exhausted. */
+  dispose(error = new Error("Execute stopped")): void {
+    if (this.stopped) return
+    this.stopped = error
+    for (const timer of this.timers.values()) clearTimeout(timer)
+    this.timers.clear()
+    for (const reject of this.pendingRuns) reject(error)
+    this.pendingRuns.clear()
+  }
+
+  get isStopped(): boolean {
+    return this.stopped !== undefined
+  }
+
+  private enter<T>(entry: () => T): T {
+    if (this.stopped) throw this.stopped
+    if (this.entryDepth > 0) return entry()
+    if (!Reflect.defineProperty(this.global, this.entryKey, { value: entry, configurable: true })) {
+      this.dispose(new Error("Execute made its global non-extensible; JavaScript state will reset before the next execute"))
+      throw this.stopped
+    }
+    const untrack = trackPromisesOf(this)
+    this.entryDepth += 1
+    const startedAt = performance.now()
+    try {
+      return this.entryScript.runInContext(this.context, { timeout: this.sliceMs }) as T
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ERR_SCRIPT_EXECUTION_TIMEOUT") {
+        this.dispose(new Error(
+          `Execute exceeded its synchronous CPU budget: JavaScript ran for over ${this.sliceMs}ms without yielding, which stalls every session on the relay. ` +
+          "Likely causes: a loop that never ends, a slow regular expression, or converting a very large value. " +
+          "Split heavy work into chunks separated by `await new Promise(r => setTimeout(r, 0))`, do it in the page with page.evaluate(), or return less data " +
+          `(the relay's limit is ${executeSliceEnvironmentVariable}). JavaScript state will reset before the next execute.`,
+        ))
+        throw this.stopped
+      }
+      throw error
+    } finally {
+      this.entryDepth -= 1
+      untrack()
+      Reflect.deleteProperty(this.global, this.entryKey)
+      this.chargeBusyTime(performance.now() - startedAt)
+    }
+  }
+
+  private chargeBusyTime(elapsedMs: number): void {
+    const now = performance.now()
+    this.busyDebtMs = Math.max(0, this.busyDebtMs - (now - this.busyCheckedAt) / 2) + elapsedMs
+    this.busyCheckedAt = now
+    if (this.busyDebtMs > this.sliceMs * 5 && !this.stopped) {
+      this.dispose(new Error(
+        "Execute exceeded its sustained CPU budget: its callbacks and timers kept the relay's JavaScript busy more than half the time, which stalls every session on the relay. " +
+        "Do heavy work in the page with page.evaluate(), or wait longer between timer or event callbacks. JavaScript state will reset before the next execute.",
+      ))
+    }
+  }
+
+  private drainMicrotasks(): void {
+    if (this.stopped || this.entryDepth > 0) return
+    try { this.enter(() => {}) } catch (error) {
+      this.dispose(error instanceof Error ? error : new Error("Execute microtask failed"))
     }
   }
 
@@ -432,20 +745,23 @@ export class ExecuteRealm {
     if (containsDynamicImport(options.source)) {
       throw new Error("import() is not available in execute code. Set OPENCODE_BROWSER_ALLOW_NODE=1 on the relay for full Node access.")
     }
-    let fn: unknown
+    let rejectRun!: (error: Error) => void
+    const stopped = new Promise<never>((_resolve, reject) => { rejectRun = reject })
+    // Attach before entering the VM: a synchronous timeout also rejects this promise.
+    void stopped.catch(() => {})
+    this.pendingRuns.add(rejectRun)
     try {
-      fn = new vm.Script(options.source, { filename: options.filename, importModuleDynamically } as vm.ScriptOptions).runInContext(this.context)
+      const result = this.enter(() => {
+        const fn = new vm.Script(options.source, { filename: options.filename, importModuleDynamically } as vm.ScriptOptions).runInContext(this.context)
+        const args = options.args.map((value, index) => options.sandboxArgs?.has(index) ? options.sandboxArgs.get(index) : this.toSandbox(value))
+        return this.toHost(Reflect.apply(fn as Function, undefined, args))
+      })
+      return await Promise.race([result, stopped])
     } catch (error) {
       throw this.toHostThrown(error)
+    } finally {
+      this.pendingRuns.delete(rejectRun)
     }
-    const args = options.args.map((value, index) => options.sandboxArgs?.has(index) ? options.sandboxArgs.get(index) : this.toSandbox(value))
-    let result: unknown
-    try {
-      result = this.toHost(Reflect.apply(fn as Function, undefined, args))
-    } catch (error) {
-      throw this.toHostThrown(error)
-    }
-    return await result
   }
 
   // ---- host → sandbox -----------------------------------------------------------------------------
@@ -470,6 +786,8 @@ export class ExecuteRealm {
 
   toSandbox(value: unknown, seen: Map<object, unknown> = new Map()): unknown {
     if (!isObjectLike(value)) return value
+    // Uninitialised Buffer storage can contain bytes belonging to the relay.
+    if (value === Buffer.allocUnsafe || value === Buffer.allocUnsafeSlow || value === (buffer as unknown as { SlowBuffer?: unknown }).SlowBuffer) return this.toSandbox(Buffer.alloc)
     if (this.hostBySandboxProxy.has(value)) return value
     const unwrapped = this.sandboxByHostProxy.get(value)
     if (unwrapped) return unwrapped
@@ -482,6 +800,15 @@ export class ExecuteRealm {
     if (denied) throw this.sandboxError(`${denied} is not available in execute code. Set ${allowNodeEnvironmentVariable}=1 for full Node access.`)
     if (this.isSandboxNative(value)) return value
     if (util.types.isPromise(value)) return this.toSandboxPromise(value as Promise<unknown>)
+    // Small Buffers share a host allocation pool. Exposing `.buffer`/`.parent`
+    // must not reveal other bytes in that pool (including relay credentials).
+    if (Buffer.isBuffer(value)) {
+      const copy = Buffer.alloc(value.length)
+      copy.set(value)
+      const proxy = this.sandboxProxy(copy)
+      this.sandboxProxyByHost.set(value, proxy)
+      return proxy
+    }
     // Binary data other than Buffer (which keeps its host API) is copied into the sandbox's own typed arrays.
     if (util.types.isArrayBuffer(value)) {
       const SandboxUint8Array = this.sandboxIntrinsics.Uint8Array as Uint8ArrayConstructor
@@ -496,11 +823,12 @@ export class ExecuteRealm {
     if (deniedClass) throw this.sandboxError(deniedClass)
     if (!this.forceProxy.has(value) && typeof value === "object") {
       const prototype = Reflect.getPrototypeOf(value)
-      if (Array.isArray(value) && prototype === Array.prototype) {
+      if ((Array.isArray(value) && prototype === Array.prototype) || util.types.isArgumentsObject(value)) {
         const output: unknown[] = []
         Reflect.setPrototypeOf(output, this.sandboxArrayPrototype)
         seen.set(value, output)
-        for (let index = 0; index < value.length; index += 1) output[index] = this.toSandbox(value[index], seen)
+        const array = value as ArrayLike<unknown>
+        for (let index = 0; index < array.length; index += 1) output[index] = this.toSandbox(array[index], seen)
         return output
       }
       if ((prototype === Object.prototype || prototype === null) && !Object.hasOwn(value, "constructor") && !util.types.isProxy(value)) {
@@ -535,14 +863,20 @@ export class ExecuteRealm {
     return new this.SandboxPromise((resolve, reject) => {
       promise.then(
         (value) => {
+          if (this.stopped) return
           try {
-            resolve(this.toSandbox(value))
+            this.enter(() => resolve(this.toSandbox(value)))
           } catch (error) {
-            reject(this.toSandboxThrown(error))
+            if (!this.stopped) this.enter(() => reject(this.toSandboxThrown(error)))
           }
+          this.drainMicrotasks()
         },
         (error: unknown) => {
-          reject(this.toSandboxThrown(error))
+          if (this.stopped) return
+          try { this.enter(() => reject(this.toSandboxThrown(error))) } catch (failure) {
+            this.dispose(failure instanceof Error ? failure : new Error("Execute promise callback failed"))
+          }
+          this.drainMicrotasks()
         },
       )
     })
@@ -586,14 +920,8 @@ export class ExecuteRealm {
           throw realm.sanitizeThrown(error)
         }
       },
-      set(_shadow, key, value) {
-        if (isHiddenKey(key)) return false
-        const hostValue = realm.toHost(value)
-        try {
-          return Reflect.set(target, key, hostValue)
-        } catch (error) {
-          throw realm.toSandboxThrown(error)
-        }
+      set() {
+        return false
       },
       has(_shadow, key) {
         if (isHiddenKey(key)) return false
@@ -603,13 +931,8 @@ export class ExecuteRealm {
           throw realm.toSandboxThrown(error)
         }
       },
-      deleteProperty(_shadow, key) {
-        if (isHiddenKey(key)) return true
-        try {
-          return Reflect.deleteProperty(target, key)
-        } catch (error) {
-          throw realm.toSandboxThrown(error)
-        }
+      deleteProperty() {
+        return false
       },
       ownKeys() {
         let keys: (string | symbol)[]
@@ -631,23 +954,14 @@ export class ExecuteRealm {
         if (!descriptor) return undefined
         try {
           return "value" in descriptor || !("get" in descriptor || "set" in descriptor)
-            ? { value: realm.toSandbox(descriptor.value), writable: descriptor.writable ?? false, enumerable: descriptor.enumerable ?? false, configurable: true }
-            : { get: realm.toSandbox(descriptor.get) as () => unknown, set: realm.toSandbox(descriptor.set) as (value: unknown) => void, enumerable: descriptor.enumerable ?? false, configurable: true }
+            ? { value: realm.toSandbox(descriptor.value), writable: false, enumerable: descriptor.enumerable ?? false, configurable: true }
+            : { get: realm.toSandbox(descriptor.get) as () => unknown, enumerable: descriptor.enumerable ?? false, configurable: true }
         } catch (error) {
           throw realm.sanitizeThrown(error)
         }
       },
-      defineProperty(_shadow, key, descriptor) {
-        if (isHiddenKey(key) || descriptor.configurable === false) return false
-        const hostDescriptor: PropertyDescriptor = { ...descriptor }
-        if ("value" in descriptor) hostDescriptor.value = realm.toHost(descriptor.value)
-        if (descriptor.get) hostDescriptor.get = realm.toHost(descriptor.get) as () => unknown
-        if (descriptor.set) hostDescriptor.set = realm.toHost(descriptor.set) as (value: unknown) => void
-        try {
-          return Reflect.defineProperty(target, key, hostDescriptor)
-        } catch (error) {
-          throw realm.toSandboxThrown(error)
-        }
+      defineProperty() {
+        return false
       },
       getPrototypeOf() {
         let prototype: object | null
@@ -670,7 +984,9 @@ export class ExecuteRealm {
         return false
       },
       apply(_shadow, thisArgument, args) {
-        const hostThis = realm.toHost(thisArgument)
+        const hostThis = isObjectLike(thisArgument) && realm.hostBySandboxProxy.has(thisArgument)
+          ? realm.hostBySandboxProxy.get(thisArgument)
+          : realm.toHost(thisArgument)
         const hostArgs = args.map((arg) => realm.toHost(arg))
         try {
           checkHostCall(target as Function, hostThis, hostArgs)
@@ -723,8 +1039,33 @@ export class ExecuteRealm {
     if (!isObjectLike(value)) return value
     if (this.sandboxByHostProxy.has(value)) return value
     const host = this.hostBySandboxProxy.get(value)
-    if (host) return host
-    if (this.sandboxToHostIntrinsic.has(value)) return this.sandboxToHostIntrinsic.get(value)
+    if (host) {
+      if (typeof host !== "function") return host
+      let guarded = this.guardedHostFunctions.get(host)
+      if (!guarded) {
+        // Functions passed to host helpers (promisify/callbackify, streams, event
+        // listeners, etc.) must keep their policy even when the helper calls them
+        // later. Merely checking Function.prototype.call is not sufficient.
+        guarded = new Proxy(host, {
+          apply(target, receiver, args) {
+            checkHostCall(target, receiver, args)
+            return Reflect.apply(target, receiver, args)
+          },
+          construct(target, args, newTarget) {
+            checkHostCall(target, undefined, args)
+            return Reflect.construct(target, args, newTarget)
+          },
+          set: () => false,
+          defineProperty: () => false,
+          deleteProperty: () => false,
+          setPrototypeOf: () => false,
+          preventExtensions: () => false,
+        })
+        this.guardedHostFunctions.set(host, guarded)
+        this.sandboxByHostProxy.set(guarded, value)
+      }
+      return guarded
+    }
     const wrapped = this.hostProxyBySandbox.get(value)
     if (wrapped) return wrapped
     const copied = seen.get(value)
@@ -779,31 +1120,33 @@ export class ExecuteRealm {
       const Constructor = (globalThis as unknown as Record<string, new (source: ArrayLike<number> | ArrayLike<bigint>) => unknown>)[name] ?? Uint8Array
       return new Constructor(value as unknown as ArrayLike<number>)
     }
-    if (Array.isArray(value)) {
+    if (Array.isArray(value) || util.types.isArgumentsObject(value)) {
       const output: unknown[] = []
       seen.set(value, output)
-      const length = value.length
-      for (let index = 0; index < length; index += 1) output[index] = this.toHost(value[index], seen)
+      const array = value as ArrayLike<unknown>
+      for (let index = 0; index < array.length; index += 1) output[index] = this.toHost(array[index], seen)
       return output
     }
     const output: Record<string, unknown> = {}
     seen.set(value, output)
-    for (const key of Object.keys(value)) output[key] = this.toHost((value as Record<string, unknown>)[key], seen)
+    for (const key of Object.keys(value)) {
+      Object.defineProperty(output, key, { value: this.toHost((value as Record<string, unknown>)[key], seen), writable: true, enumerable: true, configurable: true })
+    }
     return output
   }
 
   private toHostPromise(promise: Promise<unknown>): Promise<unknown> {
     return new Promise((resolve, reject) => {
-      Reflect.apply(this.sandboxPromiseThen, promise, [
+      Reflect.apply(this.sandboxAwait, undefined, [promise,
         (value: unknown) => {
           try {
-            resolve(this.toHost(value))
+            resolve(this.enter(() => this.toHost(value)))
           } catch (error) {
-            reject(this.toHostThrown(error))
+            reject(this.stopped ?? this.enter(() => this.toHostThrown(error)))
           }
         },
         (error: unknown) => {
-          reject(this.toHostThrown(error))
+          try { reject(this.enter(() => this.toHostThrown(error))) } catch (failure) { reject(failure) }
         },
       ])
     })
@@ -811,6 +1154,8 @@ export class ExecuteRealm {
 
   /** Convert anything thrown by sandbox code into a host value. */
   toHostThrown(error: unknown): unknown {
+    if (this.stopped) return this.stopped
+    if (this.entryDepth === 0) return this.enter(() => this.toHostThrown(error))
     if (isObjectLike(error) && !this.hostBySandboxProxy.has(error) && !this.isSandboxNative(error) && error instanceof Error) return error
     try {
       return this.toHost(error)
@@ -819,44 +1164,66 @@ export class ExecuteRealm {
     }
   }
 
+  /** A value thrown from a sandbox callback into host code, tagged so an uncaught one stops only this realm. */
+  private thrownToHost(error: unknown): unknown {
+    const thrown = this.toHostThrown(error)
+    // Primitives cannot be tagged; host callers only see their message.
+    const value = isObjectLike(thrown) ? thrown : new Error(String(thrown))
+    if (!thrownByRealm.has(value)) thrownByRealm.set(value, this)
+    return value
+  }
+
   private hostProxy(target: object): object {
     const realm = this
     const handler: ProxyHandler<object> = {
       apply(_shadow, thisArgument, args) {
+        if (realm.stopped) return undefined
         try {
-          const sandboxThis = realm.toSandbox(thisArgument)
-          const sandboxArgs = args.map((arg) => realm.toSandbox(arg))
-          return realm.toHost(Reflect.apply(target as Function, sandboxThis, sandboxArgs))
+          return realm.enter(() => {
+            const sandboxThis = realm.toSandbox(thisArgument)
+            const sandboxArgs = args.map((arg) => realm.toSandbox(arg))
+            return realm.toHost(Reflect.apply(target as Function, sandboxThis, sandboxArgs))
+          })
         } catch (error) {
-          throw realm.toHostThrown(error)
+          if (realm.stopped) return undefined
+          throw realm.thrownToHost(error)
         }
       },
       construct(_shadow, args) {
+        if (realm.stopped) return Object.create(null) as object
         try {
-          return realm.toHost(Reflect.construct(target as Function, args.map((arg) => realm.toSandbox(arg)))) as object
+          return realm.enter(() => realm.toHost(Reflect.construct(target as Function, args.map((arg) => realm.toSandbox(arg))))) as object
         } catch (error) {
-          throw realm.toHostThrown(error)
+          throw realm.thrownToHost(error)
         }
       },
       get(_shadow, key) {
+        if (realm.stopped) {
+          if (key === "apply") return Function.prototype.apply
+          if (key === "call") return Function.prototype.call
+          if (key === "bind") return Function.prototype.bind
+          return undefined
+        }
         try {
-          return realm.toHost(Reflect.get(target, key))
+          return realm.enter(() => realm.toHost(Reflect.get(target, key)))
         } catch (error) {
-          throw realm.toHostThrown(error)
+          throw realm.thrownToHost(error)
         }
       },
       set(_shadow, key, value) {
+        if (realm.stopped) return false
         try {
-          return Reflect.set(target, key, realm.toSandbox(value))
+          return realm.enter(() => Reflect.set(target, key, realm.toSandbox(value)))
         } catch (error) {
-          throw realm.toHostThrown(error)
+          throw realm.thrownToHost(error)
         }
       },
       has(_shadow, key) {
+        if (realm.stopped) return false
         try {
-          return Reflect.has(target, key)
+          return realm.enter(() => Reflect.has(target, key))
         } catch (error) {
-          throw realm.toHostThrown(error)
+          throw realm.thrownToHost(error)
         }
       },
     }
