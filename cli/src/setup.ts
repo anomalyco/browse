@@ -3,6 +3,7 @@
 //              (reloading a connected one), then check which browsers have the extension and open the Chrome Web
 //              Store listing when none does
 //   extension  open the unpacked extension folder (for "Load unpacked")
+//   pair       print the pairing code a Chrome Web Store build asks for (unpacked builds are paired by install)
 //   uninstall  remove everything install wrote
 // Earlier versions registered a native messaging host and wrote an opencode plugin; install and uninstall
 // remove those leftovers.
@@ -14,6 +15,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse } from "jsonc-parser"
 import { dataRoot } from "./paths.ts"
+import { formatPairingCode, pairingCode, relayAuthorization, writeExtensionPairing } from "./relay-secrets.ts"
 import { opencodeBrowserVersion } from "./version.ts"
 
 const STORE_ID = "mfnicocicmmlkpjnaffgihfjhdgjkdjg"
@@ -52,6 +54,12 @@ const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 /** Running from a source checkout without a package to install: the MCP server runs main.ts in place with bun. */
 const fromSource = existsSync(path.join(packageRoot, "src", "main.ts")) && !process.env.OPENCODE_BROWSER_PACKAGE
 const bundledExtension = path.join(packageRoot, "extension")
+/** From a checkout, the extension folder users load unpacked (dist/) and its source (public/, copied into dist/ by every build). */
+const checkoutExtensionDirs = (() => {
+  const repo = path.dirname(packageRoot)
+  if (!fromSource || !existsSync(path.join(repo, "public", "manifest.json"))) return []
+  return [path.join(repo, "public"), path.join(repo, "dist")]
+})()
 
 type Settings = { opencode?: string; entry?: string; version?: string }
 
@@ -291,6 +299,11 @@ async function install(args: string[]) {
   if (existsSync(bundledExtension)) {
     rmSync(files.extension, { recursive: true, force: true })
     cpSync(bundledExtension, files.extension, { recursive: true })
+  }
+  // The unpacked extension reads the pairing code from its own folder, so it pairs with the relay without a step.
+  pairUnpacked()
+  log("✓ Paired the unpacked extension with the relay (for the Chrome Web Store build, run `opencode-browser pair`)")
+  if (existsSync(bundledExtension)) {
     // A browser already running an older unpacked build keeps its old code until it reloads; ask it to.
     const reload = connected ? await reloadOutdatedExtension(connected) : "current"
     if (reload === "reloaded") log("✓ Reloaded OpenCode Browser in your browser")
@@ -318,9 +331,27 @@ function extension() {
     mkdirSync(files.dir, { recursive: true })
     cpSync(bundledExtension, files.extension, { recursive: true })
   }
+  pairUnpacked()
   const opener = windows ? "explorer" : process.platform === "darwin" ? "open" : "xdg-open"
   spawnSync(opener, [files.extension])
   log(`Load unpacked from: ${files.extension}`)
+}
+
+/** Writes the pairing code into every unpacked extension folder this install manages. */
+function pairUnpacked() {
+  const code = pairingCode()
+  for (const directory of [files.extension, ...checkoutExtensionDirs])
+    if (existsSync(path.join(directory, "manifest.json"))) writeExtensionPairing(directory, code)
+}
+
+function pair() {
+  mkdirSync(files.dir, { recursive: true })
+  pairUnpacked()
+  log(`Pairing code: ${formatPairingCode(pairingCode())}`)
+  log("")
+  log("OpenCode Browser from the Chrome Web Store asks for this code once: open its status page (right-click the")
+  log("toolbar button, then Options), paste it, and click Pair. Unpacked installs are paired by `install`.")
+  log("Keep it private: with it, a program could pose as the relay to your browser.")
 }
 
 function uninstall() {
@@ -337,8 +368,17 @@ type ExtensionStatus = { connected?: boolean; build?: string | null; origin?: st
 
 const relayBase = () => `http://127.0.0.1:${Number(process.env.OPENCODE_BROWSER_PORT) || 19988}`
 
+/** The relay token header; the relay rejects every API request without it. */
+const relayHeaders = (): Record<string, string> => {
+  try {
+    return { authorization: relayAuthorization() }
+  } catch {
+    return {}
+  }
+}
+
 const extensionStatus = () =>
-  fetch(`${relayBase()}/extension/status`, { signal: AbortSignal.timeout(3_000) })
+  fetch(`${relayBase()}/extension/status`, { headers: relayHeaders(), signal: AbortSignal.timeout(3_000) })
     .then((response) => (response.ok ? (response.json() as Promise<ExtensionStatus>) : undefined))
     .catch(() => undefined)
 
@@ -363,7 +403,7 @@ async function reloadOutdatedExtension(before: ExtensionStatus): Promise<"reload
   const sent = await fetch(`${relayBase()}/extension/reload`, {
     method: "POST",
     body: "{}",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...relayHeaders() },
     signal: AbortSignal.timeout(5_000),
   }).then(
     (response) => response.ok,
@@ -578,4 +618,5 @@ export async function runSetup(command: string, args: string[]) {
   if (command === "install") return install(args)
   if (command === "extension") return extension()
   if (command === "uninstall") return uninstall()
+  if (command === "pair") return pair()
 }

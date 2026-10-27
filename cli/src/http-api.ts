@@ -43,16 +43,19 @@ import { SessionError, type OpenCodeBrowserSessions } from "./session-manager.ts
 import type { RecordingRelay, RecordingStartOptions, RecordingTargetOptions } from "./recording-relay.ts"
 import { TargetOwnershipError, type TargetRegistry } from "./target-registry.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "./version.ts"
+import { relayTokenQueryParam, secretsEqual } from "./relay-secrets.ts"
 import { RelayShutdown, RelayShutdownError } from "./relay-shutdown.ts"
 
 export function createHttpRequestHandler(options: {
   readonly host: string
   readonly port: number
   readonly browserId: string
+  /** This install's relay token (relay-secrets.ts); every route but the version probe requires it. */
+  readonly authToken: string
   readonly relayInstance: { readonly id: string; readonly startedAt: string; readonly pid: number; readonly managed: boolean }
   readonly shutdown: RelayShutdown
   readonly extensionStatus: () => Pick<ExtensionStatus,
-    "connected" | "version" | "build" | "origin" | "protocolVersion" | "protocolCompatible" | "protocolLegacy" | "rejectedConnections" | "cdpClients"
+    "connected" | "version" | "build" | "origin" | "protocolVersion" | "protocolCompatible" | "protocolLegacy" | "rejectedConnections" | "pairingFailures" | "cdpClients" | "processFaults"
   >
   readonly recordingRelay: RecordingRelay
   readonly flightRecorder: FlightRecorderRelay
@@ -81,6 +84,12 @@ export function createHttpRequestHandler(options: {
     }
     const requestUrl = new URL(request.url ?? "/", `http://${formatHostForUrl(options.host)}:${options.port}`)
     const pathname = requestUrl.pathname.replace(/\/$/, "") || "/"
+    // The version probe stays open: it reveals nothing sensitive and lets clients of another build or install tell
+    // which relay holds the port before they send a token it would reject.
+    if (pathname !== "/" && pathname !== "/version" && !hasRelayToken(request, options.authToken)) {
+      sendJson(response, { error: "Missing or invalid OpenCode Browser relay token", code: "unauthorized" }, 401)
+      return
+    }
     const observational = request.method === "GET" || pathname === "/network/status" || pathname === "/auth/status"
     const run = (effect: Effect.Effect<void, Error>, settle = false): void => {
       runRequestEffect(response, observational ? effect : options.shutdown.track(settle ? Effect.uninterruptible(effect) : effect))
@@ -111,6 +120,8 @@ export function createHttpRequestHandler(options: {
       if (opencodeBrowserSessionId) {
         webSocketDebuggerUrl.searchParams.set("opencodeBrowserSessionId", opencodeBrowserSessionId)
       }
+      // The caller already proved it has the token; clients that connect to this URL without headers need it too.
+      webSocketDebuggerUrl.searchParams.set(relayTokenQueryParam, options.authToken)
       sendJson(response, {
         Browser: `OpenCode-Browser/${opencodeBrowserVersion}`,
         "Protocol-Version": "1.3",
@@ -150,6 +161,8 @@ export function createHttpRequestHandler(options: {
         ...(extensionStatus.protocolLegacy === undefined ? {} : { protocolLegacy: extensionStatus.protocolLegacy }),
         ...(extensionStatus.rejectedConnections === undefined ? {} : { rejectedConnections: extensionStatus.rejectedConnections }),
         ...(extensionStatus.cdpClients === undefined ? {} : { cdpClients: extensionStatus.cdpClients }),
+        ...(extensionStatus.pairingFailures === undefined ? {} : { pairingFailures: extensionStatus.pairingFailures }),
+        ...(extensionStatus.processFaults === undefined ? {} : { processFaults: extensionStatus.processFaults }),
         activeTargets: options.registry.rootTargetCount(),
         childTargets: options.registry.childTargets.size,
         sessions: options.sessions.listSummaries(),
@@ -195,6 +208,13 @@ export function createHttpRequestHandler(options: {
     response.writeHead(404)
     response.end("Not found")
   }
+}
+
+/** Whether a request carries the relay token as `Authorization: Bearer <token>`, compared in constant time. */
+export function hasRelayToken(request: http.IncomingMessage, token: string): boolean {
+  const header = request.headers.authorization
+  const match = /^Bearer\s+(\S+)$/i.exec(header ?? "")
+  return secretsEqual(token, match?.[1])
 }
 
 function handleClientRequest(options: {

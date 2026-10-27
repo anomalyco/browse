@@ -93,6 +93,8 @@ export class OpenCodeBrowserSessions {
   private readonly createSandbox: (id: string, onDefaultTargetChange: (target: SessionTarget | undefined) => void) => ExecuteSandboxLike
   private readonly hooks: SessionHooks
   private readonly executing = new Set<string>()
+  /** Answers a running execute early with an error (the user stopped it); the script itself settles later. */
+  private readonly executionStoppers = new Map<string, (message: string) => void>()
   private readonly adoptSemaphore = Semaphore.makeUnsafe(1)
   private readonly targetOwnership: TargetOwnership
   private persistenceTail = Promise.resolve()
@@ -240,6 +242,17 @@ export class OpenCodeBrowserSessions {
 
   isExecuting(id: string): boolean {
     return this.executing.has(id)
+  }
+
+  /**
+   * Fails the session's running execute now with `message`. The script keeps the session's execute lock until it
+   * settles (its pages are gone, so it soon does), so the next execute still runs after it.
+   */
+  stopExecution(id: string, message: string): boolean {
+    const stop = this.executionStoppers.get(id)
+    if (!stop) return false
+    stop(message)
+    return true
   }
 
   hasPendingWork(id: string): boolean {
@@ -434,10 +447,27 @@ export class OpenCodeBrowserSessions {
           started = true
           session.updatedAt = new Date().toISOString()
           manager.setExecuting(session.id, true)
+          const stopper = (message: string) => {
+            Effect.runSync(Deferred.succeed(response, {
+              result: {
+                text: message,
+                isError: true,
+                logs: [],
+                logSummary: { totalCount: 0, returnedCount: 0, repeatedCount: 0, omittedCount: 0 },
+                warnings: [],
+                diagnostic: "user-stopped",
+              },
+              session: manager.createdSummary(session, resolved.created),
+            }))
+          }
+          manager.executionStoppers.set(session.id, stopper)
           const startedAt = Date.now()
           const result = yield* session.sandbox
             .execute(options.code, { ...(options.targetSelection ? { targetSelection: options.targetSelection } : {}) })
-            .pipe(Effect.ensuring(Effect.sync(() => manager.setExecuting(session.id, false))))
+            .pipe(Effect.ensuring(Effect.sync(() => {
+              if (manager.executionStoppers.get(session.id) === stopper) manager.executionStoppers.delete(session.id)
+              manager.setExecuting(session.id, false)
+            })))
           if (resolved.created && result.setupFailed) {
             return yield* sessionError("setup-failed", result.text, session.id)
           }

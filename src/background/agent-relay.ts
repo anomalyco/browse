@@ -21,10 +21,12 @@ import type {
   OffscreenStatusRecordingResult,
   OffscreenStopRecordingResult,
 } from "../agent-relay/recording-types"
-import type { AgentRelayState, AgentRelayStatus } from "../shared/protocol"
+import type { AgentRelayState, AgentRelayStatus, PairingSource } from "../shared/protocol"
 import { createAgentRelayLog, formatAgentRelayLog } from "./agent-relay-log"
 import { AgentGroups } from "./agent-groups"
+import { AgentWindow } from "./agent-window"
 import { DebuggerHub } from "./debugger-hub"
+import { normalizePairingCode, pairingProof, randomNonce, sameSecret } from "./pairing"
 import { TabCleanup } from "./tab-cleanup"
 
 /** Badge text the relay asked for, by tab. */
@@ -34,6 +36,10 @@ const OWNER = "relay"
 /** Overrides the relay port, for development and isolated tests. */
 const PORT_KEY = "agentRelayPort"
 const PROFILE_KEY = "agentRelayProfile"
+/** chrome.storage.local: the pairing code typed on the status page (Chrome Web Store builds). */
+export const PAIRING_KEY = "agentRelayPairingCode"
+/** Written next to the manifest by `install` for unpacked builds (cli/src/relay-secrets.ts). */
+const PAIRING_FILE = "relay-pairing.json"
 const ALARM = "opencode-browser-relay"
 // Relay tab groups end with this marker, which Chrome renders without width: they read like the session
 // groups ("opencode", or the agent session's name) but stay distinguishable for cleanup.
@@ -62,6 +68,8 @@ const CLOSE_CODES: Record<number, string> = {
   4002: "hello missing or liveness probe failed",
   4003: "protocol incompatible",
   4004: "another browser or profile is connected",
+  4005: "relay requires pairing (this extension is too old)",
+  4006: "pairing failed",
 }
 
 export function createAgentRelay(input: { changed: (state: AgentRelayState) => void; badgesChanged: () => void }) {
@@ -87,9 +95,16 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   const badges = new Map<number, AgentBadge>()
   /** Tabs the user let agents use while the relay was not connected; announced once it is. */
   const pendingAttach = new Set<number>()
+  /** Sockets whose relay proved it knows the pairing code; nothing else is obeyed. */
+  const trusted = new WeakSet<WebSocket>()
+  /** The handshake in flight on a socket: this extension's nonce and the code it proves with. */
+  const handshakes = new WeakMap<WebSocket, { nonce: string; code: string }>()
+  let pairing: PairingSource = "none"
+  let bundledPairing: Promise<string | undefined> | undefined
 
   const snapshot = (): AgentRelayState => ({
     status,
+    pairing,
     tabs: Array.from(relayTabs, (tabId) => {
       const page = pageStatuses.get(tabId)
       return page ? { tabId, status: page } : { tabId }
@@ -103,7 +118,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     notify()
   }
 
-  const open = () => (socket?.readyState === WebSocket.OPEN ? socket : undefined)
+  /** The connection, once its relay has paired; events and data never go to an unpaired one. */
+  const open = () => (socket?.readyState === WebSocket.OPEN && trusted.has(socket) ? socket : undefined)
   const send = (message: JsonObject) => {
     const data = serialize(message)
     // The relay drops a connection that sends more than it accepts; a lost event is better than a reconnect loop.
@@ -114,6 +130,25 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     const known = relayTabs.delete(tabId)
     pageStatuses.delete(tabId)
     if (known) notify()
+  }
+
+  /**
+   * The pairing code: the one `install` wrote into this unpacked build, else the one typed on the status page. A store
+   * build has no file; a missing file is only looked for again after the worker restarts.
+   */
+  const pairingCode = async () => {
+    bundledPairing ??= fetch(chrome.runtime.getURL(PAIRING_FILE))
+      .then((response) => (response.ok ? (response.json() as Promise<unknown>) : undefined))
+      .then((value) => normalizePairingCode(isJsonObject(value) ? value.code : undefined))
+      .catch(() => undefined)
+    const bundled = await bundledPairing
+    const stored = bundled === undefined ? normalizePairingCode((await chrome.storage.local.get(PAIRING_KEY))[PAIRING_KEY]) : undefined
+    const source: PairingSource = bundled !== undefined ? "bundled" : stored !== undefined ? "stored" : "none"
+    if (source !== pairing) {
+      pairing = source
+      notify()
+    }
+    return bundled ?? stored
   }
 
   const connect = (reason: string) => {
@@ -128,6 +163,13 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     clearTimeout(retry)
     retry = undefined
     port = Number((await chrome.storage.local.get(PORT_KEY))[PORT_KEY]) || defaultRelayPort
+    if (socket && socket.readyState <= WebSocket.OPEN) return
+    // Without a pairing code there is no relay to trust; wait for one (install, or the status page).
+    if ((await pairingCode()) === undefined) {
+      if (status !== "unpaired") log.add("pairing.missing")
+      setStatus("unpaired")
+      return
+    }
     if (socket && socket.readyState <= WebSocket.OPEN) return
     const url = `ws://127.0.0.1:${port}/extension`
     const mine = ++generation
@@ -153,7 +195,12 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       })
     }
     current.onmessage = (event) => {
-      if (typeof event.data === "string") void handle(current, event.data)
+      if (typeof event.data !== "string") return
+      if (trusted.has(current)) void handle(current, event.data)
+      else void verify(current, event.data).catch((error: unknown) => {
+        log.add("pairing.error", { error: text(error) })
+        current.close(4006, "Relay failed pairing")
+      })
     }
     current.onclose = (event) => {
       clearTimeout(timeout)
@@ -176,6 +223,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       void chrome.runtime.sendMessage({ action: "recording.cancelAll" }).catch(() => undefined)
       if (event.code === 4003) setStatus("incompatible")
       else if (event.code === 4004) setStatus("conflict")
+      else if (event.code === 4006) setStatus("untrusted")
       // A missing relay is normal until an agent's browse tools (or the opencode-browser CLI) start one.
       else setStatus(openedAt === undefined ? "offline" : "connecting")
       schedule(quiet && openedAt === undefined)
@@ -195,11 +243,26 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     }, delay)
   }
 
+  /**
+   * Opens the pairing handshake: the hello carries a fresh nonce, and nothing the relay sends is obeyed until it
+   * answers with a proof over that nonce (`verify`).
+   */
   const hello = async (current: WebSocket) => {
     const stored = (await chrome.storage.local.get(PROFILE_KEY))[PROFILE_KEY] as { id: string; name?: string } | undefined
     const profile = stored ?? { id: crypto.randomUUID() }
     if (!stored) await chrome.storage.local.set({ [PROFILE_KEY]: profile })
+    const code = await pairingCode()
     if (socket !== current || current.readyState !== WebSocket.OPEN) return
+    if (code === undefined) return current.close(4006, "Not paired")
+    const nonce = randomNonce()
+    handshakes.set(current, { nonce, code })
+    // An older relay waits for commands it never gets; one that doesn't pair in time isn't ours.
+    setTimeout(() => {
+      if (socket === current && current.readyState === WebSocket.OPEN && !trusted.has(current)) {
+        log.add("pairing.rejected", { reason: "no challenge" })
+        current.close(4006, "Relay did not pair")
+      }
+    }, CONNECT_TIMEOUT)
     current.send(
       JSON.stringify({
         method: "hello",
@@ -209,9 +272,42 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
           protocolVersion: extensionProtocolVersion,
           profileId: profile.id,
           profileName: profile.name ?? "OpenCode Browser",
+          pairing: { nonce },
         },
       }),
     )
+  }
+
+  /** Checks the relay's proof, answers with this extension's, and only then starts working for it. */
+  const verify = async (current: WebSocket, data: string) => {
+    const pending = handshakes.get(current)
+    handshakes.delete(current)
+    const message = (() => {
+      try {
+        const parsed: unknown = JSON.parse(data)
+        return isJsonObject(parsed) ? parsed : undefined
+      } catch {
+        return undefined
+      }
+    })()
+    const params = isJsonObject(message?.params) ? message.params : undefined
+    const relayNonce = typeof params?.nonce === "string" ? params.nonce : undefined
+    const ok =
+      pending !== undefined &&
+      message?.method === "auth.challenge" &&
+      relayNonce !== undefined &&
+      /^[A-Za-z0-9_-]{22,128}$/.test(relayNonce) &&
+      sameSecret(await pairingProof(pending.code, "relay", relayNonce, pending.nonce), params?.proof)
+    if (socket !== current || current.readyState !== WebSocket.OPEN) return
+    if (!ok || !pending || !relayNonce) {
+      // An older relay, or a program posing as one on this port: it gets nothing.
+      log.add("pairing.rejected", { reason: message?.method === "auth.challenge" ? "wrong proof" : `unexpected ${String(message?.method ?? message?.id ?? "message")}` })
+      current.close(4006, "Relay failed pairing")
+      return
+    }
+    current.send(JSON.stringify({ method: "auth.response", params: { proof: await pairingProof(pending.code, "extension", pending.nonce, relayNonce) } }))
+    trusted.add(current)
+    log.add("pairing.ok", { source: pairing })
     relayTabs.forEach((tabId) => current.send(JSON.stringify({ method: "debugger.attached", params: { tabId } })))
     current.send(JSON.stringify({ method: "ready" }))
     log.add("hello", { tabs: relayTabs.size, protocol: extensionProtocolVersion })
@@ -306,12 +402,14 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         TabCleanup.touch(number(params, "tabId"))
         return sendCommand(params)
       case "tabs.create": {
-        const tab = await chrome.tabs.create({
-          url: typeof params?.url === "string" ? params.url : "about:blank",
+        // In the agents' own unfocused window, never over the user's tabs.
+        const tab = await AgentWindow.openTab(typeof params?.url === "string" ? params.url : "about:blank", {
           active: params?.active === true,
         })
         if (tab.id === undefined) throw new Error("Created tab has no id")
         TabCleanup.track(tab.id)
+        // A discarded tab loses the debugger and the agent's page.
+        await chrome.tabs.update(tab.id, { autoDiscardable: false }).catch(() => undefined)
         return { tabId: tab.id }
       }
       case "tabs.remove":
@@ -358,6 +456,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         if (!page) throw new Error("Invalid page status")
         const wasWaiting = pageStatuses.get(tabId)?.state === "waiting"
         pageStatuses.set(tabId, page)
+        // An execute starting or ending counts as use, so idle time runs from the end of the last one.
+        TabCleanup.touch(tabId)
         notify()
         // A handoff opens the agent's group so the user can find the tab; it folds up again afterwards.
         if (page.state === "waiting") void AgentGroups.expandTab(tabId)
@@ -458,6 +558,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   const reattach = (tabId: number) =>
     DebuggerHub.attach(tabId, OWNER).then(
       () => {
+        // A new attachment starts without the relay's focus emulation, which keeps a background tab from throttling.
+        void chrome.debugger.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => undefined)
         if (!relayTabs.has(tabId)) {
           relayTabs.add(tabId)
           notify()
@@ -653,7 +755,11 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   chrome.tabs.onUpdated.addListener((tabId, change) => {
     if (change.url && relayTabs.has(tabId)) void renameForPage(tabId, change.url)
   })
-  TabCleanup.guard((tabId) => recordingTabs.has(tabId) || pageStatuses.get(tabId)?.state === "waiting")
+  // Never close a tab while its agent runs a script on it, waits for the user there, or records it.
+  TabCleanup.guard((tabId) => {
+    const state = pageStatuses.get(tabId)?.state
+    return recordingTabs.has(tabId) || state === "waiting" || state === "running"
+  })
   AgentGroups.keepOpenWhile((tabId) => pageStatuses.get(tabId)?.state === "waiting")
   chrome.tabs.onRemoved.addListener((tabId) => {
     recordingTabs.delete(tabId)
@@ -666,6 +772,80 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   })
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === ALARM && !retry) void connect("alarm")
+  })
+  // A code typed on the status page (or removed) takes effect on a fresh connection.
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local" || !(PAIRING_KEY in changes)) return
+    log.add("pairing.changed")
+    attempts = 0
+    clearTimeout(retry)
+    retry = undefined
+    socket?.close(1000, "Pairing changed")
+    void connect("pairing")
+  })
+  /** The active tab of each window and the one before it, to give a window back its tab after an agent popup. */
+  const activeTabs = new Map<number, { current: number; previous?: number }>()
+  chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+    const entry = activeTabs.get(windowId)
+    if (entry?.current !== tabId) activeTabs.set(windowId, { current: tabId, ...(entry ? { previous: entry.current } : {}) })
+  })
+  chrome.windows.onRemoved.addListener((windowId) => activeTabs.delete(windowId))
+  /** The focused window and the one focused before it, to tell whether an agent's popup took focus. */
+  const focus: { current?: number; previous?: number; at: number } = { at: 0 }
+  chrome.windows.onFocusChanged.addListener((windowId) => {
+    if (windowId === chrome.windows.WINDOW_ID_NONE || windowId === focus.current) return
+    focus.previous = focus.current
+    focus.current = windowId
+    focus.at = Date.now()
+  })
+  void chrome.tabs.query({ active: true }).then((tabs) => {
+    for (const tab of tabs) if (tab.id !== undefined && !activeTabs.has(tab.windowId)) activeTabs.set(tab.windowId, { current: tab.id })
+  })
+  /**
+   * A tab an agent's page opened (target=_blank, window.open): it belongs with the agent's tabs. It closes when idle
+   * like them, joins the opener's group, and moves to the agent window; if it took over the user's window, the user
+   * gets their tab back there. A popup window can't be moved, so it only gives up focus, as does the agent window
+   * when the popup's activation focused it. (The opener comes from webNavigation: a tab's openerTabId names the
+   * window's active tab, not the background agent tab that clicked the link.)
+   */
+  const adoptOpened = async (tabId: number, opener: number) => {
+    if (!(await TabCleanup.isTracked(opener))) return
+    const tab = await chrome.tabs.get(tabId).catch(() => undefined)
+    if (!tab) return
+    void chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => undefined)
+    const agentWindow = await AgentWindow.id()
+    const window = await chrome.windows.get(tab.windowId).catch(() => undefined)
+    log.add("tab.opened", { tabId, opener, window: window?.type, agentWindow: tab.windowId === agentWindow })
+    // Focus that just moved to the agent window came from the popup, not from the user going there.
+    const justFocused = focus.current !== agentWindow || Date.now() - focus.at < 2_000
+    if (window?.focused && tab.windowId === agentWindow && justFocused) {
+      await chrome.windows.update(tab.windowId, { focused: false }).catch(() => undefined)
+    }
+    if (window && tab.windowId !== agentWindow) {
+      if (window.type === "normal") {
+        const entry = activeTabs.get(tab.windowId)
+        const previous = entry?.current === tabId ? entry.previous : entry?.current
+        if (agentWindow !== undefined) await chrome.tabs.move(tabId, { windowId: agentWindow, index: -1 }).catch(() => undefined)
+        if (tab.active && previous !== undefined && previous !== tabId)
+          await chrome.tabs.update(previous, { active: true }).catch(() => undefined)
+      } else if (window.focused) {
+        await chrome.windows.update(tab.windowId, { focused: false }).catch(() => undefined)
+      }
+    }
+    const [current, openerTab] = await Promise.all([chrome.tabs.get(tabId).catch(() => undefined), chrome.tabs.get(opener).catch(() => undefined)])
+    if (
+      current &&
+      openerTab &&
+      openerTab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE &&
+      openerTab.windowId === current.windowId &&
+      current.groupId !== openerTab.groupId
+    )
+      await chrome.tabs.group({ tabIds: [tabId], groupId: openerTab.groupId }).catch(() => undefined)
+    // After the move and grouping, which would otherwise read as the user claiming the tab.
+    TabCleanup.track(tabId)
+  }
+  chrome.webNavigation.onCreatedNavigationTarget.addListener(({ sourceTabId, tabId }) => {
+    void adoptOpened(tabId, sourceTabId).catch((error: unknown) => log.add("tab.opened.error", { error: text(error) }))
   })
   void chrome.alarms.create(ALARM, { periodInMinutes: extensionReconnectAlarmPeriodMs / 60_000 })
   void DebuggerHub.restore().then(() => {
@@ -738,6 +918,13 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       }
       return undefined
     },
+    /** Stores a pairing code typed on the status page; false when it isn't one. Reconnects through storage.onChanged. */
+    async pair(input: string) {
+      const code = normalizePairingCode(input)
+      if (code === undefined) return false
+      await chrome.storage.local.set({ [PAIRING_KEY]: code })
+      return true
+    },
     /** Reconnects now, for example after the user fixed what blocked the connection. */
     reconnect() {
       log.add("reconnect.requested")
@@ -755,6 +942,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         `extension: ${manifest.version} (${chrome.runtime.id})`,
         `browser: ${navigator.userAgent}`,
         `relay: ws://127.0.0.1:${port}/extension, protocol ${extensionProtocolVersion}`,
+        `pairing: ${pairing}`,
         `status: ${status}${connectedAt ? ` since ${new Date(connectedAt).toISOString()}` : ""}`,
         `reconnect attempts: ${attempts}${retry ? " (retry scheduled)" : ""}`,
         `cdp commands: ${cdp.count} (${cdp.errors} failed)`,

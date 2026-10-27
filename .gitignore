@@ -1,3 +1,5 @@
 node_modules/
 dist/
 release/
+# Per-install pairing code written by `install` (see cli/src/relay-secrets.ts)
+relay-pairing.json

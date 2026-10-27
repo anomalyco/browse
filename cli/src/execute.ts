@@ -59,6 +59,7 @@ import {
 import { createScreenshotDiff, type ScreenshotDiffOptions, type ScreenshotDiffResult } from "./screenshot-diff.ts"
 import { createWebMcpHelper, type WebMcpHelper } from "./webmcp.ts"
 import { startDemonstrationRecorder, type DemonstrationResult } from "./demonstration.ts"
+import { relayToken } from "./relay-secrets.ts"
 
 export { createAriaSnapshotHelper, createSnapshotHelpers, defaultAriaSnapshotTimeoutMs, fillInputs }
 
@@ -434,6 +435,8 @@ export const shouldCloseCurrentPageOnAdopt = (options: {
 
 type ExecuteSandboxOptions = {
   readonly endpointUrl: string
+  /** The relay token for connectOverCDP; read from the data root when omitted. */
+  readonly authToken?: string
   readonly sessionId?: string
   readonly requestHandoff?: RequestHandoff
   readonly onDefaultTargetChange?: (target: SessionTarget | undefined) => void
@@ -771,7 +774,10 @@ export class ExecuteSandbox {
         // a connect promise that could bind a page after reporting failure.
         this.browser = await chromium.connectOverCDP(this.options.endpointUrl, {
           timeout: adoptedDefaultTarget ? adoptedPageConnectTimeoutMs : playwrightConnectTimeoutMs,
-          ...(this.options.sessionId ? { headers: { "OpenCode-Browser-Session-Id": encodeURIComponent(this.options.sessionId), "OpenCode-Browser-Client-Kind": "sandbox" } } : {}),
+          headers: {
+            Authorization: `Bearer ${this.options.authToken ?? relayToken()}`,
+            ...(this.options.sessionId ? { "OpenCode-Browser-Session-Id": encodeURIComponent(this.options.sessionId), "OpenCode-Browser-Client-Kind": "sandbox" } : {}),
+          },
         })
       } catch (cause) {
         if (adoptedDefaultTarget && cause instanceof errors.TimeoutError) {

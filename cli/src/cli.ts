@@ -568,6 +568,13 @@ const status = Command.make(
     if ((extensionStatus.rejectedConnections ?? 0) > 0) {
       yield* Console.log(`Warning: ${extensionStatus.rejectedConnections} competing browser/profile connection attempt(s) rejected; the active connection was preserved. Use OpenCode Browser in one browser/profile at a time.`)
     }
+    if ((extensionStatus.pairingFailures ?? 0) > 0 && !extensionStatus.connected) {
+      yield* Console.log(`Warning: ${extensionStatus.pairingFailures} extension connection(s) failed pairing. Update the extension, or run \`opencode-browser pair\` and enter the code on its status page.`)
+    }
+    if ((extensionStatus.processFaults?.suppressed ?? 0) > 0) {
+      const faults = extensionStatus.processFaults!
+      yield* Console.log(`Warning: the relay survived ${faults.suppressed} Playwright fault(s)${faults.lastAt ? `, last at ${faults.lastAt}` : ""}${faults.lastMessage ? `: ${faults.lastMessage}` : ""}. See the relay log.`)
+    }
     if (extensionStatus.protocolVersion !== undefined && extensionStatus.protocolVersion !== null) {
       const compatibility = extensionStatus.protocolCompatible === false ? "incompatible" : "compatible"
       const legacy = extensionStatus.protocolLegacy === true ? ", inferred from legacy hello" : ""

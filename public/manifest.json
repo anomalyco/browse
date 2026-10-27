@@ -44,7 +44,8 @@
     "storage",
     "alarms",
     "offscreen",
-    "tabCapture"
+    "tabCapture",
+    "webNavigation"
   ],
   "host_permissions": [
     "<all_urls>"
