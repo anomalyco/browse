@@ -1,20 +1,47 @@
-// Manual, isolated headless integration check: node --no-warnings test/execute-realm-browser.ts
-// Requires `bun build.ts` and Playwright's bundled Chromium. Never uses the installed relay/profile.
+// Isolated headless integration check of the execute sandbox against a real browser:
+//   bun build.ts && node --no-warnings test/execute-realm-browser.ts [--browser <chromium executable>]
+// The browser is --browser, else PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH, else patchright-core's own Chromium
+// (`node node_modules/patchright-core/cli.js install chromium`). Ports come from BROWSE_TEST_RELAY_PORT and
+// BROWSE_TEST_FIXTURE_PORT, or are free ports. Never uses the installed relay, its data or the user's profile.
 import assert from "node:assert/strict"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import http from "node:http"
+import net from "node:net"
 import { spawn, spawnSync } from "node:child_process"
+import { parseArgs } from "node:util"
 import { chromium } from "patchright-core"
 import { relayToken } from "../src/relay-secrets.ts"
 
-const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "opencode", "realm3-browser-"))
+async function freePort(): Promise<number> {
+  const server = net.createServer()
+  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve) })
+  const { port } = server.address() as net.AddressInfo
+  await new Promise<void>((resolve) => server.close(() => resolve()))
+  return port
+}
+async function portFromEnv(name: string): Promise<number> {
+  const value = process.env[name]
+  if (!value) return await freePort()
+  const port = Number(value)
+  assert.ok(Number.isInteger(port) && port > 0 && port < 65536, `${name} must be a port number`)
+  return port
+}
+
+const { values: options } = parseArgs({ options: { browser: { type: "string" } } })
+const executablePath = options.browser || process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || chromium.executablePath()
+assert.ok(fs.existsSync(executablePath), `No Chromium at ${executablePath}: pass --browser, set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH or run \`node node_modules/patchright-core/cli.js install chromium\``)
+const tmp = path.join(fs.realpathSync(os.tmpdir()), "opencode")
+fs.mkdirSync(tmp, { recursive: true })
+const root = fs.mkdtempSync(path.join(tmp, "realm3-browser-"))
 const home = path.join(root, "home")
 const runtime = path.join(root, "runtime")
 const extension = path.join(home, "extension")
 const cliRoot = path.resolve(import.meta.dirname, "..")
-const port = 19930
+const port = await portFromEnv("BROWSE_TEST_RELAY_PORT")
+const fixturePort = await portFromEnv("BROWSE_TEST_FIXTURE_PORT")
+const fixtureUrl = `http://127.0.0.1:${fixturePort}`
 const base = `http://127.0.0.1:${port}`
 const env: NodeJS.ProcessEnv = { ...process.env, HOME: root, OPENCODE_BROWSER_HOME: home, OPENCODE_BROWSER_PORT: String(port) }
 delete env.OPENCODE_BROWSER_ALLOW_NODE
@@ -62,14 +89,14 @@ function cliExecute(code: string): Promise<Record<string, any>> {
   })
 }
 try {
-  await new Promise<void>((resolve, reject) => { fixture.once("error", reject); fixture.listen(19931, "127.0.0.1", resolve) })
+  await new Promise<void>((resolve, reject) => { fixture.once("error", reject); fixture.listen(fixturePort, "127.0.0.1", resolve) })
   for (let i = 0; i < 100; i++) {
     if (await fetch(`${base}/version`).then(r => r.ok, () => false)) break
     await pause(50)
   }
   authorization = `Bearer ${relayToken(home)}`
   browser = await chromium.launchPersistentContext(path.join(root, "profile"), {
-    executablePath: path.join(os.homedir(), "Library/Caches/ms-playwright/chromium-1243/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"),
+    executablePath,
     headless: true,
     args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`],
   })
@@ -81,7 +108,7 @@ try {
   assert.equal((await api("/extension/status")).connected, true)
   await api("/cli/session/new", { id: "realm-e2e" })
   const normal = await cliExecute(`
-    await page.goto('http://127.0.0.1:19931');
+    await page.goto(${JSON.stringify(fixtureUrl)});
     await page.getByLabel('Name').fill('sandbox');
     await page.getByRole('button',{name:'Save'}).click();
     const outline = await snapshot();
@@ -156,7 +183,7 @@ try {
   assert.equal((await api("/extension/status")).connected, true)
   assert.equal((await execute("return 42", "realm-loop")).value, 42)
   // A loop in a Playwright event handler (dispatched from the relay's WebSocket, outside any execute call).
-  await execute("await page.goto('http://127.0.0.1:19931')", "realm-loop")
+  await execute(`await page.goto(${JSON.stringify(fixtureUrl)})`, "realm-loop")
   const handlerStarted = Date.now()
   const handlerLoop = execute("page.on('request', () => { while(true){} }); await page.evaluate(() => fetch('/data')); await new Promise(r => setTimeout(r, 10_000))", "realm-loop")
   await pause(200)
