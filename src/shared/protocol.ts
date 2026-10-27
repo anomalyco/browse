@@ -35,6 +35,9 @@ export type AgentRelayUpdate = { summary: string; command: string }
 /** chrome.runtime.sendMessage request from an extension page; the worker answers with `{ text }`. */
 export const AGENT_DIAGNOSTICS = "agents.diagnostics"
 
+/** chrome.storage.local, set on the status page: where agents open new tabs, "current" (default) or "separate". */
+export const AGENT_WINDOW_KEY = "agentTabsWindow"
+
 export const STATUS_PORT = "opencode-browser.status"
 
 export type ToStatusPage = { type: "agents"; state: AgentRelayState } | { type: "pairing.result"; ok: boolean }

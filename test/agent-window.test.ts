@@ -15,9 +15,69 @@ beforeEach(async () => {
   stub.state.windows.clear()
   stub.state.tabs.clear()
   stub.state.created.length = 0
+  stub.state.activations.length = 0
   stub.state.focusedWindowId = undefined
   stub.state.displays = [{ left: 0, top: 0, width: 1512, height: 982 }]
   await stub.chrome.storage.session.remove("agentWindowId")
+  await stub.chrome.storage.local.remove("agentTabsWindow")
+})
+
+describe("AgentWindow.open", () => {
+  test("by default opens a background tab in the window the user last focused", async () => {
+    const user = await userWindow({ left: 0, top: 30, width: 1512, height: 950 })
+    const userTab = [...stub.state.tabs.values()].find((tab) => tab.windowId === user.id)!
+    const tab = await AgentWindow.open("https://example.com/")
+    expect(tab.windowId).toBe(user.id)
+    expect(tab.active).toBe(false)
+    expect(stub.state.created).toHaveLength(0)
+    expect(stub.state.tabs.get(userTab.id)!.active).toBe(true)
+    expect(stub.state.focusedWindowId).toBe(user.id)
+    expect(stub.state.activations).toEqual([])
+  })
+
+  test("with only a popup window focused, opens in an unfocused new window, never a focused one", async () => {
+    await stub.chrome.windows.create({ type: "popup", focused: true })
+    stub.state.created.length = 0
+    const tab = await AgentWindow.open("https://example.com/")
+    expect(stub.state.created).toEqual([expect.objectContaining({ focused: false, type: "normal" })])
+    expect(stub.state.windows.get(tab.windowId)?.focused).toBe(false)
+  })
+
+  test("with no window at all, makes one unfocused", async () => {
+    const tab = await AgentWindow.open("https://example.com/")
+    expect(stub.state.created).toEqual([expect.objectContaining({ focused: false, type: "normal" })])
+    expect(stub.state.windows.get(tab.windowId)?.focused).toBe(false)
+    expect(await AgentWindow.id()).toBeUndefined()
+  })
+
+  test("the separate setting opens tabs in the agent window", async () => {
+    await stub.chrome.storage.local.set({ agentTabsWindow: "separate" })
+    const user = await userWindow({ left: 0, top: 30, width: 600, height: 600 })
+    const tab = await AgentWindow.open("https://example.com/")
+    expect(tab.windowId).not.toBe(user.id)
+    expect(tab.windowId).toBe((await AgentWindow.id())!)
+    expect(stub.state.created).toEqual([expect.objectContaining({ focused: false })])
+    expect(stub.state.focusedWindowId).toBe(user.id)
+    expect(stub.state.activations).toEqual([])
+  })
+
+  test("an override from the relay wins over the setting, and switching affects new tabs only", async () => {
+    const user = await userWindow({ left: 0, top: 30, width: 600, height: 600 })
+    const separate = await AgentWindow.open("https://example.com/1", { override: "separate" })
+    expect(separate.windowId).not.toBe(user.id)
+    await stub.chrome.storage.local.set({ agentTabsWindow: "separate" })
+    const current = await AgentWindow.open("https://example.com/2", { override: "current" })
+    expect(current.windowId).toBe(user.id)
+    await stub.chrome.storage.local.set({ agentTabsWindow: "current" })
+    expect((await AgentWindow.open("https://example.com/3")).windowId).toBe(user.id)
+    // The tab already in the agent window stays there.
+    expect(stub.state.tabs.get(separate.id!)!.windowId).toBe(separate.windowId)
+  })
+
+  test("an unknown stored value means the default", async () => {
+    await stub.chrome.storage.local.set({ agentTabsWindow: "elsewhere" })
+    expect(await AgentWindow.placement()).toBe("current")
+  })
 })
 
 describe("AgentWindow.openTab", () => {

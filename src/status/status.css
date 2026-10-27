@@ -144,3 +144,26 @@ footer {
   font-family: ui-monospace, Menlo, monospace;
   user-select: all;
 }
+.choices {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  color: var(--muted);
+}
+.choices legend {
+  padding: 0;
+  margin-bottom: 6px;
+}
+.choices label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  cursor: pointer;
+}
+.choices label + label {
+  margin-top: 4px;
+}
+.note {
+  margin-top: 8px;
+  font-size: 12.5px;
+}

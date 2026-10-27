@@ -410,9 +410,11 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         TabCleanup.touch(number(params, "tabId"))
         return sendCommand(params)
       case "tabs.create": {
-        // In the agents' own unfocused window, never over the user's tabs.
-        const tab = await AgentWindow.openTab(typeof params?.url === "string" ? params.url : "about:blank", {
+        // In the background of the user's window (or the agents' own unfocused window, by setting), never in front
+        // of the user's tabs.
+        const tab = await AgentWindow.open(typeof params?.url === "string" ? params.url : "about:blank", {
           active: params?.active === true,
+          ...(AgentWindow.isPlacement(params?.window) ? { override: params.window } : {}),
         })
         if (tab.id === undefined) throw new Error("Created tab has no id")
         TabCleanup.track(tab.id)
@@ -823,19 +825,24 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   })
   /**
    * A tab an agent's page opened (target=_blank, window.open): it belongs with the agent's tabs. It closes when idle
-   * like them, joins the opener's group, and moves to the agent window; if it took over the user's window, the user
-   * gets their tab back there. A popup window can't be moved, so it only gives up focus, as does the agent window
-   * when the popup's activation focused it. (The opener comes from webNavigation: a tab's openerTabId names the
-   * window's active tab, not the background agent tab that clicked the link.)
+   * like them and joins the opener's group. If it took over a window's active tab, the user gets their tab back there.
+   * It stays in the window it opened in, unless its opener is in the agent window (agent tabs in a separate window):
+   * then it moves there. A popup window can't be moved, so it only gives up focus, as does the agent window when the
+   * popup's activation focused it. (The opener comes from webNavigation: a tab's openerTabId names the window's active
+   * tab, not the background agent tab that clicked the link.)
    */
   const adoptOpened = async (tabId: number, opener: number) => {
     if (!(await TabCleanup.isTracked(opener))) return
     const tab = await chrome.tabs.get(tabId).catch(() => undefined)
     if (!tab) return
     void chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => undefined)
-    const agentWindow = await AgentWindow.id()
+    const [agentWindow, openerWindow] = await Promise.all([
+      AgentWindow.id(),
+      chrome.tabs.get(opener).then((openerTab) => openerTab.windowId, () => undefined),
+    ])
     const window = await chrome.windows.get(tab.windowId).catch(() => undefined)
-    log.add("tab.opened", { tabId, opener, window: window?.type, agentWindow: tab.windowId === agentWindow })
+    const separate = agentWindow !== undefined && openerWindow === agentWindow
+    log.add("tab.opened", { tabId, opener, window: window?.type, agentWindow: tab.windowId === agentWindow, separate })
     // Focus that just moved to the agent window came from the popup, not from the user going there.
     const justFocused = focus.current !== agentWindow || Date.now() - focus.at < 2_000
     if (window?.focused && tab.windowId === agentWindow && justFocused) {
@@ -845,7 +852,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       if (window.type === "normal") {
         const entry = activeTabs.get(tab.windowId)
         const previous = entry?.current === tabId ? entry.previous : entry?.current
-        if (agentWindow !== undefined) await chrome.tabs.move(tabId, { windowId: agentWindow, index: -1 }).catch(() => undefined)
+        if (separate) await chrome.tabs.move(tabId, { windowId: agentWindow, index: -1 }).catch(() => undefined)
         if (tab.active && previous !== undefined && previous !== tabId)
           await chrome.tabs.update(previous, { active: true }).catch(() => undefined)
       } else if (window.focused) {

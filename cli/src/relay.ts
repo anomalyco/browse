@@ -647,6 +647,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   // Off by default: pages can detect an injected cursor, and recordings should show only the page. A recording or
   // flight recorder started with cursor: true shows it (demo videos), as do showGhostCursor() and the env var.
   const ghostCursorByDefault = yield* Config.Boolean("OPENCODE_BROWSER_GHOST_CURSOR").pipe(Config.withDefault(false))
+  // Where new agent tabs open: "current" (the user's window) or "separate" (the agents' own window). Unset, the
+  // extension's status page setting decides; so does any other value.
+  const agentWindowSetting = Option.getOrUndefined(yield* Config.option(Config.String("OPENCODE_BROWSER_AGENT_WINDOW")))?.trim().toLowerCase()
+  const agentWindow = agentWindowSetting === "current" || agentWindowSetting === "separate" ? agentWindowSetting : undefined
   const ghostCursor = new GhostCursorTabs({
     send: sendDebuggerCommand,
     mainFrameId: (tabId) => mainFrameIdsByTab.get(tabId),
@@ -1690,7 +1694,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     readonly opencodeBrowserSessionId?: string
     readonly autoAttachParams?: JsonObject
   }) {
-    const result = yield* sendToExtension({ method: "tabs.create", params: { url: options.url, active: options.active } })
+    const result = yield* sendToExtension({ method: "tabs.create", params: { url: options.url, active: options.active, ...(agentWindow ? { window: agentWindow } : {}) } })
     const tabId = getNumber(result, "tabId")
     if (!tabId) {
       return yield* Effect.fail(new Error("tabs.create did not return a tabId"))

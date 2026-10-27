@@ -23,7 +23,8 @@ export class StubEvent {
 
 type Bounds = { left: number; top: number; width: number; height: number }
 type Window = Bounds & { id: number; type: string; state: string; focused: boolean }
-type Tab = { id: number; windowId: number; url: string; active: boolean; index: number; groupId: number }
+type Tab = { id: number; windowId: number; url: string; active: boolean; index: number; groupId: number; pinned: boolean }
+type Group = { id: number; windowId: number; title: string; color: string; collapsed: boolean }
 type CreateWindow = Partial<Bounds> & { url?: string; focused?: boolean; state?: string; type?: string }
 
 /** Chromium's check for chrome.windows.create bounds: at least half the window on some display. */
@@ -86,10 +87,14 @@ export function createChrome() {
   let nextId = 100
   const windows = new Map<number, Window>()
   const tabs = new Map<number, Tab>()
+  const groups = new Map<number, Group>()
   const onChanged = new StubEvent()
   const state = {
     windows,
     tabs,
+    groups,
+    /** Every chrome.windows.update({ focused: true }) and chrome.tabs.update({ active: true }), in order. */
+    activations: [] as ({ windowId: number } | { tabId: number })[],
     /** The displays chrome.windows.create bounds are checked against. */
     displays: [{ left: 0, top: 0, width: 1512, height: 982 }] as Bounds[],
     focusedWindowId: undefined as number | undefined,
@@ -127,6 +132,7 @@ export function createChrome() {
       const window = windows.get(id)
       if (!window) throw new Error(`No window with id: ${id}.`)
       if (change.focused === true) {
+        state.activations.push({ windowId: id })
         for (const other of windows.values()) other.focused = other === window
         state.focusedWindowId = id
       } else if (change.focused === false && window.focused) {
@@ -142,7 +148,8 @@ export function createChrome() {
     },
   })
   const addTab = (windowId: number, url: string, active: boolean) => {
-    const tab: Tab = { id: nextId++, windowId, url, active, index: [...tabs.values()].filter((tab) => tab.windowId === windowId).length, groupId: -1 }
+    if (active) for (const other of tabs.values()) if (other.windowId === windowId) other.active = false
+    const tab: Tab = { id: nextId++, windowId, url, active, index: [...tabs.values()].filter((tab) => tab.windowId === windowId).length, groupId: -1, pinned: false }
     tabs.set(tab.id, tab)
     return tab
   }
@@ -166,12 +173,20 @@ export function createChrome() {
         if (!tab) throw new Error(`No tab with id: ${id}.`)
         return { ...tab }
       },
-      async query(query: { windowId?: number } = {}) {
-        return [...tabs.values()].filter((tab) => query.windowId === undefined || tab.windowId === query.windowId).map((tab) => ({ ...tab }))
+      async query(query: { windowId?: number; active?: boolean; groupId?: number } = {}) {
+        return [...tabs.values()]
+          .filter((tab) => query.windowId === undefined || tab.windowId === query.windowId)
+          .filter((tab) => query.active === undefined || tab.active === query.active)
+          .filter((tab) => query.groupId === undefined || tab.groupId === query.groupId)
+          .map((tab) => ({ ...tab }))
       },
       async update(id: number, change: Partial<Tab>) {
         const tab = tabs.get(id)
         if (!tab) throw new Error(`No tab with id: ${id}.`)
+        if (change.active === true) {
+          state.activations.push({ tabId: id })
+          for (const other of tabs.values()) if (other.windowId === tab.windowId) other.active = false
+        }
         Object.assign(tab, change)
         return { ...tab }
       },
@@ -184,16 +199,46 @@ export function createChrome() {
         return { ...tab }
       },
       async group({ tabIds, groupId }: { tabIds: number | number[]; groupId?: number }) {
+        const ids = Array.isArray(tabIds) ? tabIds : [tabIds]
         const id = groupId ?? nextId++
-        for (const tabId of Array.isArray(tabIds) ? tabIds : [tabIds]) {
+        for (const tabId of ids) {
           const tab = tabs.get(tabId)
           if (!tab) throw new Error(`No tab with id: ${tabId}.`)
           tab.groupId = id
         }
+        // Like Chrome, a new group starts expanded, in its tabs' window.
+        if (!groups.has(id)) groups.set(id, { id, windowId: tabs.get(ids[0]!)!.windowId, title: "", color: "grey", collapsed: false })
         return id
       },
+      async ungroup(tabIds: number | number[]) {
+        for (const tabId of Array.isArray(tabIds) ? tabIds : [tabIds]) {
+          const tab = tabs.get(tabId)
+          if (tab) tab.groupId = -1
+        }
+      },
     }),
-    tabGroups: lenient({ TAB_GROUP_ID_NONE: -1 }),
+    tabGroups: lenient({
+      TAB_GROUP_ID_NONE: -1,
+      async get(id: number) {
+        const group = groups.get(id)
+        if (!group) throw new Error(`No group with id: ${id}.`)
+        return { ...group }
+      },
+      async query() {
+        return [...groups.values()].map((group) => ({ ...group }))
+      },
+      async update(id: number, change: Partial<Group>) {
+        const group = groups.get(id)
+        if (!group) throw new Error(`No group with id: ${id}.`)
+        Object.assign(group, change)
+        return { ...group }
+      },
+      async move(id: number) {
+        const group = groups.get(id)
+        if (!group) throw new Error(`No group with id: ${id}.`)
+        return { ...group }
+      },
+    }),
     storage: lenient({
       onChanged,
       local: storageArea("local", onChanged),

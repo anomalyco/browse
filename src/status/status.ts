@@ -1,7 +1,9 @@
 // The status page (welcome.html): opened on install and as the extension's options page. Shows the install command
-// and the relay connection (with the update the relay found, if any), and offers reconnect, cleanup, and diagnostics.
+// and the relay connection (with the update the relay found, if any), offers reconnect, cleanup, and diagnostics, and
+// sets where agents open their tabs.
 import {
   AGENT_DIAGNOSTICS,
+  AGENT_WINDOW_KEY as PLACEMENT_KEY,
   STATUS_PORT,
   type AgentRelayState,
   type FromStatusPage,
@@ -68,6 +70,21 @@ const flash = (button: HTMLButtonElement, label: string) => {
   button.textContent = label
   setTimeout(() => (button.textContent = original), 1500)
 }
+
+// Where agents open new tabs (agent-window.ts reads it when an agent opens one).
+const placements = Array.from(element("agent-window").querySelectorAll<HTMLInputElement>("input[name=agent-window]"))
+const showPlacement = (value: unknown) => {
+  const chosen = value === "separate" ? "separate" : "current"
+  for (const input of placements) input.checked = input.value === chosen
+}
+void chrome.storage.local.get(PLACEMENT_KEY).then((stored) => showPlacement(stored[PLACEMENT_KEY]))
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && PLACEMENT_KEY in changes) showPlacement(changes[PLACEMENT_KEY]?.newValue)
+})
+for (const input of placements)
+  input.addEventListener("change", () => {
+    if (input.checked) void chrome.storage.local.set({ [PLACEMENT_KEY]: input.value })
+  })
 
 element<HTMLButtonElement>("copy-command").addEventListener("click", (event) => {
   const button = event.currentTarget as HTMLButtonElement

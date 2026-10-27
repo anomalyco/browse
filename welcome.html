@@ -39,6 +39,16 @@
         </div>
       </section>
 
+      <section>
+        <h2>Agent tabs</h2>
+        <fieldset class="choices" id="agent-window">
+          <legend>Where agents open their tabs</legend>
+          <label><input type="radio" name="agent-window" value="current" checked /> In your window, in a collapsed group per agent session (default)</label>
+          <label><input type="radio" name="agent-window" value="separate" /> In a separate window that opens unfocused, beside yours</label>
+        </fieldset>
+        <p class="note">Applies to new tabs. <code>OPENCODE_BROWSER_AGENT_WINDOW</code> on the relay overrides it.</p>
+      </section>
+
       <section id="update" hidden>
         <h2>Update available</h2>
         <p><span id="update-summary"></span>. Run this in a terminal (or ask your agent to update browse), then restart opencode:</p>
@@ -64,7 +74,7 @@
       <section>
         <h2>Using it</h2>
         <ul>
-          <li>Agents open their own tabs in a window of their own, which opens unfocused, beside yours. Tabs nobody uses for 10 minutes close.</li>
+          <li>Agents open their own tabs in the background of your window, grouped at the start of your tab strip and collapsed unless you're looking at one (or, by the setting above, in a separate window). Tabs nobody uses for 10 minutes close.</li>
           <li>To let agents use a tab you have open, click the OpenCode Browser toolbar button on it. Click again to take it back, even while an agent is running.</li>
           <li>When an agent needs you (a login, 2FA, a payment), the badge shows WAIT and the page shows a card. Finish, then click Continue or the toolbar button.</li>
           <li>Recordings show only the page. If an agent needs you while it records a tab, you get a notification instead of the card; click it to go to the tab.</li>
