@@ -42,7 +42,7 @@ import {
   validateWebSocketOrigin,
 } from "./relay-helpers.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
-import { ghostCursorMouseActionExpression, ghostCursorRestoreExpression, inputDispatchMouseEventToGhostCursorAction } from "./ghost-cursor.ts"
+import { GhostCursorTabs, ghostCursorCommandMethod } from "./ghost-cursor.ts"
 import { guardCdpMethod } from "./cdp-guardrails.ts"
 import {
   awaitHandoffAction,
@@ -581,7 +581,13 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     ...(contextDebugLog ? { trace: contextDebugLog } : {}),
   })
   const mainFrameIdsByTab = new Map<number, string>()
-  const ghostCursorPositionsByTab = new Map<number, { readonly x: number; readonly y: number }>()
+  // Off by default: pages can detect an injected cursor. Recordings and the flight recorder show it.
+  const ghostCursorByDefault = yield* Config.Boolean("OPENCODE_BROWSER_GHOST_CURSOR").pipe(Config.withDefault(false))
+  const ghostCursor = new GhostCursorTabs({
+    send: sendDebuggerCommand,
+    mainFrameId: (tabId) => mainFrameIdsByTab.get(tabId),
+    shownByDefault: (tabId) => ghostCursorByDefault || recordingRelay.isRecordingTab(tabId) || flightRecorder.isActiveTab(tabId),
+  })
   const suppressedChildSessions = new Map<string, number>()
   const protectedFrames = new ProtectedFrameTracker()
 
@@ -1101,6 +1107,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         }
         // The previous document's frames, protected ones included, are gone.
         forgetProtectedFrames(tabId)
+        // A visible ghost cursor goes back where it was in the new document.
+        Effect.runPromise(Effect.ignore(ghostCursor.documentCreated(tabId))).catch(() => {})
         contextDebugLog?.(`main-frame-navigated frame=${boundedToken(frameId)} loader=${boundedToken(getString(frame, "loaderId"))} ${targetDiagnosticIdentity(target)} ${summarizeDiagnosticUrl(frameUrl)}`)
         registry.updateTargetUrl(tabId, frameUrl)
       }
@@ -1149,14 +1157,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       const auxData = getObject(context?.auxData)
       const contextTarget = targetForCdpSession(tabId, eventSessionId)
       contextDebugLog?.(`context-created id=${boundedToken(getIdText(context, "id"))} unique=${boundedToken(getString(context, "uniqueId"))} default=${auxData?.isDefault === true} type=${boundedToken(getString(auxData, "type"))} frame=${boundedToken(getString(auxData, "frameId"))} ${targetDiagnosticIdentity(contextTarget)} ${summarizeDiagnosticUrl(getString(context, "origin"))}`)
-      const cursorPosition = ghostCursorPositionsByTab.get(tabId)
-      if (cursorPosition && auxData?.isDefault === true && auxData.frameId === mainFrameIdsByTab.get(tabId)) {
-        Effect.runPromise(Effect.ignore(sendDebuggerCommand({
-          tabId,
-          method: "Runtime.evaluate",
-          params: { expression: ghostCursorRestoreExpression(cursorPosition) },
-        }))).catch(() => {})
-      }
     } else if (method === "Runtime.executionContextDestroyed") {
       const contextTarget = targetForCdpSession(tabId, eventSessionId)
       contextDebugLog?.(`context-destroyed id=${boundedToken(getIdText(params, "executionContextId"))} unique=${boundedToken(getString(params, "executionContextUniqueId"))} ${targetDiagnosticIdentity(contextTarget)}`)
@@ -1364,6 +1364,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       catch: (error) => error instanceof Error ? error : new Error(String(error)),
     })
     const { tabId } = route
+    if (message.method === ghostCursorCommandMethod) return yield* ghostCursor.command(tabId, message.params)
     const command = {
       tabId,
       method: normalizedMessage.method,
@@ -1466,22 +1467,13 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (options.message.method !== "Input.dispatchMouseEvent") {
       return
     }
-    const action = inputDispatchMouseEventToGhostCursorAction(options.message.params)
-    if (!action) {
-      return
-    }
-    ghostCursorPositionsByTab.set(options.tabId, { x: action.x, y: action.y })
-    yield* sendDebuggerCommand({
-      tabId: options.tabId,
-      method: "Runtime.evaluate",
-      params: { expression: ghostCursorMouseActionExpression(action), awaitPromise: true },
-    }).pipe(Effect.timeout("2 seconds"), Effect.ignore)
+    yield* ghostCursor.mouseEvent(options.tabId, options.message.params)
   })
 
   function clearTabRuntimeState(tabId: number): void {
     mainFrameIdsByTab.delete(tabId)
     protectedFrames.forgetTab(tabId)
-    ghostCursorPositionsByTab.delete(tabId)
+    ghostCursor.forget(tabId)
     forgetTab(tabId)
     for (const [sessionId, childTabId] of suppressedChildSessions) {
       if (childTabId === tabId) {

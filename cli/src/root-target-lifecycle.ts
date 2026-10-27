@@ -1,6 +1,5 @@
 import { Effect, Exit, Latch, Schedule, Schema, Scope, Semaphore } from "effect"
 import type { CdpClientPool } from "./cdp-client-pool.ts"
-import { ghostCursorClientSource } from "./ghost-cursor.ts"
 import type { HandoffRegistry } from "./handoff.ts"
 import type { ExtensionCommand, JsonObject } from "./protocol.ts"
 import { getTargetInfo } from "./relay-helpers.ts"
@@ -257,8 +256,6 @@ export class RootTargetLifecycle {
     yield* this.command(transition, "Page.enable")
     yield* Effect.gen({ self: this }, function* () {
       yield* this.command(transition, "Emulation.setFocusEmulationEnabled", { enabled: true })
-      yield* this.command(transition, "Page.addScriptToEvaluateOnNewDocument", { source: ghostCursorClientSource })
-      yield* this.command(transition, "Runtime.evaluate", { expression: ghostCursorClientSource })
     }).pipe(Effect.ignore)
     yield* this.check(transition)
     const result = yield* this.command(transition, "Target.getTargetInfo")

@@ -552,10 +552,14 @@ values fail instead of silently clamping. The start result reports the chosen ra
 Tab capture can include audio; CDP requires `ffmpeg` and has no audio. Use the
 command's `--help` for format and cursor options.
 
-Playwright mouse actions automatically reveal the on-page Ghost Cursor
-(`distance-glide` motion + `tactile-bloom` click shockwave). When recording a
-user-facing proof or PR walkthrough video, opt into the `ghostCursor` helpers
-inside `execute` to focus attention on key steps and verified postconditions:
+The on-page Ghost Cursor (`distance-glide` motion + `tactile-bloom` click
+shockwave) is off by default, because pages can detect an element added to their
+DOM. It follows Playwright mouse actions automatically while a recording or the
+flight recorder runs on the tab, after `showGhostCursor()` (until
+`hideGhostCursor()`), or on every tab when the relay runs with
+`OPENCODE_BROWSER_GHOST_CURSOR=1`. When recording a user-facing proof or PR
+walkthrough video, opt into the `ghostCursor` helpers inside `execute` to focus
+attention on key steps and verified postconditions:
 
 ```ts
 await showGhostCursor()

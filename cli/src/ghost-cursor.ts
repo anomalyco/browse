@@ -1,4 +1,4 @@
-import { Match, Predicate } from "effect"
+import { Effect, Match, Predicate } from "effect"
 import type { Locator, Page } from "patchright-core"
 import type { JsonObject } from "./protocol.ts"
 
@@ -44,10 +44,6 @@ export type GhostCursorMouseAction = {
   readonly button: "left" | "right" | "middle" | "none"
 }
 
-type GhostCursorEvaluatePayload = {
-  readonly cursorOptions?: GhostCursorClientOptions
-}
-
 type GhostCursorCaptionPayload = {
   readonly title: string
   readonly options?: GhostCursorCaptionOptions
@@ -82,39 +78,24 @@ type GhostCursorKeysPayload = {
   readonly label?: string
 }
 
-type GhostCursorBrowserApi = {
-  readonly show: (options?: GhostCursorClientOptions) => void
-  readonly hide: () => void
-  readonly restore: (position: { readonly x: number; readonly y: number }) => void
-  readonly applyMouseEvent: (action: GhostCursorMouseAction) => Promise<void>
-  readonly setCaption: (payload: GhostCursorCaptionPayload | null) => void
-  readonly showCallout: (payload: GhostCursorCalloutPayload) => void
-  readonly clearCallouts: () => void
-  readonly zoomTo: (payload: GhostCursorZoomPayload) => Promise<void>
-  readonly setSpotlight: (payload: GhostCursorSpotlightPayload) => Promise<void>
-  readonly showKeys: (payload: GhostCursorKeysPayload) => void
-  readonly isVisible: () => boolean
-}
-
-const ghostCursorElementId = "__opencode_browser_ghost_cursor__"
-
+// The cursor and its overlays render in a CDP isolated world the relay creates for the tab (GhostCursorTabs
+// below), inside a closed shadow root on a host element without an id. The page cannot see the script's globals,
+// its observers or timers; only the host element while something is shown.
 export const ghostCursorClientSource = `(() => {
-  if (window !== window.top) {
-    return;
-  }
-  if (globalThis.__opencodeBrowserGhostCursor?.version === 12) {
+  if (globalThis.__opencodeBrowserGhostCursor?.version === 13) {
     return;
   }
   globalThis.__opencodeBrowserGhostCursor?.hide?.();
-  const cursorId = "${ghostCursorElementId}";
-  const stageId = "__opencode_browser_ghost_stage__";
-  const captionId = "__opencode_browser_ghost_caption__";
-  const spotlightId = "__opencode_browser_ghost_spotlight__";
-  const keysId = "__opencode_browser_ghost_keys__";
-  const positionStorageKey = "__opencode_browser_ghost_cursor_position__";
-  const captionStorageKey = "__opencode_browser_ghost_cursor_caption__";
+  const cursorId = "cursor";
+  const stageId = "stage";
+  const captionId = "caption";
+  const spotlightId = "spotlight";
+  const keysId = "keys";
+  const hostStyle = ":host { all: initial !important; display: block !important; position: fixed !important; inset: 0 !important; margin: 0 !important; padding: 0 !important; border: 0 !important; pointer-events: none !important; overflow: hidden !important; z-index: 2147483646 !important; }";
+  let host = null;
+  let root = null;
   const defaults = {
-    color: "#1c1c1f",
+    color: "#131313",
     size: 23,
     zIndex: 2147483646,
     style: "distance-glide",
@@ -163,7 +144,8 @@ export const ghostCursorClientSource = `(() => {
     tickTimer: undefined,
     previousFrameTime: undefined,
     nextTickDue: 0,
-    mode: "auto",
+    // The relay only draws the cursor when it should show (a recording, or showGhostCursor), so it stays put.
+    mode: "persistent",
     options: defaults,
     fadeTimer: undefined,
     removeTimer: undefined,
@@ -182,6 +164,26 @@ export const ghostCursorClientSource = `(() => {
     return u === 1 ? 1 : 1 - Math.pow(2, -10 * u);
   };
   const easeOutQuart = (t) => 1 - Math.pow(1 - clamp(t, 0, 1), 4);
+  // Created on first use and removed again once nothing is shown, so the page normally finds no trace of it.
+  const ensureRoot = () => {
+    if (!root) {
+      host = document.createElement("div");
+      root = host.attachShadow({ mode: "closed" });
+      const style = document.createElement("style");
+      style.textContent = hostStyle;
+      root.appendChild(style);
+    }
+    if (!host.isConnected) {
+      if (document.documentElement) document.documentElement.appendChild(host);
+      // A document that has just committed may not have its root element yet.
+      else document.addEventListener("readystatechange", () => { if (state.element || state.stage) ensureRoot(); }, { once: true });
+    }
+    return root;
+  };
+  const releaseRoot = () => {
+    if (!host || state.element || (state.stage && state.stage.childElementCount > 0)) return;
+    host.remove();
+  };
   const mergeOptions = (options) => ({
     color: typeof options?.color === "string" ? options.color : defaults.color,
     size: typeof options?.size === "number" && Number.isFinite(options.size) ? options.size : defaults.size,
@@ -224,7 +226,7 @@ export const ghostCursorClientSource = `(() => {
   };
 
   const ensureStage = () => {
-    const existing = document.getElementById(stageId);
+    const existing = ensureRoot().getElementById(stageId);
     if (existing instanceof HTMLDivElement) {
       state.stage = existing;
       return existing;
@@ -233,7 +235,7 @@ export const ghostCursorClientSource = `(() => {
     stage.id = stageId;
     stage.setAttribute("aria-hidden", "true");
     stage.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:" + (state.options.zIndex - 1) + ";overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Inter','SF Pro Text',sans-serif;";
-    document.documentElement.appendChild(stage);
+    ensureRoot().appendChild(stage);
     state.stage = stage;
     return stage;
   };
@@ -357,6 +359,7 @@ export const ghostCursorClientSource = `(() => {
       if (u >= 1) {
         fx.el.remove();
         state.effects.splice(i, 1);
+        releaseRoot();
         continue;
       }
       fx.step(u);
@@ -417,6 +420,7 @@ export const ghostCursorClientSource = `(() => {
         if (sp.alpha <= 0.01) {
           sp.el.remove();
           state.spotlight = null;
+          releaseRoot();
         }
         try { resolve?.(); } catch {}
       } else {
@@ -553,7 +557,7 @@ export const ghostCursorClientSource = `(() => {
     }
   };
   const ensureElement = () => {
-    const existing = document.getElementById(cursorId);
+    const existing = ensureRoot().getElementById(cursorId);
     if (existing instanceof HTMLDivElement) {
       state.element = existing;
       state.arrow = existing.querySelector("svg");
@@ -583,13 +587,13 @@ export const ghostCursorClientSource = `(() => {
     const arrowPath = document.createElementNS(svgNamespace, "path");
     arrowPath.setAttribute("d", cursorPathData);
     arrowPath.setAttribute("fill", state.options.color);
-    arrowPath.setAttribute("stroke", "#fafafa");
-    arrowPath.setAttribute("stroke-width", "1.5");
+    arrowPath.setAttribute("stroke", "#ffffff");
+    arrowPath.setAttribute("stroke-width", "1.4");
     arrowPath.setAttribute("stroke-linejoin", "round");
     arrowPath.setAttribute("paint-order", "stroke");
     arrow.appendChild(arrowPath);
     element.appendChild(arrow);
-    document.documentElement.appendChild(element);
+    ensureRoot().appendChild(element);
     state.element = element;
     state.arrow = arrow;
     return element;
@@ -610,6 +614,7 @@ export const ghostCursorClientSource = `(() => {
         state.element = null;
         state.arrow = null;
         state.removeTimer = undefined;
+        releaseRoot();
       }, 160);
       state.fadeTimer = undefined;
     }, 620);
@@ -641,8 +646,9 @@ export const ghostCursorClientSource = `(() => {
     state.element?.remove();
     state.element = null;
     state.arrow = null;
-    document.getElementById(stageId)?.remove();
+    root?.getElementById(stageId)?.remove();
     state.stage = null;
+    host?.remove();
   };
   const restore = (position) => {
     if (typeof position?.x !== "number" || typeof position?.y !== "number") return;
@@ -676,9 +682,6 @@ export const ghostCursorClientSource = `(() => {
     applyVisualOptions();
     state.targetX = action.x;
     state.targetY = action.y;
-    try {
-      window.sessionStorage.setItem(positionStorageKey, JSON.stringify({ x: action.x, y: action.y }));
-    } catch {}
     element.dataset.targetX = String(action.x);
     element.dataset.targetY = String(action.y);
     element.style.opacity = "1";
@@ -919,7 +922,7 @@ export const ghostCursorClientSource = `(() => {
   const showKeys = (payload) => {
     if (!payload?.keys?.length) return;
     const stage = ensureStage();
-    document.getElementById(keysId)?.remove();
+    root?.getElementById(keysId)?.remove();
     if (state.keysTimer !== undefined) window.clearTimeout(state.keysTimer);
     const badge = document.createElement("div");
     badge.id = keysId;
@@ -970,18 +973,18 @@ export const ghostCursorClientSource = `(() => {
     state.keysTimer = window.setTimeout(() => {
       badge.remove();
       state.keysTimer = undefined;
+      releaseRoot();
     }, 1500);
   };
 
   const setCaption = (payload) => {
-    const stage = ensureStage();
-    const existing = document.getElementById(captionId);
+    const existing = root?.getElementById(captionId);
     if (!payload || !payload.title) {
-      try { window.sessionStorage.removeItem(captionStorageKey); } catch {}
       if (existing) existing.remove();
+      releaseRoot();
       return;
     }
-    try { window.sessionStorage.setItem(captionStorageKey, JSON.stringify(payload)); } catch {}
+    const stage = ensureStage();
     if (existing) existing.remove();
     const wrap = document.createElement("div");
     wrap.id = captionId;
@@ -1031,11 +1034,12 @@ export const ghostCursorClientSource = `(() => {
     stage.appendChild(wrap);
   };
   const clearCallouts = () => {
-    const stage = document.getElementById(stageId);
+    const stage = root?.getElementById(stageId);
     if (!stage) return;
     for (const node of Array.from(stage.querySelectorAll("[data-bc-callout='true']"))) {
       node.remove();
     }
+    releaseRoot();
   };
   const showCallout = (payload) => {
     if (!payload?.rect) return;
@@ -1067,7 +1071,7 @@ export const ghostCursorClientSource = `(() => {
     stage.appendChild(container);
   };
   globalThis.__opencodeBrowserGhostCursor = {
-    version: 12,
+    version: 13,
     show,
     hide,
     restore,
@@ -1080,65 +1084,6 @@ export const ghostCursorClientSource = `(() => {
     showKeys,
     isVisible: () => state.mode !== "disabled" && Boolean(state.element),
   };
-  const restoreSavedState = () => {
-    try {
-      const savedPosition = JSON.parse(window.sessionStorage.getItem(positionStorageKey) || "null");
-      if (typeof savedPosition?.x === "number" && typeof savedPosition?.y === "number") {
-        restore(savedPosition);
-      }
-      const savedCaption = JSON.parse(window.sessionStorage.getItem(captionStorageKey) || "null");
-      if (savedCaption?.title) {
-        setCaption(savedCaption);
-      }
-    } catch {}
-  };
-  const isForeignExtensionNode = (node) => {
-    if (!(node instanceof Element)) return false;
-    const tag = node.tagName ? node.tagName.toLowerCase() : "";
-    if (tag.startsWith("com-1password-") || node.hasAttribute("data-onepassword-extension") || node.hasAttribute("data-lastpass-root")) {
-      return true;
-    }
-    if (tag === "iframe" || tag === "frame" || tag === "object" || tag === "embed") {
-      const src = node.getAttribute("src") || node.src || "";
-      if (typeof src === "string" && src.startsWith("chrome-extension://")) return true;
-    }
-    return false;
-  };
-  const sweepForeignExtensionNodes = (root) => {
-    if (document.getElementById("__opencode_browser_page_status__")?.getAttribute("data-waiting") === "true") return;
-    if (isForeignExtensionNode(root)) {
-      root.remove();
-      return;
-    }
-    if (!root || typeof root.querySelectorAll !== "function") return;
-    for (const el of root.querySelectorAll("com-1password-notification, com-1password-menu, com-1password-button, [data-onepassword-extension], [data-lastpass-root], iframe[src^='chrome-extension://'], frame[src^='chrome-extension://']")) {
-      el.remove();
-    }
-  };
-  const guardExtensionFrames = () => {
-    sweepForeignExtensionNodes(document.documentElement);
-    const extObserver = new MutationObserver((records) => {
-      if (document.getElementById("__opencode_browser_page_status__")?.getAttribute("data-waiting") === "true") return;
-      for (const record of records) {
-        for (const added of record.addedNodes) {
-          sweepForeignExtensionNodes(added);
-        }
-      }
-    });
-    extObserver.observe(document.documentElement, { childList: true, subtree: true });
-  };
-  if (document.documentElement) {
-    restoreSavedState();
-    guardExtensionFrames();
-  } else {
-    const observer = new MutationObserver(() => {
-      if (!document.documentElement) return;
-      observer.disconnect();
-      restoreSavedState();
-      guardExtensionFrames();
-    });
-    observer.observe(document, { childList: true });
-  }
 })();`
 
 export function inputDispatchMouseEventToGhostCursorAction(params: JsonObject | undefined): GhostCursorMouseAction | undefined {
@@ -1166,16 +1111,228 @@ export function inputDispatchMouseEventToGhostCursorAction(params: JsonObject | 
   }
 }
 
-export function ghostCursorMouseActionExpression(action: GhostCursorMouseAction): string {
-  return `globalThis.__opencodeBrowserGhostCursor?.applyMouseEvent(${JSON.stringify(action)})`
+/** The relay answers this CDP method itself (GhostCursorTabs.command); execute's helpers send it over a CDP session. */
+export const ghostCursorCommandMethod = "OpenCodeBrowser.ghostCursor"
+
+type GhostCursorOperation =
+  | "show"
+  | "hide"
+  | "setCaption"
+  | "showCallout"
+  | "clearCallouts"
+  | "zoomTo"
+  | "setSpotlight"
+  | "showKeys"
+
+const ghostCursorOperations: ReadonlySet<string> = new Set<GhostCursorOperation>([
+  "show",
+  "hide",
+  "setCaption",
+  "showCallout",
+  "clearCallouts",
+  "zoomTo",
+  "setSpotlight",
+  "showKeys",
+])
+
+type GhostCursorPosition = { readonly x: number; readonly y: number }
+
+type GhostCursorTabState = {
+  /** Set by showGhostCursor (persistent) or hideGhostCursor (disabled); otherwise the default applies. */
+  mode?: "persistent" | "disabled"
+  cursorOptions?: JsonObject
+  position?: GhostCursorPosition
+  caption?: JsonObject
+  /** Whether the current document shows the cursor. */
+  drawn?: boolean
 }
 
-export function ghostCursorRestoreExpression(position: { readonly x: number; readonly y: number }): string {
-  return `globalThis.__opencodeBrowserGhostCursor?.restore(${JSON.stringify(position)})`
+type SendDebuggerCommand = (command: {
+  readonly tabId: number
+  readonly method: string
+  readonly params: JsonObject
+}) => Effect.Effect<unknown, Error>
+
+/**
+ * The relay's ghost cursor, per tab. It is off unless a recording or the flight recorder runs on the tab,
+ * OPENCODE_BROWSER_GHOST_CURSOR=1 is set, or the agent calls showGhostCursor(). While it is off the relay sends
+ * nothing to the page for it. While it is on it runs in an isolated world (Page.createIsolatedWorld, which
+ * returns the same world for the same name until the document changes), so the page's own scripts can't see
+ * it. Position and caption live here, in the relay, and are restored on the next document.
+ */
+export class GhostCursorTabs {
+  private readonly tabs = new Map<number, GhostCursorTabState>()
+  private readonly worldName = globalThis.crypto.randomUUID().replaceAll("-", "")
+  /** Tabs showing the cursor only because of the default (a recording); it goes once that ends. */
+  private readonly shownByDefault = new Set<number>()
+  private watchTimer: ReturnType<typeof setInterval> | undefined
+
+  constructor(private readonly options: {
+    readonly send: SendDebuggerCommand
+    readonly mainFrameId: (tabId: number) => string | undefined
+    /** Whether the cursor shows on a tab the agent hasn't shown or hidden it on. */
+    readonly shownByDefault: (tabId: number) => boolean
+  }) {}
+
+  visible(tabId: number): boolean {
+    const mode = this.tabs.get(tabId)?.mode
+    return mode === "persistent" || (mode === undefined && this.options.shownByDefault(tabId))
+  }
+
+  /** Animates the cursor toward an Input.dispatchMouseEvent target; only remembers the position while hidden. */
+  readonly mouseEvent = Effect.fnUntraced(function* (this: GhostCursorTabs, tabId: number, params: JsonObject | undefined) {
+    const action = inputDispatchMouseEventToGhostCursorAction(params)
+    if (!action) return
+    const state = this.state(tabId)
+    const previous = state.position
+    state.position = { x: action.x, y: action.y }
+    if (!this.visible(tabId)) return
+    yield* Effect.gen({ self: this }, function* () {
+      if (!state.drawn) {
+        yield* this.call(tabId, "show", state.cursorOptions ?? {})
+        if (previous) yield* this.call(tabId, "restore", previous)
+        this.drawn(tabId, state)
+      }
+      yield* this.call(tabId, "applyMouseEvent", action, true)
+    }).pipe(Effect.timeout("2 seconds"), Effect.ignore)
+  })
+
+  /** A new main-frame document: put the visible cursor and caption back where they were. */
+  readonly documentCreated = Effect.fnUntraced(function* (this: GhostCursorTabs, tabId: number) {
+    const state = this.tabs.get(tabId)
+    if (!state) return
+    state.drawn = false
+    if (state.position && this.visible(tabId)) {
+      yield* this.call(tabId, "show", state.cursorOptions ?? {})
+      yield* this.call(tabId, "restore", state.position)
+      this.drawn(tabId, state)
+    }
+    if (state.caption) yield* this.call(tabId, "setCaption", state.caption)
+  })
+
+  /** Answers ghostCursorCommandMethod from execute's ghostCursor helpers. */
+  readonly command = Effect.fnUntraced(function* (this: GhostCursorTabs, tabId: number, params: JsonObject | undefined) {
+    const operation = params?.op
+    if (!Predicate.isString(operation) || !ghostCursorOperations.has(operation)) {
+      return yield* Effect.fail(new Error(`Unknown ghost cursor operation: ${String(operation)}`))
+    }
+    const payload = params?.payload ?? null
+    const state = this.state(tabId)
+    if (operation === "show") {
+      state.mode = "persistent"
+      state.cursorOptions = Predicate.isObject(payload) && !Array.isArray(payload) ? payload as JsonObject : {}
+      yield* this.call(tabId, "show", state.cursorOptions)
+      if (state.position) yield* this.call(tabId, "restore", state.position)
+      state.drawn = true
+      return {}
+    }
+    if (operation === "hide") {
+      state.mode = "disabled"
+      state.drawn = false
+      delete state.caption
+      yield* this.call(tabId, "hide", null, false, false)
+      return {}
+    }
+    if (operation === "setCaption") {
+      if (Predicate.isObject(payload) && !Array.isArray(payload)) state.caption = payload as JsonObject
+      else delete state.caption
+    }
+    yield* this.call(tabId, operation, payload, operation === "zoomTo" || operation === "setSpotlight")
+    return {}
+  })
+
+  forget(tabId: number): void {
+    this.tabs.delete(tabId)
+    this.shownByDefault.delete(tabId)
+  }
+
+  private drawn(tabId: number, state: GhostCursorTabState): void {
+    state.drawn = true
+    if (state.mode === "persistent") return
+    this.shownByDefault.add(tabId)
+    // Recordings end in their own modules; check once a second and take the cursor away when one has.
+    this.watchTimer ??= setInterval(() => {
+      for (const id of this.shownByDefault) {
+        if (this.visible(id)) continue
+        this.shownByDefault.delete(id)
+        const current = this.tabs.get(id)
+        if (current) {
+          current.drawn = false
+          delete current.caption
+        }
+        Effect.runPromise(Effect.ignore(this.call(id, "hide", null, false, false))).catch(() => {})
+      }
+      if (this.shownByDefault.size === 0) {
+        clearInterval(this.watchTimer)
+        this.watchTimer = undefined
+      }
+    }, 1_000)
+    this.watchTimer.unref?.()
+  }
+
+  private state(tabId: number): GhostCursorTabState {
+    let state = this.tabs.get(tabId)
+    if (!state) {
+      state = {}
+      this.tabs.set(tabId, state)
+    }
+    return state
+  }
+
+  /**
+   * Calls the cursor API in the tab's isolated world, installing it first when the document is new. With
+   * `install` false a missing cursor is left alone (nothing to hide).
+   */
+  private readonly call = Effect.fnUntraced(function* (
+    this: GhostCursorTabs,
+    tabId: number,
+    method: string,
+    payload: unknown,
+    awaitPromise = false,
+    install = true,
+  ) {
+    const frameId = this.options.mainFrameId(tabId)
+    if (!frameId) return
+    const world = yield* this.options.send({
+      tabId,
+      method: "Page.createIsolatedWorld",
+      params: { frameId, worldName: this.worldName },
+    })
+    const contextId = Predicate.isObject(world) && "executionContextId" in world ? world.executionContextId : undefined
+    if (!Predicate.isNumber(contextId)) return
+    const api = "globalThis.__opencodeBrowserGhostCursor"
+    const evaluate = (expression: string) => this.options.send({
+      tabId,
+      method: "Runtime.evaluate",
+      params: { expression, contextId, awaitPromise, returnByValue: true, silent: true },
+    })
+    const invoke = `${api}?.${method}(${JSON.stringify(payload)})`
+    if (!install) {
+      yield* evaluate(invoke)
+      return
+    }
+    const result = yield* evaluate(`${api} ? ${invoke} : ${JSON.stringify(missingGhostCursor)}`)
+    const value = Predicate.isObject(result) && "result" in result && Predicate.isObject(result.result) && "value" in result.result
+      ? result.result.value
+      : undefined
+    if (value !== missingGhostCursor) return
+    yield* evaluate(`${ghostCursorClientSource}\n${invoke}`)
+  })
 }
 
-async function ensureGhostCursor(page: Page): Promise<void> {
-  await page.evaluate(ghostCursorClientSource)
+const missingGhostCursor = "__missing__"
+
+async function runGhostCursorOperation(page: Page, op: GhostCursorOperation, payload?: unknown): Promise<void> {
+  const session = await page.context().newCDPSession(page)
+  try {
+    // The relay handles this method; Chromium never sees it.
+    await (session.send as (method: string, params: object) => Promise<unknown>)(ghostCursorCommandMethod, {
+      op,
+      ...(payload === undefined ? {} : { payload }),
+    })
+  } finally {
+    await session.detach().catch(() => {})
+  }
 }
 
 async function resolveTargetBox(page: Page, target: Locator | string): Promise<GhostCursorRect | null> {
@@ -1184,22 +1341,11 @@ async function resolveTargetBox(page: Page, target: Locator | string): Promise<G
 }
 
 export async function showGhostCursor(options: { readonly page: Page; readonly cursorOptions?: GhostCursorClientOptions }): Promise<void> {
-  await ensureGhostCursor(options.page)
-  const payload: GhostCursorEvaluatePayload = options.cursorOptions ? { cursorOptions: options.cursorOptions } : {}
-  await options.page.evaluate(
-    (payload: GhostCursorEvaluatePayload) => {
-      const api = (globalThis as { __opencodeBrowserGhostCursor?: GhostCursorBrowserApi }).__opencodeBrowserGhostCursor
-      api?.show(payload.cursorOptions)
-    },
-    payload,
-  )
+  await runGhostCursorOperation(options.page, "show", options.cursorOptions ?? {})
 }
 
 export async function hideGhostCursor(options: { readonly page: Page }): Promise<void> {
-  await options.page.evaluate(() => {
-    const api = (globalThis as { __opencodeBrowserGhostCursor?: GhostCursorBrowserApi }).__opencodeBrowserGhostCursor
-    api?.hide()
-  })
+  await runGhostCursorOperation(options.page, "hide")
 }
 
 export async function setGhostCursorCaption(options: {
@@ -1207,14 +1353,10 @@ export async function setGhostCursorCaption(options: {
   readonly title: string | null
   readonly captionOptions?: GhostCursorCaptionOptions
 }): Promise<void> {
-  await ensureGhostCursor(options.page)
   const payload: GhostCursorCaptionPayload | null = options.title
     ? { title: options.title, ...(options.captionOptions ? { options: options.captionOptions } : {}) }
     : null
-  await options.page.evaluate((captionPayload: GhostCursorCaptionPayload | null) => {
-    const api = (globalThis as { __opencodeBrowserGhostCursor?: GhostCursorBrowserApi }).__opencodeBrowserGhostCursor
-    api?.setCaption(captionPayload)
-  }, payload)
+  await runGhostCursorOperation(options.page, "setCaption", payload)
 }
 
 export async function showGhostCursorCallout(options: {
@@ -1223,7 +1365,6 @@ export async function showGhostCursorCallout(options: {
   readonly label: string
   readonly calloutOptions?: GhostCursorCalloutOptions
 }): Promise<void> {
-  await ensureGhostCursor(options.page)
   const box = await resolveTargetBox(options.page, options.target)
   if (!box) return
   const payload: GhostCursorCalloutPayload = {
@@ -1231,17 +1372,11 @@ export async function showGhostCursorCallout(options: {
     label: options.label,
     ...(options.calloutOptions ? { options: options.calloutOptions } : {}),
   }
-  await options.page.evaluate((calloutPayload: GhostCursorCalloutPayload) => {
-    const api = (globalThis as { __opencodeBrowserGhostCursor?: GhostCursorBrowserApi }).__opencodeBrowserGhostCursor
-    api?.showCallout(calloutPayload)
-  }, payload)
+  await runGhostCursorOperation(options.page, "showCallout", payload)
 }
 
 export async function clearGhostCursorCallouts(options: { readonly page: Page }): Promise<void> {
-  await options.page.evaluate(() => {
-    const api = (globalThis as { __opencodeBrowserGhostCursor?: GhostCursorBrowserApi }).__opencodeBrowserGhostCursor
-    api?.clearCallouts()
-  })
+  await runGhostCursorOperation(options.page, "clearCallouts")
 }
 
 export async function zoomGhostCursorCamera(options: {
@@ -1249,7 +1384,6 @@ export async function zoomGhostCursorCamera(options: {
   readonly target: Locator | string | { readonly x: number; readonly y: number } | null
   readonly zoomOptions?: GhostCursorZoomOptions
 }): Promise<void> {
-  await ensureGhostCursor(options.page)
   let rect: GhostCursorRect | null = null
   if (options.target !== null) {
     rect = (Predicate.isString(options.target) || "boundingBox" in options.target)
@@ -1261,10 +1395,7 @@ export async function zoomGhostCursorCamera(options: {
     scale: options.target === null ? 1 : (options.zoomOptions?.scale ?? 1.75),
     durationMs: options.zoomOptions?.durationMs ?? 360,
   }
-  await options.page.evaluate(async (zoomPayload: GhostCursorZoomPayload) => {
-    const api = (globalThis as { __opencodeBrowserGhostCursor?: GhostCursorBrowserApi }).__opencodeBrowserGhostCursor
-    await api?.zoomTo(zoomPayload)
-  }, payload)
+  await runGhostCursorOperation(options.page, "zoomTo", payload)
 }
 
 export async function setGhostCursorSpotlight(options: {
@@ -1272,16 +1403,12 @@ export async function setGhostCursorSpotlight(options: {
   readonly target: Locator | string | null
   readonly spotlightOptions?: GhostCursorSpotlightOptions
 }): Promise<void> {
-  await ensureGhostCursor(options.page)
   const rect = options.target !== null ? await resolveTargetBox(options.page, options.target) : null
   const payload: GhostCursorSpotlightPayload = {
     rect,
     ...(options.spotlightOptions ? { options: options.spotlightOptions } : {}),
   }
-  await options.page.evaluate(async (spotlightPayload: GhostCursorSpotlightPayload) => {
-    const api = (globalThis as { __opencodeBrowserGhostCursor?: GhostCursorBrowserApi }).__opencodeBrowserGhostCursor
-    await api?.setSpotlight(spotlightPayload)
-  }, payload)
+  await runGhostCursorOperation(options.page, "setSpotlight", payload)
 }
 
 export async function showGhostCursorKeys(options: {
@@ -1289,16 +1416,12 @@ export async function showGhostCursorKeys(options: {
   readonly keys: string | readonly string[]
   readonly label?: string
 }): Promise<void> {
-  await ensureGhostCursor(options.page)
   const keys = Predicate.isString(options.keys) ? options.keys.split("+").map((k) => k.trim()).filter(Boolean) : options.keys
   const payload: GhostCursorKeysPayload = {
     keys,
     ...(options.label ? { label: options.label } : {}),
   }
-  await options.page.evaluate((keysPayload: GhostCursorKeysPayload) => {
-    const api = (globalThis as { __opencodeBrowserGhostCursor?: GhostCursorBrowserApi }).__opencodeBrowserGhostCursor
-    api?.showKeys(keysPayload)
-  }, payload)
+  await runGhostCursorOperation(options.page, "showKeys", payload)
 }
 
 function parseButton(value: JsonObject[string] | undefined): GhostCursorMouseAction["button"] {
