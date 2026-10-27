@@ -27,6 +27,13 @@
  *   Playwright file options (`path`, `setInputFiles`, `saveAs`, ...) must stay
  *   inside the execute file roots.
  *
+ * Execute JavaScript shares the relay's event loop with every session, so each
+ * synchronous slice (initial code, callback, timer, promise continuation and the
+ * microtasks it queues) is cut off after OPENCODE_BROWSER_EXECUTE_SLICE_MS, and
+ * callbacks that keep the loop busy more than half the time are stopped too.
+ * Native work inside one host call (a large zlib *Sync call, allocating a huge
+ * Buffer) and memory use are not bounded this way.
+ *
  * Residual risk: this is defence in depth, not a security boundary as strong
  * as a separate process. A bug in this membrane or a Playwright API that
  * reaches the host in a way not covered here could still escape, and the
@@ -65,6 +72,19 @@ import { dataRoot } from "./paths.ts"
 export const allowNodeEnvironmentVariable = "OPENCODE_BROWSER_ALLOW_NODE"
 export const allowForegroundEnvironmentVariable = "OPENCODE_BROWSER_ALLOW_FOREGROUND"
 export const fileRootsEnvironmentVariable = "OPENCODE_BROWSER_FILE_ROOTS"
+
+export const executeSliceEnvironmentVariable = "OPENCODE_BROWSER_EXECUTE_SLICE_MS"
+
+/**
+ * Longest synchronous run of execute JavaScript (one VM entry: the initial code, a callback,
+ * a timer, a promise continuation, plus its microtasks) before the realm is stopped. Every
+ * session shares the relay's event loop, so this is how long a runaway loop can stall them.
+ * 2s fits multi-MB JSON, large sorts and returning ~10 MB of data with headroom on slower machines.
+ */
+export function executeSliceMs(): number {
+  const configured = Number.parseInt(process.env[executeSliceEnvironmentVariable] ?? "", 10)
+  return Number.isFinite(configured) ? Math.min(Math.max(configured, 50), 60_000) : 2_000
+}
 
 export const executeAllowsNode = (): boolean => process.env[allowNodeEnvironmentVariable] === "1"
 export const executeAllowsForeground = (): boolean => process.env[allowForegroundEnvironmentVariable] === "1"
@@ -358,6 +378,10 @@ const deniedHostValues = new Map<unknown, string>([
   [util.format, "host object formatting"],
   [util.formatWithOptions, "host object formatting"],
   [crypto.setEngine, "loading native crypto engines"],
+  [events.setMaxListeners, "changing shared event-emitter defaults or prototypes"],
+  // Native work the CPU budget cannot interrupt until it returns; the async versions run off the event loop.
+  ...[crypto.pbkdf2Sync, crypto.scryptSync, crypto.hkdfSync, crypto.generateKeyPairSync, crypto.generateKeySync, crypto.generatePrimeSync, crypto.checkPrimeSync]
+    .map((fn) => [fn, `crypto.${fn.name} (blocks the relay; use the async version)`] as const),
 ])
 
 // Playwright classes that launch local processes or make Node-side HTTP requests.
@@ -429,6 +453,49 @@ function isObjectLike(value: unknown): value is object {
 
 const isHiddenKey = (key: PropertyKey): boolean => typeof key === "string" && key.startsWith("_")
 
+// Promise rejections originating in execute must not become relay process faults.
+// Creation is tracked without inspecting attacker-controlled promise prototypes.
+let activeRealm: ExecuteRealm | undefined
+const promiseRealms = new WeakMap<Promise<unknown>, ExecuteRealm>()
+// The hook is installed only while execute JavaScript runs: promise hooks slow every await in the
+// process. The relay runs under Node; Bun runs the outer tests and has no promiseHooks.
+let stopPromiseHook: (() => void) | undefined
+
+function trackPromisesOf(realm: ExecuteRealm): () => void {
+  const previous = activeRealm
+  activeRealm = realm
+  if (!stopPromiseHook && !process.versions.bun) {
+    stopPromiseHook = v8.promiseHooks.createHook({ init(promise: Promise<unknown>) {
+      if (activeRealm) promiseRealms.set(promise, activeRealm)
+    } }) as () => void
+  }
+  return () => {
+    activeRealm = previous
+    if (!activeRealm && stopPromiseHook) {
+      stopPromiseHook()
+      stopPromiseHook = undefined
+    }
+  }
+}
+
+export function handleExecuteRealmRejection(promise: Promise<unknown>): boolean {
+  const realm = promiseRealms.get(promise)
+  if (!realm) return false
+  realm.dispose(new Error("Unhandled execute rejection; JavaScript state will reset before the next execute"))
+  return true
+}
+
+// Errors execute callbacks throw into host code. A host caller that does not catch them
+// (a timer or event emitter outside the realm's own wrappers) would otherwise crash the relay.
+const thrownByRealm = new WeakMap<object, ExecuteRealm>()
+
+export function handleExecuteRealmException(error: unknown): boolean {
+  const realm = isObjectLike(error) ? thrownByRealm.get(error) : undefined
+  if (!realm) return false
+  realm.dispose(new Error("Uncaught exception in an execute callback; JavaScript state will reset before the next execute"))
+  return true
+}
+
 /** A shadow target with no non-configurable own properties, so the proxy can report the host object's shape freely. */
 function shadowFor(value: object): object {
   if (typeof value === "function") return (function () {}).bind(undefined)
@@ -455,7 +522,13 @@ export class ExecuteRealm {
   private readonly forceProxy = new WeakSet<object>()
   private readonly timers = new Map<number, ReturnType<typeof setTimeout>>()
   private nextTimer = 0
+  private timersAborted = false
   private entryDepth = 0
+  private readonly sliceMs = executeSliceMs()
+  // Leaky bucket of VM time: repeated near-limit slices (a busy setInterval) may use at most
+  // half of the relay's time, with a burst allowance of five slices, before the realm stops.
+  private busyDebtMs = 0
+  private busyCheckedAt = performance.now()
   private stopped: Error | undefined
   private readonly pendingRuns = new Set<(error: Error) => void>()
   private readonly entryKey = `__execute_${crypto.randomUUID().replaceAll("-", "")}`
@@ -517,7 +590,7 @@ export class ExecuteRealm {
     this.global = new vm.Script("globalThis").runInContext(this.context) as Record<string, unknown>
     // Remove the host entry function before running any untrusted code. It is
     // never exposed to the realm, even while callbacks re-enter it.
-    this.entryScript = new vm.Script(`(() => { "use strict"; const entry = globalThis[${JSON.stringify(this.entryKey)}]; delete globalThis[${JSON.stringify(this.entryKey)}]; return entry(); })()`)
+    this.entryScript = new vm.Script(`(() => { "use strict"; const entry = this[${JSON.stringify(this.entryKey)}]; delete this[${JSON.stringify(this.entryKey)}]; return entry(); })()`)
     // Stack-trace callbacks receive call sites that can expose functions of sloppy host frames.
     new vm.Script(
       "Object.defineProperty(Error, 'prepareStackTrace', { value: undefined, writable: false, configurable: false }); globalThis.SharedArrayBuffer = undefined; globalThis.Atomics = undefined; globalThis.WeakRef = undefined; globalThis.FinalizationRegistry = undefined",
@@ -529,11 +602,16 @@ export class ExecuteRealm {
   private installGlobals(): void {
     const global = this.global
     const schedule = (repeat: boolean, callback: (...args: unknown[]) => unknown, delay = 0, ...args: unknown[]) => {
+      // A string callback would be code generation; refuse it rather than failing later.
+      if (typeof callback !== "function") throw new TypeError("The timer callback must be a function")
       const id = ++this.nextTimer
+      if (this.timersAborted || this.stopped) return id
       const fire = () => {
         if (!repeat) this.timers.delete(id)
         if (this.stopped) return
-        try { callback(...args) } catch (error) { this.dispose(error instanceof Error ? error : new Error("Execute timer callback failed")) }
+        try { callback(...args) } catch {
+          this.dispose(new Error("Execute timer callback failed; JavaScript state will reset before the next execute"))
+        }
       }
       this.timers.set(id, (repeat ? setInterval : setTimeout)(fire, delay))
       return id
@@ -558,6 +636,25 @@ export class ExecuteRealm {
     new vm.Script("{ const then = Promise.prototype.then; const ready = Promise.resolve(); globalThis.queueMicrotask = callback => Reflect.apply(then, ready, [callback]); }").runInContext(this.context)
   }
 
+  /**
+   * Clear every pending realm timer and park new ones (they never fire) until resumeTimers(),
+   * keeping JavaScript state. For a user stop that should not reset `state`; dispose() is the full stop.
+   */
+  abortTimers(): void {
+    this.timersAborted = true
+    for (const timer of this.timers.values()) clearTimeout(timer)
+    this.timers.clear()
+  }
+
+  resumeTimers(): void {
+    this.timersAborted = false
+  }
+
+  /** Pending realm timers, for tests and diagnostics. */
+  get pendingTimers(): number {
+    return this.timers.size
+  }
+
   /** Revoke callbacks and timers when execution is stopped or its CPU budget is exhausted. */
   dispose(error = new Error("Execute stopped")): void {
     if (this.stopped) return
@@ -568,22 +665,50 @@ export class ExecuteRealm {
     this.pendingRuns.clear()
   }
 
+  get isStopped(): boolean {
+    return this.stopped !== undefined
+  }
+
   private enter<T>(entry: () => T): T {
     if (this.stopped) throw this.stopped
     if (this.entryDepth > 0) return entry()
-    Reflect.defineProperty(this.global, this.entryKey, { value: entry, configurable: true })
+    if (!Reflect.defineProperty(this.global, this.entryKey, { value: entry, configurable: true })) {
+      this.dispose(new Error("Execute made its global non-extensible; JavaScript state will reset before the next execute"))
+      throw this.stopped
+    }
+    const untrack = trackPromisesOf(this)
     this.entryDepth += 1
+    const startedAt = performance.now()
     try {
-      return this.entryScript.runInContext(this.context, { timeout: 250 }) as T
+      return this.entryScript.runInContext(this.context, { timeout: this.sliceMs }) as T
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code === "ERR_SCRIPT_EXECUTION_TIMEOUT") {
-        this.dispose(new Error("Execute exceeded its 250ms synchronous CPU budget; reset the session before retrying"))
+        this.dispose(new Error(
+          `Execute exceeded its synchronous CPU budget: JavaScript ran for over ${this.sliceMs}ms without yielding, which stalls every session on the relay. ` +
+          "Likely causes: a loop that never ends, a slow regular expression, or converting a very large value. " +
+          "Split heavy work into chunks separated by `await new Promise(r => setTimeout(r, 0))`, do it in the page with page.evaluate(), or return less data " +
+          `(the relay's limit is ${executeSliceEnvironmentVariable}). JavaScript state will reset before the next execute.`,
+        ))
         throw this.stopped
       }
       throw error
     } finally {
       this.entryDepth -= 1
+      untrack()
       Reflect.deleteProperty(this.global, this.entryKey)
+      this.chargeBusyTime(performance.now() - startedAt)
+    }
+  }
+
+  private chargeBusyTime(elapsedMs: number): void {
+    const now = performance.now()
+    this.busyDebtMs = Math.max(0, this.busyDebtMs - (now - this.busyCheckedAt) / 2) + elapsedMs
+    this.busyCheckedAt = now
+    if (this.busyDebtMs > this.sliceMs * 5 && !this.stopped) {
+      this.dispose(new Error(
+        "Execute exceeded its sustained CPU budget: its callbacks and timers kept the relay's JavaScript busy more than half the time, which stalls every session on the relay. " +
+        "Do heavy work in the page with page.evaluate(), or wait longer between timer or event callbacks. JavaScript state will reset before the next execute.",
+      ))
     }
   }
 
@@ -698,11 +823,12 @@ export class ExecuteRealm {
     if (deniedClass) throw this.sandboxError(deniedClass)
     if (!this.forceProxy.has(value) && typeof value === "object") {
       const prototype = Reflect.getPrototypeOf(value)
-      if (Array.isArray(value) && prototype === Array.prototype) {
+      if ((Array.isArray(value) && prototype === Array.prototype) || util.types.isArgumentsObject(value)) {
         const output: unknown[] = []
         Reflect.setPrototypeOf(output, this.sandboxArrayPrototype)
         seen.set(value, output)
-        for (let index = 0; index < value.length; index += 1) output[index] = this.toSandbox(value[index], seen)
+        const array = value as ArrayLike<unknown>
+        for (let index = 0; index < array.length; index += 1) output[index] = this.toSandbox(array[index], seen)
         return output
       }
       if ((prototype === Object.prototype || prototype === null) && !Object.hasOwn(value, "constructor") && !util.types.isProxy(value)) {
@@ -994,11 +1120,11 @@ export class ExecuteRealm {
       const Constructor = (globalThis as unknown as Record<string, new (source: ArrayLike<number> | ArrayLike<bigint>) => unknown>)[name] ?? Uint8Array
       return new Constructor(value as unknown as ArrayLike<number>)
     }
-    if (Array.isArray(value)) {
+    if (Array.isArray(value) || util.types.isArgumentsObject(value)) {
       const output: unknown[] = []
       seen.set(value, output)
-      const length = value.length
-      for (let index = 0; index < length; index += 1) output[index] = this.toHost(value[index], seen)
+      const array = value as ArrayLike<unknown>
+      for (let index = 0; index < array.length; index += 1) output[index] = this.toHost(array[index], seen)
       return output
     }
     const output: Record<string, unknown> = {}
@@ -1038,6 +1164,15 @@ export class ExecuteRealm {
     }
   }
 
+  /** A value thrown from a sandbox callback into host code, tagged so an uncaught one stops only this realm. */
+  private thrownToHost(error: unknown): unknown {
+    const thrown = this.toHostThrown(error)
+    // Primitives cannot be tagged; host callers only see their message.
+    const value = isObjectLike(thrown) ? thrown : new Error(String(thrown))
+    if (!thrownByRealm.has(value)) thrownByRealm.set(value, this)
+    return value
+  }
+
   private hostProxy(target: object): object {
     const realm = this
     const handler: ProxyHandler<object> = {
@@ -1051,35 +1186,44 @@ export class ExecuteRealm {
           })
         } catch (error) {
           if (realm.stopped) return undefined
-          throw realm.toHostThrown(error)
+          throw realm.thrownToHost(error)
         }
       },
       construct(_shadow, args) {
+        if (realm.stopped) return Object.create(null) as object
         try {
           return realm.enter(() => realm.toHost(Reflect.construct(target as Function, args.map((arg) => realm.toSandbox(arg))))) as object
         } catch (error) {
-          throw realm.toHostThrown(error)
+          throw realm.thrownToHost(error)
         }
       },
       get(_shadow, key) {
+        if (realm.stopped) {
+          if (key === "apply") return Function.prototype.apply
+          if (key === "call") return Function.prototype.call
+          if (key === "bind") return Function.prototype.bind
+          return undefined
+        }
         try {
           return realm.enter(() => realm.toHost(Reflect.get(target, key)))
         } catch (error) {
-          throw realm.toHostThrown(error)
+          throw realm.thrownToHost(error)
         }
       },
       set(_shadow, key, value) {
+        if (realm.stopped) return false
         try {
           return realm.enter(() => Reflect.set(target, key, realm.toSandbox(value)))
         } catch (error) {
-          throw realm.toHostThrown(error)
+          throw realm.thrownToHost(error)
         }
       },
       has(_shadow, key) {
+        if (realm.stopped) return false
         try {
           return realm.enter(() => Reflect.has(target, key))
         } catch (error) {
-          throw realm.toHostThrown(error)
+          throw realm.thrownToHost(error)
         }
       },
     }

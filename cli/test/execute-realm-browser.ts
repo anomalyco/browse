@@ -9,7 +9,7 @@ import { spawn, spawnSync } from "node:child_process"
 import { chromium } from "patchright-core"
 import { relayToken } from "../src/relay-secrets.ts"
 
-const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "opencode", "realm-browser-"))
+const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "opencode", "realm3-browser-"))
 const home = path.join(root, "home")
 const runtime = path.join(root, "runtime")
 const extension = path.join(home, "extension")
@@ -109,6 +109,7 @@ try {
   assert.equal(normal.value.evaluated, 42)
   assert.equal(normal.value.screenshot, true)
   assert.equal(normal.value.saved, true)
+  assert.deepEqual(normal.value.console, ["console-probe"])
   assert.ok(normal.logs.some((entry: { text: string }) => entry.text.includes("console-probe")))
   const persisted = await cliExecute("return {count:++state.count, output:await state.locator.textContent()}")
   assert.deepEqual(persisted.value, { count: 2, output: "sandbox" })
@@ -145,7 +146,29 @@ try {
   assert.equal(healthy.value, 42)
   assert.equal(health.connected, true)
   assert.ok(Date.now() - started < 5_000)
-  console.log(JSON.stringify({ normal: "PASS", persistence: "PASS", handoffTimeout: "PASS", escapes: escapes.length, concurrentCpuTimeoutMs: Date.now() - started, root }))
+  const concurrentCpuTimeoutMs = Date.now() - started
+  const recovered = await execute("return 42", "realm-loop")
+  assert.equal(recovered.value, 42)
+  assert.ok(recovered.warnings.some((warning: string) => warning.includes("state and pending callbacks were reset")))
+  const rejected = await execute("Promise.reject(new Error('isolated rejection')); await new Promise(()=>{})", "realm-loop")
+  assert.equal(rejected.isError, true)
+  assert.match(rejected.text, /Unhandled execute rejection/)
+  assert.equal((await api("/extension/status")).connected, true)
+  assert.equal((await execute("return 42", "realm-loop")).value, 42)
+  // A loop in a Playwright event handler (dispatched from the relay's WebSocket, outside any execute call).
+  await execute("await page.goto('http://127.0.0.1:19931')", "realm-loop")
+  const handlerStarted = Date.now()
+  const handlerLoop = execute("page.on('request', () => { while(true){} }); await page.evaluate(() => fetch('/data')); await new Promise(r => setTimeout(r, 10_000))", "realm-loop")
+  await pause(200)
+  const [handlerResult, otherSession, versionDuringLoop] = await Promise.all([handlerLoop, execute("return await page.title()"), fetch(`${base}/version`).then(r => r.status)])
+  assert.equal(handlerResult.isError, true, JSON.stringify(handlerResult))
+  assert.match(handlerResult.text, /CPU budget/)
+  assert.equal(otherSession.value, "Realm fixture")
+  assert.equal(versionDuringLoop, 200)
+  const handlerCpuTimeoutMs = Date.now() - handlerStarted
+  assert.ok(handlerCpuTimeoutMs < 5_000)
+  assert.equal((await execute("return 7", "realm-loop")).value, 7)
+  console.log(JSON.stringify({ normal: "PASS", persistence: "PASS", handoffTimeout: "PASS", escapes: escapes.length, concurrentCpuTimeoutMs, handlerCpuTimeoutMs, rejectionIsolation: "PASS", recovery: "PASS", root }))
 } finally {
   await browser?.close()
   relay.kill("SIGTERM")

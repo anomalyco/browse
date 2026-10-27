@@ -520,6 +520,11 @@ export class ExecuteSandbox {
   execute(code: string, options: ExecuteOptions = {}): Effect.Effect<ExecuteResult> {
     return Effect.tryPromise({
       try: async () => {
+        if (this.realm?.isStopped) {
+          this.realm = new ExecuteRealm()
+          this.state = this.realm.state
+          this.pendingWarnings.push("The previous execute realm stopped; JavaScript state and pending callbacks were reset.")
+        }
         const globals = await this.getGlobals(options)
         const { result, logs, logSummary, aftermath } = await runUserCode({ code, globals, ...(this.realm ? { realm: this.realm } : {}) })
         await this.networkCapture.settleForOutput()

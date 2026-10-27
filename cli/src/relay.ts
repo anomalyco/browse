@@ -68,6 +68,7 @@ import { RootTargetLifecycle } from "./root-target-lifecycle.ts"
 import { boundedToken, runtimeFailureKind, summarizeDiagnosticUrl, summarizeRuntimeEvaluate } from "./runtime-diagnostics.ts"
 import { shouldExposeChildTarget, TargetRegistry, type RootTargetChange, type TargetOwnershipChange } from "./target-registry.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "./version.ts"
+import { handleExecuteRealmException, handleExecuteRealmRejection } from "./execute-realm.ts"
 
 export const startRelay = Effect.fn("Relay.start")(function* (options: {
   readonly port?: number
@@ -86,9 +87,11 @@ type RelayProcessFaultKind = "uncaughtException" | "unhandledRejection"
 const installRelayProcessGuard = Effect.acquireRelease(
   Effect.sync(() => {
     const onUncaughtException = (error: Error, origin: NodeJS.UncaughtExceptionOrigin) => {
+      if (handleExecuteRealmException(error)) return
       handleRelayProcessFault("uncaughtException", error, { origin })
     }
     const onUnhandledRejection = (reason: unknown, promise: Promise<unknown>) => {
+      if (handleExecuteRealmRejection(promise)) return
       handleRelayProcessFault("unhandledRejection", reason, { promise })
     }
     process.on("uncaughtException", onUncaughtException)
