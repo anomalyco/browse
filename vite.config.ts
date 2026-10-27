@@ -20,6 +20,7 @@ export default defineConfig(({ mode }) => ({
     rolldownOptions: {
       input: {
         welcome: fileURLToPath(new URL("./welcome.html", import.meta.url)),
+        "agent-window": fileURLToPath(new URL("./agent-window.html", import.meta.url)),
         offscreen: fileURLToPath(new URL("./offscreen.html", import.meta.url)),
         background: fileURLToPath(new URL("./src/background/index.ts", import.meta.url)),
       },

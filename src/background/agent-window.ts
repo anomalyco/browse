@@ -12,9 +12,17 @@ export * as AgentWindow from "./agent-window"
 //
 // A minimized window was tried instead and isn't usable: Page.captureScreenshot on its active tab never returns and
 // its timers are throttled, even with focus emulation.
+//
+// No extension API can put a window on another macOS Space or keep a tiling window manager from tiling it into the
+// user's current one, so the window opens on a pinned page titled TITLE and keeps it until a window manager has had
+// time to see that title (macOS gives the window the active tab's title). A rule matching it can then send the window
+// to a workspace the user never looks at, where it keeps rendering; the agent's tab opens only after that.
 
+export const TITLE = "OpenCode Browser agents"
 const KEY = "agentWindowId"
 const SIZE = { width: 1280, height: 900 }
+/** How long a window manager gets to see the placeholder's title before the agent's tab replaces it. */
+export const timing = { loadMs: 1_500, settleMs: 600 }
 let queue: Promise<unknown> = Promise.resolve()
 
 type Bounds = { left: number; top: number; width: number; height: number }
@@ -33,12 +41,16 @@ export function openTab(url: string, options: { active?: boolean } = {}): Promis
   const run = async () => {
     const windowId = await id()
     if (windowId !== undefined) return chrome.tabs.create({ windowId, url, active: options.active === true })
-    const window = await create(url)
+    const window = await create(chrome.runtime.getURL("agent-window.html"))
     if (window?.id === undefined) throw new Error("Could not open the agent window")
     await chrome.storage.session.set({ [KEY]: window.id })
-    const tab = window.tabs?.[0] ?? (await chrome.tabs.query({ windowId: window.id }))[0]
-    if (!tab) throw new Error("The agent window has no tab")
-    return tab
+    const placeholder = window.tabs?.[0] ?? (await chrome.tabs.query({ windowId: window.id }))[0]
+    if (placeholder?.id !== undefined) {
+      await chrome.tabs.update(placeholder.id, { pinned: true }).catch(() => undefined)
+      await titled(placeholder.id)
+    }
+    // The window's first agent tab is its active one: a background tab of a window isn't painted.
+    return chrome.tabs.create({ windowId: window.id, url, active: true })
   }
   const next = queue.then(run, run)
   queue = next.catch(() => undefined)
@@ -56,6 +68,19 @@ export function placements(user: Partial<Bounds> | undefined, size = SIZE): Boun
     { left, top: top - size.height, ...size },
   ]
 }
+
+/** Waits for the placeholder to load (so the window carries its title), then gives a window manager time to see it. */
+async function titled(tabId: number) {
+  const deadline = Date.now() + timing.loadMs
+  while (Date.now() < deadline) {
+    const tab = await chrome.tabs.get(tabId).catch(() => undefined)
+    if (!tab || tab.status !== "loading") break
+    await sleep(50)
+  }
+  await sleep(timing.settleMs)
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 async function create(url: string) {
   const base = { url, focused: false, state: "normal", type: "normal" } as const

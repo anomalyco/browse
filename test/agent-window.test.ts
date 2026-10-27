@@ -3,6 +3,8 @@ import { installChrome, settle } from "./chrome-stub"
 
 const stub = installChrome()
 const { AgentWindow } = await import("../src/background/agent-window")
+AgentWindow.timing.loadMs = 0
+AgentWindow.timing.settleMs = 0
 
 /** The user's window, focused, at the given bounds. */
 async function userWindow(bounds: { left: number; top: number; width: number; height: number }) {
@@ -30,6 +32,7 @@ describe("AgentWindow.openTab", () => {
     expect(stub.state.created).toHaveLength(1)
     expect(stub.state.created[0]).toMatchObject({ focused: false, state: "normal", left: 1512, top: 30, width: 1280, height: 900 })
     expect(first.windowId).not.toBe(user.id)
+    expect(first.active).toBe(true)
     expect(stub.state.focusedWindowId).toBe(user.id)
 
     const second = await AgentWindow.openTab("https://example.org/")
@@ -89,6 +92,19 @@ describe("AgentWindow.openTab", () => {
     expect(stub.state.created).toEqual([expect.objectContaining({ focused: false, width: 1280, height: 900 })])
     expect(stub.state.created[0]?.left).toBeUndefined()
   })
+})
+
+test("opens on a pinned, titled placeholder a window manager can match, then the agent's tab", async () => {
+  await userWindow({ left: 0, top: 30, width: 600, height: 600 })
+  const tab = await AgentWindow.openTab("https://example.com/")
+  expect(stub.state.created[0]?.url).toBe("chrome-extension://stubextensionid/agent-window.html")
+  const tabs = await stub.chrome.tabs.query({ windowId: tab.windowId })
+  expect(tabs.map(({ url, pinned }: { url: string; pinned?: boolean }) => ({ url, pinned }))).toEqual([
+    { url: "chrome-extension://stubextensionid/agent-window.html", pinned: true },
+    { url: "https://example.com/", pinned: undefined },
+  ])
+  const html = await Bun.file(new URL("../agent-window.html", import.meta.url)).text()
+  expect(html).toContain(`<title>${AgentWindow.TITLE}</title>`)
 })
 
 describe("AgentWindow.placements", () => {
