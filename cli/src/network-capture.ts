@@ -3,7 +3,7 @@ import path from "node:path"
 import type { Page, Request, Response } from "patchright-core"
 import * as AuthProfile from "./auth-profile.ts"
 import { writeJsonFileAtomically } from "./fs-durability.ts"
-import { SecretCollector } from "./network-redaction.ts"
+import { looksLikeTokenSegment, SecretCollector } from "./network-redaction.ts"
 
 export type NetworkCaptureOptions = {
   readonly urlFilter?: string
@@ -697,16 +697,25 @@ function protectCapturedBody(
     : { ...body, text }
 }
 
+// Known values shorter than this are not replaced inside URLs and headers, where short strings collide with ordinary text.
+const minimumKnownSubstringLength = 8
+
 function redactEntryKnownValues(entry: CapturedEntry, collector: SecretCollector): CapturedEntry {
+  const redactText = (text: string) => collector.redactKnownSubstrings(text, minimumKnownSubstringLength)
+  const redactHeaders = (headers: readonly Header[]) => headers.map((item) => ({ ...item, value: redactText(item.value) }))
   return {
     ...entry,
     request: {
       ...entry.request,
+      url: redactText(entry.request.url),
+      headers: redactHeaders(entry.request.headers),
+      ...(entry.request.redirectedFrom ? { redirectedFrom: redactText(entry.request.redirectedFrom) } : {}),
       ...(entry.request.body?.text ? { body: redactStructuredBody(entry.request.body, collector) } : {}),
     },
     ...(entry.response ? {
       response: {
         ...entry.response,
+        headers: redactHeaders(entry.response.headers),
         ...(entry.response.body?.text ? { body: redactStructuredBody(entry.response.body, collector) } : {}),
       },
     } : {}),
@@ -835,11 +844,23 @@ function safeValue<A>(read: () => A, fallback: A): A {
 }
 
 function requestScope(method: string, rawUrl: string): string {
+  let base: string
   try {
     const url = new URL(rawUrl)
-    return `${method.toUpperCase()} ${url.origin}${url.pathname}`
+    base = `${url.origin}${url.pathname}`
   } catch {
-    return `${method.toUpperCase()} ${rawUrl.split("?", 1)[0] ?? rawUrl}`
+    base = rawUrl.split("?", 1)[0] ?? rawUrl
+  }
+  // Scopes name slot sources in stored profiles and status output: keep token-like path segments out of them.
+  const scrubbed = base.split("/").map((segment) => looksLikeTokenSegment(safeDecode(segment)) ? ":token" : segment).join("/")
+  return `${method.toUpperCase()} ${scrubbed}`
+}
+
+function safeDecode(segment: string): string {
+  try {
+    return decodeURIComponent(segment)
+  } catch {
+    return segment
   }
 }
 

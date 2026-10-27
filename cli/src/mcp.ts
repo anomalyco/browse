@@ -271,7 +271,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       description: "Stop network capture. Optionally write a credential-redacted HAR and store lossless credential values in a reusable secret profile. At least one of outputPath or secrets is required.",
       inputSchema: objectSchema({
         session: sessionSchemaProperty,
-        outputPath: { type: "string", description: "Optional artifact path, resolved against the MCP process working directory. The HAR contains stable ${BC_SECRET_N} references, not captured values." },
+        outputPath: { type: "string", description: "Optional artifact path, resolved against the MCP process working directory. The HAR contains stable ${BC_SECRET_N} references (and redaction-only ${BC_REDACTED_N} for passwords, one-time codes and token-like URL path segments), not captured values." },
         secrets: { type: "string", description: "Optional reusable profile name for captured credential values." },
       }),
       readOnly: false,
