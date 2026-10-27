@@ -9,7 +9,7 @@ extension, for [opencode](https://opencode.ai) and any other MCP client.
 ---
 
 Agents get a `browse` MCP server. They open and drive tabs with Playwright, take screenshots, capture network
-traffic and record the screen, in a browser window of their own that never takes focus. When it's your turn (a login,
+traffic and record the screen, in a browser window of their own that opens unfocused, beside yours. When it's your turn (a login,
 a 2FA prompt, a payment), they hand the tab back to you and continue once you click **Continue**.
 
 It works in Chrome, Edge, Brave, Arc, Helium, Vivaldi, Opera and Chromium.
@@ -42,7 +42,7 @@ code into `dist/`, and the extension only obeys a relay that proves it knows tha
 A Chrome Web Store build has no pairing file: run `node cli/dist/cli.mjs pair` and paste the code it prints on the
 extension's status page (right-click the toolbar button, then **Options**).
 
-> **Coming soon:** a Chrome Web Store listing and `npx opencode-browser-cli install`, so you can skip the clone.
+> **Coming soon:** a Chrome Web Store listing and an npm package, so you can skip the clone.
 
 ### Other MCP clients
 
@@ -56,8 +56,8 @@ extension's status page (right-click the toolbar button, then **Options**).
 
 ## Using it
 
-- **Agents open their own tabs** in a separate browser window that is created unfocused and never brought to the
-  front. Tabs are grouped under the agent's session name; popups an agent opens move into its window. Tabs nobody
+- **Agents open their own tabs** in a separate browser window that opens unfocused, placed beside the window you last
+  used (on another display when there's no room on yours), and agents can't bring it to the front. Tabs are grouped under the agent's session name; popups an agent opens move into its window. Tabs nobody
   touches for 10 minutes close by themselves (never while a script runs on them).
 - **Hand an agent one of your tabs** by clicking the toolbar button on it. The badge shows **ON**; click again to take
   it back. While an agent works the badge reads **RUN**, and **WAIT** when it needs you. The button always works: a
@@ -65,7 +65,8 @@ extension's status page (right-click the toolbar button, then **Options**).
 - **Handoffs:** the page shows a small card with the site's origin. Do the human part, then click **Continue** on the
   card or the toolbar button.
 - **Recordings show only the page.** Nothing from OpenCode Browser is drawn while a tab is recorded: no cursor, no
-  labels, no handoff card (you get a system notification instead; click it to go to the tab). For a demo video, ask for
+  labels, no handoff card (you get a system notification instead; click it to go to the tab). If notifications are
+  turned off for the extension, the card is shown after all, and the recording includes it. For a demo video, ask for
   the ghost cursor with `cursor: true` on `recording_start` (`--cursor` on the CLI).
 - **Status:** the extension's options page shows whether the relay is connected and paired, and can copy diagnostics.
 
@@ -129,9 +130,11 @@ may try to steer it, and that other programs on your computer may try to use the
 - **Pairing.** The extension and the relay prove to each other that they know the same pairing code (HMAC over fresh
   nonces) before the extension obeys anything, so a program that grabs the port first can't drive your browser. The
   relay accepts only the two published extension IDs (plus any listed in `OPENCODE_BROWSER_EXTENSION_ORIGINS`).
-- **Sandboxed `execute`.** Agent code runs in a separate JavaScript realm without `process`, `require`, `import()`,
-  `fs` or network modules. It gets a `files` helper and Playwright file options limited to the temp directory, and
-  can't read OpenCode Browser's data. The relay starts with an allowlisted environment, so your API keys aren't in it.
+- **Sandboxed `execute`.** Agent code runs in a separate JavaScript realm that isolates it from Node: it isn't given
+  `process`, `require`, `import()`, `fs` or network modules, only a `files` helper and Playwright file options limited
+  to the temp directory, not OpenCode Browser's data. The sandbox is a defense in depth, not a hard security boundary:
+  treat code an agent runs as code running as you. The relay starts with an allowlisted environment (the basics plus
+  `OPENCODE_BROWSER_*`, proxy variables and CA certificate paths), so your API keys aren't in it.
 - **CDP guardrails.** Cookie reads return only cookies for the session's own pages; cookie writes are limited to
   those hosts. Clearing cookies, cache or site data, and closing the browser, are always refused. `page.bringToFront()`
   is refused so agents can't raise windows over your work.
@@ -140,7 +143,10 @@ may try to steer it, and that other programs on your computer may try to use the
 - **Less on disk.** Session journals are private (0700/0600), redact typed passwords, codes and tokens, and are pruned
   after 14 days (200 at most). HARs replace credentials with references; typed passwords and one-time codes are never
   stored. Secret profiles keep values out of transcripts and artifacts, but anything that runs with them (like
-  `secrets_run`) can use them.
+  `secrets_run`) can use them. `secrets_run` commands get the relay's allowlisted environment plus the profile's
+  `BC_SECRET_N` values, not the environment you started opencode with: `PATH`, `HOME`, locale, `HTTP_PROXY`,
+  `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR` and `NODE_EXTRA_CA_CERTS` pass through; other
+  variables (API keys included) don't.
 
 Escape hatches. Set them in the environment you start opencode (or your MCP client) from; the relay inherits
 `OPENCODE_BROWSER_*` variables. Run `node cli/dist/cli.mjs relay restart` after changing them:

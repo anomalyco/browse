@@ -76,8 +76,8 @@ MCP keeps one implicit process session. Omit `session` for that normal path, or
 call `session_new` and pass an explicit id when one MCP process needs multiple
 sessions.
 
-Tabs you open live in a separate agent window that never takes focus, so the
-user keeps working undisturbed; popups your clicks open move there too. Don't
+Tabs you open live in a separate agent window that opens unfocused beside the
+user's window, so the user keeps working undisturbed; popups your clicks open move there too. Don't
 ask the user to watch a tab unless you hand it off.
 
 To work in a tab the user already has open, ask them to click the OpenCode
@@ -559,7 +559,10 @@ redacted. The public SDK exposes profile metadata but never raw profile values.
 Redaction keeps values out of transcripts and artifacts by accident; it does not
 protect them from a command that deliberately sends, encodes or writes them,
 because that command receives the real values. Only run commands you wrote or
-trust. Execute code cannot read Secret Profile files.
+trust. Execute code isn't given access to Secret Profile files. Commands run
+with a profile get the relay's allowlisted environment (`PATH`, `HOME`, locale,
+proxy variables, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`) plus
+the `BC_SECRET_N` values, not the user's full shell environment.
 
 Refresh credentials normally renewed by a page reload with:
 
@@ -604,7 +607,9 @@ Recordings are clean by default: nothing from OpenCode Browser is drawn in the
 recorded page. The ghost cursor stays off, `screenshotWithLabels` draws its
 labels onto the returned image instead of the page, and a handoff on a tab being
 recorded shows no in-page card: the user gets a system notification and the
-toolbar badge says WAIT (the card appears if the recording stops first).
+toolbar badge says WAIT (the card appears if the recording stops first, or
+right away if notifications are turned off for the extension, in which case
+the recording shows it).
 
 The on-page Ghost Cursor (`distance-glide` motion + `tactile-bloom` click
 shockwave) is off by default, because pages can detect an element added to their
