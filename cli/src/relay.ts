@@ -975,14 +975,24 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     })
   }
 
+  /** Opener tab -> in-flight detaches of its popups' auto-attached sessions, which a root attach must wait for. */
+  const openedPageReleases = new Map<number, Set<Promise<void>>>()
+
   function releaseOpenedPageSession(tabId: number, parentSessionId: string | undefined, childSessionId: string, params: JsonObject | undefined): void {
     resumeIfWaitingForDebugger(tabId, childSessionId, params, "Failed to resume opened page")
-    Effect.runPromise(sendDebuggerCommand({
+    const release = Effect.runPromise(sendDebuggerCommand({
       tabId,
       ...(parentSessionId === undefined ? {} : { sessionId: parentSessionId }),
       method: "Target.detachFromTarget",
       params: { sessionId: childSessionId },
     }).pipe(Effect.ignore)).catch(() => {})
+    const releases = openedPageReleases.get(tabId) ?? new Set()
+    releases.add(release)
+    openedPageReleases.set(tabId, releases)
+    void release.finally(() => {
+      releases.delete(release)
+      if (releases.size === 0 && openedPageReleases.get(tabId) === releases) openedPageReleases.delete(tabId)
+    })
   }
 
   /**
@@ -1002,13 +1012,30 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       .find((params) => params !== undefined)
     relayLog("tab.opened", { tabId, openerTabId, session: sessionId })
     currentAnnouncedRootTabIds?.add(tabId)
-    Effect.runPromise(rootLifecycle.attach({
+    const attach = () => Effect.runPromise(rootLifecycle.attach({
       tabId,
       owner: "relay",
       opencodeBrowserSessionId: sessionId,
       openerTargetId: opener.targetInfo.targetId,
       ...(autoAttachParams ? { autoAttachParams } : {}),
-    })).catch((error: unknown) => {
+    }))
+    const attachWithRetry = async () => {
+      // The opener's auto-attached session holds the popup until its detach lands; attaching sooner fails as
+      // "already attached". Wait for that detach, then retry briefly in case Chrome is still letting go.
+      await Promise.allSettled(Array.from(openedPageReleases.get(openerTabId) ?? []))
+      for (const delayMs of [100, 250, 500, 1_000]) {
+        try {
+          return await attach()
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          if (!/already attached|another debugger/i.test(message) || registry.routingRootTarget(tabId) || !registry.tabTargets.has(openerTabId)) throw error
+          relayLog("tab.opened.retry", { tabId, delayMs, error: message })
+          await new Promise((resolve) => setTimeout(resolve, delayMs))
+        }
+      }
+      return await attach()
+    }
+    attachWithRetry().catch((error: unknown) => {
       relayLog("tab.opened.error", { tabId, error: error instanceof Error ? error.message : String(error) })
     })
   }

@@ -75,11 +75,16 @@ class FakeExtension {
     if (typeof command.id !== "number" || command.id === 0) return
     this.commands.push(command)
     const method = command.method === "debugger.sendCommand" ? String(command.params?.method) : command.method
+    const handler = this.handlers.get(method)
+    const reply = (result: unknown) => this.socket.send(JSON.stringify({ id: command.id, result: result ?? {} }))
+    const fail = (error: unknown) => this.socket.send(JSON.stringify({ id: command.id, error: String(error) }))
     try {
-      const result = this.handlers.get(method)?.(command) ?? {}
-      this.socket.send(JSON.stringify({ id: command.id, result }))
+      const result = handler?.(command)
+      // A handler may answer later, as Chrome does for slow commands.
+      if (result instanceof Promise) result.then(reply, fail)
+      else reply(result)
     } catch (error) {
-      this.socket.send(JSON.stringify({ id: command.id, error: String(error) }))
+      fail(error)
     }
   }
 
@@ -287,6 +292,41 @@ describe("relay", () => {
     await Bun.sleep(200)
     expect(extension.commands.some((command) => command.method === "debugger.attach" && command.params?.tabId === 64)).toBe(false)
     other.close()
+    socket.close()
+    extension.close()
+  }, 20_000)
+
+  test("a popup's root attach waits for the opener's child detach and retries while Chrome still holds it", async () => {
+    const targetInfo = (tabId: number) => ({ targetId: `TARGET-${tabId}`, type: "page", title: "Example", url: `https://example.com/${tabId}`, attached: true, browserContextId: "CTX" })
+    const order: string[] = []
+    let refusals = 1
+    const extension = new FakeExtension(pairingCode(home))
+      .on("tabs.create", () => ({ tabId: 65 }))
+      .on("Target.getTargetInfo", (command) => ({ targetInfo: targetInfo(Number(command.params?.tabId)) }))
+      // The child detach answers late; Chrome still holds the popup once more after it.
+      .on("Target.detachFromTarget", () => Bun.sleep(300).then(() => { order.push("detached") }))
+      .on("debugger.attach", (command) => {
+        if (command.params?.tabId !== 66) return {}
+        order.push("attach")
+        if (refusals-- > 0) throw new Error("Another debugger (DevTools or another extension) is attached to this tab. Ask the user to close it, then retry.")
+        return {}
+      })
+    expect(await extension.pair()).toBe(true)
+    const socket = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test?opencodeBrowserSessionId=popup-race`, { authorization: `Bearer ${token}` })
+    if (!(socket instanceof WebSocket)) throw new Error(`CDP connection refused: ${socket}`)
+    const events = collect(socket)
+    expect((await cdpCall(socket, 1, "Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true })).error).toBeUndefined()
+    expect((await cdpCall(socket, 2, "Target.createTarget", { url: "https://example.com/65" })).result?.targetId).toBe("TARGET-65")
+    extension.emit("debugger.event", {
+      tabId: 65,
+      method: "Target.attachedToTarget",
+      params: { sessionId: "race-child", targetInfo: { ...targetInfo(66), openerId: "TARGET-65" }, waitingForDebugger: true },
+    })
+    // The extension reports the tab right away, before the child detach answers.
+    extension.emit("tabs.opened", { tabId: 66, openerTabId: 65 })
+    const announced = () => events.some((event) => event.method === "Target.attachedToTarget" && (event.params?.targetInfo as { targetId?: string } | undefined)?.targetId === "TARGET-66")
+    expect(await until(announced, 5_000)).toBe(true)
+    expect(order).toEqual(["detached", "attach", "attach"])
     socket.close()
     extension.close()
   }, 20_000)
