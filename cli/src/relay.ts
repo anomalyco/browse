@@ -23,6 +23,7 @@ import { extensionProtocolCompatibility, isCdpRequest, isExtensionEvent, isExten
 import {
   closeHttpServer,
   closeWebSocketServer,
+  dataUrlDocument,
   chromeExtensionOriginForPath,
   defaultHost,
   defaultPort,
@@ -629,6 +630,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     ...(contextDebugLog ? { trace: contextDebugLog } : {}),
   })
   const mainFrameIdsByTab = new Map<number, string>()
+  /** Page.navigate to a data: URL waits for its tab's main frame to commit the about:blank document it writes into. */
+  const blankNavigationWaiters = new Map<number, (url: string, loaderId: string | undefined) => void>()
   // Off by default: pages can detect an injected cursor, and recordings should show only the page. A recording or
   // flight recorder started with cursor: true shows it (demo videos), as do showGhostCursor() and the env var.
   const ghostCursorByDefault = yield* Config.Boolean("OPENCODE_BROWSER_GHOST_CURSOR").pipe(Config.withDefault(false))
@@ -1228,6 +1231,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         Effect.runPromise(Effect.ignore(ghostCursor.documentCreated(tabId))).catch(() => {})
         contextDebugLog?.(`main-frame-navigated frame=${boundedToken(frameId)} loader=${boundedToken(getString(frame, "loaderId"))} ${targetDiagnosticIdentity(target)} ${summarizeDiagnosticUrl(frameUrl)}`)
         registry.updateTargetUrl(tabId, frameUrl)
+        blankNavigationWaiters.get(tabId)?.(frameUrl, getString(frame, "loaderId"))
         // Some Chromium builds drop focus emulation across navigations; without it a background tab is throttled.
         Effect.runPromise(Effect.ignore(sendDebuggerCommand({ tabId, method: "Emulation.setFocusEmulationEnabled", params: { enabled: true } }))).catch(() => {})
       }
@@ -1499,6 +1503,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     })
     const { tabId } = route
     if (message.method === ghostCursorCommandMethod) return yield* ghostCursor.command(tabId, message.params)
+    if (message.method === "Page.navigate" && route.chromeSessionId === undefined) {
+      const dataNavigation = yield* navigateTopFrameToDataUrl(tabId, message.params)
+      if (dataNavigation) return dataNavigation
+    }
     const command = {
       tabId,
       method: normalizedMessage.method,
@@ -1527,6 +1535,47 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         Effect.tap(() => Effect.sync(() => setProtectedUi(tabId, false))),
       )
     return scopeCdpResult({ method: message.method, result, pageUrls: () => cdpRouter.visibleRoots(socket).map((target) => target.targetInfo.url) })
+  })
+
+  /**
+   * Chromium refuses top-frame navigations to data: URLs that an extension starts (chrome.debugger's Page.navigate and
+   * chrome.tabs.update both end in ERR_ABORTED), so page.goto("data:...") would always fail. The relay navigates the
+   * frame to about:blank instead (which extensions may open, giving a fresh opaque origin like a data: document has)
+   * and writes the data URL's content into it with Page.setDocumentContent before answering, with the about:blank
+   * document's loader id, so Playwright's goto waits for that document as usual. HTML is written as is; text and
+   * JSON appear as preformatted text and images as an image, the way the browser shows them. The page URL stays
+   * about:blank. Undefined when this isn't such a navigation or the content type can't be shown; the original
+   * command is then forwarded.
+   */
+  const navigateTopFrameToDataUrl = Effect.fnUntraced(function* (tabId: number, params: JsonObject | undefined) {
+    const url = getString(params, "url")?.trim()
+    if (!url || !/^data:/i.test(url)) return undefined
+    const frameId = mainFrameIdsByTab.get(tabId) ?? registry.tabTargets.get(tabId)?.targetInfo.targetId
+    const requestedFrameId = getString(params, "frameId")
+    if (!frameId || (requestedFrameId !== undefined && requestedFrameId !== frameId) || blankNavigationWaiters.has(tabId)) return undefined
+    const html = yield* Effect.tryPromise(() => dataUrlDocument(url)).pipe(Effect.orElseSucceed(() => undefined))
+    if (html === undefined) return undefined
+    const committedLoaders = new Set<string>()
+    let loaderCommitted: (loaderId: string) => void = () => {}
+    blankNavigationWaiters.set(tabId, (frameUrl, loaderId) => {
+      if (frameUrl !== "about:blank" || loaderId === undefined) return
+      committedLoaders.add(loaderId)
+      loaderCommitted(loaderId)
+    })
+    return yield* Effect.gen(function* () {
+      const navigated = yield* sendDebuggerCommand({ tabId, method: "Page.navigate", params: { url: "about:blank", frameId } })
+      const loaderId = getString(navigated, "loaderId")
+      if (getString(navigated, "errorText") || loaderId === undefined) return navigated
+      if (!committedLoaders.has(loaderId)) {
+        const committed = yield* Effect.promise(() => new Promise<void>((resolve) => {
+          loaderCommitted = (id) => { if (id === loaderId) resolve() }
+        })).pipe(Effect.timeoutOption(10_000))
+        if (committed._tag === "None") return navigated
+      }
+      yield* sendDebuggerCommand({ tabId, method: "Page.setDocumentContent", params: { frameId, html } })
+      relayLog("navigate.data", { tabId, chars: html.length })
+      return { frameId: getString(navigated, "frameId") ?? frameId, loaderId } as JsonObject
+    }).pipe(Effect.ensuring(Effect.sync(() => { blankNavigationWaiters.delete(tabId) })))
   })
 
   const detachTab = Effect.fnUntraced(function* (tabId: number) {

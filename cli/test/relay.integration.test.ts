@@ -5,7 +5,7 @@ import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import WebSocket from "ws"
-import { stableUnpackedExtensionOrigin } from "../src/relay-helpers.ts"
+import { dataUrlDocument, stableUnpackedExtensionOrigin } from "../src/relay-helpers.ts"
 import { pairingCode, pairingProof, relayToken } from "../src/relay-secrets.ts"
 
 // A relay from source on a free port with its own data root, and a fake extension that pairs with it and answers
@@ -83,9 +83,27 @@ class FakeExtension {
     }
   }
 
+  /** Sends an extension event, as the real extension does for debugger events and tab changes. */
+  emit(method: string, params: Record<string, unknown>) {
+    this.socket.send(JSON.stringify({ method, params }))
+  }
+
   close() {
     this.socket.close()
   }
+}
+
+/** Every message a CDP client receives, for asserting on events. */
+function collect(socket: WebSocket): Array<{ method?: string; params?: Record<string, unknown>; sessionId?: string }> {
+  const messages: Array<{ method?: string; params?: Record<string, unknown>; sessionId?: string }> = []
+  socket.on("message", (data) => messages.push(JSON.parse(String(data))))
+  return messages
+}
+
+async function until(condition: () => boolean, timeoutMs = 3_000) {
+  const deadline = Date.now() + timeoutMs
+  while (!condition() && Date.now() < deadline) await Bun.sleep(20)
+  return condition()
 }
 
 async function freePort(): Promise<number> {
@@ -222,4 +240,46 @@ describe("relay", () => {
     socket.close()
     extension.close()
   }, 20_000)
+
+  test("page.goto to a data: URL writes its content into about:blank", async () => {
+    const targetInfo = { targetId: "TARGET-71", type: "page", title: "Example", url: "https://example.com/", attached: true, browserContextId: "CTX" }
+    const extension = new FakeExtension(pairingCode(home))
+    extension
+      .on("tabs.create", () => ({ tabId: 71 }))
+      .on("Target.getTargetInfo", () => ({ targetInfo }))
+      .on("Page.navigate", (command) => {
+        const url = String((command.params?.params as { url?: string }).url)
+        // Chromium refuses data: navigations from extensions; about:blank commits.
+        if (url.startsWith("data:")) return { frameId: "TARGET-71", loaderId: "REFUSED", errorText: "net::ERR_ABORTED" }
+        extension.emit("debugger.event", { tabId: 71, method: "Page.frameNavigated", params: { frame: { id: "TARGET-71", loaderId: "BLANK-1", url } } })
+        return { frameId: "TARGET-71", loaderId: "BLANK-1" }
+      })
+    expect(await extension.pair()).toBe(true)
+    const socket = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test?opencodeBrowserSessionId=data`, { authorization: `Bearer ${token}` })
+    if (!(socket instanceof WebSocket)) throw new Error("CDP connection refused")
+    await cdpCall(socket, 1, "Target.createTarget", { url: "https://example.com/" })
+    const sessionId = String((await cdpCall(socket, 2, "Target.attachToTarget", { targetId: "TARGET-71", flatten: true })).result?.sessionId)
+    const navigated = await cdpCall(socket, 3, "Page.navigate", { url: "data:text/html,<h1>hi</h1>" }, sessionId)
+    expect(navigated.error).toBeUndefined()
+    expect(navigated.result).toEqual({ frameId: "TARGET-71", loaderId: "BLANK-1" })
+    const sent = extension.commands.filter((command) => command.params?.tabId === 71 && (command.params?.method === "Page.navigate" || command.params?.method === "Page.setDocumentContent"))
+    expect(sent.map((command) => [command.params?.method, command.params?.params])).toEqual([
+      ["Page.navigate", { url: "about:blank", frameId: "TARGET-71" }],
+      ["Page.setDocumentContent", { frameId: "TARGET-71", html: "<h1>hi</h1>" }],
+    ])
+    socket.close()
+    extension.close()
+  }, 20_000)
+})
+
+describe("dataUrlDocument", () => {
+  test("shows HTML as is, text as preformatted text, images as an image", async () => {
+    expect(await dataUrlDocument("data:text/html,<p>x</p>")).toBe("<p>x</p>")
+    expect(await dataUrlDocument(`data:text/html;base64,${Buffer.from("<b>y</b>").toString("base64")}`)).toBe("<b>y</b>")
+    expect(await dataUrlDocument("data:text/plain,a<b")).toContain("<pre")
+    expect(await dataUrlDocument("data:text/plain,a<b")).toContain("a&lt;b")
+    expect(await dataUrlDocument("data:application/json,{\"a\":1}")).toContain("{\"a\":1}")
+    expect(await dataUrlDocument("data:image/png;base64,iVBORw0KGgo=")).toContain('<img src="data:image/png;base64,iVBORw0KGgo=">')
+    expect(await dataUrlDocument("data:application/pdf;base64,JVBERi0=")).toBeUndefined()
+  })
 })
