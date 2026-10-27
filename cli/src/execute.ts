@@ -1090,11 +1090,11 @@ export class ExecuteSandbox {
     return true
   }
 
-  restore(target: SessionTarget | undefined): void {
+  restore(target: SessionTarget | undefined, warning = "The relay restarted; session JavaScript state and snapshot refs were reset."): void {
     if (target) {
       this.unbindDefaultPage(target.id, { ownsPage: target.owner === "relay" })
     }
-    this.pendingWarnings.push("The relay restarted; session JavaScript state and snapshot refs were reset.")
+    this.pendingWarnings.push(warning)
   }
 
   private notifyDefaultTargetChange(): void {

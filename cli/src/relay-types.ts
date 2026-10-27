@@ -73,7 +73,8 @@ export interface ExecuteSandboxLike {
   markTargetProtectedUi(targetId: string, protectedUi: boolean): boolean
   markTargetDetached(targetId: string): boolean
   markTargetReplaced(previousTargetId: string, targetId: string): boolean
-  restore(target: SessionTarget | undefined): void
+  /** Rebind a durable default target in a new sandbox; `warning` goes into the next execute result. */
+  restore(target: SessionTarget | undefined, warning?: string): void
   getStatus(): {
     readonly sessionId?: string
     readonly connected: boolean

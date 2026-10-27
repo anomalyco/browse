@@ -820,7 +820,7 @@ export class OpenCodeBrowserSessions {
   private replaceSandbox(session: OpenCodeBrowserSession): void {
     if (this.sessions.get(session.id) !== session) return
     session.sandbox = this.createSandbox(session.id, (target) => this.updateTarget(session, target))
-    session.sandbox.restore(session.target)
+    session.sandbox.restore(session.target, "The previous script was stopped and did not end in time, so this session's JavaScript state and snapshot refs were reset.")
   }
 
   /** Resolve execute/adopt work before any permit; the caller owns cleanup of a created session. */
