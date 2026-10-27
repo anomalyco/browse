@@ -209,6 +209,16 @@ describe("relay", () => {
     // Guardrails apply on the way through.
     const blocked = await cdpCall(socket, 4, "Storage.clearDataForOrigin", { origin: "https://example.com", storageTypes: "all" }, sessionId)
     expect(blocked.error?.message).toContain("blocked Storage.clearDataForOrigin")
+    // Site storage is scoped to the session's page hosts; navigations to local and internal pages are refused.
+    const otherOrigin = await cdpCall(socket, 5, "IndexedDB.requestDatabaseNames", { securityOrigin: "https://bank.test" }, sessionId)
+    expect(otherOrigin.error?.message).toContain("blocked IndexedDB.requestDatabaseNames")
+    const ownOrigin = await cdpCall(socket, 6, "IndexedDB.requestDatabaseNames", { securityOrigin: "https://example.com" }, sessionId)
+    expect(ownOrigin.error).toBeUndefined()
+    const file = await cdpCall(socket, 7, "Page.navigate", { url: "file:///etc/passwd" }, sessionId)
+    expect(file.error?.message).toContain("blocked Page.navigate to a file: URL")
+    const internal = await cdpCall(socket, 8, "Target.createTarget", { url: "chrome://settings" })
+    expect(internal.error?.message).toContain("blocked Target.createTarget")
+    expect(extension.commands.some((command) => command.params?.method === "Page.navigate" || (command.method === "tabs.create" && String(command.params?.url).startsWith("chrome:")))).toBe(false)
     socket.close()
     extension.close()
   }, 20_000)
