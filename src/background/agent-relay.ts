@@ -467,9 +467,10 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         // A handoff opens the agent's group so the user can find the tab; it folds up again afterwards.
         if (page.state === "waiting") void AgentGroups.expandTab(tabId)
         else if (wasWaiting) void AgentGroups.settleTab(tabId)
-        // A recorded tab gets no card; the user hears about the handoff from a notification instead.
-        void HandoffNotice.sync(tabId, page, sessionName)
-        await PageScripts.send(tabId, { action: "page-status.set", status: HandoffNotice.forPage(page) })
+        // A recorded tab gets no card; the user hears about the handoff from a notification instead (or sees the
+        // card after all when no notification can be shown).
+        await HandoffNotice.sync(tabId, page, sessionName)
+        await PageScripts.send(tabId, { action: "page-status.set", status: HandoffNotice.forPage(tabId, page) })
         return {}
       }
       case "pageStatus.clear": {
@@ -888,7 +889,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
           const page = pageStatuses.get(tabId)
           if (page)
             void chrome.tabs
-              .sendMessage(tabId, { action: "page-status.set", status: HandoffNotice.forPage(page) })
+              .sendMessage(tabId, { action: "page-status.set", status: HandoffNotice.forPage(tabId, page) })
               .catch(() => undefined)
           send({ method: "pageStatus.requested", params: { tabId } })
         }
