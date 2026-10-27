@@ -699,6 +699,9 @@ function protectCapturedBody(
 
 // Known values shorter than this are not replaced inside URLs and headers, where short strings collide with ordinary text.
 const minimumKnownSubstringLength = 8
+// Inside JSON string values (a "next" link carrying an access token, an echoed path token) only longer known values
+// are replaced: ordinary text rarely contains 16 characters of a credential.
+const minimumKnownBodySubstringLength = 16
 
 function redactEntryKnownValues(entry: CapturedEntry, collector: SecretCollector): CapturedEntry {
   const redactText = (text: string) => collector.redactKnownSubstrings(text, minimumKnownSubstringLength)
@@ -736,7 +739,9 @@ function redactKnownScalars(value: unknown, collector: SecretCollector): unknown
   if (Predicate.isObject(value)) {
     return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactKnownScalars(item, collector)]))
   }
-  return collector.redactExactValue(value, 8)
+  const exact = collector.redactExactValue(value, 8)
+  if (exact !== value || !Predicate.isString(value)) return exact
+  return collector.redactKnownSubstrings(value, minimumKnownBodySubstringLength)
 }
 
 function toHarEntry(entry: CapturedEntry): Record<string, unknown> {
