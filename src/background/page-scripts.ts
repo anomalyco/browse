@@ -16,13 +16,17 @@ export async function inject(tabId: number) {
     .catch(() => undefined)
 }
 
-/** Messages the tab's page-status script, injecting it first when the document doesn't have it yet. */
+/**
+ * Messages the tab's page-status script, injecting it first when the document doesn't have it yet. Pages that refuse
+ * the script (about:blank, chrome://, the Web Store) get nothing: the caller keeps the status, and the script asks for
+ * it ("page-status.ready") once the tab navigates to a page that takes the injection.
+ */
 export async function send(tabId: number, message: object) {
   try {
     return await chrome.tabs.sendMessage(tabId, message)
   } catch {
     await inject(tabId)
-    return await chrome.tabs.sendMessage(tabId, message)
+    return await chrome.tabs.sendMessage(tabId, message).catch(() => undefined)
   }
 }
 
