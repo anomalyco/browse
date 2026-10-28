@@ -339,7 +339,16 @@ const layer: Layer.Layer<Service, RelayConfigInvalid, HttpClient.HttpClient> = L
 /** RelayClient backed by `node:http` (avoiding undici's 5-minute headersTimeout on long handoffs/commands), for standalone CLI/MCP wiring. */
 export const layerFetch: Layer.Layer<Service, RelayConfigInvalid> = layer.pipe(Layer.provide(NodeHttpClient.layerNodeHttp))
 
+/**
+ * The process the relay watches for this MCP server: the auto-update shim's supervisor when it runs one (it outlives
+ * the servers it swaps on an update, so the session and its tabs survive), else this process.
+ */
+function mcpClientPid(): number {
+  const shim = Number(process.env.OPENCODE_BROWSER_CLIENT_PID)
+  return Number.isSafeInteger(shim) && shim > 1 && shim === process.ppid ? shim : process.pid
+}
+
 /** layerFetch for the MCP server, which names its process to the relay (see `make`). */
-export const layerFetchMcp: Layer.Layer<Service, RelayConfigInvalid> = Layer.effect(Service, make({ clientPid: process.pid })).pipe(
+export const layerFetchMcp: Layer.Layer<Service, RelayConfigInvalid> = Layer.effect(Service, make({ clientPid: mcpClientPid() })).pipe(
   Layer.provide(NodeHttpClient.layerNodeHttp),
 )

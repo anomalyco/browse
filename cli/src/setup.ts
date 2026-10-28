@@ -17,7 +17,7 @@ import path from "node:path"
 import { createInterface } from "node:readline/promises"
 import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse } from "jsonc-parser"
-import { describeAutoUpdate, autoUpdateStatus, installVersion, pruneVersions, readCurrent, runtimeLayout, switchVersion, updateState, compareVersions, versionEntry } from "./auto-update.ts"
+import { describeAutoUpdate, autoUpdateStatus, installVersion, pruneVersions, readCurrent, readState, runtimeLayout, switchVersion, updateState, compareVersions, versionEntry } from "./auto-update.ts"
 import { cliCommand, dataRoot, installCommand, STORE_LISTED, storeConfig } from "./paths.ts"
 import { formatPairingCode, pairingCode, relayAuthorization, writeExtensionPairing } from "./relay-secrets.ts"
 import { opencodeBrowserVersion } from "./version.ts"
@@ -316,7 +316,7 @@ function removeLegacyHost() {
  * never change opencode's config. Returns the shim and the version. From source (development), runs in place.
  * OPENCODE_BROWSER_PACKAGE installs a specific spec instead, for example a local tarball.
  */
-function installRuntime(): { entry: string; version: string } {
+async function installRuntime(): Promise<{ entry: string; version: string }> {
   // From a checkout, run the bundle `bun run build` wrote: Node can't run the TypeScript sources (they use
   // syntax type stripping doesn't cover), and the MCP server runs under Node.
   if (fromSource) {
@@ -331,7 +331,7 @@ function installRuntime(): { entry: string; version: string } {
   const reuse = !spec && existsSync(existing) && spawnSync(process.execPath, [existing, "--version"], { encoding: "utf8", timeout: 30_000 }).stdout?.trim() === opencodeBrowserVersion
   let installed: string
   try {
-    installed = reuse ? existing : installVersion({ layout, version: opencodeBrowserVersion, ...(spec ? { spec } : {}) })
+    installed = reuse ? existing : await installVersion({ layout, version: opencodeBrowserVersion, ...(spec ? { spec } : {}) })
   } catch (error) {
     fail(`Could not install ${spec ?? `${PACKAGE}@${opencodeBrowserVersion}`}: ${(error as Error).message}`)
   }
@@ -345,7 +345,7 @@ function installRuntime(): { entry: string; version: string } {
     ...(pending && compareVersions(pending, version) > 0 ? { pending } : {}),
     ...(skipped && skipped !== version ? { skipped } : {}),
   }))
-  pruneVersions(layout, [version, previous])
+  pruneVersions(layout, [version, previous, readState(layout).pending])
   // Earlier versions installed one copy straight into runtime/; the shim replaces it.
   for (const legacy of ["node_modules", "package.json", "package-lock.json"]) rmSync(path.join(files.runtime, legacy), { recursive: true, force: true })
   return { entry: layout.shim, version }
@@ -373,7 +373,7 @@ async function install(args: string[]) {
   const opencode = findOpencode(args)
 
   mkdirSync(files.dir, { recursive: true })
-  const { entry, version } = installRuntime()
+  const { entry, version } = await installRuntime()
   log(`✓ OpenCode Browser ${version} installed${fromSource ? " (from source)" : ""}`)
   writeFileSync(files.settings, JSON.stringify({ ...(opencode ? { opencode } : {}), entry, version } satisfies Settings, null, 2) + "\n")
   if (removeLegacyHost()) log("✓ Removed the native messaging host of an earlier version")
@@ -684,8 +684,10 @@ export function locateExtension(options: LocateOptions, effects: Effects = syste
 /**
  * Pairs a store-installed extension without the copy-paste step: opens its status page in the browser profile that has
  * it, with the pairing code in the URL fragment (`welcome.html#pair=<code>`). The page pairs and clears the fragment at
- * once. The code passes through that browser's command line once, on this machine, which any local program running as
- * this user could read anyway (it's in the data root); `pair` and pasting the code stay as the fallback.
+ * once. The code passes through that browser's command line once, on this machine: briefly visible in the process
+ * list (to other local users too, on systems that show every user's arguments), where a program running as this user
+ * could read it from the data root anyway. The page ignores it when it's already connected; `pair` and pasting the
+ * code stay as the fallback.
  * Returns "opened", "manual" (the store build is there but nothing was opened: say how to pair) or "none".
  */
 export function pairStoreExtension(

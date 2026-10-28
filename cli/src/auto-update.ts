@@ -14,8 +14,8 @@
 // the browser, switches current.json and restarts the relay from the new version. "notify" only shows the update;
 // "off" doesn't check. OPENCODE_BROWSER_AUTO_UPDATE overrides the stored mode. The previous version stays installed for
 // `opencode-browser rollback`, which also skips the version it rolled back from until a newer one is published.
-import { spawn, spawnSync } from "node:child_process"
-import { chmodSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { spawn } from "node:child_process"
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { dataRoot, fromCheckout } from "./paths.ts"
@@ -227,20 +227,37 @@ export function describeAutoUpdate(status: AutoUpdateStatus): string {
 
 // ---- registry and install ----------------------------------------------------------------------------
 
-export type Run = (command: string, args: readonly string[], options?: { readonly timeoutMs?: number; readonly env?: NodeJS.ProcessEnv }) => { status: number | null; stdout: string; stderr: string }
+export type Run = (command: string, args: readonly string[], options?: { readonly timeoutMs?: number; readonly env?: NodeJS.ProcessEnv }) => Promise<{ status: number | null; stdout: string; stderr: string }>
 
-export const runCommand: Run = (command, args, options = {}) => {
-  // On Windows npm is npm.cmd, which Node only runs through a shell; run npm's own entry beside node.exe instead.
-  const npmCli = process.platform === "win32" && command === "npm" ? path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js") : undefined
-  const [file, argv] = npmCli && existsSync(npmCli) ? [process.execPath, [npmCli, ...args]] : [command, args]
-  const result = spawnSync(file, argv, { encoding: "utf8", timeout: options.timeoutMs ?? 120_000, env: options.env ?? process.env })
-  return { status: result.status, stdout: result.stdout ?? "", stderr: (result.stderr ?? "") + (result.error ? String(result.error.message) : "") }
-}
+/**
+ * Runs a command without blocking the event loop: the relay keeps serving agents and the extension while npm installs
+ * an update (minutes on a slow network).
+ */
+export const runCommand: Run = (command, args, options = {}) =>
+  new Promise((resolve) => {
+    // On Windows npm is npm.cmd, which Node only runs through a shell; run npm's own entry beside node.exe instead.
+    const npmCli = process.platform === "win32" && command === "npm" ? path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js") : undefined
+    const [file, argv] = npmCli && existsSync(npmCli) ? [process.execPath, [npmCli, ...args]] : [command, args]
+    const child = spawn(file, argv, { env: options.env ?? process.env, stdio: ["ignore", "pipe", "pipe"] })
+    let stdout = ""
+    let stderr = ""
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => void (stdout += chunk))
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => void (stderr += chunk))
+    const timer = setTimeout(() => child.kill(), options.timeoutMs ?? 120_000)
+    child.on("error", (error) => {
+      clearTimeout(timer)
+      resolve({ status: null, stdout, stderr: stderr + error.message })
+    })
+    child.on("close", (status) => {
+      clearTimeout(timer)
+      resolve({ status, stdout, stderr })
+    })
+  })
 
 /** The registry npm installs from: OPENCODE_BROWSER_NPM_REGISTRY, else npm's own configuration, else npmjs.org. */
-export function registryUrl(run: Run = runCommand, env: NodeJS.ProcessEnv = process.env): string {
+export async function registryUrl(run: Run = runCommand, env: NodeJS.ProcessEnv = process.env): Promise<string> {
   const override = env.OPENCODE_BROWSER_NPM_REGISTRY?.trim()
-  const configured = override || run("npm", ["config", "get", "registry"], { timeoutMs: 15_000 }).stdout.trim()
+  const configured = override || (await run("npm", ["config", "get", "registry"], { timeoutMs: 15_000 })).stdout.trim()
   return /^https?:\/\//.test(configured) ? configured.replace(/\/+$/, "") : DEFAULT_REGISTRY
 }
 
@@ -268,7 +285,7 @@ export async function fetchPublished(options: { readonly registry: string; reado
  * must run and report the version. Built in a temporary directory and renamed into place, so a failed install never
  * leaves a half-written version where the shim could find it. Returns the verified entry.
  */
-export function installVersion(options: {
+export async function installVersion(options: {
   readonly layout: Layout
   readonly version: string
   readonly integrity?: string
@@ -276,7 +293,7 @@ export function installVersion(options: {
   readonly registry?: string
   readonly run?: Run
   readonly node?: string
-}): string {
+}): Promise<string> {
   const run = options.run ?? runCommand
   const { layout } = options
   const spec = options.spec ?? `${PACKAGE_NAME}@${options.version}`
@@ -288,7 +305,7 @@ export function installVersion(options: {
   try {
     writeFileSync(path.join(temporary, "package.json"), "{\"private\":true}\n")
     const args = ["install", "--prefix", temporary, "--no-audit", "--no-fund", "--ignore-scripts", "--loglevel=error", ...(options.registry ? [`--registry=${options.registry}`] : []), spec]
-    const npm = run("npm", args, { timeoutMs: 10 * 60_000 })
+    const npm = await run("npm", args, { timeoutMs: 10 * 60_000 })
     if (npm.status !== 0) throw new Error(`npm install ${spec} failed: ${(npm.stderr || npm.stdout).trim().split("\n").slice(-3).join(" ")}`)
     const installed = readJson<{ version?: string }>(path.join(temporary, "node_modules", "@opencode", "browse", "package.json"))?.version
     if (!installed) throw new Error(`npm install ${spec} didn't install ${PACKAGE_NAME}`)
@@ -298,7 +315,7 @@ export function installVersion(options: {
       if (locked?.integrity !== options.integrity) throw new Error(`${PACKAGE_NAME}@${installed} installed with integrity ${locked?.integrity ?? "unknown"}, not the registry's ${options.integrity}`)
     }
     const entry = path.join(temporary, "node_modules", "@opencode", "browse", "dist", "cli.mjs")
-    const reported = run(options.node ?? process.execPath, [entry, "--version"], { timeoutMs: 30_000, env: { ...process.env, OPENCODE_BROWSER_AUTOSTART: "0" } })
+    const reported = await run(options.node ?? process.execPath, [entry, "--version"], { timeoutMs: 30_000, env: { ...process.env, OPENCODE_BROWSER_AUTOSTART: "0" } })
     if (reported.status !== 0 || reported.stdout.trim() !== installed)
       throw new Error(`${PACKAGE_NAME}@${installed} didn't run: \`--version\` printed ${JSON.stringify(reported.stdout.trim() || reported.stderr.trim()).slice(0, 200)}`)
     const target = versionDirectory(layout, installed)
@@ -320,7 +337,9 @@ export function pruneVersions(layout: Layout, keep: readonly (string | undefined
   }
   for (const name of names) {
     if (keep.includes(name)) continue
-    if (name.startsWith(".install-") && name.includes(`-${process.pid}-`)) continue
+    // Another process's install in progress: leave temporary directories younger than an hour.
+    const started = Number(/^\.install-\d+-(\d+)$/.exec(name)?.[1])
+    if (name.startsWith(".install-") && Number.isFinite(started) && Date.now() - started < 60 * 60_000) continue
     rmSync(path.join(layout.versions, name), { recursive: true, force: true })
   }
 }
@@ -362,6 +381,10 @@ if (process.argv[2] !== "mcp") {
   await import(pathToFileURL(entry(current())).href)
 } else {
   const REPLAY = "opencode-browser-shim-initialize"
+  // Every server this supervisor starts keeps one implicit session, and the relay watches this process (not the
+  // server it replaces), so an update doesn't end the agent's session or close its tabs.
+  process.env.OPENCODE_BROWSER_MCP_SESSION ??= "mcp-" + Math.random().toString(16).slice(2, 10).padEnd(8, "0")
+  process.env.OPENCODE_BROWSER_CLIENT_PID = String(process.pid)
   let version = current()
   let child
   let initialize
@@ -497,7 +520,7 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
       if (!state.checkedAt || now() - state.checkedAt >= checkIntervalMs || now() < state.checkedAt) {
         const channel = channelOf(running)
         try {
-          const published = await fetchPublished({ registry: registryUrl(deps.run, env), channel, ...(deps.fetch ? { fetch: deps.fetch } : {}) })
+          const published = await fetchPublished({ registry: await registryUrl(deps.run, env), channel, ...(deps.fetch ? { fetch: deps.fetch } : {}) })
           state = updateState(layout, ({ failed: _failed, ...rest }) => ({ ...rest, checkedAt: now(), latest: published.version, integrity: published.integrity }))
           deps.log("autoupdate.checked", { channel, latest: published.version, running })
         } catch (error) {
@@ -509,11 +532,12 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
       const latest = state.latest
       const wanted = latest && compareVersions(latest, running) > 0 && latest !== state.skipped ? latest : undefined
       if (!wanted || mode !== "on") return
-      if (state.pending !== wanted) {
+      // A pending version whose directory is gone (pruned by an install, deleted by hand) is installed again.
+      if (state.pending !== wanted || !existsSync(versionEntry(layout, wanted))) {
         if (state.lastError?.version === wanted && now() - Date.parse(state.lastError.at) < checkIntervalMs) return
         try {
           deps.log("autoupdate.installing", { version: wanted })
-          installVersion({ layout, version: wanted, ...(state.integrity ? { integrity: state.integrity } : {}), ...(deps.run ? { run: deps.run } : {}), ...(env.OPENCODE_BROWSER_NPM_REGISTRY ? { registry: registryUrl(deps.run, env) } : {}) })
+          await installVersion({ layout, version: wanted, ...(state.integrity ? { integrity: state.integrity } : {}), ...(deps.run ? { run: deps.run } : {}), ...(env.OPENCODE_BROWSER_NPM_REGISTRY ? { registry: await registryUrl(deps.run, env) } : {}) })
           state = updateState(layout, ({ lastError: _error, ...rest }) => ({ ...rest, pending: wanted }))
           deps.log("autoupdate.installed", { version: wanted })
           deps.onChange?.()
@@ -566,7 +590,9 @@ export function spawnRelayRestart(layout: Layout, refused: () => void, env: Node
   mkdirSync(path.join(layout.root, "logs"), { recursive: true })
   const log = openSync(path.join(layout.root, "logs", "auto-update.log"), "a", 0o600)
   const child = spawn(process.execPath, [layout.shim, "relay", "restart"], { detached: true, stdio: ["ignore", log, log], env: { ...rest, OPENCODE_BROWSER_HOME: layout.root } })
+  closeSync(log)
   // When the restart works this relay is gone before the child exits; still here and a failure means it was refused.
+  child.on("error", () => refused())
   child.on("exit", (code) => {
     if (code !== 0) refused()
   })

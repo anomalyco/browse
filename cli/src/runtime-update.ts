@@ -86,7 +86,7 @@ export async function runNpmUpdate(args: readonly string[], layout?: Layout) {
   if (!runtime) return false
   const lay = runtime.layout
   const channel = channelOf(runtime.version)
-  const published = await fetchPublished({ registry: registryUrl(), channel }).catch((error: Error) => error)
+  const published = await fetchPublished({ registry: await registryUrl(), channel }).catch((error: Error) => error)
   if (published instanceof Error) {
     log(`✗ Couldn't check for updates: ${published.message}`)
     process.exitCode = 1
@@ -102,15 +102,11 @@ export async function runNpmUpdate(args: readonly string[], layout?: Layout) {
     return true
   }
   log(`Installing ${published.version} (you have ${runtime.version})…`)
-  const entry = (() => {
-    try {
-      return installVersion({ layout: lay, version: published.version, integrity: published.integrity, ...(process.env.OPENCODE_BROWSER_NPM_REGISTRY ? { registry: registryUrl() } : {}) })
-    } catch (error) {
-      log(`✗ ${(error as Error).message}`)
-      process.exitCode = 1
-      return undefined
-    }
-  })()
+  const entry = await installVersion({ layout: lay, version: published.version, integrity: published.integrity, ...(process.env.OPENCODE_BROWSER_NPM_REGISTRY ? { registry: await registryUrl() } : {}) }).catch((error: Error) => {
+    log(`✗ ${error.message}`)
+    process.exitCode = 1
+    return undefined
+  })
   if (!entry) return true
   const current = readCurrent(lay)!
   switchVersion(lay, published.version, current.version)

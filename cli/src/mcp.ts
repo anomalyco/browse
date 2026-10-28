@@ -556,7 +556,8 @@ const registerTools = Effect.gen(function* () {
   const relay = yield* RelayClient.Service
   const configuredSession = Option.getOrUndefined(yield* Config.option(Config.String("OPENCODE_BROWSER_SESSION")))
   const currentSession: CurrentSession = {
-    id: configuredSession || `mcp-${crypto.randomUUID().slice(0, 8)}`,
+    // Under the auto-update shim, every server it starts for one opencode session keeps the same implicit session.
+    id: configuredSession || shimSession() || `mcp-${crypto.randomUUID().slice(0, 8)}`,
     established: Boolean(configuredSession),
   }
   // Checks for a newer browse in the background (cached; never delays a tool call). The first tool result after one
@@ -612,6 +613,12 @@ const registerTools = Effect.gen(function* () {
 /** The one-time note on a tool result: what to tell the user, and that the agent may run the update itself. */
 export function mcpUpdateNote(notice: Pick<UpdateNotice, "summary" | "command">): string {
   return `Note: browse (OpenCode Browser) has an update: ${notice.summary}. Tell the user they can run \`${notice.command}\` and then restart opencode, or ask you to run it for them.`
+}
+
+/** The implicit session the shim's MCP supervisor picked (auto-update.ts shimSource), when valid. */
+function shimSession(): string | undefined {
+  const value = process.env.OPENCODE_BROWSER_MCP_SESSION
+  return value && /^mcp-[0-9a-f]{8}$/.test(value) ? value : undefined
 }
 
 export function mcpToolRequiresRelayCompatibility(name: string): boolean {
