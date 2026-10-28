@@ -60,11 +60,17 @@ appending to `scenarios` in `scenarios.ts`; tag it `soak` if it's safe to run be
 
 **Soak chaos events:** `relay-kill9` (kill -9; the next call restarts it), `sw-stop` (terminates the extension's
 service worker), `close-agent-tabs`, `close-windows`, `chrome-restart`, `network-drop` (iptables drops ports 80, 443
-and 53 for 10 to 25 s), `session-delete` (mid-task), `mcp-kill` (an agent's MCP server dies), `tabs-cleanup`. After
-each one a probe session must run an execute within `--recovery-bound` seconds. Tasks overlapping a chaos window are
-left out of the success rate. Pass criteria: calm success rate, every event recovered, no stuck workers, no relay
-restarts that chaos didn't cause, and bounded growth (relay RSS, fds, tabs per hour, fitted after a 5-minute
-warm-up). There is no toolbar-stop event yet: it needs a test hook in the extension.
+and 53 for 10 to 25 s), `session-delete` (mid-task), `mcp-kill` (an agent's MCP server dies), `tabs-cleanup`,
+`toolbar-stop` (the user clicks the toolbar button on an agent's tab, the kill switch). After each one a probe session
+must run an execute within `--recovery-bound` seconds. Tasks overlapping a chaos window are left out of the success
+rate. Pass criteria: calm success rate, every event recovered, no stuck workers, no relay restarts that chaos didn't
+cause, bounded growth (relay RSS, fds, tabs per hour, fitted after a 5-minute warm-up), every tab a session holds
+tracked for idle cleanup throughout, and no leaked tabs after the run (neither held by a session nor a window's active
+tab).
+
+`toolbar-stop` clicks through a test hook the extension has only when built with `OPENCODE_BROWSER_TEST_HOOKS=1`
+(`exe/deploy.sh` builds it that way; release builds compile the hook out). It lives in the service worker's globals,
+which the harness reaches over the debugging port; pages can't.
 
 **Fuzz checks:** the relay never restarts or stops answering `/version`, nothing but `/` and `/version` answers without
 the token, foreign `Host` headers and non-extension origins are refused, an unpaired `/extension` client never

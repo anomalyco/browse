@@ -110,6 +110,15 @@ export class Sampler {
         sample.groupedTabs = view.tabs.filter((t) => t.groupId !== -1).length
         sample.groups = view.groups.length
         sample.windows = view.windows
+        // Leak accounting: every tab a session holds is tracked for idle cleanup, and no tab is left that neither a
+        // session holds nor a window shows (agent tabs are opened in the background, so the active ones are users').
+        const tracked = new Set(await cdp.evalInExtension<number[]>(`chrome.storage.local.get("tabCleanup").then((s) => Object.keys(s.tabCleanup ?? {}).map(Number))`))
+        const held = new Set((await relayJson<any[]>("/json/list", undefined, 5000)).filter((t) => t.opencodeBrowserSessionId).map((t) => t.tabId as number))
+        const existing = new Set(view.tabs.map((t) => t.id))
+        sample.trackedTabs = [...tracked].filter((id) => existing.has(id)).length
+        sample.sessionTabs = [...held].filter((id) => existing.has(id)).length
+        sample.untrackedSessionTabs = [...held].filter((id) => existing.has(id) && !tracked.has(id)).length
+        sample.orphanTabs = view.tabs.filter((t) => !t.active && !held.has(t.id)).length
       } catch (error) {
         sample.cdpError = String(error).slice(0, 120)
       }
