@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>browse stealth probe</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 24px; max-width: 900px; }
+  .pad { display: inline-block; width: 140px; height: 70px; margin: 8px; background: #e8eef7; border: 1px solid #9ab; text-align: center; line-height: 70px; }
+  #report { white-space: pre-wrap; font: 11px ui-monospace, monospace; background: #f6f6f6; padding: 8px; max-height: 300px; overflow: auto; }
+</style>
+<script src="/snapshot.js"></script>
+</head>
+<body>
+<h1>browse stealth probe</h1>
+<p>Local page that records CDP-specific tells while an agent moves, clicks and types. Nothing leaves this machine.</p>
+<div><span class="pad" id="pad-a">A</span><span class="pad" id="pad-b">B</span><span class="pad" id="pad-c">C</span></div>
+<p><button id="target">Click target</button> <label>Text <input id="text" autocomplete="off"></label></p>
+<p><button id="finish">Finish</button> <span id="ready"></span></p>
+<img src="/probe-pixel.png" alt="" width="1" height="1">
+<pre id="report"></pre>
+<script>
+(() => {
+  "use strict"
+  const started = performance.now()
+  const events = []
+  const maxEvents = 4000
+  const pageScriptUrl = location.href.split("#")[0]
+  const nativePattern = /^function [\w$.\[\] ]*\(\) \{\s*\[native code\]\s*\}$/
+
+  // ---- input events --------------------------------------------------------------------------------
+  const record = (event) => {
+    if (events.length >= maxEvents) return
+    const entry = {
+      type: event.type,
+      t: event.timeStamp,
+      trusted: event.isTrusted,
+    }
+    if ("clientX" in event) {
+      Object.assign(entry, {
+        clientX: event.clientX, clientY: event.clientY, screenX: event.screenX, screenY: event.screenY,
+        movementX: event.movementX, movementY: event.movementY, buttons: event.buttons, detail: event.detail,
+      })
+    }
+    if (typeof PointerEvent !== "undefined" && event instanceof PointerEvent) {
+      Object.assign(entry, {
+        pointerType: event.pointerType, pressure: event.pressure, width: event.width, height: event.height,
+        coalesced: typeof event.getCoalescedEvents === "function" ? event.getCoalescedEvents().length : null,
+        predicted: typeof event.getPredictedEvents === "function" ? event.getPredictedEvents().length : null,
+      })
+    }
+    if (event instanceof KeyboardEvent) Object.assign(entry, { key: event.key.length === 1 ? "char" : event.key, code: event.code ? "set" : "", repeat: event.repeat })
+    events.push(entry)
+  }
+  for (const type of ["pointermove", "mousemove", "pointerdown", "mousedown", "pointerup", "mouseup", "click", "keydown", "keyup", "input", "wheel"]) {
+    document.addEventListener(type, record, { capture: true, passive: true })
+  }
+
+  // ---- focus and visibility over the run -----------------------------------------------------------
+  const lifecycle = []
+  for (const type of ["focus", "blur", "visibilitychange", "pagehide", "pageshow"]) {
+    window.addEventListener(type, () => lifecycle.push({ type, t: performance.now(), visibility: document.visibilityState, hasFocus: document.hasFocus() }), true)
+  }
+
+  // ---- main-world traps: calls the page didn't make (stack shows where they came from) ---------------
+  const trapped = []
+  const trap = (owner, name, label) => {
+    const original = owner[name]
+    if (typeof original !== "function") return
+    const wrapper = {
+      [name](...args) {
+        const stack = new Error().stack || ""
+        const foreign = stack.split("\n").slice(2).filter((line) => /\bat\b/.test(line) && !line.includes(pageScriptUrl))
+        if (foreign.length > 0 && trapped.length < 50) trapped.push({ api: label, stack: foreign.slice(0, 4).map((line) => line.trim().slice(0, 200)) })
+        return original.apply(this, args)
+      },
+    }[name]
+    try { Object.defineProperty(owner, name, { value: wrapper, configurable: true, writable: true }) } catch {}
+  }
+  trap(Document.prototype, "querySelector", "document.querySelector")
+  trap(Document.prototype, "querySelectorAll", "document.querySelectorAll")
+  trap(Element.prototype, "getBoundingClientRect", "Element.getBoundingClientRect")
+  trap(Element.prototype, "scrollIntoView", "Element.scrollIntoView")
+  trap(HTMLElement.prototype, "focus", "HTMLElement.focus")
+
+  // Runtime.enable tell: a console listener serializes the error, which reads its stack.
+  let consoleSerializedStack = false
+  try {
+    const probe = new Error("probe")
+    Object.defineProperty(probe, "stack", { configurable: true, get() { consoleSerializedStack = true; return "" } })
+    console.debug(probe)
+  } catch {}
+
+  // For the runner's explicit main-world evaluate: returns the stack it was called with.
+  window.__stealthProbeStack = () => (new Error().stack || "").split("\n").slice(1, 6).map((line) => line.trim().slice(0, 200))
+
+  // ---- environment snapshots -----------------------------------------------------------------------
+  // snapshot.js defines self.__probeSnapshot(); workers load the same file, so every scope runs the same code.
+  const snapshotUrl = `${location.origin}/snapshot.js`
+  const workerSource = `importScripts(${JSON.stringify(snapshotUrl)})
+    const reply = (port) => self.__probeSnapshot().then((value) => port.postMessage(value), (error) => port.postMessage({ error: String(error) }))
+    if (self.constructor.name === "SharedWorkerGlobalScope") self.onconnect = (event) => reply(event.ports[0])
+    else self.onmessage = () => reply(self)`
+  const windowSnapshot = () => self.__probeSnapshot()
+
+  const withTimeout = (promise, ms, label) => Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve({ error: `${label} timed out` }), ms))])
+  const blobUrl = () => URL.createObjectURL(new Blob([workerSource], { type: "text/javascript" }))
+  const dedicatedWorker = () => withTimeout(new Promise((resolve) => {
+    try {
+      const worker = new Worker(blobUrl())
+      worker.onmessage = (event) => { resolve(event.data); worker.terminate() }
+      worker.onerror = (event) => resolve({ error: String(event.message || "worker error") })
+      worker.postMessage("go")
+    } catch (error) { resolve({ error: String(error) }) }
+  }), 3000, "dedicated worker")
+  const sharedWorker = () => withTimeout(new Promise((resolve) => {
+    try {
+      if (typeof SharedWorker === "undefined") return resolve({ error: "SharedWorker unavailable" })
+      const worker = new SharedWorker(blobUrl())
+      worker.port.onmessage = (event) => resolve(event.data)
+      worker.port.start()
+    } catch (error) { resolve({ error: String(error) }) }
+  }), 3000, "shared worker")
+  const serviceWorker = () => withTimeout((async () => {
+    if (!navigator.serviceWorker) return { error: "serviceWorker unavailable" }
+    const registration = await navigator.serviceWorker.register("/probe-sw.js", { scope: "/" })
+    const worker = registration.active || registration.waiting || registration.installing
+    const ready = worker && worker.state === "activated" ? worker : await new Promise((resolve) => {
+      worker.addEventListener("statechange", () => { if (worker.state === "activated") resolve(worker) })
+    })
+    const channel = new MessageChannel()
+    const answer = new Promise((resolve) => { channel.port1.onmessage = (event) => resolve(event.data) })
+    ready.postMessage("go", [channel.port2])
+    const value = await answer
+    await registration.unregister().catch(() => {})
+    return value
+  })().catch((error) => ({ error: String(error) })), 5000, "service worker")
+
+  const compare = (window, others) => {
+    const mismatches = []
+    for (const [scope, value] of Object.entries(others)) {
+      if (!value || value.error) continue
+      // Workers have no navigator.webdriver (WorkerNavigator lacks it), so it isn't compared.
+      for (const key of ["userAgent", "uaBrands", "uaPlatform", "uaMobile", "platform", "hardwareConcurrency", "deviceMemory", "languages", "language", "timezone", "timezoneOffset"]) {
+        if (JSON.stringify(window[key]) !== JSON.stringify(value[key])) mismatches.push({ scope, key, window: window[key], worker: value[key] })
+      }
+      if (window.highEntropy && value.highEntropy && JSON.stringify(window.highEntropy) !== JSON.stringify(value.highEntropy)) {
+        mismatches.push({ scope, key: "highEntropy", window: window.highEntropy, worker: value.highEntropy })
+      }
+    }
+    return mismatches
+  }
+
+  // ---- native-function checks ----------------------------------------------------------------------
+  const nativeChecks = () => {
+    const getter = (proto, name) => Object.getOwnPropertyDescriptor(proto, name)?.get
+    const candidates = {
+      "fetch": window.fetch,
+      "XMLHttpRequest.open": XMLHttpRequest.prototype.open,
+      "Function.toString": Function.prototype.toString,
+      "permissions.query": navigator.permissions && navigator.permissions.query,
+      "attachShadow": Element.prototype.attachShadow,
+      "window.open": window.open,
+      "console.log": console.log,
+      "console.debug": console.debug,
+      "Object.defineProperty": Object.defineProperty,
+      "Date": Date,
+      "Intl.DateTimeFormat": Intl.DateTimeFormat,
+      "WebGL getParameter": typeof WebGLRenderingContext !== "undefined" ? WebGLRenderingContext.prototype.getParameter : undefined,
+      "navigator.webdriver getter": getter(Navigator.prototype, "webdriver"),
+      "navigator.userAgent getter": getter(Navigator.prototype, "userAgent"),
+      "navigator.languages getter": getter(Navigator.prototype, "languages"),
+      "navigator.plugins getter": getter(Navigator.prototype, "plugins"),
+      "screen.width getter": getter(Screen.prototype, "width"),
+      "MouseEvent.screenX getter": getter(MouseEvent.prototype, "screenX"),
+      "HTMLCanvasElement.toDataURL": HTMLCanvasElement.prototype.toDataURL,
+      "requestAnimationFrame": window.requestAnimationFrame,
+      "addEventListener": EventTarget.prototype.addEventListener,
+      "Error.captureStackTrace": Error.captureStackTrace,
+    }
+    const results = {}
+    for (const [name, fn] of Object.entries(candidates)) {
+      if (typeof fn !== "function") { results[name] = "missing"; continue }
+      let text
+      try { text = Function.prototype.toString.call(fn) } catch (error) { results[name] = `toString threw: ${error}`; continue }
+      results[name] = nativePattern.test(text.replace(/\s+/g, " ").trim()) ? "native" : `NOT NATIVE: ${text.slice(0, 120)}`
+    }
+    return results
+  }
+
+  // ---- globals and DOM artifacts -------------------------------------------------------------------
+  const knownAutomationGlobals = /^(cdc_|\$cdc_|__playwright|__pw|__pwInitScripts|playwright|__webdriver|_selenium|callSelenium|_Selenium_IDE_Recorder|__nightmare|domAutomation|domAutomationController|__puppeteer|puppeteer|__lastWatirAlert|__driver_evaluate|__webdriver_evaluate|__selenium_evaluate|__fxdriver|_phantom|callPhantom|__stagehand|__browserUse|__opencode)/i
+  const globalArtifacts = () => {
+    const frame = document.createElement("iframe")
+    frame.style.display = "none"
+    document.body.appendChild(frame)
+    const baseline = new Set(Object.getOwnPropertyNames(frame.contentWindow))
+    frame.remove()
+    const own = Object.getOwnPropertyNames(window)
+    const pageGlobals = new Set(["__stealthProbeStack", "__probeSnapshot"])
+    const extra = own.filter((name) => !baseline.has(name) && !pageGlobals.has(name))
+    return {
+      extraGlobals: extra.slice(0, 50),
+      automationGlobals: own.filter((name) => knownAutomationGlobals.test(name)),
+      documentAutomationKeys: Object.getOwnPropertyNames(document).filter((name) => knownAutomationGlobals.test(name)),
+      htmlAttributes: Array.from(document.documentElement.attributes, (attribute) => attribute.name).filter((name) => name !== "lang"),
+    }
+  }
+  const unexpectedNodes = []
+  new MutationObserver((records) => {
+    for (const recordEntry of records) {
+      for (const node of recordEntry.addedNodes) {
+        if (node.nodeType !== 1 || unexpectedNodes.length >= 20) continue
+        if (node.closest && node.closest("#report")) continue
+        unexpectedNodes.push({ tag: node.tagName.toLowerCase(), id: node.id || undefined, shadow: Boolean(node.shadowRoot), parent: recordEntry.target.nodeName.toLowerCase() })
+      }
+    }
+  }).observe(document.documentElement, { childList: true, subtree: true })
+
+  // ---- statistics ----------------------------------------------------------------------------------
+  const stats = (values) => {
+    if (values.length === 0) return null
+    const sorted = [...values].sort((a, b) => a - b)
+    const mean = values.reduce((sum, value) => sum + value, 0) / values.length
+    const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length
+    const at = (p) => sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))]
+    return { n: values.length, min: +sorted[0].toFixed(2), p10: +at(0.1).toFixed(2), median: +at(0.5).toFixed(2), p90: +at(0.9).toFixed(2), max: +sorted[sorted.length - 1].toFixed(2), mean: +mean.toFixed(2), stdev: +Math.sqrt(variance).toFixed(2) }
+  }
+  const intervals = (list) => list.slice(1).map((entry, index) => entry.t - list[index].t)
+
+  const inputSummary = () => {
+    const mouse = events.filter((entry) => entry.clientX !== undefined)
+    const moves = events.filter((entry) => entry.type === "mousemove")
+    const pointerMoves = events.filter((entry) => entry.type === "pointermove")
+    const clicks = events.filter((entry) => entry.type === "click")
+    const keydowns = events.filter((entry) => entry.type === "keydown")
+    const keyups = events.filter((entry) => entry.type === "keyup")
+    const chromeX = (window.outerWidth - window.innerWidth) / 2
+    const chromeY = window.outerHeight - window.innerHeight - chromeX
+    const dwell = []
+    for (let index = 0; index < Math.min(keydowns.length, keyups.length); index++) dwell.push(keyups[index].t - keydowns[index].t)
+    return {
+      counts: Object.fromEntries(["pointermove", "mousemove", "mousedown", "mouseup", "click", "keydown", "keyup", "input", "wheel"].map((type) => [type, events.filter((entry) => entry.type === type).length])),
+      untrusted: events.filter((entry) => !entry.trusted).length,
+      screenEqualsClient: mouse.length ? +(mouse.filter((entry) => entry.screenX === entry.clientX && entry.screenY === entry.clientY).length / mouse.length).toFixed(3) : null,
+      screenXEqualsClientX: mouse.length ? +(mouse.filter((entry) => entry.screenX === entry.clientX).length / mouse.length).toFixed(3) : null,
+      screenYEqualsClientY: mouse.length ? +(mouse.filter((entry) => entry.screenY === entry.clientY).length / mouse.length).toFixed(3) : null,
+      screenOffset: mouse.length ? { dx: stats(mouse.map((entry) => entry.screenX - entry.clientX)), dy: stats(mouse.map((entry) => entry.screenY - entry.clientY)) } : null,
+      expectedScreenOffset: { dx: Math.round(window.screenX + chromeX), dy: Math.round(window.screenY + chromeY), note: "a real mouse gives screenX - clientX near window.screenX plus the window frame" },
+      coalescedEmpty: pointerMoves.length ? +(pointerMoves.filter((entry) => entry.coalesced === 0).length / pointerMoves.length).toFixed(3) : null,
+      coalescedCounts: stats(pointerMoves.map((entry) => entry.coalesced ?? 0)),
+      predictedEmpty: pointerMoves.length ? +(pointerMoves.filter((entry) => entry.predicted === 0).length / pointerMoves.length).toFixed(3) : null,
+      movementZero: moves.length ? +(moves.filter((entry) => entry.movementX === 0 && entry.movementY === 0).length / moves.length).toFixed(3) : null,
+      pointer: pointerMoves[0] ? { type: pointerMoves[0].pointerType, pressure: pointerMoves[0].pressure, width: pointerMoves[0].width, height: pointerMoves[0].height } : null,
+      clickDetail: clicks.map((entry) => entry.detail),
+      mousemoveIntervalMs: stats(intervals(moves)),
+      keyIntervalMs: stats(intervals(keydowns)),
+      keyDwellMs: stats(dwell),
+      firstEvents: events.slice(0, 12),
+    }
+  }
+
+  const finish = async () => {
+    const windowValues = await windowSnapshot()
+    const [dedicated, shared, service] = await Promise.all([dedicatedWorker(), sharedWorker(), serviceWorker()])
+    const navigation = performance.getEntriesByType("navigation")[0]
+    const resources = performance.getEntriesByType("resource").filter((entry) => entry.name.startsWith(location.origin))
+    let webgl = null
+    try {
+      const gl = document.createElement("canvas").getContext("webgl")
+      const info = gl && gl.getExtension("WEBGL_debug_renderer_info")
+      webgl = info ? { vendor: gl.getParameter(info.UNMASKED_VENDOR_WEBGL), renderer: gl.getParameter(info.UNMASKED_RENDERER_WEBGL) } : null
+    } catch {}
+    let notificationPermissionConsistent = null
+    try {
+      const status = await navigator.permissions.query({ name: "notifications" })
+      notificationPermissionConsistent = !(Notification.permission === "denied" && status.state === "prompt")
+    } catch {}
+    const report = {
+      probeVersion: 1,
+      url: location.href,
+      durationMs: Math.round(performance.now() - started),
+      input: inputSummary(),
+      navigation: {
+        documentNextHopProtocol: navigation ? navigation.nextHopProtocol : null,
+        documentTransferSize: navigation ? navigation.transferSize : null,
+        documentResponseStart: navigation ? Math.round(navigation.responseStart) : null,
+        subresources: resources.map((entry) => ({ path: new URL(entry.name).pathname, nextHopProtocol: entry.nextHopProtocol, initiator: entry.initiatorType })),
+        note: "an empty document nextHopProtocol while subresources have one points at document interception (addInitScript, exposeBinding, route.fulfill)",
+      },
+      workers: {
+        window: windowValues,
+        dedicated, shared, service,
+        mismatches: compare(windowValues, { dedicated, shared, service }),
+      },
+      window: {
+        outer: [window.outerWidth, window.outerHeight], inner: [window.innerWidth, window.innerHeight],
+        outerMinusInner: [window.outerWidth - window.innerWidth, window.outerHeight - window.innerHeight],
+        screen: [screen.width, screen.height], avail: [screen.availWidth, screen.availHeight], position: [window.screenX, window.screenY],
+        devicePixelRatio: window.devicePixelRatio,
+        visibilityState: document.visibilityState, hidden: document.hidden, hasFocus: document.hasFocus(),
+        lifecycle,
+        zeroOuter: window.outerWidth === 0 || window.outerHeight === 0,
+      },
+      native: nativeChecks(),
+      artifacts: { ...globalArtifacts(), unexpectedNodes, trappedForeignCalls: trapped, consoleSerializedStack },
+      misc: {
+        webdriver: navigator.webdriver,
+        windowChrome: typeof window.chrome,
+        pluginsLength: navigator.plugins.length,
+        mimeTypesLength: navigator.mimeTypes.length,
+        notificationPermissionConsistent,
+        webgl,
+        pdfViewerEnabled: navigator.pdfViewerEnabled,
+      },
+    }
+    const output = document.getElementById("report")
+    output.textContent = JSON.stringify(report, null, 2)
+    output.dataset.done = "1"
+  }
+
+  document.getElementById("finish").addEventListener("click", () => { finish().catch((error) => {
+    const output = document.getElementById("report")
+    output.textContent = JSON.stringify({ error: String(error && error.stack || error) })
+    output.dataset.done = "1"
+  }) })
+  document.getElementById("ready").textContent = "ready"
+  document.getElementById("ready").dataset.ready = "1"
+})()
+</script>
+</body>
+</html>

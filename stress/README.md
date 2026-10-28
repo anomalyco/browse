@@ -94,3 +94,43 @@ An opencode MCP server entry for it (add it yourself; nothing here edits your co
 ```
 
 Use the full `/usr/local/bin/node` path: exe.dev's SSH `PATH` lists `/usr/local/bin` last.
+
+## Stealth on a real Mac (manual, never CI)
+
+The box above measures robustness, not stealth: Linux, Xvfb and Chrome for Testing look nothing like a user's
+browser. `stress/stealth/run.ts` measures what sites can tell about browse on a real browser (Chrome or Helium on a
+Mac). It opens public detector sites, so it never runs in CI, isn't part of `run-all.sh`, and should run only when
+someone starts it.
+
+```sh
+cd cli && bun build.ts && cd ..                      # the runner uses this checkout's cli/dist/cli.mjs
+node stress/stealth/run.ts                           # local probe, then every detector site
+node stress/stealth/run.ts --probe-only              # only the local probe (no public sites)
+node stress/stealth/run.ts --sites sannysoft,creepjs --wait-ms 10000
+node stress/stealth/run.ts --sites-file my-sites.json --out /tmp/stealth-run
+```
+
+It drives browse the way an agent does, through the MCP server (`session_new`, then `execute` with `page.mouse`,
+`page.click` and `page.keyboard`, so human-like input applies), against whichever relay `OPENCODE_BROWSER_HOME` and
+`OPENCODE_BROWSER_PORT` select. Prefer a separate browser profile paired to its own relay (a different
+`OPENCODE_BROWSER_HOME` and `OPENCODE_BROWSER_PORT`) over your everyday one, and note the browser version, macOS
+version and network. Report a clean-profile run and a warm-profile run separately: clearance cookies change verdicts.
+
+- **Local probe** (`stress/stealth/probe.html` and `snapshot.js`, served on `127.0.0.1`): records, while browse moves,
+  hovers, clicks, types and scrolls: `screenX`/`screenY` against `clientX`/`clientY` (Chromium bug 40280325),
+  `getCoalescedEvents()`/`getPredictedEvents()` emptiness, `isTrusted`, `movementX/Y`, click `detail`, inter-event
+  timing and key dwell distributions; `nextHopProtocol` of the document against its subresources (document
+  interception); navigator, User-Agent Client Hints, platform, `hardwareConcurrency`, `deviceMemory`, languages and
+  timezone in the window against dedicated, shared and service workers; outer against inner window size, focus and
+  visibility over the run; `Function.prototype.toString` of common APIs; automation globals, extra globals, `<html>`
+  attributes and DOM nodes the page didn't add; main-world calls with foreign stacks; whether a console listener
+  serialized an `Error` (the `Runtime.enable` tell); and the stack a main-world `page.evaluate` shows.
+- **Detector sites** (`--sites` ids): `sannysoft` (bot.sannysoft.com), `browserscan` (browserscan.net/bot-detection),
+  `creepjs`, `rebrowser` (bot-detector.rebrowser.net), `deviceandbrowserinfo` (are_you_a_bot), `pixelscan`,
+  `fingerprint-demo` (demo.fingerprint.com bot firewall) and `recaptcha-v3` (antcpt.com score detector). Each gets a
+  screenshot, a best-effort verdict read from the page (sites change; the screenshot is the ground truth) and any
+  `aftermath.challenge` execute saw. `--sites-file` takes `[{ "id", "url", "waitMs"?, "extract"? }]`, where `extract`
+  is the body of an async function run in the page that returns the verdict.
+
+Results go to `~/stress-results/<time>-stealth/` (or `--out`): `summary.md`, `results.json`, `probe.json` and one PNG
+per page. Keep them private: they describe the machine and browser.
