@@ -395,6 +395,69 @@ describe("relay", () => {
     extension.close()
   }, 20_000)
 
+  test("a wedged tab is let go within seconds when the extension reconnects, not after three 60 s timeouts", async () => {
+    const info = (tabId: number) => ({ targetId: `TARGET-${tabId}`, type: "page", title: "Example", url: `https://example.com/${tabId}`, attached: true, browserContextId: "CTX" })
+    const extension = new FakeExtension(pairingCode(home))
+      .on("Target.getTargetInfo", (command) => ({ targetInfo: info(Number(command.params?.tabId)) }))
+      // Tab 94 never answers, as a tab whose page waits on a dialog nobody saw.
+      .on("Page.enable", (command) => command.params?.tabId === 94 ? new Promise(() => {}) : {})
+    const started = Date.now()
+    expect(await extension.pair({ attachedTabs: [93, 94] })).toBe(true)
+    const status = async () => await (await fetch(`${base}/extension/status`, { headers: { authorization: `Bearer ${token}` } })).json() as { connected: boolean; targets: Array<{ tabId: number }> }
+    for (let i = 0; i < 300 && !(await status()).connected; i++) await Bun.sleep(100)
+    expect((await status()).connected).toBe(true)
+    expect(Date.now() - started).toBeLessThan(25_000)
+    expect((await status()).targets.map((target) => target.tabId)).toEqual([93])
+    expect(extension.commands.some((command) => command.method === "debugger.detach" && command.params?.tabId === 94)).toBe(true)
+    extension.close()
+  }, 40_000)
+
+  test("an extension reconnect (a service worker restart) keeps every page a session opened its own and grouped", async () => {
+    const info = (tabId: number) => ({ targetId: `TARGET-${tabId}`, type: "page", title: "Example", url: `https://example.com/${tabId}`, attached: true, browserContextId: "CTX" })
+    let next = 101
+    const first = new FakeExtension(pairingCode(home))
+      .on("tabs.create", () => ({ tabId: next++ }))
+      .on("Target.getTargetInfo", (command) => ({ targetInfo: info(Number(command.params?.tabId)) }))
+    expect(await first.pair()).toBe(true)
+    const post = (route: string, body: unknown) => fetch(`${base}${route}`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body) })
+    expect((await post("/cli/session/new", { id: "keeps-pages" })).ok).toBe(true)
+    const socket = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test?opencodeBrowserSessionId=keeps-pages`, { authorization: `Bearer ${token}` })
+    if (!(socket instanceof WebSocket)) throw new Error(`CDP connection refused: ${socket}`)
+    expect((await cdpCall(socket, 1, "Target.createTarget", { url: "https://example.com/101" })).result?.targetId).toBe("TARGET-101")
+    expect((await cdpCall(socket, 2, "Target.createTarget", { url: "https://example.com/102" })).result?.targetId).toBe("TARGET-102")
+    first.close()
+    const owners = async () => (await (await fetch(`${base}/json/list`, { headers: { authorization: `Bearer ${token}` } })).json() as Array<{ tabId: number; opencodeBrowserSessionId?: string }>)
+      .filter((target) => target.tabId === 101 || target.tabId === 102)
+    for (let i = 0; i < 50 && (await owners()).length > 0; i++) await Bun.sleep(50)
+
+    const second = new FakeExtension(pairingCode(home))
+      .on("Target.getTargetInfo", (command) => ({ targetInfo: info(Number(command.params?.tabId)) }))
+    expect(await second.pair({ attachedTabs: [101, 102] })).toBe(true)
+    for (let i = 0; i < 50 && (await owners()).length < 2; i++) await Bun.sleep(50)
+    expect((await owners()).map((target) => [target.tabId, target.opencodeBrowserSessionId]).sort()).toEqual([[101, "keeps-pages"], [102, "keeps-pages"]])
+    // Only the session sees them; before, the page that wasn't the session's default came back as a user's tab, which
+    // every session saw.
+    const other = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test?opencodeBrowserSessionId=someone-else`, { authorization: `Bearer ${token}` })
+    if (!(other instanceof WebSocket)) throw new Error("CDP connection refused")
+    const seen = (await cdpCall(other, 1, "Target.getTargets")).result?.targetInfos as Array<{ targetId: string }>
+    expect(seen.some((target) => target.targetId === "TARGET-101" || target.targetId === "TARGET-102")).toBe(false)
+    // Both go back in the session's group rather than out of it.
+    expect(await until(() => [101, 102].every((tabId) => second.commands.some((command) => command.method === "tabs.group" && command.params?.tabId === tabId && command.params?.sessionId === "keeps-pages")))).toBe(true)
+    expect(second.commands.some((command) => command.method === "tabs.ungroup")).toBe(false)
+
+    // A session deleted while the extension was away closes its pages once the extension is back.
+    second.close()
+    for (let i = 0; i < 50 && (await owners()).length > 0; i++) await Bun.sleep(50)
+    expect((await post("/cli/session/delete", { id: "keeps-pages" })).ok).toBe(true)
+    const third = new FakeExtension(pairingCode(home))
+      .on("Target.getTargetInfo", (command) => ({ targetInfo: info(Number(command.params?.tabId)) }))
+    expect(await third.pair({ attachedTabs: [101, 102] })).toBe(true)
+    expect(await until(() => [101, 102].every((tabId) => third.commands.some((command) => command.method === "tabs.remove" && command.params?.tabId === tabId)), 5_000)).toBe(true)
+    other.close()
+    socket.close()
+    third.close()
+  }, 30_000)
+
   test("a page restored from the back/forward cache is reported loaded, so goBack doesn't wait forever", async () => {
     const targetInfo = { targetId: "TARGET-81", type: "page", title: "Example", url: "https://example.com/b", attached: true, browserContextId: "CTX" }
     const extension = new FakeExtension(pairingCode(home))

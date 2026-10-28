@@ -50,6 +50,8 @@ const OWNER = "relay"
 /** Overrides the relay port, for development and isolated tests. */
 const PORT_KEY = "agentRelayPort"
 const PROFILE_KEY = "agentRelayProfile"
+/** chrome.storage.local: each agent session's tab group, so a worker restart keeps a session's tabs in one group. */
+const SESSION_GROUPS_KEY = "agentSessionGroups"
 /** chrome.storage.local: the pairing code typed on the status page (Chrome Web Store builds). */
 export const PAIRING_KEY = "agentRelayPairingCode"
 /** Written next to the manifest by `install` for unpacked builds (cli/src/relay-secrets.ts). */
@@ -105,8 +107,27 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   let reloading = false
   /** Tabs with a recording in progress; cleanup leaves them open. */
   const recordingTabs = new Set<number>()
-  /** Each agent session's tab group, so a session keeps one group while its display name changes. */
+  /**
+   * Each agent session's tab group, so a session keeps one group while its display name changes. Stored, so a service
+   * worker restart doesn't put a session's next tab in a second group. Group ids don't survive a browser restart.
+   */
   const sessionGroups = new Map<string, number>()
+  let sessionGroupsRestored: Promise<void> | undefined
+  const restoreSessionGroups = () =>
+    (sessionGroupsRestored ??= chrome.storage.local
+      .get(SESSION_GROUPS_KEY)
+      .then((stored) => {
+        const saved = stored[SESSION_GROUPS_KEY]
+        if (!isJsonObject(saved)) return
+        for (const [key, groupId] of Object.entries(saved))
+          if (typeof groupId === "number" && !sessionGroups.has(key)) sessionGroups.set(key, groupId)
+      })
+      .catch(() => undefined))
+  const setSessionGroup = (key: string, groupId: number) => {
+    if (sessionGroups.get(key) === groupId) return
+    sessionGroups.set(key, groupId)
+    void chrome.storage.local.set({ [SESSION_GROUPS_KEY]: Object.fromEntries(sessionGroups) }).catch(() => undefined)
+  }
   const pageStatuses = new Map<number, PageStatus>()
   /** Each tab's page status deliveries, in order (see deliverPageStatus). */
   const pageDeliveries = new Map<number, Promise<void>>()
@@ -758,8 +779,15 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     if (mode === "shared") return serially(() => groupShared(tabId, current))
     const title = groupTitle(sessionId, tab.url)
     const key = sessionId ?? ""
+    await restoreSessionGroups()
     const known = sessionGroups.get(key)
-    const target = known === undefined ? undefined : await chrome.tabGroups.get(known).catch(() => undefined)
+    let target = known === undefined ? undefined : await chrome.tabGroups.get(known).catch(() => undefined)
+    // The tab is already in a session group of ours the session has no record of (a worker restart lost it): it is
+    // the session's group, so its other tabs join it rather than a new one.
+    if ((!target || target.windowId !== tab.windowId) && existing && ownedGroup(existing.title) && !sharedGroup(existing.title)) {
+      target = existing
+      setSessionGroup(key, existing.id)
+    }
     if (target && target.windowId === tab.windowId && ownedGroup(target.title)) {
       if (tab.groupId !== target.id) await chrome.tabs.group({ tabIds: [tabId], groupId: target.id })
       if (target.title !== title) await chrome.tabGroups.update(target.id, { title, color: GROUP_COLOR })
@@ -774,7 +802,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       throw new Error("The relay reconnected while grouping the tab")
     }
     await chrome.tabGroups.update(groupId, { title, color: GROUP_COLOR })
-    sessionGroups.set(key, groupId)
+    setSessionGroup(key, groupId)
     await AgentGroups.adopt(groupId)
     return groupId
   }
@@ -833,6 +861,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   const renameForPage = async (tabId: number, url: string | undefined) => {
     const tab = await chrome.tabs.get(tabId).catch(() => undefined)
     if (!tab || tab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) return
+    await restoreSessionGroups()
     const sessionId = Array.from(sessionGroups).find(([, id]) => id === tab.groupId)?.[0]
     if (sessionId === undefined || !autoNamed(sessionId)) return
     const current = await chrome.tabGroups.get(tab.groupId).catch(() => undefined)
@@ -909,6 +938,19 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     if (change.groupId !== undefined) recountShared()
   })
   chrome.tabs.onAttached.addListener(() => recountShared())
+  chrome.tabGroups.onRemoved.addListener((removed) => {
+    void restoreSessionGroups().then(() => {
+      const keys = Array.from(sessionGroups).filter(([, groupId]) => groupId === removed.id).map(([key]) => key)
+      if (!keys.length) return
+      keys.forEach((key) => sessionGroups.delete(key))
+      void chrome.storage.local.set({ [SESSION_GROUPS_KEY]: Object.fromEntries(sessionGroups) }).catch(() => undefined)
+    })
+  })
+  // Group ids don't survive a browser restart.
+  chrome.runtime.onStartup.addListener(() => {
+    sessionGroups.clear()
+    void chrome.storage.local.remove(SESSION_GROUPS_KEY)
+  })
   chrome.tabs.onDetached.addListener(() => recountShared())
   // Never close a tab while its agent runs a script on it, waits for the user there, or records it.
   TabCleanup.guard((tabId) => {

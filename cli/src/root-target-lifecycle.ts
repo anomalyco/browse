@@ -34,11 +34,20 @@ type Options = {
     readonly announceChild: (rootSessionId: string, target: ChildTarget) => void
   }
   readonly reportError: (message: string, error: unknown) => void
+  /**
+   * How long one command may take while the extension's inventory is reconciled (a reconnect re-announcing its tabs).
+   * Every attempt used to wait the full debugger timeout (60 s), so one wedged tab held the reconnect for three
+   * minutes; now it fails within seconds and the tab is let go.
+   */
+  readonly inventoryCommandTimeoutMs?: number
 }
+
+const DEFAULT_INVENTORY_COMMAND_TIMEOUT_MS = 5_000
 
 type TabWork = { readonly semaphore: Semaphore.Semaphore; revision: number; users: number }
 type Transition = {
   readonly tabId: number
+  readonly timeoutMs?: number
   readonly generation: number
   readonly work: TabWork
   readonly revision: number
@@ -143,7 +152,7 @@ export class RootTargetLifecycle {
           return mayAttach
             ? lifecycle.attachUnlocked(transition, { tabId: options.tabId, owner: "user", alreadyAttached: true }).pipe(Effect.asVoid)
             : Effect.void
-        })
+        }, lifecycle.options.inventoryCommandTimeoutMs ?? DEFAULT_INVENTORY_COMMAND_TIMEOUT_MS)
       }).pipe(
         Effect.tapError((error) => Effect.sync(() => lifecycle.options.reportError(options.errorMessage, error))),
         Effect.retry({
@@ -204,7 +213,7 @@ export class RootTargetLifecycle {
     this.tabs.clear()
   })
 
-  private withPermit<A>(tabId: number, expectedGeneration: number | undefined, use: (transition: Transition) => Effect.Effect<A, Error>): Effect.Effect<A, Error> {
+  private withPermit<A>(tabId: number, expectedGeneration: number | undefined, use: (transition: Transition) => Effect.Effect<A, Error>, timeoutMs?: number): Effect.Effect<A, Error> {
     const lifecycle = this
     return Effect.suspend(() => {
       if (lifecycle.closing) return Effect.fail(new Error("Relay is closing"))
@@ -217,6 +226,7 @@ export class RootTargetLifecycle {
       return work.semaphore.withPermit(Effect.suspend(() => {
         const transition: Transition = {
           tabId, generation, work, revision,
+          ...(timeoutMs === undefined ? {} : { timeoutMs }),
           root: lifecycle.options.registry.tabTargets.get(tabId),
           staged: lifecycle.options.registry.stagedRootTarget(tabId),
         }
@@ -254,7 +264,12 @@ export class RootTargetLifecycle {
   }
 
   private command(transition: Transition, method: string, params: JsonObject = {}): Effect.Effect<JsonObject, Error> {
-    return this.step(transition, this.options.extension.send({ method: "debugger.sendCommand", params: { tabId: transition.tabId, method, params } }))
+    const send = this.options.extension.send({ method: "debugger.sendCommand", params: { tabId: transition.tabId, method, params } })
+    const timeoutMs = transition.timeoutMs
+    return this.step(transition, timeoutMs === undefined ? send : send.pipe(Effect.timeoutOrElse({
+      duration: timeoutMs,
+      orElse: () => Effect.fail(new Error(`${method} did not answer within ${timeoutMs} ms while reconciling tab ${transition.tabId}`)),
+    })))
   }
 
   private readonly attachUnlocked = Effect.fnUntraced(function* (this: RootTargetLifecycle, transition: Transition, options: AttachOptions) {

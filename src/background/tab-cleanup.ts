@@ -17,6 +17,9 @@ const ALARM = "opencode-browser-tab-cleanup"
 const tracked = new Map<number, Tracked>()
 let restored: Promise<void> | undefined
 let saveTimer: ReturnType<typeof setTimeout> | undefined
+let writes: Promise<unknown> = Promise.resolve()
+/** Touches are written at most this often; which tabs are tracked is written at once. */
+const TOUCH_SAVE_MS = 2_000
 /** Tabs that must stay open whatever their age, for example while a handoff waits for the user or a recording runs. */
 const guards: ((tabId: number) => boolean)[] = []
 
@@ -31,7 +34,7 @@ export function touch(tabId: number) {
   const entry = tracked.get(tabId)
   if (!entry) return
   entry.touched = Date.now()
-  save()
+  save({ soon: true })
 }
 
 export function forget(tabId: number) {
@@ -101,11 +104,34 @@ function restore() {
   return restored
 }
 
-function save() {
+/**
+ * Writes the tracked tabs to storage, so a service worker restart (or an extension reload) still knows which tabs
+ * agents opened. Tracking a tab or forgetting one is written at once; a touch within a couple of seconds. (A
+ * debounce that every touch pushed back never wrote while agents kept sending commands, so a worker restart then
+ * forgot nearly every agent tab, and idle cleanup never closed them.) Writes run in order, after the stored list was
+ * read back, so an early write can't replace tabs the worker hasn't restored yet.
+ */
+function save(options: { soon?: boolean } = {}) {
+  if (options.soon) {
+    saveTimer ??= setTimeout(flush, TOUCH_SAVE_MS)
+    return
+  }
+  flush()
+}
+
+function flush() {
   clearTimeout(saveTimer)
-  saveTimer = setTimeout(() => {
-    void chrome.storage.local.set({ [STORAGE_KEY]: Object.fromEntries(tracked) }).catch(() => undefined)
-  }, 500)
+  saveTimer = undefined
+  writes = writes
+    .then(() => restore())
+    .then(() => chrome.storage.local.set({ [STORAGE_KEY]: Object.fromEntries(tracked) }))
+    .catch(() => undefined)
+}
+
+/** Resolves once every pending write has reached storage (tests). */
+export async function flushed() {
+  if (saveTimer !== undefined) flush()
+  await writes
 }
 
 // The user switching to a tab counts as using it; a tab the user moves out of the agent's group is theirs now.

@@ -496,6 +496,8 @@ export class ExecuteSandbox {
   private browser: Browser | undefined
   private page: Page | undefined
   private defaultPageTargetId: string | undefined
+  /** The default page's target when its page object closed; the same tab may come back (see getSessionPage). */
+  private closedDefaultPage: { readonly targetId: string; readonly ownsPage: boolean } | undefined
   private ownsPage = false
   private pageHealthCheckRequired = false
   private pageCrashed = false
@@ -730,6 +732,7 @@ export class ExecuteSandbox {
       const browser = sandbox.browser
       const ownsOpenPage = page !== undefined && sandbox.ownsPage && !page.isClosed()
       sandbox.browser = undefined
+      sandbox.closedDefaultPage = undefined
       sandbox.unbindDefaultPage(undefined, { notify: true })
       yield* sandbox.networkCapture.cancel()
 
@@ -1129,6 +1132,7 @@ export class ExecuteSandbox {
     this.recordNonBlankUrl(safePageUrl(page))
     const close = () => {
       if (this.page !== page) return
+      if (targetId !== undefined && !this.pageCrashed) this.closedDefaultPage = { targetId, ownsPage: this.ownsPage }
       if (this.lastKnownNonBlankUrl) {
         this.recreatedFromClosedUrl = this.lastKnownNonBlankUrl
       }
@@ -1271,6 +1275,18 @@ export class ExecuteSandbox {
         if (page) return page
       } else {
         return this.page
+      }
+    }
+    // The page object also closes when the relay loses the extension for a moment (its service worker restarted):
+    // the tab lives on and comes back under the same target id, so take it back rather than open another tab.
+    const closed = this.closedDefaultPage
+    this.closedDefaultPage = undefined
+    if (closed && (!this.page || this.page.isClosed())) {
+      const same = await openPageWithTargetId(context, closed.targetId)
+      if (same) {
+        this.bindDefaultPage(same, closed.targetId, closed.ownsPage, true)
+        this.recreatedFromClosedUrl = undefined
+        return same
       }
     }
     if (this.page?.isClosed()) {
@@ -1433,6 +1449,14 @@ export class ExecuteSandbox {
     this.pendingWarnings.push(defaultPageRecoveredWarning)
     return undefined
   }
+}
+
+/** The open page with this target id right now, without waiting for one to appear. */
+async function openPageWithTargetId(context: BrowserContext, targetId: string): Promise<Page | undefined> {
+  const pages = context.pages().filter((page) => !page.isClosed())
+  const ids = await Promise.all(pages.map((page) => resolvePageTargetId(page)))
+  const index = ids.indexOf(targetId)
+  return index === -1 ? undefined : pages[index]
 }
 
 async function waitForPageTarget(options: {

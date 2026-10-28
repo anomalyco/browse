@@ -299,7 +299,7 @@ export const scenarios: Scenario[] = [
   } },
   { name: "session-reset", tags: ["sessions", "soak"], run: async ({ client, session, fx }) => {
     await client.call("execute", { session, code: `await page.goto(${j(fx.url("/form"))}); state.x = 1` })
-    const reset = await client.call("session_reset", { session })
+    const reset = await client.call("session_reset", { id: session })
     assert(!reset.isError, reset.text)
     const out = await client.call("execute", { session, code: `return { url: page.url(), x: state.x ?? null }` })
     assert(!out.isError && out.data.value.x === null, `after reset: ${out.text.slice(0, 200)}`)
@@ -310,12 +310,51 @@ export const scenarios: Scenario[] = [
     await client.call("execute", { session: id, code: `await page.goto(${j(fx.url("/target?from=delete"))}); const p = await context.newPage(); await p.goto(${j(fx.url("/target?from=delete2"))})` })
     const before = await sessionTargets(id)
     const tabIds = before.map((t) => t.tabId)
-    assert(!(await client.call("session_delete", { session: id })).isError, "session_delete")
+    assert(!(await client.call("session_delete", { id })).isError, "session_delete")
     await sleep(1500)
     const view = await cdp.extensionView()
     const left = view.tabs.filter((t) => tabIds.includes(t.id))
     assert(left.length === 0, `session_delete left ${left.length} tab(s) open`)
     assert((await sessionTargets(id)).length === 0, "relay still lists the deleted session's targets")
+  } },
+  { name: "sw-restart-keeps-tabs", tags: ["sessions", "chaos-lite"], timeoutMs: 120_000, run: async ({ client, fx, cdp }) => {
+    // The extension's service worker restarting must not orphan agent tabs: each session keeps its tabs (same tab ids),
+    // its group and idle-cleanup tracking, and session_delete still closes them.
+    const ids = [0, 1, 2].map((i) => `sc-sw-${i}-${Date.now().toString(36)}`)
+    for (const id of ids) {
+      assert(!(await client.call("session_new", { id })).isError, "session_new")
+      await exec(client, id, `await page.goto(${j(fx.url(`/target?from=${id}`))}); const p = await context.newPage(); await p.goto(${j(fx.url(`/target?from=${id}-2`))})`)
+    }
+    const before = new Map<string, number[]>()
+    for (const id of ids) before.set(id, (await sessionTargets(id)).map((t) => t.tabId).sort())
+    const all = [...before.values()].flat()
+    assert(all.length === 6, `expected 6 session tabs, relay lists ${all.length}`)
+    const started = Date.now()
+    await cdp.stopExtensionWorker()
+    // Recovered: every session runs an execute on its own tabs again.
+    for (const id of ids) {
+      const out = await exec(client, id, `return context.pages().length`, 60_000)
+      assert(out === 2, `${id} sees ${out} pages after the worker restart`)
+    }
+    const recoveryMs = Date.now() - started
+    for (const id of ids) {
+      const after = (await sessionTargets(id)).map((t) => t.tabId).sort()
+      assert(j(after) === j(before.get(id)), `${id} tabs changed across the worker restart: ${j(before.get(id))} -> ${j(after)}`)
+    }
+    const view = await cdp.extensionView()
+    const tracked = await cdp.evalInExtension<number[]>(`chrome.storage.local.get("tabCleanup").then((s) => Object.keys(s.tabCleanup ?? {}).map(Number))`)
+    for (const tabId of all) {
+      const tab = view.tabs.find((t) => t.id === tabId)
+      assert(tab, `tab ${tabId} disappeared`)
+      assert(tab.groupId !== -1, `tab ${tabId} lost its group across the worker restart`)
+      assert(tracked.includes(tabId), `tab ${tabId} is no longer tracked for idle cleanup`)
+    }
+    for (const id of ids) assert(!(await client.call("session_delete", { id })).isError, "session_delete")
+    await sleep(1500)
+    const left = (await cdp.extensionView()).tabs.filter((t) => all.includes(t.id))
+    assert(left.length === 0, `session_delete left ${left.length} tab(s) open after the worker restart`)
+    assert(recoveryMs < 20_000, `recovery took ${recoveryMs} ms`)
+    return { recoveryMs }
   } },
   { name: "idle-cleanup", tags: ["sessions"], run: async ({ client, fx, cdp }) => {
     const id = `sc-idle-${Date.now().toString(36)}`
@@ -327,7 +366,7 @@ export const scenarios: Scenario[] = [
     await sleep(1000)
     // The tab a window shows stays open by design; Chrome activates an agent tab when the tab before it closes.
     const left = (await cdp.extensionView()).tabs.filter((t) => tabIds.includes(t.id) && !t.active)
-    await client.call("session_delete", { session: id })
+    await client.call("session_delete", { id })
     assert(left.length === 0, `tabs_cleanup(0) left ${left.length} idle background agent tab(s)`)
   } },
   { name: "user-closes-tab", tags: ["chaos-lite", "soak"], run: async ({ client, session, fx, cdp }) => {

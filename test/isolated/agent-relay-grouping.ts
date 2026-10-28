@@ -122,6 +122,33 @@ describe("grouping: one group per session (default)", () => {
   })
 })
 
+describe("grouping across a service worker restart", () => {
+  test("a session whose group the worker forgot keeps using the group its tab is in, and remembers it", async () => {
+    const { user } = await userWindow()
+    // A tab already in a session group, as after a restart: the relay re-announces it, then groups it.
+    const tabId = ((await command("tabs.create", { url: "https://example.com/", active: false })) as { tabId: number }).tabId
+    const kept = await stub.chrome.tabs.group({ tabIds: [tabId] })
+    await stub.chrome.tabGroups.update(kept, { title: `restarted${MARKER}` })
+    await command("debugger.attach", { tabId })
+    expect(((await command("tabs.group", { tabId, sessionId: "restarted" })) as { groupId: number }).groupId).toBe(kept)
+    // The session's next tab joins it instead of making a second group.
+    const next = await agentTab("restarted")
+    expect(next.groupId).toBe(kept)
+    expect(group(kept)).toMatchObject({ windowId: user.id, title: `restarted${MARKER}` })
+    expect(((await stub.chrome.storage.local.get("agentSessionGroups")).agentSessionGroups as Record<string, number>).restarted).toBe(kept)
+  })
+
+  test("an agent tab stays tracked for idle cleanup while its agent keeps sending commands", async () => {
+    await userWindow()
+    const { tabId } = await agentTab("busy")
+    // Every CDP command touches the tab; the tracked list still reaches storage at once.
+    await until(async () => {
+      TabCleanup.touch(tabId)
+      return String(tabId) in (((await stub.chrome.storage.local.get("tabCleanup")).tabCleanup ?? {}) as Record<string, unknown>)
+    })
+  })
+})
+
 describe("grouping: one shared group for all agents", () => {
   test("two sessions share one collapsed group that counts its tabs", async () => {
     await stub.chrome.storage.local.set({ agentTabsGrouping: "shared" })

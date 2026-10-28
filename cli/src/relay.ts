@@ -255,10 +255,29 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   }
   const handoffs = new HandoffRegistry()
   const activeHandoffTabs = new Map<string, Set<number>>()
+  /**
+   * Who owned each root target when the extension link last dropped, by Chrome target id. The extension announces the
+   * same tabs again when it comes back (a service worker restart); the session catalog keeps only each session's
+   * default page, so every other page a session opened used to come back as a user's tab: visible to every session,
+   * taken out of its group, and so forgotten by idle cleanup. Cleared once the extension's inventory has settled.
+   */
+  const ownersAcrossReconnect = new Map<string, { readonly sessionId?: string; readonly owner: "relay" | "user" }>()
+  const ownerAcrossReconnect = (targetId: string) => {
+    const known = ownersAcrossReconnect.get(targetId)
+    return known?.sessionId !== undefined && sessions.sessions.has(known.sessionId)
+      ? { sessionId: known.sessionId, owner: known.owner }
+      : undefined
+  }
   const clearLiveExtensionState = (reason: string) => {
     void recordingRelay.cleanupAll(reason).catch(() => {})
     void flightRecorder.cleanupAll().catch(() => {})
     pendingTabGrouping.clear()
+    for (const target of registry.listRootTargets()) {
+      ownersAcrossReconnect.set(target.targetInfo.targetId, {
+        owner: target.owner,
+        ...(target.opencodeBrowserSessionId ? { sessionId: target.opencodeBrowserSessionId } : {}),
+      })
+    }
     for (const target of [...registry.listRootTargets()]) {
       detachTargetState(target.tabId, { preserveSessionTarget: true, updateExtension: false })
     }
@@ -454,9 +473,16 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         reconcileTargetOwnership(change)
       },
       onReleaseRelayTarget: (targetId) => releaseRelayTarget(targetId),
-      relayTargetIdsForSession: (sessionId) => registry.listRootTargets()
-        .filter((target) => target.owner === "relay" && target.opencodeBrowserSessionId === sessionId)
-        .map((target) => target.targetInfo.targetId),
+      // With the extension away, the session's pages are only in ownersAcrossReconnect; releaseRelayTarget waits
+      // for them to come back.
+      relayTargetIdsForSession: (sessionId) => [
+        ...registry.listRootTargets()
+          .filter((target) => target.owner === "relay" && target.opencodeBrowserSessionId === sessionId)
+          .map((target) => target.targetInfo.targetId),
+        ...Array.from(ownersAcrossReconnect)
+          .filter(([targetId, known]) => known.owner === "relay" && known.sessionId === sessionId && !registry.targetsByTargetId.has(targetId))
+          .map(([targetId]) => targetId),
+      ],
       onCancelSessionHandoff: (sessionId) => handoffs.cancelForSession(sessionId) !== undefined,
       onSessionsChanged: async (entries) => {
         if (catalogWritesEnabled) await sessionCatalog?.save(entries)
@@ -1181,6 +1207,17 @@ const makeRelay = Effect.fnUntraced(function* (options: {
           for (const target of registry.listRootTargets()) {
             if (!announcedRootTabIds.has(target.tabId)) detachTargetState(target.tabId)
           }
+          // A page whose session was deleted while the extension was away: nobody owns it now, so it closes like
+          // the session's other pages did.
+          for (const [targetId, known] of ownersAcrossReconnect) {
+            if (known.owner !== "relay" || known.sessionId === undefined || sessions.sessions.has(known.sessionId)) continue
+            const target = registry.targetsByTargetId.get(targetId)
+            if (!target || target.opencodeBrowserSessionId !== undefined) continue
+            relayLog("extension.inventory.orphan", { tabId: target.tabId, session: known.sessionId })
+            sendExtensionBestEffort({ method: "tabs.remove", params: { tabId: target.tabId } })
+            detachTargetState(target.tabId, { updateExtension: false })
+          }
+          ownersAcrossReconnect.clear()
           extensionRpc.markReady()
           if (updates.current) sendUpdateNotice()
           for (const target of registry.listRootTargets()) refreshTabGrouping(target.tabId)
@@ -1818,7 +1855,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
 
   const rootLifecycle = yield* RootTargetLifecycle.make({
     registry,
-    sessions,
+    sessions: {
+      persistedTargetOwner: (targetId) => sessions.persistedTargetOwner(targetId) ?? ownerAcrossReconnect(targetId),
+      markTargetReplaced: (previousTargetId, targetId) => sessions.markTargetReplaced(previousTargetId, targetId),
+    },
     handoffs,
     clients: cdpClients,
     extension: { generation: () => extensionGeneration, send: sendToExtension },

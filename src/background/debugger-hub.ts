@@ -61,6 +61,10 @@ export function tabsOwnedBy(owner: string) {
  * Restores relay ownership after a service worker restart (Chrome keeps the attachments, the worker's memory
  * does not) or an extension reload or update (the attachments are gone too, so the tabs are attached again).
  * Either way the relay gets its sessions' tabs back instead of losing them.
+ *
+ * An attachment that outlived the worker is replaced by a fresh one: whatever the old worker left half done on it
+ * (a dialog or a paused child target nobody answered while no worker ran, which left every later command on the tab
+ * timing out) goes with it, and the relay sets the tab up again from scratch anyway.
  */
 export async function restore() {
   const stored = ((await chrome.storage.local.get(RELAY_KEY))[RELAY_KEY] ?? []) as unknown[]
@@ -68,13 +72,15 @@ export async function restore() {
     stored.map(async (item) => {
       // Earlier versions stored bare tab ids.
       const { tabId, url } = typeof item === "number" ? { tabId: item, url: undefined } : (item as { tabId: number; url?: string })
+      const tab = await chrome.tabs.get(tabId).catch(() => undefined)
+      if (!tab) return
       if (await ownedByUs(tabId)) {
-        owners.set(tabId, new Set([...(owners.get(tabId) ?? []), "relay"]))
+        await chrome.debugger.detach({ tabId }).catch(() => undefined)
+        await attach(tabId, "relay").catch(() => undefined)
         return
       }
       // Tab ids restart with the browser; only re-attach the same page, never a stranger that reused the id.
-      const tab = await chrome.tabs.get(tabId).catch(() => undefined)
-      if (!tab || !url || tab.url !== url) return
+      if (!url || tab.url !== url) return
       await attach(tabId, "relay").catch(() => undefined)
     }),
   )
@@ -95,12 +101,23 @@ export function freeze() {
   frozen = true
 }
 
-async function persist() {
-  if (frozen) return
-  const tabs = await Promise.all(
-    tabsOwnedBy("relay").map(async (tabId) => ({ tabId, url: (await chrome.tabs.get(tabId).catch(() => undefined))?.url })),
-  )
-  return chrome.storage.local.set({ [RELAY_KEY]: tabs }).catch(() => undefined)
+let persisting: Promise<unknown> = Promise.resolve()
+
+/**
+ * Stores the relay's tabs. Writes run one at a time, each with the tabs as they are when its turn comes: side by side,
+ * a slower write with an older list could land last and drop tabs attached meanwhile, which a worker restart then lost.
+ */
+function persist() {
+  persisting = persisting
+    .then(async () => {
+      if (frozen) return
+      const tabs = await Promise.all(
+        tabsOwnedBy("relay").map(async (tabId) => ({ tabId, url: (await chrome.tabs.get(tabId).catch(() => undefined))?.url })),
+      )
+      if (!frozen) await chrome.storage.local.set({ [RELAY_KEY]: tabs })
+    })
+    .catch(() => undefined)
+  return persisting
 }
 
 // Tab ids don't survive a browser restart.
