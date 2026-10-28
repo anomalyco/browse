@@ -17,7 +17,7 @@ import path from "node:path"
 import { createInterface } from "node:readline/promises"
 import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse } from "jsonc-parser"
-import { describeAutoUpdate, autoUpdateStatus, installVersion, pruneVersions, readCurrent, runtimeLayout, switchVersion, updateState, compareVersions } from "./auto-update.ts"
+import { describeAutoUpdate, autoUpdateStatus, installVersion, pruneVersions, readCurrent, runtimeLayout, switchVersion, updateState, compareVersions, versionEntry } from "./auto-update.ts"
 import { cliCommand, dataRoot, installCommand, STORE_LISTED, storeConfig } from "./paths.ts"
 import { formatPairingCode, pairingCode, relayAuthorization, writeExtensionPairing } from "./relay-secrets.ts"
 import { opencodeBrowserVersion } from "./version.ts"
@@ -326,21 +326,26 @@ function installRuntime(): { entry: string; version: string } {
   }
   const spec = process.env.OPENCODE_BROWSER_PACKAGE
   const before = readCurrent(layout)
+  // Already installed (install run again): keep it. Reinstalling would replace the files a running relay still loads.
+  const existing = versionEntry(layout, opencodeBrowserVersion)
+  const reuse = !spec && existsSync(existing) && spawnSync(process.execPath, [existing, "--version"], { encoding: "utf8", timeout: 30_000 }).stdout?.trim() === opencodeBrowserVersion
   let installed: string
   try {
-    installed = installVersion({ layout, version: opencodeBrowserVersion, ...(spec ? { spec } : {}) })
+    installed = reuse ? existing : installVersion({ layout, version: opencodeBrowserVersion, ...(spec ? { spec } : {}) })
   } catch (error) {
     fail(`Could not install ${spec ?? `${PACKAGE}@${opencodeBrowserVersion}`}: ${(error as Error).message}`)
   }
   const version = path.basename(path.dirname(path.dirname(path.dirname(path.dirname(path.dirname(installed))))))
-  switchVersion(layout, version, before?.version)
+  // Running install again for the same version keeps the version it replaced for rollback.
+  const previous = before?.version === version ? before.previous : before?.version
+  switchVersion(layout, version, previous)
   // Installing by hand settles any update the relay was waiting to switch to, and un-skips this version.
   updateState(layout, ({ pending, skipped, ...state }) => ({
     ...state,
     ...(pending && compareVersions(pending, version) > 0 ? { pending } : {}),
     ...(skipped && skipped !== version ? { skipped } : {}),
   }))
-  pruneVersions(layout, [version, before?.version !== version ? before?.version : undefined])
+  pruneVersions(layout, [version, previous])
   // Earlier versions installed one copy straight into runtime/; the shim replaces it.
   for (const legacy of ["node_modules", "package.json", "package-lock.json"]) rmSync(path.join(files.runtime, legacy), { recursive: true, force: true })
   return { entry: layout.shim, version }
