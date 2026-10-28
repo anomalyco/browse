@@ -89,6 +89,18 @@
         </fieldset>
       </section>
 
+      <section id="updates" hidden>
+        <h2>Updates</h2>
+        <fieldset class="choices" id="auto-update">
+          <legend>When a new version of browse is published</legend>
+          <label><input type="radio" name="auto-update" value="on" checked /> Install it automatically, once no agent is using the browser (default)</label>
+          <label><input type="radio" name="auto-update" value="notify" /> Only tell me</label>
+          <label><input type="radio" name="auto-update" value="off" /> Don't check</label>
+        </fieldset>
+        <p class="note" id="auto-update-state"></p>
+        <p class="note override" id="auto-update-override" hidden></p>
+      </section>
+
       <section id="update" hidden>
         <h2>Update available</h2>
         <p><span id="update-summary"></span>. Run this in a terminal (or ask your agent to update browse), then restart opencode:</p>

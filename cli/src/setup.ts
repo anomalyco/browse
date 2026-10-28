@@ -17,6 +17,7 @@ import path from "node:path"
 import { createInterface } from "node:readline/promises"
 import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse } from "jsonc-parser"
+import { describeAutoUpdate, autoUpdateStatus, installVersion, pruneVersions, readCurrent, runtimeLayout, switchVersion, updateState, compareVersions } from "./auto-update.ts"
 import { cliCommand, dataRoot, installCommand, STORE_LISTED, storeConfig } from "./paths.ts"
 import { formatPairingCode, pairingCode, relayAuthorization, writeExtensionPairing } from "./relay-secrets.ts"
 import { opencodeBrowserVersion } from "./version.ts"
@@ -42,9 +43,10 @@ const windows = process.platform === "win32"
 const home = homedir()
 const root = dataRoot()
 const configRoot = process.env.XDG_CONFIG_HOME ?? path.join(home, ".config")
+const layout = runtimeLayout(root)
 const files = {
   dir: root,
-  /** A pinned npm install of this package: the MCP server runs from here, not the npx cache. */
+  /** Installed versions of this package (auto-update.ts): the MCP server runs from here through the shim, not the npx cache. */
   runtime: path.join(root, "runtime"),
   settings: path.join(root, "settings.json"),
   extension: path.join(root, "extension"),
@@ -256,7 +258,8 @@ function configureMcp(entry: string) {
   // makes opencode restart the server with the new code.
   const renamed = removeMcp(LEGACY_MCP_NAME)
   const existing = mcpServers()[MCP_NAME]
-  const server = mergedMcpServer(existing, [process.execPath, entry, "mcp"], fingerprint(entry))
+  // The shim of an npm install never changes and swaps the server itself after an update, so its entry stays the same.
+  const server = mergedMcpServer(existing, [process.execPath, entry, "mcp"], entry === layout.shim ? "auto-update" : fingerprint(entry))
   if (existing && JSON.stringify(existing) === JSON.stringify(server)) return `"${MCP_NAME}" is up to date`
   const text = readFileOr(file, "{}")
   const edits = modify(text, ["mcp", "servers", MCP_NAME], server, { formattingOptions: { tabSize: 2, insertSpaces: true } })
@@ -308,39 +311,39 @@ function removeLegacyHost() {
 // ---- runtime ----------------------------------------------------------------------------------------
 
 /**
- * Installs this exact version into the data root, so the MCP server keeps working after the npx cache is
- * cleared, and an update is one `install` away. From source (development), runs in place.
+ * Installs this exact version into the data root (runtime/versions/<version>, auto-update.ts), points runtime/current.json
+ * at it and writes the stable shim, so the MCP server keeps working after the npx cache is cleared and later updates
+ * never change opencode's config. Returns the shim and the version. From source (development), runs in place.
  * OPENCODE_BROWSER_PACKAGE installs a specific spec instead, for example a local tarball.
  */
-function installRuntime() {
+function installRuntime(): { entry: string; version: string } {
   // From a checkout, run the bundle `bun run build` wrote: Node can't run the TypeScript sources (they use
   // syntax type stripping doesn't cover), and the MCP server runs under Node.
   if (fromSource) {
     const bundle = path.join(packageRoot, "dist", "cli.mjs")
     if (!existsSync(bundle)) fail("Build the CLI first: `bun run build` in cli/ (or `bun run setup` at the top).")
-    return bundle
+    return { entry: bundle, version: opencodeBrowserVersion }
   }
-  const spec = process.env.OPENCODE_BROWSER_PACKAGE ?? `${PACKAGE}@${opencodeBrowserVersion}`
-  // A package name, name@version, tarball path or URL: never an npm flag, and nothing a shell would interpret.
-  if (spec.startsWith("-") || /[\s"'`&|<>^%!;]/.test(spec)) fail(`Invalid OPENCODE_BROWSER_PACKAGE: ${JSON.stringify(spec)}`)
-  mkdirSync(files.runtime, { recursive: true })
-  if (!existsSync(path.join(files.runtime, "package.json"))) writeFileSync(path.join(files.runtime, "package.json"), "{\"private\":true}\n")
-  const npmArgs = ["install", "--prefix", files.runtime, "--no-audit", "--no-fund", "--loglevel=error", spec]
-  // On Windows npm is a .cmd script, which Node only runs through a shell; run npm's own entry with node instead.
-  const npmCli = windows ? windowsNpmCli() : undefined
-  const npm = spawnSync(npmCli ? process.execPath : "npm", npmCli ? [npmCli, ...npmArgs] : npmArgs, { encoding: "utf8" })
-  if (npm.status !== 0) fail(`Could not install ${spec}: ${(npm.stderr || npm.stdout || "npm failed").trim()}`)
-  return path.join(files.runtime, "node_modules", PACKAGE, "dist", "cli.mjs")
-}
-
-/** npm's JavaScript entry next to node.exe, or next to the npm.cmd on PATH. */
-function windowsNpmCli() {
-  const besideNode = path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js")
-  if (existsSync(besideNode)) return besideNode
-  const npmCmd = spawnSync("where", ["npm.cmd"], { encoding: "utf8" }).stdout?.split(/\r?\n/).find((line) => line.trim())
-  const besideCmd = npmCmd ? path.join(path.dirname(npmCmd.trim()), "node_modules", "npm", "bin", "npm-cli.js") : undefined
-  if (besideCmd && existsSync(besideCmd)) return besideCmd
-  fail("Could not find npm (node_modules\\npm\\bin\\npm-cli.js next to node.exe or npm.cmd). Install Node.js with npm and retry.")
+  const spec = process.env.OPENCODE_BROWSER_PACKAGE
+  const before = readCurrent(layout)
+  let installed: string
+  try {
+    installed = installVersion({ layout, version: opencodeBrowserVersion, ...(spec ? { spec } : {}) })
+  } catch (error) {
+    fail(`Could not install ${spec ?? `${PACKAGE}@${opencodeBrowserVersion}`}: ${(error as Error).message}`)
+  }
+  const version = path.basename(path.dirname(path.dirname(path.dirname(path.dirname(path.dirname(installed))))))
+  switchVersion(layout, version, before?.version)
+  // Installing by hand settles any update the relay was waiting to switch to, and un-skips this version.
+  updateState(layout, ({ pending, skipped, ...state }) => ({
+    ...state,
+    ...(pending && compareVersions(pending, version) > 0 ? { pending } : {}),
+    ...(skipped && skipped !== version ? { skipped } : {}),
+  }))
+  pruneVersions(layout, [version, before?.version !== version ? before?.version : undefined])
+  // Earlier versions installed one copy straight into runtime/; the shim replaces it.
+  for (const legacy of ["node_modules", "package.json", "package-lock.json"]) rmSync(path.join(files.runtime, legacy), { recursive: true, force: true })
+  return { entry: layout.shim, version }
 }
 
 // ---- commands -------------------------------------------------------------------------------------
@@ -365,9 +368,9 @@ async function install(args: string[]) {
   const opencode = findOpencode(args)
 
   mkdirSync(files.dir, { recursive: true })
-  const entry = installRuntime()
-  log(`✓ OpenCode Browser ${opencodeBrowserVersion} installed${fromSource ? " (from source)" : ""}`)
-  writeFileSync(files.settings, JSON.stringify({ ...(opencode ? { opencode } : {}), entry, version: opencodeBrowserVersion } satisfies Settings, null, 2) + "\n")
+  const { entry, version } = installRuntime()
+  log(`✓ OpenCode Browser ${version} installed${fromSource ? " (from source)" : ""}`)
+  writeFileSync(files.settings, JSON.stringify({ ...(opencode ? { opencode } : {}), entry, version } satisfies Settings, null, 2) + "\n")
   if (removeLegacyHost()) log("✓ Removed the native messaging host of an earlier version")
 
   const node = process.execPath
@@ -454,7 +457,9 @@ export function installedRuntime(settings: Settings | undefined, server: Servers
   // A bundle with the sources beside it is a checkout's build: cli/dist/cli.mjs next to cli/src/main.ts.
   const packageDir = path.dirname(path.dirname(entry))
   const source = existsSync(path.join(packageDir, "src", "main.ts"))
+  // The shim runs whatever runtime/current.json names, which auto-update moves.
   const version =
+    (entry === layout.shim ? readCurrent(layout)?.version : undefined) ??
     settings?.version ??
     (path.resolve(entry) === path.join(packageRoot, "dist", "cli.mjs") ? opencodeBrowserVersion : readJson<{ version?: string }>(path.join(packageDir, "package.json"))?.version)
   return { entry, version, source }
@@ -468,6 +473,7 @@ export function printSetupStatus() {
   log(`Version:   ${runtime ? `${runtime.version ?? "unknown"} (${runtime.entry})` : "not installed"}`)
   log(`opencode:  ${settings?.opencode ?? findOpencode([]) ?? "not found"}`)
   log(mcpServers()[MCP_NAME] ? `MCP:       "${MCP_NAME}" configured` : "MCP:       not configured")
+  log(describeAutoUpdate(autoUpdateStatus({ layout })))
   log(`Logs:      ${path.join(files.dir, "logs")}`)
   log("")
 }
@@ -940,4 +946,8 @@ export async function runSetup(command: string, args: string[]) {
   if (command === "extension") return extension()
   if (command === "uninstall") return uninstall(args)
   if (command === "pair") return pair()
+  if (command === "rollback") {
+    const { runRollback } = await import("./runtime-update.ts")
+    return runRollback(args)
+  }
 }

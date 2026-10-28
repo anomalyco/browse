@@ -5,10 +5,12 @@
 //   update check    asks the remote for its branch head (`git ls-remote`, never a fetch), at most every 6 hours,
 //                   cached in the data root. `status`, `doctor`, the MCP server and the extension's status page show
 //                   its notice. It never blocks startup and fails silently. OPENCODE_BROWSER_UPDATE_CHECK=0 turns it off.
-// The published npm package has no clone; `update` prints how to update it with npx instead.
+// An npm install (`npx @opencode/browse install`) has no clone: it updates itself (auto-update.ts), `update` installs
+// the newest version on its channel now (runtime-update.ts), and the notice shows a newer version in "notify" mode.
 import { execFile, spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs"
 import path from "node:path"
+import { autoUpdateStatus, compareVersions, npmRuntime } from "./auto-update.ts"
 import { checkoutRoot, cliCommand, dataRoot } from "./paths.ts"
 
 /** How long a check result stands before the remote is asked again. */
@@ -162,6 +164,10 @@ export function formatUpdateNotice(notice: Pick<UpdateNotice, "summary" | "comma
  */
 export async function updateNotice(options: { readonly repo?: string; readonly dataDir?: string; readonly git?: Git } = {}): Promise<UpdateNotice | undefined> {
   try {
+    if (!options.repo) {
+      const npm = npmUpdateNotice()
+      if (npm !== false) return npm
+    }
     const repo = options.repo ?? checkoutRoot()
     if (!repo || !updateCheckEnabled() || !existsSync(path.join(repo, ".git"))) return undefined
     const check = await cachedUpdateCheck({ repo, dataDir: options.dataDir ?? dataRoot(), ...(options.git ? { git: options.git } : {}) })
@@ -169,6 +175,21 @@ export async function updateNotice(options: { readonly repo?: string; readonly d
   } catch {
     return undefined
   }
+}
+
+/**
+ * An npm install's notice, from what the relay's last daily check found: shown when a newer version waits and auto-update
+ * won't install it by itself (notify mode, or its last attempt failed). false when this isn't an npm install.
+ */
+export function npmUpdateNotice(): UpdateNotice | undefined | false {
+  const runtime = npmRuntime()
+  if (!runtime) return false
+  const status = autoUpdateStatus({ runtime })
+  const latest = status.latest
+  if (!latest || compareVersions(latest, runtime.version) <= 0 || status.effective === "off" || latest === status.skipped) return undefined
+  if (status.effective === "on" && !status.lastError) return undefined
+  const check: UpdateCheck = { repo: "npm", checkedAt: Date.now(), head: runtime.version, upstream: `npm ${status.channel ?? "latest"}`, latest, available: true }
+  return { summary: `browse ${latest} is available (you have ${runtime.version})`, command: cliCommand("update"), check }
 }
 
 /**
@@ -374,6 +395,8 @@ export function runUpdate(args: readonly string[], deps: UpdateDeps): number {
 /** `opencode-browser update [--check]`. */
 export async function runUpdateCommand(args: readonly string[]) {
   const log = (line: string) => process.stdout.write(line + "\n")
+  const { runNpmUpdate } = await import("./runtime-update.ts")
+  if (await runNpmUpdate(args)) return
   if (args.includes("--check")) {
     const repo = checkoutRoot()
     if (!repo) return log("Installed from npm: run `npx @opencode/browse@latest install` to update.")

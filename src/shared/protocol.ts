@@ -30,6 +30,23 @@ export type AgentRelayState = {
   update?: AgentRelayUpdate
   /** Settings the connected relay's environment variables fix (OPENCODE_BROWSER_AGENT_WINDOW, …). */
   overrides?: RelayOverrides
+  /** How the connected relay's install updates (cli/src/auto-update.ts), as it reported it in `relay.settings`. */
+  autoUpdate?: RelayAutoUpdate
+}
+
+export type AutoUpdateMode = "on" | "notify" | "off"
+export const autoUpdateMode = (value: unknown): AutoUpdateMode | undefined => (value === "on" || value === "notify" || value === "off" ? value : undefined)
+/** The relay's update state: an npm install updates itself; a checkout updates with `update`. */
+export type RelayAutoUpdate = {
+  install: "npm" | "checkout" | "other"
+  mode: AutoUpdateMode
+  effective: AutoUpdateMode
+  overriddenBy?: string
+  version?: string
+  channel?: string
+  latest?: string
+  pending?: string
+  previous?: string
 }
 
 export type AgentRelayUpdate = { summary: string; command: string }
@@ -76,4 +93,8 @@ export type RelayOverrides = { agentWindow?: "current" | "separate"; cursor?: Ag
 export const STATUS_PORT = "opencode-browser.status"
 
 export type ToStatusPage = { type: "agents"; state: AgentRelayState } | { type: "pairing.result"; ok: boolean }
-export type FromStatusPage = { type: "agents.reconnect" } | { type: "tabs.cleanup" } | { type: "pairing.set"; code: string }
+export type FromStatusPage =
+  | { type: "agents.reconnect" }
+  | { type: "tabs.cleanup" }
+  | { type: "pairing.set"; code: string }
+  | { type: "autoUpdate.set"; mode: AutoUpdateMode }

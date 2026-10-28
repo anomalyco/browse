@@ -64,7 +64,34 @@ function render(state: AgentRelayState) {
   element("update-summary").textContent = state.update ? capitalized(state.update.summary) : ""
   element("update-command").textContent = state.update?.command ?? ""
   showOverrides(state.overrides)
+  showAutoUpdate(state.autoUpdate)
 }
+
+/** The relay's update setting: shown for an npm install (a checkout updates with `update`; the notice above says so). */
+function showAutoUpdate(autoUpdate: AgentRelayState["autoUpdate"]) {
+  element("updates").hidden = autoUpdate?.install !== "npm"
+  if (!autoUpdate || autoUpdate.install !== "npm") return
+  for (const input of Array.from(element("auto-update").querySelectorAll<HTMLInputElement>("input[name=auto-update]")))
+    input.checked = input.value === autoUpdate.mode
+  const facts = [
+    autoUpdate.version ? `Installed: ${autoUpdate.version}${autoUpdate.channel === "beta" ? " (beta channel)" : ""}.` : "",
+    autoUpdate.pending ? `${autoUpdate.pending} is ready and switches in once no agent is using the browser.` : "",
+    !autoUpdate.pending && autoUpdate.latest && autoUpdate.latest !== autoUpdate.version ? `Newest: ${autoUpdate.latest}.` : "",
+    autoUpdate.previous && autoUpdate.version && autoUpdate.previous !== autoUpdate.version ? `\`opencode-browser rollback\` switches to ${autoUpdate.previous}.` : "",
+  ]
+  element("auto-update-state").textContent = facts.filter(Boolean).join(" ")
+  const note = element("auto-update-override")
+  note.hidden = !autoUpdate.overriddenBy
+  if (autoUpdate.overriddenBy) {
+    const variable = document.createElement("code")
+    variable.textContent = autoUpdate.overriddenBy
+    note.replaceChildren(`In effect: ${{ on: "automatic", notify: "notify only", off: "off" }[autoUpdate.effective]}. Set by `, variable, " on the relay.")
+  }
+}
+for (const input of Array.from(element("auto-update").querySelectorAll<HTMLInputElement>("input[name=auto-update]")))
+  input.addEventListener("change", () => {
+    if (input.checked && (input.value === "on" || input.value === "notify" || input.value === "off")) send({ type: "autoUpdate.set", mode: input.value })
+  })
 
 const capitalized = (text: string) => text.charAt(0).toUpperCase() + text.slice(1)
 

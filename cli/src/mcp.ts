@@ -9,6 +9,7 @@ import { getObject, getString, parseTargetSelection } from "./relay-helpers.ts"
 import * as RelayClient from "./relay-client.ts"
 import * as RelayLifecycle from "./relay-lifecycle.ts"
 import type { TargetSelection } from "./relay-schema.ts"
+import { autoUpdateStatus } from "./auto-update.ts"
 import { createUpdateWatcher, updateJson, type UpdateNotice } from "./update.ts"
 import { securityVariables, settingKeys, settingSpecs } from "./user-settings.ts"
 import { opencodeBrowserVersion } from "./version.ts"
@@ -99,7 +100,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         const [version, status] = yield* Effect.all([relay.version, relay.extensionStatus])
         const buildProblem = RelayLifecycle.relayBuildProblem(version)
         const available = updateJson(update())
-        return { endpoint: relay.endpoint, currentSession: currentSession.id, version, status, ...(buildProblem ? { buildProblem } : {}), ...(available ? { update: available } : {}) }
+        return { endpoint: relay.endpoint, currentSession: currentSession.id, version, status, ...(buildProblem ? { buildProblem } : {}), ...(available ? { update: available } : {}), autoUpdate: autoUpdateStatus() }
       }),
     },
     {

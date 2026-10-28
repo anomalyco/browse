@@ -123,6 +123,11 @@ export const restartRelay = Effect.fn("RelayLifecycle.restartRelay")(function* (
   readonly clientKind?: RelayShutdownRequest["client"]["kind"]
   /** End captures and recordings and disconnect raw CDP clients rather than be refused. */
   readonly force?: boolean
+  /**
+   * `update` and `rollback`: `start` launches another installed build, newer or older than this CLI's, so the checks that
+   * compare the relay's build with this CLI's (no downgrade, the replacement is this build) don't apply.
+   */
+  readonly otherBuild?: boolean
 }) {
   const buildId = options.buildId ?? opencodeBrowserBuildId
   const initial = yield* Effect.result(options.relay.version)
@@ -147,7 +152,7 @@ export const restartRelay = Effect.fn("RelayLifecycle.restartRelay")(function* (
     if (!Number.isFinite(Date.parse(buildId)) || !original.buildId || !Number.isFinite(Date.parse(original.buildId))) {
       return yield* Effect.fail(new Error("Cannot explicitly replace a source or unorderable relay build. Stop it manually, then launch the intended build."))
     }
-    if (isNewerBuild(original.buildId, buildId)) {
+    if (!options.otherBuild && isNewerBuild(original.buildId, buildId)) {
       return yield* Effect.fail(new Error(`Refusing to downgrade relay build ${original.buildId} to ${buildId}; refresh or restart this CLI or MCP client.`))
     }
 
@@ -184,7 +189,7 @@ export const restartRelay = Effect.fn("RelayLifecycle.restartRelay")(function* (
   if (!replacement || !replacement.instanceId || replacement.managed !== true || (original && isSameRelayInstance(original, replacement))) {
     return yield* Effect.fail(new Error("Relay restart did not produce a new managed instance; no further shutdown was attempted."))
   }
-  const buildProblem = relayBuildProblem(replacement, buildId)
+  const buildProblem = options.otherBuild ? undefined : relayBuildProblem(replacement, buildId)
   if (buildProblem) return yield* Effect.fail(new Error(`${buildProblem} A competing relay was left untouched.`))
   return { version: replacement, started, waitForReconnect: true } satisfies RelayReadiness
 })

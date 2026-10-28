@@ -69,8 +69,9 @@ import { ProtectedFrameTracker } from "./protected-frames.ts"
 import { RootTargetLifecycle } from "./root-target-lifecycle.ts"
 import { boundedToken, runtimeFailureKind, summarizeDiagnosticUrl, summarizeRuntimeEvaluate } from "./runtime-diagnostics.ts"
 import { shouldExposeChildTarget, TargetRegistry, type RootTargetChange, type TargetOwnershipChange } from "./target-registry.ts"
+import { autoUpdateModes, autoUpdateOverride, autoUpdateStatus, createAutoUpdater, npmRuntime, setStoredMode, spawnRelayRestart, storedMode, type AutoUpdateMode } from "./auto-update.ts"
 import { createUpdateWatcher } from "./update.ts"
-import { describeChanges, describeSettings, parseSettingChanges, settingsFromExtension, SettingsInputError, settingsToExtension, type SettingOverrides } from "./user-settings.ts"
+import { describeChanges, describeSettings, parseSettingChanges, settingsFromExtension, SettingsInputError, settingsToExtension, type SettingOverrides, type Settings } from "./user-settings.ts"
 import { installCommand, storeConfig } from "./paths.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "./version.ts"
 import { handleExecuteRealmException, handleExecuteRealmRejection, pruneStaleExecuteFilesDirectories } from "./execute-realm.ts"
@@ -697,7 +698,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     cleanupTabs: (idleMinutes) =>
       sendToExtension({ method: "tabs.cleanup", ...(idleMinutes === undefined ? {} : { params: { idleMinutes } }) }),
     settings: {
-      get: () => extensionSettings("settings.get").pipe(Effect.map((stored) => describeSettings(stored, userSettingOverrides()))),
+      get: () => extensionSettings("settings.get").pipe(Effect.map((stored) => describeSettings(withRelaySettings(stored), userSettingOverrides()))),
       set: (input) => Effect.gen(function* () {
         const requested = yield* Effect.try({
           try: () => parseSettingChanges(input),
@@ -708,8 +709,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         const overrides = userSettingOverrides()
         // A setting the environment fixes isn't written: it would have no effect, and the answer says so instead.
         const writable = Object.fromEntries(Object.entries(requested).filter(([key]) => !(key in overrides)))
-        const before = yield* extensionSettings("settings.get")
-        const after = Object.keys(writable).length ? yield* extensionSettings("settings.set", settingsToExtension(writable)) : before
+        // autoUpdate is the relay's own; it doesn't need the extension.
+        const extensionChanges = settingsToExtension(writable)
+        const relayOnly = Object.keys(extensionChanges).length === 0
+        const fromExtension = relayOnly && !extensionRpc.connected ? undefined : yield* extensionSettings("settings.get")
+        const before = withRelaySettings(fromExtension ?? settingsFromExtension({ settings: {} }))
+        if (typeof writable.autoUpdate === "string") setStoredMode(writable.autoUpdate as AutoUpdateMode)
+        const after = withRelaySettings(Object.keys(extensionChanges).length ? yield* extensionSettings("settings.set", extensionChanges) : (fromExtension ?? before))
+        if (writable.autoUpdate !== undefined) sendRelaySettings()
         relayLog("settings.set", { changes: Object.keys(writable).join(",") || undefined, overridden: Object.keys(requested).filter((key) => key in overrides).join(",") || undefined })
         return describeChanges({ before, after, requested, overrides })
       }),
@@ -731,6 +738,23 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     },
   })
   let relayReady = false
+  /** The last request from an agent (anything but version and connection polls), for auto-update's idle check. */
+  let lastAgentActivity = Date.now()
+  const autoUpdateIdleMs = Number(process.env.OPENCODE_BROWSER_AUTO_UPDATE_IDLE_MS) || 15 * 60_000
+  /**
+   * No agent is using the browser: nothing running or waiting (scripts, handoffs, captures, recordings, flight recorders),
+   * no CDP client attached, the relay not draining, and no agent request for a while. Auto-update switches only then.
+   */
+  const browserIdle = () =>
+    shutdownControl.accepting &&
+    cdpClients.size === 0 &&
+    !sessions.hasActiveNetworkCapture() &&
+    recordingRelay.recordingTabIds().length === 0 &&
+    flightRecorder.activeTabIds().length === 0 &&
+    !Array.from(activeHandoffTabs.values()).some((tabs) => tabs.size > 0) &&
+    !Array.from(sessions.sessions.keys()).some((id) => sessions.isExecuting(id) || sessions.hasPendingWork(id)) &&
+    Date.now() - lastAgentActivity >= autoUpdateIdleMs
+  let autoUpdater: ReturnType<typeof createAutoUpdater> | undefined
   const httpServer = http.createServer((request, response) => {
     if (!relayReady) {
       response.writeHead(503, { "content-type": "application/json; charset=utf-8", "retry-after": "1" })
@@ -738,6 +762,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return
     }
     const started = performance.now()
+    const requestPath = (request.url ?? "").split("?")[0]
+    if (requestPath !== "/version" && requestPath !== "/json/version" && requestPath !== "/json/version/" && requestPath !== "/extension/status") lastAgentActivity = Date.now()
     response.once("finish", () => {
       const pathname = (request.url ?? "").split("?")[0]
       // Health, version, and connection polls (every 200ms while a client waits) are frequent and uninteresting.
@@ -792,10 +818,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     shownByDefault: (tabId) =>
       isTabRecorded(tabId) ? recordingRelay.showsGhostCursor(tabId) || flightRecorder.showsGhostCursor(tabId) : ghostCursorAlways(),
   })
+  /** The extension's settings with the relay's own (autoUpdate) filled in from the data root. */
+  const withRelaySettings = (settings: Settings): Settings => ({ ...settings, autoUpdate: storedMode() })
   /** The same, for the settings tool: by setting, with the variable that fixes it and the value in effect. */
   const userSettingOverrides = (): SettingOverrides => {
     const human = humanInputOverride()
+    const autoUpdate = autoUpdateOverride()
     return {
+      ...(autoUpdate ? { autoUpdate: { variable: process.env.OPENCODE_BROWSER_AUTO_UPDATE !== undefined ? "OPENCODE_BROWSER_AUTO_UPDATE" : "OPENCODE_BROWSER_UPDATE_CHECK", value: autoUpdate } } : {}),
       ...(agentWindow ? { window: { variable: "OPENCODE_BROWSER_AGENT_WINDOW", value: agentWindow } } : {}),
       ...(ghostCursorEnv === undefined ? {} : { cursor: { variable: "OPENCODE_BROWSER_GHOST_CURSOR", value: ghostCursorEnv ? "always" : "off" } }),
       ...(human === undefined ? {} : { humanInput: { variable: "OPENCODE_BROWSER_HUMAN_INPUT", value: human ? "on" : "off" } }),
@@ -835,9 +865,19 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (cursor === "off" || cursor === "always") ghostCursorSetting = cursor === "always"
     const human = params?.humanInput
     if (human === "on" || human === "off") setHumanInput(human === "on")
+    // The options page's update setting (the relay keeps it, auto-update.ts).
+    const autoUpdate = params?.autoUpdate
+    if (typeof autoUpdate === "string" && (autoUpdateModes as readonly string[]).includes(autoUpdate)) {
+      setStoredMode(autoUpdate as AutoUpdateMode)
+      relayLog("autoupdate.mode", { mode: autoUpdate })
+    }
     relayLog("extension.settings", { cursor: ghostCursorAlways() ? "always" : "off", humanInput: humanInputEnabled() ? "on" : "off" })
     void ghostCursor.refresh()
-    sendExtensionBestEffort({ method: "relay.settings", params: { overrides: settingOverrides() } })
+    sendRelaySettings()
+  }
+  /** What the status page shows from the relay: the settings its environment fixes, and the update state. */
+  const sendRelaySettings = () => {
+    sendExtensionBestEffort({ method: "relay.settings", params: { overrides: settingOverrides(), autoUpdate: autoUpdateStatus() as unknown as JsonObject } })
   }
   const suppressedChildSessions = new Map<string, number>()
   const protectedFrames = new ProtectedFrameTracker()
@@ -897,6 +937,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     stopJournalRetention?.()
     clearInterval(updateTimer)
     clearInterval(orphanTimer)
+    autoUpdater?.stop()
     yield* shutdownControl.close().pipe(Effect.ignore)
     yield* sessions.closeAll()
     yield* rootLifecycle.close()
@@ -2122,6 +2163,18 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       updateTimer.unref()
       orphanTimer = setInterval(collectOrphans, Math.max(1_000, Math.min(30_000, Math.floor(clientGoneGraceMs / 2))))
       orphanTimer.unref()
+      // An npm install updates itself (auto-update.ts); a checkout or a foreground relay never does.
+      const runtime = managed ? npmRuntime() : undefined
+      if (runtime) {
+        autoUpdater = createAutoUpdater({
+          runtime,
+          isIdle: browserIdle,
+          log: relayLog,
+          onChange: () => sendRelaySettings(),
+          restart: (refused) => spawnRelayRestart(runtime.layout, refused),
+        })
+        autoUpdater.start()
+      }
       relayLog("relay.ready", { url: endpointUrl, version: opencodeBrowserVersion, build: opencodeBrowserBuildId, pid: process.pid, managed })
     }),
     (error) => Effect.gen(function* () {

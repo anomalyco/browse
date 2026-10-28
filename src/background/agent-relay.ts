@@ -29,9 +29,12 @@ import {
   type AgentRelayState,
   type AgentRelayStatus,
   type AgentRelayUpdate,
+  type AutoUpdateMode,
   type PairingSource,
+  type RelayAutoUpdate,
   type RelayOverrides,
   type RelaySettings,
+  autoUpdateMode,
 } from "../shared/protocol"
 import { createAgentRelayLog, formatAgentRelayLog } from "./agent-relay-log"
 import { AgentGroups } from "./agent-groups"
@@ -142,6 +145,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   let update: AgentRelayUpdate | undefined
   /** Settings the connected relay's environment fixes, as it reported them (`relay.settings`). */
   let overrides: RelayOverrides | undefined
+  /** The connected relay's update state (`relay.settings`). */
+  let autoUpdate: RelayAutoUpdate | undefined
   let bundledPairing: Promise<string | undefined> | undefined
 
   const snapshot = (): AgentRelayState => ({
@@ -153,6 +158,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     }),
     ...(update ? { update } : {}),
     ...(overrides ? { overrides } : {}),
+    ...(autoUpdate ? { autoUpdate } : {}),
   })
   const notify = () => input.changed(snapshot())
   const setStatus = (next: AgentRelayStatus) => {
@@ -299,6 +305,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       })
       void chrome.runtime.sendMessage({ action: "recording.cancelAll" }).catch(() => undefined)
       overrides = undefined
+      autoUpdate = undefined
       if (event.code === 4003) setStatus("incompatible")
       else if (event.code === 4004) setStatus("conflict")
       else if (event.code === 4006) setStatus("untrusted")
@@ -583,6 +590,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
           ...(fixed.humanInput === "on" || fixed.humanInput === "off" ? { humanInput: fixed.humanInput } : {}),
         }
         overrides = Object.keys(next).length ? next : undefined
+        autoUpdate = relayAutoUpdate(params?.autoUpdate)
         notify()
         return {}
       }
@@ -1153,6 +1161,12 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       await chrome.storage.local.set({ [PAIRING_KEY]: code })
       return true
     },
+    /** The status page's update setting; the relay keeps it (an older relay ignores it). */
+    setAutoUpdate(mode: AutoUpdateMode) {
+      if (!open()) return
+      log.add("settings", { autoUpdate: mode })
+      send({ method: "settings", params: { autoUpdate: mode } })
+    },
     /** Reconnects now, for example after the user fixed what blocked the connection. */
     reconnect() {
       log.add("reconnect.requested")
@@ -1265,4 +1279,16 @@ function string(params: JsonObject | undefined, key: string) {
   const value = params?.[key]
   if (typeof value !== "string") throw new Error(`Missing string param: ${key}`)
   return value
+}
+
+/** The relay's update state from `relay.settings`, keeping only known fields and values. */
+function relayAutoUpdate(input: unknown): RelayAutoUpdate | undefined {
+  if (!isJsonObject(input)) return undefined
+  const install = input.install === "npm" || input.install === "checkout" ? input.install : "other"
+  const mode = autoUpdateMode(input.mode)
+  const effective = autoUpdateMode(input.effective)
+  if (!mode || !effective) return undefined
+  const text = (value: unknown) => (typeof value === "string" && value.length <= 100 ? value : undefined)
+  const optional = { overriddenBy: text(input.overriddenBy), version: text(input.version), channel: text(input.channel), latest: text(input.latest), pending: text(input.pending), previous: text(input.previous) }
+  return { install, mode, effective, ...Object.fromEntries(Object.entries(optional).filter(([, value]) => value !== undefined)) }
 }

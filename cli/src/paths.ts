@@ -37,9 +37,12 @@ const quoted = (value: string) => (/^[\w@%+=:,./-]+$/.test(value) ? value : JSON
  * checkout's bundle from a checkout (where nothing is on PATH and the package may not be published).
  */
 export function cliCommand(args: string): string {
-  return fromCheckout()
-    ? `node ${quoted(path.join(packageRoot(), "dist", "cli.mjs"))} ${args}`
-    : `npx @opencode/browse ${args}`
+  if (fromCheckout()) return `node ${quoted(path.join(packageRoot(), "dist", "cli.mjs"))} ${args}`
+  // An installed runtime (auto-update.ts): its stable shim runs the version this install uses, which npx might not.
+  const shim = path.join(dataRoot(), "bin", "opencode-browser.mjs")
+  const versions = path.join(dataRoot(), "runtime", "versions")
+  if (!path.relative(versions, packageRoot()).startsWith("..") && fs.existsSync(shim)) return `node ${quoted(shim)} ${args}`
+  return `npx @opencode/browse ${args}`
 }
 
 declare global {
