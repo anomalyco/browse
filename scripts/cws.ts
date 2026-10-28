@@ -95,7 +95,7 @@ export function createClient(options: { fetch?: typeof fetch; sleep?: (ms: numbe
   return {
     item,
     status,
-    async upload(zip: Uint8Array, expected: string) {
+    async upload(zip: Uint8Array<ArrayBuffer>, expected: string) {
       const result = await call<{ uploadState?: string; crxVersion?: string }>("POST", `${api}/upload/v2/${item}:upload`, {
         body: zip,
         contentType: "application/zip",
@@ -151,7 +151,7 @@ if (import.meta.main) {
       console.log(JSON.stringify(await client.status(), null, 2))
     } else if (command === "publish" && values.zip && values.version) {
       const expected = manifestVersionFields(values.version).version
-      const zip = new Uint8Array(await readFile(values.zip))
+      const zip = new Uint8Array(await readFile(values.zip)) as Uint8Array<ArrayBuffer>
       // Never upload a zip whose manifest isn't the version being released.
       const packaged = JSON.parse(await $`unzip -p ${values.zip} manifest.json`.quiet().text()).version
       if (packaged !== expected) throw new Error(`${values.zip} has manifest version ${packaged}, not ${expected}.`)
