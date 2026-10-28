@@ -229,6 +229,17 @@ export function createHttpRequestHandler(options: {
 }
 
 /**
+ * A recording request that failed because there was nothing to act on (no recording) is the caller's mistake, not
+ * the relay's: 404, like an unavailable extension is 503. Only real failures are 500.
+ */
+function recordingStatusCode(result: { readonly success: boolean; readonly error?: string }): number {
+  if (result.success) return 200
+  if (/^No active recording/i.test(result.error ?? "")) return 404
+  if (/extension is not connected/i.test(result.error ?? "")) return 503
+  return 500
+}
+
+/**
  * The MCP server names its process (OpenCode-Browser-Client-Pid) on session requests; the relay remembers it per
  * session so a capture or an implicit session outlives its MCP server only briefly (relay.ts, collectOrphans).
  */
@@ -379,7 +390,7 @@ function handleRecordingRequest(options: {
       const request = yield* decodeRequest(RecordingTargetRequest, body, "recording stop")
       const target = recordingTargetFromValues({ registry: options.registry, tabId: request.tabId, sessionId: request.sessionId })
       const result = yield* tryRecordingPromise("stop recording", () => options.recordingRelay.stopRecording(target))
-      sendJson(options.response, result, result.success ? 200 : 500)
+      sendJson(options.response, result, recordingStatusCode(result))
       return
     }
     if (options.pathname === "/recording/status" && options.request.method === "GET") {
@@ -393,7 +404,7 @@ function handleRecordingRequest(options: {
       const request = yield* decodeRequest(RecordingTargetRequest, body, "recording cancel")
       const target = recordingTargetFromValues({ registry: options.registry, tabId: request.tabId, sessionId: request.sessionId })
       const result = yield* tryRecordingPromise("cancel recording", () => options.recordingRelay.cancelRecording(target))
-      sendJson(options.response, result, result.success ? 200 : 500)
+      sendJson(options.response, result, recordingStatusCode(result))
       return
     }
     options.response.writeHead(404)

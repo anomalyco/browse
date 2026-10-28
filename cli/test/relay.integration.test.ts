@@ -481,6 +481,24 @@ describe("relay", () => {
     extension.close()
   }, 20_000)
 
+  test("stopping or cancelling a recording when none runs is a clean 404, not a 500", async () => {
+    const targetInfo = { targetId: "TARGET-77", type: "page", title: "Example", url: "https://example.com/", attached: true, browserContextId: "CTX" }
+    const extension = new FakeExtension(pairingCode(home))
+      .on("tabs.create", () => ({ tabId: 77 }))
+      .on("Target.getTargetInfo", () => ({ targetInfo }))
+    expect(await extension.pair()).toBe(true)
+    const socket = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test?opencodeBrowserSessionId=no-recording`, { authorization: `Bearer ${token}` })
+    if (!(socket instanceof WebSocket)) throw new Error("CDP connection refused")
+    await cdpCall(socket, 1, "Target.createTarget", { url: "https://example.com/" })
+    const post = (route: string) => fetch(`${base}${route}`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ tabId: 77 }) })
+    const stopped = await post("/recording/stop")
+    expect(stopped.status).toBe(404)
+    expect(((await stopped.json()) as { error?: string }).error).toContain("No active recording")
+    expect((await post("/recording/cancel")).status).toBe(200)
+    socket.close()
+    extension.close()
+  }, 20_000)
+
   test("a page restored from the back/forward cache is reported loaded, so goBack doesn't wait forever", async () => {
     const targetInfo = { targetId: "TARGET-81", type: "page", title: "Example", url: "https://example.com/b", attached: true, browserContextId: "CTX" }
     const extension = new FakeExtension(pairingCode(home))
