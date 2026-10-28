@@ -59,8 +59,10 @@ export async function switchTo(layout: Layout, version: string, options: { reado
       clientKind: "cli",
       force: options.force,
       otherBuild: true,
-      // Runs only after the old relay accepted the shutdown and stopped.
-      start: point.pipe(Effect.andThen(RelayLifecycle.startManagedRelay(entry))),
+      // current.json moves once the old relay accepted the shutdown (so its MCP servers stop restarting it), and the new
+      // relay starts once it has gone. A refused shutdown reaches neither.
+      onShutdownAccepted: point,
+      start: Effect.suspend(() => (switched ? Effect.void : point)).pipe(Effect.andThen(RelayLifecycle.startManagedRelay(entry))),
     })
     // Another relay can start in the gap (an old MCP server's next call); it must be the new version.
     const now = yield* relay.version

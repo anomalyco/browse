@@ -179,7 +179,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 })
 `
 
-  test("swaps to a new version only once the relay runs it, keeping the session identity", async () => {
+  test("swaps to a new version only once the relay runs it, holding requests meanwhile and keeping the session identity", async () => {
     const shimRoot = fs.mkdtempSync(path.join(os.tmpdir(), "browse-shim-it-"))
     const shimLayout = runtimeLayout(shimRoot)
     for (const stubVersion of ["9.0.1", "9.0.2"]) {
@@ -212,17 +212,22 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       expect(first.session).toMatch(/^mcp-[0-9a-f]{8}$/)
       expect(first.clientPid).toBe(String(shim.pid))
 
-      // current.json moves, but the relay still runs 9.0.1 (a switch not finished, or refused): no swap.
+      // current.json moves while the relay still runs 9.0.1 (a switch not finished): no swap, and a new request waits
+      // rather than reaching a server whose relay is going away.
       writeCurrent(shimLayout, { version: "9.0.2", previous: "9.0.1", channel: "latest" })
-      await Bun.sleep(3_000)
-      expect((await call("whoami")).version).toBe("9.0.1")
+      const held = ++id
+      shim.stdin!.write(JSON.stringify({ jsonrpc: "2.0", id: held, method: "whoami" }) + "\n")
+      await Bun.sleep(2_500)
+      expect(answers.has(held)).toBe(false)
+      // The switch is called off (current.json back to 9.0.1): the held request goes to the 9.0.1 server.
+      writeCurrent(shimLayout, { version: "9.0.1", channel: "latest" })
+      expect((await until(() => answers.get(held), 5_000)).version).toBe("9.0.1")
 
-      // The relay now runs 9.0.2: the next server is 9.0.2, with the same session and client pid.
+      // The switch happens: current.json moves and the relay runs 9.0.2. The next server is 9.0.2, same session and pid.
+      writeCurrent(shimLayout, { version: "9.0.2", previous: "9.0.1", channel: "latest" })
       relayVersion = "9.0.2"
-      const swapped = await until(async () => {
-        const answer = await call("whoami")
-        return answer.version === "9.0.2" ? answer : undefined
-      }, 10_000)
+      const swapped = await call("whoami")
+      expect(swapped.version).toBe("9.0.2")
       expect(swapped.session).toBe(first.session)
       expect(swapped.clientPid).toBe(String(shim.pid))
       expect(swapped.ppid).toBe(String(shim.pid))

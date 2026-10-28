@@ -454,8 +454,17 @@ if (process.argv[2] !== "mcp") {
     }
   }
 
+  // Once current.json names another version, new requests wait for the swap instead of reaching a server whose relay is
+  // going away (or already runs the other version); a switch that doesn't happen releases them.
+  let heldSince
+  const moved = () => { try { return current() !== version } catch { return false } }
   const fromClient = (line) => {
     if (swapping) return void queue.push(line)
+    if (moved()) {
+      heldSince ??= Date.now()
+      queue.push(line)
+      return void maybeSwap()
+    }
     const message = parse(line)
     if (message && message.method === "initialize") initialize = message
     if (message && message.method === "notifications/initialized") initialized = line
@@ -474,15 +483,23 @@ if (process.argv[2] !== "mcp") {
     if (swapping || checking || inflight.size > 0) return
     let next
     try { next = current() } catch { return }
-    if (next === version) return void (unreachable = 0)
+    if (next === version) {
+      unreachable = 0
+      heldSince = undefined
+      for (const queued of queue.splice(0)) fromClient(queued)
+      return
+    }
     checking = true
     const running = await relayVersion()
     checking = false
     unreachable = running === undefined ? unreachable + 1 : 0
-    if (running !== next && unreachable < 3) return
+    // Held requests don't wait forever for a relay that never reports the new version.
+    const waitedOut = heldSince !== undefined && Date.now() - heldSince > 15000
+    if (running !== next && unreachable < 3 && !waitedOut) return
     if (swapping || inflight.size > 0 || current() !== next) return
     const old = child
     version = next
+    heldSince = undefined
     start(true)
     old.stdin.end()
     setTimeout(() => old.kill(), 5000).unref()

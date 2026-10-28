@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url"
 import { extensionProtocolAdvice, extensionReconnectAlarmPeriodMs } from "./protocol.ts"
 import * as RelayClient from "./relay-client.ts"
 import { RelayShutdownRequest, type ExtensionStatus, type RelayVersion } from "./relay-schema.ts"
+import { npmRuntime } from "./auto-update.ts"
 import { cliCommand, installCommand } from "./paths.ts"
 import { opencodeBrowserBuildId } from "./version.ts"
 
@@ -57,6 +58,16 @@ export class ExtensionProtocolIncompatible extends Schema.TaggedError<ExtensionP
   },
 ) {}
 
+/** This process runs an installed npm version that current.json no longer names (auto-update.ts). */
+function supersededRuntime(): boolean {
+  try {
+    const runtime = npmRuntime()
+    return runtime !== undefined && runtime.current.version !== runtime.version
+  } catch {
+    return false
+  }
+}
+
 export function relayBuildProblem(version: RelayVersion, buildId = opencodeBrowserBuildId): string | undefined {
   if (!version.buildId) {
     return `Running relay does not report a build id; use \`${cliCommand("relay restart")}\` for upgrade guidance (${buildId}).`
@@ -95,7 +106,9 @@ export const ensureRelay = Effect.fn("RelayLifecycle.ensureRelay")(function* (op
     if (!autoStart) {
       return yield* Effect.fail(new Error(`Automatic relay startup is disabled; no relay is available at ${options.relay.endpoint}`))
     }
-    yield* options.start ?? startManagedRelay()
+    // An npm install's older version, after an update moved current.json: the new version's relay is on its way, and
+    // starting this one would race it (and run a mix); wait for it instead.
+    if (!supersededRuntime()) yield* options.start ?? startManagedRelay()
   }
   const version = yield* waitForRelayReady(options)
   const buildProblem = relayBuildProblem(version, buildId)
@@ -128,6 +141,8 @@ export const restartRelay = Effect.fn("RelayLifecycle.restartRelay")(function* (
    * compare the relay's build with this CLI's (no downgrade, the replacement is this build) don't apply.
    */
   readonly otherBuild?: boolean
+  /** Runs once the old relay accepted the shutdown, before it exits (switchTo moves current.json here). */
+  readonly onShutdownAccepted?: Effect.Effect<void>
 }) {
   const buildId = options.buildId ?? opencodeBrowserBuildId
   const initial = yield* Effect.result(options.relay.version)
@@ -173,7 +188,10 @@ export const restartRelay = Effect.fn("RelayLifecycle.restartRelay")(function* (
         ...(options.force ? { force: true } : {}),
       })
       const shutdown = yield* Effect.result(options.relay.shutdown(request))
-      if (Result.isSuccess(shutdown)) restartRequestId = request.requestId
+      if (Result.isSuccess(shutdown)) {
+        restartRequestId = request.requestId
+        if (options.onShutdownAccepted) yield* options.onShutdownAccepted
+      }
       else if (!isRelayUnreachable(shutdown.failure) && !isRelayInstanceChanged(shutdown.failure)) {
         return yield* shutdown.failure
       }

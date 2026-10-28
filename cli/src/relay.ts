@@ -760,11 +760,12 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const autoUpdateIdleMs = Number(process.env.OPENCODE_BROWSER_AUTO_UPDATE_IDLE_MS) || 15 * 60_000
   /**
    * No agent is using the browser: nothing running or waiting (scripts, handoffs, captures, recordings, flight recorders),
-   * no CDP client attached, the relay not draining, and no agent request for a while. Auto-update switches only then.
+   * no raw CDP client attached, the relay not draining, and no agent request for a while. Auto-update switches only then.
    */
   const browserIdle = () =>
     shutdownControl.accepting &&
-    cdpClients.size === 0 &&
+    // The relay's own sandbox connections (one per session that ran a script) stay open; only outside clients count.
+    !Array.from(cdpClients).some((client) => !cdpClients.isSandbox(client)) &&
     !sessions.hasActiveNetworkCapture() &&
     recordingRelay.recordingTabIds().length === 0 &&
     flightRecorder.activeTabIds().length === 0 &&
