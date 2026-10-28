@@ -512,7 +512,7 @@ headers and automatic in-page `handoff` recovery when a session expires or
 redirects to login):
 
 ```ts
-import { OpenCodeBrowserClient } from "opencode-browser-cli"
+import { OpenCodeBrowserClient } from "@opencode/browse"
 
 const ubereats = OpenCodeBrowserClient.origin("https://www.ubereats.com", {
   session: "🥤 karma-cafe",
@@ -531,7 +531,7 @@ For Effect-native applications with schema decoding or `sensitive: true`
 `Redacted` responses, use `OpenCodeBrowserClient.Service`:
 
 ```ts
-import { OpenCodeBrowserClient } from "opencode-browser-cli"
+import { OpenCodeBrowserClient } from "@opencode/browse"
 
 const sensitive = yield* origin.json({
   path: "/api/session",
@@ -580,7 +580,7 @@ Generated TypeScript applications can own that wrapper internally through the
 public SDK:
 
 ```ts
-import { SecretProfile } from "opencode-browser-cli"
+import { SecretProfile } from "@opencode/browse"
 import { Effect } from "effect"
 
 const result = await Effect.runPromise(SecretProfile.run({

@@ -19,7 +19,7 @@ Anomaly, the maker of OpenCode, doesn't run a server for this extension and does
 
 ## Your choices
 - Agents can't use your tabs unless you click the toolbar button on them. Click again to take a tab back.
-- Remove the extension and run `opencode-browser uninstall` (`node cli/dist/cli.mjs uninstall` from a checkout) to delete everything it set up.
+- Remove the extension and run `npx @opencode/browse uninstall` (`node cli/dist/cli.mjs uninstall` from a checkout) to delete everything it set up.
 
 ## Contact
 Questions: open an issue at https://github.com/anomalyco/browse.

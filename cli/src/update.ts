@@ -287,7 +287,7 @@ export function runUpdate(args: readonly string[], deps: UpdateDeps): number {
   const repo = deps.repo
   if (!repo) {
     log("OpenCode Browser was installed from npm. Update it with:")
-    log("  npx opencode-browser-cli@latest install")
+    log("  npx @opencode/browse@latest install")
     log("then restart opencode.")
     return 0
   }
@@ -376,7 +376,7 @@ export async function runUpdateCommand(args: readonly string[]) {
   const log = (line: string) => process.stdout.write(line + "\n")
   if (args.includes("--check")) {
     const repo = checkoutRoot()
-    if (!repo) return log("Installed from npm: run `npx opencode-browser-cli@latest install` to update.")
+    if (!repo) return log("Installed from npm: run `npx @opencode/browse@latest install` to update.")
     // Ask the remote now, whatever the cache says.
     const check = await checkForUpdate(repo)
     if (check) writeCache(path.join(dataRoot(), CACHE_FILE), check)

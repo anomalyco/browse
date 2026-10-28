@@ -23,7 +23,7 @@ const STORE_ID = "mfnicocicmmlkpjnaffgihfjhdgjkdjg"
 /** The unpacked build; its ID is pinned by the manifest key. */
 const UNPACKED_ID = "afeafocngkodbmaipcngoamamfmekgfo"
 const STORE_URL = `https://chromewebstore.google.com/detail/${STORE_ID}`
-const PACKAGE = "opencode-browser-cli"
+const PACKAGE = "@opencode/browse"
 const MCP_NAME = "browse"
 /** The MCP server's name before it was renamed to `browse`. */
 const LEGACY_MCP_NAME = "opencode-browser"
