@@ -12,7 +12,13 @@ export type NetworkCaptureOptions = {
   readonly maxBodyBytes?: number
   readonly maxTotalBodyBytes?: number
   readonly maxEntries?: number
+  /** The capture ends by itself (its data discarded) after this long; it holds the relay busy for restarts meanwhile. */
+  readonly maxDurationMs?: number
 }
+
+/** A forgotten capture used to keep `relay restart` and `update` refusing forever. */
+export const defaultNetworkCaptureMaxDurationMs = 30 * 60_000
+const maxAllowedDurationMs = 24 * 60 * 60_000
 
 export type NetworkCaptureStopOptions = {
   readonly outputPath?: string
@@ -33,6 +39,9 @@ export type NetworkCaptureStatus = {
   readonly resourceTypes?: readonly string[]
   readonly content?: "omit" | "embed"
   readonly secrets?: string
+  /** When the capture ends by itself: when, and the maximum duration it reached (or that its client went away). */
+  readonly endsAt?: string
+  readonly ended?: string
 }
 
 type NetworkEndpointDigest = {
@@ -127,6 +136,7 @@ type ActiveCapture = {
   stopping: boolean
   cancelled: boolean
   outputUnsafe: boolean
+  endsAt?: string
 }
 
 const maxAllowedBodyBytes = 10_000_000
@@ -137,6 +147,9 @@ const maxFinalizeWorkers = 4
 
 export class Recorder {
   private active: ActiveCapture | undefined
+  private expiry: ReturnType<typeof setTimeout> | undefined
+  /** Why the last capture ended without a stop, shown by status and by a stop that comes too late. */
+  private ended: string | undefined
   private page: Page | undefined
   private pageEpoch = 0
   private readonly transition = Semaphore.makeUnsafe(1)
@@ -154,6 +167,8 @@ export class Recorder {
         if (capture.active) {
           throw new NetworkCaptureError({ message: "Network capture is already active for this session", operation: "start", reason: "already-active" })
         }
+        const maxDurationMs = options.maxDurationMs ?? defaultNetworkCaptureMaxDurationMs
+        capture.ended = undefined
         capture.active = {
           startedAt: new Date().toISOString(),
           options: {
@@ -178,6 +193,14 @@ export class Recorder {
           outputUnsafe: false,
         }
         capture.bindPage(page)
+        const active = capture.active
+        clearTimeout(capture.expiry)
+        capture.expiry = setTimeout(() => {
+          if (capture.active !== active) return
+          Effect.runFork(capture.end(`it reached its maximum duration of ${formatDuration(maxDurationMs)} (maxDurationMs)`))
+        }, maxDurationMs)
+        capture.expiry.unref?.()
+        active.endsAt = new Date(Date.now() + maxDurationMs).toISOString()
         return capture.status()
       },
       catch: (cause) => cause instanceof NetworkCaptureError
@@ -191,6 +214,7 @@ export class Recorder {
     if (!active) {
       return {
         active: false,
+        ...(this.ended ? { ended: this.ended } : {}),
         entryCount: 0,
         responseCount: 0,
         failureCount: 0,
@@ -211,7 +235,15 @@ export class Recorder {
       ...(active.options.urlFilter ? { urlFilter: active.options.urlFilter } : {}),
       ...(active.options.resourceTypes ? { resourceTypes: [...active.options.resourceTypes] } : {}),
       content: active.options.content,
+      ...(active.endsAt ? { endsAt: active.endsAt } : {}),
     }
+  }
+
+  /** Ends the capture without a result (its data is discarded), saying why on the next status or stop. */
+  end(reason: string): Effect.Effect<{ readonly cancelled: boolean }> {
+    return this.cancel().pipe(Effect.tap(({ cancelled }) => Effect.sync(() => {
+      if (cancelled) this.ended = reason
+    })))
   }
 
   stop(options: NetworkCaptureStopOptions = {}): Effect.Effect<NetworkCaptureResult, NetworkCaptureError> {
@@ -219,7 +251,13 @@ export class Recorder {
     return this.transition.withPermit(Effect.gen(function* () {
       const active = capture.active
       if (!active) {
-        return yield* new NetworkCaptureError({ message: "Network capture is not active for this session", operation: "stop", reason: "inactive" })
+        return yield* new NetworkCaptureError({
+          message: capture.ended
+            ? `Network capture is not active for this session: it ended because ${capture.ended}, and what it captured was discarded. Start a new one.`
+            : "Network capture is not active for this session",
+          operation: "stop",
+          reason: "inactive",
+        })
       }
       const boundPage = capture.page
       active.stopping = true
@@ -249,8 +287,9 @@ export class Recorder {
             ? cause
             : new NetworkCaptureError({ message: cause.message, operation: "auth-profile", reason: "persistence-failed", cause })),
         )
-        const finalStatus = capture.status()
+        const { endsAt: _endsAt, ...finalStatus } = capture.status()
         capture.active = undefined
+        clearTimeout(capture.expiry)
         return {
           ...finalStatus,
           ...(secrets ? { secrets } : {}),
@@ -283,7 +322,11 @@ export class Recorder {
       capture.unbindPage()
       capture.discardFinalizers(active)
       yield* Effect.promise(() => settleFinalizers(active, 5_000))
-      if (capture.active === active) capture.active = undefined
+      if (capture.active === active) {
+        capture.active = undefined
+        clearTimeout(capture.expiry)
+      }
+      capture.ended = undefined
       return { cancelled: true }
     })).pipe(Effect.uninterruptible)
   }
@@ -605,9 +648,16 @@ function validateOptions(options: NetworkCaptureOptions): void {
   validateLimit("maxBodyBytes", options.maxBodyBytes, maxAllowedBodyBytes)
   validateLimit("maxTotalBodyBytes", options.maxTotalBodyBytes, maxAllowedTotalBodyBytes)
   validateLimit("maxEntries", options.maxEntries, maxAllowedEntries)
+  validateLimit("maxDurationMs", options.maxDurationMs, maxAllowedDurationMs)
   if (options.resourceTypes && options.resourceTypes.length > maxAllowedResourceTypes) {
     throw new NetworkCaptureError({ message: `resourceTypes cannot contain more than ${maxAllowedResourceTypes} values`, operation: "start", reason: "invalid-options" })
   }
+}
+
+function formatDuration(ms: number): string {
+  if (ms % 3_600_000 === 0) return `${ms / 3_600_000} hour${ms === 3_600_000 ? "" : "s"}`
+  if (ms % 60_000 === 0) return `${ms / 60_000} minute${ms === 60_000 ? "" : "s"}`
+  return `${Math.round(ms / 1000)} s`
 }
 
 function validateLimit(name: string, value: number | undefined, maximum: number): void {

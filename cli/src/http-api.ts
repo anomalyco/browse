@@ -228,6 +228,15 @@ export function createHttpRequestHandler(options: {
   }
 }
 
+/**
+ * The MCP server names its process (OpenCode-Browser-Client-Pid) on session requests; the relay remembers it per
+ * session so a capture or an implicit session outlives its MCP server only briefly (relay.ts, collectOrphans).
+ */
+function noteClient(request: http.IncomingMessage, sessions: OpenCodeBrowserSessions, sessionId: string): void {
+  const pid = Number(headerValue(request.headers["opencode-browser-client-pid"]))
+  if (Number.isSafeInteger(pid) && pid > 0) sessions.noteClient(sessionId, pid)
+}
+
 /** Whether a request carries the relay token as `Authorization: Bearer <token>`, compared in constant time. */
 export function hasRelayToken(request: http.IncomingMessage, token: string): boolean {
   const header = request.headers.authorization
@@ -244,11 +253,11 @@ function handleClientRequest(options: {
   return Effect.gen(function* () {
     if (options.pathname === "/v1/sessions/ensure" && options.request.method === "POST") {
       const request = yield* decodeRequest(SessionEnsureRequest, yield* readJsonBody(options.request), "session ensure")
-      sendJson(options.response, {
-        session: yield* options.sessions.ensure(request.id, {
-          ...(request.readOnly === undefined ? {} : { readOnly: request.readOnly }),
-        }),
+      const session = yield* options.sessions.ensure(request.id, {
+        ...(request.readOnly === undefined ? {} : { readOnly: request.readOnly }),
       })
+      noteClient(options.request, options.sessions, session.id)
+      sendJson(options.response, { session })
       return
     }
     if (options.pathname === "/v1/authenticated-origin/json" && options.request.method === "POST") {
@@ -272,6 +281,7 @@ function handleNetworkRequest(options: {
     if (options.pathname === "/network/start" && options.request.method === "POST") {
       const request = yield* decodeRequest(NetworkStartRequest, yield* readJsonBody(options.request), "network start")
       const { sessionId, ...captureOptions } = request
+      noteClient(options.request, options.sessions, sessionId)
       const result = yield* options.sessions.networkStart(sessionId, captureOptions)
       sendJson(options.response, result)
       return
@@ -472,6 +482,7 @@ function handleCliRequest(options: {
       const body = yield* readJsonBody(options.request)
       const request = yield* decodeRequest(SessionNewRequest, body, "session new")
       const session = yield* options.sessions.create(optionalSessionId(request.id), { readOnly: request.readOnly === true })
+      noteClient(options.request, options.sessions, session.id)
       sendJson(options.response, { session: options.sessions.summary(session.id) })
       return
     }
@@ -534,6 +545,7 @@ function handleCliRequest(options: {
       const body = yield* readJsonBody(options.request)
       const request = yield* decodeRequest(ExecuteRequest, body, "execute")
       const requestedSessionId = optionalSessionId(request.sessionId)
+      if (requestedSessionId) noteClient(options.request, options.sessions, requestedSessionId)
       const { result, session } = yield* options.sessions.execute({
         ...(requestedSessionId ? { sessionId: requestedSessionId } : {}),
         code: request.code,
@@ -541,6 +553,7 @@ function handleCliRequest(options: {
         ...(request.targetSelection ? { targetSelection: request.targetSelection } : {}),
       })
       const { setupFailed: _setupFailed, ...wireResult } = result
+      noteClient(options.request, options.sessions, session.id)
       sendJson(options.response, { ...wireResult, session })
       return
     }

@@ -44,6 +44,7 @@ class FakeSandbox implements ExecuteSandboxLike {
   networkStatus() { return { active: false } as never }
   networkStop(): never { throw new Error("unused") }
   networkCancel() { return Effect.succeed({ cancelled: false }) }
+  networkEnd() { return Effect.succeed({ cancelled: false }) }
   authRefresh(): never { throw new Error("unused") }
   redactNetworkCaptureText(text: string) { return text }
   markTargetCrashed() { return false }

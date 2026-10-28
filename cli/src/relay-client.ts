@@ -159,7 +159,11 @@ export class Service extends Context.Service<Service, Interface>()("opencode-bro
 const decodeErrorEnvelope = Schema.decodeUnknownOption(ErrorEnvelope)
 const decodeErrorMessage = Schema.decodeUnknownOption(Schema.Struct({ error: Schema.String }))
 
-export const make = Effect.fn("RelayClient.make")(function* (options?: { readonly endpoint?: string }) {
+export const make = Effect.fn("RelayClient.make")(function* (options?: {
+  readonly endpoint?: string
+  /** Sent as OpenCode-Browser-Client-Pid so the relay can end a capture or an implicit session once this process is gone. */
+  readonly clientPid?: number
+}) {
   const port = yield* portConfig.pipe(
     Effect.mapError((cause) => new RelayConfigInvalid({
       message: `Invalid OPENCODE_BROWSER_PORT configuration: ${cause.message}`,
@@ -231,7 +235,8 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: { readonl
     } catch {
       return request
     }
-    return HttpClientRequest.setHeader(request, "authorization", authorization)
+    const authorized = HttpClientRequest.setHeader(request, "authorization", authorization)
+    return options?.clientPid === undefined ? authorized : HttpClientRequest.setHeader(authorized, "opencode-browser-client-pid", String(options.clientPid))
   }
 
   const getJson = <A>(path: string, schema: Schema.ConstraintDecoder<A>): Effect.Effect<A, RelayClientError> =>
@@ -333,3 +338,8 @@ const layer: Layer.Layer<Service, RelayConfigInvalid, HttpClient.HttpClient> = L
 
 /** RelayClient backed by `node:http` (avoiding undici's 5-minute headersTimeout on long handoffs/commands), for standalone CLI/MCP wiring. */
 export const layerFetch: Layer.Layer<Service, RelayConfigInvalid> = layer.pipe(Layer.provide(NodeHttpClient.layerNodeHttp))
+
+/** layerFetch for the MCP server, which names its process to the relay (see `make`). */
+export const layerFetchMcp: Layer.Layer<Service, RelayConfigInvalid> = Layer.effect(Service, make({ clientPid: process.pid })).pipe(
+  Layer.provide(NodeHttpClient.layerNodeHttp),
+)

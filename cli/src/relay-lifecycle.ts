@@ -121,6 +121,8 @@ function waitForRelayReady(options: EnsureRelayOptions): Effect.Effect<RelayVers
 
 export const restartRelay = Effect.fn("RelayLifecycle.restartRelay")(function* (options: EnsureRelayOptions & {
   readonly clientKind?: RelayShutdownRequest["client"]["kind"]
+  /** End captures and recordings and disconnect raw CDP clients rather than be refused. */
+  readonly force?: boolean
 }) {
   const buildId = options.buildId ?? opencodeBrowserBuildId
   const initial = yield* Effect.result(options.relay.version)
@@ -163,6 +165,7 @@ export const restartRelay = Effect.fn("RelayLifecycle.restartRelay")(function* (
         requestId: crypto.randomUUID(),
         reason: "explicit-restart",
         client: { kind: options.clientKind ?? "sdk", instanceId: clientInstanceId, buildId },
+        ...(options.force ? { force: true } : {}),
       })
       const shutdown = yield* Effect.result(options.relay.shutdown(request))
       if (Result.isSuccess(shutdown)) restartRequestId = request.requestId

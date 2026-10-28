@@ -213,10 +213,14 @@ export function relayNotRestarted(statusJson: string, output: string, command = 
     : sessions.length > 1
       ? `${sessions.length} agent sessions are active (${sessions.slice(0, 5).join(", ")}${sessions.length > 5 ? ", …" : ""})`
       : undefined
+  // A capture, recording or raw client refuses the restart until it ends; --force ends it.
+  const forceable = /--force/.test(reason)
   return [
     `! Relay not restarted: ${who ?? (reason || "it declined")}${who && reason ? ` (${reason})` : ""}.`,
     "  It keeps running the previous version, so agents get this update only after it restarts.",
-    `  When no agent is using the browser, run: ${command}`,
+    forceable
+      ? `  When no agent is using the browser, run: ${command} (or ${command} --force to end what's blocking it now)`
+      : `  When no agent is using the browser, run: ${command}`,
   ]
 }
 

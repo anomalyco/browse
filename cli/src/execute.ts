@@ -1211,6 +1211,10 @@ export class ExecuteSandbox {
     return this.networkCapture.cancel()
   }
 
+  networkEnd(reason: string): Effect.Effect<{ readonly cancelled: boolean }> {
+    return this.networkCapture.end(reason)
+  }
+
   authRefresh(options: {
     readonly name: string
     readonly urlFilter?: string

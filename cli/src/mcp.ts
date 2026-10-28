@@ -227,6 +227,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         maxBodyBytes: { type: "integer", minimum: 1, description: "Maximum bytes captured from each body. Defaults to 1000000." },
         maxTotalBodyBytes: { type: "integer", minimum: 1, description: "Maximum body bytes retained for the capture. Defaults to 25000000." },
         maxEntries: { type: "integer", minimum: 1, description: "Maximum captured requests. Defaults to 1000." },
+        maxDurationMs: { type: "integer", minimum: 1, maximum: 86_400_000, description: "The capture ends by itself, discarding what it captured, after this long. Defaults to 1800000 (30 minutes). It also ends when this MCP server exits." },
       }),
       readOnly: false,
       destructive: false,
@@ -251,6 +252,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         const maxBodyBytes = optionalPositiveIntegerField(object, "maxBodyBytes")
         const maxTotalBodyBytes = optionalPositiveIntegerField(object, "maxTotalBodyBytes")
         const maxEntries = optionalPositiveIntegerField(object, "maxEntries")
+        const maxDurationMs = optionalPositiveIntegerField(object, "maxDurationMs")
         const result = yield* relay.networkStart({
           sessionId,
           ...(urlFilter ? { urlFilter } : {}),
@@ -259,6 +261,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
           ...(maxBodyBytes === undefined ? {} : { maxBodyBytes }),
           ...(maxTotalBodyBytes === undefined ? {} : { maxTotalBodyBytes }),
           ...(maxEntries === undefined ? {} : { maxEntries }),
+          ...(maxDurationMs === undefined ? {} : { maxDurationMs }),
         })
         return { session: sessionId, ...result }
       }),
@@ -626,7 +629,7 @@ export const runMcpServer: Effect.Effect<never, Error> = Layer.launch(
   mcpToolsLayer.pipe(
     Layer.provide(mcpServerLayer),
     Layer.provide(NodeStdio.layer),
-    Layer.provide(RelayClient.layerFetch),
+    Layer.provide(RelayClient.layerFetchMcp),
   ),
 )
 

@@ -1,6 +1,10 @@
 import { Data, Effect, Exit, Latch, Match, Schema } from "effect"
 import type { RelayShutdownRequest } from "./relay-schema.ts"
 import { RelayLifecycleEvent } from "./relay-lifecycle-log.ts"
+import { cliCommand } from "./paths.ts"
+
+/** What keeps the relay from restarting, in words for the user ("a network capture in session x since 12:01"). */
+export type RelayBusy = { readonly reason: "raw-clients" | "recordings"; readonly detail: string }
 
 type State = Data.TaggedEnum<{
   Running: {}
@@ -28,7 +32,9 @@ export class RelayShutdown {
     readonly managed: boolean
     readonly drain: Effect.Effect<void, Error>
     readonly resume: () => void
-    readonly busy: () => "raw-clients" | "recordings" | undefined
+    readonly busy: () => RelayBusy | undefined
+    /** For a forced restart: ends captures and recordings and disconnects raw CDP clients. */
+    readonly release?: Effect.Effect<void>
     readonly settle: Effect.Effect<void, Error>
     readonly quiescent: () => boolean
     readonly audit: (event: RelayLifecycleEvent) => Effect.Effect<void, Error>
@@ -94,6 +100,10 @@ export class RelayShutdown {
         return yield* new RelayShutdownError({ reason: "not-managed", message: "A foreground relay must be stopped by its owner" })
       }
       if (!control.accepting) return yield* control.busyError()
+      // A forced restart ends what would otherwise refuse it (the user asked for exactly that).
+      if (request.force === true && control.options.busy() && control.options.release) {
+        yield* control.options.release
+      }
       control.state = State.Draining()
       const fields = { instanceId: request.instanceId, requestId: request.requestId, client: request.client }
       yield* Effect.gen(function* () {
@@ -139,10 +149,13 @@ export class RelayShutdown {
     }))
   }
 
-  private busyError(reason?: "raw-clients" | "recordings" | "timeout" | "changed"): RelayShutdownError {
+  private busyError(busy?: RelayBusy | "timeout" | "changed"): RelayShutdownError {
+    const reason = typeof busy === "object" ? busy.reason : busy
+    const detail = typeof busy === "object" ? busy.detail : undefined
+    const force = cliCommand("relay restart --force")
     const message = Match.value(reason).pipe(
-      Match.when("raw-clients", () => "Relay has raw CDP clients attached; disconnect them before restarting"),
-      Match.when("recordings", () => "Relay has active recordings or network captures; stop them before restarting"),
+      Match.when("raw-clients", () => `Relay has ${detail ?? "raw CDP clients attached"}; disconnect them, or run \`${force}\` to disconnect them and restart`),
+      Match.when("recordings", () => `Relay has ${detail ?? "active recordings or network captures"}; stop them, or run \`${force}\` to end them (discarding what they captured) and restart`),
       Match.when("timeout", () => "Relay restart timed out waiting for accepted work; the relay is still running"),
       Match.when("changed", () => "Relay changed while preparing restart; it is still running, retry the restart"),
       Match.orElse(() => "Relay is draining for an explicit restart; retry after it completes"),

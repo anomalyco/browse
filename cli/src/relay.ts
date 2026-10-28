@@ -305,6 +305,42 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   // A newer browse on the clone's remote branch, shown on the extension's status page.
   const updates = createUpdateWatcher({ onChange: () => sendUpdateNotice() })
   let updateTimer: NodeJS.Timeout | undefined
+  let orphanTimer: NodeJS.Timeout | undefined
+  /** When each session's client was first seen gone. */
+  const clientGoneSince = new Map<string, number>()
+  /**
+   * Cleans up after MCP servers that went away (opencode quit, the server crashed). A session's network capture ends
+   * (a forgotten one kept `relay restart` and `update` refusing forever), and the server's implicit session
+   * (mcp-xxxxxxxx, which no one else can name) is deleted with its tabs, so they stop piling up. Never while the
+   * session runs a script, waits for the user or records, and only after the grace period, in case the client was
+   * restarting.
+   */
+  const collectOrphans = () => {
+    if (!shutdownControl.accepting) return
+    const now = Date.now()
+    for (const session of sessions.sessions.values()) {
+      const pid = session.clientPid
+      if (pid === undefined || processAlive(pid)) {
+        clientGoneSince.delete(session.id)
+        continue
+      }
+      const since = clientGoneSince.get(session.id) ?? now
+      clientGoneSince.set(session.id, since)
+      if (now - since < clientGoneGraceMs) continue
+      const id = session.id
+      Effect.runPromise(Effect.gen(function* () {
+        if (yield* sessions.networkEnd(id, `its client (process ${pid}) exited`)) relayLog("session.capture.ended", { session: id, reason: "client gone", pid })
+        if (!/^mcp-[0-9a-f]{8}$/.test(id) || sessions.isExecuting(id) || sessions.hasPendingWork(id)) return
+        const tabs = registry.listRootTargets().filter((target) => target.opencodeBrowserSessionId === id).map((target) => target.tabId)
+        if (tabs.some((tabId) => handoffs.pendingForTab(tabId) || isTabRecorded(tabId))) return
+        if (activeHandoffTabs.has(id)) return
+        relayLog("session.collected", { session: id, reason: "client gone", pid, tabs: tabs.length })
+        clientGoneSince.delete(id)
+        yield* sessions.delete(id)
+      }).pipe(Effect.ignore)).catch(() => {})
+    }
+    for (const id of clientGoneSince.keys()) if (!sessions.sessions.has(id)) clientGoneSince.delete(id)
+  }
   const sendUpdateNotice = () => {
     if (!extensionRpc.connected) return
     const notice = updates.current
@@ -581,6 +617,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   }
   const managed = yield* Config.Boolean("OPENCODE_BROWSER_MANAGED_RELAY").pipe(Config.withDefault(false))
   const restartTimeoutMs = yield* Config.Int("OPENCODE_BROWSER_RESTART_TIMEOUT_MS").pipe(Config.withDefault(10_000))
+  /** How long a session's MCP server may be gone before its capture ends and an implicit session is deleted. */
+  const clientGoneGraceMs = yield* Config.Int("OPENCODE_BROWSER_CLIENT_GONE_GRACE_MS").pipe(Config.withDefault(60_000))
   const restartRequestId = yield* Config.option(Config.String("OPENCODE_BROWSER_RESTART_REQUEST_ID"))
   const lifecycleLogPath = path.join(path.dirname(defaultSessionCatalogPath(port)), "lifecycle.jsonl")
   const audit = (event: RelayLifecycleEvent) => Effect.try(() => appendRelayLifecycleEvent(lifecycleLogPath, event))
@@ -595,10 +633,24 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     drain: sessions.beginDrain(),
     resume: () => sessions.resume(),
     busy: () => {
-      if (Array.from(cdpClients).some((client) => !cdpClients.isSandbox(client))) return "raw-clients"
-      if (recordingRelay.hasActiveRecordings() || flightRecorder.hasActiveRecorders() || sessions.hasActiveNetworkCapture()) return "recordings"
-      return undefined
+      const raw = Array.from(cdpClients).filter((client) => !cdpClients.isSandbox(client)).length
+      if (raw > 0) return { reason: "raw-clients", detail: `${raw} raw CDP client${raw === 1 ? "" : "s"} attached (a script using connectOverCDP)` }
+      const busy = [
+        ...sessions.activeNetworkCaptures().map((capture) => `a network capture in session ${capture.sessionId}${capture.startedAt ? ` (since ${capture.startedAt})` : ""}`),
+        ...recordingRelay.recordingTabIds().map((tabId) => `a recording of tab ${tabId}`),
+        ...flightRecorder.activeTabIds().map((tabId) => `a flight recorder on tab ${tabId}`),
+      ]
+      return busy.length ? { reason: "recordings", detail: busy.slice(0, 5).join(", ") + (busy.length > 5 ? ` and ${busy.length - 5} more` : "") } : undefined
     },
+    release: Effect.gen(function* () {
+      relayLog("relay.restart.force", {})
+      for (const capture of sessions.activeNetworkCaptures()) yield* sessions.networkEnd(capture.sessionId, "the relay was restarted with --force")
+      yield* Effect.promise(() => recordingRelay.cleanupAll("The relay was restarted with --force").catch(() => {}))
+      yield* Effect.promise(() => flightRecorder.cleanupAll().catch(() => {}))
+      for (const client of Array.from(cdpClients)) if (!cdpClients.isSandbox(client)) client.close(1001, "Relay restarting")
+      // The closes land asynchronously.
+      yield* Effect.sleep(200)
+    }),
     settle: settleRootWork(),
     quiescent: () => rootLifecycle.isIdle() && sessions.isDrained(),
     audit,
@@ -818,6 +870,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const cleanup = Effect.fnUntraced(function* () {
     stopJournalRetention?.()
     clearInterval(updateTimer)
+    clearInterval(orphanTimer)
     yield* shutdownControl.close().pipe(Effect.ignore)
     yield* sessions.closeAll()
     yield* rootLifecycle.close()
@@ -2033,6 +2086,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       void updates.refresh()
       updateTimer = setInterval(() => void updates.refresh(), 60 * 60 * 1000)
       updateTimer.unref()
+      orphanTimer = setInterval(collectOrphans, Math.max(1_000, Math.min(30_000, Math.floor(clientGoneGraceMs / 2))))
+      orphanTimer.unref()
       relayLog("relay.ready", { url: endpointUrl, version: opencodeBrowserVersion, build: opencodeBrowserBuildId, pid: process.pid, managed })
     }),
     (error) => Effect.gen(function* () {
@@ -2048,6 +2103,16 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     },
   }
 })
+
+/** Whether a local process still runs (a pid from OpenCode-Browser-Client-Pid). */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM"
+  }
+}
 
 function sendUpgradeError(options: {
   readonly socket: stream.Duplex

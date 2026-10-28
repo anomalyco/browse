@@ -80,6 +80,11 @@ export class FlightRecorderRelay {
     return this.active.size > 0 || this.starting.size > 0
   }
 
+  /** Tabs with a flight recorder running (or starting). */
+  activeTabIds(): number[] {
+    return Array.from(new Set([...this.active.keys(), ...this.starting]))
+  }
+
   isActiveTab(tabId: number): boolean {
     return this.active.has(tabId) || this.starting.has(tabId)
   }

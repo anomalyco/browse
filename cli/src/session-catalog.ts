@@ -16,6 +16,8 @@ export const PersistedSession = Schema.Struct({
     id: Schema.String,
     owner: Schema.Literals(["relay", "user"]),
   })),
+  /** The process (an MCP server, a CLI) that last used the session, so the relay can tell when it is gone. */
+  clientPid: Schema.optionalKey(Schema.Int),
 })
 
 export type PersistedSession = Schema.Schema.Type<typeof PersistedSession>

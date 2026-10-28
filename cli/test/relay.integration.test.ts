@@ -524,6 +524,33 @@ async function settingsScene(options: { readonly relayPort: number; readonly rel
   }
 }
 
+describe("sessions of MCP servers that went away", () => {
+  test("an implicit session is deleted once its MCP server has been gone for the grace period; a named one stays", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "browse-orphans-"))
+    const started = await startRelay(root, { OPENCODE_BROWSER_CLIENT_GONE_GRACE_MS: "1000" })
+    try {
+      const client = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], { stdio: "ignore" })
+      const ensure = (id: string) => fetch(`http://127.0.0.1:${started.port}/v1/sessions/ensure`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${started.token}`, "content-type": "application/json", "opencode-browser-client-pid": String(client.pid) },
+        body: JSON.stringify({ id }),
+      })
+      expect((await ensure("mcp-0123abcd")).ok).toBe(true)
+      expect((await ensure("named-work")).ok).toBe(true)
+      const ids = async () => ((await (await fetch(`http://127.0.0.1:${started.port}/cli/sessions`, { headers: { authorization: `Bearer ${started.token}` } })).json()) as { sessions: { id: string }[] }).sessions.map((session) => session.id).sort()
+      // Alive: nothing happens past the grace period.
+      await Bun.sleep(1_800)
+      expect(await ids()).toEqual(["mcp-0123abcd", "named-work"])
+      client.kill("SIGKILL")
+      for (let i = 0; i < 60 && (await ids()).includes("mcp-0123abcd"); i++) await Bun.sleep(100)
+      expect(await ids()).toEqual(["named-work"])
+    } finally {
+      await stopRelay(started.child)
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  }, 30_000)
+})
+
 describe("settings from the extension", () => {
   test("cursor and human input follow the extension's settings at runtime; invalid values change nothing", async () => {
     const scene = await settingsScene({ relayPort: port, relayToken: token, code: pairingCode(home), tabId: 81, settings: { cursor: "always", humanInput: "off" } })

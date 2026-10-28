@@ -185,6 +185,11 @@ describe("relayNotRestarted", () => {
     expect(relayNotRestarted(status([{ id: "a", connected: true }, { id: "b", connected: true }]), output, "cmd")[0]).toStartWith("! Relay not restarted: 2 agent sessions are active (a, b)")
   })
 
+  test("when a capture or recording blocks the restart, it offers --force", () => {
+    const blocked = "Relay has a network capture in session x; stop them, or run `opencode-browser relay restart --force` to end them (discarding what they captured) and restart"
+    expect(relayNotRestarted("not json", blocked, "cmd")[2]).toBe("  When no agent is using the browser, run: cmd (or cmd --force to end what's blocking it now)")
+  })
+
   test("without a connected session it gives the relay's reason, and by default the command for this checkout", () => {
     const lines = relayNotRestarted("not json", output)
     expect(lines[0]).toBe("! Relay not restarted: Relay has raw CDP clients attached; disconnect them before restarting.")

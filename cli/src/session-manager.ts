@@ -170,6 +170,7 @@ export class OpenCodeBrowserSessions {
         updatedAt: entry.updatedAt,
       })
       if (entry.target) session.target = entry.target
+      if (entry.clientPid !== undefined) session.clientPid = entry.clientPid
       session.sandbox.restore(entry.target)
       this.sessions.set(entry.id, session)
     }
@@ -316,7 +317,30 @@ export class OpenCodeBrowserSessions {
   }
 
   hasActiveNetworkCapture(): boolean {
-    return Array.from(this.sessions.values()).some((session) => session.sandbox.networkStatus().active)
+    return this.activeNetworkCaptures().length > 0
+  }
+
+  /** Sessions with a network capture running, and since when. */
+  activeNetworkCaptures(): { readonly sessionId: string; readonly startedAt?: string }[] {
+    return Array.from(this.sessions.values()).flatMap((session) => {
+      const status = session.sandbox.networkStatus()
+      return status.active ? [{ sessionId: session.id, ...(status.startedAt ? { startedAt: status.startedAt } : {}) }] : []
+    })
+  }
+
+  /** Records the process using a session (its MCP server or CLI), so the session can be cleaned up once it is gone. */
+  noteClient(id: string, pid: number): void {
+    const session = this.sessions.get(id)
+    if (!session || session.clientPid === pid) return
+    session.clientPid = pid
+    this.schedulePersistence()
+  }
+
+  /** Ends a session's network capture without a result (its client went away, or a forced restart). */
+  networkEnd(id: string, reason: string): Effect.Effect<boolean> {
+    const session = this.sessions.get(id)
+    if (!session) return Effect.succeed(false)
+    return session.sandbox.networkEnd(reason).pipe(Effect.map(({ cancelled }) => cancelled))
   }
 
   private collectSessionIds(matches: (session: OpenCodeBrowserSession) => boolean): string[] {
@@ -920,6 +944,7 @@ export class OpenCodeBrowserSessions {
       updatedAt: session.updatedAt,
       readOnly: session.readOnly,
       ...(target ? { target } : {}),
+      ...(session.clientPid === undefined ? {} : { clientPid: session.clientPid }),
     }
   }
 

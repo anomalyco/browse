@@ -258,11 +258,13 @@ const serve = Command.make(
 
 const relayRestart = Command.make(
   "restart",
-  {},
-  Effect.fn("Cli.relayRestart")(function* () {
+  {
+    force: Flag.Boolean("force").pipe(Flag.withDefault(false), Flag.withDescription("End network captures and recordings (discarding them) and disconnect raw CDP clients instead of refusing to restart")),
+  },
+  Effect.fn("Cli.relayRestart")(function* ({ force }) {
     const relay = yield* RelayClient.Service
     yield* Console.error("Restarting the relay leaves browser tabs open but resets in-memory JavaScript state.")
-    const readiness = yield* RelayLifecycle.restartRelay({ relay, clientKind: "cli" })
+    const readiness = yield* RelayLifecycle.restartRelay({ relay, clientKind: "cli", force })
     yield* Console.log(`${readiness.started ? "Started" : "Reused concurrent replacement"} OpenCode Browser relay at ${relay.endpoint} (${readiness.version.buildId})`)
   }),
 ).pipe(Command.withDescription("Explicitly drain and restart the managed relay using this installation"))
@@ -837,8 +839,8 @@ const parseNetworkContent = Effect.fnUntraced(function* (content: Option.Option<
 })
 
 function formatNetworkStatus(status: NetworkStatusResponse): string {
-  if (!status.active) return "Network capture: inactive"
-  return `Network capture: active entries=${status.entryCount} responses=${status.responseCount} failures=${status.failureCount} bodyBytes=${status.capturedBodyBytes} truncated=${status.truncatedBodyCount} dropped=${status.droppedEntryCount} startedAt=${status.startedAt ?? "unknown"}`
+  if (!status.active) return status.ended ? `Network capture: inactive (the last one ended because ${status.ended})` : "Network capture: inactive"
+  return `Network capture: active entries=${status.entryCount} responses=${status.responseCount} failures=${status.failureCount} bodyBytes=${status.capturedBodyBytes} truncated=${status.truncatedBodyCount} dropped=${status.droppedEntryCount} startedAt=${status.startedAt ?? "unknown"}${status.endsAt ? ` endsAt=${status.endsAt}` : ""}`
 }
 
 function formatNetworkResult(result: NetworkStopResponse): string {
@@ -857,9 +859,10 @@ const networkStart = Command.make(
     maxBodyBytes: Flag.Int("max-body-bytes").pipe(Flag.optional, Flag.withDescription("Maximum captured bytes per body, defaults to 1000000")),
     maxTotalBodyBytes: Flag.Int("max-total-body-bytes").pipe(Flag.optional, Flag.withDescription("Maximum captured body bytes for the whole capture, defaults to 25000000")),
     maxEntries: Flag.Int("max-entries").pipe(Flag.optional, Flag.withDescription("Maximum request entries, defaults to 1000")),
+    maxDuration: Flag.Int("max-duration-ms").pipe(Flag.optional, Flag.withDescription("End the capture by itself (discarding it) after this long, defaults to 1800000 (30 minutes)")),
     json: jsonFlag,
   },
-  Effect.fn("Cli.networkStart")(function* ({ session, urlFilter, resourceTypes, content, maxBodyBytes, maxTotalBodyBytes, maxEntries, json }) {
+  Effect.fn("Cli.networkStart")(function* ({ session, urlFilter, resourceTypes, content, maxBodyBytes, maxTotalBodyBytes, maxEntries, maxDuration, json }) {
     const relay = yield* RelayClient.Service
     yield* ensureCliRelayAndExtension()
     const sessionId = yield* networkSession(session)
@@ -872,6 +875,7 @@ const networkStart = Command.make(
       ...(Option.isSome(maxBodyBytes) ? { maxBodyBytes: maxBodyBytes.value } : {}),
       ...(Option.isSome(maxTotalBodyBytes) ? { maxTotalBodyBytes: maxTotalBodyBytes.value } : {}),
       ...(Option.isSome(maxEntries) ? { maxEntries: maxEntries.value } : {}),
+      ...(Option.isSome(maxDuration) ? { maxDurationMs: maxDuration.value } : {}),
     })
     yield* Console.log(json ? JSON.stringify(result, null, 2) : formatNetworkStatus(result))
   }),

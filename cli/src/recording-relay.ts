@@ -228,6 +228,11 @@ export class RecordingRelay {
     return this.activeRecordings.size > 0 || this.startingRecordings.size > 0
   }
 
+  /** Tabs being recorded (or starting to be). */
+  recordingTabIds(): number[] {
+    return Array.from(new Set([...this.activeRecordings.keys(), ...this.startingRecordings.keys()]))
+  }
+
   isRecordingTab(tabId: number): boolean {
     return this.activeRecordings.has(tabId) || this.startingRecordings.has(tabId)
   }

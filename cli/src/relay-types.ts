@@ -67,6 +67,8 @@ export interface ExecuteSandboxLike {
   networkStatus(): NetworkCaptureStatus
   networkStop(options?: NetworkCaptureStopOptions): Effect.Effect<NetworkCaptureResult, Error>
   networkCancel(): Effect.Effect<{ readonly cancelled: boolean }>
+  /** Ends an active capture without a result, saying why on the next status or stop. */
+  networkEnd(reason: string): Effect.Effect<{ readonly cancelled: boolean }>
   authRefresh(options: { readonly name: string; readonly urlFilter?: string; readonly timeoutMs?: number }): Effect.Effect<NetworkCaptureResult, Error>
   redactNetworkCaptureText(text: string): string
   markTargetCrashed(targetId: string): boolean
@@ -93,6 +95,8 @@ export type OpenCodeBrowserSession = {
   /** Durable default-target identity. Authoritative live ownership remains in TargetRegistry. */
   target?: SessionTarget
   updatedAt: string
+  /** The process that last used the session (OpenCode-Browser-Client-Pid); see OpenCodeBrowserSessions.noteClient. */
+  clientPid?: number
 }
 
 export type { SessionSummary }

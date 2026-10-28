@@ -305,6 +305,8 @@ export const RelayShutdownRequest = Schema.Struct({
     instanceId: RelayIdentity,
     buildId: RelayBuildId,
   }),
+  /** End captures and recordings and disconnect raw CDP clients instead of refusing (`relay restart --force`). */
+  force: Schema.optionalKey(Schema.Boolean),
 })
 
 export interface RelayShutdownRequest extends Schema.Schema.Type<typeof RelayShutdownRequest> {}
@@ -325,6 +327,7 @@ export const NetworkStartRequest = Schema.Struct({
   maxBodyBytes: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 10_000_000 }))),
   maxTotalBodyBytes: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100_000_000 }))),
   maxEntries: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 10_000 }))),
+  maxDurationMs: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 86_400_000 }))),
 })
 
 export interface NetworkStartRequest extends Schema.Schema.Type<typeof NetworkStartRequest> {}
@@ -351,6 +354,8 @@ export const NetworkStatusResponse = Schema.Struct({
   resourceTypes: Schema.optionalKey(Schema.Array(Schema.String)),
   content: Schema.optionalKey(NetworkContentMode),
   secrets: Schema.optionalKey(Schema.String),
+  endsAt: Schema.optionalKey(Schema.String),
+  ended: Schema.optionalKey(Schema.String),
 })
 export interface NetworkStatusResponse extends Schema.Schema.Type<typeof NetworkStatusResponse> {}
 
