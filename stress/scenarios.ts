@@ -141,11 +141,13 @@ export const scenarios: Scenario[] = [
     return { goto: out, viewerWarning: (viewer.data?.warnings ?? []).some((w: string) => /PDF in Chrome's viewer/.test(w)) }
   } },
   { name: "service-worker", tags: ["web", "soak"], run: async ({ exec, fx }) => {
-    // Registration and control work. Fetches from browse-driven pages bypass the worker's fetch handler (Patchright's
-    // request interception), so `intercepted` is recorded rather than asserted.
-    const out = await exec(`await page.goto(${j(fx.url("/sw"))}); await page.locator('#state', {hasText: 'ready'}).waitFor({timeout: 15000}); await page.reload(); return { controller: await page.evaluate(() => !!navigator.serviceWorker.controller), body: await page.evaluate(() => fetch('/sw-hello').then(r => r.text())) }`)
+    // Registration, control, and the worker's fetch handler for the page's own requests. page.evaluate runs in an
+    // isolated world (Patchright), and Chrome sends isolated-world fetches past service workers, so the main world
+    // (evaluate's fourth argument false) is where the worker answers; the isolated result is recorded only.
+    const out = await exec(`await page.goto(${j(fx.url("/sw"))}); await page.locator('#state', {hasText: 'ready'}).waitFor({timeout: 15000}); await page.reload(); return { controller: await page.evaluate(() => !!navigator.serviceWorker.controller), main: await page.evaluate(() => fetch('/sw-hello').then(r => r.text()), undefined, undefined, false), isolated: await page.evaluate(() => fetch('/sw-hello').then(r => r.text())) }`)
     assert(out.controller === true, `sw ${j(out)}`)
-    return { intercepted: out.body === "from-sw" }
+    assert(out.main === "from-sw", `the worker's fetch handler didn't answer the page: ${j(out)}`)
+    return { isolatedIntercepted: out.isolated === "from-sw" }
   } },
   { name: "websocket", tags: ["web", "soak"], run: async ({ exec, fx }) => {
     const out = await exec(`await page.goto(${j(fx.url("/ws"))}); await page.locator('#ws', {hasText: 'got:'}).waitFor({timeout: 10000}); return await page.locator('#ws').textContent()`)

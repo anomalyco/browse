@@ -376,7 +376,10 @@ Execute code can use `page`, `context`, `browser`, persistent `state`, the
 the OpenCode Browser helpers documented here. Timers, `URL`, `TextEncoder`,
 `Buffer`, `structuredClone` and `crypto.randomUUID()` are available. Use
 `page.evaluate` for `window`, `document`, storage, and same-origin `fetch`
-with page cookies. Single expressions auto-return;
+with page cookies. `page.evaluate` runs in an isolated world, whose `fetch`
+skips the page's service worker; pass `false` as its fourth argument
+(`page.evaluate(fn, arg, undefined, false)`) to run in the page's own world
+when the worker's response matters. Single expressions auto-return;
 multi-statement scripts need `return`. Use `--file` for longer scripts:
 
 ```bash
