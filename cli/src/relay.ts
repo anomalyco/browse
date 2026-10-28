@@ -48,6 +48,7 @@ import { ensurePrivateDirectory, pairingCode, pairingProof, relayToken, relayTok
 import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
 import { GhostCursorTabs, ghostCursorCommandMethod } from "./ghost-cursor.ts"
 import { guardCdpMethod, scopeCdpResult } from "./cdp-guardrails.ts"
+import { SessionNavigationGuard } from "./session-navigation-guard.ts"
 import {
   awaitHandoffAction,
   HandoffRegistry,
@@ -407,6 +408,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         authToken,
         sessionId: id,
         onDefaultTargetChange,
+        allowedOrigins: () => sessions.allowedOrigins(id),
+        drainGuardWarnings: () => navigationGuard.drainWarnings(id),
         isRecordingTarget: (targetId) => {
           const target = registry.targetsByTargetId.get(targetId)
           return target !== undefined && isTabRecorded(target.tabId)
@@ -464,6 +467,20 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     },
     registry,
   )
+  const navigationGuard = new SessionNavigationGuard({
+    allowedOrigins: (sessionId) => sessions.allowedOrigins(sessionId),
+    isExecuting: (sessionId) => sessions.isExecuting(sessionId),
+    mainFrameId: (tabId) => mainFrameIdsByTab.get(tabId),
+    send: (tabId, method, params) => Effect.runPromise(sendDebuggerCommand({ tabId, method, params })),
+    closeTab: (tabId) => Effect.runPromise(Effect.gen(function* () {
+      const target = registry.tabTargets.get(tabId)
+      if (target?.owner === "user") return
+      relayLog("allowlist.close", { tabId, registered: target !== undefined })
+      yield* sendToExtension({ method: "tabs.remove", params: { tabId } })
+      if (target) detachTargetState(tabId)
+    })),
+    log: (event, details) => relayLog(event, details),
+  })
   function pageStatusSessionId(target: ConnectedTarget): string | undefined {
     return target.opencodeBrowserSessionId
   }
@@ -1131,7 +1148,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       }
       return await attach()
     }
-    attachWithRetry().catch((error: unknown) => {
+    attachWithRetry().then(() => {
+      const popup = registry.tabTargets.get(tabId)
+      if (popup) navigationGuard.popupAttached(popup)
+    }).catch((error: unknown) => {
       relayLog("tab.opened.error", { tabId, error: error instanceof Error ? error.message : String(error) })
     })
   }
@@ -1289,6 +1309,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (flightRecorder.handleDebuggerEvent({ tabId, method, params }) || recordingRelay.handleDebuggerEvent({ tabId, method, params })) {
       return
     }
+    if (sourceSessionId === undefined || sourceSessionId === target.sessionId) navigationGuard.observeEvent(target, method, params)
     let shouldBroadcast = true
     let attachedChildTarget: ChildTarget | undefined
 
@@ -1598,6 +1619,24 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (guardMessage) {
       return yield* Effect.fail(new Error(guardMessage))
     }
+    if (message.method === "Page.navigate" || message.method === "Target.createTarget") {
+      // A navigated tab follows its own session's allowlist; a new tab follows the creating client's session.
+      const tabSessionId = message.method === "Page.navigate"
+        ? (() => {
+            try {
+              return registry.tabTargets.get(cdpRouter.resolveCommandRoute(socket, message).tabId)?.opencodeBrowserSessionId
+            } catch {
+              return undefined
+            }
+          })()
+        : undefined
+      const refusal = yield* Effect.promise(() => navigationGuard.checkCommand({
+        method: message.method,
+        params: message.params,
+        sessionId: tabSessionId ?? clientOpenCodeBrowserSessionId,
+      }))
+      if (refusal) return yield* Effect.fail(new Error(refusal))
+    }
     if (message.method === "Browser.getVersion") {
       return {
         protocolVersion: "1.3",
@@ -1863,6 +1902,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   function clearTabRuntimeState(tabId: number): void {
     mainFrameIdsByTab.delete(tabId)
     protectedFrames.forgetTab(tabId)
+    navigationGuard.forgetTab(tabId)
     ghostCursor.forget(tabId)
     forgetTab(tabId)
     for (const [sessionId, childTabId] of suppressedChildSessions) {

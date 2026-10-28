@@ -104,6 +104,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       inputSchema: objectSchema({
         id: { type: "string", description: "Optional lowercase session id." },
         readOnly: { type: "boolean", description: "Create a read-only session: the relay rejects input-dispatching CDP so scripts can inspect but not click or type." },
+        allowedOrigins: { type: "array", items: { type: "string" }, description: "Optional domain allowlist: hosts or origins this session's tabs may load (example.com, *.example.com, https://app.example.com, http://localhost:3000). Navigations elsewhere are refused or sent back to about:blank; private and loopback addresses need an exact entry." },
       }),
       readOnly: false,
       destructive: false,
@@ -111,9 +112,32 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       handle: (input) => Effect.gen(function* () {
         const requestedId = optionalStringField(input, "id")
         const readOnly = optionalBooleanField(input, "readOnly")
-        const session = yield* relay.sessionNew(requestedId, readOnly ? { readOnly: true } : {})
+        const allowedOrigins = optionalStringArrayField(input, "allowedOrigins")
+        const session = yield* relay.sessionNew(requestedId, {
+          ...(readOnly ? { readOnly: true } : {}),
+          ...(allowedOrigins ? { allowedOrigins } : {}),
+        })
         establishCurrentSession(session.id)
         return { session }
+      }),
+    },
+    {
+      name: "session_allowlist",
+      description: "Set the domain allowlist of a session (the current one by default): the hosts or origins its tabs may load. Pass an empty list to remove it. Use it before typing secrets or working on sites with untrusted content.",
+      inputSchema: objectSchema({
+        session: { type: "string", description: "Session id; defaults to the current session." },
+        allowedOrigins: { type: "array", items: { type: "string" }, description: "Patterns: example.com, *.example.com, https://app.example.com, http://localhost:3000. Empty removes the allowlist." },
+      }, ["allowedOrigins"]),
+      readOnly: false,
+      destructive: false,
+      idempotent: true,
+      handle: (input) => Effect.gen(function* () {
+        const sessionId = resolveSessionId(input)
+        const allowedOrigins = requireObject(input).allowedOrigins
+        if (!Array.isArray(allowedOrigins) || !allowedOrigins.every((item) => Predicate.isString(item))) {
+          return yield* Effect.fail(new Error("allowedOrigins must be an array of strings"))
+        }
+        return { session: yield* relay.sessionAllowlist(sessionId, allowedOrigins) }
       }),
     },
     {

@@ -459,6 +459,10 @@ type ExecuteSandboxOptions = {
   readonly pageHealthCheckTimeoutMs?: number
   /** Whether the page with this target id is being recorded; helpers then draw nothing into it. */
   readonly isRecordingTarget?: (targetId: string) => boolean
+  /** The session's domain allowlist patterns (domain-policy.ts), or undefined when it has none. */
+  readonly allowedOrigins?: () => readonly string[] | undefined
+  /** Allowlist violations the relay saw in this session's tabs since the last execute. */
+  readonly drainGuardWarnings?: () => readonly string[]
 }
 
 export type ExecuteResult = {
@@ -680,6 +684,7 @@ export class ExecuteSandbox {
   private drainWarnings(): string[] {
     const warnings = this.pendingWarnings
     this.pendingWarnings = []
+    for (const warning of this.options.drainGuardWarnings?.() ?? []) if (!warnings.includes(warning)) warnings.push(warning)
     return warnings
   }
 

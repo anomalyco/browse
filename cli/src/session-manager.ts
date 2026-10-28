@@ -21,6 +21,7 @@ export type SessionExecuteRecord = {
 }
 
 type CreatedSessionSummary = SessionSummary & { readonly created?: boolean }
+type SessionCreateOptions = { readonly readOnly?: boolean; readonly allowedOrigins?: readonly string[] }
 
 type ExecutionResponse = { readonly result: ExecuteResult; readonly session: CreatedSessionSummary }
 
@@ -169,6 +170,7 @@ export class OpenCodeBrowserSessions {
         createdAt: entry.createdAt,
         updatedAt: entry.updatedAt,
       })
+      if (entry.allowedOrigins && entry.allowedOrigins.length > 0) session.allowedOrigins = entry.allowedOrigins
       if (entry.target) session.target = entry.target
       session.sandbox.restore(entry.target)
       this.sessions.set(entry.id, session)
@@ -192,24 +194,25 @@ export class OpenCodeBrowserSessions {
     this.schedulePersistence()
   }
 
-  createNew(id: string | undefined, options?: { readonly readOnly?: boolean }): OpenCodeBrowserSession {
+  createNew(id: string | undefined, options?: SessionCreateOptions): OpenCodeBrowserSession {
     this.assertAdmission()
     if (id !== undefined) this.assertStableIdentity(id)
     return this.createAcceptedSession(id, options)
   }
 
-  private createAcceptedSession(id: string | undefined, options?: { readonly readOnly?: boolean }): OpenCodeBrowserSession {
+  private createAcceptedSession(id: string | undefined, options?: SessionCreateOptions): OpenCodeBrowserSession {
     const sessionId = id ?? generateSessionId(this.sessions)
     if (this.sessions.has(sessionId)) {
       throw sessionError("already-exists", `Session already exists: ${sessionId}`, sessionId)
     }
     const session = this.createOpenCodeBrowserSession(sessionId, options?.readOnly === true)
+    if (options?.allowedOrigins && options.allowedOrigins.length > 0) session.allowedOrigins = options.allowedOrigins
     this.sessions.set(sessionId, session)
     this.schedulePersistence()
     return session
   }
 
-  create(id: string | undefined, options?: { readonly readOnly?: boolean }): Effect.Effect<OpenCodeBrowserSession, Error> {
+  create(id: string | undefined, options?: SessionCreateOptions): Effect.Effect<OpenCodeBrowserSession, Error> {
     return this.withAdmission(id, this.createPersistedSession(id, options).pipe(Effect.uninterruptible))
   }
 
@@ -232,7 +235,7 @@ export class OpenCodeBrowserSessions {
     }).pipe(Effect.uninterruptible))
   }
 
-  private readonly createPersistedSession = Effect.fnUntraced(function* (this: OpenCodeBrowserSessions, id: string | undefined, options?: { readonly readOnly?: boolean }) {
+  private readonly createPersistedSession = Effect.fnUntraced(function* (this: OpenCodeBrowserSessions, id: string | undefined, options?: SessionCreateOptions) {
     const manager = this
     const sessionId = id ?? generateSessionId(this.sessions)
     return yield* manager.withIdentityChange(sessionId, Effect.gen(function* () {
@@ -261,6 +264,25 @@ export class OpenCodeBrowserSessions {
 
   isReadOnly(id: string): boolean {
     return this.sessions.get(id)?.readOnly === true
+  }
+
+  /** The session's allowed-origin patterns, or undefined when it has no allowlist. */
+  allowedOrigins(id: string): readonly string[] | undefined {
+    return this.sessions.get(id)?.allowedOrigins
+  }
+
+  /** Replace a session's allowed-origin patterns (already normalized); an empty list removes the allowlist. */
+  setAllowedOrigins(id: string, patterns: readonly string[]): Effect.Effect<SessionSummary, Error> {
+    const manager = this
+    return Effect.gen(function* () {
+      const session = manager.sessions.get(id)
+      if (!session) return yield* sessionError("not-found", `Session not found: ${id}`, id)
+      if (patterns.length > 0) session.allowedOrigins = patterns
+      else delete session.allowedOrigins
+      session.updatedAt = new Date().toISOString()
+      manager.schedulePersistence()
+      return manager.sessionSummary(session)
+    })
   }
 
   isExecuting(id: string): boolean {
@@ -396,6 +418,7 @@ export class OpenCodeBrowserSessions {
         }
         yield* manager.closeSessionRelayTargets(existing)
         const session = manager.createOpenCodeBrowserSession(id, existing.readOnly)
+        if (existing.allowedOrigins) session.allowedOrigins = existing.allowedOrigins
         manager.sessions.set(id, session)
         yield* manager.commitPersistence(() => Effect.sync(() => {
           manager.sessions.set(id, existing)
@@ -854,6 +877,7 @@ export class OpenCodeBrowserSessions {
       pageUrl: status.pageUrl,
       stateKeys: status.stateKeys,
       ...(session.readOnly ? { readOnly: true } : {}),
+      ...(session.allowedOrigins ? { allowedOrigins: [...session.allowedOrigins] } : {}),
     }
   }
 
@@ -919,6 +943,7 @@ export class OpenCodeBrowserSessions {
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
       readOnly: session.readOnly,
+      ...(session.allowedOrigins ? { allowedOrigins: [...session.allowedOrigins] } : {}),
       ...(target ? { target } : {}),
     }
   }
@@ -993,6 +1018,7 @@ export class OpenCodeBrowserSessions {
         const replacement = manager.createOpenCodeBrowserSession(session.id, session.readOnly, {
           createdAt: session.createdAt,
         })
+        if (session.allowedOrigins) replacement.allowedOrigins = session.allowedOrigins
         manager.sessions.set(session.id, replacement)
       }
       yield* manager.commitPersistence()

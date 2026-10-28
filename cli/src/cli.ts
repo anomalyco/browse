@@ -363,12 +363,16 @@ const sessionNew = Command.make(
   {
     name: Argument.String("name").pipe(Argument.optional, Argument.withDescription("Optional lowercase session id")),
     readOnly: Flag.Boolean("read-only").pipe(Flag.withDefault(false), Flag.withDescription("Create a read-only session: the relay rejects input-dispatching CDP so scripts can inspect but not click or type")),
+    allowOrigin: Flag.String("allow-origin").pipe(Flag.atLeast(0), Flag.withDescription("Only let this session's tabs load these hosts or origins (repeatable or comma-separated): example.com, *.example.com, https://app.example.com, http://localhost:3000")),
   },
-  Effect.fn("Cli.sessionNew")(function* ({ name, readOnly }) {
+  Effect.fn("Cli.sessionNew")(function* ({ name, readOnly, allowOrigin }) {
     const relay = yield* RelayClient.Service
     yield* ensureCliRelay()
     const store = yield* SessionStore.Service
-    const result = yield* relay.sessionNew(Option.getOrUndefined(name), readOnly ? { readOnly: true } : {})
+    const result = yield* relay.sessionNew(Option.getOrUndefined(name), {
+      ...(readOnly ? { readOnly: true } : {}),
+      ...(allowOrigin.length > 0 ? { allowedOrigins: allowOrigin } : {}),
+    })
     yield* store.write(result.id)
     yield* Console.log(result.id)
   }),
@@ -398,7 +402,8 @@ const sessionList = Command.make(
       const page = item.pageUrl ?? "no page yet"
       const keys = item.stateKeys.length ? ` state=${item.stateKeys.join(",")}` : ""
       const readOnly = item.readOnly ? " read-only" : ""
-      return Console.log(`${marker} ${item.id} ${page}${keys}${readOnly}`)
+      const allowed = item.allowedOrigins ? ` allow=${item.allowedOrigins.join(",")}` : ""
+      return Console.log(`${marker} ${item.id} ${page}${keys}${readOnly}${allowed}`)
     })
   }),
 ).pipe(Command.withDescription("List OpenCode Browser sessions"))
@@ -512,9 +517,33 @@ const sessionDelete = Command.make(
   }),
 ).pipe(Command.withDescription("Delete a OpenCode Browser session"))
 
+const sessionAllow = Command.make(
+  "allow",
+  {
+    session: sessionFlag(),
+    origins: Argument.String("origins").pipe(Argument.variadic({ min: 0 }), Argument.withDescription("Hosts or origins the session's tabs may load: example.com, *.example.com, https://app.example.com, http://localhost:3000")),
+    clear: Flag.Boolean("clear").pipe(Flag.withDefault(false), Flag.withDescription("Remove the allowlist: the session may load any site again")),
+    json: jsonFlag,
+  },
+  Effect.fn("Cli.sessionAllow")(function* ({ session, origins, clear, json }) {
+    const relay = yield* RelayClient.Service
+    yield* ensureCliRelay()
+    if (!clear && origins.length === 0) {
+      return yield* Effect.fail(new Error("session allow needs origins, or --clear to remove the allowlist"))
+    }
+    const id = yield* resolvePositionalOrFlagSessionId(Option.none(), session)
+    const result = yield* relay.sessionAllowlist(id, clear ? [] : origins)
+    if (json) {
+      yield* Console.log(JSON.stringify(result, null, 2))
+      return
+    }
+    yield* Console.log(result.allowedOrigins ? `${result.id} may load: ${result.allowedOrigins.join(", ")}` : `${result.id} may load any site`)
+  }),
+).pipe(Command.withDescription("Set the domain allowlist of a session (the current one by default)"))
+
 const session = Command.make("session").pipe(
   Command.withDescription("Manage OpenCode Browser sessions"),
-  Command.withSubcommands([sessionNew, sessionList, sessionCurrent, sessionUse, sessionReset, sessionAdopt, sessionDelete]),
+  Command.withSubcommands([sessionNew, sessionList, sessionCurrent, sessionUse, sessionReset, sessionAdopt, sessionDelete, sessionAllow]),
 )
 
 const status = Command.make(

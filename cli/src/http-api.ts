@@ -34,12 +34,14 @@ import {
   RelayShutdownRequest,
   SessionAdoptRequest,
   SessionIdRequest,
+  SessionAllowlistRequest,
   SessionEnsureRequest,
   SessionNewRequest,
   type ExtensionStatus,
   type TargetSummary,
 } from "./relay-schema.ts"
 import { SessionError, type OpenCodeBrowserSessions } from "./session-manager.ts"
+import { normalizeOriginPatterns, OriginPatternError } from "./domain-policy.ts"
 import type { RecordingRelay, RecordingStartOptions, RecordingTargetOptions } from "./recording-relay.ts"
 import { TargetOwnershipError, type TargetRegistry } from "./target-registry.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "./version.ts"
@@ -471,8 +473,19 @@ function handleCliRequest(options: {
     if (options.pathname === "/cli/session/new" && options.request.method === "POST") {
       const body = yield* readJsonBody(options.request)
       const request = yield* decodeRequest(SessionNewRequest, body, "session new")
-      const session = yield* options.sessions.create(optionalSessionId(request.id), { readOnly: request.readOnly === true })
+      const allowedOrigins = request.allowedOrigins === undefined ? undefined : yield* originPatterns(request.allowedOrigins)
+      const session = yield* options.sessions.create(optionalSessionId(request.id), {
+        readOnly: request.readOnly === true,
+        ...(allowedOrigins ? { allowedOrigins } : {}),
+      })
       sendJson(options.response, { session: options.sessions.summary(session.id) })
+      return
+    }
+    if (options.pathname === "/cli/session/allowlist" && options.request.method === "POST") {
+      const request = yield* decodeRequest(SessionAllowlistRequest, yield* readJsonBody(options.request), "session allowlist")
+      const id = requiredSessionId(request.id)
+      const allowedOrigins = yield* originPatterns(request.allowedOrigins)
+      sendJson(options.response, { session: yield* options.sessions.setAllowedOrigins(id, allowedOrigins) })
       return
     }
     if (options.pathname === "/cli/session/delete" && options.request.method === "POST") {
@@ -705,4 +718,12 @@ function relayHttpError(error: unknown): HttpRouteError {
     return routeError(error.message, status, code)
   }
   return routeError(error instanceof Error ? error.message : String(error), 500, "internal")
+}
+
+/** Normalize allowed-origin patterns, failing with a 400-style message on an invalid one. */
+function originPatterns(raw: readonly string[]): Effect.Effect<readonly string[], Error> {
+  return Effect.try({
+    try: () => normalizeOriginPatterns(raw),
+    catch: (cause) => cause instanceof OriginPatternError ? new Error(cause.message) : new Error("Invalid origin patterns", { cause }),
+  })
 }
