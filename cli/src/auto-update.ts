@@ -376,6 +376,8 @@ if (process.argv[2] !== "mcp") {
 
   const start = (replay) => {
     const next = spawn(process.execPath, [entry(version), "mcp"], { stdio: ["pipe", "pipe", "inherit"], env: process.env })
+    // A server that exits mid-write (an old one being replaced) must not take the supervisor down with EPIPE.
+    next.stdin.on("error", () => {})
     child = next
     next.on("exit", (code, signal) => {
       if (next !== child) return
