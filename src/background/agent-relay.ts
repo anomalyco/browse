@@ -108,6 +108,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   /** Each agent session's tab group, so a session keeps one group while its display name changes. */
   const sessionGroups = new Map<string, number>()
   const pageStatuses = new Map<number, PageStatus>()
+  /** Each tab's page status deliveries, in order (see deliverPageStatus). */
+  const pageDeliveries = new Map<number, Promise<void>>()
   const badges = new Map<number, AgentBadge>()
   /** Tabs the user let agents use while the relay was not connected; announced once it is. */
   const pendingAttach = new Set<number>()
@@ -146,6 +148,36 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     // The relay drops a connection that sends more than it accepts; a lost event is better than a reconnect loop.
     if (data === undefined) return log.add("event.dropped", { method: String(message.method) })
     open()?.send(data)
+  }
+  /**
+   * Brings the tab's page (and its handoff notification) up to date with its latest status. Deliveries run one at a
+   * time per tab and each sends whatever is latest when its turn comes: they await notifications and messaging, and
+   * when they ran side by side an earlier "running" could reach the page after the "waiting" that followed it, which
+   * removed the handoff card (about one handoff in ten with eight agents busy) and left the agent waiting for a
+   * Continue nobody could see.
+   */
+  const deliverPageStatus = (tabId: number): Promise<void> => {
+    const run = (pageDeliveries.get(tabId) ?? Promise.resolve()).then(async () => {
+      const page = pageStatuses.get(tabId)
+      if (!page) {
+        await HandoffNotice.clear(tabId)
+        // Restricted pages have no content script; the status is best-effort there.
+        await chrome.tabs.sendMessage(tabId, { action: "page-status.clear" }).catch(() => undefined)
+        return
+      }
+      // A recorded tab gets no card; the user hears about the handoff from a notification instead (or sees the
+      // card after all when no notification can be shown).
+      await HandoffNotice.sync(tabId, page, sessionName)
+      // A newer status arrived meanwhile; its own delivery, queued behind this one, sends it.
+      if (pageStatuses.get(tabId) !== page) return
+      await PageScripts.send(tabId, { action: "page-status.set", status: HandoffNotice.forPage(tabId, page) })
+    })
+    const settled = run.catch(() => undefined)
+    pageDeliveries.set(tabId, settled)
+    void settled.then(() => {
+      if (pageDeliveries.get(tabId) === settled) pageDeliveries.delete(tabId)
+    })
+    return run
   }
   const forget = (tabId: number) => {
     const known = relayTabs.delete(tabId)
@@ -492,10 +524,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         // A handoff opens the agent's group so the user can find the tab; it folds up again afterwards.
         if (page.state === "waiting") void AgentGroups.expandTab(tabId)
         else if (wasWaiting) void AgentGroups.settleTab(tabId)
-        // A recorded tab gets no card; the user hears about the handoff from a notification instead (or sees the
-        // card after all when no notification can be shown).
-        await HandoffNotice.sync(tabId, page, sessionName)
-        await PageScripts.send(tabId, { action: "page-status.set", status: HandoffNotice.forPage(tabId, page) })
+        await deliverPageStatus(tabId)
         return {}
       }
       case "pageStatus.clear": {
@@ -503,10 +532,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         const wasWaiting = pageStatuses.get(tabId)?.state === "waiting"
         pageStatuses.delete(tabId)
         if (wasWaiting) void AgentGroups.settleTab(tabId)
-        void HandoffNotice.clear(tabId)
         notify()
-        // Restricted pages have no content script; the status is best-effort there.
-        await chrome.tabs.sendMessage(tabId, { action: "page-status.clear" }).catch(() => undefined)
+        await deliverPageStatus(tabId)
         return {}
       }
       case "runtime.reload":
