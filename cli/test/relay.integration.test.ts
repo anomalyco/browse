@@ -396,7 +396,7 @@ describe("relay", () => {
     extension.close()
   }, 20_000)
 
-  test("a wedged tab is let go within seconds when the extension reconnects, not after three 60 s timeouts", async () => {
+  test("a wedged tab is let go within seconds when the extension reconnects (one 5 s timeout, no retries)", async () => {
     const info = (tabId: number) => ({ targetId: `TARGET-${tabId}`, type: "page", title: "Example", url: `https://example.com/${tabId}`, attached: true, browserContextId: "CTX" })
     const extension = new FakeExtension(pairingCode(home))
       .on("Target.getTargetInfo", (command) => ({ targetInfo: info(Number(command.params?.tabId)) }))
@@ -407,7 +407,7 @@ describe("relay", () => {
     const status = async () => await (await fetch(`${base}/extension/status`, { headers: { authorization: `Bearer ${token}` } })).json() as { connected: boolean; targets: Array<{ tabId: number }> }
     for (let i = 0; i < 300 && !(await status()).connected; i++) await Bun.sleep(100)
     expect((await status()).connected).toBe(true)
-    expect(Date.now() - started).toBeLessThan(25_000)
+    expect(Date.now() - started).toBeLessThan(10_000)
     expect((await status()).targets.map((target) => target.tabId)).toEqual([93])
     expect(extension.commands.some((command) => command.method === "debugger.detach" && command.params?.tabId === 94)).toBe(true)
     extension.close()

@@ -118,7 +118,8 @@ export class Sampler {
         sample.trackedTabs = [...tracked].filter((id) => existing.has(id)).length
         sample.sessionTabs = [...held].filter((id) => existing.has(id)).length
         sample.untrackedSessionTabs = [...held].filter((id) => existing.has(id) && !tracked.has(id)).length
-        sample.orphanTabs = view.tabs.filter((t) => !t.active && !held.has(t.id)).length
+        // The extension's own pages (its welcome page after a reinstall) aren't agent tabs.
+        sample.orphanTabs = view.tabs.filter((t) => !t.active && !held.has(t.id) && !t.url.startsWith("chrome-extension://")).length
       } catch (error) {
         sample.cdpError = String(error).slice(0, 120)
       }
