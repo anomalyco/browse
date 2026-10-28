@@ -389,8 +389,8 @@ export const scenarios: Scenario[] = [
     assert(out > 0, `heavy ${out}`)
   } },
   { name: "large-result-stays-responsive", tags: ["core"], run: async ({ client, session }) => {
-    // A 5 MB result used to hang the relay in journal redaction. browse doesn't cap what execute returns, so the size
-    // the agent receives is recorded, not asserted.
+    // A 5 MB result used to hang the relay in journal redaction. What execute returns is capped (100 000 characters),
+    // with a warning that says how to keep all of it.
     const started = Date.now()
     const out = await client.call("execute", { session, code: `return 'x'.repeat(5_000_000)` }, 60_000)
     const ms = Date.now() - started
@@ -399,6 +399,8 @@ export const scenarios: Scenario[] = [
     const ping = Date.now()
     await relayJson("/extension/status")
     assert(Date.now() - ping < 2000, "relay slow after a large result")
+    assert(out.text.length < 250_000, `execute returned ${out.text.length} characters`)
+    assert((out.data?.warnings ?? []).some((w: string) => w.includes("files.write")), `no truncation note: ${j(out.data?.warnings)}`)
     return { ms, chars: out.text.length }
   } },
 ]

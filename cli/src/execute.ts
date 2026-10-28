@@ -541,13 +541,15 @@ export class ExecuteSandbox {
         const extracted = extractExecuteMedia(result)
         const redactedValue = this.networkCapture.redactValue(extracted.value)
         const jsonSafeResult = toJsonSafeValue(redactedValue)
+        const bounded = boundExecuteResult(stringifyResult(redactedValue), jsonSafeResult.serializable ? jsonSafeResult.value : undefined, jsonSafeResult.serializable)
         const warnings = this.finalizeWarnings(
           logSummary,
           jsonSafeResult.serializable ? undefined : `Execute result could not be represented as JSON value: ${jsonSafeResult.reason}`,
+          bounded.warning,
         )
         return {
-          text: stringifyResult(redactedValue),
-          ...(jsonSafeResult.serializable ? { value: jsonSafeResult.value } : {}),
+          text: bounded.text,
+          ...(bounded.hasValue ? { value: bounded.value } : {}),
           ...(extracted.media.length > 0 ? { media: extracted.media } : {}),
           isError: false,
           logs: this.redactCaptureLogs(logs),
@@ -2037,6 +2039,25 @@ export function wrapCode(code: string): string {
 
 function wrapCodeWithModuleAliases(code: string, aliases: readonly string[]): string {
   return `const { ${aliases.join(", ")} } = modules;\n{\n${wrapCode(code)}\n}`
+}
+
+/** The most text (and JSON value) an execute returns; an agent's context can't take more, and the relay copies it. */
+export const maxExecuteResultChars = 100_000
+
+/**
+ * Caps what an execute returns. A result past the limit keeps the start of its text, drops its JSON value, and says
+ * how to keep all of it: write it to a file inside the execute and read the parts needed.
+ */
+export function boundExecuteResult(text: string, value: unknown, hasValue: boolean): { readonly text: string; readonly value?: unknown; readonly hasValue: boolean; readonly warning?: string } {
+  const valueChars = hasValue && value !== null && typeof value === "object" ? safeJsonStringify(value)?.length ?? 0 : typeof value === "string" ? value.length : 0
+  const size = Math.max(text.length, valueChars)
+  if (size <= maxExecuteResultChars) return { text, value, hasValue }
+  const warning = `The result is ${size.toLocaleString("en-US")} characters, more than the ${maxExecuteResultChars.toLocaleString("en-US")} an execute returns: the text shows its start and the JSON value is left out. To keep all of it, write it to a file in the execute (await files.write("result.json", JSON.stringify(data))) and return only what you need, or read parts back later with files.read(files.path("result.json")).`
+  return {
+    text: text.length > maxExecuteResultChars ? `${text.slice(0, maxExecuteResultChars)}\n… [truncated ${(text.length - maxExecuteResultChars).toLocaleString("en-US")} characters]` : text,
+    hasValue: false,
+    warning,
+  }
 }
 
 function stringifyResult(result: unknown): string {

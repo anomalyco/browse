@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
-import type { ExecuteResult } from "../src/execute.ts"
+import { boundExecuteResult, maxExecuteResultChars, type ExecuteResult } from "../src/execute.ts"
 import { ExecuteRealm } from "../src/execute-realm.ts"
 import { HandoffRegistry } from "../src/handoff.ts"
 import type { ExecuteSandboxLike } from "../src/relay-types.ts"
@@ -229,3 +229,22 @@ describe("realm timers", () => {
     expect(fired).toEqual([])
   })
 })
+
+describe("execute result size", () => {
+  test("a result under the limit passes through untouched", () => {
+    expect(boundExecuteResult("ok", { a: 1 }, true)).toEqual({ text: "ok", value: { a: 1 }, hasValue: true })
+  })
+
+  test("a huge result keeps the start of its text, drops the value, and says how to save all of it", () => {
+    const big = "x".repeat(maxExecuteResultChars * 3)
+    const bounded = boundExecuteResult(big, big, true)
+    expect(bounded.hasValue).toBe(false)
+    expect(bounded.text.length).toBeLessThan(maxExecuteResultChars + 100)
+    expect(bounded.text).toContain("[truncated")
+    expect(bounded.warning).toContain("files.write")
+    // A large JSON value with a short inspected text is capped as well.
+    const rows = Array.from({ length: 20_000 }, (_, i) => ({ row: i, text: "lorem ipsum dolor" }))
+    expect(boundExecuteResult("[ ... 20000 items ]", rows, true).hasValue).toBe(false)
+  })
+})
+
