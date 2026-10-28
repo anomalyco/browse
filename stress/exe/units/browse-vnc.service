@@ -1,0 +1,14 @@
+[Unit]
+Description=browse stress: x11vnc on :99 (localhost only)
+After=browse-xvfb.service
+BindsTo=browse-xvfb.service
+
+[Service]
+User=@USER@
+ExecStartPre=/bin/sh -c 'for i in $(seq 50); do xdpyinfo -display :99 >/dev/null 2>&1 && exit 0; sleep 0.2; done; exit 1'
+ExecStart=/usr/bin/x11vnc -display :99 -localhost -rfbport 5900 -forever -shared -nopw -quiet -noxdamage
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

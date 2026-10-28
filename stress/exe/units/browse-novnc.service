@@ -1,0 +1,12 @@
+[Unit]
+Description=browse stress: noVNC on :@NOVNC_PORT@ (exe.dev's private proxy serves it)
+After=browse-vnc.service
+
+[Service]
+User=@USER@
+ExecStart=/usr/bin/websockify --web /opt/novnc @NOVNC_PORT@ 127.0.0.1:5900
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

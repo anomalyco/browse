@@ -1,0 +1,12 @@
+[Unit]
+Description=browse stress: Xvfb display :99
+After=network.target
+
+[Service]
+User=@USER@
+ExecStart=/usr/bin/Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -ac
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

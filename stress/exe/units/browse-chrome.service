@@ -1,0 +1,19 @@
+[Unit]
+Description=browse stress: Chrome for Testing (headed on :99) with the browse extension
+After=browse-wm.service
+Wants=browse-wm.service
+BindsTo=browse-xvfb.service
+StartLimitIntervalSec=0
+
+[Service]
+User=@USER@
+Environment=DISPLAY=:99
+Environment=HOME=@HOME@
+ExecStart=@REPO@/stress/exe/chrome.sh
+Restart=always
+RestartSec=2
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

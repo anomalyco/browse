@@ -1,0 +1,15 @@
+[Unit]
+Description=browse stress: fluxbox window manager on :99
+After=browse-xvfb.service
+BindsTo=browse-xvfb.service
+
+[Service]
+User=@USER@
+Environment=DISPLAY=:99
+ExecStartPre=/bin/sh -c 'for i in $(seq 50); do xdpyinfo -display :99 >/dev/null 2>&1 && exit 0; sleep 0.2; done; exit 1'
+ExecStart=/usr/bin/fluxbox
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
