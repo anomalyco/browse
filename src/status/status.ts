@@ -23,10 +23,10 @@ import {
   type ToStatusPage,
 } from "../shared/protocol"
 
-// `npx @opencode/browse install` opens this page as welcome.html#pair=<code> for a store build (cli/src/setup.ts
-// pairStoreExtension). Take the code, then drop it from the URL (address bar and history) before anything else runs.
-let fragmentCode = /^#pair=([0-9A-Za-z-]{16,64})$/.exec(location.hash)?.[1]
-if (location.hash.startsWith("#pair=")) history.replaceState(null, "", location.pathname + location.search)
+// `npx @opencode/browse install` opens this page as welcome.html#ticket=<one-time ticket> for a store build
+// (cli/src/setup.ts pairStoreExtension). Take it, then drop it from the URL (address bar and history) before anything else.
+let fragmentTicket = /^#ticket=([0-9A-Za-z-]{16,64})$/.exec(location.hash)?.[1]
+if (location.hash.startsWith("#ticket=") || location.hash.startsWith("#pair=")) history.replaceState(null, "", location.pathname + location.search)
 
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T
 const status = element<HTMLParagraphElement>("status")
@@ -38,6 +38,8 @@ const connect = () => {
   port = next
   next.onMessage.addListener((message: ToStatusPage) => {
     if (message.type === "agents") render(message.state)
+    if (message.type === "pairing.ticket.result")
+      showPairingNote(message.ok ? "Pairing with the relay on this computer…" : "Already paired with the relay; the pairing link from install was ignored.")
     if (message.type === "pairing.result") {
       const button = element<HTMLButtonElement>("pairing-form").querySelector("button")!
       if (message.ok) element<HTMLInputElement>("pairing-code").value = ""
@@ -55,9 +57,14 @@ connect()
 const send = (message: FromStatusPage) => port?.postMessage(message)
 
 function render(state: AgentRelayState) {
-  // The code from install's URL, applied once, and only when the extension isn't already working with the relay.
-  if (fragmentCode && state.status !== "connected") send({ type: "pairing.set", code: fragmentCode })
-  fragmentCode = undefined
+  // The ticket from install's URL, used once, and only when this extension isn't paired with the relay (no code, or one
+  // the relay refused). A working pairing is never replaced; the page says it ignored the link instead.
+  // While it's still connecting (or the relay is starting), wait for a status that tells.
+  if (fragmentTicket && state.status !== "offline" && state.status !== "connecting") {
+    if (state.status === "unpaired" || state.status === "untrusted") send({ type: "pairing.ticket", ticket: fragmentTicket })
+    else showPairingNote("Already paired with the relay; the pairing link from install was ignored.")
+    fragmentTicket = undefined
+  }
   status.dataset.state = state.status
   status.textContent = describe(state)
   // An unpacked build is paired by install; a store build pairs here (and can be paired again).
@@ -67,6 +74,9 @@ function render(state: AgentRelayState) {
   element("update-command").textContent = state.update?.command ?? ""
   showOverrides(state.overrides)
   showAutoUpdate(state.autoUpdate)
+  if (state.status === "connected" && element("pairing-note").textContent?.startsWith("Pairing with")) showPairingNote("Paired with the relay on this computer.")
+  if (state.ticketRejected && state.status !== "connected")
+    showPairingNote("The pairing link from install expired or was already used. Run `npx @opencode/browse pair` and paste the code below.")
 }
 
 /** The relay's update setting: shown for an npm install (a checkout updates with `update`; the notice above says so). */
@@ -94,6 +104,13 @@ for (const input of Array.from(element("auto-update").querySelectorAll<HTMLInput
   input.addEventListener("change", () => {
     if (input.checked && (input.value === "on" || input.value === "notify" || input.value === "off")) send({ type: "autoUpdate.set", mode: input.value })
   })
+
+/** A short line under the status, for what happened to install's pairing link. */
+function showPairingNote(text: string) {
+  const note = element("pairing-note")
+  note.textContent = text
+  note.hidden = false
+}
 
 const capitalized = (text: string) => text.charAt(0).toUpperCase() + text.slice(1)
 

@@ -1,12 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { spawn, type ChildProcess } from "node:child_process"
+import { createHmac } from "node:crypto"
 import fs from "node:fs"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import WebSocket from "ws"
 import { dataUrlDocument, stableUnpackedExtensionOrigin } from "../src/relay-helpers.ts"
-import { pairingCode, pairingProof, relayToken } from "../src/relay-secrets.ts"
+import { mintPairingTicket, pairingCode, pairingProof, pairingTicketKey, relayToken } from "../src/relay-secrets.ts"
 import { isBenignClosedSessionRejection } from "../src/relay.ts"
 
 // A relay from source on a free port with its own data root, and a fake extension that pairs with it and answers
@@ -202,6 +203,43 @@ describe("relay", () => {
     expect(byHeader).toBeInstanceOf(WebSocket)
     expect(byQuery).toBeInstanceOf(WebSocket)
     for (const socket of [byHeader, byQuery]) if (socket instanceof WebSocket) socket.close()
+  })
+
+  test("a one-time pairing ticket brings in the code once; used again, it's refused", async () => {
+    /** The extension side of a ticket handshake: proves the ticket, unmasks the code, proves the code. */
+    const pairWithTicket = async (ticket: string) => {
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/extension`, { origin: stableUnpackedExtensionOrigin })
+      await new Promise<void>((resolve) => socket.once("open", () => resolve()))
+      const closed = new Promise<number>((resolve) => socket.once("close", (code) => resolve(code)))
+      const nonce = crypto.randomUUID().replaceAll("-", "")
+      const challenge = new Promise<{ nonce: string; proof: string; wrapped?: string } | undefined>((resolve) => {
+        socket.once("message", (data) => resolve((JSON.parse(String(data)) as { params?: { nonce: string; proof: string; wrapped?: string } }).params))
+        socket.once("close", () => resolve(undefined))
+      })
+      socket.send(JSON.stringify({ method: "hello", params: { version: "0.0.0-test", build: "test", protocolVersion: 2, profileId: "t", profileName: "T", pairing: { nonce, ticket: true } } }))
+      const params = await challenge
+      if (!params?.wrapped) return { code: undefined, closeCode: await closed }
+      const key = pairingTicketKey(ticket)
+      expect(params.proof).toBe(pairingProof(key, "relay", port, params.nonce, nonce))
+      const mask = createHmac("sha256", key).update(`opencode-browser-pairing-v2|wrap|127.0.0.1:${port}/extension|${nonce}|${params.nonce}`).digest()
+      const code = Buffer.from(Buffer.from(params.wrapped, "base64url").map((byte, index) => byte ^ mask[index]!)).toString("ascii")
+      socket.send(JSON.stringify({ method: "auth.response", params: { proof: pairingProof(code, "extension", port, nonce, params.nonce) } }))
+      socket.send(JSON.stringify({ method: "ready" }))
+      await Bun.sleep(200)
+      const open = socket.readyState === WebSocket.OPEN
+      socket.close()
+      await closed
+      return { code, open }
+    }
+    const ticket = mintPairingTicket(home)
+    const first = await pairWithTicket(ticket)
+    expect(first.code).toBe(pairingCode(home))
+    expect(first.open).toBe(true)
+    const again = await pairWithTicket(ticket)
+    expect(again.code).toBeUndefined()
+    expect(again.closeCode).toBe(4006)
+    const expired = await pairWithTicket(mintPairingTicket(home, Date.now() - 3 * 60_000))
+    expect(expired.closeCode).toBe(4006)
   })
 
   test("an extension with the wrong pairing code is refused", async () => {

@@ -32,6 +32,7 @@ chrome.runtime.onConnect.addListener((port) => {
     if (message.type === "agents.reconnect") agents.reconnect()
     if (message.type === "tabs.cleanup") void TabCleanup.cleanup({ minutes: 0 })
     if (message.type === "autoUpdate.set") agents.setAutoUpdate(message.mode)
+    if (message.type === "pairing.ticket") post(port, { type: "pairing.ticket.result", ok: agents.pairTicket(message.ticket) })
     if (message.type === "pairing.set")
       void agents.pair(message.code).then((ok) => post(port, { type: "pairing.result", ok }))
   })

@@ -34,6 +34,8 @@ export type AgentRelayState = {
   autoUpdate?: RelayAutoUpdate
   /** With status "incompatible": which side is behind, when the relay said (its protocol range, or the 4003 reason). */
   skew?: ProtocolSkew
+  /** The relay refused install's one-time pairing link (expired or already used). */
+  ticketRejected?: boolean
 }
 
 /** update-cli: this extension is newer than the relay; update-extension: it's older than the relay supports. */
@@ -97,9 +99,13 @@ export type RelayOverrides = { agentWindow?: "current" | "separate"; cursor?: Ag
 
 export const STATUS_PORT = "opencode-browser.status"
 
-export type ToStatusPage = { type: "agents"; state: AgentRelayState } | { type: "pairing.result"; ok: boolean }
+export type ToStatusPage =
+  | { type: "agents"; state: AgentRelayState }
+  | { type: "pairing.result"; ok: boolean }
+  | { type: "pairing.ticket.result"; ok: boolean }
 export type FromStatusPage =
   | { type: "agents.reconnect" }
   | { type: "tabs.cleanup" }
   | { type: "pairing.set"; code: string }
+  | { type: "pairing.ticket"; ticket: string }
   | { type: "autoUpdate.set"; mode: AutoUpdateMode }

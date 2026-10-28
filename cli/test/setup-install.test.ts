@@ -135,16 +135,16 @@ describe("pairing the store build", () => {
     const opened: [string, string, string | undefined][] = []
     const lines: string[] = []
     const outcome = pairStoreExtension(
-      { detections, preferred: chrome, allowOpen: overrides.allowOpen ?? true, env: { ssh: overrides.ssh ?? false, display: true, tty: true, platform: "darwin" }, code: "CODE", storeIds: [storeId] },
+      { detections, preferred: chrome, allowOpen: overrides.allowOpen ?? true, env: { ssh: overrides.ssh ?? false, display: true, tty: true, platform: "darwin" }, ticket: () => "TICKET", storeIds: [storeId] },
       { open: (target, url, dir) => (opened.push([target.name, url, dir]), true), reveal: () => true, copy: () => true, log: (line) => lines.push(line) },
     )
     return { outcome, opened, output: lines.join("\n") }
   }
 
-  test("opens the store build's status page with the code in the fragment, in the profile that has it", () => {
+  test("opens the store build's status page with a one-time ticket in the fragment, in the profile that has it", () => {
     const { outcome, opened, output } = pair([{ ...none(chrome), enabled: [{ browser: chrome, profile, id: storeId }] }])
     expect(outcome).toBe("opened")
-    expect(opened).toEqual([["Google Chrome", `chrome-extension://${storeId}/welcome.html#pair=CODE`, "Profile 2"]])
+    expect(opened).toEqual([["Google Chrome", `chrome-extension://${storeId}/welcome.html#ticket=TICKET`, "Profile 2"]])
     expect(output).toContain("Google Chrome (Work)")
   })
 

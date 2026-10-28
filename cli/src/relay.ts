@@ -44,7 +44,7 @@ import {
   validateHostHeader,
   validateWebSocketOrigin,
 } from "./relay-helpers.ts"
-import { ensurePrivateDirectory, pairingCode, pairingProof, relayToken, relayTokenQueryParam, secretsEqual } from "./relay-secrets.ts"
+import { ensurePrivateDirectory, pairingCode, pairingProof, relayToken, relayTokenQueryParam, secretsEqual, takePairingTicket, wrapPairingCode } from "./relay-secrets.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
 import { GhostCursorTabs, ghostCursorCommandMethod } from "./ghost-cursor.ts"
 import { guardCdpMethod, scopeCdpResult } from "./cdp-guardrails.ts"
@@ -1164,6 +1164,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       socket.close(4002, "Invalid pairing nonce")
       return undefined
     }
+    // A store build paired by install's URL holds a one-time ticket instead of the code (relay-secrets.ts).
+    const ticket = getObject(getObject(message.params)?.pairing)?.ticket === true
     let code: string
     try {
       code = pairingCode()
@@ -1173,10 +1175,25 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return undefined
     }
     const relayNonce = crypto.randomBytes(32).toString("base64url")
+    const ticketKey = ticket ? takePairingTicket() : undefined
+    if (ticket && !ticketKey) {
+      pairingFailures += 1
+      relayLog("extension.rejected", { reason: "pairing ticket expired or used" })
+      socket.close(4006, "Pairing ticket expired or already used: run `pair` and enter the code")
+      return undefined
+    }
+    if (ticketKey) relayLog("extension.ticket", {})
     socket.send(JSON.stringify({
       method: "auth.challenge",
       // The protocols this relay speaks, so the extension can tell the user which side to update (older ones ignore it).
-      params: { nonce: relayNonce, proof: pairingProof(code, "relay", port, relayNonce, extensionNonce), protocol: { version: extensionProtocolVersion, min: minExtensionProtocolVersion } },
+      params: {
+        nonce: relayNonce,
+        // With a ticket, the relay proves it holds the ticket and hands over the code masked with it; the extension then
+        // proves the code as usual, so the rest of the handshake is the same.
+        proof: pairingProof(ticketKey ?? code, "relay", port, relayNonce, extensionNonce),
+        ...(ticketKey ? { wrapped: wrapPairingCode(ticketKey, code, port, extensionNonce, relayNonce) } : {}),
+        protocol: { version: extensionProtocolVersion, min: minExtensionProtocolVersion },
+      },
     }))
     return { hello: message, extensionNonce, relayNonce, code }
   }

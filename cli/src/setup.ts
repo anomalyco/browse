@@ -17,9 +17,9 @@ import path from "node:path"
 import { createInterface } from "node:readline/promises"
 import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse } from "jsonc-parser"
-import { describeAutoUpdate, autoUpdateStatus, installVersion, pruneVersions, readCurrent, readState, runtimeLayout, switchVersion, updateState, compareVersions, versionEntry } from "./auto-update.ts"
+import { describeAutoUpdate, autoUpdateStatus, installVersion, pruneVersions, readCurrent, runtimeLayout, switchVersion, updateState, compareVersions, versionEntry } from "./auto-update.ts"
 import { cliCommand, dataRoot, installCommand, STORE_LISTED, storeConfig } from "./paths.ts"
-import { formatPairingCode, pairingCode, relayAuthorization, writeExtensionPairing } from "./relay-secrets.ts"
+import { formatPairingCode, mintPairingTicket, pairingCode, relayAuthorization, writeExtensionPairing } from "./relay-secrets.ts"
 import { opencodeBrowserVersion } from "./version.ts"
 
 /**
@@ -421,7 +421,7 @@ async function install(args: string[]) {
     env,
   })
   if (found === "ready" && !connected) {
-    const paired = pairStoreExtension({ detections, preferred: ssh ? undefined : defaultBrowser(detections.map((detection) => detection.browser)), allowOpen: !args.includes("--no-open"), env, code: pairingCode() })
+    const paired = pairStoreExtension({ detections, preferred: ssh ? undefined : defaultBrowser(detections.map((detection) => detection.browser)), allowOpen: !args.includes("--no-open"), env, ticket: () => mintPairingTicket() })
     if (paired === "opened") return awaitConnection(entry)
   }
   if (found === "guided" && !STORE_LISTED && env.tty && !ssh && !args.includes("--no-wait")) return awaitConnection(entry)
@@ -683,15 +683,15 @@ export function locateExtension(options: LocateOptions, effects: Effects = syste
 
 /**
  * Pairs a store-installed extension without the copy-paste step: opens its status page in the browser profile that has
- * it, with the pairing code in the URL fragment (`welcome.html#pair=<code>`). The page pairs and clears the fragment at
- * once. The code passes through that browser's command line once, on this machine: briefly visible in the process
- * list (to other local users too, on systems that show every user's arguments), where a program running as this user
- * could read it from the data root anyway. The page ignores it when it's already connected; `pair` and pasting the
- * code stay as the fallback.
+ * it, with a one-time pairing ticket in the URL fragment (`welcome.html#ticket=<ticket>`). The page clears the fragment
+ * at once and, only when the extension isn't paired, connects with the ticket; the relay exchanges it for the pairing
+ * code during the handshake (relay-secrets.ts). The ticket passes through the browser's command line, which other local
+ * users can see in the process list (`ps`), so it's worth nothing after its first use or two minutes, whichever comes
+ * first; the real code never leaves the data root this way. `pair` and pasting the code stay as the fallback.
  * Returns "opened", "manual" (the store build is there but nothing was opened: say how to pair) or "none".
  */
 export function pairStoreExtension(
-  options: Pick<LocateOptions, "detections" | "preferred" | "allowOpen" | "env"> & { code: string; storeIds?: readonly string[] },
+  options: Pick<LocateOptions, "detections" | "preferred" | "allowOpen" | "env"> & { ticket: () => string; storeIds?: readonly string[] },
   effects: Effects = systemEffects,
 ): "opened" | "manual" | "none" {
   const ids = options.storeIds ?? STORE_IDS
@@ -699,8 +699,7 @@ export function pairStoreExtension(
   const match = matches.find((candidate) => candidate.browser.name === options.preferred?.name) ?? matches[0]
   if (!match) return "none"
   const interactive = options.allowOpen && options.env.display && !options.env.ssh
-  const url = `chrome-extension://${match.id}/welcome.html#pair=${options.code}`
-  if (interactive && effects.open(match.browser, url, match.profile.dir)) {
+  if (interactive && effects.open(match.browser, `chrome-extension://${match.id}/welcome.html#ticket=${options.ticket()}`, match.profile.dir)) {
     effects.log(`✓ Opened OpenCode Browser's status page in ${match.browser.name} (${match.profile.name}) to pair it with the relay`)
     return "opened"
   }
