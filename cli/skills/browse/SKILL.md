@@ -559,6 +559,11 @@ opencode-browser network stop --session github \
   --output ./github.har --secrets github
 ```
 
+A capture ends by itself after 30 minutes (`--max-duration-ms` /
+`maxDurationMs`), discarding what it captured, and when the MCP server that
+started it exits; stop it before then. A running capture keeps the relay from
+restarting.
+
 Written artifacts replace credential-bearing headers, cookies, query fields,
 OAuth fragment fields, and structured body fields with stable references such as `${BC_SECRET_1}`.
 `--secrets github` stores lossless values separately in a mode-`0600` Secret
@@ -759,7 +764,9 @@ Common diagnoses:
   repeatedly creating sessions or resetting tabs does not switch browsers.
 - Stale relay build: inspect `doctor`, then coordinate an explicit
   `opencode-browser relay restart`. It requires an exact managed instance and
-  safe shutdown protocol 2. Legacy relays need a one-time coordinated manual
+  safe shutdown protocol 2. It refuses while a network capture, recording or
+  raw CDP client is active and names it; `relay restart --force` ends those
+  first, so use it only with the user's agreement. Legacy relays need a one-time coordinated manual
   stop; foreground/source or newer relays are never force-killed or downgraded.
   MCP observational tools remain available on a mismatch.
 - Unexpected restart: inspect private endpoint-scoped
