@@ -120,7 +120,7 @@ function describe(state: AgentRelayState) {
     return tabs ? `Connected. Agents are using ${tabs} tab${tabs === 1 ? "" : "s"}.` : "Connected. No agent is using a tab yet."
   if (state.status === "connecting") return "Connecting to the relay…"
   if (state.status === "conflict")
-    return "OpenCode Browser in another browser or profile is connected. Close it there (or quit that browser), then click Reconnect."
+    return "Browse in another browser or profile is connected. Close it there (or quit that browser), then click Reconnect."
   if (state.status === "incompatible" && state.skew === "update-cli")
     return "This extension is newer than the browse CLI on this computer. Update the CLI: run `npx @opencode/browse@latest install` (with automatic updates on, it catches up by itself within a day), then click Reconnect."
   if (state.status === "incompatible" && state.skew === "update-extension")

@@ -222,7 +222,7 @@ export class ExecuteFileAccessError extends Error {
   override readonly name = "ExecuteFileAccessError"
 }
 
-/** Throw unless `target` is an absolute path inside the execute file roots and outside OpenCode Browser's data. */
+/** Throw unless `target` is an absolute path inside the execute file roots and outside Browse's data. */
 export function assertExecuteFilePath(target: unknown, operation: string): string {
   if (typeof target !== "string" || target.length === 0) {
     throw new ExecuteFileAccessError(`${operation}: file paths must be non-empty strings`)
@@ -235,7 +235,7 @@ export function assertExecuteFilePath(target: unknown, operation: string): strin
   const resolved = realTarget(target)
   const data = realTarget(dataRoot())
   if (isInside(resolved, data)) {
-    throw new ExecuteFileAccessError(`${operation}: ${target} is inside OpenCode Browser's data directory, which execute code cannot access`)
+    throw new ExecuteFileAccessError(`${operation}: ${target} is inside Browse's data directory, which execute code cannot access`)
   }
   if (!roots.some((root) => isInside(resolved, root))) {
     throw new ExecuteFileAccessError(`${operation}: ${target} is outside the execute file roots ${describeRoots()}. Set ${allowNodeEnvironmentVariable}=1 for unrestricted file access.`)

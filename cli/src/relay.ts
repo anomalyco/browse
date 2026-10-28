@@ -374,9 +374,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     const notice = updates.current
     sendExtensionBestEffort({ method: "update.notice", ...(notice ? { params: { summary: notice.summary, command: notice.command } } : {}) })
   }
-  const attachedBadge = { text: "ON", color: "#7c3aed", title: "Detach from OpenCode Browser" }
-  const executingBadge = { text: "RUN", color: "#f59e0b", title: "OpenCode Browser is running a script. Click to stop it and take this tab back." }
-  const waitingBadge = (message: string) => ({ text: "WAIT", color: "#2563eb", title: `OpenCode Browser is waiting for you: ${message} Click here when you're done.` })
+  const attachedBadge = { text: "ON", color: "#7c3aed", title: "Detach from Browse" }
+  const executingBadge = { text: "RUN", color: "#f59e0b", title: "Browse is running a script. Click to stop it and take this tab back." }
+  const waitingBadge = (message: string) => ({ text: "WAIT", color: "#2563eb", title: `Browse is waiting for you: ${message} Click here when you're done.` })
   const executionBadge = (sessionId: string, executing: boolean) => executing && !sessions.isReadOnly(sessionId) ? executingBadge : attachedBadge
   const setActivityForSessionTabs = (
     opencodeBrowserSessionId: string,
@@ -776,7 +776,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const httpServer = http.createServer((request, response) => {
     if (!relayReady) {
       response.writeHead(503, { "content-type": "application/json; charset=utf-8", "retry-after": "1" })
-      response.end(JSON.stringify({ error: "OpenCode Browser relay is starting", code: "relay-starting" }))
+      response.end(JSON.stringify({ error: "Browse relay is starting", code: "relay-starting" }))
       return
     }
     const started = performance.now()
@@ -856,10 +856,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const extensionSettings = (method: "settings.get" | "settings.set", values?: JsonObject) =>
     Effect.gen(function* () {
       if (!extensionRpc.connected)
-        return yield* Effect.fail(new Error("The OpenCode Browser extension isn't connected, so its settings can't be read or changed. Ask the user to open the browser with the extension; its options page shows whether it's connected."))
+        return yield* Effect.fail(new Error("The Browse extension isn't connected, so its settings can't be read or changed. Ask the user to open the browser with the extension; its options page shows whether it's connected."))
       const result = yield* sendToExtension({ method, ...(values ? { params: { values } } : {}) }).pipe(
         Effect.mapError((error) => /Invalid extension command/.test(error.message)
-          ? new Error(`The connected OpenCode Browser extension is too old to read or change settings from here. Update browse (\`${installCommand()}\`) and reload the extension, or change them on its options page.`)
+          ? new Error(`The connected Browse extension is too old to read or change settings from here. Update browse (\`${installCommand()}\`) and reload the extension, or change them on its options page.`)
           : error),
       )
       return settingsFromExtension(result)
@@ -978,7 +978,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
 
   httpServer.on("upgrade", (request, socket, head) => {
     if (!relayReady) {
-      sendUpgradeError({ socket, status: 404, message: "OpenCode Browser relay is starting" })
+      sendUpgradeError({ socket, status: 404, message: "Browse relay is starting" })
       return
     }
     const hostError = validateHostHeader({ hostHeader: request.headers.host, host, port })
@@ -1005,7 +1005,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return
     }
     if (!hasRelayToken(request, authToken) && !secretsEqual(authToken, requestUrl.searchParams.get(relayTokenQueryParam) ?? undefined)) {
-      sendUpgradeError({ socket, status: 401, message: "Missing or invalid OpenCode Browser relay token" })
+      sendUpgradeError({ socket, status: 401, message: "Missing or invalid Browse relay token" })
       return
     }
     if (requestUrl.pathname.startsWith("/devtools/browser/")) {
@@ -1160,7 +1160,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         legacyExtensionReloaded = true
         socket.send(JSON.stringify({ id: 0, method: "runtime.reload" }))
       }
-      socket.close(4005, "Pairing required: update OpenCode Browser")
+      socket.close(4005, "Pairing required: update Browse")
       return undefined
     }
     if (!/^[A-Za-z0-9_-]{22,128}$/.test(extensionNonce)) {
@@ -1741,7 +1741,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       }
       if (action === "stop-execution" && sessionId) {
         relayLog("execute.stopped", { tabId, session: sessionId, from: "toolbar" })
-        sessions.stopExecution(sessionId, `The user took tab ${tabId} back (OpenCode Browser toolbar button) while this script ran, so it was stopped. Don't use that tab again unless the user lends it back; ask the user how to continue.`)
+        sessions.stopExecution(sessionId, `The user took tab ${tabId} back (Browse toolbar button) while this script ran, so it was stopped. Don't use that tab again unless the user lends it back; ask the user how to continue.`)
       }
     }
     Effect.runPromise(toggleTab(tabId)).catch((error: unknown) => {
@@ -2238,11 +2238,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     Effect.gen(function* () {
       const restoredSessions = yield* Effect.tryPromise({
         try: () => sessionCatalog?.load() ?? Promise.resolve([]),
-        catch: (cause) => cause instanceof Error ? cause : new Error("Load OpenCode Browser session catalog", { cause }),
+        catch: (cause) => cause instanceof Error ? cause : new Error("Load Browse session catalog", { cause }),
       })
       yield* Effect.try({
         try: () => sessions.restore(restoredSessions),
-        catch: (cause) => cause instanceof Error ? cause : new Error("Restore OpenCode Browser sessions", { cause }),
+        catch: (cause) => cause instanceof Error ? cause : new Error("Restore Browse sessions", { cause }),
       })
       catalogWritesEnabled = true
       if (managed) {

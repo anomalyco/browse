@@ -94,7 +94,7 @@ export function createHttpRequestHandler(options: {
     // The version probe stays open: it reveals nothing sensitive and lets clients of another build or install tell
     // which relay holds the port before they send a token it would reject.
     if (pathname !== "/" && pathname !== "/version" && !hasRelayToken(request, options.authToken)) {
-      sendJson(response, { error: "Missing or invalid OpenCode Browser relay token", code: "unauthorized" }, 401)
+      sendJson(response, { error: "Missing or invalid Browse relay token", code: "unauthorized" }, 401)
       return
     }
     const observational = request.method === "GET" || pathname === "/network/status" || pathname === "/auth/status"
@@ -537,7 +537,7 @@ function handleCliRequest(options: {
       const allTargets = options.registry.listRootTargets()
       const byTab = request.tabId === undefined ? undefined : allTargets.find((target) => target.tabId === request.tabId)
       if (request.tabId !== undefined && !byTab)
-        throw new Error(`Tab ${request.tabId} is not available to agents. Ask the user to click the OpenCode Browser toolbar button on that tab.`)
+        throw new Error(`Tab ${request.tabId} is not available to agents. Ask the user to click the Browse toolbar button on that tab.`)
       const candidates = byTab ? [byTab] : request.targetSelection
         ? allTargets
         : (() => {

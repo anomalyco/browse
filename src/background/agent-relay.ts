@@ -1,4 +1,4 @@
-// The link to the OpenCode Browser relay (ws://127.0.0.1:19988/extension). The relay runs agent sessions
+// The link to the Browse relay (ws://127.0.0.1:19988/extension). The relay runs agent sessions
 // for the browse MCP server and the opencode-browser CLI (Playwright `execute`, recordings, handoffs) and drives tabs
 // through this extension; this module runs its commands. The wire protocol is in ../agent-relay/protocol.ts,
 // the relay itself in cli/src/relay.ts.
@@ -383,7 +383,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
           build: __OPENCODE_BROWSER_BUILD__,
           protocolVersion: extensionProtocolVersion,
           profileId: profile.id,
-          profileName: profile.name ?? "OpenCode Browser",
+          profileName: profile.name ?? "Browse",
           pairing: { nonce, ...(usingTicket !== undefined ? { ticket: true } : {}) },
         },
       }),
@@ -789,7 +789,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       const message = text(error)
       throw new Error(
         /invoked|activeTab/i.test(message)
-          ? `${message.replace(/\.+$/, "")}. Click the OpenCode Browser toolbar icon on this tab once before recording.`
+          ? `${message.replace(/\.+$/, "")}. Click the Browse toolbar icon on this tab once before recording.`
           : message,
       )
     })
@@ -830,13 +830,13 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
 
   const sendRecordingChunk = async (data: Uint8Array) => {
     const current = open()
-    if (!current) throw new Error("The OpenCode Browser relay is not connected")
+    if (!current) throw new Error("The Browse relay is not connected")
     const deadline = Date.now() + 30_000
     while (current.bufferedAmount + data.byteLength > MAX_RECORDING_BUFFER) {
       await sleep(10)
       if (socket !== current || current.readyState !== WebSocket.OPEN)
-        throw new Error("The OpenCode Browser relay disconnected while receiving recording data")
-      if (Date.now() >= deadline) throw new Error("Timed out sending recording data to the OpenCode Browser relay")
+        throw new Error("The Browse relay disconnected while receiving recording data")
+      if (Date.now() >= deadline) throw new Error("Timed out sending recording data to the Browse relay")
     }
     current.send(new Uint8Array(data))
   }
@@ -1280,7 +1280,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       const entries = await log.entries()
       const manifest = chrome.runtime.getManifest()
       return [
-        "OpenCode Browser diagnostics",
+        "Browse diagnostics",
         `extension: ${manifest.version} (${chrome.runtime.id})`,
         `browser: ${navigator.userAgent}`,
         `relay: ws://127.0.0.1:${port}/extension, protocol ${extensionProtocolVersion}`,
@@ -1324,7 +1324,7 @@ function serialize(message: JsonObject) {
   return new TextEncoder().encode(data).byteLength <= MAX_MESSAGE ? data : undefined
 }
 
-const ATTACHED_TITLE = "OpenCode Browser · Agents can use this tab. Click to stop."
+const ATTACHED_TITLE = "Browse · Agents can use this tab. Click to stop."
 
 /** How a handoff notification names the agent: its session's chosen name, else "An agent". */
 function sessionName(sessionId?: string) {

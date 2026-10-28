@@ -990,14 +990,14 @@ export class OpenCodeBrowserSessions {
       }
     })
     void this.persistenceTail.catch((error) => {
-      console.error("Failed to persist OpenCode Browser sessions", error)
+      console.error("Failed to persist Browse sessions", error)
     })
   }
 
   private flushPersistence(): Effect.Effect<void, Error> {
     return Effect.tryPromise({
       try: () => this.persistenceTail,
-      catch: (cause) => cause instanceof Error ? cause : new Error("Persist OpenCode Browser sessions", { cause }),
+      catch: (cause) => cause instanceof Error ? cause : new Error("Persist Browse sessions", { cause }),
     })
   }
 
@@ -1064,8 +1064,8 @@ export class OpenCodeBrowserSessions {
   private assertAdmission(): void {
     if (this.admission !== "open") {
       throw sessionError("inactive", this.admission === "closed"
-        ? "OpenCode Browser sessions are closing"
-        : "OpenCode Browser sessions are draining")
+        ? "Browse sessions are closing"
+        : "Browse sessions are draining")
     }
   }
 

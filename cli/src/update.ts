@@ -307,7 +307,7 @@ export function runUpdate(args: readonly string[], deps: UpdateDeps): number {
   }
   const repo = deps.repo
   if (!repo) {
-    log("OpenCode Browser was installed from npm. Update it with:")
+    log("Browse was installed from npm. Update it with:")
     log("  npx @opencode/browse@latest install")
     log("then restart opencode.")
     return 0

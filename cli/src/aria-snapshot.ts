@@ -1,7 +1,7 @@
 import { selectors, type BrowserContext, type Frame, type Locator, type Page } from "patchright-core"
 import { runtimeFailureKind } from "./runtime-diagnostics.ts"
 
-const redactionCleanupErrorMessage = "OpenCode Browser could not confirm ARIA snapshot value-redaction cleanup"
+const redactionCleanupErrorMessage = "Browse could not confirm ARIA snapshot value-redaction cleanup"
 // Keep the engine as source text so bundlers cannot inject Node-only helpers into the browser function.
 const redactionSelectorSource = `({
   query(root, body) {

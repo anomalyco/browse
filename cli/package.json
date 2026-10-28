@@ -1,7 +1,7 @@
 {
   "name": "@opencode/browse",
   "version": "0.0.2",
-  "description": "OpenCode Browser: connect the extension to opencode, and drive your browser from any agent (CLI, MCP, Playwright).",
+  "description": "Browse: connect the extension to opencode, and drive your browser from any agent (CLI, MCP, Playwright).",
   "type": "module",
   "license": "MIT",
   "bin": {

@@ -4,7 +4,7 @@ Copy these into the developer dashboard. The release workflow uploads `opencode-
 
 ## Store listing
 
-**Name:** OpenCode Browser
+**Name:** Browse
 
 **Summary (132 chars max):**
 Let your OpenCode agents use your browser: open and drive tabs, take screenshots, and hand logins back to you.
@@ -12,7 +12,7 @@ Let your OpenCode agents use your browser: open and drive tabs, take screenshots
 **Category:** Developer Tools
 
 **Description:**
-OpenCode Browser lets OpenCode, the open source AI coding agent running on your computer, use your real browser through its browse tools.
+Browse lets OpenCode, the open source AI coding agent running on your computer, use your real browser through its browse tools.
 
 - Agents open their own tabs in the background of your window, grouped at the start of your tab strip and collapsed so they stay out of your way. Prefer a separate window, one shared group or no groups? Choose it on the status page. Idle agent tabs close by themselves after 10 minutes, or the time you set.
 - Want an agent to use a tab you have open? Click the toolbar button on it. Click again to take it back, even while the agent is working.

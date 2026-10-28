@@ -578,7 +578,7 @@ function finishCapture(
       yield* writeArtifact(options.outputPath, {
         log: {
           version: "1.2",
-          creator: { name: "OpenCode Browser", version: "1" },
+          creator: { name: "Browse", version: "1" },
           entries: protectedEntries.map(toHarEntry),
         },
       })

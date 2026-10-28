@@ -58,7 +58,7 @@ export async function sync(tabId: number, page: PageStatus | undefined, sessionN
     .create(PREFIX + tabId, {
       type: "basic",
       iconUrl: chrome.runtime.getURL("icons/icon-128.png"),
-      title: "OpenCode Browser",
+      title: "Browse",
       message: `${sessionName(page?.sessionId)} needs you on ${origin}`,
       ...(page?.message ? { contextMessage: page.message } : {}),
       requireInteraction: true,

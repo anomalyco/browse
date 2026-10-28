@@ -1,4 +1,4 @@
-// Setup for OpenCode Browser, without changing opencode itself:
+// Setup for Browse, without changing opencode itself:
 //   install    install the runtime, add the browse MCP server to opencode's config, copy the unpacked extension
 //              (reloading a connected one), then check which browsers have the extension; when none does, guide
 //              loading it unpacked (or, once STORE_LISTED, open the Chrome Web Store listing) and wait for it; when a
@@ -277,7 +277,7 @@ function removeMcp(name: string) {
   return true
 }
 
-/** MCP servers from the separate Browser Control product, which OpenCode Browser replaces. */
+/** MCP servers from the separate Browser Control product, which Browse replaces. */
 function legacyBrowserControl() {
   return Object.entries(mcpServers())
     .filter(([name, server]) => name === "browser-control" || JSON.stringify(server.command ?? "").includes("browser-control"))
@@ -357,10 +357,10 @@ async function installRuntime(): Promise<{ entry: string; version: string }> {
 function checkNode() {
   // `bun run` stands in a bun shim for a missing node.
   if (process.versions.bun)
-    fail("OpenCode Browser runs on Node.js 22.19 or newer, but this ran under Bun (`bun run` uses Bun when `node` isn't on PATH). Install Node.js from https://nodejs.org, then run setup again.")
+    fail("Browse runs on Node.js 22.19 or newer, but this ran under Bun (`bun run` uses Bun when `node` isn't on PATH). Install Node.js from https://nodejs.org, then run setup again.")
   const [major = 0, minor = 0] = process.versions.node.split(".").map(Number)
   if (major < 22 || (major === 22 && minor < 19))
-    fail(`OpenCode Browser needs Node.js 22.19 or newer; this is ${process.version} (${process.execPath}). Update Node.js (https://nodejs.org), then run setup again.`)
+    fail(`Browse needs Node.js 22.19 or newer; this is ${process.version} (${process.execPath}). Update Node.js (https://nodejs.org), then run setup again.`)
 }
 
 /** The folder to load unpacked: the checkout's dist/ (which `bun run setup` builds), else the copy in the data root. */
@@ -374,7 +374,7 @@ async function install(args: string[]) {
 
   mkdirSync(files.dir, { recursive: true })
   const { entry, version } = await installRuntime()
-  log(`✓ OpenCode Browser ${version} installed${fromSource ? " (from source)" : ""}`)
+  log(`✓ Browse ${version} installed${fromSource ? " (from source)" : ""}`)
   writeFileSync(files.settings, JSON.stringify({ ...(opencode ? { opencode } : {}), entry, version } satisfies Settings, null, 2) + "\n")
   if (removeLegacyHost()) log("✓ Removed the native messaging host of an earlier version")
 
@@ -385,7 +385,7 @@ async function install(args: string[]) {
   for (const line of restartOutdatedRelay(entry, node) ?? []) log(line)
   const legacy = legacyBrowserControl()
   if (legacy.length)
-    log(`! Browser Control MCP server${legacy.length === 1 ? "" : "s"} ${legacy.map((name) => `"${name}"`).join(", ")} also configured. OpenCode Browser replaces it; remove ${legacy.length === 1 ? "it" : "them"} from ${configFile()} to avoid two sets of browser tools.`)
+    log(`! Browser Control MCP server${legacy.length === 1 ? "" : "s"} ${legacy.map((name) => `"${name}"`).join(", ")} also configured. Browse replaces it; remove ${legacy.length === 1 ? "it" : "them"} from ${configFile()} to avoid two sets of browser tools.`)
 
   const connected = await connectedExtension()
   if (existsSync(bundledExtension)) {
@@ -398,9 +398,9 @@ async function install(args: string[]) {
   if (existsSync(bundledExtension)) {
     // A browser already running an older unpacked build keeps its old code until it reloads; ask it to.
     const reload = connected ? await reloadOutdatedExtension(connected) : "current"
-    if (reload === "reloaded") log("✓ Reloaded OpenCode Browser in your browser")
+    if (reload === "reloaded") log("✓ Reloaded Browse in your browser")
     if (reload === "stale")
-      log("! OpenCode Browser didn't reload in your browser. Reload it on the browser's extensions page to finish the update.")
+      log("! Browse didn't reload in your browser. Reload it on the browser's extensions page to finish the update.")
   }
   log("")
   // Over SSH the browsers here aren't the ones the user looks at, so they aren't scanned.
@@ -508,7 +508,7 @@ function pair() {
   pairUnpacked()
   log(`Pairing code: ${formatPairingCode(pairingCode())}`)
   log("")
-  log("OpenCode Browser from the Chrome Web Store asks for this code once: open its status page (right-click the")
+  log("Browse from the Chrome Web Store asks for this code once: open its status page (right-click the")
   log("toolbar button, then Options), paste it, and click Pair. Unpacked installs are paired by `install`.")
   log("Keep it private: with it, a program could pose as the relay to your browser.")
 }
@@ -627,7 +627,7 @@ export type LocateOptions = {
 }
 
 /**
- * Reports the browsers and profiles that have OpenCode Browser. When none does (and none is connected to the relay),
+ * Reports the browsers and profiles that have Browse. When none does (and none is connected to the relay),
  * guides installing it: until the Chrome Web Store listing is live (STORE_LISTED), that's loading the unpacked build,
  * with the browser's extensions page opened, the folder revealed and its path copied; after, the store listing.
  * Nothing opens when the browsers here aren't the ones the user looks at (SSH, no display), there is no terminal,
@@ -638,10 +638,10 @@ export function locateExtension(options: LocateOptions, effects: Effects = syste
   const { log } = effects
   const listing = options.storeUrl ?? STORE_URL
   const storeListed = (options.storeListed ?? STORE_LISTED) && listing !== undefined
-  const ready = "✓ Agents can use OpenCode Browser now. Click its toolbar button on a tab to let them use that tab too."
+  const ready = "✓ Agents can use Browse now. Click its toolbar button on a tab to let them use that tab too."
   if (options.env.ssh) {
     if (options.connected) return log(ready), "ready"
-    if (storeListed) log(`Install OpenCode Browser in your browser from the Chrome Web Store: ${listing}`)
+    if (storeListed) log(`Install Browse in your browser from the Chrome Web Store: ${listing}`)
     else unpackedSteps({ folder: options.folder, platform: options.env.platform, log })
     return "guided"
   }
@@ -650,7 +650,7 @@ export function locateExtension(options: LocateOptions, effects: Effects = syste
   if (options.connected || options.detections.some((detection) => detection.enabled.length)) return log(ready), "ready"
   const off = options.detections.flatMap((detection) => detection.disabled)
   if (off.length) {
-    log(`! OpenCode Browser is turned off in ${off.map((match) => `${match.browser.name} (${match.profile.name})`).join(", ")}. Turn it on in the browser's extensions page.`)
+    log(`! Browse is turned off in ${off.map((match) => `${match.browser.name} (${match.profile.name})`).join(", ")}. Turn it on in the browser's extensions page.`)
     return "off"
   }
   const blocked = options.detections.filter((detection) => detection.blocked).map((detection) => detection.browser.name)
@@ -658,7 +658,7 @@ export function locateExtension(options: LocateOptions, effects: Effects = syste
   const interactive = options.allowOpen && options.env.display && options.env.tty
   if (storeListed) {
     const opened = interactive && !blocked.length && target !== undefined && effects.open(target, listing!)
-    log(`Install OpenCode Browser from the Chrome Web Store${opened ? ` (opened in ${target.name})` : ""}:`)
+    log(`Install Browse from the Chrome Web Store${opened ? ` (opened in ${target.name})` : ""}:`)
     log(`  ${listing}`)
     if (blocked.length) log(`  Already installed in ${blocked.join(", ")}? Then you're set.`)
     log(`  Or load the unpacked build: ${cliCommand("extension")}`)
@@ -700,10 +700,10 @@ export function pairStoreExtension(
   if (!match) return "none"
   const interactive = options.allowOpen && options.env.display && !options.env.ssh
   if (interactive && effects.open(match.browser, `chrome-extension://${match.id}/welcome.html#ticket=${options.ticket()}`, match.profile.dir)) {
-    effects.log(`✓ Opened OpenCode Browser's status page in ${match.browser.name} (${match.profile.name}) to pair it with the relay`)
+    effects.log(`✓ Opened Browse's status page in ${match.browser.name} (${match.profile.name}) to pair it with the relay`)
     return "opened"
   }
-  effects.log(`! To pair OpenCode Browser in ${match.browser.name} (${match.profile.name}), run \`${cliCommand("pair")}\` and paste the code on its status page (right-click the toolbar button, then Options).`)
+  effects.log(`! To pair Browse in ${match.browser.name} (${match.profile.name}), run \`${cliCommand("pair")}\` and paste the code on its status page (right-click the toolbar button, then Options).`)
   return "manual"
 }
 
@@ -754,7 +754,7 @@ export async function waitForExtension(options: {
   }
 }
 
-/** Every browser with user data here, and the profiles that have OpenCode Browser. */
+/** Every browser with user data here, and the profiles that have Browse. */
 function detectBrowsers() {
   return browsers().flatMap((browser): Detection[] => {
     const state = readLocked(path.join(browser.userData, "Local State"))
@@ -858,9 +858,9 @@ function reportDetections(detections: Detection[], preferred: Browser | undefine
   detections.forEach((detection) => {
     const name = detection.browser.name
     if (detection.blocked) return log(`  ${name}: couldn't check (${blockedReason()})`)
-    if (detection.enabled.length) return log(`  ${name}: OpenCode Browser in ${detection.enabled.map(describe).join(", ")}`)
-    if (detection.disabled.length) return log(`  ${name}: OpenCode Browser turned off in ${detection.disabled.map(describe).join(", ")}`)
-    log(`  ${name}: no OpenCode Browser`)
+    if (detection.enabled.length) return log(`  ${name}: Browse in ${detection.enabled.map(describe).join(", ")}`)
+    if (detection.disabled.length) return log(`  ${name}: Browse turned off in ${detection.disabled.map(describe).join(", ")}`)
+    log(`  ${name}: no Browse`)
   })
 }
 

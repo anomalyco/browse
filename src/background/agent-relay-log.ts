@@ -1,4 +1,4 @@
-// A small structured debug log for the OpenCode Browser relay link: connects, closes, reconnect backoff,
+// A small structured debug log for the Browse relay link: connects, closes, reconnect backoff,
 // commands with their durations, and errors. The last entries stay in memory and in chrome.storage.session
 // (so they survive a service worker restart), and the status page copies them as diagnostics for bug reports.
 

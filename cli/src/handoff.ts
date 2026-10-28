@@ -2,7 +2,7 @@
  * Human-in-the-loop handoff registry.
  *
  * A running execute script can call `await handoff("Complete the 2FA prompt")`.
- * The sandbox registers a pending handoff for its OpenCode Browser session and
+ * The sandbox registers a pending handoff for its Browse session and
  * exact tab, then blocks until the in-page completion control sends the
  * matching handoff id or the timeout elapses.
  */

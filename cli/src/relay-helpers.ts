@@ -9,7 +9,7 @@ import type { OpenCodeBrowserSession } from "./relay-types.ts"
 import { RelayErrorCode } from "./relay-schema.ts"
 
 export const defaultHost = "127.0.0.1"
-/** Not Browser Control's 19989, so an old relay can't hold OpenCode Browser's port. Keep in step with the extension. */
+/** Not Browser Control's 19989, so an old relay can't hold Browse's port. Keep in step with the extension. */
 export const defaultPort = 19988
 /**
  * The unpacked build (its ID is pinned by the manifest key). The Chrome Web Store items are release configuration

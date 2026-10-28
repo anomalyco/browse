@@ -39,7 +39,7 @@ The API can update items but not create them, so create both items by hand in th
 2. **Stable item.** Build a zip with `bun run release:check` and use `release/opencode-browser-<version>.zip`. In the
    dashboard click **New item** and upload it. Fill in **Store listing** and **Privacy** from
    [store/listing.md](store/listing.md), set visibility to **Public**, and submit it.
-3. **Beta item.** Click **New item** again, upload the same zip, name it *OpenCode Browser (Beta)*, copy the same listing
+3. **Beta item.** Click **New item** again, upload the same zip, name it *Browse (Beta)*, copy the same listing
    and privacy answers, set visibility to **Unlisted**, and submit it.
    - Why a separate item: the store only accepts numeric versions, so beta `0.2.0-beta.1` ships as `0.2.0.1`
      (`version_name` shows the full name). On one shared item, that beta would rank above the stable `0.2.0` that

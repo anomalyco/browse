@@ -92,7 +92,7 @@ const ensureCliRelay = Effect.fnUntraced(function* () {
   const relay = yield* RelayClient.Service
   const readiness = yield* RelayLifecycle.ensureRelay({ relay })
   if (readiness.started) {
-    yield* Console.error(`Started OpenCode Browser relay at ${relay.endpoint}`)
+    yield* Console.error(`Started Browse relay at ${relay.endpoint}`)
   }
   if (readiness.buildProblem) {
     return yield* Effect.fail(new Error(readiness.buildProblem))
@@ -106,7 +106,7 @@ const ensureCliRelayAndExtension = Effect.fnUntraced(function* () {
   yield* RelayLifecycle.ensureExtensionConnected({
     relay,
     waitForReconnect: RelayLifecycle.shouldWaitForExtensionReconnect(readiness),
-    onWait: Console.error(`Waiting up to ${RelayLifecycle.extensionReconnectWaitMs / 1_000}s for the OpenCode Browser extension to reconnect`),
+    onWait: Console.error(`Waiting up to ${RelayLifecycle.extensionReconnectWaitMs / 1_000}s for the Browse extension to reconnect`),
   })
 })
 
@@ -114,7 +114,7 @@ const resolveSelectedSessionId = Effect.fnUntraced(function* (explicitSessionId:
   const store = yield* SessionStore.Service
   const sessionId = explicitSessionId ?? (yield* store.read)
   if (!sessionId) {
-    return yield* Effect.fail(new Error("No session provided and no current OpenCode Browser session exists"))
+    return yield* Effect.fail(new Error("No session provided and no current Browse session exists"))
   }
   return sessionId
 })
@@ -250,13 +250,13 @@ const serve = Command.make(
     yield* Effect.scoped(
       Effect.gen(function* () {
         const relay = yield* startRelay({ port, additionalExtensionOrigins })
-        yield* Console.log(`opencode-browser relay listening at ${relay.url}`)
-        yield* Console.log(`OpenCode Browser connects automatically while the browser runs. Run \`${cliCommand("status")}\` to check.`)
+        yield* Console.log(`Browse relay listening at ${relay.url}`)
+        yield* Console.log(`Browse connects automatically while the browser runs. Run \`${cliCommand("status")}\` to check.`)
         yield* Effect.never
       }),
     )
   }),
-).pipe(Command.withDescription("Start the local OpenCode Browser relay"))
+).pipe(Command.withDescription("Start the local Browse relay"))
 
 const relayRestart = Command.make(
   "restart",
@@ -267,7 +267,7 @@ const relayRestart = Command.make(
     const relay = yield* RelayClient.Service
     yield* Console.error("Restarting the relay leaves browser tabs open but resets in-memory JavaScript state.")
     const readiness = yield* RelayLifecycle.restartRelay({ relay, clientKind: "cli", force })
-    yield* Console.log(`${readiness.started ? "Started" : "Reused concurrent replacement"} OpenCode Browser relay at ${relay.endpoint} (${readiness.version.buildId})`)
+    yield* Console.log(`${readiness.started ? "Started" : "Reused concurrent replacement"} Browse relay at ${relay.endpoint} (${readiness.version.buildId})`)
   }),
 ).pipe(Command.withDescription("Explicitly drain and restart the managed relay using this installation"))
 
@@ -281,7 +281,7 @@ const execute = Command.make(
   {
     code: Argument.String("code").pipe(Argument.variadic({ min: 0 })),
     file: Flag.String("file").pipe(Flag.optional, Flag.withDescription("Read execute code from a file")),
-    session: sessionFlag("Continue an existing OpenCode Browser session; omit to create a fresh one"),
+    session: sessionFlag("Continue an existing Browse session; omit to create a fresh one"),
     targetUrl: Flag.String("target-url").pipe(Flag.optional, Flag.withDescription("Use the attached page whose URL contains this text")),
     targetIndex: Flag.Int("target-index").pipe(Flag.optional, Flag.withDescription("Use the attached page at this zero-based index")),
     json: Flag.Boolean("json").pipe(Flag.withDefault(false), Flag.withDescription("Print a machine-readable result envelope: { ok, isError, text, value, valueUnavailable, error?, logs, warnings, diagnostic?, aftermath, session }")),
@@ -380,7 +380,7 @@ const sessionNew = Command.make(
     yield* store.write(result.id)
     yield* Console.log(result.id)
   }),
-).pipe(Command.withDescription("Create a OpenCode Browser session and make it current"))
+).pipe(Command.withDescription("Create a Browse session and make it current"))
 
 const sessionList = Command.make(
   "list",
@@ -410,7 +410,7 @@ const sessionList = Command.make(
       return Console.log(`${marker} ${item.id} ${page}${keys}${readOnly}${allowed}`)
     })
   }),
-).pipe(Command.withDescription("List OpenCode Browser sessions"))
+).pipe(Command.withDescription("List Browse sessions"))
 
 const sessionCurrent = Command.make(
   "current",
@@ -439,7 +439,7 @@ const sessionReset = Command.make(
   "reset",
   {
     id: Argument.String("id").pipe(Argument.optional),
-    session: sessionFlag("Reset this OpenCode Browser session id"),
+    session: sessionFlag("Reset this Browse session id"),
   },
   Effect.fn("Cli.sessionReset")(function* ({ id, session }) {
     const relay = yield* RelayClient.Service
@@ -449,12 +449,12 @@ const sessionReset = Command.make(
     if (reset.stopped) yield* Console.error(`Stopped first: ${describeStop(reset.stopped)}`)
     yield* Console.log(reset.session.id)
   }),
-).pipe(Command.withDescription("Reset a OpenCode Browser session state and page"))
+).pipe(Command.withDescription("Reset a Browse session state and page"))
 
 const sessionAdopt = Command.make(
   "adopt",
   {
-    session: sessionFlag("Adopt into this OpenCode Browser session, creating it when it does not exist yet; omit to create a fresh readable id"),
+    session: sessionFlag("Adopt into this Browse session, creating it when it does not exist yet; omit to create a fresh readable id"),
     targetUrl: Flag.String("target-url").pipe(Flag.optional, Flag.withDescription("Adopt the attached page whose URL contains this text")),
     targetIndex: Flag.Int("target-index").pipe(Flag.optional, Flag.withDescription("Adopt the attached page at this zero-based target index")),
     tabId: tabIdFlag("Adopt the user's shared tab with this Chrome tab id (the tab= value in status)"),
@@ -504,7 +504,7 @@ const sessionDelete = Command.make(
   "delete",
   {
     id: Argument.String("id").pipe(Argument.optional),
-    session: sessionFlag("Delete this OpenCode Browser session id"),
+    session: sessionFlag("Delete this Browse session id"),
   },
   Effect.fn("Cli.sessionDelete")(function* ({ id, session }) {
     const relay = yield* RelayClient.Service
@@ -519,7 +519,7 @@ const sessionDelete = Command.make(
     }
     yield* Console.log(sessionId)
   }),
-).pipe(Command.withDescription("Delete a OpenCode Browser session"))
+).pipe(Command.withDescription("Delete a Browse session"))
 
 const sessionAllow = Command.make(
   "allow",
@@ -546,7 +546,7 @@ const sessionAllow = Command.make(
 ).pipe(Command.withDescription("Set the domain allowlist of a session (the current one by default)"))
 
 const session = Command.make("session").pipe(
-  Command.withDescription("Manage OpenCode Browser sessions"),
+  Command.withDescription("Manage Browse sessions"),
   Command.withSubcommands([sessionNew, sessionList, sessionCurrent, sessionUse, sessionReset, sessionAdopt, sessionDelete, sessionAllow]),
 )
 
@@ -618,7 +618,7 @@ const status = Command.make(
     }
     yield* Console.log(`Extension: ${extensionStatus.connected ? "connected" : "disconnected"}${extensionStatus.version ? ` (${extensionStatus.version})` : ""}`)
     if ((extensionStatus.rejectedConnections ?? 0) > 0) {
-      yield* Console.log(`Warning: ${extensionStatus.rejectedConnections} competing browser/profile connection attempt(s) rejected; the active connection was preserved. Use OpenCode Browser in one browser/profile at a time.`)
+      yield* Console.log(`Warning: ${extensionStatus.rejectedConnections} competing browser/profile connection attempt(s) rejected; the active connection was preserved. Use Browse in one browser/profile at a time.`)
     }
     if ((extensionStatus.pairingFailures ?? 0) > 0 && !extensionStatus.connected) {
       yield* Console.log(`Warning: ${extensionStatus.pairingFailures} extension connection(s) failed pairing. Update the extension, or run \`${cliCommand("pair")}\` and enter the code on its status page.`)
@@ -674,7 +674,7 @@ const recordingStart = Command.make(
   "start",
   {
     outputPath: Argument.String("output-path").pipe(Argument.withDescription("Path to write the recording artifact; tabCapture requires .webm, CDP accepts .webm or .mp4")),
-    session: sessionFlag("Record the page for this OpenCode Browser or CDP session id"),
+    session: sessionFlag("Record the page for this Browse or CDP session id"),
     tabId: tabIdFlag("Record this attached Chrome tab id"),
     mode: Flag.String("mode").pipe(Flag.optional, Flag.withDescription("Recording mode: auto, tab-capture, or cdp. auto uses CDP for relay-owned tabs and tabCapture for user-owned tabs")),
     audio: Flag.Boolean("audio").pipe(Flag.withDefault(false), Flag.withDescription("Include tab audio")),
@@ -884,7 +884,7 @@ function formatNetworkResult(result: NetworkStopResponse): string {
 const networkStart = Command.make(
   "start",
   {
-    session: sessionFlag("Capture the default page for this OpenCode Browser session"),
+    session: sessionFlag("Capture the default page for this Browse session"),
     urlFilter: Flag.String("url").pipe(Flag.optional, Flag.withDescription("Capture only requests whose URL contains this text")),
     resourceTypes: Flag.String("resource-type").pipe(Flag.atMost(50), Flag.withDescription("Capture this Playwright resource type; repeat for multiple types")),
     content: Flag.String("content").pipe(Flag.optional, Flag.withDescription("Response and request body mode: embed (default) or omit")),
@@ -1036,7 +1036,7 @@ const secretsRun = Command.make(
     yield* Effect.sync(() => {
       if (result.stdout) process.stdout.write(result.stdout)
       if (result.stderr) process.stderr.write(result.stderr)
-      if (result.stdoutTruncated || result.stderrTruncated) process.stderr.write("\nOpenCode Browser truncated child output.\n")
+      if (result.stdoutTruncated || result.stderrTruncated) process.stderr.write("\nBrowse truncated child output.\n")
       if (result.exitCode !== 0) process.exitCode = result.exitCode
     })
   }),
@@ -1135,7 +1135,7 @@ const secrets = Command.make("secrets").pipe(
 const journal = Command.make(
   "journal",
   {
-    session: sessionFlag("Show the journal for this OpenCode Browser session id"),
+    session: sessionFlag("Show the journal for this Browse session id"),
     limit: Flag.Int("limit").pipe(Flag.optional, Flag.withDescription("Number of most recent entries to show, defaults to 20")),
     json: jsonFlag,
   },
@@ -1158,7 +1158,7 @@ const journal = Command.make(
       return Console.log(formatJournalEntry(entry))
     })
   }),
-).pipe(Command.withDescription("Show what agents did in a OpenCode Browser session"))
+).pipe(Command.withDescription("Show what agents did in a Browse session"))
 
 const doctor = Command.make(
   "doctor",
@@ -1177,7 +1177,7 @@ const doctor = Command.make(
       yield* failExit
     }
   }),
-).pipe(Command.withDescription("Diagnose the local OpenCode Browser install and runtime"))
+).pipe(Command.withDescription("Diagnose the local Browse install and runtime"))
 
 const skill = Command.make(
   "skill",
@@ -1189,7 +1189,7 @@ const skill = Command.make(
     )
     yield* Console.log(text.trimEnd())
   }),
-).pipe(Command.withDescription("Print the OpenCode Browser agent skill text"))
+).pipe(Command.withDescription("Print the Browse agent skill text"))
 
 const tabsCleanup = Command.make(
   "cleanup",
@@ -1264,10 +1264,10 @@ const mcp = Command.make(
   Effect.fn("Cli.mcp")(function* () {
     yield* runMcpServer
   }),
-).pipe(Command.withDescription("Run the OpenCode Browser MCP server over stdio"))
+).pipe(Command.withDescription("Run the Browse MCP server over stdio"))
 
 export const opencodeBrowser = Command.make("opencode-browser").pipe(
-  Command.withDescription("Control the user's existing browser through the OpenCode Browser extension"),
+  Command.withDescription("Control the user's existing browser through the Browse extension"),
   Command.withSubcommands([serve, relay, execute, session, tabs, settings, status, network, secrets, recording, flightRecorder, journal, doctor, skill, mcp]),
 )
 

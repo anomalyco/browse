@@ -45,10 +45,10 @@ export function extensionProtocolAdvice(version: number | null | undefined, comm
   const skew = extensionProtocolSkew(version)
   const versions = `extension protocol ${version ?? "unknown"}, this relay speaks ${minExtensionProtocolVersion === extensionProtocolVersion ? extensionProtocolVersion : `${minExtensionProtocolVersion} to ${extensionProtocolVersion}`}`
   if (skew === "extension-newer")
-    return `The OpenCode Browser extension is newer than this browse CLI (${versions}). Update the CLI: run \`${commands.install}\` (an npm install with automatic updates also catches up by itself within a day), then restart opencode.`
+    return `The Browse extension is newer than this browse CLI (${versions}). Update the CLI: run \`${commands.install}\` (an npm install with automatic updates also catches up by itself within a day), then restart opencode.`
   if (skew === "extension-older")
-    return `The OpenCode Browser extension is older than this browse CLI (${versions}). Update the extension: the Chrome Web Store updates it within a few hours (to update now, open chrome://extensions, turn on Developer mode and click Update); an unpacked extension updates when you run \`${commands.install}\` again.`
-  return `The OpenCode Browser extension and this browse CLI don't speak the same protocol (${versions}). Run \`${commands.install}\` again and update the extension.`
+    return `The Browse extension is older than this browse CLI (${versions}). Update the extension: the Chrome Web Store updates it within a few hours (to update now, open chrome://extensions, turn on Developer mode and click Update); an unpacked extension updates when you run \`${commands.install}\` again.`
+  return `The Browse extension and this browse CLI don't speak the same protocol (${versions}). Run \`${commands.install}\` again and update the extension.`
 }
 
 export type CdpRequest = {

@@ -82,7 +82,7 @@ const sessionPageHealthCheckTimeoutMs = 3_000
 const sessionPageHealthRetryDelayMs = 100
 const handoffPageContextTimeoutMs = 15_000
 const timedOut = Symbol("timed-out")
-export const downloadCapabilityErrorMessage = "Downloads are unavailable in OpenCode Browser extension-backed tabs: Chromium blocks Browser.setDownloadBehavior and Page.setDownloadBehavior through chrome.debugger, so Playwright cannot retain an artifact for download.saveAs(). Fetch the response in the page and save the returned bytes with files.write() when the site exposes them."
+export const downloadCapabilityErrorMessage = "Downloads are unavailable in Browse extension-backed tabs: Chromium blocks Browser.setDownloadBehavior and Page.setDownloadBehavior through chrome.debugger, so Playwright cannot retain an artifact for download.saveAs(). Fetch the response in the page and save the returned bytes with files.write() when the site exposes them."
 const downloadGuardedPages = new WeakSet<Page>()
 const downloadGuardedContexts = new WeakSet<BrowserContext>()
 const viewportZoomGuardedPages = new WeakSet<Page>()
@@ -297,10 +297,10 @@ export async function finishHandoff(options: {
   } catch (error) {
     const kind = runtimeFailureKind(error)
     if (kind !== "context-destroyed" && kind !== "context-missing") throw error
-    // The user finished the handoff; only OpenCode Browser's view of the page is stale. Keep that
+    // The user finished the handoff; only Browse's view of the page is stale. Keep that
     // distinction visible and let the next execute health-check and repair the same tab.
     throw new Error(
-      `Handoff resolved (${options.message}), but the page execution context did not become available within ${contextTimeoutMs}ms: ${error instanceof Error ? error.message : String(error)}. The tab was kept; run a short follow-up execute so OpenCode Browser can re-check it.`,
+      `Handoff resolved (${options.message}), but the page execution context did not become available within ${contextTimeoutMs}ms: ${error instanceof Error ? error.message : String(error)}. The tab was kept; run a short follow-up execute so Browse can re-check it.`,
       { cause: error },
     )
   }
@@ -436,7 +436,7 @@ export type ExecuteTargetSelection = {
 export const defaultPageClosedWarning = "The session default page was closed; created a new page. References to the old page in state are stale."
 const defaultPageRecoveredWarning = "The session default page was unresponsive; created a new page. References to the old page in state are stale."
 const defaultPageCrashedWarning = "The session default page target crashed; checking it before the next execute."
-export const defaultPageRepairedWarning = "The session default page stopped answering automation; OpenCode Browser reconnected and re-resolved the same tab. References to the old page in state are stale."
+export const defaultPageRepairedWarning = "The session default page stopped answering automation; Browse reconnected and re-resolved the same tab. References to the old page in state are stale."
 const protectedExtensionUiWarning = "Chromium blocked protected extension UI, possibly a password manager. Ask the user to finish or dismiss it in the browser, then retry."
 const protectedExtensionUiDiagnostic = "target/cross-extension-page"
 const syntheticInputWarning = "fillInput/fillInputs set the value with synthetic input events (isTrusted: false, no key presses), which pages and bot protection can tell apart from typing. Prefer locator.fill() or locator.pressSequentially()."
@@ -1073,7 +1073,7 @@ export class ExecuteSandbox {
     const requestHandoff = this.options.requestHandoff
     const handoff = async (message?: string, options?: HandoffCallOptions) => {
       if (!requestHandoff) {
-        throw new Error("handoff is not available in this sandbox; it requires a relay-backed OpenCode Browser session")
+        throw new Error("handoff is not available in this sandbox; it requires a relay-backed Browse session")
       }
       const handoffMessage = message?.trim() || defaultHandoffMessage
       const timeoutMs = options?.timeoutMs ?? defaultHandoffTimeoutMs
@@ -1737,7 +1737,7 @@ export function selectTarget<T>({
     if (matches.length === 0) {
       throw new TargetSelectionError({
         reason: "not-found",
-        message: `No existing attached page URL includes ${selection.urlIncludes}. Target selectors do not navigate or open pages: use page.goto() in the session page, or attach the intended user tab with the OpenCode Browser toolbar first.`,
+        message: `No existing attached page URL includes ${selection.urlIncludes}. Target selectors do not navigate or open pages: use page.goto() in the session page, or attach the intended user tab with the Browse toolbar first.`,
       })
     }
     if (matches.length > 1) {
@@ -1765,7 +1765,7 @@ export function selectTarget<T>({
   if (targets.length === 0) {
     throw new TargetSelectionError({
       reason: "not-found",
-      message: "No attached pages available. Attach the intended user tab with the OpenCode Browser toolbar first.",
+      message: "No attached pages available. Attach the intended user tab with the Browse toolbar first.",
     })
   }
   if (targets.length > 1) {

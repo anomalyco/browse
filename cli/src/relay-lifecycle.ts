@@ -124,7 +124,7 @@ function waitForRelayReady(options: EnsureRelayOptions): Effect.Effect<RelayVers
     }),
     Effect.mapError((error) => isRelayStartingOrUnreachable(error)
       ? new RelayStartFailed({
-        message: `OpenCode Browser relay did not start at ${options.relay.endpoint}`,
+        message: `Browse relay did not start at ${options.relay.endpoint}`,
         endpoint: options.relay.endpoint,
         cause: error,
       })
@@ -220,7 +220,7 @@ function waitForRelayExitOrReplacement(options: {
 }): Effect.Effect<RelayVersion | undefined, Error | RelayClient.RelayClientError> {
   return options.relay.version.pipe(
     Effect.flatMap((version) => isSameRelayInstance(options.version, version)
-      ? Effect.fail(new RelayStillRunning("OpenCode Browser relay is still draining; no replacement was started"))
+      ? Effect.fail(new RelayStillRunning("Browse relay is still draining; no replacement was started"))
       : Effect.succeed(version)),
     Effect.catch((error) => isRelayUnreachable(error) ? Effect.succeed(undefined) : Effect.fail(error)),
     Effect.retry({
@@ -271,7 +271,7 @@ export const ensureExtensionConnected = Effect.fn("RelayLifecycle.ensureExtensio
     return status.connected
       ? Effect.succeed(status)
       : Effect.fail(new ExtensionDisconnected({
-        message: `OpenCode Browser extension is not connected. Open the browser with OpenCode Browser installed (\`${installCommand()}\`); it reconnects automatically after relay or browser startup.`,
+        message: `Browse extension is not connected. Open the browser with Browse installed (\`${installCommand()}\`); it reconnects automatically after relay or browser startup.`,
       }))
   }))
   if (!options.waitForReconnect) {
@@ -329,7 +329,7 @@ export function startManagedRelay(
       })
       child.unref()
     },
-    catch: (cause) => cause instanceof Error ? cause : new Error("Failed to start OpenCode Browser relay", { cause }),
+    catch: (cause) => cause instanceof Error ? cause : new Error("Failed to start Browse relay", { cause }),
   })
 }
 

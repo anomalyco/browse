@@ -404,7 +404,7 @@ describe("execute file access", () => {
     expect(() => assertExecuteFilePath(path.join(link, "hosts"), "files.read")).toThrow(/outside the execute file roots/)
   })
 
-  test("refuses OpenCode Browser's own data directory even inside a temp root", async () => {
+  test("refuses Browse's own data directory even inside a temp root", async () => {
     const files = createExecuteFiles()
     fs.writeFileSync(path.join(home, "relay-token"), "secret")
     await expect(files.read(path.join(home, "relay-token"))).rejects.toThrow(/data directory/)

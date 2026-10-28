@@ -222,7 +222,7 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
 
   const transportError = (path: string) => (cause: unknown) =>
     new RelayUnreachable({
-      message: `OpenCode Browser relay is not reachable at ${endpoint}. Relay-backed CLI commands start it automatically; use \`${cliCommand("serve")}\` only for foreground debugging.`,
+      message: `Browse relay is not reachable at ${endpoint}. Relay-backed CLI commands start it automatically; use \`${cliCommand("serve")}\` only for foreground debugging.`,
       endpoint,
       path,
       cause,

@@ -132,7 +132,7 @@ export class ExtensionRpc {
         return Effect.void
       }
       if (!socket || socket.readyState !== WebSocket.OPEN || !this.acceptsEvents) {
-        resume(Effect.fail(new Error("OpenCode Browser extension is not connected")))
+        resume(Effect.fail(new Error("Browse extension is not connected")))
         return Effect.void
       }
 

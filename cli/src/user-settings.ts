@@ -1,4 +1,4 @@
-// The user's OpenCode Browser settings: the same ones as the extension's options page (where agent tabs open, how
+// The user's Browse settings: the same ones as the extension's options page (where agent tabs open, how
 // they're grouped, when idle ones close, the agent cursor, human-like input, handoff notifications). The extension
 // owns them (chrome.storage.local); the relay reads and writes them through it (`settings.get`, `settings.set`) for the
 // `settings` MCP tool and CLI command, so the options page updates live and the relay hears of cursor and input changes

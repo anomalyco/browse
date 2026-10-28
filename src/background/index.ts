@@ -77,7 +77,7 @@ async function updateBadges(tabs?: chrome.tabs.Tab[]) {
         .setBadgeBackgroundColor({ tabId: tab.id, color: BADGE_COLORS[badge?.text ?? ""] ?? BADGE_COLORS.default })
         .catch(() => undefined)
       await chrome.action
-        .setTitle({ tabId: tab.id, title: badge?.title ?? "OpenCode Browser · Click to let agents use this tab" })
+        .setTitle({ tabId: tab.id, title: badge?.title ?? "Browse · Click to let agents use this tab" })
         .catch(() => undefined)
     }),
   )

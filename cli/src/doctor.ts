@@ -535,14 +535,14 @@ function buildDoctorRecommendations(options: {
     ? options.extensionResult.value.protocolCompatible === false
       ? [extensionProtocolAdvice(options.extensionResult.value.protocolVersion, { install: installCommand() })]
       : [STORE_LISTED
-        ? `Run \`${installCommand()}\`, and install OpenCode Browser from the Chrome Web Store (or load the unpacked extension it copies).`
+        ? `Run \`${installCommand()}\`, and install Browse from the Chrome Web Store (or load the unpacked extension it copies).`
         : `Run \`${installCommand()}\` and load the extension it points to (Load unpacked on your browser's extensions page).`]
     : []
   const artifactRecommendations = options.artifacts.some((artifact) => {
     return !artifact.exists
   }) ? [`Rebuild or reinstall the missing files with \`${installCommand()}\`.`] : []
   const connectionConflictRecommendations = options.extensionResult.ok && (options.extensionResult.value.rejectedConnections ?? 0) > 0
-    ? ["Keep OpenCode Browser enabled in one browser/profile. To switch, disable it in the current browser before connecting the other; new sessions do not change the active browser."]
+    ? ["Keep Browse enabled in one browser/profile. To switch, disable it in the current browser before connecting the other; new sessions do not change the active browser."]
     : []
   const staleSessionRecommendations = options.staleCurrent && options.current ? [
     `Current session ${options.current} is stale; run \`${cliCommand("session new")}\` or \`${cliCommand("session use <id>")}\` after the relay is running.`,
@@ -578,7 +578,7 @@ function summarizeCheckStatus(checks: readonly DoctorCheck[]): DoctorCheckStatus
 
 export function formatDoctorReport(report: DoctorReport): string {
   const lines: string[] = [
-    "OpenCode Browser doctor",
+    "Browse doctor",
     `Status: ${report.status}`,
     `Endpoint: ${report.endpoint}`,
     `CLI: ${report.cli.version} (${report.cli.buildId})`,

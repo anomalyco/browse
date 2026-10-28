@@ -99,7 +99,7 @@ export class FlightRecorderRelay {
   }
 
   async start(options: FlightRecorderStartOptions): Promise<FlightRecorderStatus> {
-    if (!this.options.isExtensionConnected()) throw new Error("OpenCode Browser extension is not connected")
+    if (!this.options.isExtensionConnected()) throw new Error("Browse extension is not connected")
     if (this.isActiveTab(options.tabId)) throw new Error("Flight recorder already active for this tab")
     if (this.options.isTabRecording?.(options.tabId)) throw new Error("Stop the active recording before starting the flight recorder")
     const retentionMs = options.retentionMs ?? defaultRetentionMs

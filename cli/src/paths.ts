@@ -1,4 +1,4 @@
-// Where OpenCode Browser keeps its files: the installed runtime, the relay's log, session catalogs and
+// Where Browse keeps its files: the installed runtime, the relay's log, session catalogs and
 // journals, and captured secrets. One root, so `uninstall` can remove it and logs are easy to find.
 //   macOS/Linux: $XDG_DATA_HOME/opencode-browser, else ~/.local/share/opencode-browser
 //   Windows:     %LOCALAPPDATA%\opencode-browser
@@ -85,7 +85,7 @@ export function storeConfig(env: NodeJS.ProcessEnv = process.env, baked = global
  */
 export const STORE_LISTED = storeConfig().listed
 
-/** How to tell the user to install (or update) OpenCode Browser. */
+/** How to tell the user to install (or update) Browse. */
 export function installCommand(): string {
   return fromCheckout() ? `cd ${quoted(path.dirname(packageRoot()))} && bun run setup` : "npx @opencode/browse install"
 }

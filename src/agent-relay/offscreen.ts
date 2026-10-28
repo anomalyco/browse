@@ -1,5 +1,5 @@
 // Records tabs for agents with chrome.tabCapture and MediaRecorder in an offscreen document, and streams
-// chunks to the background, which forwards them to the OpenCode Browser relay.
+// chunks to the background, which forwards them to the Browse relay.
 import type {
   ChromeTabCaptureAudioConstraints,
   ChromeTabCaptureVideoConstraints,

@@ -12,7 +12,7 @@ export type ConnectedTarget = {
   readonly tabId: number
   readonly sessionId: string
   /**
-   * The OpenCode Browser session the tab was created for. Owned tabs are
+   * The Browse session the tab was created for. Owned tabs are
    * visible only to that session's CDP clients; unowned tabs (user
    * toolbar-attached or raw-client-created) are visible to every client.
    */

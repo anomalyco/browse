@@ -62,10 +62,10 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
   return [
     {
       name: "execute",
-      description: "Execute Playwright JavaScript against the OpenCode Browser session. Code runs in a sandbox on the relay without process, require, import(), fs, child_process, http/https or Node fetch; save and read files with the files helper inside the execute file roots, and cookie access is limited to the session's pages. The result includes console logs, warnings, a bounded execution-context diagnostic when relevant, and an aftermath summary (URL movement, navigations, error counts, handoffs, and a bot challenge or block page when one appears: hand interactive ones to the user with handoff(), never solve or retry-loop them).",
+      description: "Execute Playwright JavaScript against the Browse session. Code runs in a sandbox on the relay without process, require, import(), fs, child_process, http/https or Node fetch; save and read files with the files helper inside the execute file roots, and cookie access is limited to the session's pages. The result includes console logs, warnings, a bounded execution-context diagnostic when relevant, and an aftermath summary (URL movement, navigations, error counts, handoffs, and a bot challenge or block page when one appears: hand interactive ones to the user with handoff(), never solve or retry-loop them).",
       inputSchema: objectSchema({
         code: { type: "string", description: "JavaScript code to execute. It receives browser, context, page, state, modules (path, url, util, crypto, buffer, zlib, events, stream), files (dir, path, write, read), fillInput, fillInputs, snapshot(options?) for compact semantic outlines, search, explicit diffs, or automatic deltas, persistent compatible ref(id) locators, webmcp (list/call), screenshot helpers, ariaSnapshot, ghostCursor, handoff, demonstrate, network capture, pageConsole (start/stop capturing the page's own console messages and errors, off by default because pages can detect it), and secrets.type(locator, name) to type a stored site secret (see secrets_list) only on its allowed origins, without seeing it." },
-        session: { type: "string", description: "Optional existing OpenCode Browser session id. Explicit ids must already exist; omit this field to use the MCP server's current session, which is created when needed." },
+        session: { type: "string", description: "Optional existing Browse session id. Explicit ids must already exist; omit this field to use the MCP server's current session, which is created when needed." },
         targetUrl: { type: "string", description: "Optional URL substring selecting an existing attached page. This does not navigate or open a URL; use page.goto() for that." },
         targetIndex: { type: "integer", minimum: 0, description: "Optional zero-based attached page index selector." },
       }, ["code"]),
@@ -106,7 +106,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "session_new",
-      description: "Create a OpenCode Browser session and make it current for this MCP server.",
+      description: "Create a Browse session and make it current for this MCP server.",
       inputSchema: objectSchema({
         id: { type: "string", description: "Optional lowercase session id." },
         readOnly: { type: "boolean", description: "Create a read-only session: the relay rejects input-dispatching CDP so scripts can inspect but not click or type." },
@@ -148,7 +148,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "session_list",
-      description: "List OpenCode Browser sessions.",
+      description: "List Browse sessions.",
       inputSchema: emptyInputSchema,
       readOnly: true,
       destructive: false,
@@ -157,7 +157,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "session_current",
-      description: "Return this MCP server's current OpenCode Browser session id.",
+      description: "Return this MCP server's current Browse session id.",
       inputSchema: emptyInputSchema,
       readOnly: true,
       destructive: false,
@@ -166,9 +166,9 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "session_use",
-      description: "Set this MCP server's current OpenCode Browser session id.",
+      description: "Set this MCP server's current Browse session id.",
       inputSchema: objectSchema({
-        id: { type: "string", description: "Existing OpenCode Browser session id." },
+        id: { type: "string", description: "Existing Browse session id." },
       }, ["id"]),
       readOnly: false,
       destructive: false,
@@ -182,7 +182,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "session_reset",
-      description: "Reset a OpenCode Browser session's state and page.",
+      description: "Reset a Browse session's state and page.",
       inputSchema: objectSchema({
         id: sessionSchemaProperty,
         session: sessionAliasSchemaProperty,
@@ -199,7 +199,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "session_delete",
-      description: "Delete a OpenCode Browser session.",
+      description: "Delete a Browse session.",
       inputSchema: objectSchema({
         id: sessionSchemaProperty,
         session: sessionAliasSchemaProperty,
@@ -219,9 +219,9 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "session_adopt",
-      description: "Make an attached tab the OpenCode Browser session's default page for subsequent bare execute calls. Omit targetUrl and targetIndex when only one user-attached tab is available.",
+      description: "Make an attached tab the Browse session's default page for subsequent bare execute calls. Omit targetUrl and targetIndex when only one user-attached tab is available.",
       inputSchema: objectSchema({
-        session: { type: "string", description: "Optional existing OpenCode Browser session id. Explicit ids must already exist; omit this field to use the MCP server's current session, which is created when needed." },
+        session: { type: "string", description: "Optional existing Browse session id. Explicit ids must already exist; omit this field to use the MCP server's current session, which is created when needed." },
         targetUrl: { type: "string", description: "Adopt an existing attached page whose URL contains this text. Omit when only one user-attached tab is available. This does not navigate or open a URL." },
         targetIndex: { type: "integer", minimum: 0, description: "Adopt the attached page at this zero-based target index." },
         tabId: { type: "integer", description: "Adopt the user's tab with this Chrome tab id (the tab= value in status)." },
@@ -244,7 +244,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "network_start",
-      description: "Start session-scoped network capture. OpenCode Browser records normalized Playwright exchanges; HAR is only the optional export format. Bodies are embedded by default with per-body and total memory limits.",
+      description: "Start session-scoped network capture. Browse records normalized Playwright exchanges; HAR is only the optional export format. Bodies are embedded by default with per-body and total memory limits.",
       inputSchema: objectSchema({
         session: { type: "string", description: "Optional existing session id. Omit to use or create this MCP server's current session." },
         urlFilter: { type: "string", description: "Capture only request URLs containing this text." },
@@ -348,7 +348,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         audio: { type: "boolean", description: "Capture tab audio in tab-capture mode." },
         frameRate: { type: "integer", minimum: 1, maximum: 60, description: "Requested frame rate." },
         maxDurationMs: { type: "integer", minimum: 1, description: "Maximum recording duration in milliseconds." },
-        cursor: { type: "boolean", description: "Draw the ghost cursor in the recording, for demo videos. Off by default: recordings show only the page, with nothing from OpenCode Browser in the frame." },
+        cursor: { type: "boolean", description: "Draw the ghost cursor in the recording, for demo videos. Off by default: recordings show only the page, with nothing from Browse in the frame." },
       }, ["outputPath"]),
       readOnly: false,
       destructive: false,
@@ -386,7 +386,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "tabs_cleanup",
-      description: "Close tabs agents opened that nobody has used for a while (no agent command and not visited by the user). Tabs the user shared or pinned, the active tab, tabs playing audio, recording, or waiting for a handoff stay open. Call it when you finish a task to leave the user's browser tidy; OpenCode Browser also does this automatically after the user's idle setting (10 minutes unless they changed it).",
+      description: "Close tabs agents opened that nobody has used for a while (no agent command and not visited by the user). Tabs the user shared or pinned, the active tab, tabs playing audio, recording, or waiting for a handoff stay open. Call it when you finish a task to leave the user's browser tidy; Browse also does this automatically after the user's idle setting (10 minutes unless they changed it).",
       inputSchema: objectSchema({
         idleMinutes: { type: "integer", minimum: 0, description: "Close tabs idle at least this long. 0 closes every eligible agent tab. Defaults to the user's setting (10 minutes; still 10 when the user set automatic cleanup to never)." },
       }),
@@ -400,7 +400,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "settings",
-      description: `Read or change the user's OpenCode Browser settings, the same ones as the extension's options page: where agent tabs open (window), how they're grouped (grouping), when untouched agent tabs close (idleMinutes), the agent cursor (cursor), human-like input (humanInput) and handoff notifications (handoffNotifications). Use it only when the user asks to change how browse behaves, never on your own initiative. Without \`set\` it returns each setting's stored value, the value in effect, and the relay environment variable that overrides it, if any. With \`set\` it validates every value strictly, applies the change at once (the options page updates live) and returns what changed: tell the user what you changed. A setting an environment variable fixes is not changed, and the result says so. Security switches (${securityVariables.join(", ")}) are environment-only and can never be read or changed here.`,
+      description: `Read or change the user's Browse settings, the same ones as the extension's options page: where agent tabs open (window), how they're grouped (grouping), when untouched agent tabs close (idleMinutes), the agent cursor (cursor), human-like input (humanInput) and handoff notifications (handoffNotifications). Use it only when the user asks to change how browse behaves, never on your own initiative. Without \`set\` it returns each setting's stored value, the value in effect, and the relay environment variable that overrides it, if any. With \`set\` it validates every value strictly, applies the change at once (the options page updates live) and returns what changed: tell the user what you changed. A setting an environment variable fixes is not changed, and the result says so. Security switches (${securityVariables.join(", ")}) are environment-only and can never be read or changed here.`,
       inputSchema: objectSchema({
         set: {
           type: "object",
@@ -572,7 +572,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "skill",
-      description: "Return the OpenCode Browser agent skill instructions.",
+      description: "Return the Browse agent skill instructions.",
       inputSchema: emptyInputSchema,
       readOnly: true,
       destructive: false,
@@ -646,7 +646,7 @@ const registerTools = Effect.gen(function* () {
 
 /** The one-time note on a tool result: what to tell the user, and that the agent may run the update itself. */
 export function mcpUpdateNote(notice: Pick<UpdateNotice, "summary" | "command">): string {
-  return `Note: browse (OpenCode Browser) has an update: ${notice.summary}. Tell the user they can run \`${notice.command}\` and then restart opencode, or ask you to run it for them.`
+  return `Note: Browse has an update: ${notice.summary}. Tell the user they can run \`${notice.command}\` and then restart opencode, or ask you to run it for them.`
 }
 
 /** The implicit session the shim's MCP supervisor picked (auto-update.ts shimSource), when valid. */

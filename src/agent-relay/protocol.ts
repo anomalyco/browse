@@ -1,4 +1,4 @@
-// The extension side of the OpenCode Browser relay's protocol (version 2). The relay (cli/src/relay.ts)
+// The extension side of the Browse relay's protocol (version 2). The relay (cli/src/relay.ts)
 // runs agent sessions for the browse MCP server and the opencode-browser CLI, and drives tabs through this extension.
 // Keep it in step with cli/src/protocol.ts and cli/src/recording-protocol.ts.
 

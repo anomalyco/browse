@@ -41,7 +41,7 @@ export class SessionCatalog {
       text = await fs.readFile(this.filePath, "utf8")
     } catch (error) {
       if (isNodeError(error) && error.code === "ENOENT") return []
-      throw new Error(`Could not read OpenCode Browser session catalog at ${this.filePath}`, { cause: error })
+      throw new Error(`Could not read Browse session catalog at ${this.filePath}`, { cause: error })
     }
     try {
       const sessions = Schema.decodeUnknownSync(Catalog)(JSON.parse(text)).sessions
@@ -50,7 +50,7 @@ export class SessionCatalog {
       return sessions
     } catch (error) {
       const detail = error instanceof Error && error.message ? `: ${error.message}` : ""
-      throw new Error(`Could not decode OpenCode Browser session catalog at ${this.filePath}${detail}`, { cause: error })
+      throw new Error(`Could not decode Browse session catalog at ${this.filePath}${detail}`, { cause: error })
     }
   }
 
@@ -85,7 +85,7 @@ export class SessionCatalog {
       try {
         await fs.rm(temporaryPath, { force: true })
       } catch {}
-      throw new Error(`Could not write OpenCode Browser session catalog at ${this.filePath}`, { cause: error })
+      throw new Error(`Could not write Browse session catalog at ${this.filePath}`, { cause: error })
     }
   }
 }

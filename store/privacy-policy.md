@@ -1,8 +1,8 @@
-# OpenCode Browser privacy policy
+# Browse privacy policy
 
 _Last updated: October 28, 2026_
 
-OpenCode Browser is a browser extension that lets OpenCode, running on your own computer, use your browser. This policy explains what it handles and where that goes.
+Browse is a browser extension that lets OpenCode, running on your own computer, use your browser. This policy explains what it handles and where that goes.
 
 ## What the extension handles
 - **Page content, screenshots, network traffic, and actions** in tabs an agent opened, or tabs you let agents use with the toolbar button.

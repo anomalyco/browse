@@ -23,7 +23,7 @@ npx @opencode/browse install
 `install` puts the relay in your data folder (`~/.local/share/opencode-browser`), adds the `browse` MCP server to
 opencode, and connects the extension:
 
-1. **Add the extension.** `install` opens OpenCode Browser in the Chrome Web Store; add it to your browser. If it's
+1. **Add the extension.** `install` opens Browse in the Chrome Web Store; add it to your browser. If it's
    already there, `install` opens its status page with the pairing code, so it pairs without copying anything.
 2. **Restart opencode.**
 
@@ -104,7 +104,7 @@ shim, which always runs the current version (from a checkout, use `/path/to/brow
   click while a script runs takes the tab back and stops the script. Agents can't close a tab you lent them.
 - **Handoffs:** the page shows a small card with the site's origin. Do the human part, then click **Continue** on the
   card or the toolbar button.
-- **Recordings show only the page.** Nothing from OpenCode Browser is drawn while a tab is recorded: no cursor, no
+- **Recordings show only the page.** Nothing from Browse is drawn while a tab is recorded: no cursor, no
   labels, no handoff card (you get a system notification instead; click it to go to the tab). If notifications are
   turned off for the extension, the card is shown after all, and the recording includes it. For a demo video, ask for
   the ghost cursor with `cursor: true` on `recording_start` (`--cursor` on the CLI).
@@ -163,7 +163,7 @@ provider; see the [privacy policy](store/privacy-policy.md).
 
 ## Security
 
-OpenCode Browser drives the browser you're signed in to, so it assumes that what an agent reads (a web page, an email)
+Browse drives the browser you're signed in to, so it assumes that what an agent reads (a web page, an email)
 may try to steer it, and that other programs on your computer may try to use the relay.
 
 - **Relay token.** Every HTTP request and CDP connection to the relay needs the token in
@@ -175,7 +175,7 @@ may try to steer it, and that other programs on your computer may try to use the
   relay accepts only the two published extension IDs (plus any listed in `OPENCODE_BROWSER_EXTENSION_ORIGINS`).
 - **Sandboxed `execute`.** Agent code runs in a separate JavaScript realm that isolates it from Node: it isn't given
   `process`, `require`, `import()`, `fs` or network modules, only a `files` helper and Playwright file options limited
-  to the temp directory, not OpenCode Browser's data. The sandbox is a defense in depth, not a hard security boundary:
+  to the temp directory, not Browse's data. The sandbox is a defense in depth, not a hard security boundary:
   treat code an agent runs as code running as you. The relay starts with an allowlisted environment (the basics plus
   `OPENCODE_BROWSER_*`, proxy variables and CA certificate paths), so your API keys aren't in it.
 - **CDP guardrails.** Cookie reads return only cookies for the session's own pages; cookie writes are limited to

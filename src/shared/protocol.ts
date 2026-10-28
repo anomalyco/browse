@@ -3,13 +3,13 @@
 
 import type { PageStatus } from "../agent-relay/protocol"
 
-/** The link to the OpenCode Browser relay, which runs agent sessions for the browse MCP server and CLI. */
+/** The link to the Browse relay, which runs agent sessions for the browse MCP server and CLI. */
 export type AgentRelayStatus =
   /** No relay is running yet; the CLI or MCP server starts one on demand. */
   | "offline"
   | "connecting"
   | "connected"
-  /** OpenCode Browser in another browser or profile holds the relay's connection. */
+  /** Browse in another browser or profile holds the relay's connection. */
   | "conflict"
   /** The relay speaks another protocol version; updating both fixes it. */
   | "incompatible"

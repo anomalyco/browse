@@ -86,7 +86,7 @@ export class SessionNavigationGuard {
     const decision = await checkNavigationUrl(url, rules)
     if (decision.allowed) return undefined
     this.dependencies.log("allowlist.refused", { session: options.sessionId, method: options.method, reason: decision.reason })
-    return `OpenCode Browser blocked ${options.method}: session ${options.sessionId} has a domain allowlist and ${decision.reason}. Ask the user before widening it (session_allowlist / \`session allow\`).`
+    return `Browse blocked ${options.method}: session ${options.sessionId} has a domain allowlist and ${decision.reason}. Ask the user before widening it (session_allowlist / \`session allow\`).`
   }
 
   /** Apply the session's allowlist to a popup the relay just attached. */
@@ -130,7 +130,7 @@ export class SessionNavigationGuard {
     const decision = checkUrl(url, rules)
     if (decision.allowed) return
     this.dependencies.send(target.tabId, "Page.stopLoading", {}).catch(() => {})
-    this.addWarning(sessionId, `Domain allowlist: a tab of session ${sessionId} started to navigate to ${shortUrl(url)}, but ${decision.reason}; OpenCode Browser stopped it. Ask the user before widening the allowlist.`)
+    this.addWarning(sessionId, `Domain allowlist: a tab of session ${sessionId} started to navigate to ${shortUrl(url)}, but ${decision.reason}; Browse stopped it. Ask the user before widening the allowlist.`)
     this.dependencies.log("allowlist.stopped", { tabId: target.tabId, session: sessionId, method, reason: decision.reason })
   }
 
@@ -156,7 +156,7 @@ export class SessionNavigationGuard {
     const shownUrl = shortUrl(url)
     const popup = this.freshPopups.has(target.tabId) && target.owner === "relay"
     const action = popup ? "closed the popup" : "sent the tab back to about:blank"
-    this.addWarning(sessionId, `Domain allowlist: a tab of session ${sessionId} went to ${shownUrl}, but ${reason}; OpenCode Browser ${action}. Ask the user before widening the allowlist.`)
+    this.addWarning(sessionId, `Domain allowlist: a tab of session ${sessionId} went to ${shownUrl}, but ${reason}; Browse ${action}. Ask the user before widening the allowlist.`)
     this.dependencies.log("allowlist.violation", { tabId: target.tabId, session: sessionId, url: shownUrl, popup })
     if (popup) {
       this.freshPopups.delete(target.tabId)

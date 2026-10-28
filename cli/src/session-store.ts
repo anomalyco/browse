@@ -5,7 +5,7 @@ import os from "node:os"
 import { endpointForPort, portConfig } from "./relay-client.ts"
 
 /**
- * SessionStore persists the CLI's current OpenCode Browser session id, scoped
+ * SessionStore persists the CLI's current Browse session id, scoped
  * by relay endpoint so switching `OPENCODE_BROWSER_PORT` cannot silently reuse
  * a session id created against a different relay.
  *
