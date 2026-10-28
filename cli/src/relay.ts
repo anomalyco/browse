@@ -1866,6 +1866,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     ], { concurrency: "unbounded", discard: true })
     const result = yield* (message.method === "Runtime.enable" && sessionId
       ? cdpRuntime.enable(route, command.params, () => clientRoutesSession(socket, sessionId) && (!announced || cdpClients.hasSession(socket, sessionId)), announced ? socket : undefined)
+      : command.method === "Page.captureScreenshot" && route.chromeSessionId === undefined
+      ? captureScreenshotNudged(command)
       : sendDebuggerCommand(command)).pipe(
         // Chrome rejects every command for a tab while another extension's frame
         // is open in it; clients only see the rejection, so record it per tab.
@@ -1876,6 +1878,28 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       )
     return scopeCdpResult({ method: message.method, result, pageUrls: () => cdpRouter.visibleRoots(socket).map((target) => target.targetInfo.url) })
   })
+
+  /**
+   * Page.captureScreenshot on a tab the user isn't looking at sometimes never answers (seen every other capture on
+   * Chrome 156 under Xvfb, with raw CDP too) until another capture request reaches the tab, which releases it at once.
+   * So while it's pending the relay sends a 1x1 capture now and then (never activating the tab) and returns the
+   * original's answer; Playwright no longer times out after 30 s.
+   */
+  function captureScreenshotNudged(command: { readonly tabId: number; readonly method: string; readonly params: JsonObject }) {
+    const nudges = Effect.gen(function* () {
+      for (const delayMs of [600, 1_000, 1_500, 2_000, 3_000, 5_000, 8_000]) {
+        yield* Effect.sleep(delayMs)
+        relayLog("screenshot.nudge", { tabId: command.tabId, afterMs: delayMs })
+        yield* Effect.forkDetach(sendDebuggerCommand({
+          tabId: command.tabId,
+          method: "Page.captureScreenshot",
+          params: { format: "jpeg", quality: 1, clip: { x: 0, y: 0, width: 1, height: 1, scale: 1 } },
+        }).pipe(Effect.ignore))
+      }
+      return yield* Effect.never
+    })
+    return Effect.raceFirst(sendDebuggerCommand(command), nudges)
+  }
 
   /**
    * Chromium refuses top-frame navigations to data: URLs that an extension starts (chrome.debugger's Page.navigate and

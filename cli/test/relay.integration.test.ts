@@ -502,6 +502,36 @@ describe("relay", () => {
     extension.close()
   }, 20_000)
 
+  test("a screenshot of a hidden tab that doesn't answer is released by a small capture, not left to time out", async () => {
+    const targetInfo = { targetId: "TARGET-79", type: "page", title: "Example", url: "https://example.com/", attached: true, browserContextId: "CTX" }
+    // Like Chrome on a background tab: a capture waits until the next capture request reaches the tab.
+    let release: (() => void) | undefined
+    const captures: Record<string, unknown>[] = []
+    const extension = new FakeExtension(pairingCode(home))
+      .on("tabs.create", () => ({ tabId: 79 }))
+      .on("Target.getTargetInfo", () => ({ targetInfo }))
+      .on("Page.captureScreenshot", (command) => {
+        captures.push(command.params?.params as Record<string, unknown>)
+        const previous = release
+        release = undefined
+        previous?.()
+        if (captures.length > 1) return { data: "nudge" }
+        return new Promise((resolve) => { release = () => resolve({ data: "full" }) })
+      })
+    expect(await extension.pair()).toBe(true)
+    const socket = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test?opencodeBrowserSessionId=shot`, { authorization: `Bearer ${token}` })
+    if (!(socket instanceof WebSocket)) throw new Error("CDP connection refused")
+    await cdpCall(socket, 1, "Target.createTarget", { url: "https://example.com/" })
+    const sessionId = String((await cdpCall(socket, 2, "Target.attachToTarget", { targetId: "TARGET-79", flatten: true })).result?.sessionId)
+    const started = Date.now()
+    const shot = await cdpCall(socket, 3, "Page.captureScreenshot", { format: "png" }, sessionId)
+    expect(shot.result).toEqual({ data: "full" })
+    expect(Date.now() - started).toBeLessThan(3_000)
+    expect(captures[1]).toMatchObject({ clip: { width: 1, height: 1 } })
+    socket.close()
+    extension.close()
+  }, 20_000)
+
   test("a page restored from the back/forward cache is reported loaded, so goBack doesn't wait forever", async () => {
     const targetInfo = { targetId: "TARGET-81", type: "page", title: "Example", url: "https://example.com/b", attached: true, browserContextId: "CTX" }
     const extension = new FakeExtension(pairingCode(home))
