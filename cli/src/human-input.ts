@@ -176,18 +176,14 @@ async function travel(tabId: number, tab: TabState, to: Point, params: JsonObjec
   const path = trajectory(from, to)
   const started = Date.now()
   for (const { point, delay } of path) {
-    // Each sample waits for the last to land so they don't arrive in bursts; the round trip counts toward the
-    // gap so it doesn't slow the hand down.
-    const sent = Date.now()
-    await send("Input.dispatchMouseEvent", {
+    await pace(delay, () => send("Input.dispatchMouseEvent", {
       type: "mouseMoved",
       x: point.x,
       y: point.y,
       ...(typeof params.button === "string" && params.type === "mouseMoved" ? { button: params.button } : {}),
       ...(typeof params.buttons === "number" ? { buttons: params.buttons } : {}),
       ...(typeof params.modifiers === "number" ? { modifiers: params.modifiers } : {}),
-    }).catch(() => undefined)
-    await sleep(delay - (Date.now() - sent))
+    }))
   }
   tab.arrivedAt = Date.now()
   if (path.length)
@@ -255,11 +251,20 @@ function glide(dx: number, dy: number): Point[] {
 }
 
 async function sendFrames(frames: Point[], send: (frame: Point) => Promise<unknown>) {
-  for (const frame of frames) {
-    const sent = Date.now()
-    await send({ x: Math.round(frame.x * 100) / 100, y: Math.round(frame.y * 100) / 100 }).catch(() => undefined)
-    await sleep(random(15.5, 18) - (Date.now() - sent))
-  }
+  for (const frame of frames) await pace(random(15.5, 18), () => send({ x: Math.round(frame.x * 100) / 100, y: Math.round(frame.y * 100) / 100 }))
+}
+
+/**
+ * Sends one sample of a gesture and waits until the next is due: for the sample to land, but no longer than its gap.
+ * Waiting only for the round trip keeps samples from arriving in bursts; never waiting past the gap matters because
+ * Chrome can hold the reply to a pointer event for a background tab until its next frame, about a second (seen after
+ * Input.insertText in a tab driven through chrome.debugger), which turned a 30-sample move into a 30-second one and
+ * made clicks time out. Chrome still delivers the samples in order, and the caller's own event lands after them.
+ */
+async function pace(gap: number, sendSample: () => Promise<unknown>) {
+  const sent = Date.now()
+  await Promise.race([sendSample().catch(() => undefined), sleep(gap)])
+  await sleep(gap - (Date.now() - sent))
 }
 
 async function paceKey(tab: TabState, params: JsonObject) {
