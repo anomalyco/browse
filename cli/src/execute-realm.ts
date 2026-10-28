@@ -424,6 +424,33 @@ export function checkHostCall(fn: Function, receiver: unknown, args: readonly un
   for (const arg of args) checkFileOptions(arg, name || "call", includeMethodKeys)
 }
 
+/**
+ * Playwright APIs that Patchright implements in a way pages can see: init scripts and exposed bindings are injected
+ * by intercepting the main document (the page then reads an empty nextHopProtocol, and the injected wrappers show up
+ * in Function.prototype.toString), and fulfilling a navigation request replaces the real response the same way.
+ * Detectors such as rebrowser's bot-detector check exactly these (documentInterception, exposeFunctionLeak).
+ * Returns a warning for the execute result, or undefined. Warnings only: nothing is refused.
+ */
+export function pageVisibleApiWarning(fn: Function, receiver: unknown, _args: readonly unknown[]): string | undefined {
+  const name = typeof fn.name === "string" ? fn.name.replace(/^bound /, "") : ""
+  if (name === "addInitScript" || name === "exposeFunction" || name === "exposeBinding") {
+    return `${name}() is visible to pages: Patchright injects it by intercepting the main document, which leaves an empty performance nextHopProtocol and readable wrapper functions that bot detectors check. It still works; prefer page.evaluate() after navigation when stealth matters.`
+  }
+  if (name === "fulfill" && receiver !== null && typeof receiver === "object") {
+    let navigation = false
+    try {
+      const request = (receiver as { request?: () => { isNavigationRequest?: () => boolean } }).request?.()
+      navigation = request?.isNavigationRequest?.() === true
+    } catch {
+      navigation = false
+    }
+    if (navigation) {
+      return "route.fulfill() on a navigation request is visible to pages: the document no longer comes from the network (empty nextHopProtocol, no real response timing), which bot detectors check. It still works; fulfill subresources only when stealth matters."
+    }
+  }
+  return undefined
+}
+
 // ---- membrane ---------------------------------------------------------------------------------------
 
 const deniedHostValues = new Map<unknown, string>([
@@ -610,7 +637,11 @@ export class ExecuteRealm {
   private readonly entryScript: vm.Script
   private readonly global: Record<string, unknown>
 
-  constructor() {
+  /** Called for every host call sandbox code makes, after the call is allowed (execute warnings). */
+  private readonly onHostCall: ((fn: Function, receiver: unknown, args: readonly unknown[]) => void) | undefined
+
+  constructor(options: { readonly onHostCall?: (fn: Function, receiver: unknown, args: readonly unknown[]) => void } = {}) {
+    this.onHostCall = options.onHostCall
     const importModuleDynamically = () => {
       throw new this.SandboxError("import() is not available in execute code")
     }
@@ -1058,6 +1089,11 @@ export class ExecuteRealm {
           // Refusals of promise-returning APIs reject, so `.catch()` in agent code sees them.
           if (returnsPromise(target as Function)) return realm.SandboxPromise.reject(realm.toSandboxThrown(error))
           throw realm.toSandboxThrown(error)
+        }
+        try {
+          realm.onHostCall?.(target as Function, hostThis, hostArgs)
+        } catch {
+          // Observation only: a failing observer never changes the call.
         }
         let result: unknown
         try {

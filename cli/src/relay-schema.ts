@@ -17,6 +17,7 @@ export const SessionSummary = Schema.Struct({
   pageUrl: Schema.NullOr(Schema.String),
   stateKeys: Schema.Array(Schema.String),
   readOnly: Schema.optionalKey(Schema.Boolean),
+  allowedOrigins: Schema.optionalKey(Schema.Array(Schema.String)),
 })
 
 export interface SessionSummary extends Schema.Schema.Type<typeof SessionSummary> {}
@@ -94,6 +95,7 @@ export interface SessionAdoptRequest extends Schema.Schema.Type<typeof SessionAd
 export const SessionNewRequest = Schema.Struct({
   id: Schema.optionalKey(Schema.String),
   readOnly: Schema.optionalKey(Schema.Boolean),
+  allowedOrigins: Schema.optionalKey(Schema.Array(Schema.String)),
 })
 
 export interface SessionNewRequest extends Schema.Schema.Type<typeof SessionNewRequest> {}
@@ -110,6 +112,14 @@ export const SessionIdRequest = Schema.Struct({
 })
 
 export interface SessionIdRequest extends Schema.Schema.Type<typeof SessionIdRequest> {}
+
+/** Set a session's allowed origins; an empty list removes the allowlist. */
+export const SessionAllowlistRequest = Schema.Struct({
+  id: Schema.String,
+  allowedOrigins: Schema.Array(Schema.String),
+})
+
+export interface SessionAllowlistRequest extends Schema.Schema.Type<typeof SessionAllowlistRequest> {}
 
 export const SessionAdoptResponse = Schema.Struct({
   session: ExecuteSessionSummary,
@@ -158,6 +168,16 @@ export const ExecuteAftermath = Schema.Struct({
   consoleErrorCount: Schema.Number,
   pageErrorCount: Schema.Number,
   handoffs: Schema.Number,
+  /** A bot challenge or block page seen on the session page after this call navigated or failed. */
+  challenge: Schema.optionalKey(Schema.Struct({
+    vendor: Schema.String,
+    kind: Schema.Literals(["non-interactive", "interactive", "block"]),
+    status: Schema.Literals(["cleared", "blocked"]),
+    signal: Schema.String,
+    url: Schema.String,
+    waitedMs: Schema.Number,
+    recommendation: Schema.Literals(["continue", "handoff", "stop"]),
+  })),
 })
 
 export interface ExecuteAftermath extends Schema.Schema.Type<typeof ExecuteAftermath> {}

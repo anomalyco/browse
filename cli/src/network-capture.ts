@@ -128,6 +128,8 @@ type ActiveCapture = {
   readonly finalizeQueue: FinalizeWork[]
   readonly finalizeWaiters: Set<() => void>
   readonly liveCollector: SecretCollector
+  /** Values typed with secrets.type(): redaction-only, never stored in a profile. */
+  readonly extraRedactions: ReadonlySet<string>
   finalizeWorkers: number
   finalizeGeneration: number
   capturedBodyBytes: number
@@ -153,6 +155,7 @@ export class Recorder {
   private page: Page | undefined
   private pageEpoch = 0
   private readonly transition = Semaphore.makeUnsafe(1)
+  private readonly extraRedactions = new Set<string>()
 
   constructor(private readonly recorderOptions: {
     readonly authProfileBaseDir?: string
@@ -183,6 +186,7 @@ export class Recorder {
           finalizeQueue: [],
           finalizeWaiters: new Set(),
           liveCollector: new SecretCollector(),
+          extraRedactions: capture.extraRedactions,
           finalizeWorkers: 0,
           finalizeGeneration: 0,
           capturedBodyBytes: 0,
@@ -192,6 +196,7 @@ export class Recorder {
           cancelled: false,
           outputUnsafe: false,
         }
+        for (const value of capture.extraRedactions) capture.active.liveCollector.addRedactionOnly(value)
         capture.bindPage(page)
         const active = capture.active
         clearTimeout(capture.expiry)
@@ -356,6 +361,13 @@ export class Recorder {
     const active = this.active
     if (!active) return
     active.outputUnsafe = !await settleFinalizers(active, this.recorderOptions.outputSettleTimeoutMs ?? 5_000)
+  }
+
+  /** Redact this value (a typed secret) from every capture output from now on, without storing it. */
+  addRedaction(value: string): void {
+    if (!value) return
+    this.extraRedactions.add(value)
+    this.active?.liveCollector.addRedactionOnly(value)
   }
 
   redactText(text: string): string {
@@ -547,8 +559,11 @@ function finishCapture(
       ? yield* AuthProfile.readOptional(secrets, profileOptions)
       : undefined
     const collector = new SecretCollector(existingProfile?.slots ?? [])
+    for (const value of active.extraRedactions) collector.addRedactionOnly(value)
     const structurallyProtected = active.entries.map((entry) => protectEntry(entry, collector))
-    const protectedEntries = structurallyProtected.map((entry) => redactEntryKnownValues(entry, collector))
+    const protectedEntries = structurallyProtected
+      .map((entry) => redactEntryKnownValues(entry, collector))
+      .map((entry) => redactEntryTypedSecrets(entry, active.extraRedactions, collector))
     if (options.requireObservedSecrets && collector.observedRefs().length === 0) {
       return yield* new NetworkCaptureError({
         message: `Auth refresh did not observe credentials for profile ${secrets ?? "unknown"}`,
@@ -770,6 +785,33 @@ function redactEntryKnownValues(entry: CapturedEntry, collector: SecretCollector
         ...entry.response,
         headers: redactHeaders(entry.response.headers),
         ...(entry.response.body?.text ? { body: redactStructuredBody(entry.response.body, collector) } : {}),
+      },
+    } : {}),
+  }
+}
+
+/** Typed secrets are replaced wherever they appear (raw, percent- or form-encoded), whatever their length. */
+function redactEntryTypedSecrets(entry: CapturedEntry, values: ReadonlySet<string>, collector: SecretCollector): CapturedEntry {
+  if (values.size === 0) return entry
+  const redact = (text: string) => collector.redactValuesEverywhere(text, values)
+  const redactBody = (body: CapturedBody | undefined) => body?.text ? { ...body, text: redact(body.text) } : body
+  const redactHeaders = (headers: readonly Header[]) => headers.map((item) => ({ ...item, value: redact(item.value) }))
+  const requestBody = redactBody(entry.request.body)
+  const responseBody = redactBody(entry.response?.body)
+  return {
+    ...entry,
+    request: {
+      ...entry.request,
+      url: redact(entry.request.url),
+      headers: redactHeaders(entry.request.headers),
+      ...(entry.request.redirectedFrom ? { redirectedFrom: redact(entry.request.redirectedFrom) } : {}),
+      ...(requestBody ? { body: requestBody } : {}),
+    },
+    ...(entry.response ? {
+      response: {
+        ...entry.response,
+        headers: redactHeaders(entry.response.headers),
+        ...(responseBody ? { body: responseBody } : {}),
       },
     } : {}),
   }

@@ -89,6 +89,8 @@ export type OpenCodeBrowserSession = {
   readonly id: string
   readonly createdAt: string
   readonly readOnly: boolean
+  /** Normalized allowed-origin patterns (domain-policy.ts); undefined: the session may go anywhere. */
+  allowedOrigins?: readonly string[]
   /** Replaced when a stopped script does not settle in time (session-manager.ts). */
   sandbox: ExecuteSandboxLike
   readonly executeSemaphore: Semaphore.Semaphore

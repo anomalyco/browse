@@ -15,6 +15,7 @@ import type { ExecuteAftermath, ExecuteLogEntry, ExecuteResponse, NetworkStatusR
 import { startRelay } from "./relay.ts"
 import { defaultJournalBaseDir, formatJournalEntry, readJournalEntries } from "./session-journal.ts"
 import * as SessionStore from "./session-store.ts"
+import * as SiteSecrets from "./site-secrets.ts"
 import { formatUpdateNotice, updateJson, updateNotice } from "./update.ts"
 import { formatSettings, settingKeys, type SettingKey, type SettingReport } from "./user-settings.ts"
 import { opencodeBrowserVersion } from "./version.ts"
@@ -365,12 +366,16 @@ const sessionNew = Command.make(
   {
     name: Argument.String("name").pipe(Argument.optional, Argument.withDescription("Optional lowercase session id")),
     readOnly: Flag.Boolean("read-only").pipe(Flag.withDefault(false), Flag.withDescription("Create a read-only session: the relay rejects input-dispatching CDP so scripts can inspect but not click or type")),
+    allowOrigin: Flag.String("allow-origin").pipe(Flag.atLeast(0), Flag.withDescription("Only let this session's tabs load these hosts or origins (repeatable or comma-separated): example.com, *.example.com, https://app.example.com, http://localhost:3000")),
   },
-  Effect.fn("Cli.sessionNew")(function* ({ name, readOnly }) {
+  Effect.fn("Cli.sessionNew")(function* ({ name, readOnly, allowOrigin }) {
     const relay = yield* RelayClient.Service
     yield* ensureCliRelay()
     const store = yield* SessionStore.Service
-    const result = yield* relay.sessionNew(Option.getOrUndefined(name), readOnly ? { readOnly: true } : {})
+    const result = yield* relay.sessionNew(Option.getOrUndefined(name), {
+      ...(readOnly ? { readOnly: true } : {}),
+      ...(allowOrigin.length > 0 ? { allowedOrigins: allowOrigin } : {}),
+    })
     yield* store.write(result.id)
     yield* Console.log(result.id)
   }),
@@ -400,7 +405,8 @@ const sessionList = Command.make(
       const page = item.pageUrl ?? "no page yet"
       const keys = item.stateKeys.length ? ` state=${item.stateKeys.join(",")}` : ""
       const readOnly = item.readOnly ? " read-only" : ""
-      return Console.log(`${marker} ${item.id} ${page}${keys}${readOnly}`)
+      const allowed = item.allowedOrigins ? ` allow=${item.allowedOrigins.join(",")}` : ""
+      return Console.log(`${marker} ${item.id} ${page}${keys}${readOnly}${allowed}`)
     })
   }),
 ).pipe(Command.withDescription("List OpenCode Browser sessions"))
@@ -514,9 +520,33 @@ const sessionDelete = Command.make(
   }),
 ).pipe(Command.withDescription("Delete a OpenCode Browser session"))
 
+const sessionAllow = Command.make(
+  "allow",
+  {
+    session: sessionFlag(),
+    origins: Argument.String("origins").pipe(Argument.variadic({ min: 0 }), Argument.withDescription("Hosts or origins the session's tabs may load: example.com, *.example.com, https://app.example.com, http://localhost:3000")),
+    clear: Flag.Boolean("clear").pipe(Flag.withDefault(false), Flag.withDescription("Remove the allowlist: the session may load any site again")),
+    json: jsonFlag,
+  },
+  Effect.fn("Cli.sessionAllow")(function* ({ session, origins, clear, json }) {
+    const relay = yield* RelayClient.Service
+    yield* ensureCliRelay()
+    if (!clear && origins.length === 0) {
+      return yield* Effect.fail(new Error("session allow needs origins, or --clear to remove the allowlist"))
+    }
+    const id = yield* resolvePositionalOrFlagSessionId(Option.none(), session)
+    const result = yield* relay.sessionAllowlist(id, clear ? [] : origins)
+    if (json) {
+      yield* Console.log(JSON.stringify(result, null, 2))
+      return
+    }
+    yield* Console.log(result.allowedOrigins ? `${result.id} may load: ${result.allowedOrigins.join(", ")}` : `${result.id} may load any site`)
+  }),
+).pipe(Command.withDescription("Set the domain allowlist of a session (the current one by default)"))
+
 const session = Command.make("session").pipe(
   Command.withDescription("Manage OpenCode Browser sessions"),
-  Command.withSubcommands([sessionNew, sessionList, sessionCurrent, sessionUse, sessionReset, sessionAdopt, sessionDelete]),
+  Command.withSubcommands([sessionNew, sessionList, sessionCurrent, sessionUse, sessionReset, sessionAdopt, sessionDelete, sessionAllow]),
 )
 
 const status = Command.make(
@@ -1010,9 +1040,94 @@ const secretsRun = Command.make(
   }),
 ).pipe(Command.withDescription("Run a command with profile values injected as BC_SECRET_* environment variables"))
 
+/** Read a secret value from stdin (piped) or a hidden prompt, never from argv. */
+function readSecretValue(prompt: string): Promise<string> {
+  const input = process.stdin
+  if (!input.isTTY) {
+    return new Promise((resolve, reject) => {
+      const chunks: Buffer[] = []
+      input.on("data", (chunk: Buffer) => chunks.push(chunk))
+      input.once("end", () => resolve(Buffer.concat(chunks).toString("utf8")))
+      input.once("error", reject)
+    })
+  }
+  return new Promise((resolve, reject) => {
+    process.stderr.write(prompt)
+    let value = ""
+    const finish = (result: string | Error) => {
+      input.setRawMode(false)
+      input.pause()
+      input.off("data", onData)
+      process.stderr.write("\n")
+      if (result instanceof Error) reject(result)
+      else resolve(result)
+    }
+    const onData = (chunk: Buffer) => {
+      for (const char of chunk.toString("utf8")) {
+        if (char === "\r" || char === "\n") return finish(value)
+        if (char === "\u0003") return finish(new Error("Cancelled"))
+        if (char === "\u007f" || char === "\b") value = value.slice(0, -1)
+        else value += char
+      }
+    }
+    input.setRawMode(true)
+    input.resume()
+    input.on("data", onData)
+  })
+}
+
+const secretsAdd = Command.make(
+  "add",
+  {
+    name: Argument.String("name").pipe(Argument.withDescription("Secret name agents use: secrets.type(locator, \"name\")")),
+    origin: Flag.String("origin").pipe(Flag.atLeast(1), Flag.withDescription("Origin the secret may be typed on (repeatable): https://example.com, *.example.com (https), http://localhost:3000")),
+    totp: Flag.Boolean("totp").pipe(Flag.withDefault(false), Flag.withDescription("The value is a TOTP seed (base32 or otpauth:// URI); typing it types the current code. Storing the seed beside the password makes 2FA one factor")),
+    json: jsonFlag,
+  },
+  Effect.fn("Cli.secretsAdd")(function* ({ name, origin, totp, json }) {
+    const value = yield* Effect.tryPromise({
+      try: () => readSecretValue(totp ? `TOTP seed for ${name} (hidden): ` : `Value for ${name} (hidden): `),
+      catch: (cause) => cause instanceof Error ? cause : new Error("Could not read the secret value"),
+    })
+    const result = yield* SiteSecrets.addSecret({ name, value, allowedOrigins: origin, kind: totp ? "totp" : "password" })
+    if (json) {
+      yield* Console.log(JSON.stringify(result, null, 2))
+      return
+    }
+    yield* Console.log(`Saved ${result.kind} secret ${result.name}; it can be typed on ${result.allowedOrigins.join(", ")}`)
+    if (totp) yield* Console.error("Note: with the TOTP seed stored here, anyone who can use these secrets has both factors. Prefer handing 2FA to a person when you can.")
+  }),
+).pipe(Command.withDescription("Store a secret agents can type only on its origins (value from stdin or a hidden prompt)"))
+
+const secretsList = Command.make(
+  "list",
+  { json: jsonFlag },
+  Effect.fn("Cli.secretsList")(function* ({ json }) {
+    const secrets = yield* SiteSecrets.listSecrets()
+    if (json) {
+      yield* Console.log(JSON.stringify({ secrets }, null, 2))
+      return
+    }
+    if (secrets.length === 0) {
+      yield* Console.log("No site secrets")
+      return
+    }
+    yield* Effect.forEach(secrets, (secret) => Console.log(`${secret.name} ${secret.kind} ${secret.allowedOrigins.join(",")}`))
+  }),
+).pipe(Command.withDescription("List site secrets (names, kinds and origins, never values)"))
+
+const secretsRemove = Command.make(
+  "remove",
+  { name: Argument.String("name") },
+  Effect.fn("Cli.secretsRemove")(function* ({ name }) {
+    const removed = yield* SiteSecrets.removeSecret(name)
+    yield* Console.log(removed ? `Removed ${name}` : `No secret named ${name}`)
+  }),
+).pipe(Command.withDescription("Delete a site secret"))
+
 const secrets = Command.make("secrets").pipe(
-  Command.withDescription("Inspect, refresh, and use captured credentials while keeping their values out of output"),
-  Command.withSubcommands([secretsStatus, secretsRefresh, secretsRun]),
+  Command.withDescription("Site secrets agents can type without seeing them, and captured credential profiles"),
+  Command.withSubcommands([secretsAdd, secretsList, secretsRemove, secretsStatus, secretsRefresh, secretsRun]),
 )
 
 const journal = Command.make(
