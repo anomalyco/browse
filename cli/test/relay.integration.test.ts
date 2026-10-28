@@ -7,6 +7,7 @@ import path from "node:path"
 import WebSocket from "ws"
 import { dataUrlDocument, stableUnpackedExtensionOrigin } from "../src/relay-helpers.ts"
 import { pairingCode, pairingProof, relayToken } from "../src/relay-secrets.ts"
+import { isBenignClosedSessionRejection } from "../src/relay.ts"
 
 // A relay from source on a free port with its own data root, and a fake extension that pairs with it and answers
 // its commands. No browser.
@@ -756,6 +757,17 @@ describe("the settings tool's relay API", () => {
       fs.rmSync(root, { recursive: true, force: true })
     }
   }, 30_000)
+})
+
+describe("process faults", () => {
+  test("Patchright's unawaited commands on a session that went away are benign; other faults are not", () => {
+    const fault = (message: string) => Object.assign(new Error(message), { stack: `Error: ${message}\n    at _CRSession.send (/x/node_modules/patchright-core/lib/coreBundle.js:36966:61)` })
+    expect(isBenignClosedSessionRejection(fault("Protocol error (Network.setCacheDisabled): Internal server error, session closed."))).toBe(true)
+    expect(isBenignClosedSessionRejection(fault("Protocol error (Network.setCacheDisabled): Extension disconnected"))).toBe(true)
+    expect(isBenignClosedSessionRejection(fault("Protocol error (Network.setCacheDisabled): Unknown CDP session bc-tab-12 for Network.setCacheDisabled"))).toBe(true)
+    expect(isBenignClosedSessionRejection(fault("Protocol error (Runtime.evaluate): Cannot find context with specified id"))).toBe(false)
+    expect(isBenignClosedSessionRejection(new Error("Protocol error (Network.setCacheDisabled): session closed"))).toBe(false)
+  })
 })
 
 describe("dataUrlDocument", () => {
