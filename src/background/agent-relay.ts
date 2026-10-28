@@ -700,7 +700,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     }
     if (!kept) forget(tabId)
     log.add("debugger.recovered", { tabId, ok: kept })
-    send({ method: "debugger.detached", params: { tabId, reason } })
+    // A new attachment starts with no domains enabled: the relay sets the tab up again when it's told so.
+    send({ method: "debugger.detached", params: { tabId, reason, ...(kept ? { reattached: true } : {}) } })
   }
 
   const startRecording = async (params: JsonObject | undefined): Promise<JsonObject> => {

@@ -58,6 +58,8 @@ type Worker = {
   readonly generation: number
   readonly done: Latch.Latch
   attachIfMissing: boolean
+  /** The extension attached the tab again (a new chrome.debugger session): set the root up from scratch. */
+  renewed: boolean
   pending: boolean
   verificationRetries: number
 }
@@ -114,6 +116,12 @@ export class RootTargetLifecycle {
     readonly verificationRetries: number
     readonly errorMessage: string
     readonly generation?: number
+    /**
+     * The extension re-attached the tab after Chrome dropped its debugger (target_closed: a PDF viewer or another
+     * extension's frame appearing). The new attachment has none of the old one's domains enabled, so the root is
+     * attached afresh and clients see it replaced, rather than waiting forever for events that never come.
+     */
+    readonly renewed?: boolean
   }): void {
     if (this.closing) return
     const lifecycle = this
@@ -129,6 +137,7 @@ export class RootTargetLifecycle {
     if (existing) {
       existing.pending = true
       existing.attachIfMissing ||= options.attachIfMissing
+      existing.renewed ||= options.renewed === true
       existing.verificationRetries = Math.max(existing.verificationRetries, options.verificationRetries)
       return
     }
@@ -137,6 +146,7 @@ export class RootTargetLifecycle {
       generation,
       done: Latch.makeUnsafe(),
       attachIfMissing: options.attachIfMissing,
+      renewed: options.renewed === true,
       pending: false,
       verificationRetries: options.verificationRetries,
     }
@@ -145,9 +155,20 @@ export class RootTargetLifecycle {
       worker.pending = false
       const mayAttach = worker.attachIfMissing
       worker.attachIfMissing = false
+      const renewed = worker.renewed
+      worker.renewed = false
       yield* Effect.suspend(() => {
         if (revision !== work.revision) return new GenerationChanged({ message: "Tab detached during root reconciliation" })
         return lifecycle.withPermit(options.tabId, generation, (transition) => {
+          const root = lifecycle.options.registry.tabTargets.get(options.tabId)
+          if (renewed && root) {
+            return lifecycle.attachUnlocked(transition, {
+              tabId: options.tabId,
+              owner: root.owner,
+              alreadyAttached: true,
+              ...(root.opencodeBrowserSessionId ? { opencodeBrowserSessionId: root.opencodeBrowserSessionId } : {}),
+            }).pipe(Effect.asVoid)
+          }
           if (lifecycle.options.registry.routingRootTarget(options.tabId)) return lifecycle.reconcileUnlocked(transition)
           return mayAttach
             ? lifecycle.attachUnlocked(transition, { tabId: options.tabId, owner: "user", alreadyAttached: true }).pipe(Effect.asVoid)

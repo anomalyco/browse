@@ -1326,7 +1326,15 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       }
       if (reason === "target_closed") {
         if (eventTabId) {
-          rootLifecycle.queue({ tabId: eventTabId, attachIfMissing: false, verificationRetries: 3, errorMessage: "Failed to reconcile ambiguous debugger detach" })
+          const renewed = message.params?.reattached === true
+          if (renewed) relayLog("debugger.renewed", { tabId: eventTabId })
+          rootLifecycle.queue({
+            tabId: eventTabId,
+            attachIfMissing: false,
+            verificationRetries: renewed ? 0 : 3,
+            errorMessage: "Failed to reconcile ambiguous debugger detach",
+            renewed,
+          })
         }
         return
       }

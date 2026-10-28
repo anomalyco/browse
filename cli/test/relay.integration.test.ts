@@ -458,6 +458,29 @@ describe("relay", () => {
     third.close()
   }, 30_000)
 
+  test("a tab the extension re-attached after Chrome dropped the debugger (a PDF opening) is set up again", async () => {
+    const targetInfo = { targetId: "TARGET-75", type: "page", title: "Doc", url: "https://example.com/doc.pdf", attached: true, browserContextId: "CTX" }
+    const extension = new FakeExtension(pairingCode(home))
+      .on("tabs.create", () => ({ tabId: 75 }))
+      .on("Target.getTargetInfo", () => ({ targetInfo }))
+    expect(await extension.pair()).toBe(true)
+    const socket = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test?opencodeBrowserSessionId=pdf`, { authorization: `Bearer ${token}` })
+    if (!(socket instanceof WebSocket)) throw new Error("CDP connection refused")
+    const events = collect(socket)
+    await cdpCall(socket, 1, "Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true })
+    await cdpCall(socket, 2, "Target.createTarget", { url: "https://example.com/doc.pdf" })
+    const enables = () => extension.commands.filter((command) => command.params?.tabId === 75 && command.params?.method === "Page.enable").length
+    const before = enables()
+    // Chrome dropped the debugger as the viewer opened; the extension attached again: a new session, no domains on.
+    extension.emit("debugger.detached", { tabId: 75, reason: "target_closed", reattached: true })
+    expect(await until(() => enables() > before)).toBe(true)
+    // Clients see the root replaced (same target), so Playwright sets its page up again instead of waiting forever.
+    const attached = () => events.filter((event) => event.method === "Target.attachedToTarget" && (event.params?.targetInfo as { targetId?: string } | undefined)?.targetId === "TARGET-75").length
+    expect(await until(() => attached() >= 2 && events.some((event) => event.method === "Target.detachedFromTarget"))).toBe(true)
+    socket.close()
+    extension.close()
+  }, 20_000)
+
   test("a page restored from the back/forward cache is reported loaded, so goBack doesn't wait forever", async () => {
     const targetInfo = { targetId: "TARGET-81", type: "page", title: "Example", url: "https://example.com/b", attached: true, browserContextId: "CTX" }
     const extension = new FakeExtension(pairingCode(home))

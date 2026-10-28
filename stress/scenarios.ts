@@ -129,12 +129,16 @@ export const scenarios: Scenario[] = [
     const out = await exec(`const body = await page.evaluate(() => fetch('/file.txt').then(r => r.text())); await files.write('stress-download.txt', body); return (await files.read(files.path('stress-download.txt'))).toString()`)
     assert(String(out).includes("stress download"), `workaround ${out}`)
   } },
-  { name: "pdf", tags: ["files"], run: async ({ exec, fx }) => {
-    // Chrome shows PDFs in its (protected) viewer. The navigation must settle and the session stay usable.
+  { name: "pdf", tags: ["files"], run: async ({ client, session, exec, fx }) => {
+    // Chrome shows PDFs in its (protected) viewer and drops the debugger when it opens; the extension re-attaches and
+    // the relay sets the tab up again. The session stays on the tab, the file is reachable, and navigating away works.
     const out = await exec(`try { await page.goto(${j(fx.url("/doc.pdf"))}, {timeout: 20000}) } catch (e) { return { error: String(e.message).slice(0, 200), url: page.url() } } return { url: page.url() }`)
+    const viewer = await client.call("execute", { session, code: `const b64 = await page.evaluate(async () => { const bytes = new Uint8Array(await (await fetch(location.href)).arrayBuffer()); let s = ""; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); return btoa(s) }); await files.write("stress.pdf", Buffer.from(b64, "base64")); return { url: page.url(), head: (await files.read(files.path("stress.pdf"))).toString("latin1").slice(0, 8) }` }, 60_000)
+    assert(!viewer.isError, `PDF page unusable: ${viewer.text.slice(0, 300)}`)
+    assert(String(viewer.data?.value?.url).endsWith("/doc.pdf") && String(viewer.data?.value?.head).startsWith("%PDF"), `PDF not reachable: ${j(viewer.data?.value)}`)
     const next = await exec(`await page.goto(${j(fx.url("/form"))}); return page.url()`)
     assert(String(next).endsWith("/form"), `session unusable after PDF (${j(out)})`)
-    return out
+    return { goto: out, viewerWarning: (viewer.data?.warnings ?? []).some((w: string) => /PDF in Chrome's viewer/.test(w)) }
   } },
   { name: "service-worker", tags: ["web", "soak"], run: async ({ exec, fx }) => {
     // Registration and control work. Fetches from browse-driven pages bypass the worker's fetch handler (Patchright's

@@ -436,6 +436,10 @@ function isMaskedProtectedUiFailure(cause: unknown): boolean {
   const kind = runtimeFailureKind(cause)
   return kind === "context-destroyed" || kind === "context-missing" || kind === "timeout"
 }
+/** The default page's tab came back under the same target after Chrome dropped the debugger (see getSessionPage). */
+export const defaultPageReattachedWarning = "Chrome re-attached the debugger to the session default page's tab (it drops it when a tab opens a PDF in its viewer, when another extension's frame appears, or when the extension restarts), which closes the page object; `page` refers to the same tab again. References to the old page in state are stale."
+/** How to get a PDF out of Chrome's viewer, whose content isn't in the page's DOM. */
+export const pdfViewerWarning = "This tab shows a PDF in Chrome's viewer, whose text isn't in the DOM. page.url() is the file's URL; save the file with: const b64 = await page.evaluate(async () => { const bytes = new Uint8Array(await (await fetch(location.href)).arrayBuffer()); let s = \"\"; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); return btoa(s) }); await files.write(\"file.pdf\", Buffer.from(b64, \"base64\"))"
 export const defaultPageReplacedWarning = "The session default page target was replaced; rebound to the same browser tab. References to the old page in state are stale."
 
 export const shouldCloseCurrentPageOnAdopt = (options: {
@@ -573,8 +577,10 @@ export class ExecuteSandbox {
           if (diagnostic?.startsWith("execution-context/")) {
             this.pageHealthCheckRequired = true
           }
+          const closedUnderScript = (this.closedDefaultPage !== undefined || this.pendingTargetRebind === "replaced") && /has been closed/i.test(error.message)
           const warnings = this.finalizeWarnings(
             logSummary,
+            closedUnderScript ? `${defaultPageReattachedWarning} The tab kept any navigation it made; continue from it in the next execute.` : undefined,
             diagnostic === protectedExtensionUiDiagnostic ? protectedExtensionUiWarning : undefined,
             error instanceof ExecuteCodeError ? formatNodeContextWarning(error.originalError) : undefined,
             error instanceof ExecuteCodeError ? formatPointerInterceptionWarning(error.originalError) : formatPointerInterceptionWarning(error),
@@ -1263,6 +1269,7 @@ export class ExecuteSandbox {
       }
       this.bindDefaultPage(replacement, targetId, this.ownsPage, false)
       if (rebind === "replaced") this.pendingWarnings.push(defaultPageReplacedWarning)
+      if (rebind === "replaced" && await showsPdf(replacement)) this.pendingWarnings.push(pdfViewerWarning)
       if (rebind !== "repaired") return replacement
       this.pageHealthCheckRequired = true
       const checked = await this.checkSessionPage(replacement, { repaired: true })
@@ -1290,6 +1297,7 @@ export class ExecuteSandbox {
       if (same) {
         this.bindDefaultPage(same, closed.targetId, closed.ownsPage, true)
         this.recreatedFromClosedUrl = undefined
+        this.pendingWarnings.push(await showsPdf(same) ? pdfViewerWarning : defaultPageReattachedWarning)
         return same
       }
     }
@@ -1453,6 +1461,15 @@ export class ExecuteSandbox {
     this.pendingWarnings.push(defaultPageRecoveredWarning)
     return undefined
   }
+}
+
+/** Whether the page shows Chrome's PDF viewer. */
+async function showsPdf(page: Page): Promise<boolean> {
+  return await Effect.runPromise(runPlaywrightOperation({
+    label: "Check for the PDF viewer",
+    timeoutMs: playwrightCloseTimeoutMs,
+    run: () => page.evaluate(() => document.contentType === "application/pdf"),
+  }).pipe(Effect.orElseSucceed(() => false)))
 }
 
 /** The open page with this target id right now, without waiting for one to appear. */
