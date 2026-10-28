@@ -44,7 +44,7 @@ import {
   validateHostHeader,
   validateWebSocketOrigin,
 } from "./relay-helpers.ts"
-import { ensurePrivateDirectory, pairingCode, pairingProof, relayToken, relayTokenQueryParam, secretsEqual, takePairingTicket, wrapPairingCode } from "./relay-secrets.ts"
+import { ensurePrivateDirectory, pairingCode, pairingProof, relayToken, relayTokenQueryParam, secretsEqual, consumePairingTicket, peekPairingTicket, wrapPairingCode } from "./relay-secrets.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
 import { GhostCursorTabs, ghostCursorCommandMethod } from "./ghost-cursor.ts"
 import { guardCdpMethod, scopeCdpResult } from "./cdp-guardrails.ts"
@@ -1039,7 +1039,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       // Pairing: the extension's hello carries a nonce; the relay answers with its own nonce and an HMAC proving it
       // knows the pairing code; the extension answers with its proof. Only then does the relay treat the socket as the
       // extension (and the extension obey it).
-      let challenge: { readonly hello: JsonObject; readonly extensionNonce: string; readonly relayNonce: string; readonly code: string } | undefined
+      let challenge: { readonly hello: JsonObject; readonly extensionNonce: string; readonly relayNonce: string; readonly code: string; readonly ticketKey?: string } | undefined
       socket.on("message", (data, isBinary) => {
         try {
           if (!handshaken) {
@@ -1060,6 +1060,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
               socket.close(4006, "Pairing failed: the extension's pairing code does not match this relay")
               return
             }
+            // The extension proved the code the ticket brought it: the ticket has done its one job.
+            if (challenge.ticketKey) consumePairingTicket(challenge.ticketKey)
             const acceptedGeneration = acceptExtensionHello(socket, challenge.hello, headerValue(request.headers.origin))
             if (acceptedGeneration === undefined) {
               socket.close(4002, "Extension hello required")
@@ -1143,7 +1145,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   })
 
   /** Answers the extension's hello with the relay's pairing proof; undefined when the socket was closed instead. */
-  function challengeExtension(socket: WebSocket, message: JsonObject, origin: string | undefined): { readonly hello: JsonObject; readonly extensionNonce: string; readonly relayNonce: string; readonly code: string } | undefined {
+  function challengeExtension(socket: WebSocket, message: JsonObject, origin: string | undefined): { readonly hello: JsonObject; readonly extensionNonce: string; readonly relayNonce: string; readonly code: string; readonly ticketKey?: string } | undefined {
     if (message.method !== "hello") {
       socket.close(4002, "Extension hello required")
       return undefined
@@ -1176,7 +1178,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return undefined
     }
     const relayNonce = crypto.randomBytes(32).toString("base64url")
-    const ticketKey = ticket ? takePairingTicket() : undefined
+    const ticketKey = ticket ? peekPairingTicket() : undefined
     if (ticket && !ticketKey) {
       pairingFailures += 1
       relayLog("extension.rejected", { reason: "pairing ticket expired or used" })
@@ -1196,7 +1198,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         protocol: { version: extensionProtocolVersion, min: minExtensionProtocolVersion },
       },
     }))
-    return { hello: message, extensionNonce, relayNonce, code }
+    return { hello: message, extensionNonce, relayNonce, code, ...(ticketKey ? { ticketKey } : {}) }
   }
 
   function acceptExtensionHello(socket: WebSocket, message: JsonObject, origin: string | undefined): number | undefined {

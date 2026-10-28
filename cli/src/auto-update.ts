@@ -493,9 +493,15 @@ if (process.argv[2] !== "mcp") {
     const running = await relayVersion()
     checking = false
     unreachable = running === undefined ? unreachable + 1 : 0
-    // Held requests don't wait forever for a relay that never reports the new version.
-    const waitedOut = heldSince !== undefined && Date.now() - heldSince > 15000
-    if (running !== next && unreachable < 3 && !waitedOut) return
+    // Held requests don't wait forever for a relay that never reports the new version: they go to the current server.
+    if (running !== next && unreachable < 3) {
+      if (heldSince !== undefined && Date.now() - heldSince > 15000) {
+        heldSince = undefined
+        const released = queue.splice(0)
+        for (const line of released) { const message = parse(line); if (message && message.id !== undefined && message.method !== undefined) inflight.add(message.id); toChild(line) }
+      }
+      return
+    }
     if (swapping || inflight.size > 0 || current() !== next) return
     const old = child
     version = next
@@ -549,6 +555,8 @@ export type AutoUpdaterDeps = {
 
 /** How long an installer may run before the relay gives up on it (npm's own timeout is 10 minutes). */
 const INSTALL_TIMEOUT_MS = 15 * 60_000
+/** How long a runtime-switch child may run (a drain is bounded by the relay's restart timeout, a start by seconds). */
+const SWITCH_TIMEOUT_MS = 5 * 60_000
 
 /**
  * The relay's background updater. tick() checks at most once per checkIntervalMs; in "on" mode a newer version is
@@ -564,7 +572,8 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
   const checkIntervalMs = Number(env.OPENCODE_BROWSER_AUTO_UPDATE_INTERVAL_MS) || DAY_MS
   const spawnChild = deps.spawnChild ?? ((args, onExit) => spawnRuntimeChild(layout, versionEntry(layout, running), args, onExit, env))
   let busy = false
-  let switching = false
+  /** A runtime-switch child in flight; a stuck one is given up on after SWITCH_TIMEOUT_MS. */
+  let switching: { pid: number | undefined; startedAt: number } | undefined
   let timer: NodeJS.Timeout | undefined
 
   // The relay now runs what it was waiting to switch to: record it, and drop versions nothing needs.
@@ -576,6 +585,10 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
   }
 
   async function tick() {
+    if (switching && (now() - switching.startedAt > SWITCH_TIMEOUT_MS || (switching.pid !== undefined && !processAlive(switching.pid)))) {
+      deps.log("autoupdate.switch_abandoned", { pid: switching.pid })
+      switching = undefined
+    }
     if (busy || switching) return
     busy = true
     try {
@@ -602,9 +615,11 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
       const installing = state.installing
       if (installing) {
         if (processAlive(installing.pid) && now() - installing.startedAt < INSTALL_TIMEOUT_MS) return
+        // The installed directory is the proof (the child's own state write may have lost a race with this process's).
+        const done = existsSync(versionEntry(layout, installing.version))
         state = updateState(layout, ({ installing: _installing, ...rest }) => ({
           ...rest,
-          ...(rest.pending === installing.version ? {} : { lastError: { message: "the installer stopped without finishing", at: new Date(now()).toISOString(), version: installing.version } }),
+          ...(done ? { pending: installing.version } : rest.pending === installing.version ? {} : { lastError: { message: "the installer stopped without finishing", at: new Date(now()).toISOString(), version: installing.version } }),
         }))
         deps.log("autoupdate.installer_gone", { version: installing.version })
       }
@@ -625,10 +640,11 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
       if (!current || current.version !== running) return
       // runtime-switch drains this relay and only then moves current.json and starts the new relay; when the drain is
       // refused (an agent started meanwhile), it changes nothing and the next idle tick tries again.
-      switching = true
+      const attempt = { pid: undefined as number | undefined, startedAt: now() }
+      switching = attempt
       deps.log("autoupdate.switching", { from: running, to: wanted })
-      spawnChild(["runtime-switch", wanted], (code) => {
-        switching = false
+      attempt.pid = spawnChild(["runtime-switch", wanted], (code) => {
+        if (switching === attempt) switching = undefined
         if (code !== 0) deps.log("autoupdate.restart_refused", { version: wanted, code })
       })
     } catch (error) {

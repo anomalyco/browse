@@ -94,8 +94,17 @@ describe("the relay's updater", () => {
     expect(spawned).toEqual([])
   })
 
+  test("an installer that died after installing counts as installed, even if its state write was lost", async () => {
+    const { layout, updater } = setup((state) => ({ ...state, installing: { version: "0.0.2", pid: 2 ** 22 + 12345, startedAt: Date.now() } }))
+    await updater.tick()
+    expect(readState(layout).installing).toBeUndefined()
+    expect(readState(layout).lastError).toBeUndefined()
+    expect(readState(layout).pending).toBe("0.0.2")
+  })
+
   test("records an installer that died without finishing", async () => {
     const { layout, events, updater } = setup((state) => ({ ...state, installing: { version: "0.0.2", pid: 2 ** 22 + 12345, startedAt: Date.now() } }))
+    fs.rmSync(path.join(layout.versions, "0.0.2"), { recursive: true })
     await updater.tick()
     expect(events).toContain("autoupdate.installer_gone")
     expect(readState(layout).installing).toBeUndefined()

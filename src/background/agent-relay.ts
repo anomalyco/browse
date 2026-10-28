@@ -147,7 +147,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   /** The code a ticket just brought in: storing it must not restart the connection it arrived on. */
   let adopting: string | undefined
   /** The socket that carried a ticket, and whether the relay refused it (expired or already used). */
-  let ticketSocket: WebSocket | undefined
+  let ticketSocket: { socket: WebSocket; ticket: string } | undefined
   let ticketRejected = false
   let pairing: PairingSource = "none"
   let update: AgentRelayUpdate | undefined
@@ -318,9 +318,11 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       void chrome.runtime.sendMessage({ action: "recording.cancelAll" }).catch(() => undefined)
       overrides = undefined
       autoUpdate = undefined
-      if (ticketSocket === current) {
+      if (ticketSocket?.socket === current) {
+        // Only the relay's refusal (4006) means the link is spent; a relay that wasn't there yet gets it on the next try.
+        ticketRejected = !trusted.has(current) && event.code === 4006
+        if (!trusted.has(current) && event.code !== 4006) ticket ??= ticketSocket.ticket
         ticketSocket = undefined
-        ticketRejected = !trusted.has(current)
       }
       if (event.code === 4003) {
         // A newer relay names the side that's behind: "Extension protocol incompatible: extension-newer".
@@ -365,7 +367,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     const nonce = randomNonce()
     // The proofs are bound to the port this socket dialled (see pairing.ts).
     handshakes.set(current, { nonce, code, port: Number(new URL(current.url).port), ...(usingTicket !== undefined ? { ticket: true } : {}) })
-    if (usingTicket !== undefined) ticketSocket = current
+    if (usingTicket !== undefined) ticketSocket = { socket: current, ticket: usingTicket }
     // An older relay waits for commands it never gets; one that doesn't pair in time isn't ours.
     setTimeout(() => {
       if (socket === current && current.readyState === WebSocket.OPEN && !trusted.has(current)) {
@@ -425,10 +427,14 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         current.close(4006, "Relay failed pairing")
         return
       }
-      adopting = code
       ticketSocket = undefined
       ticketRejected = false
-      await chrome.storage.local.set({ [PAIRING_KEY]: code })
+      // Storing a different code fires storage.onChanged, which must not restart this connection; the same code fires nothing.
+      const previous = normalizePairingCode((await chrome.storage.local.get(PAIRING_KEY))[PAIRING_KEY])
+      if (previous !== code) {
+        adopting = code
+        await chrome.storage.local.set({ [PAIRING_KEY]: code })
+      }
       log.add("pairing.ticket")
       proven = code
     }

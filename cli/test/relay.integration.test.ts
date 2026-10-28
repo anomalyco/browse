@@ -232,6 +232,14 @@ describe("relay", () => {
       return { code, open }
     }
     const ticket = mintPairingTicket(home)
+    // A program that only claims a ticket (it can't prove the code) doesn't use it up.
+    const claimer = new WebSocket(`ws://127.0.0.1:${port}/extension`, { origin: stableUnpackedExtensionOrigin })
+    await new Promise<void>((resolve) => claimer.once("open", () => resolve()))
+    const claimed = new Promise<void>((resolve) => claimer.once("message", () => resolve()))
+    claimer.send(JSON.stringify({ method: "hello", params: { version: "0.0.0-test", build: "test", protocolVersion: 2, profileId: "x", profileName: "X", pairing: { nonce: crypto.randomUUID().replaceAll("-", ""), ticket: true } } }))
+    await claimed
+    claimer.send(JSON.stringify({ method: "auth.response", params: { proof: "wrong" } }))
+    await new Promise<void>((resolve) => claimer.once("close", () => resolve()))
     const first = await pairWithTicket(ticket)
     expect(first.code).toBe(pairingCode(home))
     expect(first.open).toBe(true)

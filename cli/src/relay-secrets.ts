@@ -90,8 +90,8 @@ export function mintPairingTicket(root = dataRoot(), now = Date.now()): string {
   return ticket
 }
 
-/** Uses up the current ticket: returns its key when one exists and hasn't expired. Any attempt consumes it. */
-export function takePairingTicket(root = dataRoot(), now = Date.now()): string | undefined {
+/** The current ticket's key when one exists and hasn't expired (an expired one is removed). */
+export function peekPairingTicket(root = dataRoot(), now = Date.now()): string | undefined {
   const file = pairingTicketPath(root)
   let record: { key?: unknown; expiresAt?: unknown } | undefined
   try {
@@ -99,8 +99,20 @@ export function takePairingTicket(root = dataRoot(), now = Date.now()): string |
   } catch {
     return undefined
   }
-  fs.rmSync(file, { force: true })
-  return typeof record?.key === "string" && /^[0-9a-f]{64}$/.test(record.key) && typeof record.expiresAt === "number" && now <= record.expiresAt ? record.key : undefined
+  const valid = typeof record?.key === "string" && /^[0-9a-f]{64}$/.test(record.key) && typeof record.expiresAt === "number" && now <= record.expiresAt
+  if (!valid) fs.rmSync(file, { force: true })
+  return valid ? (record!.key as string) : undefined
+}
+
+/**
+ * Uses up the ticket with this key, once an extension proved it got the code through it. Consuming only then means a
+ * program that merely claims a ticket can't burn it; a completed exchange makes it worthless.
+ */
+export function consumePairingTicket(key: string, root = dataRoot()): void {
+  const file = pairingTicketPath(root)
+  try {
+    if ((JSON.parse(fs.readFileSync(file, "utf8")) as { key?: unknown }).key === key) fs.rmSync(file, { force: true })
+  } catch {}
 }
 
 /** The pairing code, masked for the extension that proved it holds the ticket: code XOR HMAC(key, nonces), base64url. */
