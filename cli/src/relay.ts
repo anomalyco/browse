@@ -1472,6 +1472,16 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
     if (shouldBroadcast) {
       sendEventToTargetViewers(target.sessionId, event)
+      // A page restored from the back/forward cache commits a new document without DOMContentLoaded or load
+      // (Chrome sends none), so page.goBack()/goForward() waited for "load" until they timed out. Playwright's own
+      // browsers don't hit this; the user's browser keeps the cache on. Tell Playwright the restored page is loaded.
+      const frame = method === "Page.frameNavigated" && params?.type === "BackForwardCacheRestore" ? getObject(params.frame) : undefined
+      const frameId = getString(frame, "id")
+      if (frameId !== undefined) {
+        const timestamp = performance.now() / 1000
+        for (const name of ["DOMContentLoaded", "load"])
+          sendEventToTargetViewers(target.sessionId, { method: "Page.lifecycleEvent", params: { frameId, loaderId: getString(frame, "loaderId") ?? "", name, timestamp }, sessionId: eventSessionId })
+      }
     }
   }
 

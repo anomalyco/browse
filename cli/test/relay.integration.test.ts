@@ -374,6 +374,31 @@ describe("relay", () => {
     socket.close()
     extension.close()
   }, 20_000)
+
+  test("a page restored from the back/forward cache is reported loaded, so goBack doesn't wait forever", async () => {
+    const targetInfo = { targetId: "TARGET-81", type: "page", title: "Example", url: "https://example.com/b", attached: true, browserContextId: "CTX" }
+    const extension = new FakeExtension(pairingCode(home))
+      .on("tabs.create", () => ({ tabId: 81 }))
+      .on("Target.getTargetInfo", () => ({ targetInfo }))
+    expect(await extension.pair()).toBe(true)
+    const socket = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test?opencodeBrowserSessionId=bfcache`, { authorization: `Bearer ${token}` })
+    if (!(socket instanceof WebSocket)) throw new Error("CDP connection refused")
+    const messages = collect(socket)
+    await cdpCall(socket, 1, "Target.createTarget", { url: "https://example.com/b" })
+    await cdpCall(socket, 2, "Target.attachToTarget", { targetId: "TARGET-81", flatten: true })
+    const lifecycle = () => messages.filter((message) => message.method === "Page.lifecycleEvent").map((message) => message.params?.name)
+    // An ordinary navigation: Chrome sends its own lifecycle events, and the relay adds none.
+    extension.emit("debugger.event", { tabId: 81, method: "Page.frameNavigated", params: { type: "Navigation", frame: { id: "TARGET-81", loaderId: "L1", url: "https://example.com/b" } } })
+    // Chrome restores the previous page from the cache without DOMContentLoaded or load.
+    extension.emit("debugger.event", { tabId: 81, method: "Page.frameNavigated", params: { type: "BackForwardCacheRestore", frame: { id: "TARGET-81", loaderId: "L0", url: "https://example.com/a" } } })
+    expect(await until(() => lifecycle().length >= 2)).toBe(true)
+    await Bun.sleep(100)
+    expect(lifecycle()).toEqual(["DOMContentLoaded", "load"])
+    const restored = messages.find((message) => message.params?.type === "BackForwardCacheRestore")
+    expect(messages.find((message) => message.method === "Page.lifecycleEvent")).toMatchObject({ sessionId: restored?.sessionId, params: { frameId: "TARGET-81", loaderId: "L0" } })
+    socket.close()
+    extension.close()
+  }, 20_000)
 })
 
 /**
