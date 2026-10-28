@@ -24,6 +24,16 @@ const secretHeaders = new Set([
   "x-xsrf-token",
 ])
 
+// Standard headers whose names match secretNamePattern but whose values are not credentials: the host,
+// and CORS metadata that lists header names (`authorization`) or says `true`.
+const nonSecretHeaders = new Set([
+  ":authority",
+  "access-control-allow-credentials",
+  "access-control-allow-headers",
+  "access-control-expose-headers",
+  "access-control-request-headers",
+])
+
 export class SecretCollector {
   private readonly slotsByRef = new Map<string, MutableCredentialSlot>()
   private readonly refsByValue = new Map<string, string>()
@@ -190,7 +200,7 @@ export class SecretCollector {
         if (separator < 1) return part
         const cookieName = part.slice(0, separator).trim()
         const cookieValue = part.slice(separator + 1)
-        if (lower === "set-cookie" && index > 0 && /^(domain|path|expires|max-age|samesite)$/i.test(cookieName)) {
+        if (lower === "set-cookie" && index > 0 && /^(domain|path|expires|max-age|samesite|priority|partitioned)$/i.test(cookieName)) {
           return part
         }
         if (!cookieValue) return part
@@ -206,7 +216,7 @@ export class SecretCollector {
       const match = /^(\S+)\s+(.+)$/.exec(value)
       if (match) return `${match[1]} ${this.reference(match[2] ?? "", source)}`
     }
-    if (secretHeaders.has(lower) || secretNamePattern.test(lower)) {
+    if (!nonSecretHeaders.has(lower) && (secretHeaders.has(lower) || secretNamePattern.test(lower))) {
       return this.reference(value, source)
     }
     return value
