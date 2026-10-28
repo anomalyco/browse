@@ -325,9 +325,10 @@ export const scenarios: Scenario[] = [
     const cleanup = await client.call("tabs_cleanup", { idleMinutes: 0 })
     assert(!cleanup.isError, cleanup.text)
     await sleep(1000)
-    const left = (await cdp.extensionView()).tabs.filter((t) => tabIds.includes(t.id))
+    // The tab a window shows stays open by design; Chrome activates an agent tab when the tab before it closes.
+    const left = (await cdp.extensionView()).tabs.filter((t) => tabIds.includes(t.id) && !t.active)
     await client.call("session_delete", { session: id })
-    assert(left.length === 0, `tabs_cleanup(0) left ${left.length} idle agent tab(s)`)
+    assert(left.length === 0, `tabs_cleanup(0) left ${left.length} idle background agent tab(s)`)
   } },
   { name: "user-closes-tab", tags: ["chaos-lite", "soak"], run: async ({ client, session, fx, cdp }) => {
     await client.call("execute", { session, code: `await page.goto(${j(fx.url("/form"))})` })
