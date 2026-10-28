@@ -5,6 +5,9 @@
 //                       that they know it (an HMAC over fresh nonces) before the extension obeys any command.
 //                       `install` writes it into the unpacked extension (relay-pairing.json); a Chrome Web Store
 //                       build gets it typed into its status page (`opencode-browser pair` prints it).
+//   pairing-ticket.json a one-time ticket `install` puts in the URL it opens for a store build (welcome.html#ticket=...):
+//                       the relay exchanges it once, within two minutes, for the pairing code over the handshake, so a
+//                       ticket seen in a process list is useless after the extension used it (or after it expired).
 // Whoever needs a secret first creates it; creation is atomic, so a concurrent reader never sees a partial file.
 import crypto from "node:crypto"
 import fs from "node:fs"
@@ -62,6 +65,61 @@ export function pairingEndpoint(port: number): string {
  */
 export function pairingProof(code: string, role: "relay" | "extension", port: number, ownNonce: string, peerNonce: string): string {
   return crypto.createHmac("sha256", code).update(`${pairingContext}|${role}|${pairingEndpoint(port)}|${peerNonce}|${ownNonce}`).digest("base64url")
+}
+
+/** How long a pairing ticket stays valid. */
+export const pairingTicketTtlMs = 2 * 60_000
+
+export function pairingTicketPath(root = dataRoot()): string {
+  return path.join(root, "pairing-ticket.json")
+}
+
+/** The key both sides derive from a ticket: its SHA-256, hex. Only this is stored. */
+export function pairingTicketKey(ticket: string): string {
+  return crypto.createHash("sha256").update(ticket).digest("hex")
+}
+
+/** Creates a one-time pairing ticket (replacing any earlier one) and returns it; only its key is written to disk. */
+export function mintPairingTicket(root = dataRoot(), now = Date.now()): string {
+  ensurePrivateDirectory(root)
+  const ticket = generatePairingCode()
+  const file = pairingTicketPath(root)
+  const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`
+  fs.writeFileSync(temporary, `${JSON.stringify({ key: pairingTicketKey(ticket), expiresAt: now + pairingTicketTtlMs })}\n`, { mode: 0o600 })
+  fs.renameSync(temporary, file)
+  return ticket
+}
+
+/** The current ticket's key when one exists and hasn't expired (an expired one is removed). */
+export function peekPairingTicket(root = dataRoot(), now = Date.now()): string | undefined {
+  const file = pairingTicketPath(root)
+  let record: { key?: unknown; expiresAt?: unknown } | undefined
+  try {
+    record = JSON.parse(fs.readFileSync(file, "utf8"))
+  } catch {
+    return undefined
+  }
+  const valid = typeof record?.key === "string" && /^[0-9a-f]{64}$/.test(record.key) && typeof record.expiresAt === "number" && now <= record.expiresAt
+  if (!valid) fs.rmSync(file, { force: true })
+  return valid ? (record!.key as string) : undefined
+}
+
+/**
+ * Uses up the ticket with this key, once an extension proved it got the code through it. Consuming only then means a
+ * program that merely claims a ticket can't burn it; a completed exchange makes it worthless.
+ */
+export function consumePairingTicket(key: string, root = dataRoot()): void {
+  const file = pairingTicketPath(root)
+  try {
+    if ((JSON.parse(fs.readFileSync(file, "utf8")) as { key?: unknown }).key === key) fs.rmSync(file, { force: true })
+  } catch {}
+}
+
+/** The pairing code, masked for the extension that proved it holds the ticket: code XOR HMAC(key, nonces), base64url. */
+export function wrapPairingCode(key: string, code: string, port: number, extensionNonce: string, relayNonce: string): string {
+  const mask = crypto.createHmac("sha256", key).update(`${pairingContext}|wrap|${pairingEndpoint(port)}|${extensionNonce}|${relayNonce}`).digest()
+  const bytes = Buffer.from(code, "ascii")
+  return Buffer.from(bytes.map((byte, index) => byte ^ mask[index]!)).toString("base64url")
 }
 
 /** Constant-time comparison of two secrets (or proofs) of any length. */

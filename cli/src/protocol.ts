@@ -5,6 +5,12 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { readonly [key: string]: 
 export type JsonObject = { readonly [key: string]: JsonValue }
 
 export const extensionProtocolVersion = 2
+/**
+ * The oldest extension protocol this relay still speaks. The store extension and the npm package update on their own
+ * schedules, so a relay keeps accepting older extensions for a while: raise this only when dropping support for them,
+ * and bump extensionProtocolVersion only for changes an older relay can't handle.
+ */
+export const minExtensionProtocolVersion = 2
 
 /**
  * Chrome's minimum alarm period. A disconnected extension's MV3 worker sleeps
@@ -23,7 +29,26 @@ export function extensionProtocolCompatibility(value: JsonValue | undefined): Ex
   const legacy = value === undefined
   const valid = typeof value === "number" && Number.isSafeInteger(value) && value > 0
   const version = valid ? value : legacy ? legacyExtensionProtocolVersion : null
-  return { version, compatible: version === extensionProtocolVersion, legacy }
+  return { version, compatible: version !== null && version >= minExtensionProtocolVersion && version <= extensionProtocolVersion, legacy }
+}
+
+/** Which side is behind when the protocols don't match: the extension (too old) or this CLI (the extension is newer). */
+export function extensionProtocolSkew(version: number | null | undefined): "extension-older" | "extension-newer" | undefined {
+  if (typeof version !== "number") return undefined
+  if (version > extensionProtocolVersion) return "extension-newer"
+  if (version < minExtensionProtocolVersion) return "extension-older"
+  return undefined
+}
+
+/** What to tell the user about a protocol mismatch: update the side that's behind, with the command. */
+export function extensionProtocolAdvice(version: number | null | undefined, commands: { readonly install: string }): string {
+  const skew = extensionProtocolSkew(version)
+  const versions = `extension protocol ${version ?? "unknown"}, this relay speaks ${minExtensionProtocolVersion === extensionProtocolVersion ? extensionProtocolVersion : `${minExtensionProtocolVersion} to ${extensionProtocolVersion}`}`
+  if (skew === "extension-newer")
+    return `The OpenCode Browser extension is newer than this browse CLI (${versions}). Update the CLI: run \`${commands.install}\` (an npm install with automatic updates also catches up by itself within a day), then restart opencode.`
+  if (skew === "extension-older")
+    return `The OpenCode Browser extension is older than this browse CLI (${versions}). Update the extension: the Chrome Web Store updates it within a few hours (to update now, open chrome://extensions, turn on Developer mode and click Update); an unpacked extension updates when you run \`${commands.install}\` again.`
+  return `The OpenCode Browser extension and this browse CLI don't speak the same protocol (${versions}). Run \`${commands.install}\` again and update the extension.`
 }
 
 export type CdpRequest = {

@@ -5,6 +5,7 @@ import { Argument, Command, Flag } from "effect/cli"
 import path from "node:path"
 import process from "node:process"
 import { fileURLToPath } from "node:url"
+import { autoUpdateStatus } from "./auto-update.ts"
 import { createDoctorReport, formatDoctorReport, formatTargetSummary } from "./doctor.ts"
 import { runMcpServer } from "./mcp.ts"
 import { cliCommand } from "./paths.ts"
@@ -578,7 +579,7 @@ const status = Command.make(
       }
       const stopped = RelayLifecycle.stoppedRelayStatus(relay.endpoint)
       if (json) {
-        yield* Console.log(JSON.stringify({ ...stopped, update: updateJson(update) }, null, 2))
+        yield* Console.log(JSON.stringify({ ...stopped, update: updateJson(update), autoUpdate: autoUpdateStatus() }, null, 2))
       } else {
         yield* Console.log(`Relay: stopped (${relay.endpoint})`)
         yield* Console.log(`Run \`${cliCommand("execute")}\` (or any relay-backed command) to start it automatically.`)
@@ -603,6 +604,7 @@ const status = Command.make(
         sessions,
         targets,
         update: updateJson(update),
+        autoUpdate: autoUpdateStatus(),
       }, null, 2))
       if (buildProblem) {
         yield* failExit

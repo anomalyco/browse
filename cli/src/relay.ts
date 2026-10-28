@@ -19,7 +19,7 @@ import { CdpRuntime } from "./cdp-runtime.ts"
 import { ExtensionRpc } from "./extension-rpc.ts"
 import { createHttpRequestHandler, hasRelayToken } from "./http-api.ts"
 import type { CdpEvent, CdpRequest, JsonObject, PageStatus } from "./protocol.ts"
-import { extensionProtocolCompatibility, isCdpRequest, isExtensionEvent, isExtensionResponse, makePageStatus, parseJsonObject } from "./protocol.ts"
+import { extensionProtocolCompatibility, extensionProtocolSkew, extensionProtocolVersion, minExtensionProtocolVersion, isCdpRequest, isExtensionEvent, isExtensionResponse, makePageStatus, parseJsonObject } from "./protocol.ts"
 import {
   closeHttpServer,
   closeWebSocketServer,
@@ -44,7 +44,7 @@ import {
   validateHostHeader,
   validateWebSocketOrigin,
 } from "./relay-helpers.ts"
-import { ensurePrivateDirectory, pairingCode, pairingProof, relayToken, relayTokenQueryParam, secretsEqual } from "./relay-secrets.ts"
+import { ensurePrivateDirectory, pairingCode, pairingProof, relayToken, relayTokenQueryParam, secretsEqual, consumePairingTicket, peekPairingTicket, wrapPairingCode } from "./relay-secrets.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
 import { GhostCursorTabs, ghostCursorCommandMethod } from "./ghost-cursor.ts"
 import { guardCdpMethod, scopeCdpResult } from "./cdp-guardrails.ts"
@@ -70,9 +70,10 @@ import { ProtectedFrameTracker } from "./protected-frames.ts"
 import { RootTargetLifecycle } from "./root-target-lifecycle.ts"
 import { boundedToken, runtimeFailureKind, summarizeDiagnosticUrl, summarizeRuntimeEvaluate } from "./runtime-diagnostics.ts"
 import { shouldExposeChildTarget, TargetRegistry, type RootTargetChange, type TargetOwnershipChange } from "./target-registry.ts"
+import { autoUpdateModes, autoUpdateOverride, autoUpdateStatus, createAutoUpdater, npmRuntime, setStoredMode, storedMode, type AutoUpdateMode } from "./auto-update.ts"
 import { createUpdateWatcher } from "./update.ts"
-import { describeChanges, describeSettings, parseSettingChanges, settingsFromExtension, SettingsInputError, settingsToExtension, type SettingOverrides } from "./user-settings.ts"
-import { installCommand } from "./paths.ts"
+import { describeChanges, describeSettings, parseSettingChanges, settingsFromExtension, SettingsInputError, settingsToExtension, type SettingOverrides, type Settings } from "./user-settings.ts"
+import { installCommand, storeConfig } from "./paths.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "./version.ts"
 import { handleExecuteRealmException, handleExecuteRealmRejection, pruneStaleExecuteFilesDirectories } from "./execute-realm.ts"
 
@@ -202,8 +203,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const releaseTargetGraceMs = Math.max(0, options.releaseTargetGraceMs ?? 10_000)
   const browserId = crypto.randomUUID()
   const endpointUrl = `http://${formatHostForUrl(host)}:${port}`
-  // Every build, from source too, accepts only the store and unpacked IDs plus OPENCODE_BROWSER_EXTENSION_ORIGINS.
+  // Every build, from source too, accepts only the unpacked ID, OPENCODE_BROWSER_EXTENSION_ORIGINS, and the store items
+  // this package was released with (paths.ts storeConfig).
   const additionalChromeExtensionOrigins = new Set(options.additionalExtensionOrigins ?? [])
+  for (const id of [storeConfig().id, storeConfig().betaId]) if (id) additionalChromeExtensionOrigins.add(`chrome-extension://${id}`)
   const sessionCatalog = options.sessionCatalogPath === null
     ? undefined
     : new SessionCatalog(options.sessionCatalogPath ?? defaultSessionCatalogPath(port))
@@ -712,7 +715,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     cleanupTabs: (idleMinutes) =>
       sendToExtension({ method: "tabs.cleanup", ...(idleMinutes === undefined ? {} : { params: { idleMinutes } }) }),
     settings: {
-      get: () => extensionSettings("settings.get").pipe(Effect.map((stored) => describeSettings(stored, userSettingOverrides()))),
+      get: () => extensionSettings("settings.get").pipe(Effect.map((stored) => describeSettings(withRelaySettings(stored), userSettingOverrides()))),
       set: (input) => Effect.gen(function* () {
         const requested = yield* Effect.try({
           try: () => parseSettingChanges(input),
@@ -723,8 +726,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         const overrides = userSettingOverrides()
         // A setting the environment fixes isn't written: it would have no effect, and the answer says so instead.
         const writable = Object.fromEntries(Object.entries(requested).filter(([key]) => !(key in overrides)))
-        const before = yield* extensionSettings("settings.get")
-        const after = Object.keys(writable).length ? yield* extensionSettings("settings.set", settingsToExtension(writable)) : before
+        // autoUpdate is the relay's own; it doesn't need the extension.
+        const extensionChanges = settingsToExtension(writable)
+        const relayOnly = Object.keys(extensionChanges).length === 0
+        const fromExtension = relayOnly && !extensionRpc.connected ? undefined : yield* extensionSettings("settings.get")
+        const before = withRelaySettings(fromExtension ?? settingsFromExtension({ settings: {} }))
+        if (typeof writable.autoUpdate === "string") setStoredMode(writable.autoUpdate as AutoUpdateMode)
+        const after = withRelaySettings(Object.keys(extensionChanges).length ? yield* extensionSettings("settings.set", extensionChanges) : (fromExtension ?? before))
+        if (writable.autoUpdate !== undefined) sendRelaySettings()
         relayLog("settings.set", { changes: Object.keys(writable).join(",") || undefined, overridden: Object.keys(requested).filter((key) => key in overrides).join(",") || undefined })
         return describeChanges({ before, after, requested, overrides })
       }),
@@ -746,6 +755,24 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     },
   })
   let relayReady = false
+  /** The last request from an agent (anything but version and connection polls), for auto-update's idle check. */
+  let lastAgentActivity = Date.now()
+  const autoUpdateIdleMs = Number(process.env.OPENCODE_BROWSER_AUTO_UPDATE_IDLE_MS) || 15 * 60_000
+  /**
+   * No agent is using the browser: nothing running or waiting (scripts, handoffs, captures, recordings, flight recorders),
+   * no raw CDP client attached, the relay not draining, and no agent request for a while. Auto-update switches only then.
+   */
+  const browserIdle = () =>
+    shutdownControl.accepting &&
+    // The relay's own sandbox connections (one per session that ran a script) stay open; only outside clients count.
+    !Array.from(cdpClients).some((client) => !cdpClients.isSandbox(client)) &&
+    !sessions.hasActiveNetworkCapture() &&
+    recordingRelay.recordingTabIds().length === 0 &&
+    flightRecorder.activeTabIds().length === 0 &&
+    !Array.from(activeHandoffTabs.values()).some((tabs) => tabs.size > 0) &&
+    !Array.from(sessions.sessions.keys()).some((id) => sessions.isExecuting(id) || sessions.hasPendingWork(id)) &&
+    Date.now() - lastAgentActivity >= autoUpdateIdleMs
+  let autoUpdater: ReturnType<typeof createAutoUpdater> | undefined
   const httpServer = http.createServer((request, response) => {
     if (!relayReady) {
       response.writeHead(503, { "content-type": "application/json; charset=utf-8", "retry-after": "1" })
@@ -753,6 +780,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return
     }
     const started = performance.now()
+    const requestPath = (request.url ?? "").split("?")[0]
+    if (requestPath !== "/version" && requestPath !== "/json/version" && requestPath !== "/json/version/" && requestPath !== "/extension/status") lastAgentActivity = Date.now()
     response.once("finish", () => {
       const pathname = (request.url ?? "").split("?")[0]
       // Health, version, and connection polls (every 200ms while a client waits) are frequent and uninteresting.
@@ -807,10 +836,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     shownByDefault: (tabId) =>
       isTabRecorded(tabId) ? recordingRelay.showsGhostCursor(tabId) || flightRecorder.showsGhostCursor(tabId) : ghostCursorAlways(),
   })
+  /** The extension's settings with the relay's own (autoUpdate) filled in from the data root. */
+  const withRelaySettings = (settings: Settings): Settings => ({ ...settings, autoUpdate: storedMode() })
   /** The same, for the settings tool: by setting, with the variable that fixes it and the value in effect. */
   const userSettingOverrides = (): SettingOverrides => {
     const human = humanInputOverride()
+    const autoUpdate = autoUpdateOverride()
     return {
+      ...(autoUpdate ? { autoUpdate: { variable: process.env.OPENCODE_BROWSER_AUTO_UPDATE !== undefined ? "OPENCODE_BROWSER_AUTO_UPDATE" : "OPENCODE_BROWSER_UPDATE_CHECK", value: autoUpdate } } : {}),
       ...(agentWindow ? { window: { variable: "OPENCODE_BROWSER_AGENT_WINDOW", value: agentWindow } } : {}),
       ...(ghostCursorEnv === undefined ? {} : { cursor: { variable: "OPENCODE_BROWSER_GHOST_CURSOR", value: ghostCursorEnv ? "always" : "off" } }),
       ...(human === undefined ? {} : { humanInput: { variable: "OPENCODE_BROWSER_HUMAN_INPUT", value: human ? "on" : "off" } }),
@@ -850,9 +883,19 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (cursor === "off" || cursor === "always") ghostCursorSetting = cursor === "always"
     const human = params?.humanInput
     if (human === "on" || human === "off") setHumanInput(human === "on")
+    // The options page's update setting (the relay keeps it, auto-update.ts).
+    const autoUpdate = params?.autoUpdate
+    if (typeof autoUpdate === "string" && (autoUpdateModes as readonly string[]).includes(autoUpdate)) {
+      setStoredMode(autoUpdate as AutoUpdateMode)
+      relayLog("autoupdate.mode", { mode: autoUpdate })
+    }
     relayLog("extension.settings", { cursor: ghostCursorAlways() ? "always" : "off", humanInput: humanInputEnabled() ? "on" : "off" })
     void ghostCursor.refresh()
-    sendExtensionBestEffort({ method: "relay.settings", params: { overrides: settingOverrides() } })
+    sendRelaySettings()
+  }
+  /** What the status page shows from the relay: the settings its environment fixes, and the update state. */
+  const sendRelaySettings = () => {
+    sendExtensionBestEffort({ method: "relay.settings", params: { overrides: settingOverrides(), autoUpdate: autoUpdateStatus() as unknown as JsonObject } })
   }
   const suppressedChildSessions = new Map<string, number>()
   const protectedFrames = new ProtectedFrameTracker()
@@ -912,6 +955,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     stopJournalRetention?.()
     clearInterval(updateTimer)
     clearInterval(orphanTimer)
+    autoUpdater?.stop()
     yield* shutdownControl.close().pipe(Effect.ignore)
     yield* sessions.closeAll()
     yield* rootLifecycle.close()
@@ -995,7 +1039,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       // Pairing: the extension's hello carries a nonce; the relay answers with its own nonce and an HMAC proving it
       // knows the pairing code; the extension answers with its proof. Only then does the relay treat the socket as the
       // extension (and the extension obey it).
-      let challenge: { readonly hello: JsonObject; readonly extensionNonce: string; readonly relayNonce: string; readonly code: string } | undefined
+      let challenge: { readonly hello: JsonObject; readonly extensionNonce: string; readonly relayNonce: string; readonly code: string; readonly ticketKey?: string } | undefined
       socket.on("message", (data, isBinary) => {
         try {
           if (!handshaken) {
@@ -1016,6 +1060,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
               socket.close(4006, "Pairing failed: the extension's pairing code does not match this relay")
               return
             }
+            // The extension proved the code the ticket brought it: the ticket has done its one job.
+            if (challenge.ticketKey) consumePairingTicket(challenge.ticketKey)
             const acceptedGeneration = acceptExtensionHello(socket, challenge.hello, headerValue(request.headers.origin))
             if (acceptedGeneration === undefined) {
               socket.close(4002, "Extension hello required")
@@ -1099,7 +1145,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   })
 
   /** Answers the extension's hello with the relay's pairing proof; undefined when the socket was closed instead. */
-  function challengeExtension(socket: WebSocket, message: JsonObject, origin: string | undefined): { readonly hello: JsonObject; readonly extensionNonce: string; readonly relayNonce: string; readonly code: string } | undefined {
+  function challengeExtension(socket: WebSocket, message: JsonObject, origin: string | undefined): { readonly hello: JsonObject; readonly extensionNonce: string; readonly relayNonce: string; readonly code: string; readonly ticketKey?: string } | undefined {
     if (message.method !== "hello") {
       socket.close(4002, "Extension hello required")
       return undefined
@@ -1121,6 +1167,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       socket.close(4002, "Invalid pairing nonce")
       return undefined
     }
+    // A store build paired by install's URL holds a one-time ticket instead of the code (relay-secrets.ts).
+    const ticket = getObject(getObject(message.params)?.pairing)?.ticket === true
     let code: string
     try {
       code = pairingCode()
@@ -1130,11 +1178,27 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return undefined
     }
     const relayNonce = crypto.randomBytes(32).toString("base64url")
+    const ticketKey = ticket ? peekPairingTicket() : undefined
+    if (ticket && !ticketKey) {
+      pairingFailures += 1
+      relayLog("extension.rejected", { reason: "pairing ticket expired or used" })
+      socket.close(4006, "Pairing ticket expired or already used: run `pair` and enter the code")
+      return undefined
+    }
+    if (ticketKey) relayLog("extension.ticket", {})
     socket.send(JSON.stringify({
       method: "auth.challenge",
-      params: { nonce: relayNonce, proof: pairingProof(code, "relay", port, relayNonce, extensionNonce) },
+      // The protocols this relay speaks, so the extension can tell the user which side to update (older ones ignore it).
+      params: {
+        nonce: relayNonce,
+        // With a ticket, the relay proves it holds the ticket and hands over the code masked with it; the extension then
+        // proves the code as usual, so the rest of the handshake is the same.
+        proof: pairingProof(ticketKey ?? code, "relay", port, relayNonce, extensionNonce),
+        ...(ticketKey ? { wrapped: wrapPairingCode(ticketKey, code, port, extensionNonce, relayNonce) } : {}),
+        protocol: { version: extensionProtocolVersion, min: minExtensionProtocolVersion },
+      },
     }))
-    return { hello: message, extensionNonce, relayNonce, code }
+    return { hello: message, extensionNonce, relayNonce, code, ...(ticketKey ? { ticketKey } : {}) }
   }
 
   function acceptExtensionHello(socket: WebSocket, message: JsonObject, origin: string | undefined): number | undefined {
@@ -1144,7 +1208,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     const protocol = extensionProtocolCompatibility(message.params?.protocolVersion)
     if (!protocol.compatible && extensionRpc.protocolCompatible === true) {
       relayLog("extension.rejected", { reason: "incompatible", protocol: protocol.version, version: getString(getObject(message.params), "version") })
-      socket.close(4003, "Extension protocol incompatible")
+      // The reason says which side is behind; the extension's status page turns it into what to update.
+      socket.close(4003, `Extension protocol incompatible: ${extensionProtocolSkew(protocol.version) ?? "unknown"}`)
       return extensionGeneration
     }
     // Protect an OPEN compatible connection, including its inventory handshake.
@@ -2198,6 +2263,17 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       updateTimer.unref()
       orphanTimer = setInterval(collectOrphans, Math.max(1_000, Math.min(30_000, Math.floor(clientGoneGraceMs / 2))))
       orphanTimer.unref()
+      // An npm install updates itself (auto-update.ts); a checkout or a foreground relay never does.
+      const runtime = managed ? npmRuntime() : undefined
+      if (runtime) {
+        autoUpdater = createAutoUpdater({
+          runtime,
+          isIdle: browserIdle,
+          log: relayLog,
+          onChange: () => sendRelaySettings(),
+        })
+        autoUpdater.start()
+      }
       relayLog("relay.ready", { url: endpointUrl, version: opencodeBrowserVersion, build: opencodeBrowserBuildId, pid: process.pid, managed })
     }),
     (error) => Effect.gen(function* () {

@@ -37,18 +37,55 @@ const quoted = (value: string) => (/^[\w@%+=:,./-]+$/.test(value) ? value : JSON
  * checkout's bundle from a checkout (where nothing is on PATH and the package may not be published).
  */
 export function cliCommand(args: string): string {
-  return fromCheckout()
-    ? `node ${quoted(path.join(packageRoot(), "dist", "cli.mjs"))} ${args}`
-    : `npx opencode-browser-cli ${args}`
+  if (fromCheckout()) return `node ${quoted(path.join(packageRoot(), "dist", "cli.mjs"))} ${args}`
+  // An installed runtime (auto-update.ts): its stable shim runs the version this install uses, which npx might not.
+  const shim = path.join(dataRoot(), "bin", "opencode-browser.mjs")
+  const versions = path.join(dataRoot(), "runtime", "versions")
+  if (!path.relative(versions, packageRoot()).startsWith("..") && fs.existsSync(shim)) return `node ${quoted(shim)} ${args}`
+  return `npx @opencode/browse ${args}`
+}
+
+declare global {
+  // Injected by build.ts from the release workflow's repository variables (RELEASING.md).
+  var __OPENCODE_BROWSER_STORE__: { readonly id?: string; readonly betaId?: string; readonly listed?: boolean } | undefined
+}
+
+/** A Chrome Web Store extension ID: 32 letters a to p. */
+const STORE_ITEM_ID = /^[a-p]{32}$/
+
+export type StoreConfig = {
+  /** The stable store item, when the release that built this package was configured with one. */
+  readonly id?: string
+  /** The unlisted beta store item. */
+  readonly betaId?: string
+  /** The item this install's channel uses: the beta item for a beta version (else the stable one). */
+  readonly channelId?: string
+  /** Whether install sends new users to the store listing instead of loading the unpacked build. */
+  readonly listed: boolean
 }
 
 /**
- * Whether the Chrome Web Store listing is live. Until it is, install guides loading the unpacked build instead of
- * opening the listing; set it to true when the listing is published to restore the store flow.
+ * The Chrome Web Store items this install knows. The published package carries the IDs the release workflow baked in
+ * (OPENCODE_BROWSER_STORE_ID, OPENCODE_BROWSER_BETA_STORE_ID, OPENCODE_BROWSER_STORE_LISTED at build time); the same
+ * variables at run time override them (testing a store build from a checkout). Nothing else is trusted as a store ID:
+ * install sends the pairing code to the extension with this ID. A checkout never sends users to the store listing.
  */
-export const STORE_LISTED = false
+export function storeConfig(env: NodeJS.ProcessEnv = process.env, baked = globalThis.__OPENCODE_BROWSER_STORE__, checkout = fromCheckout(), version = globalThis.__OPENCODE_BROWSER_VERSION__ ?? ""): StoreConfig {
+  const valid = (value: string | undefined) => (value && STORE_ITEM_ID.test(value) ? value : undefined)
+  const id = valid(env.OPENCODE_BROWSER_STORE_ID) ?? valid(baked?.id)
+  const betaId = valid(env.OPENCODE_BROWSER_BETA_STORE_ID) ?? valid(baked?.betaId)
+  const listedFlag = env.OPENCODE_BROWSER_STORE_LISTED !== undefined ? env.OPENCODE_BROWSER_STORE_LISTED === "true" : baked?.listed === true
+  const channelId = (version.includes("-beta.") ? betaId : undefined) ?? id
+  return { ...(id ? { id } : {}), ...(betaId ? { betaId } : {}), ...(channelId ? { channelId } : {}), listed: !checkout && listedFlag && !!channelId }
+}
+
+/**
+ * Whether install opens the Chrome Web Store listing for new users. False from a checkout and until a release is built
+ * with a live listing (the CWS_ITEM_LISTED repository variable); then install guides loading the unpacked build.
+ */
+export const STORE_LISTED = storeConfig().listed
 
 /** How to tell the user to install (or update) OpenCode Browser. */
 export function installCommand(): string {
-  return fromCheckout() ? `cd ${quoted(path.dirname(packageRoot()))} && bun run setup` : "npx opencode-browser-cli install"
+  return fromCheckout() ? `cd ${quoted(path.dirname(packageRoot()))} && bun run setup` : "npx @opencode/browse install"
 }

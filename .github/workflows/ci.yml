@@ -60,6 +60,11 @@ jobs:
         run: bun run test
         working-directory: cli
 
+      # The store zip and npm tarball the release workflow would build, with its artifact checks (permission allowlist,
+      # no key, pairing code, source maps or test hooks), so a problem shows up on the PR rather than at release time.
+      - name: Release artifacts check
+        run: bun run release:check
+
   browser:
     name: Execute sandbox in headless Chromium (optional)
     runs-on: ubuntu-latest

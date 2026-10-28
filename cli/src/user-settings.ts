@@ -3,11 +3,14 @@
 // owns them (chrome.storage.local); the relay reads and writes them through it (`settings.get`, `settings.set`) for the
 // `settings` MCP tool and CLI command, so the options page updates live and the relay hears of cursor and input changes
 // the way it does for changes made on the page. Environment variables on the relay override some of them; security
-// switches are environment-only and never settable here.
+// switches are environment-only and never settable here. autoUpdate is the relay's own (auto-update.ts keeps it in the
+// data root, so it works without the extension); the relay merges it in and never sends it to the extension.
 import type { JsonObject } from "./protocol.ts"
 import { cliCommand } from "./paths.ts"
 
-export const settingKeys = ["window", "grouping", "idleMinutes", "cursor", "humanInput", "handoffNotifications"] as const
+export const settingKeys = ["window", "grouping", "idleMinutes", "cursor", "humanInput", "handoffNotifications", "autoUpdate"] as const
+/** Settings the relay stores itself rather than in the extension. */
+export const relaySettingKeys: readonly SettingKey[] = ["autoUpdate"]
 export type SettingKey = (typeof settingKeys)[number]
 export type SettingValue = string | number
 export type Settings = Record<SettingKey, SettingValue>
@@ -21,6 +24,7 @@ export const settingSpecs: Record<SettingKey, { readonly label: string; readonly
   cursor: { label: "Agent cursor on agent tabs outside recordings (pages can detect it)", values: ["off", "always"], variable: "OPENCODE_BROWSER_GHOST_CURSOR" },
   humanInput: { label: "Human-like input (off is faster, but easier for sites to flag)", values: ["on", "off"], variable: "OPENCODE_BROWSER_HUMAN_INPUT" },
   handoffNotifications: { label: "System notification on a handoff (only while recorded, or every handoff)", values: ["recording", "always"] },
+  autoUpdate: { label: "npm installs: install updates automatically when idle, only notify, or never check", values: ["on", "notify", "off"], variable: "OPENCODE_BROWSER_AUTO_UPDATE" },
 }
 
 /** Environment-only switches that relax a guard or reach the network; the settings tool never touches them. */
@@ -79,7 +83,8 @@ export function settingsFromExtension(wire: JsonObject | undefined): Settings {
   const settings = {} as Settings
   for (const key of settingKeys) {
     const value = values[key]
-    if (key === "idleMinutes") settings[key] = value === 0 ? "never" : typeof value === "number" ? value : 10
+    if (relaySettingKeys.includes(key)) settings[key] = String(settingSpecs[key].values[0])
+    else if (key === "idleMinutes") settings[key] = value === 0 ? "never" : typeof value === "number" ? value : 10
     else settings[key] = typeof value === "string" ? value : String(settingSpecs[key].values[0])
   }
   return settings
@@ -87,7 +92,9 @@ export function settingsFromExtension(wire: JsonObject | undefined): Settings {
 
 /** Changes in the extension's terms (idleMinutes 0 for never). */
 export function settingsToExtension(changes: Partial<Settings>): JsonObject {
-  return Object.fromEntries(Object.entries(changes).map(([key, value]) => [key, key === "idleMinutes" && value === "never" ? 0 : value]))
+  return Object.fromEntries(Object.entries(changes)
+    .filter(([key]) => !relaySettingKeys.includes(key as SettingKey))
+    .map(([key, value]) => [key, key === "idleMinutes" && value === "never" ? 0 : value]))
 }
 
 export type SettingReport = {

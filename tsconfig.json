@@ -9,6 +9,7 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "noEmit": true,
+    "allowImportingTsExtensions": true,
     "lib": ["es2024", "dom", "dom.iterable"],
     "strict": true,
     "skipLibCheck": true,

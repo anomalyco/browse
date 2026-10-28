@@ -17,6 +17,36 @@ It works in Chrome, Edge, Brave, Arc, Helium, Vivaldi, Opera and Chromium.
 ## Install
 
 ```sh
+npx @opencode/browse install
+```
+
+`install` puts the relay in your data folder (`~/.local/share/opencode-browser`), adds the `browse` MCP server to
+opencode, and connects the extension:
+
+1. **Add the extension.** `install` opens OpenCode Browser in the Chrome Web Store; add it to your browser. If it's
+   already there, `install` opens its status page with the pairing code, so it pairs without copying anything.
+2. **Restart opencode.**
+
+That's it. Ask an agent to *"open news.ycombinator.com and tell me the top story"*. Or paste this into opencode:
+*"Install browse with `npx @opencode/browse install`."*
+
+Requirements: Node.js 22.19+, a Chromium browser, and [opencode](https://opencode.ai) or another MCP client.
+
+**Updates are automatic.** The relay checks npm once a day and installs a new version in the background; it switches
+over when no agent is using the browser, without changing opencode's config or restarting it. Choose *Only tell me* or
+*Don't check* under **Updates** on the extension's status page (or `settings set autoUpdate=notify`, or
+`OPENCODE_BROWSER_AUTO_UPDATE=off`). `npx @opencode/browse update` updates now, and `npx @opencode/browse rollback` goes
+back to the previous version. The Chrome Web Store updates the extension. Betas: `npx @opencode/browse@beta install`.
+
+There's nothing to sign in to. The extension only obeys a relay that proves it knows this computer's pairing code (see
+[Security](#security)). If pairing didn't happen by itself, run `npx @opencode/browse pair` and paste the code on the
+extension's status page (right-click the toolbar button, then **Options**).
+
+### From source
+
+For contributors, or before a release you need is on npm:
+
+```sh
 git clone https://github.com/anomalyco/browse.git && cd browse && bun run setup
 ```
 
@@ -28,34 +58,21 @@ local relay. Two steps are left for you:
    picker and paste), or drag the folder onto the page. `setup` waits until the extension connects.
 2. **Restart opencode.**
 
-That's it. Ask an agent to *"open news.ycombinator.com and tell me the top story"*.
-
-**Or let your agent do it.** Paste this into opencode: *"Install browse from https://github.com/anomalyco/browse and
-follow its README."* The agent clones it, runs `setup` and tells you which folder to load; you still click
-**Load unpacked** and restart opencode.
-
-Requirements: [Bun](https://bun.sh), Node.js 22.19+, a Chromium browser, and [opencode](https://opencode.ai) or another
-MCP client.
-
-**Updating:** run `node cli/dist/cli.mjs update` in your `browse` folder (or ask your agent to update browse), then
-restart opencode. It pulls the new commits (fast-forward only, and never over local changes), rebuilds, and reloads the
-extension for you. The manual equivalent is `git pull && bun run setup`. When there's an update, `status`, `doctor`, the
-extension's status page and the agent (once per session) say so; browse checks the clone's remote at most every six
-hours. Set `OPENCODE_BROWSER_UPDATE_CHECK=0` to turn the check off.
-
-There's nothing to sign in to. `setup` writes a pairing code into `dist/`, and the extension only obeys a relay that
-proves it knows that code (see [Security](#security)). A Chrome Web Store build has no pairing file: run
-`node cli/dist/cli.mjs pair` and paste the code on its status page (right-click the toolbar button, then **Options**).
-
-> **Coming soon:** a Chrome Web Store listing and an npm package, so you can skip the clone.
+This needs [Bun](https://bun.sh) as well. A checkout never updates itself: run `node cli/dist/cli.mjs update` in your
+`browse` folder (or ask your agent to update browse), then restart opencode. It pulls the new commits (fast-forward
+only, and never over local changes), rebuilds, and reloads the extension for you. The manual equivalent is
+`git pull && bun run setup`. When there's an update, `status`, `doctor`, the extension's status page and the agent (once
+per session) say so; browse checks the clone's remote at most every six hours. Set `OPENCODE_BROWSER_UPDATE_CHECK=0` to
+turn the check off.
 
 ### Other MCP clients
 
-`setup` writes the server into opencode's config. For other clients, add an stdio server that runs the built CLI:
+`install` writes the server into opencode's config. For other clients, add an stdio server that runs the installed
+shim, which always runs the current version (from a checkout, use `/path/to/browse/cli/dist/cli.mjs` instead):
 
 ```json
 {
-  "browse": { "command": "node", "args": ["/path/to/browse/cli/dist/cli.mjs", "mcp"] }
+  "browse": { "command": "node", "args": ["/Users/you/.local/share/opencode-browser/bin/opencode-browser.mjs", "mcp"] }
 }
 ```
 
@@ -205,6 +222,7 @@ Escape hatches. Set them in the environment you start opencode (or your MCP clie
 | `OPENCODE_BROWSER_AGENT_WINDOW=separate` | Open agent tabs in a separate window (`current`: in the user's window), overriding the options page's *Where agents open their tabs* |
 | `OPENCODE_BROWSER_EXECUTE_SLICE_MS=2000` | Longest `execute` JavaScript may run without yielding before it is stopped (50 to 60000; every session waits meanwhile) |
 | `OPENCODE_BROWSER_GHOST_CURSOR=1` | Show the agent cursor on every agent tab outside recordings (pages can see it); `0` keeps it off. Overrides the options page's *Agent cursor* |
+| `OPENCODE_BROWSER_AUTO_UPDATE=notify` | npm installs: only show new versions (`off`: don't check; `on`: install them when idle, the default). Overrides the status page's *Updates* |
 | `OPENCODE_BROWSER_HUMAN_INPUT=0` | Send input at full speed instead of human-like paths and pacing; `1` keeps them on. Overrides the options page's *Human-like input* |
 | `OPENCODE_BROWSER_CHALLENGE_WAIT_MS=15000` | How long `execute` waits for a bot check the browser clears by itself (0 to 60000; 0 reports it without waiting) |
 
@@ -227,11 +245,11 @@ bun install && bun run dev       # rebuilds dist/ on change; reload the extensio
 bun run typecheck
 bun run test                     # the extension and cli/ test suites (bun test), no browser needed
 cd cli && bun src/main.ts status # the CLI from source
-bun run package                  # release/opencode-browser-<version>.zip for the Chrome Web Store
+bun run release:check            # the store zip and npm tarball a release would publish, with its checks
 ```
 
-`cli/` is the npm package `opencode-browser-cli` with its own lockfile. To release: bump `cli/package.json`, run
-`npm publish --access public` in `cli/`, then upload the zip from `bun run package`.
+`cli/` is the npm package `@opencode/browse` with its own lockfile. The extension and the package share one version;
+[RELEASING.md](RELEASING.md) has the release flow (`bun run release <version>`, then push the tag).
 
 ## License
 

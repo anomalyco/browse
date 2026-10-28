@@ -23,6 +23,11 @@ import {
   type ToStatusPage,
 } from "../shared/protocol"
 
+// `npx @opencode/browse install` opens this page as welcome.html#ticket=<one-time ticket> for a store build
+// (cli/src/setup.ts pairStoreExtension). Take it, then drop it from the URL (address bar and history) before anything else.
+let fragmentTicket = /^#ticket=([0-9A-Za-z-]{16,64})$/.exec(location.hash)?.[1]
+if (location.hash.startsWith("#ticket=") || location.hash.startsWith("#pair=")) history.replaceState(null, "", location.pathname + location.search)
+
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T
 const status = element<HTMLParagraphElement>("status")
 element("extension-id").textContent = chrome.runtime.id
@@ -33,6 +38,8 @@ const connect = () => {
   port = next
   next.onMessage.addListener((message: ToStatusPage) => {
     if (message.type === "agents") render(message.state)
+    if (message.type === "pairing.ticket.result")
+      showPairingNote(message.ok ? "Pairing with the relay on this computer…" : "Already paired with the relay; the pairing link from install was ignored.")
     if (message.type === "pairing.result") {
       const button = element<HTMLButtonElement>("pairing-form").querySelector("button")!
       if (message.ok) element<HTMLInputElement>("pairing-code").value = ""
@@ -50,6 +57,14 @@ connect()
 const send = (message: FromStatusPage) => port?.postMessage(message)
 
 function render(state: AgentRelayState) {
+  // The ticket from install's URL, used once, and only when this extension isn't paired with the relay (no code, or one
+  // the relay refused). A working pairing is never replaced; the page says it ignored the link instead.
+  // While it's still connecting (or the relay is starting), wait for a status that tells.
+  if (fragmentTicket && state.status !== "offline" && state.status !== "connecting") {
+    if (state.status === "unpaired" || state.status === "untrusted") send({ type: "pairing.ticket", ticket: fragmentTicket })
+    else showPairingNote("Already paired with the relay; the pairing link from install was ignored.")
+    fragmentTicket = undefined
+  }
   status.dataset.state = state.status
   status.textContent = describe(state)
   // An unpacked build is paired by install; a store build pairs here (and can be paired again).
@@ -58,6 +73,43 @@ function render(state: AgentRelayState) {
   element("update-summary").textContent = state.update ? capitalized(state.update.summary) : ""
   element("update-command").textContent = state.update?.command ?? ""
   showOverrides(state.overrides)
+  showAutoUpdate(state.autoUpdate)
+  if (state.status === "connected" && element("pairing-note").textContent?.startsWith("Pairing with")) showPairingNote("Paired with the relay on this computer.")
+  if (state.ticketRejected && state.status !== "connected")
+    showPairingNote("The pairing link from install expired or was already used. Run `npx @opencode/browse pair` and paste the code below.")
+}
+
+/** The relay's update setting: shown for an npm install (a checkout updates with `update`; the notice above says so). */
+function showAutoUpdate(autoUpdate: AgentRelayState["autoUpdate"]) {
+  element("updates").hidden = autoUpdate?.install !== "npm"
+  if (!autoUpdate || autoUpdate.install !== "npm") return
+  for (const input of Array.from(element("auto-update").querySelectorAll<HTMLInputElement>("input[name=auto-update]")))
+    input.checked = input.value === autoUpdate.mode
+  const facts = [
+    autoUpdate.version ? `Installed: ${autoUpdate.version}${autoUpdate.channel === "beta" ? " (beta channel)" : ""}.` : "",
+    autoUpdate.pending ? `${autoUpdate.pending} is ready and switches in once no agent is using the browser.` : "",
+    !autoUpdate.pending && autoUpdate.latest && autoUpdate.latest !== autoUpdate.version ? `Newest: ${autoUpdate.latest}.` : "",
+    autoUpdate.previous && autoUpdate.version && autoUpdate.previous !== autoUpdate.version ? `\`opencode-browser rollback\` switches to ${autoUpdate.previous}.` : "",
+  ]
+  element("auto-update-state").textContent = facts.filter(Boolean).join(" ")
+  const note = element("auto-update-override")
+  note.hidden = !autoUpdate.overriddenBy
+  if (autoUpdate.overriddenBy) {
+    const variable = document.createElement("code")
+    variable.textContent = autoUpdate.overriddenBy
+    note.replaceChildren(`In effect: ${{ on: "automatic", notify: "notify only", off: "off" }[autoUpdate.effective]}. Set by `, variable, " on the relay.")
+  }
+}
+for (const input of Array.from(element("auto-update").querySelectorAll<HTMLInputElement>("input[name=auto-update]")))
+  input.addEventListener("change", () => {
+    if (input.checked && (input.value === "on" || input.value === "notify" || input.value === "off")) send({ type: "autoUpdate.set", mode: input.value })
+  })
+
+/** A short line under the status, for what happened to install's pairing link. */
+function showPairingNote(text: string) {
+  const note = element("pairing-note")
+  note.textContent = text
+  note.hidden = false
 }
 
 const capitalized = (text: string) => text.charAt(0).toUpperCase() + text.slice(1)
@@ -69,6 +121,12 @@ function describe(state: AgentRelayState) {
   if (state.status === "connecting") return "Connecting to the relay…"
   if (state.status === "conflict")
     return "OpenCode Browser in another browser or profile is connected. Close it there (or quit that browser), then click Reconnect."
+  if (state.status === "incompatible" && state.skew === "update-cli")
+    return "This extension is newer than the browse CLI on this computer. Update the CLI: run `npx @opencode/browse@latest install` (with automatic updates on, it catches up by itself within a day), then click Reconnect."
+  if (state.status === "incompatible" && state.skew === "update-extension")
+    return state.pairing === "bundled"
+      ? "This extension is older than the browse CLI on this computer. Run the install command again to update it, then click Reconnect."
+      : "This extension is older than the browse CLI on this computer. Chrome updates it within a few hours; to update now, open chrome://extensions, turn on Developer mode and click Update."
   if (state.status === "incompatible")
     return "This extension and the installed CLI don't match. Run the install command again, then click Reconnect."
   if (state.status === "unpaired") return "Not paired yet. Enter the pairing code below; until then no agent can use this browser."

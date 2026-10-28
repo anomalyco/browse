@@ -11,8 +11,10 @@ import { RelayErrorCode } from "./relay-schema.ts"
 export const defaultHost = "127.0.0.1"
 /** Not Browser Control's 19989, so an old relay can't hold OpenCode Browser's port. Keep in step with the extension. */
 export const defaultPort = 19988
-/** OpenCode Browser from the Chrome Web Store, and the unpacked build (its ID is pinned by the manifest key). */
-export const chromeWebStoreExtensionOrigin = "chrome-extension://mfnicocicmmlkpjnaffgihfjhdgjkdjg"
+/**
+ * The unpacked build (its ID is pinned by the manifest key). The Chrome Web Store items are release configuration
+ * (paths.ts storeConfig): the relay adds them to the allowed origins, so no store ID is hard-coded here.
+ */
 export const stableUnpackedExtensionOrigin = "chrome-extension://afeafocngkodbmaipcngoamamfmekgfo"
 
 export function chromeExtensionOriginForPath(extensionPath: string, platform: NodeJS.Platform = process.platform): string {
@@ -107,8 +109,7 @@ export function validateWebSocketOrigin(options: {
     return options.requireChromeExtension ? "Extension WebSocket origin is required" : undefined
   }
   if (
-    options.origin === chromeWebStoreExtensionOrigin
-    || options.origin === stableUnpackedExtensionOrigin
+    options.origin === stableUnpackedExtensionOrigin
     || options.additionalChromeExtensionOrigins?.has(options.origin)
   ) {
     return undefined

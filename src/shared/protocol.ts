@@ -30,6 +30,30 @@ export type AgentRelayState = {
   update?: AgentRelayUpdate
   /** Settings the connected relay's environment variables fix (OPENCODE_BROWSER_AGENT_WINDOW, …). */
   overrides?: RelayOverrides
+  /** How the connected relay's install updates (cli/src/auto-update.ts), as it reported it in `relay.settings`. */
+  autoUpdate?: RelayAutoUpdate
+  /** With status "incompatible": which side is behind, when the relay said (its protocol range, or the 4003 reason). */
+  skew?: ProtocolSkew
+  /** The relay refused install's one-time pairing link (expired or already used). */
+  ticketRejected?: boolean
+}
+
+/** update-cli: this extension is newer than the relay; update-extension: it's older than the relay supports. */
+export type ProtocolSkew = "update-cli" | "update-extension"
+
+export type AutoUpdateMode = "on" | "notify" | "off"
+export const autoUpdateMode = (value: unknown): AutoUpdateMode | undefined => (value === "on" || value === "notify" || value === "off" ? value : undefined)
+/** The relay's update state: an npm install updates itself; a checkout updates with `update`. */
+export type RelayAutoUpdate = {
+  install: "npm" | "checkout" | "other"
+  mode: AutoUpdateMode
+  effective: AutoUpdateMode
+  overriddenBy?: string
+  version?: string
+  channel?: string
+  latest?: string
+  pending?: string
+  previous?: string
 }
 
 export type AgentRelayUpdate = { summary: string; command: string }
@@ -75,5 +99,13 @@ export type RelayOverrides = { agentWindow?: "current" | "separate"; cursor?: Ag
 
 export const STATUS_PORT = "opencode-browser.status"
 
-export type ToStatusPage = { type: "agents"; state: AgentRelayState } | { type: "pairing.result"; ok: boolean }
-export type FromStatusPage = { type: "agents.reconnect" } | { type: "tabs.cleanup" } | { type: "pairing.set"; code: string }
+export type ToStatusPage =
+  | { type: "agents"; state: AgentRelayState }
+  | { type: "pairing.result"; ok: boolean }
+  | { type: "pairing.ticket.result"; ok: boolean }
+export type FromStatusPage =
+  | { type: "agents.reconnect" }
+  | { type: "tabs.cleanup" }
+  | { type: "pairing.set"; code: string }
+  | { type: "pairing.ticket"; ticket: string }
+  | { type: "autoUpdate.set"; mode: AutoUpdateMode }

@@ -20,11 +20,11 @@
       <section>
         <h2>Set up</h2>
         <p>
-          Run this once in a terminal (it needs Bun and Node.js 22.19+). It builds the relay, adds the <code>browse</code>
-          tools to opencode and pairs an unpacked copy of this extension with it.
+          Run this once in a terminal (it needs Node.js 22.19+). It installs the relay, adds the <code>browse</code> tools
+          to opencode and pairs it with this extension.
         </p>
         <div class="command">
-          <code id="install-command">git clone https://github.com/anomalyco/browse.git &amp;&amp; cd browse &amp;&amp; bun run setup</code>
+          <code id="install-command">npx @opencode/browse install</code>
           <button type="button" id="copy-command">Copy</button>
         </div>
       </section>
@@ -32,6 +32,7 @@
       <section>
         <h2>Status</h2>
         <p class="status" id="status" data-state="offline">Checking…</p>
+        <p class="note" id="pairing-note" hidden></p>
         <div class="actions">
           <button type="button" id="reconnect">Reconnect</button>
           <button type="button" id="cleanup">Close agent tabs</button>
@@ -89,6 +90,18 @@
         </fieldset>
       </section>
 
+      <section id="updates" hidden>
+        <h2>Updates</h2>
+        <fieldset class="choices" id="auto-update">
+          <legend>When a new version of browse is published</legend>
+          <label><input type="radio" name="auto-update" value="on" checked /> Install it automatically, once no agent is using the browser (default)</label>
+          <label><input type="radio" name="auto-update" value="notify" /> Only tell me</label>
+          <label><input type="radio" name="auto-update" value="off" /> Don't check</label>
+        </fieldset>
+        <p class="note" id="auto-update-state"></p>
+        <p class="note override" id="auto-update-override" hidden></p>
+      </section>
+
       <section id="update" hidden>
         <h2>Update available</h2>
         <p><span id="update-summary"></span>. Run this in a terminal (or ask your agent to update browse), then restart opencode:</p>
@@ -101,9 +114,9 @@
       <section id="pairing" hidden>
         <h2>Pair with the relay</h2>
         <p>
-          The extension only obeys the relay on this computer once both know the same pairing code. Run
-          <code>node cli/dist/cli.mjs pair</code> in your <code>browse</code> folder (or <code>opencode-browser pair</code>)
-          and paste the code it prints.
+          The extension only obeys the relay on this computer once both know the same pairing code. <code>npx @opencode/browse install</code>
+          pairs it for you. Otherwise run <code>npx @opencode/browse pair</code> (from a checkout:
+          <code>node cli/dist/cli.mjs pair</code>) and paste the code it prints.
         </p>
         <form class="command" id="pairing-form">
           <input id="pairing-code" autocomplete="off" spellcheck="false" placeholder="XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX" aria-label="Pairing code" />

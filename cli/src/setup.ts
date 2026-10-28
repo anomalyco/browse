@@ -1,7 +1,9 @@
 // Setup for OpenCode Browser, without changing opencode itself:
 //   install    install the runtime, add the browse MCP server to opencode's config, copy the unpacked extension
 //              (reloading a connected one), then check which browsers have the extension; when none does, guide
-//              loading it unpacked (or, once STORE_LISTED, open the Chrome Web Store listing) and wait for it
+//              loading it unpacked (or, once STORE_LISTED, open the Chrome Web Store listing) and wait for it; when a
+//              browser has the store build, open its status page with the pairing code in the URL fragment so it
+//              pairs without a step
 //   extension  show the unpacked extension folder (for "Load unpacked")
 //   pair       print the pairing code a Chrome Web Store build asks for (unpacked builds are paired by install)
 //   uninstall  remove everything install wrote
@@ -15,15 +17,22 @@ import path from "node:path"
 import { createInterface } from "node:readline/promises"
 import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse } from "jsonc-parser"
-import { cliCommand, dataRoot, installCommand, STORE_LISTED } from "./paths.ts"
-import { formatPairingCode, pairingCode, relayAuthorization, writeExtensionPairing } from "./relay-secrets.ts"
+import { describeAutoUpdate, autoUpdateStatus, installVersion, pruneVersions, readCurrent, runtimeLayout, switchVersion, updateState, compareVersions, versionEntry } from "./auto-update.ts"
+import { cliCommand, dataRoot, installCommand, STORE_LISTED, storeConfig } from "./paths.ts"
+import { formatPairingCode, mintPairingTicket, pairingCode, relayAuthorization, writeExtensionPairing } from "./relay-secrets.ts"
 import { opencodeBrowserVersion } from "./version.ts"
 
-const STORE_ID = "mfnicocicmmlkpjnaffgihfjhdgjkdjg"
+/**
+ * The Chrome Web Store items this package was released with (paths.ts storeConfig). Only these IDs count as the store
+ * build: install hands the pairing code to the extension with this ID, so it must be ours.
+ */
+const store = storeConfig()
+const STORE_IDS = [store.id, store.betaId].filter((id): id is string => !!id)
 /** The unpacked build; its ID is pinned by the manifest key. */
 const UNPACKED_ID = "afeafocngkodbmaipcngoamamfmekgfo"
-const STORE_URL = `https://chromewebstore.google.com/detail/${STORE_ID}`
-const PACKAGE = "opencode-browser-cli"
+const storeUrl = (id: string | undefined) => (id ? `https://chromewebstore.google.com/detail/${id}` : undefined)
+const STORE_URL = storeUrl(store.channelId)
+const PACKAGE = "@opencode/browse"
 const MCP_NAME = "browse"
 /** The MCP server's name before it was renamed to `browse`. */
 const LEGACY_MCP_NAME = "opencode-browser"
@@ -34,9 +43,10 @@ const windows = process.platform === "win32"
 const home = homedir()
 const root = dataRoot()
 const configRoot = process.env.XDG_CONFIG_HOME ?? path.join(home, ".config")
+const layout = runtimeLayout(root)
 const files = {
   dir: root,
-  /** A pinned npm install of this package: the MCP server runs from here, not the npx cache. */
+  /** Installed versions of this package (auto-update.ts): the MCP server runs from here through the shim, not the npx cache. */
   runtime: path.join(root, "runtime"),
   settings: path.join(root, "settings.json"),
   extension: path.join(root, "extension"),
@@ -248,7 +258,8 @@ function configureMcp(entry: string) {
   // makes opencode restart the server with the new code.
   const renamed = removeMcp(LEGACY_MCP_NAME)
   const existing = mcpServers()[MCP_NAME]
-  const server = mergedMcpServer(existing, [process.execPath, entry, "mcp"], fingerprint(entry))
+  // The shim of an npm install never changes and swaps the server itself after an update, so its entry stays the same.
+  const server = mergedMcpServer(existing, [process.execPath, entry, "mcp"], entry === layout.shim ? "auto-update" : fingerprint(entry))
   if (existing && JSON.stringify(existing) === JSON.stringify(server)) return `"${MCP_NAME}" is up to date`
   const text = readFileOr(file, "{}")
   const edits = modify(text, ["mcp", "servers", MCP_NAME], server, { formattingOptions: { tabSize: 2, insertSpaces: true } })
@@ -300,39 +311,44 @@ function removeLegacyHost() {
 // ---- runtime ----------------------------------------------------------------------------------------
 
 /**
- * Installs this exact version into the data root, so the MCP server keeps working after the npx cache is
- * cleared, and an update is one `install` away. From source (development), runs in place.
+ * Installs this exact version into the data root (runtime/versions/<version>, auto-update.ts), points runtime/current.json
+ * at it and writes the stable shim, so the MCP server keeps working after the npx cache is cleared and later updates
+ * never change opencode's config. Returns the shim and the version. From source (development), runs in place.
  * OPENCODE_BROWSER_PACKAGE installs a specific spec instead, for example a local tarball.
  */
-function installRuntime() {
+async function installRuntime(): Promise<{ entry: string; version: string }> {
   // From a checkout, run the bundle `bun run build` wrote: Node can't run the TypeScript sources (they use
   // syntax type stripping doesn't cover), and the MCP server runs under Node.
   if (fromSource) {
     const bundle = path.join(packageRoot, "dist", "cli.mjs")
     if (!existsSync(bundle)) fail("Build the CLI first: `bun run build` in cli/ (or `bun run setup` at the top).")
-    return bundle
+    return { entry: bundle, version: opencodeBrowserVersion }
   }
-  const spec = process.env.OPENCODE_BROWSER_PACKAGE ?? `${PACKAGE}@${opencodeBrowserVersion}`
-  // A package name, name@version, tarball path or URL: never an npm flag, and nothing a shell would interpret.
-  if (spec.startsWith("-") || /[\s"'`&|<>^%!;]/.test(spec)) fail(`Invalid OPENCODE_BROWSER_PACKAGE: ${JSON.stringify(spec)}`)
-  mkdirSync(files.runtime, { recursive: true })
-  if (!existsSync(path.join(files.runtime, "package.json"))) writeFileSync(path.join(files.runtime, "package.json"), "{\"private\":true}\n")
-  const npmArgs = ["install", "--prefix", files.runtime, "--no-audit", "--no-fund", "--loglevel=error", spec]
-  // On Windows npm is a .cmd script, which Node only runs through a shell; run npm's own entry with node instead.
-  const npmCli = windows ? windowsNpmCli() : undefined
-  const npm = spawnSync(npmCli ? process.execPath : "npm", npmCli ? [npmCli, ...npmArgs] : npmArgs, { encoding: "utf8" })
-  if (npm.status !== 0) fail(`Could not install ${spec}: ${(npm.stderr || npm.stdout || "npm failed").trim()}`)
-  return path.join(files.runtime, "node_modules", PACKAGE, "dist", "cli.mjs")
-}
-
-/** npm's JavaScript entry next to node.exe, or next to the npm.cmd on PATH. */
-function windowsNpmCli() {
-  const besideNode = path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js")
-  if (existsSync(besideNode)) return besideNode
-  const npmCmd = spawnSync("where", ["npm.cmd"], { encoding: "utf8" }).stdout?.split(/\r?\n/).find((line) => line.trim())
-  const besideCmd = npmCmd ? path.join(path.dirname(npmCmd.trim()), "node_modules", "npm", "bin", "npm-cli.js") : undefined
-  if (besideCmd && existsSync(besideCmd)) return besideCmd
-  fail("Could not find npm (node_modules\\npm\\bin\\npm-cli.js next to node.exe or npm.cmd). Install Node.js with npm and retry.")
+  const spec = process.env.OPENCODE_BROWSER_PACKAGE
+  const before = readCurrent(layout)
+  // Already installed (install run again): keep it. Reinstalling would replace the files a running relay still loads.
+  const existing = versionEntry(layout, opencodeBrowserVersion)
+  const reuse = !spec && existsSync(existing) && spawnSync(process.execPath, [existing, "--version"], { encoding: "utf8", timeout: 30_000 }).stdout?.trim() === opencodeBrowserVersion
+  let installed: string
+  try {
+    installed = reuse ? existing : await installVersion({ layout, version: opencodeBrowserVersion, ...(spec ? { spec } : {}) })
+  } catch (error) {
+    fail(`Could not install ${spec ?? `${PACKAGE}@${opencodeBrowserVersion}`}: ${(error as Error).message}`)
+  }
+  const version = path.basename(path.dirname(path.dirname(path.dirname(path.dirname(path.dirname(installed))))))
+  // Running install again for the same version keeps the version it replaced for rollback.
+  const previous = before?.version === version ? before.previous : before?.version
+  switchVersion(layout, version, previous)
+  // Installing by hand settles any update the relay was waiting to switch to, and un-skips this version.
+  updateState(layout, ({ pending, skipped, ...state }) => ({
+    ...state,
+    ...(pending && compareVersions(pending, version) > 0 ? { pending } : {}),
+    ...(skipped && skipped !== version ? { skipped } : {}),
+  }))
+  pruneVersions(layout, [version, previous])
+  // Earlier versions installed one copy straight into runtime/; the shim replaces it.
+  for (const legacy of ["node_modules", "package.json", "package-lock.json"]) rmSync(path.join(files.runtime, legacy), { recursive: true, force: true })
+  return { entry: layout.shim, version }
 }
 
 // ---- commands -------------------------------------------------------------------------------------
@@ -357,9 +373,9 @@ async function install(args: string[]) {
   const opencode = findOpencode(args)
 
   mkdirSync(files.dir, { recursive: true })
-  const entry = installRuntime()
-  log(`✓ OpenCode Browser ${opencodeBrowserVersion} installed${fromSource ? " (from source)" : ""}`)
-  writeFileSync(files.settings, JSON.stringify({ ...(opencode ? { opencode } : {}), entry, version: opencodeBrowserVersion } satisfies Settings, null, 2) + "\n")
+  const { entry, version } = await installRuntime()
+  log(`✓ OpenCode Browser ${version} installed${fromSource ? " (from source)" : ""}`)
+  writeFileSync(files.settings, JSON.stringify({ ...(opencode ? { opencode } : {}), entry, version } satisfies Settings, null, 2) + "\n")
   if (removeLegacyHost()) log("✓ Removed the native messaging host of an earlier version")
 
   const node = process.execPath
@@ -404,6 +420,10 @@ async function install(args: string[]) {
     preferred: ssh ? undefined : defaultBrowser(detections.map((detection) => detection.browser)),
     env,
   })
+  if (found === "ready" && !connected) {
+    const paired = pairStoreExtension({ detections, preferred: ssh ? undefined : defaultBrowser(detections.map((detection) => detection.browser)), allowOpen: !args.includes("--no-open"), env, ticket: () => mintPairingTicket() })
+    if (paired === "opened") return awaitConnection(entry)
+  }
   if (found === "guided" && !STORE_LISTED && env.tty && !ssh && !args.includes("--no-wait")) return awaitConnection(entry)
   // The MCP server entry changed: a running opencode picks it up on restart.
   if (found === "ready" && !mcp.endsWith("up to date")) log("Restart opencode (if it's running) to load the browse tools.")
@@ -442,7 +462,9 @@ export function installedRuntime(settings: Settings | undefined, server: Servers
   // A bundle with the sources beside it is a checkout's build: cli/dist/cli.mjs next to cli/src/main.ts.
   const packageDir = path.dirname(path.dirname(entry))
   const source = existsSync(path.join(packageDir, "src", "main.ts"))
+  // The shim runs whatever runtime/current.json names, which auto-update moves.
   const version =
+    (entry === layout.shim ? readCurrent(layout)?.version : undefined) ??
     settings?.version ??
     (path.resolve(entry) === path.join(packageRoot, "dist", "cli.mjs") ? opencodeBrowserVersion : readJson<{ version?: string }>(path.join(packageDir, "package.json"))?.version)
   return { entry, version, source }
@@ -456,6 +478,7 @@ export function printSetupStatus() {
   log(`Version:   ${runtime ? `${runtime.version ?? "unknown"} (${runtime.entry})` : "not installed"}`)
   log(`opencode:  ${settings?.opencode ?? findOpencode([]) ?? "not found"}`)
   log(mcpServers()[MCP_NAME] ? `MCP:       "${MCP_NAME}" configured` : "MCP:       not configured")
+  log(describeAutoUpdate(autoUpdateStatus({ layout })))
   log(`Logs:      ${path.join(files.dir, "logs")}`)
   log("")
 }
@@ -581,8 +604,8 @@ export type Detection = { browser: Browser; blocked: boolean; enabled: Match[]; 
 
 /** What locateExtension may do outside the terminal; stubbed in tests so they never open a real browser. */
 export type Effects = {
-  /** Opens a URL in a specific browser; false when it couldn't be handed to one. */
-  open(browser: Browser, url: string): boolean
+  /** Opens a URL in a specific browser (and profile directory); false when it couldn't be handed to one. */
+  open(browser: Browser, url: string, profile?: string): boolean
   /** Shows the folder in the file manager, selected where the OS can, so it can be dragged. */
   reveal(folder: string): boolean
   /** Puts text on the clipboard; false when there is no clipboard tool. */
@@ -599,6 +622,8 @@ export type LocateOptions = {
   preferred: Browser | undefined
   env: { ssh: boolean; display: boolean; tty: boolean; platform: NodeJS.Platform }
   storeListed?: boolean
+  /** The listing to open when storeListed; defaults to this channel's store item. */
+  storeUrl?: string
 }
 
 /**
@@ -611,11 +636,12 @@ export type LocateOptions = {
  */
 export function locateExtension(options: LocateOptions, effects: Effects = systemEffects): "ready" | "off" | "guided" {
   const { log } = effects
-  const storeListed = options.storeListed ?? STORE_LISTED
+  const listing = options.storeUrl ?? STORE_URL
+  const storeListed = (options.storeListed ?? STORE_LISTED) && listing !== undefined
   const ready = "✓ Agents can use OpenCode Browser now. Click its toolbar button on a tab to let them use that tab too."
   if (options.env.ssh) {
     if (options.connected) return log(ready), "ready"
-    if (storeListed) log(`Install OpenCode Browser in your browser from the Chrome Web Store: ${STORE_URL}`)
+    if (storeListed) log(`Install OpenCode Browser in your browser from the Chrome Web Store: ${listing}`)
     else unpackedSteps({ folder: options.folder, platform: options.env.platform, log })
     return "guided"
   }
@@ -631,9 +657,9 @@ export function locateExtension(options: LocateOptions, effects: Effects = syste
   const target = options.preferred ?? options.detections.find((detection) => !detection.blocked)?.browser
   const interactive = options.allowOpen && options.env.display && options.env.tty
   if (storeListed) {
-    const opened = interactive && !blocked.length && target !== undefined && effects.open(target, STORE_URL)
+    const opened = interactive && !blocked.length && target !== undefined && effects.open(target, listing!)
     log(`Install OpenCode Browser from the Chrome Web Store${opened ? ` (opened in ${target.name})` : ""}:`)
-    log(`  ${STORE_URL}`)
+    log(`  ${listing}`)
     if (blocked.length) log(`  Already installed in ${blocked.join(", ")}? Then you're set.`)
     log(`  Or load the unpacked build: ${cliCommand("extension")}`)
     return "guided"
@@ -653,6 +679,32 @@ export function locateExtension(options: LocateOptions, effects: Effects = syste
   })
   if (blocked.length) log(`Already loaded in ${blocked.join(", ")}? Then you're set.`)
   return "guided"
+}
+
+/**
+ * Pairs a store-installed extension without the copy-paste step: opens its status page in the browser profile that has
+ * it, with a one-time pairing ticket in the URL fragment (`welcome.html#ticket=<ticket>`). The page clears the fragment
+ * at once and, only when the extension isn't paired, connects with the ticket; the relay exchanges it for the pairing
+ * code during the handshake (relay-secrets.ts). The ticket passes through the browser's command line, which other local
+ * users can see in the process list (`ps`), so it's worth nothing after its first use or two minutes, whichever comes
+ * first; the real code never leaves the data root this way. `pair` and pasting the code stay as the fallback.
+ * Returns "opened", "manual" (the store build is there but nothing was opened: say how to pair) or "none".
+ */
+export function pairStoreExtension(
+  options: Pick<LocateOptions, "detections" | "preferred" | "allowOpen" | "env"> & { ticket: () => string; storeIds?: readonly string[] },
+  effects: Effects = systemEffects,
+): "opened" | "manual" | "none" {
+  const ids = options.storeIds ?? STORE_IDS
+  const matches = options.detections.flatMap((detection) => detection.enabled).filter((match) => ids.includes(match.id))
+  const match = matches.find((candidate) => candidate.browser.name === options.preferred?.name) ?? matches[0]
+  if (!match) return "none"
+  const interactive = options.allowOpen && options.env.display && !options.env.ssh
+  if (interactive && effects.open(match.browser, `chrome-extension://${match.id}/welcome.html#ticket=${options.ticket()}`, match.profile.dir)) {
+    effects.log(`✓ Opened OpenCode Browser's status page in ${match.browser.name} (${match.profile.name}) to pair it with the relay`)
+    return "opened"
+  }
+  effects.log(`! To pair OpenCode Browser in ${match.browser.name} (${match.profile.name}), run \`${cliCommand("pair")}\` and paste the code on its status page (right-click the toolbar button, then Options).`)
+  return "manual"
 }
 
 /** The numbered steps for loading the unpacked build, saying what install already did for each. */
@@ -715,7 +767,7 @@ function detectBrowsers() {
           (parseJson(readLocked(path.join(browser.userData, profile.dir, file)).text) as { extensions?: { settings?: Record<string, ExtensionSetting> } } | undefined)
             ?.extensions?.settings ?? {},
       )
-      const id = [STORE_ID, UNPACKED_ID].find((candidate) => settings.some((entries) => entries[candidate]))
+      const id = [...STORE_IDS, UNPACKED_ID].find((candidate) => settings.some((entries) => entries[candidate]))
       if (!id) return []
       const setting = settings.find((entries) => entries[id])![id]!
       return [{ browser, profile, id, enabled: !disabled(setting) }]
@@ -812,7 +864,7 @@ function reportDetections(detections: Detection[], preferred: Browser | undefine
   })
 }
 
-const describe = (match: Match) => `${match.profile.name}${match.id === UNPACKED_ID ? " (unpacked)" : ""}`
+const describe = (match: Match) => `${match.profile.name}${match.id === UNPACKED_ID ? " (unpacked)" : match.id === store.betaId ? " (beta)" : ""}`
 const blockedReason = () => (process.platform === "darwin" ? "macOS privacy protection" : "permission denied")
 
 /**
@@ -820,11 +872,11 @@ const blockedReason = () => (process.platform === "darwin" ? "macOS privacy prot
  * instance; chrome:// URLs only open this way. Without the executable, an https URL goes through the OS, which on
  * macOS can still pick the app; a chrome:// URL can't (it isn't a scheme the OS knows), so it's left to the user.
  */
-function openInBrowser(browser: Browser, url: string) {
+function openInBrowser(browser: Browser, url: string, profile?: string) {
   const executable = launcher(browser)?.executable
   const web = /^https?:/.test(url)
   if (executable) {
-    const child = spawn(executable, [url], { detached: true, stdio: "ignore" })
+    const child = spawn(executable, [...(profile ? [`--profile-directory=${profile}`] : []), url], { detached: true, stdio: "ignore" })
     child.on("error", () => web && openWithSystem(browser, url))
     child.unref()
     return true
@@ -900,4 +952,8 @@ export async function runSetup(command: string, args: string[]) {
   if (command === "extension") return extension()
   if (command === "uninstall") return uninstall(args)
   if (command === "pair") return pair()
+  if (command === "rollback") {
+    const { runRollback } = await import("./runtime-update.ts")
+    return runRollback(args)
+  }
 }

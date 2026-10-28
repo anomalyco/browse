@@ -39,6 +39,23 @@ export function sameSecret(expected: string, actual: unknown) {
   return difference === 0
 }
 
+/** The key a one-time pairing ticket stands for (cli/src/relay-secrets.ts pairingTicketKey): its SHA-256, hex. */
+export async function pairingTicketKey(ticket: string) {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(ticket)))
+  return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("")
+}
+
+/** The pairing code the relay masked for a ticket holder (relay-secrets.ts wrapPairingCode), or undefined. */
+export async function unwrapPairingCode(key: string, wrapped: unknown, port: number, ownNonce: string, relayNonce: string) {
+  if (typeof wrapped !== "string" || !/^[A-Za-z0-9_-]{20,64}$/.test(wrapped)) return undefined
+  const encoder = new TextEncoder()
+  const hmac = await crypto.subtle.importKey("raw", encoder.encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"])
+  const mask = new Uint8Array(await crypto.subtle.sign("HMAC", hmac, encoder.encode(`${CONTEXT}|wrap|${pairingEndpoint(port)}|${ownNonce}|${relayNonce}`)))
+  const bytes = Uint8Array.from(atob(wrapped.replace(/-/g, "+").replace(/_/g, "/")), (char) => char.charCodeAt(0))
+  if (bytes.length > mask.length) return undefined
+  return normalizePairingCode(String.fromCharCode(...bytes.map((byte, index) => byte ^ mask[index]!)))
+}
+
 function base64url(bytes: Uint8Array) {
   let binary = ""
   for (const byte of bytes) binary += String.fromCharCode(byte)

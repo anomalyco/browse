@@ -29,16 +29,20 @@ import {
   type AgentRelayState,
   type AgentRelayStatus,
   type AgentRelayUpdate,
+  type AutoUpdateMode,
   type PairingSource,
+  type ProtocolSkew,
+  type RelayAutoUpdate,
   type RelayOverrides,
   type RelaySettings,
+  autoUpdateMode,
 } from "../shared/protocol"
 import { createAgentRelayLog, formatAgentRelayLog } from "./agent-relay-log"
 import { AgentGroups } from "./agent-groups"
 import { AgentWindow } from "./agent-window"
 import { DebuggerHub } from "./debugger-hub"
 import { HandoffNotice } from "./handoff-notice"
-import { normalizePairingCode, pairingProof, randomNonce, sameSecret } from "./pairing"
+import { normalizePairingCode, pairingProof, pairingTicketKey, randomNonce, sameSecret, unwrapPairingCode } from "./pairing"
 import { PageScripts } from "./page-scripts"
 import { TabCleanup } from "./tab-cleanup"
 import { UserSettings } from "./user-settings"
@@ -137,11 +141,22 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   /** Sockets whose relay proved it knows the pairing code; nothing else is obeyed. */
   const trusted = new WeakSet<WebSocket>()
   /** The handshake in flight on a socket: this extension's nonce and the code it proves with. */
-  const handshakes = new WeakMap<WebSocket, { nonce: string; code: string; port: number }>()
+  const handshakes = new WeakMap<WebSocket, { nonce: string; code: string; port: number; ticket?: boolean }>()
+  /** A one-time pairing ticket from install's URL (welcome.html#ticket=…), used on the next connection only. */
+  let ticket: string | undefined
+  /** The code a ticket just brought in: storing it must not restart the connection it arrived on. */
+  let adopting: string | undefined
+  /** The socket that carried a ticket, and whether the relay refused it (expired or already used). */
+  let ticketSocket: { socket: WebSocket; ticket: string } | undefined
+  let ticketRejected = false
   let pairing: PairingSource = "none"
   let update: AgentRelayUpdate | undefined
   /** Settings the connected relay's environment fixes, as it reported them (`relay.settings`). */
   let overrides: RelayOverrides | undefined
+  /** The connected relay's update state (`relay.settings`). */
+  let autoUpdate: RelayAutoUpdate | undefined
+  /** Which side to update when the relay's protocol doesn't match this extension's. */
+  let skew: ProtocolSkew | undefined
   let bundledPairing: Promise<string | undefined> | undefined
 
   const snapshot = (): AgentRelayState => ({
@@ -153,6 +168,9 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     }),
     ...(update ? { update } : {}),
     ...(overrides ? { overrides } : {}),
+    ...(autoUpdate ? { autoUpdate } : {}),
+    ...(skew && status === "incompatible" ? { skew } : {}),
+    ...(ticketRejected ? { ticketRejected: true } : {}),
   })
   const notify = () => input.changed(snapshot())
   const setStatus = (next: AgentRelayStatus) => {
@@ -242,7 +260,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     port = Number((await chrome.storage.local.get(PORT_KEY))[PORT_KEY]) || defaultRelayPort
     if (socket && socket.readyState <= WebSocket.OPEN) return
     // Without a pairing code there is no relay to trust; wait for one (install, or the status page).
-    if ((await pairingCode()) === undefined) {
+    if ((await pairingCode()) === undefined && ticket === undefined) {
       if (status !== "unpaired") log.add("pairing.missing")
       setStatus("unpaired")
       return
@@ -299,7 +317,18 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       })
       void chrome.runtime.sendMessage({ action: "recording.cancelAll" }).catch(() => undefined)
       overrides = undefined
-      if (event.code === 4003) setStatus("incompatible")
+      autoUpdate = undefined
+      if (ticketSocket?.socket === current) {
+        // Only the relay's refusal (4006) means the link is spent; a relay that wasn't there yet gets it on the next try.
+        ticketRejected = !trusted.has(current) && event.code === 4006
+        if (!trusted.has(current) && event.code !== 4006) ticket ??= ticketSocket.ticket
+        ticketSocket = undefined
+      }
+      if (event.code === 4003) {
+        // A newer relay names the side that's behind: "Extension protocol incompatible: extension-newer".
+        skew = /extension-newer/.test(event.reason) ? "update-cli" : /extension-older/.test(event.reason) ? "update-extension" : undefined
+        setStatus("incompatible")
+      }
       else if (event.code === 4004) setStatus("conflict")
       else if (event.code === 4006) setStatus("untrusted")
       // A missing relay is normal until an agent's browse tools (or the opencode-browser CLI) start one.
@@ -329,12 +358,16 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     const stored = (await chrome.storage.local.get(PROFILE_KEY))[PROFILE_KEY] as { id: string; name?: string } | undefined
     const profile = stored ?? { id: crypto.randomUUID() }
     if (!stored) await chrome.storage.local.set({ [PROFILE_KEY]: profile })
-    const code = await pairingCode()
+    // A ticket goes first (and only once): it's how a store build without the right code gets it.
+    const usingTicket = ticket
+    ticket = undefined
+    const code = usingTicket !== undefined ? await pairingTicketKey(usingTicket) : await pairingCode()
     if (socket !== current || current.readyState !== WebSocket.OPEN) return
     if (code === undefined) return current.close(4006, "Not paired")
     const nonce = randomNonce()
     // The proofs are bound to the port this socket dialled (see pairing.ts).
-    handshakes.set(current, { nonce, code, port: Number(new URL(current.url).port) })
+    handshakes.set(current, { nonce, code, port: Number(new URL(current.url).port), ...(usingTicket !== undefined ? { ticket: true } : {}) })
+    if (usingTicket !== undefined) ticketSocket = { socket: current, ticket: usingTicket }
     // An older relay waits for commands it never gets; one that doesn't pair in time isn't ours.
     setTimeout(() => {
       if (socket === current && current.readyState === WebSocket.OPEN && !trusted.has(current)) {
@@ -351,7 +384,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
           protocolVersion: extensionProtocolVersion,
           profileId: profile.id,
           profileName: profile.name ?? "OpenCode Browser",
-          pairing: { nonce },
+          pairing: { nonce, ...(usingTicket !== undefined ? { ticket: true } : {}) },
         },
       }),
     )
@@ -384,7 +417,37 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       current.close(4006, "Relay failed pairing")
       return
     }
-    current.send(JSON.stringify({ method: "auth.response", params: { proof: await pairingProof(pending.code, "extension", pending.port, pending.nonce, relayNonce) } }))
+    // With a ticket, the relay proved it holds it and sent the real code masked with it: keep that code and prove it.
+    let proven = pending.code
+    if (pending.ticket) {
+      const code = await unwrapPairingCode(pending.code, params?.wrapped, pending.port, pending.nonce, relayNonce)
+      if (socket !== current || current.readyState !== WebSocket.OPEN) return
+      if (code === undefined) {
+        log.add("pairing.rejected", { reason: "ticket without a code" })
+        current.close(4006, "Relay failed pairing")
+        return
+      }
+      ticketSocket = undefined
+      ticketRejected = false
+      // Storing a different code fires storage.onChanged, which must not restart this connection; the same code fires nothing.
+      const previous = normalizePairingCode((await chrome.storage.local.get(PAIRING_KEY))[PAIRING_KEY])
+      if (previous !== code) {
+        adopting = code
+        await chrome.storage.local.set({ [PAIRING_KEY]: code })
+      }
+      log.add("pairing.ticket")
+      proven = code
+    }
+    current.send(JSON.stringify({ method: "auth.response", params: { proof: await pairingProof(proven, "extension", pending.port, pending.nonce, relayNonce) } }))
+    // The protocols the relay speaks (newer relays say): outside them, the relay keeps this connection but sends no
+    // work, so show which side to update instead of "connected".
+    const range = isJsonObject(params?.protocol) ? params.protocol : undefined
+    skew =
+      typeof range?.version === "number" && extensionProtocolVersion > range.version
+        ? "update-cli"
+        : typeof range?.min === "number" && extensionProtocolVersion < range.min
+          ? "update-extension"
+          : undefined
     trusted.add(current)
     log.add("pairing.ok", { source: pairing })
     // Tabs an agent opened say so: one the relay no longer knows after a reconnect is closed, not handed to the user.
@@ -402,7 +465,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       if (socket === current) send({ method: "pong" })
     }, KEEPALIVE)
     connectedAt = Date.now()
-    setStatus("connected")
+    setStatus(skew ? "incompatible" : "connected")
     pendingAttach.forEach((tabId) => send({ method: "toolbar.clicked", params: { tabId } }))
     pendingAttach.clear()
     void ungroupStale().catch((error: unknown) => log.add("ungroupStale.error", { error: text(error) }))
@@ -597,6 +660,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
           ...(fixed.humanInput === "on" || fixed.humanInput === "off" ? { humanInput: fixed.humanInput } : {}),
         }
         overrides = Object.keys(next).length ? next : undefined
+        autoUpdate = relayAutoUpdate(params?.autoUpdate)
         notify()
         return {}
       }
@@ -1000,6 +1064,11 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   // A code typed on the status page (or removed) takes effect on a fresh connection.
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== "local" || !(PAIRING_KEY in changes)) return
+    if (adopting !== undefined && changes[PAIRING_KEY]?.newValue === adopting) {
+      adopting = undefined
+      bundledPairing = undefined
+      return
+    }
     log.add("pairing.changed")
     bundledPairing = undefined
     attempts = 0
@@ -1174,6 +1243,29 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       await chrome.storage.local.set({ [PAIRING_KEY]: code })
       return true
     },
+    /** The status page's update setting; the relay keeps it (an older relay ignores it). */
+    setAutoUpdate(mode: AutoUpdateMode) {
+      if (!open()) return
+      log.add("settings", { autoUpdate: mode })
+      send({ method: "settings", params: { autoUpdate: mode } })
+    },
+    /**
+     * A one-time pairing ticket from install (welcome.html#ticket=…). Ignored while this extension works with the relay,
+     * so a stray link can't replace a working pairing; false then, or when it isn't a ticket.
+     */
+    pairTicket(input: string) {
+      const value = normalizePairingCode(input)
+      if (value === undefined || status === "connected") return false
+      ticket = value
+      log.add("pairing.ticket.received")
+      // A connection in progress (with the old code) closes; the next one carries the ticket.
+      socket?.close(1000, "Pairing with a ticket")
+      attempts = 0
+      clearTimeout(retry)
+      retry = undefined
+      setTimeout(() => void connect("ticket"), 200)
+      return true
+    },
     /** Reconnects now, for example after the user fixed what blocked the connection. */
     reconnect() {
       log.add("reconnect.requested")
@@ -1286,4 +1378,16 @@ function string(params: JsonObject | undefined, key: string) {
   const value = params?.[key]
   if (typeof value !== "string") throw new Error(`Missing string param: ${key}`)
   return value
+}
+
+/** The relay's update state from `relay.settings`, keeping only known fields and values. */
+function relayAutoUpdate(input: unknown): RelayAutoUpdate | undefined {
+  if (!isJsonObject(input)) return undefined
+  const install = input.install === "npm" || input.install === "checkout" ? input.install : "other"
+  const mode = autoUpdateMode(input.mode)
+  const effective = autoUpdateMode(input.effective)
+  if (!mode || !effective) return undefined
+  const text = (value: unknown) => (typeof value === "string" && value.length <= 100 ? value : undefined)
+  const optional = { overriddenBy: text(input.overriddenBy), version: text(input.version), channel: text(input.channel), latest: text(input.latest), pending: text(input.pending), previous: text(input.previous) }
+  return { install, mode, effective, ...Object.fromEntries(Object.entries(optional).filter(([, value]) => value !== undefined)) }
 }
