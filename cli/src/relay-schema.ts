@@ -158,6 +158,16 @@ export const ExecuteAftermath = Schema.Struct({
   consoleErrorCount: Schema.Number,
   pageErrorCount: Schema.Number,
   handoffs: Schema.Number,
+  /** A bot challenge or block page seen on the session page after this call navigated or failed. */
+  challenge: Schema.optionalKey(Schema.Struct({
+    vendor: Schema.String,
+    kind: Schema.Literals(["non-interactive", "interactive", "block"]),
+    status: Schema.Literals(["cleared", "blocked"]),
+    signal: Schema.String,
+    url: Schema.String,
+    waitedMs: Schema.Number,
+    recommendation: Schema.Literals(["continue", "handoff", "stop"]),
+  })),
 })
 
 export interface ExecuteAftermath extends Schema.Schema.Type<typeof ExecuteAftermath> {}

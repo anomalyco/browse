@@ -61,6 +61,7 @@ import { createScreenshotDiff, type ScreenshotDiffOptions, type ScreenshotDiffRe
 import { createWebMcpHelper, type WebMcpHelper } from "./webmcp.ts"
 import { startDemonstrationRecorder, type DemonstrationResult } from "./demonstration.ts"
 import { relayToken } from "./relay-secrets.ts"
+import { challengeWarning, classifyChallenge, probePageScript, probeSelectors, type ChallengeOutcome, type ChallengeProbe } from "./challenge-detection.ts"
 import { createExecuteFiles, executeAllowsNode, ExecuteRealm, pageVisibleApiWarning, sandboxModules, type ExecuteFiles } from "./execute-realm.ts"
 
 export { createAriaSnapshotHelper, createSnapshotHelpers, defaultAriaSnapshotTimeoutMs, fillInputs }
@@ -542,6 +543,11 @@ export class ExecuteSandbox {
         if (!this.realm) for (const warning of pageVisibleApiSourceWarnings(code)) this.addWarningOnce(warning)
         const globals = await this.getGlobals(options)
         const { result, logs, logSummary, aftermath } = await runUserCode({ code, globals, ...(this.realm ? { realm: this.realm } : {}) })
+          .then(async (completed) => ({ ...completed, aftermath: await this.withChallenge(globals.page, completed.aftermath, false) }))
+          .catch(async (error: unknown) => {
+            if (!(error instanceof ExecuteCodeError) || !error.aftermath) throw error
+            throw new ExecuteCodeError(error.originalError, error.logs, error.logSummary, await this.withChallenge(globals.page, error.aftermath, true))
+          })
         await this.networkCapture.settleForOutput()
         const extracted = extractExecuteMedia(result)
         const redactedValue = this.networkCapture.redactValue(extracted.value)
@@ -659,6 +665,18 @@ export class ExecuteSandbox {
     }).pipe(Effect.uninterruptible)
   }
 
+  /**
+   * After a call that navigated or failed, look for a bot challenge or block page on the session page. A challenge the
+   * browser clears by itself is waited out (bounded); an interactive one or a block is reported, never touched.
+   */
+  private async withChallenge(page: Page, aftermath: ExecuteAftermath, failed: boolean): Promise<ExecuteAftermath> {
+    if (!failed && aftermath.navigations.length === 0 && aftermath.startUrl === aftermath.endUrl) return aftermath
+    const outcome = await detectChallenge(page, { waitMs: challengeWaitMs() }).catch(() => undefined)
+    if (!outcome) return aftermath
+    this.addWarningOnce(challengeWarning(outcome))
+    return { ...aftermath, challenge: outcome }
+  }
+
   private drainWarnings(): string[] {
     const warnings = this.pendingWarnings
     this.pendingWarnings = []
@@ -697,6 +715,7 @@ export class ExecuteSandbox {
       startUrl: aftermath.startUrl ? this.networkCapture.redactUrl(aftermath.startUrl) : aftermath.startUrl,
       endUrl: aftermath.endUrl ? this.networkCapture.redactUrl(aftermath.endUrl) : aftermath.endUrl,
       navigations: aftermath.navigations.map((url) => this.networkCapture.redactUrl(url)),
+      ...(aftermath.challenge ? { challenge: { ...aftermath.challenge, url: this.networkCapture.redactUrl(aftermath.challenge.url) } } : {}),
     }
   }
 
@@ -1814,6 +1833,56 @@ function formatLocatorFailurePageWarning(
     return `Locator failed on about:blank because the previous session page (${formatBoundedPageUrl(recreatedFromClosedUrl)}) was closed. Call page.goto(...) to reopen it before querying controls.`
   }
   return "Locator failed on page about:blank. Navigate with page.goto(...) or adopt an attached tab before querying controls."
+}
+
+const challengeProbeTimeoutMs = 2_000
+const challengePollMs = 1_000
+const defaultChallengeWaitMs = 15_000
+
+/** How long execute waits for a non-interactive challenge to clear (OPENCODE_BROWSER_CHALLENGE_WAIT_MS, 0 to 60000). */
+function challengeWaitMs(): number {
+  const value = Number(process.env.OPENCODE_BROWSER_CHALLENGE_WAIT_MS)
+  return Number.isInteger(value) && value >= 0 && value <= 60_000 && process.env.OPENCODE_BROWSER_CHALLENGE_WAIT_MS !== "" ? value : defaultChallengeWaitMs
+}
+
+async function probeChallengePage(page: Page): Promise<ChallengeProbe | undefined> {
+  if (page.isClosed()) return undefined
+  const url = page.url()
+  if (!/^https?:/i.test(url)) return undefined
+  // Patchright evaluates in an isolated world: the page's scripts can't see the probe.
+  const probed = await withTimeout(page.evaluate(probePageScript, [...probeSelectors]), challengeProbeTimeoutMs)
+  if (probed === timedOut) return undefined
+  return { ...probed, url: page.url(), frameUrls: page.frames().map((frame) => frame.url()).slice(0, 50) }
+}
+
+/** Classify the page; wait out a non-interactive challenge for up to `waitMs`. Undefined when there's none. */
+export async function detectChallenge(page: Page, options: { readonly waitMs: number }): Promise<ChallengeOutcome | undefined> {
+  const first = await probeChallengePage(page).catch(() => undefined)
+  const detected = first && classifyChallenge(first)
+  if (!first || !detected) return undefined
+  const started = Date.now()
+  let current = detected
+  let url = first.url
+  while (current.kind === "non-interactive" && Date.now() - started < options.waitMs) {
+    await delay(Math.min(challengePollMs, Math.max(0, options.waitMs - (Date.now() - started))))
+    if (page.isClosed()) return undefined
+    // A probe that fails mid-navigation (the challenge often clears by navigating) counts as still waiting.
+    const probe = await probeChallengePage(page).catch(() => null)
+    if (probe === null) continue
+    if (probe === undefined) return { ...current, status: "cleared", url, waitedMs: Date.now() - started, recommendation: "continue" }
+    const next = classifyChallenge(probe)
+    url = probe.url
+    if (!next) return { ...current, status: "cleared", url, waitedMs: Date.now() - started, recommendation: "continue" }
+    current = next
+  }
+  const waitedMs = current === detected && detected.kind !== "non-interactive" ? 0 : Date.now() - started
+  return {
+    ...current,
+    status: "blocked",
+    url,
+    waitedMs,
+    recommendation: current.kind === "block" ? "stop" : "handoff",
+  }
 }
 
 /** Full-Node execute code bypasses the realm's call observer, so look for the page-visible APIs in its source. */
