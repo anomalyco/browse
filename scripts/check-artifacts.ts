@@ -65,7 +65,10 @@ function versionProblems(manifest: Record<string, unknown>, version: string, lab
 }
 
 async function files(directory: string): Promise<string[]> {
-  return (await readdir(directory, { recursive: true, withFileTypes: true }))
+  const entries = await readdir(directory, { recursive: true, withFileTypes: true })
+  const links = entries.filter((entry) => entry.isSymbolicLink())
+  if (links.length) throw new Error(`symbolic links in the artifact: ${links.map((entry) => entry.name).join(", ")}`)
+  return entries
     .filter((entry) => entry.isFile())
     .map((entry) => path.relative(directory, path.join(entry.parentPath, entry.name)).split(path.sep).join("/"))
 }
@@ -138,6 +141,11 @@ export async function checkPackageTarball(tarball: string, version: string, allo
     for (const hook of ["preinstall", "install", "postinstall", "prepare"])
       if (pkg.scripts?.[hook]) problems.push(`${label}: has a ${hook} script; installs must not run code`)
     for (const bin of ["browse", "opencode-browser"]) if (pkg.bin?.[bin] !== "dist/cli.mjs") problems.push(`${label}: bin ${bin} should be dist/cli.mjs`)
+    for (const name of names.filter((file) => file.startsWith("dist/"))) {
+      if (name.endsWith(".map")) problems.push(`${label}: contains source map ${name}`)
+      else if (/\.m?js$/.test(name) && (await readFile(path.join(packageDir, name), "utf8")).includes("sourceMappingURL"))
+        problems.push(`${label}: ${name} references a source map`)
+    }
     if (!names.includes("dist/cli.mjs")) problems.push(`${label}: missing dist/cli.mjs`)
     else {
       const cli = await readFile(path.join(packageDir, "dist", "cli.mjs"), "utf8")

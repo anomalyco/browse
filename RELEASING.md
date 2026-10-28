@@ -122,7 +122,8 @@ Secrets live only in these environments, and an approval gates every job that ca
    gh secret delete NPM_TOKEN --env npm --repo anomalyco/browse
    ```
 
-   Revoke the token on npmjs.com. Under the package's **Settings → Publishing access**, choose *Require two-factor
+   Revoke the token on npmjs.com. (The workflow only writes an `.npmrc` when `NPM_TOKEN` has a value, so with the secret
+   gone npm uses OIDC.) Under the package's **Settings → Publishing access**, choose *Require two-factor
    authentication and disallow tokens*. The workflow needs no change: it already has `id-token: write`, Node 24
    (npm 11.5+), and `npm publish --provenance`, and npm uses OIDC when no token is set.
    See [npm trusted publishing](https://docs.npmjs.com/trusted-publishers).

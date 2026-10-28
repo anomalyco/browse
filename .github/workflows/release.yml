@@ -245,7 +245,6 @@ jobs:
         with:
           # npm 11.5.1+ for trusted publishing.
           node-version: 24
-          registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
       - name: Publish the built tarball
@@ -254,9 +253,15 @@ jobs:
           VERSION: ${{ needs.verify.outputs.version }}
           CHANNEL: ${{ needs.verify.outputs.channel }}
           # Temporary until trusted publishing is configured on npmjs.com; then delete the secret and npm uses OIDC.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           sha256sum -c SHA256SUMS
+          # Only write a token when there is one, so an empty value never stands in for OIDC.
+          if [ -n "$NPM_TOKEN" ]; then
+            printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > "$RUNNER_TEMP/.npmrc"
+            export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/.npmrc"
+          fi
+          unset NPM_TOKEN
           if [ "$(npm view "@opencode/browse@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
             echo "@opencode/browse@$VERSION is already on npm; nothing to publish." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0

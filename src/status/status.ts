@@ -25,7 +25,7 @@ import {
 
 // `npx @opencode/browse install` opens this page as welcome.html#pair=<code> for a store build (cli/src/setup.ts
 // pairStoreExtension). Take the code, then drop it from the URL (address bar and history) before anything else runs.
-const fragmentCode = /^#pair=([0-9A-Za-z-]{16,64})$/.exec(location.hash)?.[1]
+let fragmentCode = /^#pair=([0-9A-Za-z-]{16,64})$/.exec(location.hash)?.[1]
 if (location.hash.startsWith("#pair=")) history.replaceState(null, "", location.pathname + location.search)
 
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T
@@ -53,9 +53,11 @@ const connect = () => {
 connect()
 
 const send = (message: FromStatusPage) => port?.postMessage(message)
-if (fragmentCode) send({ type: "pairing.set", code: fragmentCode })
 
 function render(state: AgentRelayState) {
+  // The code from install's URL, applied once, and only when the extension isn't already working with the relay.
+  if (fragmentCode && state.status !== "connected") send({ type: "pairing.set", code: fragmentCode })
+  fragmentCode = undefined
   status.dataset.state = state.status
   status.textContent = describe(state)
   // An unpacked build is paired by install; a store build pairs here (and can be paired again).

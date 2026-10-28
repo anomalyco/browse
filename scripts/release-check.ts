@@ -51,6 +51,12 @@ if (import.meta.main) {
   if (problems.length) fail(problems)
   console.log(`✓ version ${version} agrees across cli/package.json, package.json and public/manifest.json${values.tag ? ` and ${values.tag}` : ""}`)
   if (values["versions-only"]) process.exit(0)
+  // A stable release without the store item can't recognize or pair the store extension; CI refuses it.
+  if (values.tag && !values.tag.includes("-beta.") && !process.env.OPENCODE_BROWSER_STORE_ID?.trim()) {
+    const message = "OPENCODE_BROWSER_STORE_ID (the CWS_ITEM_ID repository variable) is not set; this stable package won't know the store item"
+    if (process.env.GITHUB_ACTIONS) fail([message])
+    console.warn(`! ${message}`)
+  }
 
   await rm(release, { recursive: true, force: true })
   const zip = (await $`bun scripts/package.ts`.cwd(root).text()).trim().split("\n").pop()!
