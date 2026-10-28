@@ -71,7 +71,7 @@ import { boundedToken, runtimeFailureKind, summarizeDiagnosticUrl, summarizeRunt
 import { shouldExposeChildTarget, TargetRegistry, type RootTargetChange, type TargetOwnershipChange } from "./target-registry.ts"
 import { createUpdateWatcher } from "./update.ts"
 import { describeChanges, describeSettings, parseSettingChanges, settingsFromExtension, SettingsInputError, settingsToExtension, type SettingOverrides } from "./user-settings.ts"
-import { installCommand } from "./paths.ts"
+import { installCommand, storeConfig } from "./paths.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "./version.ts"
 import { handleExecuteRealmException, handleExecuteRealmRejection, pruneStaleExecuteFilesDirectories } from "./execute-realm.ts"
 
@@ -201,8 +201,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const releaseTargetGraceMs = Math.max(0, options.releaseTargetGraceMs ?? 10_000)
   const browserId = crypto.randomUUID()
   const endpointUrl = `http://${formatHostForUrl(host)}:${port}`
-  // Every build, from source too, accepts only the store and unpacked IDs plus OPENCODE_BROWSER_EXTENSION_ORIGINS.
+  // Every build, from source too, accepts only the store and unpacked IDs plus OPENCODE_BROWSER_EXTENSION_ORIGINS, and the
+  // store items this package was released with (paths.ts storeConfig).
   const additionalChromeExtensionOrigins = new Set(options.additionalExtensionOrigins ?? [])
+  for (const id of [storeConfig().id, storeConfig().betaId]) if (id) additionalChromeExtensionOrigins.add(`chrome-extension://${id}`)
   const sessionCatalog = options.sessionCatalogPath === null
     ? undefined
     : new SessionCatalog(options.sessionCatalogPath ?? defaultSessionCatalogPath(port))

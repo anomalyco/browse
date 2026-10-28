@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { installedRuntime, locateExtension, relayNotRestarted, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
+import { installedRuntime, locateExtension, pairStoreExtension, relayNotRestarted, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
 
 const browser = (name: string): Browser => ({ name, userData: `/data/${name}`, manifests: [], defaultIDs: [], executables: [] })
 const chrome = browser("Google Chrome")
@@ -121,11 +121,45 @@ describe("install with the extension", () => {
 })
 
 test("once the store listing is live, opens the listing instead", () => {
-  const { calls, output } = run({ storeListed: true })
+  const { calls, output } = run({ storeListed: true, storeUrl: "https://chromewebstore.google.com/detail/abcdefghijklmnopabcdefghijklmnop" })
   expect(calls.open).toHaveLength(1)
   expect(calls.open[0]![1]).toStartWith("https://chromewebstore.google.com/")
   expect(calls.reveal).toEqual([])
   expect(output).toContain("Chrome Web Store (opened in Google Chrome)")
+})
+
+describe("pairing the store build", () => {
+  const storeId = "abcdefghijklmnopabcdefghijklmnop"
+  const profile = { dir: "Profile 2", name: "Work" }
+  const pair = (detections: Detection[], overrides: { allowOpen?: boolean; ssh?: boolean } = {}) => {
+    const opened: [string, string, string | undefined][] = []
+    const lines: string[] = []
+    const outcome = pairStoreExtension(
+      { detections, preferred: chrome, allowOpen: overrides.allowOpen ?? true, env: { ssh: overrides.ssh ?? false, display: true, tty: true, platform: "darwin" }, code: "CODE", storeIds: [storeId] },
+      { open: (target, url, dir) => (opened.push([target.name, url, dir]), true), reveal: () => true, copy: () => true, log: (line) => lines.push(line) },
+    )
+    return { outcome, opened, output: lines.join("\n") }
+  }
+
+  test("opens the store build's status page with the code in the fragment, in the profile that has it", () => {
+    const { outcome, opened, output } = pair([{ ...none(chrome), enabled: [{ browser: chrome, profile, id: storeId }] }])
+    expect(outcome).toBe("opened")
+    expect(opened).toEqual([["Google Chrome", `chrome-extension://${storeId}/welcome.html#pair=CODE`, "Profile 2"]])
+    expect(output).toContain("Google Chrome (Work)")
+  })
+
+  test("never hands the code to an extension that isn't a configured store item", () => {
+    const { outcome, opened } = pair([{ ...none(chrome), enabled: [{ browser: chrome, profile, id: "afeafocngkodbmaipcngoamamfmekgfo" }] }])
+    expect(outcome).toBe("none")
+    expect(opened).toEqual([])
+  })
+
+  test("with --no-open, says how to pair by hand", () => {
+    const { outcome, opened, output } = pair([{ ...none(chrome), enabled: [{ browser: chrome, profile, id: storeId }] }], { allowOpen: false })
+    expect(outcome).toBe("manual")
+    expect(opened).toEqual([])
+    expect(output).toContain("pair")
+  })
 })
 
 describe("waiting for the extension", () => {

@@ -10,6 +10,19 @@ const here = import.meta.dir
 const extension = path.resolve(here, "..")
 const pkg = await Bun.file(path.join(here, "package.json")).json()
 
+// The Chrome Web Store items, from the release workflow's repository variables (RELEASING.md); unset in a checkout.
+const storeId = (name: string) => {
+  const value = process.env[name]?.trim()
+  if (!value) return undefined
+  if (!/^[a-p]{32}$/.test(value)) throw new Error(`${name} is not a Chrome Web Store item ID: ${JSON.stringify(value)}`)
+  return value
+}
+const store = {
+  ...(storeId("OPENCODE_BROWSER_STORE_ID") ? { id: storeId("OPENCODE_BROWSER_STORE_ID") } : {}),
+  ...(storeId("OPENCODE_BROWSER_BETA_STORE_ID") ? { betaId: storeId("OPENCODE_BROWSER_BETA_STORE_ID") } : {}),
+  listed: process.env.OPENCODE_BROWSER_STORE_LISTED?.trim() === "true",
+}
+
 const build = new Date().toISOString()
 await $`bun run build`.cwd(extension).env({ ...process.env, OPENCODE_BROWSER_BUILD: build }).quiet()
 await rm(path.join(here, "dist"), { recursive: true, force: true })
@@ -37,6 +50,7 @@ const result = await Bun.build({
   define: {
     "globalThis.__OPENCODE_BROWSER_VERSION__": JSON.stringify(pkg.version),
     "globalThis.__OPENCODE_BROWSER_BUILD_ID__": JSON.stringify(new Date().toISOString()),
+    "globalThis.__OPENCODE_BROWSER_STORE__": JSON.stringify(store),
   },
 })
 if (!result.success) throw new AggregateError(result.logs, "build failed")
@@ -58,4 +72,4 @@ await Bun.write(manifestFile, JSON.stringify(manifest, null, 2) + "\n")
 await Bun.write(path.join(here, "extension", "build.json"), JSON.stringify({ build }) + "\n")
 // MIT asks for the license with every copy; npm ships LICENSE from the package folder.
 await cp(path.join(extension, "LICENSE"), path.join(here, "LICENSE"))
-console.log(`built dist/cli.mjs and extension/ (${pkg.version})`)
+console.log(`built dist/cli.mjs and extension/ (${pkg.version}${store.id || store.betaId ? `, store ${[store.id, store.betaId].filter(Boolean).join(" / ")}${store.listed ? " listed" : ""}` : ""})`)

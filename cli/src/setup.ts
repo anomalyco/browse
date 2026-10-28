@@ -1,7 +1,9 @@
 // Setup for OpenCode Browser, without changing opencode itself:
 //   install    install the runtime, add the browse MCP server to opencode's config, copy the unpacked extension
 //              (reloading a connected one), then check which browsers have the extension; when none does, guide
-//              loading it unpacked (or, once STORE_LISTED, open the Chrome Web Store listing) and wait for it
+//              loading it unpacked (or, once STORE_LISTED, open the Chrome Web Store listing) and wait for it; when a
+//              browser has the store build, open its status page with the pairing code in the URL fragment so it
+//              pairs without a step
 //   extension  show the unpacked extension folder (for "Load unpacked")
 //   pair       print the pairing code a Chrome Web Store build asks for (unpacked builds are paired by install)
 //   uninstall  remove everything install wrote
@@ -15,14 +17,20 @@ import path from "node:path"
 import { createInterface } from "node:readline/promises"
 import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse } from "jsonc-parser"
-import { cliCommand, dataRoot, installCommand, STORE_LISTED } from "./paths.ts"
+import { cliCommand, dataRoot, installCommand, STORE_LISTED, storeConfig } from "./paths.ts"
 import { formatPairingCode, pairingCode, relayAuthorization, writeExtensionPairing } from "./relay-secrets.ts"
 import { opencodeBrowserVersion } from "./version.ts"
 
-const STORE_ID = "mfnicocicmmlkpjnaffgihfjhdgjkdjg"
+/**
+ * The Chrome Web Store items this package was released with (paths.ts storeConfig). Only these IDs count as the store
+ * build: install hands the pairing code to the extension with this ID, so it must be ours.
+ */
+const store = storeConfig()
+const STORE_IDS = [store.id, store.betaId].filter((id): id is string => !!id)
 /** The unpacked build; its ID is pinned by the manifest key. */
 const UNPACKED_ID = "afeafocngkodbmaipcngoamamfmekgfo"
-const STORE_URL = `https://chromewebstore.google.com/detail/${STORE_ID}`
+const storeUrl = (id: string | undefined) => (id ? `https://chromewebstore.google.com/detail/${id}` : undefined)
+const STORE_URL = storeUrl(store.channelId)
 const PACKAGE = "@opencode/browse"
 const MCP_NAME = "browse"
 /** The MCP server's name before it was renamed to `browse`. */
@@ -404,6 +412,10 @@ async function install(args: string[]) {
     preferred: ssh ? undefined : defaultBrowser(detections.map((detection) => detection.browser)),
     env,
   })
+  if (found === "ready" && !connected) {
+    const paired = pairStoreExtension({ detections, preferred: ssh ? undefined : defaultBrowser(detections.map((detection) => detection.browser)), allowOpen: !args.includes("--no-open"), env, code: pairingCode() })
+    if (paired === "opened") return awaitConnection(entry)
+  }
   if (found === "guided" && !STORE_LISTED && env.tty && !ssh && !args.includes("--no-wait")) return awaitConnection(entry)
   // The MCP server entry changed: a running opencode picks it up on restart.
   if (found === "ready" && !mcp.endsWith("up to date")) log("Restart opencode (if it's running) to load the browse tools.")
@@ -581,8 +593,8 @@ export type Detection = { browser: Browser; blocked: boolean; enabled: Match[]; 
 
 /** What locateExtension may do outside the terminal; stubbed in tests so they never open a real browser. */
 export type Effects = {
-  /** Opens a URL in a specific browser; false when it couldn't be handed to one. */
-  open(browser: Browser, url: string): boolean
+  /** Opens a URL in a specific browser (and profile directory); false when it couldn't be handed to one. */
+  open(browser: Browser, url: string, profile?: string): boolean
   /** Shows the folder in the file manager, selected where the OS can, so it can be dragged. */
   reveal(folder: string): boolean
   /** Puts text on the clipboard; false when there is no clipboard tool. */
@@ -599,6 +611,8 @@ export type LocateOptions = {
   preferred: Browser | undefined
   env: { ssh: boolean; display: boolean; tty: boolean; platform: NodeJS.Platform }
   storeListed?: boolean
+  /** The listing to open when storeListed; defaults to this channel's store item. */
+  storeUrl?: string
 }
 
 /**
@@ -611,11 +625,12 @@ export type LocateOptions = {
  */
 export function locateExtension(options: LocateOptions, effects: Effects = systemEffects): "ready" | "off" | "guided" {
   const { log } = effects
-  const storeListed = options.storeListed ?? STORE_LISTED
+  const listing = options.storeUrl ?? STORE_URL
+  const storeListed = (options.storeListed ?? STORE_LISTED) && listing !== undefined
   const ready = "✓ Agents can use OpenCode Browser now. Click its toolbar button on a tab to let them use that tab too."
   if (options.env.ssh) {
     if (options.connected) return log(ready), "ready"
-    if (storeListed) log(`Install OpenCode Browser in your browser from the Chrome Web Store: ${STORE_URL}`)
+    if (storeListed) log(`Install OpenCode Browser in your browser from the Chrome Web Store: ${listing}`)
     else unpackedSteps({ folder: options.folder, platform: options.env.platform, log })
     return "guided"
   }
@@ -631,9 +646,9 @@ export function locateExtension(options: LocateOptions, effects: Effects = syste
   const target = options.preferred ?? options.detections.find((detection) => !detection.blocked)?.browser
   const interactive = options.allowOpen && options.env.display && options.env.tty
   if (storeListed) {
-    const opened = interactive && !blocked.length && target !== undefined && effects.open(target, STORE_URL)
+    const opened = interactive && !blocked.length && target !== undefined && effects.open(target, listing!)
     log(`Install OpenCode Browser from the Chrome Web Store${opened ? ` (opened in ${target.name})` : ""}:`)
-    log(`  ${STORE_URL}`)
+    log(`  ${listing}`)
     if (blocked.length) log(`  Already installed in ${blocked.join(", ")}? Then you're set.`)
     log(`  Or load the unpacked build: ${cliCommand("extension")}`)
     return "guided"
@@ -653,6 +668,31 @@ export function locateExtension(options: LocateOptions, effects: Effects = syste
   })
   if (blocked.length) log(`Already loaded in ${blocked.join(", ")}? Then you're set.`)
   return "guided"
+}
+
+/**
+ * Pairs a store-installed extension without the copy-paste step: opens its status page in the browser profile that has
+ * it, with the pairing code in the URL fragment (`welcome.html#pair=<code>`). The page pairs and clears the fragment at
+ * once. The code passes through that browser's command line once, on this machine, which any local program running as
+ * this user could read anyway (it's in the data root); `pair` and pasting the code stay as the fallback.
+ * Returns "opened", "manual" (the store build is there but nothing was opened: say how to pair) or "none".
+ */
+export function pairStoreExtension(
+  options: Pick<LocateOptions, "detections" | "preferred" | "allowOpen" | "env"> & { code: string; storeIds?: readonly string[] },
+  effects: Effects = systemEffects,
+): "opened" | "manual" | "none" {
+  const ids = options.storeIds ?? STORE_IDS
+  const matches = options.detections.flatMap((detection) => detection.enabled).filter((match) => ids.includes(match.id))
+  const match = matches.find((candidate) => candidate.browser.name === options.preferred?.name) ?? matches[0]
+  if (!match) return "none"
+  const interactive = options.allowOpen && options.env.display && !options.env.ssh
+  const url = `chrome-extension://${match.id}/welcome.html#pair=${options.code}`
+  if (interactive && effects.open(match.browser, url, match.profile.dir)) {
+    effects.log(`✓ Opened OpenCode Browser's status page in ${match.browser.name} (${match.profile.name}) to pair it with the relay`)
+    return "opened"
+  }
+  effects.log(`! To pair OpenCode Browser in ${match.browser.name} (${match.profile.name}), run \`${cliCommand("pair")}\` and paste the code on its status page (right-click the toolbar button, then Options).`)
+  return "manual"
 }
 
 /** The numbered steps for loading the unpacked build, saying what install already did for each. */
@@ -715,7 +755,7 @@ function detectBrowsers() {
           (parseJson(readLocked(path.join(browser.userData, profile.dir, file)).text) as { extensions?: { settings?: Record<string, ExtensionSetting> } } | undefined)
             ?.extensions?.settings ?? {},
       )
-      const id = [STORE_ID, UNPACKED_ID].find((candidate) => settings.some((entries) => entries[candidate]))
+      const id = [...STORE_IDS, UNPACKED_ID].find((candidate) => settings.some((entries) => entries[candidate]))
       if (!id) return []
       const setting = settings.find((entries) => entries[id])![id]!
       return [{ browser, profile, id, enabled: !disabled(setting) }]
@@ -812,7 +852,7 @@ function reportDetections(detections: Detection[], preferred: Browser | undefine
   })
 }
 
-const describe = (match: Match) => `${match.profile.name}${match.id === UNPACKED_ID ? " (unpacked)" : ""}`
+const describe = (match: Match) => `${match.profile.name}${match.id === UNPACKED_ID ? " (unpacked)" : match.id === store.betaId ? " (beta)" : ""}`
 const blockedReason = () => (process.platform === "darwin" ? "macOS privacy protection" : "permission denied")
 
 /**
@@ -820,11 +860,11 @@ const blockedReason = () => (process.platform === "darwin" ? "macOS privacy prot
  * instance; chrome:// URLs only open this way. Without the executable, an https URL goes through the OS, which on
  * macOS can still pick the app; a chrome:// URL can't (it isn't a scheme the OS knows), so it's left to the user.
  */
-function openInBrowser(browser: Browser, url: string) {
+function openInBrowser(browser: Browser, url: string, profile?: string) {
   const executable = launcher(browser)?.executable
   const web = /^https?:/.test(url)
   if (executable) {
-    const child = spawn(executable, [url], { detached: true, stdio: "ignore" })
+    const child = spawn(executable, [...(profile ? [`--profile-directory=${profile}`] : []), url], { detached: true, stdio: "ignore" })
     child.on("error", () => web && openWithSystem(browser, url))
     child.unref()
     return true

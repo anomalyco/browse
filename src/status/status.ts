@@ -23,6 +23,11 @@ import {
   type ToStatusPage,
 } from "../shared/protocol"
 
+// `npx @opencode/browse install` opens this page as welcome.html#pair=<code> for a store build (cli/src/setup.ts
+// pairStoreExtension). Take the code, then drop it from the URL (address bar and history) before anything else runs.
+const fragmentCode = /^#pair=([0-9A-Za-z-]{16,64})$/.exec(location.hash)?.[1]
+if (location.hash.startsWith("#pair=")) history.replaceState(null, "", location.pathname + location.search)
+
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T
 const status = element<HTMLParagraphElement>("status")
 element("extension-id").textContent = chrome.runtime.id
@@ -48,6 +53,7 @@ const connect = () => {
 connect()
 
 const send = (message: FromStatusPage) => port?.postMessage(message)
+if (fragmentCode) send({ type: "pairing.set", code: fragmentCode })
 
 function render(state: AgentRelayState) {
   status.dataset.state = state.status
