@@ -127,12 +127,36 @@ export function shouldSuppressRelayProcessFault(cause: unknown): boolean {
   return /playwright-core|patchright-core|coreBundle|Duplicate target/i.test(errorText)
 }
 
+/**
+ * A CDP command Patchright sent without awaiting it (its page constructor's setRequestInterception, for one) failing
+ * because the session went away: the extension disconnected, the tab detached or closed. Harmless, and a single
+ * extension restart produced a hundred of them, which buried real faults in the log; they're counted and summarized
+ * instead (benignRejections).
+ */
+export function isBenignClosedSessionRejection(cause: unknown): boolean {
+  if (!(cause instanceof Error) || !/patchright-core|playwright-core|coreBundle/.test(cause.stack ?? "")) return false
+  return /^Protocol error \([\w.]+\): .*(session closed|Target closed|Extension disconnected|extension is not connected|Unknown CDP session|Detached while handling command|Relay closed)/i.test(cause.message)
+}
+
+const benignRejections = { count: 0, logged: 0, lastLogAt: 0 }
+
 export function handleRelayProcessFault(
   kind: RelayProcessFaultKind,
   cause: unknown,
   detail: Record<string, unknown>,
   options: { readonly rethrow?: (cause: unknown) => never } = {},
 ): void {
+  if (kind === "unhandledRejection" && isBenignClosedSessionRejection(cause)) {
+    benignRejections.count += 1
+    const now = Date.now()
+    if (now - benignRejections.lastLogAt >= 60_000) {
+      const since = benignRejections.count - benignRejections.logged
+      benignRejections.lastLogAt = now
+      benignRejections.logged = benignRejections.count
+      relayLog("process.benignRejections", { count: since, total: benignRejections.count, example: (cause as Error).message.slice(0, 160) })
+    }
+    return
+  }
   if (shouldSuppressRelayProcessFault(cause)) {
     suppressedProcessFaults.count += 1
     suppressedProcessFaults.lastAt = new Date().toISOString()
