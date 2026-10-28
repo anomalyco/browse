@@ -4,7 +4,7 @@ import crypto from "node:crypto"
 import path from "node:path"
 import process from "node:process"
 import { fileURLToPath } from "node:url"
-import { extensionReconnectAlarmPeriodMs } from "./protocol.ts"
+import { extensionProtocolAdvice, extensionReconnectAlarmPeriodMs } from "./protocol.ts"
 import * as RelayClient from "./relay-client.ts"
 import { RelayShutdownRequest, type ExtensionStatus, type RelayVersion } from "./relay-schema.ts"
 import { cliCommand, installCommand } from "./paths.ts"
@@ -246,7 +246,7 @@ export const ensureExtensionConnected = Effect.fn("RelayLifecycle.ensureExtensio
   > => {
     if (status.protocolCompatible === false) {
       return Effect.fail(new ExtensionProtocolIncompatible({
-        message: `OpenCode Browser extension protocol ${status.protocolVersion ?? "unknown"} is incompatible with this relay.`,
+        message: extensionProtocolAdvice(status.protocolVersion, { install: installCommand() }),
         protocolVersion: status.protocolVersion ?? null,
       }))
     }

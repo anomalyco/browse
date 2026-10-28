@@ -1,6 +1,8 @@
 import { Effect, Predicate } from "effect"
 import { WebSocket } from "ws"
+import { installCommand } from "./paths.ts"
 import {
+  extensionProtocolAdvice,
   extensionProtocolCompatibility,
   type ExtensionCommand,
   type ExtensionProtocolCompatibility,
@@ -126,7 +128,7 @@ export class ExtensionRpc {
     return Effect.callback<JsonObject, Error>((resume) => {
       const socket = this.socket
       if (this.protocolCompatible === false) {
-        resume(Effect.fail(new Error(`OpenCode Browser extension protocol ${this.protocolVersion ?? "unknown"} is incompatible`)))
+        resume(Effect.fail(new Error(extensionProtocolAdvice(this.protocolVersion, { install: installCommand() }))))
         return Effect.void
       }
       if (!socket || socket.readyState !== WebSocket.OPEN || !this.acceptsEvents) {

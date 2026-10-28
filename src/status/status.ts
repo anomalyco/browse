@@ -102,6 +102,12 @@ function describe(state: AgentRelayState) {
   if (state.status === "connecting") return "Connecting to the relay…"
   if (state.status === "conflict")
     return "OpenCode Browser in another browser or profile is connected. Close it there (or quit that browser), then click Reconnect."
+  if (state.status === "incompatible" && state.skew === "update-cli")
+    return "This extension is newer than the browse CLI on this computer. Update the CLI: run `npx @opencode/browse@latest install` (with automatic updates on, it catches up by itself within a day), then click Reconnect."
+  if (state.status === "incompatible" && state.skew === "update-extension")
+    return state.pairing === "bundled"
+      ? "This extension is older than the browse CLI on this computer. Run the install command again to update it, then click Reconnect."
+      : "This extension is older than the browse CLI on this computer. Chrome updates it within a few hours; to update now, open chrome://extensions, turn on Developer mode and click Update."
   if (state.status === "incompatible")
     return "This extension and the installed CLI don't match. Run the install command again, then click Reconnect."
   if (state.status === "unpaired") return "Not paired yet. Enter the pairing code below; until then no agent can use this browser."

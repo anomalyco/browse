@@ -2,7 +2,7 @@ import { Effect, FileSystem, Path, Schema } from "effect"
 import * as RelayClient from "./relay-client.ts"
 import { relayBuildProblem } from "./relay-lifecycle.ts"
 import type { ExtensionStatus, RelayVersion, SessionSummary, TargetSummary } from "./relay-schema.ts"
-import { extensionProtocolVersion } from "./protocol.ts"
+import { extensionProtocolAdvice, extensionProtocolVersion } from "./protocol.ts"
 import { cliCommand, installCommand, STORE_LISTED } from "./paths.ts"
 import * as SessionStore from "./session-store.ts"
 import type { UpdateJson } from "./update.ts"
@@ -533,7 +533,7 @@ function buildDoctorRecommendations(options: {
     : []
   const extensionRecommendations = options.relayResult.ok && options.extensionResult.ok && !options.extensionResult.value.connected
     ? options.extensionResult.value.protocolCompatible === false
-      ? ["Update the OpenCode Browser extension or npm package so their extension protocols are compatible."]
+      ? [extensionProtocolAdvice(options.extensionResult.value.protocolVersion, { install: installCommand() })]
       : [STORE_LISTED
         ? `Run \`${installCommand()}\`, and install OpenCode Browser from the Chrome Web Store (or load the unpacked extension it copies).`
         : `Run \`${installCommand()}\` and load the extension it points to (Load unpacked on your browser's extensions page).`]

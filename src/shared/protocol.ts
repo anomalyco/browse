@@ -32,7 +32,12 @@ export type AgentRelayState = {
   overrides?: RelayOverrides
   /** How the connected relay's install updates (cli/src/auto-update.ts), as it reported it in `relay.settings`. */
   autoUpdate?: RelayAutoUpdate
+  /** With status "incompatible": which side is behind, when the relay said (its protocol range, or the 4003 reason). */
+  skew?: ProtocolSkew
 }
+
+/** update-cli: this extension is newer than the relay; update-extension: it's older than the relay supports. */
+export type ProtocolSkew = "update-cli" | "update-extension"
 
 export type AutoUpdateMode = "on" | "notify" | "off"
 export const autoUpdateMode = (value: unknown): AutoUpdateMode | undefined => (value === "on" || value === "notify" || value === "off" ? value : undefined)

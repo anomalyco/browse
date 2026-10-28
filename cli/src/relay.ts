@@ -19,7 +19,7 @@ import { CdpRuntime } from "./cdp-runtime.ts"
 import { ExtensionRpc } from "./extension-rpc.ts"
 import { createHttpRequestHandler, hasRelayToken } from "./http-api.ts"
 import type { CdpEvent, CdpRequest, JsonObject, PageStatus } from "./protocol.ts"
-import { extensionProtocolCompatibility, isCdpRequest, isExtensionEvent, isExtensionResponse, makePageStatus, parseJsonObject } from "./protocol.ts"
+import { extensionProtocolCompatibility, extensionProtocolSkew, extensionProtocolVersion, minExtensionProtocolVersion, isCdpRequest, isExtensionEvent, isExtensionResponse, makePageStatus, parseJsonObject } from "./protocol.ts"
 import {
   closeHttpServer,
   closeWebSocketServer,
@@ -1156,7 +1156,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     const relayNonce = crypto.randomBytes(32).toString("base64url")
     socket.send(JSON.stringify({
       method: "auth.challenge",
-      params: { nonce: relayNonce, proof: pairingProof(code, "relay", port, relayNonce, extensionNonce) },
+      // The protocols this relay speaks, so the extension can tell the user which side to update (older ones ignore it).
+      params: { nonce: relayNonce, proof: pairingProof(code, "relay", port, relayNonce, extensionNonce), protocol: { version: extensionProtocolVersion, min: minExtensionProtocolVersion } },
     }))
     return { hello: message, extensionNonce, relayNonce, code }
   }
@@ -1168,7 +1169,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     const protocol = extensionProtocolCompatibility(message.params?.protocolVersion)
     if (!protocol.compatible && extensionRpc.protocolCompatible === true) {
       relayLog("extension.rejected", { reason: "incompatible", protocol: protocol.version, version: getString(getObject(message.params), "version") })
-      socket.close(4003, "Extension protocol incompatible")
+      // The reason says which side is behind; the extension's status page turns it into what to update.
+      socket.close(4003, `Extension protocol incompatible: ${extensionProtocolSkew(protocol.version) ?? "unknown"}`)
       return extensionGeneration
     }
     // Protect an OPEN compatible connection, including its inventory handshake.

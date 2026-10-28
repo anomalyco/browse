@@ -31,6 +31,7 @@ import {
   type AgentRelayUpdate,
   type AutoUpdateMode,
   type PairingSource,
+  type ProtocolSkew,
   type RelayAutoUpdate,
   type RelayOverrides,
   type RelaySettings,
@@ -147,6 +148,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   let overrides: RelayOverrides | undefined
   /** The connected relay's update state (`relay.settings`). */
   let autoUpdate: RelayAutoUpdate | undefined
+  /** Which side to update when the relay's protocol doesn't match this extension's. */
+  let skew: ProtocolSkew | undefined
   let bundledPairing: Promise<string | undefined> | undefined
 
   const snapshot = (): AgentRelayState => ({
@@ -159,6 +162,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     ...(update ? { update } : {}),
     ...(overrides ? { overrides } : {}),
     ...(autoUpdate ? { autoUpdate } : {}),
+    ...(skew && status === "incompatible" ? { skew } : {}),
   })
   const notify = () => input.changed(snapshot())
   const setStatus = (next: AgentRelayStatus) => {
@@ -306,7 +310,11 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       void chrome.runtime.sendMessage({ action: "recording.cancelAll" }).catch(() => undefined)
       overrides = undefined
       autoUpdate = undefined
-      if (event.code === 4003) setStatus("incompatible")
+      if (event.code === 4003) {
+        // A newer relay names the side that's behind: "Extension protocol incompatible: extension-newer".
+        skew = /extension-newer/.test(event.reason) ? "update-cli" : /extension-older/.test(event.reason) ? "update-extension" : undefined
+        setStatus("incompatible")
+      }
       else if (event.code === 4004) setStatus("conflict")
       else if (event.code === 4006) setStatus("untrusted")
       // A missing relay is normal until an agent's browse tools (or the opencode-browser CLI) start one.
@@ -392,6 +400,15 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       return
     }
     current.send(JSON.stringify({ method: "auth.response", params: { proof: await pairingProof(pending.code, "extension", pending.port, pending.nonce, relayNonce) } }))
+    // The protocols the relay speaks (newer relays say): outside them, the relay keeps this connection but sends no
+    // work, so show which side to update instead of "connected".
+    const range = isJsonObject(params?.protocol) ? params.protocol : undefined
+    skew =
+      typeof range?.version === "number" && extensionProtocolVersion > range.version
+        ? "update-cli"
+        : typeof range?.min === "number" && extensionProtocolVersion < range.min
+          ? "update-extension"
+          : undefined
     trusted.add(current)
     log.add("pairing.ok", { source: pairing })
     relayTabs.forEach((tabId) => current.send(JSON.stringify({ method: "debugger.attached", params: { tabId } })))
@@ -404,7 +421,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       if (socket === current) send({ method: "pong" })
     }, KEEPALIVE)
     connectedAt = Date.now()
-    setStatus("connected")
+    setStatus(skew ? "incompatible" : "connected")
     pendingAttach.forEach((tabId) => send({ method: "toolbar.clicked", params: { tabId } }))
     pendingAttach.clear()
     void ungroupStale().catch((error: unknown) => log.add("ungroupStale.error", { error: text(error) }))
