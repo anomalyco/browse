@@ -58,6 +58,8 @@ if (import.meta.main) {
     console.warn(`! ${message}`)
   }
 
+  // The stress harness's hooks must never be built into a release (vite.config.ts).
+  if (process.env.OPENCODE_BROWSER_TEST_HOOKS === "1") fail(["OPENCODE_BROWSER_TEST_HOOKS=1 is set; unset it, test hooks never ship"])
   await rm(release, { recursive: true, force: true })
   const zip = (await $`bun scripts/package.ts`.cwd(root).text()).trim().split("\n").pop()!
   await $`bun build.ts`.cwd(path.join(root, "cli"))

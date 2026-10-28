@@ -25,6 +25,8 @@ const TEST_ONLY_MARKERS = [
   "OPENCODE_BROWSER_TEST",
   "__OPENCODE_BROWSER_TEST",
   "BROWSE_TEST_",
+  // The stress harness's hooks (vite.config.ts OPENCODE_BROWSER_TEST_HOOKS).
+  "__opencodeBrowserTest",
 ]
 const STORE_FILE_TYPES = /\.(js|css|html|json|png|svg)$/
 
@@ -64,13 +66,22 @@ function versionProblems(manifest: Record<string, unknown>, version: string, lab
   return problems
 }
 
+const relative = (directory: string, entry: { parentPath: string; name: string }) => path.relative(directory, path.join(entry.parentPath, entry.name)).split(path.sep).join("/")
+
 async function files(directory: string): Promise<string[]> {
-  const entries = await readdir(directory, { recursive: true, withFileTypes: true })
-  const links = entries.filter((entry) => entry.isSymbolicLink())
-  if (links.length) throw new Error(`symbolic links in the artifact: ${links.map((entry) => entry.name).join(", ")}`)
-  return entries
-    .filter((entry) => entry.isFile())
-    .map((entry) => path.relative(directory, path.join(entry.parentPath, entry.name)).split(path.sep).join("/"))
+  return (await readdir(directory, { recursive: true, withFileTypes: true })).filter((entry) => entry.isFile()).map((entry) => relative(directory, entry))
+}
+
+/** What no artifact may contain anywhere: symbolic links (and anything else that isn't a file or folder) and source maps. */
+async function structureProblems(directory: string, label: string): Promise<string[]> {
+  const problems: string[] = []
+  for (const entry of await readdir(directory, { recursive: true, withFileTypes: true })) {
+    const name = relative(directory, entry)
+    if (entry.isSymbolicLink()) problems.push(`${label}: ${name} is a symbolic link`)
+    else if (!entry.isFile() && !entry.isDirectory()) problems.push(`${label}: ${name} isn't a regular file`)
+    else if (entry.isFile() && name.endsWith(".map")) problems.push(`${label}: contains source map ${name}`)
+  }
+  return problems
 }
 
 async function extracted<T>(prefix: string, extract: (directory: string) => Promise<void>, use: (directory: string) => Promise<T>) {
@@ -106,7 +117,12 @@ export async function checkStoreZip(zip: string, version: string, allowlist?: Al
   const listing = (await $`unzip -Z1 ${zip}`.quiet().text()).split("\n").filter(Boolean)
   const unsafe = listing.filter((name) => name.startsWith("/") || name.split("/").includes(".."))
   if (unsafe.length) return [`${label}: unsafe entry paths ${unsafe.join(", ")}`]
+  // Symbolic links, found in the archive listing (unzip would follow or refuse them).
+  const links = (await $`unzip -Z ${zip}`.quiet().text()).split("\n").filter((line) => /^l[rwx-]{9}/.test(line)).map((line) => line.split(/\s+/).pop())
+  if (links.length) return links.map((name) => `${label}: ${name} is a symbolic link`)
   return extracted("browse-zip-", async (directory) => void (await $`unzip -q ${zip} -d ${directory}`.quiet()), async (directory) => {
+    const structure = await structureProblems(directory, label)
+    if (structure.length) return structure
     const { names, problems } = await extensionContentProblems(directory, label)
     if (!names.includes("manifest.json")) return [...problems, `${label}: no manifest.json at the top level`]
     const manifest = JSON.parse(await readFile(path.join(directory, "manifest.json"), "utf8")) as Record<string, unknown>
@@ -125,8 +141,10 @@ export async function checkPackageTarball(tarball: string, version: string, allo
   const label = path.basename(tarball)
   return extracted("browse-tgz-", async (directory) => void (await $`tar -xzf ${tarball} -C ${directory}`.quiet()), async (directory) => {
     const packageDir = path.join(directory, "package")
+    const structure = await structureProblems(directory, label)
+    if (structure.some((problem) => !problem.includes("source map"))) return structure
     const names = await files(packageDir)
-    const problems: string[] = []
+    const problems: string[] = [...structure]
     const allowedFile = (name: string) => /^(dist|extension|skills)\//.test(name) || ["package.json", "LICENSE", "README.md"].includes(name)
     for (const name of names) if (!allowedFile(name)) problems.push(`${label}: unexpected file ${name}`)
     for (const name of names) if (/(^|\/)\.env/.test(name) || /\.(pem|key|p12)$/.test(name)) problems.push(`${label}: looks like a secret: ${name}`)
@@ -141,10 +159,10 @@ export async function checkPackageTarball(tarball: string, version: string, allo
     for (const hook of ["preinstall", "install", "postinstall", "prepare"])
       if (pkg.scripts?.[hook]) problems.push(`${label}: has a ${hook} script; installs must not run code`)
     for (const bin of ["browse", "opencode-browser"]) if (pkg.bin?.[bin] !== "dist/cli.mjs") problems.push(`${label}: bin ${bin} should be dist/cli.mjs`)
-    for (const name of names.filter((file) => file.startsWith("dist/"))) {
-      if (name.endsWith(".map")) problems.push(`${label}: contains source map ${name}`)
-      else if (/\.m?js$/.test(name) && (await readFile(path.join(packageDir, name), "utf8")).includes("sourceMappingURL"))
-        problems.push(`${label}: ${name} references a source map`)
+    // Every script in dist/, not just the entry.
+    for (const name of names.filter((file) => file.startsWith("dist/") && /\.[mc]?js$/.test(file))) {
+      const text = await readFile(path.join(packageDir, name), "utf8")
+      for (const marker of TEST_ONLY_MARKERS) if (text.includes(marker)) problems.push(`${label}: ${name} contains the development/test marker ${JSON.stringify(marker)}`)
     }
     if (!names.includes("dist/cli.mjs")) problems.push(`${label}: missing dist/cli.mjs`)
     else {

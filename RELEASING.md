@@ -11,10 +11,14 @@ bun run release 0.2.0 ──► commit "release: v0.2.0" + tag v0.2.0 ──► 
   verify: installs, typechecks, builds, tests, tag = versions, changelog  ▼
   build:  store zip + npm tarball + artifact checks + SHA256SUMS (once; every later job uses these files)
   attest: build provenance for both (Sigstore)
-     ├─► publish-npm  [approve: environment npm]               npm publish --provenance, dist-tag latest | beta
-     └─► publish-cws  [approve: environment chrome-web-store]  upload + submit for review (stable or beta item)
+     ├─► publish-npm  [approve: environment npm]               gh attestation verify, npm publish --provenance (latest | beta)
+     └─► publish-cws  [approve: environment chrome-web-store]  gh attestation verify, upload + submit for review
               └─► github-release: changelog entry, zip, tarball, SHA256SUMS, attestation
 ```
+
+Both publish jobs check, with `gh attestation verify`, that the files they're about to publish are the ones this
+workflow built and attested, not just consistent with the `SHA256SUMS` beside them. A stable tag fails the build when
+`CWS_ITEM_ID` isn't set, so every stable package knows its store item.
 
 `v1.2.3` is stable (npm `latest`, the public store item). `v1.2.3-beta.4` is a beta (npm `beta`, the unlisted beta store
 item, a GitHub prerelease). Run the workflow by hand (Actions → Release → Run workflow) with `dry_run` on for a full
@@ -29,9 +33,9 @@ Do these once, in order. Each step says where to click or what to run.
 The API can update items but not create them, so create both items by hand in the
 [developer dashboard](https://chrome.google.com/webstore/devconsole) (Anomaly's publisher).
 
-1. **Check the old ID.** The code used to point at item `mfnicocicmmlkpjnaffgihfjhdgjkdjg`. Look for it in the
-   dashboard. If it isn't Anomaly's item, also delete `chromeWebStoreExtensionOrigin` in `cli/src/relay-helpers.ts`, so
-   the relay stops accepting connections from that origin. Pairing still protects it, but there's no reason to allow it.
+1. **Check the old ID.** Earlier code pointed at item `mfnicocicmmlkpjnaffgihfjhdgjkdjg`; the relay no longer trusts
+   it unless a release configures it. Look for it in the dashboard. If it's Anomaly's item, use it as the stable item
+   below (its ID goes in `CWS_ITEM_ID`) instead of creating a new one.
 2. **Stable item.** Build a zip with `bun run release:check` and use `release/opencode-browser-<version>.zip`. In the
    dashboard click **New item** and upload it. Fill in **Store listing** and **Privacy** from
    [store/listing.md](store/listing.md), set visibility to **Public**, and submit it.
