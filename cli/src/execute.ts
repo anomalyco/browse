@@ -61,7 +61,7 @@ import { createScreenshotDiff, type ScreenshotDiffOptions, type ScreenshotDiffRe
 import { createWebMcpHelper, type WebMcpHelper } from "./webmcp.ts"
 import { startDemonstrationRecorder, type DemonstrationResult } from "./demonstration.ts"
 import { relayToken } from "./relay-secrets.ts"
-import { createExecuteFiles, executeAllowsNode, ExecuteRealm, sandboxModules, type ExecuteFiles } from "./execute-realm.ts"
+import { createExecuteFiles, executeAllowsNode, ExecuteRealm, pageVisibleApiWarning, sandboxModules, type ExecuteFiles } from "./execute-realm.ts"
 
 export { createAriaSnapshotHelper, createSnapshotHelpers, defaultAriaSnapshotTimeoutMs, fillInputs }
 
@@ -508,7 +508,7 @@ export class ExecuteSandbox {
   private explicitMedia: string | undefined
   /** Full Node access for execute code (OPENCODE_BROWSER_ALLOW_NODE=1); otherwise code runs in a vm realm. */
   private readonly allowNode = executeAllowsNode()
-  private realm = this.allowNode ? undefined : new ExecuteRealm()
+  private realm = this.allowNode ? undefined : this.createRealm()
   private state: Record<string, unknown> = this.realm?.state ?? {}
   private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
   private readonly networkCapture = new NetworkCapture.Recorder()
@@ -521,14 +521,25 @@ export class ExecuteSandbox {
 
   constructor(readonly options: ExecuteSandboxOptions) {}
 
+  private createRealm(): ExecuteRealm {
+    return new ExecuteRealm({
+      onHostCall: (fn, receiver, args) => this.addWarningOnce(pageVisibleApiWarning(fn, receiver, args)),
+    })
+  }
+
+  private addWarningOnce(warning: string | undefined): void {
+    if (warning && !this.pendingWarnings.includes(warning)) this.pendingWarnings.push(warning)
+  }
+
   execute(code: string, options: ExecuteOptions = {}): Effect.Effect<ExecuteResult> {
     return Effect.tryPromise({
       try: async () => {
         if (this.realm?.isStopped) {
-          this.realm = new ExecuteRealm()
+          this.realm = this.createRealm()
           this.state = this.realm.state
           this.pendingWarnings.push("The previous execute realm stopped; JavaScript state and pending callbacks were reset.")
         }
+        if (!this.realm) for (const warning of pageVisibleApiSourceWarnings(code)) this.addWarningOnce(warning)
         const globals = await this.getGlobals(options)
         const { result, logs, logSummary, aftermath } = await runUserCode({ code, globals, ...(this.realm ? { realm: this.realm } : {}) })
         await this.networkCapture.settleForOutput()
@@ -703,7 +714,7 @@ export class ExecuteSandbox {
     const sandbox = this
     return Effect.gen(function* () {
       sandbox.realm?.dispose()
-      sandbox.realm = sandbox.allowNode ? undefined : new ExecuteRealm()
+      sandbox.realm = sandbox.allowNode ? undefined : sandbox.createRealm()
       sandbox.state = sandbox.realm?.state ?? {}
       const browser = sandbox.browser
       sandbox.browser = undefined
@@ -1803,6 +1814,19 @@ function formatLocatorFailurePageWarning(
     return `Locator failed on about:blank because the previous session page (${formatBoundedPageUrl(recreatedFromClosedUrl)}) was closed. Call page.goto(...) to reopen it before querying controls.`
   }
   return "Locator failed on page about:blank. Navigate with page.goto(...) or adopt an attached tab before querying controls."
+}
+
+/** Full-Node execute code bypasses the realm's call observer, so look for the page-visible APIs in its source. */
+export function pageVisibleApiSourceWarnings(code: string): readonly string[] {
+  const warnings: string[] = []
+  for (const name of ["addInitScript", "exposeFunction", "exposeBinding"]) {
+    if (new RegExp(`\\.${name}\\s*\\(`).test(code)) {
+      const named = { [name]: () => {} }[name]!
+      const warning = pageVisibleApiWarning(named, undefined, [])
+      if (warning) warnings.push(warning)
+    }
+  }
+  return warnings
 }
 
 export async function runUserCode({ code, globals, realm }: { readonly code: string; readonly globals: SandboxGlobals; readonly realm?: ExecuteRealm }): Promise<{
