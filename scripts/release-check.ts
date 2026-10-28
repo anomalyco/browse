@@ -1,5 +1,5 @@
 // Builds and checks the release artifacts exactly as the release workflow does, without publishing anything:
-//   bun run release:check [--tag v0.1.0] [--require-changelog]
+//   bun run release:check [--tag v0.1.0] [--require-changelog] [--versions-only]
 // 1. the version is one release version everywhere: cli/package.json, package.json, public/manifest.json (and the tag)
 // 2. release/opencode-browser-<version>.zip (scripts/package.ts) and release/opencode-browse-<version>.tgz (npm pack of
 //    a fresh cli/ build, with the store item IDs from OPENCODE_BROWSER_STORE_ID / OPENCODE_BROWSER_BETA_STORE_ID baked in)
@@ -42,7 +42,7 @@ async function sha256(file: string) {
 }
 
 if (import.meta.main) {
-  const { values } = parseArgs({ options: { tag: { type: "string" }, "require-changelog": { type: "boolean" } } })
+  const { values } = parseArgs({ options: { tag: { type: "string" }, "require-changelog": { type: "boolean" }, "versions-only": { type: "boolean" } } })
   const fail = (problems: string[]) => {
     for (const problem of problems) console.error(`✗ ${problem}`)
     process.exit(1)
@@ -50,6 +50,7 @@ if (import.meta.main) {
   const { version, problems } = await versionProblems({ ...(values.tag ? { tag: values.tag } : {}), requireChangelog: values["require-changelog"] ?? false })
   if (problems.length) fail(problems)
   console.log(`✓ version ${version} agrees across cli/package.json, package.json and public/manifest.json${values.tag ? ` and ${values.tag}` : ""}`)
+  if (values["versions-only"]) process.exit(0)
 
   await rm(release, { recursive: true, force: true })
   const zip = (await $`bun scripts/package.ts`.cwd(root).text()).trim().split("\n").pop()!
