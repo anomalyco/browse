@@ -1,0 +1,21 @@
+{
+  "$comment": "What the store zip and the npm package's extension may ask the browser for. scripts/check-artifacts.ts fails the release when the built manifest differs from this in either direction, so a new permission is a reviewed change here (and a new justification in store/listing.md), never a side effect.",
+  "permissions": [
+    "alarms",
+    "debugger",
+    "notifications",
+    "offscreen",
+    "scripting",
+    "storage",
+    "tabCapture",
+    "tabGroups",
+    "tabs",
+    "webNavigation"
+  ],
+  "optional_permissions": [],
+  "host_permissions": ["<all_urls>"],
+  "optional_host_permissions": [],
+  "content_scripts": [],
+  "web_accessible_resources": [],
+  "externally_connectable": null
+}

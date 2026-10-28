@@ -12,7 +12,9 @@
     "dev": "vite build -c vite.content.config.ts --mode development && (vite build -c vite.content.config.ts --watch --mode development & vite build --watch --mode development)",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "bun test ./test && cd cli && bun test",
-    "package": "bun scripts/package.ts"
+    "package": "bun scripts/package.ts",
+    "release": "bun scripts/release.ts",
+    "release:check": "bun scripts/release-check.ts"
   },
   "devDependencies": {
     "@tsconfig/node22": "22.0.2",

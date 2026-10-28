@@ -4,6 +4,7 @@
 import { $ } from "bun"
 import { chmod, cp, rm } from "node:fs/promises"
 import path from "node:path"
+import { applyManifestVersion } from "../scripts/version.ts"
 
 const here = import.meta.dir
 const extension = path.resolve(here, "..")
@@ -51,8 +52,10 @@ await cp(path.join(extension, "dist"), path.join(here, "extension"), {
 })
 const manifestFile = path.join(here, "extension", "manifest.json")
 const manifest = await Bun.file(manifestFile).json()
-manifest.version = pkg.version
+applyManifestVersion(manifest, pkg.version)
 await Bun.write(manifestFile, JSON.stringify(manifest, null, 2) + "\n")
 // install compares this with the build a connected extension reports, to skip a reload that changes nothing.
 await Bun.write(path.join(here, "extension", "build.json"), JSON.stringify({ build }) + "\n")
+// MIT asks for the license with every copy; npm ships LICENSE from the package folder.
+await cp(path.join(extension, "LICENSE"), path.join(here, "LICENSE"))
 console.log(`built dist/cli.mjs and extension/ (${pkg.version})`)
