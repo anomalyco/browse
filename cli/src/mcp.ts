@@ -8,6 +8,7 @@ import type { JsonObject } from "./protocol.ts"
 import { getObject, getString, parseTargetSelection } from "./relay-helpers.ts"
 import * as RelayClient from "./relay-client.ts"
 import * as RelayLifecycle from "./relay-lifecycle.ts"
+import * as SiteSecrets from "./site-secrets.ts"
 import type { TargetSelection } from "./relay-schema.ts"
 import { createUpdateWatcher, updateJson, type UpdateNotice } from "./update.ts"
 import { securityVariables, settingKeys, settingSpecs } from "./user-settings.ts"
@@ -58,7 +59,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       name: "execute",
       description: "Execute Playwright JavaScript against the OpenCode Browser session. Code runs in a sandbox on the relay without process, require, import(), fs, child_process, http/https or Node fetch; save and read files with the files helper inside the execute file roots, and cookie access is limited to the session's pages. The result includes console logs, warnings, a bounded execution-context diagnostic when relevant, and an aftermath summary (URL movement, navigations, error counts, handoffs, and a bot challenge or block page when one appears: hand interactive ones to the user with handoff(), never solve or retry-loop them).",
       inputSchema: objectSchema({
-        code: { type: "string", description: "JavaScript code to execute. It receives browser, context, page, state, modules (path, url, util, crypto, buffer, zlib, events, stream), files (dir, path, write, read), fillInput, fillInputs, snapshot(options?) for compact semantic outlines, search, explicit diffs, or automatic deltas, persistent compatible ref(id) locators, webmcp (list/call), screenshot helpers, ariaSnapshot, ghostCursor, handoff, demonstrate, network capture, and pageConsole (start/stop capturing the page's own console messages and errors, off by default because pages can detect it)." },
+        code: { type: "string", description: "JavaScript code to execute. It receives browser, context, page, state, modules (path, url, util, crypto, buffer, zlib, events, stream), files (dir, path, write, read), fillInput, fillInputs, snapshot(options?) for compact semantic outlines, search, explicit diffs, or automatic deltas, persistent compatible ref(id) locators, webmcp (list/call), screenshot helpers, ariaSnapshot, ghostCursor, handoff, demonstrate, network capture, pageConsole (start/stop capturing the page's own console messages and errors, off by default because pages can detect it), and secrets.type(locator, name) to type a stored site secret (see secrets_list) only on its allowed origins, without seeing it." },
         session: { type: "string", description: "Optional existing OpenCode Browser session id. Explicit ids must already exist; omit this field to use the MCP server's current session, which is created when needed." },
         targetUrl: { type: "string", description: "Optional URL substring selecting an existing attached page. This does not navigate or open a URL; use page.goto() for that." },
         targetIndex: { type: "integer", minimum: 0, description: "Optional zero-based attached page index selector." },
@@ -491,6 +492,15 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       handle: (input) => relay.flightRecorderCancel({ sessionId: resolveSessionId(input) }),
     },
     {
+      name: "secrets_list",
+      description: "List site secrets the user stored for typing with secrets.type(target, name) in execute: names, kinds and allowed origins, never values. Only the user adds them (`opencode-browser secrets add`).",
+      inputSchema: emptyInputSchema,
+      readOnly: true,
+      destructive: false,
+      idempotent: true,
+      handle: () => SiteSecrets.listSecrets().pipe(Effect.map((secrets) => ({ secrets }))),
+    },
+    {
       name: "secrets_status",
       description: "Return secret profile references, sources, and expiration metadata without revealing credential values.",
       inputSchema: objectSchema({ name: { type: "string", description: "Secret profile name." } }, ["name"]),
@@ -629,7 +639,7 @@ export function mcpUpdateNote(notice: Pick<UpdateNotice, "summary" | "command">)
 }
 
 export function mcpToolRequiresRelayCompatibility(name: string): boolean {
-  return !["status", "session_list", "session_current", "network_status", "recording_status", "flight_recorder_status", "secrets_status", "skill"].includes(name)
+  return !["status", "session_list", "session_current", "network_status", "recording_status", "flight_recorder_status", "secrets_status", "secrets_list", "skill"].includes(name)
 }
 
 export const mcpServerLayer = McpServer.layerStdio({

@@ -15,6 +15,7 @@ import type { ExecuteAftermath, ExecuteLogEntry, ExecuteResponse, NetworkStatusR
 import { startRelay } from "./relay.ts"
 import { defaultJournalBaseDir, formatJournalEntry, readJournalEntries } from "./session-journal.ts"
 import * as SessionStore from "./session-store.ts"
+import * as SiteSecrets from "./site-secrets.ts"
 import { formatUpdateNotice, updateJson, updateNotice } from "./update.ts"
 import { formatSettings, settingKeys, type SettingKey, type SettingReport } from "./user-settings.ts"
 import { opencodeBrowserVersion } from "./version.ts"
@@ -1035,9 +1036,94 @@ const secretsRun = Command.make(
   }),
 ).pipe(Command.withDescription("Run a command with profile values injected as BC_SECRET_* environment variables"))
 
+/** Read a secret value from stdin (piped) or a hidden prompt, never from argv. */
+function readSecretValue(prompt: string): Promise<string> {
+  const input = process.stdin
+  if (!input.isTTY) {
+    return new Promise((resolve, reject) => {
+      const chunks: Buffer[] = []
+      input.on("data", (chunk: Buffer) => chunks.push(chunk))
+      input.once("end", () => resolve(Buffer.concat(chunks).toString("utf8")))
+      input.once("error", reject)
+    })
+  }
+  return new Promise((resolve, reject) => {
+    process.stderr.write(prompt)
+    let value = ""
+    const finish = (result: string | Error) => {
+      input.setRawMode(false)
+      input.pause()
+      input.off("data", onData)
+      process.stderr.write("\n")
+      if (result instanceof Error) reject(result)
+      else resolve(result)
+    }
+    const onData = (chunk: Buffer) => {
+      for (const char of chunk.toString("utf8")) {
+        if (char === "\r" || char === "\n") return finish(value)
+        if (char === "\u0003") return finish(new Error("Cancelled"))
+        if (char === "\u007f" || char === "\b") value = value.slice(0, -1)
+        else value += char
+      }
+    }
+    input.setRawMode(true)
+    input.resume()
+    input.on("data", onData)
+  })
+}
+
+const secretsAdd = Command.make(
+  "add",
+  {
+    name: Argument.String("name").pipe(Argument.withDescription("Secret name agents use: secrets.type(locator, \"name\")")),
+    origin: Flag.String("origin").pipe(Flag.atLeast(1), Flag.withDescription("Origin the secret may be typed on (repeatable): https://example.com, *.example.com (https), http://localhost:3000")),
+    totp: Flag.Boolean("totp").pipe(Flag.withDefault(false), Flag.withDescription("The value is a TOTP seed (base32 or otpauth:// URI); typing it types the current code. Storing the seed beside the password makes 2FA one factor")),
+    json: jsonFlag,
+  },
+  Effect.fn("Cli.secretsAdd")(function* ({ name, origin, totp, json }) {
+    const value = yield* Effect.tryPromise({
+      try: () => readSecretValue(totp ? `TOTP seed for ${name} (hidden): ` : `Value for ${name} (hidden): `),
+      catch: (cause) => cause instanceof Error ? cause : new Error("Could not read the secret value"),
+    })
+    const result = yield* SiteSecrets.addSecret({ name, value, allowedOrigins: origin, kind: totp ? "totp" : "password" })
+    if (json) {
+      yield* Console.log(JSON.stringify(result, null, 2))
+      return
+    }
+    yield* Console.log(`Saved ${result.kind} secret ${result.name}; it can be typed on ${result.allowedOrigins.join(", ")}`)
+    if (totp) yield* Console.error("Note: with the TOTP seed stored here, anyone who can use these secrets has both factors. Prefer handing 2FA to a person when you can.")
+  }),
+).pipe(Command.withDescription("Store a secret agents can type only on its origins (value from stdin or a hidden prompt)"))
+
+const secretsList = Command.make(
+  "list",
+  { json: jsonFlag },
+  Effect.fn("Cli.secretsList")(function* ({ json }) {
+    const secrets = yield* SiteSecrets.listSecrets()
+    if (json) {
+      yield* Console.log(JSON.stringify({ secrets }, null, 2))
+      return
+    }
+    if (secrets.length === 0) {
+      yield* Console.log("No site secrets")
+      return
+    }
+    yield* Effect.forEach(secrets, (secret) => Console.log(`${secret.name} ${secret.kind} ${secret.allowedOrigins.join(",")}`))
+  }),
+).pipe(Command.withDescription("List site secrets (names, kinds and origins, never values)"))
+
+const secretsRemove = Command.make(
+  "remove",
+  { name: Argument.String("name") },
+  Effect.fn("Cli.secretsRemove")(function* ({ name }) {
+    const removed = yield* SiteSecrets.removeSecret(name)
+    yield* Console.log(removed ? `Removed ${name}` : `No secret named ${name}`)
+  }),
+).pipe(Command.withDescription("Delete a site secret"))
+
 const secrets = Command.make("secrets").pipe(
-  Command.withDescription("Inspect, refresh, and use captured credentials while keeping their values out of output"),
-  Command.withSubcommands([secretsStatus, secretsRefresh, secretsRun]),
+  Command.withDescription("Site secrets agents can type without seeing them, and captured credential profiles"),
+  Command.withSubcommands([secretsAdd, secretsList, secretsRemove, secretsStatus, secretsRefresh, secretsRun]),
 )
 
 const journal = Command.make(

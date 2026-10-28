@@ -61,6 +61,8 @@ import { createScreenshotDiff, type ScreenshotDiffOptions, type ScreenshotDiffRe
 import { createWebMcpHelper, type WebMcpHelper } from "./webmcp.ts"
 import { startDemonstrationRecorder, type DemonstrationResult } from "./demonstration.ts"
 import { relayToken } from "./relay-secrets.ts"
+import * as SiteSecrets from "./site-secrets.ts"
+import { checkUrl, parseOriginPatterns } from "./domain-policy.ts"
 import { challengeWarning, classifyChallenge, probePageScript, probeSelectors, type ChallengeOutcome, type ChallengeProbe } from "./challenge-detection.ts"
 import { createExecuteFiles, executeAllowsNode, ExecuteRealm, pageVisibleApiWarning, sandboxModules, type ExecuteFiles } from "./execute-realm.ts"
 
@@ -374,8 +376,20 @@ type SandboxGlobals = {
     readonly start: (page?: Page) => Promise<{ readonly capturing: boolean }>
     readonly stop: (page?: Page) => Promise<{ readonly capturing: boolean }>
   }
+  readonly secrets: {
+    readonly type: (target: Locator | string, name: string, options?: TypeSecretOptions) => Promise<TypeSecretResult>
+  }
   readonly handoffTracker: { count: number }
 }
+
+type TypeSecretOptions = {
+  /** Clear the field first (default true). */
+  readonly clear?: boolean
+  /** How long to wait for the target element, in milliseconds (default 10000). */
+  readonly timeout?: number
+}
+
+type TypeSecretResult = { readonly typed: true; readonly name: string; readonly origin: string; readonly kind: SiteSecrets.SiteSecretKind }
 
 type HandoffCallOptions = {
   readonly timeoutMs?: number
@@ -554,7 +568,7 @@ export class ExecuteSandbox {
           })
         await this.networkCapture.settleForOutput()
         const extracted = extractExecuteMedia(result)
-        const redactedValue = this.networkCapture.redactValue(extracted.value)
+        const redactedValue = this.redactOutputValue(extracted.value)
         const jsonSafeResult = toJsonSafeValue(redactedValue)
         const warnings = this.finalizeWarnings(
           logSummary,
@@ -602,12 +616,12 @@ export class ExecuteSandbox {
               : formatLocatorFailurePageWarning(error instanceof ExecuteCodeError ? error.originalError : error, aftermath, this.recreatedFromClosedUrl),
           )
           return {
-            text: this.networkCapture.redactText(error instanceof ExecuteCodeError ? error.stack ?? error.message : error.message),
+            text: this.redactOutputText(error instanceof ExecuteCodeError ? error.stack ?? error.message : error.message),
             isError: true,
             logs: this.redactCaptureLogs(error instanceof ExecuteCodeError ? error.logs : []),
             logSummary,
             warnings,
-            ...(diagnostic ? { diagnostic: this.networkCapture.redactText(diagnostic) } : {}),
+            ...(diagnostic ? { diagnostic: this.redactOutputText(diagnostic) } : {}),
             ...(aftermath ? { aftermath: this.redactCaptureAftermath(aftermath) } : {}),
             ...(error instanceof ExecuteCodeError ? {} : { setupFailed: true as const }),
           }
@@ -697,19 +711,118 @@ export class ExecuteSandbox {
     if (logCompactionWarning) {
       warnings.push(logCompactionWarning)
     }
-    return warnings.map((warning) => this.networkCapture.redactText(warning))
+    return warnings.map((warning) => this.redactOutputText(warning))
   }
 
   redactNetworkCaptureText(text: string): string {
-    return this.networkCapture.redactText(text)
+    return this.redactOutputText(text)
+  }
+
+  /** Values typed with secrets.type() in this sandbox, mapped to their secret's name, for redaction. */
+  private readonly typedSecrets = new Map<string, string>()
+
+  private redactTypedSecrets(text: string): string {
+    let output = text
+    for (const [value, name] of [...this.typedSecrets].sort(([left], [right]) => right.length - left.length)) {
+      output = output.split(value).join(`[secret ${name}]`)
+    }
+    return output
+  }
+
+  private redactOutputText(text: string): string {
+    return this.redactTypedSecrets(this.networkCapture.redactText(text))
+  }
+
+  private redactOutputUrl(url: string): string {
+    return this.redactTypedSecrets(this.networkCapture.redactUrl(url))
+  }
+
+  private redactOutputValue(value: unknown): unknown {
+    const redacted = this.networkCapture.redactValue(value)
+    if (this.typedSecrets.size === 0) return redacted
+    const visit = (item: unknown, depth: number): unknown => {
+      if (typeof item === "string") return this.redactTypedSecrets(item)
+      if (typeof item === "number" && this.typedSecrets.has(String(item))) return `[secret ${this.typedSecrets.get(String(item))}]`
+      if (depth > 32 || item === null || typeof item !== "object" || Buffer.isBuffer(item)) return item
+      if (Array.isArray(item)) return item.map((entry) => visit(entry, depth + 1))
+      const prototype = Object.getPrototypeOf(item)
+      if (prototype !== Object.prototype && prototype !== null) return item
+      return Object.fromEntries(Object.entries(item).map(([key, entry]) => [key, visit(entry, depth + 1)]))
+    }
+    return visit(redacted, 0)
+  }
+
+  /**
+   * secrets.type(target, name): type a stored site secret into a field without the value entering the realm. The
+   * field's frame URL (Playwright's frame tree, fed by CDP, not page script) must match the secret's allowed origins,
+   * and the session's allowlist when it has one, right before the value is inserted.
+   */
+  private async typeSecret(page: Page, target: Locator | string, name: string, options: TypeSecretOptions = {}): Promise<TypeSecretResult> {
+    if (typeof name !== "string" || !name) throw new Error("secrets.type(target, name): name must be the name of a stored secret")
+    const secret = await Effect.runPromise(SiteSecrets.readSecret(name)).catch((error: unknown) => {
+      throw new Error(`secrets.type: ${error instanceof Error ? error.message : "could not read the secret"}`)
+    })
+    const secretRules = parseOriginPatterns(secret.allowedOrigins)
+    const sessionPatterns = this.options.allowedOrigins?.()
+    const sessionRules = sessionPatterns && sessionPatterns.length > 0 ? parseOriginPatterns(sessionPatterns) : undefined
+    const locator = typeof target === "string" ? page.locator(target) : target
+    if (!locator || typeof (locator as Locator).elementHandle !== "function") {
+      throw new Error("secrets.type(target, name): target must be a selector string or a Locator")
+    }
+    const handle = await locator.elementHandle({ timeout: options.timeout ?? 10_000 })
+    try {
+      const frame = await handle.ownerFrame()
+      if (!frame) throw new Error(`secrets.type: target_not_editable: the element for ${JSON.stringify(name)} is not in a frame`)
+      const checkOrigin = (): string => {
+        const url = frame.url()
+        let origin: string
+        try {
+          origin = new URL(url).origin
+        } catch {
+          origin = url.slice(0, 200)
+        }
+        const decision = checkUrl(url, secretRules, { httpsOnlyWithoutScheme: true })
+        if (!decision.allowed || /^(?:about|data|blob):/i.test(url)) {
+          throw new Error(`secrets.type: domain_not_allowed: the field's frame is ${origin}, which is not an allowed origin of secret ${JSON.stringify(name)} (${secret.allowedOrigins.join(", ")}). Nothing was typed.`)
+        }
+        if (sessionRules && !checkUrl(url, sessionRules).allowed) {
+          throw new Error(`secrets.type: domain_not_allowed: the field's frame is ${origin}, which is outside this session's domain allowlist. Nothing was typed.`)
+        }
+        return origin
+      }
+      checkOrigin()
+      if (!(await handle.isEditable().catch(() => false))) {
+        throw new Error(`secrets.type: target_not_editable: the target is not an editable field. Nothing was typed.`)
+      }
+      if (options.clear !== false) await handle.fill("")
+      await handle.focus()
+      const focused = await handle.evaluate((element) => element.ownerDocument.activeElement === element || element.contains(element.ownerDocument.activeElement))
+      if (!focused) throw new Error("secrets.type: target_not_editable: the field did not keep focus. Nothing was typed.")
+      const origin = checkOrigin()
+      const urlBefore = frame.url()
+      const text = SiteSecrets.secretText(secret)
+      // Register first, so a capture or result that sees the value already redacts it.
+      this.typedSecrets.set(text, name)
+      this.networkCapture.addRedaction(text)
+      await frame.page().keyboard.insertText(text)
+      if (frame.url() !== urlBefore) {
+        this.addWarningOnce(`secrets.type: the field's frame navigated while ${JSON.stringify(name)} was typed; check where it went before submitting.`)
+      }
+      if (!sessionRules) {
+        this.addWarningOnce(`secrets.type typed ${JSON.stringify(name)} in a session without a domain allowlist. A prompt-injected page could steer this session elsewhere after the value is in the page: set one with session_allowlist (or \`session allow\`) before using secrets.`)
+      }
+      return { typed: true, name, origin, kind: secret.kind }
+    } finally {
+      await handle.dispose().catch(() => {})
+    }
   }
 
   private redactCaptureLogs(logs: readonly ExecuteLogEntry[]): readonly ExecuteLogEntry[] {
     return logs.map((log) => ({
       ...log,
-      text: this.networkCapture.redactText(log.text),
+      text: this.redactOutputText(log.text),
       ...(log.location ? {
-        location: { ...log.location, url: this.networkCapture.redactUrl(log.location.url) },
+        location: { ...log.location, url: this.redactOutputUrl(log.location.url) },
       } : {}),
     }))
   }
@@ -717,10 +830,10 @@ export class ExecuteSandbox {
   private redactCaptureAftermath(aftermath: ExecuteAftermath): ExecuteAftermath {
     return {
       ...aftermath,
-      startUrl: aftermath.startUrl ? this.networkCapture.redactUrl(aftermath.startUrl) : aftermath.startUrl,
-      endUrl: aftermath.endUrl ? this.networkCapture.redactUrl(aftermath.endUrl) : aftermath.endUrl,
-      navigations: aftermath.navigations.map((url) => this.networkCapture.redactUrl(url)),
-      ...(aftermath.challenge ? { challenge: { ...aftermath.challenge, url: this.networkCapture.redactUrl(aftermath.challenge.url) } } : {}),
+      startUrl: aftermath.startUrl ? this.redactOutputUrl(aftermath.startUrl) : aftermath.startUrl,
+      endUrl: aftermath.endUrl ? this.redactOutputUrl(aftermath.endUrl) : aftermath.endUrl,
+      navigations: aftermath.navigations.map((url) => this.redactOutputUrl(url)),
+      ...(aftermath.challenge ? { challenge: { ...aftermath.challenge, url: this.redactOutputUrl(aftermath.challenge.url) } } : {}),
     }
   }
 
@@ -1082,6 +1195,9 @@ export class ExecuteSandbox {
       pageConsole: {
         start: (target) => PageConsole.start(target ?? page),
         stop: (target) => PageConsole.stop(target ?? page),
+      },
+      secrets: {
+        type: (target, name, typeOptions) => this.typeSecret(page, target, name, typeOptions),
       },
       handoffTracker,
     }
@@ -2003,6 +2119,7 @@ const sandboxGlobalKeys = [
   "demonstrate",
   "network",
   "pageConsole",
+  "secrets",
 ] as const satisfies readonly (keyof Omit<SandboxGlobals, "handoffTracker">)[]
 
 function safePageUrl(page: Page): string | null {

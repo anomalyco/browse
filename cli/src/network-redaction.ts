@@ -165,6 +165,24 @@ export class SecretCollector {
     ]
   }
 
+  /** Redact `value` everywhere from now on under a redaction-only reference (never persisted to a profile). */
+  addRedactionOnly(value: string): void {
+    if (value) this.redactionReference(value)
+  }
+
+  /** Replace these values (raw, percent- and form-encoded) under their redaction-only references, at any length. */
+  redactValuesEverywhere(text: string, values: Iterable<string>): string {
+    const slots: RedactionSlot[] = []
+    for (const value of values) {
+      if (!value) continue
+      const ref = /^\$\{(.+)\}$/.exec(this.redactionReference(value))?.[1] ?? "BC_REDACTED_0"
+      for (const variant of new Set([value, encodeURIComponent(value), new URLSearchParams({ v: value }).toString().slice(2)])) {
+        slots.push({ ref, value: variant })
+      }
+    }
+    return redactKnownValues(text, slots)
+  }
+
   /** A stable redaction-only reference: kept out of slots() so it is never persisted to a profile. */
   private redactionReference(value: string): string {
     const persisted = this.refsByValue.get(value)
@@ -411,7 +429,7 @@ export function redactKnownValues(text: string, slots: readonly RedactionSlot[])
     .reduce((output, slot) => replaceOutsideReferences(output, slot.value, `\${${slot.ref}}`), text)
 }
 
-function redactKnownValue(value: unknown, slots: readonly RedactionSlot[]): unknown {
+export function redactKnownValue(value: unknown, slots: readonly RedactionSlot[]): unknown {
   if (Predicate.isString(value)) return redactKnownValues(value, slots)
   if (Predicate.isNumber(value) || Predicate.isBoolean(value)) {
     const slot = slots.find((candidate) => candidate.value === String(value))
