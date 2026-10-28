@@ -75,7 +75,7 @@ if (!values.remote) {
     check(size > 10_000, `${size} bytes`)
     return size
   })
-  await step("session_delete", async () => { const r = await client.call("session_delete", { session }); check(!r.isError && r.data?.deleted === true, r.text); return r.data })
+  await step("session_delete", async () => { const r = await client.call("session_delete", { id: session }); check(!r.isError && r.data?.deleted === true, r.text); return r.data })
   fs.rmSync(out, { recursive: true, force: true })
   await fx.close()
 }

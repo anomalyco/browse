@@ -43,12 +43,16 @@ const sessionSchemaProperty = {
   type: "string",
   description: "Optional session id. Defaults to this MCP server's current session.",
 } as const
+const sessionAliasSchemaProperty = { type: "string", description: "Same as id." } as const
 const sessionOnlyInputSchema = objectSchema({
   session: sessionSchemaProperty,
 })
 
 function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSession, update: () => UpdateNotice | undefined = () => undefined): readonly ToolSpec[] {
-  const resolveSessionId = (input: unknown, field = "session") => optionalStringField(input, field) ?? currentSession.id
+  // session_reset and session_delete name the session `id`; `session`, as every other tool calls it, means the same
+  // there. Ignoring it used to reset or delete the current session instead of the one asked for.
+  const resolveSessionId = (input: unknown, field = "session") =>
+    optionalStringField(input, field) ?? (field === "id" ? optionalStringField(input, "session") : undefined) ?? currentSession.id
   const establishCurrentSession = (id: string) => {
     currentSession.id = id
     currentSession.established = true
@@ -155,6 +159,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       description: "Reset a OpenCode Browser session's state and page.",
       inputSchema: objectSchema({
         id: sessionSchemaProperty,
+        session: sessionAliasSchemaProperty,
       }),
       readOnly: false,
       destructive: true,
@@ -171,6 +176,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       description: "Delete a OpenCode Browser session.",
       inputSchema: objectSchema({
         id: sessionSchemaProperty,
+        session: sessionAliasSchemaProperty,
       }),
       readOnly: false,
       destructive: true,

@@ -41,7 +41,7 @@ async function runOne(scenario: Scenario, round: number) {
   } catch (e) {
     error = oneLine(e)
   } finally {
-    await client.call("session_delete", { session }, 30_000).catch(() => undefined)
+    await client.call("session_delete", { id: session }, 30_000).catch(() => undefined)
   }
   const ms = Date.now() - started
   out.write({ scenario: scenario.name, round, ok, ms, ...(error ? { error } : {}), ...(extra === undefined ? {} : { extra }) })

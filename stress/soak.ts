@@ -101,7 +101,7 @@ async function workerLoop(worker: Worker) {
     } catch (e) {
       error = oneLine(e)
     } finally {
-      await worker.client.call("session_delete", { session }, 30_000).catch(() => undefined)
+      await worker.client.call("session_delete", { id: session }, 30_000).catch(() => undefined)
     }
     const to = Date.now()
     worker.busySince = undefined
@@ -261,7 +261,7 @@ await sleep(1000)
 await metrics.catch(() => undefined)
 const finalSample = await new Sampler().sample(await cdp().catch(() => undefined)).catch(() => ({}))
 for (const w of workers) await w.client.close()
-await probe.client.call("session_delete", { session: "soak-probe" }).catch(() => undefined)
+await probe.client.call("session_delete", { id: "soak-probe" }).catch(() => undefined)
 await probe.client.close()
 cdpConnection?.close()
 await fx.close()
