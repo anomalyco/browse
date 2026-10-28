@@ -119,17 +119,26 @@ export class BrowserCdp {
    * shadow root (DOM.getDocument pierces it), and sends a trusted mouse click at its centre. The host exists (hidden)
    * before the handoff waits, so it keeps clicking every `everyMs` until `done()` says the handoff finished.
    */
-  async clickHandoffContinue(targetId: string, done: () => boolean, timeoutMs = 60_000, everyMs = 1500): Promise<number> {
-    await this.send("Target.activateTarget", { targetId })
+  async clickHandoffContinue(targetId: string, done: () => boolean, timeoutMs = 60_000, everyMs = 1500): Promise<{ clicks: number; rounds: number; found: number; lastError?: string }> {
     const { sessionId } = await this.send("Target.attachToTarget", { targetId, flatten: true })
+    // Without focus emulation Chrome answers pointer events for a hidden tab only seconds later; another agent's
+    // handoff can hide this tab again at any time.
+    await this.send("Emulation.setFocusEmulationEnabled", { enabled: true }, sessionId).catch(() => undefined)
     let clicks = 0
+    let rounds = 0
+    let found = 0
+    let lastError: string | undefined
     try {
       const deadline = Date.now() + timeoutMs
       while (Date.now() < deadline && !done()) {
+        rounds++
         try {
+          // A person switches to the tab first; switch again each round in case another tab took the front.
+          await this.send("Target.activateTarget", { targetId })
           const { root } = await this.send("DOM.getDocument", { depth: -1, pierce: true }, sessionId)
           const nodeId = findNode(root, (node) => attribute(node, "id") === "continue" && node.nodeName === "BUTTON")
           if (nodeId !== undefined) {
+            found++
             const { model } = await this.send("DOM.getBoxModel", { backendNodeId: nodeId }, sessionId)
             const [x1, y1, , , x3, y3] = model.content as number[]
             const x = (x1! + x3!) / 2
@@ -139,12 +148,13 @@ export class BrowserCdp {
             await this.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 }, sessionId)
             clicks++
           }
-        } catch {
+        } catch (error) {
           // Not laid out yet (hidden card) or the document changed; try again.
+          lastError = String(error).slice(0, 160)
         }
         await sleep(everyMs)
       }
-      return clicks
+      return { clicks, rounds, found, ...(lastError ? { lastError } : {}) }
     } finally {
       await this.send("Target.detachFromTarget", { sessionId }).catch(() => undefined)
     }

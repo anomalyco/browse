@@ -1,7 +1,7 @@
 // Soak + chaos: N agents (MCP stdio servers, like N opencode sessions) loop random tasks from the scenario set and a
 // few real sites while chaos events hit the relay, the extension, Chrome and the network.
 //   node stress/soak.ts [--workers 8] [--minutes 60] [--chaos-every 120] [--chaos relay-kill9,sw-stop,...]
-//                       [--no-sites] [--sample-every 30] [--recovery-bound 120]
+//                       [--no-sites] [--sample-every 30] [--recovery-bound 120] [--only scenario,scenario]
 // Writes tasks.jsonl, chaos.jsonl, metrics.jsonl and summary.md under ~/stress-results/<stamp>-soak/.
 // Chaos types: relay-kill9, sw-stop, close-agent-tabs, close-windows, chrome-restart, network-drop, session-delete,
 // mcp-kill, tabs-cleanup. (A toolbar-stop simulation needs a test hook the extension doesn't have yet.)
@@ -27,11 +27,12 @@ const { values } = parseArgs({ options: {
   "sample-every": { type: "string", default: "30" },
   "recovery-bound": { type: "string", default: "120" },
   "min-success": { type: "string", default: "0.9" },
+  only: { type: "string" },
 } })
 const WORKERS = Number(values.workers)
 const DURATION_MS = Number(values.minutes) * 60_000
 const CHAOS_MEAN_MS = Number(values["chaos-every"]) * 1000
-const CHAOS = values.chaos!.split(",").filter(Boolean)
+const CHAOS = values.chaos!.split(",").filter((c) => c && c !== "none")
 const RECOVERY_BOUND_MS = Number(values["recovery-bound"]) * 1000
 const MIN_SUCCESS = Number(values["min-success"])
 
@@ -63,7 +64,8 @@ const SITES: { name: string; code: string }[] = [
   { name: "site:mdn", code: `await page.goto('https://developer.mozilla.org/en-US/docs/Web/JavaScript', {waitUntil: 'domcontentloaded', timeout: 45000}); return { title: await page.title(), shot: (await page.screenshot()).length }` },
   { name: "site:bbc-news", code: `await page.goto('https://www.bbc.com/news', {waitUntil: 'domcontentloaded', timeout: 45000}); await page.mouse.wheel(0, 2500); return (await snapshot({find: 'News'})).length` },
 ]
-const soakScenarios = scenarios.filter((s) => s.tags.includes("soak"))
+const only = values.only?.split(",")
+const soakScenarios = scenarios.filter((s) => (only ? only.includes(s.name) : s.tags.includes("soak")))
 
 type Worker = { id: number; client: McpClient; session?: string | undefined; busySince?: number | undefined; task?: string | undefined; iterations: number }
 const workers: Worker[] = []

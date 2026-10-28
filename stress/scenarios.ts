@@ -236,7 +236,7 @@ export const scenarios: Scenario[] = [
     const clicking = cdp.clickHandoffContinue(target.id, () => finished)
     const result = await waiting.finally(() => { finished = true })
     const clicks = await clicking
-    assert(!result.isError && result.data?.value === "continued", `handoff: ${result.text.slice(0, 300)}`)
+    assert(!result.isError && result.data?.value === "continued", `handoff (Continue: ${JSON.stringify(clicks)}): ${result.text.slice(0, 300)}`)
     return { ms: Date.now() - started, clicks }
   } },
   { name: "handoff-synthetic-click-ignored", tags: ["handoff", "security"], timeoutMs: 60_000, run: async ({ client, session, fx }) => {
