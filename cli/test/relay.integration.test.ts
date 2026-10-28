@@ -42,7 +42,7 @@ class FakeExtension {
    * Resolves true once the relay proved the code and accepted the extension's proof. A real extension stops when
    * the relay's proof is wrong; `answerAnyway` sends the extension's proof regardless, as an impostor would.
    */
-  async pair(options: { readonly answerAnyway?: boolean; readonly proofPort?: number; readonly settings?: Record<string, unknown>; readonly attachedTabs?: readonly number[] } = {}): Promise<boolean> {
+  async pair(options: { readonly answerAnyway?: boolean; readonly proofPort?: number; readonly settings?: Record<string, unknown>; readonly attachedTabs?: readonly number[]; readonly agentTabs?: readonly number[] } = {}): Promise<boolean> {
     await new Promise<void>((resolve, reject) => {
       this.socket.once("open", () => resolve())
       this.socket.once("error", reject)
@@ -68,7 +68,7 @@ class FakeExtension {
     this.socket.send(JSON.stringify({ method: "auth.response", params: { proof: pairingProof(this.code, "extension", proofPort, nonce, params.nonce) } }))
     this.socket.on("message", (data) => this.answer(JSON.parse(String(data)) as Command))
     // A reconnecting extension announces the tabs it still has attached, then says it's ready.
-    for (const tabId of options.attachedTabs ?? []) this.emit("debugger.attached", { tabId })
+    for (const tabId of options.attachedTabs ?? []) this.emit("debugger.attached", { tabId, ...(options.agentTabs?.includes(tabId) ? { agent: true } : {}) })
     this.socket.send(JSON.stringify({ method: "ready" }))
     // A current extension sends its status page settings right after; an older one sends none.
     if (options.settings) this.emit("settings", options.settings)
@@ -452,8 +452,10 @@ describe("relay", () => {
     expect((await post("/cli/session/delete", { id: "keeps-pages" })).ok).toBe(true)
     const third = new FakeExtension(pairingCode(home))
       .on("Target.getTargetInfo", (command) => ({ targetInfo: info(Number(command.params?.tabId)) }))
-    expect(await third.pair({ attachedTabs: [101, 102] })).toBe(true)
-    expect(await until(() => [101, 102].every((tabId) => third.commands.some((command) => command.method === "tabs.remove" && command.params?.tabId === tabId)), 5_000)).toBe(true)
+    // 103: an agent's tab the relay never knew (its attach was cut short); 104: a tab the user lent.
+    expect(await third.pair({ attachedTabs: [101, 102, 103, 104], agentTabs: [101, 102, 103] })).toBe(true)
+    expect(await until(() => [101, 102, 103].every((tabId) => third.commands.some((command) => command.method === "tabs.remove" && command.params?.tabId === tabId)), 5_000)).toBe(true)
+    expect(third.commands.some((command) => command.method === "tabs.remove" && command.params?.tabId === 104)).toBe(false)
     other.close()
     socket.close()
     third.close()

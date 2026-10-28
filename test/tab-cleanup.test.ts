@@ -96,3 +96,40 @@ describe("idle tab cleanup", () => {
     expect(await TabCleanup.idleMinutes()).toBe(10)
   })
 })
+
+describe("a tab the worker was opening when it stopped", () => {
+  test("is closed on the next worker start; tracked tabs and the user's tabs stay", async () => {
+    const before = await agentTab(0)
+    await TabCleanup.beginCreate("about:blank")
+    // The worker stopped here: Chrome finished creating the tab, nobody tracked it.
+    const lost = (await stub.chrome.tabs.create({ windowId: window, url: "about:blank", active: false })).id
+    const user = (await stub.chrome.tabs.create({ windowId: window, url: "about:blank", active: true })).id
+    const closed = await TabCleanup.reconcileCreates(() => false)
+    expect(closed.map((tab) => tab.tabId)).toEqual([lost])
+    expect(open(before)).toBe(true)
+    expect(open(user)).toBe(true)
+    // Nothing is pending any more.
+    expect(await TabCleanup.reconcileCreates(() => false)).toEqual([])
+  })
+
+  test("a creation that finished leaves nothing to reconcile", async () => {
+    const token = await TabCleanup.beginCreate("about:blank")
+    const tab = (await stub.chrome.tabs.create({ windowId: window, url: "about:blank", active: false })).id
+    TabCleanup.track(tab)
+    await TabCleanup.endCreate(token)
+    expect(await TabCleanup.reconcileCreates(() => false)).toEqual([])
+    expect(open(tab)).toBe(true)
+  })
+})
+
+describe("tracked tabs the relay doesn't have after a worker restart", () => {
+  test("are closed; attached ones stay", async () => {
+    const kept = await agentTab(0)
+    const lost = await agentTab(0)
+    const closed = await TabCleanup.closeUnattached((tabId) => tabId === kept)
+    expect(closed.map((tab) => tab.tabId)).toEqual([lost])
+    expect(open(kept)).toBe(true)
+    expect(await TabCleanup.isTracked(lost)).toBe(false)
+  })
+})
+

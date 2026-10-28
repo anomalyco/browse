@@ -296,7 +296,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     void recordingRelay.cleanupAll(reason).catch(() => {})
     void flightRecorder.cleanupAll().catch(() => {})
     pendingTabGrouping.clear()
-    for (const target of registry.listRootTargets()) {
+    for (const target of [...registry.listRootTargets(), ...registry.listStagedRootTargets()]) {
       ownersAcrossReconnect.set(target.targetInfo.targetId, {
         owner: target.owner,
         ...(target.opencodeBrowserSessionId ? { sessionId: target.opencodeBrowserSessionId } : {}),
@@ -967,6 +967,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   })
 
   let currentAnnouncedRootTabIds: Set<number> | undefined
+  /** Tabs the reconnecting extension announced as opened by an agent (TabCleanup tracks them). */
+  const announcedAgentTabIds = new Set<number>()
   websocketServer.on("connection", (socket, request) => {
     const requestUrl = new URL(request.url ?? "/", endpointUrl)
     if (requestUrl.pathname === "/extension") {
@@ -1140,6 +1142,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     extensionGeneration += 1
     rejectedExtensionConnections = 0
     clearLiveExtensionState("Extension replaced")
+    announcedAgentTabIds.clear()
     // A new extension starts from the defaults until it sends its settings (an older one never does).
     ghostCursorSetting = false
     setHumanInput(undefined)
@@ -1294,6 +1297,16 @@ const makeRelay = Effect.fnUntraced(function* (options: {
             sendExtensionBestEffort({ method: "tabs.remove", params: { tabId: target.tabId } })
             detachTargetState(target.tabId, { updateExtension: false })
           }
+          // An agent's tab nobody owns any more (its session went away, or its attach was cut short by the
+          // disconnect) would otherwise stay as a user's tab, visible to every session: close it.
+          for (const target of registry.listRootTargets()) {
+            if (!announcedAgentTabIds.has(target.tabId) || target.owner !== "user" || target.opencodeBrowserSessionId !== undefined) continue
+            if (ownersAcrossReconnect.get(target.targetInfo.targetId)?.owner === "user") continue
+            relayLog("extension.inventory.orphan", { tabId: target.tabId, reason: "agent tab without a session" })
+            sendExtensionBestEffort({ method: "tabs.remove", params: { tabId: target.tabId } })
+            detachTargetState(target.tabId, { updateExtension: false })
+          }
+          announcedAgentTabIds.clear()
           ownersAcrossReconnect.clear()
           extensionRpc.markReady()
           if (updates.current) sendUpdateNotice()
@@ -1307,6 +1320,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (extensionMethod === "debugger.attached") {
       if (eventTabId) {
         announcedRootTabIds.add(eventTabId)
+        if (message.params?.agent === true) announcedAgentTabIds.add(eventTabId)
         rootLifecycle.queue({ tabId: eventTabId, attachIfMissing: true, verificationRetries: 0, errorMessage: "Debugger re-announce failed", generation })
       }
       return

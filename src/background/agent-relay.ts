@@ -387,7 +387,12 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     current.send(JSON.stringify({ method: "auth.response", params: { proof: await pairingProof(pending.code, "extension", pending.port, pending.nonce, relayNonce) } }))
     trusted.add(current)
     log.add("pairing.ok", { source: pairing })
-    relayTabs.forEach((tabId) => current.send(JSON.stringify({ method: "debugger.attached", params: { tabId } })))
+    // Tabs an agent opened say so: one the relay no longer knows after a reconnect is closed, not handed to the user.
+    for (const tabId of Array.from(relayTabs)) {
+      const agent = await TabCleanup.isTracked(tabId)
+      if (socket !== current) return
+      current.send(JSON.stringify({ method: "debugger.attached", params: { tabId, ...(agent ? { agent: true } : {}) } }))
+    }
     current.send(JSON.stringify({ method: "ready" }))
     log.add("hello", { tabs: relayTabs.size, protocol: extensionProtocolVersion })
     // The status page's relay-side settings; an older relay ignores the event and keeps its defaults.
@@ -485,12 +490,21 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       case "tabs.create": {
         // In the background of the user's window (or the agents' own unfocused window, by setting), never in front
         // of the user's tabs.
-        const tab = await AgentWindow.open(typeof params?.url === "string" ? params.url : "about:blank", {
+        const url = typeof params?.url === "string" ? params.url : "about:blank"
+        const creating = await TabCleanup.beginCreate(url)
+        const tab = await AgentWindow.open(url, {
           active: params?.active === true,
           ...(AgentWindow.isPlacement(params?.window) ? { override: params.window } : {}),
+        }).catch(async (error: unknown) => {
+          await TabCleanup.endCreate(creating)
+          throw error
         })
-        if (tab.id === undefined) throw new Error("Created tab has no id")
+        if (tab.id === undefined) {
+          void TabCleanup.endCreate(creating)
+          throw new Error("Created tab has no id")
+        }
         TabCleanup.track(tab.id)
+        await TabCleanup.endCreate(creating)
         // A discarded tab loses the debugger and the agent's page.
         await chrome.tabs.update(tab.id, { autoDiscardable: false }).catch(() => undefined)
         return { tabId: tab.id }
@@ -1073,11 +1087,18 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       })
   })
   void chrome.alarms.create(ALARM, { periodInMinutes: extensionReconnectAlarmPeriodMs / 60_000 })
-  void DebuggerHub.restore().then(() => {
-    DebuggerHub.tabsOwnedBy(OWNER).forEach((tabId) => relayTabs.add(tabId))
-    log.add("worker.start", { restoredTabs: relayTabs.size })
-    return connect("startup")
-  })
+  void DebuggerHub.restore()
+    .then(async () => {
+      DebuggerHub.tabsOwnedBy(OWNER).forEach((tabId) => relayTabs.add(tabId))
+      // Tabs the previous worker was opening for an agent when it stopped (never tracked, or tracked but never
+      // attached): the relay doesn't know them, so nothing would use them again. Close them.
+      const orphans = [
+        ...(await TabCleanup.reconcileCreates((tabId) => relayTabs.has(tabId)).catch(() => [])),
+        ...(await TabCleanup.closeUnattached((tabId) => relayTabs.has(tabId)).catch(() => [])),
+      ]
+      log.add("worker.start", { restoredTabs: relayTabs.size, ...(orphans.length ? { closedOrphans: orphans.length } : {}) })
+    })
+    .then(() => connect("startup"))
 
   return {
     state: snapshot,

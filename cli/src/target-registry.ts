@@ -212,6 +212,11 @@ export class TargetRegistry {
     return replaced
   }
 
+  /** Roots being attached: staged, not yet committed. */
+  listStagedRootTargets(): ConnectedTarget[] {
+    return Array.from(this.stagedRootTargets.values())
+  }
+
   rootTargetCount(): number {
     return this.targets.size
   }
