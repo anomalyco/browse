@@ -26,6 +26,16 @@ describe("journal redaction", () => {
     expect(redacted).toContain("next=/home")
   })
 
+  test("stays fast on huge results", () => {
+    // A 5 MB string of word characters used to make the assignment pattern backtrack quadratically and hang the relay.
+    for (const text of ["x".repeat(5_000_000), `password${"a".repeat(2_000_000)}`, `?${"t".repeat(2_000_000)}token`]) {
+      const started = performance.now()
+      redactJournalText(text)
+      expect(performance.now() - started).toBeLessThan(2_000)
+    }
+    expect(redactJournalText(`const myExtremelyLongAndDescriptiveIdentifierForTheProductionDatabasePassword = "pw-123456"`)).not.toContain("pw-123456")
+  })
+
   test("entries redact code, results and URLs", () => {
     const entry = makeJournalEntry({
       sessionId: "github",

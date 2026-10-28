@@ -59,14 +59,19 @@ export function truncateForJournal(text: string, maxLength: number): string {
 const redacted = "[REDACTED]"
 const sensitiveWord = String.raw`(?:pass(?:word|wd|code|phrase)?|pwd|otp|one[-_ ]?time|2fa|mfa|totp|pin|code|token|secret|api[-_]?key|access[-_]?key|private[-_]?key|auth(?:orization)?|credential|session|cookie|bearer|cvv|cvc|card[-_ ]?number)`
 const stringLiteral = String.raw`(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|\`(?:[^\`\\]|\\.)*\`)`
+// The identifier text around a credential word is bounded: an unbounded `[\w$-]*` before the word backtracks over
+// every word character after each start position, so a long run of them (a 5 MB result, a base64 screenshot) made
+// redaction quadratic and hung the relay. A match can start anywhere in a longer identifier, so the bound loses nothing
+// before the word.
+const affix = String.raw`{0,64}`
 // `password: "x"`, `token = 'x'`, `"otp": "x"`
-const sensitiveAssignment = new RegExp(String.raw`(["'\`]?[\w$-]*${sensitiveWord}[\w$-]*["'\`]?\s*[:=]\s*)${stringLiteral}`, "gi")
+const sensitiveAssignment = new RegExp(String.raw`(["'\`]?[\w$-]${affix}${sensitiveWord}[\w$-]${affix}["'\`]?\s*[:=]\s*)${stringLiteral}`, "gi")
 // `getByLabel("Password").fill("x")`, `fill("#otp", "x")`, `fillInput(ref("e3"), "x")` on a line mentioning a credential.
 const valueCall = new RegExp(String.raw`(\.(?:fill|type|pressSequentially|setInputValue)\s*\((?:\s*${stringLiteral}\s*,)?\s*|\bfillInput\s*\([^;\n]*?,\s*)${stringLiteral}`, "gi")
 const sensitiveLine = new RegExp(sensitiveWord, "i")
 // `{ target: "Password", value: "x" }` on a line mentioning a credential.
 const valueProperty = new RegExp(String.raw`(\bvalue\s*:\s*)${stringLiteral}`, "gi")
-const sensitiveQuery = new RegExp(String.raw`([?&#][\w.-]*${sensitiveWord}[\w.-]*=)[^&#\s"'\`]+`, "gi")
+const sensitiveQuery = new RegExp(String.raw`([?&#][\w.-]${affix}${sensitiveWord}[\w.-]${affix}=)[^&#\s"'\`]+`, "gi")
 const tokenPatterns = [
   /\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}/g, // JWT
   /\b(?:Bearer|Basic)\s+[\w~+/.=-]{12,}/gi,
