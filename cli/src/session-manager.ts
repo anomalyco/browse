@@ -45,6 +45,8 @@ export type SessionHooks = {
   readonly onTargetOwnershipChange?: (change: TargetOwnershipChange) => void
   /** Close a live relay-owned target by its durable target id. */
   readonly onReleaseRelayTarget?: (targetId: string) => Effect.Effect<void, Error>
+  /** Target ids of every live relay-owned page of a session: its default page and the pages and popups it opened. */
+  readonly relayTargetIdsForSession?: (sessionId: string) => readonly string[]
   /** Persist session identity and target continuity after durable lifecycle changes. */
   readonly onSessionsChanged?: (sessions: readonly PersistedSession[]) => unknown | Promise<unknown>
   /** Cancel the session's pending handoff so its waiter fails; true when one was pending. */
@@ -367,7 +369,7 @@ export class OpenCodeBrowserSessions {
         if (manager.sessions.get(id) !== session) {
           return false
         }
-        if (session.target?.owner === "relay") yield* manager.closeRelayTarget(session.target.id).pipe(Effect.ignore)
+        yield* manager.closeSessionRelayTargets(session)
         manager.sessions.delete(id)
         yield* manager.commitPersistence(() => Effect.sync(() => {
           manager.sessions.set(id, session)
@@ -392,7 +394,7 @@ export class OpenCodeBrowserSessions {
         if (manager.sessions.get(id) !== existing) {
           return yield* sessionError("inactive", `Session is no longer active: ${id}`, id)
         }
-        if (existing.target?.owner === "relay") yield* manager.closeRelayTarget(existing.target.id).pipe(Effect.ignore)
+        yield* manager.closeSessionRelayTargets(existing)
         const session = manager.createOpenCodeBrowserSession(id, existing.readOnly)
         manager.sessions.set(id, session)
         yield* manager.commitPersistence(() => Effect.sync(() => {
@@ -880,6 +882,18 @@ export class OpenCodeBrowserSessions {
     this.notifyTargetOwnershipChange(this.targetOwnership.releaseTargetOwnership(target.id, session.id))
     delete session.target
     return Effect.void
+  }
+
+  /**
+   * Delete and reset close the pages the session opened, not just its default page: `context.newPage()` pages and
+   * popups used to stay open (and grouped under the gone session) until idle cleanup closed them. Adopted user tabs
+   * are never closed, only released.
+   */
+  private closeSessionRelayTargets(session: OpenCodeBrowserSession): Effect.Effect<void> {
+    const ids = new Set(this.hooks.relayTargetIdsForSession?.(session.id) ?? [])
+    if (session.target?.owner === "relay") ids.add(session.target.id)
+    else if (session.target) ids.delete(session.target.id)
+    return Effect.forEach(ids, (targetId) => this.closeRelayTarget(targetId).pipe(Effect.ignore), { discard: true })
   }
 
   private closeRelayTarget(targetId: string): Effect.Effect<void, Error> {

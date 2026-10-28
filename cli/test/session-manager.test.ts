@@ -188,6 +188,25 @@ describe("delete and reset while busy", () => {
   })
 })
 
+describe("closing a session's pages", () => {
+  test("delete and reset close every page the session opened, not just its default page", async () => {
+    const closed: string[] = []
+    const pages: Record<string, string[]> = { many: ["T-default", "T-new-page", "T-popup"], again: ["T-other"] }
+    const sessions = new OpenCodeBrowserSessions("http://127.0.0.1:0", () => new FakeSandbox(async () => ok("x")), {
+      lifecycleTimeoutMs: 5_000,
+      onReleaseRelayTarget: (targetId) => Effect.sync(() => { closed.push(targetId) }),
+      relayTargetIdsForSession: (id) => pages[id] ?? [],
+    })
+    await run(sessions.execute({ sessionId: "many", code: "...", createIfMissing: true }))
+    expect(await run(sessions.delete("many"))).toEqual({ deleted: true })
+    expect(closed.sort()).toEqual(["T-default", "T-new-page", "T-popup"])
+    closed.length = 0
+    await run(sessions.execute({ sessionId: "again", code: "...", createIfMissing: true }))
+    await run(sessions.reset("again"))
+    expect(closed).toEqual(["T-other"])
+  })
+})
+
 describe("realm timers", () => {
   test("dispose clears pending timers and refuses new ones", async () => {
     const realm = new ExecuteRealm()

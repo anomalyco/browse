@@ -454,6 +454,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         reconcileTargetOwnership(change)
       },
       onReleaseRelayTarget: (targetId) => releaseRelayTarget(targetId),
+      relayTargetIdsForSession: (sessionId) => registry.listRootTargets()
+        .filter((target) => target.owner === "relay" && target.opencodeBrowserSessionId === sessionId)
+        .map((target) => target.targetInfo.targetId),
       onCancelSessionHandoff: (sessionId) => handoffs.cancelForSession(sessionId) !== undefined,
       onSessionsChanged: async (entries) => {
         if (catalogWritesEnabled) await sessionCatalog?.save(entries)
