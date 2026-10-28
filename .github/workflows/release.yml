@@ -100,10 +100,14 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          tag="v$VERSION"
-          if [ "$REF_TYPE" = tag ]; then tag="$REF_NAME"; fi
-          bun scripts/release-check.ts --versions-only --tag "$tag" --require-changelog
-          bun scripts/changelog.ts check "$VERSION"
+          if [ "$REF_TYPE" = tag ]; then
+            bun scripts/release-check.ts --versions-only --tag "$REF_NAME" --require-changelog
+            bun scripts/changelog.ts check "$VERSION"
+          else
+            # A dry run from a branch: the changelog entry comes with `bun run release`, so only warn.
+            bun scripts/release-check.ts --versions-only
+            bun scripts/changelog.ts check "$VERSION" || echo "::warning::changelog/$VERSION.md is missing or not ready; a release tag would fail here."
+          fi
 
       - name: Typecheck (extension)
         run: bun run typecheck
@@ -161,12 +165,12 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
         run: |
           if [ "$REF_TYPE" = tag ]; then bun scripts/release-check.ts --tag "$REF_NAME" --require-changelog
-          else bun scripts/release-check.ts --require-changelog; fi
+          else bun scripts/release-check.ts; fi
 
       - name: Release notes
         env:
           VERSION: ${{ needs.verify.outputs.version }}
-        run: bun scripts/changelog.ts notes "$VERSION" > release/NOTES.md
+        run: bun scripts/changelog.ts notes "$VERSION" > release/NOTES.md || echo "No changelog entry for $VERSION (dry run)." > release/NOTES.md
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
