@@ -70,7 +70,7 @@ import { ProtectedFrameTracker } from "./protected-frames.ts"
 import { RootTargetLifecycle } from "./root-target-lifecycle.ts"
 import { boundedToken, runtimeFailureKind, summarizeDiagnosticUrl, summarizeRuntimeEvaluate } from "./runtime-diagnostics.ts"
 import { shouldExposeChildTarget, TargetRegistry, type RootTargetChange, type TargetOwnershipChange } from "./target-registry.ts"
-import { autoUpdateModes, autoUpdateOverride, autoUpdateStatus, createAutoUpdater, npmRuntime, setStoredMode, spawnRelayRestart, storedMode, type AutoUpdateMode } from "./auto-update.ts"
+import { autoUpdateModes, autoUpdateOverride, autoUpdateStatus, createAutoUpdater, npmRuntime, setStoredMode, storedMode, type AutoUpdateMode } from "./auto-update.ts"
 import { createUpdateWatcher } from "./update.ts"
 import { describeChanges, describeSettings, parseSettingChanges, settingsFromExtension, SettingsInputError, settingsToExtension, type SettingOverrides, type Settings } from "./user-settings.ts"
 import { installCommand, storeConfig } from "./paths.ts"
@@ -2251,7 +2251,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
           isIdle: browserIdle,
           log: relayLog,
           onChange: () => sendRelaySettings(),
-          restart: (refused) => spawnRelayRestart(runtime.layout, refused),
         })
         autoUpdater.start()
       }

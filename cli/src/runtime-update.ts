@@ -1,6 +1,10 @@
-// `update` and `rollback` for npm installs (auto-update.ts has the layout). Both switch runtime/current.json and restart
-// the relay through the same safe restart as `relay restart`, which a busy relay refuses (a capture, a recording, a raw
-// CDP client); then nothing is switched and the command says so. --force ends what's blocking it, like `relay restart`.
+// Switching an npm install's version (auto-update.ts has the layout): `update`, `rollback`, and the two commands the
+// relay's updater runs in detached children so nothing waits on its event loop:
+//   runtime-install <version> [--integrity <sri>]   installs and verifies one version, records it as pending
+//   runtime-switch <version>                         switches to an installed version (exit 1 when refused)
+// A switch drains the running relay first (the same safe restart as `relay restart`, refused while a capture, a recording
+// or a raw CDP client is busy). Only once it has stopped does current.json move and the new version's relay start, so
+// on a refusal nothing changes: no MCP server swaps, and nothing runs a mix of versions. --force ends what's blocking it.
 import { Effect } from "effect"
 import { existsSync } from "node:fs"
 import {
@@ -14,10 +18,13 @@ import {
   readCurrent,
   readState,
   registryUrl,
+  runtimeLayout,
   switchVersion,
   updateState,
   versionEntry,
   writeCurrent,
+  type AutoUpdateState,
+  type Current,
   type Layout,
 } from "./auto-update.ts"
 import { cliCommand, installCommand } from "./paths.ts"
@@ -26,22 +33,42 @@ import * as RelayLifecycle from "./relay-lifecycle.ts"
 
 const log = (line: string) => process.stdout.write(line + "\n")
 
-/** Restarts the relay from `entry`; undefined when it restarted (or none was running), else why it didn't. */
-async function restartFrom(entry: string, options: { readonly force: boolean }): Promise<string | undefined> {
+/**
+ * Switches to an installed `version`: drains the running relay, then points current.json at the version (keeping
+ * `previous` for rollback) and starts its relay. Undefined when it switched, else why not (and current.json is as it was).
+ */
+export async function switchTo(layout: Layout, version: string, options: { readonly previous: string | undefined; readonly force: boolean }): Promise<string | undefined> {
+  const entry = versionEntry(layout, version)
+  if (!existsSync(entry)) return `${version} isn't installed`
+  const before: Current | undefined = readCurrent(layout)
+  let switched = false
+  const point = Effect.sync(() => {
+    switchVersion(layout, version, options.previous)
+    switched = true
+  })
   const program = Effect.gen(function* () {
     const relay = yield* RelayClient.Service
     const running = yield* Effect.result(relay.version)
-    if (running._tag === "Failure") return undefined
+    // No relay: nothing to drain or mix with.
+    if (running._tag === "Failure") {
+      yield* point
+      return undefined
+    }
     yield* RelayLifecycle.restartRelay({
       relay,
       clientKind: "cli",
       force: options.force,
       otherBuild: true,
-      start: RelayLifecycle.startManagedRelay(entry),
+      // Runs only after the old relay accepted the shutdown and stopped.
+      start: point.pipe(Effect.andThen(RelayLifecycle.startManagedRelay(entry))),
     })
-    return undefined
+    // Another relay can start in the gap (an old MCP server's next call); it must be the new version.
+    const now = yield* relay.version
+    return now.version === version ? undefined : `a relay of version ${now.version} started first`
   }).pipe(Effect.provide(RelayClient.layerFetch))
-  return Effect.runPromise(program.pipe(Effect.catch((error) => Effect.succeed((error as Error).message ?? String(error)))))
+  const refused = await Effect.runPromise(program.pipe(Effect.catch((error) => Effect.succeed((error as Error).message ?? String(error)))))
+  if (refused && switched && before) writeCurrent(layout, before)
+  return refused
 }
 
 function npmOnly(command: string) {
@@ -64,12 +91,8 @@ export async function runRollback(args: readonly string[]) {
     process.exitCode = 1
     return
   }
-  // Switch first so the replacement relay (and every new process) runs the previous version, and put it back if the
-  // relay refuses to restart, so nothing runs a mix.
-  writeCurrent(layout, { version: previous, previous: current.version, channel: channelOf(previous) })
-  const refused = await restartFrom(versionEntry(layout, previous), { force: args.includes("--force") })
+  const refused = await switchTo(layout, previous, { previous: current.version, force: args.includes("--force") })
   if (refused) {
-    writeCurrent(layout, current)
     log(`✗ Not rolled back: the relay didn't restart (${refused}).`)
     log(`  When no agent is using the browser, run \`${cliCommand("rollback")}\` again (or add --force to end what's blocking it).`)
     process.exitCode = 1
@@ -108,21 +131,61 @@ export async function runNpmUpdate(args: readonly string[], layout?: Layout) {
     return undefined
   })
   if (!entry) return true
+  // Asked for by name: no longer skipped (after a rollback), and pending, so the relay may switch to it once idle.
+  updateState(lay, ({ skipped: _skipped, ...state }) => ({ ...state, pending: published.version }))
   const current = readCurrent(lay)!
-  switchVersion(lay, published.version, current.version)
-  const refused = await restartFrom(entry, { force: args.includes("--force") })
+  const refused = await switchTo(lay, published.version, { previous: current.version, force: args.includes("--force") })
   if (refused) {
-    // Leave it installed and pending: the relay switches to it by itself once idle (unless auto-update is off).
-    writeCurrent(lay, current)
-    // Asked for by name: no longer skipped (after a rollback), so the relay may switch to it once idle.
-    updateState(lay, ({ skipped: _skipped, ...state }) => ({ ...state, pending: published.version }))
     const automatic = (autoUpdateOverride() ?? readState(lay).mode ?? "on") === "on"
     log(`! Installed ${published.version}, but the relay didn't restart (${refused}).`)
     log(automatic ? "  It switches to the new version by itself once no agent is using the browser." : `  When no agent is using the browser, run \`${cliCommand("update")}\` again.`)
     return true
   }
-  updateState(lay, ({ pending: _pending, skipped: _skipped, ...state }) => ({ ...state, lastUpdate: { from: current.version, to: published.version, at: new Date().toISOString() } }))
-  pruneVersions(lay, [published.version, current.version])
+  updateState(lay, ({ pending: _pending, ...state }) => ({ ...state, lastUpdate: { from: current.version, to: published.version, at: new Date().toISOString() } }))
+  pruneVersions(lay)
   log(`✓ Updated ${current.version} → ${published.version}.`)
   return true
+}
+
+/** `runtime-install <version> [--integrity <sri>]`: the relay's installer child. Exit 0 when installed and pending. */
+export async function runRuntimeInstall(args: readonly string[]) {
+  const layout = runtimeLayout()
+  const version = args[0]
+  const integrityAt = args.indexOf("--integrity")
+  const integrity = integrityAt === -1 ? undefined : args[integrityAt + 1]
+  if (!version || !/^\d+\.\d+\.\d+(-beta\.\d+)?$/.test(version)) {
+    log(`runtime-install: invalid version ${JSON.stringify(version)}`)
+    process.exitCode = 2
+    return
+  }
+  const clear = (installing: AutoUpdateState["installing"]) => (installing?.pid === process.pid ? undefined : installing)
+  try {
+    await installVersion({ layout, version, ...(integrity ? { integrity } : {}), ...(process.env.OPENCODE_BROWSER_NPM_REGISTRY ? { registry: await registryUrl() } : {}) })
+    updateState(layout, ({ installing, lastError: _error, ...state }) => {
+      const still = clear(installing)
+      return { ...state, ...(still ? { installing: still } : {}), pending: version }
+    })
+    log(`${new Date().toISOString()} installed ${version}`)
+  } catch (error) {
+    updateState(layout, ({ installing, ...state }) => {
+      const still = clear(installing)
+      return { ...state, ...(still ? { installing: still } : {}), lastError: { message: (error as Error).message, at: new Date().toISOString(), version } }
+    })
+    log(`${new Date().toISOString()} install of ${version} failed: ${(error as Error).message}`)
+    process.exitCode = 1
+  }
+}
+
+/** `runtime-switch <version>`: the relay's switch child. Exit 1 when the relay refused (nothing changed). */
+export async function runRuntimeSwitch(args: readonly string[]) {
+  const layout = runtimeLayout()
+  const version = args[0]
+  const current = readCurrent(layout)
+  if (!version || !current) {
+    process.exitCode = 2
+    return
+  }
+  const refused = await switchTo(layout, version, { previous: current.version, force: false })
+  log(`${new Date().toISOString()} switch ${current.version} → ${version}: ${refused ? `refused (${refused})` : "done"}`)
+  if (refused) process.exitCode = 1
 }

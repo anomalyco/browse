@@ -17,6 +17,10 @@ if (command === "--version" || command === "-v") {
   const { NodeRuntime } = await import("@effect/platform-node")
   const { runMcpServer } = await import("./mcp.ts")
   runMcpServer.pipe(NodeRuntime.runMain)
+} else if (command === "runtime-install" || command === "runtime-switch") {
+  // The relay's auto-update children (auto-update.ts); not for people.
+  const { runRuntimeInstall, runRuntimeSwitch } = await import("./runtime-update.ts")
+  await (command === "runtime-install" ? runRuntimeInstall : runRuntimeSwitch)(process.argv.slice(3))
 } else if (command === "update") {
   const { runUpdateCommand } = await import("./update.ts")
   await runUpdateCommand(process.argv.slice(3))

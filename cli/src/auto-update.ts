@@ -108,6 +108,8 @@ export type AutoUpdateState = {
   readonly skipped?: string
   readonly lastUpdate?: { readonly from: string; readonly to: string; readonly at: string }
   readonly lastError?: { readonly message: string; readonly at: string; readonly version?: string }
+  /** An installer running in its own process (`runtime-install`), so npm never blocks the relay. */
+  readonly installing?: { readonly version: string; readonly pid: number; readonly startedAt: number }
 }
 
 export function readState(layout = runtimeLayout()): AutoUpdateState {
@@ -327,21 +329,43 @@ export async function installVersion(options: {
   }
 }
 
-/** Keeps the current and previous versions and removes the rest (and abandoned temporary installs). */
-export function pruneVersions(layout: Layout, keep: readonly (string | undefined)[]) {
+/** Whether a process still runs. */
+export function processAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM"
+  }
+}
+
+/**
+ * Removes installed versions nothing needs. Never removes the current, previous or pending version (whatever the caller
+ * passes), nor a temporary install whose process still runs.
+ */
+export function pruneVersions(layout: Layout, keep: readonly (string | undefined)[] = []) {
   let names: string[] = []
   try {
     names = readdirSync(layout.versions)
   } catch {
     return
   }
+  const current = readCurrent(layout)
+  const kept = new Set([...keep, current?.version, current?.previous, readState(layout).pending].filter((name): name is string => !!name))
   for (const name of names) {
-    if (keep.includes(name)) continue
-    // Another process's install in progress: leave temporary directories younger than an hour.
-    const started = Number(/^\.install-\d+-(\d+)$/.exec(name)?.[1])
-    if (name.startsWith(".install-") && Number.isFinite(started) && Date.now() - started < 60 * 60_000) continue
+    if (kept.has(name)) continue
+    const temporary = /^\.install-(\d+)-\d+$/.exec(name)
+    if (temporary && processAlive(Number(temporary[1]))) continue
     rmSync(path.join(layout.versions, name), { recursive: true, force: true })
   }
+}
+
+/** Clears `pending` when its directory is gone (removed by hand, or by an older version's pruning). */
+export function validatePending(layout: Layout): AutoUpdateState {
+  const state = readState(layout)
+  if (!state.pending || existsSync(versionEntry(layout, state.pending))) return state
+  return updateState(layout, ({ pending: _pending, ...rest }) => rest)
 }
 
 /** Points new processes at `version`, keeping the version it replaces for rollback. */
@@ -375,6 +399,7 @@ const runtime = path.join(root, "runtime")
 const current = () => JSON.parse(readFileSync(path.join(runtime, "current.json"), "utf8")).version
 const entry = (version) => path.join(runtime, "versions", version, "node_modules", "@opencode", "browse", "dist", "cli.mjs")
 process.env.OPENCODE_BROWSER_HOME ??= root
+const relayPort = Number(process.env.OPENCODE_BROWSER_PORT) || 19988
 
 if (process.argv[2] !== "mcp") {
   process.argv[1] = entry(current())
@@ -421,7 +446,7 @@ if (process.argv[2] !== "mcp") {
         if (message.result && message.result.capabilities && message.result.capabilities.tools) listChanged = message.result.capabilities.tools.listChanged === true
       }
       toClient(line)
-      maybeSwap()
+      void maybeSwap()
     })
     if (replay && initialize) {
       swapping = true
@@ -438,11 +463,24 @@ if (process.argv[2] !== "mcp") {
     toChild(line)
   }
 
-  const maybeSwap = () => {
-    if (swapping || inflight.size > 0) return
+  // A new version in current.json swaps the server only once the relay runs it too (GET /version), so a server never
+  // talks to a relay of another version. With no relay at all for a few checks, nothing can mix, and it swaps.
+  let checking = false
+  let unreachable = 0
+  const relayVersion = () => fetch("http://127.0.0.1:" + relayPort + "/version", { signal: AbortSignal.timeout(2000) })
+    .then((response) => (response.ok ? response.json() : undefined))
+    .then((body) => (body && typeof body.version === "string" ? body.version : undefined), () => undefined)
+  const maybeSwap = async () => {
+    if (swapping || checking || inflight.size > 0) return
     let next
     try { next = current() } catch { return }
-    if (next === version) return
+    if (next === version) return void (unreachable = 0)
+    checking = true
+    const running = await relayVersion()
+    checking = false
+    unreachable = running === undefined ? unreachable + 1 : 0
+    if (running !== next && unreachable < 3) return
+    if (swapping || inflight.size > 0 || current() !== next) return
     const old = child
     version = next
     start(true)
@@ -455,7 +493,7 @@ if (process.argv[2] !== "mcp") {
     child.stdin.end()
     setTimeout(() => process.exit(0), 5000).unref()
   })
-  setInterval(maybeSwap, 2000).unref()
+  setInterval(() => void maybeSwap(), 1000).unref()
 }
 `
 }
@@ -481,42 +519,52 @@ export type AutoUpdaterDeps = {
   readonly log: (event: string, fields?: Record<string, unknown>) => void
   /** The notice changed (status page, MCP note). */
   readonly onChange?: () => void
-  /** Restarts the relay from the version current.json now names; `refused` runs when that restart didn't happen. */
-  readonly restart: (refused: () => void) => void
+  /**
+   * Starts a detached child process of this version's CLI (`runtime-install`, `runtime-switch`); onExit gets its exit
+   * code (null when it couldn't start). Children run on their own, so npm and the restart never block the relay.
+   */
+  readonly spawnChild?: (args: readonly string[], onExit: (code: number | null) => void) => number | undefined
   readonly env?: NodeJS.ProcessEnv
   readonly fetch?: typeof fetch
   readonly run?: Run
   readonly now?: () => number
 }
 
+/** How long an installer may run before the relay gives up on it (npm's own timeout is 10 minutes). */
+const INSTALL_TIMEOUT_MS = 15 * 60_000
+
 /**
- * The relay's background updater. tick() checks at most once per checkIntervalMs, installs in "on" mode, and switches
- * and restarts once the browser is idle. Never throws; failures are kept in auto-update.json and tried again on the
- * next day's check.
+ * The relay's background updater. tick() checks at most once per checkIntervalMs; in "on" mode a newer version is
+ * installed by a detached `runtime-install` child, and once it's installed and the browser is idle, a detached
+ * `runtime-switch` child drains this relay, points current.json at the new version and starts its relay (refused while
+ * busy, and then nothing changes). Nothing on the relay's event loop waits for npm. Never throws; failures are kept in
+ * auto-update.json and tried again on the next day's check.
  */
 export function createAutoUpdater(deps: AutoUpdaterDeps) {
   const env = deps.env ?? process.env
   const now = deps.now ?? Date.now
   const { layout, version: running } = deps.runtime
   const checkIntervalMs = Number(env.OPENCODE_BROWSER_AUTO_UPDATE_INTERVAL_MS) || DAY_MS
+  const spawnChild = deps.spawnChild ?? ((args, onExit) => spawnRuntimeChild(layout, versionEntry(layout, running), args, onExit, env))
   let busy = false
+  let switching = false
   let timer: NodeJS.Timeout | undefined
 
-  // The relay now runs what it was waiting to switch to: record it, and drop versions older than the previous one.
+  // The relay now runs what it was waiting to switch to: record it, and drop versions nothing needs.
   const settled = readState(layout)
   if (settled.pending === running) {
     updateState(layout, ({ pending: _pending, lastError: _error, ...state }) => ({ ...state, lastUpdate: { from: deps.runtime.current.previous ?? "unknown", to: running, at: new Date(now()).toISOString() } }))
     deps.log("autoupdate.switched", { version: running, previous: deps.runtime.current.previous })
-    pruneVersions(layout, [running, deps.runtime.current.previous])
+    pruneVersions(layout, [running])
   }
 
   async function tick() {
-    if (busy) return
+    if (busy || switching) return
     busy = true
     try {
       const mode = effectiveMode(layout, env)
       if (mode === "off") return
-      let state = readState(layout)
+      let state = validatePending(layout)
       if (!state.checkedAt || now() - state.checkedAt >= checkIntervalMs || now() < state.checkedAt) {
         const channel = channelOf(running)
         try {
@@ -532,33 +580,39 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
       const latest = state.latest
       const wanted = latest && compareVersions(latest, running) > 0 && latest !== state.skipped ? latest : undefined
       if (!wanted || mode !== "on") return
-      // A pending version whose directory is gone (pruned by an install, deleted by hand) is installed again.
-      if (state.pending !== wanted || !existsSync(versionEntry(layout, wanted))) {
+
+      // An installer in its own process: wait for it, or record that it died without saying how it went.
+      const installing = state.installing
+      if (installing) {
+        if (processAlive(installing.pid) && now() - installing.startedAt < INSTALL_TIMEOUT_MS) return
+        state = updateState(layout, ({ installing: _installing, ...rest }) => ({
+          ...rest,
+          ...(rest.pending === installing.version ? {} : { lastError: { message: "the installer stopped without finishing", at: new Date(now()).toISOString(), version: installing.version } }),
+        }))
+        deps.log("autoupdate.installer_gone", { version: installing.version })
+      }
+      if (state.pending !== wanted) {
         if (state.lastError?.version === wanted && now() - Date.parse(state.lastError.at) < checkIntervalMs) return
-        try {
-          deps.log("autoupdate.installing", { version: wanted })
-          await installVersion({ layout, version: wanted, ...(state.integrity ? { integrity: state.integrity } : {}), ...(deps.run ? { run: deps.run } : {}), ...(env.OPENCODE_BROWSER_NPM_REGISTRY ? { registry: await registryUrl(deps.run, env) } : {}) })
-          state = updateState(layout, ({ lastError: _error, ...rest }) => ({ ...rest, pending: wanted }))
-          deps.log("autoupdate.installed", { version: wanted })
+        deps.log("autoupdate.installing", { version: wanted })
+        const pid = spawnChild(["runtime-install", wanted, ...(state.integrity ? ["--integrity", state.integrity] : [])], (code) => {
+          deps.log(code === 0 ? "autoupdate.installed" : "autoupdate.install_failed", { version: wanted, code })
           deps.onChange?.()
-        } catch (error) {
-          updateState(layout, (rest) => ({ ...rest, lastError: { message: (error as Error).message, at: new Date(now()).toISOString(), version: wanted } }))
-          deps.log("autoupdate.install_failed", { version: wanted, error: (error as Error).message })
-          deps.onChange?.()
-          return
-        }
+          // Switch as soon as it's ready rather than at the next tick.
+          if (code === 0) void tick()
+        })
+        if (pid) updateState(layout, (rest) => ({ ...rest, installing: { version: wanted, pid, startedAt: now() } }))
+        return
       }
       if (!deps.isIdle()) return
-      // Re-read: a concurrent install or rollback may have moved it.
       const current = readCurrent(layout)
       if (!current || current.version !== running) return
-      switchVersion(layout, wanted, running)
+      // runtime-switch drains this relay and only then moves current.json and starts the new relay; when the drain is
+      // refused (an agent started meanwhile), it changes nothing and the next idle tick tries again.
+      switching = true
       deps.log("autoupdate.switching", { from: running, to: wanted })
-      // A restart refused at the last moment (an agent started) puts current.json back, so nothing runs a mix; the
-      // version stays pending and the next idle tick tries again.
-      deps.restart(() => {
-        writeCurrent(layout, current)
-        deps.log("autoupdate.restart_refused", { version: wanted })
+      spawnChild(["runtime-switch", wanted], (code) => {
+        switching = false
+        if (code !== 0) deps.log("autoupdate.restart_refused", { version: wanted, code })
       })
     } catch (error) {
       deps.log("autoupdate.error", { error: (error as Error).message })
@@ -581,20 +635,21 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
   }
 }
 
-/**
- * Restarts the relay from the version current.json names: a detached `opencode-browser relay restart` through the shim
- * asks this relay to drain and stop (it refuses while busy) and starts the new one.
- */
-export function spawnRelayRestart(layout: Layout, refused: () => void, env: NodeJS.ProcessEnv = process.env) {
+/** Starts `node <entry> <args>` detached, logging to logs/auto-update.log; returns its pid. */
+export function spawnRuntimeChild(layout: Layout, entry: string, args: readonly string[], onExit: (code: number | null) => void, env: NodeJS.ProcessEnv = process.env): number | undefined {
   const { OPENCODE_BROWSER_MANAGED_RELAY: _managed, OPENCODE_BROWSER_RESTART_REQUEST_ID: _request, ...rest } = env
   mkdirSync(path.join(layout.root, "logs"), { recursive: true })
   const log = openSync(path.join(layout.root, "logs", "auto-update.log"), "a", 0o600)
-  const child = spawn(process.execPath, [layout.shim, "relay", "restart"], { detached: true, stdio: ["ignore", log, log], env: { ...rest, OPENCODE_BROWSER_HOME: layout.root } })
-  closeSync(log)
-  // When the restart works this relay is gone before the child exits; still here and a failure means it was refused.
-  child.on("error", () => refused())
-  child.on("exit", (code) => {
-    if (code !== 0) refused()
-  })
-  child.unref()
+  try {
+    const child = spawn(process.execPath, [entry, ...args], { detached: true, stdio: ["ignore", log, log], env: { ...rest, OPENCODE_BROWSER_HOME: layout.root } })
+    child.on("error", () => onExit(null))
+    child.on("exit", (code) => onExit(code))
+    child.unref()
+    return child.pid
+  } catch {
+    onExit(null)
+    return undefined
+  } finally {
+    closeSync(log)
+  }
 }

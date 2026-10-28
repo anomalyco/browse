@@ -345,7 +345,7 @@ async function installRuntime(): Promise<{ entry: string; version: string }> {
     ...(pending && compareVersions(pending, version) > 0 ? { pending } : {}),
     ...(skipped && skipped !== version ? { skipped } : {}),
   }))
-  pruneVersions(layout, [version, previous, readState(layout).pending])
+  pruneVersions(layout, [version, previous])
   // Earlier versions installed one copy straight into runtime/; the shim replaces it.
   for (const legacy of ["node_modules", "package.json", "package-lock.json"]) rmSync(path.join(files.runtime, legacy), { recursive: true, force: true })
   return { entry: layout.shim, version }
