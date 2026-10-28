@@ -17,6 +17,9 @@ export function dataRoot(home = os.homedir()): string {
   return path.join(xdg ?? path.join(home, ".local", "share"), "opencode-browser")
 }
 
+/** The published npm package. */
+export const PACKAGE_NAME = "@opencode/browse"
+
 /** This package's root: cli/ in a checkout (src/paths.ts, or the dist/cli.mjs bundle), else the installed package. */
 const packageRoot = () => path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 
@@ -39,7 +42,7 @@ const quoted = (value: string) => (/^[\w@%+=:,./-]+$/.test(value) ? value : JSON
 export function cliCommand(args: string): string {
   return fromCheckout()
     ? `node ${quoted(path.join(packageRoot(), "dist", "cli.mjs"))} ${args}`
-    : `npx opencode-browser-cli ${args}`
+    : `npx ${PACKAGE_NAME} ${args}`
 }
 
 /**
@@ -50,5 +53,5 @@ export const STORE_LISTED = false
 
 /** How to tell the user to install (or update) OpenCode Browser. */
 export function installCommand(): string {
-  return fromCheckout() ? `cd ${quoted(path.dirname(packageRoot()))} && bun run setup` : "npx opencode-browser-cli install"
+  return fromCheckout() ? `cd ${quoted(path.dirname(packageRoot()))} && bun run setup` : `npx ${PACKAGE_NAME} install`
 }

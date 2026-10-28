@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "opencode-browser-cli",
+      "name": "@opencode/browse",
       "dependencies": {
         "@effect/platform-node": "4.0.1",
         "@effect/platform-node-shared": "4.0.1",

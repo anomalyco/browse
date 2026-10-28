@@ -230,8 +230,9 @@ cd cli && bun src/main.ts status # the CLI from source
 bun run package                  # release/opencode-browser-<version>.zip for the Chrome Web Store
 ```
 
-`cli/` is the npm package `opencode-browser-cli` with its own lockfile. To release: bump `cli/package.json`, run
-`npm publish --access public` in `cli/`, then upload the zip from `bun run package`.
+`cli/` is the npm package [`@opencode/browse`](https://www.npmjs.com/package/@opencode/browse) with its own lockfile.
+To release: bump `cli/package.json`, run `npm publish` in `cli/` (`publishConfig` makes the scoped package public),
+then upload the zip from `bun run package`.
 
 ## License
 
