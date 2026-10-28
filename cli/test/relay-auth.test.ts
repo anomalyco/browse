@@ -6,7 +6,6 @@ import path from "node:path"
 import * as ExtensionPairing from "../../src/background/pairing.ts"
 import { hasRelayToken } from "../src/http-api.ts"
 import {
-  chromeWebStoreExtensionOrigin,
   stableUnpackedExtensionOrigin,
   validateBrowserFetchSite,
   validateHostHeader,
@@ -61,9 +60,13 @@ describe("Host, Origin and Sec-Fetch-Site checks", () => {
     expect(validateBrowserFetchSite(request({ "sec-fetch-site": "same-site" }))).toBeDefined()
   })
 
-  test("the extension link accepts only the two known extension ids", () => {
-    expect(validateWebSocketOrigin({ origin: chromeWebStoreExtensionOrigin, requireChromeExtension: true })).toBeUndefined()
+  test("the extension link accepts the unpacked id and configured store items only", () => {
+    const store = "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
     expect(validateWebSocketOrigin({ origin: stableUnpackedExtensionOrigin, requireChromeExtension: true })).toBeUndefined()
+    expect(validateWebSocketOrigin({ origin: store, requireChromeExtension: true })).toBeDefined()
+    expect(validateWebSocketOrigin({ origin: store, requireChromeExtension: true, additionalChromeExtensionOrigins: new Set([store]) })).toBeUndefined()
+    // The store ID earlier builds hard-coded is accepted only once a release configures it.
+    expect(validateWebSocketOrigin({ origin: "chrome-extension://mfnicocicmmlkpjnaffgihfjhdgjkdjg", requireChromeExtension: true })).toBeDefined()
     expect(validateWebSocketOrigin({ origin: "chrome-extension://aaaabbbbccccddddeeeeffffgggghhhh", requireChromeExtension: true })).toBeDefined()
     expect(validateWebSocketOrigin({ origin: undefined, requireChromeExtension: true })).toBeDefined()
     expect(validateWebSocketOrigin({ origin: "https://evil.test" })).toBeDefined()
