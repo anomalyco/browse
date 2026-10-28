@@ -1163,9 +1163,21 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return
     }
     if (extensionMethod === "ready") {
-      void Effect.runPromise(rootLifecycle.settle(generation)).then((reconciled) => {
+      void Effect.runPromise(rootLifecycle.settle(generation)).then((settled) => {
         if (!extensionRpc.isCurrent(socket) || generation !== extensionGeneration) return
-        if (reconciled) {
+        // A tab that can't be attached again (seen: a page wedged mid-navigation after the extension's service
+        // worker restarted, where every command times out) used to fail the whole inventory: the relay closed the
+        // connection, the extension reconnected, the same tab failed three minutes later, and no agent could work
+        // until the user found and closed that tab. Only those tabs are let go now.
+        const failed = settled ? [] : rootLifecycle.failedTabIds(generation)
+        if (failed.length > 0) {
+          relayLog("extension.inventory.dropped", { tabIds: failed.join(","), generation })
+          for (const tabId of failed) {
+            detachTargetState(tabId)
+            sendExtensionBestEffort({ method: "debugger.detach", params: { tabId } })
+          }
+        }
+        if (settled || failed.length > 0) {
           for (const target of registry.listRootTargets()) {
             if (!announcedRootTabIds.has(target.tabId)) detachTargetState(target.tabId)
           }

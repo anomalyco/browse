@@ -192,6 +192,11 @@ export class RootTargetLifecycle {
     return generation === undefined || (generation === this.options.extension.generation() && !Array.from(this.failedTabs.values()).includes(generation))
   })
 
+  /** Tabs whose inventory work failed in this generation (why `settle` reported false). */
+  failedTabIds(generation: number): number[] {
+    return Array.from(this.failedTabs).filter(([, failedGeneration]) => failedGeneration === generation).map(([tabId]) => tabId)
+  }
+
   readonly close = Effect.fn("RootTargetLifecycle.close")(function* (this: RootTargetLifecycle) {
     this.closing = true
     yield* this.settle()

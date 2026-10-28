@@ -41,7 +41,7 @@ class FakeExtension {
    * Resolves true once the relay proved the code and accepted the extension's proof. A real extension stops when
    * the relay's proof is wrong; `answerAnyway` sends the extension's proof regardless, as an impostor would.
    */
-  async pair(options: { readonly answerAnyway?: boolean; readonly proofPort?: number; readonly settings?: Record<string, unknown> } = {}): Promise<boolean> {
+  async pair(options: { readonly answerAnyway?: boolean; readonly proofPort?: number; readonly settings?: Record<string, unknown>; readonly attachedTabs?: readonly number[] } = {}): Promise<boolean> {
     await new Promise<void>((resolve, reject) => {
       this.socket.once("open", () => resolve())
       this.socket.once("error", reject)
@@ -66,6 +66,8 @@ class FakeExtension {
     if (!this.relayProved && !options.answerAnyway) return false
     this.socket.send(JSON.stringify({ method: "auth.response", params: { proof: pairingProof(this.code, "extension", proofPort, nonce, params.nonce) } }))
     this.socket.on("message", (data) => this.answer(JSON.parse(String(data)) as Command))
+    // A reconnecting extension announces the tabs it still has attached, then says it's ready.
+    for (const tabId of options.attachedTabs ?? []) this.emit("debugger.attached", { tabId })
     this.socket.send(JSON.stringify({ method: "ready" }))
     // A current extension sends its status page settings right after; an older one sends none.
     if (options.settings) this.emit("settings", options.settings)
@@ -372,6 +374,24 @@ describe("relay", () => {
       ["Page.setDocumentContent", { frameId: "TARGET-71", html: "<h1>hi</h1>" }],
     ])
     socket.close()
+    extension.close()
+  }, 20_000)
+
+  test("a tab that can't be attached again is let go instead of failing the whole reconnect", async () => {
+    const info = (tabId: number) => ({ targetId: `TARGET-${tabId}`, type: "page", title: "Example", url: `https://example.com/${tabId}`, attached: true, browserContextId: "CTX" })
+    const extension = new FakeExtension(pairingCode(home))
+      .on("Target.getTargetInfo", (command) => ({ targetInfo: info(Number(command.params?.tabId)) }))
+      // Tab 92 is wedged: every command to it fails, as when a page hangs mid-navigation.
+      .on("Page.enable", (command) => { if (command.params?.tabId === 92) throw new Error("Page.enable timed out"); return {} })
+    expect(await extension.pair({ attachedTabs: [91, 92] })).toBe(true)
+    const status = async () => await (await fetch(`${base}/extension/status`, { headers: { authorization: `Bearer ${token}` } })).json() as { connected: boolean; targets: Array<{ tabId: number }> }
+    for (let i = 0; i < 100 && !(await status()).targets?.some((target) => target.tabId === 91); i++) await Bun.sleep(100)
+    await Bun.sleep(500)
+    // Before, the relay closed the connection (1011) and the extension never got to work.
+    expect(extension.closeCode).toBeUndefined()
+    expect((await status()).connected).toBe(true)
+    expect((await status()).targets.map((target) => target.tabId)).toEqual([91])
+    expect(extension.commands.some((command) => command.method === "debugger.detach" && command.params?.tabId === 92)).toBe(true)
     extension.close()
   }, 20_000)
 
