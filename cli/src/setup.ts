@@ -15,7 +15,7 @@ import path from "node:path"
 import { createInterface } from "node:readline/promises"
 import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse } from "jsonc-parser"
-import { cliCommand, dataRoot, installCommand, STORE_LISTED } from "./paths.ts"
+import { cliCommand, dataRoot, installCommand, PACKAGE_NAME, STORE_LISTED } from "./paths.ts"
 import { formatPairingCode, pairingCode, relayAuthorization, writeExtensionPairing } from "./relay-secrets.ts"
 import { opencodeBrowserVersion } from "./version.ts"
 
@@ -23,7 +23,6 @@ const STORE_ID = "mfnicocicmmlkpjnaffgihfjhdgjkdjg"
 /** The unpacked build; its ID is pinned by the manifest key. */
 const UNPACKED_ID = "afeafocngkodbmaipcngoamamfmekgfo"
 const STORE_URL = `https://chromewebstore.google.com/detail/${STORE_ID}`
-const PACKAGE = "opencode-browser-cli"
 const MCP_NAME = "browse"
 /** The MCP server's name before it was renamed to `browse`. */
 const LEGACY_MCP_NAME = "opencode-browser"
@@ -312,7 +311,7 @@ function installRuntime() {
     if (!existsSync(bundle)) fail("Build the CLI first: `bun run build` in cli/ (or `bun run setup` at the top).")
     return bundle
   }
-  const spec = process.env.OPENCODE_BROWSER_PACKAGE ?? `${PACKAGE}@${opencodeBrowserVersion}`
+  const spec = process.env.OPENCODE_BROWSER_PACKAGE ?? `${PACKAGE_NAME}@${opencodeBrowserVersion}`
   // A package name, name@version, tarball path or URL: never an npm flag, and nothing a shell would interpret.
   if (spec.startsWith("-") || /[\s"'`&|<>^%!;]/.test(spec)) fail(`Invalid OPENCODE_BROWSER_PACKAGE: ${JSON.stringify(spec)}`)
   mkdirSync(files.runtime, { recursive: true })
@@ -322,7 +321,7 @@ function installRuntime() {
   const npmCli = windows ? windowsNpmCli() : undefined
   const npm = spawnSync(npmCli ? process.execPath : "npm", npmCli ? [npmCli, ...npmArgs] : npmArgs, { encoding: "utf8" })
   if (npm.status !== 0) fail(`Could not install ${spec}: ${(npm.stderr || npm.stdout || "npm failed").trim()}`)
-  return path.join(files.runtime, "node_modules", PACKAGE, "dist", "cli.mjs")
+  return path.join(files.runtime, "node_modules", PACKAGE_NAME, "dist", "cli.mjs")
 }
 
 /** npm's JavaScript entry next to node.exe, or next to the npm.cmd on PATH. */

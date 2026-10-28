@@ -1,12 +1,15 @@
 {
-  "name": "opencode-browser-cli",
+  "name": "@opencode/browse",
   "version": "0.0.2",
   "description": "OpenCode Browser: connect the extension to opencode, and drive your browser from any agent (CLI, MCP, Playwright).",
   "type": "module",
   "license": "MIT",
   "bin": {
-    "opencode-browser": "dist/cli.mjs",
-    "opencode-browser-cli": "dist/cli.mjs"
+    "browse": "dist/cli.mjs",
+    "opencode-browser": "dist/cli.mjs"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "files": [
     "dist",
