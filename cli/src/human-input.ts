@@ -123,7 +123,7 @@ export function beforeInput(tabId: number, method: string, params: JsonObject, r
   const run = tab.queue.then(() => {
     if (method === "Input.dispatchKeyEvent") return paceKey(tab, params)
     if (method === "DOM.scrollIntoViewIfNeeded") return scrollToward(tabId, tab, params, send)
-    return paceMouse(tabId, tab, params, send)
+    return paceMouse(tabId, tab, params, send, root)
   })
   tab.queue = run.catch(() => undefined)
   return run
@@ -131,7 +131,7 @@ export function beforeInput(tabId: number, method: string, params: JsonObject, r
 
 const paced = new Set(["Input.dispatchKeyEvent", "Input.dispatchMouseEvent", "DOM.scrollIntoViewIfNeeded"])
 
-async function paceMouse(tabId: number, tab: TabState, params: JsonObject, send: Send): Promise<void> {
+async function paceMouse(tabId: number, tab: TabState, params: JsonObject, send: Send, root: boolean): Promise<void> {
   const type = params.type
   if (typeof params.x !== "number" || typeof params.y !== "number") return
   // The relay forwards this same object, so adjustments here are what Chrome receives.
@@ -156,7 +156,7 @@ async function paceMouse(tabId: number, tab: TabState, params: JsonObject, send:
   target.x = x
   target.y = y
   if (type === "mouseMoved" || ((type === "mousePressed" || type === "mouseReleased") && tab.pointer && Math.hypot(tab.pointer.x - x, tab.pointer.y - y) >= 2))
-    await travel(tabId, tab, { x, y }, params, send)
+    await travel(tabId, tab, { x, y }, params, send, root)
   if (type === "mousePressed") {
     // People settle on a target for a moment before pressing.
     await sleep(random(45, 130) - (Date.now() - tab.arrivedAt))
@@ -170,10 +170,13 @@ async function paceMouse(tabId: number, tab: TabState, params: JsonObject, send:
 }
 
 /** Sends the curved movement from the pointer's last position to `to`, ending just short of it. */
-async function travel(tabId: number, tab: TabState, to: Point, params: JsonObject, send: Send) {
-  // The first movement on a page starts from somewhere plausible rather than the corner.
-  const from = tab.pointer ?? { x: to.x + random(-260, 260), y: to.y + random(-180, 180) }
-  const path = trajectory(from, to)
+async function travel(tabId: number, tab: TabState, to: Point, params: JsonObject, send: Send, root: boolean) {
+  // The first movement on a page starts from somewhere plausible rather than the corner, inside the viewport: a
+  // start off screen (negative, or past the edge) sent events no real pointer can.
+  const bounds = root && !tab.pointer ? await viewportSize(send) : undefined
+  const from = clampPoint(tab.pointer ?? { x: to.x + random(-260, 260), y: to.y + random(-180, 180) }, bounds)
+  // The bow, tremor and overshoot can swing past an edge too.
+  const path = trajectory(from, to).map((step) => ({ ...step, point: clampPoint(step.point, bounds) }))
   const started = Date.now()
   for (const { point, delay } of path) {
     await pace(delay, () => send("Input.dispatchMouseEvent", {
@@ -188,6 +191,20 @@ async function travel(tabId: number, tab: TabState, to: Point, params: JsonObjec
   tab.arrivedAt = Date.now()
   if (path.length)
     relayLog("input.move", { tabId, type: params.type, from: `${Math.round(from.x)},${Math.round(from.y)}`, to: `${Math.round(to.x)},${Math.round(to.y)}`, points: path.length, ms: tab.arrivedAt - started })
+}
+
+/** The page's viewport in CSS pixels, when Chrome reports it. */
+async function viewportSize(send: Send): Promise<{ width: number; height: number } | undefined> {
+  const metrics = (await send("Page.getLayoutMetrics", {}).catch(() => undefined)) as { cssLayoutViewport?: { clientWidth?: number; clientHeight?: number } } | undefined
+  const width = metrics?.cssLayoutViewport?.clientWidth
+  const height = metrics?.cssLayoutViewport?.clientHeight
+  return typeof width === "number" && typeof height === "number" && width > 0 && height > 0 ? { width, height } : undefined
+}
+
+/** Keeps a pointer position on screen: never negative, and inside the viewport when it's known. */
+export function clampPoint(point: Point, bounds?: { width: number; height: number }): Point {
+  const clamp = (value: number, max: number | undefined) => Math.min(Math.max(value, 0), max === undefined ? Infinity : Math.max(0, max - 1))
+  return { x: clamp(point.x, bounds?.width), y: clamp(point.y, bounds?.height) }
 }
 
 /**
@@ -218,7 +235,7 @@ async function scrollToward(tabId: number, tab: TabState, params: JsonObject, se
   // The wheel scrolls whatever is under the pointer, so it rests over the page first.
   if (!tab.pointer) {
     const rest = { x: viewport.clientWidth * random(0.35, 0.65), y: viewport.clientHeight * random(0.35, 0.65) }
-    await travel(tabId, tab, rest, { type: "mouseMoved" }, send)
+    await travel(tabId, tab, rest, { type: "mouseMoved" }, send, true)
     tab.pointer = rest
   }
   const pointer = tab.pointer

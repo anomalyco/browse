@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { beforeInput, humanInputEnabled, setHumanInput } from "../src/human-input.ts"
+import { beforeInput, clampPoint, humanInputEnabled, setHumanInput } from "../src/human-input.ts"
 
 // Human-like input follows the extension's setting from the next input, without a relay restart, and
 // OPENCODE_BROWSER_HUMAN_INPUT overrides it either way.
@@ -54,3 +54,30 @@ describe("human-like input", () => {
     expect((await move()).sent).toBeGreaterThan(5)
   })
 })
+
+describe("pointer positions stay on screen", () => {
+  test("the first move near a corner never starts or passes off screen", async () => {
+    for (let i = 0; i < 6; i++) {
+      const moves: { x: number; y: number }[] = []
+      const send = async (method: string, params: Record<string, unknown>) => {
+        if (method === "Page.getLayoutMetrics") return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } }
+        if (method === "Input.dispatchMouseEvent") moves.push({ x: Number(params.x), y: Number(params.y) })
+        return {}
+      }
+      await beforeInput(1000 + i, "Input.dispatchMouseEvent", { type: "mouseMoved", x: 5, y: 5 }, true, send)
+      expect(moves.length).toBeGreaterThan(0)
+      for (const point of moves) {
+        expect(point.x).toBeGreaterThanOrEqual(0)
+        expect(point.y).toBeGreaterThanOrEqual(0)
+        expect(point.x).toBeLessThan(800)
+        expect(point.y).toBeLessThan(600)
+      }
+    }
+  }, 30_000)
+
+  test("clampPoint keeps a point inside the viewport, and non-negative when the viewport is unknown", () => {
+    expect(clampPoint({ x: -12, y: 900 }, { width: 800, height: 600 })).toEqual({ x: 0, y: 599 })
+    expect(clampPoint({ x: -3, y: 40 })).toEqual({ x: 0, y: 40 })
+  })
+})
+
