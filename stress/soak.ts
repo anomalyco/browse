@@ -4,7 +4,7 @@
 //                       [--no-sites] [--sample-every 30] [--recovery-bound 120] [--only scenario,scenario]
 // Writes tasks.jsonl, chaos.jsonl, metrics.jsonl and summary.md under ~/stress-results/<stamp>-soak/.
 // Chaos types: relay-kill9, sw-stop, close-agent-tabs, close-windows, chrome-restart, network-drop, session-delete,
-// mcp-kill, tabs-cleanup. (A toolbar-stop simulation needs a test hook the extension doesn't have yet.)
+// mcp-kill, tabs-cleanup, toolbar-stop (needs an extension built with OPENCODE_BROWSER_TEST_HOOKS=1, as deploy.sh does).
 import fs from "node:fs"
 import path from "node:path"
 import { execFileSync } from "node:child_process"
@@ -17,7 +17,7 @@ import { relayPid, Sampler, type Sample } from "./lib/metrics.ts"
 import { Jsonl, mdEscape, oneLine, percentile, slope } from "./lib/results.ts"
 import { scenarios, type Ctx } from "./scenarios.ts"
 
-const ALL_CHAOS = ["relay-kill9", "sw-stop", "close-agent-tabs", "close-windows", "chrome-restart", "network-drop", "session-delete", "mcp-kill", "tabs-cleanup"]
+const ALL_CHAOS = ["relay-kill9", "sw-stop", "close-agent-tabs", "close-windows", "chrome-restart", "network-drop", "session-delete", "mcp-kill", "tabs-cleanup", "toolbar-stop"]
 const { values } = parseArgs({ options: {
   workers: { type: "string", default: "8" },
   minutes: { type: "string", default: "60" },
@@ -67,7 +67,7 @@ const SITES: { name: string; code: string }[] = [
 const only = values.only?.split(",")
 const soakScenarios = scenarios.filter((s) => (only ? only.includes(s.name) : s.tags.includes("soak")))
 
-type Worker = { id: number; client: McpClient; session?: string | undefined; busySince?: number | undefined; task?: string | undefined; iterations: number }
+type Worker = { id: number; client: McpClient; session?: string | undefined; busySince?: number | undefined; task?: string | undefined; iterations: number; leftover: string[] }
 const workers: Worker[] = []
 
 function newClient() {
@@ -80,6 +80,9 @@ async function workerLoop(worker: Worker) {
       worker.client = newClient()
       try { await worker.client.initialize() } catch (e) { tasksLog.write({ worker: worker.id, task: "mcp-initialize", ok: false, ms: 0, error: oneLine(e) }); await sleep(2000); continue }
     }
+    // A session whose delete failed (its MCP server was killed mid-task) is the harness's to clean up, as a person
+    // would close the tabs of an agent that crashed; named sessions outlive their clients by design.
+    for (const left of worker.leftover.splice(0)) await worker.client.call("session_delete", { id: left }, 30_000).catch(() => worker.leftover.push(left))
     const useSite = !values["no-sites"] && Math.random() < 0.3
     const site = SITES[Math.floor(Math.random() * SITES.length)]!
     const scenario = soakScenarios[Math.floor(Math.random() * soakScenarios.length)]!
@@ -101,7 +104,8 @@ async function workerLoop(worker: Worker) {
     } catch (e) {
       error = oneLine(e)
     } finally {
-      await worker.client.call("session_delete", { id: session }, 30_000).catch(() => undefined)
+      const deleted = await worker.client.call("session_delete", { id: session }, 30_000).then((r) => !r.isError, () => false)
+      if (!deleted) worker.leftover.push(session)
     }
     const to = Date.now()
     worker.busySince = undefined
@@ -187,6 +191,17 @@ const chaosActions: Record<string, () => Promise<Record<string, unknown>>> = {
     return { worker: victim.id, pid }
   },
   "tabs-cleanup": async () => ({ result: await relayJson("/tabs/cleanup", { idleMinutes: 0 }, 30_000).catch((e) => ({ error: oneLine(e) })) }),
+  // The user clicks the toolbar button on an agent's tab: the kill switch, which stops the agent there.
+  "toolbar-stop": async () => {
+    const c = await cdp()
+    const held = (await relayJson<any[]>("/json/list")).filter((t) => t.opencodeBrowserSessionId?.startsWith("soak-w"))
+    const victim = held[Math.floor(Math.random() * held.length)]
+    if (!victim) return { skipped: "no agent tab" }
+    const hooked = await c.evalInExtension<boolean>(`typeof globalThis.__opencodeBrowserTest?.toolbarClick === "function"`)
+    if (!hooked) throw new Error("the extension has no test hooks; build it with OPENCODE_BROWSER_TEST_HOOKS=1 (stress/exe/deploy.sh does)")
+    await c.evalInExtension(`globalThis.__opencodeBrowserTest.toolbarClick(${Number(victim.tabId)})`)
+    return { tabId: victim.tabId, session: victim.opencodeBrowserSessionId }
+  },
 }
 
 async function chaosLoop() {
@@ -246,7 +261,7 @@ await probe.client.call("session_new", { id: "soak-probe" })
 for (let i = 0; i < WORKERS; i++) {
   const client = newClient()
   await client.initialize()
-  workers.push({ id: i, client, iterations: 0 })
+  workers.push({ id: i, client, iterations: 0, leftover: [] })
 }
 const metrics = metricsLoop()
 const chaos = CHAOS.length ? chaosLoop() : Promise.resolve()
@@ -259,7 +274,10 @@ stopping = true
 const stuck = workers.filter((w) => w.busySince).map((w) => ({ worker: w.id, task: w.task, busyMs: Date.now() - w.busySince! }))
 await sleep(1000)
 await metrics.catch(() => undefined)
-const finalSample = await new Sampler().sample(await cdp().catch(() => undefined)).catch(() => ({}))
+for (const w of workers) for (const left of w.leftover.splice(0)) await w.client.call("session_delete", { id: left }, 30_000).catch(() => undefined)
+// Session deletes close their tabs asynchronously.
+await sleep(5000)
+const finalSample = await new Sampler().sample(await cdp().catch(() => undefined)).catch(() => ({} as Sample))
 for (const w of workers) await w.client.close()
 await probe.client.call("session_delete", { id: "soak-probe" }).catch(() => undefined)
 await probe.client.close()
@@ -278,7 +296,7 @@ const fit = (key: string) => {
   const vals = points.map((p) => p[1])
   return { key, perHour: Math.round(slope(points) * 100) / 100, min: Math.min(...vals), max: Math.max(...vals), last: vals.at(-1) ?? NaN, n: points.length }
 }
-const growth = ["relayRssMb", "relayFds", "relayThreads", "chromeRssMb", "chromeProcesses", "tabs", "groupedTabs", "groups", "debuggerAttached", "relayTargets", "relaySessions", "journalBytes", "relayLogBytes"].map(fit)
+const growth = ["relayRssMb", "relayFds", "relayThreads", "chromeRssMb", "chromeProcesses", "tabs", "groupedTabs", "groups", "debuggerAttached", "relayTargets", "relaySessions", "trackedTabs", "sessionTabs", "orphanTabs", "journalBytes", "relayLogBytes"].map(fit)
 const unexplainedRestarts = pidChanges.filter((c) => !chaosEvents.some((e) => (e.type === "relay-kill9") && Math.abs(e.at - c.at) < 60_000 + Number(values["sample-every"]) * 1000))
 const byChaos = new Map<string, any[]>()
 for (const e of chaosEvents) byChaos.set(e.type, [...(byChaos.get(e.type) ?? []), e])
@@ -287,6 +305,7 @@ for (const t of tasks) byTask.set(t.task, [...(byTask.get(t.task) ?? []), t])
 const errors = new Map<string, number>()
 for (const t of calm.filter((t) => !t.ok)) { const key = String(t.error).slice(0, 110); errors.set(key, (errors.get(key) ?? 0) + 1) }
 
+const maxUntracked = Math.max(0, ...samples.map((sample) => Number(sample.untrackedSessionTabs ?? 0)))
 const perHour = (key: string) => growth.find((g) => g.key === key)?.perHour ?? 0
 const memoryOk = perHour("relayRssMb") < 50 && perHour("relayFds") < 50 && perHour("tabs") < 10
 const criteria = [
@@ -295,6 +314,8 @@ const criteria = [
   { name: "no stuck workers after the run", ok: stuck.length === 0 && settle === "settled", value: JSON.stringify(stuck) },
   { name: "no unexplained relay restarts (crash loops)", ok: unexplainedRestarts.length === 0, value: String(unexplainedRestarts.length) },
   { name: "bounded growth (relay RSS < 50 MB/h, fds < 50/h, tabs < 10/h)", ok: memoryOk, value: "" },
+  { name: "every session tab tracked for idle cleanup (max untracked over the run)", ok: maxUntracked === 0, value: String(maxUntracked) },
+  { name: "no leaked tabs after the run (not held by a session, not a window's active tab)", ok: finalSample.orphanTabs === 0, value: String(finalSample.orphanTabs) },
 ]
 const md = [
   `# Soak + chaos`,

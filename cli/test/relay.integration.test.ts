@@ -42,7 +42,7 @@ class FakeExtension {
    * Resolves true once the relay proved the code and accepted the extension's proof. A real extension stops when
    * the relay's proof is wrong; `answerAnyway` sends the extension's proof regardless, as an impostor would.
    */
-  async pair(options: { readonly answerAnyway?: boolean; readonly proofPort?: number; readonly settings?: Record<string, unknown>; readonly attachedTabs?: readonly number[] } = {}): Promise<boolean> {
+  async pair(options: { readonly answerAnyway?: boolean; readonly proofPort?: number; readonly settings?: Record<string, unknown>; readonly attachedTabs?: readonly number[]; readonly agentTabs?: readonly number[] } = {}): Promise<boolean> {
     await new Promise<void>((resolve, reject) => {
       this.socket.once("open", () => resolve())
       this.socket.once("error", reject)
@@ -68,7 +68,7 @@ class FakeExtension {
     this.socket.send(JSON.stringify({ method: "auth.response", params: { proof: pairingProof(this.code, "extension", proofPort, nonce, params.nonce) } }))
     this.socket.on("message", (data) => this.answer(JSON.parse(String(data)) as Command))
     // A reconnecting extension announces the tabs it still has attached, then says it's ready.
-    for (const tabId of options.attachedTabs ?? []) this.emit("debugger.attached", { tabId })
+    for (const tabId of options.attachedTabs ?? []) this.emit("debugger.attached", { tabId, ...(options.agentTabs?.includes(tabId) ? { agent: true } : {}) })
     this.socket.send(JSON.stringify({ method: "ready" }))
     // A current extension sends its status page settings right after; an older one sends none.
     if (options.settings) this.emit("settings", options.settings)
@@ -396,7 +396,7 @@ describe("relay", () => {
     extension.close()
   }, 20_000)
 
-  test("a wedged tab is let go within seconds when the extension reconnects, not after three 60 s timeouts", async () => {
+  test("a wedged tab is let go within seconds when the extension reconnects (one 5 s timeout, no retries)", async () => {
     const info = (tabId: number) => ({ targetId: `TARGET-${tabId}`, type: "page", title: "Example", url: `https://example.com/${tabId}`, attached: true, browserContextId: "CTX" })
     const extension = new FakeExtension(pairingCode(home))
       .on("Target.getTargetInfo", (command) => ({ targetInfo: info(Number(command.params?.tabId)) }))
@@ -407,7 +407,7 @@ describe("relay", () => {
     const status = async () => await (await fetch(`${base}/extension/status`, { headers: { authorization: `Bearer ${token}` } })).json() as { connected: boolean; targets: Array<{ tabId: number }> }
     for (let i = 0; i < 300 && !(await status()).connected; i++) await Bun.sleep(100)
     expect((await status()).connected).toBe(true)
-    expect(Date.now() - started).toBeLessThan(25_000)
+    expect(Date.now() - started).toBeLessThan(10_000)
     expect((await status()).targets.map((target) => target.tabId)).toEqual([93])
     expect(extension.commands.some((command) => command.method === "debugger.detach" && command.params?.tabId === 94)).toBe(true)
     extension.close()
@@ -452,8 +452,10 @@ describe("relay", () => {
     expect((await post("/cli/session/delete", { id: "keeps-pages" })).ok).toBe(true)
     const third = new FakeExtension(pairingCode(home))
       .on("Target.getTargetInfo", (command) => ({ targetInfo: info(Number(command.params?.tabId)) }))
-    expect(await third.pair({ attachedTabs: [101, 102] })).toBe(true)
-    expect(await until(() => [101, 102].every((tabId) => third.commands.some((command) => command.method === "tabs.remove" && command.params?.tabId === tabId)), 5_000)).toBe(true)
+    // 103: an agent's tab the relay never knew (its attach was cut short); 104: a tab the user lent.
+    expect(await third.pair({ attachedTabs: [101, 102, 103, 104], agentTabs: [101, 102, 103] })).toBe(true)
+    expect(await until(() => [101, 102, 103].every((tabId) => third.commands.some((command) => command.method === "tabs.remove" && command.params?.tabId === tabId)), 5_000)).toBe(true)
+    expect(third.commands.some((command) => command.method === "tabs.remove" && command.params?.tabId === 104)).toBe(false)
     other.close()
     socket.close()
     third.close()
@@ -496,6 +498,36 @@ describe("relay", () => {
     expect(stopped.status).toBe(404)
     expect(((await stopped.json()) as { error?: string }).error).toContain("No active recording")
     expect((await post("/recording/cancel")).status).toBe(200)
+    socket.close()
+    extension.close()
+  }, 20_000)
+
+  test("a screenshot of a hidden tab that doesn't answer is released by a small capture, not left to time out", async () => {
+    const targetInfo = { targetId: "TARGET-79", type: "page", title: "Example", url: "https://example.com/", attached: true, browserContextId: "CTX" }
+    // Like Chrome on a background tab: a capture waits until the next capture request reaches the tab.
+    let release: (() => void) | undefined
+    const captures: Record<string, unknown>[] = []
+    const extension = new FakeExtension(pairingCode(home))
+      .on("tabs.create", () => ({ tabId: 79 }))
+      .on("Target.getTargetInfo", () => ({ targetInfo }))
+      .on("Page.captureScreenshot", (command) => {
+        captures.push(command.params?.params as Record<string, unknown>)
+        const previous = release
+        release = undefined
+        previous?.()
+        if (captures.length > 1) return { data: "nudge" }
+        return new Promise((resolve) => { release = () => resolve({ data: "full" }) })
+      })
+    expect(await extension.pair()).toBe(true)
+    const socket = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test?opencodeBrowserSessionId=shot`, { authorization: `Bearer ${token}` })
+    if (!(socket instanceof WebSocket)) throw new Error("CDP connection refused")
+    await cdpCall(socket, 1, "Target.createTarget", { url: "https://example.com/" })
+    const sessionId = String((await cdpCall(socket, 2, "Target.attachToTarget", { targetId: "TARGET-79", flatten: true })).result?.sessionId)
+    const started = Date.now()
+    const shot = await cdpCall(socket, 3, "Page.captureScreenshot", { format: "png" }, sessionId)
+    expect(shot.result).toEqual({ data: "full" })
+    expect(Date.now() - started).toBeLessThan(3_000)
+    expect(captures[1]).toMatchObject({ clip: { width: 1, height: 1 } })
     socket.close()
     extension.close()
   }, 20_000)

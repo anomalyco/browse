@@ -61,7 +61,10 @@ import { createScreenshotDiff, type ScreenshotDiffOptions, type ScreenshotDiffRe
 import { createWebMcpHelper, type WebMcpHelper } from "./webmcp.ts"
 import { startDemonstrationRecorder, type DemonstrationResult } from "./demonstration.ts"
 import { relayToken } from "./relay-secrets.ts"
-import { createExecuteFiles, executeAllowsNode, ExecuteRealm, sandboxModules, type ExecuteFiles } from "./execute-realm.ts"
+import * as SiteSecrets from "./site-secrets.ts"
+import { checkUrl, parseOriginPatterns } from "./domain-policy.ts"
+import { challengeWarning, classifyChallenge, probePageScript, probeSelectors, type ChallengeOutcome, type ChallengeProbe } from "./challenge-detection.ts"
+import { createExecuteFiles, executeAllowsNode, ExecuteRealm, pageVisibleApiWarning, sandboxModules, type ExecuteFiles } from "./execute-realm.ts"
 
 export { createAriaSnapshotHelper, createSnapshotHelpers, defaultAriaSnapshotTimeoutMs, fillInputs }
 
@@ -373,8 +376,20 @@ type SandboxGlobals = {
     readonly start: (page?: Page) => Promise<{ readonly capturing: boolean }>
     readonly stop: (page?: Page) => Promise<{ readonly capturing: boolean }>
   }
+  readonly secrets: {
+    readonly type: (target: Locator | string, name: string, options?: TypeSecretOptions) => Promise<TypeSecretResult>
+  }
   readonly handoffTracker: { count: number }
 }
+
+type TypeSecretOptions = {
+  /** Clear the field first (default true). */
+  readonly clear?: boolean
+  /** How long to wait for the target element, in milliseconds (default 10000). */
+  readonly timeout?: number
+}
+
+type TypeSecretResult = { readonly typed: true; readonly name: string; readonly origin: string; readonly kind: SiteSecrets.SiteSecretKind }
 
 type HandoffCallOptions = {
   readonly timeoutMs?: number
@@ -462,6 +477,10 @@ type ExecuteSandboxOptions = {
   readonly pageHealthCheckTimeoutMs?: number
   /** Whether the page with this target id is being recorded; helpers then draw nothing into it. */
   readonly isRecordingTarget?: (targetId: string) => boolean
+  /** The session's domain allowlist patterns (domain-policy.ts), or undefined when it has none. */
+  readonly allowedOrigins?: () => readonly string[] | undefined
+  /** Allowlist violations the relay saw in this session's tabs since the last execute. */
+  readonly drainGuardWarnings?: () => readonly string[]
 }
 
 export type ExecuteResult = {
@@ -514,7 +533,7 @@ export class ExecuteSandbox {
   private explicitMedia: string | undefined
   /** Full Node access for execute code (OPENCODE_BROWSER_ALLOW_NODE=1); otherwise code runs in a vm realm. */
   private readonly allowNode = executeAllowsNode()
-  private realm = this.allowNode ? undefined : new ExecuteRealm()
+  private realm = this.allowNode ? undefined : this.createRealm()
   private state: Record<string, unknown> = this.realm?.state ?? {}
   private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
   private readonly networkCapture = new NetworkCapture.Recorder()
@@ -527,19 +546,35 @@ export class ExecuteSandbox {
 
   constructor(readonly options: ExecuteSandboxOptions) {}
 
+  private createRealm(): ExecuteRealm {
+    return new ExecuteRealm({
+      onHostCall: (fn, receiver, args) => this.addWarningOnce(pageVisibleApiWarning(fn, receiver, args)),
+    })
+  }
+
+  private addWarningOnce(warning: string | undefined): void {
+    if (warning && !this.pendingWarnings.includes(warning)) this.pendingWarnings.push(warning)
+  }
+
   execute(code: string, options: ExecuteOptions = {}): Effect.Effect<ExecuteResult> {
     return Effect.tryPromise({
       try: async () => {
         if (this.realm?.isStopped) {
-          this.realm = new ExecuteRealm()
+          this.realm = this.createRealm()
           this.state = this.realm.state
           this.pendingWarnings.push("The previous execute realm stopped; JavaScript state and pending callbacks were reset.")
         }
+        if (!this.realm) for (const warning of pageVisibleApiSourceWarnings(code)) this.addWarningOnce(warning)
         const globals = await this.getGlobals(options)
         const { result, logs, logSummary, aftermath } = await runUserCode({ code, globals, ...(this.realm ? { realm: this.realm } : {}) })
+          .then(async (completed) => ({ ...completed, aftermath: await this.withChallenge(globals.page, completed.aftermath, false) }))
+          .catch(async (error: unknown) => {
+            if (!(error instanceof ExecuteCodeError) || !error.aftermath) throw error
+            throw new ExecuteCodeError(error.originalError, error.logs, error.logSummary, await this.withChallenge(globals.page, error.aftermath, true))
+          })
         await this.networkCapture.settleForOutput()
         const extracted = extractExecuteMedia(result)
-        const redactedValue = this.networkCapture.redactValue(extracted.value)
+        const redactedValue = this.redactOutputValue(extracted.value)
         const jsonSafeResult = toJsonSafeValue(redactedValue)
         const bounded = boundExecuteResult(stringifyResult(redactedValue), jsonSafeResult.serializable ? jsonSafeResult.value : undefined, jsonSafeResult.serializable)
         const warnings = this.finalizeWarnings(
@@ -591,12 +626,12 @@ export class ExecuteSandbox {
               : formatLocatorFailurePageWarning(error instanceof ExecuteCodeError ? error.originalError : error, aftermath, this.recreatedFromClosedUrl),
           )
           return {
-            text: this.networkCapture.redactText(error instanceof ExecuteCodeError ? error.stack ?? error.message : error.message),
+            text: this.redactOutputText(error instanceof ExecuteCodeError ? error.stack ?? error.message : error.message),
             isError: true,
             logs: this.redactCaptureLogs(error instanceof ExecuteCodeError ? error.logs : []),
             logSummary,
             warnings,
-            ...(diagnostic ? { diagnostic: this.networkCapture.redactText(diagnostic) } : {}),
+            ...(diagnostic ? { diagnostic: this.redactOutputText(diagnostic) } : {}),
             ...(aftermath ? { aftermath: this.redactCaptureAftermath(aftermath) } : {}),
             ...(error instanceof ExecuteCodeError ? {} : { setupFailed: true as const }),
           }
@@ -658,9 +693,22 @@ export class ExecuteSandbox {
     }).pipe(Effect.uninterruptible)
   }
 
+  /**
+   * After a call that navigated or failed, look for a bot challenge or block page on the session page. A challenge the
+   * browser clears by itself is waited out (bounded); an interactive one or a block is reported, never touched.
+   */
+  private async withChallenge(page: Page, aftermath: ExecuteAftermath, failed: boolean): Promise<ExecuteAftermath> {
+    if (!failed && aftermath.navigations.length === 0 && aftermath.startUrl === aftermath.endUrl) return aftermath
+    const outcome = await detectChallenge(page, { waitMs: challengeWaitMs() }).catch(() => undefined)
+    if (!outcome) return aftermath
+    this.addWarningOnce(challengeWarning(outcome))
+    return { ...aftermath, challenge: outcome }
+  }
+
   private drainWarnings(): string[] {
     const warnings = this.pendingWarnings
     this.pendingWarnings = []
+    for (const warning of this.options.drainGuardWarnings?.() ?? []) if (!warnings.includes(warning)) warnings.push(warning)
     return warnings
   }
 
@@ -673,19 +721,118 @@ export class ExecuteSandbox {
     if (logCompactionWarning) {
       warnings.push(logCompactionWarning)
     }
-    return warnings.map((warning) => this.networkCapture.redactText(warning))
+    return warnings.map((warning) => this.redactOutputText(warning))
   }
 
   redactNetworkCaptureText(text: string): string {
-    return this.networkCapture.redactText(text)
+    return this.redactOutputText(text)
+  }
+
+  /** Values typed with secrets.type() in this sandbox, mapped to their secret's name, for redaction. */
+  private readonly typedSecrets = new Map<string, string>()
+
+  private redactTypedSecrets(text: string): string {
+    let output = text
+    for (const [value, name] of [...this.typedSecrets].sort(([left], [right]) => right.length - left.length)) {
+      output = output.split(value).join(`[secret ${name}]`)
+    }
+    return output
+  }
+
+  private redactOutputText(text: string): string {
+    return this.redactTypedSecrets(this.networkCapture.redactText(text))
+  }
+
+  private redactOutputUrl(url: string): string {
+    return this.redactTypedSecrets(this.networkCapture.redactUrl(url))
+  }
+
+  private redactOutputValue(value: unknown): unknown {
+    const redacted = this.networkCapture.redactValue(value)
+    if (this.typedSecrets.size === 0) return redacted
+    const visit = (item: unknown, depth: number): unknown => {
+      if (typeof item === "string") return this.redactTypedSecrets(item)
+      if (typeof item === "number" && this.typedSecrets.has(String(item))) return `[secret ${this.typedSecrets.get(String(item))}]`
+      if (depth > 32 || item === null || typeof item !== "object" || Buffer.isBuffer(item)) return item
+      if (Array.isArray(item)) return item.map((entry) => visit(entry, depth + 1))
+      const prototype = Object.getPrototypeOf(item)
+      if (prototype !== Object.prototype && prototype !== null) return item
+      return Object.fromEntries(Object.entries(item).map(([key, entry]) => [key, visit(entry, depth + 1)]))
+    }
+    return visit(redacted, 0)
+  }
+
+  /**
+   * secrets.type(target, name): type a stored site secret into a field without the value entering the realm. The
+   * field's frame URL (Playwright's frame tree, fed by CDP, not page script) must match the secret's allowed origins,
+   * and the session's allowlist when it has one, right before the value is inserted.
+   */
+  private async typeSecret(page: Page, target: Locator | string, name: string, options: TypeSecretOptions = {}): Promise<TypeSecretResult> {
+    if (typeof name !== "string" || !name) throw new Error("secrets.type(target, name): name must be the name of a stored secret")
+    const secret = await Effect.runPromise(SiteSecrets.readSecret(name)).catch((error: unknown) => {
+      throw new Error(`secrets.type: ${error instanceof Error ? error.message : "could not read the secret"}`)
+    })
+    const secretRules = parseOriginPatterns(secret.allowedOrigins)
+    const sessionPatterns = this.options.allowedOrigins?.()
+    const sessionRules = sessionPatterns && sessionPatterns.length > 0 ? parseOriginPatterns(sessionPatterns) : undefined
+    const locator = typeof target === "string" ? page.locator(target) : target
+    if (!locator || typeof (locator as Locator).elementHandle !== "function") {
+      throw new Error("secrets.type(target, name): target must be a selector string or a Locator")
+    }
+    const handle = await locator.elementHandle({ timeout: options.timeout ?? 10_000 })
+    try {
+      const frame = await handle.ownerFrame()
+      if (!frame) throw new Error(`secrets.type: target_not_editable: the element for ${JSON.stringify(name)} is not in a frame`)
+      const checkOrigin = (): string => {
+        const url = frame.url()
+        let origin: string
+        try {
+          origin = new URL(url).origin
+        } catch {
+          origin = url.slice(0, 200)
+        }
+        const decision = checkUrl(url, secretRules, { httpsOnlyWithoutScheme: true })
+        if (!decision.allowed || /^(?:about|data|blob):/i.test(url)) {
+          throw new Error(`secrets.type: domain_not_allowed: the field's frame is ${origin}, which is not an allowed origin of secret ${JSON.stringify(name)} (${secret.allowedOrigins.join(", ")}). Nothing was typed.`)
+        }
+        if (sessionRules && !checkUrl(url, sessionRules).allowed) {
+          throw new Error(`secrets.type: domain_not_allowed: the field's frame is ${origin}, which is outside this session's domain allowlist. Nothing was typed.`)
+        }
+        return origin
+      }
+      checkOrigin()
+      if (!(await handle.isEditable().catch(() => false))) {
+        throw new Error(`secrets.type: target_not_editable: the target is not an editable field. Nothing was typed.`)
+      }
+      if (options.clear !== false) await handle.fill("")
+      await handle.focus()
+      const focused = await handle.evaluate((element) => element.ownerDocument.activeElement === element || element.contains(element.ownerDocument.activeElement))
+      if (!focused) throw new Error("secrets.type: target_not_editable: the field did not keep focus. Nothing was typed.")
+      const origin = checkOrigin()
+      const urlBefore = frame.url()
+      const text = SiteSecrets.secretText(secret)
+      // Register first, so a capture or result that sees the value already redacts it.
+      this.typedSecrets.set(text, name)
+      this.networkCapture.addRedaction(text)
+      await frame.page().keyboard.insertText(text)
+      if (frame.url() !== urlBefore) {
+        this.addWarningOnce(`secrets.type: the field's frame navigated while ${JSON.stringify(name)} was typed; check where it went before submitting.`)
+      }
+      if (!sessionRules) {
+        this.addWarningOnce(`secrets.type typed ${JSON.stringify(name)} in a session without a domain allowlist. A prompt-injected page could steer this session elsewhere after the value is in the page: set one with session_allowlist (or \`session allow\`) before using secrets.`)
+      }
+      return { typed: true, name, origin, kind: secret.kind }
+    } finally {
+      await handle.dispose().catch(() => {})
+    }
   }
 
   private redactCaptureLogs(logs: readonly ExecuteLogEntry[]): readonly ExecuteLogEntry[] {
     return logs.map((log) => ({
       ...log,
-      text: this.networkCapture.redactText(log.text),
+      text: this.redactOutputText(log.text),
       ...(log.location ? {
-        location: { ...log.location, url: this.networkCapture.redactUrl(log.location.url) },
+        location: { ...log.location, url: this.redactOutputUrl(log.location.url) },
       } : {}),
     }))
   }
@@ -693,9 +840,10 @@ export class ExecuteSandbox {
   private redactCaptureAftermath(aftermath: ExecuteAftermath): ExecuteAftermath {
     return {
       ...aftermath,
-      startUrl: aftermath.startUrl ? this.networkCapture.redactUrl(aftermath.startUrl) : aftermath.startUrl,
-      endUrl: aftermath.endUrl ? this.networkCapture.redactUrl(aftermath.endUrl) : aftermath.endUrl,
-      navigations: aftermath.navigations.map((url) => this.networkCapture.redactUrl(url)),
+      startUrl: aftermath.startUrl ? this.redactOutputUrl(aftermath.startUrl) : aftermath.startUrl,
+      endUrl: aftermath.endUrl ? this.redactOutputUrl(aftermath.endUrl) : aftermath.endUrl,
+      navigations: aftermath.navigations.map((url) => this.redactOutputUrl(url)),
+      ...(aftermath.challenge ? { challenge: { ...aftermath.challenge, url: this.redactOutputUrl(aftermath.challenge.url) } } : {}),
     }
   }
 
@@ -713,7 +861,7 @@ export class ExecuteSandbox {
     const sandbox = this
     return Effect.gen(function* () {
       sandbox.realm?.dispose()
-      sandbox.realm = sandbox.allowNode ? undefined : new ExecuteRealm()
+      sandbox.realm = sandbox.allowNode ? undefined : sandbox.createRealm()
       sandbox.state = sandbox.realm?.state ?? {}
       const browser = sandbox.browser
       sandbox.browser = undefined
@@ -1058,6 +1206,9 @@ export class ExecuteSandbox {
       pageConsole: {
         start: (target) => PageConsole.start(target ?? page),
         stop: (target) => PageConsole.stop(target ?? page),
+      },
+      secrets: {
+        type: (target, name, typeOptions) => this.typeSecret(page, target, name, typeOptions),
       },
       handoffTracker,
     }
@@ -1852,6 +2003,69 @@ function formatLocatorFailurePageWarning(
   return "Locator failed on page about:blank. Navigate with page.goto(...) or adopt an attached tab before querying controls."
 }
 
+const challengeProbeTimeoutMs = 2_000
+const challengePollMs = 1_000
+const defaultChallengeWaitMs = 15_000
+
+/** How long execute waits for a non-interactive challenge to clear (OPENCODE_BROWSER_CHALLENGE_WAIT_MS, 0 to 60000). */
+function challengeWaitMs(): number {
+  const value = Number(process.env.OPENCODE_BROWSER_CHALLENGE_WAIT_MS)
+  return Number.isInteger(value) && value >= 0 && value <= 60_000 && process.env.OPENCODE_BROWSER_CHALLENGE_WAIT_MS !== "" ? value : defaultChallengeWaitMs
+}
+
+async function probeChallengePage(page: Page): Promise<ChallengeProbe | undefined> {
+  if (page.isClosed()) return undefined
+  const url = page.url()
+  if (!/^https?:/i.test(url)) return undefined
+  // Patchright evaluates in an isolated world: the page's scripts can't see the probe.
+  const probed = await withTimeout(page.evaluate(probePageScript, [...probeSelectors]), challengeProbeTimeoutMs)
+  if (probed === timedOut) return undefined
+  return { ...probed, url: page.url(), frameUrls: page.frames().map((frame) => frame.url()).slice(0, 50) }
+}
+
+/** Classify the page; wait out a non-interactive challenge for up to `waitMs`. Undefined when there's none. */
+export async function detectChallenge(page: Page, options: { readonly waitMs: number }): Promise<ChallengeOutcome | undefined> {
+  const first = await probeChallengePage(page).catch(() => undefined)
+  const detected = first && classifyChallenge(first)
+  if (!first || !detected) return undefined
+  const started = Date.now()
+  let current = detected
+  let url = first.url
+  while (current.kind === "non-interactive" && Date.now() - started < options.waitMs) {
+    await delay(Math.min(challengePollMs, Math.max(0, options.waitMs - (Date.now() - started))))
+    if (page.isClosed()) return undefined
+    // A probe that fails mid-navigation (the challenge often clears by navigating) counts as still waiting.
+    const probe = await probeChallengePage(page).catch(() => null)
+    if (probe === null) continue
+    if (probe === undefined) return { ...current, status: "cleared", url, waitedMs: Date.now() - started, recommendation: "continue" }
+    const next = classifyChallenge(probe)
+    url = probe.url
+    if (!next) return { ...current, status: "cleared", url, waitedMs: Date.now() - started, recommendation: "continue" }
+    current = next
+  }
+  const waitedMs = current === detected && detected.kind !== "non-interactive" ? 0 : Date.now() - started
+  return {
+    ...current,
+    status: "blocked",
+    url,
+    waitedMs,
+    recommendation: current.kind === "block" ? "stop" : "handoff",
+  }
+}
+
+/** Full-Node execute code bypasses the realm's call observer, so look for the page-visible APIs in its source. */
+export function pageVisibleApiSourceWarnings(code: string): readonly string[] {
+  const warnings: string[] = []
+  for (const name of ["addInitScript", "exposeFunction", "exposeBinding"]) {
+    if (new RegExp(`\\.${name}\\s*\\(`).test(code)) {
+      const named = { [name]: () => {} }[name]!
+      const warning = pageVisibleApiWarning(named, undefined, [])
+      if (warning) warnings.push(warning)
+    }
+  }
+  return warnings
+}
+
 export async function runUserCode({ code, globals, realm }: { readonly code: string; readonly globals: SandboxGlobals; readonly realm?: ExecuteRealm }): Promise<{
   readonly result: unknown
   readonly logs: readonly ExecuteLogEntry[]
@@ -1952,6 +2166,7 @@ const sandboxGlobalKeys = [
   "demonstrate",
   "network",
   "pageConsole",
+  "secrets",
 ] as const satisfies readonly (keyof Omit<SandboxGlobals, "handoffTracker">)[]
 
 function safePageUrl(page: Page): string | null {

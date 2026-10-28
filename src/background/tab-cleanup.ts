@@ -134,12 +134,93 @@ export async function flushed() {
   await writes
 }
 
+const CREATING_KEY = "tabCleanupCreating"
+type Creating = { id: string; url: string; after: number; at: number }
+let creatingWrites: Promise<unknown> = Promise.resolve()
+
+/**
+ * Notes a tab an agent is about to open, before chrome.tabs.create runs. A service worker that stops while the tab is
+ * being created (Chrome finishes creating it) never tracks it, and nobody would ever close it: a worker restart left
+ * such a tab behind about every other time while agents were busy. `reconcileCreates` finds and closes it.
+ */
+export async function beginCreate(url: string): Promise<string> {
+  const after = Math.max(0, ...(await chrome.tabs.query({}).catch(() => [] as chrome.tabs.Tab[])).map((tab) => tab.id ?? 0))
+  const entry: Creating = { id: crypto.randomUUID(), url, after, at: Date.now() }
+  await updateCreating((list) => [...list, entry])
+  return entry.id
+}
+
+/** The tab is tracked (and stored) now, or its creation failed. */
+export async function endCreate(id: string) {
+  await flushed()
+  await updateCreating((list) => list.filter((entry) => entry.id !== id))
+}
+
+/**
+ * On a worker start: closes tabs a previous worker created for an agent but stopped before tracking. Such a tab is
+ * newer than the tabs that existed when its creation began, in the background, opened by no tab, showing the URL it
+ * was opened with, and neither tracked nor attached.
+ */
+export async function reconcileCreates(attached: (tabId: number) => boolean): Promise<Closed[]> {
+  await restore()
+  const pending = ((await chrome.storage.local.get(CREATING_KEY))[CREATING_KEY] ?? []) as Creating[]
+  if (!pending.length) return []
+  const tabs = (await chrome.tabs.query({}).catch(() => [] as chrome.tabs.Tab[])).sort((a, b) => (a.id ?? 0) - (b.id ?? 0))
+  const closed: Closed[] = []
+  const taken = new Set<number>()
+  for (const entry of pending) {
+    const tab = tabs.find((candidate) =>
+      candidate.id !== undefined &&
+      candidate.id > entry.after &&
+      !taken.has(candidate.id) &&
+      !candidate.active &&
+      candidate.openerTabId === undefined &&
+      [candidate.url, candidate.pendingUrl].includes(entry.url) &&
+      !tracked.has(candidate.id) &&
+      !attached(candidate.id),
+    )
+    if (tab?.id === undefined) continue
+    taken.add(tab.id)
+    if (await chrome.tabs.remove(tab.id).then(() => true, () => false)) closed.push({ tabId: tab.id, title: tab.title || tab.url || "Untitled", idleMinutes: 0 })
+  }
+  await updateCreating((list) => list.filter((entry) => !pending.some((done) => done.id === entry.id)))
+  return closed
+}
+
+/**
+ * On a worker start: closes tracked agent tabs the relay doesn't have (no debugger attachment survived or came back).
+ * The relay attaches every tab it opens right away and closes the ones it lets go, so such a tab is one whose opening
+ * the stopped worker never reported, or whose attach it cut short; nothing would use it again.
+ */
+export async function closeUnattached(attached: (tabId: number) => boolean): Promise<Closed[]> {
+  await restore()
+  const closed: Closed[] = []
+  for (const tabId of Array.from(tracked.keys())) {
+    if (attached(tabId)) continue
+    const tab = await chrome.tabs.get(tabId).catch(() => undefined)
+    tracked.delete(tabId)
+    if (!tab || tab.pinned) continue
+    if (await chrome.tabs.remove(tabId).then(() => true, () => false)) closed.push({ tabId, title: tab.title || tab.url || "Untitled", idleMinutes: 0 })
+  }
+  save()
+  return closed
+}
+
+function updateCreating(change: (list: Creating[]) => Creating[]) {
+  const write = creatingWrites.then(async () => {
+    const list = ((await chrome.storage.local.get(CREATING_KEY))[CREATING_KEY] ?? []) as Creating[]
+    await chrome.storage.local.set({ [CREATING_KEY]: change(list) })
+  })
+  creatingWrites = write.catch(() => undefined)
+  return write.catch(() => undefined)
+}
+
 // The user switching to a tab counts as using it; a tab the user moves out of the agent's group is theirs now.
 // Kept in local storage so an extension reload or update doesn't forget which tabs agents opened; tab ids
 // don't survive a browser restart, so the list starts over then.
 chrome.runtime.onStartup.addListener(() => {
   tracked.clear()
-  void chrome.storage.local.remove(STORAGE_KEY)
+  void chrome.storage.local.remove([STORAGE_KEY, CREATING_KEY])
 })
 chrome.tabs.onActivated.addListener(({ tabId }) => touch(tabId))
 chrome.tabs.onRemoved.addListener((tabId) => forget(tabId))

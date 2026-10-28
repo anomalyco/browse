@@ -8,6 +8,7 @@ import type { JsonObject } from "./protocol.ts"
 import { getObject, getString, parseTargetSelection } from "./relay-helpers.ts"
 import * as RelayClient from "./relay-client.ts"
 import * as RelayLifecycle from "./relay-lifecycle.ts"
+import * as SiteSecrets from "./site-secrets.ts"
 import type { TargetSelection } from "./relay-schema.ts"
 import { autoUpdateStatus } from "./auto-update.ts"
 import { createUpdateWatcher, updateJson, type UpdateNotice } from "./update.ts"
@@ -61,9 +62,9 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
   return [
     {
       name: "execute",
-      description: "Execute Playwright JavaScript against the OpenCode Browser session. Code runs in a sandbox on the relay without process, require, import(), fs, child_process, http/https or Node fetch; save and read files with the files helper inside the execute file roots, and cookie access is limited to the session's pages. The result includes console logs, warnings, a bounded execution-context diagnostic when relevant, and an aftermath summary (URL movement, navigations, error counts, handoffs).",
+      description: "Execute Playwright JavaScript against the OpenCode Browser session. Code runs in a sandbox on the relay without process, require, import(), fs, child_process, http/https or Node fetch; save and read files with the files helper inside the execute file roots, and cookie access is limited to the session's pages. The result includes console logs, warnings, a bounded execution-context diagnostic when relevant, and an aftermath summary (URL movement, navigations, error counts, handoffs, and a bot challenge or block page when one appears: hand interactive ones to the user with handoff(), never solve or retry-loop them).",
       inputSchema: objectSchema({
-        code: { type: "string", description: "JavaScript code to execute. It receives browser, context, page, state, modules (path, url, util, crypto, buffer, zlib, events, stream), files (dir, path, write, read), fillInput, fillInputs, snapshot(options?) for compact semantic outlines, search, explicit diffs, or automatic deltas, persistent compatible ref(id) locators, webmcp (list/call), screenshot helpers, ariaSnapshot, ghostCursor, handoff, demonstrate, network capture, and pageConsole (start/stop capturing the page's own console messages and errors, off by default because pages can detect it)." },
+        code: { type: "string", description: "JavaScript code to execute. It receives browser, context, page, state, modules (path, url, util, crypto, buffer, zlib, events, stream), files (dir, path, write, read), fillInput, fillInputs, snapshot(options?) for compact semantic outlines, search, explicit diffs, or automatic deltas, persistent compatible ref(id) locators, webmcp (list/call), screenshot helpers, ariaSnapshot, ghostCursor, handoff, demonstrate, network capture, pageConsole (start/stop capturing the page's own console messages and errors, off by default because pages can detect it), and secrets.type(locator, name) to type a stored site secret (see secrets_list) only on its allowed origins, without seeing it." },
         session: { type: "string", description: "Optional existing OpenCode Browser session id. Explicit ids must already exist; omit this field to use the MCP server's current session, which is created when needed." },
         targetUrl: { type: "string", description: "Optional URL substring selecting an existing attached page. This does not navigate or open a URL; use page.goto() for that." },
         targetIndex: { type: "integer", minimum: 0, description: "Optional zero-based attached page index selector." },
@@ -109,6 +110,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       inputSchema: objectSchema({
         id: { type: "string", description: "Optional lowercase session id." },
         readOnly: { type: "boolean", description: "Create a read-only session: the relay rejects input-dispatching CDP so scripts can inspect but not click or type." },
+        allowedOrigins: { type: "array", items: { type: "string" }, description: "Optional domain allowlist: hosts or origins this session's tabs may load (example.com, *.example.com, https://app.example.com, http://localhost:3000). Navigations elsewhere are refused or sent back to about:blank; private and loopback addresses need an exact entry." },
       }),
       readOnly: false,
       destructive: false,
@@ -116,9 +118,32 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       handle: (input) => Effect.gen(function* () {
         const requestedId = optionalStringField(input, "id")
         const readOnly = optionalBooleanField(input, "readOnly")
-        const session = yield* relay.sessionNew(requestedId, readOnly ? { readOnly: true } : {})
+        const allowedOrigins = optionalStringArrayField(input, "allowedOrigins")
+        const session = yield* relay.sessionNew(requestedId, {
+          ...(readOnly ? { readOnly: true } : {}),
+          ...(allowedOrigins ? { allowedOrigins } : {}),
+        })
         establishCurrentSession(session.id)
         return { session }
+      }),
+    },
+    {
+      name: "session_allowlist",
+      description: "Set the domain allowlist of a session (the current one by default): the hosts or origins its tabs may load. Pass an empty list to remove it. Use it before typing secrets or working on sites with untrusted content.",
+      inputSchema: objectSchema({
+        session: { type: "string", description: "Session id; defaults to the current session." },
+        allowedOrigins: { type: "array", items: { type: "string" }, description: "Patterns: example.com, *.example.com, https://app.example.com, http://localhost:3000. Empty removes the allowlist." },
+      }, ["allowedOrigins"]),
+      readOnly: false,
+      destructive: false,
+      idempotent: true,
+      handle: (input) => Effect.gen(function* () {
+        const sessionId = resolveSessionId(input)
+        const allowedOrigins = requireObject(input).allowedOrigins
+        if (!Array.isArray(allowedOrigins) || !allowedOrigins.every((item) => Predicate.isString(item))) {
+          return yield* Effect.fail(new Error("allowedOrigins must be an array of strings"))
+        }
+        return { session: yield* relay.sessionAllowlist(sessionId, allowedOrigins) }
       }),
     },
     {
@@ -477,6 +502,15 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       handle: (input) => relay.flightRecorderCancel({ sessionId: resolveSessionId(input) }),
     },
     {
+      name: "secrets_list",
+      description: "List site secrets the user stored for typing with secrets.type(target, name) in execute: names, kinds and allowed origins, never values. Only the user adds them (`opencode-browser secrets add`).",
+      inputSchema: emptyInputSchema,
+      readOnly: true,
+      destructive: false,
+      idempotent: true,
+      handle: () => SiteSecrets.listSecrets().pipe(Effect.map((secrets) => ({ secrets }))),
+    },
+    {
       name: "secrets_status",
       description: "Return secret profile references, sources, and expiration metadata without revealing credential values.",
       inputSchema: objectSchema({ name: { type: "string", description: "Secret profile name." } }, ["name"]),
@@ -622,7 +656,7 @@ function shimSession(): string | undefined {
 }
 
 export function mcpToolRequiresRelayCompatibility(name: string): boolean {
-  return !["status", "session_list", "session_current", "network_status", "recording_status", "flight_recorder_status", "secrets_status", "skill"].includes(name)
+  return !["status", "session_list", "session_current", "network_status", "recording_status", "flight_recorder_status", "secrets_status", "secrets_list", "skill"].includes(name)
 }
 
 export const mcpServerLayer = McpServer.layerStdio({

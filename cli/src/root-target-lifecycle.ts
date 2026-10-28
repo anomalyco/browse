@@ -64,6 +64,10 @@ type Worker = {
   verificationRetries: number
 }
 
+class InventoryTimeout extends Schema.TaggedError<InventoryTimeout>()("RootTargetLifecycle.InventoryTimeout", {
+  message: Schema.String,
+}) {}
+
 class GenerationChanged extends Schema.TaggedError<GenerationChanged>()("RootTargetLifecycle.GenerationChanged", {
   message: Schema.String,
 }) {}
@@ -179,7 +183,9 @@ export class RootTargetLifecycle {
         Effect.retry({
           times: 2,
           schedule: Schedule.spaced(0).pipe(Schedule.modifyDelay(({ attempt }) => Effect.succeed(100 * attempt))),
-          while: (error) => !(error instanceof GenerationChanged) && !lifecycle.closing && generation === lifecycle.options.extension.generation() && revision === work.revision,
+          // A command that didn't answer within the inventory timeout won't answer on a retry either (the tab is
+          // wedged); retrying only held every agent back another timeout each time.
+          while: (error) => !(error instanceof GenerationChanged) && !(error instanceof InventoryTimeout) && !lifecycle.closing && generation === lifecycle.options.extension.generation() && revision === work.revision,
         }),
       )
       if (lifecycle.closing || generation !== lifecycle.options.extension.generation()) return null
@@ -289,7 +295,7 @@ export class RootTargetLifecycle {
     const timeoutMs = transition.timeoutMs
     return this.step(transition, timeoutMs === undefined ? send : send.pipe(Effect.timeoutOrElse({
       duration: timeoutMs,
-      orElse: () => Effect.fail(new Error(`${method} did not answer within ${timeoutMs} ms while reconciling tab ${transition.tabId}`)),
+      orElse: () => Effect.fail(new InventoryTimeout({ message: `${method} did not answer within ${timeoutMs} ms while reconciling tab ${transition.tabId}` })),
     })))
   }
 

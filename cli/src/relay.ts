@@ -48,6 +48,7 @@ import { ensurePrivateDirectory, pairingCode, pairingProof, relayToken, relayTok
 import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
 import { GhostCursorTabs, ghostCursorCommandMethod } from "./ghost-cursor.ts"
 import { guardCdpMethod, scopeCdpResult } from "./cdp-guardrails.ts"
+import { SessionNavigationGuard } from "./session-navigation-guard.ts"
 import {
   awaitHandoffAction,
   HandoffRegistry,
@@ -299,7 +300,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     void recordingRelay.cleanupAll(reason).catch(() => {})
     void flightRecorder.cleanupAll().catch(() => {})
     pendingTabGrouping.clear()
-    for (const target of registry.listRootTargets()) {
+    for (const target of [...registry.listRootTargets(), ...registry.listStagedRootTargets()]) {
       ownersAcrossReconnect.set(target.targetInfo.targetId, {
         owner: target.owner,
         ...(target.opencodeBrowserSessionId ? { sessionId: target.opencodeBrowserSessionId } : {}),
@@ -489,6 +490,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         authToken,
         sessionId: id,
         onDefaultTargetChange,
+        allowedOrigins: () => sessions.allowedOrigins(id),
+        drainGuardWarnings: () => navigationGuard.drainWarnings(id),
         isRecordingTarget: (targetId) => {
           const target = registry.targetsByTargetId.get(targetId)
           return target !== undefined && isTabRecorded(target.tabId)
@@ -553,6 +556,20 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     },
     registry,
   )
+  const navigationGuard = new SessionNavigationGuard({
+    allowedOrigins: (sessionId) => sessions.allowedOrigins(sessionId),
+    isExecuting: (sessionId) => sessions.isExecuting(sessionId),
+    mainFrameId: (tabId) => mainFrameIdsByTab.get(tabId),
+    send: (tabId, method, params) => Effect.runPromise(sendDebuggerCommand({ tabId, method, params })),
+    closeTab: (tabId) => Effect.runPromise(Effect.gen(function* () {
+      const target = registry.tabTargets.get(tabId)
+      if (target?.owner === "user") return
+      relayLog("allowlist.close", { tabId, registered: target !== undefined })
+      yield* sendToExtension({ method: "tabs.remove", params: { tabId } })
+      if (target) detachTargetState(tabId)
+    })),
+    log: (event, details) => relayLog(event, details),
+  })
   function pageStatusSessionId(target: ConnectedTarget): string | undefined {
     return target.opencodeBrowserSessionId
   }
@@ -1010,6 +1027,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   })
 
   let currentAnnouncedRootTabIds: Set<number> | undefined
+  /** Tabs the reconnecting extension announced as opened by an agent (TabCleanup tracks them). */
+  const announcedAgentTabIds = new Set<number>()
   websocketServer.on("connection", (socket, request) => {
     const requestUrl = new URL(request.url ?? "/", endpointUrl)
     if (requestUrl.pathname === "/extension") {
@@ -1185,6 +1204,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     extensionGeneration += 1
     rejectedExtensionConnections = 0
     clearLiveExtensionState("Extension replaced")
+    announcedAgentTabIds.clear()
     // A new extension starts from the defaults until it sends its settings (an older one never does).
     ghostCursorSetting = false
     setHumanInput(undefined)
@@ -1279,7 +1299,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       }
       return await attach()
     }
-    attachWithRetry().catch((error: unknown) => {
+    attachWithRetry().then(() => {
+      const popup = registry.tabTargets.get(tabId)
+      if (popup) navigationGuard.popupAttached(popup)
+    }).catch((error: unknown) => {
       relayLog("tab.opened.error", { tabId, error: error instanceof Error ? error.message : String(error) })
     })
   }
@@ -1339,6 +1362,16 @@ const makeRelay = Effect.fnUntraced(function* (options: {
             sendExtensionBestEffort({ method: "tabs.remove", params: { tabId: target.tabId } })
             detachTargetState(target.tabId, { updateExtension: false })
           }
+          // An agent's tab nobody owns any more (its session went away, or its attach was cut short by the
+          // disconnect) would otherwise stay as a user's tab, visible to every session: close it.
+          for (const target of registry.listRootTargets()) {
+            if (!announcedAgentTabIds.has(target.tabId) || target.owner !== "user" || target.opencodeBrowserSessionId !== undefined) continue
+            if (ownersAcrossReconnect.get(target.targetInfo.targetId)?.owner === "user") continue
+            relayLog("extension.inventory.orphan", { tabId: target.tabId, reason: "agent tab without a session" })
+            sendExtensionBestEffort({ method: "tabs.remove", params: { tabId: target.tabId } })
+            detachTargetState(target.tabId, { updateExtension: false })
+          }
+          announcedAgentTabIds.clear()
           ownersAcrossReconnect.clear()
           extensionRpc.markReady()
           if (updates.current) sendUpdateNotice()
@@ -1352,6 +1385,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (extensionMethod === "debugger.attached") {
       if (eventTabId) {
         announcedRootTabIds.add(eventTabId)
+        if (message.params?.agent === true) announcedAgentTabIds.add(eventTabId)
         rootLifecycle.queue({ tabId: eventTabId, attachIfMissing: true, verificationRetries: 0, errorMessage: "Debugger re-announce failed", generation })
       }
       return
@@ -1456,6 +1490,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (flightRecorder.handleDebuggerEvent({ tabId, method, params }) || recordingRelay.handleDebuggerEvent({ tabId, method, params })) {
       return
     }
+    if (sourceSessionId === undefined || sourceSessionId === target.sessionId) navigationGuard.observeEvent(target, method, params)
     let shouldBroadcast = true
     let attachedChildTarget: ChildTarget | undefined
 
@@ -1765,6 +1800,24 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (guardMessage) {
       return yield* Effect.fail(new Error(guardMessage))
     }
+    if (message.method === "Page.navigate" || message.method === "Target.createTarget") {
+      // A navigated tab follows its own session's allowlist; a new tab follows the creating client's session.
+      const tabSessionId = message.method === "Page.navigate"
+        ? (() => {
+            try {
+              return registry.tabTargets.get(cdpRouter.resolveCommandRoute(socket, message).tabId)?.opencodeBrowserSessionId
+            } catch {
+              return undefined
+            }
+          })()
+        : undefined
+      const refusal = yield* Effect.promise(() => navigationGuard.checkCommand({
+        method: message.method,
+        params: message.params,
+        sessionId: tabSessionId ?? clientOpenCodeBrowserSessionId,
+      }))
+      if (refusal) return yield* Effect.fail(new Error(refusal))
+    }
     if (message.method === "Browser.getVersion") {
       return {
         protocolVersion: "1.3",
@@ -1897,6 +1950,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     ], { concurrency: "unbounded", discard: true })
     const result = yield* (message.method === "Runtime.enable" && sessionId
       ? cdpRuntime.enable(route, command.params, () => clientRoutesSession(socket, sessionId) && (!announced || cdpClients.hasSession(socket, sessionId)), announced ? socket : undefined)
+      : command.method === "Page.captureScreenshot" && route.chromeSessionId === undefined
+      ? captureScreenshotNudged(command)
       : sendDebuggerCommand(command)).pipe(
         // Chrome rejects every command for a tab while another extension's frame
         // is open in it; clients only see the rejection, so record it per tab.
@@ -1907,6 +1962,28 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       )
     return scopeCdpResult({ method: message.method, result, pageUrls: () => cdpRouter.visibleRoots(socket).map((target) => target.targetInfo.url) })
   })
+
+  /**
+   * Page.captureScreenshot on a tab the user isn't looking at sometimes never answers (seen every other capture on
+   * Chrome 156 under Xvfb, with raw CDP too) until another capture request reaches the tab, which releases it at once.
+   * So while it's pending the relay sends a 1x1 capture now and then (never activating the tab) and returns the
+   * original's answer; Playwright no longer times out after 30 s.
+   */
+  function captureScreenshotNudged(command: { readonly tabId: number; readonly method: string; readonly params: JsonObject }) {
+    const nudges = Effect.gen(function* () {
+      for (const delayMs of [600, 1_000, 1_500, 2_000, 3_000, 5_000, 8_000]) {
+        yield* Effect.sleep(delayMs)
+        relayLog("screenshot.nudge", { tabId: command.tabId, afterMs: delayMs })
+        yield* Effect.forkDetach(sendDebuggerCommand({
+          tabId: command.tabId,
+          method: "Page.captureScreenshot",
+          params: { format: "jpeg", quality: 1, clip: { x: 0, y: 0, width: 1, height: 1, scale: 1 } },
+        }).pipe(Effect.ignore))
+      }
+      return yield* Effect.never
+    })
+    return Effect.raceFirst(sendDebuggerCommand(command), nudges)
+  }
 
   /**
    * Chromium refuses top-frame navigations to data: URLs that an extension starts (chrome.debugger's Page.navigate and
@@ -2033,6 +2110,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   function clearTabRuntimeState(tabId: number): void {
     mainFrameIdsByTab.delete(tabId)
     protectedFrames.forgetTab(tabId)
+    navigationGuard.forgetTab(tabId)
     ghostCursor.forget(tabId)
     forgetTab(tabId)
     for (const [sessionId, childTabId] of suppressedChildSessions) {

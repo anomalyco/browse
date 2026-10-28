@@ -117,9 +117,11 @@ shim, which always runs the current version (from a checkout, use `/path/to/brow
 | `execute` | Run Playwright code against the session's page (`page`, `context`, `snapshot()`, `handoff()`, …) |
 | `session_new`, `session_list`, `session_use`, `session_current`, `session_reset`, `session_delete` | Named sessions, each with its own tabs; they survive restarts |
 | `session_adopt` | Take over a tab you handed over with the toolbar button |
+| `session_allowlist` | Limit a session's tabs to the sites you name (also `allowedOrigins` on `session_new`) |
 | `network_start`, `network_status`, `network_stop`, `network_cancel` | Capture traffic to a redacted HAR |
 | `recording_start`, `recording_stop`, `recording_status`, `recording_cancel` | Record a tab to MP4 or WebM (`cursor: true` draws the ghost cursor) |
 | `flight_recorder_start`, `flight_recorder_save_last`, … | Keep the last minute of video, save it when something breaks |
+| `secrets_list` | Site secrets you stored; agents type them with `secrets.type()` only on their sites, without seeing them |
 | `secrets_status`, `secrets_refresh`, `secrets_run` | Reuse captured credentials while keeping their values out of transcripts and artifacts |
 | `tabs_cleanup` | Close the agent's idle tabs |
 | `settings` | Read or change the settings below when the user asks (never the security switches); the options page updates live |
@@ -179,6 +181,26 @@ may try to steer it, and that other programs on your computer may try to use the
 - **CDP guardrails.** Cookie reads return only cookies for the session's own pages; cookie writes are limited to
   those hosts. Clearing cookies, cache or site data, and closing the browser, are always refused. `page.bringToFront()`
   is refused so agents can't raise windows over your work.
+- **Domain allowlists (opt-in).** `session new <name> --allow-origin example.com` (or `session allow`, or
+  `allowedOrigins` on `session_new` / `session_allowlist`) limits where a session's tabs go. The relay refuses agent
+  navigations and new tabs to other hosts, stops or blanks links, redirects and script navigations that leave the
+  list, and closes popups that open elsewhere. Private, loopback and link-local addresses need an entry naming that
+  exact host; names are resolved first and the document's real remote IP is checked, against DNS rebinding.
+  Subresources (images, fetch, iframes, workers) are not blocked: request interception is shared with Playwright's
+  `page.route()`, so the relay can't own it reliably. Browsing through a local proxy makes every document look like
+  it came from the proxy's address, so name the hosts you need exactly.
+- **Site secrets.** `opencode-browser secrets add <name> --origin https://example.com` stores a password, key or (with
+  `--totp`) a TOTP seed, read from stdin or a hidden prompt, in `~/.local/share/opencode-browser/site-secrets/`
+  (0700/0600). An agent types it with `secrets.type(locator, "<name>")`: the relay checks the field's frame URL from
+  the browser's frame tree against the secret's origins (and the session's allowlist) right before it inserts the
+  value, so a cross-origin iframe or a redirect gets nothing. The value never enters the execute sandbox, results,
+  logs, journals or HARs. Once typed it is in the page, where page script could read it, so pair secrets with an
+  allowlist (execute warns when you don't). A stored TOTP seed makes 2FA one factor; keep handing 2FA to yourself
+  when you can. `secrets list` and `secrets remove` manage them.
+- **Bot challenges.** After a navigation, execute reports Cloudflare, Akamai, DataDome, PerimeterX, Imperva, AWS WAF,
+  captcha walls and "access denied" pages in `aftermath.challenge`. It waits up to 15 s
+  (`OPENCODE_BROWSER_CHALLENGE_WAIT_MS`) for checks the browser clears by itself, and tells the agent to hand
+  interactive ones to you. It never solves them.
 - **Your tabs stay yours.** Agents use only tabs they opened or you lent them. The toolbar button always takes a tab
   back; only a real click on the card or the toolbar button finishes a handoff, so a page can't fake it.
 - **Less on disk.** Session journals are private (0700/0600), redact typed passwords, codes and tokens, and are pruned
@@ -202,6 +224,7 @@ Escape hatches. Set them in the environment you start opencode (or your MCP clie
 | `OPENCODE_BROWSER_GHOST_CURSOR=1` | Show the agent cursor on every agent tab outside recordings (pages can see it); `0` keeps it off. Overrides the options page's *Agent cursor* |
 | `OPENCODE_BROWSER_AUTO_UPDATE=notify` | npm installs: only show new versions (`off`: don't check; `on`: install them when idle, the default). Overrides the status page's *Updates* |
 | `OPENCODE_BROWSER_HUMAN_INPUT=0` | Send input at full speed instead of human-like paths and pacing; `1` keeps them on. Overrides the options page's *Human-like input* |
+| `OPENCODE_BROWSER_CHALLENGE_WAIT_MS=15000` | How long `execute` waits for a bot check the browser clears by itself (0 to 60000; 0 reports it without waiting) |
 
 ## Troubleshooting
 
