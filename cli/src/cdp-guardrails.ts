@@ -220,6 +220,11 @@ export function guardCdpMethod(context: GuardContext): string | null {
   if (reason) {
     return `Browse blocked ${context.method}: ${reason}. This command is always blocked by the relay.`
   }
+  if (context.method.startsWith("WebAuthn.")) {
+    // A virtual authenticator would let a script register or answer passkey ceremonies as the user. Passkeys in agent
+    // tabs come only from Deadbolt grants, through the relay (passkey-bridge.ts).
+    return `Browse blocked ${context.method}: agents can't drive WebAuthn or add virtual authenticators. Passkey sign-ins in agent tabs use the logins the user granted in Deadbolt. This command is always blocked by the relay.`
+  }
   if (context.method === "Page.bringToFront" && !allowsForeground()) {
     return "Browse blocked Page.bringToFront: it raises the user's browser window over their work. Use handoff() when the user needs to act in the tab, or set OPENCODE_BROWSER_ALLOW_FOREGROUND=1 on the relay to allow it."
   }
