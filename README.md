@@ -201,16 +201,20 @@ may try to steer it, and that other programs on your computer may try to use the
 - **Deadbolt sign-ins.** With [Deadbolt](https://github.com/anomalyco/deadbolt), agents can sign in unattended with
   the logins you allow, and never see a value. Connect once with `opencode-browser deadbolt connect` (it runs
   `deadbolt agents add-client browse`, which asks for Touch ID or your passphrase and refuses AI agents) and allow
-  logins in Deadbolt, site by site: `deadbolt agents allow github.com [--login <username>] [--fields
-  username,password,totp] [--passkeys] [--expires 30d]`. Only you can grant; `deadbolt agents grants` and `deadbolt
+  logins in Deadbolt: `deadbolt agents allow github.com` lets agents use that site's logins (username, password,
+  one-time code and passkeys, unless you narrow it with `--login <username>`, `--fields`, `--no-passkeys` or
+  `--expires 30d`), and
+  `deadbolt agents allow --all` lets them use every login. Only you can grant; `deadbolt agents grants` and `deadbolt
   agents revoke <id>` manage grants, and every fill is in `deadbolt activity`. Agents then call the `signin` tool (or
   `secrets.signIn()` in execute): the relay does the whole sign-in inside one call (username, submit, password, an
   authenticator code including split code boxes, "Use password instead", and Sign in with Google when a Google login
   is granted) and returns only `{status, step, reason}`. It stops with `needs_user` for captchas, codes sent by SMS or
   email, push approvals and new-device checks, for you to finish after a handoff. One value can also be typed with
   `secrets.type(locator, "deadbolt:<site>[/<username>]", { field })`. In tabs agents opened, a site's passkey request
-  (`navigator.credentials.get`) is answered by Deadbolt when the grant has `--passkeys` (user presence only, never
-  user verification, so sites that require verification fall back); otherwise it fails as if you dismissed it, and
+  (`navigator.credentials.get`) is answered by Deadbolt when a grant covers the site's passkeys (user presence only,
+  never user verification, so sites that require verification fall back); otherwise it fails as if you dismissed it.
+  With several passkeys for a site the agent names the account (`signin` with `username`, or
+  `secrets.usePasskey({ site, username })`); without one, `signin` returns `needs_choice` with the accounts, and
   agents can't use the browser's WebAuthn debugging methods at all. **Trust model:** the relay checks each field's
   frame origin from the browser's frame tree (and the session allowlist) before it asks Deadbolt, which checks the
   grant and the login's URLs against that origin again; values are redacted from everything the agent gets, like

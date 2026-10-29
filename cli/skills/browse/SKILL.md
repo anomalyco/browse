@@ -583,8 +583,12 @@ When the user connected Browse to Deadbolt (`opencode-browser deadbolt
 connect`), you can sign in with the logins they granted to agents, without
 seeing any value. `secrets_list` shows them for the session's allowed sites:
 title, username, `granted`, which `fields` (username, password, totp) and
-whether `passkeys` are allowed. Only the user grants, in Deadbolt:
-`deadbolt agents allow <site> [--login <username>] [--fields ...] [--passkeys]`.
+whether `passkeys` are allowed, plus the site's passkey accounts (`username`,
+`displayName`). Only the user grants, in Deadbolt: `deadbolt agents allow
+<site>` (everything for that site's logins: username, password, one-time code
+and passkeys, unless narrowed with `--login`, `--fields`, `--no-passkeys`,
+`--expires`) or
+`deadbolt agents allow --all` (every login).
 Never try to grant, pair or unlock yourself; Deadbolt refuses AI callers.
 
 Prefer the whole sign-in in one call (the `signin` tool, or in execute):
@@ -605,6 +609,9 @@ Deadbolt grants a Google login, all inside the relay. Then:
   new-device or "verify it's you" check, or Deadbolt is locked. Call
   `handoff("Finish signing in, then click Continue")` so the user does it.
   Don't retry in a loop.
+- `needs_choice`: several passkeys can sign in; `choices` lists their
+  `username` / `displayName`. Ask the user which one if it isn't obvious, then
+  call again with `{ username }`.
 - `not_granted`: tell the user what to allow (the reason names the site and
   login).
 - `failed`: the reason says why (no form found, wrong password, the page didn't
@@ -627,7 +634,10 @@ reconnect), `rate_limited`. Set a session allowlist before signing in.
 
 Passkeys: in tabs you opened, a site's passkey sign-in
 (`navigator.credentials.get`) is answered by Deadbolt when the grant allows
-passkeys; it never verifies the user, so sites that require that fall back to
+passkeys. `signIn({ username })` picks that account's passkey; to choose one
+before your own click on a "Sign in with a passkey" button, call
+`await secrets.usePasskey({ site: "example.com", username: "me@example.com" })`
+(it applies to the tab's next passkey request, once). Deadbolt never verifies the user, so sites that require that fall back to
 other methods. Otherwise the request fails with NotAllowedError, as if the user
 dismissed it. WebAuthn CDP methods are blocked.
 
