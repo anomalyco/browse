@@ -23,6 +23,12 @@ describe("guardCdpMethod", () => {
     }
   })
 
+  test("always blocks WebAuthn: agents can't add virtual authenticators or answer passkey ceremonies", () => {
+    for (const method of ["WebAuthn.enable", "WebAuthn.addVirtualAuthenticator", "WebAuthn.addCredential", "WebAuthn.getCredentials"]) {
+      expect(guardCdpMethod({ method, readOnly: false })).toContain(`blocked ${method}`)
+    }
+  })
+
   test("blocks Page.bringToFront unless the relay allows foreground", () => {
     expect(guardCdpMethod({ method: "Page.bringToFront", readOnly: false })).toContain("Page.bringToFront")
     process.env.OPENCODE_BROWSER_ALLOW_FOREGROUND = "1"

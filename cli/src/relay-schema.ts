@@ -395,6 +395,42 @@ export const AuthProfileSummary = Schema.Struct({
 })
 export interface AuthProfileSummary extends Schema.Schema.Type<typeof AuthProfileSummary> {}
 
+/** Deadbolt logins granted to this install, for a session's allowed sites (or its open pages without an allowlist). */
+export const DeadboltLoginsRequest = Schema.Struct({
+  sessionId: Schema.optionalKey(Schema.String),
+})
+export interface DeadboltLoginsRequest extends Schema.Schema.Type<typeof DeadboltLoginsRequest> {}
+
+const DeadboltListedLogin = Schema.Struct({
+  origin: Schema.String,
+  title: Schema.String,
+  username: Schema.optionalKey(Schema.String),
+  hasPassword: Schema.Boolean,
+  hasTotp: Schema.Boolean,
+  hasPasskey: Schema.Boolean,
+  granted: Schema.Boolean,
+  fields: Schema.optionalKey(Schema.Array(Schema.String)),
+  passkeys: Schema.Boolean,
+  signIn: Schema.optionalKey(Schema.Struct({ provider: Schema.String, account: Schema.optionalKey(Schema.String) })),
+})
+
+const DeadboltListedPasskey = Schema.Struct({
+  origin: Schema.String,
+  username: Schema.optionalKey(Schema.String),
+  displayName: Schema.optionalKey(Schema.String),
+  granted: Schema.Boolean,
+})
+
+export const DeadboltLoginsResponse = Schema.Struct({
+  connected: Schema.Boolean,
+  origins: Schema.Array(Schema.String),
+  logins: Schema.Array(DeadboltListedLogin),
+  passkeys: Schema.Array(DeadboltListedPasskey),
+  error: Schema.optionalKey(Schema.Struct({ code: Schema.String, message: Schema.String })),
+  note: Schema.optionalKey(Schema.String),
+})
+export interface DeadboltLoginsResponse extends Schema.Schema.Type<typeof DeadboltLoginsResponse> {}
+
 const NetworkEndpointDigest = Schema.Struct({
   method: Schema.String,
   url: Schema.String,

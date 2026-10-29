@@ -1,6 +1,6 @@
 import { Effect, Predicate, Schema } from "effect"
 import { installPageReadTimeout } from "./page-read-timeout.ts"
-import { chromium, errors, type Browser, type BrowserContext, type ConsoleMessage, type Frame, type Locator, type Page } from "patchright-core"
+import { chromium, errors, type Browser, type BrowserContext, type ConsoleMessage, type ElementHandle, type Frame, type Locator, type Page } from "patchright-core"
 import * as acorn from "acorn"
 import fs from "node:fs"
 import path from "node:path"
@@ -62,6 +62,9 @@ import { createWebMcpHelper, type WebMcpHelper } from "./webmcp.ts"
 import { startDemonstrationRecorder, type DemonstrationResult } from "./demonstration.ts"
 import { relayToken } from "./relay-secrets.ts"
 import * as SiteSecrets from "./site-secrets.ts"
+import * as Deadbolt from "./deadbolt.ts"
+import * as SignIn from "./sign-in.ts"
+import type { PasskeyChoice } from "./passkey-bridge.ts"
 import { checkUrl, parseOriginPatterns } from "./domain-policy.ts"
 import { challengeWarning, classifyChallenge, probePageScript, probeSelectors, type ChallengeOutcome, type ChallengeProbe } from "./challenge-detection.ts"
 import { createExecuteFiles, executeAllowsNode, ExecuteRealm, pageVisibleApiWarning, sandboxModules, type ExecuteFiles } from "./execute-realm.ts"
@@ -377,7 +380,9 @@ type SandboxGlobals = {
     readonly stop: (page?: Page) => Promise<{ readonly capturing: boolean }>
   }
   readonly secrets: {
-    readonly type: (target: Locator | string, name: string, options?: TypeSecretOptions) => Promise<TypeSecretResult>
+    readonly type: (target: Locator | string, name: string, options?: TypeSecretOptions) => Promise<TypeSecretResult | TypeDeadboltResult>
+    readonly signIn: (options?: SignIn.SignInOptions) => Promise<SignIn.SignInResult>
+    readonly usePasskey: (options: { readonly site: string; readonly username: string; readonly page?: Page }) => Promise<{ readonly selected: true; readonly site: string; readonly username: string }>
   }
   readonly handoffTracker: { count: number }
 }
@@ -387,9 +392,17 @@ type TypeSecretOptions = {
   readonly clear?: boolean
   /** How long to wait for the target element, in milliseconds (default 10000). */
   readonly timeout?: number
+  /** For a Deadbolt login (`deadbolt:<site>[/<username>]`): which value to type (default "password"). */
+  readonly field?: Deadbolt.DeadboltField
+  /**
+   * For a Deadbolt password or code (required for them): submit the field's form in the same call, wait for the page
+   * to move on, then empty any password and code inputs left in that frame.
+   */
+  readonly submit?: boolean
 }
 
 type TypeSecretResult = { readonly typed: true; readonly name: string; readonly origin: string; readonly kind: SiteSecrets.SiteSecretKind }
+type TypeDeadboltResult = { readonly typed: true; readonly name: string; readonly origin: string; readonly field: Deadbolt.DeadboltField; readonly submitted?: boolean; readonly progressed?: boolean }
 
 type HandoffCallOptions = {
   readonly timeoutMs?: number
@@ -481,6 +494,12 @@ type ExecuteSandboxOptions = {
   readonly allowedOrigins?: () => readonly string[] | undefined
   /** Allowlist violations the relay saw in this session's tabs since the last execute. */
   readonly drainGuardWarnings?: () => readonly string[]
+  /** Passkey account choice in this session's agent tabs (passkey-bridge.ts), by CDP target id. */
+  readonly passkeys?: {
+    /** Throws when the target isn't an agent tab of this session. An empty username clears the choice. */
+    readonly select: (targetId: string, site: string, username: string) => void
+    readonly choiceSince: (targetId: string, since: number) => readonly PasskeyChoice[] | undefined
+  }
 }
 
 export type ExecuteResult = {
@@ -548,7 +567,11 @@ export class ExecuteSandbox {
 
   private createRealm(): ExecuteRealm {
     return new ExecuteRealm({
-      onHostCall: (fn, receiver, args) => this.addWarningOnce(pageVisibleApiWarning(fn, receiver, args)),
+      onHostCall: (fn, receiver, args) => {
+        this.addWarningOnce(pageVisibleApiWarning(fn, receiver, args))
+        const hook = pageHookCall(fn, args)
+        if (hook) this.pageHooks.add(hook)
+      },
     })
   }
 
@@ -767,8 +790,10 @@ export class ExecuteSandbox {
    * field's frame URL (Playwright's frame tree, fed by CDP, not page script) must match the secret's allowed origins,
    * and the session's allowlist when it has one, right before the value is inserted.
    */
-  private async typeSecret(page: Page, target: Locator | string, name: string, options: TypeSecretOptions = {}): Promise<TypeSecretResult> {
+  private async typeSecret(page: Page, target: Locator | string, name: string, options: TypeSecretOptions = {}): Promise<TypeSecretResult | TypeDeadboltResult> {
     if (typeof name !== "string" || !name) throw new Error("secrets.type(target, name): name must be the name of a stored secret")
+    const deadboltSpec = Deadbolt.parseDeadboltName(name)
+    if (deadboltSpec) return await this.typeDeadboltSecret(page, target, name, deadboltSpec, options)
     const secret = await Effect.runPromise(SiteSecrets.readSecret(name)).catch((error: unknown) => {
       throw new Error(`secrets.type: ${error instanceof Error ? error.message : "could not read the secret"}`)
     })
@@ -827,6 +852,186 @@ export class ExecuteSandbox {
     }
   }
 
+  private deadboltConnection: Deadbolt.DeadboltConnection | undefined
+  /** Request interception, page scripts or raw CDP this sandbox's code set up (pageHookCall); Deadbolt values aren't typed then. */
+  private readonly pageHooks = new Set<string>()
+
+  /**
+   * Deadbolt passwords and codes aren't typed into a session whose code set up request interception, request
+   * listeners, init scripts, exposed functions or a raw CDP session: those would see the value in the page or on the
+   * wire. (Listeners added with page.evaluate can't be told apart from normal page reads; that limit is documented.)
+   */
+  private refuseWithPageHooks(label: string): void {
+    if (this.pageHooks.size === 0) return
+    throw new Error(`${label}: page_hooks: this session's code used ${[...this.pageHooks].sort().join(", ")}, which could capture what is typed, so Deadbolt passwords and codes aren't typed here. Reset the session (session_reset) and sign in before setting those up. Nothing was typed.`)
+  }
+
+  /** This install's Deadbolt client, reconnected when `deadbolt connect` stored another one. */
+  private deadbolt(): Deadbolt.DeadboltConnection {
+    const client = Deadbolt.readClient()
+    if (!this.deadboltConnection || !client || this.deadboltConnection.client.id !== client.id || this.deadboltConnection.client.token !== client.token) {
+      this.deadboltConnection = Deadbolt.connect(client ? { client } : {})
+    }
+    return this.deadboltConnection
+  }
+
+  private sessionAllows(url: string): boolean {
+    const patterns = this.options.allowedOrigins?.()
+    return !patterns || patterns.length === 0 || checkUrl(url, parseOriginPatterns(patterns)).allowed
+  }
+
+  /**
+   * Types one value of a Deadbolt login into a field, or one character per box into split code boxes. The fields'
+   * frame origin (Playwright's CDP-fed frame tree) must be on the login's site and in the session's allowlist; Deadbolt
+   * checks the grant and the login's URLs against that origin before it answers. The value is registered for
+   * redaction before it is typed and dropped right after.
+   */
+  private async typeDeadbolt(handles: readonly ElementHandle[], spec: SignIn.LoginSpec, field: Deadbolt.DeadboltField, label: string): Promise<{ readonly origin: string; readonly login: Deadbolt.DeadboltLogin }> {
+    if (!["username", "password", "totp"].includes(field)) throw new Error(`${label}: field must be "username", "password" or "totp"`)
+    if (handles.length === 0) throw new Error(`${label}: target_not_editable: no field to type into`)
+    if (field !== "username") this.refuseWithPageHooks(label)
+    const frame = await handles[0]!.ownerFrame()
+    if (!frame) throw new Error(`${label}: target_not_editable: the field is not in a frame`)
+    for (const handle of handles.slice(1)) {
+      if ((await handle.ownerFrame()) !== frame) throw new Error(`${label}: target_not_editable: the code boxes are in different frames`)
+    }
+    const checkOrigin = (): string => {
+      const url = frame.url()
+      let origin: string
+      try {
+        origin = new URL(url).origin
+      } catch {
+        origin = url.slice(0, 200)
+      }
+      if (/^(?:about|data|blob):/i.test(url) || !Deadbolt.originOnSite(origin, spec.site)) {
+        throw new Error(`${label}: domain_not_allowed: the field's frame is ${origin}, which is not on ${spec.site}. Nothing was typed.`)
+      }
+      if (!this.sessionAllows(url)) {
+        throw new Error(`${label}: domain_not_allowed: the field's frame is ${origin}, which is outside this session's domain allowlist. Nothing was typed.`)
+      }
+      return origin
+    }
+    const origin = checkOrigin()
+    for (const handle of handles) {
+      if (!(await handle.isEditable().catch(() => false))) throw new Error(`${label}: target_not_editable: the target is not an editable field. Nothing was typed.`)
+    }
+    const connection = this.deadbolt()
+    const login = Deadbolt.pickLogin(await connection.logins(origin), spec.site, spec.username, field)
+    const values = await connection.fill(origin, login, [field])
+    let value = values[field]
+    if (!value) throw new Deadbolt.DeadboltError("not_found", `The Deadbolt login for ${spec.site} has no ${field}.`)
+    const name = `deadbolt:${spec.site}${login.username ? `/${login.username}` : ""} ${field}`
+    try {
+      // Register first, so a capture or result that sees the value already redacts it. Usernames aren't secret
+      // (secrets_list shows them), so they aren't redacted.
+      if (field !== "username") {
+        this.typedSecrets.set(value, name)
+        this.networkCapture.addRedaction(value)
+      }
+      const characters = handles.length === 1 ? [value] : Array.from(value)
+      if (handles.length > 1 && characters.length !== handles.length) {
+        throw new Error(`${label}: target_not_editable: ${handles.length} code boxes for a ${characters.length}-character code. Nothing was typed.`)
+      }
+      for (const [index, handle] of handles.entries()) {
+        await handle.fill("")
+        await handle.focus()
+        const focused = await handle.evaluate((node) => {
+          const element = node as Element
+          return element.ownerDocument.activeElement === element || element.contains(element.ownerDocument.activeElement)
+        })
+        if (!focused) throw new Error(`${label}: target_not_editable: the field did not keep focus.`)
+        checkOrigin()
+        await frame.page().keyboard.insertText(characters[index]!)
+      }
+    } finally {
+      value = undefined
+    }
+    if (!this.options.allowedOrigins?.()?.length) {
+      this.addWarningOnce(`A Deadbolt login was typed in a session without a domain allowlist. A prompt-injected page could steer this session elsewhere after the value is in the page: set one with session_allowlist (or \`session allow\`) before signing in.`)
+    }
+    return { origin, login }
+  }
+
+  /**
+   * secrets.type with a Deadbolt login. A username may be typed on its own; a password or code only with
+   * `{submit: true}`: typed, submitted (the form's submit control, else Enter) and waited on in the same call, after
+   * which password and code inputs left in that frame are emptied, so the value isn't sitting in a page the agent's
+   * next call can read. Prefer secrets.signIn().
+   */
+  private async typeDeadboltSecret(page: Page, target: Locator | string, name: string, spec: SignIn.LoginSpec, options: TypeSecretOptions): Promise<TypeDeadboltResult> {
+    const field = options.field ?? "password"
+    if (field !== "username" && options.submit !== true) {
+      throw new Error(`secrets.type: submit_required: a Deadbolt ${field} is typed only with { submit: true }, which submits the form in the same call and clears the field afterwards. Prefer secrets.signIn(). Nothing was typed.`)
+    }
+    const locator = typeof target === "string" ? page.locator(target) : target
+    if (!locator || typeof (locator as Locator).elementHandle !== "function") {
+      throw new Error("secrets.type(target, name): target must be a selector string or a Locator")
+    }
+    const handle = await locator.elementHandle({ timeout: options.timeout ?? 10_000 })
+    const frame = await handle.ownerFrame()
+    let typed = false
+    try {
+      const { origin } = await this.typeDeadbolt([handle], spec, field, "secrets.type").catch((error: unknown) => {
+        if (error instanceof Deadbolt.DeadboltError) throw new Error(`secrets.type: ${error.code}: ${error.message} Nothing was typed.`)
+        throw error
+      })
+      typed = true
+      if (options.submit !== true) return { typed: true, name, origin, field }
+      const submitControl = await handle.evaluateHandle((node) => {
+        const form = (node as HTMLInputElement).form
+        if (!form) return null
+        return form.querySelector("button[type=submit], input[type=submit], button:not([type])")
+      })
+      const button = submitControl.asElement()
+      if (button) await button.click({ timeout: 5_000 }).catch(() => handle.press("Enter"))
+      else await handle.press("Enter")
+      const progressed = await SignIn.waitForProgress(frame?.page() ?? page, handle, 15_000)
+      return { typed: true, name, origin, field, submitted: true, progressed }
+    } finally {
+      if (typed && field !== "username") await SignIn.clearSecretInputs(frame ? [frame] : [], [handle])
+      await handle.dispose().catch(() => {})
+    }
+  }
+
+  /**
+   * secrets.usePasskey({site, username}): the account for the next passkey request (navigator.credentials.get) in
+   * the page's tab, used once, for two minutes. Deadbolt still checks the grant; the ref stays in the relay.
+   */
+  private async usePasskey(page: Page, options: { readonly site: string; readonly username: string }): Promise<{ readonly selected: true; readonly site: string; readonly username: string }> {
+    const site = typeof options?.site === "string" ? options.site.trim().toLowerCase() : ""
+    const username = typeof options?.username === "string" ? options.username.trim() : ""
+    if (!site || !username) throw new Error("secrets.usePasskey({ site, username }): site and username are required")
+    if (!this.options.passkeys) throw new Error("secrets.usePasskey: passkeys aren't available in this relay")
+    this.options.passkeys.select(await pageTargetId(page), site, username)
+    return { selected: true, site, username }
+  }
+
+  /** secrets.signIn(): the whole sign-in in the relay (sign-in.ts); only {status, step, reason} comes back. */
+  private async signIn(page: Page, options: SignIn.SignInOptions = {}): Promise<SignIn.SignInResult> {
+    if (options !== null && typeof options !== "object") throw new Error("secrets.signIn(options): options must be an object like { site, username }")
+    const site = typeof options?.site === "string" ? options.site : undefined
+    const username = typeof options?.username === "string" ? options.username : undefined
+    const timeoutMs = typeof options?.timeoutMs === "number" && options.timeoutMs > 0 ? Math.min(options.timeoutMs, 300_000) : undefined
+    return await SignIn.signIn({
+      page,
+      context: page.context(),
+      type: async (handles, spec, field) => (await this.typeDeadbolt(handles, spec, field, "secrets.signIn")).login,
+      logins: (origin) => this.deadbolt().logins(origin),
+      passkeyAccounts: async (origin) => (await this.deadbolt().site(origin)).passkeys,
+      challenge: async (target) => {
+        const outcome = await detectChallenge(target, { waitMs: challengeWaitMs() }).catch(() => undefined)
+        return outcome && outcome.status === "blocked" ? outcome : undefined
+      },
+      allowed: (url) => this.sessionAllows(url),
+      ...(this.options.passkeys ? {
+        passkeys: {
+          select: async (target, passkeySite, passkeyUsername) => this.options.passkeys!.select(await pageTargetId(target), passkeySite, passkeyUsername),
+          choiceSince: async (target, since) => this.options.passkeys!.choiceSince(await pageTargetId(target), since),
+        },
+      } : {}),
+    }, { ...(site ? { site } : {}), ...(username ? { username } : {}), ...(timeoutMs ? { timeoutMs } : {}) })
+  }
+
   private redactCaptureLogs(logs: readonly ExecuteLogEntry[]): readonly ExecuteLogEntry[] {
     return logs.map((log) => ({
       ...log,
@@ -863,6 +1068,8 @@ export class ExecuteSandbox {
       sandbox.realm?.dispose()
       sandbox.realm = sandbox.allowNode ? undefined : sandbox.createRealm()
       sandbox.state = sandbox.realm?.state ?? {}
+      // Routes, listeners, init scripts and CDP sessions belong to the browser connection closed below.
+      sandbox.pageHooks.clear()
       const browser = sandbox.browser
       sandbox.browser = undefined
       sandbox.unbindDefaultPage(sandbox.defaultPageTargetId, {
@@ -1209,6 +1416,8 @@ export class ExecuteSandbox {
       },
       secrets: {
         type: (target, name, typeOptions) => this.typeSecret(page, target, name, typeOptions),
+        signIn: (signInOptions) => this.signIn(page, signInOptions),
+        usePasskey: (passkeyOptions) => this.usePasskey(passkeyOptions?.page ?? page, passkeyOptions),
       },
       handoffTracker,
     }
@@ -2051,6 +2260,19 @@ export async function detectChallenge(page: Page, options: { readonly waitMs: nu
     waitedMs,
     recommendation: current.kind === "block" ? "stop" : "handoff",
   }
+}
+
+const requestEvents = new Set(["request", "requestfinished", "requestfailed", "response", "websocket", "route"])
+
+/**
+ * Calls from execute code that can watch what a page sends or types: request interception and listeners, page
+ * scripts added before navigation, exposed functions, raw CDP sessions. Returns a label, or undefined.
+ */
+export function pageHookCall(fn: Function, args: readonly unknown[]): string | undefined {
+  const name = typeof fn.name === "string" ? fn.name.replace(/^bound /, "") : ""
+  if (["route", "routeFromHAR", "routeWebSocket", "addInitScript", "exposeBinding", "exposeFunction", "newCDPSession", "waitForRequest", "waitForResponse"].includes(name)) return `${name}()`
+  if (["on", "once", "addListener", "prependListener", "waitForEvent"].includes(name) && typeof args[0] === "string" && requestEvents.has(args[0])) return `${name}("${args[0]}")`
+  return undefined
 }
 
 /** Full-Node execute code bypasses the realm's call observer, so look for the page-visible APIs in its source. */

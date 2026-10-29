@@ -1,5 +1,6 @@
 // Isolated headless check of the guarded-agent features against a real browser: challenge detection, per-session
-// domain allowlists, origin-bound secrets and page-visible API warnings.
+// domain allowlists, origin-bound secrets, page-visible API warnings, and Deadbolt sign-ins and passkeys (against a
+// fake Deadbolt socket, test/fake-deadbolt.ts).
 //   bun build.ts && node --no-warnings test/guarded-agents-browser.ts [--browser <chromium executable>]
 // Same isolation as execute-realm-browser.ts: a port-patched copy of the extension in Playwright's Chromium (headless),
 // a fresh OPENCODE_BROWSER_HOME and relay port (BROWSE_TEST_RELAY_PORT / BROWSE_TEST_FIXTURE_PORT, else free ports).
@@ -13,6 +14,8 @@ import { spawn, spawnSync } from "node:child_process"
 import { parseArgs } from "node:util"
 import { chromium } from "patchright-core"
 import { relayToken } from "../src/relay-secrets.ts"
+import { saveClient } from "../src/deadbolt.ts"
+import { startFakeDeadbolt } from "./fake-deadbolt.ts"
 
 async function freePort(): Promise<number> {
   const server = net.createServer()
@@ -66,6 +69,20 @@ for (const entry of fs.readdirSync(extension, { recursive: true })) {
 const cli = path.join(runtime, "dist/cli.mjs")
 assert.equal(spawnSync("node", [cli, "pair"], { env, stdio: "ignore" }).status, 0)
 
+// ---- fake Deadbolt: the relay finds it through OPENCODE_BROWSER_DEADBOLT_SOCKET and the client file in its home.
+const dbPassword = "Db-Pa55word!q7"
+const dbTotp = "123456"
+const fakeDeadbolt = await startFakeDeadbolt({
+  directory: path.join(root, "db"),
+  logins: [
+    { ref: { vault: "v", item: "alice" }, site, title: "Fixture", username: "alice@example.com", values: { username: "alice@example.com", password: dbPassword, totp: dbTotp }, fields: ["username", "password", "totp"], passkeys: true, passkey: { displayName: "Alice" } },
+    { ref: { vault: "v", item: "carol" }, site, title: "Fixture (carol)", username: "carol", values: { username: "carol" }, fields: [], passkeys: true, passkey: { displayName: "Carol" } },
+    { ref: { vault: "v", item: "bob" }, site, title: "Fixture (bob)", username: "bob", values: { username: "bob", password: "bob-password-x" }, fields: [] },
+  ],
+})
+await saveClient(fakeDeadbolt.client, home)
+env.OPENCODE_BROWSER_DEADBOLT_SOCKET = fakeDeadbolt.socket
+
 const page = (title: string, body: string) => `<!doctype html><title>${title}</title><body>${body}</body>`
 let otherHostHits = 0
 const fixture = http.createServer((request, response) => {
@@ -83,6 +100,95 @@ const fixture = http.createServer((request, response) => {
       request.on("end", () => html(200, page("Submitted", `<p id="len">${body.length}</p>`)))
       return
     }
+    case "/db/spa": return html(200, page("Sign in", `<div id="app"><label for="email">Email</label><input id="email" type="email" autocomplete="username"><button id="next">Next</button></div>
+<script>
+next.onclick = () => {
+  const user = email.value
+  app.innerHTML = '<label for="pw">Password</label><input id="pw" type="password" autocomplete="current-password"><button id="go">Sign in</button>'
+  go.onclick = async () => {
+    const response = await fetch('/db/check', { method: 'POST', body: JSON.stringify({ user, password: pw.value }) })
+    app.innerHTML = (await response.json()).ok ? '<h1>Welcome back</h1><a href="/">Home</a>' : '<p role="alert">Wrong password. Try again.</p><input id="pw" type="password"><button>Sign in</button>'
+  }
+}
+</script>`))
+    case "/db/check": {
+      let body = ""
+      request.on("data", (chunk) => { body += chunk })
+      request.on("end", () => {
+        const { user, password } = JSON.parse(body)
+        response.writeHead(200, { "content-type": "application/json" })
+        response.end(JSON.stringify({ ok: user === "alice@example.com" && password === dbPassword }))
+      })
+      return
+    }
+    case "/db/two": return html(200, page("Sign in", `<form action="/db/two/password"><label>Username <input name="username" autocomplete="username"></label><button type="submit">Continue</button></form>`))
+    case "/db/two/password": return html(200, page("Password", `<form method="post" action="/db/two/otp"><input type="hidden" name="username" value="${url.searchParams.get("username") ?? ""}"><label>Password <input type="password" name="password"></label><button>Log in</button></form>`))
+    case "/db/two/otp":
+    case "/db/two/done": {
+      let body = ""
+      request.on("data", (chunk) => { body += chunk })
+      request.on("end", () => {
+        const form = new URLSearchParams(body)
+        if (url.pathname === "/db/two/otp") {
+          if (form.get("password") !== dbPassword || form.get("username") !== "alice@example.com") return html(200, page("Password", `<p role="alert">Incorrect password</p>`))
+          const boxes = Array.from({ length: 6 }, (_, index) => `<input name="d${index}" maxlength="1" inputmode="numeric" aria-label="Digit ${index + 1}">`).join("")
+          return html(200, page("Two-factor", `<p>Enter the 6-digit code from your authenticator app.</p><form id="f" method="post" action="/db/two/done">${boxes}</form>
+<script>
+const inputs = [...document.querySelectorAll('#f input')]
+inputs.forEach((input, index) => input.addEventListener('input', () => {
+  if (input.value && inputs[index + 1]) inputs[index + 1].focus()
+  if (inputs.every((box) => box.value)) document.getElementById('f').submit()
+}))
+</script>`))
+        }
+        const code = Array.from({ length: 6 }, (_, index) => form.get(`d${index}`) ?? "").join("")
+        return html(200, page(code === dbTotp ? "Dashboard" : "Two-factor", code === dbTotp ? `<h1>Signed in</h1>` : `<p role="alert">Invalid code</p>`))
+      })
+      return
+    }
+    case "/db/stay": return html(200, page("Sign in", `<form id="f"><input id="pw" type="password"><button>Sign in</button></form><p id="status"></p><p id="events"></p>
+<script>
+f.onsubmit = (event) => { event.preventDefault(); status.textContent = 'Checking…' }
+pw.addEventListener('input', () => { if (!pw.value) events.textContent += 'input ' })
+</script>`))
+    case "/db/captcha-after": return html(200, page("Sign in", `<form id="f"><input type="email" autocomplete="username"><input type="password" autocomplete="current-password"><button>Sign in</button></form>
+<script>
+f.onsubmit = (event) => {
+  event.preventDefault()
+  if (document.querySelector('iframe')) return
+  const frame = document.createElement('iframe')
+  frame.src = '/recaptcha/api2/anchor?k=x'
+  frame.width = 300
+  frame.height = 80
+  document.body.append(frame)
+}
+</script>`))
+    case "/db/captcha": return html(200, page("Sign in", `<form><input type="email" autocomplete="username"><input type="password"><button>Sign in</button></form><iframe src="/recaptcha/api2/anchor?k=x" width="300" height="80"></iframe>`))
+    case "/db/sms": return html(200, page("Verify", `<p>We sent a code to your phone ending in 42.</p><input autocomplete="one-time-code" inputmode="numeric"><button>Verify</button>`))
+    case "/db/pk-login": return html(200, page("Sign in", `<button id="pk">Sign in with a passkey</button><p id="err"></p>
+<script>
+pk.onclick = async () => {
+  try {
+    const credential = await navigator.credentials.get({ publicKey: { challenge: new Uint8Array(32).fill(3), rpId: location.hostname, userVerification: 'preferred' } })
+    location.href = '/db/pk-ok?id=' + credential.id
+  } catch (error) {
+    err.textContent = error.name
+  }
+}
+</script>`))
+    case "/db/pk-ok": return html(200, page("Welcome", `<h1>Welcome ${Buffer.from(url.searchParams.get("id") ?? "", "base64url").toString()}</h1>`))
+    case "/db/passkey": return html(200, page("Passkey", `<button id="pk">Sign in with a passkey</button><pre id="out"></pre>
+<script>
+document.title = Object.getOwnPropertyNames(window).some((key) => /^__b[0-9a-f]{24}$/.test(key)) ? 'binding-leaked' : 'Passkey'
+pk.onclick = async () => {
+  try {
+    const credential = await navigator.credentials.get({ publicKey: { challenge: new Uint8Array(32).fill(9), rpId: location.hostname, allowCredentials: [], userVerification: 'preferred' } })
+    out.textContent = JSON.stringify({ ok: true, id: credential.id, type: credential.type, isPublicKeyCredential: credential instanceof PublicKeyCredential, clientData: JSON.parse(new TextDecoder().decode(credential.response.clientDataJSON)), signature: credential.response.signature.byteLength, json: credential.toJSON().id })
+  } catch (error) {
+    out.textContent = JSON.stringify({ ok: false, name: error.name })
+  }
+}
+</script>`))
     case "/cf-wait": return html(200, page("Just a moment...", `<div id="challenge-running">Checking your browser</div><script>setTimeout(()=>location.replace('/cleared'),1500)</script>`))
     case "/cf-stuck": return html(200, page("Just a moment...", `<div id="challenge-running">Checking your browser</div>`))
     case "/px": return html(200, page("Access to this page has been denied", `<div id="px-captcha" style="width:300px;height:80px"></div><p>Press &amp; Hold to confirm you are a human (and not a bot).</p>`))
@@ -281,8 +387,151 @@ try {
   const leaks = [...filesContaining(home, secretValue, path.join(home, "site-secrets")), ...filesContaining(path.dirname(path.join(root, "relay.log")), secretValue, path.join(root, "profile")).filter((file) => !file.startsWith(home))]
   assert.deepEqual(leaks, [], `the secret leaked into ${leaks.join(", ")}`)
   report.secrets = { typed: "PASS", readBackRedacted: "PASS", harRedacted: "PASS", crossOriginIframe: "PASS", redirect: "PASS", notEditable: "PASS", noLeaksOnDisk: "PASS" }
+
+  // ---- Deadbolt logins ----------------------------------------------------------------------------
+  await api("/cli/session/new", { id: "guard-db" })
+  const dbName = `deadbolt:${site}/alice@example.com`
+  const dbTyped = await execute("guard-db", `
+    await page.goto(${JSON.stringify(`${site}/login`)});
+    const user = await secrets.type('#user', ${JSON.stringify(dbName)}, { field: 'username' });
+    const username = await page.inputValue('#user');
+    const unsubmitted = await secrets.type('#pass', ${JSON.stringify(dbName)}).then(() => 'typed', (error) => error.message);
+    const left = await page.inputValue('#pass');
+    const result = await secrets.type('#pass', ${JSON.stringify(dbName)}, { submit: true });
+    console.log('submitted', page.url());
+    return { user, result, username, unsubmitted, left, url: page.url(), length: await page.textContent('#len') }`)
+  assert.equal(dbTyped.isError, false, dbTyped.text)
+  assert.match(dbTyped.value.unsubmitted, /submit_required/)
+  assert.equal(dbTyped.value.left, "", "nothing typed without submit")
+  assert.deepEqual(dbTyped.value.result, { typed: true, name: dbName, origin: site, field: "password", submitted: true, progressed: true })
+  assert.equal(dbTyped.value.username, "alice@example.com")
+  assert.equal(dbTyped.value.url, `${site}/submit`)
+  assert.ok(Number(dbTyped.value.length) > dbPassword.length, "the form posted the password")
+  const stay = await execute("guard-db", `
+    await page.goto(${JSON.stringify(`${site}/db/stay`)});
+    const result = await secrets.type('#pw', ${JSON.stringify(dbName)}, { submit: true });
+    return { result, left: await page.inputValue('#pw'), events: await page.textContent('#events') }`)
+  assert.equal(stay.isError, false, stay.text)
+  assert.equal(stay.value.result.submitted, true)
+  assert.equal(stay.value.left, "", "the password is cleared when the page stays")
+  assert.match(stay.value.events, /input/, "clearing fires input events")
+  assert.ok(!JSON.stringify(dbTyped).includes(dbPassword), "the execute result must not contain the Deadbolt password")
+  const fills = fakeDeadbolt.requests.filter((request) => request.cmd === "agent-fill")
+  assert.ok(fills.length >= 2 && fills.every((request) => request.origin === site), JSON.stringify(fills.map((request) => request.origin)))
+  const dbIframe = await execute("guard-db", `await page.goto(${JSON.stringify(`${site}/login`)}); return await secrets.type(page.frameLocator('iframe').locator('#inner'), ${JSON.stringify(dbName)}, { submit: true })`)
+  assert.equal(dbIframe.isError, true)
+  assert.match(dbIframe.text, /domain_not_allowed: the field's frame is http:\/\/localhost:\d+/)
+  const fillsBefore = fakeDeadbolt.requests.filter((request) => request.cmd === "agent-fill").length
+  const dbNotGranted = await execute("guard-db", `return await secrets.type('#pass', ${JSON.stringify(`deadbolt:${site}/bob`)}, { submit: true })`)
+  assert.equal(dbNotGranted.isError, true)
+  assert.match(dbNotGranted.text, /not_granted: No Deadbolt login for bob is granted/)
+  assert.equal(fakeDeadbolt.requests.filter((request) => request.cmd === "agent-fill").length, fillsBefore, "nothing is asked of Deadbolt for an ungranted login")
+  const dbWrongSite = await execute("guard-db", `return await secrets.type('#pass', 'deadbolt:example.com', { submit: true })`)
+  assert.match(dbWrongSite.text, /domain_not_allowed: the field's frame is http:\/\/127\.0\.0\.1:\d+, which is not on example\.com/)
+  fakeDeadbolt.locked = true
+  const dbLocked = await execute("guard-db", `return await secrets.type('#pass', ${JSON.stringify(dbName)}, { submit: true })`)
+  fakeDeadbolt.locked = false
+  assert.match(dbLocked.text, /secrets\.type: locked: .*Deadbolt is locked/)
+  assert.equal(runCli(["session", "allow", "--session", "guard-db", "localhost"]).status, 0)
+  const dbOutside = await execute("guard-db", `return { url: page.url(), result: await secrets.type('#pass', ${JSON.stringify(dbName)}, { submit: true }).catch((error) => error.message) }`)
+  assert.ok(dbOutside.value.url === "about:blank" || /outside this session's domain allowlist/.test(dbOutside.value.result), JSON.stringify(dbOutside.value))
+  assert.equal(runCli(["session", "allow", "--session", "guard-db", "127.0.0.1"]).status, 0)
+  const listedLogins = await api("/cli/deadbolt/logins", { sessionId: "guard-db" })
+  assert.deepEqual(listedLogins.logins.map((login: { username: string; granted: boolean }) => [login.username, login.granted]), [["alice@example.com", true], ["carol", true], ["bob", false]])
+  assert.deepEqual(listedLogins.passkeys.map((passkey: { username: string; displayName: string; granted: boolean }) => [passkey.username, passkey.displayName, passkey.granted]), [["alice@example.com", "Alice", true], ["carol", "Carol", true]])
+  assert.ok(!JSON.stringify(listedLogins).includes(dbPassword))
+  report.deadboltType = { usernameAlone: "PASS", passwordNeedsSubmit: "PASS", submitted: "PASS", clearedWhenPageStays: "PASS", crossOriginIframe: "PASS", notGranted: "PASS", wrongSite: "PASS", locked: "PASS", allowlist: dbOutside.value.url === "about:blank" ? "PASS (tab sent away)" : "PASS", list: "PASS" }
+
+  const signIn = async (pathname: string, options = "") => await execute("guard-db", `await page.goto(${JSON.stringify(`${site}${pathname}`)}); const result = await secrets.signIn(${options}); return { result, title: await page.title(), url: page.url() }`)
+  const spa = await signIn("/db/spa")
+  assert.equal(spa.isError, false, spa.text)
+  assert.deepEqual(Object.keys(spa.value.result).sort(), ["reason", "status", "step"])
+  assert.equal(spa.value.result.status, "signed_in", JSON.stringify(spa.value))
+  assert.ok(!JSON.stringify(spa).includes(dbPassword))
+  const two = await signIn("/db/two", "{ username: 'alice@example.com' }")
+  assert.equal(two.value.result.status, "signed_in", JSON.stringify(two.value))
+  assert.equal(two.value.title, "Dashboard", JSON.stringify(two.value))
+  assert.ok(!JSON.stringify(two).includes(dbPassword) && !JSON.stringify(two).includes(dbTotp), "no value in the result")
+  const captcha = await signIn("/db/captcha")
+  assert.equal(captcha.value.result.status, "needs_user", JSON.stringify(captcha.value))
+  assert.match(captcha.value.result.reason, /captcha.*handoff/)
+  const sms = await signIn("/db/sms")
+  assert.deepEqual([sms.value.result.status, sms.value.result.step], ["needs_user", "code"], JSON.stringify(sms.value))
+  const captchaAfter = await execute("guard-db", `
+    await page.goto(${JSON.stringify(`${site}/db/captcha-after`)});
+    const result = await secrets.signIn();
+    return { result, left: await page.inputValue('input[type=password]') }`)
+  assert.equal(captchaAfter.value.result.status, "needs_user", JSON.stringify(captchaAfter.value))
+  assert.equal(captchaAfter.value.result.step, "password", JSON.stringify(captchaAfter.value))
+  assert.equal(captchaAfter.value.left, "", "a stopped sign-in leaves no password in the page")
+  await api("/cli/session/new", { id: "guard-db-hooks" })
+  const hooked = await execute("guard-db-hooks", `
+    await page.route('**/never', (route) => route.continue());
+    await page.goto(${JSON.stringify(`${site}/login`)});
+    const typed = await secrets.type('#pass', ${JSON.stringify(dbName)}, { submit: true }).then(() => 'typed', (error) => error.message);
+    const signedIn = await secrets.signIn();
+    return { typed, signedIn, left: await page.inputValue('#pass') }`)
+  assert.match(hooked.value.typed, /page_hooks: this session's code used route\(\)/)
+  assert.equal(hooked.value.signedIn.status, "failed")
+  assert.match(hooked.value.signedIn.reason, /page_hooks/)
+  assert.equal(hooked.value.left, "")
+  fakeDeadbolt.locked = true
+  const locked = await signIn("/db/spa")
+  fakeDeadbolt.locked = false
+  assert.equal(locked.value.result.status, "needs_user", JSON.stringify(locked.value))
+  report.deadboltSignIn = { identifierFirstSpa: "PASS", twoPageWithSplitTotp: "PASS", captcha: "PASS", smsCode: "PASS", captchaAfterPasswordCleared: "PASS", pageHooksRefused: "PASS", locked: "PASS" }
+
+  // ---- passkeys in agent tabs -----------------------------------------------------------------------
+  const unchosen = await execute("guard-db", `
+    await page.goto(${JSON.stringify(`${site}/db/passkey`)});
+    await page.click('#pk');
+    await page.waitForFunction(() => document.querySelector('#out').textContent.length > 0);
+    return JSON.parse(await page.textContent('#out'))`)
+  assert.deepEqual(unchosen.value, { ok: false, name: "NotAllowedError" }, "two granted passkeys and no account chosen: " + JSON.stringify(unchosen.value))
+  const passkey = await execute("guard-db", `
+    await page.goto(${JSON.stringify(`${site}/db/passkey`)});
+    const title = await page.title();
+    await secrets.usePasskey({ site: ${JSON.stringify(site)}, username: 'alice@example.com' });
+    await page.click('#pk');
+    await page.waitForFunction(() => document.querySelector('#out').textContent.length > 0);
+    const result = JSON.parse(await page.textContent('#out'));
+    const cdp = await page.context().newCDPSession(page);
+    const webauthn = await cdp.send('WebAuthn.enable').then(() => 'allowed', (error) => error.message);
+    return { title, result, webauthn }`)
+  assert.equal(passkey.isError, false, passkey.text)
+  assert.equal(passkey.value.title, "Passkey", "the binding must not be visible to page script")
+  assert.equal(passkey.value.result.ok, true, JSON.stringify(passkey.value))
+  assert.equal(passkey.value.result.isPublicKeyCredential, true)
+  assert.equal(passkey.value.result.type, "public-key")
+  assert.equal(passkey.value.result.clientData.origin, site, "Deadbolt got the origin from CDP")
+  assert.equal(passkey.value.result.json, passkey.value.result.id)
+  assert.equal(Buffer.from(passkey.value.result.id, "base64url").toString(), "cred-alice")
+  assert.match(passkey.value.webauthn, /blocked WebAuthn\.enable/)
+  const passkeyRequest = fakeDeadbolt.requests.find((request) => request.cmd === "agent-passkey-get")!
+  assert.deepEqual([passkeyRequest.origin, passkeyRequest.rp_id, passkeyRequest.user_verification], [site, "127.0.0.1", "preferred"])
+  const needsChoice = await signIn("/db/pk-login")
+  assert.equal(needsChoice.value.result.status, "needs_choice", JSON.stringify(needsChoice.value))
+  assert.deepEqual(needsChoice.value.result.choices, [{ username: "alice@example.com", displayName: "Alice" }, { username: "carol", displayName: "Carol" }])
+  assert.ok(!JSON.stringify(needsChoice).includes("vault"), "no refs reach the agent")
+  const chosen = await signIn("/db/pk-login", "{ username: 'carol' }")
+  assert.equal(chosen.value.result.status, "signed_in", JSON.stringify(chosen.value))
+  assert.equal(chosen.value.title, "Welcome", JSON.stringify(chosen.value))
+  assert.equal(await execute("guard-db", "return await page.textContent('h1')").then((result) => result.value), "Welcome cred-carol")
+  assert.equal(runCli(["session", "allow", "--session", "guard-db", "127.0.0.1", "localhost"]).status, 0)
+  const noGrant = await execute("guard-db", `
+    await page.goto(${JSON.stringify(`${other}/db/passkey`)});
+    await page.click('#pk');
+    await page.waitForFunction(() => document.querySelector('#out').textContent.length > 0);
+    return JSON.parse(await page.textContent('#out'))`)
+  assert.deepEqual(noGrant.value, { ok: false, name: "NotAllowedError" }, JSON.stringify(noGrant.value))
+  report.passkeys = { chooseWithoutAccount: "PASS", usePasskey: "PASS", signInNeedsChoice: "PASS", signInWithUsername: "PASS", assertion: "PASS", originFromCdp: "PASS", bindingNotOnPageAtLoad: "PASS", webauthnBlocked: "PASS", noGrantNotAllowed: "PASS" }
+  await pause(500)
+  const dbLeaks = filesContaining(home, dbPassword, path.join(home, "site-secrets"))
+  assert.deepEqual(dbLeaks, [], `the Deadbolt password leaked into ${dbLeaks.join(", ")}`)
+
   console.log(JSON.stringify(report, null, 2))
 } finally {
+  await fakeDeadbolt.close()
   await browser?.close()
   relay.kill("SIGTERM")
   await new Promise<void>(resolve => fixture.close(() => resolve()))

@@ -9,6 +9,7 @@ import { getObject, getString, parseTargetSelection } from "./relay-helpers.ts"
 import * as RelayClient from "./relay-client.ts"
 import * as RelayLifecycle from "./relay-lifecycle.ts"
 import * as SiteSecrets from "./site-secrets.ts"
+import * as Deadbolt from "./deadbolt.ts"
 import type { TargetSelection } from "./relay-schema.ts"
 import { autoUpdateStatus } from "./auto-update.ts"
 import { createUpdateWatcher, updateJson, type UpdateNotice } from "./update.ts"
@@ -64,7 +65,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       name: "execute",
       description: "Execute Playwright JavaScript against the Browse session. Code runs in a sandbox on the relay without process, require, import(), fs, child_process, http/https or Node fetch; save and read files with the files helper inside the execute file roots, and cookie access is limited to the session's pages. The result includes console logs, warnings, a bounded execution-context diagnostic when relevant, and an aftermath summary (URL movement, navigations, error counts, handoffs, and a bot challenge or block page when one appears: hand interactive ones to the user with handoff(), never solve or retry-loop them).",
       inputSchema: objectSchema({
-        code: { type: "string", description: "JavaScript code to execute. It receives browser, context, page, state, modules (path, url, util, crypto, buffer, zlib, events, stream), files (dir, path, write, read), fillInput, fillInputs, snapshot(options?) for compact semantic outlines, search, explicit diffs, or automatic deltas, persistent compatible ref(id) locators, webmcp (list/call), screenshot helpers, ariaSnapshot, ghostCursor, handoff, demonstrate, network capture, pageConsole (start/stop capturing the page's own console messages and errors, off by default because pages can detect it), and secrets.type(locator, name) to type a stored site secret (see secrets_list) only on its allowed origins, without seeing it." },
+        code: { type: "string", description: "JavaScript code to execute. It receives browser, context, page, state, modules (path, url, util, crypto, buffer, zlib, events, stream), files (dir, path, write, read), fillInput, fillInputs, snapshot(options?) for compact semantic outlines, search, explicit diffs, or automatic deltas, persistent compatible ref(id) locators, webmcp (list/call), screenshot helpers, ariaSnapshot, ghostCursor, handoff, demonstrate, network capture, pageConsole (start/stop capturing the page's own console messages and errors, off by default because pages can detect it), secrets.type(locator, name) to type a stored site secret or a granted Deadbolt login (\"deadbolt:<site>[/<username>]\", { field: \"username\" }, or a password/code with { submit: true }; see secrets_list) only on its allowed origins, without seeing it, secrets.signIn({ site?, username? }) for a whole sign-in (same as the signin tool), and secrets.usePasskey({ site, username }) to pick the passkey account for the tab's next passkey request." },
         session: { type: "string", description: "Optional existing Browse session id. Explicit ids must already exist; omit this field to use the MCP server's current session, which is created when needed." },
         targetUrl: { type: "string", description: "Optional URL substring selecting an existing attached page. This does not navigate or open a URL; use page.goto() for that." },
         targetIndex: { type: "integer", minimum: 0, description: "Optional zero-based attached page index selector." },
@@ -503,12 +504,48 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "secrets_list",
-      description: "List site secrets the user stored for typing with secrets.type(target, name) in execute: names, kinds and allowed origins, never values. Only the user adds them (`opencode-browser secrets add`).",
-      inputSchema: emptyInputSchema,
+      description: "List what agents may type without seeing: site secrets the user stored (names, kinds and allowed origins; type them with secrets.type(target, name) in execute; only the user adds them with `opencode-browser secrets add`), and Deadbolt logins the user granted to Browse for this session's allowed sites (title, username, which values and passkeys, never values; sign in with the signin tool or secrets.signIn(), or type one value with secrets.type(target, \"deadbolt:<site>[/<username>]\", { field })). Passkeys are listed by account (username, displayName). Only the user grants Deadbolt logins, in Deadbolt (`deadbolt agents allow <site>`, or `deadbolt agents allow --all`).",
+      inputSchema: sessionOnlyInputSchema,
       readOnly: true,
       destructive: false,
       idempotent: true,
-      handle: () => SiteSecrets.listSecrets().pipe(Effect.map((secrets) => ({ secrets }))),
+      handle: (input) => Effect.gen(function* () {
+        const secrets = yield* SiteSecrets.listSecrets()
+        if (!Deadbolt.readClient()) {
+          return { secrets, deadbolt: { connected: false, logins: [], passkeys: [], note: "Browse isn't connected to Deadbolt. The user can connect it with `opencode-browser deadbolt connect` and grant logins with `deadbolt agents allow <site>`." } }
+        }
+        const deadbolt = yield* relay.deadboltLogins({ sessionId: resolveSessionId(input) }).pipe(
+          Effect.catch((error) => Effect.succeed({ connected: true, origins: [], logins: [], passkeys: [], error: { code: "unavailable", message: error.message } })),
+        )
+        return { secrets, deadbolt }
+      }),
+    },
+    {
+      name: "signin",
+      description: "Sign in to a site in the session's page with a Deadbolt login the user granted to Browse, without seeing any value. The relay does the whole sign-in in one call: username, submit, password, an authenticator (TOTP) code when asked (split boxes too), \"Use password instead\" toggles, and Sign in with Google when a Google login is granted. A username also picks the passkey account when the site signs in with a passkey. Returns only {status: signed_in | needs_user | needs_choice | not_granted | failed, step, reason}; needs_choice comes with choices [{username, displayName}] when several passkeys could sign in: call again with one username. needs_user means a captcha, a code sent by SMS or email, a push approval or a new-device check: hand it to the user with handoff() in execute. not_granted: tell the user what to allow (`deadbolt agents allow <site>`). Navigate to the sign-in page first, or pass site.",
+      inputSchema: objectSchema({
+        site: { type: "string", description: "The login's site: a host like github.com, or an exact origin. Defaults to the page's site; the page goes there first when it is elsewhere." },
+        username: { type: "string", description: "Which login (and which passkey account), when several are granted for the site." },
+        session: sessionSchemaProperty,
+        timeoutMs: { type: "integer", minimum: 1, description: "Overall limit. Defaults to 90000." },
+      }),
+      readOnly: false,
+      destructive: true,
+      idempotent: false,
+      handle: (input) => Effect.gen(function* () {
+        const object = input === undefined ? {} : requireObject(input)
+        const site = optionalStringField(object, "site")
+        const username = optionalStringField(object, "username")
+        const timeoutMs = optionalPositiveIntegerField(object, "timeoutMs")
+        const explicitSession = optionalStringField(object, "session")
+        yield* RelayLifecycle.ensureExtensionConnected({ relay, waitForReconnect: true })
+        const sessionId = explicitSession ?? currentSession.id
+        const options = { ...(site ? { site } : {}), ...(username ? { username } : {}), ...(timeoutMs === undefined ? {} : { timeoutMs }) }
+        const result = yield* relay.execute({ sessionId, code: `return await secrets.signIn(${JSON.stringify(options)})`, createIfMissing: !explicitSession })
+        establishCurrentSession(sessionId)
+        if (result.isError) return yield* Effect.fail(new Error(result.text))
+        return { ...(result.value as object), ...(result.aftermath?.endUrl ? { url: result.aftermath.endUrl } : {}), ...(result.warnings?.length ? { warnings: result.warnings } : {}) }
+      }),
     },
     {
       name: "secrets_status",

@@ -577,6 +577,81 @@ secret in a session without an allowlist adds a loud warning: set one first.
 Once typed, the value is in the page, so don't read it back or copy it
 elsewhere.
 
+### Signing in with Deadbolt
+
+When the user connected Browse to Deadbolt (`opencode-browser deadbolt
+connect`), you can sign in with the logins they granted to agents, without
+seeing any value. `secrets_list` shows them for the session's allowed sites:
+title, username, `granted`, which `fields` (username, password, totp) and
+whether `passkeys` are allowed, plus the site's passkey accounts (`username`,
+`displayName`). Only the user grants, in Deadbolt: `deadbolt agents allow
+<site>` (everything for that site's logins: username, password, one-time code
+and passkeys, unless narrowed with `--login`, `--fields`, `--no-passkeys`,
+`--expires`) or
+`deadbolt agents allow --all` (every login).
+Never try to grant, pair or unlock yourself; Deadbolt refuses AI callers.
+
+Prefer the whole sign-in in one call (the `signin` tool, or in execute):
+
+```js
+await page.goto("https://github.com/login")
+const result = await secrets.signIn()            // or { site: "github.com", username: "me@example.com" }
+// { status: "signed_in" | "needs_user" | "not_granted" | "failed", step, reason }
+```
+
+It fills the username, submits, waits, fills the password, types an
+authenticator (TOTP) code when the site asks for one (single field or split
+boxes), follows "Use password instead", and follows Sign in with Google when
+Deadbolt grants a Google login, all inside the relay. Then:
+
+- `signed_in`: carry on.
+- `needs_user`: a captcha, a code sent by SMS or email, a push approval, a
+  new-device or "verify it's you" check, or Deadbolt is locked. Call
+  `handoff("Finish signing in, then click Continue")` so the user does it.
+  Don't retry in a loop.
+- `needs_choice`: several passkeys can sign in; `choices` lists their
+  `username` / `displayName`. Ask the user which one if it isn't obvious, then
+  call again with `{ username }`.
+- `not_granted`: tell the user what to allow (the reason names the site and
+  login).
+- `failed`: the reason says why (no form found, wrong password, the page didn't
+  move on). Don't loop.
+
+It doesn't handle security questions, image or canvas keypads, closed shadow
+roots, or sign-in providers other than Google; those return `needs_user` or
+`failed`. When it stops after a fill it empties the password and code fields
+first. For a form it misreads, type one value at a time: a username on its
+own, a password or code only with `{ submit: true }`, which types it, submits
+the form, waits for the page to move on and empties password and code fields
+in that frame, all in the same call:
+
+```js
+await secrets.type("#login", "deadbolt:github.com/me@example.com", { field: "username" })
+await secrets.type("#password", "deadbolt:github.com/me@example.com", { submit: true })   // field defaults to "password"
+```
+
+The same origin checks as stored secrets apply (the field's frame must be on
+the login's site and in the session allowlist; Deadbolt checks again), and
+values never appear in what you get back. Errors start with the code:
+`submit_required`, `domain_not_allowed`, `not_granted`, `locked`, `forbidden`
+(the user must reconnect), `rate_limited`, `page_hooks`. `page_hooks` means
+this session's code set up request interception or listeners
+(`page.route`, `page.on("request")`, `waitForRequest`...), init scripts,
+exposed functions or a CDP session: Deadbolt passwords and codes aren't typed
+then. Sign in first, in a fresh session (`session_reset`), and set those up
+afterwards. Never try to read or capture a value that was typed: the user
+grants logins on the understanding that you don't. Set a session allowlist
+before signing in.
+
+Passkeys: in tabs you opened, a site's passkey sign-in
+(`navigator.credentials.get`) is answered by Deadbolt when the grant allows
+passkeys. `signIn({ username })` picks that account's passkey; to choose one
+before your own click on a "Sign in with a passkey" button, call
+`await secrets.usePasskey({ site: "example.com", username: "me@example.com" })`
+(it applies to the tab's next passkey request, once). Deadbolt never verifies the user, so sites that require that fall back to
+other methods. Otherwise the request fails with NotAllowedError, as if the user
+dismissed it. WebAuthn CDP methods are blocked.
+
 For destructive UI work, use a two-phase **read, confirm, verify** flow:
 
 1. Read candidates and return exact stable identifiers or row text.

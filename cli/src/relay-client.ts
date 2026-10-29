@@ -9,6 +9,8 @@ import {
   type AuthenticatedJsonRequest,
   AuthenticatedJsonOutcome,
   AuthProfileSummary,
+  DeadboltLoginsResponse,
+  type DeadboltLoginsRequest,
   type AuthRefreshRequest,
   type AuthRunRequest,
   AuthRunResponse,
@@ -139,6 +141,8 @@ export interface Interface {
   readonly networkStop: (request: NetworkStopRequest) => Effect.Effect<NetworkStopResponse, RelayClientError>
   readonly networkCancel: (request: NetworkSessionRequest) => Effect.Effect<NetworkCancelResponse, RelayClientError>
   readonly authStatus: (request: AuthProfileRequest) => Effect.Effect<AuthProfileSummary, RelayClientError>
+  /** Deadbolt logins granted to this install for a session's sites (metadata only). */
+  readonly deadboltLogins: (request: DeadboltLoginsRequest) => Effect.Effect<DeadboltLoginsResponse, RelayClientError>
   readonly authRefresh: (request: AuthRefreshRequest) => Effect.Effect<NetworkStopResponse, RelayClientError>
   readonly authRun: (request: AuthRunRequest) => Effect.Effect<AuthRunResponse, RelayClientError>
   readonly recordingStart: (request: RecordingStartRequest) => Effect.Effect<RecordingStartResponse, RelayClientError>
@@ -320,6 +324,7 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
     networkStop: (request) => postJson("/network/stop", { ...request }, NetworkStopResponse),
     networkCancel: (request) => postJson("/network/cancel", { ...request }, NetworkCancelResponse),
     authStatus: (request) => postJson("/auth/status", { ...request }, AuthProfileSummary),
+    deadboltLogins: (request) => postJson("/cli/deadbolt/logins", { ...request }, DeadboltLoginsResponse),
     authRefresh: (request) => postJson("/auth/refresh", { ...request }, NetworkStopResponse),
     authRun: (request) => postJson("/auth/run", { ...request }, AuthRunResponse),
     recordingStart: ({ sessionId, tabId, ...request }) =>

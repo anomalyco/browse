@@ -76,6 +76,7 @@ import { describeChanges, describeSettings, parseSettingChanges, settingsFromExt
 import { installCommand, storeConfig } from "./paths.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "./version.ts"
 import { handleExecuteRealmException, handleExecuteRealmRejection, pruneStaleExecuteFilesDirectories } from "./execute-realm.ts"
+import { PasskeyBridge } from "./passkey-bridge.ts"
 
 export const startRelay = Effect.fn("Relay.start")(function* (options: {
   readonly port?: number
@@ -251,6 +252,15 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
       },
     }).pipe(Effect.ensuring(Effect.sync(() => { finishDisable?.() })))
+  })
+  // Passkeys in agent tabs, signed by Deadbolt (passkey-bridge.ts). Installed only in relay-owned session tabs.
+  const passkeys = new PasskeyBridge({
+    send: (tabId, method, params) => Effect.runPromise(sendDebuggerCommand({ tabId, method, params })),
+    allowedOrigins: (tabId) => {
+      const sessionId = registry.tabTargets.get(tabId)?.opencodeBrowserSessionId
+      return sessionId ? sessions.allowedOrigins(sessionId) : undefined
+    },
+    log: (event, fields) => relayLog(event, fields),
   })
   const recordingRelay = new RecordingRelay({
     sendToExtension: (command) => {
@@ -492,6 +502,20 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         onDefaultTargetChange,
         allowedOrigins: () => sessions.allowedOrigins(id),
         drainGuardWarnings: () => navigationGuard.drainWarnings(id),
+        passkeys: {
+          select: (targetId, site, username) => {
+            const target = registry.targetsByTargetId.get(targetId)
+            if (!target || !("owner" in target) || target.owner !== "relay" || target.opencodeBrowserSessionId !== id) {
+              throw new Error("secrets.usePasskey: passkeys are answered only in tabs this session opened")
+            }
+            if (username) passkeys.select(target.tabId, site, username)
+            else passkeys.clearSelection(target.tabId)
+          },
+          choiceSince: (targetId, since) => {
+            const target = registry.targetsByTargetId.get(targetId)
+            return target && target.opencodeBrowserSessionId === id ? passkeys.choiceSince(target.tabId, since) : undefined
+          },
+        },
         isRecordingTarget: (targetId) => {
           const target = registry.targetsByTargetId.get(targetId)
           return target !== undefined && isTabRecorded(target.tabId)
@@ -1507,6 +1531,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     ) {
       return
     }
+    if (passkeys.handleEvent(tabId, method, params, sourceSessionId === undefined || sourceSessionId === target.sessionId)) {
+      return
+    }
     if (flightRecorder.handleDebuggerEvent({ tabId, method, params }) || recordingRelay.handleDebuggerEvent({ tabId, method, params })) {
       return
     }
@@ -1647,6 +1674,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         Effect.runPromise(Effect.ignore(ghostCursor.documentCreated(tabId))).catch(() => {})
         contextDebugLog?.(`main-frame-navigated frame=${boundedToken(frameId)} loader=${boundedToken(getString(frame, "loaderId"))} ${targetDiagnosticIdentity(target)} ${summarizeDiagnosticUrl(frameUrl)}`)
         registry.updateTargetUrl(tabId, frameUrl)
+        passkeys.navigated(tabId)
         blankNavigationWaiters.get(tabId)?.(frameUrl, getString(frame, "loaderId"))
         // Some Chromium builds drop focus emulation across navigations; without it a background tab is throttled.
         Effect.runPromise(Effect.ignore(sendDebuggerCommand({ tabId, method: "Emulation.setFocusEmulationEnabled", params: { enabled: true } }))).catch(() => {})
@@ -2105,6 +2133,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (committedTarget.opencodeBrowserSessionId) {
       pruneInvisibleAnnouncementsForSession(committedTarget.opencodeBrowserSessionId)
     }
+    if (committedTarget.owner === "relay" && committedTarget.opencodeBrowserSessionId) {
+      void passkeys.install(tabId)
+    }
     if (extensionRpc.connected) {
       refreshTabGrouping(tabId)
     }
@@ -2133,6 +2164,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     navigationGuard.forgetTab(tabId)
     ghostCursor.forget(tabId)
     forgetTab(tabId)
+    passkeys.forget(tabId)
     for (const [sessionId, childTabId] of suppressedChildSessions) {
       if (childTabId === tabId) {
         suppressedChildSessions.delete(sessionId)
