@@ -502,6 +502,20 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         onDefaultTargetChange,
         allowedOrigins: () => sessions.allowedOrigins(id),
         drainGuardWarnings: () => navigationGuard.drainWarnings(id),
+        passkeys: {
+          select: (targetId, site, username) => {
+            const target = registry.targetsByTargetId.get(targetId)
+            if (!target || !("owner" in target) || target.owner !== "relay" || target.opencodeBrowserSessionId !== id) {
+              throw new Error("secrets.usePasskey: passkeys are answered only in tabs this session opened")
+            }
+            if (username) passkeys.select(target.tabId, site, username)
+            else passkeys.clearSelection(target.tabId)
+          },
+          choiceSince: (targetId, since) => {
+            const target = registry.targetsByTargetId.get(targetId)
+            return target && target.opencodeBrowserSessionId === id ? passkeys.choiceSince(target.tabId, since) : undefined
+          },
+        },
         isRecordingTarget: (targetId) => {
           const target = registry.targetsByTargetId.get(targetId)
           return target !== undefined && isTabRecorded(target.tabId)

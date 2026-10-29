@@ -1146,7 +1146,7 @@ const deadboltConnect = Command.make(
       return
     }
     yield* Console.log(`Connected Browse to Deadbolt as client ${paired.id}.`)
-    yield* Console.log("Agents can use only the logins you allow, in Deadbolt: deadbolt agents allow <site> [--login <username>] [--fields username,password,totp] [--passkeys]")
+    yield* Console.log("Agents can use only the logins you allow, in Deadbolt: deadbolt agents allow <site> (narrow with --login, --fields, --expires), or deadbolt agents allow --all for every login")
   }),
 ).pipe(Command.withDescription("Pair Browse with Deadbolt (runs `deadbolt agents add-client browse`, which asks you to confirm) and store its client token (0600)"))
 

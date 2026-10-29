@@ -75,7 +75,8 @@ const dbTotp = "123456"
 const fakeDeadbolt = await startFakeDeadbolt({
   directory: path.join(root, "db"),
   logins: [
-    { ref: { vault: "v", item: "alice" }, site, title: "Fixture", username: "alice@example.com", values: { username: "alice@example.com", password: dbPassword, totp: dbTotp }, fields: ["username", "password", "totp"], passkeys: true },
+    { ref: { vault: "v", item: "alice" }, site, title: "Fixture", username: "alice@example.com", values: { username: "alice@example.com", password: dbPassword, totp: dbTotp }, fields: ["username", "password", "totp"], passkeys: true, passkey: { displayName: "Alice" } },
+    { ref: { vault: "v", item: "carol" }, site, title: "Fixture (carol)", username: "carol", values: { username: "carol" }, fields: [], passkeys: true, passkey: { displayName: "Carol" } },
     { ref: { vault: "v", item: "bob" }, site, title: "Fixture (bob)", username: "bob", values: { username: "bob", password: "bob-password-x" }, fields: [] },
   ],
 })
@@ -147,6 +148,18 @@ inputs.forEach((input, index) => input.addEventListener('input', () => {
     }
     case "/db/captcha": return html(200, page("Sign in", `<form><input type="email" autocomplete="username"><input type="password"><button>Sign in</button></form><iframe src="/recaptcha/api2/anchor?k=x" width="300" height="80"></iframe>`))
     case "/db/sms": return html(200, page("Verify", `<p>We sent a code to your phone ending in 42.</p><input autocomplete="one-time-code" inputmode="numeric"><button>Verify</button>`))
+    case "/db/pk-login": return html(200, page("Sign in", `<button id="pk">Sign in with a passkey</button><p id="err"></p>
+<script>
+pk.onclick = async () => {
+  try {
+    const credential = await navigator.credentials.get({ publicKey: { challenge: new Uint8Array(32).fill(3), rpId: location.hostname, userVerification: 'preferred' } })
+    location.href = '/db/pk-ok?id=' + credential.id
+  } catch (error) {
+    err.textContent = error.name
+  }
+}
+</script>`))
+    case "/db/pk-ok": return html(200, page("Welcome", `<h1>Welcome ${Buffer.from(url.searchParams.get("id") ?? "", "base64url").toString()}</h1>`))
     case "/db/passkey": return html(200, page("Passkey", `<button id="pk">Sign in with a passkey</button><pre id="out"></pre>
 <script>
 document.title = Object.getOwnPropertyNames(window).some((key) => /^__b[0-9a-f]{24}$/.test(key)) ? 'binding-leaked' : 'Passkey'
@@ -394,7 +407,8 @@ try {
   assert.ok(dbOutside.value.url === "about:blank" || /outside this session's domain allowlist/.test(dbOutside.value.result), JSON.stringify(dbOutside.value))
   assert.equal(runCli(["session", "allow", "--session", "guard-db", "127.0.0.1"]).status, 0)
   const listedLogins = await api("/cli/deadbolt/logins", { sessionId: "guard-db" })
-  assert.deepEqual(listedLogins.logins.map((login: { username: string; granted: boolean }) => [login.username, login.granted]), [["alice@example.com", true], ["bob", false]])
+  assert.deepEqual(listedLogins.logins.map((login: { username: string; granted: boolean }) => [login.username, login.granted]), [["alice@example.com", true], ["carol", true], ["bob", false]])
+  assert.deepEqual(listedLogins.passkeys.map((passkey: { username: string; displayName: string; granted: boolean }) => [passkey.username, passkey.displayName, passkey.granted]), [["alice@example.com", "Alice", true], ["carol", "Carol", true]])
   assert.ok(!JSON.stringify(listedLogins).includes(dbPassword))
   report.deadboltType = { typed: "PASS", redacted: "PASS", crossOriginIframe: "PASS", notGranted: "PASS", wrongSite: "PASS", locked: "PASS", allowlist: dbOutside.value.url === "about:blank" ? "PASS (tab sent away)" : "PASS", list: "PASS" }
 
@@ -420,9 +434,16 @@ try {
   report.deadboltSignIn = { identifierFirstSpa: "PASS", twoPageWithSplitTotp: "PASS", captcha: "PASS", smsCode: "PASS", locked: "PASS" }
 
   // ---- passkeys in agent tabs -----------------------------------------------------------------------
+  const unchosen = await execute("guard-db", `
+    await page.goto(${JSON.stringify(`${site}/db/passkey`)});
+    await page.click('#pk');
+    await page.waitForFunction(() => document.querySelector('#out').textContent.length > 0);
+    return JSON.parse(await page.textContent('#out'))`)
+  assert.deepEqual(unchosen.value, { ok: false, name: "NotAllowedError" }, "two granted passkeys and no account chosen: " + JSON.stringify(unchosen.value))
   const passkey = await execute("guard-db", `
     await page.goto(${JSON.stringify(`${site}/db/passkey`)});
     const title = await page.title();
+    await secrets.usePasskey({ site: ${JSON.stringify(site)}, username: 'alice@example.com' });
     await page.click('#pk');
     await page.waitForFunction(() => document.querySelector('#out').textContent.length > 0);
     const result = JSON.parse(await page.textContent('#out'));
@@ -436,9 +457,18 @@ try {
   assert.equal(passkey.value.result.type, "public-key")
   assert.equal(passkey.value.result.clientData.origin, site, "Deadbolt got the origin from CDP")
   assert.equal(passkey.value.result.json, passkey.value.result.id)
+  assert.equal(Buffer.from(passkey.value.result.id, "base64url").toString(), "cred-alice")
   assert.match(passkey.value.webauthn, /blocked WebAuthn\.enable/)
   const passkeyRequest = fakeDeadbolt.requests.find((request) => request.cmd === "agent-passkey-get")!
   assert.deepEqual([passkeyRequest.origin, passkeyRequest.rp_id, passkeyRequest.user_verification], [site, "127.0.0.1", "preferred"])
+  const needsChoice = await signIn("/db/pk-login")
+  assert.equal(needsChoice.value.result.status, "needs_choice", JSON.stringify(needsChoice.value))
+  assert.deepEqual(needsChoice.value.result.choices, [{ username: "alice@example.com", displayName: "Alice" }, { username: "carol", displayName: "Carol" }])
+  assert.ok(!JSON.stringify(needsChoice).includes("vault"), "no refs reach the agent")
+  const chosen = await signIn("/db/pk-login", "{ username: 'carol' }")
+  assert.equal(chosen.value.result.status, "signed_in", JSON.stringify(chosen.value))
+  assert.equal(chosen.value.title, "Welcome", JSON.stringify(chosen.value))
+  assert.equal(await execute("guard-db", "return await page.textContent('h1')").then((result) => result.value), "Welcome cred-carol")
   assert.equal(runCli(["session", "allow", "--session", "guard-db", "127.0.0.1", "localhost"]).status, 0)
   const noGrant = await execute("guard-db", `
     await page.goto(${JSON.stringify(`${other}/db/passkey`)});
@@ -446,7 +476,7 @@ try {
     await page.waitForFunction(() => document.querySelector('#out').textContent.length > 0);
     return JSON.parse(await page.textContent('#out'))`)
   assert.deepEqual(noGrant.value, { ok: false, name: "NotAllowedError" }, JSON.stringify(noGrant.value))
-  report.passkeys = { assertion: "PASS", originFromCdp: "PASS", bindingNotOnPageAtLoad: "PASS", webauthnBlocked: "PASS", noGrantNotAllowed: "PASS" }
+  report.passkeys = { chooseWithoutAccount: "PASS", usePasskey: "PASS", signInNeedsChoice: "PASS", signInWithUsername: "PASS", assertion: "PASS", originFromCdp: "PASS", bindingNotOnPageAtLoad: "PASS", webauthnBlocked: "PASS", noGrantNotAllowed: "PASS" }
   await pause(500)
   const dbLeaks = filesContaining(home, dbPassword, path.join(home, "site-secrets"))
   assert.deepEqual(dbLeaks, [], `the Deadbolt password leaked into ${dbLeaks.join(", ")}`)

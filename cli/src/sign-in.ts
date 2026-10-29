@@ -24,11 +24,17 @@
  * questions, account pickers other than Google's, or SSO providers other than Google (those stop with needs_user).
  */
 import type { BrowserContext, ElementHandle, Frame, JSHandle, Page } from "patchright-core"
-import { DeadboltError, type DeadboltField, type DeadboltLogin, originOnSite } from "./deadbolt.ts"
+import { DeadboltError, type DeadboltField, type DeadboltLogin, type DeadboltPasskey, originOnSite, pickPasskey } from "./deadbolt.ts"
 
-export type SignInStatus = "signed_in" | "needs_user" | "not_granted" | "failed"
-export type SignInStep = "start" | "identifier" | "password" | "code" | "provider" | "verify" | "done"
-export type SignInResult = { readonly status: SignInStatus; readonly step: SignInStep; readonly reason: string }
+export type SignInStatus = "signed_in" | "needs_user" | "needs_choice" | "not_granted" | "failed"
+export type SignInStep = "start" | "identifier" | "password" | "code" | "passkey" | "provider" | "verify" | "done"
+export type SignInResult = {
+  readonly status: SignInStatus
+  readonly step: SignInStep
+  readonly reason: string
+  /** With needs_choice: the passkey accounts to pick from; call again with `username`. */
+  readonly choices?: readonly { readonly username?: string; readonly displayName?: string }[]
+}
 
 export type SignInOptions = {
   /** The site the login is saved for (a host like `github.com`, or an exact origin). Default: the page's site. */
@@ -48,10 +54,17 @@ export type SignInDeps = {
   readonly type: (handles: readonly ElementHandle[], spec: LoginSpec, field: DeadboltField) => Promise<DeadboltLogin>
   /** Logins granted on an origin (metadata only). */
   readonly logins: (origin: string) => Promise<readonly DeadboltLogin[]>
+  /** Passkey accounts on an origin's site (no refs needed here). */
+  readonly passkeyAccounts: (origin: string) => Promise<readonly DeadboltPasskey[]>
   /** An interactive bot challenge or block page on the page, if one is showing. */
   readonly challenge: (page: Page) => Promise<{ readonly vendor: string; readonly kind: string } | undefined>
   /** Origins the session may visit; undefined without an allowlist. */
   readonly allowed: (url: string) => boolean
+  /** Passkey account choice for the page's tab (passkey-bridge.ts); absent where passkeys aren't answered. */
+  readonly passkeys?: {
+    readonly select: (page: Page, site: string, username: string) => Promise<void>
+    readonly choiceSince: (page: Page, since: number) => Promise<readonly { readonly username?: string; readonly displayName?: string }[] | undefined>
+  }
 }
 
 const googleSite = "accounts.google.com"
@@ -67,6 +80,7 @@ type PageState = {
   readonly hasPasswordToggle: boolean
   readonly hasGoogle: boolean
   readonly hasSignInLink: boolean
+  readonly hasPasskeyButton: boolean
   readonly text: string
   readonly errorText: string
 }
@@ -156,6 +170,7 @@ const readPageScript = () => {
     passwordToggle: byText(/use (your )?password|(sign|log) ?in with (a |your )?password|enter (your )?password( instead)?|password instead|try another way/) ?? null,
     google: byText(/(sign ?in|log ?in|continue|sign ?up) (with|using|via) google|^google$/) ?? null,
     signInLink: byText(/^(sign ?in|log ?in|login)$/) ?? null,
+    passkeyButton: byText(/(sign ?in|log ?in|continue) (with|using) (a |your )?passkey|use (a |your )?passkey|^passkey$/) ?? null,
   }
   const state = {
     captcha: captchaFrame ? captchaFrame.src.slice(0, 120) : captchaWidget ? `#${captchaWidget.id}` : null,
@@ -166,6 +181,7 @@ const readPageScript = () => {
     hasPasswordToggle: Boolean(handles.passwordToggle),
     hasGoogle: Boolean(handles.google),
     hasSignInLink: Boolean(handles.signInLink),
+    hasPasskeyButton: Boolean(handles.passkeyButton),
     text: `${document.title}\n${document.body?.innerText ?? ""}`.slice(0, 4000).toLowerCase(),
     errorText: errors.map((element) => (element as HTMLElement).innerText ?? "").join(" ").replace(/\s+/g, " ").trim().slice(0, 200),
   }
@@ -174,7 +190,7 @@ const readPageScript = () => {
 
 type Read = { readonly frame: Frame; readonly state: PageState; readonly handles: JSHandle }
 
-async function element(read: Read, name: "password" | "username" | "submit" | "passwordToggle" | "google" | "signInLink"): Promise<ElementHandle | undefined> {
+async function element(read: Read, name: "password" | "username" | "submit" | "passwordToggle" | "google" | "signInLink" | "passkeyButton"): Promise<ElementHandle | undefined> {
   const property = await read.handles.getProperty(name)
   return property.asElement() ?? undefined
 }
@@ -201,7 +217,7 @@ async function readFrame(frame: Frame): Promise<Read | undefined> {
   }
 }
 
-const actionable = (state: PageState) => Boolean(state.captcha || state.otpCount || state.hasPassword || state.hasUsername || state.hasPasswordToggle || state.hasGoogle)
+const actionable = (state: PageState) => Boolean(state.captcha || state.otpCount || state.hasPassword || state.hasUsername || state.hasPasswordToggle || state.hasGoogle || state.hasPasskeyButton)
 
 /** The main frame, or the first same-site frame with something to act on (login forms embedded in an iframe). */
 async function readPage(page: Page, site: string): Promise<Read | undefined> {
@@ -308,9 +324,14 @@ export async function signIn(deps: SignInDeps, options: SignInOptions = {}): Pro
       const start = /^https?:\/\//.test(startSite) ? startSite : `https://${startSite}/`
       await page.goto(start, { waitUntil: "domcontentloaded", timeout: Math.min(30_000, timeoutMs) })
     }
+    // A username names the passkey too: the tab's next passkey request uses that account.
+    if (options.username && deps.passkeys) await deps.passkeys.select(page, startSite, options.username).catch(() => {})
     return await run(deps, page, siteSpec, deadline, 0)
   } catch (error) {
     return fromError(error, "start")
+  } finally {
+    // The account was for this sign-in only.
+    if (options.username && deps.passkeys && !page.isClosed()) await deps.passkeys.select(page, startSite, "").catch(() => {})
   }
 }
 
@@ -333,6 +354,15 @@ async function run(deps: SignInDeps, startPage: Page, siteSpec: LoginSpec, deadl
   let toggles = 0
   let lastSignature = ""
   let repeats = 0
+  let passkeyClicks = 0
+  const started = Date.now()
+  /** A passkey request on the page found several accounts and none was named: the agent picks. */
+  const needsChoice = async (): Promise<SignInResult | undefined> => {
+    if (siteSpec.username || !deps.passkeys) return undefined
+    const choices = await deps.passkeys.choiceSince(page, started).catch(() => undefined)
+    if (!choices || choices.length === 0) return undefined
+    return { status: "needs_choice", step: "passkey", reason: `Several passkeys can sign in to ${siteSpec.site}; call again with { username } set to one of the choices.`, choices }
+  }
   const specFor = (url: string): LoginSpec | undefined => {
     let origin: string
     try {
@@ -354,6 +384,8 @@ async function run(deps: SignInDeps, startPage: Page, siteSpec: LoginSpec, deadl
       // Sent somewhere else after a step: a site we don't sign in to (another identity provider, a consent page).
       return needsUser("provider", `The sign-in moved to ${safeOrigin(url)}, which isn't ${siteSpec.site}${googleSpec ? " or Google" : ""}.`)
     }
+    const choice = await needsChoice()
+    if (choice) return choice
     // SPAs render their forms late: give the page a few seconds to show something to act on.
     let read: Read | undefined
     const settleUntil = Math.min(deadline, Date.now() + (step === "start" ? 8_000 : 5_000))
@@ -447,6 +479,27 @@ async function run(deps: SignInDeps, startPage: Page, siteSpec: LoginSpec, deadl
         } else {
           await waitForProgress(page, undefined, 10_000)
         }
+        continue
+      }
+    }
+
+    if (state.hasPasskeyButton && passkeyClicks < 1) {
+      const origin = new URL(read.frame.url()).origin
+      const passkeys = await deps.passkeyAccounts(origin).catch(() => [] as readonly DeadboltPasskey[])
+      const granted = spec.username ? pickPasskey(passkeys, spec.username) !== undefined : passkeys.some((passkey) => passkey.granted)
+      if (granted) {
+        passkeyClicks += 1
+        step = "passkey"
+        const before = page.url()
+        await clickHandle((await element(read, "passkeyButton"))!)
+        // Until the page moves on, or the passkey request needs the agent to pick an account.
+        const until = Math.min(deadline, Date.now() + 10_000)
+        while (Date.now() < until && !page.isClosed() && page.url() === before) {
+          const picked = await needsChoice()
+          if (picked) return picked
+          await delay(250)
+        }
+        await page.waitForLoadState("domcontentloaded").catch(() => {})
         continue
       }
     }

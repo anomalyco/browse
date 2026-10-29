@@ -50,13 +50,17 @@ export type DeadboltErrorCode =
   /** The login's URLs aren't on the site of the origin. */
   | "domain_mismatch"
   | "not_found"
+  /** Several granted passkeys could answer: the caller names one (`detail.choices`). */
+  | "choose_passkey"
   | "failed"
+
+export type DeadboltErrorDetail = { readonly site?: string; readonly login?: string; readonly choices?: readonly DeadboltPasskey[] }
 
 export class DeadboltError extends Error {
   override readonly name = "DeadboltError"
   readonly code: DeadboltErrorCode
-  readonly detail: { readonly site?: string; readonly login?: string }
-  constructor(code: DeadboltErrorCode, message: string, detail: { readonly site?: string; readonly login?: string } = {}) {
+  readonly detail: DeadboltErrorDetail
+  constructor(code: DeadboltErrorCode, message: string, detail: DeadboltErrorDetail = {}) {
     super(message)
     this.code = code
     this.detail = detail
@@ -85,6 +89,16 @@ export type DeadboltLogin = {
 }
 
 export type DeadboltField = "username" | "password" | "totp"
+
+/** A passkey Deadbolt has for a site: its account, never key material. */
+export type DeadboltPasskey = {
+  /** Opaque reference passed back to agent-passkey-get; kept in the relay, never shown to the agent. */
+  readonly ref: unknown
+  readonly username?: string
+  readonly displayName?: string
+  /** Whether live grants let this client sign in with it. */
+  readonly granted: boolean
+}
 
 export type DeadboltValues = { readonly username?: string; readonly password?: string; readonly totp?: string }
 
@@ -211,6 +225,7 @@ function errorCode(code: unknown): DeadboltErrorCode {
     case "rate_limited":
     case "domain_mismatch":
     case "not_found":
+    case "choose_passkey":
       return normalized
     case "not_initialized":
       return "locked"
@@ -265,9 +280,11 @@ export function rawRequest(socket: string, request: Record<string, unknown>, tim
           const code = errorCode(message.code)
           const text = typeof message.message === "string" ? message.message : String(message.code)
           const detail = (message.grant ?? {}) as Record<string, unknown>
+          const choices = passkeyList(message.choices ?? message.passkeys)
           return finish(new DeadboltError(code, errorHints[code] ? `${text.replace(/[\s.]*$/, ".")} ${errorHints[code]}` : text, {
             ...(typeof detail.site === "string" ? { site: detail.site } : {}),
             ...(typeof detail.login === "string" ? { login: detail.login } : {}),
+            ...(choices.length > 0 ? { choices } : {}),
           }))
         }
         // Events (pairing only) aren't expected for agent commands; ignore them.
@@ -282,6 +299,8 @@ export type DeadboltConnection = {
   readonly client: DeadboltClient
   readonly status: () => Promise<{ readonly protocol: number; readonly unlocked: boolean; readonly version?: string }>
   readonly logins: (origin: string) => Promise<readonly DeadboltLogin[]>
+  /** The logins and the passkeys (accounts only) on an origin's site, in one request. */
+  readonly site: (origin: string) => Promise<{ readonly logins: readonly DeadboltLogin[]; readonly passkeys: readonly DeadboltPasskey[] }>
   readonly fill: (origin: string, login: DeadboltLogin, want: readonly DeadboltField[]) => Promise<DeadboltValues>
   readonly passkeyGet: (request: {
     readonly origin: string
@@ -289,10 +308,22 @@ export type DeadboltConnection = {
     readonly challenge: string
     readonly allowCredentials: readonly string[]
     readonly userVerification: string
+    /** Which passkey (a ref from `site().passkeys`); without one Deadbolt picks, or answers choose_passkey. */
+    readonly login?: unknown
   }) => Promise<DeadboltAssertion>
 }
 
 const str = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined)
+
+/** Passkey accounts from a reply (`passkeys` or `choices`): `{ref, username, display_name, granted?}`. */
+function passkeyList(value: unknown): DeadboltPasskey[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((entry): entry is Record<string, unknown> => entry !== null && typeof entry === "object").map((entry) => {
+    const username = str(entry.username)
+    const displayName = str(entry.display_name) ?? str(entry.displayName)
+    return { ref: entry.ref ?? entry.login, ...(username ? { username } : {}), ...(displayName ? { displayName } : {}), granted: entry.granted !== false }
+  })
+}
 
 function toLogin(raw: Record<string, unknown>): DeadboltLogin {
   const signIn = raw.sign_in as Record<string, unknown> | undefined
@@ -330,6 +361,17 @@ export function connect(options: { readonly root?: string; readonly socket?: str
   }
   const send = async (cmd: string, fields: Record<string, unknown>) =>
     rawRequest(socket, { v: await version(), cmd, client: { id: client.id, token: client.token }, ...fields })
+  const site = async (origin: string) => {
+    const reply = await send("agent-logins", { origin })
+    const raw = (Array.isArray(reply.logins) ? reply.logins : []).filter((login): login is Record<string, unknown> => login !== null && typeof login === "object")
+    const logins = raw.map(toLogin)
+    let passkeys = passkeyList(reply.passkeys)
+    // Without a passkey list, a login that has a passkey stands for it (its username is the passkey's account).
+    if (!Array.isArray(reply.passkeys)) {
+      passkeys = logins.filter((login) => login.hasPasskey).map((login) => ({ ref: login.ref, ...(login.username ? { username: login.username } : {}), granted: login.passkeys }))
+    }
+    return { logins, passkeys }
+  }
   return {
     socket,
     client,
@@ -338,11 +380,8 @@ export function connect(options: { readonly root?: string; readonly socket?: str
       protocol = typeof status.protocol === "number" ? status.protocol : 0
       return { protocol, unlocked: status.unlocked === true, ...(str(status.version) ? { version: str(status.version)! } : {}) }
     },
-    logins: async (origin) => {
-      const reply = await send("agent-logins", { origin })
-      const logins = Array.isArray(reply.logins) ? reply.logins : []
-      return logins.filter((login): login is Record<string, unknown> => login !== null && typeof login === "object").map(toLogin)
-    },
+    logins: async (origin) => (await site(origin)).logins,
+    site: (origin) => site(origin),
     fill: async (origin, login, want) => {
       const reply = await send("agent-fill", { origin, login: login.ref, want: [...want] })
       const values = (reply.values ?? reply) as Record<string, unknown>
@@ -359,7 +398,11 @@ export function connect(options: { readonly root?: string; readonly socket?: str
         challenge: request.challenge,
         allow_credentials: [...request.allowCredentials],
         user_verification: request.userVerification,
+        ...(request.login !== undefined ? { login: request.login } : {}),
       })
+      if (reply.reply === "choose-passkey") {
+        throw new DeadboltError("choose_passkey", "Several passkeys could sign in here; name one by its username.", { choices: passkeyList(reply.choices ?? reply.passkeys) })
+      }
       const credentialId = str(reply.credential_id)
       const clientDataJson = str(reply.client_data_json)
       const authenticatorData = str(reply.authenticator_data)
@@ -437,9 +480,12 @@ export function originsFromPatterns(patterns: readonly string[]): string[] {
 
 export type ListedLogin = Omit<DeadboltLogin, "ref"> & { readonly origin: string }
 
+export type ListedPasskey = Omit<DeadboltPasskey, "ref"> & { readonly origin: string }
+
 export type LoginListing = {
   readonly connected: boolean
   readonly logins: readonly ListedLogin[]
+  readonly passkeys: readonly ListedPasskey[]
   readonly error?: { readonly code: DeadboltErrorCode; readonly message: string }
 }
 
@@ -449,18 +495,28 @@ export async function listLogins(origins: readonly string[], connection?: Deadbo
   try {
     deadbolt = connection ?? connect()
   } catch (error) {
-    return { connected: false, logins: [], error: { code: error instanceof DeadboltError ? error.code : "failed", message: error instanceof Error ? error.message : String(error) } }
+    return { connected: false, logins: [], passkeys: [], error: { code: error instanceof DeadboltError ? error.code : "failed", message: error instanceof Error ? error.message : String(error) } }
   }
   const logins: ListedLogin[] = []
+  const passkeys: ListedPasskey[] = []
   for (const origin of origins.slice(0, 20)) {
     try {
-      for (const { ref: _ref, ...login } of await deadbolt.logins(origin)) logins.push({ ...login, origin })
+      const found = await deadbolt.site(origin)
+      for (const { ref: _ref, ...login } of found.logins) logins.push({ ...login, origin })
+      for (const { ref: _ref, ...passkey } of found.passkeys) passkeys.push({ ...passkey, origin })
     } catch (error) {
       if (error instanceof DeadboltError && (error.code === "domain_mismatch" || error.code === "not_found" || error.code === "not_granted")) continue
-      return { connected: true, logins, error: { code: error instanceof DeadboltError ? error.code : "failed", message: error instanceof Error ? error.message : String(error) } }
+      return { connected: true, logins, passkeys, error: { code: error instanceof DeadboltError ? error.code : "failed", message: error instanceof Error ? error.message : String(error) } }
     }
   }
-  return { connected: true, logins }
+  return { connected: true, logins, passkeys }
+}
+
+/** The granted passkey for a username (case-insensitive, username or display name), or undefined. */
+export function pickPasskey(passkeys: readonly DeadboltPasskey[], username: string): DeadboltPasskey | undefined {
+  const wanted = username.toLowerCase()
+  const granted = passkeys.filter((passkey) => passkey.granted)
+  return granted.find((passkey) => passkey.username?.toLowerCase() === wanted) ?? granted.find((passkey) => passkey.displayName?.toLowerCase() === wanted)
 }
 
 // ---- connect / disconnect (CLI) -------------------------------------------------------------------------------

@@ -115,8 +115,46 @@ describe("client", () => {
     const listing = await Deadbolt.listLogins(["https://example.com", "https://other.test"], Deadbolt.connect({ root, socket: fake.socket }))
     expect(listing.connected).toBe(true)
     expect(listing.logins.map((login) => login.username)).toEqual(["alice", "bob"])
+    expect(listing.passkeys).toEqual([])
     expect(JSON.stringify(listing)).not.toMatch(/pw-1|"ref"/)
   })
+})
+
+describe("passkey accounts", () => {
+  const challenge = Buffer.alloc(32, 7).toString("base64url")
+  for (const chooseAsReply of [false, true]) {
+    test(`several granted passkeys need a choice (${chooseAsReply ? "ok reply" : "error code"}); a ref picks one`, async () => {
+      const root = tempDir()
+      const fake = await startFakeDeadbolt({
+        directory: path.join(root, "sock"),
+        chooseAsReply,
+        logins: [
+          { ref: { vault: "v", item: "a" }, site: "example.com", title: "A", username: "alice", values: {}, fields: [], passkeys: true, passkey: { displayName: "Alice A" } },
+          { ref: { vault: "v", item: "c" }, site: "example.com", title: "C", username: "carol", values: {}, fields: [], passkeys: true, passkey: { displayName: "Carol C" } },
+          { ref: { vault: "v", item: "d" }, site: "example.com", title: "D", username: "dave", values: {}, fields: [], passkey: { displayName: "Dave" } },
+        ],
+      })
+      try {
+        const connection = Deadbolt.connect({ client: fake.client, socket: fake.socket })
+        const { passkeys } = await connection.site("https://example.com")
+        expect(passkeys.map((passkey) => [passkey.username, passkey.displayName, passkey.granted])).toEqual([["alice", "Alice A", true], ["carol", "Carol C", true]])
+        const request = { origin: "https://example.com", challenge, allowCredentials: [], userVerification: "preferred" }
+        const choose = await connection.passkeyGet(request).catch((error) => error)
+        expect(choose).toBeInstanceOf(Deadbolt.DeadboltError)
+        expect(choose.code).toBe("choose_passkey")
+        expect(choose.detail.choices.map((choice: Deadbolt.DeadboltPasskey) => [choice.username, choice.displayName])).toEqual([["alice", "Alice A"], ["carol", "Carol C"]])
+        const carol = Deadbolt.pickPasskey(passkeys, "Carol")!
+        expect(Deadbolt.pickPasskey(passkeys, "carol c")).toBe(carol)
+        expect(Deadbolt.pickPasskey(passkeys, "dave")).toBeUndefined()
+        expect(JSON.stringify(choose.detail.choices)).not.toContain("cred-")
+        const assertion = await connection.passkeyGet({ ...request, login: carol.ref })
+        expect(Buffer.from(assertion.credentialId, "base64url").toString()).toBe("cred-c")
+        expect(fake.requests.at(-1)).toMatchObject({ cmd: "agent-passkey-get", login: { vault: "v", item: "c" } })
+      } finally {
+        await fake.close()
+      }
+    })
+  }
 })
 
 describe("passkey requests from the page", () => {

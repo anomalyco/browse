@@ -26,6 +26,12 @@ import type { JsonObject } from "./protocol.ts"
 
 type Install = { readonly binding: string; readonly reply: string }
 
+/** A passkey account to offer the agent: never the ref. */
+export type PasskeyChoice = { readonly username?: string; readonly displayName?: string }
+
+/** How long a preselected account waits for the tab's next passkey request. */
+const selectionTtlMs = 2 * 60_000
+
 export type PasskeyBridgeOptions = {
   /** Sends a CDP command to a tab's root target. */
   readonly send: (tabId: number, method: string, params: JsonObject) => Promise<JsonObject>
@@ -183,6 +189,10 @@ export function rpIdAllowed(origin: string, rpId: string | undefined): boolean {
 
 export class PasskeyBridge {
   private readonly installs = new Map<number, Install>()
+  /** The account the agent chose for a tab's next passkey request (secrets.usePasskey, secrets.signIn). */
+  private readonly selections = new Map<number, { readonly site: string; readonly username: string; readonly expiresAt: number }>()
+  /** The last time a tab's passkey request found several accounts and none was chosen. */
+  private readonly choices = new Map<number, { readonly at: number; readonly choices: readonly PasskeyChoice[] }>()
   private readonly options: PasskeyBridgeOptions
 
   constructor(options: PasskeyBridgeOptions) {
@@ -214,8 +224,26 @@ export class PasskeyBridge {
     void this.options.send(tabId, "Runtime.addBinding", { name: install.binding }).catch(() => {})
   }
 
-    forget(tabId: number): void {
+    /** Preselects the account for the tab's next passkey request on `site` (a host or origin). */
+  select(tabId: number, site: string, username: string, now = Date.now()): void {
+    this.selections.set(tabId, { site, username, expiresAt: now + selectionTtlMs })
+  }
+
+  /** Drops a preselected account that wasn't used. */
+  clearSelection(tabId: number): void {
+    this.selections.delete(tabId)
+  }
+
+  /** The accounts offered when a passkey request in the tab needed a choice at or after `since`. */
+  choiceSince(tabId: number, since: number): readonly PasskeyChoice[] | undefined {
+    const event = this.choices.get(tabId)
+    return event && event.at >= since ? event.choices : undefined
+  }
+
+  forget(tabId: number): void {
     this.installs.delete(tabId)
+    this.selections.delete(tabId)
+    this.choices.delete(tabId)
   }
 
   /**
@@ -273,12 +301,31 @@ export class PasskeyBridge {
     const patterns = this.options.allowedOrigins(tabId)
     if (patterns && patterns.length > 0 && !checkUrl(url, parseOriginPatterns(patterns)).allowed) throw new Error("outside the session allowlist")
     const deadbolt = (this.options.deadbolt ?? (() => Deadbolt.connect()))()
+    // An account the agent chose for this tab, on this site, is used once.
+    const selection = this.selections.get(tabId)
+    this.selections.delete(tabId)
+    let login: unknown
+    if (selection && selection.expiresAt >= Date.now() && Deadbolt.originOnSite(origin, selection.site)) {
+      const passkey = Deadbolt.pickPasskey((await deadbolt.site(origin)).passkeys, selection.username)
+      if (!passkey) throw new Deadbolt.DeadboltError("not_granted", `No granted passkey for ${selection.username} on ${selection.site}`)
+      login = passkey.ref
+    }
     const assertion = await deadbolt.passkeyGet({
       origin,
       ...(request.rpId ? { rpId: request.rpId } : {}),
       challenge: request.challenge,
       allowCredentials: request.allowCredentials,
       userVerification: request.userVerification,
+      ...(login !== undefined ? { login } : {}),
+    }).catch((error: unknown) => {
+      if (error instanceof Deadbolt.DeadboltError && error.code === "choose_passkey") {
+        const offered = (error.detail.choices ?? []).map((choice) => ({
+          ...(choice.username ? { username: choice.username } : {}),
+          ...(choice.displayName ? { displayName: choice.displayName } : {}),
+        }))
+        this.choices.set(tabId, { at: Date.now(), choices: offered })
+      }
+      throw error
     })
     for (const value of [assertion.credentialId, assertion.clientDataJson, assertion.authenticatorData, assertion.signature, assertion.userHandle ?? ""]) {
       if (!Deadbolt.isBase64Url(value, 16_384)) throw new Error("Deadbolt's assertion isn't base64url")

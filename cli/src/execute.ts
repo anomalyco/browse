@@ -64,6 +64,7 @@ import { relayToken } from "./relay-secrets.ts"
 import * as SiteSecrets from "./site-secrets.ts"
 import * as Deadbolt from "./deadbolt.ts"
 import * as SignIn from "./sign-in.ts"
+import type { PasskeyChoice } from "./passkey-bridge.ts"
 import { checkUrl, parseOriginPatterns } from "./domain-policy.ts"
 import { challengeWarning, classifyChallenge, probePageScript, probeSelectors, type ChallengeOutcome, type ChallengeProbe } from "./challenge-detection.ts"
 import { createExecuteFiles, executeAllowsNode, ExecuteRealm, pageVisibleApiWarning, sandboxModules, type ExecuteFiles } from "./execute-realm.ts"
@@ -381,6 +382,7 @@ type SandboxGlobals = {
   readonly secrets: {
     readonly type: (target: Locator | string, name: string, options?: TypeSecretOptions) => Promise<TypeSecretResult | TypeDeadboltResult>
     readonly signIn: (options?: SignIn.SignInOptions) => Promise<SignIn.SignInResult>
+    readonly usePasskey: (options: { readonly site: string; readonly username: string; readonly page?: Page }) => Promise<{ readonly selected: true; readonly site: string; readonly username: string }>
   }
   readonly handoffTracker: { count: number }
 }
@@ -487,6 +489,12 @@ type ExecuteSandboxOptions = {
   readonly allowedOrigins?: () => readonly string[] | undefined
   /** Allowlist violations the relay saw in this session's tabs since the last execute. */
   readonly drainGuardWarnings?: () => readonly string[]
+  /** Passkey account choice in this session's agent tabs (passkey-bridge.ts), by CDP target id. */
+  readonly passkeys?: {
+    /** Throws when the target isn't an agent tab of this session. An empty username clears the choice. */
+    readonly select: (targetId: string, site: string, username: string) => void
+    readonly choiceSince: (targetId: string, since: number) => readonly PasskeyChoice[] | undefined
+  }
 }
 
 export type ExecuteResult = {
@@ -940,6 +948,19 @@ export class ExecuteSandbox {
     }
   }
 
+  /**
+   * secrets.usePasskey({site, username}): the account for the next passkey request (navigator.credentials.get) in
+   * the page's tab, used once, for two minutes. Deadbolt still checks the grant; the ref stays in the relay.
+   */
+  private async usePasskey(page: Page, options: { readonly site: string; readonly username: string }): Promise<{ readonly selected: true; readonly site: string; readonly username: string }> {
+    const site = typeof options?.site === "string" ? options.site.trim().toLowerCase() : ""
+    const username = typeof options?.username === "string" ? options.username.trim() : ""
+    if (!site || !username) throw new Error("secrets.usePasskey({ site, username }): site and username are required")
+    if (!this.options.passkeys) throw new Error("secrets.usePasskey: passkeys aren't available in this relay")
+    this.options.passkeys.select(await pageTargetId(page), site, username)
+    return { selected: true, site, username }
+  }
+
   /** secrets.signIn(): the whole sign-in in the relay (sign-in.ts); only {status, step, reason} comes back. */
   private async signIn(page: Page, options: SignIn.SignInOptions = {}): Promise<SignIn.SignInResult> {
     if (options !== null && typeof options !== "object") throw new Error("secrets.signIn(options): options must be an object like { site, username }")
@@ -951,11 +972,18 @@ export class ExecuteSandbox {
       context: page.context(),
       type: async (handles, spec, field) => (await this.typeDeadbolt(handles, spec, field, "secrets.signIn")).login,
       logins: (origin) => this.deadbolt().logins(origin),
+      passkeyAccounts: async (origin) => (await this.deadbolt().site(origin)).passkeys,
       challenge: async (target) => {
         const outcome = await detectChallenge(target, { waitMs: challengeWaitMs() }).catch(() => undefined)
         return outcome && outcome.status === "blocked" ? outcome : undefined
       },
       allowed: (url) => this.sessionAllows(url),
+      ...(this.options.passkeys ? {
+        passkeys: {
+          select: async (target, passkeySite, passkeyUsername) => this.options.passkeys!.select(await pageTargetId(target), passkeySite, passkeyUsername),
+          choiceSince: async (target, since) => this.options.passkeys!.choiceSince(await pageTargetId(target), since),
+        },
+      } : {}),
     }, { ...(site ? { site } : {}), ...(username ? { username } : {}), ...(timeoutMs ? { timeoutMs } : {}) })
   }
 
@@ -1342,6 +1370,7 @@ export class ExecuteSandbox {
       secrets: {
         type: (target, name, typeOptions) => this.typeSecret(page, target, name, typeOptions),
         signIn: (signInOptions) => this.signIn(page, signInOptions),
+        usePasskey: (passkeyOptions) => this.usePasskey(passkeyOptions?.page ?? page, passkeyOptions),
       },
       handoffTracker,
     }

@@ -13,6 +13,8 @@ export type FakeLogin = {
   /** Fields the grant covers; empty: listed but not granted. */
   readonly fields: readonly ("username" | "password" | "totp")[]
   readonly passkeys?: boolean
+  /** The login has a passkey for its site, for this account name (display name). */
+  readonly passkey?: { readonly displayName: string }
   readonly signIn?: { readonly provider: string; readonly account?: string }
 }
 
@@ -31,7 +33,13 @@ function onSite(origin: string, site: string): boolean {
   return host === site || host.endsWith(`.${site}`)
 }
 
-export async function startFakeDeadbolt(options: { readonly directory: string; readonly logins: readonly FakeLogin[]; readonly protocol?: number }): Promise<FakeDeadbolt> {
+export async function startFakeDeadbolt(options: {
+  readonly directory: string
+  readonly logins: readonly FakeLogin[]
+  readonly protocol?: number
+  /** Answer a passkey choice as an ok reply `choose-passkey` instead of the error code. */
+  readonly chooseAsReply?: boolean
+}): Promise<FakeDeadbolt> {
   fs.mkdirSync(options.directory, { recursive: true, mode: 0o700 })
   const socket = path.join(options.directory, "agent.sock")
   fs.rmSync(socket, { force: true })
@@ -64,10 +72,12 @@ export async function startFakeDeadbolt(options: { readonly directory: string; r
           granted: logins.some((login) => login.fields.length > 0 || login.passkeys),
           logins: logins.map((login) => ({
             ref: login.ref, title: login.title, username: login.username ?? null,
-            has_password: Boolean(login.values.password), has_totp: Boolean(login.values.totp), has_passkey: Boolean(login.passkeys),
+            has_password: Boolean(login.values.password), has_totp: Boolean(login.values.totp), has_passkey: Boolean(login.passkey),
             ...(login.signIn ? { sign_in: login.signIn } : {}),
             fields: login.fields, passkeys: Boolean(login.passkeys),
           })),
+          // Like Deadbolt: only the passkeys the client's grants cover.
+          passkeys: logins.filter((login) => login.passkey && login.passkeys).map((login) => ({ ref: login.ref, username: login.username ?? null, display_name: login.passkey!.displayName, rp_id: new URL(origin).hostname, credential_id: Buffer.from(`cred-${login.ref.item}`).toString("base64url") })),
         })
       }
       if (request.cmd === "agent-fill") {
@@ -78,7 +88,12 @@ export async function startFakeDeadbolt(options: { readonly directory: string; r
         return ok(connection, { reply: "site-fill", values: Object.fromEntries(want.map((field) => [field, login.values[field as keyof FakeLogin["values"]]])) })
       }
       if (request.cmd === "agent-passkey-get") {
-        const login = logins.find((candidate) => candidate.passkeys)
+        const candidates = logins.filter((candidate) => candidate.passkeys && candidate.passkey)
+        const login = request.login ? candidates.find((candidate) => candidate.ref.item === request.login.item) : candidates.length === 1 ? candidates[0] : undefined
+        if (!request.login && candidates.length > 1) {
+          const passkeys = candidates.map((candidate) => ({ ref: candidate.ref, username: candidate.username ?? null, display_name: candidate.passkey!.displayName, rp_id: new URL(origin).hostname, credential_id: Buffer.from(`cred-${candidate.ref.item}`).toString("base64url") }))
+          return options.chooseAsReply ? ok(connection, { reply: "choose-passkey", passkeys }) : reply(connection, { type: "error", code: "choose-passkey", message: "several passkeys", passkeys })
+        }
         if (!login) return error(connection, "not-granted", "no passkey grant for this site", { site: site ?? origin, login: null })
         const clientData = Buffer.from(JSON.stringify({ type: "webauthn.get", challenge: request.challenge, origin, crossOrigin: false })).toString("base64url")
         return ok(connection, {

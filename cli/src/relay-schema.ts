@@ -414,10 +414,18 @@ const DeadboltListedLogin = Schema.Struct({
   signIn: Schema.optionalKey(Schema.Struct({ provider: Schema.String, account: Schema.optionalKey(Schema.String) })),
 })
 
+const DeadboltListedPasskey = Schema.Struct({
+  origin: Schema.String,
+  username: Schema.optionalKey(Schema.String),
+  displayName: Schema.optionalKey(Schema.String),
+  granted: Schema.Boolean,
+})
+
 export const DeadboltLoginsResponse = Schema.Struct({
   connected: Schema.Boolean,
   origins: Schema.Array(Schema.String),
   logins: Schema.Array(DeadboltListedLogin),
+  passkeys: Schema.Array(DeadboltListedPasskey),
   error: Schema.optionalKey(Schema.Struct({ code: Schema.String, message: Schema.String })),
   note: Schema.optionalKey(Schema.String),
 })
