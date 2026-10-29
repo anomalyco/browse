@@ -17,6 +17,7 @@ import { startRelay } from "./relay.ts"
 import { defaultJournalBaseDir, formatJournalEntry, readJournalEntries } from "./session-journal.ts"
 import * as SessionStore from "./session-store.ts"
 import * as SiteSecrets from "./site-secrets.ts"
+import * as Deadbolt from "./deadbolt.ts"
 import { formatUpdateNotice, updateJson, updateNotice } from "./update.ts"
 import { formatSettings, settingKeys, type SettingKey, type SettingReport } from "./user-settings.ts"
 import { opencodeBrowserVersion } from "./version.ts"
@@ -1132,6 +1133,71 @@ const secrets = Command.make("secrets").pipe(
   Command.withSubcommands([secretsAdd, secretsList, secretsRemove, secretsStatus, secretsRefresh, secretsRun]),
 )
 
+const deadboltConnect = Command.make(
+  "connect",
+  { json: jsonFlag },
+  Effect.fn("Cli.deadboltConnect")(function* ({ json }) {
+    const paired = yield* Effect.tryPromise({
+      try: () => Deadbolt.pair(),
+      catch: (cause) => cause instanceof Error ? cause : new Error("Could not connect to Deadbolt"),
+    })
+    if (json) {
+      yield* Console.log(JSON.stringify({ connected: true, id: paired.id, ...(paired.socket ? { socket: paired.socket } : {}) }, null, 2))
+      return
+    }
+    yield* Console.log(`Connected Browse to Deadbolt as client ${paired.id}.`)
+    yield* Console.log("Agents can use only the logins you allow, in Deadbolt: deadbolt agents allow <site> [--login <username>] [--fields username,password,totp] [--passkeys]")
+  }),
+).pipe(Command.withDescription("Pair Browse with Deadbolt (runs `deadbolt agents add-client browse`, which asks you to confirm) and store its client token (0600)"))
+
+const deadboltDisconnect = Command.make(
+  "disconnect",
+  {},
+  Effect.fn("Cli.deadboltDisconnect")(function* () {
+    const result = yield* Effect.try({
+      try: () => Deadbolt.unpair(),
+      catch: (cause) => cause instanceof Error ? cause : new Error("Could not disconnect from Deadbolt"),
+    })
+    if (!result.removed) {
+      yield* Console.log("Browse isn't connected to Deadbolt")
+      return
+    }
+    yield* Console.log(result.revoked ? "Disconnected: the client is removed in Deadbolt and its token deleted here." : "Deleted the client token here. Deadbolt didn't confirm removing the client: check `deadbolt agents clients`.")
+  }),
+).pipe(Command.withDescription("Remove Browse's Deadbolt client (in Deadbolt and here)"))
+
+const deadboltStatus = Command.make(
+  "status",
+  { json: jsonFlag },
+  Effect.fn("Cli.deadboltStatus")(function* ({ json }) {
+    const client = Deadbolt.readClient()
+    const socket = Deadbolt.socketPath()
+    const status = client
+      ? yield* Effect.promise(() => Deadbolt.connect({ client, socket }).status().then(
+        (value) => ({ reachable: true as const, ...value }),
+        (error: unknown) => ({ reachable: false as const, error: error instanceof Error ? error.message : String(error) }),
+      ))
+      : undefined
+    const report = { connected: client !== undefined, ...(client ? { id: client.id } : {}), socket, ...(status ? { deadbolt: status } : {}) }
+    if (json) {
+      yield* Console.log(JSON.stringify(report, null, 2))
+      return
+    }
+    if (!client) {
+      yield* Console.log("Not connected to Deadbolt. Run `opencode-browser deadbolt connect`.")
+      return
+    }
+    yield* Console.log(`Connected as Deadbolt client ${client.id}; socket ${socket}`)
+    if (status && status.reachable) yield* Console.log(`Deadbolt ${status.version ?? ""} (protocol ${status.protocol}) is ${status.unlocked ? "unlocked" : "locked: agent sign-ins are paused until you unlock it"}`)
+    else if (status) yield* Console.log(`Deadbolt isn't reachable: ${status.error}`)
+  }),
+).pipe(Command.withDescription("Show whether Browse is paired with Deadbolt and whether Deadbolt is reachable and unlocked"))
+
+const deadbolt = Command.make("deadbolt").pipe(
+  Command.withDescription("Let agents sign in with the Deadbolt logins you grant them, without seeing any value"),
+  Command.withSubcommands([deadboltConnect, deadboltDisconnect, deadboltStatus]),
+)
+
 const journal = Command.make(
   "journal",
   {
@@ -1268,7 +1334,7 @@ const mcp = Command.make(
 
 export const opencodeBrowser = Command.make("opencode-browser").pipe(
   Command.withDescription("Control the user's existing browser through the Browse extension"),
-  Command.withSubcommands([serve, relay, execute, session, tabs, settings, status, network, secrets, recording, flightRecorder, journal, doctor, skill, mcp]),
+  Command.withSubcommands([serve, relay, execute, session, tabs, settings, status, network, secrets, deadbolt, recording, flightRecorder, journal, doctor, skill, mcp]),
 )
 
 const mainLayer = Layer.mergeAll(RelayClient.layerFetch, SessionStore.layer).pipe(
