@@ -1142,7 +1142,7 @@ const deadboltConnect = Command.make(
       catch: (cause) => cause instanceof Error ? cause : new Error("Could not connect to Deadbolt"),
     })
     if (json) {
-      yield* Console.log(JSON.stringify({ connected: true, id: paired.id, ...(paired.socket ? { socket: paired.socket } : {}) }, null, 2))
+      yield* Console.log(JSON.stringify({ connected: true, id: paired.id }, null, 2))
       return
     }
     yield* Console.log(`Connected Browse to Deadbolt as client ${paired.id}.`)

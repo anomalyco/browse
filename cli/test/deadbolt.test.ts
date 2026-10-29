@@ -26,7 +26,7 @@ describe("socket path", () => {
   })
 
   test("OPENCODE_BROWSER_DEADBOLT_SOCKET overrides it", () => {
-    expect(Deadbolt.socketPath({ root: tempDir(), env: { OPENCODE_BROWSER_DEADBOLT_SOCKET: "/x/agent.sock" } })).toBe("/x/agent.sock")
+    expect(Deadbolt.socketPath({ env: { OPENCODE_BROWSER_DEADBOLT_SOCKET: "/x/agent.sock" } })).toBe("/x/agent.sock")
   })
 })
 

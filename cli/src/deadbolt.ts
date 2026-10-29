@@ -17,14 +17,11 @@
  * `{"type":"ok","reply":{...}}` or `{"type":"error","code":"...","message":"..."}`. `v` is the protocol the running
  * agent reports in `status` (answered whatever `v` says), asked once per connection to Deadbolt.
  *
- * Socket path, first that applies:
- *   1. $OPENCODE_BROWSER_DEADBOLT_SOCKET.
- *   2. The path `deadbolt status --json` reported when `deadbolt connect` ran (stored in the client file), or that the
- *      relay asked for once itself when the computed path has no socket.
- *   3. Deadbolt's own rules (crates/client/src/paths.rs): `$XDG_RUNTIME_DIR/deadbolt<suffix>/agent.sock`, else
- *      `/run/user/<uid>/deadbolt<suffix>/agent.sock` when that directory exists and is ours, else
- *      `$TMPDIR/deadbolt<suffix>-<uid>/agent.sock`; `<suffix>` is empty, or `-` and the first 8 hex digits of the
- *      BLAKE3 hash of $DEADBOLT_HOME when it is set.
+ * Socket path: $OPENCODE_BROWSER_DEADBOLT_SOCKET, else Deadbolt's own rules (crates/client/src/paths.rs):
+ * `$XDG_RUNTIME_DIR/deadbolt<suffix>/agent.sock`, else `/run/user/<uid>/deadbolt<suffix>/agent.sock` when that
+ * directory exists and is ours, else `$TMPDIR/deadbolt<suffix>-<uid>/agent.sock`; `<suffix>` is empty, or `-` and the
+ * first 8 hex digits of the BLAKE3 hash of $DEADBOLT_HOME when it is set. Nothing else (no file, no other program)
+ * decides where the relay sends a client token.
  */
 import { spawn, spawnSync } from "node:child_process"
 import crypto from "node:crypto"
@@ -116,7 +113,7 @@ export function clientFilePath(root = dataRoot()): string {
   return path.join(root, clientFileName)
 }
 
-type ClientFile = { readonly version: 1; readonly id: string; readonly token: string; readonly socket?: string; readonly connectedAt: string }
+type ClientFile = { readonly version: 1; readonly id: string; readonly token: string; readonly connectedAt: string }
 
 function readClientFile(root = dataRoot()): ClientFile | undefined {
   let text: string
@@ -135,7 +132,6 @@ function readClientFile(root = dataRoot()): ClientFile | undefined {
       version: 1,
       id: value.id,
       token: value.token,
-      ...(typeof value.socket === "string" && value.socket ? { socket: value.socket } : {}),
       connectedAt: typeof value.connectedAt === "string" ? value.connectedAt : "",
     }
   } catch {
@@ -149,8 +145,8 @@ export function readClient(root = dataRoot()): DeadboltClient | undefined {
   return file ? { id: file.id, token: file.token } : undefined
 }
 
-export async function saveClient(client: DeadboltClient & { readonly socket?: string }, root = dataRoot()): Promise<void> {
-  const value: ClientFile = { version: 1, id: client.id, token: client.token, ...(client.socket ? { socket: client.socket } : {}), connectedAt: new Date().toISOString() }
+export async function saveClient(client: DeadboltClient, root = dataRoot()): Promise<void> {
+  const value: ClientFile = { version: 1, id: client.id, token: client.token, connectedAt: new Date().toISOString() }
   await writeJsonFileAtomically(clientFilePath(root), value, { dirMode: 0o700 })
 }
 
@@ -184,31 +180,10 @@ function userRuntimeDir(uid: number): string | undefined {
   }
 }
 
-/** The socket `deadbolt status --json` reports, when that CLI is installed and says. */
-export function askCliForSocket(command = process.env.OPENCODE_BROWSER_DEADBOLT_CLI || "deadbolt"): string | undefined {
-  try {
-    const result = spawnSync(command, ["status", "--json"], { encoding: "utf8", timeout: 3_000, stdio: ["ignore", "pipe", "ignore"] })
-    if (result.status !== 0 || !result.stdout) return undefined
-    const status = JSON.parse(result.stdout) as Record<string, unknown>
-    const socket = status.socket ?? (status.paths as Record<string, unknown> | undefined)?.socket
-    return typeof socket === "string" && path.isAbsolute(socket) ? socket : undefined
-  } catch {
-    return undefined
-  }
-}
-
-let askedCli: { readonly socket: string | undefined } | undefined
-
-/** Where to reach Deadbolt (see the module comment for the order). */
-export function socketPath(options: { readonly root?: string; readonly env?: NodeJS.ProcessEnv } = {}): string {
+/** Where to reach Deadbolt: $OPENCODE_BROWSER_DEADBOLT_SOCKET, else Deadbolt's own path rules. */
+export function socketPath(options: { readonly env?: NodeJS.ProcessEnv } = {}): string {
   const env = options.env ?? process.env
-  if (env.OPENCODE_BROWSER_DEADBOLT_SOCKET) return env.OPENCODE_BROWSER_DEADBOLT_SOCKET
-  const stored = readClientFile(options.root)?.socket
-  if (stored && fs.existsSync(stored)) return stored
-  const computed = computedSocketPath(env)
-  if (fs.existsSync(computed)) return computed
-  askedCli ??= { socket: askCliForSocket() }
-  return askedCli.socket ?? stored ?? computed
+  return env.OPENCODE_BROWSER_DEADBOLT_SOCKET || computedSocketPath(env)
 }
 
 // ---- requests -------------------------------------------------------------------------------------------------
@@ -350,7 +325,7 @@ export function connect(options: { readonly root?: string; readonly socket?: str
   if (!client) {
     throw new DeadboltError("not_connected", "Browse isn't connected to Deadbolt. Ask the user to run `opencode-browser deadbolt connect` and to allow the logins agents may use with `deadbolt agents allow <site>`.")
   }
-  const socket = options.socket ?? socketPath(options.root ? { root: options.root } : {})
+  const socket = options.socket ?? socketPath()
   let protocol: number | undefined
   const version = async () => {
     if (protocol === undefined) {
@@ -526,7 +501,7 @@ export function pickPasskey(passkeys: readonly DeadboltPasskey[], username: stri
  * passphrase on this terminal), and stores the client it prints. The prompt goes to the terminal: stdin and stderr are
  * inherited, stdout (the JSON with the token) is read here and never printed.
  */
-export async function pair(options: { readonly name?: string; readonly command?: string; readonly root?: string } = {}): Promise<{ readonly id: string; readonly socket?: string }> {
+export async function pair(options: { readonly name?: string; readonly command?: string; readonly root?: string } = {}): Promise<{ readonly id: string }> {
   const command = options.command ?? (process.env.OPENCODE_BROWSER_DEADBOLT_CLI || "deadbolt")
   const stdout = await new Promise<string>((resolve, reject) => {
     const child = spawn(command, ["agents", "add-client", options.name ?? "browse", "--json"], { stdio: ["inherit", "pipe", "inherit"] })
@@ -547,9 +522,8 @@ export async function pair(options: { readonly name?: string; readonly command?:
   const id = str(client.id)
   const token = str(client.token) ?? str(parsed.token)
   if (!id || !token) throw new DeadboltError("failed", "deadbolt agents add-client --json printed no id and token")
-  const socket = askCliForSocket(command)
-  await saveClient({ id, token, ...(socket ? { socket } : {}) }, options.root)
-  return { id, ...(socket ? { socket } : {}) }
+  await saveClient({ id, token }, options.root)
+  return { id }
 }
 
 /** Runs `deadbolt agents remove-client <id>` (best effort) and deletes the stored client. */
