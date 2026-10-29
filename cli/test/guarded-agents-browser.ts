@@ -146,6 +146,23 @@ inputs.forEach((input, index) => input.addEventListener('input', () => {
       })
       return
     }
+    case "/db/stay": return html(200, page("Sign in", `<form id="f"><input id="pw" type="password"><button>Sign in</button></form><p id="status"></p><p id="events"></p>
+<script>
+f.onsubmit = (event) => { event.preventDefault(); status.textContent = 'Checking…' }
+pw.addEventListener('input', () => { if (!pw.value) events.textContent += 'input ' })
+</script>`))
+    case "/db/captcha-after": return html(200, page("Sign in", `<form id="f"><input type="email" autocomplete="username"><input type="password" autocomplete="current-password"><button>Sign in</button></form>
+<script>
+f.onsubmit = (event) => {
+  event.preventDefault()
+  if (document.querySelector('iframe')) return
+  const frame = document.createElement('iframe')
+  frame.src = '/recaptcha/api2/anchor?k=x'
+  frame.width = 300
+  frame.height = 80
+  document.body.append(frame)
+}
+</script>`))
     case "/db/captcha": return html(200, page("Sign in", `<form><input type="email" autocomplete="username"><input type="password"><button>Sign in</button></form><iframe src="/recaptcha/api2/anchor?k=x" width="300" height="80"></iframe>`))
     case "/db/sms": return html(200, page("Verify", `<p>We sent a code to your phone ending in 42.</p><input autocomplete="one-time-code" inputmode="numeric"><button>Verify</button>`))
     case "/db/pk-login": return html(200, page("Sign in", `<button id="pk">Sign in with a passkey</button><p id="err"></p>
@@ -377,40 +394,53 @@ try {
   const dbTyped = await execute("guard-db", `
     await page.goto(${JSON.stringify(`${site}/login`)});
     const user = await secrets.type('#user', ${JSON.stringify(dbName)}, { field: 'username' });
-    const result = await secrets.type('#pass', ${JSON.stringify(dbName)});
-    const readBack = await page.inputValue('#pass');
-    console.log('typed', readBack);
-    return { user, result, username: await page.inputValue('#user'), readBack }`)
+    const username = await page.inputValue('#user');
+    const unsubmitted = await secrets.type('#pass', ${JSON.stringify(dbName)}).then(() => 'typed', (error) => error.message);
+    const left = await page.inputValue('#pass');
+    const result = await secrets.type('#pass', ${JSON.stringify(dbName)}, { submit: true });
+    console.log('submitted', page.url());
+    return { user, result, username, unsubmitted, left, url: page.url(), length: await page.textContent('#len') }`)
   assert.equal(dbTyped.isError, false, dbTyped.text)
-  assert.deepEqual(dbTyped.value.result, { typed: true, name: dbName, origin: site, field: "password" })
+  assert.match(dbTyped.value.unsubmitted, /submit_required/)
+  assert.equal(dbTyped.value.left, "", "nothing typed without submit")
+  assert.deepEqual(dbTyped.value.result, { typed: true, name: dbName, origin: site, field: "password", submitted: true, progressed: true })
   assert.equal(dbTyped.value.username, "alice@example.com")
-  assert.equal(dbTyped.value.readBack, `[secret deadbolt:${site}/alice@example.com password]`)
+  assert.equal(dbTyped.value.url, `${site}/submit`)
+  assert.ok(Number(dbTyped.value.length) > dbPassword.length, "the form posted the password")
+  const stay = await execute("guard-db", `
+    await page.goto(${JSON.stringify(`${site}/db/stay`)});
+    const result = await secrets.type('#pw', ${JSON.stringify(dbName)}, { submit: true });
+    return { result, left: await page.inputValue('#pw'), events: await page.textContent('#events') }`)
+  assert.equal(stay.isError, false, stay.text)
+  assert.equal(stay.value.result.submitted, true)
+  assert.equal(stay.value.left, "", "the password is cleared when the page stays")
+  assert.match(stay.value.events, /input/, "clearing fires input events")
   assert.ok(!JSON.stringify(dbTyped).includes(dbPassword), "the execute result must not contain the Deadbolt password")
   const fills = fakeDeadbolt.requests.filter((request) => request.cmd === "agent-fill")
   assert.ok(fills.length >= 2 && fills.every((request) => request.origin === site), JSON.stringify(fills.map((request) => request.origin)))
-  const dbIframe = await execute("guard-db", `return await secrets.type(page.frameLocator('iframe').locator('#inner'), ${JSON.stringify(dbName)})`)
+  const dbIframe = await execute("guard-db", `await page.goto(${JSON.stringify(`${site}/login`)}); return await secrets.type(page.frameLocator('iframe').locator('#inner'), ${JSON.stringify(dbName)}, { submit: true })`)
   assert.equal(dbIframe.isError, true)
   assert.match(dbIframe.text, /domain_not_allowed: the field's frame is http:\/\/localhost:\d+/)
   const fillsBefore = fakeDeadbolt.requests.filter((request) => request.cmd === "agent-fill").length
-  const dbNotGranted = await execute("guard-db", `return await secrets.type('#pass', ${JSON.stringify(`deadbolt:${site}/bob`)})`)
+  const dbNotGranted = await execute("guard-db", `return await secrets.type('#pass', ${JSON.stringify(`deadbolt:${site}/bob`)}, { submit: true })`)
   assert.equal(dbNotGranted.isError, true)
   assert.match(dbNotGranted.text, /not_granted: No Deadbolt login for bob is granted/)
   assert.equal(fakeDeadbolt.requests.filter((request) => request.cmd === "agent-fill").length, fillsBefore, "nothing is asked of Deadbolt for an ungranted login")
-  const dbWrongSite = await execute("guard-db", `return await secrets.type('#pass', 'deadbolt:example.com')`)
+  const dbWrongSite = await execute("guard-db", `return await secrets.type('#pass', 'deadbolt:example.com', { submit: true })`)
   assert.match(dbWrongSite.text, /domain_not_allowed: the field's frame is http:\/\/127\.0\.0\.1:\d+, which is not on example\.com/)
   fakeDeadbolt.locked = true
-  const dbLocked = await execute("guard-db", `return await secrets.type('#pass', ${JSON.stringify(dbName)})`)
+  const dbLocked = await execute("guard-db", `return await secrets.type('#pass', ${JSON.stringify(dbName)}, { submit: true })`)
   fakeDeadbolt.locked = false
   assert.match(dbLocked.text, /secrets\.type: locked: .*Deadbolt is locked/)
   assert.equal(runCli(["session", "allow", "--session", "guard-db", "localhost"]).status, 0)
-  const dbOutside = await execute("guard-db", `return { url: page.url(), result: await secrets.type('#pass', ${JSON.stringify(dbName)}).catch((error) => error.message) }`)
+  const dbOutside = await execute("guard-db", `return { url: page.url(), result: await secrets.type('#pass', ${JSON.stringify(dbName)}, { submit: true }).catch((error) => error.message) }`)
   assert.ok(dbOutside.value.url === "about:blank" || /outside this session's domain allowlist/.test(dbOutside.value.result), JSON.stringify(dbOutside.value))
   assert.equal(runCli(["session", "allow", "--session", "guard-db", "127.0.0.1"]).status, 0)
   const listedLogins = await api("/cli/deadbolt/logins", { sessionId: "guard-db" })
   assert.deepEqual(listedLogins.logins.map((login: { username: string; granted: boolean }) => [login.username, login.granted]), [["alice@example.com", true], ["carol", true], ["bob", false]])
   assert.deepEqual(listedLogins.passkeys.map((passkey: { username: string; displayName: string; granted: boolean }) => [passkey.username, passkey.displayName, passkey.granted]), [["alice@example.com", "Alice", true], ["carol", "Carol", true]])
   assert.ok(!JSON.stringify(listedLogins).includes(dbPassword))
-  report.deadboltType = { typed: "PASS", redacted: "PASS", crossOriginIframe: "PASS", notGranted: "PASS", wrongSite: "PASS", locked: "PASS", allowlist: dbOutside.value.url === "about:blank" ? "PASS (tab sent away)" : "PASS", list: "PASS" }
+  report.deadboltType = { usernameAlone: "PASS", passwordNeedsSubmit: "PASS", submitted: "PASS", clearedWhenPageStays: "PASS", crossOriginIframe: "PASS", notGranted: "PASS", wrongSite: "PASS", locked: "PASS", allowlist: dbOutside.value.url === "about:blank" ? "PASS (tab sent away)" : "PASS", list: "PASS" }
 
   const signIn = async (pathname: string, options = "") => await execute("guard-db", `await page.goto(${JSON.stringify(`${site}${pathname}`)}); const result = await secrets.signIn(${options}); return { result, title: await page.title(), url: page.url() }`)
   const spa = await signIn("/db/spa")
@@ -427,11 +457,29 @@ try {
   assert.match(captcha.value.result.reason, /captcha.*handoff/)
   const sms = await signIn("/db/sms")
   assert.deepEqual([sms.value.result.status, sms.value.result.step], ["needs_user", "code"], JSON.stringify(sms.value))
+  const captchaAfter = await execute("guard-db", `
+    await page.goto(${JSON.stringify(`${site}/db/captcha-after`)});
+    const result = await secrets.signIn();
+    return { result, left: await page.inputValue('input[type=password]') }`)
+  assert.equal(captchaAfter.value.result.status, "needs_user", JSON.stringify(captchaAfter.value))
+  assert.equal(captchaAfter.value.result.step, "password", JSON.stringify(captchaAfter.value))
+  assert.equal(captchaAfter.value.left, "", "a stopped sign-in leaves no password in the page")
+  await api("/cli/session/new", { id: "guard-db-hooks" })
+  const hooked = await execute("guard-db-hooks", `
+    await page.route('**/never', (route) => route.continue());
+    await page.goto(${JSON.stringify(`${site}/login`)});
+    const typed = await secrets.type('#pass', ${JSON.stringify(dbName)}, { submit: true }).then(() => 'typed', (error) => error.message);
+    const signedIn = await secrets.signIn();
+    return { typed, signedIn, left: await page.inputValue('#pass') }`)
+  assert.match(hooked.value.typed, /page_hooks: this session's code used route\(\)/)
+  assert.equal(hooked.value.signedIn.status, "failed")
+  assert.match(hooked.value.signedIn.reason, /page_hooks/)
+  assert.equal(hooked.value.left, "")
   fakeDeadbolt.locked = true
   const locked = await signIn("/db/spa")
   fakeDeadbolt.locked = false
   assert.equal(locked.value.result.status, "needs_user", JSON.stringify(locked.value))
-  report.deadboltSignIn = { identifierFirstSpa: "PASS", twoPageWithSplitTotp: "PASS", captcha: "PASS", smsCode: "PASS", locked: "PASS" }
+  report.deadboltSignIn = { identifierFirstSpa: "PASS", twoPageWithSplitTotp: "PASS", captcha: "PASS", smsCode: "PASS", captchaAfterPasswordCleared: "PASS", pageHooksRefused: "PASS", locked: "PASS" }
 
   // ---- passkeys in agent tabs -----------------------------------------------------------------------
   const unchosen = await execute("guard-db", `

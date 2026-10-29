@@ -619,18 +619,29 @@ Deadbolt grants a Google login, all inside the relay. Then:
 
 It doesn't handle security questions, image or canvas keypads, closed shadow
 roots, or sign-in providers other than Google; those return `needs_user` or
-`failed`. For a form it misreads, type one value at a time:
+`failed`. When it stops after a fill it empties the password and code fields
+first. For a form it misreads, type one value at a time: a username on its
+own, a password or code only with `{ submit: true }`, which types it, submits
+the form, waits for the page to move on and empties password and code fields
+in that frame, all in the same call:
 
 ```js
 await secrets.type("#login", "deadbolt:github.com/me@example.com", { field: "username" })
-await secrets.type("#password", "deadbolt:github.com/me@example.com")   // field defaults to "password"
+await secrets.type("#password", "deadbolt:github.com/me@example.com", { submit: true })   // field defaults to "password"
 ```
 
 The same origin checks as stored secrets apply (the field's frame must be on
 the login's site and in the session allowlist; Deadbolt checks again), and
-values are redacted from everything you get back. Errors start with the code:
-`domain_not_allowed`, `not_granted`, `locked`, `forbidden` (the user must
-reconnect), `rate_limited`. Set a session allowlist before signing in.
+values never appear in what you get back. Errors start with the code:
+`submit_required`, `domain_not_allowed`, `not_granted`, `locked`, `forbidden`
+(the user must reconnect), `rate_limited`, `page_hooks`. `page_hooks` means
+this session's code set up request interception or listeners
+(`page.route`, `page.on("request")`, `waitForRequest`...), init scripts,
+exposed functions or a CDP session: Deadbolt passwords and codes aren't typed
+then. Sign in first, in a fresh session (`session_reset`), and set those up
+afterwards. Never try to read or capture a value that was typed: the user
+grants logins on the understanding that you don't. Set a session allowlist
+before signing in.
 
 Passkeys: in tabs you opened, a site's passkey sign-in
 (`navigator.credentials.get`) is answered by Deadbolt when the grant allows

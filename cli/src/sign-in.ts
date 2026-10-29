@@ -183,7 +183,7 @@ const readPageScript = () => {
     hasSignInLink: Boolean(handles.signInLink),
     hasPasskeyButton: Boolean(handles.passkeyButton),
     text: `${document.title}\n${document.body?.innerText ?? ""}`.slice(0, 4000).toLowerCase(),
-    errorText: errors.map((element) => (element as HTMLElement).innerText ?? "").join(" ").replace(/\s+/g, " ").trim().slice(0, 200),
+    errorText: errors.map((element) => (element as HTMLElement).innerText ?? "").join(" ").replace(/\s+/g, " ").trim().slice(0, 120),
   }
   return { state, handles }
 }
@@ -282,9 +282,17 @@ async function clickHandle(handle: ElementHandle): Promise<void> {
 }
 
 /** After a submit or click: until the URL changes, the field goes away, or `timeoutMs`. */
-async function waitForProgress(page: Page, field: ElementHandle | undefined, timeoutMs: number): Promise<boolean> {
+/** A cheap fingerprint of a frame's document: its inputs, frames and text length. */
+async function domSignature(frame: Frame): Promise<string> {
+  return await frame.evaluate(() => `${document.querySelectorAll("input, iframe, [role='alert']").length}:${document.body?.innerText.length ?? 0}`).catch(() => "")
+}
+
+/** After a submit or click: until the URL changes, the field goes away, the document changes, or `timeoutMs`. */
+export async function waitForProgress(page: Page, field: ElementHandle | undefined, timeoutMs: number): Promise<boolean> {
   const url = page.url()
   const until = Date.now() + timeoutMs
+  const frame = (await field?.ownerFrame().catch(() => null)) ?? page.mainFrame()
+  const before = await domSignature(frame)
   while (Date.now() < until) {
     await delay(250)
     if (page.isClosed()) return true
@@ -293,8 +301,56 @@ async function waitForProgress(page: Page, field: ElementHandle | undefined, tim
       return true
     }
     if (field && !(await field.isVisible().catch(() => false))) return true
+    const now = await domSignature(frame)
+    if (before && now && now !== before) {
+      // Let the change settle (an error message, a captcha, the next step) before reading the page again.
+      await delay(400)
+      return true
+    }
   }
   return false
+}
+
+/**
+ * Empties password and one-time-code inputs (and the given fields) in these frames, firing input and change events,
+ * so a value typed for a step that didn't finish doesn't stay in a page the agent keeps using. Best effort: a frame
+ * that navigated away is already empty.
+ */
+export async function clearSecretInputs(frames: Iterable<Frame>, fields: readonly ElementHandle[] = []): Promise<void> {
+  const clearScript = (nodes: readonly Element[]) => {
+    const own = (element: Element) => {
+      const input = element as HTMLInputElement
+      if (!(input instanceof HTMLInputElement) || !input.value) return
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set
+      if (setter) setter.call(input, "")
+      else input.value = ""
+      input.dispatchEvent(new Event("input", { bubbles: true }))
+      input.dispatchEvent(new Event("change", { bubbles: true }))
+    }
+    const all: Element[] = [...nodes]
+    const walk = (root: Document | ShadowRoot) => {
+      for (const element of Array.from(root.querySelectorAll("input"))) {
+        const input = element as HTMLInputElement
+        if (input.type === "password" || /one-time-code/i.test(input.autocomplete) || (input.maxLength === 1 && input.type !== "checkbox" && input.type !== "radio")) all.push(input)
+      }
+      for (const host of Array.from(root.querySelectorAll("*"))) if (host.shadowRoot) walk(host.shadowRoot)
+    }
+    walk(document)
+    for (const element of all) own(element)
+  }
+  for (const field of fields) {
+    await field.evaluate((node) => {
+      const input = node as HTMLInputElement
+      if (!(input instanceof HTMLInputElement) || !input.value) return
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, "")
+      input.dispatchEvent(new Event("input", { bubbles: true }))
+      input.dispatchEvent(new Event("change", { bubbles: true }))
+    }).catch(() => {})
+  }
+  for (const frame of new Set(frames)) {
+    if (frame.isDetached()) continue
+    await frame.evaluate(clearScript, []).catch(() => {})
+  }
 }
 
 async function submit(read: Read, field: ElementHandle): Promise<void> {
@@ -312,6 +368,20 @@ export async function signIn(deps: SignInDeps, options: SignInOptions = {}): Pro
   const startSite = options.site?.toLowerCase() ?? defaultSite(page.url())
   if (!startSite) return { status: "failed", step: "start", reason: "The page isn't on a website; navigate to the site's sign-in page first, or pass {site}." }
   const siteSpec: LoginSpec = { site: startSite, ...(options.username ? { username: options.username } : {}) }
+  const typedFrames = new Set<Frame>()
+  const typedFields: ElementHandle[] = []
+  const tracked: SignInDeps = {
+    ...deps,
+    type: async (handles, spec, field) => {
+      for (const handle of handles) {
+        const frame = await handle.ownerFrame().catch(() => null)
+        if (frame) typedFrames.add(frame)
+        if (field !== "username") typedFields.push(handle)
+      }
+      return await deps.type(handles, spec, field)
+    },
+  }
+  let result: SignInResult | undefined
   try {
     const onSite = (() => {
       try {
@@ -326,10 +396,14 @@ export async function signIn(deps: SignInDeps, options: SignInOptions = {}): Pro
     }
     // A username names the passkey too: the tab's next passkey request uses that account.
     if (options.username && deps.passkeys) await deps.passkeys.select(page, startSite, options.username).catch(() => {})
-    return await run(deps, page, siteSpec, deadline, 0)
+    result = await run(tracked, page, siteSpec, deadline, 0)
+    return result
   } catch (error) {
-    return fromError(error, "start")
+    result = fromError(error, "start")
+    return result
   } finally {
+    // A sign-in that stopped after a fill leaves no password or code behind in the page.
+    if (result?.status !== "signed_in" && typedFrames.size > 0) await clearSecretInputs(typedFrames, typedFields)
     // The account was for this sign-in only.
     if (options.username && deps.passkeys && !page.isClosed()) await deps.passkeys.select(page, startSite, "").catch(() => {})
   }
