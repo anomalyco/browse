@@ -216,17 +216,18 @@ export const run = Effect.fn("AuthProfile.run")(function* (options: AuthRunOptio
     return yield* new AuthProfileError({ message: `Auth command output limit must be an integer between 0 and ${maximumRunOutputBytes} bytes`, operation: "run", reason: "run-failed" })
   }
   const profile = yield* read(options.name, { ...(options.baseDir ? { baseDir: options.baseDir } : {}) })
+  const cwd = yield* resolveRunCwd(options)
   const startedAt = Date.now()
   const maxSecretBytes = profile.slots.reduce((max, slot) => Math.max(max, Buffer.byteLength(slot.value)), 0)
   const result = yield* runChild({
       command: options.command,
       args: options.args ?? [],
-      ...(options.cwd ? { cwd: options.cwd } : {}),
+      ...(cwd ? { cwd } : {}),
       timeoutMs,
       maxOutputBytes: maxOutputBytes + maxSecretBytes,
       env: Object.fromEntries(profile.slots.map((slot) => [slot.ref, slot.value])),
     }).pipe(
-      Effect.mapError((cause) => new AuthProfileError({ message: `Could not run command with auth profile ${options.name}`, operation: "run", reason: "run-failed", cause })),
+      Effect.mapError((cause) => new AuthProfileError({ message: `Could not run command with auth profile ${options.name}: ${cause.message}`, operation: "run", reason: "run-failed", cause })),
     )
   const stdout = redactOutput(result.stdout, profile.slots, maxOutputBytes)
   const stderr = redactOutput(result.stderr, profile.slots, maxOutputBytes)
@@ -238,6 +239,19 @@ export const run = Effect.fn("AuthProfile.run")(function* (options: AuthRunOptio
     stderrTruncated: result.stderrTruncated || stderr.truncated,
     durationMs: Date.now() - startedAt,
   } satisfies AuthRunResult
+})
+
+// The relay runs the command, so the directory must exist on the relay host, which may not be the caller's.
+const resolveRunCwd = Effect.fnUntraced(function* (options: AuthRunOptions) {
+  const cwd = options.cwd
+  if (!cwd) return undefined
+  const isDirectory = yield* Effect.promise(() => fs.stat(cwd).then((stat) => stat.isDirectory(), () => false))
+  if (isDirectory) return cwd
+  return yield* new AuthProfileError({
+    message: `Working directory does not exist on the relay host: ${cwd}. The relay runs the command; pass --cwd with a directory on that host.`,
+    operation: "run",
+    reason: "run-failed",
+  })
 })
 
 function summary(profile: AuthProfile): AuthProfileSummary {
