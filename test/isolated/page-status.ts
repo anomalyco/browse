@@ -54,6 +54,10 @@ class Element extends Node {
   id = ""
   shadowRoot: ShadowRoot | null = null
   popoverOpen = false
+  /** Open as a modal dialog (:modal). */
+  modal = false
+  /** Its box; the whole viewport unless a test places it. */
+  rect = { left: 0, top: 0, right: 1280, bottom: 800 }
   shown = 0
   hidden = 0
   constructor(readonly tagName: string) {
@@ -75,8 +79,12 @@ class Element extends Node {
     return [...this.attributes.keys()]
   }
   matches(selector: string) {
-    if (selector !== ":popover-open") throw new Error(`The shim only knows :popover-open, not ${selector}`)
+    if (selector === ":modal") return this.modal
+    if (selector !== ":popover-open") throw new Error(`The shim only knows :popover-open and :modal, not ${selector}`)
     return this.popoverOpen
+  }
+  getBoundingClientRect() {
+    return this.rect
   }
   showPopover() {
     if (this.popoverOpen) throw new Error("InvalidStateError: already open")
@@ -166,6 +174,19 @@ function waitFor(message = "Sign in") {
 /** The card's host: the element the script put in the page. */
 const host = () => document.documentElement.children.find((child) => child instanceof Element && child.getAttribute("popover") === "manual") as Element | undefined
 const card = () => shadows.at(-1)!
+/** The blue edge around the page: the element the script put in the page that isn't a popover. */
+const edge = () => document.documentElement.children.find((child) => child instanceof Element && child !== host() && child.getAttribute("popover") === null) as Element | undefined
+/** Places the card and the pill in the bottom right corner, as the stylesheet does in a 1280×800 viewport. */
+function placeCard() {
+  card().getElementById("card")!.rect = { left: 948, top: 620, right: 1268, bottom: 742 }
+  card().getElementById("pill")!.rect = { left: 1150, top: 752, right: 1268, bottom: 778 }
+}
+/** A popover the page (or another extension) shows at `rect`. */
+function popoverAt(rect: Element["rect"]) {
+  const popover = new HTMLElement("DIV")
+  popover.rect = rect
+  return popover
+}
 const button = () => card().getElementById("continue")!
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
 
@@ -229,6 +250,28 @@ describe("handoff card", () => {
   })
 })
 
+describe("edge", () => {
+  test("the blue edge is drawn outside the top layer, and goes with the card", () => {
+    waitFor()
+    const element = edge()
+    expect(element).toBeDefined()
+    expect(element!.popoverOpen).toBe(false)
+    expect(element!.shown).toBe(0)
+    tell({ action: "page-status.clear" })
+    expect(edge()).toBeUndefined()
+  })
+
+  test("a page that removes or restyles the edge gets it back with the card", () => {
+    waitFor()
+    const element = edge()!
+    element.setAttribute("style", "display:none")
+    element.remove()
+    document.dispatchEvent({ type: "toggle", target: new HTMLDialogElement("DIALOG"), newState: "open" })
+    expect(edge()).toBe(element)
+    expect(element.getAttributeNames()).toEqual([])
+  })
+})
+
 describe("retop", () => {
   test("a dialog or popover the page opens later puts the card back on top", () => {
     waitFor()
@@ -262,6 +305,32 @@ describe("retop", () => {
     now += 1_000
     document.dispatchEvent({ type: "toggle", target: popover, newState: "open" })
     expect(element.hidden).toBe(11)
+    expect(element.popoverOpen).toBe(true)
+  })
+
+  test("a popover away from the card, such as a password manager's menu under a field, stays on top", () => {
+    waitFor()
+    placeCard()
+    const element = host()!
+    const menu = popoverAt({ left: 370, top: 252, right: 730, bottom: 374 })
+    for (let i = 0; i < 5; i++) document.dispatchEvent({ type: "toggle", target: menu, newState: "open" })
+    expect(element.hidden).toBe(0)
+    expect(element.popoverOpen).toBe(true)
+  })
+
+  test("a popover over the card or its pill, or a modal dialog anywhere, still puts the card back on top", () => {
+    waitFor()
+    placeCard()
+    const element = host()!
+    document.dispatchEvent({ type: "toggle", target: popoverAt({ left: 900, top: 700, right: 1000, bottom: 760 }), newState: "open" })
+    expect(element.hidden).toBe(1)
+    document.dispatchEvent({ type: "toggle", target: popoverAt({ left: 1200, top: 760, right: 1210, bottom: 770 }), newState: "open" })
+    expect(element.hidden).toBe(2)
+    const dialog = new HTMLDialogElement("DIALOG")
+    dialog.modal = true
+    dialog.rect = { left: 400, top: 200, right: 800, bottom: 500 }
+    document.dispatchEvent({ type: "toggle", target: dialog, newState: "open" })
+    expect(element.hidden).toBe(3)
     expect(element.popoverOpen).toBe(true)
   })
 
