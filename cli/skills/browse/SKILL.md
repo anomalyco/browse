@@ -577,6 +577,60 @@ secret in a session without an allowlist adds a loud warning: set one first.
 Once typed, the value is in the page, so don't read it back or copy it
 elsewhere.
 
+### Signing in with Deadbolt
+
+When the user connected Browse to Deadbolt (`opencode-browser deadbolt
+connect`), you can sign in with the logins they granted to agents, without
+seeing any value. `secrets_list` shows them for the session's allowed sites:
+title, username, `granted`, which `fields` (username, password, totp) and
+whether `passkeys` are allowed. Only the user grants, in Deadbolt:
+`deadbolt agents allow <site> [--login <username>] [--fields ...] [--passkeys]`.
+Never try to grant, pair or unlock yourself; Deadbolt refuses AI callers.
+
+Prefer the whole sign-in in one call (the `signin` tool, or in execute):
+
+```js
+await page.goto("https://github.com/login")
+const result = await secrets.signIn()            // or { site: "github.com", username: "me@example.com" }
+// { status: "signed_in" | "needs_user" | "not_granted" | "failed", step, reason }
+```
+
+It fills the username, submits, waits, fills the password, types an
+authenticator (TOTP) code when the site asks for one (single field or split
+boxes), follows "Use password instead", and follows Sign in with Google when
+Deadbolt grants a Google login, all inside the relay. Then:
+
+- `signed_in`: carry on.
+- `needs_user`: a captcha, a code sent by SMS or email, a push approval, a
+  new-device or "verify it's you" check, or Deadbolt is locked. Call
+  `handoff("Finish signing in, then click Continue")` so the user does it.
+  Don't retry in a loop.
+- `not_granted`: tell the user what to allow (the reason names the site and
+  login).
+- `failed`: the reason says why (no form found, wrong password, the page didn't
+  move on). Don't loop.
+
+It doesn't handle security questions, image or canvas keypads, closed shadow
+roots, or sign-in providers other than Google; those return `needs_user` or
+`failed`. For a form it misreads, type one value at a time:
+
+```js
+await secrets.type("#login", "deadbolt:github.com/me@example.com", { field: "username" })
+await secrets.type("#password", "deadbolt:github.com/me@example.com")   // field defaults to "password"
+```
+
+The same origin checks as stored secrets apply (the field's frame must be on
+the login's site and in the session allowlist; Deadbolt checks again), and
+values are redacted from everything you get back. Errors start with the code:
+`domain_not_allowed`, `not_granted`, `locked`, `forbidden` (the user must
+reconnect), `rate_limited`. Set a session allowlist before signing in.
+
+Passkeys: in tabs you opened, a site's passkey sign-in
+(`navigator.credentials.get`) is answered by Deadbolt when the grant allows
+passkeys; it never verifies the user, so sites that require that fall back to
+other methods. Otherwise the request fails with NotAllowedError, as if the user
+dismissed it. WebAuthn CDP methods are blocked.
+
 For destructive UI work, use a two-phase **read, confirm, verify** flow:
 
 1. Read candidates and return exact stable identifiers or row text.

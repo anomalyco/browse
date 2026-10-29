@@ -121,7 +121,8 @@ shim, which always runs the current version (from a checkout, use `/path/to/brow
 | `network_start`, `network_status`, `network_stop`, `network_cancel` | Capture traffic to a redacted HAR |
 | `recording_start`, `recording_stop`, `recording_status`, `recording_cancel` | Record a tab to MP4 or WebM (`cursor: true` draws the ghost cursor) |
 | `flight_recorder_start`, `flight_recorder_save_last`, … | Keep the last minute of video, save it when something breaks |
-| `secrets_list` | Site secrets you stored; agents type them with `secrets.type()` only on their sites, without seeing them |
+| `secrets_list` | Site secrets you stored, and the Deadbolt logins you granted, for the session's sites; agents type them with `secrets.type()` only on their sites, without seeing them |
+| `signin` | Sign in to a site with a Deadbolt login you granted, in one step, without the agent seeing any value |
 | `secrets_status`, `secrets_refresh`, `secrets_run` | Reuse captured credentials while keeping their values out of transcripts and artifacts |
 | `tabs_cleanup` | Close the agent's idle tabs |
 | `settings` | Read or change the settings below when the user asks (never the security switches); the options page updates live |
@@ -197,6 +198,29 @@ may try to steer it, and that other programs on your computer may try to use the
   logs, journals or HARs. Once typed it is in the page, where page script could read it, so pair secrets with an
   allowlist (execute warns when you don't). A stored TOTP seed makes 2FA one factor; keep handing 2FA to yourself
   when you can. `secrets list` and `secrets remove` manage them.
+- **Deadbolt sign-ins.** With [Deadbolt](https://github.com/anomalyco/deadbolt), agents can sign in unattended with
+  the logins you allow, and never see a value. Connect once with `opencode-browser deadbolt connect` (it runs
+  `deadbolt agents add-client browse`, which asks for Touch ID or your passphrase and refuses AI agents) and allow
+  logins in Deadbolt, site by site: `deadbolt agents allow github.com [--login <username>] [--fields
+  username,password,totp] [--passkeys] [--expires 30d]`. Only you can grant; `deadbolt agents grants` and `deadbolt
+  agents revoke <id>` manage grants, and every fill is in `deadbolt activity`. Agents then call the `signin` tool (or
+  `secrets.signIn()` in execute): the relay does the whole sign-in inside one call (username, submit, password, an
+  authenticator code including split code boxes, "Use password instead", and Sign in with Google when a Google login
+  is granted) and returns only `{status, step, reason}`. It stops with `needs_user` for captchas, codes sent by SMS or
+  email, push approvals and new-device checks, for you to finish after a handoff. One value can also be typed with
+  `secrets.type(locator, "deadbolt:<site>[/<username>]", { field })`. In tabs agents opened, a site's passkey request
+  (`navigator.credentials.get`) is answered by Deadbolt when the grant has `--passkeys` (user presence only, never
+  user verification, so sites that require verification fall back); otherwise it fails as if you dismissed it, and
+  agents can't use the browser's WebAuthn debugging methods at all. **Trust model:** the relay checks each field's
+  frame origin from the browser's frame tree (and the session allowlist) before it asks Deadbolt, which checks the
+  grant and the login's URLs against that origin again; values are redacted from everything the agent gets, like
+  site secrets. The client token is stored 0600 in `~/.local/share/opencode-browser/deadbolt-client.json`: any
+  program running as you that can read it can use the logins you granted (never anything else), which is the price of
+  unattended use, so keep grants small and pair them with a session allowlist. Locking Deadbolt pauses all agent
+  sign-ins. `opencode-browser deadbolt status` shows the connection; `deadbolt disconnect` removes it. The relay finds
+  Deadbolt's socket by Deadbolt's own rules (`$XDG_RUNTIME_DIR/deadbolt…/agent.sock`, else
+  `$TMPDIR/deadbolt…-<uid>/agent.sock`, with `DEADBOLT_HOME` taken into account) or
+  `OPENCODE_BROWSER_DEADBOLT_SOCKET`.
 - **Bot challenges.** After a navigation, execute reports Cloudflare, Akamai, DataDome, PerimeterX, Imperva, AWS WAF,
   captcha walls and "access denied" pages in `aftermath.challenge`. It waits up to 15 s
   (`OPENCODE_BROWSER_CHALLENGE_WAIT_MS`) for checks the browser clears by itself, and tells the agent to hand
