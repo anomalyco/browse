@@ -980,7 +980,7 @@ const secretsStatus = Command.make(
   },
   Effect.fn("Cli.secretsStatus")(function* ({ name, json }) {
     const relay = yield* RelayClient.Service
-    yield* ensureCliRelay()
+    // Observational, like the MCP secrets_status tool: never start a relay to read metadata.
     const result = yield* relay.authStatus({ name })
     if (json) {
       yield* Console.log(JSON.stringify(result, null, 2))
