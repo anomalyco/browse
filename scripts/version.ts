@@ -1,8 +1,8 @@
 // The one release version: cli/package.json, the root package.json and the extension manifest move together.
 // npm takes the version as is (0.1.0, or 0.1.1-dev.42 for a dev build). Chrome's manifest `version` must be one to four
 // dot-separated integers of at most 65535, so a dev build becomes 0.1.1.42 with `version_name` "0.1.1-dev.42" for
-// display. Dev builds go to their own private store item (RELEASING.md), so a dev build's four-part version never has to
-// sort below the stable release that follows it.
+// display. Dev builds never go to the Chrome Web Store (they're loaded unpacked from the release service), so a dev
+// build's four-part version never has to sort below the stable release that follows it.
 //
 //   bun scripts/version.ts set <version>                       writes the version into the three files
 //   bun scripts/version.ts dev --run <n> [--attempt <n>]       writes the dev version of this run and prints it
@@ -26,14 +26,14 @@ export function parseReleaseVersion(version: string): ReleaseVersion {
     throw new Error(`${version}: every part must be at most ${MANIFEST_PART_MAX} (Chrome's manifest version limit)`)
   const core = `${major}.${minor}.${patch}`
   if (!run) return { version, channel: "latest", manifest: { version } }
-  // A rerun (.<attempt>) keeps the run's store version: the store already has it, or gets it from this attempt.
+  // A rerun (.<attempt>) keeps the run's manifest version; version_name tells the attempts apart.
   return { version, channel: "dev", manifest: { version: `${core}.${run}`, version_name: version } }
 }
 
 /**
  * The dev build of a workflow run: the next patch after the stable version in cli/package.json, with -dev.<run number>,
  * and .<attempt> on a rerun so no npm version is ever reused. Run numbers only grow and the base only moves forward with
- * releases, so every dev build sorts above the one before it, on npm (auto-update) and in the store (0.1.1.42).
+ * releases, so every dev build sorts above the one before it, on npm (auto-update) and in the manifest (0.1.1.42).
  */
 export function devVersion(current: string, run: number, attempt = 1) {
   const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(current)

@@ -1,15 +1,15 @@
-# Releases browse: the Chrome Web Store zip and the @opencode/browse npm package.
-#   push to main    dev:    <next>-dev.<run> (scripts/version.ts), npm dist-tag dev and the private dev store item
-#                           (vars.CWS_DEV_ITEM_ID), in environments npm-dev and chrome-web-store-dev (no approval);
-#                           no GitHub release
+# Releases browse: the extension zip and the @opencode/browse npm package.
+#   push to main    dev:    <next>-dev.<run> (scripts/version.ts): the unpacked extension zip and the npm tarball to
+#                           Anomaly's release service (anoma.ly/release, channel dev, GitHub OIDC), then npm dist-tag dev,
+#                           all in environment release-dev (no approval); no store upload, no GitHub release
 #   v1.2.3          stable: npm dist-tag latest and the public store item (vars.CWS_ITEM_ID), in environments npm and
 #                           chrome-web-store (approved), and a GitHub release
 #   workflow_dispatch with dry_run (default true): verify, build, check and attest, never publish; from main it builds
 #                   the dev version, and dry_run=false publishes it as a dev build
 # Tags come from `bun run release` (scripts/release.ts). RELEASING.md has the one-time setup.
 #
-# verify -> build -> attest -> publish-npm (npm, or npm-dev) ------------------------+
-#                          \-> publish-cws (chrome-web-store, or chrome-web-store-dev) -> github-release (stable)
+# dev:    verify -> build -> attest -> publish-release (release-dev) -> publish-npm (release-dev)
+# stable: verify -> build -> attest -> publish-npm (npm) + publish-cws (chrome-web-store) -> github-release
 # The artifacts are built once in `build` and passed along; nothing is rebuilt after the checks.
 name: Release
 
@@ -178,12 +178,12 @@ jobs:
           VERSION: ${{ needs.verify.outputs.version }}
         run: bun scripts/version.ts set "$VERSION"
 
-      # The store zip, the npm tarball (with the store item IDs baked in, cli/build.ts), the artifact checks and
-      # SHA256SUMS: the same script as `bun run release:check`.
-      - name: Build and check the store zip and npm tarball
+      # The extension zip (the store zip, or a dev build's unpacked zip), the npm tarball (with the store item ID, and a
+      # dev build's zip sha256, baked in: cli/build.ts), the artifact checks and SHA256SUMS: the same script as
+      # `bun run release:check`.
+      - name: Build and check the extension zip and npm tarball
         env:
           OPENCODE_BROWSER_STORE_ID: ${{ vars.CWS_ITEM_ID }}
-          OPENCODE_BROWSER_DEV_STORE_ID: ${{ vars.CWS_DEV_ITEM_ID }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
         run: |
@@ -245,16 +245,82 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  publish-npm:
-    name: Publish to npm
+  # Dev builds only: the unpacked extension zip and the npm tarball to Anomaly's release service, the way Hex and
+  # Deadbolt publish (scripts/release-service.sh). The job's OIDC token is the only credential; the service checks it
+  # against its registry entry for browse (repository, workflow, refs/heads/main, environment release-dev).
+  publish-release:
+    name: Publish to the release service
     needs: [verify, attest]
-    if: needs.verify.outputs.publish == 'true'
+    if: needs.verify.outputs.publish == 'true' && needs.verify.outputs.channel == 'dev'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Stable: required reviewers approve before this job starts. Dev: npm-dev has no reviewers (every push to
+    # No reviewers (every push to main publishes); admits only main (RELEASING.md).
+    environment:
+      name: release-dev
+      url: https://anoma.ly/release/browse/extension/dev/chromium/info
+    permissions:
+      contents: read
+      id-token: write
+      attestations: read
+    steps:
+      # Only for scripts/release-service.sh; the files come from the build job.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/release-service.sh
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: release
+
+      - name: Verify build provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          (cd release && sha256sum -c SHA256SUMS)
+          for file in release/*.zip release/*.tgz; do
+            gh attestation verify "$file" --repo "$GH_REPO" --signer-workflow "$GH_REPO/.github/workflows/release.yml"
+          done
+
+      - name: Publish
+        env:
+          RELEASE: https://anoma.ly/release
+          BROWSE_VERSION: ${{ needs.verify.outputs.version }}
+          BROWSE_RELEASE_CHANNEL: dev
+          NOTES_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+        run: |
+          sh scripts/release-service.sh publish release
+          {
+            echo "### Release service (dev)"
+            echo
+            echo "- Extension: $RELEASE/browse/extension/dev/chromium"
+            echo "- npm tarball: $RELEASE/browse/cli/dev/npm"
+            for manifest in release/manifest-*.json; do
+              echo
+              echo "#### $(basename "$manifest")"
+              echo '```json'
+              cat "$manifest"
+              echo '```'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish-npm:
+    name: Publish to npm
+    # Dev: after the release service has the extension zip the package fetches. Stable: publish-release is skipped.
+    needs: [verify, attest, publish-release]
+    if: >-
+      ${{ !cancelled() && needs.verify.outputs.publish == 'true' && needs.attest.result == 'success'
+      && (needs.publish-release.result == 'success'
+      || (needs.verify.outputs.channel != 'dev' && needs.publish-release.result == 'skipped')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Stable: required reviewers approve before this job starts. Dev: release-dev has no reviewers (every push to
     # main publishes) and admits only main (RELEASING.md).
     environment:
-      name: ${{ needs.verify.outputs.channel == 'dev' && 'npm-dev' || 'npm' }}
+      name: ${{ needs.verify.outputs.channel == 'dev' && 'release-dev' || 'npm' }}
       url: https://www.npmjs.com/package/@opencode/browse/v/${{ needs.verify.outputs.version }}
     permissions:
       # npm trusted publishing (OIDC) and the provenance statement.
@@ -273,9 +339,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          VERSION: ${{ needs.verify.outputs.version }}
         run: |
-          for file in "release/opencode-browser-$VERSION.zip" "release/opencode-browse-$VERSION.tgz"; do
+          for file in release/*.zip release/*.tgz; do
             gh attestation verify "$file" --repo "$GH_REPO" --signer-workflow "$GH_REPO/.github/workflows/release.yml"
           done
 
@@ -307,15 +372,16 @@ jobs:
           npm publish "./opencode-browse-$VERSION.tgz" --provenance --access public --tag "$CHANNEL"
           echo "Published @opencode/browse@$VERSION with dist-tag $CHANNEL." | tee -a "$GITHUB_STEP_SUMMARY"
 
+  # Stable only: every store upload is reviewed, too slow for a build per push, so dev builds never go to the store.
   publish-cws:
     name: Publish to the Chrome Web Store
     needs: [verify, attest]
-    if: needs.verify.outputs.publish == 'true'
+    if: needs.verify.outputs.publish == 'true' && needs.verify.outputs.channel == 'latest'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Stable: required reviewers approve first. Dev: chrome-web-store-dev has no reviewers and admits only main.
+    # Required reviewers approve first.
     environment:
-      name: ${{ needs.verify.outputs.channel == 'dev' && 'chrome-web-store-dev' || 'chrome-web-store' }}
+      name: chrome-web-store
     permissions:
       contents: read
       attestations: read
@@ -353,29 +419,18 @@ jobs:
       - name: Upload and submit for review
         env:
           VERSION: ${{ needs.verify.outputs.version }}
-          CHANNEL: ${{ needs.verify.outputs.channel }}
           CWS_CLIENT_ID: ${{ secrets.CWS_CLIENT_ID }}
           CWS_CLIENT_SECRET: ${{ secrets.CWS_CLIENT_SECRET }}
           CWS_REFRESH_TOKEN: ${{ secrets.CWS_REFRESH_TOKEN }}
           CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
-          STABLE_ITEM: ${{ vars.CWS_ITEM_ID }}
-          DEV_ITEM: ${{ vars.CWS_DEV_ITEM_ID }}
-          # The item takes one submission at a time. Dev skips while an earlier dev build is in review, so a busy main
-          # never keeps restarting the review; set CWS_DEV_IF_PENDING=cancel to replace it instead. Stable fails.
-          DEV_IF_PENDING: ${{ vars.CWS_DEV_IF_PENDING || 'skip' }}
+          CWS_ITEM_ID: ${{ vars.CWS_ITEM_ID }}
         run: |
           (cd release && sha256sum -c SHA256SUMS)
-          if [ "$CHANNEL" = dev ]; then
-            CWS_ITEM_ID="$DEV_ITEM" variable=CWS_DEV_ITEM_ID if_pending="$DEV_IF_PENDING"
-          else
-            CWS_ITEM_ID="$STABLE_ITEM" variable=CWS_ITEM_ID if_pending=fail
-          fi
           if [ -z "$CWS_ITEM_ID" ]; then
-            echo "::error::No store item for $CHANNEL: set the repository variable $variable (RELEASING.md)."
+            echo "::error::No store item: set the repository variable CWS_ITEM_ID (RELEASING.md)."
             exit 1
           fi
-          export CWS_ITEM_ID
-          bun scripts/cws.ts publish --zip "release/opencode-browser-$VERSION.zip" --version "$VERSION" --if-pending "$if_pending"
+          bun scripts/cws.ts publish --zip "release/opencode-browser-$VERSION.zip" --version "$VERSION"
 
   github-release:
     name: GitHub release

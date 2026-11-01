@@ -73,7 +73,8 @@ import { shouldExposeChildTarget, TargetRegistry, type RootTargetChange, type Ta
 import { autoUpdateModes, autoUpdateOverride, autoUpdateStatus, createAutoUpdater, npmRuntime, setStoredMode, storedMode, type AutoUpdateMode } from "./auto-update.ts"
 import { createUpdateWatcher } from "./update.ts"
 import { describeChanges, describeSettings, parseSettingChanges, settingsFromExtension, SettingsInputError, settingsToExtension, type SettingOverrides, type Settings } from "./user-settings.ts"
-import { installCommand, storeConfig } from "./paths.ts"
+import { installedDevExtension, syncDevExtension } from "./dev-extension.ts"
+import { devExtension, installCommand, storeConfig } from "./paths.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "./version.ts"
 import { handleExecuteRealmException, handleExecuteRealmRejection, pruneStaleExecuteFilesDirectories } from "./execute-realm.ts"
 import { PasskeyBridge } from "./passkey-bridge.ts"
@@ -204,10 +205,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const releaseTargetGraceMs = Math.max(0, options.releaseTargetGraceMs ?? 10_000)
   const browserId = crypto.randomUUID()
   const endpointUrl = `http://${formatHostForUrl(host)}:${port}`
-  // Every build, from source too, accepts only the unpacked ID, OPENCODE_BROWSER_EXTENSION_ORIGINS, and the store items
+  // Every build, from source too, accepts only the unpacked ID, OPENCODE_BROWSER_EXTENSION_ORIGINS, and the store item
   // this package was released with (paths.ts storeConfig).
   const additionalChromeExtensionOrigins = new Set(options.additionalExtensionOrigins ?? [])
-  for (const id of [storeConfig().id, storeConfig().devId]) if (id) additionalChromeExtensionOrigins.add(`chrome-extension://${id}`)
+  const storeId = storeConfig().id
+  if (storeId) additionalChromeExtensionOrigins.add(`chrome-extension://${storeId}`)
   const sessionCatalog = options.sessionCatalogPath === null
     ? undefined
     : new SessionCatalog(options.sessionCatalogPath ?? defaultSessionCatalogPath(port))
@@ -235,6 +237,21 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const sendToExtension = (command: Parameters<ExtensionRpc["send"]>[0]) => extensionRpc.send(command)
   const sendExtensionBestEffort = (command: Parameters<ExtensionRpc["send"]>[0]): void => {
     Effect.runPromise(Effect.ignore(sendToExtension(command))).catch(() => {})
+  }
+  /** The dev extension build last reloaded for, so a build that never matches (a checkout's, same ID) reloads only once. */
+  let devExtensionReloadedFor: string | undefined
+  /**
+   * A dev install (dev-extension.ts) keeps its unpacked extension in <data root>/extension. When the connected unpacked
+   * extension runs another build than that folder holds, it reloads, picking up the folder's files. Never a store
+   * install: only the unpacked ID, and only when a dev install put the folder there.
+   */
+  const reloadOutdatedDevExtension = () => {
+    const folderBuild = installedDevExtension()?.build
+    if (!folderBuild || !extensionRpc.connected || extensionOrigin !== stableUnpackedExtensionOrigin) return
+    if (extensionBuild === folderBuild || devExtensionReloadedFor === folderBuild) return
+    devExtensionReloadedFor = folderBuild
+    relayLog("extension.dev_reload", { from: extensionBuild, to: folderBuild })
+    sendExtensionBestEffort({ method: "runtime.reload" })
   }
   const sendDebuggerCommand = Effect.fnUntraced(function* (options: {
     readonly tabId: number
@@ -1259,6 +1276,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     )
     extensionBuild = getString(message.params, "build")
     extensionOrigin = origin
+    const generation = extensionGeneration
+    // After the handshake settles: a dev install's unpacked extension running an older build than its folder reloads.
+    setTimeout(() => {
+      if (generation === extensionGeneration) reloadOutdatedDevExtension()
+    }, 2_000).unref()
     relayLog("extension.connected", {
       version: getString(message.params, "version"),
       build: getString(message.params, "build"),
@@ -2305,6 +2327,18 @@ const makeRelay = Effect.fnUntraced(function* (options: {
           onChange: () => sendRelaySettings(),
         })
         autoUpdater.start()
+      }
+      // A dev build brings its own extension: when a dev install has the unpacked folder (install put it there), this
+      // version's extension replaces what's in it, and the connected extension reloads (after an auto-update, say).
+      const dev = devExtension()
+      if (dev && installedDevExtension()) {
+        syncDevExtension(dev).then(
+          (result) => {
+            if (result === "updated") relayLog("extension.dev_updated", { file: dev.file })
+            reloadOutdatedDevExtension()
+          },
+          (error: unknown) => relayLog("extension.dev_update_failed", { error: (error as Error).message }),
+        )
       }
       relayLog("relay.ready", { url: endpointUrl, version: opencodeBrowserVersion, build: opencodeBrowserBuildId, pid: process.pid, managed })
     }),

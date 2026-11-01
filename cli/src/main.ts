@@ -32,10 +32,12 @@ if (command === "--version" || command === "-v") {
     process.stdout.write(`SETUP
   install [--opencode <path>]    Install Browse: add the browse MCP server to opencode, check which browsers
                                  have the extension and pair it (when none does, open its Chrome Web Store
-                                 page, or from a checkout show the folder to load unpacked, and wait for it)
+                                 page, or from a checkout or a dev install show the folder to load unpacked,
+                                 and wait for it)
     --no-open                    Print the steps without opening anything or copying the path
     --no-wait                    Don't wait for the extension to be added or connect
-  extension                      Show where to get the extension (a checkout's unpacked folder, or the store page)
+  extension                      Show where to get the extension (the unpacked folder of a checkout or a dev
+                                 install, or the store page)
   pair                           Print the pairing code the Chrome Web Store extension asks for
   update [--check]               Update now. A git clone install pulls the newer commits (fast-forward only)
                                  and runs setup again; an npm install installs the newest version on its

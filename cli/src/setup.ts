@@ -1,11 +1,12 @@
 // Setup for Browse, without changing opencode itself:
 //   install    install the runtime, add the browse MCP server to opencode's config, then check which browsers have the
-//              extension. An npm install gets it from its channel's Chrome Web Store item (the public one, or the
-//              team's private dev item for a dev build): when no browser has it, install opens that item's page; when
-//              one has it, install opens its status page with a one-time pairing ticket in the URL fragment so it
-//              pairs without a step. A checkout loads its own build (dist/) unpacked: install pairs it through the
-//              folder, reloads a connected one that's out of date, and guides loading it when no browser has it
-//   extension  show the checkout's unpacked extension folder (for "Load unpacked"), or an npm install's store page
+//              extension. A stable npm install gets it from the Chrome Web Store item: when no browser has it, install
+//              opens that item's page; when one has it, install opens its status page with a one-time pairing ticket
+//              in the URL fragment so it pairs without a step. A checkout loads its own build (dist/) unpacked, and a
+//              dev npm install the dev extension it downloads from the release service into <data root>/extension
+//              (dev-extension.ts): install pairs it through the folder, reloads a connected one that's out of date,
+//              and guides loading it when no browser has it
+//   extension  show the unpacked extension folder (for "Load unpacked"), or a stable npm install's store page
 //   pair       print the pairing code a Chrome Web Store build asks for (unpacked builds are paired by install)
 //   uninstall  remove everything install wrote
 // Earlier versions registered a native messaging host and wrote an opencode plugin; install and uninstall
@@ -19,20 +20,21 @@ import { createInterface } from "node:readline/promises"
 import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse } from "jsonc-parser"
 import { describeAutoUpdate, autoUpdateStatus, installVersion, pruneVersions, readCurrent, runtimeLayout, switchVersion, updateState, compareVersions, versionEntry } from "./auto-update.ts"
-import { cliCommand, dataRoot, installCommand, storeConfig, storeUrl } from "./paths.ts"
+import { syncDevExtension } from "./dev-extension.ts"
+import { cliCommand, dataRoot, devExtension, devExtensionFolder, installCommand, storeConfig, storeUrl } from "./paths.ts"
 import { formatPairingCode, mintPairingTicket, pairingCode, relayAuthorization, writeExtensionPairing } from "./relay-secrets.ts"
 import { opencodeBrowserVersion } from "./version.ts"
 
 /**
- * The Chrome Web Store items this package was released with (paths.ts storeConfig). Only these IDs count as the store
+ * The Chrome Web Store item this package was released with (paths.ts storeConfig). Only this ID counts as the store
  * build: install hands the pairing code to the extension with this ID, so it must be ours.
  */
 const store = storeConfig()
-const STORE_IDS = [store.id, store.devId].filter((id): id is string => !!id)
-/** The unpacked build; its ID is pinned by the manifest key. */
+const STORE_IDS = [store.id].filter((id): id is string => !!id)
+/** The unpacked build (a checkout's, or a dev install's); its ID is pinned by the manifest key. */
 const UNPACKED_ID = "afeafocngkodbmaipcngoamamfmekgfo"
-/** This install's channel's store page; undefined for a package built without the store items (and a checkout). */
-const STORE_URL = store.channelId ? storeUrl(store.channelId) : undefined
+/** The store page; undefined for a package built without the store item (and a checkout). */
+const STORE_URL = store.id ? storeUrl(store.id) : undefined
 const PACKAGE = "@opencode/browse"
 const MCP_NAME = "browse"
 /** The MCP server's name before it was renamed to `browse`. */
@@ -362,8 +364,22 @@ function checkNode() {
     fail(`Browse needs Node.js 22.19 or newer; this is ${process.version} (${process.execPath}). Update Node.js (https://nodejs.org), then run setup again.`)
 }
 
-/** The checkout's folder to load unpacked: dist/, which `bun run setup` builds. */
-const unpackedFolder = (): string | undefined => checkoutExtensionDirs[1]
+/** The dev extension a dev npm install downloads (paths.ts devExtension); undefined for a checkout or a stable release. */
+const dev = fromSource ? undefined : devExtension()
+
+/** The folder to load unpacked: a checkout's dist/, which `bun run setup` builds, or a dev install's <data root>/extension. */
+const unpackedFolder = (): string | undefined => checkoutExtensionDirs[1] ?? (dev ? devExtensionFolder(root) : undefined)
+
+/** Puts this version's dev extension in <data root>/extension (paired); fails install when it can't be downloaded. */
+async function syncDev() {
+  if (!dev) return
+  try {
+    const result = await syncDevExtension(dev, { root })
+    log(result === "updated" ? `✓ Downloaded the dev extension (${dev.file}) to ${devExtensionFolder(root)}` : `✓ Dev extension ${dev.file} is in ${devExtensionFolder(root)}`)
+  } catch (error) {
+    fail(`Could not get the dev extension: ${(error as Error).message}`)
+  }
+}
 
 async function install(args: string[]) {
   checkNode()
@@ -384,6 +400,7 @@ async function install(args: string[]) {
   if (legacy.length)
     log(`! Browser Control MCP server${legacy.length === 1 ? "" : "s"} ${legacy.map((name) => `"${name}"`).join(", ")} also configured. Browse replaces it; remove ${legacy.length === 1 ? "it" : "them"} from ${configFile()} to avoid two sets of browser tools.`)
 
+  await syncDev()
   const connected = await connectedExtension()
   const folder = unpackedFolder()
   if (folder) {
@@ -510,7 +527,7 @@ export function printSetupStatus() {
   log("")
 }
 
-function extension() {
+async function extension() {
   const folder = unpackedFolder()
   if (!folder) {
     if (!STORE_URL) fail("This package doesn't know its Chrome Web Store item. Install a released version (`npx @opencode/browse install`), or set up Browse from a checkout.")
@@ -518,16 +535,17 @@ function extension() {
     log(`Then run \`${cliCommand("install")}\` again to pair it.`)
     return
   }
+  await syncDev()
   if (!existsSync(path.join(folder, "manifest.json"))) fail(`${folder} has no built extension. Run \`${installCommand()}\` first.`)
   pairUnpacked()
   revealFolder(folder)
   log(`Load unpacked from: ${folder}`)
 }
 
-/** Writes the pairing code into the checkout's unpacked extension folders. */
+/** Writes the pairing code into the unpacked extension folders: a checkout's, or a dev install's. */
 function pairUnpacked() {
   const code = pairingCode()
-  for (const directory of checkoutExtensionDirs)
+  for (const directory of [...checkoutExtensionDirs, ...(dev ? [devExtensionFolder(root)] : [])])
     if (existsSync(path.join(directory, "manifest.json"))) writeExtensionPairing(directory, code)
 }
 
@@ -644,7 +662,7 @@ export type Effects = {
 export type LocateOptions = {
   allowOpen: boolean
   connected: boolean
-  /** A checkout's folder to load unpacked (dist/). Without one, the extension comes from the store item. */
+  /** The folder to load unpacked (a checkout's dist/, or a dev install's). Without one, the extension comes from the store item. */
   folder?: string
   detections: Detection[]
   preferred: Browser | undefined
@@ -655,8 +673,8 @@ export type LocateOptions = {
 
 /**
  * Reports the browsers and profiles that have Browse. When none does (and none is connected to the relay),
- * guides installing it: from a checkout, loading the unpacked build, with the browser's extensions page opened, the
- * folder revealed and its path copied; from npm, the channel's Chrome Web Store item, whose page it opens.
+ * guides installing it: from a checkout or a dev install, loading the unpacked build, with the browser's extensions page
+ * opened, the folder revealed and its path copied; from a stable npm install, the Chrome Web Store item, whose page it opens.
  * Nothing opens when the browsers here aren't the ones the user looks at (SSH, no display), there is no terminal,
  * with --no-open, or when a browser couldn't be checked and may already have it.
  * Returns "ready" when the extension is there, "off" when it's turned off, else "guided".
@@ -895,7 +913,7 @@ function reportDetections(detections: Detection[], preferred: Browser | undefine
   })
 }
 
-const describe = (match: Match) => `${match.profile.name}${match.id === UNPACKED_ID ? " (unpacked)" : match.id === store.devId ? " (dev)" : ""}`
+const describe = (match: Match) => `${match.profile.name}${match.id === UNPACKED_ID ? " (unpacked)" : ""}`
 const blockedReason = () => (process.platform === "darwin" ? "macOS privacy protection" : "permission denied")
 
 /**

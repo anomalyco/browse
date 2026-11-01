@@ -39,8 +39,9 @@ over when no agent is using the browser, without changing opencode's config or r
 `OPENCODE_BROWSER_AUTO_UPDATE=off`). `npx @opencode/browse update` updates now, and `npx @opencode/browse rollback` goes
 back to the previous version. The Chrome Web Store updates the extension.
 
-**Dev builds** (Anomaly team): every push to `main` publishes one. `npx @opencode/browse@dev install` follows the dev
-channel and opens *Browse Dev*, a private Chrome Web Store item only the anoma.ly Google Workspace can install.
+**Dev builds**: every push to `main` publishes one. `npx @opencode/browse@dev install` follows the dev channel: it
+downloads that build's extension into a folder you load unpacked once (install shows where), and each update refreshes
+the folder and reloads the extension. The zip is also at https://anoma.ly/release/browse/extension/dev/chromium.
 
 There's nothing to sign in to. The extension only obeys a relay that proves it knows this computer's pairing code (see
 [Security](#security)). If pairing didn't happen by itself, run `npx @opencode/browse pair` and paste the code on the
