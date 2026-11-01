@@ -1,11 +1,14 @@
 // Uploads and publishes the store zip with the Chrome Web Store API (v2), for the release workflow's publish-cws job:
-//   bun scripts/cws.ts publish --zip release/opencode-browser-0.1.0.zip --version 0.1.0 [--dry-run]
+//   bun scripts/cws.ts publish --zip release/opencode-browser-0.1.0.zip --version 0.1.0 [--if-pending fail|skip|cancel] [--dry-run]
 //   bun scripts/cws.ts status
-// Environment: CWS_CLIENT_ID, CWS_CLIENT_SECRET, CWS_REFRESH_TOKEN (the chrome-web-store environment's secrets),
-// CWS_PUBLISHER_ID and CWS_ITEM_ID (repository variables; the beta job passes the beta item's ID).
+// Environment: CWS_CLIENT_ID, CWS_CLIENT_SECRET, CWS_REFRESH_TOKEN (the chrome-web-store environments' secrets),
+// CWS_PUBLISHER_ID and CWS_ITEM_ID (repository variables; a dev build passes the private dev item's ID).
 // Idempotent: when the item already has this version (published or in review), nothing is uploaded again; it reports
-// the state. Publishing uses the item's visibility in the dashboard (public for stable, unlisted for the beta item) and
-// submits for review; the job ends with the review state, it doesn't wait for review.
+// the state. Publishing uses the item's visibility in the dashboard (public for stable, private to the domain for the dev
+// item) and submits for review; the job ends with the review state, it doesn't wait for review.
+// An item holds one submission at a time. When another version is still in review, --if-pending decides: fail (the
+// default, for stable releases), skip (leave the review alone; a later build goes in once it's done), or cancel (withdraw
+// it and submit this one, which restarts review).
 // CWS_API_BASE and CWS_TOKEN_URL point it at a local fake for testing; they only accept loopback http URLs, so a changed
 // variable can't send the credentials anywhere else.
 import { $ } from "bun"
@@ -113,6 +116,10 @@ export function createClient(options: { fetch?: typeof fetch; sleep?: (ms: numbe
       if (version && version !== expected) throw new Error(`The store read version ${version} from the upload, expected ${expected}.`)
       log(`✓ Uploaded ${expected}`)
     },
+    /** Withdraws the submission in review, so another version can be uploaded. */
+    async cancel() {
+      await call<Record<string, unknown>>("POST", `${api}/v2/${item}:cancelSubmission`)
+    },
     async publish() {
       const result = await call<{ state?: string; warningInfo?: { warnings?: { reason?: string; description?: string }[] } }>(
         "POST",
@@ -134,6 +141,16 @@ export function existingVersion(status: Status, expected: string) {
   return undefined
 }
 
+/** The version waiting in review (or approved and about to publish), which blocks another upload. */
+export function pendingVersion(status: Status) {
+  const submitted = status.submittedItemRevisionStatus
+  if (submitted?.state !== "PENDING_REVIEW" && submitted?.state !== "STAGED") return undefined
+  return { version: submitted.distributionChannels?.[0]?.crxVersion ?? "unknown", state: submitted.state }
+}
+
+export const pendingModes = ["fail", "skip", "cancel"] as const
+export type PendingMode = (typeof pendingModes)[number]
+
 async function summary(lines: string[]) {
   for (const line of lines) console.log(line)
   if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n")
@@ -142,7 +159,7 @@ async function summary(lines: string[]) {
 if (import.meta.main) {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
-    options: { zip: { type: "string" }, version: { type: "string" }, "dry-run": { type: "boolean" } },
+    options: { zip: { type: "string" }, version: { type: "string" }, "if-pending": { type: "string" }, "dry-run": { type: "boolean" } },
   })
   const command = positionals[0]
   try {
@@ -157,12 +174,27 @@ if (import.meta.main) {
       if (packaged !== expected) throw new Error(`${values.zip} has manifest version ${packaged}, not ${expected}.`)
       const before = await client.status()
       if (before.takenDown) throw new Error(`Item ${client.item} is taken down for a policy violation; resolve it in the developer dashboard first.`)
+      const ifPending = (values["if-pending"] || "fail") as PendingMode
+      if (!pendingModes.includes(ifPending)) throw new Error(`--if-pending must be one of ${pendingModes.join(", ")}`)
       const existing = existingVersion(before, expected)
+      const pending = existing ? undefined : pendingVersion(before)
       if (existing) {
         await summary([`### Chrome Web Store`, `${values.version} (${expected}) is already ${existing.where} on ${client.item}: ${existing.state}. Nothing uploaded.`])
+      } else if (pending && ifPending === "fail") {
+        throw new Error(`${pending.version} is still ${pending.state} on ${client.item}; wait for it, or cancel it in the developer dashboard, then rerun this job.`)
+      } else if (pending && ifPending === "skip") {
+        await summary([
+          `### Chrome Web Store`,
+          `${pending.version} is still ${pending.state} on ${client.item}, so ${values.version} (${expected}) wasn't uploaded.`,
+          "The first build after that review ends goes in; the npm package published as usual.",
+        ])
       } else if (values["dry-run"]) {
-        await summary([`### Chrome Web Store (dry run)`, `Would upload ${values.zip} (${expected}) to ${client.item} and publish it; the store has ${before.publishedItemRevisionStatus?.distributionChannels?.[0]?.crxVersion ?? "no published version"}.`])
+        await summary([`### Chrome Web Store (dry run)`, `Would ${pending ? `cancel the review of ${pending.version}, then ` : ""}upload ${values.zip} (${expected}) to ${client.item} and publish it; the store has ${before.publishedItemRevisionStatus?.distributionChannels?.[0]?.crxVersion ?? "no published version"}.`])
       } else {
+        if (pending) {
+          await client.cancel()
+          console.log(`Cancelled the review of ${pending.version} on ${client.item}; ${values.version} replaces it.`)
+        }
         await client.upload(zip, expected)
         const state = await client.publish()
         await summary([
@@ -172,7 +204,7 @@ if (import.meta.main) {
         ].filter(Boolean))
       }
     } else {
-      console.error("usage: bun scripts/cws.ts publish --zip <file> --version <version> [--dry-run] | status")
+      console.error("usage: bun scripts/cws.ts publish --zip <file> --version <version> [--if-pending fail|skip|cancel] [--dry-run] | status")
       process.exit(2)
     }
   } catch (error) {

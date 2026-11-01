@@ -1,14 +1,15 @@
 # Releases browse: the Chrome Web Store zip and the @opencode/browse npm package.
-#   push to main    dev:    <next>-dev.<run> (scripts/version.ts), npm dist-tag dev (environment npm-dev, no approval);
-#                           no store upload and no GitHub release
-#   v1.2.3          stable: npm dist-tag latest, the store item (vars.CWS_ITEM_ID)
-#   v1.2.3-beta.4   beta:   npm dist-tag beta, the unlisted beta store item (vars.CWS_BETA_ITEM_ID)
+#   push to main    dev:    <next>-dev.<run> (scripts/version.ts), npm dist-tag dev and the private dev store item
+#                           (vars.CWS_DEV_ITEM_ID), in environments npm-dev and chrome-web-store-dev (no approval);
+#                           no GitHub release
+#   v1.2.3          stable: npm dist-tag latest and the public store item (vars.CWS_ITEM_ID), in environments npm and
+#                           chrome-web-store (approved), and a GitHub release
 #   workflow_dispatch with dry_run (default true): verify, build, check and attest, never publish; from main it builds
 #                   the dev version, and dry_run=false publishes it as a dev build
 # Tags come from `bun run release` (scripts/release.ts). RELEASING.md has the one-time setup.
 #
-# verify -> build -> attest -> publish-npm (environment npm, or npm-dev for dev) -----------------+
-#                          \-> publish-cws (environment chrome-web-store; not dev) -> github-release (not dev)
+# verify -> build -> attest -> publish-npm (npm, or npm-dev) ------------------------+
+#                          \-> publish-cws (chrome-web-store, or chrome-web-store-dev) -> github-release (stable)
 # The artifacts are built once in `build` and passed along; nothing is rebuilt after the checks.
 name: Release
 
@@ -19,7 +20,6 @@ on:
     paths-ignore: ["**/*.md"]
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
-      - "v[0-9]+.[0-9]+.[0-9]+-beta.[0-9]+"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -80,7 +80,6 @@ jobs:
           fi
           case "$version" in
             *-dev.*) channel=dev ;;
-            *-beta.*) channel=beta ;;
             *) channel=latest ;;
           esac
           publish=false
@@ -184,8 +183,7 @@ jobs:
       - name: Build and check the store zip and npm tarball
         env:
           OPENCODE_BROWSER_STORE_ID: ${{ vars.CWS_ITEM_ID }}
-          OPENCODE_BROWSER_BETA_STORE_ID: ${{ vars.CWS_BETA_ITEM_ID }}
-          OPENCODE_BROWSER_STORE_LISTED: ${{ vars.CWS_ITEM_LISTED }}
+          OPENCODE_BROWSER_DEV_STORE_ID: ${{ vars.CWS_DEV_ITEM_ID }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
         run: |
@@ -253,7 +251,7 @@ jobs:
     if: needs.verify.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Stable and beta: required reviewers approve before this job starts. Dev: npm-dev has no reviewers (every push to
+    # Stable: required reviewers approve before this job starts. Dev: npm-dev has no reviewers (every push to
     # main publishes) and admits only main (RELEASING.md).
     environment:
       name: ${{ needs.verify.outputs.channel == 'dev' && 'npm-dev' || 'npm' }}
@@ -312,12 +310,12 @@ jobs:
   publish-cws:
     name: Publish to the Chrome Web Store
     needs: [verify, attest]
-    # Dev builds never go to the store: every upload waits for review, and dev installs load the unpacked build.
-    if: needs.verify.outputs.publish == 'true' && needs.verify.outputs.channel != 'dev'
+    if: needs.verify.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Stable: required reviewers approve first. Dev: chrome-web-store-dev has no reviewers and admits only main.
     environment:
-      name: chrome-web-store
+      name: ${{ needs.verify.outputs.channel == 'dev' && 'chrome-web-store-dev' || 'chrome-web-store' }}
     permissions:
       contents: read
       attestations: read
@@ -361,16 +359,23 @@ jobs:
           CWS_REFRESH_TOKEN: ${{ secrets.CWS_REFRESH_TOKEN }}
           CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
           STABLE_ITEM: ${{ vars.CWS_ITEM_ID }}
-          BETA_ITEM: ${{ vars.CWS_BETA_ITEM_ID }}
+          DEV_ITEM: ${{ vars.CWS_DEV_ITEM_ID }}
+          # The item takes one submission at a time. Dev skips while an earlier dev build is in review, so a busy main
+          # never keeps restarting the review; set CWS_DEV_IF_PENDING=cancel to replace it instead. Stable fails.
+          DEV_IF_PENDING: ${{ vars.CWS_DEV_IF_PENDING || 'skip' }}
         run: |
           (cd release && sha256sum -c SHA256SUMS)
-          if [ "$CHANNEL" = beta ]; then CWS_ITEM_ID="$BETA_ITEM"; else CWS_ITEM_ID="$STABLE_ITEM"; fi
+          if [ "$CHANNEL" = dev ]; then
+            CWS_ITEM_ID="$DEV_ITEM" variable=CWS_DEV_ITEM_ID if_pending="$DEV_IF_PENDING"
+          else
+            CWS_ITEM_ID="$STABLE_ITEM" variable=CWS_ITEM_ID if_pending=fail
+          fi
           if [ -z "$CWS_ITEM_ID" ]; then
-            echo "::error::No store item for $CHANNEL: set the repository variable $([ "$CHANNEL" = beta ] && echo CWS_BETA_ITEM_ID || echo CWS_ITEM_ID) (RELEASING.md)."
+            echo "::error::No store item for $CHANNEL: set the repository variable $variable (RELEASING.md)."
             exit 1
           fi
           export CWS_ITEM_ID
-          bun scripts/cws.ts publish --zip "release/opencode-browser-$VERSION.zip" --version "$VERSION"
+          bun scripts/cws.ts publish --zip "release/opencode-browser-$VERSION.zip" --version "$VERSION" --if-pending "$if_pending"
 
   github-release:
     name: GitHub release
@@ -392,7 +397,6 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
           VERSION: ${{ needs.verify.outputs.version }}
-          CHANNEL: ${{ needs.verify.outputs.channel }}
           ATTESTATION: ${{ needs.attest.outputs.url }}
         run: |
           cd release
@@ -402,9 +406,7 @@ jobs:
             echo
             echo "## Install"
             echo
-            spec="@opencode/browse"
-            if [ "$CHANNEL" = beta ]; then spec="@opencode/browse@beta"; fi
-            printf '%snpx %s install%s\n' '`' "$spec" '`'
+            printf '%snpx @opencode/browse install%s\n' '`' '`'
             echo
             echo "## Verify"
             echo
@@ -416,12 +418,10 @@ jobs:
             echo "gh attestation verify opencode-browse-$VERSION.tgz --repo $GH_REPO"
             echo '```'
           } > body.md
-          prerelease=()
-          if [ "$CHANNEL" = beta ]; then prerelease=(--prerelease); fi
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" --clobber "opencode-browser-$VERSION.zip" "opencode-browse-$VERSION.tgz" SHA256SUMS attestation.sigstore.json
             gh release edit "$TAG" --notes-file body.md
           else
-            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file body.md "${prerelease[@]}" \
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file body.md \
               "opencode-browser-$VERSION.zip" "opencode-browse-$VERSION.tgz" SHA256SUMS attestation.sigstore.json
           fi

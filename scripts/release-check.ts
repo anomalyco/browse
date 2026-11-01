@@ -2,7 +2,7 @@
 //   bun run release:check [--tag v0.1.0] [--require-changelog] [--versions-only]
 // 1. the version is one release version everywhere: cli/package.json, package.json, public/manifest.json (and the tag)
 // 2. release/opencode-browser-<version>.zip (scripts/package.ts) and release/opencode-browse-<version>.tgz (npm pack of
-//    a fresh cli/ build, with the store item IDs from OPENCODE_BROWSER_STORE_ID / OPENCODE_BROWSER_BETA_STORE_ID baked in)
+//    a fresh cli/ build, with the store item IDs from OPENCODE_BROWSER_STORE_ID / OPENCODE_BROWSER_DEV_STORE_ID baked in)
 // 3. scripts/check-artifacts.ts on both, then release/SHA256SUMS
 import { $ } from "bun"
 import { createHash } from "node:crypto"
@@ -51,11 +51,14 @@ if (import.meta.main) {
   if (problems.length) fail(problems)
   console.log(`✓ version ${version} agrees across cli/package.json, package.json and public/manifest.json${values.tag ? ` and ${values.tag}` : ""}`)
   if (values["versions-only"]) process.exit(0)
-  // A stable release without the store item can't recognize or pair the store extension; CI refuses it.
-  if (values.tag && !values.tag.includes("-beta.") && !process.env.OPENCODE_BROWSER_STORE_ID?.trim()) {
-    const message = "OPENCODE_BROWSER_STORE_ID (the CWS_ITEM_ID repository variable) is not set; this stable package won't know the store item"
-    if (process.env.GITHUB_ACTIONS) fail([message])
-    console.warn(`! ${message}`)
+  // npm installs get the extension only from their channel's store item, so a package that doesn't know it can't install
+  // one. CI refuses a stable release without it; a dev build only warns, so dev npm builds keep flowing before setup.
+  const dev = parseReleaseVersion(version).channel === "dev"
+  const [variable, repository] = dev ? ["OPENCODE_BROWSER_DEV_STORE_ID", "CWS_DEV_ITEM_ID"] : ["OPENCODE_BROWSER_STORE_ID", "CWS_ITEM_ID"]
+  if ((values.tag || dev) && !process.env[variable]?.trim()) {
+    const message = `${variable} (the ${repository} repository variable) is not set; this package won't know its store item, so npm installs of it can't get the extension`
+    if (process.env.GITHUB_ACTIONS && !dev) fail([message])
+    console.warn(process.env.GITHUB_ACTIONS ? `::warning::${message}` : `! ${message}`)
   }
 
   // The stress harness's hooks must never be built into a release (vite.config.ts).

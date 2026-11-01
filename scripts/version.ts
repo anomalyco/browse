@@ -1,8 +1,8 @@
 // The one release version: cli/package.json, the root package.json and the extension manifest move together.
-// npm takes the version as is (0.1.0, 0.1.0-beta.2, 0.1.1-dev.42). Chrome's manifest `version` must be one to four
-// dot-separated integers, so a beta becomes 0.1.0.2 with `version_name` "0.1.0-beta.2" for display. Betas go to their
-// own unlisted store item (RELEASING.md), so a beta's four-part version never has to sort below the stable release that
-// follows it. Dev builds never go to the store; their manifest carries the core version with the full name beside it.
+// npm takes the version as is (0.1.0, or 0.1.1-dev.42 for a dev build). Chrome's manifest `version` must be one to four
+// dot-separated integers of at most 65535, so a dev build becomes 0.1.1.42 with `version_name` "0.1.1-dev.42" for
+// display. Dev builds go to their own private store item (RELEASING.md), so a dev build's four-part version never has to
+// sort below the stable release that follows it.
 //
 //   bun scripts/version.ts set <version>                       writes the version into the three files
 //   bun scripts/version.ts dev --run <n> [--attempt <n>]       writes the dev version of this run and prints it
@@ -10,34 +10,38 @@ import { readFile, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { parseArgs } from "node:util"
 
-/** A stable release (1.2.3), a beta (1.2.3-beta.4) or a dev build (1.2.4-dev.42, .2 on a rerun); nothing else ships. */
-export const RELEASE_VERSION = /^(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})(?:-beta\.([1-9]\d{0,4})|-dev\.([1-9]\d{0,9})(?:\.([1-9]\d{0,4}))?)?$/
+/** A stable release (1.2.3) or a dev build (1.2.4-dev.42, .2 on a rerun); nothing else ships. */
+export const RELEASE_VERSION = /^(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})(?:-dev\.([1-9]\d{0,4})(?:\.([1-9]\d{0,4}))?)?$/
+/** Chrome's limit for each part of a manifest version. */
+const MANIFEST_PART_MAX = 65535
 
-export type Channel = "latest" | "beta" | "dev"
+export type Channel = "latest" | "dev"
 export type ReleaseVersion = { version: string; channel: Channel; manifest: { version: string; version_name?: string } }
 
 export function parseReleaseVersion(version: string): ReleaseVersion {
   const match = RELEASE_VERSION.exec(version)
-  if (!match) throw new Error(`Not a release version: ${JSON.stringify(version)} (use 1.2.3 or 1.2.3-beta.4)`)
-  const [, major, minor, patch, beta, dev] = match
+  if (!match) throw new Error(`Not a release version: ${JSON.stringify(version)} (use 1.2.3)`)
+  const [, major, minor, patch, run] = match
+  if ([major, minor, patch, run].some((part) => part !== undefined && Number(part) > MANIFEST_PART_MAX))
+    throw new Error(`${version}: every part must be at most ${MANIFEST_PART_MAX} (Chrome's manifest version limit)`)
   const core = `${major}.${minor}.${patch}`
-  if (dev) return { version, channel: "dev", manifest: { version: core, version_name: version } }
-  if (!beta) return { version, channel: "latest", manifest: { version } }
-  return { version, channel: "beta", manifest: { version: `${core}.${beta}`, version_name: version } }
+  if (!run) return { version, channel: "latest", manifest: { version } }
+  // A rerun (.<attempt>) keeps the run's store version: the store already has it, or gets it from this attempt.
+  return { version, channel: "dev", manifest: { version: `${core}.${run}`, version_name: version } }
 }
 
 /**
- * The dev build of a workflow run: the next stable version (the beta's own version after a beta, else the next patch)
- * with -dev.<run number>, and .<attempt> on a rerun so no version is ever reused. Run numbers only grow and the base only
- * moves forward with releases, so every dev build sorts above the one before it, as auto-update needs.
+ * The dev build of a workflow run: the next patch after the stable version in cli/package.json, with -dev.<run number>,
+ * and .<attempt> on a rerun so no npm version is ever reused. Run numbers only grow and the base only moves forward with
+ * releases, so every dev build sorts above the one before it, on npm (auto-update) and in the store (0.1.1.42).
  */
 export function devVersion(current: string, run: number, attempt = 1) {
-  const match = /^(\d+)\.(\d+)\.(\d+)(-beta\.\d+)?$/.exec(current)
-  if (!match) throw new Error(`cli/package.json version ${JSON.stringify(current)} isn't a stable or beta release`)
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(current)
+  if (!match) throw new Error(`cli/package.json version ${JSON.stringify(current)} isn't a stable release`)
   if (!Number.isSafeInteger(run) || run < 1 || !Number.isSafeInteger(attempt) || attempt < 1) throw new Error(`Invalid run ${run} (attempt ${attempt})`)
-  const [, major, minor, patch, beta] = match
-  const next = beta ? `${major}.${minor}.${patch}` : `${major}.${minor}.${Number(patch) + 1}`
-  return `${next}-dev.${run}${attempt > 1 ? `.${attempt}` : ""}`
+  if (run > MANIFEST_PART_MAX) throw new Error(`Run ${run} doesn't fit a Chrome manifest version (at most ${MANIFEST_PART_MAX})`)
+  const [, major, minor, patch] = match
+  return `${major}.${minor}.${Number(patch) + 1}-dev.${run}${attempt > 1 ? `.${attempt}` : ""}`
 }
 
 /** The manifest fields for a package version; a development version (0.0.0-dev) maps to 0.0.0. */

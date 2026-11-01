@@ -207,7 +207,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   // Every build, from source too, accepts only the unpacked ID, OPENCODE_BROWSER_EXTENSION_ORIGINS, and the store items
   // this package was released with (paths.ts storeConfig).
   const additionalChromeExtensionOrigins = new Set(options.additionalExtensionOrigins ?? [])
-  for (const id of [storeConfig().id, storeConfig().betaId]) if (id) additionalChromeExtensionOrigins.add(`chrome-extension://${id}`)
+  for (const id of [storeConfig().id, storeConfig().devId]) if (id) additionalChromeExtensionOrigins.add(`chrome-extension://${id}`)
   const sessionCatalog = options.sessionCatalogPath === null
     ? undefined
     : new SessionCatalog(options.sessionCatalogPath ?? defaultSessionCatalogPath(port))

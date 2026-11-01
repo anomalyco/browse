@@ -1,43 +1,48 @@
 # Releasing browse
 
 One version ships two artifacts: the Chrome Web Store extension (`opencode-browser-<version>.zip`) and the npm package
-`@opencode/browse` (`opencode-browse-<version>.tgz`, the CLI, relay and MCP server). There are three channels, the way
-Deadbolt and OpenCode release:
+`@opencode/browse` (`opencode-browse-<version>.tgz`, the CLI, relay and MCP server). The package carries no extension:
+an npm install gets it from its channel's store item, and only a checkout loads `dist/` unpacked. Two channels, as
+Deadbolt has (dev and stable; its beta channel isn't used):
 
 | Channel | Starts from | Version | Publishes |
 | --- | --- | --- | --- |
-| `dev` | every push to `main` (not Markdown-only) | `<next>-dev.<run>`, e.g. `0.2.1-dev.57` | npm `dev`, no approval. No store upload, no GitHub release |
-| `beta` | `bun run release 0.2.0-beta.1` (tag `v0.2.0-beta.1`) | as tagged | npm `beta`, the unlisted beta store item, a GitHub prerelease; approved |
-| `latest` | `bun run release [patch\|minor\|major]` on `main` (tag `v0.2.0`) | as tagged | npm `latest`, the public store item, a GitHub release; approved |
+| `dev` | every push to `main` (not Markdown-only) | `<next>-dev.<run>`, e.g. `0.2.1-dev.57` (store `0.2.1.57`) | npm `dev`, the private dev store item *Browse Dev*; no approval, no GitHub release |
+| `latest` | `bun run release [patch\|minor\|major]` on `main` (tag `v0.2.1`) | as tagged | npm `latest`, the public store item, a GitHub release; approved |
 
-`<next>` is the release after the one in `cli/package.json` (the next patch, or the beta's own version after a beta),
-so dev builds sort above the last release and below the next one, and each run is newer than the last
-(`scripts/version.ts`; a rerun adds `.<attempt>`). The dev version is stamped into the checkout in CI and never
-committed. Installs follow the channel they came from: `npx @opencode/browse@dev install` stays on `dev`
-(`cli/src/auto-update.ts`), and a dev install loads its own unpacked extension rather than the store item.
+`<next>` is the patch after the version in `cli/package.json`, so dev builds sort above the last release and below the
+next, and each run is newer than the last, on npm and in the store (`scripts/version.ts`; a rerun adds `.<attempt>` on
+npm and keeps the store version). The dev version is stamped into the checkout in CI, never committed. Installs follow
+their channel: `npx @opencode/browse@dev install` stays on `dev` (`cli/src/auto-update.ts`) and opens the dev item, whose
+ID dev builds have baked in (`cli/src/paths.ts`).
 
-Dev builds skip the Chrome Web Store on purpose: every upload waits for review (hours to days) and resubmitting
-replaces the pending one, so a build per push would never get through. Deadbolt doesn't put dev builds in a store either.
+Dev replaces the old beta channel (unlisted item, `-beta.N` tags): the team gets every `main` build through a private
+item Chrome keeps updated, which is what the beta was for, with one less channel and item to run.
+
+**The dev item and review.** A store item holds one submission at a time, and private items are reviewed too. When a
+dev build arrives while an earlier one is still in review, `publish-cws` skips the upload (the npm package still
+publishes); the first push after the review ends uploads the newest build. Cancelling the pending review instead
+(`cancelSubmission`) would restart review on every push, and a busy `main` would never get a build through. To replace
+pending builds anyway, set `CWS_DEV_IF_PENDING=cancel`. A stable release fails when an earlier stable version is still
+in review (`scripts/cws.ts --if-pending`).
 
 ```
-bun run release 0.2.0 ──► commit "release: v0.2.0" + tag v0.2.0 ──► git push --atomic origin main v0.2.0
-                                                                          │
+bun run release ──► commit "release: v0.2.1" + tag v0.2.1 ──► git push --atomic origin main v0.2.1
+                                                                   │
   verify: installs, typechecks, builds, tests, tag = versions, changelog  ▼
   build:  store zip + npm tarball + artifact checks + SHA256SUMS (once; every later job uses these files)
   attest: build provenance for both (Sigstore)
-     ├─► publish-npm  [approve: environment npm]               gh attestation verify, npm publish --provenance (latest | beta)
+     ├─► publish-npm  [approve: environment npm]               gh attestation verify, npm publish --provenance --tag latest
      └─► publish-cws  [approve: environment chrome-web-store]  gh attestation verify, upload + submit for review
               └─► github-release: changelog entry, zip, tarball, SHA256SUMS, attestation
 ```
 
-Both publish jobs check, with `gh attestation verify`, that the files they're about to publish are the ones this
-workflow built and attested, not just consistent with the `SHA256SUMS` beside them. A stable tag fails the build when
-`CWS_ITEM_ID` isn't set, so every stable package knows its store item.
-
-A push to `main` runs the same verify, build and attest jobs, then `publish-npm` in the `npm-dev` environment
-(no reviewers) with dist-tag `dev`, and stops. Run the workflow by hand (Actions → Release → Run workflow) with `dry_run`
-on for a full rehearsal that publishes nothing (from `main` it builds the dev version); `bun run release:check` does the
-build and checks locally.
+A push to `main` runs the same jobs with the dev version, in the `npm-dev` and `chrome-web-store-dev` environments (no
+reviewers, `main` only), with dist-tag `dev` and the dev item, and no GitHub release. Both publish jobs check, with
+`gh attestation verify`, that the files they publish are the ones this workflow built and attested. A stable tag fails
+the build when `CWS_ITEM_ID` isn't set; a dev build only warns about `CWS_DEV_ITEM_ID`, but its `publish-cws` fails
+until it's set. Run the workflow by hand (Actions → Release → Run workflow) with `dry_run` on for a rehearsal that
+publishes nothing; `bun run release:check` does the build and checks locally.
 
 ## One-time setup
 
@@ -46,7 +51,8 @@ Do these once, in order. Each step says where to click or what to run.
 ### 1. Chrome Web Store items
 
 The API can update items but not create them, so create both items by hand in the
-[developer dashboard](https://chrome.google.com/webstore/devconsole) (Anomaly's publisher).
+[developer dashboard](https://chrome.google.com/webstore/devconsole) (Anomaly's publisher, which must belong to the
+anoma.ly Google Workspace for the dev item's domain visibility).
 
 1. **Check the old ID.** Earlier code pointed at item `mfnicocicmmlkpjnaffgihfjhdgjkdjg`; the relay no longer trusts
    it unless a release configures it. Look for it in the dashboard. If it's Anomaly's item, use it as the stable item
@@ -54,28 +60,25 @@ The API can update items but not create them, so create both items by hand in th
 2. **Stable item.** Build a zip with `bun run release:check` and use `release/opencode-browser-<version>.zip`. In the
    dashboard click **New item** and upload it. Fill in **Store listing** and **Privacy** from
    [store/listing.md](store/listing.md), set visibility to **Public**, and submit it.
-3. **Beta item.** Click **New item** again, upload the same zip, name it *Browse (Beta)*, copy the same listing
-   and privacy answers, set visibility to **Unlisted**, and submit it.
-   - Why a separate item: the store only accepts numeric versions, so beta `0.2.0-beta.1` ships as `0.2.0.1`
-     (`version_name` shows the full name). On one shared item, that beta would rank above the stable `0.2.0` that
-     follows it, and the stable release would be refused.
-   - The other option is trusted testers on the stable item (Distribution → visibility → trusted testers). It only
-     works if every beta's number is lower than the next stable release's, which gets in the way. Not used.
+3. **Dev item.** Build a dev zip: `bun scripts/version.ts dev --run 1 && bun run release:check`, then
+   `git checkout -- cli/package.json package.json public/manifest.json`. Upload `release/opencode-browser-0.0.3-dev.1.zip`
+   (named *Browse Dev*) with **New item**, copy the listing and privacy answers, and under **Distribution → Visibility**
+   choose **Private** → *Everyone at anoma.ly* (the Workspace domain), then submit it. Team members install it once from
+   its store page (or `npx @opencode/browse@dev install` opens it), and Chrome keeps it updated.
+   - Why a separate item: dev builds ship as `0.2.1.57`, which on the stable item would rank above the stable `0.2.1`
+     that follows, and the stable release would be refused. A private item also keeps every `main` build off the public
+     listing.
 4. **Publisher ID.** Copy it from **Account** (Publisher settings) in the dashboard.
 5. **Repository variables.** These are IDs, not secrets.
 
    ```sh
    gh variable set CWS_PUBLISHER_ID --repo anomalyco/browse --body <publisher id>
    gh variable set CWS_ITEM_ID      --repo anomalyco/browse --body <stable item id>
-   gh variable set CWS_BETA_ITEM_ID --repo anomalyco/browse --body <beta item id>
+   gh variable set CWS_DEV_ITEM_ID  --repo anomalyco/browse --body <dev item id>
    ```
 
-   Every npm build now has the IDs baked in, so `install` recognizes the store extension and pairs it through its
-   status page.
-6. **Once the stable listing has passed review and is public:**
-   `gh variable set CWS_ITEM_LISTED --repo anomalyco/browse --body true`. From the next release on,
-   `npx @opencode/browse install` sends new users to the store listing instead of the unpacked build. Checkouts always
-   keep the unpacked flow.
+   Every npm build has both IDs baked in: the relay trusts both store extensions, and `install` opens its channel's
+   item and pairs it through its status page. Delete the old `CWS_BETA_ITEM_ID` and `CWS_ITEM_LISTED` variables if set.
 
 ### 2. Chrome Web Store API credentials
 
@@ -86,11 +89,13 @@ The API can update items but not create them, so create both items by hand in th
    to **In production**. In *Testing*, refresh tokens expire after 7 days and releases start failing.
 3. **Credentials → Create credentials → OAuth client ID → Desktop app**, named `browse release`. The script below
    receives the code on a `127.0.0.1` redirect, which Desktop clients allow without configuration.
-4. Store the client in the `chrome-web-store` environment (create the environment first, step 3):
+4. Store the client in both store environments (create them first, step 3):
 
    ```sh
-   gh secret set CWS_CLIENT_ID     --env chrome-web-store --repo anomalyco/browse
-   gh secret set CWS_CLIENT_SECRET --env chrome-web-store --repo anomalyco/browse
+   for env in chrome-web-store chrome-web-store-dev; do
+     gh secret set CWS_CLIENT_ID     --env $env --repo anomalyco/browse
+     gh secret set CWS_CLIENT_SECRET --env $env --repo anomalyco/browse
+   done
    ```
 
 5. Get the refresh token. Sign in as the Google account with access to the publisher:
@@ -101,7 +106,13 @@ The API can update items but not create them, so create both items by hand in th
 
    The script asks for the client ID and secret (hidden), opens Google's consent page (PKCE, a one-time loopback
    redirect), and pipes the refresh token straight into `gh secret set CWS_REFRESH_TOKEN --env chrome-web-store`.
-   Nothing is written to disk, and without `--set-secret` it prints the token once instead.
+   Nothing is written to disk, and without `--set-secret` it prints the token once instead. Run it without
+   `--set-secret` and set the printed token in `chrome-web-store-dev` too
+   (`gh secret set CWS_REFRESH_TOKEN --env chrome-web-store-dev --repo anomalyco/browse`).
+
+   The token can publish every item of the publisher, so whoever can push to `main` could, by changing the workflow,
+   publish to the stable item without approval. To close that, publish the dev item from a separate Google account
+   (its own refresh token in `chrome-web-store-dev`) that only has access to the dev item.
 6. Check it without publishing: `CWS_CLIENT_ID=… CWS_CLIENT_SECRET=… CWS_REFRESH_TOKEN=… CWS_PUBLISHER_ID=… CWS_ITEM_ID=… bun scripts/cws.ts status`.
 
 Later hardening: a service account through
@@ -110,14 +121,14 @@ refresh token with GitHub's OIDC token.
 
 ### 3. GitHub environments and tag rules
 
-1. **Settings → Environments → New environment**, twice: `npm` and `chrome-web-store`. For each one:
+1. **Settings → Environments → New environment**, twice for stable: `npm` and `chrome-web-store`. For each one:
    - **Required reviewers**: Ryan and at least one other maintainer. Turn on **Prevent self-review** once two people
      can approve.
    - **Deployment branches and tags** → *Selected branches and tags* → add a **tag** rule `v*`, so only release tags
      can use the environment's secrets.
-2. **A third environment, `npm-dev`**, for the dev builds: no required reviewers (every push to `main` publishes, as in
-   Deadbolt), and *Selected branches and tags* → a **branch** rule `main` only. It holds no secret once npm trusted
-   publishing is set up.
+2. **Two more for dev builds, `npm-dev` and `chrome-web-store-dev`**: no required reviewers (every push to `main`
+   publishes, as in Deadbolt), and *Selected branches and tags* → a **branch** rule `main` only. `npm-dev` holds no
+   secret once npm trusted publishing is set up.
 3. **Settings → Rules → Rulesets → New tag ruleset**: target `v*`, restrict creations, updates and deletions to
    maintainers, so only maintainers can start a release.
 4. **Main.** Anyone who can push to `main` publishes a dev build, so protect it: **Settings → Rules → Rulesets → New
@@ -126,8 +137,8 @@ refresh token with GitHub's OIDC token.
 5. **Settings → Actions → General**: turn on *Require actions to be pinned to a full-length commit SHA*. Every action in
    both workflows already is.
 
-Secrets live only in these environments. An approval gates every stable and beta publish; dev builds trade that for
-a build per push, guarded by `main`'s ruleset and `npm-dev` admitting only `main`. The workflow has no
+Secrets live only in these environments. An approval gates every stable publish; dev builds trade that for a build per
+push, guarded by `main`'s ruleset and the dev environments admitting only `main`. The workflow has no
 `pull_request` trigger and starts with `permissions: {}`.
 
 ### 4. npm
@@ -160,7 +171,7 @@ a build per push, guarded by `main`'s ruleset and `npm-dev` admitting only `main
 
 ## Cutting a release
 
-**Dev** needs nothing: merge to `main`. Try it with `npx @opencode/browse@dev install`.
+**Dev** needs nothing: merge to `main`. Try it with `npx @opencode/browse@dev install`; it opens *Browse Dev* in the store.
 
 **Stable**, from an up-to-date `main`:
 
@@ -175,17 +186,13 @@ bun run release            # bumps the versions, runs release:check, commits "re
 **Actions → Release**, check the verify, build and attest jobs, then approve `npm` and `chrome-web-store`. The workflow
 refuses a stable tag that isn't on `main`.
 
-**Beta** works the same way from any branch with an exact version: `bun run release 0.2.0-beta.1` (pushes the branch
-and the tag). Beta users install it with `npx @opencode/browse@beta install` (auto-update keeps them on the beta
-channel) and the unlisted beta item's link.
-
 The changelog follows the Anomaly format: frontmatter `date` and `summary`, then `## Major` (a `### Title`, a sentence
 or two, an optional `Icon: icons/<slug>.svg`), `## Improvements` and `## Fixes`, one line each, written for the person
 using it. `bun scripts/changelog.ts check <version>` lints it.
 
 After the run, the job summary shows the store review state (usually `PENDING_REVIEW`; review takes hours to a few
-days). npm users get the new version within a day (dev installs too, for each dev build): the relay checks once a day and switches when no agent is using the
-browser.
+days). npm users get the new version within a day (dev installs too, for each dev build): the relay checks once a day
+and switches when no agent is using the browser.
 
 **If a step fails**, fix it and rerun the failed jobs. Publishing is idempotent: a version that's already on npm or
 already submitted to the store is skipped.

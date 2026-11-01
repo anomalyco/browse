@@ -25,18 +25,17 @@ const installed = (layout: Layout) => fs.readdirSync(layout.versions).sort()
 describe("channels and versions", () => {
   test("a version's channel follows its prerelease", () => {
     expect(channelOf("0.2.0")).toBe("latest")
-    expect(channelOf("0.2.0-beta.3")).toBe("beta")
     expect(channelOf("0.2.1-dev.57")).toBe("dev")
   })
 
   test("dev builds sort by run, above the release before them and below the one they lead to", () => {
-    const ordered = ["0.2.0-beta.1", "0.2.0-dev.40", "0.2.0", "0.2.1-dev.57", "0.2.1-dev.57.2", "0.2.1-dev.58", "0.2.1", "0.2.2-dev.60"]
+    const ordered = ["0.2.0-dev.40", "0.2.0", "0.2.1-dev.57", "0.2.1-dev.57.2", "0.2.1-dev.58", "0.2.1", "0.2.2-dev.60"]
     for (let index = 1; index < ordered.length; index++) {
       expect(compareVersions(ordered[index]!, ordered[index - 1]!)).toBe(1)
       expect(compareVersions(ordered[index - 1]!, ordered[index]!)).toBe(-1)
     }
     expect(compareVersions("0.2.1-dev.57", "0.2.1-dev.57")).toBe(0)
-    expect(compareVersions("0.2.1-nightly.9", "0.2.0")).toBe(0)
+    expect(compareVersions("0.2.1-beta.9", "0.2.0")).toBe(0)
   })
 })
 

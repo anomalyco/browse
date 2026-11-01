@@ -2,8 +2,8 @@
 // the release workflow:
 //   store zip   no manifest `key` or `update_url`, no relay-pairing.json, no source maps, no test-only hooks, the default
 //               relay port, the release version, and exactly the capabilities in store/permissions.json
-//   npm tarball @opencode/browse at the release version, only dist/, extension/, skills/ and package metadata, no install
-//               scripts, no pairing code or source maps, and its bundled extension on the same allowlist
+//   npm tarball @opencode/browse at the release version, only dist/, skills/ and package metadata (no extension: npm
+//               installs get it from the store), no install scripts, no source maps
 //   bun scripts/check-artifacts.ts --version 0.1.0 --zip release/opencode-browser-0.1.0.zip --tarball release/opencode-browse-0.1.0.tgz
 import { $ } from "bun"
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises"
@@ -94,7 +94,7 @@ async function extracted<T>(prefix: string, extract: (directory: string) => Prom
   }
 }
 
-/** Problems shared by both copies of the extension: pairing code, source maps, development markers. */
+/** Problems in the extension's files: pairing code, source maps, development markers. */
 async function extensionContentProblems(directory: string, label: string) {
   const problems: string[] = []
   const names = await files(directory)
@@ -136,8 +136,7 @@ export async function checkStoreZip(zip: string, version: string, allowlist?: Al
   })
 }
 
-export async function checkPackageTarball(tarball: string, version: string, allowlist?: Allowlist): Promise<string[]> {
-  const allowed = allowlist ?? (await readAllowlist())
+export async function checkPackageTarball(tarball: string, version: string): Promise<string[]> {
   const label = path.basename(tarball)
   return extracted("browse-tgz-", async (directory) => void (await $`tar -xzf ${tarball} -C ${directory}`.quiet()), async (directory) => {
     const packageDir = path.join(directory, "package")
@@ -145,7 +144,7 @@ export async function checkPackageTarball(tarball: string, version: string, allo
     if (structure.some((problem) => !problem.includes("source map"))) return structure
     const names = await files(packageDir)
     const problems: string[] = [...structure]
-    const allowedFile = (name: string) => /^(dist|extension|skills)\//.test(name) || ["package.json", "LICENSE", "README.md"].includes(name)
+    const allowedFile = (name: string) => /^(dist|skills)\//.test(name) || ["package.json", "LICENSE", "README.md"].includes(name)
     for (const name of names) if (!allowedFile(name)) problems.push(`${label}: unexpected file ${name}`)
     for (const name of names) if (/(^|\/)\.env/.test(name) || /\.(pem|key|p12)$/.test(name)) problems.push(`${label}: looks like a secret: ${name}`)
     const pkg = JSON.parse(await readFile(path.join(packageDir, "package.json"), "utf8")) as {
@@ -171,14 +170,6 @@ export async function checkPackageTarball(tarball: string, version: string, allo
       if (!cli.includes(JSON.stringify(version))) problems.push(`${label}: dist/cli.mjs doesn't carry version ${version}`)
       if (cli.includes("sourceMappingURL")) problems.push(`${label}: dist/cli.mjs references a source map`)
     }
-    const extension = path.join(packageDir, "extension")
-    if (!names.includes("extension/manifest.json")) return [...problems, `${label}: missing extension/manifest.json`]
-    const content = await extensionContentProblems(extension, `${label} extension/`)
-    problems.push(...content.problems)
-    const manifest = JSON.parse(await readFile(path.join(extension, "manifest.json"), "utf8")) as Record<string, unknown>
-    // The unpacked copy keeps `key`: it pins the unpacked ID the relay's allowed origins expect.
-    if (typeof manifest.key !== "string") problems.push(`${label}: extension/manifest.json lost its \`key\` (the unpacked ID would change)`)
-    problems.push(...versionProblems(manifest, version, `${label} extension/`), ...capabilityProblems(manifest, allowed, `${label} extension/`))
     return problems
   })
 }

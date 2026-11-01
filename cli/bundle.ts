@@ -9,7 +9,7 @@ export async function bundleCli(options: {
   readonly outdir: string
   readonly version: string
   readonly buildId?: string
-  readonly store?: { readonly id?: string | undefined; readonly betaId?: string | undefined; readonly listed: boolean }
+  readonly store?: { readonly id?: string | undefined; readonly devId?: string | undefined }
 }): Promise<string> {
   const pkg = await Bun.file(path.join(here, "package.json")).json()
   const result = await Bun.build({
@@ -34,7 +34,7 @@ export async function bundleCli(options: {
     define: {
       "globalThis.__OPENCODE_BROWSER_VERSION__": JSON.stringify(options.version),
       "globalThis.__OPENCODE_BROWSER_BUILD_ID__": JSON.stringify(options.buildId ?? new Date().toISOString()),
-      "globalThis.__OPENCODE_BROWSER_STORE__": JSON.stringify(options.store ?? { listed: false }),
+      "globalThis.__OPENCODE_BROWSER_STORE__": JSON.stringify(options.store ?? {}),
     },
   })
   if (!result.success) throw new AggregateError(result.logs, "build failed")

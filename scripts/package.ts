@@ -1,7 +1,8 @@
 // Builds the extension and zips it for the Chrome Web Store: release/opencode-browser-<version>.zip.
 // The store assigns its own ID and rejects the `key` field, which only pins the ID of unpacked builds.
 // The version comes from cli/package.json, the one release version for the zip and the npm package (scripts/version.ts
-// maps a beta to the four-part manifest version Chrome accepts).
+// maps a dev build to the four-part manifest version Chrome accepts). A dev build is named "Browse Dev", so it stands
+// apart from the stable one in the store and in the browser.
 import { $ } from "bun"
 import { cp, mkdir, rm } from "node:fs/promises"
 import path from "node:path"
@@ -17,6 +18,7 @@ const manifest = await Bun.file(path.join(staging, "manifest.json")).json()
 delete manifest.key
 const version: string = (await Bun.file(path.join(root, "cli", "package.json")).json()).version
 applyManifestVersion(manifest, version)
+if (version.includes("-dev.")) manifest.name = `${manifest.name} Dev`
 await Bun.write(path.join(staging, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n")
 const zip = path.join(root, "release", `opencode-browser-${version}.zip`)
 await rm(zip, { force: true })

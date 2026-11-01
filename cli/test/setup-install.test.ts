@@ -11,18 +11,18 @@ const none = (target: Browser): Detection => ({ browser: target, blocked: false,
 const folder = "/src/browse/dist"
 
 /** Runs locateExtension with recording effects: nothing real is opened, revealed or copied. */
-function run(overrides: Partial<LocateOptions> = {}, results: { open?: boolean } = {}) {
+function run(overrides: Partial<Omit<LocateOptions, "folder">> & { folder?: string | undefined } = {}, results: { open?: boolean } = {}) {
   const calls: { open: [string, string][]; reveal: string[]; copy: string[] } = { open: [], reveal: [], copy: [] }
   const lines: string[] = []
+  const { folder: unpacked = "folder" in overrides ? undefined : folder, ...rest } = overrides
   const options: LocateOptions = {
     allowOpen: true,
     connected: false,
-    folder,
+    ...(unpacked ? { folder: unpacked } : {}),
     detections: [none(chrome)],
     preferred: chrome,
     env: { ssh: false, display: true, tty: true, platform: "darwin" },
-    storeListed: false,
-    ...overrides,
+    ...rest,
   }
   const outcome = locateExtension(options, {
     open: (target, url) => (calls.open.push([target.name, url]), results.open ?? true),
@@ -33,7 +33,7 @@ function run(overrides: Partial<LocateOptions> = {}, results: { open?: boolean }
   return { outcome, calls, output: lines.join("\n") }
 }
 
-describe("install without the extension, before the store listing", () => {
+describe("a checkout install without the extension", () => {
   test("opens the extensions page, reveals the folder and copies its path", () => {
     const { outcome, calls, output } = run()
     expect(outcome).toBe("guided")
@@ -120,12 +120,31 @@ describe("install with the extension", () => {
   })
 })
 
-test("once the store listing is live, opens the listing instead", () => {
-  const { calls, output } = run({ storeListed: true, storeUrl: "https://chromewebstore.google.com/detail/abcdefghijklmnopabcdefghijklmnop" })
-  expect(calls.open).toHaveLength(1)
-  expect(calls.open[0]![1]).toStartWith("https://chromewebstore.google.com/")
-  expect(calls.reveal).toEqual([])
-  expect(output).toContain("Chrome Web Store (opened in Google Chrome)")
+describe("an npm install without the extension", () => {
+  const storeUrl = "https://chromewebstore.google.com/detail/abcdefghijklmnopabcdefghijklmnop"
+
+  test("opens its channel's store page, never the unpacked steps", () => {
+    const { outcome, calls, output } = run({ folder: undefined, storeUrl })
+    expect(outcome).toBe("guided")
+    expect(calls).toEqual({ open: [["Google Chrome", storeUrl]], reveal: [], copy: [] })
+    expect(output).toContain("Chrome Web Store (opened in Google Chrome)")
+    expect(output).toContain("pairs it with the relay")
+    expect(output).not.toContain("Load unpacked")
+  })
+
+  test("over SSH, prints the store page", () => {
+    const { calls, output } = run({ folder: undefined, storeUrl, env: { ssh: true, display: true, tty: true, platform: "linux" } })
+    expect(calls.open).toEqual([])
+    expect(output).toContain(storeUrl)
+    expect(output).not.toContain("Load unpacked")
+  })
+
+  test("a package built without its store item says it can't install the extension", () => {
+    const { outcome, calls, output } = run({ folder: undefined })
+    expect(outcome).toBe("guided")
+    expect(calls.open).toEqual([])
+    expect(output).toContain("doesn't know its Chrome Web Store item")
+  })
 })
 
 describe("pairing the store build", () => {
