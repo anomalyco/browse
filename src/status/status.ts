@@ -91,7 +91,7 @@ function showAutoUpdate(autoUpdate: AgentRelayState["autoUpdate"]) {
   for (const input of Array.from(element("auto-update").querySelectorAll<HTMLInputElement>("input[name=auto-update]")))
     input.checked = input.value === autoUpdate.mode
   const facts = [
-    autoUpdate.version ? `Installed: ${autoUpdate.version}${autoUpdate.channel === "beta" ? " (beta channel)" : ""}.` : "",
+    autoUpdate.version ? `Installed: ${autoUpdate.version}${autoUpdate.channel === "dev" ? " (dev channel)" : ""}.` : "",
     autoUpdate.pending ? `${autoUpdate.pending} is ready and switches in once no agent is using the browser.` : "",
     !autoUpdate.pending && autoUpdate.latest && autoUpdate.latest !== autoUpdate.version ? `Newest: ${autoUpdate.latest}.` : "",
     autoUpdate.previous && autoUpdate.version && autoUpdate.previous !== autoUpdate.version ? `\`opencode-browser rollback\` switches to ${autoUpdate.previous}.` : "",

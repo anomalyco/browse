@@ -92,7 +92,8 @@ import { shouldExposeChildTarget, TargetRegistry, type RootTargetChange, type Ta
 import { autoUpdateModes, autoUpdateOverride, autoUpdateStatus, createAutoUpdater, npmRuntime, setStoredMode, storedMode, type AutoUpdateMode } from "./auto-update.ts"
 import { createUpdateWatcher } from "./update.ts"
 import { describeChanges, describeSettings, parseSettingChanges, settingsFromExtension, SettingsInputError, settingsToExtension, type SettingOverrides, type Settings } from "./user-settings.ts"
-import { installCommand, storeConfig } from "./paths.ts"
+import { installedDevExtension, syncDevExtension } from "./dev-extension.ts"
+import { devExtension, installCommand, storeConfig } from "./paths.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "./version.ts"
 import { handleExecuteRealmException, handleExecuteRealmRejection, pruneStaleExecuteFilesDirectories } from "./execute-realm.ts"
 import { PasskeyBridge } from "./passkey-bridge.ts"
@@ -226,10 +227,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const releaseTargetGraceMs = Math.max(0, options.releaseTargetGraceMs ?? 10_000)
   const browserId = crypto.randomUUID()
   const endpointUrl = `http://${formatHostForUrl(host)}:${port}`
-  // Every build, from source too, accepts only the unpacked ID, OPENCODE_BROWSER_EXTENSION_ORIGINS, and the store items
+  // Every build, from source too, accepts only the unpacked ID, OPENCODE_BROWSER_EXTENSION_ORIGINS, and the store item
   // this package was released with (paths.ts storeConfig).
   const additionalChromeExtensionOrigins = new Set(options.additionalExtensionOrigins ?? [])
-  for (const id of [storeConfig().id, storeConfig().betaId]) if (id) additionalChromeExtensionOrigins.add(`chrome-extension://${id}`)
+  const storeId = storeConfig().id
+  if (storeId) additionalChromeExtensionOrigins.add(`chrome-extension://${storeId}`)
   const sessionCatalog = options.sessionCatalogPath === null
     ? undefined
     : new SessionCatalog(options.sessionCatalogPath ?? defaultSessionCatalogPath(port))
@@ -287,6 +289,21 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     const failed = results.find(Result.isFailure)
     return yield* Effect.fail(failed?.failure ?? new Error("Browse extension is not connected"))
   })
+  /** The dev extension build last reloaded for, so a build that never matches (a checkout's, same ID) reloads only once. */
+  let devExtensionReloadedFor: string | undefined
+  /**
+   * A dev install (dev-extension.ts) keeps its unpacked extension in <data root>/extension. When a browser on this
+   * computer runs that unpacked extension with another build than the folder holds, it reloads, picking up the
+   * folder's files. Never a store install, and never a browser on another computer (its folder isn't this one).
+   */
+  const reloadOutdatedDevExtension = (link: BrowserLink) => {
+    const folderBuild = installedDevExtension()?.build
+    if (!folderBuild || !link.rpc.connected || link.origin !== stableUnpackedExtensionOrigin) return
+    if (link.build === folderBuild || devExtensionReloadedFor === folderBuild) return
+    devExtensionReloadedFor = folderBuild
+    relayLog("extension.dev_reload", { browser: link.id, from: link.build, to: folderBuild })
+    sendExtensionBestEffort({ method: "runtime.reload" }, link)
+  }
   const sendDebuggerCommand = Effect.fnUntraced(function* (options: {
     readonly tabId: number
     readonly sessionId?: string
@@ -1232,7 +1249,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
               const queued = waiting ?? []
               waiting = undefined
               if (socket.readyState !== WebSocket.OPEN) return
-              link = acceptExtensionHello(socket, hello, headerValue(request.headers.origin), name)
+              link = acceptExtensionHello(socket, hello, headerValue(request.headers.origin), name, isLocalPeer(request.socket))
               if (!link) {
                 socket.close(4002, "Extension hello required")
                 return
@@ -1435,7 +1452,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
    * link, whose tabs are cleared and announced again. A browser whose protocol doesn't match stays connected but gets
    * no work: commands for it fail with what to update (extension-rpc.ts), as the extension's status page says.
    */
-  function acceptExtensionHello(socket: WebSocket, message: JsonObject, origin: string | undefined, computer: string): BrowserLink | undefined {
+  function acceptExtensionHello(socket: WebSocket, message: JsonObject, origin: string | undefined, computer: string, local: boolean): BrowserLink | undefined {
     if (!isExtensionEvent(message) || message.method !== "hello") {
       return undefined
     }
@@ -1451,6 +1468,13 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     link.rpc.markHandshake(getString(message.params, "version"), message.params?.protocolVersion)
     link.build = getString(message.params, "build")
     link.origin = origin
+    link.local = local
+    // After the handshake settles: a dev install's unpacked extension here running an older build than its folder reloads.
+    if (local) {
+      setTimeout(() => {
+        if (browsers.ofSocket(socket) === link) reloadOutdatedDevExtension(link)
+      }, 2_000).unref()
+    }
     relayLog("extension.connected", {
       browser: link.id,
       name: link.name,
@@ -2534,6 +2558,18 @@ const makeRelay = Effect.fnUntraced(function* (options: {
           onChange: () => sendRelaySettings(),
         })
         autoUpdater.start()
+      }
+      // A dev build brings its own extension: when a dev install has the unpacked folder (install put it there), this
+      // version's extension replaces what's in it, and the connected extension reloads (after an auto-update, say).
+      const dev = devExtension()
+      if (dev && installedDevExtension()) {
+        syncDevExtension(dev).then(
+          (result) => {
+            if (result === "updated") relayLog("extension.dev_updated", { file: dev.file })
+            for (const link of browsers.list()) if (link.local) reloadOutdatedDevExtension(link)
+          },
+          (error: unknown) => relayLog("extension.dev_update_failed", { error: (error as Error).message }),
+        )
       }
       relayLog("relay.ready", { url: endpointUrl, version: opencodeBrowserVersion, build: opencodeBrowserBuildId, pid: process.pid, managed })
     }),

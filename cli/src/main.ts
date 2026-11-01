@@ -30,12 +30,14 @@ if (command === "--version" || command === "-v") {
 } else {
   if (!command || command === "--help" || command === "-h") {
     process.stdout.write(`SETUP
-  install [--opencode <path>]    Install Browse: add the browse MCP server to opencode, pair
-                                 the extension, and check which browsers have it (when none does, open
-                                 the extensions page, show the folder to load unpacked and wait for it)
+  install [--opencode <path>]    Install Browse: add the browse MCP server to opencode, check which browsers
+                                 have the extension and pair it (when none does, open its Chrome Web Store
+                                 page, or from a checkout or a dev install show the folder to load unpacked,
+                                 and wait for it)
     --no-open                    Print the steps without opening anything or copying the path
-    --no-wait                    Don't wait for the extension to connect
-  extension                      Show the unpacked extension folder (for "Load unpacked")
+    --no-wait                    Don't wait for the extension to be added or connect
+  extension                      Show where to get the extension (the unpacked folder of a checkout or a dev
+                                 install, or the store page)
   pair                           Print a one-time pairing code (XXXX-XXXX, valid 10 minutes) to enter on the
                                  extension's status page; the browser exchanges it for a key of its own
     --list                       Show paired browsers: id, name, profile, when paired and last seen

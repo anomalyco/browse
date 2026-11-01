@@ -11,6 +11,7 @@ import {
   autoUpdateOverride,
   channelOf,
   compareVersions,
+  UPDATE_VERSION,
   fetchPublished,
   installVersion,
   npmRuntime,
@@ -155,7 +156,7 @@ export async function runRuntimeInstall(args: readonly string[]) {
   const version = args[0]
   const integrityAt = args.indexOf("--integrity")
   const integrity = integrityAt === -1 ? undefined : args[integrityAt + 1]
-  if (!version || !/^\d+\.\d+\.\d+(-beta\.\d+)?$/.test(version)) {
+  if (!version || !UPDATE_VERSION.test(version)) {
     log(`runtime-install: invalid version ${JSON.stringify(version)}`)
     process.exitCode = 2
     return

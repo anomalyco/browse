@@ -1,25 +1,26 @@
 // Setup for Browse, without changing opencode itself:
-//   install    install the runtime, add the browse MCP server to opencode's config, copy the unpacked extension
-//              (reloading a connected one), then check which browsers have the extension; when none does, guide
-//              loading it unpacked (or, once STORE_LISTED, open the Chrome Web Store listing) and wait for it; when a
-//              browser has the store build, open its status page with a one-time pairing code in the URL fragment so
-//              it pairs without a step
-//   extension  show the unpacked extension folder (for "Load unpacked")
+//   install    install the runtime, add the browse MCP server to opencode's config, then check which browsers have the
+//              extension. A stable npm install gets it from the Chrome Web Store item: when no browser has it, install
+//              opens that item's page; when one has it, install opens its status page with a one-time pairing code in
+//              the URL fragment so it pairs without a step. A checkout loads its own build (dist/) unpacked, and a dev
+//              npm install the dev extension it downloads from the release service into <data root>/extension
+//              (dev-extension.ts): install puts a one-time code in that folder, reloads a connected one that's out of
+//              date, and guides loading it when no browser has it
+//   extension  show the unpacked extension folder (for "Load unpacked"), or a stable npm install's store page
 //   pair       print a one-time pairing code for a browser; --list shows paired browsers, --revoke unpairs one
+//   set        set hostname: where the relay listens (relay-config.ts)
 //   uninstall  remove everything install wrote
 // Earlier versions registered a native messaging host and wrote an opencode plugin; install and uninstall
 // remove those leftovers.
 import { spawn, spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { homedir, networkInterfaces } from "node:os"
 import path from "node:path"
 import { createInterface } from "node:readline/promises"
 import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse } from "jsonc-parser"
 import { describeAutoUpdate, autoUpdateStatus, installVersion, pruneVersions, readCurrent, runtimeLayout, switchVersion, updateState, compareVersions, versionEntry } from "./auto-update.ts"
-import { cliCommand, dataRoot, installCommand, STORE_LISTED, storeConfig } from "./paths.ts"
-import { parseHostname, readRelayConfig, writeRelayConfig } from "./relay-config.ts"
 import {
   bundledPairingCodeTtlMs,
   formatPairingCode,
@@ -31,19 +32,22 @@ import {
   revokeBrowserToken,
   writeExtensionPairing,
 } from "./browser-pairing.ts"
+import { syncDevExtension } from "./dev-extension.ts"
+import { cliCommand, dataRoot, devExtension, devExtensionFolder, installCommand, storeConfig, storeUrl } from "./paths.ts"
+import { parseHostname, readRelayConfig, writeRelayConfig } from "./relay-config.ts"
 import { relayAuthorization } from "./relay-secrets.ts"
 import { opencodeBrowserVersion } from "./version.ts"
 
 /**
- * The Chrome Web Store items this package was released with (paths.ts storeConfig). Only these IDs count as the store
+ * The Chrome Web Store item this package was released with (paths.ts storeConfig). Only this ID counts as the store
  * build: install hands a pairing code to the extension with this ID, so it must be ours.
  */
 const store = storeConfig()
-const STORE_IDS = [store.id, store.betaId].filter((id): id is string => !!id)
-/** The unpacked build; its ID is pinned by the manifest key. */
+const STORE_IDS = [store.id].filter((id): id is string => !!id)
+/** The unpacked build (a checkout's, or a dev install's); its ID is pinned by the manifest key. */
 const UNPACKED_ID = "afeafocngkodbmaipcngoamamfmekgfo"
-const storeUrl = (id: string | undefined) => (id ? `https://chromewebstore.google.com/detail/${id}` : undefined)
-const STORE_URL = storeUrl(store.channelId)
+/** The store page; undefined for a package built without the store item (and a checkout). */
+const STORE_URL = store.id ? storeUrl(store.id) : undefined
 const PACKAGE = "@opencode/browse"
 const MCP_NAME = "browse"
 /** The MCP server's name before it was renamed to `browse`. */
@@ -61,7 +65,6 @@ const files = {
   /** Installed versions of this package (auto-update.ts): the MCP server runs from here through the shim, not the npx cache. */
   runtime: path.join(root, "runtime"),
   settings: path.join(root, "settings.json"),
-  extension: path.join(root, "extension"),
 }
 /**
  * Files the native messaging host of earlier versions left behind. Not session.json: it has only ever been at
@@ -80,7 +83,6 @@ const legacyFiles = [
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 /** Running from a source checkout without a package to install: the MCP server runs main.ts in place with bun. */
 const fromSource = existsSync(path.join(packageRoot, "src", "main.ts")) && !process.env.OPENCODE_BROWSER_PACKAGE
-const bundledExtension = path.join(packageRoot, "extension")
 /** From a checkout, the extension folder users load unpacked (dist/) and its source (public/, copied into dist/ by every build). */
 const checkoutExtensionDirs = (() => {
   const repo = path.dirname(packageRoot)
@@ -375,9 +377,21 @@ function checkNode() {
     fail(`Browse needs Node.js 22.19 or newer; this is ${process.version} (${process.execPath}). Update Node.js (https://nodejs.org), then run setup again.`)
 }
 
-/** The folder to load unpacked: the checkout's dist/ (which `bun run setup` builds), else the copy in the data root. */
-function unpackedFolder() {
-  return checkoutExtensionDirs[1] ?? files.extension
+/** The dev extension a dev npm install downloads (paths.ts devExtension); undefined for a checkout or a stable release. */
+const dev = fromSource ? undefined : devExtension()
+
+/** The folder to load unpacked: a checkout's dist/, which `bun run setup` builds, or a dev install's <data root>/extension. */
+const unpackedFolder = (): string | undefined => checkoutExtensionDirs[1] ?? (dev ? devExtensionFolder(root) : undefined)
+
+/** Puts this version's dev extension in <data root>/extension (paired); fails install when it can't be downloaded. */
+async function syncDev() {
+  if (!dev) return
+  try {
+    const result = await syncDevExtension(dev, { root })
+    log(result === "updated" ? `✓ Downloaded the dev extension (${dev.file}) to ${devExtensionFolder(root)}` : `✓ Dev extension ${dev.file} is in ${devExtensionFolder(root)}`)
+  } catch (error) {
+    fail(`Could not get the dev extension: ${(error as Error).message}`)
+  }
 }
 
 async function install(args: string[]) {
@@ -399,17 +413,15 @@ async function install(args: string[]) {
   if (legacy.length)
     log(`! Browser Control MCP server${legacy.length === 1 ? "" : "s"} ${legacy.map((name) => `"${name}"`).join(", ")} also configured. Browse replaces it; remove ${legacy.length === 1 ? "it" : "them"} from ${configFile()} to avoid two sets of browser tools.`)
 
+  await syncDev()
   const connected = await connectedExtension()
-  if (existsSync(bundledExtension)) {
-    rmSync(files.extension, { recursive: true, force: true })
-    cpSync(bundledExtension, files.extension, { recursive: true })
-  }
-  // The unpacked extension finds a one-time code in its own folder and exchanges it for its token, without a step.
-  pairUnpacked()
-  log(`✓ Put a one-time pairing code in the unpacked extension (good for an hour)${STORE_LISTED ? ` (for the Chrome Web Store build, run \`${cliCommand("pair")}\`)` : ""}`)
-  if (existsSync(bundledExtension)) {
+  const folder = unpackedFolder()
+  if (folder) {
+    // The unpacked extension finds a one-time code in its own folder and exchanges it for its key, without a step.
+    pairUnpacked()
+    log("✓ Put a one-time pairing code in the unpacked extension (good for an hour)")
     // A browser already running an older unpacked build keeps its old code until it reloads; ask it to.
-    const reload = connected ? await reloadOutdatedExtension(connected) : "current"
+    const reload = connected ? await reloadOutdatedExtension(connected, folder) : "current"
     if (reload === "reloaded") log("✓ Reloaded Browse in your browser")
     if (reload === "stale")
       log("! Browse didn't reload in your browser. Reload it on the browser's extensions page to finish the update.")
@@ -427,18 +439,51 @@ async function install(args: string[]) {
   const found = locateExtension({
     allowOpen: !args.includes("--no-open"),
     connected: !!connected,
-    folder: unpackedFolder(),
+    ...(folder ? { folder } : {}),
     detections,
     preferred: ssh ? undefined : defaultBrowser(detections.map((detection) => detection.browser)),
     env,
   })
-  if (found === "ready" && !connected) {
-    const paired = pairStoreExtension({ detections, preferred: ssh ? undefined : defaultBrowser(detections.map((detection) => detection.browser)), allowOpen: !args.includes("--no-open"), env, code: () => mintPairingCode() })
-    if (paired === "opened") return awaitConnection(entry)
+  const pairStore = (scanned: Detection[]) =>
+    pairStoreExtension({ detections: scanned, preferred: ssh ? undefined : defaultBrowser(scanned.map((detection) => detection.browser)), allowOpen: !args.includes("--no-open"), env, code: () => mintPairingCode() })
+  if (found === "ready" && !connected && pairStore(detections) === "opened") return awaitConnection(entry)
+  const wait = found === "guided" && env.tty && !ssh && !args.includes("--no-wait")
+  // Loading unpacked connects at once.
+  if (wait && folder) return awaitConnection(entry)
+  // A store install still has to pair: wait for the browser to add it, then open its status page with a code.
+  if (wait && STORE_URL) {
+    const added = await awaitStoreExtension()
+    if (added && pairStore(added) === "opened") return awaitConnection(entry)
   }
-  if (found === "guided" && !STORE_LISTED && env.tty && !ssh && !args.includes("--no-wait")) return awaitConnection(entry)
   // The MCP server entry changed: a running opencode picks it up on restart.
   if (found === "ready" && !mcp.endsWith("up to date")) log("Restart opencode (if it's running) to load the browse tools.")
+}
+
+/**
+ * After opening the store page, waits up to five minutes for a browser profile to have the store build, rescanning
+ * the browsers' preferences. Returns the scan that found it, or undefined (timed out, or Ctrl+C).
+ */
+async function awaitStoreExtension(): Promise<Detection[] | undefined> {
+  log("")
+  log("Waiting for Browse to be added in your browser (up to 5 minutes; Ctrl+C to skip)…")
+  let stopped = false
+  const stop = () => void (stopped = true)
+  process.once("SIGINT", stop)
+  let found: Detection[] | undefined
+  await waitForExtension({
+    connected: async () => {
+      if (stopped) return true
+      const scan = detectBrowsers()
+      if (scan.some((detection) => detection.enabled.some((match) => STORE_IDS.includes(match.id)))) found = scan
+      return found !== undefined
+    },
+    timeoutMs: 300_000,
+    intervalMs: 2_000,
+  })
+  process.off("SIGINT", stop)
+  if (!found) log(stopped ? "" : "! Browse wasn't added yet.")
+  if (!found) log(`Once it's added, run \`${cliCommand("install")}\` again to pair it.`)
+  return found
 }
 
 /**
@@ -495,13 +540,15 @@ export function printSetupStatus() {
   log("")
 }
 
-function extension() {
-  if (!checkoutExtensionDirs.length && !existsSync(files.extension)) {
-    if (!existsSync(bundledExtension)) fail("This package has no bundled extension.")
-    mkdirSync(files.dir, { recursive: true })
-    cpSync(bundledExtension, files.extension, { recursive: true })
-  }
+async function extension() {
   const folder = unpackedFolder()
+  if (!folder) {
+    if (!STORE_URL) fail("This package doesn't know its Chrome Web Store item. Install a released version (`npx @opencode/browse install`), or set up Browse from a checkout.")
+    log(`Install Browse from the Chrome Web Store: ${STORE_URL}`)
+    log(`Then run \`${cliCommand("install")}\` again to pair it.`)
+    return
+  }
+  await syncDev()
   if (!existsSync(path.join(folder, "manifest.json"))) fail(`${folder} has no built extension. Run \`${installCommand()}\` first.`)
   pairUnpacked()
   revealFolder(folder)
@@ -509,12 +556,12 @@ function extension() {
 }
 
 /**
- * Writes a fresh one-time code into every unpacked extension folder this install manages (one code: a checkout's
- * public/ and dist/ are the same extension). It's good for an hour and only until an extension used it, so the folder
- * holds nothing reusable; an extension that already has its token ignores it.
+ * Writes a fresh one-time code into every unpacked extension folder this install manages (a checkout's, or a dev
+ * install's). It's good for an hour and only until an extension used it, so the folder holds nothing reusable; an
+ * extension that already has its key ignores it.
  */
 function pairUnpacked() {
-  const directories = [files.extension, ...checkoutExtensionDirs].filter((directory) => existsSync(path.join(directory, "manifest.json")))
+  const directories = [...checkoutExtensionDirs, ...(dev ? [devExtensionFolder(root)] : [])].filter((directory) => existsSync(path.join(directory, "manifest.json")))
   if (directories.length === 0) return
   const code = mintPairingCode(undefined, { ttlMs: bundledPairingCodeTtlMs })
   for (const directory of directories) writeExtensionPairing(directory, code)
@@ -677,12 +724,12 @@ async function connectedExtension() {
 }
 
 /**
- * Reloads the connected extension when it's the unpacked build (the store updates its own) and older than the files
- * just copied, then checks the reload took effect: the build it reports after reconnecting must be the new one.
+ * Reloads the connected extension when it's the checkout's unpacked build (the store updates its own) and older than
+ * the folder's build, then checks the reload took effect: the build it reports after reconnecting must be the new one.
  */
-async function reloadOutdatedExtension(before: ExtensionStatus): Promise<"reloaded" | "stale" | "current"> {
+async function reloadOutdatedExtension(before: ExtensionStatus, folder: string): Promise<"reloaded" | "stale" | "current"> {
   if (before.origin !== `chrome-extension://${UNPACKED_ID}`) return "current"
-  const bundled = readJson<{ build?: string }>(path.join(files.extension, "build.json"))?.build
+  const bundled = readJson<{ build?: string }>(path.join(folder, "build.json"))?.build
   if (bundled && before.build === bundled) return "current"
   const sent = await fetch(`${relayBase()}/extension/reload`, {
     method: "POST",
@@ -728,20 +775,19 @@ export type Effects = {
 export type LocateOptions = {
   allowOpen: boolean
   connected: boolean
-  /** The folder to load unpacked: the checkout's dist/, or the copy in the data root. */
-  folder: string
+  /** The folder to load unpacked (a checkout's dist/, or a dev install's). Without one, the extension comes from the store item. */
+  folder?: string
   detections: Detection[]
   preferred: Browser | undefined
   env: { ssh: boolean; display: boolean; tty: boolean; platform: NodeJS.Platform }
-  storeListed?: boolean
-  /** The listing to open when storeListed; defaults to this channel's store item. */
+  /** The store page to open; defaults to this channel's store item. */
   storeUrl?: string
 }
 
 /**
  * Reports the browsers and profiles that have Browse. When none does (and none is connected to the relay),
- * guides installing it: until the Chrome Web Store listing is live (STORE_LISTED), that's loading the unpacked build,
- * with the browser's extensions page opened, the folder revealed and its path copied; after, the store listing.
+ * guides installing it: from a checkout or a dev install, loading the unpacked build, with the browser's extensions page
+ * opened, the folder revealed and its path copied; from a stable npm install, the Chrome Web Store item, whose page it opens.
  * Nothing opens when the browsers here aren't the ones the user looks at (SSH, no display), there is no terminal,
  * with --no-open, or when a browser couldn't be checked and may already have it.
  * Returns "ready" when the extension is there, "off" when it's turned off, else "guided".
@@ -749,12 +795,15 @@ export type LocateOptions = {
 export function locateExtension(options: LocateOptions, effects: Effects = systemEffects): "ready" | "off" | "guided" {
   const { log } = effects
   const listing = options.storeUrl ?? STORE_URL
-  const storeListed = (options.storeListed ?? STORE_LISTED) && listing !== undefined
   const ready = "✓ Agents can use Browse now. Click its toolbar button on a tab to let them use that tab too."
+  const noListing = () =>
+    log(`! This package doesn't know its Chrome Web Store item, so it can't install the extension. Install a released version (\`npx @opencode/browse install\`), or set up Browse from a checkout.`)
+  const pairLater = () => log(`  Once it's added, run \`${cliCommand("install")}\` again to pair it with the relay.`)
   if (options.env.ssh) {
     if (options.connected) return log(ready), "ready"
-    if (storeListed) log(`Install Browse in your browser from the Chrome Web Store: ${listing}`)
-    else unpackedSteps({ folder: options.folder, platform: options.env.platform, log })
+    if (options.folder) unpackedSteps({ folder: options.folder, platform: options.env.platform, log })
+    else if (listing) log(`Install Browse in your browser from the Chrome Web Store: ${listing}`), pairLater()
+    else noListing()
     return "guided"
   }
   reportDetections(options.detections, options.preferred, log)
@@ -768,12 +817,13 @@ export function locateExtension(options: LocateOptions, effects: Effects = syste
   const blocked = options.detections.filter((detection) => detection.blocked).map((detection) => detection.browser.name)
   const target = options.preferred ?? options.detections.find((detection) => !detection.blocked)?.browser
   const interactive = options.allowOpen && options.env.display && options.env.tty
-  if (storeListed) {
-    const opened = interactive && !blocked.length && target !== undefined && effects.open(target, listing!)
+  if (!options.folder) {
+    if (!listing) return noListing(), "guided"
+    const opened = interactive && !blocked.length && target !== undefined && effects.open(target, listing)
     log(`Install Browse from the Chrome Web Store${opened ? ` (opened in ${target.name})` : ""}:`)
     log(`  ${listing}`)
+    log(`  Once it's added, install pairs it with the relay (if install isn't waiting for it, run \`${cliCommand("install")}\` again).`)
     if (blocked.length) log(`  Already installed in ${blocked.join(", ")}? Then you're set.`)
-    log(`  Or load the unpacked build: ${cliCommand("extension")}`)
     return "guided"
   }
   // A browser that couldn't be checked may already have it: show the steps, but don't open anything over the user's work.
@@ -976,7 +1026,7 @@ function reportDetections(detections: Detection[], preferred: Browser | undefine
   })
 }
 
-const describe = (match: Match) => `${match.profile.name}${match.id === UNPACKED_ID ? " (unpacked)" : match.id === store.betaId ? " (beta)" : ""}`
+const describe = (match: Match) => `${match.profile.name}${match.id === UNPACKED_ID ? " (unpacked)" : ""}`
 const blockedReason = () => (process.platform === "darwin" ? "macOS privacy protection" : "permission denied")
 
 /**

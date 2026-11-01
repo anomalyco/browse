@@ -23,8 +23,9 @@ npx @opencode/browse install
 `install` puts the relay in your data folder (`~/.local/share/opencode-browser`), adds the `browse` MCP server to
 opencode, and connects the extension:
 
-1. **Add the extension.** `install` opens Browse in the Chrome Web Store; add it to your browser. If it's
-   already there, `install` opens its status page with a one-time pairing code, so it pairs without copying anything.
+1. **Add the extension.** `install` opens Browse in the Chrome Web Store; add it to your browser, and `install` pairs
+   it once it's there. If it's already there, `install` opens its status page with a one-time pairing code, so it
+   pairs without copying anything.
 2. **Restart opencode.**
 
 That's it. Ask an agent to *"open news.ycombinator.com and tell me the top story"*. Or paste this into opencode:
@@ -36,7 +37,11 @@ Requirements: Node.js 22.19+, a Chromium browser, and [opencode](https://opencod
 over when no agent is using the browser, without changing opencode's config or restarting it. Choose *Only tell me* or
 *Don't check* under **Updates** on the extension's status page (or `settings set autoUpdate=notify`, or
 `OPENCODE_BROWSER_AUTO_UPDATE=off`). `npx @opencode/browse update` updates now, and `npx @opencode/browse rollback` goes
-back to the previous version. The Chrome Web Store updates the extension. Betas: `npx @opencode/browse@beta install`.
+back to the previous version. The Chrome Web Store updates the extension.
+
+**Dev builds**: every push to `main` publishes one. `npx @opencode/browse@dev install` follows the dev channel: it
+downloads that build's extension into a folder you load unpacked once (install shows where), and each update refreshes
+the folder and reloads the extension. The zip is also at https://anoma.ly/release/browse/extension/dev/chromium.
 
 There's nothing to sign in to. Each browser pairs with the relay once and gets a key of its own (see
 [Security](#security)). If pairing didn't happen by itself, run `npx @opencode/browse pair` and enter the short code it
@@ -315,7 +320,7 @@ bun run release:check            # the store zip and npm tarball a release would
 ```
 
 `cli/` is the npm package `@opencode/browse` with its own lockfile. The extension and the package share one version;
-[RELEASING.md](RELEASING.md) has the release flow (`bun run release <version>`, then push the tag).
+[RELEASING.md](RELEASING.md) has the release flow (dev builds from `main`, `bun run release` for a stable release).
 
 ## License
 

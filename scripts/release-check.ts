@@ -1,8 +1,10 @@
 // Builds and checks the release artifacts exactly as the release workflow does, without publishing anything:
 //   bun run release:check [--tag v0.1.0] [--require-changelog] [--versions-only]
 // 1. the version is one release version everywhere: cli/package.json, package.json, public/manifest.json (and the tag)
-// 2. release/opencode-browser-<version>.zip (scripts/package.ts) and release/opencode-browse-<version>.tgz (npm pack of
-//    a fresh cli/ build, with the store item IDs from OPENCODE_BROWSER_STORE_ID / OPENCODE_BROWSER_BETA_STORE_ID baked in)
+// 2. the extension zip (scripts/package.ts): release/opencode-browser-<version>.zip for the store (stable), or
+//    release/browse-extension-<version>.zip for the release service (dev); then release/opencode-browse-<version>.tgz
+//    (npm pack of a fresh cli/ build, with the store item ID from OPENCODE_BROWSER_STORE_ID baked in, and for a dev
+//    build the dev zip's sha256)
 // 3. scripts/check-artifacts.ts on both, then release/SHA256SUMS
 import { $ } from "bun"
 import { createHash } from "node:crypto"
@@ -51,9 +53,11 @@ if (import.meta.main) {
   if (problems.length) fail(problems)
   console.log(`✓ version ${version} agrees across cli/package.json, package.json and public/manifest.json${values.tag ? ` and ${values.tag}` : ""}`)
   if (values["versions-only"]) process.exit(0)
-  // A stable release without the store item can't recognize or pair the store extension; CI refuses it.
-  if (values.tag && !values.tag.includes("-beta.") && !process.env.OPENCODE_BROWSER_STORE_ID?.trim()) {
-    const message = "OPENCODE_BROWSER_STORE_ID (the CWS_ITEM_ID repository variable) is not set; this stable package won't know the store item"
+  // Stable npm installs get the extension only from the store item, so a package that doesn't know it can't install one.
+  // CI refuses a stable release without it. Dev installs load the dev zip unpacked, so dev builds don't need it.
+  const dev = parseReleaseVersion(version).channel === "dev"
+  if (values.tag && !dev && !process.env.OPENCODE_BROWSER_STORE_ID?.trim()) {
+    const message = "OPENCODE_BROWSER_STORE_ID (the CWS_ITEM_ID repository variable) is not set; this package won't know its store item, so npm installs of it can't get the extension"
     if (process.env.GITHUB_ACTIONS) fail([message])
     console.warn(`! ${message}`)
   }
@@ -62,12 +66,14 @@ if (import.meta.main) {
   if (process.env.OPENCODE_BROWSER_TEST_HOOKS === "1") fail(["OPENCODE_BROWSER_TEST_HOOKS=1 is set; unset it, test hooks never ship"])
   await rm(release, { recursive: true, force: true })
   const zip = (await $`bun scripts/package.ts`.cwd(root).text()).trim().split("\n").pop()!
-  await $`bun build.ts`.cwd(path.join(root, "cli"))
+  // A dev CLI carries its extension zip's sha256 (cli/build.ts), so it fetches exactly this zip from the release service.
+  const { OPENCODE_BROWSER_EXTENSION_ZIP: _zip, ...env } = process.env
+  await $`bun build.ts`.cwd(path.join(root, "cli")).env(dev ? { ...env, OPENCODE_BROWSER_EXTENSION_ZIP: zip } : env)
   const packed = JSON.parse(await $`npm pack --json --pack-destination ${release}`.cwd(path.join(root, "cli")).text()) as { filename: string }[]
   const tarball = path.join(release, packed[0]!.filename.replace(/^@/, "").replace("/", "-"))
   if (!existsSync(tarball)) fail([`npm pack didn't write ${tarball}`])
 
-  const artifactProblems = [...(await checkStoreZip(zip, version)), ...(await checkPackageTarball(tarball, version))]
+  const artifactProblems = [...(await checkStoreZip(zip, version, undefined, dev)), ...(await checkPackageTarball(tarball, version, dev ? await sha256(zip) : undefined))]
   if (artifactProblems.length) fail(artifactProblems)
   const sums = await Promise.all([zip, tarball].map(async (file) => `${await sha256(file)}  ${path.basename(file)}`))
   await writeFile(path.join(release, "SHA256SUMS"), sums.join("\n") + "\n")

@@ -52,6 +52,8 @@ export type BrowserLink = {
   /** The status page settings this browser sent. */
   cursor: boolean
   humanInput: boolean | undefined
+  /** It runs on this computer (not over the network), so its unpacked extension is this computer's folder. */
+  local: boolean
 }
 
 type Known = Record<string, { readonly id: string; readonly name: string }>
@@ -130,6 +132,7 @@ export class BrowserLinks {
       announcedAgentTabIds: new Set(),
       cursor: false,
       humanInput: undefined,
+      local: false,
     }
     link.rpc.replaceSocket(options.socket)
     this.links.set(options.key, link)
