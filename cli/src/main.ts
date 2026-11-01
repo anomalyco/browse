@@ -36,7 +36,11 @@ if (command === "--version" || command === "-v") {
     --no-open                    Print the steps without opening anything or copying the path
     --no-wait                    Don't wait for the extension to connect
   extension                      Show the unpacked extension folder (for "Load unpacked")
-  pair                           Print the pairing code the Chrome Web Store extension asks for
+  pair                           Print a one-time pairing code (XXXX-XXXX, valid 10 minutes) to enter on the
+                                 extension's status page; the browser exchanges it for a key of its own
+    --list                       Show paired browsers: id, name, profile, when paired and last seen
+    --revoke <browser>           Unpair a browser (its id, name or profile) and disconnect it;
+                                 \`--revoke legacy\` retires the shared code of earlier versions
   set hostname <address>         Where the relay listens: 127.0.0.1 (this computer, the default) or 0.0.0.0
                                  (browsers on other computers can connect too, after pairing)
   update [--check]               Update now. A git clone install pulls the newer commits (fast-forward only)

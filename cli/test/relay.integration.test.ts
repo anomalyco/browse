@@ -1,13 +1,24 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { spawn, type ChildProcess } from "node:child_process"
-import { createHmac } from "node:crypto"
 import fs from "node:fs"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import WebSocket from "ws"
 import { dataUrlDocument, stableUnpackedExtensionOrigin } from "../src/relay-helpers.ts"
-import { mintPairingTicket, pairingCode, pairingProof, pairingTicketKey, relayToken } from "../src/relay-secrets.ts"
+import * as ExtensionPairing from "../../src/background/pairing.ts"
+import {
+  browserToken,
+  issueBrowserToken,
+  legacyPairingCodePath,
+  legacyPairingProof,
+  maxPairingFailures,
+  mintPairingCode,
+  pairingProof,
+  readBrowserPairings,
+  revokeBrowserToken,
+} from "../src/browser-pairing.ts"
+import { relayToken } from "../src/relay-secrets.ts"
 import { isBenignClosedSessionRejection } from "../src/relay.ts"
 
 // A relay from source on a free port with its own data root, and a fake extension that pairs with it and answers
@@ -21,7 +32,10 @@ let token = ""
 
 type Command = { readonly id: number; readonly method: string; readonly params?: Record<string, unknown> }
 
-/** The extension side of the link: pairing handshake, then generic answers to the relay's commands. */
+/**
+ * The extension side of the link: the token handshake (with a token for its profile written into the relay's data root
+ * `root`, as a code exchange leaves it), then generic answers to the relay's commands.
+ */
 class FakeExtension {
   readonly commands: Command[] = []
   readonly socket: WebSocket
@@ -29,7 +43,7 @@ class FakeExtension {
   relayProved = false
   private readonly handlers = new Map<string, (command: Command) => unknown>()
 
-  constructor(private readonly code: string, private readonly relayPort = port, host = "127.0.0.1") {
+  constructor(private readonly root: string, private readonly relayPort = port, host = "127.0.0.1") {
     this.socket = new WebSocket(`ws://${host}:${relayPort}/extension`, { origin: stableUnpackedExtensionOrigin })
     this.socket.on("close", (code) => { this.closeCode = code })
   }
@@ -40,15 +54,19 @@ class FakeExtension {
   }
 
   /**
-   * Resolves true once the relay proved the code and accepted the extension's proof. A real extension stops when
-   * the relay's proof is wrong; `answerAnyway` sends the extension's proof regardless, as an impostor would.
+   * Resolves true once the relay proved the token and accepted the extension's proof. A real extension stops when
+   * the relay's proof is wrong; `answerAnyway` sends the extension's proof regardless, as an impostor would. `legacy`
+   * speaks the handshake of an extension too old for tokens, with the old shared code.
    */
-  async pair(options: { readonly answerAnyway?: boolean; readonly proofPort?: number; readonly settings?: Record<string, unknown>; readonly attachedTabs?: readonly number[]; readonly agentTabs?: readonly number[]; readonly hello?: Record<string, unknown> } = {}): Promise<boolean> {
+  async pair(options: { readonly legacy?: string; readonly token?: string; readonly answerAnyway?: boolean; readonly proofPort?: number; readonly settings?: Record<string, unknown>; readonly attachedTabs?: readonly number[]; readonly agentTabs?: readonly number[]; readonly hello?: Record<string, unknown> } = {}): Promise<boolean> {
     await new Promise<void>((resolve, reject) => {
       this.socket.once("open", () => resolve())
       this.socket.once("error", reject)
     })
     const nonce = crypto.randomUUID().replaceAll("-", "")
+    const profileId = String(options.hello?.profileId ?? "test")
+    const secret = options.legacy ?? options.token ?? browserToken(profileId, this.root) ?? issueBrowserToken(profileId, this.root)
+    const proof = options.legacy === undefined ? pairingProof : legacyPairingProof
     const challenge = new Promise<{ nonce: string; proof: string } | undefined>((resolve) => {
       this.socket.once("message", (data) => {
         const message = JSON.parse(String(data)) as { method?: string; params?: { nonce: string; proof: string } }
@@ -58,15 +76,15 @@ class FakeExtension {
     })
     this.socket.send(JSON.stringify({
       method: "hello",
-      params: { version: "0.0.0-test", build: "test", protocolVersion: 2, profileId: "test", profileName: "Test", ...options.hello, pairing: { nonce } },
+      params: { version: "0.0.0-test", build: "test", protocolVersion: 2, profileId: "test", profileName: "Test", ...options.hello, pairing: { nonce, ...(options.legacy === undefined ? { mode: "token" } : {}) } },
     }))
     const params = await challenge
     // The relay must prove it knows the code before the extension obeys it.
     if (!params) return false
     const proofPort = options.proofPort ?? this.relayPort
-    this.relayProved = params.proof === pairingProof(this.code, "relay", proofPort, params.nonce, nonce)
+    this.relayProved = params.proof === proof(secret, "relay", proofPort, params.nonce, nonce)
     if (!this.relayProved && !options.answerAnyway) return false
-    this.socket.send(JSON.stringify({ method: "auth.response", params: { proof: pairingProof(this.code, "extension", proofPort, nonce, params.nonce) } }))
+    this.socket.send(JSON.stringify({ method: "auth.response", params: { proof: proof(secret, "extension", proofPort, nonce, params.nonce) } }))
     this.socket.on("message", (data) => this.answer(JSON.parse(String(data)) as Command))
     // A reconnecting extension announces the tabs it still has attached, then says it's ready.
     for (const tabId of options.attachedTabs ?? []) this.emit("debugger.attached", { tabId, ...(options.agentTabs?.includes(tabId) ? { agent: true } : {}) })
@@ -169,6 +187,53 @@ async function stopRelay(child: ChildProcess | undefined) {
   child?.kill("SIGKILL")
 }
 
+/**
+ * The extension's side of a code exchange, with the extension's own crypto (src/background/pairing.ts): ECDH, prove
+ * the code, unmask the token, prove the token. Records every frame both ways.
+ */
+async function pairWithCode(relayPort: number, code: string, profileId: string) {
+  const socket = new WebSocket(`ws://127.0.0.1:${relayPort}/extension`, { origin: stableUnpackedExtensionOrigin })
+  const frames: string[] = []
+  const send = (message: unknown) => {
+    frames.push(JSON.stringify(message))
+    socket.send(JSON.stringify(message))
+  }
+  const inbox: Array<{ method?: string; params?: Record<string, any> }> = []
+  let wake = () => {}
+  socket.on("message", (data) => {
+    frames.push(String(data))
+    inbox.push(JSON.parse(String(data)))
+    wake()
+  })
+  const closed = new Promise<number>((resolve) => socket.once("close", (closeCode) => resolve(closeCode)))
+  const next = async () => {
+    while (inbox.length === 0 && socket.readyState === WebSocket.OPEN) await new Promise<void>((resolve) => { wake = resolve; setTimeout(resolve, 50) })
+    return inbox.shift()
+  }
+  await new Promise<void>((resolve) => socket.once("open", () => resolve()))
+  const keys = await ExtensionPairing.ecdhKeyPair()
+  const nonce = ExtensionPairing.randomNonce()
+  send({ method: "hello", params: { version: "0.0.0-test", build: "test", protocolVersion: 2, profileId, profileName: profileId, pairing: { nonce, mode: "code", ecdh: keys.publicKey } } })
+  const fail = async () => ({ token: undefined, open: false, closeCode: await closed, wire: frames.join("\n") })
+  const challenge = await next()
+  if (challenge?.method !== "auth.challenge") return fail()
+  const secret = await keys.secret(challenge.params?.ecdh)
+  const transcript = { port: relayPort, extensionNonce: nonce, relayNonce: String(challenge.params?.nonce), extensionKey: keys.publicKey, relayKey: String(challenge.params?.ecdh) }
+  const session = await ExtensionPairing.pairingSessionKey(await ExtensionPairing.pairingCodeMaterial({ code, legacy: false }), secret!, transcript)
+  send({ method: "auth.code", params: { proof: await ExtensionPairing.sessionProof(session, "extension") } })
+  const answer = await next()
+  if (answer?.method !== "auth.token") return fail()
+  expect(answer.params?.proof).toBe(await ExtensionPairing.sessionProof(session, "relay"))
+  const token = (await ExtensionPairing.unwrapToken(session, answer.params?.wrapped))!
+  send({ method: "auth.response", params: { proof: await ExtensionPairing.pairingProof(token, "extension", relayPort, nonce, transcript.relayNonce) } })
+  send({ method: "ready" })
+  await Bun.sleep(200)
+  const open = socket.readyState === WebSocket.OPEN
+  socket.close()
+  await closed
+  return { token, open, closeCode: undefined, wire: frames.join("\n") }
+}
+
 beforeAll(async () => {
   const started = await startRelay(home)
   relay = started.child
@@ -205,53 +270,82 @@ describe("relay", () => {
     for (const socket of [byHeader, byQuery]) if (socket instanceof WebSocket) socket.close()
   })
 
-  test("a one-time pairing ticket brings in the code once; used again, it's refused", async () => {
-    /** The extension side of a ticket handshake: proves the ticket, unmasks the code, proves the code. */
-    const pairWithTicket = async (ticket: string) => {
-      const socket = new WebSocket(`ws://127.0.0.1:${port}/extension`, { origin: stableUnpackedExtensionOrigin })
-      await new Promise<void>((resolve) => socket.once("open", () => resolve()))
-      const closed = new Promise<number>((resolve) => socket.once("close", (code) => resolve(code)))
-      const nonce = crypto.randomUUID().replaceAll("-", "")
-      const challenge = new Promise<{ nonce: string; proof: string; wrapped?: string } | undefined>((resolve) => {
-        socket.once("message", (data) => resolve((JSON.parse(String(data)) as { params?: { nonce: string; proof: string; wrapped?: string } }).params))
-        socket.once("close", () => resolve(undefined))
-      })
-      socket.send(JSON.stringify({ method: "hello", params: { version: "0.0.0-test", build: "test", protocolVersion: 2, profileId: "t", profileName: "T", pairing: { nonce, ticket: true } } }))
-      const params = await challenge
-      if (!params?.wrapped) return { code: undefined, closeCode: await closed }
-      const key = pairingTicketKey(ticket)
-      expect(params.proof).toBe(pairingProof(key, "relay", port, params.nonce, nonce))
-      const mask = createHmac("sha256", key).update(`opencode-browser-pairing-v2|wrap|127.0.0.1:${port}/extension|${nonce}|${params.nonce}`).digest()
-      const code = Buffer.from(Buffer.from(params.wrapped, "base64url").map((byte, index) => byte ^ mask[index]!)).toString("ascii")
-      socket.send(JSON.stringify({ method: "auth.response", params: { proof: pairingProof(code, "extension", port, nonce, params.nonce) } }))
-      socket.send(JSON.stringify({ method: "ready" }))
-      await Bun.sleep(200)
-      const open = socket.readyState === WebSocket.OPEN
-      socket.close()
-      await closed
-      return { code, open }
-    }
-    const ticket = mintPairingTicket(home)
-    // A program that only claims a ticket (it can't prove the code) doesn't use it up.
-    const claimer = new WebSocket(`ws://127.0.0.1:${port}/extension`, { origin: stableUnpackedExtensionOrigin })
-    await new Promise<void>((resolve) => claimer.once("open", () => resolve()))
-    const claimed = new Promise<void>((resolve) => claimer.once("message", () => resolve()))
-    claimer.send(JSON.stringify({ method: "hello", params: { version: "0.0.0-test", build: "test", protocolVersion: 2, profileId: "x", profileName: "X", pairing: { nonce: crypto.randomUUID().replaceAll("-", ""), ticket: true } } }))
-    await claimed
-    claimer.send(JSON.stringify({ method: "auth.response", params: { proof: "wrong" } }))
-    await new Promise<void>((resolve) => claimer.once("close", () => resolve()))
-    const first = await pairWithTicket(ticket)
-    expect(first.code).toBe(pairingCode(home))
+  test("a code is exchanged once for a token of the browser's own, which never crosses the wire", async () => {
+    const code = mintPairingCode(home)
+    const first = await pairWithCode(port, code, "exchange-1")
     expect(first.open).toBe(true)
-    const again = await pairWithTicket(ticket)
-    expect(again.code).toBeUndefined()
+    expect(first.token).toBe(browserToken("exchange-1", home))
+    // Neither the code nor the token is in anything either side sent.
+    expect(first.wire).not.toContain(first.token!)
+    expect(first.wire).not.toContain(code)
+    // The token pairs from then on.
+    const extension = new FakeExtension(home)
+    expect(await extension.pair({ hello: { profileId: "exchange-1" } })).toBe(true)
+    extension.close()
+    // Used up: the same code again is refused.
+    const again = await pairWithCode(port, code, "exchange-2")
+    expect(again.token).toBeUndefined()
     expect(again.closeCode).toBe(4006)
-    const expired = await pairWithTicket(mintPairingTicket(home, Date.now() - 3 * 60_000))
+    expect(browserToken("exchange-2", home)).toBeUndefined()
+  })
+
+  test("two browsers pairing get different tokens", async () => {
+    const one = await pairWithCode(port, mintPairingCode(home), "browser-one")
+    const two = await pairWithCode(port, mintPairingCode(home), "browser-two")
+    expect(one.open && two.open).toBe(true)
+    expect(one.token).not.toBe(two.token)
+    expect(readBrowserPairings(home)["browser-one"]?.token).toBe(one.token!)
+    expect(readBrowserPairings(home)["browser-two"]?.token).toBe(two.token!)
+  })
+
+  test("an expired code is refused", async () => {
+    const expired = await pairWithCode(port, mintPairingCode(home, { now: Date.now() - 11 * 60_000 }), "late")
+    expect(expired.token).toBeUndefined()
     expect(expired.closeCode).toBe(4006)
   })
 
+  test("after five wrong codes even the right one is refused", async () => {
+    const code = mintPairingCode(home)
+    for (let attempt = 0; attempt < maxPairingFailures; attempt++) {
+      const guess = await pairWithCode(port, code === "00000000" ? "11111111" : "00000000", "guesser")
+      expect(guess.closeCode).toBe(4006)
+    }
+    const right = await pairWithCode(port, code, "guesser")
+    expect(right.token).toBeUndefined()
+    expect(right.closeCode).toBe(4006)
+  })
+
+  test("revoking a browser drops its connection, and its token no longer pairs", async () => {
+    const extension = new FakeExtension(home)
+    expect(await extension.pair({ hello: { profileId: "revoked" } })).toBe(true)
+    const old = browserToken("revoked", home)!
+    expect(revokeBrowserToken("revoked", home)).toBe(true)
+    const response = await fetch(`${base}/extension/revoke`, { method: "POST", body: JSON.stringify({ key: "revoked" }), headers: { authorization: `Bearer ${token}`, "content-type": "application/json" } })
+    expect(await response.json()).toEqual({ dropped: true })
+    expect(await until(() => extension.closeCode !== undefined)).toBe(true)
+    expect(extension.closeCode).toBe(4006)
+    // Its old token pairs no more.
+    const again = new FakeExtension(home)
+    expect(await again.pair({ hello: { profileId: "revoked" }, token: old, answerAnyway: true })).toBe(false)
+    await Bun.sleep(100)
+    expect(again.closeCode).toBe(4006)
+  })
+
+  test("the old shared code still pairs an extension too old for tokens, until it's retired", async () => {
+    const legacy = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+    fs.writeFileSync(legacyPairingCodePath(home), `${legacy}\n`, { mode: 0o600 })
+    const old = new FakeExtension(home)
+    expect(await old.pair({ legacy, hello: { profileId: "old" } })).toBe(true)
+    old.close()
+    fs.rmSync(legacyPairingCodePath(home))
+    const retired = new FakeExtension(home)
+    expect(await retired.pair({ legacy, hello: { profileId: "old" } })).toBe(false)
+    await Bun.sleep(100)
+    expect(retired.closeCode).toBe(4006)
+  })
+
   test("an extension with the wrong pairing code is refused", async () => {
-    const impostor = new FakeExtension(pairingCode(fs.mkdtempSync(path.join(home, "other-"))))
+    const impostor = new FakeExtension(fs.mkdtempSync(path.join(home, "other-")))
     expect(await impostor.pair({ answerAnyway: true })).toBe(false)
     // The extension would not have trusted this relay either: its proof is for a different code.
     expect(impostor.relayProved).toBe(false)
@@ -263,7 +357,7 @@ describe("relay", () => {
 
   test("a handshake passed through from another port is refused", async () => {
     // The extension dialled a listener on another port that forwards to this relay: its proofs name that port.
-    const forwarded = new FakeExtension(pairingCode(home))
+    const forwarded = new FakeExtension(home)
     expect(await forwarded.pair({ answerAnyway: true, proofPort: port + 1 })).toBe(false)
     expect(forwarded.relayProved).toBe(false)
     await Bun.sleep(100)
@@ -273,7 +367,7 @@ describe("relay", () => {
   test("a paired extension carries an authenticated CDP command", async () => {
     const tabId = 41
     const targetInfo = { targetId: "TARGET-41", type: "page", title: "Example", url: "https://example.com/", attached: true, browserContextId: "CTX" }
-    const extension = new FakeExtension(pairingCode(home))
+    const extension = new FakeExtension(home)
       .on("tabs.create", () => ({ tabId }))
       .on("Target.getTargetInfo", () => ({ targetInfo }))
       .on("Page.getFrameTree", () => ({ frameTree: { frame: { id: "TARGET-41", loaderId: "L", url: targetInfo.url, domainAndRegistry: "", securityOrigin: "https://example.com", mimeType: "text/html", secureContextType: "Secure", crossOriginIsolatedContextType: "NotIsolated", gatedAPIFeatures: [] } } }))
@@ -311,7 +405,7 @@ describe("relay", () => {
 
   test("a popup an agent's page opens becomes the opener session's page, with openerId", async () => {
     const targetInfo = (tabId: number) => ({ targetId: `TARGET-${tabId}`, type: "page", title: "Example", url: `https://example.com/${tabId}`, attached: true, browserContextId: "CTX" })
-    const extension = new FakeExtension(pairingCode(home))
+    const extension = new FakeExtension(home)
       .on("tabs.create", () => ({ tabId: 61 }))
       .on("Target.getTargetInfo", (command) => ({ targetInfo: targetInfo(Number(command.params?.tabId)) }))
     expect(await extension.pair()).toBe(true)
@@ -363,7 +457,7 @@ describe("relay", () => {
     const targetInfo = (tabId: number) => ({ targetId: `TARGET-${tabId}`, type: "page", title: "Example", url: `https://example.com/${tabId}`, attached: true, browserContextId: "CTX" })
     const order: string[] = []
     let refusals = 1
-    const extension = new FakeExtension(pairingCode(home))
+    const extension = new FakeExtension(home)
       .on("tabs.create", () => ({ tabId: 65 }))
       .on("Target.getTargetInfo", (command) => ({ targetInfo: targetInfo(Number(command.params?.tabId)) }))
       // The child detach answers late; Chrome still holds the popup once more after it.
@@ -396,7 +490,7 @@ describe("relay", () => {
 
   test("page.goto to a data: URL writes its content into about:blank", async () => {
     const targetInfo = { targetId: "TARGET-71", type: "page", title: "Example", url: "https://example.com/", attached: true, browserContextId: "CTX" }
-    const extension = new FakeExtension(pairingCode(home))
+    const extension = new FakeExtension(home)
     extension
       .on("tabs.create", () => ({ tabId: 71 }))
       .on("Target.getTargetInfo", () => ({ targetInfo }))
@@ -426,7 +520,7 @@ describe("relay", () => {
 
   test("a tab that can't be attached again is let go instead of failing the whole reconnect", async () => {
     const info = (tabId: number) => ({ targetId: `TARGET-${tabId}`, type: "page", title: "Example", url: `https://example.com/${tabId}`, attached: true, browserContextId: "CTX" })
-    const extension = new FakeExtension(pairingCode(home))
+    const extension = new FakeExtension(home)
       .on("Target.getTargetInfo", (command) => ({ targetInfo: info(Number(command.params?.tabId)) }))
       // Tab 92 is wedged: every command to it fails, as when a page hangs mid-navigation.
       .on("Page.enable", (command) => { if (command.params?.tabId === 92) throw new Error("Page.enable timed out"); return {} })
@@ -444,7 +538,7 @@ describe("relay", () => {
 
   test("a wedged tab is let go within seconds when the extension reconnects (one 5 s timeout, no retries)", async () => {
     const info = (tabId: number) => ({ targetId: `TARGET-${tabId}`, type: "page", title: "Example", url: `https://example.com/${tabId}`, attached: true, browserContextId: "CTX" })
-    const extension = new FakeExtension(pairingCode(home))
+    const extension = new FakeExtension(home)
       .on("Target.getTargetInfo", (command) => ({ targetInfo: info(Number(command.params?.tabId)) }))
       // Tab 94 never answers, as a tab whose page waits on a dialog nobody saw.
       .on("Page.enable", (command) => command.params?.tabId === 94 ? new Promise(() => {}) : {})
@@ -462,7 +556,7 @@ describe("relay", () => {
   test("an extension reconnect (a service worker restart) keeps every page a session opened its own and grouped", async () => {
     const info = (tabId: number) => ({ targetId: `TARGET-${tabId}`, type: "page", title: "Example", url: `https://example.com/${tabId}`, attached: true, browserContextId: "CTX" })
     let next = 101
-    const first = new FakeExtension(pairingCode(home))
+    const first = new FakeExtension(home)
       .on("tabs.create", () => ({ tabId: next++ }))
       .on("Target.getTargetInfo", (command) => ({ targetInfo: info(Number(command.params?.tabId)) }))
     expect(await first.pair()).toBe(true)
@@ -477,7 +571,7 @@ describe("relay", () => {
       .filter((target) => target.tabId === 101 || target.tabId === 102)
     for (let i = 0; i < 50 && (await owners()).length > 0; i++) await Bun.sleep(50)
 
-    const second = new FakeExtension(pairingCode(home))
+    const second = new FakeExtension(home)
       .on("Target.getTargetInfo", (command) => ({ targetInfo: info(Number(command.params?.tabId)) }))
     expect(await second.pair({ attachedTabs: [101, 102] })).toBe(true)
     for (let i = 0; i < 50 && (await owners()).length < 2; i++) await Bun.sleep(50)
@@ -496,7 +590,7 @@ describe("relay", () => {
     second.close()
     for (let i = 0; i < 50 && (await owners()).length > 0; i++) await Bun.sleep(50)
     expect((await post("/cli/session/delete", { id: "keeps-pages" })).ok).toBe(true)
-    const third = new FakeExtension(pairingCode(home))
+    const third = new FakeExtension(home)
       .on("Target.getTargetInfo", (command) => ({ targetInfo: info(Number(command.params?.tabId)) }))
     // 103: an agent's tab the relay never knew (its attach was cut short); 104: a tab the user lent.
     expect(await third.pair({ attachedTabs: [101, 102, 103, 104], agentTabs: [101, 102, 103] })).toBe(true)
@@ -509,7 +603,7 @@ describe("relay", () => {
 
   test("a tab the extension re-attached after Chrome dropped the debugger (a PDF opening) is set up again", async () => {
     const targetInfo = { targetId: "TARGET-75", type: "page", title: "Doc", url: "https://example.com/doc.pdf", attached: true, browserContextId: "CTX" }
-    const extension = new FakeExtension(pairingCode(home))
+    const extension = new FakeExtension(home)
       .on("tabs.create", () => ({ tabId: 75 }))
       .on("Target.getTargetInfo", () => ({ targetInfo }))
     expect(await extension.pair()).toBe(true)
@@ -532,7 +626,7 @@ describe("relay", () => {
 
   test("stopping or cancelling a recording when none runs is a clean 404, not a 500", async () => {
     const targetInfo = { targetId: "TARGET-77", type: "page", title: "Example", url: "https://example.com/", attached: true, browserContextId: "CTX" }
-    const extension = new FakeExtension(pairingCode(home))
+    const extension = new FakeExtension(home)
       .on("tabs.create", () => ({ tabId: 77 }))
       .on("Target.getTargetInfo", () => ({ targetInfo }))
     expect(await extension.pair()).toBe(true)
@@ -553,7 +647,7 @@ describe("relay", () => {
     // Like Chrome on a background tab: a capture waits until the next capture request reaches the tab.
     let release: (() => void) | undefined
     const captures: Record<string, unknown>[] = []
-    const extension = new FakeExtension(pairingCode(home))
+    const extension = new FakeExtension(home)
       .on("tabs.create", () => ({ tabId: 79 }))
       .on("Target.getTargetInfo", () => ({ targetInfo }))
       .on("Page.captureScreenshot", (command) => {
@@ -580,7 +674,7 @@ describe("relay", () => {
 
   test("a page restored from the back/forward cache is reported loaded, so goBack doesn't wait forever", async () => {
     const targetInfo = { targetId: "TARGET-81", type: "page", title: "Example", url: "https://example.com/b", attached: true, browserContextId: "CTX" }
-    const extension = new FakeExtension(pairingCode(home))
+    const extension = new FakeExtension(home)
       .on("tabs.create", () => ({ tabId: 81 }))
       .on("Target.getTargetInfo", () => ({ targetInfo }))
     expect(await extension.pair()).toBe(true)
@@ -656,7 +750,7 @@ describe("several browsers", () => {
   })
 
   // Both browsers number their new tab 7, as two Chromes easily do.
-  const browser = (targetId: string) => new FakeExtension(pairingCode(multiHome), multi!.port)
+  const browser = (targetId: string) => new FakeExtension(multiHome, multi!.port)
     .on("tabs.create", () => ({ tabId: 7 }))
     .on("Target.getTargetInfo", () => ({ targetInfo: { targetId, type: "page", title: targetId, url: "https://example.com/", attached: true, browserContextId: "CTX" } }))
     .on("Page.getFrameTree", () => ({ frameTree: { frame: { id: targetId, loaderId: "L", url: "https://example.com/", domainAndRegistry: "", securityOrigin: "https://example.com", mimeType: "text/html", secureContextType: "Secure", crossOriginIsolatedContextType: "NotIsolated", gatedAPIFeatures: [] } } }))
@@ -733,11 +827,11 @@ describe.skipIf(lanAddress === undefined)("a browser on another computer (hostna
   })
 
   test("the extension pairs over the network, and a wrong code is refused there too", async () => {
-    const extension = new FakeExtension(pairingCode(remoteHome), remote!.port, lanAddress)
+    const extension = new FakeExtension(remoteHome, remote!.port, lanAddress)
     expect(await extension.pair()).toBe(true)
     extension.socket.close()
     await Bun.sleep(100)
-    const impostor = new FakeExtension(pairingCode(fs.mkdtempSync(path.join(remoteHome, "other-"))), remote!.port, lanAddress)
+    const impostor = new FakeExtension(fs.mkdtempSync(path.join(remoteHome, "other-")), remote!.port, lanAddress)
     expect(await impostor.pair({ answerAnyway: true })).toBe(false)
     await Bun.sleep(100)
     expect(impostor.closeCode).toBe(4006)
@@ -792,7 +886,7 @@ describe("sessions of MCP servers that went away", () => {
 
 describe("settings from the extension", () => {
   test("cursor and human input follow the extension's settings at runtime; invalid values change nothing", async () => {
-    const scene = await settingsScene({ relayPort: port, relayToken: token, code: pairingCode(home), tabId: 81, settings: { cursor: "always", humanInput: "off" } })
+    const scene = await settingsScene({ relayPort: port, relayToken: token, code: home, tabId: 81, settings: { cursor: "always", humanInput: "off" } })
     expect(await until(() => scene.overrides().length === 1)).toBe(true)
     expect(scene.overrides()[0]).toEqual({})
     expect(await scene.mouse()).toEqual({ inputs: 1, cursor: true })
@@ -809,7 +903,7 @@ describe("settings from the extension", () => {
   }, 20_000)
 
   test("with the cursor always shown, a recording without cursor: true still leaves it out", async () => {
-    const scene = await settingsScene({ relayPort: port, relayToken: token, code: pairingCode(home), tabId: 84, settings: { cursor: "always", humanInput: "off" } })
+    const scene = await settingsScene({ relayPort: port, relayToken: token, code: home, tabId: 84, settings: { cursor: "always", humanInput: "off" } })
     expect(await until(() => scene.overrides().length === 1)).toBe(true)
     expect((await scene.mouse()).cursor).toBe(true)
     const post = (pathname: string, body: unknown) =>
@@ -825,11 +919,11 @@ describe("settings from the extension", () => {
   }, 20_000)
 
   test("an older extension that sends no settings gets the defaults (human input on, no cursor), not the last extension's", async () => {
-    const first = await settingsScene({ relayPort: port, relayToken: token, code: pairingCode(home), tabId: 82, settings: { cursor: "always", humanInput: "off" } })
+    const first = await settingsScene({ relayPort: port, relayToken: token, code: home, tabId: 82, settings: { cursor: "always", humanInput: "off" } })
     expect(await until(() => first.overrides().length === 1)).toBe(true)
     first.close()
     await Bun.sleep(200)
-    const older = await settingsScene({ relayPort: port, relayToken: token, code: pairingCode(home), tabId: 83 })
+    const older = await settingsScene({ relayPort: port, relayToken: token, code: home, tabId: 83 })
     const moved = await older.mouse()
     expect(moved.inputs).toBeGreaterThan(1)
     expect(moved.cursor).toBe(false)
@@ -842,7 +936,7 @@ describe("settings from the extension", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "browse-relay-env-"))
     const started = await startRelay(root, { OPENCODE_BROWSER_GHOST_CURSOR: "1", OPENCODE_BROWSER_HUMAN_INPUT: "0", OPENCODE_BROWSER_AGENT_WINDOW: "separate" })
     try {
-      const scene = await settingsScene({ relayPort: started.port, relayToken: started.token, code: pairingCode(root), tabId: 91, settings: { cursor: "off", humanInput: "on" } })
+      const scene = await settingsScene({ relayPort: started.port, relayToken: started.token, code: root, tabId: 91, settings: { cursor: "off", humanInput: "on" } })
       expect(await until(() => scene.overrides().length === 1)).toBe(true)
       expect(scene.overrides()[0]).toEqual({ agentWindow: "separate", cursor: "always", humanInput: "off" })
       expect(await scene.mouse()).toEqual({ inputs: 1, cursor: true })
@@ -878,7 +972,7 @@ async function settingsRequest(relayBase: string, relayToken: string, set?: Reco
 
 describe("the settings tool's relay API", () => {
   test("get and set round-trip through the extension, strictly validated", async () => {
-    const { extension, stored, sets } = settingsExtension(pairingCode(home))
+    const { extension, stored, sets } = settingsExtension(home)
     expect(await extension.pair()).toBe(true)
     const got = await settingsRequest(base, token)
     expect(got.status).toBe(200)
@@ -922,7 +1016,7 @@ describe("the settings tool's relay API", () => {
     const missing = await settingsRequest(base, token)
     expect(missing.status).toBeGreaterThanOrEqual(400)
     expect(String(missing.body.error)).toContain("extension isn't connected")
-    const older = new FakeExtension(pairingCode(home))
+    const older = new FakeExtension(home)
       .on("settings.get", () => { throw new Error("Invalid extension command") })
     expect(await older.pair()).toBe(true)
     const tooOld = await settingsRequest(base, token, { grouping: "shared" })
@@ -935,7 +1029,7 @@ describe("the settings tool's relay API", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "browse-relay-settings-env-"))
     const started = await startRelay(root, { OPENCODE_BROWSER_GHOST_CURSOR: "0", OPENCODE_BROWSER_AGENT_WINDOW: "separate" })
     try {
-      const { extension, sets } = settingsExtension(pairingCode(root), started.port)
+      const { extension, sets } = settingsExtension(root, started.port)
       expect(await extension.pair()).toBe(true)
       const relayBase = `http://127.0.0.1:${started.port}`
       const got = await settingsRequest(relayBase, started.token)

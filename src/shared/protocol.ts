@@ -13,13 +13,13 @@ export type AgentRelayStatus =
   | "conflict"
   /** The relay speaks another protocol version; updating both fixes it. */
   | "incompatible"
-  /** No pairing code yet: a Chrome Web Store build needs the one `opencode-browser pair` prints. */
+  /** Not paired with this relay yet: it needs a code from `opencode-browser pair`. */
   | "unpaired"
-  /** The relay on the port didn't pair: a different code, an older relay, or another program posing as one. */
+  /** The relay didn't pair: a wrong or used code, a revoked browser, an older relay, or a program posing as one. */
   | "untrusted"
 
-/** Where the pairing code comes from: written into an unpacked build by install, or typed on the status page. */
-export type PairingSource = "bundled" | "stored" | "none"
+/** What the next connection pairs with: this browser's token for the relay, a code to exchange for one, or nothing. */
+export type PairingSource = "token" | "code" | "none"
 
 export type AgentRelayState = {
   status: AgentRelayStatus
@@ -34,9 +34,11 @@ export type AgentRelayState = {
   autoUpdate?: RelayAutoUpdate
   /** With status "incompatible": which side is behind, when the relay said (its protocol range, or the 4003 reason). */
   skew?: ProtocolSkew
-  /** The relay refused install's one-time pairing link (expired or already used). */
-  ticketRejected?: boolean
-  /** Where the extension connects, `host:port`, and whether that's another computer (the status page's relay address). */
+  /** The relay refused the last pairing code (wrong, used, expired, or too many tries). */
+  codeRejected?: boolean
+  /** Install wrote a code into this unpacked build, so it pairs with this computer's relay by itself. */
+  unpacked?: boolean
+  /** Where the extension connects, `localhost:port` or `host:port`, and whether that's another computer. */
   relay: { address: string; remote: boolean }
   /** What the connected relay calls this browser; agents pass `id` to use it when several are connected. */
   browser?: { id: string; name: string }
@@ -60,7 +62,9 @@ export function relayAddress(input: unknown): RelayAddress | undefined {
   try {
     const url = new URL(`ws://${value}`)
     if (url.username || url.password || url.pathname !== "/" || url.search || url.hash || !url.hostname) return undefined
-    return url.port ? { host: url.hostname, port: Number(url.port) } : { host: url.hostname }
+    // This computer, however it's written.
+    const host = url.hostname === "localhost" || url.hostname === "[::1]" ? "127.0.0.1" : url.hostname
+    return url.port ? { host, port: Number(url.port) } : { host }
   } catch {
     return undefined
   }
@@ -129,15 +133,14 @@ export const STATUS_PORT = "opencode-browser.status"
 
 export type ToStatusPage =
   | { type: "agents"; state: AgentRelayState }
-  | { type: "pairing.result"; ok: boolean }
-  | { type: "pairing.ticket.result"; ok: boolean }
+  | { type: "pairing.link.result"; ok: boolean }
   /** The outcome of `relay.connect`: the status the new connection settled on, or why nothing was tried. */
   | { type: "relay.result"; status: AgentRelayStatus | "invalid-address" | "invalid-code"; address?: string }
 export type FromStatusPage =
-  /** Save the relay address (empty: this computer) and, when given, a pairing code; reconnect and report how it went. */
+  /** Save the relay address (empty or localhost: this computer) and, when given, a pairing code; reconnect and report how it went. */
   | { type: "relay.connect"; address: string; code: string }
   | { type: "agents.reconnect" }
   | { type: "tabs.cleanup" }
-  | { type: "pairing.set"; code: string }
-  | { type: "pairing.ticket"; ticket: string }
+  /** A one-time code from install's link (welcome.html#code=…). */
+  | { type: "pairing.link"; code: string }
   | { type: "autoUpdate.set"; mode: AutoUpdateMode }

@@ -1,6 +1,6 @@
 node_modules/
 dist/
 release/
-# Per-install pairing code written by `install` (see cli/src/relay-secrets.ts)
+# One-time pairing code written by `install` (see cli/src/browser-pairing.ts)
 relay-pairing.json
 cli/LICENSE

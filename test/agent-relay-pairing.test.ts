@@ -2,8 +2,8 @@ import { expect, test } from "bun:test"
 import type { AgentRelayState } from "../src/shared/protocol"
 import { installChrome, settle, type StubEvent } from "./chrome-stub"
 
-// The bundled pairing file (relay-pairing.json, written into an unpacked build by `install`) is looked for again
-// while the extension is unpaired, and re-read on Reconnect and when the stored code changes. No relay: WebSocket is
+// The bundled pairing file (relay-pairing.json, the one-time code `install` writes into an unpacked build) is looked
+// for again while the extension is unpaired, and re-read on Reconnect and when the entered code changes. No relay: WebSocket is
 // a fake that never opens unless told to. The fakes stay installed after this file: the relay it creates keeps its
 // timers for the rest of the run, and must never reach a real port.
 
@@ -31,8 +31,8 @@ class FakeWebSocket {
   }
 }
 
-const CODE = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-const OTHER = "ZYXWVTSRQPNMKJHGFEDCBA9876543210"
+const CODE = "0123ABCD"
+const OTHER = "ZYXW9876"
 let bundled: string | undefined
 const reads: string[] = []
 const realFetch = globalThis.fetch
@@ -67,7 +67,8 @@ test("a pairing file written later (bun run setup) is found on the next attempt,
   alarm()
   await until(() => FakeWebSocket.made.length === 1)
   expect(reads.length).toBe(before + 1)
-  expect(relay.state().pairing).toBe("bundled")
+  expect(relay.state().pairing).toBe("code")
+  expect(relay.state().unpacked).toBe(true)
   expect(FakeWebSocket.made[0]!.url).toBe("ws://127.0.0.1:19925/extension")
 })
 
@@ -91,14 +92,16 @@ test("a pairing change re-reads the file", async () => {
   bundled = undefined
   await stub.chrome.storage.local.set({ agentRelayPairingCode: CODE })
   await until(() => reads.length === before + 1)
-  // No file now; the stored code takes over.
-  await until(() => relay.state().pairing === "stored")
+  // No file now; the entered code takes over.
+  await until(() => relay.state().pairing === "code" && relay.state().unpacked !== true)
 })
 
 test("a relay address that isn't one is refused, and nothing is saved", async () => {
   const before = FakeWebSocket.made.length
   expect(await relay.connectTo("host/path", "")).toEqual({ status: "invalid-address" })
-  expect(await relay.connectTo("100.64.0.2", "not a code")).toEqual({ status: "invalid-code" })
+  expect(await relay.connectTo("100.64.0.2", "not a pairing code")).toEqual({ status: "invalid-code" })
+  // The long code earlier versions printed isn't one to type anymore.
+  expect(await relay.connectTo("100.64.0.2", "0123")).toEqual({ status: "invalid-code" })
   expect((await stub.chrome.storage.local.get("agentRelayAddress")).agentRelayAddress).toBeUndefined()
   expect(FakeWebSocket.made).toHaveLength(before)
 })
@@ -109,19 +112,25 @@ test("Connect dials the relay address, a typed code wins over the bundled one th
   const outcome = relay.connectTo("100.64.0.2", CODE)
   await until(() => FakeWebSocket.made.length > before && FakeWebSocket.made.at(-1)!.url === "ws://100.64.0.2:19925/extension")
   expect(relay.state().relay).toEqual({ address: "100.64.0.2:19925", remote: true })
-  expect(relay.state().pairing).toBe("stored")
+  expect(relay.state().pairing).toBe("code")
   // No relay answers there.
   FakeWebSocket.made.at(-1)!.close()
   expect(await outcome).toEqual({ status: "offline", address: "100.64.0.2:19925" })
   expect((await stub.chrome.storage.local.get("agentRelayAddress")).agentRelayAddress).toBe("100.64.0.2")
 })
 
-test("an empty address goes back to this computer's relay and its bundled code", async () => {
-  const before = FakeWebSocket.made.length
-  const outcome = relay.connectTo("", "")
-  await until(() => FakeWebSocket.made.length > before && FakeWebSocket.made.at(-1)!.url === "ws://127.0.0.1:19925/extension")
-  expect(relay.state().relay).toEqual({ address: "127.0.0.1:19925", remote: false })
-  await until(() => relay.state().pairing === "bundled")
-  FakeWebSocket.made.at(-1)!.close()
-  expect((await outcome).status).toBe("offline")
+test("localhost (as the page shows it) goes back to this computer's relay and its bundled code", async () => {
+  await stub.chrome.storage.local.remove("agentRelayPairingCode")
+  for (const address of ["localhost:19925", "", "127.0.0.1"]) {
+    await stub.chrome.storage.local.set({ agentRelayAddress: "100.64.0.2" })
+    await settle()
+    const before = FakeWebSocket.made.length
+    const outcome = relay.connectTo(address, "")
+    await until(() => FakeWebSocket.made.length > before && FakeWebSocket.made.at(-1)!.url === "ws://127.0.0.1:19925/extension")
+    expect(relay.state().relay).toEqual({ address: "localhost:19925", remote: false })
+    await until(() => relay.state().unpacked === true)
+    expect((await stub.chrome.storage.local.get("agentRelayAddress")).agentRelayAddress).toBe("")
+    FakeWebSocket.made.at(-1)!.close()
+    expect((await outcome).status).toBe("offline")
+  }
 })

@@ -24,7 +24,7 @@ npx @opencode/browse install
 opencode, and connects the extension:
 
 1. **Add the extension.** `install` opens Browse in the Chrome Web Store; add it to your browser. If it's
-   already there, `install` opens its status page with the pairing code, so it pairs without copying anything.
+   already there, `install` opens its status page with a one-time pairing code, so it pairs without copying anything.
 2. **Restart opencode.**
 
 That's it. Ask an agent to *"open news.ycombinator.com and tell me the top story"*. Or paste this into opencode:
@@ -38,9 +38,10 @@ over when no agent is using the browser, without changing opencode's config or r
 `OPENCODE_BROWSER_AUTO_UPDATE=off`). `npx @opencode/browse update` updates now, and `npx @opencode/browse rollback` goes
 back to the previous version. The Chrome Web Store updates the extension. Betas: `npx @opencode/browse@beta install`.
 
-There's nothing to sign in to. The extension only obeys a relay that proves it knows this computer's pairing code (see
-[Security](#security)). If pairing didn't happen by itself, run `npx @opencode/browse pair` and paste the code on the
-extension's status page (right-click the toolbar button, then **Options**).
+There's nothing to sign in to. Each browser pairs with the relay once and gets a key of its own (see
+[Security](#security)). If pairing didn't happen by itself, run `npx @opencode/browse pair` and enter the short code it
+prints under **Connection** on the extension's status page (right-click the toolbar button, then **Options**), then
+click **Connect**. `pair --list` shows the paired browsers, and `pair --revoke <browser>` unpairs one.
 
 ### From source
 
@@ -50,8 +51,9 @@ For contributors, or before a release you need is on npm:
 git clone https://github.com/anomalyco/browse.git && cd browse && bun run setup
 ```
 
-`setup` builds the extension and the CLI, adds the `browse` MCP server to opencode, and pairs the extension with the
-local relay. Two steps are left for you:
+`setup` builds the extension and the CLI, adds the `browse` MCP server to opencode, and puts a one-time pairing code
+in the extension's folder (good for an hour), which the extension exchanges for its own key when it first connects. Two
+steps are left for you:
 
 1. **Load the extension.** `setup` opens your browser's extensions page, shows the `browse/dist` folder and copies its
    path. Turn on **Developer mode**, click **Load unpacked** and choose that folder (on macOS, press Cmd+Shift+G in the
@@ -83,16 +85,19 @@ and the extension connects to it across the network:
 
 1. On the opencode machine, run `npx @opencode/browse install`, then `npx @opencode/browse set hostname 0.0.0.0`.
    The relay then listens on every network, restarting if it runs. Other computers reach only the extension link;
-   the HTTP API and CDP answer on `127.0.0.1` only. The command prints the address and pairing code for step 2.
+   the HTTP API and CDP answer on `127.0.0.1` only. The command prints the address and a pairing code for step 2
+   (`npx @opencode/browse pair` prints another; each works once, within 10 minutes).
 2. In the browser, open the extension's status page (right-click the toolbar button, then **Options**). Under
-   **Relay on another computer**, enter that machine's address (a Tailscale IP or name, with `:port` if it isn't
-   19988) and the code, then click **Connect**. The page says whether the relay answered and accepted the code.
+   **Connection**, replace `localhost:19988` in **Relay** with that machine's address (a Tailscale IP or name, with
+   `:port` if it isn't 19988), enter the code under **Pairing code**, then click **Connect**. The page says right there
+   whether the relay answered and accepted the code.
 
 `npx @opencode/browse set hostname 127.0.0.1` goes back to this computer only.
 
-Pairing works as it does locally: both sides prove they know the code on every connection, so anyone else on the
-network who reaches the port gets nothing. The connection itself isn't encrypted by Browse; use a network that is
-(Tailscale or WireGuard), not the open internet. Clear the address to go back to a relay on the browser's computer.
+Pairing works as it does locally: the browser exchanges the code for a key of its own, and from then on both sides
+prove they hold that key on every connection, so anyone else on the network who reaches the port gets nothing. The
+connection itself isn't encrypted by Browse; use a network that is (Tailscale or WireGuard), not the open internet. Set
+**Relay** back to `localhost` (or clear it) to go back to a relay on the browser's computer.
 
 ## Using it
 
@@ -189,9 +194,16 @@ may try to steer it, and that other programs on your computer may try to use the
   `~/.local/share/opencode-browser/relay-token` (readable only by you): an `Authorization: Bearer` header, or
   `?opencodeBrowserToken=` on the CDP WebSocket URL. The MCP server and CLI read it for you. The relay listens on
   `127.0.0.1` only and refuses cross-site browser requests and foreign `Host` headers.
-- **Pairing.** The extension and the relay prove to each other that they know the same pairing code (HMAC over fresh
-  nonces) before the extension obeys anything, so a program that grabs the port first can't drive your browser. The
-  relay accepts only the two published extension IDs (plus any listed in `OPENCODE_BROWSER_EXTENSION_ORIGINS`).
+- **Pairing.** `pair` prints a short code (`XXXX-XXXX`) that works once, within 10 minutes; five wrong codes in a row
+  void every pending one. A browser exchanges it for a random key of its own, kept by the relay
+  (`browser-tokens.json` in the data folder, readable only by you) and in the extension's storage. The exchange runs
+  over a fresh key agreement (ECDH), so neither the code nor the key crosses the connection, and each side proves it
+  knows the code before the other gives anything away. On every later connection both sides prove they hold the key
+  (HMAC over fresh nonces) before the extension obeys anything, so a program that grabs the port first can't drive
+  your browser. `pair --list` shows paired browsers and when each was last seen; `pair --revoke <browser>` deletes a
+  browser's key and disconnects it. The relay accepts only the two published extension IDs (plus any listed in
+  `OPENCODE_BROWSER_EXTENSION_ORIGINS`). Browsers paired by an earlier version with its shared code switch to a key of
+  their own the next time they connect; `pair --revoke legacy` retires that code once they all have.
 - **Sandboxed `execute`.** Agent code runs in a separate JavaScript realm that isolates it from Node: it isn't given
   `process`, `require`, `import()`, `fs` or network modules, only a `files` helper and Playwright file options limited
   to the temp directory, not Browse's data. The sandbox is a defense in depth, not a hard security boundary:

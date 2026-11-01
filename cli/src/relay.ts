@@ -46,7 +46,24 @@ import {
   validateWebSocketOrigin,
 } from "./relay-helpers.ts"
 import { isLocalPeer, relayHostname } from "./relay-config.ts"
-import { ensurePrivateDirectory, pairingCode, pairingProof, relayToken, relayTokenQueryParam, secretsEqual, consumePairingTicket, peekPairingTicket, wrapPairingCode } from "./relay-secrets.ts"
+import { ensurePrivateDirectory, relayToken, relayTokenQueryParam, secretsEqual } from "./relay-secrets.ts"
+import {
+  browserToken,
+  consumePairingCode,
+  ecdhExchange,
+  issueBrowserToken,
+  legacyPairingCode,
+  legacyPairingProof,
+  newBrowserToken,
+  pairingProof,
+  pairingSessionKey,
+  pendingPairingCodeKeys,
+  recordPairingFailure,
+  sessionProof,
+  touchBrowserPairing,
+  wrapToken,
+  type HandshakeTranscript,
+} from "./browser-pairing.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
 import { GhostCursorTabs, ghostCursorCommandMethod } from "./ghost-cursor.ts"
 import { guardCdpMethod, scopeCdpResult } from "./cdp-guardrails.ts"
@@ -779,6 +796,12 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     flightRecorder,
     sessions,
     reloadExtension: () => sendToEach({ method: "runtime.reload" }),
+    revokeBrowser: (key) => {
+      const links = browsers.list().filter((link) => link.key === key)
+      for (const link of links) link.socket.close(4006, "Pairing revoked: run `pair` and enter the code to pair again")
+      if (links.length) relayLog("extension.revoked", { browser: links.map((link) => link.id).join(", ") })
+      return links.length > 0
+    },
     cleanupTabs: (idleMinutes) =>
       sendToEach({ method: "tabs.cleanup", ...(idleMinutes === undefined ? {} : { params: { idleMinutes } }) }),
     settings: {
@@ -1167,10 +1190,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         }
         handleExtensionMessage(link, data.toString())
       }
-      // Pairing: the extension's hello carries a nonce; the relay answers with its own nonce and an HMAC proving it
-      // knows the pairing code; the extension answers with its proof. Only then does the relay treat the socket as the
-      // extension (and the extension obey it).
-      let challenge: { readonly hello: JsonObject; readonly extensionNonce: string; readonly relayNonce: string; readonly code: string; readonly ticketKey?: string } | undefined
+      // Pairing (browser-pairing.ts): the extension's hello carries a nonce; the relay answers with its own and, for a
+      // paired browser, an HMAC proving it holds the browser's token; the extension answers with its proof. A browser
+      // with a code exchanges it for a token first. Only then does the relay treat the socket as the extension (and the
+      // extension obey it).
+      let challenge: Challenge | undefined
       socket.on("message", (data, isBinary) => {
         try {
           if (waiting) {
@@ -1188,15 +1212,19 @@ const makeRelay = Effect.fnUntraced(function* (options: {
               challenge = challengeExtension(socket, message, headerValue(request.headers.origin))
               return
             }
-            const proof = message.method === "auth.response" ? getString(message.params, "proof") : undefined
-            if (!secretsEqual(pairingProof(challenge.code, "extension", port, challenge.extensionNonce, challenge.relayNonce), proof)) {
-              pairingFailures += 1
-              relayLog("extension.rejected", { reason: "pairing failed", profile: getString(getObject(challenge.hello.params), "profileName") })
-              socket.close(4006, "Pairing failed: the extension's pairing code does not match this relay")
+            if (challenge.code) {
+              exchangeCode(socket, challenge, message)
               return
             }
-            // The extension proved the code the ticket brought it: the ticket has done its one job.
-            if (challenge.ticketKey) consumePairingTicket(challenge.ticketKey)
+            const proof = message.method === "auth.response" ? getString(message.params, "proof") : undefined
+            if (challenge.expected === undefined || !secretsEqual(challenge.expected, proof)) {
+              pairingFailures += 1
+              relayLog("extension.rejected", { reason: "pairing failed", mode: challenge.mode, profile: getString(getObject(challenge.hello.params), "profileName") })
+              socket.close(4006, "Pairing failed: this browser isn't paired with this relay")
+              return
+            }
+            // An extension upgrading from the old shared code proved it unmasked its new token: keep it.
+            if (challenge.issue) issueBrowserToken(challenge.key, undefined, Date.now(), challenge.issue)
             handshaken = true
             const hello = challenge.hello
             waiting = []
@@ -1279,16 +1307,36 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     detachTargetState(target.tabId)
   })
 
-  /** Answers the extension's hello with the relay's pairing proof; undefined when the socket was closed instead. */
-  function challengeExtension(socket: WebSocket, message: JsonObject, origin: string | undefined): { readonly hello: JsonObject; readonly extensionNonce: string; readonly relayNonce: string; readonly code: string; readonly ticketKey?: string } | undefined {
+  /**
+   * A handshake in progress on an extension socket. `mode` is what the hello asked for: "token" (a paired browser),
+   * "code" (exchanging a code for a token), "legacy" (exchanging the old shared code for a token) or "old" (an extension
+   * too old for tokens, proving the old shared code). `expected` is the proof the extension's auth.response must carry.
+   */
+  type Challenge = {
+    readonly mode: "token" | "code" | "legacy" | "old"
+    readonly hello: JsonObject
+    readonly key: string
+    readonly extensionNonce: string
+    readonly relayNonce: string
+    expected?: string
+    /** A code exchange waiting for the extension's auth.code. */
+    code?: { readonly secret: Buffer; readonly transcript: HandshakeTranscript } | undefined
+    /** The token a legacy upgrade hands over, stored once the extension proves it unmasked it. */
+    readonly issue?: string
+  }
+
+  /** Answers the extension's hello (see Challenge); undefined when the socket was closed instead. */
+  function challengeExtension(socket: WebSocket, message: JsonObject, origin: string | undefined): Challenge | undefined {
     if (message.method !== "hello") {
       socket.close(4002, "Extension hello required")
       return undefined
     }
-    const extensionNonce = getString(getObject(getObject(message.params)?.pairing), "nonce")
+    const params = getObject(message.params)
+    const pairing = getObject(params?.pairing)
+    const extensionNonce = getString(pairing, "nonce")
     if (extensionNonce === undefined) {
       pairingFailures += 1
-      relayLog("extension.rejected", { reason: "no pairing (extension too old)", version: getString(getObject(message.params), "version") })
+      relayLog("extension.rejected", { reason: "no pairing (extension too old)", version: getString(params, "version") })
       // An unpacked extension older than pairing reloads once, picking up the files install just wrote. The command
       // carries nothing; the relay never trusts this socket.
       if (!legacyExtensionReloaded && origin === stableUnpackedExtensionOrigin) {
@@ -1302,38 +1350,84 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       socket.close(4002, "Invalid pairing nonce")
       return undefined
     }
-    // A store build paired by install's URL holds a one-time ticket instead of the code (relay-secrets.ts).
-    const ticket = getObject(getObject(message.params)?.pairing)?.ticket === true
-    let code: string
-    try {
-      code = pairingCode()
-    } catch (error) {
-      relayLog("extension.rejected", { reason: "pairing code unavailable", error: error instanceof Error ? error.message : String(error) })
-      socket.close(1011, "Relay pairing code unavailable")
+    const requested = getString(pairing, "mode")
+    const mode = requested === "token" || requested === "code" || requested === "legacy" ? requested : "old"
+    const key = getString(params, "profileId")
+    if (mode !== "old" && (key === undefined || !/^[\w-]{1,64}$/.test(key))) {
+      socket.close(4002, "Invalid profile id")
+      return undefined
+    }
+    const refuse = (reason: string, text: string) => {
+      pairingFailures += 1
+      relayLog("extension.rejected", { reason, mode, profile: getString(params, "profileName") })
+      socket.close(4006, text)
       return undefined
     }
     const relayNonce = crypto.randomBytes(32).toString("base64url")
-    const ticketKey = ticket ? peekPairingTicket() : undefined
-    if (ticket && !ticketKey) {
-      pairingFailures += 1
-      relayLog("extension.rejected", { reason: "pairing ticket expired or used" })
-      socket.close(4006, "Pairing ticket expired or already used: run `pair` and enter the code")
+    // The protocols this relay speaks, so the extension can tell the user which side to update (older ones ignore it).
+    const protocol = { version: extensionProtocolVersion, min: minExtensionProtocolVersion }
+    const base = { mode, hello: message, key: key ?? "", extensionNonce, relayNonce } as const
+    if (mode === "token") {
+      const token = browserToken(key!)
+      if (token === undefined) return refuse("not paired", "Not paired: run `pair` on the relay's computer and enter the code")
+      socket.send(JSON.stringify({ method: "auth.challenge", params: { nonce: relayNonce, proof: pairingProof(token, "relay", port, relayNonce, extensionNonce), protocol } }))
+      return { ...base, expected: pairingProof(token, "extension", port, extensionNonce, relayNonce) }
+    }
+    if (mode === "old") {
+      const code = legacyPairingCode()
+      if (code === undefined) return refuse("old extension, no shared code", "Pairing failed: update Browse, then pair it with the code `pair` prints")
+      socket.send(JSON.stringify({ method: "auth.challenge", params: { nonce: relayNonce, proof: legacyPairingProof(code, "relay", port, relayNonce, extensionNonce), protocol } }))
+      return { ...base, expected: legacyPairingProof(code, "extension", port, extensionNonce, relayNonce) }
+    }
+    const exchange = ecdhExchange(getString(pairing, "ecdh") ?? "")
+    if (!exchange) {
+      socket.close(4002, "Invalid pairing key")
       return undefined
     }
-    if (ticketKey) relayLog("extension.ticket", {})
+    const transcript: HandshakeTranscript = { port, extensionNonce, relayNonce, extensionKey: getString(pairing, "ecdh")!, relayKey: exchange.publicKey }
+    if (mode === "code") {
+      // Which pending code the extension has isn't said; its auth.code proof tells (exchangeCode).
+      socket.send(JSON.stringify({ method: "auth.challenge", params: { nonce: relayNonce, ecdh: exchange.publicKey, protocol } }))
+      return { ...base, code: { secret: exchange.secret, transcript } }
+    }
+    // The old shared code, exchanged once for a token of the browser's own.
+    const legacy = legacyPairingCode()
+    if (legacy === undefined) return refuse("shared code retired", "The old pairing code is no longer accepted: run `pair` and enter the new code")
+    const session = pairingSessionKey(legacy, exchange.secret, transcript)
+    const token = newBrowserToken()
+    relayLog("extension.pairing", { mode })
     socket.send(JSON.stringify({
       method: "auth.challenge",
-      // The protocols this relay speaks, so the extension can tell the user which side to update (older ones ignore it).
-      params: {
-        nonce: relayNonce,
-        // With a ticket, the relay proves it holds the ticket and hands over the code masked with it; the extension then
-        // proves the code as usual, so the rest of the handshake is the same.
-        proof: pairingProof(ticketKey ?? code, "relay", port, relayNonce, extensionNonce),
-        ...(ticketKey ? { wrapped: wrapPairingCode(ticketKey, code, port, extensionNonce, relayNonce) } : {}),
-        protocol: { version: extensionProtocolVersion, min: minExtensionProtocolVersion },
-      },
+      params: { nonce: relayNonce, ecdh: exchange.publicKey, proof: sessionProof(session, "relay"), wrapped: wrapToken(session, token), protocol },
     }))
-    return { hello: message, extensionNonce, relayNonce, code, ...(ticketKey ? { ticketKey } : {}) }
+    return { ...base, expected: pairingProof(token, "extension", port, extensionNonce, relayNonce), issue: token }
+  }
+
+  /**
+   * The extension's proof that it knows a pending code (auth.code). The code it proved is used up and the browser gets
+   * a token, stored at once and sent masked under the code exchange's key, with the relay's own proof of the code.
+   */
+  function exchangeCode(socket: WebSocket, challenge: Challenge, message: JsonObject): void {
+    const exchange = challenge.code!
+    challenge.code = undefined
+    const proof = message.method === "auth.code" ? getString(getObject(message.params), "proof") : undefined
+    const match = proof === undefined
+      ? undefined
+      : pendingPairingCodeKeys()
+          .map((codeKey) => ({ codeKey, session: pairingSessionKey(codeKey, exchange.secret, exchange.transcript) }))
+          .find(({ session }) => secretsEqual(sessionProof(session, "extension"), proof))
+    if (!match) {
+      pairingFailures += 1
+      const exhausted = recordPairingFailure()
+      relayLog("extension.rejected", { reason: "wrong pairing code", exhausted, profile: getString(getObject(challenge.hello.params), "profileName") })
+      socket.close(4006, exhausted ? "Too many wrong codes: run `pair` for a new one" : "Pairing failed: that code is wrong, used or expired")
+      return
+    }
+    consumePairingCode(match.codeKey)
+    const token = issueBrowserToken(challenge.key)
+    relayLog("extension.paired", { profile: getString(getObject(challenge.hello.params), "profileName") })
+    socket.send(JSON.stringify({ method: "auth.token", params: { proof: sessionProof(match.session, "relay"), wrapped: wrapToken(match.session, token) } }))
+    challenge.expected = pairingProof(token, "extension", port, challenge.extensionNonce, challenge.relayNonce)
   }
 
   /**
@@ -1367,6 +1461,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       browsers: browsers.list().length,
     })
     browsersChanged()
+    try {
+      touchBrowserPairing(key, { id: link.id, name: link.name })
+    } catch {}
     return link
   }
 

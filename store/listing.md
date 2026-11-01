@@ -19,7 +19,7 @@ Browse lets OpenCode, the open source AI coding agent running on your computer, 
 - Hand off when it's your turn: logins, 2FA, passkeys, and payments stay with you, then the agent continues.
 - Agents use Playwright, take screenshots, capture network traffic, and record the tab when you ask. Recordings show only the page.
 
-Requires OpenCode on your computer and Node.js 22.19 or newer. Run `npx @opencode/browse install` once: it adds the browse tools to OpenCode and pairs them with this extension (or run `npx @opencode/browse pair` and paste the code on the extension's status page). The extension only obeys the relay that knows that code.
+Requires OpenCode on your computer and Node.js 22.19 or newer. Run `npx @opencode/browse install` once: it adds the browse tools to OpenCode and pairs them with this extension (or run `npx @opencode/browse pair` and enter the one-time code on the extension's status page). The relay then gives this browser a key of its own, and the extension only obeys the relay that holds it.
 
 Everything stays between your browser and the OpenCode tools on your computer. The extension has no server of its own.
 

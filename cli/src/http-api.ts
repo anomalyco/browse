@@ -69,6 +69,8 @@ export function createHttpRequestHandler(options: {
   readonly cleanupTabs: (idleMinutes: number | undefined) => Effect.Effect<JsonObject, Error>
   /** Reloads the extension so an unpacked install picks up files `install` just replaced. */
   readonly reloadExtension: () => Effect.Effect<JsonObject, Error>
+  /** Drops the connection of the browser with this profile key, whose token `pair --revoke` just deleted. */
+  readonly revokeBrowser: (key: string) => boolean
   /** The user's settings (user-settings.ts), read and written through the extension. */
   readonly settings: {
     readonly get: () => Effect.Effect<object, Error>
@@ -141,6 +143,15 @@ export function createHttpRequestHandler(options: {
     if (pathname === "/extension/reload" && request.method === "POST") {
       run(Effect.gen(function* () {
         sendJson(response, yield* options.reloadExtension())
+      }))
+      return
+    }
+    if (pathname === "/extension/revoke" && request.method === "POST") {
+      run(Effect.gen(function* () {
+        const body = yield* readJsonBody(request)
+        const key = typeof body === "object" && body !== null && "key" in body && typeof body.key === "string" ? body.key : undefined
+        if (key === undefined) return sendJson(response, { error: "key is required", code: "invalid-request" }, 400)
+        sendJson(response, { dropped: options.revokeBrowser(key) })
       }))
       return
     }

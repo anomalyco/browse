@@ -9,7 +9,8 @@ import { installChrome, settle, type StubEvent } from "../chrome-stub"
 
 const stub = installChrome()
 ;(globalThis as { __OPENCODE_BROWSER_BUILD__?: string }).__OPENCODE_BROWSER_BUILD__ = "test"
-const CODE = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+/** This browser's token for the relay, as a code exchange left it. */
+const TOKEN = "test-token-0123456789abcdefghijklmnopqrstuv"
 const PORT = 19907
 type Message = { id?: number; method?: string; params?: Record<string, unknown>; result?: unknown; error?: unknown }
 
@@ -39,7 +40,7 @@ class FakeRelaySocket {
   }
   private async challenge(extensionNonce: string) {
     const nonce = randomNonce()
-    this.deliver({ method: "auth.challenge", params: { nonce, proof: await pairingProof(CODE, "relay", PORT, nonce, extensionNonce) } })
+    this.deliver({ method: "auth.challenge", params: { nonce, proof: await pairingProof(TOKEN, "relay", PORT, nonce, extensionNonce) } })
   }
   deliver(message: Message) {
     this.onmessage?.({ data: JSON.stringify(message) })
@@ -47,11 +48,11 @@ class FakeRelaySocket {
   close() {}
 }
 
-globalThis.fetch = (async (input: string | URL) =>
-  String(input).endsWith("/relay-pairing.json") ? Response.json({ code: CODE }) : new Response("not found", { status: 404 })) as typeof fetch
+globalThis.fetch = (async () =>
+  new Response("not found", { status: 404 })) as unknown as typeof fetch
 ;(globalThis as { WebSocket: unknown }).WebSocket = FakeRelaySocket
 
-await stub.chrome.storage.local.set({ agentRelayPort: PORT })
+await stub.chrome.storage.local.set({ agentRelayPort: PORT, agentRelayTokens: { [`127.0.0.1:${PORT}`]: TOKEN } })
 const { createAgentRelay } = await import("../../src/background/agent-relay")
 const { TabCleanup } = await import("../../src/background/tab-cleanup")
 const relay = createAgentRelay({ changed: () => {}, badgesChanged: () => {} })

@@ -29,40 +29,40 @@
         </div>
       </section>
 
-      <section>
-        <h2>Status</h2>
+      <section id="connection">
+        <h2>Connection</h2>
         <p class="status" id="status" data-state="offline">Checking…</p>
         <p class="note" id="pairing-note" hidden></p>
-        <div class="actions">
-          <button type="button" id="reconnect">Reconnect</button>
-          <button type="button" id="cleanup">Close agent tabs</button>
-          <button type="button" id="diagnostics">Copy diagnostics</button>
-        </div>
-      </section>
-
-      <section id="relay">
-        <h2>Relay on another computer</h2>
-        <p>
-          When opencode runs on another computer, run <code>npx @opencode/browse set hostname 0.0.0.0</code> there,
-          then enter that computer's address (its Tailscale IP or name) and the pairing code it prints. Leave the
-          address empty for this computer.
-        </p>
         <form class="relay-form" id="relay-form">
           <label>
-            Address
+            Relay
             <span class="command">
-              <input id="relay-address" autocomplete="off" spellcheck="false" placeholder="This computer (127.0.0.1)" aria-label="Relay address" />
+              <input id="relay-address" autocomplete="off" spellcheck="false" placeholder="localhost:19988" aria-label="Relay address" />
             </span>
           </label>
           <label>
             Pairing code
             <span class="command">
-              <input id="relay-code" autocomplete="off" spellcheck="false" placeholder="Empty keeps the current code" aria-label="Relay pairing code" />
-              <button type="submit">Connect</button>
+              <input id="relay-code" autocomplete="off" spellcheck="false" placeholder="XXXX-XXXX" aria-label="Pairing code" />
             </span>
           </label>
+          <p class="note" id="relay-help">
+            The relay is on this computer (<code>localhost</code>) unless opencode runs on another one: then run
+            <code>npx @opencode/browse set hostname 0.0.0.0</code> there and enter that computer's Tailscale IP or name.
+            A pairing code is only needed for a new relay, or after this browser was unpaired: run
+            <code>npx @opencode/browse pair</code> on the relay's computer (from a checkout: <code>node cli/dist/cli.mjs pair</code>)
+            and enter the code it prints. It works once, within 10 minutes.
+          </p>
+          <div class="actions">
+            <button type="submit">Connect</button>
+          </div>
         </form>
         <p class="note" id="relay-result" hidden></p>
+        <div class="actions">
+          <button type="button" id="reconnect">Reconnect</button>
+          <button type="button" id="cleanup">Close agent tabs</button>
+          <button type="button" id="diagnostics">Copy diagnostics</button>
+        </div>
       </section>
 
       <section>
@@ -144,19 +144,6 @@
           <code id="update-command"></code>
           <button type="button" id="copy-update">Copy</button>
         </div>
-      </section>
-
-      <section id="pairing" hidden>
-        <h2>Pair with the relay</h2>
-        <p>
-          The extension only obeys the relay on this computer once both know the same pairing code. <code>npx @opencode/browse install</code>
-          pairs it for you. Otherwise run <code>npx @opencode/browse pair</code> (from a checkout:
-          <code>node cli/dist/cli.mjs pair</code>) and paste the code it prints.
-        </p>
-        <form class="command" id="pairing-form">
-          <input id="pairing-code" autocomplete="off" spellcheck="false" placeholder="XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX" aria-label="Pairing code" />
-          <button type="submit">Pair</button>
-        </form>
       </section>
 
       <section>
