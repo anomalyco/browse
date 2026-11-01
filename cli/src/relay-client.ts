@@ -127,7 +127,7 @@ export interface Interface {
   readonly extensionStatus: Effect.Effect<ExtensionStatus, RelayClientError>
   readonly targets: Effect.Effect<readonly TargetSummary[], RelayClientError>
   readonly sessions: Effect.Effect<readonly SessionSummary[], RelayClientError>
-  readonly sessionNew: (id?: string | undefined, options?: { readonly readOnly?: boolean; readonly allowedOrigins?: readonly string[] }) => Effect.Effect<SessionSummary, RelayClientError>
+  readonly sessionNew: (id?: string | undefined, options?: { readonly readOnly?: boolean; readonly allowedOrigins?: readonly string[]; readonly browser?: string }) => Effect.Effect<SessionSummary, RelayClientError>
   /** Replace a session's allowed origins; an empty list removes the allowlist. */
   readonly sessionAllowlist: (id: string, allowedOrigins: readonly string[]) => Effect.Effect<SessionSummary, RelayClientError>
   readonly sessionEnsure: (id: string, options?: { readonly readOnly?: boolean }) => Effect.Effect<SessionSummary, RelayClientError>
@@ -297,6 +297,7 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
         ...(id ? { id } : {}),
         ...(options?.readOnly ? { readOnly: true } : {}),
         ...(options?.allowedOrigins && options.allowedOrigins.length > 0 ? { allowedOrigins: [...options.allowedOrigins] } : {}),
+        ...(options?.browser ? { browser: options.browser } : {}),
       }, SessionContainer).pipe(Effect.map((container) => container.session)),
     sessionAllowlist: (id, allowedOrigins) =>
       postJson("/cli/session/allowlist", { id, allowedOrigins: [...allowedOrigins] }, SessionContainer).pipe(Effect.map((container) => container.session)),

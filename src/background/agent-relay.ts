@@ -24,8 +24,11 @@ import type {
 import {
   AGENT_CURSOR_KEY,
   agentCursor,
+  BROWSER_NAME_KEY,
   HUMAN_INPUT_KEY,
   humanInput,
+  RELAY_ADDRESS_KEY,
+  relayAddress,
   type AgentRelayState,
   type AgentRelayStatus,
   type AgentRelayUpdate,
@@ -42,7 +45,18 @@ import { AgentGroups } from "./agent-groups"
 import { AgentWindow } from "./agent-window"
 import { DebuggerHub } from "./debugger-hub"
 import { HandoffNotice } from "./handoff-notice"
-import { normalizePairingCode, pairingProof, pairingTicketKey, randomNonce, sameSecret, unwrapPairingCode } from "./pairing"
+import {
+  ecdhKeyPair,
+  normalizePairingCode,
+  pairingCodeMaterial,
+  pairingProof,
+  pairingSessionKey,
+  randomNonce,
+  sameSecret,
+  sessionProof,
+  unwrapToken,
+  type PairingCode,
+} from "./pairing"
 import { PageScripts } from "./page-scripts"
 import { TabCleanup } from "./tab-cleanup"
 import { UserSettings } from "./user-settings"
@@ -56,9 +70,17 @@ const PORT_KEY = "agentRelayPort"
 const PROFILE_KEY = "agentRelayProfile"
 /** chrome.storage.local: each agent session's tab group, so a worker restart keeps a session's tabs in one group. */
 const SESSION_GROUPS_KEY = "agentSessionGroups"
-/** chrome.storage.local: the pairing code typed on the status page (Chrome Web Store builds). */
+/**
+ * chrome.storage.local: a pairing code to exchange for a token on the next connection, typed on the status page or
+ * brought by install's link (welcome.html#code=…). Earlier versions kept their long shared code here; it's exchanged
+ * the same way, once.
+ */
 export const PAIRING_KEY = "agentRelayPairingCode"
-/** Written next to the manifest by `install` for unpacked builds (cli/src/relay-secrets.ts). */
+/** chrome.storage.local: this browser's token for each relay it paired with, by `host:port` (cli/src/browser-pairing.ts). */
+export const TOKENS_KEY = "agentRelayTokens"
+/** chrome.storage.local: codes already tried, so a used or refused one (install's, in the folder) isn't tried again. */
+const SPENT_KEY = "agentRelaySpentCodes"
+/** Written next to the manifest by `install` for unpacked builds: a one-time code (cli/src/browser-pairing.ts). */
 const PAIRING_FILE = "relay-pairing.json"
 const ALARM = "opencode-browser-relay"
 // Relay tab groups end with this marker, which Chrome renders without width: they read like the session
@@ -94,12 +116,26 @@ const CLOSE_CODES: Record<number, string> = {
   4006: "pairing failed",
 }
 
+/** The browser's own name for the relay to name it by: Chrome, Edge, Brave, Opera or Chromium. */
+function browserBrand(): string {
+  const brands = (navigator as Navigator & { userAgentData?: { brands?: { brand: string }[] } }).userAgentData?.brands?.map((entry) => entry.brand) ?? []
+  const known: [string, string][] = [["Microsoft Edge", "Edge"], ["Brave", "Brave"], ["Opera", "Opera"], ["Google Chrome", "Chrome"], ["Chromium", "Chromium"]]
+  return known.find(([brand]) => brands.includes(brand))?.[1] ?? "Chrome"
+}
+
+/** The name set on the status page, if any. */
+async function browserName(): Promise<string | undefined> {
+  const value = (await chrome.storage.local.get(BROWSER_NAME_KEY))[BROWSER_NAME_KEY]
+  return typeof value === "string" && value.trim() ? value.trim().slice(0, 60) : undefined
+}
+
 export function createAgentRelay(input: { changed: (state: AgentRelayState) => void; badgesChanged: () => void }) {
   const log = createAgentRelayLog()
   let socket: WebSocket | undefined
   let starting: Promise<void> | undefined
   let generation = 0
   let status: AgentRelayStatus = "offline"
+  let host = "127.0.0.1"
   let port = defaultRelayPort
   let attempts = 0
   let retry: ReturnType<typeof setTimeout> | undefined
@@ -138,26 +174,31 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   const badges = new Map<number, AgentBadge>()
   /** Tabs the user let agents use while the relay was not connected; announced once it is. */
   const pendingAttach = new Set<number>()
-  /** Sockets whose relay proved it knows the pairing code; nothing else is obeyed. */
+  /** Sockets whose relay proved it holds this browser's token; nothing else is obeyed. */
   const trusted = new WeakSet<WebSocket>()
-  /** The handshake in flight on a socket: this extension's nonce and the code it proves with. */
-  const handshakes = new WeakMap<WebSocket, { nonce: string; code: string; port: number; ticket?: boolean }>()
-  /** A one-time pairing ticket from install's URL (welcome.html#ticket=…), used on the next connection only. */
-  let ticket: string | undefined
-  /** The code a ticket just brought in: storing it must not restart the connection it arrived on. */
-  let adopting: string | undefined
-  /** The socket that carried a ticket, and whether the relay refused it (expired or already used). */
-  let ticketSocket: { socket: WebSocket; ticket: string } | undefined
-  let ticketRejected = false
+  /** What each socket pairs with, for its close to say what was refused. */
+  const credentials = new WeakMap<WebSocket, Credential>()
+  /** The handshake in flight on a socket: this extension's nonce, and the code exchange's state once it started. */
+  const handshakes = new WeakMap<WebSocket, Handshake>()
+  /** The relay (`host:port`) that refused this browser's token since the worker started: a code goes first there. */
+  let tokenRefused: string | undefined
+  /** The relay refused the last code (wrong, used, expired, or too many tries). */
+  let codeRejected = false
+  /** This worker is removing a used code from storage: that change mustn't restart the connection. */
+  let clearingCode = false
   let pairing: PairingSource = "none"
+  /** A code install wrote into this unpacked build was found. */
+  let unpacked = false
   let update: AgentRelayUpdate | undefined
   /** Settings the connected relay's environment fixes, as it reported them (`relay.settings`). */
   let overrides: RelayOverrides | undefined
+  /** What the connected relay calls this browser (`relay.settings`): agents name it by `id`. */
+  let browser: { id: string; name: string } | undefined
   /** The connected relay's update state (`relay.settings`). */
   let autoUpdate: RelayAutoUpdate | undefined
   /** Which side to update when the relay's protocol doesn't match this extension's. */
   let skew: ProtocolSkew | undefined
-  let bundledPairing: Promise<string | undefined> | undefined
+  let bundledPairing: Promise<PairingCode | undefined> | undefined
 
   const snapshot = (): AgentRelayState => ({
     status,
@@ -170,7 +211,10 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     ...(overrides ? { overrides } : {}),
     ...(autoUpdate ? { autoUpdate } : {}),
     ...(skew && status === "incompatible" ? { skew } : {}),
-    ...(ticketRejected ? { ticketRejected: true } : {}),
+    ...(codeRejected ? { codeRejected: true } : {}),
+    ...(unpacked ? { unpacked: true } : {}),
+    ...(browser && status === "connected" ? { browser } : {}),
+    relay: { address: `${host === "127.0.0.1" ? "localhost" : host}:${port}`, remote: host !== "127.0.0.1" },
   })
   const notify = () => input.changed(snapshot())
   const setStatus = (next: AgentRelayStatus) => {
@@ -178,6 +222,18 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     log.add("status", { from: status, to: next })
     status = next
     notify()
+  }
+  /**
+   * Waiters for how the next connection attempt ends (`connectTo` on the status page), each with the generation it
+   * waits past, so the close of the connection it replaced doesn't answer for the new one.
+   */
+  const outcomes = new Set<{ after: number; resolve: (status: AgentRelayStatus) => void }>()
+  const settle = (attempt: number) => {
+    for (const waiter of outcomes)
+      if (attempt > waiter.after) {
+        outcomes.delete(waiter)
+        waiter.resolve(status)
+      }
   }
 
   /** The connection, once its relay has paired; events and data never go to an unpaired one. */
@@ -225,25 +281,55 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     if (known) notify()
   }
 
-  /**
-   * The pairing code: the one `install` wrote into this unpacked build, else the one typed on the status page. A store
-   * build has no file. A missing file is looked for again on every connection attempt (install may write it while the
-   * worker runs), and a found one again on Reconnect or a pairing change (install may have written a new code).
-   */
-  const pairingCode = async () => {
+  /** The one-time code install wrote into this unpacked build, if any. Looked for again until found (install may write it while the worker runs), and again on Reconnect or a pairing change. */
+  const bundledCode = async () => {
     const reading = (bundledPairing ??= fetch(chrome.runtime.getURL(PAIRING_FILE))
       .then((response) => (response.ok ? (response.json() as Promise<unknown>) : undefined))
       .then((value) => normalizePairingCode(isJsonObject(value) ? value.code : undefined))
       .catch(() => undefined))
     const bundled = await reading
     if (bundled === undefined && bundledPairing === reading) bundledPairing = undefined
-    const stored = bundled === undefined ? normalizePairingCode((await chrome.storage.local.get(PAIRING_KEY))[PAIRING_KEY]) : undefined
-    const source: PairingSource = bundled !== undefined ? "bundled" : stored !== undefined ? "stored" : "none"
-    if (source !== pairing) {
+    return bundled
+  }
+
+  /**
+   * What the next connection pairs with: a code the user entered (or install's link brought), else this browser's
+   * token for the relay, else the code install wrote into this unpacked build (only for this computer's relay, and
+   * only once), else the token again even though the relay refused it (it may have been a relay that isn't ours).
+   */
+  const credential = async (): Promise<Credential | undefined> => {
+    const address = `${host}:${port}`
+    const stored = await chrome.storage.local.get([PAIRING_KEY, TOKENS_KEY, SPENT_KEY])
+    const spent = new Set(Array.isArray(stored[SPENT_KEY]) ? (stored[SPENT_KEY] as unknown[]) : [])
+    const tokens = isJsonObject(stored[TOKENS_KEY]) ? stored[TOKENS_KEY] : {}
+    const token = typeof tokens[address] === "string" ? tokens[address] : undefined
+    const entered = normalizePairingCode(stored[PAIRING_KEY])
+    const bundled = host === "127.0.0.1" ? await bundledCode() : undefined
+    const usable = (code: PairingCode | undefined) => code !== undefined && !spent.has(code.code) && !(code.legacy && token !== undefined)
+    const next: Credential | undefined =
+      usable(entered) ? { kind: "code", code: entered!, source: "entered" }
+      : token !== undefined && tokenRefused !== address ? { kind: "token", token }
+      : usable(bundled) ? { kind: "code", code: bundled!, source: "bundled" }
+      : token !== undefined ? { kind: "token", token }
+      : undefined
+    const source: PairingSource = next?.kind ?? "none"
+    if (source !== pairing || unpacked !== (bundled !== undefined)) {
       pairing = source
+      unpacked = bundled !== undefined
       notify()
     }
-    return bundled ?? stored
+    return next
+  }
+
+  /** A code that was tried is never tried again; one entered is removed (without restarting the connection). */
+  const spendCode = async (code: string) => {
+    const stored = await chrome.storage.local.get([PAIRING_KEY, SPENT_KEY])
+    const spent = Array.isArray(stored[SPENT_KEY]) ? (stored[SPENT_KEY] as unknown[]).filter((value) => typeof value === "string") : []
+    await chrome.storage.local.set({ [SPENT_KEY]: [...spent.filter((value) => value !== code), code].slice(-20) })
+    if (normalizePairingCode(stored[PAIRING_KEY])?.code === code) {
+      clearingCode = true
+      await chrome.storage.local.remove(PAIRING_KEY)
+    }
   }
 
   const connect = (reason: string) => {
@@ -257,20 +343,27 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     if (socket && socket.readyState <= WebSocket.OPEN) return
     clearTimeout(retry)
     retry = undefined
-    port = Number((await chrome.storage.local.get(PORT_KEY))[PORT_KEY]) || defaultRelayPort
+    const stored = await chrome.storage.local.get([PORT_KEY, RELAY_ADDRESS_KEY])
+    // A relay on another computer (the status page's relay address), else this one; an unusable value reads as unset.
+    const address = relayAddress(stored[RELAY_ADDRESS_KEY]) ?? { host: "127.0.0.1" }
+    const previous = `${host}:${port}`
+    host = address.host
+    port = address.port ?? (Number(stored[PORT_KEY]) || defaultRelayPort)
+    if (`${host}:${port}` !== previous) notify()
     if (socket && socket.readyState <= WebSocket.OPEN) return
-    // Without a pairing code there is no relay to trust; wait for one (install, or the status page).
-    if ((await pairingCode()) === undefined && ticket === undefined) {
+    // Without a token or a code there is no relay to trust; wait for one (install, or the status page).
+    if ((await credential()) === undefined) {
       if (status !== "unpaired") log.add("pairing.missing")
       setStatus("unpaired")
+      settle(Infinity)
       return
     }
     if (socket && socket.readyState <= WebSocket.OPEN) return
-    const url = `ws://127.0.0.1:${port}/extension`
+    const url = `ws://${host}:${port}/extension`
     const mine = ++generation
     // While no relay runs, attempts repeat until one starts; log the first ones of a streak, not every poll.
     const quiet = status === "offline" && attempts > 1
-    if (!quiet) log.add("connect", { port, attempt: attempts, reason, generation: mine })
+    if (!quiet) log.add("connect", { host, port, attempt: attempts, reason, generation: mine })
     const current = new WebSocket(url)
     socket = current
     let openedAt: number | undefined
@@ -318,11 +411,15 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       void chrome.runtime.sendMessage({ action: "recording.cancelAll" }).catch(() => undefined)
       overrides = undefined
       autoUpdate = undefined
-      if (ticketSocket?.socket === current) {
-        // Only the relay's refusal (4006) means the link is spent; a relay that wasn't there yet gets it on the next try.
-        ticketRejected = !trusted.has(current) && event.code === 4006
-        if (!trusted.has(current) && event.code !== 4006) ticket ??= ticketSocket.ticket
-        ticketSocket = undefined
+      browser = undefined
+      // Only a refusal (4006) during pairing counts; a relay that wasn't there yet gets the same try next time.
+      const used = credentials.get(current)
+      if (used && !trusted.has(current) && event.code === 4006) {
+        if (used.kind === "token") tokenRefused = `${host}:${port}`
+        else {
+          codeRejected = true
+          void spendCode(used.code.code).catch(() => undefined)
+        }
       }
       if (event.code === 4003) {
         // A newer relay names the side that's behind: "Extension protocol incompatible: extension-newer".
@@ -333,6 +430,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       else if (event.code === 4006) setStatus("untrusted")
       // A missing relay is normal until an agent's browse tools (or the opencode-browser CLI) start one.
       else setStatus(openedAt === undefined ? "offline" : "connecting")
+      settle(mine)
       schedule(quiet && openedAt === undefined)
     }
   }
@@ -351,23 +449,22 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   }
 
   /**
-   * Opens the pairing handshake: the hello carries a fresh nonce, and nothing the relay sends is obeyed until it
-   * answers with a proof over that nonce (`verify`).
+   * Opens the pairing handshake: the hello carries a fresh nonce (and, to exchange a code, an ECDH public key), and
+   * nothing the relay sends is obeyed until it proved it holds this browser's token or knows the code (`verify`).
    */
   const hello = async (current: WebSocket) => {
     const stored = (await chrome.storage.local.get(PROFILE_KEY))[PROFILE_KEY] as { id: string; name?: string } | undefined
     const profile = stored ?? { id: crypto.randomUUID() }
     if (!stored) await chrome.storage.local.set({ [PROFILE_KEY]: profile })
-    // A ticket goes first (and only once): it's how a store build without the right code gets it.
-    const usingTicket = ticket
-    ticket = undefined
-    const code = usingTicket !== undefined ? await pairingTicketKey(usingTicket) : await pairingCode()
+    const using = await credential()
+    const name = await browserName()
+    const ecdh = using?.kind === "code" ? await ecdhKeyPair() : undefined
     if (socket !== current || current.readyState !== WebSocket.OPEN) return
-    if (code === undefined) return current.close(4006, "Not paired")
+    if (using === undefined) return current.close(1000, "Not paired")
     const nonce = randomNonce()
     // The proofs are bound to the port this socket dialled (see pairing.ts).
-    handshakes.set(current, { nonce, code, port: Number(new URL(current.url).port), ...(usingTicket !== undefined ? { ticket: true } : {}) })
-    if (usingTicket !== undefined) ticketSocket = { socket: current, ticket: usingTicket }
+    handshakes.set(current, { nonce, port: Number(new URL(current.url).port), credential: using, ...(ecdh ? { ecdh } : {}) })
+    credentials.set(current, using)
     // An older relay waits for commands it never gets; one that doesn't pair in time isn't ours.
     setTimeout(() => {
       if (socket === current && current.readyState === WebSocket.OPEN && !trusted.has(current)) {
@@ -375,6 +472,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         current.close(4006, "Relay did not pair")
       }
     }, CONNECT_TIMEOUT)
+    const mode = using.kind === "token" ? "token" : using.code.legacy ? "legacy" : "code"
+    if (using.kind === "code") log.add("pairing.code", { source: using.source, legacy: using.code.legacy })
     current.send(
       JSON.stringify({
         method: "hello",
@@ -384,16 +483,34 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
           protocolVersion: extensionProtocolVersion,
           profileId: profile.id,
           profileName: profile.name ?? "Browse",
-          pairing: { nonce, ...(usingTicket !== undefined ? { ticket: true } : {}) },
+          // What agents call this browser: the name set on the status page, else the relay names it from these
+          // and the computer ("Chrome on MacBook").
+          browser: browserBrand(),
+          ...(name ? { name } : {}),
+          pairing: { nonce, mode, ...(ecdh ? { ecdh: ecdh.publicKey } : {}) },
         },
       }),
     )
   }
 
-  /** Checks the relay's proof, answers with this extension's, and only then starts working for it. */
+  /** Keeps the token a code was exchanged for, and spends the code. */
+  const adoptToken = async (token: string, code: PairingCode) => {
+    const stored = await chrome.storage.local.get(TOKENS_KEY)
+    const tokens = isJsonObject(stored[TOKENS_KEY]) ? stored[TOKENS_KEY] : {}
+    await chrome.storage.local.set({ [TOKENS_KEY]: { ...tokens, [`${host}:${port}`]: token } })
+    await spendCode(code.code)
+    tokenRefused = undefined
+    codeRejected = false
+    log.add("pairing.token", { legacy: code.legacy })
+  }
+
+  /**
+   * Checks the relay's proof, answers with this extension's, and only then starts working for it. With a token that's
+   * one round; a code takes two (auth.code, then auth.token brings the token masked); the old shared code one, with
+   * the token in the challenge (cli/src/browser-pairing.ts).
+   */
   const verify = async (current: WebSocket, data: string) => {
     const pending = handshakes.get(current)
-    handshakes.delete(current)
     const message = (() => {
       try {
         const parsed: unknown = JSON.parse(data)
@@ -403,42 +520,50 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       }
     })()
     const params = isJsonObject(message?.params) ? message.params : undefined
-    const relayNonce = typeof params?.nonce === "string" ? params.nonce : undefined
-    const ok =
-      pending !== undefined &&
-      message?.method === "auth.challenge" &&
-      relayNonce !== undefined &&
-      /^[A-Za-z0-9_-]{22,128}$/.test(relayNonce) &&
-      sameSecret(await pairingProof(pending.code, "relay", pending.port, relayNonce, pending.nonce), params?.proof)
-    if (socket !== current || current.readyState !== WebSocket.OPEN) return
-    if (!ok || !pending || !relayNonce) {
+    const refuse = (reason: string) => {
+      handshakes.delete(current)
       // An older relay, or a program posing as one on this port: it gets nothing.
-      log.add("pairing.rejected", { reason: message?.method === "auth.challenge" ? "wrong proof" : `unexpected ${String(message?.method ?? message?.id ?? "message")}` })
-      current.close(4006, "Relay failed pairing")
-      return
+      log.add("pairing.rejected", { reason })
+      if (socket === current && current.readyState === WebSocket.OPEN) current.close(4006, "Relay failed pairing")
     }
-    // With a ticket, the relay proved it holds it and sent the real code masked with it: keep that code and prove it.
-    let proven = pending.code
-    if (pending.ticket) {
-      const code = await unwrapPairingCode(pending.code, params?.wrapped, pending.port, pending.nonce, relayNonce)
-      if (socket !== current || current.readyState !== WebSocket.OPEN) return
-      if (code === undefined) {
-        log.add("pairing.rejected", { reason: "ticket without a code" })
-        current.close(4006, "Relay failed pairing")
-        return
+    if (!pending) return refuse(`unexpected ${String(message?.method ?? message?.id ?? "message")}`)
+    const using = pending.credential
+    let token: string | undefined
+    let relayNonce: string
+    if (pending.session) {
+      // A code exchange's second round: the relay proves the code and sends the token.
+      if (message?.method !== "auth.token" || !sameSecret(await sessionProof(pending.session.key, "relay"), params?.proof)) return refuse("wrong code proof")
+      token = await unwrapToken(pending.session.key, params?.wrapped)
+      relayNonce = pending.session.relayNonce
+    } else {
+      const nonce = typeof params?.nonce === "string" && /^[A-Za-z0-9_-]{22,128}$/.test(params.nonce) ? params.nonce : undefined
+      if (message?.method !== "auth.challenge" || nonce === undefined) return refuse(`unexpected ${String(message?.method ?? message?.id ?? "message")}`)
+      relayNonce = nonce
+      if (using.kind === "token") {
+        if (!sameSecret(await pairingProof(using.token, "relay", pending.port, relayNonce, pending.nonce), params?.proof)) return refuse("wrong proof")
+        token = using.token
+      } else {
+        const secret = await pending.ecdh?.secret(params?.ecdh)
+        if (!secret || !pending.ecdh) return refuse("no key exchange")
+        const transcript = { port: pending.port, extensionNonce: pending.nonce, relayNonce, extensionKey: pending.ecdh.publicKey, relayKey: String(params?.ecdh) }
+        const key = await pairingSessionKey(await pairingCodeMaterial(using.code), secret, transcript)
+        if (!using.code.legacy) {
+          // Prove the code; the relay finds which of its pending codes it is and answers with auth.token.
+          if (socket !== current || current.readyState !== WebSocket.OPEN) return
+          pending.session = { key, relayNonce }
+          current.send(JSON.stringify({ method: "auth.code", params: { proof: await sessionProof(key, "extension") } }))
+          return
+        }
+        if (!sameSecret(await sessionProof(key, "relay"), params?.proof)) return refuse("wrong proof")
+        token = await unwrapToken(key, params?.wrapped)
       }
-      ticketSocket = undefined
-      ticketRejected = false
-      // Storing a different code fires storage.onChanged, which must not restart this connection; the same code fires nothing.
-      const previous = normalizePairingCode((await chrome.storage.local.get(PAIRING_KEY))[PAIRING_KEY])
-      if (previous !== code) {
-        adopting = code
-        await chrome.storage.local.set({ [PAIRING_KEY]: code })
-      }
-      log.add("pairing.ticket")
-      proven = code
     }
-    current.send(JSON.stringify({ method: "auth.response", params: { proof: await pairingProof(proven, "extension", pending.port, pending.nonce, relayNonce) } }))
+    handshakes.delete(current)
+    if (socket !== current || current.readyState !== WebSocket.OPEN) return
+    if (token === undefined) return refuse("no token")
+    if (using.kind === "code") await adoptToken(token, using.code)
+    if (socket !== current || current.readyState !== WebSocket.OPEN) return
+    current.send(JSON.stringify({ method: "auth.response", params: { proof: await pairingProof(token, "extension", pending.port, pending.nonce, relayNonce) } }))
     // The protocols the relay speaks (newer relays say): outside them, the relay keeps this connection but sends no
     // work, so show which side to update instead of "connected".
     const range = isJsonObject(params?.protocol) ? params.protocol : undefined
@@ -449,7 +574,9 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
           ? "update-extension"
           : undefined
     trusted.add(current)
-    log.add("pairing.ok", { source: pairing })
+    tokenRefused = undefined
+    codeRejected = false
+    log.add("pairing.ok", { source: using.kind })
     // Tabs an agent opened say so: one the relay no longer knows after a reconnect is closed, not handed to the user.
     for (const tabId of Array.from(relayTabs)) {
       const agent = await TabCleanup.isTracked(tabId)
@@ -466,6 +593,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     }, KEEPALIVE)
     connectedAt = Date.now()
     setStatus(skew ? "incompatible" : "connected")
+    // Only the newest connection gets this far (verify checks socket === current).
+    settle(generation)
     pendingAttach.forEach((tabId) => send({ method: "toolbar.clicked", params: { tabId } }))
     pendingAttach.clear()
     void ungroupStale().catch((error: unknown) => log.add("ungroupStale.error", { error: text(error) }))
@@ -661,6 +790,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         }
         overrides = Object.keys(next).length ? next : undefined
         autoUpdate = relayAutoUpdate(params?.autoUpdate)
+        const named = isJsonObject(params?.browser) ? params.browser : undefined
+        browser = typeof named?.id === "string" && typeof named.name === "string" ? { id: named.id, name: named.name } : undefined
         notify()
         return {}
       }
@@ -1061,14 +1192,14 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && (AGENT_CURSOR_KEY in changes || HUMAN_INPUT_KEY in changes)) void sendSettings()
   })
-  // A code typed on the status page (or removed) takes effect on a fresh connection.
+  // A code entered on the status page, a new relay address or a new name takes effect on a fresh connection.
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== "local" || !(PAIRING_KEY in changes)) return
-    if (adopting !== undefined && changes[PAIRING_KEY]?.newValue === adopting) {
-      adopting = undefined
-      bundledPairing = undefined
+    if (area !== "local" || !(PAIRING_KEY in changes || RELAY_ADDRESS_KEY in changes || BROWSER_NAME_KEY in changes)) return
+    if (!(RELAY_ADDRESS_KEY in changes) && !(BROWSER_NAME_KEY in changes) && clearingCode && changes[PAIRING_KEY]?.newValue === undefined) {
+      clearingCode = false
       return
     }
+    if (PAIRING_KEY in changes && changes[PAIRING_KEY]?.newValue !== undefined) codeRejected = false
     log.add("pairing.changed")
     bundledPairing = undefined
     attempts = 0
@@ -1236,12 +1367,46 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       }
       return undefined
     },
-    /** Stores a pairing code typed on the status page; false when it isn't one. Reconnects through storage.onChanged. */
-    async pair(input: string) {
-      const code = normalizePairingCode(input)
-      if (code === undefined) return false
-      await chrome.storage.local.set({ [PAIRING_KEY]: code })
-      return true
+    /**
+     * The status page's Connection form: saves the relay address (empty, localhost or 127.0.0.1: this computer) and the
+     * pairing code when one is given, connects afresh (even with nothing changed, so the page can check the pairing)
+     * and resolves with how the attempt ended, or with the current status if it takes longer than an attempt can.
+     */
+    async connectTo(addressInput: string, codeInput: string): Promise<{ status: AgentRelayStatus | "invalid-address" | "invalid-code"; address?: string }> {
+      const address = relayAddress(addressInput)
+      if (address === undefined) return { status: "invalid-address" }
+      const code = codeInput.trim() === "" ? undefined : normalizePairingCode(codeInput)
+      if (codeInput.trim() !== "" && code === undefined) return { status: "invalid-code" }
+      const storedPort = Number((await chrome.storage.local.get(PORT_KEY))[PORT_KEY]) || defaultRelayPort
+      const local = address.host === "127.0.0.1" && (address.port === undefined || address.port === storedPort)
+      const value = local ? "" : address.port ? `${address.host}:${address.port}` : address.host
+      const before = await chrome.storage.local.get([RELAY_ADDRESS_KEY, PAIRING_KEY])
+      const changed = (before[RELAY_ADDRESS_KEY] ?? "") !== value || (code !== undefined && before[PAIRING_KEY] !== code.code)
+      const outcome = new Promise<AgentRelayStatus>((resolve) => {
+        const waiter = { after: generation, resolve }
+        outcomes.add(waiter)
+        setTimeout(() => {
+          if (outcomes.delete(waiter)) resolve(status)
+        }, CONNECT_TIMEOUT + 2_000)
+      })
+      log.add("relay.configure", { address: value || "this computer", code: code !== undefined })
+      if (code !== undefined) {
+        // Typed again after it was refused: the user wants it tried.
+        const spent = (await chrome.storage.local.get(SPENT_KEY))[SPENT_KEY]
+        if (Array.isArray(spent)) await chrome.storage.local.set({ [SPENT_KEY]: spent.filter((entry) => entry !== code.code) })
+      }
+      // One write, so storage.onChanged reconnects once.
+      if (changed) await chrome.storage.local.set({ [RELAY_ADDRESS_KEY]: value, ...(code !== undefined ? { [PAIRING_KEY]: code.code } : {}) })
+      else {
+        bundledPairing = undefined
+        tokenRefused = undefined
+        attempts = 0
+        clearTimeout(retry)
+        retry = undefined
+        socket?.close(1000, "Checking the connection")
+        void connect("user")
+      }
+      return { status: await outcome, address: snapshot().relay.address }
     },
     /** The status page's update setting; the relay keeps it (an older relay ignores it). */
     setAutoUpdate(mode: AutoUpdateMode) {
@@ -1250,26 +1415,22 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       send({ method: "settings", params: { autoUpdate: mode } })
     },
     /**
-     * A one-time pairing ticket from install (welcome.html#ticket=…). Ignored while this extension works with the relay,
-     * so a stray link can't replace a working pairing; false then, or when it isn't a ticket.
+     * A one-time code from install's link (welcome.html#code=…). Ignored while this extension works with the relay, so
+     * a stray link can't replace a working pairing; false then, or when it isn't a code.
      */
-    pairTicket(input: string) {
-      const value = normalizePairingCode(input)
-      if (value === undefined || status === "connected") return false
-      ticket = value
-      log.add("pairing.ticket.received")
-      // A connection in progress (with the old code) closes; the next one carries the ticket.
-      socket?.close(1000, "Pairing with a ticket")
-      attempts = 0
-      clearTimeout(retry)
-      retry = undefined
-      setTimeout(() => void connect("ticket"), 200)
+    async pairLink(input: string) {
+      const code = normalizePairingCode(input)
+      if (code === undefined || code.legacy || status === "connected") return false
+      log.add("pairing.link")
+      // Reconnects through storage.onChanged.
+      await chrome.storage.local.set({ [PAIRING_KEY]: code.code })
       return true
     },
     /** Reconnects now, for example after the user fixed what blocked the connection. */
     reconnect() {
       log.add("reconnect.requested")
       bundledPairing = undefined
+      tokenRefused = undefined
       attempts = 0
       clearTimeout(retry)
       retry = undefined
@@ -1283,7 +1444,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         "Browse diagnostics",
         `extension: ${manifest.version} (${chrome.runtime.id})`,
         `browser: ${navigator.userAgent}`,
-        `relay: ws://127.0.0.1:${port}/extension, protocol ${extensionProtocolVersion}`,
+        `relay: ws://${host}:${port}/extension, protocol ${extensionProtocolVersion}`,
         `pairing: ${pairing}`,
         `status: ${status}${connectedAt ? ` since ${new Date(connectedAt).toISOString()}` : ""}`,
         `reconnect attempts: ${attempts}${retry ? " (retry scheduled)" : ""}`,
@@ -1304,6 +1465,17 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
 }
 
 declare const __OPENCODE_BROWSER_BUILD__: string
+
+/** What a connection pairs with: this browser's token for the relay, or a code to exchange for one. */
+type Credential = { kind: "token"; token: string } | { kind: "code"; code: PairingCode; source: "entered" | "bundled" }
+type Handshake = {
+  nonce: string
+  port: number
+  credential: Credential
+  ecdh?: Awaited<ReturnType<typeof ecdhKeyPair>>
+  /** A code exchange after this extension proved the code: the session key and the relay's nonce. */
+  session?: { key: Uint8Array; relayNonce: string }
+}
 
 /**
  * JSON for the relay, or undefined when it's larger than the relay accepts (or too large for V8 to serialize at

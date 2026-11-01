@@ -181,6 +181,16 @@ footer {
 .choices.inline label + label {
   margin-top: 0;
 }
+.relay-form label {
+  display: block;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 0.9em;
+}
+.relay-form .command {
+  margin-top: 4px;
+  font-size: 14px;
+}
 .note.override {
   color: var(--fg);
 }

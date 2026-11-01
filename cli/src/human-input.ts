@@ -34,8 +34,9 @@ export function setHumanInput(value: boolean | undefined) {
   setting = value
 }
 
-export function humanInputEnabled(): boolean {
-  return humanInputOverride() ?? setting ?? true
+/** `browserSetting`: the setting of the tab's browser, when the relay has several; else the one set here. */
+export function humanInputEnabled(browserSetting: boolean | undefined = setting): boolean {
+  return humanInputOverride() ?? browserSetting ?? true
 }
 
 type TabState = { pointer?: Point; aim?: Point & { dx: number; dy: number }; arrivedAt: number; pressedAt?: number; lastKeyAt: number; queue: Promise<void> }
@@ -115,8 +116,8 @@ export function trajectory(from: Point, to: Point): { point: Point; delay: numbe
  * remaining delta are adjusted, so Playwright's own semantics (buttons, modifiers, frames) are untouched. `root`
  * is false for commands to a child frame, whose coordinates aren't the page's.
  */
-export function beforeInput(tabId: number, method: string, params: JsonObject, root: boolean, send: Send): Promise<void> {
-  if (!humanInputEnabled() || !paced.has(method) || (method === "DOM.scrollIntoViewIfNeeded" && !root)) return Promise.resolve()
+export function beforeInput(tabId: number, method: string, params: JsonObject, root: boolean, send: Send, browserSetting: boolean | undefined = setting): Promise<void> {
+  if (!humanInputEnabled(browserSetting) || !paced.has(method) || (method === "DOM.scrollIntoViewIfNeeded" && !root)) return Promise.resolve()
   // Playwright doesn't always wait for a move before pressing, so one tab's input runs in order: the press
   // waits for the movement before it to land.
   const tab = state(tabId)

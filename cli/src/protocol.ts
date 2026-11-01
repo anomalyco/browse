@@ -143,6 +143,7 @@ const extensionCommandMethodValues = [
 
 const extensionEventMethodValues = [
   "hello",
+  "auth.code",
   "auth.response",
   "ready",
   "toolbar.clicked",

@@ -1,9 +1,11 @@
 // Checks the two release artifacts before anything is published, the same way locally (`bun run release:check`) and in
 // the release workflow:
-//   store zip   no manifest `key` or `update_url`, no relay-pairing.json, no source maps, no test-only hooks, the default
-//               relay port, the release version, and exactly the capabilities in store/permissions.json
-//   npm tarball @opencode/browse at the release version, only dist/, extension/, skills/ and package metadata, no install
-//               scripts, no pairing code or source maps, and its bundled extension on the same allowlist
+//   extension zip  no `update_url`, no relay-pairing.json, no source maps, no test-only hooks, the default relay port,
+//                  the release version, and exactly the capabilities in store/permissions.json; the store zip (stable)
+//                  has no manifest `key`, the dev zip (loaded unpacked) has the checkout's key and a build.json
+//   npm tarball    @opencode/browse at the release version, only dist/, skills/ and package metadata (no extension: npm
+//                  installs get it from the store or, for a dev build, the release service), no install scripts, no
+//                  source maps
 //   bun scripts/check-artifacts.ts --version 0.1.0 --zip release/opencode-browser-0.1.0.zip --tarball release/opencode-browse-0.1.0.tgz
 import { $ } from "bun"
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises"
@@ -94,7 +96,7 @@ async function extracted<T>(prefix: string, extract: (directory: string) => Prom
   }
 }
 
-/** Problems shared by both copies of the extension: pairing code, source maps, development markers. */
+/** Problems in the extension's files: pairing code, source maps, development markers. */
 async function extensionContentProblems(directory: string, label: string) {
   const problems: string[] = []
   const names = await files(directory)
@@ -111,7 +113,17 @@ async function extensionContentProblems(directory: string, label: string) {
   return { names, problems }
 }
 
-export async function checkStoreZip(zip: string, version: string, allowlist?: Allowlist): Promise<string[]> {
+/** The manifest key that pins the unpacked ID the relay trusts (public/manifest.json). */
+async function unpackedKey() {
+  return (JSON.parse(await readFile(path.join(root, "public", "manifest.json"), "utf8")) as { key?: string }).key
+}
+
+/**
+ * The extension zip: the store zip for a stable release, or for a dev build (`unpacked`) the zip dev installs load
+ * unpacked, which must carry the checkout's manifest key (the ID the relay trusts) and passes every other check.
+ */
+export async function checkStoreZip(zip: string, version: string, allowlist?: Allowlist, unpacked = false): Promise<string[]> {
+  const key = unpacked ? await unpackedKey() : undefined
   const allowed = allowlist ?? (await readAllowlist())
   const label = path.basename(zip)
   const listing = (await $`unzip -Z1 ${zip}`.quiet().text()).split("\n").filter(Boolean)
@@ -126,7 +138,10 @@ export async function checkStoreZip(zip: string, version: string, allowlist?: Al
     const { names, problems } = await extensionContentProblems(directory, label)
     if (!names.includes("manifest.json")) return [...problems, `${label}: no manifest.json at the top level`]
     const manifest = JSON.parse(await readFile(path.join(directory, "manifest.json"), "utf8")) as Record<string, unknown>
-    if ("key" in manifest) problems.push(`${label}: manifest has \`key\` (the store assigns the ID and rejects it)`)
+    if (unpacked) {
+      if (!key || manifest.key !== key) problems.push(`${label}: manifest \`key\` isn't public/manifest.json's, so it wouldn't load with the unpacked ID the relay trusts`)
+      if (!names.includes("build.json")) problems.push(`${label}: missing build.json (the relay reloads a dev extension by its build)`)
+    } else if ("key" in manifest) problems.push(`${label}: manifest has \`key\` (the store assigns the ID and rejects it)`)
     if ("update_url" in manifest) problems.push(`${label}: manifest has \`update_url\` (the store rejects it)`)
     if (manifest.manifest_version !== 3) problems.push(`${label}: manifest_version is not 3`)
     for (const name of names) if (!STORE_FILE_TYPES.test(name)) problems.push(`${label}: unexpected file type ${name}`)
@@ -136,8 +151,8 @@ export async function checkStoreZip(zip: string, version: string, allowlist?: Al
   })
 }
 
-export async function checkPackageTarball(tarball: string, version: string, allowlist?: Allowlist): Promise<string[]> {
-  const allowed = allowlist ?? (await readAllowlist())
+/** `extensionSha256`: a dev build's CLI must carry the sha256 of the extension zip published with it. */
+export async function checkPackageTarball(tarball: string, version: string, extensionSha256?: string): Promise<string[]> {
   const label = path.basename(tarball)
   return extracted("browse-tgz-", async (directory) => void (await $`tar -xzf ${tarball} -C ${directory}`.quiet()), async (directory) => {
     const packageDir = path.join(directory, "package")
@@ -145,7 +160,7 @@ export async function checkPackageTarball(tarball: string, version: string, allo
     if (structure.some((problem) => !problem.includes("source map"))) return structure
     const names = await files(packageDir)
     const problems: string[] = [...structure]
-    const allowedFile = (name: string) => /^(dist|extension|skills)\//.test(name) || ["package.json", "LICENSE", "README.md"].includes(name)
+    const allowedFile = (name: string) => /^(dist|skills)\//.test(name) || ["package.json", "LICENSE", "README.md"].includes(name)
     for (const name of names) if (!allowedFile(name)) problems.push(`${label}: unexpected file ${name}`)
     for (const name of names) if (/(^|\/)\.env/.test(name) || /\.(pem|key|p12)$/.test(name)) problems.push(`${label}: looks like a secret: ${name}`)
     const pkg = JSON.parse(await readFile(path.join(packageDir, "package.json"), "utf8")) as {
@@ -170,15 +185,8 @@ export async function checkPackageTarball(tarball: string, version: string, allo
       if (!cli.startsWith("#!/usr/bin/env node")) problems.push(`${label}: dist/cli.mjs has no node shebang`)
       if (!cli.includes(JSON.stringify(version))) problems.push(`${label}: dist/cli.mjs doesn't carry version ${version}`)
       if (cli.includes("sourceMappingURL")) problems.push(`${label}: dist/cli.mjs references a source map`)
+      if (extensionSha256 && !cli.includes(extensionSha256)) problems.push(`${label}: dist/cli.mjs doesn't carry the dev extension zip's sha256 ${extensionSha256}`)
     }
-    const extension = path.join(packageDir, "extension")
-    if (!names.includes("extension/manifest.json")) return [...problems, `${label}: missing extension/manifest.json`]
-    const content = await extensionContentProblems(extension, `${label} extension/`)
-    problems.push(...content.problems)
-    const manifest = JSON.parse(await readFile(path.join(extension, "manifest.json"), "utf8")) as Record<string, unknown>
-    // The unpacked copy keeps `key`: it pins the unpacked ID the relay's allowed origins expect.
-    if (typeof manifest.key !== "string") problems.push(`${label}: extension/manifest.json lost its \`key\` (the unpacked ID would change)`)
-    problems.push(...versionProblems(manifest, version, `${label} extension/`), ...capabilityProblems(manifest, allowed, `${label} extension/`))
     return problems
   })
 }
@@ -190,7 +198,7 @@ if (import.meta.main) {
     process.exit(2)
   }
   const problems = [
-    ...(values.zip ? await checkStoreZip(values.zip, values.version) : []),
+    ...(values.zip ? await checkStoreZip(values.zip, values.version, undefined, values.version.includes("-dev.")) : []),
     ...(values.tarball ? await checkPackageTarball(values.tarball, values.version) : []),
   ]
   for (const problem of problems) console.error(`✗ ${problem}`)

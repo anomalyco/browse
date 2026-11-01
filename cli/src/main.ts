@@ -6,7 +6,7 @@
 // `opencode-browser mcp` runs the MCP server over stdio (as does the bundle invoked as `opencode-browser-mcp`).
 import path from "node:path"
 
-const setupCommands = new Set(["install", "uninstall", "extension", "pair", "rollback"])
+const setupCommands = new Set(["install", "uninstall", "extension", "pair", "rollback", "set"])
 const command = process.argv[2]
 const invokedAs = path.basename(process.argv[1] ?? "")
 
@@ -30,13 +30,21 @@ if (command === "--version" || command === "-v") {
 } else {
   if (!command || command === "--help" || command === "-h") {
     process.stdout.write(`SETUP
-  install [--opencode <path>]    Install Browse: add the browse MCP server to opencode, pair
-                                 the extension, and check which browsers have it (when none does, open
-                                 the extensions page, show the folder to load unpacked and wait for it)
+  install [--opencode <path>]    Install Browse: add the browse MCP server to opencode, check which browsers
+                                 have the extension and pair it (when none does, open its Chrome Web Store
+                                 page, or from a checkout or a dev install show the folder to load unpacked,
+                                 and wait for it)
     --no-open                    Print the steps without opening anything or copying the path
-    --no-wait                    Don't wait for the extension to connect
-  extension                      Show the unpacked extension folder (for "Load unpacked")
-  pair                           Print the pairing code the Chrome Web Store extension asks for
+    --no-wait                    Don't wait for the extension to be added or connect
+  extension                      Show where to get the extension (the unpacked folder of a checkout or a dev
+                                 install, or the store page)
+  pair                           Print a one-time pairing code (XXXX-XXXX, valid 10 minutes) to enter on the
+                                 extension's status page; the browser exchanges it for a key of its own
+    --list                       Show paired browsers: id, name, profile, when paired and last seen
+    --revoke <browser>           Unpair a browser (its id, name or profile) and disconnect it;
+                                 \`--revoke legacy\` retires the shared code of earlier versions
+  set hostname <address>         Where the relay listens: 127.0.0.1 (this computer, the default) or 0.0.0.0
+                                 (browsers on other computers can connect too, after pairing)
   update [--check]               Update now. A git clone install pulls the newer commits (fast-forward only)
                                  and runs setup again; an npm install installs the newest version on its
                                  channel and switches to it; --check only says whether there's an update

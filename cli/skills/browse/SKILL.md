@@ -940,9 +940,11 @@ Common diagnoses:
 - All targets disappeared: dismissing Chromium's debugging banner detaches every
   tab. Ask the user to click the toolbar button on it again.
 - Extension not connecting, status page says "Not paired" or "didn't pair": the
-  extension and relay must share a pairing code. Unpacked installs are paired by
-  `opencode-browser install` (or `bun run setup`); a Chrome Web Store build needs
-  the code from `opencode-browser pair` pasted on its status page.
+  browser needs its own key from the relay. Unpacked installs are paired by
+  `opencode-browser install` (or `bun run setup`); otherwise run
+  `opencode-browser pair` and have the user enter the code (it works once, within
+  10 minutes) under Connection on the status page. `pair --list` shows paired
+  browsers; `pair --revoke <browser>` unpairs one.
 - HTTP 401 from the relay: clients need the relay token from the data root
   (`relay-token`); the CLI and MCP server send it, other CDP clients must add
   `Authorization: Bearer <token>` or `?opencodeBrowserToken=<token>`.

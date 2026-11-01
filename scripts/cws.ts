@@ -2,10 +2,12 @@
 //   bun scripts/cws.ts publish --zip release/opencode-browser-0.1.0.zip --version 0.1.0 [--dry-run]
 //   bun scripts/cws.ts status
 // Environment: CWS_CLIENT_ID, CWS_CLIENT_SECRET, CWS_REFRESH_TOKEN (the chrome-web-store environment's secrets),
-// CWS_PUBLISHER_ID and CWS_ITEM_ID (repository variables; the beta job passes the beta item's ID).
+// CWS_PUBLISHER_ID and CWS_ITEM_ID (repository variables). Only stable releases go to the store; dev builds go to the
+// release service.
 // Idempotent: when the item already has this version (published or in review), nothing is uploaded again; it reports
-// the state. Publishing uses the item's visibility in the dashboard (public for stable, unlisted for the beta item) and
-// submits for review; the job ends with the review state, it doesn't wait for review.
+// the state. Publishing uses the item's visibility in the dashboard and submits for review; the job ends with the review
+// state, it doesn't wait for review. An item holds one submission at a time, so it fails while another version is still
+// in review.
 // CWS_API_BASE and CWS_TOKEN_URL point it at a local fake for testing; they only accept loopback http URLs, so a changed
 // variable can't send the credentials anywhere else.
 import { $ } from "bun"
@@ -134,6 +136,13 @@ export function existingVersion(status: Status, expected: string) {
   return undefined
 }
 
+/** The version waiting in review (or approved and about to publish), which blocks another upload. */
+export function pendingVersion(status: Status) {
+  const submitted = status.submittedItemRevisionStatus
+  if (submitted?.state !== "PENDING_REVIEW" && submitted?.state !== "STAGED") return undefined
+  return { version: submitted.distributionChannels?.[0]?.crxVersion ?? "unknown", state: submitted.state }
+}
+
 async function summary(lines: string[]) {
   for (const line of lines) console.log(line)
   if (process.env.GITHUB_STEP_SUMMARY) await appendFile(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n")
@@ -158,8 +167,11 @@ if (import.meta.main) {
       const before = await client.status()
       if (before.takenDown) throw new Error(`Item ${client.item} is taken down for a policy violation; resolve it in the developer dashboard first.`)
       const existing = existingVersion(before, expected)
+      const pending = existing ? undefined : pendingVersion(before)
       if (existing) {
         await summary([`### Chrome Web Store`, `${values.version} (${expected}) is already ${existing.where} on ${client.item}: ${existing.state}. Nothing uploaded.`])
+      } else if (pending) {
+        throw new Error(`${pending.version} is still ${pending.state} on ${client.item}; wait for it, or cancel it in the developer dashboard, then rerun this job.`)
       } else if (values["dry-run"]) {
         await summary([`### Chrome Web Store (dry run)`, `Would upload ${values.zip} (${expected}) to ${client.item} and publish it; the store has ${before.publishedItemRevisionStatus?.distributionChannels?.[0]?.crxVersion ?? "no published version"}.`])
       } else {

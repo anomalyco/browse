@@ -11,7 +11,27 @@ import {
   validateHostHeader,
   validateWebSocketOrigin,
 } from "../src/relay-helpers.ts"
-import { formatPairingCode, pairingCode, pairingProof, relayToken, secretsEqual, writeExtensionPairing } from "../src/relay-secrets.ts"
+import {
+  browserTokensPath,
+  consumePairingCode,
+  ecdhExchange,
+  formatPairingCode,
+  issueBrowserToken,
+  maxPairingFailures,
+  mintPairingCode,
+  pairingCodeKey,
+  pairingCodesPath,
+  pairingProof,
+  pairingSessionKey,
+  pendingPairingCodeKeys,
+  readBrowserPairings,
+  recordPairingFailure,
+  revokeBrowserToken,
+  sessionProof,
+  wrapToken,
+  writeExtensionPairing,
+} from "../src/browser-pairing.ts"
+import { relayToken, secretsEqual } from "../src/relay-secrets.ts"
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-auth-"))
 afterAll(() => fs.rmSync(home, { recursive: true, force: true }))
@@ -75,17 +95,104 @@ describe("Host, Origin and Sec-Fetch-Site checks", () => {
   })
 })
 
-describe("pairing handshake", () => {
-  const code = pairingCode(home)
+describe("pairing codes", () => {
+  const root = () => fs.mkdtempSync(path.join(home, "codes-"))
+
+  test("are short, typed loosely, stored only as a slow hash, privately", () => {
+    const dir = root()
+    const code = mintPairingCode(dir)
+    expect(code).toMatch(/^[0-9A-HJKMNP-TV-Z]{8}$/)
+    expect(formatPairingCode(code)).toBe(`${code.slice(0, 4)}-${code.slice(4)}`)
+    expect(ExtensionPairing.normalizePairingCode(formatPairingCode(code).toLowerCase())).toEqual({ code, legacy: false })
+    const file = fs.readFileSync(pairingCodesPath(dir), "utf8")
+    expect(file).not.toContain(code)
+    expect(pendingPairingCodeKeys(dir)).toEqual([pairingCodeKey(code)])
+    expect(fs.statSync(pairingCodesPath(dir)).mode & 0o777).toBe(0o600)
+  })
+
+  test("the extension derives the same key", async () => {
+    const code = mintPairingCode(root())
+    expect(await ExtensionPairing.pairingCodeMaterial({ code, legacy: false })).toBe(pairingCodeKey(code))
+  })
+
+  test("work once", () => {
+    const dir = root()
+    const first = mintPairingCode(dir)
+    const second = mintPairingCode(dir)
+    consumePairingCode(pairingCodeKey(first), dir)
+    expect(pendingPairingCodeKeys(dir)).toEqual([pairingCodeKey(second)])
+  })
+
+  test("expire after ten minutes (an hour for the one install writes into an unpacked build)", () => {
+    const dir = root()
+    const now = Date.now()
+    const code = mintPairingCode(dir, { now })
+    const bundled = mintPairingCode(dir, { now, ttlMs: 60 * 60_000 })
+    expect(pendingPairingCodeKeys(dir, now + 9 * 60_000)).toHaveLength(2)
+    expect(pendingPairingCodeKeys(dir, now + 11 * 60_000)).toEqual([pairingCodeKey(bundled)])
+    expect(pendingPairingCodeKeys(dir, now + 61 * 60_000)).toEqual([])
+    expect(code).not.toBe(bundled)
+  })
+
+  test("are all thrown away after five wrong guesses", () => {
+    const dir = root()
+    mintPairingCode(dir)
+    for (let attempt = 1; attempt < maxPairingFailures; attempt++) expect(recordPairingFailure(dir)).toBe(false)
+    expect(pendingPairingCodeKeys(dir)).toHaveLength(1)
+    expect(recordPairingFailure(dir)).toBe(true)
+    expect(pendingPairingCodeKeys(dir)).toEqual([])
+    // A new code gets the full allowance again.
+    mintPairingCode(dir)
+    expect(recordPairingFailure(dir)).toBe(false)
+  })
+})
+
+describe("browser tokens", () => {
+  test("are per browser, private, and revocable", () => {
+    const dir = fs.mkdtempSync(path.join(home, "tokens-"))
+    const work = issueBrowserToken("work", dir)
+    const personal = issueBrowserToken("personal", dir)
+    expect(work).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(work).not.toBe(personal)
+    expect(fs.statSync(browserTokensPath(dir)).mode & 0o777).toBe(0o600)
+    expect(revokeBrowserToken("work", dir)).toBe(true)
+    expect(Object.keys(readBrowserPairings(dir))).toEqual(["personal"])
+    expect(revokeBrowserToken("work", dir)).toBe(false)
+  })
+})
+
+describe("code exchange", () => {
+  test("the extension and the relay agree on the session key, and the token unmasks only with it", async () => {
+    const port = 19988
+    const code = mintPairingCode(fs.mkdtempSync(path.join(home, "exchange-")))
+    const extensionKeys = await ExtensionPairing.ecdhKeyPair()
+    const relay = ecdhExchange(extensionKeys.publicKey)!
+    const transcript = { port, extensionNonce: ExtensionPairing.randomNonce(), relayNonce: ExtensionPairing.randomNonce(), extensionKey: extensionKeys.publicKey, relayKey: relay.publicKey }
+    const relaySession = pairingSessionKey(pairingCodeKey(code), relay.secret, transcript)
+    const secret = (await extensionKeys.secret(relay.publicKey))!
+    const extensionSession = await ExtensionPairing.pairingSessionKey(await ExtensionPairing.pairingCodeMaterial({ code, legacy: false }), secret, transcript)
+    expect(Buffer.from(extensionSession).equals(relaySession)).toBe(true)
+    expect(await ExtensionPairing.sessionProof(extensionSession, "extension")).toBe(sessionProof(relaySession, "extension"))
+    const token = issueBrowserToken("x", fs.mkdtempSync(path.join(home, "exchange-")))
+    const wrapped = wrapToken(relaySession, token)
+    expect(wrapped).not.toBe(token)
+    expect(await ExtensionPairing.unwrapToken(extensionSession, wrapped)).toBe(token)
+    // Someone who knows the code but not the ECDH secret (a passive observer who guessed it) gets nothing.
+    const guessed = pairingSessionKey(pairingCodeKey(code), Buffer.alloc(32), transcript)
+    expect(await ExtensionPairing.unwrapToken(guessed, wrapped)).not.toBe(token)
+  })
+
+  test("a relay public key that isn't one is refused", async () => {
+    expect(ecdhExchange("not-a-key")).toBeUndefined()
+    expect(await (await ExtensionPairing.ecdhKeyPair()).secret("x")).toBeUndefined()
+  })
+})
+
+describe("token handshake", () => {
+  const code = issueBrowserToken("test", home)
   const relayNonce = ExtensionPairing.randomNonce()
   const extensionNonce = ExtensionPairing.randomNonce()
   const port = 19988
-
-  test("the code is private and formatted for typing", () => {
-    expect(code).toMatch(/^[0-9A-HJKMNP-TV-Z]{32}$/)
-    expect(fs.statSync(path.join(home, "extension-pairing")).mode & 0o777).toBe(0o600)
-    expect(ExtensionPairing.normalizePairingCode(formatPairingCode(code).toLowerCase())).toBe(code)
-  })
 
   test("the extension accepts the relay's proof, and the relay the extension's", async () => {
     // Relay → extension: the relay proves it knows the code over both nonces.
@@ -97,7 +204,7 @@ describe("pairing handshake", () => {
   })
 
   test("a wrong code, swapped role or replayed nonce is refused", async () => {
-    const other = pairingCode(fs.mkdtempSync(path.join(home, "other-")))
+    const other = issueBrowserToken("other", fs.mkdtempSync(path.join(home, "other-")))
     expect(other).not.toBe(code)
     const relayProof = pairingProof(other, "relay", port, relayNonce, extensionNonce)
     expect(ExtensionPairing.sameSecret(await ExtensionPairing.pairingProof(code, "relay", port, relayNonce, extensionNonce), relayProof)).toBe(false)
@@ -118,11 +225,12 @@ describe("pairing handshake", () => {
     expect(ExtensionPairing.pairingEndpoint(port)).toBe("127.0.0.1:19988/extension")
   })
 
-  test("install writes the code into an unpacked extension folder", () => {
+  test("install writes a one-time code into an unpacked extension folder", () => {
     const extension = fs.mkdtempSync(path.join(home, "extension-"))
-    writeExtensionPairing(extension, code)
+    const pending = mintPairingCode(fs.mkdtempSync(path.join(home, "install-")))
+    writeExtensionPairing(extension, pending)
     const file = path.join(extension, "relay-pairing.json")
-    expect(JSON.parse(fs.readFileSync(file, "utf8"))).toEqual({ code })
+    expect(JSON.parse(fs.readFileSync(file, "utf8"))).toEqual({ code: pending })
     expect(fs.statSync(file).mode & 0o777).toBe(0o600)
   })
 })
