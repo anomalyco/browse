@@ -80,6 +80,8 @@ export const ExecuteRequest = Schema.Struct({
   createIfMissing: Schema.Boolean,
   /** The browser a session created here opens its tabs in; for an existing session it must be the session's. */
   browser: Schema.optionalKey(Schema.String),
+  removeAfterExecute: Schema.optionalKey(Schema.Boolean),
+  timeoutMs: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   targetSelection: Schema.optionalKey(TargetSelection),
 })
 

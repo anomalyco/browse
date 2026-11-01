@@ -115,11 +115,29 @@ describe("grouping: one group per session (default)", () => {
     const first = await agentTab("github")
     const second = await agentTab("linear")
     const again = await agentTab("github")
+    const auto = await agentTab("oc-ses_123abc")
     expect(first.groupId).not.toBe(second.groupId)
     expect(again.groupId).toBe(first.groupId)
     expect(group(first.groupId)).toMatchObject({ windowId: user.id, title: `github${MARKER}`, collapsed: true })
     expect(group(second.groupId)).toMatchObject({ windowId: user.id, title: `linear${MARKER}`, collapsed: true })
+    expect(group(auto.groupId)).toMatchObject({ windowId: user.id, title: `Agent · example.com${MARKER}`, collapsed: true })
     expect(tab(userTab).active).toBe(true)
+  })
+
+  test("ping calls chrome.runtime.getPlatformInfo to keep the MV3 service worker awake without logging noise", async () => {
+    let platformCalls = 0
+    const orig = stub.chrome.runtime.getPlatformInfo
+    stub.chrome.runtime.getPlatformInfo = async () => {
+      platformCalls += 1
+      return orig()
+    }
+    try {
+      expect(await command("ping", {})).toEqual({})
+      expect(platformCalls).toBe(1)
+      expect(await relay.diagnostics()).not.toContain("method=ping")
+    } finally {
+      stub.chrome.runtime.getPlatformInfo = orig
+    }
   })
 })
 

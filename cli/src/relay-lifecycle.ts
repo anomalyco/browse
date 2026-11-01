@@ -11,8 +11,8 @@ import { npmRuntime } from "./auto-update.ts"
 import { cliCommand, installCommand } from "./paths.ts"
 import { opencodeBrowserBuildId } from "./version.ts"
 
-// From source the CLI entry is main.ts next to this file; the published bundle is a single file, so it is this file.
-const loadedCliEntrypoint = fileURLToPath(import.meta.url.endsWith(".ts") ? new URL("./main.ts", import.meta.url) : import.meta.url)
+// From source the CLI entry is main.ts next to this file; the published bundle may split into chunks beside cli.mjs.
+const loadedCliEntrypoint = fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "./main.ts" : "./cli.mjs", import.meta.url))
 const clientInstanceId = crypto.randomUUID()
 
 export type RelayReadiness = {

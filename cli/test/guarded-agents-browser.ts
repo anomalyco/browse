@@ -62,7 +62,7 @@ delete env.OPENCODE_BROWSER_ALLOW_NODE
 fs.mkdirSync(path.join(runtime, "dist"), { recursive: true })
 // The extension build (`bun run build` at the repo root); the npm package doesn't ship it.
 fs.cpSync(path.join(cliRoot, "..", "dist"), extension, { recursive: true })
-fs.copyFileSync(path.join(cliRoot, "dist/cli.mjs"), path.join(runtime, "dist/cli.mjs"))
+fs.cpSync(path.join(cliRoot, "dist"), path.join(runtime, "dist"), { recursive: true })
 fs.symlinkSync(path.join(cliRoot, "node_modules"), path.join(runtime, "node_modules"), "dir")
 for (const entry of fs.readdirSync(extension, { recursive: true })) {
   const file = path.join(extension, String(entry))

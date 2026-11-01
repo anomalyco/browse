@@ -159,6 +159,7 @@ export function createChrome() {
       lastError: undefined,
       getURL: (file: string) => `chrome-extension://stubextensionid/${file.replace(/^\//, "")}`,
       getManifest: () => ({ version: "0.0.0-test" }),
+      getPlatformInfo: async () => ({ os: "mac", arch: "arm64", nacl_arch: "arm64" }),
       sendMessage: async () => undefined,
     }),
     windows: windowsApi,

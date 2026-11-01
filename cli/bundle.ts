@@ -1,4 +1,4 @@
-// Bundles the CLI (src/main.ts and everything it loads) into one node ESM file, with npm dependencies left external
+// Bundles the CLI (src/main.ts and its lazy chunks) into node ESM files, with npm dependencies left external
 // and installed by npm. build.ts uses it for dist/cli.mjs; the auto-update tests build throwaway versions with it.
 import { chmod } from "node:fs/promises"
 import path from "node:path"
@@ -16,7 +16,11 @@ export async function bundleCli(options: {
   const result = await Bun.build({
     entrypoints: [path.join(here, "src/main.ts")],
     outdir: options.outdir,
-    naming: "cli.mjs",
+    splitting: true,
+    naming: {
+      entry: "cli.mjs",
+      chunk: "[name]-[hash].mjs",
+    },
     target: "node",
     format: "esm",
     // Runtime dependencies stay external; jsonc-parser (a dev dependency) is bundled.

@@ -1,4 +1,3 @@
-import { fileURLToPath } from "node:url"
 import { NodeHttpClient } from "@effect/platform-node"
 import { Context, Effect, Layer, Match, Redacted, Schema } from "effect"
 import * as AuthenticatedOriginInternal from "./authenticated-origin.ts"
@@ -188,7 +187,7 @@ export const make = Effect.fn("OpenCodeBrowserClient.make")(function* (options: 
   const readiness = yield* RelayLifecycle.ensureRelay({
     relay,
     // The consumer may run under Bun; the relay is a Node application.
-    start: RelayLifecycle.startManagedRelay(fileURLToPath(import.meta.url), "node", []),
+    start: RelayLifecycle.startManagedRelay(undefined, "node", []),
   }).pipe(Effect.mapError((error) => clientError("connect", error)))
   if (readiness.buildProblem) {
     return yield* new ClientError({

@@ -3,7 +3,7 @@ import { defaultPageClosedWarning, ExecuteSandbox, hasExplicitTargetSelection, t
 import type { NetworkCaptureOptions, NetworkCaptureResult, NetworkCaptureStatus, NetworkCaptureStopOptions } from "./network-capture.ts"
 import { cliCommand } from "./paths.ts"
 import { generateSessionId } from "./relay-helpers.ts"
-import type { OpenCodeBrowserSession, ExecuteSandboxLike, SessionSummary, SessionTarget } from "./relay-types.ts"
+import type { OpenCodeBrowserSession, ConnectedTarget, ExecuteSandboxLike, SessionSummary, SessionTarget } from "./relay-types.ts"
 import type { AuthenticatedJsonOutcome, AuthenticatedJsonRequest } from "./relay-schema.ts"
 import type { PersistedSession } from "./session-catalog.ts"
 import {
@@ -31,15 +31,19 @@ type AdoptionResult = {
   readonly releasedTargetIds: readonly string[]
 }
 
+export const defaultExecuteTimeoutMs = 60_000
+
 export type SessionHooks = {
   /** A browser a session asks for, by id or name: its id while it's connected, else why not. */
   readonly resolveBrowser?: (requested: string) => { readonly id: string } | { readonly error: string }
   /** Called when a session starts (true) or finishes (false) an execute. */
-  readonly onExecuteStateChange?: (sessionId: string, executing: boolean) => void
+  readonly onExecuteStateChange?: (sessionId: string, executing: boolean) => void | Effect.Effect<void>
   /** Called after each execute completes, for journaling. Failure is logged and ignored. */
   readonly onExecuteRecord?: (record: SessionExecuteRecord) => unknown | Promise<unknown>
   /** How long lifecycle commands wait for a permit or sandbox operation. */
   readonly lifecycleTimeoutMs?: number
+  /** Overall budget for a single execute call (paused while handoff waits on the user); 0 disables. */
+  readonly executeTimeoutMs?: number
   /** Maximum time best-effort journal I/O may retain an execute permit. */
   readonly journalTimeoutMs?: number
   /** Current user-owned attached page URLs, used for relay-side adoption hints. */
@@ -50,6 +54,8 @@ export type SessionHooks = {
   readonly onReleaseRelayTarget?: (targetId: string) => Effect.Effect<void, Error>
   /** Target ids of every live relay-owned page of a session: its default page and the pages and popups it opened. */
   readonly relayTargetIdsForSession?: (sessionId: string) => readonly string[]
+  /** Live root targets currently attached to the relay. */
+  readonly getTargets?: () => readonly ConnectedTarget[]
   /** Persist session identity and target continuity after durable lifecycle changes. */
   readonly onSessionsChanged?: (sessions: readonly PersistedSession[]) => unknown | Promise<unknown>
   /** Cancel the session's pending handoff so its waiter fails; true when one was pending. */
@@ -70,8 +76,58 @@ export type SessionStopReport = {
 
 type RunningExecution = {
   readonly stop: (message: string, diagnostic: string) => void
+  readonly pauseTimeout: () => () => void
   /** Settles once the execute lock is released, with whether the script had to be abandoned. */
   readonly released: Deferred.Deferred<{ readonly forced: boolean }>
+}
+
+class ExecutionDeadline {
+  private remainingMs: number
+  private startedAt: number | undefined
+  private timer: NodeJS.Timeout | undefined
+  private pauses = 0
+  private settled = false
+
+  constructor(timeoutMs: number, private readonly onExpire: () => void) {
+    this.remainingMs = timeoutMs
+    this.arm()
+  }
+
+  pause(): () => void {
+    if (!this.settled && this.pauses++ === 0 && this.startedAt !== undefined) {
+      clearTimeout(this.timer)
+      this.timer = undefined
+      this.remainingMs = Math.max(0, this.remainingMs - (Date.now() - this.startedAt))
+      this.startedAt = undefined
+    }
+    let resumed = false
+    return () => {
+      if (resumed) return
+      resumed = true
+      if (!this.settled && --this.pauses === 0) this.arm()
+    }
+  }
+
+  cancel(): void {
+    this.settled = true
+    clearTimeout(this.timer)
+    this.timer = undefined
+  }
+
+  private arm(): void {
+    if (this.settled || this.pauses > 0) return
+    if (this.remainingMs <= 0) {
+      this.settled = true
+      this.onExpire()
+      return
+    }
+    this.startedAt = Date.now()
+    this.timer = setTimeout(() => {
+      this.settled = true
+      this.onExpire()
+    }, this.remainingMs)
+    this.timer.unref?.()
+  }
 }
 
 export class SessionError extends Schema.TaggedError<SessionError>()(
@@ -310,6 +366,11 @@ export class OpenCodeBrowserSessions {
     return true
   }
 
+  /** Pauses a running execute's outer timeout while a handoff waits on the user; returns a resume callback. */
+  pauseExecutionTimeout(id: string): () => void {
+    return this.runningExecutions.get(id)?.pauseTimeout() ?? (() => {})
+  }
+
   /**
    * Ends whatever holds the session before delete or reset: a running execute and a pending handoff (which can also
    * belong to an authenticated request). Waits a bounded time for the execute lock to be released.
@@ -522,9 +583,9 @@ export class OpenCodeBrowserSessions {
       sessionId,
       "authenticated request",
       (session) => Effect.gen(function* () {
-        manager.setExecuting(session.id, true)
+        yield* manager.setExecuting(session.id, true)
         const result = yield* session.sandbox.authenticatedJson(pageRequest).pipe(
-          Effect.ensuring(Effect.sync(() => manager.setExecuting(session.id, false))),
+          Effect.ensuring(manager.setExecuting(session.id, false)),
         )
         session.updatedAt = new Date().toISOString()
         yield* manager.commitPersistence()
@@ -544,11 +605,16 @@ export class OpenCodeBrowserSessions {
     readonly sessionId?: string
     readonly code: string
     readonly createIfMissing: boolean
+    readonly removeAfterExecute?: boolean
+    readonly timeoutMs?: number
     readonly targetSelection?: ExecuteTargetSelection
     readonly browser?: string
   }): Effect.Effect<ExecutionResponse, Error> {
     const manager = this
     return this.withAdmission(options.sessionId, Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
+      if (options.removeAfterExecute && options.sessionId) {
+        return yield* sessionError("invalid-request", "One-shot execute requires a fresh unnamed session")
+      }
       const resolved = yield* manager.resolveWorkSession(options.sessionId, options.createIfMissing, options.browser)
       const session = resolved.session
       const response = yield* Deferred.make<ExecutionResponse, Error>()
@@ -563,18 +629,31 @@ export class OpenCodeBrowserSessions {
           }
           started = true
           session.updatedAt = new Date().toISOString()
-          manager.setExecuting(session.id, true)
+          yield* manager.setExecuting(session.id, true)
           const stopSignal = Deferred.makeUnsafe<{ readonly message: string; readonly diagnostic: string }>()
           const released = Deferred.makeUnsafe<{ readonly forced: boolean }>()
+          const effectiveTimeoutMs = options.timeoutMs ?? manager.hooks.executeTimeoutMs ?? defaultExecuteTimeoutMs
+          let deadline: ExecutionDeadline | undefined
+          const stopRunning = (message: string, diagnostic: string) => {
+            deadline?.cancel()
+            Effect.runSync(Deferred.succeed(stopSignal, { message, diagnostic }))
+            Effect.runSync(Deferred.succeed(response, {
+              result: stoppedExecuteResult(message, diagnostic),
+              session: manager.createdSummary(session, resolved.created),
+            }))
+          }
+          if (effectiveTimeoutMs > 0) {
+            deadline = new ExecutionDeadline(effectiveTimeoutMs, () => {
+              stopRunning(
+                `Execute timed out after ${effectiveTimeoutMs}ms. Pass --timeout-ms <ms> (or timeoutMs in MCP) for longer runs, or 0 to disable.`,
+                "execute-timeout",
+              )
+            })
+          }
           const running: RunningExecution = {
             released,
-            stop: (message, diagnostic) => {
-              Effect.runSync(Deferred.succeed(stopSignal, { message, diagnostic }))
-              Effect.runSync(Deferred.succeed(response, {
-                result: stoppedExecuteResult(message, diagnostic),
-                session: manager.createdSummary(session, resolved.created),
-              }))
-            },
+            stop: stopRunning,
+            pauseTimeout: () => deadline ? deadline.pause() : () => {},
           }
           manager.runningExecutions.set(session.id, running)
           let forced = false
@@ -600,9 +679,10 @@ export class OpenCodeBrowserSessions {
               manager.replaceSandbox(session)
             }
             return stoppedExecuteResult(first.stop.message, first.stop.diagnostic)
-          }).pipe(Effect.ensuring(Effect.sync(() => {
+          }).pipe(Effect.ensuring(Effect.gen(function* () {
+            deadline?.cancel()
             if (manager.runningExecutions.get(session.id) === running) manager.runningExecutions.delete(session.id)
-            manager.setExecuting(session.id, false)
+            yield* manager.setExecuting(session.id, false)
             Effect.runSync(Deferred.succeed(released, { forced }))
           })))
           if (resolved.created && result.setupFailed) {
@@ -631,12 +711,17 @@ export class OpenCodeBrowserSessions {
         onFailure: (error) => (resolved.created
           ? manager.cleanupCreatedSession(session)
           : Effect.void).pipe(Effect.andThen(Deferred.fail(response, error))),
-        onSuccess: (value) => Deferred.succeed(response, value),
+        onSuccess: (value) => (options.removeAfterExecute
+          ? manager.cleanupCreatedSession(session)
+          : Effect.void).pipe(Effect.andThen(Deferred.succeed(response, value))),
       })))
       const workerFiber = yield* manager.forkTracked(worker, session.id)
       return yield* restore(Deferred.await(response)).pipe(
         Effect.onInterrupt(() => Effect.suspend(() => {
-          if (started) return Effect.void
+          if (started) {
+            manager.stopExecution(session.id, `Execute stopped because its caller disconnected.`, "client-disconnected")
+            return Effect.void
+          }
           cancelled = true
           return Fiber.interrupt(workerFiber).pipe(
             Effect.asVoid,
@@ -806,17 +891,62 @@ export class OpenCodeBrowserSessions {
     return this.sessionSummary(session)
   }
 
-  private setExecuting(id: string, executing: boolean): void {
-    if (executing) {
-      this.executing.add(id)
-    } else {
-      this.executing.delete(id)
-    }
-    try {
-      this.hooks.onExecuteStateChange?.(id, executing)
-    } catch (error) {
-      console.error("Session execute-state hook failed", error)
-    }
+  /** Reaps idle auto-named/oc-* sessions and disconnects idle explicit sessions. */
+  reapIdleSessions(options: {
+    readonly now?: number
+    readonly maxIdleMs: number
+    readonly isTargetBusy?: (targetId: string) => boolean
+  }): Effect.Effect<readonly string[]> {
+    const manager = this
+    return Effect.gen(function* () {
+      const now = options.now ?? Date.now()
+      const reaped: string[] = []
+      for (const session of Array.from(manager.sessions.values())) {
+        if (manager.isExecuting(session.id) || manager.hasPendingWork(session.id) || session.sandbox.networkStatus().active) {
+          continue
+        }
+        const updatedAtMs = Date.parse(session.updatedAt)
+        if (!Number.isFinite(updatedAtMs) || now - updatedAtMs < options.maxIdleMs) {
+          continue
+        }
+        const targetIds = manager.sessionRelayTargetIds(session)
+        if (session.target) targetIds.add(session.target.id)
+        if (Array.from(targetIds).some((id) => options.isTargetBusy?.(id))) continue
+        // Both paths clear state and disconnect CDP. Keep explicit names resumable;
+        // oc-* agent defaults are recreated on demand, so deleting them bounds the catalog.
+        const autoNamed = /^mcp-[0-9a-f]{6,}$/i.test(session.id) || /^[a-z]+-[a-z]+-\d{3}$/.test(session.id) || session.id.startsWith("oc-")
+        const done = yield* (autoNamed
+          ? manager.delete(session.id).pipe(Effect.map((r) => r.deleted))
+          : manager.reset(session.id).pipe(Effect.map(Boolean))
+        ).pipe(Effect.orElseSucceed(() => false))
+        if (done) reaped.push(session.id)
+      }
+      return reaped
+    })
+  }
+
+  /** Called once after startup inventory; unknown/user-owned tabs are never inferred. */
+  sweepOrphanedRelayTargets(): Effect.Effect<void> {
+    return Effect.forEach(this.hooks.getTargets?.() ?? [], (target) =>
+      target.owner === "relay" && target.opencodeBrowserSessionId && !this.sessions.has(target.opencodeBrowserSessionId)
+        ? this.closeRelayTarget(target.targetInfo.targetId).pipe(Effect.ignore)
+        : Effect.void, { discard: true })
+  }
+
+  private setExecuting(id: string, executing: boolean): Effect.Effect<void> {
+    return Effect.suspend(() => {
+      if (executing) {
+        this.executing.add(id)
+      } else {
+        this.executing.delete(id)
+      }
+      try {
+        return this.hooks.onExecuteStateChange?.(id, executing) ?? Effect.void
+      } catch (error) {
+        console.error("Session execute-state hook failed", error)
+      }
+      return Effect.void
+    })
   }
 
   private recordExecute(record: SessionExecuteRecord): Effect.Effect<void> {
@@ -953,15 +1083,27 @@ export class OpenCodeBrowserSessions {
   }
 
   private closeOpenCodeBrowserSessionSettled(session: OpenCodeBrowserSession): Effect.Effect<void> {
-    return session.sandbox.closeSettled().pipe(Effect.ignore)
+    return session.sandbox.closeSettled({ clearState: true }).pipe(Effect.ignore)
   }
 
   private releaseSessionTargetOwnership(session: OpenCodeBrowserSession): Effect.Effect<void> {
-    const target = session.target
-    if (!target) return Effect.void
-    this.notifyTargetOwnershipChange(this.targetOwnership.releaseTargetOwnership(target.id, session.id))
+    const ids = this.sessionRelayTargetIds(session)
+    if (session.target) ids.add(session.target.id)
+    for (const id of ids) this.notifyTargetOwnershipChange(this.targetOwnership.releaseTargetOwnership(id, session.id))
     delete session.target
     return Effect.void
+  }
+
+  private sessionRelayTargetIds(session: OpenCodeBrowserSession): Set<string> {
+    const ids = new Set(this.hooks.relayTargetIdsForSession?.(session.id) ?? [])
+    for (const target of this.hooks.getTargets?.() ?? []) {
+      if (target.owner === "relay" && target.opencodeBrowserSessionId === session.id) {
+        ids.add(target.targetInfo.targetId)
+      }
+    }
+    if (session.target?.owner === "relay") ids.add(session.target.id)
+    else if (session.target) ids.delete(session.target.id)
+    return ids
   }
 
   /**
@@ -970,10 +1112,22 @@ export class OpenCodeBrowserSessions {
    * are never closed, only released.
    */
   private closeSessionRelayTargets(session: OpenCodeBrowserSession): Effect.Effect<void> {
-    const ids = new Set(this.hooks.relayTargetIdsForSession?.(session.id) ?? [])
-    if (session.target?.owner === "relay") ids.add(session.target.id)
-    else if (session.target) ids.delete(session.target.id)
-    return Effect.forEach(ids, (targetId) => this.closeRelayTarget(targetId).pipe(Effect.ignore), { discard: true })
+    return Effect.gen({ self: this }, function* () {
+      const closed = new Set<string>()
+      const defaultId = session.target?.owner === "relay" ? session.target.id : undefined
+      if (defaultId) {
+        yield* this.closeRelayTarget(defaultId).pipe(Effect.ignore)
+        closed.add(defaultId)
+      }
+      while (true) {
+        const pending = Array.from(this.sessionRelayTargetIds(session)).filter((id) => !closed.has(id))
+        if (pending.length === 0) return
+        for (const targetId of pending) {
+          yield* this.closeRelayTarget(targetId).pipe(Effect.ignore)
+          closed.add(targetId)
+        }
+      }
+    })
   }
 
   private closeRelayTarget(targetId: string): Effect.Effect<void, Error> {
@@ -1088,6 +1242,7 @@ export class OpenCodeBrowserSessions {
     const manager = this
     return Effect.gen(function* () {
       if (manager.sessions.get(session.id) !== session) return
+      yield* manager.closeSessionRelayTargets(session)
       manager.sessions.delete(session.id)
       yield* manager.releaseSessionTargetOwnership(session)
       yield* manager.closeOpenCodeBrowserSession(session)
