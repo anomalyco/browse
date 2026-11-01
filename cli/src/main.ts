@@ -6,7 +6,7 @@
 // `opencode-browser mcp` runs the MCP server over stdio (as does the bundle invoked as `opencode-browser-mcp`).
 import path from "node:path"
 
-const setupCommands = new Set(["install", "uninstall", "extension", "pair", "rollback"])
+const setupCommands = new Set(["install", "uninstall", "extension", "pair", "rollback", "set"])
 const command = process.argv[2]
 const invokedAs = path.basename(process.argv[1] ?? "")
 
@@ -37,6 +37,8 @@ if (command === "--version" || command === "-v") {
     --no-wait                    Don't wait for the extension to connect
   extension                      Show the unpacked extension folder (for "Load unpacked")
   pair                           Print the pairing code the Chrome Web Store extension asks for
+  set hostname <address>         Where the relay listens: 127.0.0.1 (this computer, the default) or 0.0.0.0
+                                 (browsers on other computers can connect too, after pairing)
   update [--check]               Update now. A git clone install pulls the newer commits (fast-forward only)
                                  and runs setup again; an npm install installs the newest version on its
                                  channel and switches to it; --check only says whether there's an update

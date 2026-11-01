@@ -133,7 +133,7 @@ function showRelayResult(result: AgentRelayState["status"] | "invalid-address" |
     "invalid-code": "That isn't a pairing code. Copy the one `npx @opencode/browse pair` prints on the relay's computer.",
     connected: `Connected and paired with the relay ${at}.`,
     connecting: `The relay ${at} hasn't answered yet. The status above updates when it does.`,
-    offline: `No relay answered ${at}. Check the address, that an agent has started the relay there, and that it runs with OPENCODE_BROWSER_HOST set to this address.`,
+    offline: `No relay answered ${at}. Check the address, that an agent has started the relay there, and that \`npx @opencode/browse set hostname 0.0.0.0\` was run there.`,
     unpaired: "Enter the pairing code from the relay's computer.",
     untrusted: `The relay ${at} didn't accept this pairing code. Run \`npx @opencode/browse pair\` there and paste the code it prints.`,
     conflict: `The relay ${at} answered, but Browse in another browser or profile is connected to it.`,

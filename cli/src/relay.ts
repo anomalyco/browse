@@ -25,7 +25,6 @@ import {
   closeWebSocketServer,
   dataUrlDocument,
   chromeExtensionOriginForPath,
-  defaultHost,
   defaultPort,
   formatHostForUrl,
   getIdText,
@@ -44,6 +43,7 @@ import {
   validateHostHeader,
   validateWebSocketOrigin,
 } from "./relay-helpers.ts"
+import { isLocalPeer, relayHostname } from "./relay-config.ts"
 import { ensurePrivateDirectory, pairingCode, pairingProof, relayToken, relayTokenQueryParam, secretsEqual, consumePairingTicket, peekPairingTicket, wrapPairingCode } from "./relay-secrets.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
 import { GhostCursorTabs, ghostCursorCommandMethod } from "./ghost-cursor.ts"
@@ -199,7 +199,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   readonly sessionCatalogPath?: string | null
   readonly additionalExtensionOrigins?: readonly string[]
 } = {}) {
-  const host = defaultHost
+  // `browse set hostname`: where the relay listens. This computer's clients use 127.0.0.1 either way; connections
+  // from other computers only get the extension link (isLocalPeer).
+  const listenHost = relayHostname()
+  const host = "127.0.0.1"
   const port = options.port ?? defaultPort
   const releaseTargetGraceMs = Math.max(0, options.releaseTargetGraceMs ?? 10_000)
   const browserId = crypto.randomUUID()
@@ -798,6 +801,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     Date.now() - lastAgentActivity >= autoUpdateIdleMs
   let autoUpdater: ReturnType<typeof createAutoUpdater> | undefined
   const httpServer = http.createServer((request, response) => {
+    if (!isLocalPeer(request.socket)) {
+      response.writeHead(404).end()
+      return
+    }
     if (!relayReady) {
       response.writeHead(503, { "content-type": "application/json; charset=utf-8", "retry-after": "1" })
       response.end(JSON.stringify({ error: "Browse relay is starting", code: "relay-starting" }))
@@ -820,15 +827,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   // listenHttpServer handles errors only until the server listens; later ones (EMFILE on accept) would otherwise be
   // unhandled and crash the relay.
   httpServer.on("error", (error) => relayLog("http.error", { error: error.message, code: (error as NodeJS.ErrnoException).code }))
-  // OPENCODE_BROWSER_HOST (a Tailscale or LAN address of this machine) lets a browser on another computer connect: the
-  // relay also listens there, for the extension's WebSocket only. Agents, the CLI and CDP clients stay on 127.0.0.1.
-  const extensionHost = Option.getOrUndefined(yield* Config.option(Config.String("OPENCODE_BROWSER_HOST")))?.trim()
-  const extensionServer = extensionHost && !["127.0.0.1", "localhost", "::1", "[::1]"].includes(extensionHost.toLowerCase())
-    ? http.createServer((_request, response) => {
-        response.writeHead(404).end()
-      })
-    : undefined
-  extensionServer?.on("error", (error) => relayLog("extension-host.error", { error: error.message, code: (error as NodeJS.ErrnoException).code }))
 
   const debugEnabled = yield* Config.Boolean("OPENCODE_BROWSER_DEBUG").pipe(Config.withDefault(false))
   const debugLog = debugEnabled ? (line: string) => console.error(`[bc ${new Date().toISOString().slice(11, 23)}] ${line}`) : undefined
@@ -1007,38 +1005,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     extensionRpc.close()
     yield* closeWebSocketServer(websocketServer).pipe(logCloseError("Failed to close websocket server"))
     yield* closeHttpServer(httpServer).pipe(logCloseError("Failed to close http server"))
-    if (extensionServer) yield* closeHttpServer(extensionServer).pipe(logCloseError("Failed to close extension host server"))
-  })
-
-  /** The extension's WebSocket. It proves itself with the pairing handshake once connected; there is no token for it. */
-  const upgradeExtension = (request: http.IncomingMessage, socket: stream.Duplex, head: Buffer) => {
-    const origin = Array.isArray(request.headers.origin) ? request.headers.origin[0] : request.headers.origin
-    const originError = validateWebSocketOrigin({
-      origin,
-      requireChromeExtension: true,
-      additionalChromeExtensionOrigins,
-    })
-    if (originError) {
-      sendUpgradeError({ socket, status: 403, message: originError })
-      return
-    }
-    websocketServer.handleUpgrade(request, socket, head, (websocket) => {
-      websocketServer.emit("connection", websocket, request)
-    })
-  }
-
-  // No Host check here: only a chrome-extension origin gets through, which web pages (and DNS rebinding) can't send,
-  // and the browser may name this machine by its Tailscale IP or its MagicDNS name.
-  extensionServer?.on("upgrade", (request, socket, head) => {
-    if (!relayReady) {
-      sendUpgradeError({ socket, status: 404, message: "Browse relay is starting" })
-      return
-    }
-    if (new URL(request.url ?? "/", endpointUrl).pathname !== "/extension") {
-      socket.destroy()
-      return
-    }
-    upgradeExtension(request, socket, head)
   })
 
   httpServer.on("upgrade", (request, socket, head) => {
@@ -1046,15 +1012,34 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       sendUpgradeError({ socket, status: 404, message: "Browse relay is starting" })
       return
     }
-    const hostError = validateHostHeader({ hostHeader: request.headers.host, host, port })
+    const requestUrl = new URL(request.url ?? "/", endpointUrl)
+    const local = isLocalPeer(request.socket)
+    // Another computer reaches the extension link only. The browser there may name this machine any way it likes (a
+    // Tailscale IP or name), so its Host isn't checked: the chrome-extension origin and pairing are what count.
+    if (!local && requestUrl.pathname !== "/extension") {
+      socket.destroy()
+      return
+    }
+    const hostError = local ? validateHostHeader({ hostHeader: request.headers.host, host, port }) : undefined
     if (hostError) {
       sendUpgradeError({ socket, status: 403, message: hostError })
       return
     }
-    const requestUrl = new URL(request.url ?? "/", endpointUrl)
     const origin = Array.isArray(request.headers.origin) ? request.headers.origin[0] : request.headers.origin
     if (requestUrl.pathname === "/extension") {
-      upgradeExtension(request, socket, head)
+      // The extension proves itself with the pairing handshake once connected; there is no token for it.
+      const originError = validateWebSocketOrigin({
+        origin,
+        requireChromeExtension: true,
+        additionalChromeExtensionOrigins,
+      })
+      if (originError) {
+        sendUpgradeError({ socket, status: 403, message: originError })
+        return
+      }
+      websocketServer.handleUpgrade(request, socket, head, (websocket) => {
+        websocketServer.emit("connection", websocket, request)
+      })
       return
     }
     if (!hasRelayToken(request, authToken) && !secretsEqual(authToken, requestUrl.searchParams.get(relayTokenQueryParam) ?? undefined)) {
@@ -2286,18 +2271,12 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
   }
 
-  yield* Effect.catch(listenHttpServer({ server: httpServer, host, port }), (error) => {
+  yield* Effect.catch(listenHttpServer({ server: httpServer, host: listenHost, port }), (error) => {
     return Effect.gen(function* () {
       yield* cleanup()
       return yield* Effect.fail(error)
     })
   })
-  // An address that isn't up (Tailscale stopped) leaves the relay working for this machine's browser.
-  if (extensionServer && extensionHost)
-    yield* listenHttpServer({ server: extensionServer, host: extensionHost, port }).pipe(
-      Effect.tap(() => Effect.sync(() => relayLog("extension-host.listening", { host: extensionHost, port }))),
-      Effect.catch((error) => Effect.sync(() => relayLog("extension-host.error", { host: extensionHost, error: error.message }))),
-    )
   // Execute files directories of relays and CLI processes that died without their exit hook.
   yield* Effect.sync(() => pruneStaleExecuteFilesDirectories())
 

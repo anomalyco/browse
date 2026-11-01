@@ -644,31 +644,34 @@ async function settingsScene(options: { readonly relayPort: number; readonly rel
   }
 }
 
-// OPENCODE_BROWSER_HOST stands in for a Tailscale address with 127.0.0.2, which Linux routes to loopback (macOS doesn't).
-describe.skipIf(process.platform !== "linux")("a browser on another computer (OPENCODE_BROWSER_HOST)", () => {
+// `set hostname 0.0.0.0`, reached through this machine's own network address: a connection from it isn't loopback,
+// so the relay treats it as another computer.
+const lanAddress = Object.values(os.networkInterfaces()).flat().find((address) => address?.family === "IPv4" && !address.internal)?.address
+describe.skipIf(lanAddress === undefined)("a browser on another computer (hostname 0.0.0.0)", () => {
   const remoteHome = fs.mkdtempSync(path.join(os.tmpdir(), "browse-remote-"))
   let remote: Awaited<ReturnType<typeof startRelay>> | undefined
   beforeAll(async () => {
-    remote = await startRelay(remoteHome, { OPENCODE_BROWSER_HOST: "127.0.0.2" })
+    fs.writeFileSync(path.join(remoteHome, "config.json"), JSON.stringify({ hostname: "0.0.0.0" }))
+    remote = await startRelay(remoteHome)
   }, 20_000)
   afterAll(async () => {
     await stopRelay(remote?.child)
     fs.rmSync(remoteHome, { recursive: true, force: true })
   })
 
-  test("the extension pairs over that address, and a wrong code is refused there too", async () => {
-    const extension = new FakeExtension(pairingCode(remoteHome), remote!.port, "127.0.0.2")
+  test("the extension pairs over the network, and a wrong code is refused there too", async () => {
+    const extension = new FakeExtension(pairingCode(remoteHome), remote!.port, lanAddress)
     expect(await extension.pair()).toBe(true)
     extension.socket.close()
     await Bun.sleep(100)
-    const impostor = new FakeExtension(pairingCode(fs.mkdtempSync(path.join(remoteHome, "other-"))), remote!.port, "127.0.0.2")
+    const impostor = new FakeExtension(pairingCode(fs.mkdtempSync(path.join(remoteHome, "other-"))), remote!.port, lanAddress)
     expect(await impostor.pair({ answerAnyway: true })).toBe(false)
     await Bun.sleep(100)
     expect(impostor.closeCode).toBe(4006)
   })
 
-  test("only the extension link is served there: no HTTP API, no CDP, no web pages", async () => {
-    const remoteBase = `http://127.0.0.2:${remote!.port}`
+  test("only the extension link is served to the network: no HTTP API, no CDP, no web pages", async () => {
+    const remoteBase = `http://${lanAddress}:${remote!.port}`
     expect((await fetch(`${remoteBase}/version`)).status).toBe(404)
     expect((await fetch(`${remoteBase}/json/version`, { headers: { authorization: `Bearer ${remote!.token}` } })).status).toBe(404)
     const refused = (url: string, origin?: string) =>
@@ -680,8 +683,8 @@ describe.skipIf(process.platform !== "linux")("a browser on another computer (OP
         })
         socket.once("error", () => resolve(true))
       })
-    expect(await refused(`ws://127.0.0.2:${remote!.port}/devtools/browser/x`)).toBe(true)
-    expect(await refused(`ws://127.0.0.2:${remote!.port}/extension`, "https://evil.example")).toBe(true)
+    expect(await refused(`ws://${lanAddress}:${remote!.port}/devtools/browser/x`)).toBe(true)
+    expect(await refused(`ws://${lanAddress}:${remote!.port}/extension`, "https://evil.example")).toBe(true)
     // This computer's agents still use 127.0.0.1.
     expect((await fetch(`http://127.0.0.1:${remote!.port}/version`)).ok).toBe(true)
   })

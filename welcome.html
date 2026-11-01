@@ -127,9 +127,9 @@
       <section id="relay">
         <h2>Relay on another computer</h2>
         <p>
-          When opencode runs on another computer, start its relay with <code>OPENCODE_BROWSER_HOST</code> set to that
-          computer's address (its Tailscale IP or name), then enter the same address here with the code
-          <code>npx @opencode/browse pair</code> prints there. Leave the address empty for this computer.
+          When opencode runs on another computer, run <code>npx @opencode/browse set hostname 0.0.0.0</code> there,
+          then enter that computer's address (its Tailscale IP or name) and the pairing code it prints. Leave the
+          address empty for this computer.
         </p>
         <form class="relay-form" id="relay-form">
           <label>

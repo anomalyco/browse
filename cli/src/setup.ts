@@ -12,13 +12,14 @@
 import { spawn, spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
-import { homedir } from "node:os"
+import { homedir, networkInterfaces } from "node:os"
 import path from "node:path"
 import { createInterface } from "node:readline/promises"
 import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse } from "jsonc-parser"
 import { describeAutoUpdate, autoUpdateStatus, installVersion, pruneVersions, readCurrent, runtimeLayout, switchVersion, updateState, compareVersions, versionEntry } from "./auto-update.ts"
 import { cliCommand, dataRoot, installCommand, STORE_LISTED, storeConfig } from "./paths.ts"
+import { parseHostname, readRelayConfig, writeRelayConfig } from "./relay-config.ts"
 import { formatPairingCode, mintPairingTicket, pairingCode, relayAuthorization, writeExtensionPairing } from "./relay-secrets.ts"
 import { opencodeBrowserVersion } from "./version.ts"
 
@@ -513,6 +514,34 @@ function pair() {
   log("Keep it private: with it, a program could pose as the relay to your browser.")
 }
 
+/** `set hostname <127.0.0.1|0.0.0.0>`: saves where the relay listens and restarts a running relay to apply it. */
+async function set(args: string[]) {
+  const [key, value] = args
+  const hostname = parseHostname(value)
+  if (key !== "hostname" || hostname === undefined) {
+    log(`Usage: ${cliCommand("set hostname <127.0.0.1|0.0.0.0>")}`)
+    log("  127.0.0.1  only browsers on this computer can connect (the default)")
+    log("  0.0.0.0    browsers on other computers can connect too, after pairing")
+    process.exitCode = 1
+    return
+  }
+  writeRelayConfig({ ...readRelayConfig(), hostname })
+  log(`✓ hostname is ${hostname}`)
+  const running = await fetch(`${relayBase()}/version`, { signal: AbortSignal.timeout(2000) }).then((response) => response.ok, () => false)
+  if (running) {
+    const restarted = spawnSync(process.execPath, [process.argv[1]!, "relay", "restart"], { stdio: "inherit" })
+    if (restarted.status !== 0) log(`! The relay is still running with the old hostname. Run \`${cliCommand("relay restart --force")}\` to apply it.`)
+  }
+  if (hostname === "127.0.0.1") return
+  const tailscale = Object.values(networkInterfaces()).flat().find((address) => address?.family === "IPv4" && /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(address.address))?.address
+  log("")
+  log("In the browser on the other computer, open Browse's options (right-click its toolbar button, then Options),")
+  log("and under Relay on another computer enter:")
+  log(`  Address       ${tailscale ?? "this computer's address"}`)
+  log(`  Pairing code  ${formatPairingCode(pairingCode())}`)
+  log("The connection isn't encrypted by Browse: use it over Tailscale or a LAN you trust, not the open internet.")
+}
+
 /** Stored secret profiles are the one thing uninstall deletes that can't be recaptured without the user. */
 async function confirmSecretRemoval(args: string[]) {
   const secrets = path.join(files.dir, "secrets")
@@ -952,6 +981,7 @@ export async function runSetup(command: string, args: string[]) {
   if (command === "extension") return extension()
   if (command === "uninstall") return uninstall(args)
   if (command === "pair") return pair()
+  if (command === "set") return set(args)
   if (command === "rollback") {
     const { runRollback } = await import("./runtime-update.ts")
     return runRollback(args)
