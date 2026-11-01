@@ -1,12 +1,26 @@
 # Releasing browse
 
 One version ships two artifacts: the Chrome Web Store extension (`opencode-browser-<version>.zip`) and the npm package
-`@opencode/browse` (`opencode-browse-<version>.tgz`, the CLI, relay and MCP server). `bun run release <version>` cuts
-it locally; pushing the tag runs [the release workflow](.github/workflows/release.yml), which publishes after a person
-approves.
+`@opencode/browse` (`opencode-browse-<version>.tgz`, the CLI, relay and MCP server). There are three channels, the way
+Deadbolt and OpenCode release:
+
+| Channel | Starts from | Version | Publishes |
+| --- | --- | --- | --- |
+| `dev` | every push to `main` (not Markdown-only) | `<next>-dev.<run>`, e.g. `0.2.1-dev.57` | npm `dev`, no approval. No store upload, no GitHub release |
+| `beta` | `bun run release 0.2.0-beta.1` (tag `v0.2.0-beta.1`) | as tagged | npm `beta`, the unlisted beta store item, a GitHub prerelease; approved |
+| `latest` | `bun run release [patch\|minor\|major]` on `main` (tag `v0.2.0`) | as tagged | npm `latest`, the public store item, a GitHub release; approved |
+
+`<next>` is the release after the one in `cli/package.json` (the next patch, or the beta's own version after a beta),
+so dev builds sort above the last release and below the next one, and each run is newer than the last
+(`scripts/version.ts`; a rerun adds `.<attempt>`). The dev version is stamped into the checkout in CI and never
+committed. Installs follow the channel they came from: `npx @opencode/browse@dev install` stays on `dev`
+(`cli/src/auto-update.ts`), and a dev install loads its own unpacked extension rather than the store item.
+
+Dev builds skip the Chrome Web Store on purpose: every upload waits for review (hours to days) and resubmitting
+replaces the pending one, so a build per push would never get through. Deadbolt doesn't put dev builds in a store either.
 
 ```
-bun run release 0.2.0 ──► commit "release: v0.2.0" + tag v0.2.0 ──► git push origin main v0.2.0
+bun run release 0.2.0 ──► commit "release: v0.2.0" + tag v0.2.0 ──► git push --atomic origin main v0.2.0
                                                                           │
   verify: installs, typechecks, builds, tests, tag = versions, changelog  ▼
   build:  store zip + npm tarball + artifact checks + SHA256SUMS (once; every later job uses these files)
@@ -20,9 +34,10 @@ Both publish jobs check, with `gh attestation verify`, that the files they're ab
 workflow built and attested, not just consistent with the `SHA256SUMS` beside them. A stable tag fails the build when
 `CWS_ITEM_ID` isn't set, so every stable package knows its store item.
 
-`v1.2.3` is stable (npm `latest`, the public store item). `v1.2.3-beta.4` is a beta (npm `beta`, the unlisted beta store
-item, a GitHub prerelease). Run the workflow by hand (Actions → Release → Run workflow) with `dry_run` on for a full
-rehearsal that publishes nothing; `bun run release:check` does the build and checks locally.
+A push to `main` runs the same verify, build and attest jobs, then `publish-npm` in the `npm-dev` environment
+(no reviewers) with dist-tag `dev`, and stops. Run the workflow by hand (Actions → Release → Run workflow) with `dry_run`
+on for a full rehearsal that publishes nothing (from `main` it builds the dev version); `bun run release:check` does the
+build and checks locally.
 
 ## One-time setup
 
@@ -100,12 +115,19 @@ refresh token with GitHub's OIDC token.
      can approve.
    - **Deployment branches and tags** → *Selected branches and tags* → add a **tag** rule `v*`, so only release tags
      can use the environment's secrets.
-2. **Settings → Rules → Rulesets → New tag ruleset**: target `v*`, restrict creations, updates and deletions to
+2. **A third environment, `npm-dev`**, for the dev builds: no required reviewers (every push to `main` publishes, as in
+   Deadbolt), and *Selected branches and tags* → a **branch** rule `main` only. It holds no secret once npm trusted
+   publishing is set up.
+3. **Settings → Rules → Rulesets → New tag ruleset**: target `v*`, restrict creations, updates and deletions to
    maintainers, so only maintainers can start a release.
-3. **Settings → Actions → General**: turn on *Require actions to be pinned to a full-length commit SHA*. Every action in
+4. **Main.** Anyone who can push to `main` publishes a dev build, so protect it: **Settings → Rules → Rulesets → New
+   branch ruleset** on `main`, requiring pull requests and blocking force pushes, with maintainers allowed to bypass
+   (`bun run release` pushes the release commit to `main` directly). Add CODEOWNERS for `.github/` and `scripts/`.
+5. **Settings → Actions → General**: turn on *Require actions to be pinned to a full-length commit SHA*. Every action in
    both workflows already is.
 
-Secrets live only in these environments, and an approval gates every job that can read them. The workflow has no
+Secrets live only in these environments. An approval gates every stable and beta publish; dev builds trade that for
+a build per push, guarded by `main`'s ruleset and `npm-dev` admitting only `main`. The workflow has no
 `pull_request` trigger and starts with `permissions: {}`.
 
 ### 4. npm
@@ -115,15 +137,19 @@ Secrets live only in these environments, and an approval gates every job that ca
    **Granular**: read and write for the `@opencode` scope, expiring in 30 days. Then:
 
    ```sh
-   gh secret set NPM_TOKEN --env npm --repo anomalyco/browse
+   gh secret set NPM_TOKEN --env npm     --repo anomalyco/browse
+   gh secret set NPM_TOKEN --env npm-dev --repo anomalyco/browse
    ```
 
 3. Cut the first release (below). It creates `@opencode/browse` on npm.
-4. **Switch to trusted publishing.** On npmjs.com open `@opencode/browse` → **Settings** → **Trusted publishing** →
-   *GitHub Actions*: organization `anomalyco`, repository `browse`, workflow `release.yml`, environment `npm`. Then:
+4. **Switch to trusted publishing.** On npmjs.com open `@opencode/browse` → **Settings** → **Trusted publishing** and
+   add two *GitHub Actions* publishers (a package can have several), each allowed to `npm publish`: organization
+   `anomalyco`, repository `browse`, workflow `release.yml`, one with environment `npm` and one with environment
+   `npm-dev`. Pinning both to an environment means a workflow on any other branch can't publish. Then:
 
    ```sh
-   gh secret delete NPM_TOKEN --env npm --repo anomalyco/browse
+   gh secret delete NPM_TOKEN --env npm     --repo anomalyco/browse
+   gh secret delete NPM_TOKEN --env npm-dev --repo anomalyco/browse
    ```
 
    Revoke the token on npmjs.com. (The workflow only writes an `.npmrc` when `NPM_TOKEN` has a value, so with the secret
@@ -134,28 +160,31 @@ Secrets live only in these environments, and an approval gates every job that ca
 
 ## Cutting a release
 
-**Beta**, from any branch:
+**Dev** needs nothing: merge to `main`. Try it with `npx @opencode/browse@dev install`.
+
+**Stable**, from an up-to-date `main`:
 
 ```sh
-bun run release 0.2.0-beta.1   # the first run writes a draft changelog/0.2.0-beta.1.md and stops
-$EDITOR changelog/0.2.0-beta.1.md
-bun run release 0.2.0-beta.1   # bumps the versions, runs release:check, commits, tags v0.2.0-beta.1
-git push origin HEAD v0.2.0-beta.1
+bun run release            # patch (or minor, major, or an exact 0.2.0); the first run drafts changelog/<version>.md and stops
+$EDITOR changelog/0.2.1.md
+bun run release            # bumps the versions, runs release:check, commits "release: v0.2.1", tags v0.2.1,
+                           # then asks and runs git push --atomic origin main v0.2.1
 ```
 
-Open the run under **Actions → Release**, check the verify, build and attest jobs, then approve `npm` and
-`chrome-web-store`. Beta users install it with `npx @opencode/browse@beta install` (auto-update keeps them on the beta
-channel) and the unlisted beta item's link.
+`--no-push` stops after the tag and prints the push command; `--yes` pushes without asking. Open the run under
+**Actions → Release**, check the verify, build and attest jobs, then approve `npm` and `chrome-web-store`. The workflow
+refuses a stable tag that isn't on `main`.
 
-**Stable** works the same way, from `main`: `bun run release 0.2.0`, edit the changelog, run it again, then
-`git push origin main v0.2.0`. The workflow refuses a stable tag that isn't on `main`.
+**Beta** works the same way from any branch with an exact version: `bun run release 0.2.0-beta.1` (pushes the branch
+and the tag). Beta users install it with `npx @opencode/browse@beta install` (auto-update keeps them on the beta
+channel) and the unlisted beta item's link.
 
 The changelog follows the Anomaly format: frontmatter `date` and `summary`, then `## Major` (a `### Title`, a sentence
 or two, an optional `Icon: icons/<slug>.svg`), `## Improvements` and `## Fixes`, one line each, written for the person
 using it. `bun scripts/changelog.ts check <version>` lints it.
 
 After the run, the job summary shows the store review state (usually `PENDING_REVIEW`; review takes hours to a few
-days). npm users get the new version within a day: the relay checks once a day and switches when no agent is using the
+days). npm users get the new version within a day (dev installs too, for each dev build): the relay checks once a day and switches when no agent is using the
 browser.
 
 **If a step fails**, fix it and rerun the failed jobs. Publishing is idempotent: a version that's already on npm or

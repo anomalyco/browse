@@ -8,7 +8,8 @@
 //                                 between requests once current.json moves.
 //   auto-update.json              the user's mode and what the last check found
 //
-// The relay checks the registry for its channel's dist-tag (latest, or beta for a beta install) at most once a day.
+// The relay checks the registry for its channel's dist-tag (latest; beta for a beta install; dev for a dev build, which
+// every push to main publishes) at most once a day.
 // Mode "on" (default) installs a newer version into its own directory, verifies it (the installed package's integrity
 // is the one the registry published for that version, and it runs and reports that version), and once no agent is using
 // the browser, switches current.json and restarts the relay from the new version. "notify" only shows the update;
@@ -26,7 +27,7 @@ const DEFAULT_REGISTRY = "https://registry.npmjs.org"
 
 export const autoUpdateModes = ["on", "notify", "off"] as const
 export type AutoUpdateMode = (typeof autoUpdateModes)[number]
-export type Channel = "latest" | "beta"
+export type Channel = "latest" | "beta" | "dev"
 
 export type Layout = {
   readonly root: string
@@ -53,18 +54,26 @@ export const versionDirectory = (layout: Layout, version: string) => path.join(l
 export const versionEntry = (layout: Layout, version: string) =>
   path.join(versionDirectory(layout, version), "node_modules", "@opencode", "browse", "dist", "cli.mjs")
 
-export const channelOf = (version: string): Channel => (version.includes("-beta.") ? "beta" : "latest")
+export const channelOf = (version: string): Channel => (version.includes("-dev.") ? "dev" : version.includes("-beta.") ? "beta" : "latest")
 
-/** 1.2.3 and 1.2.3-beta.4, a beta below its release; anything else sorts as unknown (never newer). */
+/** A version auto-update installs: 1.2.3, 1.2.3-beta.4 or 1.2.4-dev.42 (1.2.4-dev.42.2 for a rerun). */
+export const UPDATE_VERSION = /^(\d+)\.(\d+)\.(\d+)(?:-(beta)\.(\d+)|-(dev)\.(\d+)(?:\.(\d+))?)?$/
+
+/**
+ * Orders versions as semver does for these shapes: a prerelease below its release, beta below dev, then by number.
+ * Anything else sorts as unknown (never newer).
+ */
 export function compareVersions(left: string, right: string): number {
   const parse = (value: string) => {
-    const match = /^(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?$/.exec(value)
-    return match ? [Number(match[1]), Number(match[2]), Number(match[3]), match[4] === undefined ? Number.POSITIVE_INFINITY : Number(match[4])] : undefined
+    const match = UPDATE_VERSION.exec(value)
+    if (!match) return undefined
+    const kind = match[4] ? 1 : match[6] ? 2 : 3
+    return [Number(match[1]), Number(match[2]), Number(match[3]), kind, Number(match[5] ?? match[7] ?? 0), Number(match[8] ?? 0)]
   }
   const a = parse(left)
   const b = parse(right)
   if (!a || !b) return 0
-  for (let index = 0; index < 4; index++) if (a[index] !== b[index]) return a[index]! < b[index]! ? -1 : 1
+  for (let index = 0; index < a.length; index++) if (a[index] !== b[index]) return a[index]! < b[index]! ? -1 : 1
   return 0
 }
 

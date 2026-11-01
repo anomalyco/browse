@@ -1,19 +1,43 @@
 // The one release version: cli/package.json, the root package.json and the extension manifest move together.
-// npm takes the version as is (0.1.0, 0.1.0-beta.2). Chrome's manifest `version` must be one to four dot-separated
-// integers, so a beta becomes 0.1.0.2 with `version_name` "0.1.0-beta.2" for display. Betas go to their own unlisted
-// store item (RELEASING.md), so a beta's four-part version never has to sort below the stable release that follows it.
+// npm takes the version as is (0.1.0, 0.1.0-beta.2, 0.1.1-dev.42). Chrome's manifest `version` must be one to four
+// dot-separated integers, so a beta becomes 0.1.0.2 with `version_name` "0.1.0-beta.2" for display. Betas go to their
+// own unlisted store item (RELEASING.md), so a beta's four-part version never has to sort below the stable release that
+// follows it. Dev builds never go to the store; their manifest carries the core version with the full name beside it.
+//
+//   bun scripts/version.ts set <version>                       writes the version into the three files
+//   bun scripts/version.ts dev --run <n> [--attempt <n>]       writes the dev version of this run and prints it
+import { readFile, writeFile } from "node:fs/promises"
+import path from "node:path"
+import { parseArgs } from "node:util"
 
-/** A stable release (1.2.3) or a beta (1.2.3-beta.4); nothing else is released. */
-export const RELEASE_VERSION = /^(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})(?:-beta\.([1-9]\d{0,4}))?$/
+/** A stable release (1.2.3), a beta (1.2.3-beta.4) or a dev build (1.2.4-dev.42, .2 on a rerun); nothing else ships. */
+export const RELEASE_VERSION = /^(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})(?:-beta\.([1-9]\d{0,4})|-dev\.([1-9]\d{0,9})(?:\.([1-9]\d{0,4}))?)?$/
 
-export type ReleaseVersion = { version: string; channel: "latest" | "beta"; manifest: { version: string; version_name?: string } }
+export type Channel = "latest" | "beta" | "dev"
+export type ReleaseVersion = { version: string; channel: Channel; manifest: { version: string; version_name?: string } }
 
 export function parseReleaseVersion(version: string): ReleaseVersion {
   const match = RELEASE_VERSION.exec(version)
   if (!match) throw new Error(`Not a release version: ${JSON.stringify(version)} (use 1.2.3 or 1.2.3-beta.4)`)
-  const [, major, minor, patch, beta] = match
+  const [, major, minor, patch, beta, dev] = match
+  const core = `${major}.${minor}.${patch}`
+  if (dev) return { version, channel: "dev", manifest: { version: core, version_name: version } }
   if (!beta) return { version, channel: "latest", manifest: { version } }
-  return { version, channel: "beta", manifest: { version: `${major}.${minor}.${patch}.${beta}`, version_name: version } }
+  return { version, channel: "beta", manifest: { version: `${core}.${beta}`, version_name: version } }
+}
+
+/**
+ * The dev build of a workflow run: the next stable version (the beta's own version after a beta, else the next patch)
+ * with -dev.<run number>, and .<attempt> on a rerun so no version is ever reused. Run numbers only grow and the base only
+ * moves forward with releases, so every dev build sorts above the one before it, as auto-update needs.
+ */
+export function devVersion(current: string, run: number, attempt = 1) {
+  const match = /^(\d+)\.(\d+)\.(\d+)(-beta\.\d+)?$/.exec(current)
+  if (!match) throw new Error(`cli/package.json version ${JSON.stringify(current)} isn't a stable or beta release`)
+  if (!Number.isSafeInteger(run) || run < 1 || !Number.isSafeInteger(attempt) || attempt < 1) throw new Error(`Invalid run ${run} (attempt ${attempt})`)
+  const [, major, minor, patch, beta] = match
+  const next = beta ? `${major}.${minor}.${patch}` : `${major}.${minor}.${Number(patch) + 1}`
+  return `${next}-dev.${run}${attempt > 1 ? `.${attempt}` : ""}`
 }
 
 /** The manifest fields for a package version; a development version (0.0.0-dev) maps to 0.0.0. */
@@ -35,4 +59,45 @@ export function applyManifestVersion(manifest: Record<string, unknown>, version:
   entries.splice(at, 0, ["version_name", fields.version_name])
   for (const key of Object.keys(manifest)) delete manifest[key]
   return Object.assign(manifest, Object.fromEntries(entries))
+}
+
+const root = path.resolve(import.meta.dir, "..")
+export const VERSION_FILES = ["cli/package.json", "package.json", "public/manifest.json"] as const
+
+async function updateJson(file: string, update: (data: Record<string, unknown>) => void) {
+  const full = path.join(root, file)
+  const data = JSON.parse(await readFile(full, "utf8")) as Record<string, unknown>
+  update(data)
+  await writeFile(full, JSON.stringify(data, null, 2) + "\n")
+}
+
+/** Writes one version into cli/package.json, package.json and public/manifest.json. */
+export async function setVersion(version: string) {
+  await updateJson("cli/package.json", (data) => void (data.version = version))
+  await updateJson("package.json", (data) => void (data.version = version))
+  await updateJson("public/manifest.json", (data) => void applyManifestVersion(data, version))
+}
+
+export const currentVersion = async () => (JSON.parse(await readFile(path.join(root, "cli", "package.json"), "utf8")) as { version: string }).version
+
+if (import.meta.main) {
+  const { positionals, values } = parseArgs({ allowPositionals: true, options: { run: { type: "string" }, attempt: { type: "string" } } })
+  const [command, argument] = positionals
+  try {
+    if (command === "set" && argument) {
+      parseReleaseVersion(argument)
+      await setVersion(argument)
+      console.log(argument)
+    } else if (command === "dev" && values.run) {
+      const version = devVersion(await currentVersion(), Number(values.run), Number(values.attempt ?? 1))
+      await setVersion(version)
+      console.log(version)
+    } else {
+      console.error("usage: bun scripts/version.ts set <version> | dev --run <n> [--attempt <n>]")
+      process.exit(2)
+    }
+  } catch (error) {
+    console.error(`✗ ${(error as Error).message}`)
+    process.exit(1)
+  }
 }

@@ -58,7 +58,7 @@ export type StoreConfig = {
   readonly id?: string
   /** The unlisted beta store item. */
   readonly betaId?: string
-  /** The item this install's channel uses: the beta item for a beta version (else the stable one). */
+  /** The item this install's channel uses: the beta item for a beta version, none for a dev build, else the stable one. */
   readonly channelId?: string
   /** Whether install sends new users to the store listing instead of loading the unpacked build. */
   readonly listed: boolean
@@ -75,7 +75,8 @@ export function storeConfig(env: NodeJS.ProcessEnv = process.env, baked = global
   const id = valid(env.OPENCODE_BROWSER_STORE_ID) ?? valid(baked?.id)
   const betaId = valid(env.OPENCODE_BROWSER_BETA_STORE_ID) ?? valid(baked?.betaId)
   const listedFlag = env.OPENCODE_BROWSER_STORE_LISTED !== undefined ? env.OPENCODE_BROWSER_STORE_LISTED === "true" : baked?.listed === true
-  const channelId = (version.includes("-beta.") ? betaId : undefined) ?? id
+  // Dev builds never reach the store, so a dev install loads its own unpacked build, which updates with the runtime.
+  const channelId = version.includes("-dev.") ? undefined : ((version.includes("-beta.") ? betaId : undefined) ?? id)
   return { ...(id ? { id } : {}), ...(betaId ? { betaId } : {}), ...(channelId ? { channelId } : {}), listed: !checkout && listedFlag && !!channelId }
 }
 

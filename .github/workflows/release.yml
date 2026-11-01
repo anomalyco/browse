@@ -1,16 +1,22 @@
-# Releases browse: the Chrome Web Store zip and the @opencode/browse npm package, from one tag.
+# Releases browse: the Chrome Web Store zip and the @opencode/browse npm package.
+#   push to main    dev:    <next>-dev.<run> (scripts/version.ts), npm dist-tag dev (environment npm-dev, no approval);
+#                           no store upload and no GitHub release
 #   v1.2.3          stable: npm dist-tag latest, the store item (vars.CWS_ITEM_ID)
 #   v1.2.3-beta.4   beta:   npm dist-tag beta, the unlisted beta store item (vars.CWS_BETA_ITEM_ID)
-#   workflow_dispatch with dry_run (default true): verify, build, check and attest, never publish
-# Tags come from `bun run release <version>` (scripts/release.ts). RELEASING.md has the one-time setup.
+#   workflow_dispatch with dry_run (default true): verify, build, check and attest, never publish; from main it builds
+#                   the dev version, and dry_run=false publishes it as a dev build
+# Tags come from `bun run release` (scripts/release.ts). RELEASING.md has the one-time setup.
 #
-# verify -> build -> attest -> publish-npm (environment npm) ---------+
-#                          \-> publish-cws (environment chrome-web-store) -> github-release
+# verify -> build -> attest -> publish-npm (environment npm, or npm-dev for dev) -----------------+
+#                          \-> publish-cws (environment chrome-web-store; not dev) -> github-release (not dev)
 # The artifacts are built once in `build` and passed along; nothing is rebuilt after the checks.
 name: Release
 
 on:
   push:
+    branches: [main]
+    # Docs alone cut no dev build (tag pushes ignore paths).
+    paths-ignore: ["**/*.md"]
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
       - "v[0-9]+.[0-9]+.[0-9]+-beta.[0-9]+"
@@ -25,7 +31,8 @@ permissions: {}
 
 concurrency:
   group: release-${{ github.ref }}
-  # Never cancel a release halfway through publishing.
+  # Never cancel a release halfway through publishing. Of the main pushes that land during a dev run, only the newest
+  # waits (GitHub replaces an older pending run in the group), so a busy main still publishes about once per run.
   cancel-in-progress: false
 
 jobs:
@@ -62,16 +69,24 @@ jobs:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
           DRY_RUN: ${{ inputs.dry_run }}
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
-          version="$(node -p 'require("./cli/package.json").version')"
+          if [ "$REF_TYPE" = branch ] && [ "$REF_NAME" = main ]; then
+            # Stamped into the checkout only (never committed); the build job stamps the same version.
+            version="$(bun scripts/version.ts dev --run "$RUN_NUMBER" --attempt "$RUN_ATTEMPT")"
+          else
+            version="$(node -p 'require("./cli/package.json").version')"
+          fi
           case "$version" in
+            *-dev.*) channel=dev ;;
             *-beta.*) channel=beta ;;
             *) channel=latest ;;
           esac
           publish=false
-          if [ "$REF_TYPE" = tag ] && { [ "$EVENT" = push ] || [ "$DRY_RUN" = false ]; }; then publish=true; fi
-          if [ "$EVENT" = workflow_dispatch ] && [ "$DRY_RUN" = false ] && [ "$REF_TYPE" != tag ]; then
-            echo "::error::A real (dry_run=false) release must run on a v* tag, not ${REF_NAME}."
+          if [ "$EVENT" = push ] || [ "$DRY_RUN" = false ]; then publish=true; fi
+          if [ "$publish" = true ] && [ "$REF_TYPE" != tag ] && [ "$channel" != dev ]; then
+            echo "::error::A real (dry_run=false) release must run on a v* tag (or main, for a dev build), not ${REF_NAME}."
             exit 1
           fi
           {
@@ -99,8 +114,12 @@ jobs:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
           VERSION: ${{ steps.version.outputs.version }}
+          CHANNEL: ${{ steps.version.outputs.channel }}
         run: |
-          if [ "$REF_TYPE" = tag ]; then
+          if [ "$CHANNEL" = dev ]; then
+            # Dev builds have no changelog entry; the GitHub commit is their notes.
+            bun scripts/release-check.ts --versions-only
+          elif [ "$REF_TYPE" = tag ]; then
             bun scripts/release-check.ts --versions-only --tag "$REF_NAME" --require-changelog
             bun scripts/changelog.ts check "$VERSION"
           else
@@ -153,6 +172,12 @@ jobs:
       - name: Install (cli)
         run: bun install --frozen-lockfile
         working-directory: cli
+
+      - name: Stamp the dev version
+        if: needs.verify.outputs.channel == 'dev'
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: bun scripts/version.ts set "$VERSION"
 
       # The store zip, the npm tarball (with the store item IDs baked in, cli/build.ts), the artifact checks and
       # SHA256SUMS: the same script as `bun run release:check`.
@@ -228,9 +253,10 @@ jobs:
     if: needs.verify.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Required reviewers approve before this job starts (RELEASING.md).
+    # Stable and beta: required reviewers approve before this job starts. Dev: npm-dev has no reviewers (every push to
+    # main publishes) and admits only main (RELEASING.md).
     environment:
-      name: npm
+      name: ${{ needs.verify.outputs.channel == 'dev' && 'npm-dev' || 'npm' }}
       url: https://www.npmjs.com/package/@opencode/browse/v/${{ needs.verify.outputs.version }}
     permissions:
       # npm trusted publishing (OIDC) and the provenance statement.
@@ -286,7 +312,8 @@ jobs:
   publish-cws:
     name: Publish to the Chrome Web Store
     needs: [verify, attest]
-    if: needs.verify.outputs.publish == 'true'
+    # Dev builds never go to the store: every upload waits for review, and dev installs load the unpacked build.
+    if: needs.verify.outputs.publish == 'true' && needs.verify.outputs.channel != 'dev'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment:
@@ -348,7 +375,7 @@ jobs:
   github-release:
     name: GitHub release
     needs: [verify, attest, publish-npm, publish-cws]
-    if: needs.verify.outputs.publish == 'true'
+    if: needs.verify.outputs.publish == 'true' && needs.verify.outputs.channel != 'dev'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
