@@ -13,6 +13,7 @@ import { spawn, spawnSync } from "node:child_process"
 import { parseArgs } from "node:util"
 import { chromium } from "patchright-core"
 import { relayToken } from "../src/relay-secrets.ts"
+import { bundledPairingCodeTtlMs, mintPairingCode, writeExtensionPairing } from "../src/browser-pairing.ts"
 
 async function freePort(): Promise<number> {
   const server = net.createServer()
@@ -47,7 +48,8 @@ const env: NodeJS.ProcessEnv = { ...process.env, HOME: root, OPENCODE_BROWSER_HO
 delete env.OPENCODE_BROWSER_ALLOW_NODE
 delete env.OPENCODE_BROWSER_ALLOW_FOREGROUND
 fs.mkdirSync(path.join(runtime, "dist"), { recursive: true })
-fs.cpSync(path.join(cliRoot, "extension"), extension, { recursive: true })
+// The extension build (`bun run build` at the repo root); the npm package doesn't ship it.
+fs.cpSync(path.join(cliRoot, "..", "dist"), extension, { recursive: true })
 fs.copyFileSync(path.join(cliRoot, "dist/cli.mjs"), path.join(runtime, "dist/cli.mjs"))
 fs.symlinkSync(path.join(cliRoot, "node_modules"), path.join(runtime, "node_modules"), "dir")
 for (const entry of fs.readdirSync(extension, { recursive: true })) {
@@ -55,8 +57,8 @@ for (const entry of fs.readdirSync(extension, { recursive: true })) {
   if (/\.(js|json)$/.test(file)) fs.writeFileSync(file, fs.readFileSync(file, "utf8").replaceAll("19988", String(port)))
 }
 const cli = path.join(runtime, "dist/cli.mjs")
-assert.equal(spawnSync("node", [cli, "pair"], { env, stdio: "ignore" }).status, 0)
-assert.ok(fs.existsSync(path.join(extension, "relay-pairing.json")))
+// A one-time code in the folder, as install leaves it: the extension exchanges it for its key.
+writeExtensionPairing(extension, mintPairingCode(home, { ttlMs: bundledPairingCodeTtlMs }))
 const log = fs.openSync(path.join(root, "relay.log"), "w", 0o600)
 const relay = spawn("node", [cli, "serve"], { env, stdio: ["ignore", log, log] })
 let browser: Awaited<ReturnType<typeof chromium.launchPersistentContext>> | undefined
