@@ -36,6 +36,29 @@ export type AgentRelayState = {
   skew?: ProtocolSkew
   /** The relay refused install's one-time pairing link (expired or already used). */
   ticketRejected?: boolean
+  /** Where the extension connects, `host:port`, and whether that's another computer (the status page's relay address). */
+  relay: { address: string; remote: boolean }
+}
+
+/** chrome.storage.local, set on the status page: a relay on another computer, `host` or `host:port`. Unset: this one. */
+export const RELAY_ADDRESS_KEY = "agentRelayAddress"
+export type RelayAddress = { host: string; port?: number }
+/**
+ * A typed or stored relay address (`100.64.0.2`, `devbox.tailnet.ts.net:19988`, `[fd7a::1]`, an optional `ws://`), or
+ * undefined when it isn't one. Empty means this computer: `{ host: "127.0.0.1" }`.
+ */
+export function relayAddress(input: unknown): RelayAddress | undefined {
+  if (input === undefined || input === null) return { host: "127.0.0.1" }
+  if (typeof input !== "string") return undefined
+  const value = input.trim().replace(/^wss?:\/\//i, "").replace(/\/(extension)?$/, "")
+  if (value === "") return { host: "127.0.0.1" }
+  try {
+    const url = new URL(`ws://${value}`)
+    if (url.username || url.password || url.pathname !== "/" || url.search || url.hash || !url.hostname) return undefined
+    return url.port ? { host: url.hostname, port: Number(url.port) } : { host: url.hostname }
+  } catch {
+    return undefined
+  }
 }
 
 /** update-cli: this extension is newer than the relay; update-extension: it's older than the relay supports. */
@@ -103,7 +126,11 @@ export type ToStatusPage =
   | { type: "agents"; state: AgentRelayState }
   | { type: "pairing.result"; ok: boolean }
   | { type: "pairing.ticket.result"; ok: boolean }
+  /** The outcome of `relay.connect`: the status the new connection settled on, or why nothing was tried. */
+  | { type: "relay.result"; status: AgentRelayStatus | "invalid-address" | "invalid-code"; address?: string }
 export type FromStatusPage =
+  /** Save the relay address (empty: this computer) and, when given, a pairing code; reconnect and report how it went. */
+  | { type: "relay.connect"; address: string; code: string }
   | { type: "agents.reconnect" }
   | { type: "tabs.cleanup" }
   | { type: "pairing.set"; code: string }

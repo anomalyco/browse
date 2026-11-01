@@ -12,6 +12,7 @@ import {
   HANDOFF_NOTIFICATIONS_KEY,
   HUMAN_INPUT_KEY,
   IDLE_MINUTES_KEY,
+  RELAY_ADDRESS_KEY,
   STATUS_PORT,
   agentCursor,
   agentGrouping,
@@ -45,10 +46,17 @@ const connect = () => {
       if (message.ok) element<HTMLInputElement>("pairing-code").value = ""
       flash(button, message.ok ? "Paired" : "Not a code")
     }
+    if (message.type === "relay.result") showRelayResult(message.status, message.address)
   })
   // The worker can stop and restart at any time; follow it.
   next.onDisconnect.addListener(() => {
     void chrome.runtime.lastError
+    // A Connect in flight lost its answer with the worker; the status above still shows how it went.
+    const button = document.querySelector<HTMLButtonElement>("#relay-form button")
+    if (button) {
+      button.disabled = false
+      button.textContent = "Connect"
+    }
     if (port === next) setTimeout(connect, 300)
   })
 }
@@ -114,10 +122,50 @@ function showPairingNote(text: string) {
 
 const capitalized = (text: string) => text.charAt(0).toUpperCase() + text.slice(1)
 
+/** What the relay form's Connect led to, under the form. */
+function showRelayResult(result: AgentRelayState["status"] | "invalid-address" | "invalid-code", address = "") {
+  const button = element<HTMLFormElement>("relay-form").querySelector("button")!
+  button.disabled = false
+  button.textContent = "Connect"
+  const at = address.startsWith("127.0.0.1:") ? "on this computer" : `at ${address}`
+  const text = {
+    "invalid-address": "That isn't an address. Use a host or IP, with an optional port: 100.64.0.2 or devbox.tailnet.ts.net:19988.",
+    "invalid-code": "That isn't a pairing code. Copy the one `npx @opencode/browse pair` prints on the relay's computer.",
+    connected: `Connected and paired with the relay ${at}.`,
+    connecting: `The relay ${at} hasn't answered yet. The status above updates when it does.`,
+    offline: `No relay answered ${at}. Check the address, that an agent has started the relay there, and that it runs with OPENCODE_BROWSER_HOST set to this address.`,
+    unpaired: "Enter the pairing code from the relay's computer.",
+    untrusted: `The relay ${at} didn't accept this pairing code. Run \`npx @opencode/browse pair\` there and paste the code it prints.`,
+    conflict: `The relay ${at} answered, but Browse in another browser or profile is connected to it.`,
+    incompatible: `Paired with the relay ${at}, but its version doesn't match this extension. See the status above.`,
+  }[result]
+  const note = element("relay-result")
+  note.textContent = text
+  note.hidden = false
+  if (result === "connected") element<HTMLInputElement>("relay-code").value = ""
+}
+// The saved address, kept in step with storage (another status page may change it).
+const showRelayAddress = (value: unknown) => (element<HTMLInputElement>("relay-address").value = typeof value === "string" ? value : "")
+void chrome.storage.local.get(RELAY_ADDRESS_KEY).then((stored) => showRelayAddress(stored[RELAY_ADDRESS_KEY]))
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && RELAY_ADDRESS_KEY in changes) showRelayAddress(changes[RELAY_ADDRESS_KEY]?.newValue)
+})
+element<HTMLFormElement>("relay-form").addEventListener("submit", (event) => {
+  event.preventDefault()
+  const button = element<HTMLFormElement>("relay-form").querySelector("button")!
+  button.disabled = true
+  button.textContent = "Connecting…"
+  element("relay-result").hidden = true
+  send({ type: "relay.connect", address: element<HTMLInputElement>("relay-address").value, code: element<HTMLInputElement>("relay-code").value })
+})
+
 function describe(state: AgentRelayState) {
   const tabs = state.tabs.length
-  if (state.status === "connected")
-    return tabs ? `Connected. Agents are using ${tabs} tab${tabs === 1 ? "" : "s"}.` : "Connected. No agent is using a tab yet."
+  const remote = state.relay.remote ? state.relay.address : undefined
+  if (state.status === "connected") {
+    const connected = remote ? `Connected to the relay at ${remote}.` : "Connected."
+    return tabs ? `${connected} Agents are using ${tabs} tab${tabs === 1 ? "" : "s"}.` : `${connected} No agent is using a tab yet.`
+  }
   if (state.status === "connecting") return "Connecting to the relay…"
   if (state.status === "conflict")
     return "Browse in another browser or profile is connected. Close it there (or quit that browser), then click Reconnect."
@@ -130,10 +178,13 @@ function describe(state: AgentRelayState) {
   if (state.status === "incompatible")
     return "This extension and the installed CLI don't match. Run the install command again, then click Reconnect."
   if (state.status === "unpaired") return "Not paired yet. Enter the pairing code below; until then no agent can use this browser."
+  if (state.status === "untrusted" && remote)
+    return `The relay at ${remote} didn't pair with this extension, so it was refused. Check the pairing code under Relay on another computer.`
   if (state.status === "untrusted")
     return state.pairing === "bundled"
       ? "The relay on this computer didn't pair with this extension, so it was refused. Run the install command again (or update the CLI), then click Reconnect."
       : "The relay on this computer didn't pair with this extension, so it was refused. Check the pairing code below, or update the CLI."
+  if (remote) return `Waiting for the relay at ${remote}. It starts the first time an agent there uses the browse tools.`
   return "Waiting for an agent. The relay starts the first time an agent uses the browse tools."
 }
 

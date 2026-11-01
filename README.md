@@ -76,6 +76,25 @@ shim, which always runs the current version (from a checkout, use `/path/to/brow
 }
 ```
 
+### Browser on another computer
+
+When opencode runs on one machine and your browser on another (over Tailscale, say), the relay runs next to opencode
+and the extension connects to it across the network:
+
+1. On the opencode machine, run `npx @opencode/browse install`, and give the `browse` MCP server
+   `OPENCODE_BROWSER_HOST` set to that machine's address, for example in `opencode.json`:
+   `"environment": { "OPENCODE_BROWSER_HOST": "100.64.0.2" }`. The relay then also listens there, for the extension
+   only: the HTTP API and CDP stay on `127.0.0.1`. A relay that's already running picks it up after
+   `npx @opencode/browse relay restart`.
+2. Run `npx @opencode/browse pair` there and copy the code.
+3. In the browser, open the extension's status page (right-click the toolbar button, then **Options**). Under
+   **Relay on another computer**, enter the same address (the IP, or a name that resolves to it, with `:port` if it
+   isn't 19988) and the code, then click **Connect**. The page says whether the relay answered and accepted the code.
+
+Pairing works as it does locally: both sides prove they know the code on every connection, so anyone else on the
+network who reaches the port gets nothing. The connection itself isn't encrypted by Browse; use a network that is
+(Tailscale or WireGuard), not the open internet. Clear the address to go back to a relay on the browser's computer.
+
 ## Using it
 
 - **Agents open their own tabs** in the background of the window you last used, grouped at the start of your tab strip

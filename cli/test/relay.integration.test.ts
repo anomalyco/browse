@@ -29,8 +29,8 @@ class FakeExtension {
   relayProved = false
   private readonly handlers = new Map<string, (command: Command) => unknown>()
 
-  constructor(private readonly code: string, private readonly relayPort = port) {
-    this.socket = new WebSocket(`ws://127.0.0.1:${relayPort}/extension`, { origin: stableUnpackedExtensionOrigin })
+  constructor(private readonly code: string, private readonly relayPort = port, host = "127.0.0.1") {
+    this.socket = new WebSocket(`ws://${host}:${relayPort}/extension`, { origin: stableUnpackedExtensionOrigin })
     this.socket.on("close", (code) => { this.closeCode = code })
   }
 
@@ -643,6 +643,49 @@ async function settingsScene(options: { readonly relayPort: number; readonly rel
     },
   }
 }
+
+// OPENCODE_BROWSER_HOST stands in for a Tailscale address with 127.0.0.2, which Linux routes to loopback (macOS doesn't).
+describe.skipIf(process.platform !== "linux")("a browser on another computer (OPENCODE_BROWSER_HOST)", () => {
+  const remoteHome = fs.mkdtempSync(path.join(os.tmpdir(), "browse-remote-"))
+  let remote: Awaited<ReturnType<typeof startRelay>> | undefined
+  beforeAll(async () => {
+    remote = await startRelay(remoteHome, { OPENCODE_BROWSER_HOST: "127.0.0.2" })
+  }, 20_000)
+  afterAll(async () => {
+    await stopRelay(remote?.child)
+    fs.rmSync(remoteHome, { recursive: true, force: true })
+  })
+
+  test("the extension pairs over that address, and a wrong code is refused there too", async () => {
+    const extension = new FakeExtension(pairingCode(remoteHome), remote!.port, "127.0.0.2")
+    expect(await extension.pair()).toBe(true)
+    extension.socket.close()
+    await Bun.sleep(100)
+    const impostor = new FakeExtension(pairingCode(fs.mkdtempSync(path.join(remoteHome, "other-"))), remote!.port, "127.0.0.2")
+    expect(await impostor.pair({ answerAnyway: true })).toBe(false)
+    await Bun.sleep(100)
+    expect(impostor.closeCode).toBe(4006)
+  })
+
+  test("only the extension link is served there: no HTTP API, no CDP, no web pages", async () => {
+    const remoteBase = `http://127.0.0.2:${remote!.port}`
+    expect((await fetch(`${remoteBase}/version`)).status).toBe(404)
+    expect((await fetch(`${remoteBase}/json/version`, { headers: { authorization: `Bearer ${remote!.token}` } })).status).toBe(404)
+    const refused = (url: string, origin?: string) =>
+      new Promise<boolean>((resolve) => {
+        const socket = new WebSocket(url, { ...(origin ? { origin } : {}), headers: { authorization: `Bearer ${remote!.token}` } })
+        socket.once("open", () => {
+          socket.close()
+          resolve(false)
+        })
+        socket.once("error", () => resolve(true))
+      })
+    expect(await refused(`ws://127.0.0.2:${remote!.port}/devtools/browser/x`)).toBe(true)
+    expect(await refused(`ws://127.0.0.2:${remote!.port}/extension`, "https://evil.example")).toBe(true)
+    // This computer's agents still use 127.0.0.1.
+    expect((await fetch(`http://127.0.0.1:${remote!.port}/version`)).ok).toBe(true)
+  })
+})
 
 describe("sessions of MCP servers that went away", () => {
   test("an implicit session is deleted once its MCP server has been gone for the grace period; a named one stays", async () => {

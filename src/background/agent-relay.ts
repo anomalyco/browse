@@ -26,6 +26,8 @@ import {
   agentCursor,
   HUMAN_INPUT_KEY,
   humanInput,
+  RELAY_ADDRESS_KEY,
+  relayAddress,
   type AgentRelayState,
   type AgentRelayStatus,
   type AgentRelayUpdate,
@@ -100,6 +102,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   let starting: Promise<void> | undefined
   let generation = 0
   let status: AgentRelayStatus = "offline"
+  let host = "127.0.0.1"
   let port = defaultRelayPort
   let attempts = 0
   let retry: ReturnType<typeof setTimeout> | undefined
@@ -171,6 +174,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     ...(autoUpdate ? { autoUpdate } : {}),
     ...(skew && status === "incompatible" ? { skew } : {}),
     ...(ticketRejected ? { ticketRejected: true } : {}),
+    relay: { address: `${host}:${port}`, remote: host !== "127.0.0.1" },
   })
   const notify = () => input.changed(snapshot())
   const setStatus = (next: AgentRelayStatus) => {
@@ -178,6 +182,18 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     log.add("status", { from: status, to: next })
     status = next
     notify()
+  }
+  /**
+   * Waiters for how the next connection attempt ends (`connectTo` on the status page), each with the generation it
+   * waits past, so the close of the connection it replaced doesn't answer for the new one.
+   */
+  const outcomes = new Set<{ after: number; resolve: (status: AgentRelayStatus) => void }>()
+  const settle = (attempt: number) => {
+    for (const waiter of outcomes)
+      if (attempt > waiter.after) {
+        outcomes.delete(waiter)
+        waiter.resolve(status)
+      }
   }
 
   /** The connection, once its relay has paired; events and data never go to an unpaired one. */
@@ -229,15 +245,24 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
    * The pairing code: the one `install` wrote into this unpacked build, else the one typed on the status page. A store
    * build has no file. A missing file is looked for again on every connection attempt (install may write it while the
    * worker runs), and a found one again on Reconnect or a pairing change (install may have written a new code).
+   * With a relay on another computer, a typed code comes first: the bundled one belongs to this computer's relay.
    */
   const pairingCode = async () => {
+    const typed = normalizePairingCode((await chrome.storage.local.get(PAIRING_KEY))[PAIRING_KEY])
+    if (host !== "127.0.0.1" && typed !== undefined) {
+      if (pairing !== "stored") {
+        pairing = "stored"
+        notify()
+      }
+      return typed
+    }
     const reading = (bundledPairing ??= fetch(chrome.runtime.getURL(PAIRING_FILE))
       .then((response) => (response.ok ? (response.json() as Promise<unknown>) : undefined))
       .then((value) => normalizePairingCode(isJsonObject(value) ? value.code : undefined))
       .catch(() => undefined))
     const bundled = await reading
     if (bundled === undefined && bundledPairing === reading) bundledPairing = undefined
-    const stored = bundled === undefined ? normalizePairingCode((await chrome.storage.local.get(PAIRING_KEY))[PAIRING_KEY]) : undefined
+    const stored = bundled === undefined ? typed : undefined
     const source: PairingSource = bundled !== undefined ? "bundled" : stored !== undefined ? "stored" : "none"
     if (source !== pairing) {
       pairing = source
@@ -257,20 +282,27 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     if (socket && socket.readyState <= WebSocket.OPEN) return
     clearTimeout(retry)
     retry = undefined
-    port = Number((await chrome.storage.local.get(PORT_KEY))[PORT_KEY]) || defaultRelayPort
+    const stored = await chrome.storage.local.get([PORT_KEY, RELAY_ADDRESS_KEY])
+    // A relay on another computer (the status page's relay address), else this one; an unusable value reads as unset.
+    const address = relayAddress(stored[RELAY_ADDRESS_KEY]) ?? { host: "127.0.0.1" }
+    const previous = `${host}:${port}`
+    host = address.host
+    port = address.port ?? (Number(stored[PORT_KEY]) || defaultRelayPort)
+    if (`${host}:${port}` !== previous) notify()
     if (socket && socket.readyState <= WebSocket.OPEN) return
     // Without a pairing code there is no relay to trust; wait for one (install, or the status page).
     if ((await pairingCode()) === undefined && ticket === undefined) {
       if (status !== "unpaired") log.add("pairing.missing")
       setStatus("unpaired")
+      settle(Infinity)
       return
     }
     if (socket && socket.readyState <= WebSocket.OPEN) return
-    const url = `ws://127.0.0.1:${port}/extension`
+    const url = `ws://${host}:${port}/extension`
     const mine = ++generation
     // While no relay runs, attempts repeat until one starts; log the first ones of a streak, not every poll.
     const quiet = status === "offline" && attempts > 1
-    if (!quiet) log.add("connect", { port, attempt: attempts, reason, generation: mine })
+    if (!quiet) log.add("connect", { host, port, attempt: attempts, reason, generation: mine })
     const current = new WebSocket(url)
     socket = current
     let openedAt: number | undefined
@@ -333,6 +365,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       else if (event.code === 4006) setStatus("untrusted")
       // A missing relay is normal until an agent's browse tools (or the opencode-browser CLI) start one.
       else setStatus(openedAt === undefined ? "offline" : "connecting")
+      settle(mine)
       schedule(quiet && openedAt === undefined)
     }
   }
@@ -466,6 +499,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     }, KEEPALIVE)
     connectedAt = Date.now()
     setStatus(skew ? "incompatible" : "connected")
+    // Only the newest connection gets this far (verify checks socket === current).
+    settle(generation)
     pendingAttach.forEach((tabId) => send({ method: "toolbar.clicked", params: { tabId } }))
     pendingAttach.clear()
     void ungroupStale().catch((error: unknown) => log.add("ungroupStale.error", { error: text(error) }))
@@ -1061,10 +1096,10 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && (AGENT_CURSOR_KEY in changes || HUMAN_INPUT_KEY in changes)) void sendSettings()
   })
-  // A code typed on the status page (or removed) takes effect on a fresh connection.
+  // A code typed on the status page (or removed), or a new relay address, takes effect on a fresh connection.
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== "local" || !(PAIRING_KEY in changes)) return
-    if (adopting !== undefined && changes[PAIRING_KEY]?.newValue === adopting) {
+    if (area !== "local" || !(PAIRING_KEY in changes || RELAY_ADDRESS_KEY in changes)) return
+    if (!(RELAY_ADDRESS_KEY in changes) && adopting !== undefined && changes[PAIRING_KEY]?.newValue === adopting) {
       adopting = undefined
       bundledPairing = undefined
       return
@@ -1243,6 +1278,39 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       await chrome.storage.local.set({ [PAIRING_KEY]: code })
       return true
     },
+    /**
+     * The status page's relay form: saves the address (empty: this computer) and the pairing code when one is given,
+     * connects afresh (even with nothing changed, so the page can check the pairing) and resolves with how the attempt
+     * ended, or with the current status if it takes longer than a connection attempt can.
+     */
+    async connectTo(addressInput: string, codeInput: string): Promise<{ status: AgentRelayStatus | "invalid-address" | "invalid-code"; address?: string }> {
+      const address = relayAddress(addressInput)
+      if (address === undefined) return { status: "invalid-address" }
+      const code = codeInput.trim() === "" ? undefined : normalizePairingCode(codeInput)
+      if (codeInput.trim() !== "" && code === undefined) return { status: "invalid-code" }
+      const value = addressInput.trim() === "" ? "" : address.port ? `${address.host}:${address.port}` : address.host
+      const before = await chrome.storage.local.get([RELAY_ADDRESS_KEY, PAIRING_KEY])
+      const changed = (before[RELAY_ADDRESS_KEY] ?? "") !== value || (code !== undefined && before[PAIRING_KEY] !== code)
+      const outcome = new Promise<AgentRelayStatus>((resolve) => {
+        const waiter = { after: generation, resolve }
+        outcomes.add(waiter)
+        setTimeout(() => {
+          if (outcomes.delete(waiter)) resolve(status)
+        }, CONNECT_TIMEOUT + 2_000)
+      })
+      log.add("relay.configure", { address: value || "this computer", code: code !== undefined })
+      // One write, so storage.onChanged reconnects once.
+      if (changed) await chrome.storage.local.set({ [RELAY_ADDRESS_KEY]: value, ...(code !== undefined ? { [PAIRING_KEY]: code } : {}) })
+      else {
+        bundledPairing = undefined
+        attempts = 0
+        clearTimeout(retry)
+        retry = undefined
+        socket?.close(1000, "Checking the connection")
+        void connect("user")
+      }
+      return { status: await outcome, address: `${host}:${port}` }
+    },
     /** The status page's update setting; the relay keeps it (an older relay ignores it). */
     setAutoUpdate(mode: AutoUpdateMode) {
       if (!open()) return
@@ -1283,7 +1351,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         "Browse diagnostics",
         `extension: ${manifest.version} (${chrome.runtime.id})`,
         `browser: ${navigator.userAgent}`,
-        `relay: ws://127.0.0.1:${port}/extension, protocol ${extensionProtocolVersion}`,
+        `relay: ws://${host}:${port}/extension, protocol ${extensionProtocolVersion}`,
         `pairing: ${pairing}`,
         `status: ${status}${connectedAt ? ` since ${new Date(connectedAt).toISOString()}` : ""}`,
         `reconnect attempts: ${attempts}${retry ? " (retry scheduled)" : ""}`,
