@@ -36,7 +36,7 @@ export class CdpRuntime<Client extends object> {
 
   constructor(private readonly options: {
     readonly registry: TargetRegistry
-    readonly generation: () => number
+    readonly generation: (tabId: number) => number
     readonly send: (command: { readonly tabId: number; readonly sessionId?: string; readonly method: string; readonly params: JsonObject }) => Effect.Effect<JsonObject, Error>
     readonly sendEvent: (client: Client, event: CdpEvent) => void
     readonly trace?: (message: string) => void
@@ -280,13 +280,13 @@ export class CdpRuntime<Client extends object> {
 
   private capture(route: CdpRoutedSession): () => boolean {
     const { registry } = this.options
-    const generation = this.options.generation()
+    const generation = this.options.generation(route.tabId)
     const root = registry.targets.get(route.rootSessionId)
     const owner = root?.opencodeBrowserSessionId
     const child = route.chromeSessionId === undefined ? undefined : registry.childTargets.get(route.chromeSessionId)
     return () => {
       const currentRoot = registry.routingRootTarget(route.tabId)
-      if (!root || generation !== this.options.generation() || currentRoot?.sessionId !== root.sessionId || currentRoot.targetInfo.targetId !== root.targetInfo.targetId || currentRoot.opencodeBrowserSessionId !== owner) return false
+      if (!root || generation !== this.options.generation(route.tabId) || currentRoot?.sessionId !== root.sessionId || currentRoot.targetInfo.targetId !== root.targetInfo.targetId || currentRoot.opencodeBrowserSessionId !== owner) return false
       if (route.chromeSessionId === undefined) return true
       const currentChild = registry.childTargets.get(route.chromeSessionId)
       return child !== undefined && currentChild?.tabId === route.tabId && currentChild.targetInfo.targetId === child.targetInfo.targetId && currentChild.parentSessionId === child.parentSessionId

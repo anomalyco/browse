@@ -8,6 +8,7 @@ import {
   AGENT_DIAGNOSTICS,
   AGENT_GROUPING_KEY,
   AGENT_WINDOW_KEY,
+  BROWSER_NAME_KEY,
   DEFAULT_IDLE_MINUTES,
   HANDOFF_NOTIFICATIONS_KEY,
   HUMAN_INPUT_KEY,
@@ -82,6 +83,7 @@ function render(state: AgentRelayState) {
   element("update-command").textContent = state.update?.command ?? ""
   showOverrides(state.overrides)
   showAutoUpdate(state.autoUpdate)
+  showBrowser(state.browser)
   if (state.status === "connected" && element("pairing-note").textContent?.startsWith("Pairing with")) showPairingNote("Paired with the relay on this computer.")
   if (state.ticketRejected && state.status !== "connected")
     showPairingNote("The pairing link from install expired or was already used. Run `npx @opencode/browse pair` and paste the code below.")
@@ -112,6 +114,30 @@ for (const input of Array.from(element("auto-update").querySelectorAll<HTMLInput
   input.addEventListener("change", () => {
     if (input.checked && (input.value === "on" || input.value === "notify" || input.value === "off")) send({ type: "autoUpdate.set", mode: input.value })
   })
+
+/** What the relay calls this browser: the id agents pass, and its name. */
+function showBrowser(browser: AgentRelayState["browser"]) {
+  const line = element("browser-identity")
+  if (!browser) {
+    line.textContent = "Agents see this browser's name once it's connected."
+    return
+  }
+  const id = document.createElement("code")
+  id.textContent = browser.id
+  line.replaceChildren("Agents call this browser ", id, ` (${browser.name}).`)
+}
+const showBrowserName = (value: unknown) => (element<HTMLInputElement>("browser-name").value = typeof value === "string" ? value : "")
+void chrome.storage.local.get(BROWSER_NAME_KEY).then((stored) => showBrowserName(stored[BROWSER_NAME_KEY]))
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && BROWSER_NAME_KEY in changes) showBrowserName(changes[BROWSER_NAME_KEY]?.newValue)
+})
+element<HTMLFormElement>("browser-name-form").addEventListener("submit", (event) => {
+  event.preventDefault()
+  const name = element<HTMLInputElement>("browser-name").value.trim().slice(0, 60)
+  // The background reconnects on the change, and the relay names the browser afresh.
+  void (name ? chrome.storage.local.set({ [BROWSER_NAME_KEY]: name }) : chrome.storage.local.remove(BROWSER_NAME_KEY))
+    .then(() => flash(element<HTMLFormElement>("browser-name-form").querySelector("button")!, "Saved"))
+})
 
 /** A short line under the status, for what happened to install's pairing link. */
 function showPairingNote(text: string) {

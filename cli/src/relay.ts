@@ -4,7 +4,7 @@ import crypto from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import { Clock, Config, Effect, Option } from "effect"
+import { Clock, Config, Effect, Option, Result } from "effect"
 import { WebSocket, WebSocketServer, type RawData } from "ws"
 import {
   removeDefaultLightColorSchemeEmulation,
@@ -13,13 +13,15 @@ import {
   replayTargetCreated,
 } from "./cdp-shims.ts"
 import { CdpClientPool } from "./cdp-client-pool.ts"
-import { beforeInput, forgetTab, humanInputEnabled, humanInputOverride, setHumanInput } from "./human-input.ts"
+import { beforeInput, forgetTab, humanInputEnabled, humanInputOverride } from "./human-input.ts"
+import { BrowserLinks, computerName, type BrowserLink } from "./browser-links.ts"
+import { decodeRecordingFrame, encodeRecordingFrame } from "./recording-protocol.ts"
 import { CdpRouter } from "./cdp-router.ts"
 import { CdpRuntime } from "./cdp-runtime.ts"
 import { ExtensionRpc } from "./extension-rpc.ts"
 import { createHttpRequestHandler, hasRelayToken } from "./http-api.ts"
 import type { CdpEvent, CdpRequest, JsonObject, PageStatus } from "./protocol.ts"
-import { extensionProtocolCompatibility, extensionProtocolSkew, extensionProtocolVersion, minExtensionProtocolVersion, isCdpRequest, isExtensionEvent, isExtensionResponse, makePageStatus, parseJsonObject } from "./protocol.ts"
+import { extensionProtocolCompatibility, extensionProtocolVersion, minExtensionProtocolVersion, isCdpRequest, isExtensionEvent, isExtensionResponse, makePageStatus, parseJsonObject } from "./protocol.ts"
 import {
   closeHttpServer,
   closeWebSocketServer,
@@ -226,19 +228,48 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     },
     catch: (cause) => new Error("Create the relay token", { cause }),
   })
-  let extensionGeneration = 0
   let rejectedExtensionConnections = 0
   /** Extension connections that failed the pairing handshake (wrong code, or an extension without one). */
   let pairingFailures = 0
   /** An extension too old to pair is reloaded once, so an unpacked install picks up the new files on disk. */
   let legacyExtensionReloaded = false
-  let extensionBuild: string | undefined
-  let extensionOrigin: string | undefined
-  const extensionRpc = new ExtensionRpc()
-  const sendToExtension = (command: Parameters<ExtensionRpc["send"]>[0]) => extensionRpc.send(command)
-  const sendExtensionBestEffort = (command: Parameters<ExtensionRpc["send"]>[0]): void => {
-    Effect.runPromise(Effect.ignore(sendToExtension(command))).catch(() => {})
+  // Every connected browser (browser-links.ts). Tab ids here are the relay's own; a command for a tab goes to that
+  // tab's browser with the browser's id for it, and a tab id in its answer comes back as the relay's.
+  const browsers = new BrowserLinks()
+  type ExtensionCommandInput = Parameters<ExtensionRpc["send"]>[0]
+  const sendToBrowser = (link: BrowserLink, command: ExtensionCommandInput) =>
+    link.rpc.send(command).pipe(Effect.map((result) => {
+      const tabId = getNumber(result, "tabId")
+      return tabId === undefined ? result : { ...result, tabId: browsers.relayTabId(link, tabId) }
+    }))
+  /** A command for a tab goes to its browser; one for no tab to `link`, else the default browser. */
+  const sendToExtension = (command: ExtensionCommandInput, link?: BrowserLink): Effect.Effect<JsonObject, Error> => {
+    const tabId = getNumber(command.params, "tabId")
+    if (tabId !== undefined) {
+      const owner = browsers.browserTab(tabId)
+      if (!owner) return Effect.fail(new Error("Browse extension is not connected"))
+      return sendToBrowser(owner.link, { ...command, params: { ...command.params, tabId: owner.tabId } })
+    }
+    const target = link ?? browsers.defaultLink()
+    return target ? sendToBrowser(target, command) : Effect.fail(new Error("Browse extension is not connected"))
   }
+  const sendExtensionBestEffort = (command: ExtensionCommandInput, link?: BrowserLink): void => {
+    Effect.runPromise(Effect.ignore(sendToExtension(command, link))).catch(() => {})
+  }
+  /** A command for every browser, such as an update notice. */
+  const sendToEveryBrowser = (command: ExtensionCommandInput): void => {
+    for (const link of browsers.list()) if (link.rpc.connected) sendExtensionBestEffort(command, link)
+  }
+  /** The same, waiting for each; fails only when no browser is connected or every one failed. */
+  const sendToEach = (command: ExtensionCommandInput): Effect.Effect<JsonObject, Error> => Effect.gen(function* () {
+    const links = browsers.list().filter((link) => link.rpc.connected)
+    if (links.length === 0) return yield* Effect.fail(new Error("Browse extension is not connected"))
+    const results = yield* Effect.forEach(links, (link) => Effect.result(sendToBrowser(link, command)), { concurrency: "unbounded" })
+    const succeeded = results.find(Result.isSuccess)
+    if (succeeded) return succeeded.success
+    const failed = results.find(Result.isFailure)
+    return yield* Effect.fail(failed?.failure ?? new Error("Browse extension is not connected"))
+  })
   const sendDebuggerCommand = Effect.fnUntraced(function* (options: {
     readonly tabId: number
     readonly sessionId?: string
@@ -267,20 +298,20 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   })
   const recordingRelay = new RecordingRelay({
     sendToExtension: (command) => {
-      return Effect.runPromise(extensionRpc.send(command))
+      return Effect.runPromise(sendToExtension(command))
     },
     sendDebuggerCommand: (command) => {
       return Effect.runPromise(sendDebuggerCommand(command))
     },
     isExtensionConnected: () => {
-      return extensionRpc.connected
+      return browsers.connected
     },
     isTabUnavailable: (tabId) => flightRecorder.isActiveTab(tabId),
     onTabRecordingChanged: (tabId) => recordingChanged(tabId),
   })
   const flightRecorder = new FlightRecorderRelay({
     sendDebuggerCommand: (command) => Effect.runPromise(sendDebuggerCommand(command)),
-    isExtensionConnected: () => extensionRpc.connected,
+    isExtensionConnected: () => browsers.connected,
     isTabRecording: (tabId) => recordingRelay.isRecordingTab(tabId),
     onTabRecordingChanged: (tabId) => recordingChanged(tabId),
   })
@@ -302,40 +333,44 @@ const makeRelay = Effect.fnUntraced(function* (options: {
    * default page, so every other page a session opened used to come back as a user's tab: visible to every session,
    * taken out of its group, and so forgotten by idle cleanup. Cleared once the extension's inventory has settled.
    */
-  const ownersAcrossReconnect = new Map<string, { readonly sessionId?: string; readonly owner: "relay" | "user" }>()
+  const ownersAcrossReconnect = new Map<string, { readonly sessionId?: string; readonly owner: "relay" | "user"; readonly browser: string }>()
   const ownerAcrossReconnect = (targetId: string) => {
     const known = ownersAcrossReconnect.get(targetId)
     return known?.sessionId !== undefined && sessions.sessions.has(known.sessionId)
       ? { sessionId: known.sessionId, owner: known.owner }
       : undefined
   }
-  const clearLiveExtensionState = (reason: string) => {
-    void recordingRelay.cleanupAll(reason).catch(() => {})
-    void flightRecorder.cleanupAll().catch(() => {})
-    pendingTabGrouping.clear()
+  /** What a browser that went away (or reconnected) held: only its tabs, never another browser's. */
+  const clearLiveExtensionState = (key: string, reason: string) => {
+    const mine = (tabId: number) => browsers.ownerKey(tabId) === key
     for (const target of [...registry.listRootTargets(), ...registry.listStagedRootTargets()]) {
+      if (!mine(target.tabId)) continue
+      void recordingRelay.abortRecordingForTab({ tabId: target.tabId, reason }).catch(() => {})
+      void flightRecorder.cancel({ tabId: target.tabId }).catch(() => {})
+      pendingTabGrouping.delete(target.tabId)
       ownersAcrossReconnect.set(target.targetInfo.targetId, {
+        browser: key,
         owner: target.owner,
         ...(target.opencodeBrowserSessionId ? { sessionId: target.opencodeBrowserSessionId } : {}),
       })
     }
-    for (const target of [...registry.listRootTargets()]) {
-      detachTargetState(target.tabId, { preserveSessionTarget: true, updateExtension: false })
+    for (const target of [...registry.listRootTargets(), ...registry.listStagedRootTargets()]) {
+      if (mine(target.tabId)) detachTargetState(target.tabId, { preserveSessionTarget: true, updateExtension: false })
     }
-    registry.clear()
-    suppressedChildSessions.clear()
+    for (const [childSessionId, tabId] of suppressedChildSessions) if (mine(tabId)) suppressedChildSessions.delete(childSessionId)
   }
   const releaseRelayTarget = Effect.fnUntraced(function* (targetId: string) {
     const deadline = (yield* Clock.currentTimeMillis) + releaseTargetGraceMs
     while (true) {
       const target = registry.targetsByTargetId.get(targetId)
-      if (target && (extensionRpc.connected || extensionRpc.protocolLegacy === true)) {
+      const link = target ? browsers.browserTab(target.tabId)?.link : undefined
+      if (target && link && (link.rpc.connected || link.rpc.protocolLegacy === true)) {
         yield* sendToExtension({ method: "tabs.remove", params: { tabId: target.tabId } })
         return
       }
       // Protocol v1 reports ready only after its complete attached-tab inventory
       // has reconciled. Legacy shims need the full grace because hello came first.
-      if (extensionRpc.connected && extensionRpc.protocolLegacy === false) return
+      if (link?.rpc.connected && link.rpc.protocolLegacy === false) return
       const remaining = deadline - (yield* Clock.currentTimeMillis)
       if (remaining <= 0) return
       yield* Effect.sleep(Math.min(50, remaining))
@@ -383,9 +418,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     for (const id of clientGoneSince.keys()) if (!sessions.sessions.has(id)) clientGoneSince.delete(id)
   }
   const sendUpdateNotice = () => {
-    if (!extensionRpc.connected) return
     const notice = updates.current
-    sendExtensionBestEffort({ method: "update.notice", ...(notice ? { params: { summary: notice.summary, command: notice.command } } : {}) })
+    sendToEveryBrowser({ method: "update.notice", ...(notice ? { params: { summary: notice.summary, command: notice.command } } : {}) })
   }
   const attachedBadge = { text: "ON", color: "#7c3aed", title: "Detach from Browse" }
   const executingBadge = { text: "RUN", color: "#f59e0b", title: "Browse is running a script. Click to stop it and take this tab back." }
@@ -533,6 +567,12 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         }),
       }),
     {
+      resolveBrowser: (requested) => {
+        const link = browsers.byId(requested)
+        if (link) return { id: link.id }
+        const connected = browsers.list().map((browser) => `${browser.id} (${browser.name})`).join(", ")
+        return { error: `No connected browser is called "${requested}". ${connected ? `Connected: ${connected}.` : "No browser is connected."}` }
+      },
       onExecuteStateChange: (sessionId, executing) => {
         setActivityForSessionTabs(sessionId, executing ? "running" : "attached", executionBadge(sessionId, executing))
         if (!executing) {
@@ -738,9 +778,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     recordingRelay,
     flightRecorder,
     sessions,
-    reloadExtension: () => sendToExtension({ method: "runtime.reload" }),
+    reloadExtension: () => sendToEach({ method: "runtime.reload" }),
     cleanupTabs: (idleMinutes) =>
-      sendToExtension({ method: "tabs.cleanup", ...(idleMinutes === undefined ? {} : { params: { idleMinutes } }) }),
+      sendToEach({ method: "tabs.cleanup", ...(idleMinutes === undefined ? {} : { params: { idleMinutes } }) }),
     settings: {
       get: () => extensionSettings("settings.get").pipe(Effect.map((stored) => describeSettings(withRelaySettings(stored), userSettingOverrides()))),
       set: (input) => Effect.gen(function* () {
@@ -756,7 +796,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         // autoUpdate is the relay's own; it doesn't need the extension.
         const extensionChanges = settingsToExtension(writable)
         const relayOnly = Object.keys(extensionChanges).length === 0
-        const fromExtension = relayOnly && !extensionRpc.connected ? undefined : yield* extensionSettings("settings.get")
+        const fromExtension = relayOnly && !browsers.connected ? undefined : yield* extensionSettings("settings.get")
         const before = withRelaySettings(fromExtension ?? settingsFromExtension({ settings: {} }))
         if (typeof writable.autoUpdate === "string") setStoredMode(writable.autoUpdate as AutoUpdateMode)
         const after = withRelaySettings(Object.keys(extensionChanges).length ? yield* extensionSettings("settings.set", extensionChanges) : (fromExtension ?? before))
@@ -766,14 +806,24 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       }),
     },
     extensionStatus: () => {
+      // The top-level fields describe the default browser, as they did when only one could connect.
+      const link = browsers.defaultLink()
       return {
-        connected: extensionRpc.connected,
-        version: extensionRpc.version ?? null,
-        build: extensionBuild ?? null,
-        origin: extensionOrigin ?? null,
-        protocolVersion: extensionRpc.protocolVersion ?? null,
-        protocolCompatible: extensionRpc.protocolCompatible ?? null,
-        protocolLegacy: extensionRpc.protocolLegacy ?? null,
+        connected: browsers.connected,
+        version: link?.rpc.version ?? null,
+        build: link?.build ?? null,
+        origin: link?.origin ?? null,
+        protocolVersion: link?.rpc.protocolVersion ?? null,
+        protocolCompatible: link?.rpc.protocolCompatible ?? null,
+        protocolLegacy: link?.rpc.protocolLegacy ?? null,
+        browsers: browsers.list().map((browser) => ({
+          id: browser.id,
+          name: browser.name,
+          default: browser === link,
+          connected: browser.rpc.connected,
+          version: browser.rpc.version ?? null,
+          tabs: registry.listRootTargets().filter((target) => browsers.ownerKey(target.tabId) === browser.key).length,
+        })),
         rejectedConnections: rejectedExtensionConnections,
         pairingFailures,
         cdpClients: cdpClients.size,
@@ -841,7 +891,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const cdpRouter = new CdpRouter(cdpClients, registry)
   const cdpRuntime = new CdpRuntime<WebSocket>({
     registry,
-    generation: () => extensionGeneration,
+    generation: (tabId) => browsers.generationOf(tabId),
     send: sendDebuggerCommand,
     sendEvent: sendCdpEvent,
     ...(contextDebugLog ? { trace: contextDebugLog } : {}),
@@ -854,9 +904,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   // the flight recorder) shows it only when that recording was started with cursor: true (demo videos), so recordings
   // show only the page whatever the setting. showGhostCursor() shows it anywhere.
   const ghostCursorEnv = Option.getOrUndefined(yield* Config.option(Config.Boolean("OPENCODE_BROWSER_GHOST_CURSOR")))
-  /** The extension's setting; an older extension sends none, which leaves it off. */
-  let ghostCursorSetting = false
-  const ghostCursorAlways = () => ghostCursorEnv ?? ghostCursorSetting
+  /** The setting of the tab's browser; an older extension sends none, which leaves it off. */
+  const ghostCursorAlways = (tabId: number) => ghostCursorEnv ?? browsers.browserTab(tabId)?.link.cursor ?? false
   // Where new agent tabs open: "current" (the user's window) or "separate" (the agents' own window). Unset, the
   // extension's status page setting decides; so does any other value.
   const agentWindowSetting = Option.getOrUndefined(yield* Config.option(Config.String("OPENCODE_BROWSER_AGENT_WINDOW")))?.trim().toLowerCase()
@@ -865,7 +914,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     send: sendDebuggerCommand,
     mainFrameId: (tabId) => mainFrameIdsByTab.get(tabId),
     shownByDefault: (tabId) =>
-      isTabRecorded(tabId) ? recordingRelay.showsGhostCursor(tabId) || flightRecorder.showsGhostCursor(tabId) : ghostCursorAlways(),
+      isTabRecorded(tabId) ? recordingRelay.showsGhostCursor(tabId) || flightRecorder.showsGhostCursor(tabId) : ghostCursorAlways(tabId),
   })
   /** The extension's settings with the relay's own (autoUpdate) filled in from the data root. */
   const withRelaySettings = (settings: Settings): Settings => ({ ...settings, autoUpdate: storedMode() })
@@ -884,9 +933,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
    * Reads (settings.get) or writes (settings.set) the user's settings in the extension, which owns them; the options
    * page follows the change live. A missing or older extension gets an error that says what to do.
    */
+  // With several browsers, the settings tool reads and changes the default browser's.
   const extensionSettings = (method: "settings.get" | "settings.set", values?: JsonObject) =>
     Effect.gen(function* () {
-      if (!extensionRpc.connected)
+      if (!browsers.connected)
         return yield* Effect.fail(new Error("The Browse extension isn't connected, so its settings can't be read or changed. Ask the user to open the browser with the extension; its options page shows whether it's connected."))
       const result = yield* sendToExtension({ method, ...(values ? { params: { values } } : {}) }).pipe(
         Effect.mapError((error) => /Invalid extension command/.test(error.message)
@@ -909,24 +959,32 @@ const makeRelay = Effect.fnUntraced(function* (options: {
    * known values count; anything else leaves that setting as it was. Environment variables still win. The answer tells
    * the status page which settings the environment fixes.
    */
-  const applyExtensionSettings = (params: JsonObject | undefined): void => {
+  const applyExtensionSettings = (link: BrowserLink, params: JsonObject | undefined): void => {
+    // The cursor and human-like input are each browser's own; they apply to that browser's tabs.
     const cursor = params?.cursor
-    if (cursor === "off" || cursor === "always") ghostCursorSetting = cursor === "always"
+    if (cursor === "off" || cursor === "always") link.cursor = cursor === "always"
     const human = params?.humanInput
-    if (human === "on" || human === "off") setHumanInput(human === "on")
+    if (human === "on" || human === "off") link.humanInput = human === "on"
     // The options page's update setting (the relay keeps it, auto-update.ts).
     const autoUpdate = params?.autoUpdate
     if (typeof autoUpdate === "string" && (autoUpdateModes as readonly string[]).includes(autoUpdate)) {
       setStoredMode(autoUpdate as AutoUpdateMode)
       relayLog("autoupdate.mode", { mode: autoUpdate })
     }
-    relayLog("extension.settings", { cursor: ghostCursorAlways() ? "always" : "off", humanInput: humanInputEnabled() ? "on" : "off" })
+    relayLog("extension.settings", { browser: link.id, cursor: (ghostCursorEnv ?? link.cursor) ? "always" : "off", humanInput: humanInputEnabled(link.humanInput) ? "on" : "off" })
     void ghostCursor.refresh()
     sendRelaySettings()
   }
-  /** What the status page shows from the relay: the settings its environment fixes, and the update state. */
+  /** What the status pages show from the relay: the settings its environment fixes, and the update state. */
   const sendRelaySettings = () => {
-    sendExtensionBestEffort({ method: "relay.settings", params: { overrides: settingOverrides(), autoUpdate: autoUpdateStatus() as unknown as JsonObject } })
+    for (const link of browsers.list()) {
+      if (!link.rpc.connected) continue
+      sendExtensionBestEffort({
+        method: "relay.settings",
+        // Each browser hears what agents call it.
+        params: { overrides: settingOverrides(), autoUpdate: autoUpdateStatus() as unknown as JsonObject, browser: { id: link.id, name: link.name } },
+      }, link)
+    }
   }
   const suppressedChildSessions = new Map<string, number>()
   const protectedFrames = new ProtectedFrameTracker()
@@ -996,13 +1054,13 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       )
     }
     handoffs.cancelAll()
-    extensionRpc.rejectPending(new Error("Relay closed"))
+    for (const link of browsers.list()) link.rpc.rejectPending(new Error("Relay closed"))
     yield* Effect.tryPromise(() => recordingRelay.cleanupAll("Relay closed")).pipe(Effect.ignore)
     yield* Effect.tryPromise(() => flightRecorder.cleanupAll()).pipe(Effect.ignore)
     for (const socket of cdpClients) {
       socket.close()
     }
-    extensionRpc.close()
+    for (const link of browsers.list()) link.rpc.close()
     yield* closeWebSocketServer(websocketServer).pipe(logCloseError("Failed to close websocket server"))
     yield* closeHttpServer(httpServer).pipe(logCloseError("Failed to close http server"))
   })
@@ -1065,21 +1123,60 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     socket.destroy()
   })
 
-  let currentAnnouncedRootTabIds: Set<number> | undefined
-  /** Tabs the reconnecting extension announced as opened by an agent (TabCleanup tracks them). */
-  const announcedAgentTabIds = new Set<number>()
+  /** A tab an agent or the user just brought in counts as announced by its browser (see `ready`). */
+  const announceTab = (tabId: number) => browsers.browserTab(tabId)?.link.announcedRootTabIds.add(tabId)
+  const browsersChanged = () =>
+    relayLog("browsers", { connected: browsers.list().map((link) => `${link.id}${link.rpc.connected ? "" : " (starting)"}`).join(", ") || "none" })
+  /** An event from a browser with its tab ids (the tab, and a popup's opener) made the relay's. */
+  const relayTabIds = <T extends { readonly params?: JsonObject | undefined }>(link: BrowserLink, message: T): T => {
+    const tabId = getNumber(message.params, "tabId")
+    const openerTabId = getNumber(message.params, "openerTabId")
+    if (tabId === undefined && openerTabId === undefined) return message
+    return {
+      ...message,
+      params: {
+        ...message.params,
+        ...(tabId === undefined ? {} : { tabId: browsers.relayTabId(link, tabId) }),
+        ...(openerTabId === undefined ? {} : { openerTabId: browsers.relayTabId(link, openerTabId) }),
+      },
+    }
+  }
+  /** A recording frame's header names the browser's tab; it's rewritten to the relay's. */
+  const relayRecordingFrame = (link: BrowserLink, data: Buffer): Buffer => {
+    const frame = decodeRecordingFrame(data)
+    return Buffer.from(encodeRecordingFrame({ ...frame, tabId: browsers.relayTabId(link, frame.tabId) }))
+  }
   websocketServer.on("connection", (socket, request) => {
     const requestUrl = new URL(request.url ?? "/", endpointUrl)
     if (requestUrl.pathname === "/extension") {
       let handshaken = false
-      let socketGeneration = 0
-      const announcedRootTabIds = new Set<number>()
+      let link: BrowserLink | undefined
+      // What the browser is called needs its computer's name; messages after pairing wait for it (a reverse lookup
+      // on the network, bounded).
+      const computer = computerName(request)
+      let waiting: { readonly data: RawData; readonly isBinary: boolean }[] | undefined
+      const handle = (data: RawData, isBinary: boolean) => {
+        if (!link || browsers.ofSocket(socket) !== link || !link.rpc.acceptsEvents) return
+        if (isBinary) {
+          try {
+            recordingRelay.handleBinaryData(relayRecordingFrame(link, rawDataToBuffer(data)))
+          } catch {
+            socket.close(1002, "Invalid recording frame")
+          }
+          return
+        }
+        handleExtensionMessage(link, data.toString())
+      }
       // Pairing: the extension's hello carries a nonce; the relay answers with its own nonce and an HMAC proving it
       // knows the pairing code; the extension answers with its proof. Only then does the relay treat the socket as the
       // extension (and the extension obey it).
       let challenge: { readonly hello: JsonObject; readonly extensionNonce: string; readonly relayNonce: string; readonly code: string; readonly ticketKey?: string } | undefined
       socket.on("message", (data, isBinary) => {
         try {
+          if (waiting) {
+            waiting.push({ data, isBinary })
+            return
+          }
           if (!handshaken) {
             if (socket.readyState !== WebSocket.OPEN) return
             const message = isBinary ? undefined : parseJsonObject(data.toString())
@@ -1100,30 +1197,29 @@ const makeRelay = Effect.fnUntraced(function* (options: {
             }
             // The extension proved the code the ticket brought it: the ticket has done its one job.
             if (challenge.ticketKey) consumePairingTicket(challenge.ticketKey)
-            const acceptedGeneration = acceptExtensionHello(socket, challenge.hello, headerValue(request.headers.origin))
-            if (acceptedGeneration === undefined) {
-              socket.close(4002, "Extension hello required")
-              return
-            }
-            socketGeneration = acceptedGeneration
             handshaken = true
-            // Only a paired extension that became the current link names the tabs it announces; an unpaired socket
-            // (or one refused for another active link) must not replace the live inventory.
-            if (extensionRpc.isCurrent(socket)) currentAnnouncedRootTabIds = announcedRootTabIds
+            const hello = challenge.hello
+            waiting = []
+            void computer.then((name) => {
+              const queued = waiting ?? []
+              waiting = undefined
+              if (socket.readyState !== WebSocket.OPEN) return
+              link = acceptExtensionHello(socket, hello, headerValue(request.headers.origin), name)
+              if (!link) {
+                socket.close(4002, "Extension hello required")
+                return
+              }
+              for (const message of queued) {
+                try {
+                  handle(message.data, message.isBinary)
+                } catch (error) {
+                  console.error("Extension message handling failed", error)
+                }
+              }
+            })
             return
           }
-          if (!extensionRpc.isCurrent(socket) || !extensionRpc.acceptsEvents) {
-            return
-          }
-          if (isBinary) {
-            try {
-              recordingRelay.handleBinaryData(rawDataToBuffer(data))
-            } catch {
-              socket.close(1002, "Invalid recording frame")
-            }
-            return
-          }
-          handleExtensionMessage(socket, data.toString(), socketGeneration, announcedRootTabIds)
+          handle(data, isBinary)
         } catch (error) {
           console.error("Extension message handling failed", error)
         }
@@ -1134,10 +1230,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         relayLog("extension.error", { error: error.message, code: (error as NodeJS.ErrnoException).code })
       })
       socket.on("close", (code, reason) => {
-        relayLog("extension.close", { code, reason: reason.toString() || undefined, current: extensionRpc.isCurrent(socket) })
-        if (extensionRpc.disconnectIfCurrent(socket)) {
-          rejectedExtensionConnections = 0
-          clearLiveExtensionState("Extension disconnected")
+        const gone = browsers.disconnect(socket)
+        relayLog("extension.close", { code, reason: reason.toString() || undefined, browser: gone?.id, current: gone !== undefined })
+        if (gone) {
+          clearLiveExtensionState(gone.key, "Extension disconnected")
+          browsersChanged()
         }
       })
       return
@@ -1239,48 +1336,38 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     return { hello: message, extensionNonce, relayNonce, code, ...(ticketKey ? { ticketKey } : {}) }
   }
 
-  function acceptExtensionHello(socket: WebSocket, message: JsonObject, origin: string | undefined): number | undefined {
+  /**
+   * A paired browser joins the others; the same profile connecting again (a service worker restart) replaces its old
+   * link, whose tabs are cleared and announced again. A browser whose protocol doesn't match stays connected but gets
+   * no work: commands for it fail with what to update (extension-rpc.ts), as the extension's status page says.
+   */
+  function acceptExtensionHello(socket: WebSocket, message: JsonObject, origin: string | undefined, computer: string): BrowserLink | undefined {
     if (!isExtensionEvent(message) || message.method !== "hello") {
       return undefined
     }
     const protocol = extensionProtocolCompatibility(message.params?.protocolVersion)
-    if (!protocol.compatible && extensionRpc.protocolCompatible === true) {
-      relayLog("extension.rejected", { reason: "incompatible", protocol: protocol.version, version: getString(getObject(message.params), "version") })
-      // The reason says which side is behind; the extension's status page turns it into what to update.
-      socket.close(4003, `Extension protocol incompatible: ${extensionProtocolSkew(protocol.version) ?? "unknown"}`)
-      return extensionGeneration
+    const key = getString(message.params, "profileId") ?? crypto.randomUUID()
+    // The name set on the extension's status page, else the browser and its computer: "Chrome on MacBook".
+    const name = getString(message.params, "name")?.trim().slice(0, 60) || `${getString(message.params, "browser")?.trim() || "Browser"} on ${computer}`
+    const { link, replaced } = browsers.connect({ key, name, socket })
+    if (replaced) {
+      replaced.socket.close(4001, "Extension replaced")
+      clearLiveExtensionState(replaced.key, "Extension replaced")
     }
-    // Protect an OPEN compatible connection, including its inventory handshake.
-    // Competing browser retries must not erase targets, handoffs, or pending RPCs.
-    if (extensionRpc.acceptsEvents) {
-      rejectedExtensionConnections += 1
-      relayLog("extension.rejected", { reason: "another connection is active", profile: getString(message.params, "profileName") })
-      extensionRpc.probeLiveness()
-      socket.close(4004, "Another browser or profile is already connected")
-      return extensionGeneration
-    }
-    extensionGeneration += 1
-    rejectedExtensionConnections = 0
-    clearLiveExtensionState("Extension replaced")
-    announcedAgentTabIds.clear()
-    // A new extension starts from the defaults until it sends its settings (an older one never does).
-    ghostCursorSetting = false
-    setHumanInput(undefined)
-    extensionRpc.replaceSocket(socket)
-    extensionRpc.markHandshake(
-      getString(message.params, "version"),
-      message.params?.protocolVersion,
-    )
-    extensionBuild = getString(message.params, "build")
-    extensionOrigin = origin
+    link.rpc.markHandshake(getString(message.params, "version"), message.params?.protocolVersion)
+    link.build = getString(message.params, "build")
+    link.origin = origin
     relayLog("extension.connected", {
+      browser: link.id,
+      name: link.name,
       version: getString(message.params, "version"),
-      build: getString(message.params, "build"),
+      build: link.build,
       protocol: protocol.version,
-      profile: getString(message.params, "profileName"),
-      generation: extensionGeneration,
+      generation: link.generation,
+      browsers: browsers.list().length,
     })
-    return extensionGeneration
+    browsersChanged()
+    return link
   }
 
   function resumeIfWaitingForDebugger(tabId: number, childSessionId: string, params: JsonObject | undefined, label: string): void {
@@ -1333,7 +1420,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       .map((client) => cdpClients.autoAttachParams(client))
       .find((params) => params !== undefined)
     relayLog("tab.opened", { tabId, openerTabId, session: sessionId })
-    currentAnnouncedRootTabIds?.add(tabId)
+    announceTab(tabId)
     const attach = () => Effect.runPromise(rootLifecycle.attach({
       tabId,
       owner: "relay",
@@ -1365,23 +1452,27 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     })
   }
 
-  function handleExtensionMessage(socket: WebSocket, raw: string, generation: number, announcedRootTabIds: Set<number>): void {
-    const message = parseJsonObject(raw)
-    if (isExtensionResponse(message)) {
-      extensionRpc.handleResponse(message)
+  function handleExtensionMessage(link: BrowserLink, raw: string): void {
+    const parsed = parseJsonObject(raw)
+    if (isExtensionResponse(parsed)) {
+      link.rpc.handleResponse(parsed)
       return
     }
 
-    if (!isExtensionEvent(message)) {
+    if (!isExtensionEvent(parsed)) {
       return
     }
+    // The browser's tab ids become the relay's from here on.
+    const message = relayTabIds(link, parsed)
+    const { socket, generation, announcedRootTabIds, announcedAgentTabIds } = link
+    const mine = (tabId: number) => browsers.ownerKey(tabId) === link.key
     const extensionMethod = message.method as string
     const eventTabId = getNumber(message.params, "tabId")
     if (extensionMethod === "hello") {
       return
     }
     if (extensionMethod === "settings") {
-      applyExtensionSettings(message.params)
+      applyExtensionSettings(link, message.params)
       return
     }
     if (extensionMethod === "log") {
@@ -1393,7 +1484,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
     if (extensionMethod === "ready") {
       void Effect.runPromise(rootLifecycle.settle(generation)).then((settled) => {
-        if (!extensionRpc.isCurrent(socket) || generation !== extensionGeneration) return
+        if (browsers.ofSocket(socket) !== link) return
         // A tab that can't be attached again (seen: a page wedged mid-navigation after the extension's service
         // worker restarted, where every command times out) used to fail the whole inventory: the relay closed the
         // connection, the extension reconnected, the same tab failed three minutes later, and no agent could work
@@ -1408,11 +1499,12 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         }
         if (settled || failed.length > 0) {
           for (const target of registry.listRootTargets()) {
-            if (!announcedRootTabIds.has(target.tabId)) detachTargetState(target.tabId)
+            if (mine(target.tabId) && !announcedRootTabIds.has(target.tabId)) detachTargetState(target.tabId)
           }
           // A page whose session was deleted while the extension was away: nobody owns it now, so it closes like
           // the session's other pages did.
           for (const [targetId, known] of ownersAcrossReconnect) {
+            if (known.browser !== link.key) continue
             if (known.owner !== "relay" || known.sessionId === undefined || sessions.sessions.has(known.sessionId)) continue
             const target = registry.targetsByTargetId.get(targetId)
             if (!target || target.opencodeBrowserSessionId !== undefined) continue
@@ -1430,10 +1522,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
             detachTargetState(target.tabId, { updateExtension: false })
           }
           announcedAgentTabIds.clear()
-          ownersAcrossReconnect.clear()
-          extensionRpc.markReady()
+          for (const [targetId, known] of ownersAcrossReconnect) if (known.browser === link.key) ownersAcrossReconnect.delete(targetId)
+          link.rpc.markReady()
           if (updates.current) sendUpdateNotice()
-          for (const target of registry.listRootTargets()) refreshTabGrouping(target.tabId)
+          for (const target of registry.listRootTargets()) if (mine(target.tabId)) refreshTabGrouping(target.tabId)
+          browsersChanged()
         } else {
           socket.close(1011, "Target inventory reconciliation failed")
         }
@@ -1560,7 +1653,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       if (crashedTarget) {
         cancelTargetHandoffs(crashedTarget, "target-crashed")
         const affectedSessions = sessions.markTargetCrashed(crashedTarget.targetInfo.targetId)
-        extensionRpc.rejectDebuggerCommandsForTab(tabId, new Error(`Target crashed: ${crashedTarget.targetInfo.targetId}`))
+        const owner = browsers.browserTab(tabId)
+        owner?.link.rpc.rejectDebuggerCommandsForTab(owner.tabId, new Error(`Target crashed: ${crashedTarget.targetInfo.targetId}`))
         contextDebugLog?.(`target-crashed ${targetDiagnosticIdentity(crashedTarget)} affectedSessions=${affectedSessions.length}`)
       }
     }
@@ -2007,7 +2101,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       Effect.promise(() =>
         beforeInput(tabId, command.method, command.params, route.chromeSessionId === undefined, (method, params) =>
           Effect.runPromise(sendDebuggerCommand({ ...command, method, params })),
-        ).catch(() => undefined),
+        browsers.browserTab(tabId)?.link.humanInput).catch(() => undefined),
       ),
     ], { concurrency: "unbounded", discard: true })
     const result = yield* (message.method === "Runtime.enable" && sessionId
@@ -2098,8 +2192,27 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (registry.tabTargets.has(tabId)) {
       return yield* detachTab(tabId)
     }
-    currentAnnouncedRootTabIds?.add(tabId)
+    announceTab(tabId)
     yield* rootLifecycle.attach({ tabId, owner: "user" })
+  })
+
+  /**
+   * The browser a session's new tabs open in: the one it was created for, else the one its tabs are already in, else
+   * the default. A session's browser that isn't connected is an error that names the ones that are.
+   */
+  const sessionBrowser = (sessionId: string | undefined): Effect.Effect<BrowserLink, Error> => Effect.suspend(() => {
+    const chosen = sessionId ? sessions.sessions.get(sessionId)?.browser : undefined
+    if (chosen !== undefined) {
+      const link = browsers.byId(chosen)
+      if (link) return Effect.succeed(link)
+      const connected = browsers.list().map((browser) => browser.id).join(", ") || "none"
+      return Effect.fail(new Error(`Browser "${chosen}" isn't connected (connected: ${connected}). Start a new session for another browser.`))
+    }
+    const existing = sessionId
+      ? registry.listRootTargets().find((target) => target.opencodeBrowserSessionId === sessionId && target.owner === "relay")
+      : undefined
+    const link = (existing && browsers.browserTab(existing.tabId)?.link) ?? browsers.defaultLink()
+    return link ? Effect.succeed(link) : Effect.fail(new Error("Browse extension is not connected"))
   })
 
   const createAndAttachTab = Effect.fnUntraced(function* (options: {
@@ -2108,12 +2221,13 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     readonly opencodeBrowserSessionId?: string
     readonly autoAttachParams?: JsonObject
   }) {
-    const result = yield* sendToExtension({ method: "tabs.create", params: { url: options.url, active: options.active, ...(agentWindow ? { window: agentWindow } : {}) } })
+    const link = yield* sessionBrowser(options.opencodeBrowserSessionId)
+    const result = yield* sendToExtension({ method: "tabs.create", params: { url: options.url, active: options.active, ...(agentWindow ? { window: agentWindow } : {}) } }, link)
     const tabId = getNumber(result, "tabId")
     if (!tabId) {
       return yield* Effect.fail(new Error("tabs.create did not return a tabId"))
     }
-    currentAnnouncedRootTabIds?.add(tabId)
+    announceTab(tabId)
     return yield* rootLifecycle.attach({
       tabId,
       owner: "relay",
@@ -2130,7 +2244,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     },
     handoffs,
     clients: cdpClients,
-    extension: { generation: () => extensionGeneration, send: sendToExtension },
+    extension: {
+      generation: (tabId) => browsers.generationOf(tabId),
+      isCurrentGeneration: (generation) => browsers.isCurrentGeneration(generation),
+      send: (command) => sendToExtension(command),
+    },
     presentation: {
       replaced: recordRootReplacement,
       committed: presentAttachedTarget,
@@ -2150,7 +2268,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (committedTarget.owner === "relay" && committedTarget.opencodeBrowserSessionId) {
       void passkeys.install(tabId)
     }
-    if (extensionRpc.connected) {
+    if (browsers.browserTab(tabId)?.link.rpc.connected) {
       refreshTabGrouping(tabId)
     }
     const pendingHandoff = handoffs.pendingForTab(tabId)

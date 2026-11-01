@@ -43,7 +43,7 @@ class FakeExtension {
    * Resolves true once the relay proved the code and accepted the extension's proof. A real extension stops when
    * the relay's proof is wrong; `answerAnyway` sends the extension's proof regardless, as an impostor would.
    */
-  async pair(options: { readonly answerAnyway?: boolean; readonly proofPort?: number; readonly settings?: Record<string, unknown>; readonly attachedTabs?: readonly number[]; readonly agentTabs?: readonly number[] } = {}): Promise<boolean> {
+  async pair(options: { readonly answerAnyway?: boolean; readonly proofPort?: number; readonly settings?: Record<string, unknown>; readonly attachedTabs?: readonly number[]; readonly agentTabs?: readonly number[]; readonly hello?: Record<string, unknown> } = {}): Promise<boolean> {
     await new Promise<void>((resolve, reject) => {
       this.socket.once("open", () => resolve())
       this.socket.once("error", reject)
@@ -58,7 +58,7 @@ class FakeExtension {
     })
     this.socket.send(JSON.stringify({
       method: "hello",
-      params: { version: "0.0.0-test", build: "test", protocolVersion: 2, profileId: "test", profileName: "Test", pairing: { nonce } },
+      params: { version: "0.0.0-test", build: "test", protocolVersion: 2, profileId: "test", profileName: "Test", ...options.hello, pairing: { nonce } },
     }))
     const params = await challenge
     // The relay must prove it knows the code before the extension obeys it.
@@ -643,6 +643,79 @@ async function settingsScene(options: { readonly relayPort: number; readonly rel
     },
   }
 }
+
+describe("several browsers", () => {
+  const multiHome = fs.mkdtempSync(path.join(os.tmpdir(), "browse-multi-"))
+  let multi: Awaited<ReturnType<typeof startRelay>> | undefined
+  beforeAll(async () => {
+    multi = await startRelay(multiHome)
+  }, 20_000)
+  afterAll(async () => {
+    await stopRelay(multi?.child)
+    fs.rmSync(multiHome, { recursive: true, force: true })
+  })
+
+  // Both browsers number their new tab 7, as two Chromes easily do.
+  const browser = (targetId: string) => new FakeExtension(pairingCode(multiHome), multi!.port)
+    .on("tabs.create", () => ({ tabId: 7 }))
+    .on("Target.getTargetInfo", () => ({ targetInfo: { targetId, type: "page", title: targetId, url: "https://example.com/", attached: true, browserContextId: "CTX" } }))
+    .on("Page.getFrameTree", () => ({ frameTree: { frame: { id: targetId, loaderId: "L", url: "https://example.com/", domainAndRegistry: "", securityOrigin: "https://example.com", mimeType: "text/html", secureContextType: "Secure", crossOriginIsolatedContextType: "NotIsolated", gatedAPIFeatures: [] } } }))
+    .on("Runtime.evaluate", () => ({ result: { type: "string", value: targetId } }))
+  const api = (pathname: string, body?: unknown) => fetch(`http://127.0.0.1:${multi!.port}${pathname}`, {
+    method: body === undefined ? "GET" : "POST",
+    headers: { authorization: `Bearer ${multi!.token}`, "content-type": "application/json" },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  })
+  /** A session's new tab, opened over CDP, and the answer to an evaluate in it. */
+  const openTab = async (session: string) => {
+    const socket = await connectCdp(`ws://127.0.0.1:${multi!.port}/devtools/browser/test?opencodeBrowserSessionId=${session}`, { authorization: `Bearer ${multi!.token}` })
+    if (!(socket instanceof WebSocket)) throw new Error(`CDP connection refused: ${socket}`)
+    const created = await cdpCall(socket, 1, "Target.createTarget", { url: "https://example.com/" })
+    const attached = await cdpCall(socket, 2, "Target.attachToTarget", { targetId: String(created.result?.targetId), flatten: true })
+    const evaluated = await cdpCall(socket, 3, "Runtime.evaluate", { expression: "1" }, String(attached.result?.sessionId))
+    socket.close()
+    expect(created.error).toBeUndefined()
+    return { targetId: created.result?.targetId, value: (evaluated.result?.result as { value?: string } | undefined)?.value }
+  }
+
+  test("browsers connect side by side, each named, the first the default; sessions open tabs in theirs", async () => {
+    const work = browser("TARGET-WORK")
+    expect(await work.pair({ hello: { profileId: "work", name: "Work Chrome" } })).toBe(true)
+    const home = browser("TARGET-HOME")
+    expect(await home.pair({ hello: { profileId: "home", name: "Home Brave" } })).toBe(true)
+    await Bun.sleep(100)
+    // The second browser didn't push the first one out.
+    expect(work.socket.readyState).toBe(WebSocket.OPEN)
+    const status = await (await api("/extension/status")).json() as { browsers: { id: string; name: string; default: boolean }[] }
+    expect(status.browsers.map(({ id, name, default: isDefault }) => ({ id, name, isDefault }))).toEqual([
+      { id: "work-chrome", name: "Work Chrome", isDefault: true },
+      { id: "home-brave", name: "Home Brave", isDefault: false },
+    ])
+
+    const unknown = await api("/cli/session/new", { id: "on-nothing", browser: "nope" })
+    expect(unknown.status).toBe(400)
+    expect(await unknown.text()).toContain("work-chrome")
+    expect((await api("/cli/session/new", { id: "on-home", browser: "home-brave" })).ok).toBe(true)
+    expect((await api("/cli/session/new", { id: "on-default" })).ok).toBe(true)
+
+    // Each session's tab opens in its browser, and commands for it go there, with that browser's own tab id.
+    expect(await openTab("on-home")).toEqual({ targetId: "TARGET-HOME", value: "TARGET-HOME" })
+    expect(await openTab("on-default")).toEqual({ targetId: "TARGET-WORK", value: "TARGET-WORK" })
+    expect(home.commands.filter((command) => command.method === "tabs.create")).toHaveLength(1)
+    expect(work.commands.filter((command) => command.method === "tabs.create")).toHaveLength(1)
+    for (const extension of [home, work])
+      expect(extension.commands.filter((command) => command.method === "debugger.sendCommand").every((command) => command.params?.tabId === 7)).toBe(true)
+
+    // A browser going away takes only its own tabs.
+    home.close()
+    await Bun.sleep(200)
+    const targets = await (await api("/json/list")).json() as { id: string }[]
+    expect(targets.map((target) => target.id)).toEqual(["TARGET-WORK"])
+    const after = await (await api("/extension/status")).json() as { browsers: { id: string }[] }
+    expect(after.browsers.map((entry) => entry.id)).toEqual(["work-chrome"])
+    work.close()
+  }, 20_000)
+})
 
 // `set hostname 0.0.0.0`, reached through this machine's own network address: a connection from it isn't loopback,
 // so the relay treats it as another computer.

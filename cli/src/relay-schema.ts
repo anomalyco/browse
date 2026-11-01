@@ -18,6 +18,7 @@ export const SessionSummary = Schema.Struct({
   stateKeys: Schema.Array(Schema.String),
   readOnly: Schema.optionalKey(Schema.Boolean),
   allowedOrigins: Schema.optionalKey(Schema.Array(Schema.String)),
+  browser: Schema.optionalKey(Schema.String),
 })
 
 export interface SessionSummary extends Schema.Schema.Type<typeof SessionSummary> {}
@@ -77,6 +78,8 @@ export const ExecuteRequest = Schema.Struct({
   sessionId: Schema.optionalKey(Schema.String),
   code: Schema.String,
   createIfMissing: Schema.Boolean,
+  /** The browser a session created here opens its tabs in; for an existing session it must be the session's. */
+  browser: Schema.optionalKey(Schema.String),
   targetSelection: Schema.optionalKey(TargetSelection),
 })
 
@@ -96,6 +99,8 @@ export const SessionNewRequest = Schema.Struct({
   id: Schema.optionalKey(Schema.String),
   readOnly: Schema.optionalKey(Schema.Boolean),
   allowedOrigins: Schema.optionalKey(Schema.Array(Schema.String)),
+  /** The connected browser (its id) the session's tabs open in; omitted: the default browser. */
+  browser: Schema.optionalKey(Schema.String),
 })
 
 export interface SessionNewRequest extends Schema.Schema.Type<typeof SessionNewRequest> {}
@@ -272,6 +277,20 @@ export interface TargetSummary extends Schema.Schema.Type<typeof TargetSummary> 
 
 export const TargetSummaries = Schema.Array(TargetSummary)
 
+export const ConnectedBrowser = Schema.Struct({
+  /** What agents pass as `browser`, such as "chrome-macbook". */
+  id: Schema.String,
+  /** "Chrome on MacBook", or the name set on the extension's status page. */
+  name: Schema.String,
+  /** Sessions that don't name a browser use this one. */
+  default: Schema.Boolean,
+  connected: Schema.Boolean,
+  version: Schema.NullOr(Schema.String),
+  tabs: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+})
+
+export interface ConnectedBrowser extends Schema.Schema.Type<typeof ConnectedBrowser> {}
+
 export const ExtensionStatus = Schema.Struct({
   connected: Schema.Boolean,
   version: Schema.NullOr(Schema.String),
@@ -282,6 +301,8 @@ export const ExtensionStatus = Schema.Struct({
   protocolVersion: Schema.optionalKey(Schema.NullOr(Schema.Number)),
   protocolCompatible: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
   protocolLegacy: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
+  /** Every connected browser; the fields above describe the default one. */
+  browsers: Schema.optionalKey(Schema.Array(ConnectedBrowser)),
   rejectedConnections: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   /** Extension connections refused because the pairing handshake failed. */
   pairingFailures: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),

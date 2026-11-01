@@ -41,6 +41,16 @@
       </section>
 
       <section>
+        <h2>This browser</h2>
+        <p id="browser-identity">Agents see this browser's name once it's connected.</p>
+        <form class="command" id="browser-name-form">
+          <input id="browser-name" autocomplete="off" spellcheck="false" maxlength="60" placeholder="Name for agents (default: browser and computer)" aria-label="Browser name" />
+          <button type="submit">Save</button>
+        </form>
+        <p class="note">When several browsers connect to one relay, agents pick one by this name; the first to connect is the default.</p>
+      </section>
+
+      <section>
         <h2>Agent tabs</h2>
         <fieldset class="choices" id="agent-window">
           <legend>Where agents open their tabs</legend>

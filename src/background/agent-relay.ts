@@ -24,6 +24,7 @@ import type {
 import {
   AGENT_CURSOR_KEY,
   agentCursor,
+  BROWSER_NAME_KEY,
   HUMAN_INPUT_KEY,
   humanInput,
   RELAY_ADDRESS_KEY,
@@ -96,6 +97,19 @@ const CLOSE_CODES: Record<number, string> = {
   4006: "pairing failed",
 }
 
+/** The browser's own name for the relay to name it by: Chrome, Edge, Brave, Opera or Chromium. */
+function browserBrand(): string {
+  const brands = (navigator as Navigator & { userAgentData?: { brands?: { brand: string }[] } }).userAgentData?.brands?.map((entry) => entry.brand) ?? []
+  const known: [string, string][] = [["Microsoft Edge", "Edge"], ["Brave", "Brave"], ["Opera", "Opera"], ["Google Chrome", "Chrome"], ["Chromium", "Chromium"]]
+  return known.find(([brand]) => brands.includes(brand))?.[1] ?? "Chrome"
+}
+
+/** The name set on the status page, if any. */
+async function browserName(): Promise<string | undefined> {
+  const value = (await chrome.storage.local.get(BROWSER_NAME_KEY))[BROWSER_NAME_KEY]
+  return typeof value === "string" && value.trim() ? value.trim().slice(0, 60) : undefined
+}
+
 export function createAgentRelay(input: { changed: (state: AgentRelayState) => void; badgesChanged: () => void }) {
   const log = createAgentRelayLog()
   let socket: WebSocket | undefined
@@ -156,6 +170,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   let update: AgentRelayUpdate | undefined
   /** Settings the connected relay's environment fixes, as it reported them (`relay.settings`). */
   let overrides: RelayOverrides | undefined
+  /** What the connected relay calls this browser (`relay.settings`): agents name it by `id`. */
+  let browser: { id: string; name: string } | undefined
   /** The connected relay's update state (`relay.settings`). */
   let autoUpdate: RelayAutoUpdate | undefined
   /** Which side to update when the relay's protocol doesn't match this extension's. */
@@ -174,6 +190,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     ...(autoUpdate ? { autoUpdate } : {}),
     ...(skew && status === "incompatible" ? { skew } : {}),
     ...(ticketRejected ? { ticketRejected: true } : {}),
+    ...(browser && status === "connected" ? { browser } : {}),
     relay: { address: `${host}:${port}`, remote: host !== "127.0.0.1" },
   })
   const notify = () => input.changed(snapshot())
@@ -350,6 +367,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       void chrome.runtime.sendMessage({ action: "recording.cancelAll" }).catch(() => undefined)
       overrides = undefined
       autoUpdate = undefined
+      browser = undefined
       if (ticketSocket?.socket === current) {
         // Only the relay's refusal (4006) means the link is spent; a relay that wasn't there yet gets it on the next try.
         ticketRejected = !trusted.has(current) && event.code === 4006
@@ -395,6 +413,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     const usingTicket = ticket
     ticket = undefined
     const code = usingTicket !== undefined ? await pairingTicketKey(usingTicket) : await pairingCode()
+    const name = await browserName()
     if (socket !== current || current.readyState !== WebSocket.OPEN) return
     if (code === undefined) return current.close(4006, "Not paired")
     const nonce = randomNonce()
@@ -417,6 +436,10 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
           protocolVersion: extensionProtocolVersion,
           profileId: profile.id,
           profileName: profile.name ?? "Browse",
+          // What agents call this browser: the name set on the status page, else the relay names it from these
+          // and the computer ("Chrome on MacBook").
+          browser: browserBrand(),
+          ...(name ? { name } : {}),
           pairing: { nonce, ...(usingTicket !== undefined ? { ticket: true } : {}) },
         },
       }),
@@ -696,6 +719,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         }
         overrides = Object.keys(next).length ? next : undefined
         autoUpdate = relayAutoUpdate(params?.autoUpdate)
+        const named = isJsonObject(params?.browser) ? params.browser : undefined
+        browser = typeof named?.id === "string" && typeof named.name === "string" ? { id: named.id, name: named.name } : undefined
         notify()
         return {}
       }
@@ -1096,10 +1121,10 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && (AGENT_CURSOR_KEY in changes || HUMAN_INPUT_KEY in changes)) void sendSettings()
   })
-  // A code typed on the status page (or removed), or a new relay address, takes effect on a fresh connection.
+  // A code typed on the status page (or removed), a new relay address or a new name takes effect on a fresh connection.
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== "local" || !(PAIRING_KEY in changes || RELAY_ADDRESS_KEY in changes)) return
-    if (!(RELAY_ADDRESS_KEY in changes) && adopting !== undefined && changes[PAIRING_KEY]?.newValue === adopting) {
+    if (area !== "local" || !(PAIRING_KEY in changes || RELAY_ADDRESS_KEY in changes || BROWSER_NAME_KEY in changes)) return
+    if (!(RELAY_ADDRESS_KEY in changes) && !(BROWSER_NAME_KEY in changes) && adopting !== undefined && changes[PAIRING_KEY]?.newValue === adopting) {
       adopting = undefined
       bundledPairing = undefined
       return

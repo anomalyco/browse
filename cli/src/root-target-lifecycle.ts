@@ -24,7 +24,9 @@ type Options = {
   readonly handoffs: Pick<HandoffRegistry, "rebindTarget">
   readonly clients: Pick<CdpClientPool<object>, "detachTab">
   readonly extension: {
-    readonly generation: () => number
+    /** The connection of the tab's browser; work started under an older one is dropped. */
+    readonly generation: (tabId: number) => number
+    readonly isCurrentGeneration: (generation: number) => boolean
     readonly send: (command: Omit<ExtensionCommand, "id">) => Effect.Effect<JsonObject, Error>
   }
   readonly presentation: {
@@ -129,10 +131,11 @@ export class RootTargetLifecycle {
   }): void {
     if (this.closing) return
     const lifecycle = this
-    const generation = options.generation ?? this.options.extension.generation()
-    if (generation !== this.options.extension.generation()) return
+    const generation = options.generation ?? this.options.extension.generation(options.tabId)
+    if (generation !== this.options.extension.generation(options.tabId)) return
+    // Failures of a browser's earlier connection are history; another browser's current ones are not.
     for (const [tabId, failedGeneration] of this.failedTabs) {
-      if (failedGeneration !== generation) this.failedTabs.delete(tabId)
+      if (failedGeneration !== generation && !this.options.extension.isCurrentGeneration(failedGeneration)) this.failedTabs.delete(tabId)
     }
     const work = this.tabWork(options.tabId)
     const revision = work.revision
@@ -185,10 +188,10 @@ export class RootTargetLifecycle {
           schedule: Schedule.spaced(0).pipe(Schedule.modifyDelay(({ attempt }) => Effect.succeed(100 * attempt))),
           // A command that didn't answer within the inventory timeout won't answer on a retry either (the tab is
           // wedged); retrying only held every agent back another timeout each time.
-          while: (error) => !(error instanceof GenerationChanged) && !(error instanceof InventoryTimeout) && !lifecycle.closing && generation === lifecycle.options.extension.generation() && revision === work.revision,
+          while: (error) => !(error instanceof GenerationChanged) && !(error instanceof InventoryTimeout) && !lifecycle.closing && generation === lifecycle.options.extension.generation(options.tabId) && revision === work.revision,
         }),
       )
-      if (lifecycle.closing || generation !== lifecycle.options.extension.generation()) return null
+      if (lifecycle.closing || generation !== lifecycle.options.extension.generation(options.tabId)) return null
       if (worker.verificationRetries > 0) {
         const delay = 50 * (4 - worker.verificationRetries)
         worker.verificationRetries -= 1
@@ -204,7 +207,7 @@ export class RootTargetLifecycle {
         ),
       }),
       Effect.onExit((exit) => Effect.sync(() => {
-        if (generation === lifecycle.options.extension.generation() && revision === work.revision) {
+        if (generation === lifecycle.options.extension.generation(options.tabId) && revision === work.revision) {
           if (Exit.isFailure(exit)) lifecycle.failedTabs.set(options.tabId, generation)
           else lifecycle.failedTabs.delete(options.tabId)
         }
@@ -225,7 +228,7 @@ export class RootTargetLifecycle {
       if (generation === undefined) yield* this.idle.await
       if (!Array.from(this.workers.values()).some((worker) => generation === undefined || worker.generation === generation)) break
     }
-    return generation === undefined || (generation === this.options.extension.generation() && !Array.from(this.failedTabs.values()).includes(generation))
+    return generation === undefined || (this.options.extension.isCurrentGeneration(generation) && !Array.from(this.failedTabs.values()).includes(generation))
   })
 
   /** Tabs whose inventory work failed in this generation (why `settle` reported false). */
@@ -244,7 +247,7 @@ export class RootTargetLifecycle {
     const lifecycle = this
     return Effect.suspend(() => {
       if (lifecycle.closing) return Effect.fail(new Error("Relay is closing"))
-      const generation = expectedGeneration ?? lifecycle.options.extension.generation()
+      const generation = expectedGeneration ?? lifecycle.options.extension.generation(tabId)
       const work = lifecycle.tabWork(tabId)
       const revision = work.revision
       work.users += 1
@@ -276,7 +279,7 @@ export class RootTargetLifecycle {
     const root = registry.tabTargets.get(transition.tabId)
     const staged = registry.stagedRootTarget(transition.tabId)
     if (
-      transition.generation !== extension.generation() || transition.revision !== transition.work.revision ||
+      transition.generation !== extension.generation(transition.tabId) || transition.revision !== transition.work.revision ||
       transition.root?.sessionId !== root?.sessionId || transition.root?.targetInfo.targetId !== root?.targetInfo.targetId ||
       transition.staged?.sessionId !== staged?.sessionId || transition.staged?.targetInfo.targetId !== staged?.targetInfo.targetId
     ) return yield* new GenerationChanged({ message: "Root target generation changed during reconciliation" })

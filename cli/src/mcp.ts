@@ -1,5 +1,5 @@
 import { NodeStdio } from "@effect/platform-node"
-import { Config, Context, Effect, Layer, Option, Predicate } from "effect"
+import { Config, Context, Effect, Layer, Option, Predicate, Schedule } from "effect"
 import { McpProtocol, McpSchema, McpServer } from "effect/ai"
 import fs from "node:fs/promises"
 import path from "node:path"
@@ -10,7 +10,7 @@ import * as RelayClient from "./relay-client.ts"
 import * as RelayLifecycle from "./relay-lifecycle.ts"
 import * as SiteSecrets from "./site-secrets.ts"
 import * as Deadbolt from "./deadbolt.ts"
-import type { TargetSelection } from "./relay-schema.ts"
+import type { ConnectedBrowser, TargetSelection } from "./relay-schema.ts"
 import { autoUpdateStatus } from "./auto-update.ts"
 import { createUpdateWatcher, updateJson, type UpdateNotice } from "./update.ts"
 import { securityVariables, settingKeys, settingSpecs } from "./user-settings.ts"
@@ -33,6 +33,19 @@ type ExecuteArguments = {
   readonly code: string
   readonly session?: string | undefined
   readonly targetSelection?: TargetSelection
+  readonly browser?: string
+}
+
+type BrowserSummary = Pick<ConnectedBrowser, "id" | "name" | "default">
+
+/**
+ * With more than one browser connected, which ones and which is the default, for the execute and session_new
+ * descriptions. With one or none it's empty, so the descriptions (and the agent's prompt cache) stay the same.
+ */
+export function browsersNote(browsers: readonly BrowserSummary[]): string {
+  if (browsers.length < 2) return ""
+  const list = browsers.map((browser) => `${browser.id} (${browser.name}${browser.default ? ", default" : ""})`).join(", ")
+  return ` Connected browsers: ${list}. Pass browser to use one other than the default.`
 }
 
 type AdoptArguments = {
@@ -51,7 +64,12 @@ const sessionOnlyInputSchema = objectSchema({
   session: sessionSchemaProperty,
 })
 
-function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSession, update: () => UpdateNotice | undefined = () => undefined): readonly ToolSpec[] {
+function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSession, update: () => UpdateNotice | undefined = () => undefined, browsers: readonly BrowserSummary[] = []): readonly ToolSpec[] {
+  const browserNote = browsersNote(browsers)
+  const browserProperty = {
+    type: "string",
+    description: `Optional browser id for a new session's tabs; omit for the default browser. A session stays in its browser.${browserNote}`,
+  } as const
   // session_reset and session_delete name the session `id`; `session`, as every other tool calls it, means the same
   // there. Ignoring it used to reset or delete the current session instead of the one asked for.
   const resolveSessionId = (input: unknown, field = "session") =>
@@ -63,12 +81,13 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
   return [
     {
       name: "execute",
-      description: "Execute Playwright JavaScript against the Browse session. Code runs in a sandbox on the relay without process, require, import(), fs, child_process, http/https or Node fetch; save and read files with the files helper inside the execute file roots, and cookie access is limited to the session's pages. The result includes console logs, warnings, a bounded execution-context diagnostic when relevant, and an aftermath summary (URL movement, navigations, error counts, handoffs, and a bot challenge or block page when one appears: hand interactive ones to the user with handoff(), never solve or retry-loop them).",
+      description: `Execute Playwright JavaScript against the Browse session. Code runs in a sandbox on the relay without process, require, import(), fs, child_process, http/https or Node fetch; save and read files with the files helper inside the execute file roots, and cookie access is limited to the session's pages. The result includes console logs, warnings, a bounded execution-context diagnostic when relevant, and an aftermath summary (URL movement, navigations, error counts, handoffs, and a bot challenge or block page when one appears: hand interactive ones to the user with handoff(), never solve or retry-loop them).${browserNote}`,
       inputSchema: objectSchema({
         code: { type: "string", description: "JavaScript code to execute. It receives browser, context, page, state, modules (path, url, util, crypto, buffer, zlib, events, stream), files (dir, path, write, read), fillInput, fillInputs, snapshot(options?) for compact semantic outlines, search, explicit diffs, or automatic deltas, persistent compatible ref(id) locators, webmcp (list/call), screenshot helpers, ariaSnapshot, ghostCursor, handoff, demonstrate, network capture, pageConsole (start/stop capturing the page's own console messages and errors, off by default because pages can detect it), secrets.type(locator, name) to type a stored site secret or a granted Deadbolt login (\"deadbolt:<site>[/<username>]\", { field: \"username\" }, or a password/code with { submit: true }; see secrets_list) only on its allowed origins, without seeing it, secrets.signIn({ site?, username? }) for a whole sign-in (same as the signin tool), and secrets.usePasskey({ site, username }) to pick the passkey account for the tab's next passkey request." },
         session: { type: "string", description: "Optional existing Browse session id. Explicit ids must already exist; omit this field to use the MCP server's current session, which is created when needed." },
         targetUrl: { type: "string", description: "Optional URL substring selecting an existing attached page. This does not navigate or open a URL; use page.goto() for that." },
         targetIndex: { type: "integer", minimum: 0, description: "Optional zero-based attached page index selector." },
+        browser: browserProperty,
       }, ["code"]),
       readOnly: false,
       destructive: true,
@@ -82,6 +101,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
           code: args.code,
           createIfMissing: !args.session,
           ...(args.targetSelection ? { targetSelection: args.targetSelection } : {}),
+          ...(args.browser ? { browser: args.browser } : {}),
         })
         const recreated = !args.session && currentSession.established && result.session.created === true
         establishCurrentSession(sessionId)
@@ -107,8 +127,9 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "session_new",
-      description: "Create a Browse session and make it current for this MCP server.",
+      description: `Create a Browse session and make it current for this MCP server.${browserNote}`,
       inputSchema: objectSchema({
+        browser: browserProperty,
         id: { type: "string", description: "Optional lowercase session id." },
         readOnly: { type: "boolean", description: "Create a read-only session: the relay rejects input-dispatching CDP so scripts can inspect but not click or type." },
         allowedOrigins: { type: "array", items: { type: "string" }, description: "Optional domain allowlist: hosts or origins this session's tabs may load (example.com, *.example.com, https://app.example.com, http://localhost:3000). Navigations elsewhere are refused or sent back to about:blank; private and loopback addresses need an exact entry." },
@@ -120,9 +141,11 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         const requestedId = optionalStringField(input, "id")
         const readOnly = optionalBooleanField(input, "readOnly")
         const allowedOrigins = optionalStringArrayField(input, "allowedOrigins")
+        const browser = optionalStringField(input, "browser")
         const session = yield* relay.sessionNew(requestedId, {
           ...(readOnly ? { readOnly: true } : {}),
           ...(allowedOrigins ? { allowedOrigins } : {}),
+          ...(browser ? { browser } : {}),
         })
         establishCurrentSession(session.id)
         return { session }
@@ -647,8 +670,8 @@ const registerTools = Effect.gen(function* () {
       content: [...result.content, McpSchema.TextContent.make({ text: mcpUpdateNote(notice) })],
     })
   }
-  yield* Effect.forEach(makeToolSpecs(relay, currentSession, () => updates.current), (spec) => {
-    return server.addTool({
+  const register = (spec: ToolSpec) =>
+    server.addTool({
       tool: new McpSchema.Tool({
         name: spec.name,
         description: spec.description,
@@ -678,8 +701,26 @@ const registerTools = Effect.gen(function* () {
         )
       },
     })
-  }, { discard: true })
+  // The connected browsers, as the descriptions of execute and session_new list them. The relay is asked every few
+  // seconds; when the browsers change, those two tools are registered again, which tells the client (list_changed).
+  const connectedBrowsers = relay.extensionStatus.pipe(
+    Effect.map((status): readonly BrowserSummary[] => (status.browsers ?? []).map(({ id, name, default: isDefault }) => ({ id, name, default: isDefault }))),
+    Effect.orElseSucceed((): readonly BrowserSummary[] => []),
+  )
+  let browsers = yield* connectedBrowsers.pipe(Effect.timeoutOption(1_000), Effect.map(Option.getOrElse((): readonly BrowserSummary[] => [])))
+  yield* Effect.forEach(makeToolSpecs(relay, currentSession, () => updates.current, browsers), register, { discard: true })
+  const refreshBrowsers = Effect.gen(function* () {
+    const next = yield* connectedBrowsers
+    if (browsersNote(next) === browsersNote(browsers)) return
+    browsers = next
+    const specs = makeToolSpecs(relay, currentSession, () => updates.current, browsers).filter((spec) => browserTools.has(spec.name))
+    yield* Effect.forEach(specs, register, { discard: true })
+  })
+  yield* refreshBrowsers.pipe(Effect.repeat(Schedule.spaced("5 seconds")), Effect.forkDetach)
 })
+
+/** The tools whose descriptions list the connected browsers. */
+const browserTools = new Set(["execute", "session_new"])
 
 /** The one-time note on a tool result: what to tell the user, and that the agent may run the update itself. */
 export function mcpUpdateNote(notice: Pick<UpdateNotice, "summary" | "command">): string {
@@ -727,10 +768,12 @@ function parseExecuteArguments(input: unknown): ExecuteArguments {
   const code = requiredStringField(object, "code")
   const session = optionalStringField(object, "session")
   const targetSelection = parseMcpTargetSelection(object)
+  const browser = optionalStringField(object, "browser")
   return {
     code,
     ...(session ? { session } : {}),
     ...(targetSelection ? { targetSelection } : {}),
+    ...(browser ? { browser } : {}),
   }
 }
 

@@ -59,7 +59,7 @@ export function createHttpRequestHandler(options: {
   readonly relayInstance: { readonly id: string; readonly startedAt: string; readonly pid: number; readonly managed: boolean }
   readonly shutdown: RelayShutdown
   readonly extensionStatus: () => Pick<ExtensionStatus,
-    "connected" | "version" | "build" | "origin" | "protocolVersion" | "protocolCompatible" | "protocolLegacy" | "rejectedConnections" | "pairingFailures" | "cdpClients" | "processFaults"
+    "connected" | "version" | "build" | "origin" | "protocolVersion" | "protocolCompatible" | "protocolLegacy" | "browsers" | "rejectedConnections" | "pairingFailures" | "cdpClients" | "processFaults"
   >
   readonly recordingRelay: RecordingRelay
   readonly flightRecorder: FlightRecorderRelay
@@ -181,6 +181,7 @@ export function createHttpRequestHandler(options: {
         ...(extensionStatus.protocolVersion === undefined ? {} : { protocolVersion: extensionStatus.protocolVersion }),
         ...(extensionStatus.protocolCompatible === undefined ? {} : { protocolCompatible: extensionStatus.protocolCompatible }),
         ...(extensionStatus.protocolLegacy === undefined ? {} : { protocolLegacy: extensionStatus.protocolLegacy }),
+        ...(extensionStatus.browsers === undefined ? {} : { browsers: extensionStatus.browsers }),
         ...(extensionStatus.rejectedConnections === undefined ? {} : { rejectedConnections: extensionStatus.rejectedConnections }),
         ...(extensionStatus.cdpClients === undefined ? {} : { cdpClients: extensionStatus.cdpClients }),
         ...(extensionStatus.pairingFailures === undefined ? {} : { pairingFailures: extensionStatus.pairingFailures }),
@@ -526,6 +527,7 @@ function handleCliRequest(options: {
       const session = yield* options.sessions.create(optionalSessionId(request.id), {
         readOnly: request.readOnly === true,
         ...(allowedOrigins ? { allowedOrigins } : {}),
+        ...(request.browser ? { browser: request.browser } : {}),
       })
       noteClient(options.request, options.sessions, session.id)
       sendJson(options.response, { session: options.sessions.summary(session.id) })
@@ -603,6 +605,7 @@ function handleCliRequest(options: {
         code: request.code,
         createIfMissing: request.createIfMissing,
         ...(request.targetSelection ? { targetSelection: request.targetSelection } : {}),
+        ...(request.browser ? { browser: request.browser } : {}),
       })
       const { setupFailed: _setupFailed, ...wireResult } = result
       noteClient(options.request, options.sessions, session.id)

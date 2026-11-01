@@ -38,7 +38,12 @@ export type AgentRelayState = {
   ticketRejected?: boolean
   /** Where the extension connects, `host:port`, and whether that's another computer (the status page's relay address). */
   relay: { address: string; remote: boolean }
+  /** What the connected relay calls this browser; agents pass `id` to use it when several are connected. */
+  browser?: { id: string; name: string }
 }
+
+/** chrome.storage.local, set on the status page: this browser's name for agents. Unset: "<browser> on <computer>". */
+export const BROWSER_NAME_KEY = "browserName"
 
 /** chrome.storage.local, set on the status page: a relay on another computer, `host` or `host:port`. Unset: this one. */
 export const RELAY_ADDRESS_KEY = "agentRelayAddress"
