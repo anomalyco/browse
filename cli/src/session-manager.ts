@@ -34,8 +34,9 @@ type AdoptionResult = {
 export const defaultExecuteTimeoutMs = 60_000
 
 export type SessionHooks = {
-  /** A browser a session asks for, by id or name: its id while it's connected, else why not. */
-  readonly resolveBrowser?: (requested: string) => { readonly id: string } | { readonly error: string }
+  /** Select once on creation, otherwise check the stored profile and any requested selector. */
+  readonly resolveBrowser?: (requested?: string, session?: OpenCodeBrowserSession) => { readonly id: string; readonly key: string } | { readonly error: string; readonly unavailable?: true }
+  readonly targetBrowserKey?: (tabId: number) => string | undefined
   /** Called when a session starts (true) or finishes (false) an execute. */
   readonly onExecuteStateChange?: (sessionId: string, executing: boolean) => void | Effect.Effect<void>
   /** Called after each execute completes, for journaling. Failure is logged and ignored. */
@@ -47,7 +48,7 @@ export type SessionHooks = {
   /** Maximum time best-effort journal I/O may retain an execute permit. */
   readonly journalTimeoutMs?: number
   /** Current user-owned attached page URLs, used for relay-side adoption hints. */
-  readonly getUserAttachedPageUrls?: () => readonly string[]
+  readonly getUserAttachedPageUrls?: (session: OpenCodeBrowserSession) => readonly string[]
   /** Reconcile relay visibility and presentation after authoritative ownership changes. */
   readonly onTargetOwnershipChange?: (change: TargetOwnershipChange) => void
   /** Close a live relay-owned target by its durable target id. */
@@ -136,6 +137,7 @@ export class SessionError extends Schema.TaggedError<SessionError>()(
     message: Schema.String,
     reason: Schema.Literals([
       "already-exists",
+      "browser-unavailable",
       "inactive",
       "invalid-request",
       "not-found",
@@ -152,6 +154,8 @@ const sessionError = (
   message: string,
   sessionId?: string,
 ): SessionError => new SessionError({ message, reason, ...(sessionId ? { sessionId } : {}) })
+
+const trySession = <A>(work: () => A) => Effect.try({ try: work, catch: (cause) => cause instanceof Error ? cause : new Error(String(cause)) })
 
 export const adoptionTipForUrl = (url: string): string => {
   const selector = targetUrlHintSelector(url)
@@ -186,7 +190,6 @@ export class OpenCodeBrowserSessions {
   private readonly pendingSessionWork = new Map<string, number>()
   private readonly identityChanges = new Map<string, Deferred.Deferred<void, Error>>()
   private readonly idle = Latch.makeUnsafe(true)
-  private userAttachedPageUrlsProvider: (() => readonly string[]) | undefined
 
   constructor(
     private readonly endpointUrl: string,
@@ -197,11 +200,6 @@ export class OpenCodeBrowserSessions {
     this.createSandbox = createSandbox ?? ((id, onDefaultTargetChange) => new ExecuteSandbox({ endpointUrl: this.endpointUrl, sessionId: id, onDefaultTargetChange }))
     this.hooks = hooks ?? {}
     this.targetOwnership = targetOwnership ?? new MemoryTargetOwnership()
-    this.userAttachedPageUrlsProvider = this.hooks.getUserAttachedPageUrls
-  }
-
-  setUserAttachedPageUrlsProvider(provider: () => readonly string[]): void {
-    this.userAttachedPageUrlsProvider = provider
   }
 
   listSummaries(): SessionSummary[] {
@@ -229,7 +227,7 @@ export class OpenCodeBrowserSessions {
         updatedAt: entry.updatedAt,
       })
       if (entry.allowedOrigins && entry.allowedOrigins.length > 0) session.allowedOrigins = entry.allowedOrigins
-      if (entry.browser) session.browser = entry.browser
+      if (entry.browser) session.browser = { id: entry.browser, ...(entry.browserKey ? { key: entry.browserKey } : {}) }
       if (entry.target) session.target = entry.target
       if (entry.clientPid !== undefined) session.clientPid = entry.clientPid
       session.sandbox.restore(entry.target)
@@ -265,20 +263,17 @@ export class OpenCodeBrowserSessions {
     if (this.sessions.has(sessionId)) {
       throw sessionError("already-exists", `Session already exists: ${sessionId}`, sessionId)
     }
+    const browser = this.resolveBrowser(options?.browser)
     const session = this.createOpenCodeBrowserSession(sessionId, options?.readOnly === true)
     if (options?.allowedOrigins && options.allowedOrigins.length > 0) session.allowedOrigins = options.allowedOrigins
-    if (options?.browser) session.browser = options.browser
+    if (browser) session.browser = browser
     this.sessions.set(sessionId, session)
     this.schedulePersistence()
     return session
   }
 
   create(id: string | undefined, options?: SessionCreateOptions): Effect.Effect<OpenCodeBrowserSession, Error> {
-    const { browser: requested, ...rest } = options ?? {}
-    return this.withAdmission(id, this.resolveBrowser(requested, id).pipe(
-      Effect.flatMap((browser) => this.createPersistedSession(id, browser === undefined ? rest : { ...rest, browser })),
-      Effect.uninterruptible,
-    ))
+    return this.withAdmission(id, this.createPersistedSession(id, options).pipe(Effect.uninterruptible))
   }
 
   ensure(id: string, options?: { readonly readOnly?: boolean }): Effect.Effect<SessionSummary, Error> {
@@ -286,6 +281,7 @@ export class OpenCodeBrowserSessions {
     return this.withAdmission(id, Effect.gen(function* () {
       const existing = manager.sessions.get(id)
       if (existing) {
+        yield* trySession(() => manager.resolveBrowser(undefined, existing))
         if (options?.readOnly === true && !existing.readOnly) {
           return yield* sessionError(
             "invalid-request",
@@ -304,7 +300,7 @@ export class OpenCodeBrowserSessions {
     const manager = this
     const sessionId = id ?? generateSessionId(this.sessions)
     return yield* manager.withIdentityChange(sessionId, Effect.gen(function* () {
-      const session = manager.createAcceptedSession(sessionId, options)
+      const session = yield* trySession(() => manager.createAcceptedSession(sessionId, options))
       yield* manager.flushPersistenceWithRollback(() => Effect.gen(function* () {
         if (manager.sessions.get(session.id) === session) manager.sessions.delete(session.id)
         yield* manager.closeOpenCodeBrowserSession(session)
@@ -568,6 +564,7 @@ export class OpenCodeBrowserSessions {
           if (manager.sessions.get(id) !== session) {
             return yield* sessionError("inactive", `Session is no longer active: ${id}`, id)
           }
+          yield* trySession(() => manager.resolveBrowser(undefined, session))
           return yield* use(session)
         }))),
       )
@@ -627,6 +624,7 @@ export class OpenCodeBrowserSessions {
           if (manager.sessions.get(session.id) !== session) {
             return yield* sessionError("inactive", `Session is no longer active: ${session.id}`, session.id)
           }
+          yield* trySession(() => manager.resolveBrowser(options.browser, session))
           started = true
           session.updatedAt = new Date().toISOString()
           yield* manager.setExecuting(session.id, true)
@@ -688,7 +686,7 @@ export class OpenCodeBrowserSessions {
           if (resolved.created && result.setupFailed) {
             return yield* sessionError("setup-failed", result.text, session.id)
           }
-          const userAttachedPageUrls = manager.userAttachedPageUrlsProvider?.() ?? []
+          const userAttachedPageUrls = manager.hooks.getUserAttachedPageUrls?.(session) ?? []
           const resultWithHint = shouldAppendAdoptionTip({
             explicitTargetSelection: hasExplicitTargetSelection(options.targetSelection),
             sessionCreated: resolved.created,
@@ -734,11 +732,20 @@ export class OpenCodeBrowserSessions {
     })))
   }
 
+  targetsForAdoption(sessionId: string | undefined, targets: readonly ConnectedTarget[]) {
+    return trySession(() => {
+      const session = sessionId === undefined ? undefined : this.sessions.get(sessionId)
+      const browser = this.resolveBrowser(undefined, session)
+      return targets.filter((target) => !browser?.key || this.hooks.targetBrowserKey?.(target.tabId) === browser.key)
+    })
+  }
+
   adopt(options: {
     readonly sessionId?: string
     readonly createIfMissing: boolean
     readonly targetId: string
     readonly targetUrl: string
+    readonly tabId?: number
   }): Effect.Effect<AdoptionResult, Error> {
     const manager = this
     return this.withAdmission(options.sessionId, Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
@@ -768,6 +775,10 @@ export class OpenCodeBrowserSessions {
           }
           if (adoptionCancelled()) {
             return yield* timeoutError
+          }
+          const browser = yield* trySession(() => manager.resolveBrowser(undefined, session))
+          if (options.tabId !== undefined && browser?.key && manager.hooks.targetBrowserKey?.(options.tabId) !== browser.key) {
+            return yield* sessionError("invalid-request", `Tab ${options.tabId} is not in session ${session.id}'s browser '${browser.id}'. Start a new session for its browser.`, session.id)
           }
           reservation = yield* Effect.try({
             try: () => manager.targetOwnership.reserveTargetOwnership(options.targetId, session.id),
@@ -1013,39 +1024,32 @@ export class OpenCodeBrowserSessions {
     session.sandbox.restore(session.target, "The previous script was stopped and did not end in time, so this session's JavaScript state and snapshot refs were reset.")
   }
 
-  /** The browser a request names, as its id, checked against the connected ones. */
-  private resolveBrowser(requested: string | undefined, sessionId?: string): Effect.Effect<string | undefined, SessionError> {
-    if (requested === undefined || requested.trim() === "") return Effect.succeed(undefined)
-    const resolved = this.hooks.resolveBrowser?.(requested) ?? { id: requested.trim() }
-    return "error" in resolved ? Effect.fail(sessionError("invalid-request", resolved.error, sessionId)) : Effect.succeed(resolved.id)
+  private resolveBrowser(requested?: string, session?: OpenCodeBrowserSession): OpenCodeBrowserSession["browser"] {
+    const browser = this.hooks.resolveBrowser?.(requested?.trim() || undefined, session)
+    if (browser && "error" in browser) throw sessionError(browser.unavailable ? "browser-unavailable" : "invalid-request", browser.error, session?.id)
+    if (browser && session && session.browser?.id !== browser.id) {
+      // A rename can change the display id, not the profile this session belongs to.
+      session.browser = browser
+      this.schedulePersistence()
+    }
+    return browser
   }
 
   /** Resolve execute/adopt work before any permit; the caller owns cleanup of a created session. */
-  private resolveWorkSession(id: string | undefined, createIfMissing: boolean, requestedBrowser?: string): Effect.Effect<{ readonly session: OpenCodeBrowserSession; readonly created: boolean }, SessionError> {
-    return this.resolveBrowser(requestedBrowser, id).pipe(Effect.flatMap((browser) => Effect.suspend(() => {
+  private resolveWorkSession(id: string | undefined, createIfMissing: boolean, requestedBrowser?: string) {
+    return trySession(() => {
       const existing = id === undefined ? undefined : this.sessions.get(id)
-      const resolved = id === undefined
-        ? createIfMissing ? { session: this.createAcceptedSession(undefined, browser ? { browser } : undefined), created: true } : undefined
-        : createIfMissing ? this.getOrCreateAcceptedSession(id) : existing ? { session: existing, created: false } : undefined
-      if (!resolved) {
-        return Effect.fail(id === undefined
+      if (existing) {
+        this.resolveBrowser(requestedBrowser, existing)
+        return { session: existing, created: false }
+      }
+      if (!createIfMissing) {
+        throw id === undefined
           ? sessionError("invalid-request", "sessionId is required when createIfMissing is false")
-          : sessionError("not-found", `Session not found: ${id}`, id))
+          : sessionError("not-found", `Session not found: ${id}`, id)
       }
-      if (browser !== undefined && !resolved.created && resolved.session.browser !== undefined && resolved.session.browser !== browser) {
-        return Effect.fail(sessionError(
-          "invalid-request",
-          `Session ${resolved.session.id} uses browser ${resolved.session.browser}. Start a new session (session_new) to use ${browser}.`,
-          resolved.session.id,
-        ))
-      }
-      // A session that didn't name a browser keeps the one asked for from now on.
-      if (browser !== undefined && resolved.session.browser === undefined) {
-        resolved.session.browser = browser
-        this.schedulePersistence()
-      }
-      return Effect.succeed(resolved)
-    })))
+      return { session: this.createAcceptedSession(id, requestedBrowser ? { browser: requestedBrowser } : undefined), created: true }
+    })
   }
 
   private createdSummary(session: OpenCodeBrowserSession, created: boolean): CreatedSessionSummary {
@@ -1063,7 +1067,7 @@ export class OpenCodeBrowserSessions {
       stateKeys: status.stateKeys,
       ...(session.readOnly ? { readOnly: true } : {}),
       ...(session.allowedOrigins ? { allowedOrigins: [...session.allowedOrigins] } : {}),
-      ...(session.browser ? { browser: session.browser } : {}),
+      ...(session.browser ? { browser: session.browser.id } : {}),
     }
   }
 
@@ -1154,7 +1158,7 @@ export class OpenCodeBrowserSessions {
       updatedAt: session.updatedAt,
       readOnly: session.readOnly,
       ...(session.allowedOrigins ? { allowedOrigins: [...session.allowedOrigins] } : {}),
-      ...(session.browser ? { browser: session.browser } : {}),
+      ...(session.browser ? { browser: session.browser.id, ...(session.browser.key ? { browserKey: session.browser.key } : {}) } : {}),
       ...(target ? { target } : {}),
       ...(session.clientPid === undefined ? {} : { clientPid: session.clientPid }),
     }

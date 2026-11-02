@@ -49,6 +49,7 @@ const hostErrorTags = new Set(["RelayClient.RelayUnreachable", "RelayLifecycle.R
 
 /** Exit 4 when the relay or extension cannot be reached, otherwise 1. */
 export function exitCodeForError(error: unknown): number {
+  if (error instanceof RelayClient.RelayRejected && error.code === "browser-unavailable") return ExitCode.host
   const tag = Predicate.isObject(error) && Predicate.hasProperty(error, "_tag") ? error._tag : undefined
   return Predicate.isString(tag) && hostErrorTags.has(tag) ? ExitCode.host : ExitCode.failure
 }
@@ -134,11 +135,12 @@ const ensureCliRelay = Effect.fnUntraced(function* () {
   return readiness
 })
 
-const ensureCliRelayAndExtension = Effect.fnUntraced(function* () {
+const ensureCliRelayAndExtension = Effect.fnUntraced(function* (sessionId?: string) {
   const relay = yield* RelayClient.Service
   const readiness = yield* ensureCliRelay()
   yield* RelayLifecycle.ensureExtensionConnected({
     relay,
+    sessionId,
     waitForReconnect: RelayLifecycle.shouldWaitForExtensionReconnect(readiness),
     onWait: Console.error(`Waiting up to ${RelayLifecycle.extensionReconnectWaitMs / 1_000}s for the Browse extension to reconnect`),
   })
@@ -340,13 +342,13 @@ const execute = Command.make(
         return yield* Effect.fail(new Error("Timeout must be a non-negative integer"))
       }
       const executeCode = filePath ? yield* readExecuteFile(filePath) : code.join(" ")
-      yield* ensureCliRelayAndExtension()
       const explicitSessionId = Option.getOrUndefined(session) ?? Option.getOrUndefined(yield* sessionIdConfig)
       if (rm && explicitSessionId) {
         return yield* Effect.fail(new Error("Use --rm without --session or OPENCODE_BROWSER_SESSION"))
       }
       const agentWorkSessionId = agentDefaultSessionId(Option.getOrUndefined(yield* agentSessionIdConfig))
       const workSessionId = explicitSessionId ?? (rm ? undefined : agentWorkSessionId)
+      yield* ensureCliRelayAndExtension(workSessionId)
       const targetUrlValue = Option.getOrUndefined(targetUrl) ?? Option.getOrUndefined(yield* targetUrlConfig)
       const targetIndexValue = Option.getOrUndefined(targetIndex) ?? Option.getOrUndefined(yield* targetIndexConfig)
       if (targetIndexValue !== undefined && targetIndexValue < 0) {
@@ -511,8 +513,8 @@ const sessionAdopt = Command.make(
   },
   Effect.fn("Cli.sessionAdopt")(function* ({ session, targetUrl, targetIndex, tabId }) {
     const relay = yield* RelayClient.Service
-    yield* ensureCliRelayAndExtension()
     const explicitSessionId = Option.getOrUndefined(session) ?? Option.getOrUndefined(yield* sessionIdConfig)
+    yield* ensureCliRelayAndExtension(explicitSessionId)
     const targetUrlValue = Option.getOrUndefined(targetUrl)
     const targetIndexValue = Option.getOrUndefined(targetIndex)
     if (targetIndexValue !== undefined && targetIndexValue < 0) {

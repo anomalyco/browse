@@ -252,6 +252,7 @@ const extensionReconnectProbeMs = 200
 
 export const ensureExtensionConnected = Effect.fn("RelayLifecycle.ensureExtensionConnected")(function* (options: {
   readonly relay: RelayClient.Interface
+  readonly sessionId?: string | undefined
   readonly waitForReconnect?: boolean
   readonly retryTimes?: number
   readonly retryDelayMs?: number
@@ -262,6 +263,10 @@ export const ensureExtensionConnected = Effect.fn("RelayLifecycle.ensureExtensio
     ExtensionStatus,
     ExtensionProtocolIncompatible | ExtensionDisconnected
   > => {
+    // For an existing session, let its operation check the bound profile and report disconnect/revocation.
+    if (options.sessionId && status.sessions?.some((session) => session.id === options.sessionId && session.browser)) {
+      return Effect.succeed(status)
+    }
     if (status.protocolCompatible === false) {
       return Effect.fail(new ExtensionProtocolIncompatible({
         message: extensionProtocolAdvice(status.protocolVersion, { install: installCommand() }),

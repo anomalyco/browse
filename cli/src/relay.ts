@@ -65,7 +65,7 @@ import {
   wrapToken,
   type HandshakeTranscript,
 } from "./browser-pairing.ts"
-import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
+import type { ChildTarget, ConnectedTarget, OpenCodeBrowserSession } from "./relay-types.ts"
 import { GhostCursorTabs, ghostCursorCommandMethod } from "./ghost-cursor.ts"
 import { guardCdpMethod, scopeCdpResult } from "./cdp-guardrails.ts"
 import { SessionNavigationGuard } from "./session-navigation-guard.ts"
@@ -584,6 +584,28 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       }
     }
   }
+  function resolveSessionBrowser(requested?: string, session?: OpenCodeBrowserSession): BrowserLink | { error: string; unavailable?: true } {
+    if (session) {
+      const key = session.browser?.key
+      if (!key) return { error: `Session ${session.id} has no identifiable browser in its saved catalog. Start a new session and select its browser.` }
+      const bound = browsers.byKey(key)
+      const belongs = `Session ${session.id} belongs to browser '${bound?.id ?? session.browser?.id ?? key}'`
+      if (bound?.rpc.protocolCompatible === false) return { error: `${belongs}. ${extensionProtocolAdvice(bound.rpc.protocolVersion, { install: installCommand() })}` }
+      if (!bound?.rpc.connected) {
+        const recovery = browserToken(key) ? "which isn't connected. Reconnect it"
+          : legacyPairingCode() ? "which isn't connected. Reconnect it (pair it again if revoked)" : "whose pairing was revoked. Pair it again"
+        return { error: `${belongs}, ${recovery} or start a new session.`, unavailable: true }
+      }
+      if (requested && browsers.byId(requested)?.key !== key) return { error: `${belongs}. Start a new session to use '${requested}'.` }
+      return bound
+    }
+    const link = requested ? browsers.byId(requested) : browsers.defaultLink()
+    if (link) return link
+    if (!requested) return { error: "No browser is connected. Connect a browser before starting a session.", unavailable: true }
+    const connected = browsers.list().map((browser) => `${browser.id} (${browser.name})`).join(", ")
+    return { error: `No connected browser is called "${requested}". ${connected ? `Connected: ${connected}.` : "No browser is connected."}` }
+  }
+
   const sessions: OpenCodeBrowserSessions = new OpenCodeBrowserSessions(
     endpointUrl,
     (id, onDefaultTargetChange) =>
@@ -622,12 +644,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         }),
       }),
     {
-      resolveBrowser: (requested) => {
-        const link = browsers.byId(requested)
-        if (link) return { id: link.id }
-        const connected = browsers.list().map((browser) => `${browser.id} (${browser.name})`).join(", ")
-        return { error: `No connected browser is called "${requested}". ${connected ? `Connected: ${connected}.` : "No browser is connected."}` }
+      resolveBrowser: (requested, session) => {
+        const link = resolveSessionBrowser(requested, session)
+        return "error" in link ? link : { id: link.id, key: link.key }
       },
+      targetBrowserKey: (tabId) => browsers.ownerKey(tabId),
+      getUserAttachedPageUrls: (session) => registry.listRootTargets()
+        .filter((target) => target.owner === "user" && browsers.ownerKey(target.tabId) === session.browser?.key)
+        .map((target) => target.targetInfo.url || "about:blank"),
       executeTimeoutMs,
       onExecuteStateChange: (sessionId, executing) => {
         setActivityForSessionTabs(sessionId, executing ? "running" : "attached", executionBadge(sessionId, executing))
@@ -964,7 +988,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     (client, event) => cdpRuntime.deliver(client, event),
     (client, sessionId) => cdpRuntime.detach(client, sessionId),
   )
-  const cdpRouter = new CdpRouter(cdpClients, registry)
+  const cdpRouter = new CdpRouter(cdpClients, registry, (id, tabId) => {
+    const session = sessions.sessions.get(id)
+    return !session || (session.browser?.key !== undefined && session.browser.key === browsers.ownerKey(tabId))
+  })
   const cdpRuntime = new CdpRuntime<WebSocket>({
     registry,
     generation: (tabId) => browsers.generationOf(tabId),
@@ -2397,17 +2424,12 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     yield* rootLifecycle.attach({ tabId, owner: "user" })
   })
 
-  /**
-   * The browser a session's new tabs open in: the one it was created for, else the one its tabs are already in, else
-   * the default. A session's browser that isn't connected is an error that names the ones that are.
-   */
+  /** Managed sessions never fall back. Raw CDP clients may have no catalog entry. */
   const sessionBrowser = (sessionId: string | undefined): Effect.Effect<BrowserLink, Error> => Effect.suspend(() => {
-    const chosen = sessionId ? sessions.sessions.get(sessionId)?.browser : undefined
-    if (chosen !== undefined) {
-      const link = browsers.byId(chosen)
-      if (link) return Effect.succeed(link)
-      const connected = browsers.list().map((browser) => browser.id).join(", ") || "none"
-      return Effect.fail(new Error(`Browser "${chosen}" isn't connected (connected: ${connected}). Start a new session for another browser.`))
+    const session = sessionId && sessions.sessions.get(sessionId)
+    if (session) {
+      const link = resolveSessionBrowser(undefined, session)
+      return "error" in link ? Effect.fail(new Error(link.error)) : Effect.succeed(link)
     }
     const existing = sessionId
       ? registry.listRootTargets().find((target) => target.opencodeBrowserSessionId === sessionId && target.owner === "relay")
@@ -2604,7 +2626,17 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   yield* Effect.catch(
     Effect.gen(function* () {
       const restoredSessions = yield* Effect.tryPromise({
-        try: () => sessionCatalog?.load() ?? Promise.resolve([]),
+        try: async () => {
+          if (!sessionCatalog) return []
+          const entries = await sessionCatalog.load()
+          // Before new connections can rename a browser or claim a label, upgrade only identifiable old entries.
+          const restored = entries.map((entry) => {
+            const known = !entry.browserKey && browsers.knownBrowser(entry.browser)
+            return known ? { ...entry, browser: known.id, browserKey: known.key } : entry
+          })
+          if (restored.some((entry, i) => entry !== entries[i])) await sessionCatalog.save(restored)
+          return restored
+        },
         catch: (cause) => cause instanceof Error ? cause : new Error("Load Browse session catalog", { cause }),
       })
       yield* Effect.try({

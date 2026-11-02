@@ -96,8 +96,8 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       idempotent: false,
       handle: (input) => Effect.gen(function* () {
         const args = yield* Effect.try(() => parseExecuteArguments(input))
-        yield* RelayLifecycle.ensureExtensionConnected({ relay, waitForReconnect: true })
         const sessionId = args.session ?? currentSession.id
+        yield* RelayLifecycle.ensureExtensionConnected({ relay, sessionId, waitForReconnect: true })
         const result = yield* relay.execute({
           sessionId,
           code: args.code,
@@ -295,7 +295,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
           yield* relay.sessionEnsure(sessionId)
           currentSession.established = true
         }
-        yield* RelayLifecycle.ensureExtensionConnected({ relay, waitForReconnect: true })
+        yield* RelayLifecycle.ensureExtensionConnected({ relay, sessionId, waitForReconnect: true })
         const content = optionalStringField(object, "content")
         if (content !== undefined && content !== "embed" && content !== "omit") {
           return yield* Effect.fail(new Error("content must be embed or omit"))
@@ -564,8 +564,8 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         const username = optionalStringField(object, "username")
         const timeoutMs = optionalPositiveIntegerField(object, "timeoutMs")
         const explicitSession = optionalStringField(object, "session")
-        yield* RelayLifecycle.ensureExtensionConnected({ relay, waitForReconnect: true })
         const sessionId = explicitSession ?? currentSession.id
+        yield* RelayLifecycle.ensureExtensionConnected({ relay, sessionId, waitForReconnect: true })
         const options = { ...(site ? { site } : {}), ...(username ? { username } : {}), ...(timeoutMs === undefined ? {} : { timeoutMs }) }
         const outerTimeoutMs = timeoutMs === undefined ? 120_000 : Math.max(60_000, timeoutMs + 10_000)
         const result = yield* relay.execute({ sessionId, code: `return await secrets.signIn(${JSON.stringify(options)})`, createIfMissing: !explicitSession, timeoutMs: outerTimeoutMs })

@@ -77,6 +77,7 @@ opencode-browser execute --rm 'await page.goto("https://example.com"); return aw
 MCP keeps one implicit process session. Omit `session` for that normal path, or
 call `session_new` and pass an explicit id when one MCP process needs multiple
 sessions.
+Each session stays in the browser selected at creation (the default if omitted); reconnect that browser or start a new session to use another.
 
 Tabs you open live in the background of the user's window, in your session's
 tab group, collapsed at the start of their tab strip, so the user keeps working

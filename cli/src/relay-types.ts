@@ -91,8 +91,8 @@ export type OpenCodeBrowserSession = {
   readonly readOnly: boolean
   /** Normalized allowed-origin patterns (domain-policy.ts); undefined: the session may go anywhere. */
   allowedOrigins?: readonly string[]
-  /** The browser (browser-links.ts id) the session's tabs open in; undefined: the default browser. */
-  browser?: string
+  /** The immutable profile key, plus its agent-facing id. Older catalogs recorded at most the id. */
+  browser?: { readonly id: string; readonly key?: string }
   /** Replaced when a stopped script does not settle in time (session-manager.ts). */
   sandbox: ExecuteSandboxLike
   readonly executeSemaphore: Semaphore.Semaphore

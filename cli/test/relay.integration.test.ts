@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { spawn, type ChildProcess } from "node:child_process"
+import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import fs from "node:fs"
 import net from "node:net"
 import os from "node:os"
@@ -168,8 +168,8 @@ function cdpCall(socket: WebSocket, id: number, method: string, params: Record<s
 }
 
 /** Starts a relay from source on a free port with the given data root and extra environment; resolves once it answers. */
-async function startRelay(root: string, env: Record<string, string> = {}) {
-  const relayPort = await freePort()
+async function startRelay(root: string, env: Record<string, string> = {}, reusePort?: number) {
+  const relayPort = reusePort ?? await freePort()
   const child = spawn(process.execPath, [path.join(import.meta.dir, "../src/main.ts"), "serve"], {
     env: { PATH: process.env.PATH ?? "", HOME: root, OPENCODE_BROWSER_HOME: root, OPENCODE_BROWSER_PORT: String(relayPort), OPENCODE_BROWSER_UPDATE_CHECK: "0", ...env },
     stdio: "ignore",
@@ -818,6 +818,108 @@ describe("several browsers", () => {
     return { targetId: created.result?.targetId, value: (evaluated.result?.result as { value?: string } | undefined)?.value }
   }
 
+  const execute = (sessionId: string, selector?: string) => api("/cli/execute", {
+    sessionId, code: "return page.url()", createIfMissing: true, ...(selector ? { browser: selector } : {}),
+  })
+
+  test("browser affinity: an implicit execute refuses a switch before running code", async () => {
+    const a = browser("IMPLICIT-A")
+    let b: FakeExtension | undefined
+    try {
+      expect(await a.pair({ hello: { profileId: "implicit-a", name: "First Lane" } })).toBe(true)
+      b = browser("IMPLICIT-B")
+      expect(await b.pair({ hello: { profileId: "implicit-b", name: "Second Lane" } })).toBe(true)
+      const id = "implicit-affinity"
+      expect(await (await execute(id)).json()).toMatchObject({ isError: false, value: "https://example.com/" })
+      const conflict = await api("/cli/execute", { sessionId: id, createIfMissing: true, browser: "second-lane", code: "return (await context.newPage()).url()" })
+      expect(conflict.status).toBe(400)
+      expect(await conflict.text()).toMatch(/implicit-affinity.*first-lane.*new session/i)
+      expect(await (await execute(id, "First Lane")).json()).toMatchObject({ isError: false, session: { browser: "first-lane" } })
+      expect(b.commands.filter(cmd => cmd.method === "tabs.create")).toHaveLength(0)
+      expect(await (await execute("explicit-affinity", "Second Lane")).json()).toMatchObject({ isError: false, session: { browser: "second-lane" } })
+      expect(await (await execute("explicit-affinity")).json()).toMatchObject({ isError: false, session: { browser: "second-lane" } })
+      expect(b.commands.filter(cmd => cmd.method === "tabs.create")).toHaveLength(1)
+    } finally { a.close(); b?.close() }
+  }, 30_000)
+
+  test("browser affinity: disconnect cannot move an existing session, and revocation explains recovery", async () => {
+    const a = browser("OFFLINE-A")
+    let b: FakeExtension | undefined
+    const hello = { profileId: "offline-a", name: "Offline A" }
+    const id = "offline-affinity"
+    let back: FakeExtension | undefined
+    try {
+      expect(await a.pair({ hello })).toBe(true)
+      b = browser("ONLINE-B")
+      expect(await b.pair({ hello: { profileId: "online-b", name: "Online B" } })).toBe(true)
+      expect((await api("/cli/session/new", { id })).ok).toBe(true)
+      a.close()
+      expect(await until(() => a.closeCode !== undefined)).toBe(true)
+      const offline = await execute(id)
+      expect(offline.status).toBe(503)
+      expect(await offline.text()).toMatch(/offline-affinity.*offline.a.*connect.*new session/i)
+      expect(b.commands.filter(cmd => cmd.method === "tabs.create")).toHaveLength(0)
+      expect(await (await api("/v1/sessions/ensure", { id: "new-default" })).json()).toMatchObject({ session: { browser: "online-b" } })
+      expect((await openTab("new-default")).targetId).toBe("ONLINE-B")
+      back = browser("RECONNECTED-A")
+      expect(await back.pair({ hello: { ...hello, name: "Returned A" } })).toBe(true)
+      expect((await openTab(id)).targetId).toBe("RECONNECTED-A")
+      expect(revokeBrowserToken(hello.profileId, multiHome)).toBe(true)
+      expect((await api("/extension/revoke", { key: hello.profileId })).ok).toBe(true)
+      expect(await until(() => back!.closeCode === 4006)).toBe(true)
+      expect(await (await execute(id)).text()).toMatch(/offline-affinity.*revoked.*new session/i)
+      b.close()
+      expect(await until(() => b!.closeCode !== undefined)).toBe(true)
+      const cli = spawnSync(process.execPath, [path.join(import.meta.dir, "../src/main.ts"), "execute", "--session", id, "return 1"], {
+        env: { PATH: process.env.PATH, HOME: multiHome, OPENCODE_BROWSER_HOME: multiHome, OPENCODE_BROWSER_PORT: String(multi!.port), OPENCODE_BROWSER_UPDATE_CHECK: "0" },
+        encoding: "utf8", timeout: 10_000,
+      })
+      expect(cli.status).toBe(4)
+      expect(cli.stderr).toMatch(/offline-affinity.*revoked.*new session/i)
+    } finally { a.close(); b?.close(); back?.close() }
+  }, 30_000)
+
+  test("browser affinity: shared tabs in another profile cannot be selected or adopted", async () => {
+    const a = browser("VISIBLE-A")
+    let b: FakeExtension | undefined
+    let client: WebSocket | undefined
+    try {
+      expect(await a.pair({ hello: { profileId: "visible-a", name: "Visible A" } })).toBe(true)
+      b = browser("SHARED-B")
+      expect(await b.pair({ hello: { profileId: "shared-b", name: "Shared B" }, attachedTabs: [707] })).toBe(true)
+      const id = "visible-affinity"
+      expect((await api("/cli/session/new", { id })).ok).toBe(true)
+      const targets = await (await api("/json/list")).json() as Array<{ id: string; tabId: number }>
+      const shared = targets.find(t => t.id === "SHARED-B")
+      expect(shared).toBeDefined()
+      const socket = await connectCdp(`ws://127.0.0.1:${multi!.port}/devtools/browser/test?opencodeBrowserSessionId=${id}`, { authorization: `Bearer ${multi!.token}` })
+      if (!(socket instanceof WebSocket)) throw new Error(`CDP connection refused: ${socket}`)
+      client = socket
+      expect((await cdpCall(client, 1, "Target.getTargets")).result?.targetInfos).toEqual([])
+      const adopt = await api("/cli/session/adopt", { sessionId: id, createIfMissing: false, tabId: shared!.tabId })
+      expect(adopt.status).toBe(400)
+      expect(await adopt.text()).toMatch(/another browser.*new session/i)
+    } finally { a.close(); b?.close(); client?.close() }
+  }, 20_000)
+
+  test("browser affinity: relay restart keeps the original browser before any tab was opened", async () => {
+    const a = browser("BEFORE-RESTART")
+    expect(await a.pair({ hello: { profileId: "restart-a", name: "Restart A" } })).toBe(true)
+    const id = "restart-affinity"
+    expect((await api("/cli/session/new", { id })).ok).toBe(true)
+    a.close()
+    await stopRelay(multi!.child)
+    multi = await startRelay(multiHome, {}, multi!.port)
+    const b = browser("AFTER-RESTART-B")
+    let back: FakeExtension | undefined
+    try {
+      expect(await b.pair({ hello: { profileId: "restart-b", name: "Restart B" } })).toBe(true)
+      back = browser("AFTER-RESTART-A")
+      expect(await back.pair({ hello: { profileId: "restart-a", name: "Restart A" } })).toBe(true)
+      expect((await openTab(id)).targetId).toBe("AFTER-RESTART-A")
+    } finally { b.close(); back?.close() }
+  }, 30_000)
+
   test("browsers connect side by side, each named, the first the default; sessions open tabs in theirs", async () => {
     const work = browser("TARGET-WORK")
     expect(await work.pair({ hello: { profileId: "work", name: "Work Chrome" } })).toBe(true)
@@ -908,6 +1010,7 @@ describe("sessions of MCP servers that went away", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "browse-orphans-"))
     const started = await startRelay(root, { OPENCODE_BROWSER_CLIENT_GONE_GRACE_MS: "1000" })
     try {
+      expect(await new FakeExtension(root, started.port).pair()).toBe(true)
       const client = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60_000)"], { stdio: "ignore" })
       const ensure = (id: string) => fetch(`http://127.0.0.1:${started.port}/v1/sessions/ensure`, {
         method: "POST",
