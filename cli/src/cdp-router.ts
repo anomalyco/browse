@@ -27,6 +27,7 @@ export class CdpRouter<Client extends object> {
   constructor(
     private readonly clients: CdpClientPool<Client>,
     private readonly registry: TargetRegistry,
+    private readonly inSessionBrowser: (sessionId: string, tabId: number) => boolean,
   ) {}
 
   canSeeTarget(client: Client, target: ConnectedTarget): boolean {
@@ -34,6 +35,7 @@ export class CdpRouter<Client extends object> {
   }
 
   canSessionSeeTarget(clientSessionId: string | undefined, target: ConnectedTarget): boolean {
+    if (clientSessionId && !this.inSessionBrowser(clientSessionId, target.tabId)) return false
     return canClientSeeTarget({
       clientSessionId,
       targetOwnerSessionId: target.opencodeBrowserSessionId,
@@ -55,7 +57,7 @@ export class CdpRouter<Client extends object> {
       if (target.crashed) return false
       if (browserContextId !== undefined && target.targetInfo.browserContextId !== browserContextId) return false
       return clientSessionId !== undefined
-        ? target.opencodeBrowserSessionId === clientSessionId
+        ? target.opencodeBrowserSessionId === clientSessionId && this.inSessionBrowser(clientSessionId, target.tabId)
         : this.canSeeTarget(client, target)
     })
     if (candidates.length === 0) return undefined

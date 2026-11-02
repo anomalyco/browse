@@ -674,6 +674,7 @@ export const FlightRecorderCancelResponse = Schema.Struct({ cancelled: Schema.Bo
 export interface FlightRecorderCancelResponse extends Schema.Schema.Type<typeof FlightRecorderCancelResponse> {}
 
 export const RelayErrorCode = Schema.Literals([
+  "browser-unavailable",
   "invalid-request",
   "unauthorized",
   "relay-starting",

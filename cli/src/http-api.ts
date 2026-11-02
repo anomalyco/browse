@@ -77,11 +77,6 @@ export function createHttpRequestHandler(options: {
     readonly set: (changes: unknown) => Effect.Effect<object, Error>
   }
 }): (request: http.IncomingMessage, response: http.ServerResponse) => void {
-  options.sessions.setUserAttachedPageUrlsProvider(() =>
-    options.registry.listRootTargets()
-      .filter((target) => target.owner === "user")
-      .map((target) => target.targetInfo.url || "about:blank")
-  )
   return (request, response) => {
     const hostError = validateHostHeader({ hostHeader: request.headers.host, host: options.host, port: options.port })
     if (hostError) {
@@ -578,16 +573,18 @@ function handleCliRequest(options: {
       const request = yield* decodeRequest(SessionAdoptRequest, body, "session adopt")
       const requestedSessionId = optionalSessionId(request.sessionId)
       const allTargets = options.registry.listRootTargets()
+      const available = yield* options.sessions.targetsForAdoption(requestedSessionId, allTargets)
       const byTab = request.tabId === undefined ? undefined : allTargets.find((target) => target.tabId === request.tabId)
       if (request.tabId !== undefined && !byTab)
         throw new Error(`Tab ${request.tabId} is not available to agents. Ask the user to click the Browse toolbar button on that tab.`)
+      if (byTab && !available.includes(byTab)) return yield* new HttpRouteError({ status: 400, code: "invalid-request", message: `Tab ${byTab.tabId} belongs to another browser. Start a new session for that browser.` })
       const candidates = byTab ? [byTab] : request.targetSelection
-        ? allTargets
+        ? available
         : (() => {
-            const adoptableUserTargets = allTargets.filter((target) =>
+            const adoptableUserTargets = available.filter((target) =>
               target.owner === "user" && (!target.opencodeBrowserSessionId || target.opencodeBrowserSessionId === requestedSessionId)
             )
-            return adoptableUserTargets.length > 0 ? adoptableUserTargets : allTargets
+            return adoptableUserTargets.length > 0 ? adoptableUserTargets : available
           })()
       const selectedTarget = selectTarget({
         targets: candidates,
@@ -604,6 +601,7 @@ function handleCliRequest(options: {
         createIfMissing: request.createIfMissing,
         targetId: adoptedTargetId,
         targetUrl: selectedTarget.targetInfo.url,
+        tabId: selectedTarget.tabId,
       })
       sendJson(options.response, { session, adoptedUrl, adoptedTargetId })
       return
@@ -735,6 +733,7 @@ function relayHttpError(error: unknown): HttpRouteError {
   if (error instanceof SessionError) {
     const [status, code] = Match.value(error.reason).pipe(
       Match.when("already-exists", () => [409, "session-already-exists"] as const),
+      Match.when("browser-unavailable", () => [503, "browser-unavailable"] as const),
       Match.when("inactive", () => [409, "session-inactive"] as const),
       Match.when("invalid-request", () => [400, "invalid-request"] as const),
       Match.when("not-found", () => [404, "session-not-found"] as const),

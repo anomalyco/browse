@@ -14,6 +14,7 @@ export const PersistedSession = Schema.Struct({
   readOnly: Schema.Boolean,
   allowedOrigins: Schema.optionalKey(Schema.Array(Schema.String)),
   browser: Schema.optionalKey(Schema.String),
+  browserKey: Schema.optionalKey(Schema.String),
   target: Schema.optionalKey(Schema.Struct({
     id: Schema.String,
     owner: Schema.Literals(["relay", "user"]),
