@@ -1,9 +1,9 @@
-// The status page (welcome.html): opened on install and as the extension's options page. Shows the install command
-// and the connection (the relay's address, a pairing code to enter, the live status and the update the relay found,
-// if any), offers reconnect, cleanup, and diagnostics, and
-// holds the settings: where agent tabs open and how they're grouped and closed, the agent cursor, human-like input,
-// and handoff notifications. Each is a chrome.storage.local key the background reads when it needs it (or sends to the
-// relay, for the cursor and input); a setting the relay's environment fixes is shown as such.
+// The status page (welcome.html): opened on install, as the extension's options page, and by the toolbar button before
+// setup. Leads with the first-run card (first-run.ts): the one thing to do next, kept live. Then the settings: where
+// agent tabs open and how they're grouped and closed, the agent cursor, human-like input, and handoff notifications.
+// Each is a chrome.storage.local key the background reads when it needs it (or sends to the relay, for the cursor and
+// input); a setting the relay's environment fixes is shown as such. Last, the connection (the relay's address, a
+// pairing code to enter, the live status and the update the relay found, if any), reconnect, cleanup and diagnostics.
 import {
   AGENT_CURSOR_KEY,
   AGENT_DIAGNOSTICS,
@@ -24,6 +24,7 @@ import {
   type RelayOverrides,
   type ToStatusPage,
 } from "../shared/protocol"
+import { firstRunStep, relayProbeResult, shouldProbe, type FirstRunStep, type RelayProbe } from "./first-run"
 
 // `npx @opencode/browse install` opens this page as welcome.html#code=<one-time code> for a store build
 // (cli/src/setup.ts pairStoreExtension). Take it, then drop it from the URL (address bar and history) before anything else.
@@ -40,19 +41,23 @@ const connect = () => {
   port = next
   next.onMessage.addListener((message: ToStatusPage) => {
     if (message.type === "agents") render(message.state)
-    if (message.type === "pairing.link.result")
-      showPairingNote(message.ok ? "Pairing with the relay on this computer…" : "Already paired with the relay; the pairing link from install was ignored.")
-    if (message.type === "relay.result") showRelayResult(message.status, message.address)
+    if (message.type === "pairing.link.result") {
+      if (message.ok) pairedBy = "link"
+      else showStepNote("Already paired with the relay; the pairing link from install was ignored.")
+    }
+    if (message.type === "relay.result") {
+      if (connectFrom === "card") showCodeResult(message.status, message.address)
+      else showRelayResult(message.status, message.address)
+      connectFrom = undefined
+    }
   })
   // The worker can stop and restart at any time; follow it.
   next.onDisconnect.addListener(() => {
     void chrome.runtime.lastError
     // A Connect in flight lost its answer with the worker; the status above still shows how it went.
-    const button = document.querySelector<HTMLButtonElement>("#relay-form button")
-    if (button) {
-      button.disabled = false
-      button.textContent = "Connect"
-    }
+    resetButton(element<HTMLFormElement>("relay-form").querySelector("button")!, "Connect")
+    resetButton(element<HTMLFormElement>("step-code-form").querySelector("button")!, "Pair")
+    connectFrom = undefined
     if (port === next) setTimeout(connect, 300)
   })
 }
@@ -60,15 +65,28 @@ connect()
 
 const send = (message: FromStatusPage) => port?.postMessage(message)
 
+/** The worker's latest state, and what the probe of this computer's relay port found while there's nothing to connect with. */
+let current: AgentRelayState | undefined
+let probe: RelayProbe = "unknown"
+/** How this page paired the browser, to confirm it once connected: install's link, or a code typed in the card. */
+let pairedBy: "link" | "code" | undefined
+/** Which form's Connect is waiting for its `relay.result`. */
+let connectFrom: "card" | "advanced" | undefined
+
 function render(state: AgentRelayState) {
+  current = state
+  renderStep()
   // The code from install's URL, used once, and only when this extension isn't paired with the relay (no token, or one
   // the relay refused). A working pairing is never replaced; the page says it ignored the link instead.
   // While it's still connecting (or the relay is starting), wait for a status that tells.
   if (fragmentCode && state.status !== "offline" && state.status !== "connecting") {
     if (state.status === "unpaired" || state.status === "untrusted") send({ type: "pairing.link", code: fragmentCode })
-    else showPairingNote("Already paired with the relay; the pairing link from install was ignored.")
+    else showStepNote("Already paired with the relay; the pairing link from install was ignored.")
     fragmentCode = undefined
   }
+  // A Connect result from the form further down doesn't outlive the connection it described.
+  if (state.status === "connected" && connectFrom === undefined) element("relay-result").hidden = true
+  if (shouldProbe(state)) void probeRelay()
   status.dataset.state = state.status
   status.textContent = describe(state)
   showRelayAddress(state.relay.address)
@@ -78,10 +96,6 @@ function render(state: AgentRelayState) {
   showOverrides(state.overrides)
   showAutoUpdate(state.autoUpdate)
   showBrowser(state.browser)
-  if (state.status === "connected" && element("pairing-note").textContent?.startsWith("Pairing with")) showPairingNote("Paired with the relay on this computer.")
-  if (state.codeRejected && state.status !== "connected")
-    showPairingNote("The relay didn't accept the pairing code: it was mistyped, already used or expired. Run `npx @opencode/browse pair` on the relay's computer and enter the new code above.")
-  else if (element("pairing-note").textContent?.startsWith("The relay didn't accept")) element("pairing-note").hidden = true
 }
 
 /** The relay's update setting: shown for an npm install (a checkout updates with `update`; the notice above says so). */
@@ -134,28 +148,249 @@ element<HTMLFormElement>("browser-name-form").addEventListener("submit", (event)
     .then(() => flash(element<HTMLFormElement>("browser-name-form").querySelector("button")!, "Saved"))
 })
 
-/** A short line under the status, for what happened to a pairing code. */
-function showPairingNote(text: string) {
-  const note = element("pairing-note")
-  note.textContent = text
+/** A short line in the first-run card, for what happened to a pairing code or install's link. */
+function showStepNote(text: string) {
+  const note = element("step-note")
+  note.replaceChildren(...rich(text))
   note.hidden = false
 }
+
+/** Text with `code` spans, as elements. */
+function rich(text: string): (string | HTMLElement)[] {
+  return text.split(/`([^`]+)`/).map((part, index) => {
+    if (index % 2 === 0) return part
+    const code = document.createElement("code")
+    code.textContent = part
+    return code
+  })
+}
+
+const resetButton = (button: HTMLButtonElement, label: string) => {
+  button.disabled = false
+  button.textContent = label
+}
+
+/** The first-run card: a title, a line or two, and only the controls this step needs. */
+function renderStep() {
+  const step = firstRunStep(current, probe)
+  const view = stepView(step)
+  const card = element("first-run")
+  // A note belongs to the step it was shown in.
+  if (card.dataset.step !== step.kind) element("step-note").hidden = true
+  card.dataset.step = step.kind
+  card.dataset.tone = view.tone
+  element("step-title").textContent = view.title
+  element("step-text").replaceChildren(...rich(view.text))
+  element("install-command").textContent = view.command ?? ""
+  element("step-command").hidden = view.command === undefined
+  element("step-agent").hidden = step.kind !== "install"
+  element("step-code-form").hidden = view.codeLabel === undefined
+  element("step-code-label").hidden = view.codeLabel === undefined
+  element("step-code-label").replaceChildren(...rich(view.codeLabel ?? ""))
+  element("step-example").hidden = !view.example
+  element("open-extensions").hidden = step.kind !== "update-extension" || step.unpacked
+  element("step-reconnect").hidden = step.kind !== "conflict" && step.kind !== "mismatch"
+  element("step-actions").hidden = element("open-extensions").hidden && element("step-reconnect").hidden
+  const footnote = element("step-footnote")
+  footnote.hidden = view.footnote === undefined
+  if (view.footnote !== undefined) footnote.replaceChildren(...view.footnote)
+  showPinHint(step.kind === "connected" || (step.kind === "waiting" && step.pairing === "token"))
+}
+
+type StepView = {
+  title: string
+  text: string
+  tone: "neutral" | "ok" | "warn"
+  /** A command to copy, in the box under the text. */
+  command?: string
+  /** What to enter in the pairing code field, shown above it (the field shows only with a label). */
+  codeLabel?: string
+  /** Show the example prompt to try. */
+  example?: boolean
+  footnote?: (string | HTMLElement)[]
+}
+
+const INSTALL = "npx @opencode/browse install"
+
+function stepView(step: FirstRunStep): StepView {
+  const here = (remote: string | undefined) => (remote ? `the relay at ${remote}` : "the relay on this computer")
+  switch (step.kind) {
+    case "checking":
+      return { title: "Checking…", text: "", tone: "neutral" }
+    case "install": {
+      const advanced = document.createElement("a")
+      advanced.href = "#connection"
+      advanced.textContent = "Advanced: connection"
+      return {
+        title: "Run this once in your terminal",
+        text: "It installs the relay, adds the `browse` tools to your agent and pairs them with this browser. It needs Node.js 22.19 or newer. This page updates by itself when it's done.",
+        tone: "neutral",
+        command: INSTALL,
+        footnote: ["Is your agent on another computer? See ", advanced, " below."],
+      }
+    }
+    case "pair": {
+      const why =
+        step.reason === "code-rejected"
+          ? `${capitalized(here(step.remote))} didn't accept the pairing code: it was mistyped, already used or expired.`
+          : step.reason === "refused"
+            ? `${capitalized(here(step.remote))} refused this browser's pairing: it was unpaired there, or that relay is a new install.`
+            : `Browse found ${here(step.remote)}, but this browser isn't paired with it yet.`
+      if (step.remote)
+        return { title: "Almost there", text: why, tone: "warn", codeLabel: "Run `npx @opencode/browse pair` on that computer and enter the code it prints:" }
+      return {
+        title: "Almost there",
+        text: `${why} Run install again: it opens this page with a one-time code and pairs by itself.`,
+        tone: "warn",
+        command: INSTALL,
+        codeLabel: "Or enter the code `npx @opencode/browse pair` prints:",
+      }
+    }
+    case "waiting":
+      if (step.pairing === "code")
+        return {
+          title: "Code saved",
+          text: `It pairs as soon as ${here(step.remote)} runs, within 10 minutes of \`pair\`. The relay starts when an agent uses the browse tools.`,
+          tone: "neutral",
+        }
+      return {
+        title: "Ready",
+        text: `Browse is paired with ${here(step.remote)}, which starts when an agent uses the browse tools. Restart your agent if it was open during setup, then ask it to open a page. For example:`,
+        tone: "neutral",
+        example: true,
+      }
+    case "connecting":
+      return { title: step.pairing ? "Pairing…" : "Connecting…", text: `Talking to ${here(step.remote)}.`, tone: "neutral" }
+    case "connected": {
+      const confirmation = pairedBy || step.remote ? `Paired with ${here(step.remote)}. ` : ""
+      if (step.tabs)
+        return { title: "Connected", text: `${confirmation}Agents are using ${step.tabs} tab${step.tabs === 1 ? "" : "s"}.`, tone: "ok" }
+      return {
+        title: "Connected",
+        text: `${confirmation}Restart your agent, then ask it to open a page. For example:`,
+        tone: "ok",
+        example: true,
+      }
+    }
+    case "update-cli":
+      return {
+        title: "Update the browse CLI",
+        text: "This extension is newer than the browse CLI on this computer. Run this, then restart your agent. (With automatic updates on, the CLI catches up by itself within a day.)",
+        tone: "warn",
+        command: "npx @opencode/browse@latest install",
+      }
+    case "update-extension":
+      return step.unpacked
+        ? { title: "Update this extension", text: "It's older than the browse CLI on this computer. Run install again to update it:", tone: "warn", command: INSTALL }
+        : {
+            title: "Update this extension",
+            text: "It's older than the browse CLI on this computer. Chrome updates it within a few hours; to update now, open the extensions page, turn on Developer mode and click Update.",
+            tone: "warn",
+          }
+    case "mismatch":
+      return { title: "Versions don't match", text: "This extension and the browse CLI on this computer don't match. Run install again, then click Reconnect.", tone: "warn", command: INSTALL }
+    case "conflict":
+      return {
+        title: "Another browser is connected",
+        text: "Browse in another browser or profile holds the relay's connection. Close it there (or quit that browser), then click Reconnect.",
+        tone: "warn",
+      }
+  }
+}
+
+/**
+ * Asks this computer's relay port whether a browse relay answers (its /version is open), while the extension has no
+ * token or code to connect with. One probe at a time, and again while the page stays in that state.
+ */
+let probing = false
+let probeTimer: ReturnType<typeof setTimeout> | undefined
+async function probeRelay() {
+  if (probing || probeTimer !== undefined) return
+  probing = true
+  const port = /:(\d+)$/.exec(current?.relay.address ?? "")?.[1]
+  let result: Exclude<RelayProbe, "unknown"> = "absent"
+  if (port) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/version`, { cache: "no-store", signal: AbortSignal.timeout(2_000) })
+      result = relayProbeResult(response.status, await response.json().catch(() => undefined))
+    } catch {
+      result = "absent"
+    }
+  }
+  probing = false
+  if (result !== probe) {
+    probe = result
+    renderStep()
+  }
+  probeTimer = setTimeout(() => {
+    probeTimer = undefined
+    if (shouldProbe(current)) void probeRelay()
+  }, 3_000)
+}
+
+/** Chrome hides a new extension's button in the Extensions menu; say how to pin it, until it is. */
+let pinned: boolean | undefined
+let pinWanted = false
+function showPinHint(wanted: boolean) {
+  pinWanted = wanted
+  element("pin-hint").hidden = !wanted || pinned !== false
+}
+const readPinned = () =>
+  chrome.action
+    .getUserSettings()
+    .then((settings) => {
+      pinned = settings.isOnToolbar
+      showPinHint(pinWanted)
+    })
+    .catch(() => undefined)
+void readPinned()
+// Chrome 130 tells; older ones are asked again when the user comes back to the page.
+chrome.action.onUserSettingsChanged?.addListener(() => void readPinned())
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") void readPinned()
+})
+
+/**
+ * What the card's pairing code led to. The card itself shows most outcomes (Connected, Code saved, a refused code);
+ * only a malformed code or a relay that's slow to answer need a line of their own.
+ */
+function showCodeResult(result: AgentRelayState["status"] | "invalid-address" | "invalid-code", address = "") {
+  resetButton(element<HTMLFormElement>("step-code-form").querySelector("button")!, "Pair")
+  if (result === "connected") pairedBy = "code"
+  if (result === "invalid-code") showStepNote("That isn't a pairing code. Enter the 8 characters `npx @opencode/browse pair` prints (XXXX-XXXX).")
+  else element<HTMLInputElement>("step-code").value = ""
+  if (result === "connecting")
+    showStepNote(`The relay ${address.startsWith("localhost:") ? "on this computer" : `at ${address}`} hasn't answered yet. This updates when it does.`)
+  renderStep()
+}
+element<HTMLFormElement>("step-code-form").addEventListener("submit", (event) => {
+  event.preventDefault()
+  const code = element<HTMLInputElement>("step-code").value
+  if (!code.trim()) return element<HTMLInputElement>("step-code").focus()
+  const button = element<HTMLFormElement>("step-code-form").querySelector("button")!
+  button.disabled = true
+  button.textContent = "Pairing…"
+  element("step-note").hidden = true
+  connectFrom = "card"
+  send({ type: "relay.connect", address: current?.relay.address ?? "", code })
+})
 
 const capitalized = (text: string) => text.charAt(0).toUpperCase() + text.slice(1)
 
 /** What Connect led to, under the form. */
 function showRelayResult(result: AgentRelayState["status"] | "invalid-address" | "invalid-code", address = "") {
-  const button = element<HTMLFormElement>("relay-form").querySelector("button")!
-  button.disabled = false
-  button.textContent = "Connect"
+  resetButton(element<HTMLFormElement>("relay-form").querySelector("button")!, "Connect")
   const local = address.startsWith("localhost:")
+  const codeSent = current?.pairing === "code"
   const at = local ? `on this computer (${address})` : `at ${address}`
   const text = {
     "invalid-address": "That isn't an address. Use localhost, or a host or IP with an optional port: 100.64.0.2 or devbox.tailnet.ts.net:19988.",
     "invalid-code": "That isn't a pairing code. Enter the 8 characters `npx @opencode/browse pair` prints on the relay's computer (XXXX-XXXX).",
     connected: `Connected to the relay ${at}.`,
     connecting: `The relay ${at} hasn't answered yet. The status above updates when it does.`,
-    offline: local
+    offline: codeSent
+      ? `Code saved. No relay answered ${at} yet; it pairs as soon as one runs there (within 10 minutes of \`pair\`).`
+      : local
       ? `No relay answered ${at}. It starts the first time an agent uses the browse tools.`
       : `No relay answered ${at}. Check the address, that an agent has started the relay there, and that \`npx @opencode/browse set hostname 0.0.0.0\` was run there.`,
     unpaired: `The relay ${at} answered, but this browser isn't paired with it. Run \`npx @opencode/browse pair\` there and enter the code it prints.`,
@@ -182,6 +417,7 @@ element<HTMLFormElement>("relay-form").addEventListener("submit", (event) => {
   button.disabled = true
   button.textContent = "Connecting…"
   element("relay-result").hidden = true
+  connectFrom = "advanced"
   send({ type: "relay.connect", address: element<HTMLInputElement>("relay-address").value, code: element<HTMLInputElement>("relay-code").value })
 })
 
@@ -203,7 +439,7 @@ function describe(state: AgentRelayState) {
       : "This extension is older than the browse CLI on this computer. Chrome updates it within a few hours; to update now, open chrome://extensions, turn on Developer mode and click Update."
   if (state.status === "incompatible")
     return "This extension and the installed CLI don't match. Run the install command again, then click Reconnect."
-  if (state.status === "unpaired") return "Not paired yet. Enter a pairing code below; until then no agent can use this browser."
+  if (state.status === "unpaired") return "Not paired yet. Run the install command at the top, or enter a pairing code below; until then no agent can use this browser."
   if (state.status === "untrusted" && remote)
     return `The relay at ${remote} didn't pair with this browser, so it was refused. Enter a new pairing code from it below.`
   if (state.status === "untrusted")
@@ -277,6 +513,12 @@ element<HTMLButtonElement>("copy-command").addEventListener("click", (event) => 
   const button = event.currentTarget as HTMLButtonElement
   void navigator.clipboard.writeText(element("install-command").textContent ?? "").then(() => flash(button, "Copied"))
 })
+element<HTMLButtonElement>("copy-example").addEventListener("click", (event) => {
+  const button = event.currentTarget as HTMLButtonElement
+  void navigator.clipboard.writeText(element("example-prompt").textContent ?? "").then(() => flash(button, "Copied"))
+})
+element<HTMLButtonElement>("open-extensions").addEventListener("click", () => void chrome.tabs.create({ url: "chrome://extensions" }))
+element<HTMLButtonElement>("step-reconnect").addEventListener("click", () => send({ type: "agents.reconnect" }))
 element<HTMLButtonElement>("copy-update").addEventListener("click", (event) => {
   const button = event.currentTarget as HTMLButtonElement
   void navigator.clipboard.writeText(element("update-command").textContent ?? "").then(() => flash(button, "Copied"))
