@@ -32,6 +32,7 @@ type ToolSpec = {
 type ExecuteArguments = {
   readonly code: string
   readonly session?: string | undefined
+  readonly timeoutMs?: number | undefined
   readonly targetSelection?: TargetSelection
   readonly browser?: string
 }
@@ -88,6 +89,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         targetUrl: { type: "string", description: "Optional URL substring selecting an existing attached page. This does not navigate or open a URL; use page.goto() for that." },
         targetIndex: { type: "integer", minimum: 0, description: "Optional zero-based attached page index selector." },
         browser: browserProperty,
+        timeoutMs: { type: "integer", minimum: 0, description: "Optional overall script timeout in milliseconds (paused while handoff() waits on the user); defaults to 60000, 0 disables." },
       }, ["code"]),
       readOnly: false,
       destructive: true,
@@ -100,6 +102,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
           sessionId,
           code: args.code,
           createIfMissing: !args.session,
+          ...(args.timeoutMs === undefined ? {} : { timeoutMs: args.timeoutMs }),
           ...(args.targetSelection ? { targetSelection: args.targetSelection } : {}),
           ...(args.browser ? { browser: args.browser } : {}),
         })
@@ -564,7 +567,8 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         yield* RelayLifecycle.ensureExtensionConnected({ relay, waitForReconnect: true })
         const sessionId = explicitSession ?? currentSession.id
         const options = { ...(site ? { site } : {}), ...(username ? { username } : {}), ...(timeoutMs === undefined ? {} : { timeoutMs }) }
-        const result = yield* relay.execute({ sessionId, code: `return await secrets.signIn(${JSON.stringify(options)})`, createIfMissing: !explicitSession })
+        const outerTimeoutMs = timeoutMs === undefined ? 120_000 : Math.max(60_000, timeoutMs + 10_000)
+        const result = yield* relay.execute({ sessionId, code: `return await secrets.signIn(${JSON.stringify(options)})`, createIfMissing: !explicitSession, timeoutMs: outerTimeoutMs })
         establishCurrentSession(sessionId)
         if (result.isError) return yield* Effect.fail(new Error(result.text))
         return { ...(result.value as object), ...(result.aftermath?.endUrl ? { url: result.aftermath.endUrl } : {}), ...(result.warnings?.length ? { warnings: result.warnings } : {}) }
@@ -767,11 +771,13 @@ function parseExecuteArguments(input: unknown): ExecuteArguments {
   const object = requireObject(input)
   const code = requiredStringField(object, "code")
   const session = optionalStringField(object, "session")
+  const timeoutMs = optionalNonNegativeIntegerField(object, "timeoutMs")
   const targetSelection = parseMcpTargetSelection(object)
   const browser = optionalStringField(object, "browser")
   return {
     code,
     ...(session ? { session } : {}),
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(targetSelection ? { targetSelection } : {}),
     ...(browser ? { browser } : {}),
   }
@@ -822,6 +828,15 @@ function optionalPositiveIntegerField(input: unknown, field: string): number | u
   if (value === undefined) return undefined
   if (!Predicate.isNumber(value) || !Number.isInteger(value) || value <= 0) {
     throw new Error(`${field} must be a positive integer`)
+  }
+  return value
+}
+
+function optionalNonNegativeIntegerField(input: unknown, field: string): number | undefined {
+  const value = requireObject(input)[field]
+  if (value === undefined) return undefined
+  if (!Predicate.isNumber(value) || !Number.isInteger(value) || value < 0) {
+    throw new Error(`${field} must be a non-negative integer`)
   }
   return value
 }

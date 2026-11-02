@@ -307,7 +307,7 @@ export class RootTargetLifecycle {
     if (!options.alreadyAttached) yield* this.step(transition, this.options.extension.send({ method: "debugger.attach", params: { tabId } }))
     yield* this.command(transition, "Page.enable")
     yield* Effect.gen({ self: this }, function* () {
-      yield* this.command(transition, "Emulation.setFocusEmulationEnabled", { enabled: true })
+      yield* this.command(transition, "Emulation.setFocusEmulationEnabled", { enabled: false })
     }).pipe(Effect.ignore)
     yield* this.check(transition)
     const result = yield* this.command(transition, "Target.getTargetInfo")

@@ -6,12 +6,13 @@
 // `opencode-browser mcp` runs the MCP server over stdio (as does the bundle invoked as `opencode-browser-mcp`).
 import path from "node:path"
 
+const embeddedVersion = globalThis.__OPENCODE_BROWSER_VERSION__
 const setupCommands = new Set(["install", "uninstall", "extension", "pair", "rollback", "set"])
 const command = process.argv[2]
 const invokedAs = path.basename(process.argv[1] ?? "")
 
 if (command === "--version" || command === "-v") {
-  const { opencodeBrowserVersion } = await import("./version.ts")
+  const opencodeBrowserVersion = embeddedVersion ?? (await import("./version.ts")).opencodeBrowserVersion
   process.stdout.write(`${opencodeBrowserVersion}\n`)
 } else if (invokedAs === "opencode-browser-mcp") {
   const { NodeRuntime } = await import("@effect/platform-node")
@@ -59,5 +60,6 @@ if (command === "--version" || command === "-v") {
     const { printSetupStatus } = await import("./setup.ts")
     printSetupStatus()
   }
-  await import("./cli.ts")
+  const { runCli } = await import("./cli.ts")
+  runCli()
 }

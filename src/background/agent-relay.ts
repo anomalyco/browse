@@ -634,7 +634,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       cdp.count++
       if (failed) cdp.errors++
     }
-    if (cdpMethod === undefined || failed || ms >= SLOW_CDP)
+    if ((command.method !== "ping" && cdpMethod === undefined) || failed || ms >= SLOW_CDP)
       log.add("command", {
         method: command.method,
         cdp: typeof cdpMethod === "string" ? cdpMethod : undefined,
@@ -660,6 +660,10 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     const params = command.params
     switch (command.method) {
       case "ping":
+        // Invoking an extension API resets Chromium's 30 s MV3 service worker idle timer.
+        if (typeof chrome.runtime.getPlatformInfo === "function") {
+          await chrome.runtime.getPlatformInfo().catch(() => undefined)
+        }
         return {}
       case "debugger.attach": {
         const tabId = number(params, "tabId")
@@ -1503,9 +1507,9 @@ function sessionName(sessionId?: string) {
   return autoNamed(sessionId) ? "An agent" : `Agent “${sessionId!.trim()}”`
 }
 
-/** Session ids the relay or MCP server made up (mcp-1a2b3c4d, quiet-falcon-333), rather than an agent's chosen name. */
+/** Session ids the relay or MCP server made up (mcp-1a2b3c4d, oc-ses_..., quiet-falcon-333), rather than an agent's chosen name. */
 function autoNamed(sessionId: string | undefined) {
-  return !sessionId || /^mcp-[0-9a-f]{6,}$/i.test(sessionId) || /^[a-z]+-[a-z]+-\d{3}$/.test(sessionId)
+  return !sessionId || sessionId.startsWith("oc-") || /^mcp-[0-9a-f]{6,}$/i.test(sessionId) || /^[a-z]+-[a-z]+-\d{3}$/.test(sessionId)
 }
 
 /**

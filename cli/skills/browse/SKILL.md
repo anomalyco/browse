@@ -59,17 +59,19 @@ are excluded from Browse's inventory. `page.title()` reads time out
 after five seconds if the page execution context remains unavailable; the read
 timeout does not close or replace the tab.
 
-A bare CLI execute creates a fresh session-owned page and prints the exact
-`--session <id>` continuation command, or you can pass a descriptive session
-name (including an optional emoji, which appears directly on the browser tab
-group). Every later CLI call must pass that id or set
-`OPENCODE_BROWSER_SESSION`; bare execute never guesses from human-shell current
-state.
+A bare CLI execute inside OpenCode defaults to `oc-<opencode-session-id>` (or
+creates a fresh session-owned page outside OpenCode and prints its
+`--session <id>` continuation command). Pass `--rm` for a one-shot session whose
+tabs close as soon as the command finishes, `--timeout-ms <ms>` when a script
+needs longer than the 60s default (paused while `handoff()` waits on the user),
+or pass a descriptive session name (including an optional emoji, which appears
+directly on the browser tab group):
 
 ```bash
 opencode-browser session new "🎙️ elevenlabs"
 opencode-browser execute --session "🎙️ elevenlabs" 'return page.url()'
 opencode-browser execute 'return page.url()'
+opencode-browser execute --rm 'await page.goto("https://example.com"); return await page.title()'
 ```
 
 MCP keeps one implicit process session. Omit `session` for that normal path, or

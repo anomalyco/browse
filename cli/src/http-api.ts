@@ -364,7 +364,9 @@ function handleAuthRequest(options: {
 
 function runRequestEffect(response: http.ServerResponse, effect: Effect.Effect<void, Error>): void {
   const controller = new AbortController()
-  const onClose = () => controller.abort()
+  const onClose = () => {
+    if (!response.writableEnded) controller.abort()
+  }
   response.once("close", onClose)
   Effect.runPromise(effect, { signal: controller.signal }).catch((error: unknown) => {
     if (response.destroyed || response.writableEnded) return
@@ -615,6 +617,8 @@ function handleCliRequest(options: {
         ...(requestedSessionId ? { sessionId: requestedSessionId } : {}),
         code: request.code,
         createIfMissing: request.createIfMissing,
+        ...(request.removeAfterExecute ? { removeAfterExecute: true } : {}),
+        ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
         ...(request.targetSelection ? { targetSelection: request.targetSelection } : {}),
         ...(request.browser ? { browser: request.browser } : {}),
       })

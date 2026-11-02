@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { Effect } from "effect"
+import { Effect, Fiber } from "effect"
 import { boundExecuteResult, maxExecuteResultChars, type ExecuteResult } from "../src/execute.ts"
 import { ExecuteRealm } from "../src/execute-realm.ts"
 import { HandoffRegistry } from "../src/handoff.ts"
-import type { ExecuteSandboxLike } from "../src/relay-types.ts"
+import type { ConnectedTarget, ExecuteSandboxLike } from "../src/relay-types.ts"
 import { OpenCodeBrowserSessions } from "../src/session-manager.ts"
 
 const ok = (text: string): ExecuteResult => ({
@@ -247,4 +247,112 @@ describe("execute result size", () => {
     expect(boundExecuteResult("[ ... 20000 items ]", rows, true).hasValue).toBe(false)
   })
 })
+
+describe("execute timeouts, disconnects, one-shot cleanup, and idle reaping", () => {
+  const rootTab = (id: string, sessionId: string | undefined, owner: "relay" | "user" = "relay"): ConnectedTarget => ({
+    tabId: id.length,
+    sessionId: `cdp-${id}`,
+    owner,
+    ...(sessionId ? { opencodeBrowserSessionId: sessionId } : {}),
+    targetInfo: { targetId: id, type: "page", title: id, url: "about:blank", attached: true, canAccessOpener: false },
+  })
+
+  test("timeoutMs stops a hung script with execute-timeout and frees the session", async () => {
+    const { sessions, sandboxes } = manager(async (sandbox) => {
+      if (sandbox.executions === 1) await sandbox.playwrightCall()
+      return ok("recovered")
+    })
+    const timedOut = await run(sessions.execute({ sessionId: "t1", code: "...", createIfMissing: true, timeoutMs: 40 }))
+    expect(timedOut.result.isError).toBe(true)
+    expect(timedOut.result.diagnostic).toBe("execute-timeout")
+    expect(timedOut.result.text).toContain("Execute timed out after 40ms")
+    expect(sandboxes[0]?.aborted).toBe(1)
+
+    const next = await run(sessions.execute({ sessionId: "t1", code: "...", createIfMissing: false, timeoutMs: 1_000 }))
+    expect(next.result.text).toBe("recovered")
+  })
+
+  test("pauseExecutionTimeout suspends the execute deadline while waiting on a handoff", async () => {
+    const { sessions } = manager(async () => {
+      const resume = sessions.pauseExecutionTimeout("t-pause")
+      await Bun.sleep(90)
+      resume()
+      await Bun.sleep(10)
+      return ok("finished after handoff")
+    })
+    const done = await run(sessions.execute({ sessionId: "t-pause", code: "...", createIfMissing: true, timeoutMs: 50 }))
+    expect(done.result.isError).toBe(false)
+    expect(done.result.text).toBe("finished after handoff")
+  })
+
+  test("disconnecting a caller while execute runs aborts the script and frees the lock", async () => {
+    const { sessions, sandboxes } = manager(async (sandbox) => {
+      if (sandbox.executions === 1) await sandbox.playwrightCall()
+      return ok("next caller")
+    })
+    const fiber = Effect.runFork(sessions.execute({ sessionId: "disc", code: "...", createIfMissing: true }))
+    for (let i = 0; i < 50 && !sessions.isExecuting("disc"); i++) await Bun.sleep(5)
+    expect(sessions.isExecuting("disc")).toBe(true)
+
+    await run(Fiber.interrupt(fiber))
+    for (let i = 0; i < 50 && sessions.isExecuting("disc"); i++) await Bun.sleep(5)
+    expect(sandboxes[0]?.aborted).toBe(1)
+    expect(sessions.isExecuting("disc")).toBe(false)
+
+    const second = await run(sessions.execute({ sessionId: "disc", code: "...", createIfMissing: false }))
+    expect(second.result.text).toBe("next caller")
+  })
+
+  test("removeAfterExecute (--rm) closes all session tabs and deletes the session", async () => {
+    const closed: string[] = []
+    const targets: ConnectedTarget[] = []
+    const sessions = new OpenCodeBrowserSessions("http://127.0.0.1:0", (id) => {
+      targets.push(rootTab("first", id), rootTab("popup", id))
+      return new FakeSandbox(async () => ok("one-shot"))
+    }, {
+      lifecycleTimeoutMs: 5_000,
+      getTargets: () => targets,
+      onReleaseRelayTarget: (id) => Effect.sync(() => { closed.push(id) }),
+    })
+
+    const out = await run(sessions.execute({ code: "return 1", createIfMissing: true, removeAfterExecute: true }))
+    expect(out.result.text).toBe("one-shot")
+    expect(closed).toEqual(["first", "popup"])
+    expect(sessions.listSummaries()).toEqual([])
+  })
+
+  test("reapIdleSessions deletes idle oc-* and auto-named sessions and resets idle named sessions", async () => {
+    const closed: string[] = []
+    const targets = [rootTab("agent-tab", "oc-ses_abc"), rootTab("named-tab", "named")]
+    const sessions = new OpenCodeBrowserSessions("http://127.0.0.1:0", () => new FakeSandbox(async () => ok("x")), {
+      lifecycleTimeoutMs: 5_000,
+      getTargets: () => targets,
+      onReleaseRelayTarget: (id) => Effect.sync(() => { closed.push(id) }),
+    })
+    await run(sessions.execute({ sessionId: "oc-ses_abc", code: "...", createIfMissing: true }))
+    await run(sessions.execute({ sessionId: "named", code: "...", createIfMissing: true }))
+    sessions.sessions.get("oc-ses_abc")!.updatedAt = new Date(0).toISOString()
+    sessions.sessions.get("named")!.updatedAt = new Date(0).toISOString()
+
+    expect(await run(sessions.reapIdleSessions({ maxIdleMs: 100, now: 101, isTargetBusy: (id) => id === "named-tab" }))).toEqual(["oc-ses_abc"])
+    expect(sessions.sessions.has("oc-ses_abc")).toBe(false)
+    expect(sessions.sessions.has("named")).toBe(true)
+
+    expect(await run(sessions.reapIdleSessions({ maxIdleMs: 100, now: 101 }))).toEqual(["named"])
+    expect(closed).toEqual(["agent-tab", "named-tab"])
+    expect(sessions.sessions.has("named")).toBe(true)
+  })
+
+  test("sweepOrphanedRelayTargets closes only relay-owned targets without a session", async () => {
+    const closed: string[] = []
+    const sessions = new OpenCodeBrowserSessions("http://127.0.0.1:0", () => new FakeSandbox(async () => ok("x")), {
+      getTargets: () => [rootTab("orphan", "gone"), rootTab("live", "live"), rootTab("user", "gone", "user"), rootTab("raw", undefined)],
+      onReleaseRelayTarget: (id) => Effect.sync(() => { closed.push(id) }),
+    })
+    await run(sessions.execute({ sessionId: "live", code: "...", createIfMissing: true }))
+    await run(sessions.sweepOrphanedRelayTargets())
+    expect(closed).toEqual(["orphan"])
+  })
+})
+
 

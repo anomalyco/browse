@@ -175,8 +175,10 @@ export async function checkPackageTarball(tarball: string, version: string, exte
       if (pkg.scripts?.[hook]) problems.push(`${label}: has a ${hook} script; installs must not run code`)
     for (const bin of ["browse", "opencode-browser"]) if (pkg.bin?.[bin] !== "dist/cli.mjs") problems.push(`${label}: bin ${bin} should be dist/cli.mjs`)
     // Every script in dist/, not just the entry.
+    const distTexts: string[] = []
     for (const name of names.filter((file) => file.startsWith("dist/") && /\.[mc]?js$/.test(file))) {
       const text = await readFile(path.join(packageDir, name), "utf8")
+      distTexts.push(text)
       for (const marker of TEST_ONLY_MARKERS) if (text.includes(marker)) problems.push(`${label}: ${name} contains the development/test marker ${JSON.stringify(marker)}`)
     }
     if (!names.includes("dist/cli.mjs")) problems.push(`${label}: missing dist/cli.mjs`)
@@ -185,7 +187,9 @@ export async function checkPackageTarball(tarball: string, version: string, exte
       if (!cli.startsWith("#!/usr/bin/env node")) problems.push(`${label}: dist/cli.mjs has no node shebang`)
       if (!cli.includes(JSON.stringify(version))) problems.push(`${label}: dist/cli.mjs doesn't carry version ${version}`)
       if (cli.includes("sourceMappingURL")) problems.push(`${label}: dist/cli.mjs references a source map`)
-      if (extensionSha256 && !cli.includes(extensionSha256)) problems.push(`${label}: dist/cli.mjs doesn't carry the dev extension zip's sha256 ${extensionSha256}`)
+      if (extensionSha256 && !distTexts.some((text) => text.includes(extensionSha256))) {
+        problems.push(`${label}: dist/ doesn't carry the dev extension zip's sha256 ${extensionSha256}`)
+      }
     }
     return problems
   })

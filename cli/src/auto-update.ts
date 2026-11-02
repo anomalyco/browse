@@ -145,7 +145,8 @@ const realpath = (file: string) => {
 export function npmRuntime(options: { readonly entry?: string; readonly layout?: Layout; readonly checkout?: boolean } = {}) {
   if (options.checkout ?? fromCheckout()) return undefined
   const layout = options.layout ?? runtimeLayout()
-  const entry = realpath(options.entry ?? fileURLToPath(import.meta.url))
+  const defaultEntry = () => fileURLToPath(import.meta.url.endsWith(".ts") ? import.meta.url : new URL("./cli.mjs", import.meta.url))
+  const entry = realpath(options.entry ?? defaultEntry())
   const relative = path.relative(realpath(layout.versions), entry).split(path.sep)
   if (relative.length !== 6 || relative[0] === ".." || relative.slice(1).join("/") !== "node_modules/@opencode/browse/dist/cli.mjs") return undefined
   const current = readCurrent(layout)
