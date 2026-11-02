@@ -167,12 +167,18 @@ export class BrowserLinks {
 
   byId(id: string): BrowserLink | undefined {
     const wanted = id.trim().toLowerCase()
-    return this.list().find((link) => link.id === wanted || link.name.toLowerCase() === wanted)
+    return this.list().find((link) => link.id === wanted) ?? this.list().find((link) => link.name.toLowerCase() === wanted)
   }
 
-  /** Every id a browser has had, including ones not connected now (a session may name one that's away). */
-  knownId(id: string): boolean {
-    return Object.values(this.load()).some((entry) => entry.id === id)
+  byKey(key: string): BrowserLink | undefined {
+    return this.links.get(key)
+  }
+
+  /** Recover a pre-affinity catalog entry only when the stored id (or a single known profile) identifies it. */
+  knownBrowser(id: string | undefined): Pick<BrowserLink, "key" | "id"> | undefined {
+    const entries = Object.entries(this.load())
+    const known = id ? entries.find(([, entry]) => entry.id === id) : entries.length === 1 ? entries[0] : undefined
+    return known && { key: known[0], id: known[1].id }
   }
 
   get connected(): boolean {
