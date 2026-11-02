@@ -30,6 +30,7 @@ import { ensurePrivateDirectory } from "./relay-secrets.ts"
 
 const legacyContext = "opencode-browser-pairing-v2"
 const context = "opencode-browser-pairing-v3"
+export { context as pairingScheme }
 const crockford = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 export const pairingCodeLength = 8
 /** PBKDF2 over the code: one key costs both sides a few milliseconds, every possible code a search that can't finish. */
@@ -54,7 +55,7 @@ export const legacyPairingCodePath = (root = dataRoot()) => path.join(root, "ext
 
 // ---- codes -----------------------------------------------------------------------------------------------------
 
-type PendingCodes = { codes: { key: string; expiresAt: number }[]; failures: number }
+type PendingCodes = { codes: { key: string; expiresAt: number; receipt?: string }[]; failures: number }
 
 /** A typed code in canonical form (8 characters, I/L read as 1, O as 0), or undefined. */
 export function normalizePairingCode(input: string): string | undefined {
@@ -93,11 +94,11 @@ function writePendingCodes(root: string, pending: PendingCodes): void {
 }
 
 /** A new single-use code; only its slow hash is stored. The oldest pending codes go past five. */
-export function mintPairingCode(root = dataRoot(), options: { readonly now?: number; readonly ttlMs?: number } = {}): string {
+export function mintPairingCode(root = dataRoot(), options: { readonly now?: number; readonly ttlMs?: number; readonly receipt?: string } = {}): string {
   const now = options.now ?? Date.now()
   const code = Array.from(crypto.randomBytes(pairingCodeLength), (byte) => crockford[byte & 31]).join("")
   const pending = readPendingCodes(root, now)
-  pending.codes.push({ key: pairingCodeKey(code), expiresAt: now + (options.ttlMs ?? pairingCodeTtlMs) })
+  pending.codes.push({ key: pairingCodeKey(code), expiresAt: now + (options.ttlMs ?? pairingCodeTtlMs), ...(options.receipt ? { receipt: options.receipt } : {}) })
   // A fresh code gets the full allowance of attempts.
   writePendingCodes(root, { codes: pending.codes.slice(-maxPendingCodes), failures: 0 })
   return code
@@ -109,9 +110,10 @@ export function pendingPairingCodeKeys(root = dataRoot(), now = Date.now()): str
 }
 
 /** Uses up a code once an extension proved it; the failure count starts over. */
-export function consumePairingCode(key: string, root = dataRoot(), now = Date.now()): void {
+export function consumePairingCode(key: string, root = dataRoot(), now = Date.now()): string | undefined {
   const pending = readPendingCodes(root, now)
   writePendingCodes(root, { codes: pending.codes.filter((entry) => entry.key !== key), failures: 0 })
+  return pending.codes.find(entry => entry.key === key)?.receipt
 }
 
 /** Counts a wrong code; at the limit every pending code is thrown away. Returns whether that happened. */
@@ -133,6 +135,8 @@ export function writeExtensionPairing(extensionDirectory: string, code: string):
 export type BrowserPairing = {
   readonly token: string
   readonly pairedAt: number
+  /** A local correlation id, not key material; lets a waiting `pair` recognize its own redemption. */
+  readonly receipt?: string
   readonly lastSeen?: number
   /** What the relay called the browser when it last connected (browser-links.ts). */
   readonly id?: string
@@ -164,9 +168,9 @@ export function browserToken(key: string, root = dataRoot()): string | undefined
 export const newBrowserToken = () => crypto.randomBytes(32).toString("base64url")
 
 /** A new token for the browser with this profile key (or the given one), replacing any it had. */
-export function issueBrowserToken(key: string, root = dataRoot(), now = Date.now(), token = newBrowserToken()): string {
+export function issueBrowserToken(key: string, root = dataRoot(), now = Date.now(), token = newBrowserToken(), receipt?: string): string {
   const pairings = readBrowserPairings(root)
-  writeBrowserPairings(root, { ...pairings, [key]: { token, pairedAt: now } })
+  writeBrowserPairings(root, { ...pairings, [key]: { token, pairedAt: now, ...(receipt ? { receipt } : {}) } })
   return token
 }
 

@@ -2,10 +2,10 @@
 // for the browse MCP server and the opencode-browser CLI (Playwright `execute`, recordings, handoffs) and drives tabs
 // through this extension; this module runs its commands. The wire protocol is in ../agent-relay/protocol.ts,
 // the relay itself in cli/src/relay.ts.
+import { extensionProtocolVersion } from "../../cli/src/protocol"
 import {
   defaultRelayPort,
   encodeRecordingFrame,
-  extensionProtocolVersion,
   extensionReconnectAlarmPeriodMs,
   isJsonObject,
   pageStatusFromJson,
@@ -351,12 +351,12 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     port = address.port ?? (Number(stored[PORT_KEY]) || defaultRelayPort)
     if (`${host}:${port}` !== previous) notify()
     if (socket && socket.readyState <= WebSocket.OPEN) return
-    // Without a token or a code there is no relay to trust; wait for one (install, or the status page).
-    if ((await credential()) === undefined) {
+    // Without a credential announce only the protocol and that pairing is needed. No identity, tabs or
+    // commands on this socket. A sleeping worker repeats this presence on the regular reconnect alarm.
+    const presenceOnly = (await credential()) === undefined
+    if (presenceOnly) {
       if (status !== "unpaired") log.add("pairing.missing")
       setStatus("unpaired")
-      settle(Infinity)
-      return
     }
     if (socket && socket.readyState <= WebSocket.OPEN) return
     const url = `ws://${host}:${port}/extension`
@@ -377,13 +377,19 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       clearTimeout(timeout)
       openedAt = Date.now()
       log.add("open", { port, generation: mine })
+      // Older relays require hello first. Detect them before either side tries an incompatible code exchange.
+      current.send(JSON.stringify({ method: "protocol", params: { protocolVersion: extensionProtocolVersion, ...(presenceOnly ? { unpaired: true } : {}) } }))
+      if (presenceOnly) {
+        setTimeout(() => { if (current.readyState === WebSocket.OPEN) current.close(1000, "Presence sent") }, CONNECT_TIMEOUT)
+        return
+      }
       void hello(current).catch((error: unknown) => {
         log.add("hello.error", { error: text(error) })
         current.close(1011, "Handshake failed")
       })
     }
     current.onmessage = (event) => {
-      if (typeof event.data !== "string") return
+      if (presenceOnly || typeof event.data !== "string") return
       if (trusted.has(current)) void handle(current, event.data)
       else void verify(current, event.data).catch((error: unknown) => {
         log.add("pairing.error", { error: text(error) })
@@ -408,7 +414,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         opened: openedAt !== undefined,
         ms: lasted,
       })
-      void chrome.runtime.sendMessage({ action: "recording.cancelAll" }).catch(() => undefined)
+      if (!presenceOnly) void chrome.runtime.sendMessage({ action: "recording.cancelAll" }).catch(() => undefined)
       overrides = undefined
       autoUpdate = undefined
       browser = undefined
@@ -421,17 +427,21 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
           void spendCode(used.code.code).catch(() => undefined)
         }
       }
-      if (event.code === 4003) {
+      if (event.code === 4002 && event.reason === "Extension hello required") {
+        skew = "update-cli"
+        setStatus("incompatible")
+      } else if (event.code === 4003) {
         // A newer relay names the side that's behind: "Extension protocol incompatible: extension-newer".
         skew = /extension-newer/.test(event.reason) ? "update-cli" : /extension-older/.test(event.reason) ? "update-extension" : undefined
         setStatus("incompatible")
       }
+      else if (presenceOnly) setStatus("unpaired")
       else if (event.code === 4004) setStatus("conflict")
       else if (event.code === 4006) setStatus("untrusted")
       // A missing relay is normal until an agent's browse tools (or the opencode-browser CLI) start one.
       else setStatus(openedAt === undefined ? "offline" : "connecting")
       settle(mine)
-      schedule(quiet && openedAt === undefined)
+      if (!presenceOnly) schedule(quiet && openedAt === undefined)
     }
   }
 
@@ -539,6 +549,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       const nonce = typeof params?.nonce === "string" && /^[A-Za-z0-9_-]{22,128}$/.test(params.nonce) ? params.nonce : undefined
       if (message?.method !== "auth.challenge" || nonce === undefined) return refuse(`unexpected ${String(message?.method ?? message?.id ?? "message")}`)
       relayNonce = nonce
+      if (isJsonObject(params?.protocol)) pending.protocol = params.protocol
       if (using.kind === "token") {
         if (!sameSecret(await pairingProof(using.token, "relay", pending.port, relayNonce, pending.nonce), params?.proof)) return refuse("wrong proof")
         token = using.token
@@ -566,7 +577,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     current.send(JSON.stringify({ method: "auth.response", params: { proof: await pairingProof(token, "extension", pending.port, pending.nonce, relayNonce) } }))
     // The protocols the relay speaks (newer relays say): outside them, the relay keeps this connection but sends no
     // work, so show which side to update instead of "connected".
-    const range = isJsonObject(params?.protocol) ? params.protocol : undefined
+    const range = pending.protocol
     skew =
       typeof range?.version === "number" && extensionProtocolVersion > range.version
         ? "update-cli"
@@ -1476,6 +1487,7 @@ type Handshake = {
   nonce: string
   port: number
   credential: Credential
+  protocol?: JsonObject
   ecdh?: Awaited<ReturnType<typeof ecdhKeyPair>>
   /** A code exchange after this extension proved the code: the session key and the relay's nonce. */
   session?: { key: Uint8Array; relayNonce: string }

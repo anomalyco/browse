@@ -37,10 +37,13 @@ if (command === "--version" || command === "-v") {
                                  and wait for it)
     --no-open                    Print the steps without opening anything or copying the path
     --no-wait                    Don't wait for the extension to be added or connect
+    --wait-seconds <seconds>     How long to wait for a connection (default 180)
+    --agent <name>               Configure this client: opencode, claude, cursor, codex, vscode, windsurf (repeatable)
+    --all-agents, --yes          Configure all detected clients without prompting
   extension                      Show where to get the extension (the unpacked folder of a checkout or a dev
                                  install, or the store page)
-  pair                           Print a one-time pairing code (XXXX-XXXX, valid 10 minutes) to enter on the
-                                 extension's status page; the browser exchanges it for a key of its own
+  pair [--wait-seconds <seconds>] Start the relay, print a one-time code (valid 10 minutes) and wait for the
+                                 browser that redeems it (default 180 seconds)
     --list                       Show paired browsers: id, name, profile, when paired and last seen
     --revoke <browser>           Unpair a browser (its id, name or profile) and disconnect it;
                                  \`--revoke legacy\` retires the shared code of earlier versions

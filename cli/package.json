@@ -1,6 +1,6 @@
 {
   "name": "@opencode/browse",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Browse: connect the extension to opencode, and drive your browser from any agent (CLI, MCP, Playwright).",
   "type": "module",
   "license": "MIT",
@@ -44,7 +44,8 @@
     "@types/pngjs": "6.0.5",
     "@types/ws": "8.18.2",
     "@typescript/native-preview": "7.0.0-dev.20260707.2",
-    "jsonc-parser": "3.3.1"
+    "jsonc-parser": "3.3.1",
+    "smol-toml": "1.9.1"
   },
   "publishConfig": {
     "access": "public"

@@ -1,4 +1,6 @@
 import type { JsonObject } from "./protocol.ts"
+import { extensionProtocolVersion, minExtensionProtocolVersion } from "./protocol.ts"
+import { pairingScheme } from "./browser-pairing.ts"
 import http from "node:http"
 import { Effect, Match, Predicate, Schema } from "effect"
 import * as AuthProfile from "./auth-profile.ts"
@@ -59,7 +61,7 @@ export function createHttpRequestHandler(options: {
   readonly relayInstance: { readonly id: string; readonly startedAt: string; readonly pid: number; readonly managed: boolean }
   readonly shutdown: RelayShutdown
   readonly extensionStatus: () => Pick<ExtensionStatus,
-    "connected" | "version" | "build" | "origin" | "protocolVersion" | "protocolCompatible" | "protocolLegacy" | "browsers" | "rejectedConnections" | "pairingFailures" | "cdpClients" | "processFaults"
+    "connected" | "pairingState" | "nextStep" | "version" | "build" | "origin" | "protocolVersion" | "protocolCompatible" | "protocolLegacy" | "browsers" | "rejectedConnections" | "pairingFailures" | "cdpClients" | "processFaults"
   >
   readonly recordingRelay: RecordingRelay
   readonly flightRecorder: FlightRecorderRelay
@@ -88,9 +90,12 @@ export function createHttpRequestHandler(options: {
       sendJson(response, { error: hostError }, 403)
       return
     }
+    const compatibility = { extensionProtocol: { min: minExtensionProtocolVersion, version: extensionProtocolVersion }, pairing: pairingScheme }
     const fetchSiteError = validateBrowserFetchSite(request)
     if (fetchSiteError) {
-      sendJson(response, { error: fetchSiteError }, 403)
+      // Chrome may mark the Options page's probe cross-site. Keep the refusal and disclose only static
+      // compatibility information on that route; never return instance metadata or enable CORS for web pages.
+      sendJson(response, { error: fetchSiteError, ...(request.method === "GET" && request.url === "/version" ? compatibility : {}) }, 403)
       return
     }
     const requestUrl = new URL(request.url ?? "/", `http://${formatHostForUrl(options.host)}:${options.port}`)
@@ -114,6 +119,7 @@ export function createHttpRequestHandler(options: {
         pid: options.relayInstance.pid,
         managed: options.relayInstance.managed,
         shutdownProtocol: 2,
+        ...compatibility,
       })
       return
     }
@@ -186,6 +192,8 @@ export function createHttpRequestHandler(options: {
       const extensionStatus = options.extensionStatus()
       sendJson(response, {
         connected: extensionStatus.connected,
+        pairingState: extensionStatus.pairingState,
+        nextStep: extensionStatus.nextStep,
         version: extensionStatus.version,
         ...(extensionStatus.build === undefined ? {} : { build: extensionStatus.build }),
         ...(extensionStatus.origin === undefined ? {} : { origin: extensionStatus.origin }),

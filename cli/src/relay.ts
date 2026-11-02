@@ -21,7 +21,7 @@ import { CdpRuntime } from "./cdp-runtime.ts"
 import { ExtensionRpc } from "./extension-rpc.ts"
 import { createHttpRequestHandler, hasRelayToken } from "./http-api.ts"
 import type { CdpEvent, CdpRequest, JsonObject, PageStatus } from "./protocol.ts"
-import { extensionProtocolCompatibility, extensionProtocolVersion, minExtensionProtocolVersion, isCdpRequest, isExtensionEvent, isExtensionResponse, makePageStatus, parseJsonObject } from "./protocol.ts"
+import { extensionProtocolAdvice, extensionProtocolCompatibility, extensionProtocolVersion, minExtensionProtocolVersion, isCdpRequest, isExtensionEvent, isExtensionResponse, makePageStatus, parseJsonObject } from "./protocol.ts"
 import {
   closeHttpServer,
   closeWebSocketServer,
@@ -59,6 +59,7 @@ import {
   pairingSessionKey,
   pendingPairingCodeKeys,
   recordPairingFailure,
+  readBrowserPairings,
   sessionProof,
   touchBrowserPairing,
   wrapToken,
@@ -94,7 +95,7 @@ import { autoUpdateModes, autoUpdateOverride, autoUpdateStatus, createAutoUpdate
 import { createUpdateWatcher } from "./update.ts"
 import { describeChanges, describeSettings, parseSettingChanges, settingsFromExtension, SettingsInputError, settingsToExtension, type SettingOverrides, type Settings } from "./user-settings.ts"
 import { installedDevExtension, syncDevExtension } from "./dev-extension.ts"
-import { devExtension, installCommand, storeConfig } from "./paths.ts"
+import { cliCommand, devExtension, installCommand, oldStoreMarker, storeConfig, storeUrl } from "./paths.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "./version.ts"
 import { handleExecuteRealmException, handleExecuteRealmRejection, pruneStaleExecuteFilesDirectories } from "./execute-realm.ts"
 import { PasskeyBridge } from "./passkey-bridge.ts"
@@ -251,6 +252,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   let rejectedExtensionConnections = 0
   /** Extension connections that failed the pairing handshake (wrong code, or an extension without one). */
   let pairingFailures = 0
+  let mismatch: ReturnType<typeof extensionProtocolCompatibility> | undefined
+  let lastUnpaired = 0
+  let lastRefused = 0
+  let hasPairedBrowser = Object.keys(readBrowserPairings()).length > 0
+  const pairingRefused = () => { pairingFailures++; lastRefused = Date.now() }
   /** An extension too old to pair is reloaded once, so an unpacked install picks up the new files on disk. */
   let legacyExtensionReloaded = false
   // Every connected browser (browser-links.ts). Tab ids here are the relay's own; a command for a tab goes to that
@@ -832,6 +838,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     sessions,
     reloadExtension: () => sendToEach({ method: "runtime.reload" }),
     revokeBrowser: (key) => {
+      hasPairedBrowser = Object.keys(readBrowserPairings()).length > 0
       const links = browsers.list().filter((link) => link.key === key)
       for (const link of links) link.socket.close(4006, "Pairing revoked: run `pair` and enter the code to pair again")
       if (links.length) relayLog("extension.revoked", { browser: links.map((link) => link.id).join(", ") })
@@ -866,13 +873,24 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     extensionStatus: () => {
       // The top-level fields describe the default browser, as they did when only one could connect.
       const link = browsers.defaultLink()
+      const rejected = link ? undefined : mismatch ?? (fs.existsSync(oldStoreMarker()) ? extensionProtocolCompatibility(2) : undefined)
+      // Presence isn't a browser connection and grants no access. Let observations expire after two worker alarms.
+      const recent = Date.now() - 65_000
+      const pairingState = browsers.connected ? "connected" : rejected ? "incompatible" : lastRefused > recent ? "refused" : lastUnpaired > recent ? "unpaired" : hasPairedBrowser ? "paired-offline" : "not-seen"
+      const nextStep = pairingState === "connected" ? undefined
+        : pairingState === "incompatible" ? extensionProtocolAdvice(rejected?.version, { install: installCommand() })
+        : pairingState === "refused" || pairingState === "unpaired" ? `${pairingState === "refused" ? "Browse refused the pairing attempt" : "Browse is installed but not paired"}. Run \`${cliCommand("install")}\` again to pair it, or run \`${cliCommand("pair")}\` and enter the new code in Browse's Options.`
+        : pairingState === "paired-offline" ? "Open the browser profile already paired with Browse and enable the extension; it reconnects automatically."
+        : `No browser has contacted this relay yet. If Browse is installed, open that browser and run \`${cliCommand("install")}\` to pair it. Otherwise ${storeId ? `add Browse from ${storeUrl(storeId)}` : `follow the extension steps in \`${installCommand()}\``}.`
       return {
         connected: browsers.connected,
+        pairingState,
+        ...(nextStep ? { nextStep } : {}),
         version: link?.rpc.version ?? null,
         build: link?.build ?? null,
         origin: link?.origin ?? null,
-        protocolVersion: link?.rpc.protocolVersion ?? null,
-        protocolCompatible: link?.rpc.protocolCompatible ?? null,
+        protocolVersion: link?.rpc.protocolVersion ?? rejected?.version ?? null,
+        protocolCompatible: link?.rpc.protocolCompatible ?? rejected?.compatible ?? null,
         protocolLegacy: link?.rpc.protocolLegacy ?? null,
         browsers: browsers.list().map((browser) => ({
           id: browser.id,
@@ -1246,6 +1264,23 @@ const makeRelay = Effect.fnUntraced(function* (options: {
               return
             }
             if (!challenge) {
+              if (message.method === "protocol" || message.method === "hello") {
+                const protocol = extensionProtocolCompatibility(message.params?.protocolVersion)
+                if (!protocol.compatible) {
+                  mismatch = protocol
+                  socket.close(4003, `Extension protocol incompatible: ${(protocol.version ?? 0) > extensionProtocolVersion ? "extension-newer" : "extension-older"}`)
+                  return
+                }
+                mismatch = undefined
+                if (fs.existsSync(oldStoreMarker())) fs.rmSync(oldStoreMarker(), { force: true })
+                if (message.method === "protocol") {
+                  if (message.params?.unpaired === true) {
+                    lastUnpaired = Date.now()
+                    socket.close(1000, "Waiting for pairing")
+                  }
+                  return
+                }
+              }
               challenge = challengeExtension(socket, message, headerValue(request.headers.origin))
               return
             }
@@ -1255,7 +1290,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
             }
             const proof = message.method === "auth.response" ? getString(message.params, "proof") : undefined
             if (challenge.expected === undefined || !secretsEqual(challenge.expected, proof)) {
-              pairingFailures += 1
+              pairingRefused()
               relayLog("extension.rejected", { reason: "pairing failed", mode: challenge.mode, profile: getString(getObject(challenge.hello.params), "profileName") })
               socket.close(4006, "Pairing failed: this browser isn't paired with this relay")
               return
@@ -1263,6 +1298,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
             // An extension upgrading from the old shared code proved it unmasked its new token: keep it.
             if (challenge.issue) issueBrowserToken(challenge.key, undefined, Date.now(), challenge.issue)
             handshaken = true
+            hasPairedBrowser = true
+            lastUnpaired = lastRefused = 0
             const hello = challenge.hello
             waiting = []
             void computer.then((name) => {
@@ -1372,7 +1409,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     const pairing = getObject(params?.pairing)
     const extensionNonce = getString(pairing, "nonce")
     if (extensionNonce === undefined) {
-      pairingFailures += 1
+      pairingRefused()
       relayLog("extension.rejected", { reason: "no pairing (extension too old)", version: getString(params, "version") })
       // An unpacked extension older than pairing reloads once, picking up the files install just wrote. The command
       // carries nothing; the relay never trusts this socket.
@@ -1395,7 +1432,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return undefined
     }
     const refuse = (reason: string, text: string) => {
-      pairingFailures += 1
+      pairingRefused()
       relayLog("extension.rejected", { reason, mode, profile: getString(params, "profileName") })
       socket.close(4006, text)
       return undefined
@@ -1454,14 +1491,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
           .map((codeKey) => ({ codeKey, session: pairingSessionKey(codeKey, exchange.secret, exchange.transcript) }))
           .find(({ session }) => secretsEqual(sessionProof(session, "extension"), proof))
     if (!match) {
-      pairingFailures += 1
+      pairingRefused()
       const exhausted = recordPairingFailure()
       relayLog("extension.rejected", { reason: "wrong pairing code", exhausted, profile: getString(getObject(challenge.hello.params), "profileName") })
       socket.close(4006, exhausted ? "Too many wrong codes: run `pair` for a new one" : "Pairing failed: that code is wrong, used or expired")
       return
     }
-    consumePairingCode(match.codeKey)
-    const token = issueBrowserToken(challenge.key)
+    const receipt = consumePairingCode(match.codeKey)
+    const token = issueBrowserToken(challenge.key, undefined, Date.now(), undefined, receipt)
     relayLog("extension.paired", { profile: getString(getObject(challenge.hello.params), "profileName") })
     socket.send(JSON.stringify({ method: "auth.token", params: { proof: sessionProof(match.session, "relay"), wrapped: wrapToken(match.session, token) } }))
     challenge.expected = pairingProof(token, "extension", port, challenge.extensionNonce, challenge.relayNonce)

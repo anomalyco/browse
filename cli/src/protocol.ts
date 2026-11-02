@@ -4,13 +4,14 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { readonly [key: string]: 
 
 export type JsonObject = { readonly [key: string]: JsonValue }
 
-export const extensionProtocolVersion = 2
+/** Used by the extension worker, the relay handshake and the public /version probe. */
+export const extensionProtocolVersion = 3
 /**
  * The oldest extension protocol this relay still speaks. The store extension and the npm package update on their own
  * schedules, so a relay keeps accepting older extensions for a while: raise this only when dropping support for them,
  * and bump extensionProtocolVersion only for changes an older relay can't handle.
  */
-export const minExtensionProtocolVersion = 2
+export const minExtensionProtocolVersion = 3
 
 /**
  * Chrome's minimum alarm period. A disconnected extension's MV3 worker sleeps
@@ -142,6 +143,7 @@ const extensionCommandMethodValues = [
 ] as const
 
 const extensionEventMethodValues = [
+  "protocol",
   "hello",
   "auth.code",
   "auth.response",

@@ -2,6 +2,8 @@ import { afterAll, describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { parse } from "jsonc-parser"
+import { agentNames, editAgentConfig } from "../src/agent-config.ts"
 import { installedRuntime, locateExtension, pairStoreExtension, relayNotRestarted, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
 
 const browser = (name: string): Browser => ({ name, userData: `/data/${name}`, manifests: [], defaultIDs: [], executables: [] })
@@ -9,6 +11,32 @@ const chrome = browser("Google Chrome")
 const edge = browser("Microsoft Edge")
 const none = (target: Browser): Detection => ({ browser: target, blocked: false, enabled: [], disabled: [] })
 const folder = "/src/browse/dist"
+
+test.each([...agentNames])("%s user config: preserve unrelated settings, install twice, uninstall, refuse collisions", name => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-config-"))
+  try {
+    const key = name === "vscode" ? "servers" : "mcpServers"
+    const toml = name === "codex"
+    const file = path.join(home, toml ? "config.toml" : "mcp.json")
+    const before = toml ? '# my config\nmodel="test"\n[mcp_servers.other]\nurl="https://other"\n' : `{\n// my config\n"unrelated":true, "${key}":{"other":{"url":"https://other"}},\n}`
+    const config = () => toml ? Bun.TOML.parse(fs.readFileSync(file, "utf8")) : parse(fs.readFileSync(file, "utf8"))
+    fs.writeFileSync(file, before)
+    const original = config()
+    const receipt = { name, file, node: "/a path/node", entry: "/a path/browse.mjs" }
+    expect(editAgentConfig(receipt)).toBe("added")
+    expect(config()[toml ? "mcp_servers" : key].browse).toMatchObject({ command: receipt.node, args: [receipt.entry, "mcp"] })
+    const once = fs.readFileSync(file, "utf8")
+    expect(editAgentConfig(receipt)).toBe("unchanged")
+    expect(fs.readFileSync(file, "utf8")).toBe(once)
+    fs.writeFileSync(file, once.replace("/a path/node", "/some-other/server"))
+    expect(editAgentConfig(receipt)).toBe("conflict")
+    expect(editAgentConfig(receipt, true)).toBe("conflict")
+    fs.writeFileSync(file, once)
+    expect(editAgentConfig(receipt, true)).toBe("removed")
+    expect(config()).toEqual(original)
+    expect(fs.readFileSync(file, "utf8")).toContain("my config")
+  } finally { fs.rmSync(home, { recursive: true, force: true }) }
+})
 
 /** Runs locateExtension with recording effects: nothing real is opened, revealed or copied. */
 function run(overrides: Partial<Omit<LocateOptions, "folder">> & { folder?: string | undefined } = {}, results: { open?: boolean } = {}) {
@@ -43,7 +71,6 @@ describe("a checkout install without the extension", () => {
     expect(output).toContain("Load unpacked")
     expect(output).toContain(`${folder} (shown in Finder)`)
     expect(output).toContain("Cmd+Shift+G")
-    expect(output).toContain("Restart opencode")
     expect(output).not.toContain("chromewebstore")
   })
 
@@ -65,7 +92,6 @@ describe("a checkout install without the extension", () => {
 
   test.each([
     ["--no-open", { allowOpen: false }],
-    ["no terminal", { env: { ssh: false, display: true, tty: false, platform: "darwin" as const } }],
     ["no display", { env: { ssh: false, display: false, tty: true, platform: "linux" as const } }],
   ])("only prints the steps with %s", (_, overrides) => {
     const { outcome, calls, output } = run(overrides)
@@ -87,7 +113,8 @@ describe("a checkout install without the extension", () => {
   test("doesn't open anything when a browser couldn't be checked and may already have it", () => {
     const { calls, output } = run({ detections: [none(chrome), { ...none(edge), blocked: true }] })
     expect(calls).toEqual({ open: [], reveal: [], copy: [] })
-    expect(output).toContain("Already loaded in Microsoft Edge?")
+    expect(output).toContain("couldn't check")
+    expect(output).not.toContain("you're set")
   })
 
   test("with no Chromium browser found, names the page without opening it", () => {
@@ -109,6 +136,7 @@ describe("install with the extension", () => {
     const { outcome, output } = run({ detections: [{ ...none(chrome), enabled: [match] }] })
     expect(outcome).toBe("ready")
     expect(output).toContain("Person 1 (unpacked)")
+    expect(output).not.toContain("Agents can use Browse now")
   })
 
   test("a turned-off extension is reported, not reinstalled", () => {
@@ -122,6 +150,11 @@ describe("install with the extension", () => {
 
 describe("an npm install without the extension", () => {
   const storeUrl = "https://chromewebstore.google.com/detail/abcdefghijklmnopabcdefghijklmnop"
+
+  test("an agent without a terminal opens the store if a display is available", () => {
+    const { calls } = run({ folder: undefined, storeUrl, env: { ssh: false, display: true, tty: false, platform: "darwin" } })
+    expect(calls.open).toEqual([["Google Chrome", storeUrl]])
+  })
 
   test("opens its channel's store page, never the unpacked steps", () => {
     const { outcome, calls, output } = run({ folder: undefined, storeUrl })
@@ -171,6 +204,14 @@ describe("pairing the store build", () => {
     const { outcome, opened } = pair([{ ...none(chrome), enabled: [{ browser: chrome, profile, id: "afeafocngkodbmaipcngoamamfmekgfo" }] }])
     expect(outcome).toBe("none")
     expect(opened).toEqual([])
+  })
+
+  test("an older store copy in the default browser doesn't hide a compatible second browser", () => {
+    const { opened } = pair([
+      { ...none(chrome), enabled: [{ browser: chrome, profile, id: storeId, version: "0.0.2" }] },
+      { ...none(edge), enabled: [{ browser: edge, profile, id: storeId, version: "0.0.3" }] },
+    ])
+    expect(opened.map(([name]) => name)).toEqual(["Microsoft Edge"])
   })
 
   test("with --no-open, says how to pair by hand", () => {
