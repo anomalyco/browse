@@ -4,11 +4,12 @@
 import type { AgentRelayState } from "../shared/protocol"
 
 /** Whether a browse relay answers on this computer's relay port; "unknown" until the first probe ends. */
-export type RelayProbe = "unknown" | "absent" | "found"
+export type RelayProbe = "unknown" | "absent" | "found" | "install-waiting"
 
 export type FirstRunStep =
   /** No state from the worker yet, or the probe hasn't answered. */
   | { kind: "checking" }
+  | { kind: "finishing" }
   /** Nothing set up: run install once. */
   | { kind: "install" }
   /** A relay is there but this browser isn't paired with it (or it refused the pairing): install again, or a code. */
@@ -48,6 +49,7 @@ export function firstRunStep(state: AgentRelayState | undefined, probe: RelayPro
       // A relay on another computer was set on purpose; it needs a code from there.
       if (remote) return { kind: "pair", reason: "unpaired", remote, unpacked }
       if (probe === "unknown") return { kind: "checking" }
+      if (probe === "install-waiting") return { kind: "finishing" }
       return probe === "found" ? { kind: "pair", reason: "unpaired", unpacked } : { kind: "install" }
   }
 }
@@ -62,7 +64,8 @@ export const shouldProbe = (state: AgentRelayState | undefined) => state?.status
 export function relayProbeResult(status: number | undefined, body: unknown): Exclude<RelayProbe, "unknown"> {
   if (status === undefined || typeof body !== "object" || body === null) return "absent"
   const reply = body as Record<string, unknown>
-  if (status === 200 && typeof reply.version === "string" && typeof reply.instanceId === "string") return "found"
-  if (status === 403 && typeof reply.error === "string" && /Cross-origin browser requests/.test(reply.error)) return "found"
+  if ((status === 200 && typeof reply.version === "string" && typeof reply.instanceId === "string") ||
+      (status === 403 && typeof reply.error === "string" && /Cross-origin browser requests/.test(reply.error)))
+    return reply.installWaiting === true ? "install-waiting" : "found"
   return "absent"
 }

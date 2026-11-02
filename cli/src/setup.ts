@@ -504,11 +504,11 @@ async function install(args: string[]) {
   let code: string | undefined
   const pairingCode = () => code ??= mintPairingCode()
   const pairStore = (scanned: Detection[]) => pairStoreExtension({ detections: scanned, preferred: defaultBrowser(scanned.map(d => d.browser)), allowOpen: !args.includes("--no-open"), env, code: pairingCode })
-  let offered = !ssh && pairStore(detections) !== "none"
+  let offer = ssh ? "none" : pairStore(detections)
   const blocked = detections.filter(d => d.blocked).map(d => d.browser.name)
-  if (!offered && blocked.length) log(`Couldn't check ${blocked.join(", ")}. If Browse is already there: ${manualPair(pairingCode())}`)
+  if (offer === "none" && blocked.length) log(`Couldn't check ${blocked.join(", ")}. If Browse is already there: ${manualPair(pairingCode())}`)
   const next = `If Browse isn't connected after you add it, run \`${cliCommand("install")}\` again to pair it.`
-  if (!env.tty) log(`Agent: ${offered || blocked.length ? "ask the user to finish pairing in Browse's Options" : "ask the user to add Browse in their browser"}. When they say it's added, re-run \`${cliCommand("install")}\` or call the status tool to check the connection.`)
+  if (!env.tty) log(`Agent: ${offer !== "none" || blocked.length ? "ask the user to finish pairing in Browse's Options" : "ask the user to add Browse in their browser"}. When they say it's added, re-run \`${cliCommand("install")}\` or call the status tool to check the connection.`)
   if (args.includes("--no-wait") || ssh || !env.display) { if (env.tty) log(next); return }
   log(`Waiting for Browse to connect (up to ${timeoutMs / 1000}s; Ctrl+C to skip)…`)
   let stopped = false
@@ -517,13 +517,13 @@ async function install(args: string[]) {
   try {
     const deadline = Date.now() + timeoutMs
     do {
-      const status = await extensionStatus()
+      const status = await extensionStatus(!args.includes("--no-open") && (offer === "opened" || (offer === "none" && !blocked.length)))
       if (status?.protocolCompatible === false) return fail(extensionProtocolAdvice(status.protocolVersion, { install: installCommand() }))
       if (status?.connected) return log(connectedMessage)
-      if (!folder && !offered) {
+      if (!folder && offer === "none") {
         const scan = detectBrowsers()
         if (!checkStore(scan)) return
-        if (scan.some(d => d.enabled.length)) offered = pairStore(scan) !== "none"
+        if (scan.some(d => d.enabled.length)) offer = pairStore(scan)
       }
       await new Promise(resolve => setTimeout(resolve, Math.max(0, Math.min(1000, deadline - Date.now()))))
     } while (!stopped && Date.now() < deadline)
@@ -761,8 +761,8 @@ const relayHeaders = (): Record<string, string> => {
   }
 }
 
-const extensionStatus = () =>
-  fetch(`${relayBase()}/extension/status`, { headers: relayHeaders(), signal: AbortSignal.timeout(3_000) })
+const extensionStatus = (installWaiting = false) =>
+  fetch(`${relayBase()}/extension/status`, { headers: { ...relayHeaders(), ...(installWaiting ? { "x-browse-install": "waiting" } : {}) }, signal: AbortSignal.timeout(3_000) })
     .then((response) => (response.ok ? (response.json() as Promise<ExtensionStatus>) : undefined))
     .catch(() => undefined)
 

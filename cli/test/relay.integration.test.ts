@@ -262,6 +262,12 @@ describe("relay", () => {
     // A browser page on another site can't reach it even with a token it doesn't have.
     expect((await fetch(`${base}/extension/status`, { headers: { "sec-fetch-site": "cross-site", authorization: `Bearer ${token}` } })).status).toBe(403)
     expect((await fetch(`${base}/version`, { headers: { host: `evil.test:${port}` } })).status).toBe(403)
+    const waiting = { "x-browse-install": "waiting" }
+    const hint = async () => (await fetch(`${base}/version`, { headers: { "sec-fetch-site": "cross-site", "x-browse-install": "probe" } })).json()
+    await fetch(`${base}/extension/status`, { headers: waiting })
+    expect(await hint()).not.toHaveProperty("installWaiting")
+    await fetch(`${base}/extension/status`, { headers: { ...waiting, authorization: `Bearer ${token}` } })
+    expect(await hint()).toMatchObject({ installWaiting: true })
   })
 
   test("CDP WebSocket needs the token in a header or the URL", async () => {

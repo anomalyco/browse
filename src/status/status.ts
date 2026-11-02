@@ -29,6 +29,7 @@ import { firstRunStep, relayProbeResult, shouldProbe, type FirstRunStep, type Re
 // `npx @opencode/browse install` opens this page as welcome.html#code=<one-time code> for a store build
 // (cli/src/setup.ts pairStoreExtension). Take it, then drop it from the URL (address bar and history) before anything else.
 let fragmentCode = /^#code=([0-9A-Za-z-]{8,9})$/.exec(location.hash)?.[1]
+let installTab = !!fragmentCode
 if (/^#(code|ticket|pair)=/.test(location.hash)) history.replaceState(null, "", location.pathname + location.search)
 
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T
@@ -76,6 +77,10 @@ let connectFrom: "card" | "advanced" | undefined
 function render(state: AgentRelayState) {
   current = state
   renderStep()
+  if (installTab && state.status === "connected") {
+    installTab = false
+    void returnToWelcomeTab().catch(() => {})
+  }
   // The code from install's URL, used once, and only when this extension isn't paired with the relay (no token, or one
   // the relay refused). A working pairing is never replaced; the page says it ignored the link instead.
   // While it's still connecting (or the relay is starting), wait for a status that tells.
@@ -96,6 +101,16 @@ function render(state: AgentRelayState) {
   showOverrides(state.overrides)
   showAutoUpdate(state.autoUpdate)
   showBrowser(state.browser)
+}
+
+// Only remove this install-created code tab, after success, if the original first-run tab still exists in its window.
+async function returnToWelcomeTab() {
+  const self = await chrome.tabs.getCurrent()
+  if (self?.id === undefined) return
+  const welcome = (await chrome.tabs.query({ windowId: self.windowId })).find(tab => tab.url === chrome.runtime.getURL("welcome.html?first-run"))
+  if (welcome?.id === undefined || welcome.id === self.id) return
+  if (self.active) await chrome.tabs.update(welcome.id, { active: true })
+  await chrome.tabs.remove(self.id)
 }
 
 /** The relay's update setting: shown for an npm install (a checkout updates with `update`; the notice above says so). */
@@ -172,7 +187,7 @@ const resetButton = (button: HTMLButtonElement, label: string) => {
 
 /** The first-run card: a title, a line or two, and only the controls this step needs. */
 function renderStep() {
-  const step = firstRunStep(current, probe)
+  const step = firstRunStep(current, installTab ? "install-waiting" : probe)
   const view = stepView(step)
   const card = element("first-run")
   // A note belongs to the step it was shown in.
@@ -217,6 +232,8 @@ function stepView(step: FirstRunStep): StepView {
   switch (step.kind) {
     case "checking":
       return { title: "Checking…", text: "", tone: "neutral" }
+    case "finishing":
+      return { title: "Finishing setup from your terminal…", text: "Keep install running. This page will update when Browse connects.", tone: "neutral" }
     case "install": {
       const advanced = document.createElement("a")
       advanced.href = "#connection"
@@ -311,7 +328,7 @@ async function probeRelay() {
   let result: Exclude<RelayProbe, "unknown"> = "absent"
   if (port) {
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/version`, { cache: "no-store", signal: AbortSignal.timeout(2_000) })
+      const response = await fetch(`http://127.0.0.1:${port}/version`, { headers: { "x-browse-install": "probe" }, cache: "no-store", signal: AbortSignal.timeout(2_000) })
       result = relayProbeResult(response.status, await response.json().catch(() => undefined))
     } catch {
       result = "absent"

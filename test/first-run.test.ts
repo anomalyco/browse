@@ -23,6 +23,11 @@ describe("first-run step", () => {
     expect(firstRunStep(state({ relay: remote }), "unknown")).toEqual({ kind: "pair", reason: "unpaired", remote: "devbox:19988", unpacked: false })
   })
 
+  test("an active installer needs no second command", () => {
+    expect(firstRunStep(state(), "install-waiting")).toEqual({ kind: "finishing" })
+    expect(firstRunStep(state({ status: "connected" }), "install-waiting")).toMatchObject({ kind: "connected" })
+  })
+
   test("a refused pairing and a refused code say which", () => {
     expect(firstRunStep(state({ status: "untrusted", pairing: "token" }), "unknown")).toMatchObject({ kind: "pair", reason: "refused" })
     expect(firstRunStep(state({ status: "untrusted", pairing: "code", codeRejected: true }), "unknown")).toMatchObject({ kind: "pair", reason: "code-rejected" })
@@ -69,6 +74,7 @@ describe("relay probe", () => {
   test("recognizes browse's own answers and nothing else", () => {
     expect(relayProbeResult(200, { version: "0.0.2", buildId: "x", instanceId: "abc", pid: 1 })).toBe("found")
     expect(relayProbeResult(403, { error: "Cross-origin browser requests are not allowed" })).toBe("found")
+    expect(relayProbeResult(403, { error: "Cross-origin browser requests are not allowed", installWaiting: true })).toBe("install-waiting")
     expect(relayProbeResult(200, { version: "1.0" })).toBe("absent")
     expect(relayProbeResult(404, undefined)).toBe("absent")
     expect(relayProbeResult(undefined, undefined)).toBe("absent")

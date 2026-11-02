@@ -84,6 +84,8 @@ export function createHttpRequestHandler(options: {
       .filter((target) => target.owner === "user")
       .map((target) => target.targetInfo.url || "about:blank")
   )
+  // A short lease from install's authenticated status polls. Even a killed install stops advertising itself.
+  let installWaitingUntil = 0
   return (request, response) => {
     const hostError = validateHostHeader({ hostHeader: request.headers.host, host: options.host, port: options.port })
     if (hostError) {
@@ -91,11 +93,12 @@ export function createHttpRequestHandler(options: {
       return
     }
     const compatibility = { extensionProtocol: { min: minExtensionProtocolVersion, version: extensionProtocolVersion }, pairing: pairingScheme }
+    const installHint = request.headers["x-browse-install"] === "probe" && Date.now() < installWaitingUntil ? { installWaiting: true } : {}
     const fetchSiteError = validateBrowserFetchSite(request)
     if (fetchSiteError) {
       // Chrome may mark the Options page's probe cross-site. Keep the refusal and disclose only static
-      // compatibility information on that route; never return instance metadata or enable CORS for web pages.
-      sendJson(response, { error: fetchSiteError, ...(request.method === "GET" && request.url === "/version" ? compatibility : {}) }, 403)
+      // compatibility and the Options page's optional waiting hint; never return instance metadata or enable CORS.
+      sendJson(response, { error: fetchSiteError, ...(request.method === "GET" && request.url === "/version" ? { ...compatibility, ...installHint } : {}) }, 403)
       return
     }
     const requestUrl = new URL(request.url ?? "/", `http://${formatHostForUrl(options.host)}:${options.port}`)
@@ -120,6 +123,7 @@ export function createHttpRequestHandler(options: {
         managed: options.relayInstance.managed,
         shutdownProtocol: 2,
         ...compatibility,
+        ...installHint,
       })
       return
     }
@@ -189,6 +193,7 @@ export function createHttpRequestHandler(options: {
       return
     }
     if (pathname === "/extension/status") {
+      if (request.headers["x-browse-install"] === "waiting") installWaitingUntil = Date.now() + 5_000
       const extensionStatus = options.extensionStatus()
       sendJson(response, {
         connected: extensionStatus.connected,

@@ -58,7 +58,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 })
 
 chrome.runtime.onInstalled.addListener((details) => {
-  if (details.reason === "install") void chrome.tabs.create({ url: chrome.runtime.getURL("welcome.html") })
+  if (details.reason === "install") void chrome.tabs.create({ url: chrome.runtime.getURL("welcome.html?first-run") })
 })
 
 // Tab-specific badges reset when a tab navigates; the relay's state for it doesn't.
