@@ -275,6 +275,15 @@ describe("relay", () => {
     for (const socket of [byHeader, byQuery]) if (socket instanceof WebSocket) socket.close()
   })
 
+  test("anonymous unpaired presence changes the next step but grants no browser access", async () => {
+    const status = async () => (await fetch(`${base}/extension/status`, { headers: { authorization: `Bearer ${token}` } })).json()
+    expect(await status()).toMatchObject({ connected: false, pairingState: "not-seen" })
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/extension`, { origin: stableUnpackedExtensionOrigin })
+    socket.on("open", () => socket.send(JSON.stringify({ method: "protocol", params: { unpaired: true, protocolVersion: extensionProtocolVersion } })))
+    await new Promise<void>(resolve => socket.on("close", () => resolve()))
+    expect(await status()).toMatchObject({ connected: false, pairingState: "unpaired", nextStep: expect.stringContaining("installed but not paired"), browsers: [] })
+  })
+
   test("a code is exchanged once for a token of the browser's own, which never crosses the wire", async () => {
     const code = mintPairingCode(home)
     const first = await pairWithCode(port, code, "exchange-1")

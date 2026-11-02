@@ -351,12 +351,12 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     port = address.port ?? (Number(stored[PORT_KEY]) || defaultRelayPort)
     if (`${host}:${port}` !== previous) notify()
     if (socket && socket.readyState <= WebSocket.OPEN) return
-    // Without a token or a code there is no relay to trust; wait for one (install, or the status page).
-    if ((await credential()) === undefined) {
+    // Without a credential announce only the protocol and that pairing is needed. No identity, tabs or
+    // commands on this socket. A sleeping worker repeats this presence on the regular reconnect alarm.
+    const presenceOnly = (await credential()) === undefined
+    if (presenceOnly) {
       if (status !== "unpaired") log.add("pairing.missing")
       setStatus("unpaired")
-      settle(Infinity)
-      return
     }
     if (socket && socket.readyState <= WebSocket.OPEN) return
     const url = `ws://${host}:${port}/extension`
@@ -378,14 +378,18 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       openedAt = Date.now()
       log.add("open", { port, generation: mine })
       // Older relays require hello first. Detect them before either side tries an incompatible code exchange.
-      current.send(JSON.stringify({ method: "protocol", params: { protocolVersion: extensionProtocolVersion } }))
+      current.send(JSON.stringify({ method: "protocol", params: { protocolVersion: extensionProtocolVersion, ...(presenceOnly ? { unpaired: true } : {}) } }))
+      if (presenceOnly) {
+        setTimeout(() => { if (current.readyState === WebSocket.OPEN) current.close(1000, "Presence sent") }, CONNECT_TIMEOUT)
+        return
+      }
       void hello(current).catch((error: unknown) => {
         log.add("hello.error", { error: text(error) })
         current.close(1011, "Handshake failed")
       })
     }
     current.onmessage = (event) => {
-      if (typeof event.data !== "string") return
+      if (presenceOnly || typeof event.data !== "string") return
       if (trusted.has(current)) void handle(current, event.data)
       else void verify(current, event.data).catch((error: unknown) => {
         log.add("pairing.error", { error: text(error) })
@@ -410,7 +414,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         opened: openedAt !== undefined,
         ms: lasted,
       })
-      void chrome.runtime.sendMessage({ action: "recording.cancelAll" }).catch(() => undefined)
+      if (!presenceOnly) void chrome.runtime.sendMessage({ action: "recording.cancelAll" }).catch(() => undefined)
       overrides = undefined
       autoUpdate = undefined
       browser = undefined
@@ -431,12 +435,13 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         skew = /extension-newer/.test(event.reason) ? "update-cli" : /extension-older/.test(event.reason) ? "update-extension" : undefined
         setStatus("incompatible")
       }
+      else if (presenceOnly) setStatus("unpaired")
       else if (event.code === 4004) setStatus("conflict")
       else if (event.code === 4006) setStatus("untrusted")
       // A missing relay is normal until an agent's browse tools (or the opencode-browser CLI) start one.
       else setStatus(openedAt === undefined ? "offline" : "connecting")
       settle(mine)
-      schedule(quiet && openedAt === undefined)
+      if (!presenceOnly) schedule(quiet && openedAt === undefined)
     }
   }
 

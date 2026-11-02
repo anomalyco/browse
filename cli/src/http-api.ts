@@ -61,7 +61,7 @@ export function createHttpRequestHandler(options: {
   readonly relayInstance: { readonly id: string; readonly startedAt: string; readonly pid: number; readonly managed: boolean }
   readonly shutdown: RelayShutdown
   readonly extensionStatus: () => Pick<ExtensionStatus,
-    "connected" | "version" | "build" | "origin" | "protocolVersion" | "protocolCompatible" | "protocolLegacy" | "browsers" | "rejectedConnections" | "pairingFailures" | "cdpClients" | "processFaults"
+    "connected" | "pairingState" | "nextStep" | "version" | "build" | "origin" | "protocolVersion" | "protocolCompatible" | "protocolLegacy" | "browsers" | "rejectedConnections" | "pairingFailures" | "cdpClients" | "processFaults"
   >
   readonly recordingRelay: RecordingRelay
   readonly flightRecorder: FlightRecorderRelay
@@ -192,6 +192,8 @@ export function createHttpRequestHandler(options: {
       const extensionStatus = options.extensionStatus()
       sendJson(response, {
         connected: extensionStatus.connected,
+        pairingState: extensionStatus.pairingState,
+        nextStep: extensionStatus.nextStep,
         version: extensionStatus.version,
         ...(extensionStatus.build === undefined ? {} : { build: extensionStatus.build }),
         ...(extensionStatus.origin === undefined ? {} : { origin: extensionStatus.origin }),

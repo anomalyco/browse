@@ -358,7 +358,10 @@ function buildDoctorChecks(options: {
         ? `${options.extensionResult.value.rejectedConnections} connection attempt(s) rejected; the active browser connection was preserved`
         : "none observed on this connection",
     }] : []),
-    ...(options.extensionResult.ok && options.extensionResult.value.pairingFailures !== undefined ? [{
+    ...(options.extensionResult.ok && options.extensionResult.value.pairingState ? [{
+      id: "extension-pairing", label: "extension pairing", status: options.extensionResult.value.connected ? "ok" as const : "warn" as const,
+      message: options.extensionResult.value.pairingState,
+    }] : options.extensionResult.ok && options.extensionResult.value.pairingFailures !== undefined ? [{
       id: "extension-pairing",
       label: "extension pairing",
       status: options.extensionResult.value.pairingFailures > 0 && !options.extensionResult.value.connected ? "warn" as const : "ok" as const,
@@ -527,7 +530,7 @@ function buildDoctorRecommendations(options: {
     ? [relayBuildProblem(options.relayResult.value)].filter((message) => message !== undefined)
     : []
   const extensionRecommendations = options.relayResult.ok && options.extensionResult.ok && !options.extensionResult.value.connected
-    ? options.extensionResult.value.protocolCompatible === false
+    ? options.extensionResult.value.nextStep ? [options.extensionResult.value.nextStep] : options.extensionResult.value.protocolCompatible === false
       ? [extensionProtocolAdvice(options.extensionResult.value.protocolVersion, { install: installCommand() })]
       : [fromCheckout() || devExtension()
         ? `Run \`${installCommand()}\` and load the extension it points to (Load unpacked on your browser's extensions page).`

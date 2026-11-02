@@ -47,7 +47,7 @@ class RelayStartFailed extends Schema.TaggedError<RelayStartFailed>()(
 
 export class ExtensionDisconnected extends Schema.TaggedError<ExtensionDisconnected>()(
   "RelayLifecycle.ExtensionDisconnected",
-  { message: Schema.String },
+  { message: Schema.String, needsPairing: Schema.optionalKey(Schema.Boolean) },
 ) {}
 
 export class ExtensionProtocolIncompatible extends Schema.TaggedError<ExtensionProtocolIncompatible>()(
@@ -271,7 +271,8 @@ export const ensureExtensionConnected = Effect.fn("RelayLifecycle.ensureExtensio
     return status.connected
       ? Effect.succeed(status)
       : Effect.fail(new ExtensionDisconnected({
-        message: `Browse extension is not connected. Open the browser with Browse installed (\`${installCommand()}\`); it reconnects automatically after relay or browser startup.`,
+        message: status.nextStep ?? `Browse extension is not connected. Open the browser with Browse installed (\`${installCommand()}\`); it reconnects automatically after relay or browser startup.`,
+        needsPairing: status.pairingState === "refused" || status.pairingState === "unpaired",
       }))
   }))
   if (!options.waitForReconnect) {
@@ -287,7 +288,7 @@ export const ensureExtensionConnected = Effect.fn("RelayLifecycle.ensureExtensio
     Effect.retry({
       times: options.retryTimes ?? Math.ceil(extensionReconnectWaitMs / extensionReconnectProbeMs),
       schedule: Schedule.spaced(options.retryDelayMs ?? extensionReconnectProbeMs),
-      while: (error) => error instanceof ExtensionDisconnected || isRelayStartingOrUnreachable(error),
+      while: (error) => (error instanceof ExtensionDisconnected && !error.needsPairing) || isRelayStartingOrUnreachable(error),
     }),
   )
 })

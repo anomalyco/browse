@@ -125,7 +125,9 @@ async function until(check: () => boolean | Promise<boolean>) {
 
 test("without a token or a code, it waits unpaired", async () => {
   await until(() => relay.state().status === "unpaired")
-  expect(ScriptedRelay.made).toHaveLength(0)
+  await until(() => last()?.received.length === 1)
+  expect(last().received[0]).toMatchObject({ method: "protocol", params: { unpaired: true } })
+  expect(last().paired).toBe(false)
 })
 
 test("an entered code is exchanged for a token, which never crosses the connection in clear", async () => {

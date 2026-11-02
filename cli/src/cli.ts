@@ -671,7 +671,8 @@ const status = Command.make(
     if ((extensionStatus.rejectedConnections ?? 0) > 0) {
       yield* Console.log(`Warning: ${extensionStatus.rejectedConnections} competing browser/profile connection attempt(s) rejected; the active connection was preserved. Use Browse in one browser/profile at a time.`)
     }
-    if ((extensionStatus.pairingFailures ?? 0) > 0 && !extensionStatus.connected) {
+    if (extensionStatus.nextStep) yield* Console.log(extensionStatus.nextStep)
+    else if ((extensionStatus.pairingFailures ?? 0) > 0 && !extensionStatus.connected) {
       yield* Console.log(`Warning: ${extensionStatus.pairingFailures} extension connection(s) failed pairing. Update the extension, or run \`${cliCommand("pair")}\` and enter the code on its status page.`)
     }
     if ((extensionStatus.processFaults?.suppressed ?? 0) > 0) {
@@ -682,7 +683,7 @@ const status = Command.make(
       const compatibility = extensionStatus.protocolCompatible === false ? "incompatible" : "compatible"
       const legacy = extensionStatus.protocolLegacy === true ? ", inferred from legacy hello" : ""
       yield* Console.log(`Extension protocol: ${extensionStatus.protocolVersion} (${compatibility}${legacy})`)
-      if (extensionStatus.protocolCompatible === false) yield* Console.log(extensionProtocolAdvice(extensionStatus.protocolVersion, { install: installCommand() }))
+      if (extensionStatus.protocolCompatible === false && !extensionStatus.nextStep) yield* Console.log(extensionProtocolAdvice(extensionStatus.protocolVersion, { install: installCommand() }))
     }
     yield* Console.log(`Active targets: ${extensionStatus.activeTargets}`)
     if (extensionStatus.childTargets !== undefined) {

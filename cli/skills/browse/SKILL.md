@@ -916,10 +916,11 @@ Common diagnoses:
   not cancel the underlying read or trigger page replacement. A cached
   `page.url()` read can still work; retry the page read after the page settles.
   Ordinary missing-locator timeouts do not receive this diagnostic.
-- `connected:false`: run a relay-backed command and allow the extension startup
-  or alarm wake-up to reconnect. A sleeping extension wakes on a 30-second
-  alarm, so the command waits up to 35 seconds. Reload the unpacked extension
-  only if that loop does not recover.
+- `connected:false`: check `extension.pairingState` and follow `extension.nextStep`.
+  `unpaired` or `refused` means Browse is installed: re-run install to pair it, **not** the store.
+  `paired-offline`: reopen the paired browser profile and enable Browse; its worker wakes every 30 seconds.
+  `not-seen`: the relay hasn't heard from a browser. If Browse is already added, open that browser and
+  rerun install. Otherwise follow install's store or Load unpacked steps.
 - Incompatible extension protocol: update either the extension or npm package;
   exact extension and relay release versions do not need to match.
 - Competing browser/profile connections: the active browser is preserved and

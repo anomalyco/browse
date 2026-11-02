@@ -23,7 +23,8 @@ class FakeWebSocket {
   constructor(readonly url: string) {
     FakeWebSocket.made.push(this)
   }
-  send() {}
+  sent: string[] = []
+  send(message: string) { this.sent.push(message) }
   close(code = 1006, reason = "") {
     if (this.readyState === FakeWebSocket.CLOSED) return
     this.readyState = FakeWebSocket.CLOSED
@@ -54,10 +55,15 @@ const until = async (check: () => boolean) => {
 }
 const alarm = () => (chrome.alarms.onAlarm as unknown as StubEvent).emit({ name: "opencode-browser-relay" })
 
-test("without a pairing file, the extension waits unpaired and doesn't connect", async () => {
+test("without a pairing file, the extension sends only anonymous protocol presence", async () => {
   await until(() => relay.state().status === "unpaired")
   expect(relay.state().pairing).toBe("none")
-  expect(FakeWebSocket.made).toHaveLength(0)
+  const socket = FakeWebSocket.made[0]!
+  socket.readyState = FakeWebSocket.OPEN
+  socket.onopen?.({})
+  expect(socket.sent.map(s => JSON.parse(s))).toEqual([{ method: "protocol", params: { protocolVersion: 3, unpaired: true } }])
+  socket.close(1000, "Waiting for pairing")
+  await settle()
   expect(reads.length).toBeGreaterThan(0)
 })
 
@@ -65,16 +71,16 @@ test("a pairing file written later (bun run setup) is found on the next attempt,
   const before = reads.length
   bundled = CODE
   alarm()
-  await until(() => FakeWebSocket.made.length === 1)
+  await until(() => FakeWebSocket.made.length === 2)
   expect(reads.length).toBe(before + 1)
   expect(relay.state().pairing).toBe("code")
   expect(relay.state().unpacked).toBe(true)
-  expect(FakeWebSocket.made[0]!.url).toBe("ws://127.0.0.1:19925/extension")
+  expect(FakeWebSocket.made.at(-1)!.url).toBe("ws://127.0.0.1:19925/extension")
 })
 
 test("a found file is cached between attempts, and read again on Reconnect", async () => {
   // The relay isn't there: the attempt closes and backs off.
-  FakeWebSocket.made[0]!.close()
+  FakeWebSocket.made.at(-1)!.close()
   await settle()
   const before = reads.length
   alarm()
@@ -83,7 +89,7 @@ test("a found file is cached between attempts, and read again on Reconnect", asy
   expect(reads.length).toBe(before)
   bundled = OTHER
   relay.reconnect()
-  await until(() => FakeWebSocket.made.length === 2)
+  await until(() => FakeWebSocket.made.length === 3)
   expect(reads.length).toBe(before + 1)
 })
 
