@@ -21,12 +21,12 @@ npx @opencode/browse install
 ```
 
 `install` puts the relay in your data folder (`~/.local/share/opencode-browser`), adds the `browse` MCP server to
-opencode, and connects the extension:
+the agent that ran it (or opencode when installed from a regular terminal), and connects the extension:
 
 1. **Add the extension.** `install` opens Browse in the Chrome Web Store; add it to your browser, and `install` pairs
    it once it's there. If it's already there, `install` opens its status page with a one-time pairing code, so it
    pairs without copying anything.
-2. **Restart opencode.**
+2. **Restart your agent.**
 
 That's it. Ask an agent to *"open news.ycombinator.com and tell me the top story"*. Or paste this into opencode:
 *"Install browse with `npx @opencode/browse install`."*

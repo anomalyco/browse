@@ -3,7 +3,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { parse } from "jsonc-parser"
-import { agentNames, editAgentConfig } from "../src/agent-config.ts"
+import { agentNames, callingAgent, editAgentConfig } from "../src/agent-config.ts"
 import { installedRuntime, installWaitTimeout, locateExtension, pairStoreExtension, relayNotRestarted, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
 
 const browser = (name: string): Browser => ({ name, userData: `/data/${name}`, manifests: [], defaultIDs: [], executables: [] })
@@ -11,6 +11,16 @@ const chrome = browser("Google Chrome")
 const edge = browser("Microsoft Edge")
 const none = (target: Browser): Detection => ({ browser: target, blocked: false, enabled: [], disabled: [] })
 const folder = "/src/browse/dist"
+
+test("identifies the calling agent, not the editor hosting a regular terminal", () => {
+  expect(callingAgent({ CLAUDECODE: "1", TERM_PROGRAM: "vscode" })).toBe("claude")
+  expect(callingAgent({ CLAUDE_CODE_ENTRYPOINT: "sdk-py" })).toBe("claude")
+  expect(callingAgent({ CODEX_THREAD_ID: "thread" })).toBe("codex")
+  expect(callingAgent({ CURSOR_AGENT: "1", TERM_PROGRAM: "vscode" })).toBe("cursor")
+  expect(callingAgent({ COPILOT_AGENT: "1", TERM_PROGRAM: "vscode" })).toBe("vscode")
+  expect(callingAgent({ AI_AGENT: "github_copilot_vscode_agent" })).toBe("vscode")
+  expect(callingAgent({ TERM_PROGRAM: "vscode", CODEX_HOME: "/home/me/.codex" })).toBeUndefined()
+})
 
 test.each([...agentNames])("%s user config: preserve unrelated settings, install twice, uninstall, refuse collisions", name => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-config-"))

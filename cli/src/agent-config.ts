@@ -9,6 +9,15 @@ export type AgentName = typeof agentNames[number]
 export type AgentReceipt = { name: AgentName; file: string; node: string; entry: string }
 export type AgentLocation = { name: AgentName; file: string; installed: boolean }
 
+/** Shell markers, not installed binaries or config directories. A plain VS Code terminal isn't its agent. */
+export function callingAgent(env: NodeJS.ProcessEnv): AgentName | undefined {
+  if (env.CLAUDECODE === "1" || env.CLAUDE_CODE_ENTRYPOINT) return "claude"
+  if (env.CODEX_THREAD_ID) return "codex"
+  if (env.CURSOR_AGENT) return "cursor"
+  if (env.AI_AGENT === "github_copilot_vscode_agent" || (env.COPILOT_AGENT === "1" && env.TERM_PROGRAM === "vscode")) return "vscode"
+  return undefined
+}
+
 /** User scope only; never write a project, workspace or managed config. */
 export function agentLocations(home: string, config: string, onPath: (name: string) => unknown): AgentLocation[] {
   const at = (...parts: string[]) => path.join(home, ...parts)

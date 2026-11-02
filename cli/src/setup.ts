@@ -20,7 +20,7 @@ import path from "node:path"
 import { createInterface } from "node:readline/promises"
 import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
-import { agentLocations, agentNames, editAgentConfig, type AgentReceipt } from "./agent-config.ts"
+import { agentLocations, agentNames, callingAgent, editAgentConfig, type AgentReceipt } from "./agent-config.ts"
 import { describeAutoUpdate, autoUpdateStatus, installVersion, pruneVersions, readCurrent, runtimeLayout, switchVersion, updateState, compareVersions, versionEntry } from "./auto-update.ts"
 import {
   bundledPairingCodeTtlMs,
@@ -413,6 +413,8 @@ async function install(args: string[]) {
   const requested = args.flatMap((arg, i) => arg === "--agent" ? [args[i + 1] ?? ""] : [])
   for (const name of requested) if (!["opencode", ...agentNames].includes(name)) fail(`Unknown agent ${JSON.stringify(name)}. Choose opencode, ${agentNames.join(", ")}.`)
   const opencode = findOpencode(args)
+  const caller = !requested.length ? callingAgent(process.env) : undefined
+  const allAgents = args.includes("--all-agents") || args.includes("--yes")
 
   mkdirSync(files.dir, { recursive: true })
   const { entry, version } = await installRuntime()
@@ -424,15 +426,16 @@ async function install(args: string[]) {
   if (removeLegacyHost()) log("✓ Removed the native messaging host of an earlier version")
 
   const node = process.execPath
-  if ((opencode && (!requested.length || args.includes("--all-agents"))) || requested.includes("opencode")) {
+  const addOpencode = (opencode && ((!requested.length && !caller) || allAgents || args.includes("--opencode"))) || requested.includes("opencode")
+  if (addOpencode) {
     const mcp = configureMcp(entry, previous?.entry)
     log(mcp ? `✓ MCP server ${mcp} (opencode)` : `! opencode already has a different server named browse in ${configFile()}; left unchanged.`)
-  }
+  } else if (opencode && caller) log(`To add opencode: ${cliCommand("install --agent opencode")}`)
   for (const agent of agentLocations(home, configRoot, findOnPath)) {
-    const explicit = requested.includes(agent.name)
+    const explicit = requested.includes(agent.name) || agent.name === caller
     if (!explicit && (!agent.installed || (requested.length && !args.includes("--all-agents")))) continue
-    let consent = explicit || args.includes("--all-agents") || args.includes("--yes")
-    if (!consent && process.stdin.isTTY && process.stdout.isTTY) {
+    let consent = explicit || allAgents
+    if (!consent && !caller && tty) {
       const prompt = createInterface({ input: process.stdin, output: process.stdout })
       consent = /^y(es)?$/i.test((await prompt.question(`Add Browse to ${agent.name} (${agent.file})? [y/N] `).finally(() => prompt.close())).trim())
     }
@@ -454,7 +457,7 @@ async function install(args: string[]) {
     }
   }
   for (const line of restartOutdatedRelay(entry, node) ?? []) log(line)
-  const legacy = opencode ? legacyBrowserControl() : []
+  const legacy = addOpencode ? legacyBrowserControl() : []
   if (legacy.length)
     log(`! Browser Control MCP server${legacy.length === 1 ? "" : "s"} ${legacy.map((name) => `"${name}"`).join(", ")} also configured. Browse replaces it; remove ${legacy.length === 1 ? "it" : "them"} from ${configFile()} to avoid two sets of browser tools.`)
 
