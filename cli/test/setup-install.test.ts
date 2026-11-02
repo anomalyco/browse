@@ -4,7 +4,7 @@ import os from "node:os"
 import path from "node:path"
 import { parse } from "jsonc-parser"
 import { agentNames, callingAgent, editAgentConfig } from "../src/agent-config.ts"
-import { installedRuntime, installWaitTimeout, locateExtension, pairStoreExtension, relayNotRestarted, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
+import { installedExtensionVersion, installedRuntime, installWaitTimeout, locateExtension, pairStoreExtension, relayNotRestarted, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
 
 const browser = (name: string): Browser => ({ name, userData: `/data/${name}`, manifests: [], defaultIDs: [], executables: [] })
 const chrome = browser("Google Chrome")
@@ -201,6 +201,12 @@ describe("an npm install without the extension", () => {
 describe("pairing the store build", () => {
   const storeId = "abcdefghijklmnopabcdefghijklmnop"
   const profile = { dir: "Profile 2", name: "Work" }
+  test("reads the packed version even when the cached store manifest is absent", () => {
+    expect(installedExtensionVersion(storeId, { path: `${storeId}/0.0.2_0` })).toBe("0.0.2")
+    expect(installedExtensionVersion(storeId, { path: `${storeId}\\0.0.3_1` })).toBe("0.0.3")
+    expect(installedExtensionVersion(storeId, { path: `${storeId}/0.0.2_0`, manifest: { version: "0.0.3" } })).toBe("0.0.3")
+    expect(installedExtensionVersion(storeId, { path: "other/0.0.2_0" })).toBeUndefined()
+  })
   const pair = (detections: Detection[], overrides: { allowOpen?: boolean; ssh?: boolean } = {}) => {
     const opened: [string, string, string | undefined][] = []
     const lines: string[] = []

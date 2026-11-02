@@ -1008,8 +1008,7 @@ function detectBrowsers() {
       const id = [...STORE_IDS, UNPACKED_ID].find((candidate) => settings.some((entries) => entries[candidate]))
       if (!id) return []
       const setting = settings.find((entries) => entries[id])![id]!
-      // Unpacked profiles omit the manifest from Secure Preferences and store its absolute folder instead.
-      const version = setting.manifest?.version ?? (setting.path && path.isAbsolute(setting.path) ? readJson<{ version?: string }>(path.join(setting.path, "manifest.json"))?.version : undefined)
+      const version = installedExtensionVersion(id, setting)
       return [{ browser, profile, id, ...(version ? { version } : {}), enabled: !disabled(setting) }]
     })
     return [
@@ -1024,6 +1023,15 @@ function detectBrowsers() {
 }
 
 type ExtensionSetting = { disable_reasons?: unknown; manifest?: { version?: string }; path?: string }
+
+export function installedExtensionVersion(id: string, setting: ExtensionSetting) {
+  if (setting.manifest?.version) return setting.manifest.version
+  if (!setting.path) return undefined
+  // Chromium omits the cached manifest for unpacked installs. Packed ones also record <id>/<version>_<index>.
+  if (path.isAbsolute(setting.path)) return readJson<{ version?: string }>(path.join(setting.path, "manifest.json"))?.version
+  const packed = /^([a-p]{32})[/\\](\d+(?:\.\d+){0,3})_\d+$/.exec(setting.path)
+  return packed?.[1] === id ? packed[2] : undefined
+}
 
 function disabled(setting: ExtensionSetting) {
   const reasons = setting.disable_reasons
