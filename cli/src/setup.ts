@@ -33,7 +33,8 @@ import {
   writeExtensionPairing,
 } from "./browser-pairing.ts"
 import { syncDevExtension } from "./dev-extension.ts"
-import { cliCommand, dataRoot, devExtension, devExtensionFolder, installCommand, storeConfig, storeUrl } from "./paths.ts"
+import { cliCommand, dataRoot, devExtension, devExtensionFolder, installCommand, oldStoreMarker, storeConfig, storeUrl } from "./paths.ts"
+import { extensionProtocolAdvice } from "./protocol.ts"
 import { parseHostname, readRelayConfig, writeRelayConfig } from "./relay-config.ts"
 import { relayAuthorization } from "./relay-secrets.ts"
 import { opencodeBrowserVersion } from "./version.ts"
@@ -430,6 +431,17 @@ async function install(args: string[]) {
   // Over SSH the browsers here aren't the ones the user looks at, so they aren't scanned.
   const ssh = !!(process.env.SSH_CONNECTION || process.env.SSH_TTY)
   const detections = ssh ? [] : detectBrowsers()
+  rmSync(oldStoreMarker(), { force: true })
+  const checkStore = (scanned: Detection[]) => {
+    const matches = scanned.flatMap(d => d.enabled).filter(m => STORE_IDS.includes(m.id))
+    if (!matches.length || !matches.every(oldStoreBuild)) return true
+    writeFileSync(oldStoreMarker(), "2\n")
+    spawnSync(node, [entry, "session", "list", "--json"], { stdio: "ignore", timeout: 30_000 })
+    log(`! Found Browse ${matches[0]!.version} in ${matches[0]!.browser.name}. ${extensionProtocolAdvice(2, { install: cliCommand("install") })}`)
+    process.exitCode = 1
+    return false
+  }
+  if (!connected && !checkStore(detections)) return
   const env = {
     ssh,
     display: process.platform !== "linux" || !!(process.env.DISPLAY || process.env.WAYLAND_DISPLAY),
@@ -453,7 +465,7 @@ async function install(args: string[]) {
   // A store install still has to pair: wait for the browser to add it, then open its status page with a code.
   if (wait && STORE_URL) {
     const added = await awaitStoreExtension()
-    if (added && pairStore(added) === "opened") return awaitConnection(entry)
+    if (added && checkStore(added) && pairStore(added) === "opened") return awaitConnection(entry)
   }
   // The MCP server entry changed: a running opencode picks it up on restart.
   if (found === "ready" && !mcp.endsWith("up to date")) log("Restart opencode (if it's running) to load the browse tools.")
@@ -757,7 +769,8 @@ function findOnPath(name: string) {
 // ---- which browsers have the extension -------------------------------------------------------------
 
 export type Profile = { dir: string; name: string }
-export type Match = { browser: Browser; profile: Profile; id: string }
+export type Match = { browser: Browser; profile: Profile; id: string; version?: string }
+const oldStoreBuild = (match: Match) => /^0\.0\.[012]$/.test(match.version ?? "")
 /** blocked: the OS refused to read the browser's data (macOS privacy protection), so it may have the extension. */
 export type Detection = { browser: Browser; blocked: boolean; enabled: Match[]; disabled: Match[] }
 
@@ -857,7 +870,7 @@ export function pairStoreExtension(
   effects: Effects = systemEffects,
 ): "opened" | "manual" | "none" {
   const ids = options.storeIds ?? STORE_IDS
-  const matches = options.detections.flatMap((detection) => detection.enabled).filter((match) => ids.includes(match.id))
+  const matches = options.detections.flatMap((detection) => detection.enabled).filter((match) => ids.includes(match.id) && !oldStoreBuild(match))
   const match = matches.find((candidate) => candidate.browser.name === options.preferred?.name) ?? matches[0]
   if (!match) return "none"
   const interactive = options.allowOpen && options.env.display && !options.env.ssh
@@ -932,7 +945,9 @@ function detectBrowsers() {
       const id = [...STORE_IDS, UNPACKED_ID].find((candidate) => settings.some((entries) => entries[candidate]))
       if (!id) return []
       const setting = settings.find((entries) => entries[id])![id]!
-      return [{ browser, profile, id, enabled: !disabled(setting) }]
+      // Unpacked profiles omit the manifest from Secure Preferences and store its absolute folder instead.
+      const version = setting.manifest?.version ?? (setting.path && path.isAbsolute(setting.path) ? readJson<{ version?: string }>(path.join(setting.path, "manifest.json"))?.version : undefined)
+      return [{ browser, profile, id, ...(version ? { version } : {}), enabled: !disabled(setting) }]
     })
     return [
       {
@@ -945,7 +960,7 @@ function detectBrowsers() {
   })
 }
 
-type ExtensionSetting = { disable_reasons?: unknown }
+type ExtensionSetting = { disable_reasons?: unknown; manifest?: { version?: string }; path?: string }
 
 function disabled(setting: ExtensionSetting) {
   const reasons = setting.disable_reasons

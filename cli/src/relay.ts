@@ -94,7 +94,7 @@ import { autoUpdateModes, autoUpdateOverride, autoUpdateStatus, createAutoUpdate
 import { createUpdateWatcher } from "./update.ts"
 import { describeChanges, describeSettings, parseSettingChanges, settingsFromExtension, SettingsInputError, settingsToExtension, type SettingOverrides, type Settings } from "./user-settings.ts"
 import { installedDevExtension, syncDevExtension } from "./dev-extension.ts"
-import { devExtension, installCommand, storeConfig } from "./paths.ts"
+import { devExtension, installCommand, oldStoreMarker, storeConfig } from "./paths.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "./version.ts"
 import { handleExecuteRealmException, handleExecuteRealmRejection, pruneStaleExecuteFilesDirectories } from "./execute-realm.ts"
 import { PasskeyBridge } from "./passkey-bridge.ts"
@@ -251,6 +251,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   let rejectedExtensionConnections = 0
   /** Extension connections that failed the pairing handshake (wrong code, or an extension without one). */
   let pairingFailures = 0
+  let mismatch: ReturnType<typeof extensionProtocolCompatibility> | undefined
   /** An extension too old to pair is reloaded once, so an unpacked install picks up the new files on disk. */
   let legacyExtensionReloaded = false
   // Every connected browser (browser-links.ts). Tab ids here are the relay's own; a command for a tab goes to that
@@ -866,13 +867,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     extensionStatus: () => {
       // The top-level fields describe the default browser, as they did when only one could connect.
       const link = browsers.defaultLink()
+      const rejected = link ? undefined : mismatch ?? (fs.existsSync(oldStoreMarker()) ? extensionProtocolCompatibility(2) : undefined)
       return {
         connected: browsers.connected,
         version: link?.rpc.version ?? null,
         build: link?.build ?? null,
         origin: link?.origin ?? null,
-        protocolVersion: link?.rpc.protocolVersion ?? null,
-        protocolCompatible: link?.rpc.protocolCompatible ?? null,
+        protocolVersion: link?.rpc.protocolVersion ?? rejected?.version ?? null,
+        protocolCompatible: link?.rpc.protocolCompatible ?? rejected?.compatible ?? null,
         protocolLegacy: link?.rpc.protocolLegacy ?? null,
         browsers: browsers.list().map((browser) => ({
           id: browser.id,
@@ -1246,6 +1248,17 @@ const makeRelay = Effect.fnUntraced(function* (options: {
               return
             }
             if (!challenge) {
+              if (message.method === "protocol" || message.method === "hello") {
+                const protocol = extensionProtocolCompatibility(message.params?.protocolVersion)
+                if (!protocol.compatible) {
+                  mismatch = protocol
+                  socket.close(4003, `Extension protocol incompatible: ${(protocol.version ?? 0) > extensionProtocolVersion ? "extension-newer" : "extension-older"}`)
+                  return
+                }
+                mismatch = undefined
+                if (fs.existsSync(oldStoreMarker())) fs.rmSync(oldStoreMarker(), { force: true })
+                if (message.method === "protocol") return
+              }
               challenge = challengeExtension(socket, message, headerValue(request.headers.origin))
               return
             }

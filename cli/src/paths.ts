@@ -20,6 +20,10 @@ export function dataRoot(home = os.homedir()): string {
 /** This package's root: cli/ in a checkout (src/paths.ts, or the dist/cli.mjs bundle), else the installed package. */
 const packageRoot = () => path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 
+// The store's v0.0.2 never dials a relay without a long code. Install records that it saw this build;
+// the relay can then explain the mismatch even though it received no hello. A new install/hello clears it.
+export const oldStoreMarker = () => path.join(dataRoot(), "old-store-extension")
+
 /** Running from a source checkout (the sources are next to the bundle), not the published npm package. */
 export function fromCheckout(): boolean {
   return fs.existsSync(path.join(packageRoot(), "src", "main.ts"))

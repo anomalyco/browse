@@ -30,6 +30,7 @@ import { ensurePrivateDirectory } from "./relay-secrets.ts"
 
 const legacyContext = "opencode-browser-pairing-v2"
 const context = "opencode-browser-pairing-v3"
+export { context as pairingScheme }
 const crockford = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 export const pairingCodeLength = 8
 /** PBKDF2 over the code: one key costs both sides a few milliseconds, every possible code a search that can't finish. */

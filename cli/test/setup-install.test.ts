@@ -173,6 +173,14 @@ describe("pairing the store build", () => {
     expect(opened).toEqual([])
   })
 
+  test("an older store copy in the default browser doesn't hide a compatible second browser", () => {
+    const { opened } = pair([
+      { ...none(chrome), enabled: [{ browser: chrome, profile, id: storeId, version: "0.0.2" }] },
+      { ...none(edge), enabled: [{ browser: edge, profile, id: storeId, version: "0.0.3" }] },
+    ])
+    expect(opened.map(([name]) => name)).toEqual(["Microsoft Edge"])
+  })
+
   test("with --no-open, says how to pair by hand", () => {
     const { outcome, opened, output } = pair([{ ...none(chrome), enabled: [{ browser: chrome, profile, id: storeId }] }], { allowOpen: false })
     expect(outcome).toBe("manual")

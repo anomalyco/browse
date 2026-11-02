@@ -6,6 +6,7 @@ import os from "node:os"
 import path from "node:path"
 import WebSocket from "ws"
 import { dataUrlDocument, stableUnpackedExtensionOrigin } from "../src/relay-helpers.ts"
+import { extensionProtocolVersion } from "../src/protocol.ts"
 import * as ExtensionPairing from "../../src/background/pairing.ts"
 import {
   browserToken,
@@ -76,7 +77,7 @@ class FakeExtension {
     })
     this.socket.send(JSON.stringify({
       method: "hello",
-      params: { version: "0.0.0-test", build: "test", protocolVersion: 2, profileId: "test", profileName: "Test", ...options.hello, pairing: { nonce, ...(options.legacy === undefined ? { mode: "token" } : {}) } },
+      params: { version: "0.0.0-test", build: "test", protocolVersion: extensionProtocolVersion, profileId: "test", profileName: "Test", ...options.hello, pairing: { nonce, ...(options.legacy === undefined ? { mode: "token" } : {}) } },
     }))
     const params = await challenge
     // The relay must prove it knows the code before the extension obeys it.
@@ -213,7 +214,7 @@ async function pairWithCode(relayPort: number, code: string, profileId: string) 
   await new Promise<void>((resolve) => socket.once("open", () => resolve()))
   const keys = await ExtensionPairing.ecdhKeyPair()
   const nonce = ExtensionPairing.randomNonce()
-  send({ method: "hello", params: { version: "0.0.0-test", build: "test", protocolVersion: 2, profileId, profileName: profileId, pairing: { nonce, mode: "code", ecdh: keys.publicKey } } })
+  send({ method: "hello", params: { version: "0.0.0-test", build: "test", protocolVersion: extensionProtocolVersion, profileId, profileName: profileId, pairing: { nonce, mode: "code", ecdh: keys.publicKey } } })
   const fail = async () => ({ token: undefined, open: false, closeCode: await closed, wire: frames.join("\n") })
   const challenge = await next()
   if (challenge?.method !== "auth.challenge") return fail()
@@ -249,7 +250,11 @@ afterAll(async () => {
 
 describe("relay", () => {
   test("HTTP API needs the token; the version probe does not", async () => {
-    expect((await fetch(`${base}/version`)).status).toBe(200)
+    const compatibility = { extensionProtocol: { min: 3, version: 3 }, pairing: "opencode-browser-pairing-v3" }
+    expect(await (await fetch(`${base}/version`)).json()).toMatchObject(compatibility)
+    const probe = await fetch(`${base}/version`, { headers: { "sec-fetch-site": "cross-site" } })
+    expect(probe.status).toBe(403)
+    expect(await probe.json()).toEqual({ ...compatibility, error: "Cross-origin browser requests are not allowed" })
     expect((await fetch(`${base}/extension/status`)).status).toBe(401)
     expect((await fetch(`${base}/extension/status`, { headers: { authorization: "Bearer wrong" } })).status).toBe(401)
     expect((await fetch(`${base}/cli/execute`, { method: "POST", body: "{}" })).status).toBe(401)
@@ -287,6 +292,14 @@ describe("relay", () => {
     expect(again.token).toBeUndefined()
     expect(again.closeCode).toBe(4006)
     expect(browserToken("exchange-2", home)).toBeUndefined()
+  })
+
+  test.each([2, extensionProtocolVersion + 1])("reports incompatible protocol %i before pairing", async (protocolVersion) => {
+    const extension = new FakeExtension(home)
+    expect(await extension.pair({ hello: { protocolVersion } })).toBe(false)
+    expect(extension.closeCode).toBe(4003)
+    const status = await (await fetch(`${base}/extension/status`, { headers: { authorization: `Bearer ${token}` } })).json()
+    expect(status).toMatchObject({ connected: false, protocolVersion, protocolCompatible: false })
   })
 
   test("two browsers pairing get different tokens", async () => {
