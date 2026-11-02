@@ -76,9 +76,15 @@ const defaultSites: readonly Site[] = [
     url: "https://bot-detector.rebrowser.net/",
     waitMs: 6_000,
     extract: `
-      const rows = Array.from(document.querySelectorAll("tr")).map((tr) => Array.from(tr.cells, (cell) => cell.innerText.trim().replace(/\\s+/g, " ").slice(0, 120)))
-      const tests = rows.filter((cells) => cells.length >= 2 && cells[0]).map((cells) => ({ test: cells[1] || cells[0], status: cells[0], detail: cells.slice(2).join(" ").slice(0, 160) }))
-      return { tests: tests.slice(0, 40) }`,
+      // Rows are [emoji + test name, time since load, notes]; the emoji is the status.
+      const statusOf = { "🟢": "pass", "🔴": "fail", "🟡": "warn", "🟠": "warn", "⚪": "not triggered" }
+      const rows = Array.from(document.querySelectorAll("tbody tr, tr")).map((tr) => Array.from(tr.cells, (cell) => cell.innerText.trim().replace(/\\s+/g, " ")))
+      const tests = rows.filter((cells) => cells.length >= 3 && /^\\p{Extended_Pictographic}/u.test(cells[0])).map((cells) => {
+        const emoji = Object.keys(statusOf).find((key) => cells[0].startsWith(key))
+        return { test: cells[0].replace(/^[\\p{Extended_Pictographic}\\uFE0F\\s]+/u, ""), status: emoji ? statusOf[emoji] : cells[0].slice(0, 2), detail: cells[2].slice(0, 160) }
+      })
+      const unique = tests.filter((entry, index) => tests.findIndex((other) => other.test === entry.test) === index)
+      return { failed: unique.filter((entry) => entry.status === "fail" || entry.status === "warn").map((entry) => entry.test), passed: unique.filter((entry) => entry.status === "pass").length, tests: unique }`,
   },
   {
     id: "deviceandbrowserinfo",
@@ -86,23 +92,38 @@ const defaultSites: readonly Site[] = [
     waitMs: 6_000,
     extract: `
       const text = document.body.innerText
-      return { verdict: /You are (?:a )?(human|bot)/i.exec(text)?.[0] ?? null, excerpt: text.slice(0, 600) }`,
+      // The raw detection JSON lists every check; the true ones are what flagged.
+      const flagged = Array.from(text.matchAll(/"(\\w+)":\\s*true/g), (match) => match[1])
+      return { verdict: /You are (?:a )?(human|bot)/i.exec(text)?.[0] ?? null, flagged }`,
   },
   {
+    // The home page is a landing page; the scan runs on /fingerprint-check.
     id: "pixelscan",
-    url: "https://pixelscan.net/",
+    url: "https://pixelscan.net/fingerprint-check",
+    waitMs: 15_000,
+    extract: `
+      const text = document.body.innerText
+      const card = (label) => new RegExp("([^\\\\n]+)\\\\n+" + label + "\\\\n").exec(text)?.[1]?.trim() ?? null
+      return { consistent: /fingerprint is\\s*(consistent|inconsistent)/i.exec(text)?.[1] ?? null, proxy: card("Proxy"), masking: card("Fingerprint"), bot: card("Bot check") }`,
+  },
+  {
+    id: "pixelscan-bot",
+    url: "https://pixelscan.net/bot-check",
     waitMs: 12_000,
     extract: `
       const text = document.body.innerText
-      return { consistent: /fingerprint is (consistent|inconsistent)/i.exec(text)?.[1] ?? null, bot: /(no automation framework detected|automation framework detected|bot(?:s)? detected)/i.exec(text)?.[0] ?? null, excerpt: text.slice(0, 600) }`,
+      const card = (label) => new RegExp(label + "\\\\n+([^\\\\n]+)").exec(text)?.[1]?.trim() ?? null
+      return { verdict: /You'?re [^\\n]*(?:human|bot)[^\\n]*/i.exec(text)?.[0] ?? null, navigator: card("Navigator"), webdriver: card("Webdriver"), cdp: card("CDP"), userAgent: card("User Agent") }`,
   },
   {
+    // /bot-firewall only lists past bot visits; the playground shows this visit's Smart Signals.
     id: "fingerprint-demo",
-    url: "https://demo.fingerprint.com/bot-firewall",
-    waitMs: 8_000,
+    url: "https://demo.fingerprint.com/playground",
+    waitMs: 12_000,
     extract: `
       const text = document.body.innerText
-      return { bot: /(bad bot|good bot|not detected|no bot)[^\\n]*/i.exec(text)?.[0] ?? null, excerpt: text.slice(0, 600) }`,
+      const signal = (label) => new RegExp(label + "\\\\t?\\\\n([^\\\\n]+)").exec(text)?.[1]?.trim() ?? null
+      return { bot: signal("Bot"), tampering: signal("Browser Tampering"), devtools: signal("Developer Tools"), virtualMachine: signal("Virtual Machine"), suspectScore: signal("Suspect Score") }`,
   },
   {
     id: "recaptcha-v3",
