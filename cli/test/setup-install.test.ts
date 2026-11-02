@@ -43,7 +43,6 @@ describe("a checkout install without the extension", () => {
     expect(output).toContain("Load unpacked")
     expect(output).toContain(`${folder} (shown in Finder)`)
     expect(output).toContain("Cmd+Shift+G")
-    expect(output).toContain("Restart opencode")
     expect(output).not.toContain("chromewebstore")
   })
 
@@ -65,7 +64,6 @@ describe("a checkout install without the extension", () => {
 
   test.each([
     ["--no-open", { allowOpen: false }],
-    ["no terminal", { env: { ssh: false, display: true, tty: false, platform: "darwin" as const } }],
     ["no display", { env: { ssh: false, display: false, tty: true, platform: "linux" as const } }],
   ])("only prints the steps with %s", (_, overrides) => {
     const { outcome, calls, output } = run(overrides)
@@ -87,7 +85,8 @@ describe("a checkout install without the extension", () => {
   test("doesn't open anything when a browser couldn't be checked and may already have it", () => {
     const { calls, output } = run({ detections: [none(chrome), { ...none(edge), blocked: true }] })
     expect(calls).toEqual({ open: [], reveal: [], copy: [] })
-    expect(output).toContain("Already loaded in Microsoft Edge?")
+    expect(output).toContain("couldn't check")
+    expect(output).not.toContain("you're set")
   })
 
   test("with no Chromium browser found, names the page without opening it", () => {
@@ -109,6 +108,7 @@ describe("install with the extension", () => {
     const { outcome, output } = run({ detections: [{ ...none(chrome), enabled: [match] }] })
     expect(outcome).toBe("ready")
     expect(output).toContain("Person 1 (unpacked)")
+    expect(output).not.toContain("Agents can use Browse now")
   })
 
   test("a turned-off extension is reported, not reinstalled", () => {
@@ -122,6 +122,11 @@ describe("install with the extension", () => {
 
 describe("an npm install without the extension", () => {
   const storeUrl = "https://chromewebstore.google.com/detail/abcdefghijklmnopabcdefghijklmnop"
+
+  test("an agent without a terminal opens the store if a display is available", () => {
+    const { calls } = run({ folder: undefined, storeUrl, env: { ssh: false, display: true, tty: false, platform: "darwin" } })
+    expect(calls.open).toEqual([["Google Chrome", storeUrl]])
+  })
 
   test("opens its channel's store page, never the unpacked steps", () => {
     const { outcome, calls, output } = run({ folder: undefined, storeUrl })

@@ -37,6 +37,7 @@ if (command === "--version" || command === "-v") {
                                  and wait for it)
     --no-open                    Print the steps without opening anything or copying the path
     --no-wait                    Don't wait for the extension to be added or connect
+    --wait-seconds <seconds>     How long to wait for a connection (default 180)
   extension                      Show where to get the extension (the unpacked folder of a checkout or a dev
                                  install, or the store page)
   pair                           Print a one-time pairing code (XXXX-XXXX, valid 10 minutes) to enter on the
