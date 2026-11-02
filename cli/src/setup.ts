@@ -19,7 +19,8 @@ import { homedir, networkInterfaces } from "node:os"
 import path from "node:path"
 import { createInterface } from "node:readline/promises"
 import { fileURLToPath } from "node:url"
-import { applyEdits, modify, parse } from "jsonc-parser"
+import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
+import { agentLocations, agentNames, editAgentConfig, type AgentReceipt } from "./agent-config.ts"
 import { describeAutoUpdate, autoUpdateStatus, installVersion, pruneVersions, readCurrent, runtimeLayout, switchVersion, updateState, compareVersions, versionEntry } from "./auto-update.ts"
 import {
   bundledPairingCodeTtlMs,
@@ -91,7 +92,7 @@ const checkoutExtensionDirs = (() => {
   return [path.join(repo, "public"), path.join(repo, "dist")]
 })()
 
-export type Settings = { opencode?: string; entry?: string; version?: string }
+export type Settings = { opencode?: string; entry?: string; version?: string; agents?: AgentReceipt[] }
 
 export type Browser = {
   name: string
@@ -250,7 +251,16 @@ export function relayNotRestarted(statusJson: string, output: string, command = 
 }
 
 function mcpServers() {
-  return ((parse(readFileOr(configFile(), "{}")) ?? {}) as { mcp?: { servers?: Servers } }).mcp?.servers ?? {}
+  const file = configFile()
+  const errors: ParseError[] = []
+  const config = parse(existsSync(file) ? readFileSync(file, "utf8") : "{}", errors, { allowTrailingComma: true })
+  if (errors.length || [config, config?.mcp, config?.mcp?.servers].some(v => v !== undefined && (!v || typeof v !== "object" || Array.isArray(v)))) fail(`Invalid ${file}; left unchanged`)
+  return (config as { mcp?: { servers?: Servers } }).mcp?.servers ?? {}
+}
+
+function ownedMcp(server: Servers[string] | undefined, entry: string | undefined) {
+  const command = server?.command
+  return Array.isArray(command) && command.length === 3 && command[2] === "mcp" && [entry, layout.shim, path.join(packageRoot, "dist/cli.mjs")].some(e => e && command[1] === e)
 }
 
 /**
@@ -266,13 +276,14 @@ function mergedMcpServer(existing: Servers[string] | undefined, command: string[
 }
 
 /** Writes (or updates) the browse MCP server so it runs the installed runtime, keeping the user's settings. */
-function configureMcp(entry: string) {
+function configureMcp(entry: string, previousEntry?: string) {
   const file = configFile()
   // A running MCP server keeps its old code after an update, and its relay calls then fail on the build check.
   // Stamping the runtime's fingerprint into the entry changes the config whenever the runtime changes, which
   // makes opencode restart the server with the new code.
-  const renamed = removeMcp(LEGACY_MCP_NAME)
   const existing = mcpServers()[MCP_NAME]
+  if (existing && !ownedMcp(existing, previousEntry)) return undefined
+  const renamed = removeMcp(LEGACY_MCP_NAME, previousEntry)
   // The shim of an npm install never changes and swaps the server itself after an update, so its entry stays the same.
   const server = mergedMcpServer(existing, [process.execPath, entry, "mcp"], entry === layout.shim ? "auto-update" : fingerprint(entry))
   if (existing && JSON.stringify(existing) === JSON.stringify(server)) return `"${MCP_NAME}" is up to date`
@@ -284,10 +295,10 @@ function configureMcp(entry: string) {
   return existing ? `"${MCP_NAME}" updated in ${file}` : `"${MCP_NAME}" added to ${file}`
 }
 
-function removeMcp(name: string) {
+function removeMcp(name: string, entry?: string) {
   const file = configFile()
   const text = readFileOr(file, "")
-  if (!text || !mcpServers()[name]) return false
+  if (!text || !ownedMcp(mcpServers()[name], entry)) return false
   writeFileSync(file, applyEdits(text, modify(text, ["mcp", "servers", name], undefined, {})))
   return true
 }
@@ -398,20 +409,51 @@ async function syncDev() {
 async function install(args: string[]) {
   checkNode()
   const timeoutMs = waitTimeout(args)
+  const requested = args.flatMap((arg, i) => arg === "--agent" ? [args[i + 1] ?? ""] : [])
+  for (const name of requested) if (!["opencode", ...agentNames].includes(name)) fail(`Unknown agent ${JSON.stringify(name)}. Choose opencode, ${agentNames.join(", ")}.`)
   const opencode = findOpencode(args)
 
   mkdirSync(files.dir, { recursive: true })
   const { entry, version } = await installRuntime()
   log(`✓ Browse ${version} installed${fromSource ? " (from source)" : ""}`)
-  writeFileSync(files.settings, JSON.stringify({ ...(opencode ? { opencode } : {}), entry, version } satisfies Settings, null, 2) + "\n")
+  const previous = readJson<Settings>(files.settings)
+  const agents = previous?.agents ?? []
+  const save = () => writeFileSync(files.settings, JSON.stringify({ ...(opencode ? { opencode } : {}), entry, version, agents } satisfies Settings, null, 2) + "\n")
+  save()
   if (removeLegacyHost()) log("✓ Removed the native messaging host of an earlier version")
 
   const node = process.execPath
-  log(opencode ? `✓ Using opencode at ${opencode}` : "! opencode not found. Install it (https://opencode.ai), or add the browse server to another MCP client (see the README).")
-  const mcp = configureMcp(entry)
-  log(`✓ MCP server ${mcp}`)
+  if ((opencode && (!requested.length || args.includes("--all-agents"))) || requested.includes("opencode")) {
+    const mcp = configureMcp(entry, previous?.entry)
+    log(mcp ? `✓ MCP server ${mcp} (opencode)` : `! opencode already has a different server named browse in ${configFile()}; left unchanged.`)
+  }
+  for (const agent of agentLocations(home, configRoot, findOnPath)) {
+    const explicit = requested.includes(agent.name)
+    if (!explicit && (!agent.installed || (requested.length && !args.includes("--all-agents")))) continue
+    let consent = explicit || args.includes("--all-agents") || args.includes("--yes")
+    if (!consent && process.stdin.isTTY && process.stdout.isTTY) {
+      const prompt = createInterface({ input: process.stdin, output: process.stdout })
+      consent = /^y(es)?$/i.test((await prompt.question(`Add Browse to ${agent.name} (${agent.file})? [y/N] `).finally(() => prompt.close())).trim())
+    }
+    if (!consent) { log(`To add ${agent.name}: ${cliCommand(`install --agent ${agent.name}`)}`); continue }
+    const receipt = { name: agent.name, file: agent.file, entry, node }
+    try {
+      const result = editAgentConfig(receipt)
+      if (result === "added") {
+        const i = agents.findIndex(a => a.file === agent.file)
+        if (i !== -1) agents.splice(i, 1)
+        agents.push(receipt)
+        save()
+      }
+      if (result === "conflict") process.exitCode = 1
+      log(result === "conflict" ? `! ${agent.name} already has a different browse server; left ${agent.file} unchanged.` : `✓ ${agent.name}: browse ${result} in ${agent.file}`)
+    } catch {
+      process.exitCode = 1
+      log(`! Couldn't edit ${agent.file} for ${agent.name}. Check its syntax and permissions, then run ${cliCommand(`install --agent ${agent.name}`)}.`)
+    }
+  }
   for (const line of restartOutdatedRelay(entry, node) ?? []) log(line)
-  const legacy = legacyBrowserControl()
+  const legacy = opencode ? legacyBrowserControl() : []
   if (legacy.length)
     log(`! Browser Control MCP server${legacy.length === 1 ? "" : "s"} ${legacy.map((name) => `"${name}"`).join(", ")} also configured. Browse replaces it; remove ${legacy.length === 1 ? "it" : "them"} from ${configFile()} to avoid two sets of browser tools.`)
 
@@ -681,7 +723,14 @@ async function confirmSecretRemoval(args: string[]) {
 async function uninstall(args: string[]) {
   await confirmSecretRemoval(args)
   const host = removeLegacyHost()
-  const mcp = [MCP_NAME, LEGACY_MCP_NAME].filter((name) => removeMcp(name))
+  const settings = readJson<Settings>(files.settings)
+  const mcp = [MCP_NAME, LEGACY_MCP_NAME].filter((name) => removeMcp(name, settings?.entry))
+  for (const receipt of settings?.agents ?? []) {
+    try {
+      const result = editAgentConfig(receipt, true)
+      log(result === "conflict" ? `! ${receipt.file} has a changed browse server; left unchanged.` : `✓ ${receipt.name}: ${result}`)
+    } catch { fail(`Couldn't safely remove Browse from ${receipt.file}. Check its syntax and permissions, then re-run uninstall.`) }
+  }
   rmSync(files.dir, { recursive: true, force: true })
   log(`✓ Removed ${files.dir}`)
   if (host) log("✓ Removed the native messaging host of an earlier version")

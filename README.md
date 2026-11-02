@@ -74,13 +74,19 @@ turn the check off.
 
 ### Other MCP clients
 
-`install` writes the server into opencode's config. For other clients, add an stdio server that runs the installed
-shim, which always runs the current version (from a checkout, use `/path/to/browse/cli/dist/cli.mjs` instead):
+`install` configures opencode if installed. In a terminal it also offers to add Browse to Claude Code, Cursor,
+Codex, VS Code and Windsurf. An agent without a terminal doesn't change those clients unless you choose one:
 
-```json
-{
-  "browse": { "command": "node", "args": ["/Users/you/.local/share/opencode-browser/bin/opencode-browser.mjs", "mcp"] }
-}
+```sh
+npx @opencode/browse install --agent cursor   # or claude, codex, vscode, windsurf
+```
+
+For another stdio MCP client, this prints the server entry with the **actual installed path** (npm shim or checkout)
+on macOS or Linux. On Windows, read `entry` from `%LOCALAPPDATA%\opencode-browser\settings.json` instead.
+
+```sh
+root="${OPENCODE_BROWSER_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/opencode-browser}"
+node -p 'JSON.stringify({browse: {command: process.execPath, args: [require(process.argv[1]).entry, "mcp"]}}, null, 2)' "$root/settings.json"
 ```
 
 ### Browser on another computer

@@ -2,6 +2,8 @@ import { afterAll, describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { parse } from "jsonc-parser"
+import { agentNames, editAgentConfig } from "../src/agent-config.ts"
 import { installedRuntime, locateExtension, pairStoreExtension, relayNotRestarted, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
 
 const browser = (name: string): Browser => ({ name, userData: `/data/${name}`, manifests: [], defaultIDs: [], executables: [] })
@@ -9,6 +11,32 @@ const chrome = browser("Google Chrome")
 const edge = browser("Microsoft Edge")
 const none = (target: Browser): Detection => ({ browser: target, blocked: false, enabled: [], disabled: [] })
 const folder = "/src/browse/dist"
+
+test.each([...agentNames])("%s user config: preserve unrelated settings, install twice, uninstall, refuse collisions", name => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-config-"))
+  try {
+    const key = name === "vscode" ? "servers" : "mcpServers"
+    const toml = name === "codex"
+    const file = path.join(home, toml ? "config.toml" : "mcp.json")
+    const before = toml ? '# my config\nmodel="test"\n[mcp_servers.other]\nurl="https://other"\n' : `{\n// my config\n"unrelated":true, "${key}":{"other":{"url":"https://other"}},\n}`
+    const config = () => toml ? Bun.TOML.parse(fs.readFileSync(file, "utf8")) : parse(fs.readFileSync(file, "utf8"))
+    fs.writeFileSync(file, before)
+    const original = config()
+    const receipt = { name, file, node: "/a path/node", entry: "/a path/browse.mjs" }
+    expect(editAgentConfig(receipt)).toBe("added")
+    expect(config()[toml ? "mcp_servers" : key].browse).toMatchObject({ command: receipt.node, args: [receipt.entry, "mcp"] })
+    const once = fs.readFileSync(file, "utf8")
+    expect(editAgentConfig(receipt)).toBe("unchanged")
+    expect(fs.readFileSync(file, "utf8")).toBe(once)
+    fs.writeFileSync(file, once.replace("/a path/node", "/some-other/server"))
+    expect(editAgentConfig(receipt)).toBe("conflict")
+    expect(editAgentConfig(receipt, true)).toBe("conflict")
+    fs.writeFileSync(file, once)
+    expect(editAgentConfig(receipt, true)).toBe("removed")
+    expect(config()).toEqual(original)
+    expect(fs.readFileSync(file, "utf8")).toContain("my config")
+  } finally { fs.rmSync(home, { recursive: true, force: true }) }
+})
 
 /** Runs locateExtension with recording effects: nothing real is opened, revealed or copied. */
 function run(overrides: Partial<Omit<LocateOptions, "folder">> & { folder?: string | undefined } = {}, results: { open?: boolean } = {}) {
