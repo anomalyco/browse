@@ -44,9 +44,10 @@ downloads that build's extension into a folder you load unpacked once (install s
 the folder and reloads the extension. The zip is also at https://anoma.ly/release/browse/extension/dev/chromium.
 
 There's nothing to sign in to. Each browser pairs with the relay once and gets a key of its own (see
-[Security](#security)). If pairing didn't happen by itself, run `npx @opencode/browse pair` and enter the short code it
-prints under **Connection** on the extension's status page (right-click the toolbar button, then **Options**), then
-click **Connect**. `pair --list` shows the paired browsers, and `pair --revoke <browser>` unpairs one.
+[Security](#security)). If pairing didn't happen by itself, run `npx @opencode/browse install` again to open a
+pairing link. To pair by hand, run `npx @opencode/browse pair` (from a checkout: `node cli/dist/cli.mjs pair`).
+It starts the relay and waits. Open **Extensions → Browse → Options**, enter the printed code, and click **Connect**.
+The command confirms which browser paired. `pair --list` shows paired browsers; `pair --revoke <browser>` unpairs one.
 
 ### From source
 

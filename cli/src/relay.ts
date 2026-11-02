@@ -1497,8 +1497,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       socket.close(4006, exhausted ? "Too many wrong codes: run `pair` for a new one" : "Pairing failed: that code is wrong, used or expired")
       return
     }
-    consumePairingCode(match.codeKey)
-    const token = issueBrowserToken(challenge.key)
+    const receipt = consumePairingCode(match.codeKey)
+    const token = issueBrowserToken(challenge.key, undefined, Date.now(), undefined, receipt)
     relayLog("extension.paired", { profile: getString(getObject(challenge.hello.params), "profileName") })
     socket.send(JSON.stringify({ method: "auth.token", params: { proof: sessionProof(match.session, "relay"), wrapped: wrapToken(match.session, token) } }))
     challenge.expected = pairingProof(token, "extension", port, challenge.extensionNonce, challenge.relayNonce)

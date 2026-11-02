@@ -13,7 +13,7 @@
 // Earlier versions registered a native messaging host and wrote an opencode plugin; install and uninstall
 // remove those leftovers.
 import { spawn, spawnSync } from "node:child_process"
-import { createHash } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { homedir, networkInterfaces } from "node:os"
 import path from "node:path"
@@ -608,17 +608,27 @@ async function pair(args: string[]) {
   mkdirSync(files.dir, { recursive: true })
   if (args[0] === "--list") return listPairings()
   if (args[0] === "--revoke") return revokePairing(args[1])
-  if (args.length) {
-    log(`Usage: ${cliCommand("pair")} [--list | --revoke <browser>]`)
+  if (args.length && !(args.length === 2 && args[0] === "--wait-seconds")) {
+    log(`Usage: ${cliCommand("pair")} [--wait-seconds <seconds> | --list | --revoke <browser>]`)
     process.exitCode = 1
     return
   }
-  const code = mintPairingCode()
+  const timeoutMs = Math.min(waitTimeout(args), pairingCodeTtlMs)
+  ensureRelay(readJson<Settings>(files.settings)?.entry ?? process.argv[1]!)
+  const receipt = randomUUID()
+  const code = mintPairingCode(undefined, { receipt })
   log(`Pairing code: ${formatPairingCode(code)}`)
-  log("")
-  log(`It works once, within ${pairingCodeTtlMs / 60_000} minutes. In the browser, open Browse's status page (right-click the`)
-  log("toolbar button, then Options), enter it under Connection and click Connect. The browser then gets a key of its")
-  log(`own; \`${cliCommand("pair --list")}\` shows paired browsers and \`${cliCommand("pair --revoke <browser>")}\` unpairs one.`)
+  log(`${manualPair(code)} It works once, within ${pairingCodeTtlMs / 60_000} minutes.`)
+  log(`Waiting up to ${timeoutMs / 1000}s for that browser. Later, \`${cliCommand("pair --list")}\` shows paired browsers.`)
+  let paired: string | undefined
+  await waitForExtension({ timeoutMs, intervalMs: 500, connected: async () => {
+    const match = Object.values(readBrowserPairings()).find(browser => browser.receipt === receipt && browser.lastSeen !== undefined)
+    paired = match?.name ?? match?.id
+    return paired !== undefined
+  } })
+  if (paired) return log(`✓ Paired ${paired}.`)
+  log(`! Pairing not confirmed. For a fresh code run \`${cliCommand("pair")}\`.`)
+  process.exitCode = 1
 }
 
 /** Paired browsers, with what the relay calls them (browsers.json, browser-links.ts) when it knows. */

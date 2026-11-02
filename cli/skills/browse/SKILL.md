@@ -942,12 +942,10 @@ Common diagnoses:
   unique URL substring or explicit index.
 - All targets disappeared: dismissing Chromium's debugging banner detaches every
   tab. Ask the user to click the toolbar button on it again.
-- Extension not connecting, status page says "Not paired" or "didn't pair": the
-  browser needs its own key from the relay. Unpacked installs are paired by
-  `opencode-browser install` (or `bun run setup`); otherwise run
-  `opencode-browser pair` and have the user enter the code (it works once, within
-  10 minutes) under Connection on the status page. `pair --list` shows paired
-  browsers; `pair --revoke <browser>` unpairs one.
+- Extension installed but not paired: re-run `npx @opencode/browse install` to open its pairing link
+  (from a checkout, `bun run setup`). To pair manually, run `npx @opencode/browse pair`
+  (from the checkout root, `node cli/dist/cli.mjs pair`). This starts the relay. Have the user enter
+  the code in Browse's Options and click Connect. The terminal confirms which browser paired.
 - HTTP 401 from the relay: clients need the relay token from the data root
   (`relay-token`); the CLI and MCP server send it, other CDP clients must add
   `Authorization: Bearer <token>` or `?opencodeBrowserToken=<token>`.

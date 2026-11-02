@@ -320,6 +320,24 @@ describe("relay", () => {
     expect(readBrowserPairings(home)["browser-two"]?.token).toBe(two.token!)
   })
 
+  test("pair waits for its own code, not a browser that redeemed another code", async () => {
+    const pair = spawn(process.execPath, [path.join(import.meta.dir, "../src/main.ts"), "pair", "--wait-seconds", "8"], {
+      env: { PATH: process.env.PATH, HOME: home, OPENCODE_BROWSER_HOME: home, OPENCODE_BROWSER_PORT: String(port) }, stdio: ["ignore", "pipe", "pipe"],
+    })
+    let output = ""
+    pair.stdout.on("data", chunk => { output += chunk })
+    const exit = new Promise(resolve => pair.once("exit", resolve))
+    try {
+      expect(await until(() => /Pairing code: (\w+-\w+)/.test(output))).toBe(true)
+      const code = /Pairing code: (\w+)-(\w+)/.exec(output)!
+      await pairWithCode(port, mintPairingCode(home), "other-browser")
+      expect(output).not.toContain("✓ Paired")
+      expect((await pairWithCode(port, code[1]! + code[2]!, "wanted-browser")).open).toBe(true)
+      expect(await exit).toBe(0)
+      expect(output).toContain(`✓ Paired ${readBrowserPairings(home)["wanted-browser"]!.name}`)
+    } finally { pair.kill() }
+  }, 12_000)
+
   test("an expired code is refused", async () => {
     const expired = await pairWithCode(port, mintPairingCode(home, { now: Date.now() - 11 * 60_000 }), "late")
     expect(expired.token).toBeUndefined()
