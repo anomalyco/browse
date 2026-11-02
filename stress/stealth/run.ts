@@ -113,7 +113,9 @@ const defaultSites: readonly Site[] = [
     extract: `
       const text = document.body.innerText
       const card = (label) => new RegExp(label + "\\\\n+([^\\\\n]+)").exec(text)?.[1]?.trim() ?? null
-      return { verdict: /You'?re [^\\n]*(?:human|bot)[^\\n]*/i.exec(text)?.[0] ?? null, navigator: card("Navigator"), webdriver: card("Webdriver"), cdp: card("CDP"), userAgent: card("User Agent") }`,
+      // Both banners are in the DOM; only the one that applies is visible.
+      const banner = Array.from(document.querySelectorAll("h1, h2, h3, p, span, div")).find((el) => el.children.length === 0 && /^(You'?re .*human|Bot Behavior Detected)/i.test(el.textContent.trim()) && el.checkVisibility({ opacityProperty: true, visibilityProperty: true }))
+      return { verdict: banner ? banner.textContent.trim() : null, navigator: card("Navigator"), webdriver: card("Webdriver"), cdp: card("CDP"), userAgent: card("User Agent") }`,
   },
   {
     // /bot-firewall only lists past bot visits; the playground shows this visit's Smart Signals.
