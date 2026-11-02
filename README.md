@@ -46,7 +46,7 @@ the folder and reloads the extension. The zip is also at https://anoma.ly/releas
 There's nothing to sign in to. Each browser pairs with the relay once and gets a key of its own (see
 [Security](#security)). If pairing didn't happen by itself, run `npx @opencode/browse install` again to open a
 pairing link. To pair by hand, run `npx @opencode/browse pair` (from a checkout: `node cli/dist/cli.mjs pair`).
-It starts the relay and waits. Open **Extensions → Browse → Options**, enter the printed code, and click **Connect**.
+It starts the relay and waits. Open **Extensions → Browse → Options**, enter the printed code, and click **Pair**.
 The command confirms which browser paired. `pair --list` shows paired browsers; `pair --revoke <browser>` unpairs one.
 
 ### From source
@@ -75,8 +75,9 @@ turn the check off.
 
 ### Other MCP clients
 
-`install` configures opencode if installed. In a terminal it also offers to add Browse to Claude Code, Cursor,
-Codex, VS Code and Windsurf. An agent without a terminal doesn't change those clients unless you choose one:
+In a regular terminal, `install` configures opencode if installed and offers Claude Code, Cursor, Codex, VS Code
+and Windsurf. It remembers declined offers. When a supported agent runs install, only that client is added.
+You can always choose a client explicitly:
 
 ```sh
 npx @opencode/browse install --agent cursor   # or claude, codex, vscode, windsurf

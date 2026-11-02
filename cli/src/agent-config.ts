@@ -6,6 +6,7 @@ import { parse as parseToml } from "smol-toml"
 
 export const agentNames = ["claude", "cursor", "codex", "vscode", "windsurf"] as const
 export type AgentName = typeof agentNames[number]
+export const agentLabels: Record<AgentName, string> = { claude: "Claude Code", cursor: "Cursor", codex: "Codex", vscode: "VS Code", windsurf: "Windsurf" }
 export type AgentReceipt = { name: AgentName; file: string; node: string; entry: string }
 export type AgentLocation = { name: AgentName; file: string; installed: boolean }
 

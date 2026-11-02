@@ -136,9 +136,17 @@ describe("a checkout install without the extension", () => {
 
 describe("install with the extension", () => {
   test("a connected extension is ready", () => {
-    const { outcome, calls } = run({ connected: true })
+    const { outcome, calls, output } = run({ connected: true })
     expect(outcome).toBe("ready")
+    expect(output).toContain("Restart your agent")
     expect(calls).toEqual({ open: [], reveal: [], copy: [] })
+  })
+
+  test("a paired browser that is closed needs no new code or tab", () => {
+    const { calls, output } = run({ pairedOffline: true })
+    expect(output).toContain("Open the browser profile already paired")
+    expect(output).not.toContain("code")
+    expect(calls.open).toEqual([])
   })
 
   test("an installed extension is ready even before the relay runs", () => {
@@ -228,7 +236,7 @@ describe("pairing the store build", () => {
     const { outcome, opened, output } = pair([{ ...none(chrome), enabled: [{ browser: chrome, profile, id: storeId }] }], { allowOpen: false })
     expect(outcome).toBe("manual")
     expect(opened).toEqual([])
-    expect(output).toContain("pair")
+    expect(output).toContain("click Pair.")
   })
 })
 

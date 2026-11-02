@@ -20,14 +20,16 @@ import path from "node:path"
 import { createInterface } from "node:readline/promises"
 import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
-import { agentLocations, agentNames, callingAgent, editAgentConfig, type AgentReceipt } from "./agent-config.ts"
+import { agentLabels, agentLocations, agentNames, callingAgent, editAgentConfig, type AgentName, type AgentReceipt } from "./agent-config.ts"
 import { describeAutoUpdate, autoUpdateStatus, installVersion, pruneVersions, readCurrent, runtimeLayout, switchVersion, updateState, compareVersions, versionEntry } from "./auto-update.ts"
 import {
   bundledPairingCodeTtlMs,
   formatPairingCode,
   legacyPairingCode,
   mintPairingCode,
+  pairingCodeKey,
   pairingCodeTtlMs,
+  pendingPairingCodeKeys,
   readBrowserPairings,
   removeLegacyPairingCode,
   revokeBrowserToken,
@@ -92,7 +94,7 @@ const checkoutExtensionDirs = (() => {
   return [path.join(repo, "public"), path.join(repo, "dist")]
 })()
 
-export type Settings = { opencode?: string; entry?: string; version?: string; agents?: AgentReceipt[] }
+export type Settings = { opencode?: string; entry?: string; version?: string; agents?: AgentReceipt[]; declinedAgents?: AgentName[] }
 
 export type Browser = {
   name: string
@@ -421,7 +423,8 @@ async function install(args: string[]) {
   log(`✓ Browse ${version} installed${fromSource ? " (from source)" : ""}`)
   const previous = readJson<Settings>(files.settings)
   const agents = previous?.agents ?? []
-  const save = () => writeFileSync(files.settings, JSON.stringify({ ...(opencode ? { opencode } : {}), entry, version, agents } satisfies Settings, null, 2) + "\n")
+  const declined = new Set(previous?.declinedAgents ?? [])
+  const save = () => writeFileSync(files.settings, JSON.stringify({ ...(opencode ? { opencode } : {}), entry, version, agents, declinedAgents: [...declined] } satisfies Settings, null, 2) + "\n")
   save()
   if (removeLegacyHost()) log("✓ Removed the native messaging host of an earlier version")
 
@@ -435,11 +438,13 @@ async function install(args: string[]) {
     const explicit = requested.includes(agent.name) || agent.name === caller
     if (!explicit && (!agent.installed || (requested.length && !args.includes("--all-agents")))) continue
     let consent = explicit || allAgents
-    if (!consent && !caller && tty) {
+    const label = agentLabels[agent.name]
+    if (!consent && !caller && tty && !declined.has(agent.name)) {
       const prompt = createInterface({ input: process.stdin, output: process.stdout })
-      consent = /^y(es)?$/i.test((await prompt.question(`Add Browse to ${agent.name} (${agent.file})? [y/N] `).finally(() => prompt.close())).trim())
+      consent = /^y(es)?$/i.test((await prompt.question(`Add Browse to ${label}? [y/N] `).finally(() => prompt.close())).trim())
+      if (!consent) { declined.add(agent.name); save() }
     }
-    if (!consent) { log(`To add ${agent.name}: ${cliCommand(`install --agent ${agent.name}`)}`); continue }
+    if (!consent) { log(`To add ${label}: ${cliCommand(`install --agent ${agent.name}`)}`); continue }
     const receipt = { name: agent.name, file: agent.file, entry, node }
     try {
       const result = editAgentConfig(receipt)
@@ -447,8 +452,8 @@ async function install(args: string[]) {
         const i = agents.findIndex(a => a.file === agent.file)
         if (i !== -1) agents.splice(i, 1)
         agents.push(receipt)
-        save()
       }
+      if (result !== "conflict" && (declined.delete(agent.name) || result === "added")) save()
       if (result === "conflict") process.exitCode = 1
       log(result === "conflict" ? `! ${agent.name} already has a different browse server; left ${agent.file} unchanged.` : `✓ ${agent.name}: browse ${result} in ${agent.file}`)
     } catch {
@@ -462,9 +467,11 @@ async function install(args: string[]) {
     log(`! Browser Control MCP server${legacy.length === 1 ? "" : "s"} ${legacy.map((name) => `"${name}"`).join(", ")} also configured. Browse replaces it; remove ${legacy.length === 1 ? "it" : "them"} from ${configFile()} to avoid two sets of browser tools.`)
 
   await syncDev()
-  const connected = await connectedExtension()
+  const initial = await settledExtensionStatus(entry)
+  const connected = initial?.connected ? initial : undefined
+  const pairedOffline = initial?.pairingState === "paired-offline"
   const folder = unpackedFolder()
-  if (folder) {
+  if (folder && !pairedOffline) {
     // The unpacked extension finds a one-time code in its own folder and exchanges it for its key, without a step.
     pairUnpacked()
     log("✓ Put a one-time pairing code in the unpacked extension (good for an hour)")
@@ -498,19 +505,20 @@ async function install(args: string[]) {
   const found = locateExtension({
     allowOpen: !args.includes("--no-open"),
     connected: !!connected,
+    pairedOffline,
     ...(folder ? { folder } : {}),
     detections,
     preferred: ssh ? undefined : defaultBrowser(detections.map((detection) => detection.browser)),
     env,
   })
-  if (connected || found === "off" || (!folder && !STORE_URL)) return
+  if (connected || found === "off" || pairedOffline || (!folder && !STORE_URL)) return
   ensureRelay(entry)
   let code: string | undefined
-  const pairingCode = () => code ??= mintPairingCode()
+  const pairingCode = () => code && pendingPairingCodeKeys().includes(pairingCodeKey(code)) ? code : (code = mintPairingCode())
   const pairStore = (scanned: Detection[]) => pairStoreExtension({ detections: scanned, preferred: defaultBrowser(scanned.map(d => d.browser)), allowOpen: !args.includes("--no-open"), env, code: pairingCode })
   let offer = ssh ? "none" : pairStore(detections)
   const blocked = detections.filter(d => d.blocked).map(d => d.browser.name)
-  if (offer === "none" && blocked.length) log(`Couldn't check ${blocked.join(", ")}. If Browse is already there: ${manualPair(pairingCode())}`)
+  if (offer === "none" && blocked.length) log(`Couldn't check ${blocked.join(", ")}. If Browse is already installed there, pair it manually. ${manualPair(pairingCode())}`)
   const next = `If Browse isn't connected after you add it, run \`${cliCommand("install")}\` again to pair it.`
   const agentNext = () => `Agent: ${offer === "opened" ? "ask the user to open Browse's status page in their browser" : offer === "manual" || blocked.length ? "ask the user to finish pairing in Browse's Options" : folder ? "ask the user to load Browse in their browser" : "ask the user to add Browse in their browser"}. Then re-run \`${cliCommand("install")}\` to finish, or call the browse status tool to check the connection.`
   if (!env.tty) log(agentNext())
@@ -525,6 +533,7 @@ async function install(args: string[]) {
       const status = await extensionStatus(!args.includes("--no-open") && (offer === "opened" || (offer === "none" && !blocked.length)))
       if (status?.protocolCompatible === false) return fail(extensionProtocolAdvice(status.protocolVersion, { install: installCommand() }))
       if (status?.connected) return log(connectedMessage)
+      if (status?.pairingState === "paired-offline") return log(pairedOfflineMessage)
       if (!folder && offer === "none") {
         const scan = detectBrowsers()
         if (!checkStore(scan)) return
@@ -533,13 +542,14 @@ async function install(args: string[]) {
       await new Promise(resolve => setTimeout(resolve, Math.max(0, Math.min(1000, deadline - Date.now()))))
     } while (!stopped && Date.now() < deadline)
     if (!env.tty) return log(`! Not connected yet. ${agentNext()}`)
-    log(`! Not connected yet. ${code ? manualPair(mintPairingCode()) : next}`)
+    log(`! Not connected yet. ${code ? manualPair(pairingCode()) : next}`)
     process.exitCode = 1
   } finally { process.off("SIGINT", stop) }
 }
 
-const connectedMessage = "✓ Connected.\n✓ Agents can use Browse now. Ask your agent to open a page."
-const manualPair = (code: string) => `Open the Extensions menu → Browse → Options, enter ${formatPairingCode(code)} as the pairing code, then click Connect.`
+const connectedMessage = "✓ Connected. Restart your agent, then ask it to open a page."
+const pairedOfflineMessage = "! Not connected yet. Open the browser profile already paired with Browse and make sure the extension is enabled. It reconnects automatically."
+const manualPair = (code: string) => `Open the Extensions menu → Browse → Options, enter ${formatPairingCode(code)} as the pairing code, then click Pair.`
 export const installWaitTimeout = (args: string[], tty: boolean) => waitTimeout(args, tty ? 180 : 90)
 function waitTimeout(args: string[], defaultSeconds = 180) {
   const seconds = Number(args.includes("--wait-seconds") ? flag(args, "--wait-seconds") : defaultSeconds)
@@ -755,7 +765,7 @@ async function uninstall(args: string[]) {
   log("Remove the extension from your browser to finish.")
 }
 
-type ExtensionStatus = { connected?: boolean; build?: string | null; origin?: string | null; protocolCompatible?: boolean | null; protocolVersion?: number | null }
+type ExtensionStatus = { connected?: boolean; pairingState?: string; build?: string | null; origin?: string | null; protocolCompatible?: boolean | null; protocolVersion?: number | null }
 
 const relayBase = () => `http://127.0.0.1:${Number(process.env.OPENCODE_BROWSER_PORT) || 19988}`
 
@@ -774,13 +784,17 @@ const extensionStatus = (installWaiting = false) =>
     .catch(() => undefined)
 
 /** The extension connected to the relay, if any; a relay restarted moments ago waits a second or two for it. */
-async function connectedExtension() {
+async function settledExtensionStatus(entry: string) {
   let status = await extensionStatus()
+  if (!status && Object.keys(readBrowserPairings()).length) {
+    ensureRelay(entry)
+    status = await extensionStatus()
+  }
   for (let attempt = 0; status?.connected === false && attempt < 10; attempt++) {
     await new Promise((resolve) => setTimeout(resolve, 500))
     status = await extensionStatus()
   }
-  return status?.connected ? status : undefined
+  return status
 }
 
 /**
@@ -837,6 +851,7 @@ export type Effects = {
 export type LocateOptions = {
   allowOpen: boolean
   connected: boolean
+  pairedOffline?: boolean
   /** The folder to load unpacked (a checkout's dist/, or a dev install's). Without one, the extension comes from the store item. */
   folder?: string
   detections: Detection[]
@@ -860,6 +875,7 @@ export function locateExtension(options: LocateOptions, effects: Effects = syste
   const noListing = () =>
     log(`! This package doesn't know its Chrome Web Store item, so it can't install the extension. Install a released version (\`npx @opencode/browse install\`), or set up Browse from a checkout.`)
   const pairLater = () => log(`  Once it's added, run \`${cliCommand("install")}\` again to pair it with the relay.`)
+  if (options.pairedOffline) return log(pairedOfflineMessage), "ready"
   if (options.env.ssh) {
     if (options.connected) return log(connectedMessage), "ready"
     if (options.folder) unpackedSteps({ folder: options.folder, platform: options.env.platform, log })
