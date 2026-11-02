@@ -343,10 +343,10 @@ async function installRuntime(): Promise<{ entry: string; version: string }> {
   const before = readCurrent(layout)
   // Already installed (install run again): keep it. Reinstalling would replace the files a running relay still loads.
   const existing = versionEntry(layout, opencodeBrowserVersion)
-  const reuse = !spec && existsSync(existing) && spawnSync(process.execPath, [existing, "--version"], { encoding: "utf8", timeout: 30_000 }).stdout?.trim() === opencodeBrowserVersion
+  const reuse = !spec && existsSync(existing) && readFileSync(existing).equals(readFileSync(path.join(packageRoot, "dist", "cli.mjs"))) && spawnSync(process.execPath, [existing, "--version"], { encoding: "utf8", timeout: 30_000 }).stdout?.trim() === opencodeBrowserVersion
   let installed: string
   try {
-    installed = reuse ? existing : await installVersion({ layout, version: opencodeBrowserVersion, ...(spec ? { spec } : {}) })
+    installed = reuse ? existing : await installVersion({ layout, version: opencodeBrowserVersion, ...(spec ? { spec } : { runningPackage: packageRoot }) })
   } catch (error) {
     fail(`Could not install ${spec ?? `${PACKAGE}@${opencodeBrowserVersion}`}: ${(error as Error).message}`)
   }
