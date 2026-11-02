@@ -1,4 +1,6 @@
 import type { JsonObject } from "./protocol.ts"
+import { extensionProtocolVersion, minExtensionProtocolVersion } from "./protocol.ts"
+import { pairingScheme } from "./browser-pairing.ts"
 import http from "node:http"
 import { Effect, Match, Predicate, Schema } from "effect"
 import * as AuthProfile from "./auth-profile.ts"
@@ -59,7 +61,7 @@ export function createHttpRequestHandler(options: {
   readonly relayInstance: { readonly id: string; readonly startedAt: string; readonly pid: number; readonly managed: boolean }
   readonly shutdown: RelayShutdown
   readonly extensionStatus: () => Pick<ExtensionStatus,
-    "connected" | "version" | "build" | "origin" | "protocolVersion" | "protocolCompatible" | "protocolLegacy" | "browsers" | "rejectedConnections" | "pairingFailures" | "cdpClients" | "processFaults"
+    "connected" | "pairingState" | "nextStep" | "version" | "build" | "origin" | "protocolVersion" | "protocolCompatible" | "protocolLegacy" | "browsers" | "rejectedConnections" | "pairingFailures" | "cdpClients" | "processFaults"
   >
   readonly recordingRelay: RecordingRelay
   readonly flightRecorder: FlightRecorderRelay
@@ -77,15 +79,21 @@ export function createHttpRequestHandler(options: {
     readonly set: (changes: unknown) => Effect.Effect<object, Error>
   }
 }): (request: http.IncomingMessage, response: http.ServerResponse) => void {
+  // A short lease from install's authenticated status polls. Even a killed install stops advertising itself.
+  let installWaitingUntil = 0
   return (request, response) => {
     const hostError = validateHostHeader({ hostHeader: request.headers.host, host: options.host, port: options.port })
     if (hostError) {
       sendJson(response, { error: hostError }, 403)
       return
     }
+    const compatibility = { extensionProtocol: { min: minExtensionProtocolVersion, version: extensionProtocolVersion }, pairing: pairingScheme }
+    const installHint = request.headers["x-browse-install"] === "probe" && Date.now() < installWaitingUntil ? { installWaiting: true } : {}
     const fetchSiteError = validateBrowserFetchSite(request)
     if (fetchSiteError) {
-      sendJson(response, { error: fetchSiteError }, 403)
+      // Chrome may mark the Options page's probe cross-site. Keep the refusal and disclose only static
+      // compatibility and the Options page's optional waiting hint; never return instance metadata or enable CORS.
+      sendJson(response, { error: fetchSiteError, ...(request.method === "GET" && request.url === "/version" ? { ...compatibility, ...installHint } : {}) }, 403)
       return
     }
     const requestUrl = new URL(request.url ?? "/", `http://${formatHostForUrl(options.host)}:${options.port}`)
@@ -109,6 +117,8 @@ export function createHttpRequestHandler(options: {
         pid: options.relayInstance.pid,
         managed: options.relayInstance.managed,
         shutdownProtocol: 2,
+        ...compatibility,
+        ...installHint,
       })
       return
     }
@@ -178,9 +188,12 @@ export function createHttpRequestHandler(options: {
       return
     }
     if (pathname === "/extension/status") {
+      if (request.headers["x-browse-install"] === "waiting") installWaitingUntil = Date.now() + 5_000
       const extensionStatus = options.extensionStatus()
       sendJson(response, {
         connected: extensionStatus.connected,
+        pairingState: extensionStatus.pairingState,
+        nextStep: extensionStatus.nextStep,
         version: extensionStatus.version,
         ...(extensionStatus.build === undefined ? {} : { build: extensionStatus.build }),
         ...(extensionStatus.origin === undefined ? {} : { origin: extensionStatus.origin }),

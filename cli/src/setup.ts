@@ -13,27 +13,31 @@
 // Earlier versions registered a native messaging host and wrote an opencode plugin; install and uninstall
 // remove those leftovers.
 import { spawn, spawnSync } from "node:child_process"
-import { createHash } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { homedir, networkInterfaces } from "node:os"
 import path from "node:path"
 import { createInterface } from "node:readline/promises"
 import { fileURLToPath } from "node:url"
-import { applyEdits, modify, parse } from "jsonc-parser"
+import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
+import { agentLabels, agentLocations, agentNames, callingAgent, editAgentConfig, type AgentName, type AgentReceipt } from "./agent-config.ts"
 import { describeAutoUpdate, autoUpdateStatus, installVersion, pruneVersions, readCurrent, runtimeLayout, switchVersion, updateState, compareVersions, versionEntry } from "./auto-update.ts"
 import {
   bundledPairingCodeTtlMs,
   formatPairingCode,
   legacyPairingCode,
   mintPairingCode,
+  pairingCodeKey,
   pairingCodeTtlMs,
+  pendingPairingCodeKeys,
   readBrowserPairings,
   removeLegacyPairingCode,
   revokeBrowserToken,
   writeExtensionPairing,
 } from "./browser-pairing.ts"
 import { syncDevExtension } from "./dev-extension.ts"
-import { cliCommand, dataRoot, devExtension, devExtensionFolder, installCommand, storeConfig, storeUrl } from "./paths.ts"
+import { cliCommand, dataRoot, devExtension, devExtensionFolder, installCommand, oldStoreMarker, storeConfig, storeUrl } from "./paths.ts"
+import { extensionProtocolAdvice } from "./protocol.ts"
 import { parseHostname, readRelayConfig, writeRelayConfig } from "./relay-config.ts"
 import { relayAuthorization } from "./relay-secrets.ts"
 import { opencodeBrowserVersion } from "./version.ts"
@@ -90,7 +94,7 @@ const checkoutExtensionDirs = (() => {
   return [path.join(repo, "public"), path.join(repo, "dist")]
 })()
 
-export type Settings = { opencode?: string; entry?: string; version?: string }
+export type Settings = { opencode?: string; entry?: string; version?: string; agents?: AgentReceipt[]; declinedAgents?: AgentName[] }
 
 export type Browser = {
   name: string
@@ -249,7 +253,16 @@ export function relayNotRestarted(statusJson: string, output: string, command = 
 }
 
 function mcpServers() {
-  return ((parse(readFileOr(configFile(), "{}")) ?? {}) as { mcp?: { servers?: Servers } }).mcp?.servers ?? {}
+  const file = configFile()
+  const errors: ParseError[] = []
+  const config = parse(existsSync(file) ? readFileSync(file, "utf8") : "{}", errors, { allowTrailingComma: true })
+  if (errors.length || [config, config?.mcp, config?.mcp?.servers].some(v => v !== undefined && (!v || typeof v !== "object" || Array.isArray(v)))) fail(`Invalid ${file}; left unchanged`)
+  return (config as { mcp?: { servers?: Servers } }).mcp?.servers ?? {}
+}
+
+function ownedMcp(server: Servers[string] | undefined, entry: string | undefined) {
+  const command = server?.command
+  return Array.isArray(command) && command.length === 3 && command[2] === "mcp" && [entry, layout.shim, path.join(packageRoot, "dist/cli.mjs")].some(e => e && command[1] === e)
 }
 
 /**
@@ -265,13 +278,14 @@ function mergedMcpServer(existing: Servers[string] | undefined, command: string[
 }
 
 /** Writes (or updates) the browse MCP server so it runs the installed runtime, keeping the user's settings. */
-function configureMcp(entry: string) {
+function configureMcp(entry: string, previousEntry?: string) {
   const file = configFile()
   // A running MCP server keeps its old code after an update, and its relay calls then fail on the build check.
   // Stamping the runtime's fingerprint into the entry changes the config whenever the runtime changes, which
   // makes opencode restart the server with the new code.
-  const renamed = removeMcp(LEGACY_MCP_NAME)
   const existing = mcpServers()[MCP_NAME]
+  if (existing && !ownedMcp(existing, previousEntry)) return undefined
+  const renamed = removeMcp(LEGACY_MCP_NAME, previousEntry)
   // The shim of an npm install never changes and swaps the server itself after an update, so its entry stays the same.
   const server = mergedMcpServer(existing, [process.execPath, entry, "mcp"], entry === layout.shim ? "auto-update" : fingerprint(entry))
   if (existing && JSON.stringify(existing) === JSON.stringify(server)) return `"${MCP_NAME}" is up to date`
@@ -283,10 +297,10 @@ function configureMcp(entry: string) {
   return existing ? `"${MCP_NAME}" updated in ${file}` : `"${MCP_NAME}" added to ${file}`
 }
 
-function removeMcp(name: string) {
+function removeMcp(name: string, entry?: string) {
   const file = configFile()
   const text = readFileOr(file, "")
-  if (!text || !mcpServers()[name]) return false
+  if (!text || !ownedMcp(mcpServers()[name], entry)) return false
   writeFileSync(file, applyEdits(text, modify(text, ["mcp", "servers", name], undefined, {})))
   return true
 }
@@ -342,10 +356,10 @@ async function installRuntime(): Promise<{ entry: string; version: string }> {
   const before = readCurrent(layout)
   // Already installed (install run again): keep it. Reinstalling would replace the files a running relay still loads.
   const existing = versionEntry(layout, opencodeBrowserVersion)
-  const reuse = !spec && existsSync(existing) && spawnSync(process.execPath, [existing, "--version"], { encoding: "utf8", timeout: 30_000 }).stdout?.trim() === opencodeBrowserVersion
+  const reuse = !spec && existsSync(existing) && readFileSync(existing).equals(readFileSync(path.join(packageRoot, "dist", "cli.mjs"))) && spawnSync(process.execPath, [existing, "--version"], { encoding: "utf8", timeout: 30_000 }).stdout?.trim() === opencodeBrowserVersion
   let installed: string
   try {
-    installed = reuse ? existing : await installVersion({ layout, version: opencodeBrowserVersion, ...(spec ? { spec } : {}) })
+    installed = reuse ? existing : await installVersion({ layout, version: opencodeBrowserVersion, ...(spec ? { spec } : { runningPackage: packageRoot }) })
   } catch (error) {
     fail(`Could not install ${spec ?? `${PACKAGE}@${opencodeBrowserVersion}`}: ${(error as Error).message}`)
   }
@@ -396,27 +410,68 @@ async function syncDev() {
 
 async function install(args: string[]) {
   checkNode()
+  const tty = !!(process.stdin.isTTY && process.stdout.isTTY)
+  const timeoutMs = installWaitTimeout(args, tty)
+  const requested = args.flatMap((arg, i) => arg === "--agent" ? [args[i + 1] ?? ""] : [])
+  for (const name of requested) if (!["opencode", ...agentNames].includes(name)) fail(`Unknown agent ${JSON.stringify(name)}. Choose opencode, ${agentNames.join(", ")}.`)
   const opencode = findOpencode(args)
+  const caller = !requested.length ? callingAgent(process.env) : undefined
+  const allAgents = args.includes("--all-agents") || args.includes("--yes")
 
   mkdirSync(files.dir, { recursive: true })
   const { entry, version } = await installRuntime()
   log(`✓ Browse ${version} installed${fromSource ? " (from source)" : ""}`)
-  writeFileSync(files.settings, JSON.stringify({ ...(opencode ? { opencode } : {}), entry, version } satisfies Settings, null, 2) + "\n")
+  const previous = readJson<Settings>(files.settings)
+  const agents = previous?.agents ?? []
+  const declined = new Set(previous?.declinedAgents ?? [])
+  const save = () => writeFileSync(files.settings, JSON.stringify({ ...(opencode ? { opencode } : {}), entry, version, agents, declinedAgents: [...declined] } satisfies Settings, null, 2) + "\n")
+  save()
   if (removeLegacyHost()) log("✓ Removed the native messaging host of an earlier version")
 
   const node = process.execPath
-  log(opencode ? `✓ Using opencode at ${opencode}` : "! opencode not found. Install it (https://opencode.ai), or add the browse server to another MCP client (see the README).")
-  const mcp = configureMcp(entry)
-  log(`✓ MCP server ${mcp}`)
+  const addOpencode = (opencode && ((!requested.length && !caller) || allAgents || args.includes("--opencode"))) || requested.includes("opencode")
+  if (addOpencode) {
+    const mcp = configureMcp(entry, previous?.entry)
+    log(mcp ? `✓ MCP server ${mcp} (opencode)` : `! opencode already has a different server named browse in ${configFile()}; left unchanged.`)
+  } else if (opencode && caller) log(`To add opencode: ${cliCommand("install --agent opencode")}`)
+  for (const agent of agentLocations(home, configRoot, findOnPath)) {
+    const explicit = requested.includes(agent.name) || agent.name === caller
+    if (!explicit && (!agent.installed || (requested.length && !args.includes("--all-agents")))) continue
+    let consent = explicit || allAgents
+    const label = agentLabels[agent.name]
+    if (!consent && !caller && tty && !declined.has(agent.name)) {
+      const prompt = createInterface({ input: process.stdin, output: process.stdout })
+      consent = /^y(es)?$/i.test((await prompt.question(`Add Browse to ${label}? [y/N] `).finally(() => prompt.close())).trim())
+      if (!consent) { declined.add(agent.name); save() }
+    }
+    if (!consent) { log(`To add ${label}: ${cliCommand(`install --agent ${agent.name}`)}`); continue }
+    const receipt = { name: agent.name, file: agent.file, entry, node }
+    try {
+      const result = editAgentConfig(receipt)
+      if (result === "added") {
+        const i = agents.findIndex(a => a.file === agent.file)
+        if (i !== -1) agents.splice(i, 1)
+        agents.push(receipt)
+      }
+      if (result !== "conflict" && (declined.delete(agent.name) || result === "added")) save()
+      if (result === "conflict") process.exitCode = 1
+      log(result === "conflict" ? `! ${agent.name} already has a different browse server; left ${agent.file} unchanged.` : `✓ ${agent.name}: browse ${result} in ${agent.file}`)
+    } catch {
+      process.exitCode = 1
+      log(`! Couldn't edit ${agent.file} for ${agent.name}. Check its syntax and permissions, then run ${cliCommand(`install --agent ${agent.name}`)}.`)
+    }
+  }
   for (const line of restartOutdatedRelay(entry, node) ?? []) log(line)
-  const legacy = legacyBrowserControl()
+  const legacy = addOpencode ? legacyBrowserControl() : []
   if (legacy.length)
     log(`! Browser Control MCP server${legacy.length === 1 ? "" : "s"} ${legacy.map((name) => `"${name}"`).join(", ")} also configured. Browse replaces it; remove ${legacy.length === 1 ? "it" : "them"} from ${configFile()} to avoid two sets of browser tools.`)
 
   await syncDev()
-  const connected = await connectedExtension()
+  const initial = await settledExtensionStatus(entry)
+  const connected = initial?.connected ? initial : undefined
+  const pairedOffline = initial?.pairingState === "paired-offline"
   const folder = unpackedFolder()
-  if (folder) {
+  if (folder && !pairedOffline) {
     // The unpacked extension finds a one-time code in its own folder and exchanges it for its key, without a step.
     pairUnpacked()
     log("✓ Put a one-time pairing code in the unpacked extension (good for an hour)")
@@ -430,82 +485,80 @@ async function install(args: string[]) {
   // Over SSH the browsers here aren't the ones the user looks at, so they aren't scanned.
   const ssh = !!(process.env.SSH_CONNECTION || process.env.SSH_TTY)
   const detections = ssh ? [] : detectBrowsers()
+  rmSync(oldStoreMarker(), { force: true })
+  const checkStore = (scanned: Detection[]) => {
+    const matches = scanned.flatMap(d => d.enabled).filter(m => STORE_IDS.includes(m.id))
+    if (!matches.length || !matches.every(oldStoreBuild)) return true
+    writeFileSync(oldStoreMarker(), "2\n")
+    ensureRelay(entry)
+    log(`! Found Browse ${matches[0]!.version} in ${matches[0]!.browser.name}. ${extensionProtocolAdvice(2, { install: cliCommand("install") })}`)
+    process.exitCode = 1
+    return false
+  }
+  if (!connected && !checkStore(detections)) return
   const env = {
     ssh,
     display: process.platform !== "linux" || !!(process.env.DISPLAY || process.env.WAYLAND_DISPLAY),
-    tty: !!process.stdout.isTTY,
+    tty,
     platform: process.platform,
   }
   const found = locateExtension({
     allowOpen: !args.includes("--no-open"),
     connected: !!connected,
+    pairedOffline,
     ...(folder ? { folder } : {}),
     detections,
     preferred: ssh ? undefined : defaultBrowser(detections.map((detection) => detection.browser)),
     env,
   })
-  const pairStore = (scanned: Detection[]) =>
-    pairStoreExtension({ detections: scanned, preferred: ssh ? undefined : defaultBrowser(scanned.map((detection) => detection.browser)), allowOpen: !args.includes("--no-open"), env, code: () => mintPairingCode() })
-  if (found === "ready" && !connected && pairStore(detections) === "opened") return awaitConnection(entry)
-  const wait = found === "guided" && env.tty && !ssh && !args.includes("--no-wait")
-  // Loading unpacked connects at once.
-  if (wait && folder) return awaitConnection(entry)
-  // A store install still has to pair: wait for the browser to add it, then open its status page with a code.
-  if (wait && STORE_URL) {
-    const added = await awaitStoreExtension()
-    if (added && pairStore(added) === "opened") return awaitConnection(entry)
-  }
-  // The MCP server entry changed: a running opencode picks it up on restart.
-  if (found === "ready" && !mcp.endsWith("up to date")) log("Restart opencode (if it's running) to load the browse tools.")
-}
-
-/**
- * After opening the store page, waits up to five minutes for a browser profile to have the store build, rescanning
- * the browsers' preferences. Returns the scan that found it, or undefined (timed out, or Ctrl+C).
- */
-async function awaitStoreExtension(): Promise<Detection[] | undefined> {
-  log("")
-  log("Waiting for Browse to be added in your browser (up to 5 minutes; Ctrl+C to skip)…")
+  if (connected || found === "off" || pairedOffline || (!folder && !STORE_URL)) return
+  ensureRelay(entry)
+  let code: string | undefined
+  const pairingCode = () => code && pendingPairingCodeKeys().includes(pairingCodeKey(code)) ? code : (code = mintPairingCode())
+  const pairStore = (scanned: Detection[]) => pairStoreExtension({ detections: scanned, preferred: defaultBrowser(scanned.map(d => d.browser)), allowOpen: !args.includes("--no-open"), env, code: pairingCode })
+  let offer = ssh ? "none" : pairStore(detections)
+  const blocked = detections.filter(d => d.blocked).map(d => d.browser.name)
+  if (offer === "none" && blocked.length) log(`Couldn't check ${blocked.join(", ")}. If Browse is already installed there, pair it manually. ${manualPair(pairingCode())}`)
+  const next = `If Browse isn't connected after you add it, run \`${cliCommand("install")}\` again to pair it.`
+  const agentNext = () => `Agent: ${offer === "opened" ? "ask the user to open Browse's status page in their browser" : offer === "manual" || blocked.length ? "ask the user to finish pairing in Browse's Options" : folder ? "ask the user to load Browse in their browser" : "ask the user to add Browse in their browser"}. Then re-run \`${cliCommand("install")}\` to finish, or call the browse status tool to check the connection.`
+  if (!env.tty) log(agentNext())
+  if (args.includes("--no-wait") || ssh || !env.display) { if (env.tty) log(next); return }
+  log(`Waiting for Browse to connect (up to ${timeoutMs / 1000}s; Ctrl+C to skip)…`)
   let stopped = false
-  const stop = () => void (stopped = true)
+  const stop = () => { stopped = true }
   process.once("SIGINT", stop)
-  let found: Detection[] | undefined
-  await waitForExtension({
-    connected: async () => {
-      if (stopped) return true
-      const scan = detectBrowsers()
-      if (scan.some((detection) => detection.enabled.some((match) => STORE_IDS.includes(match.id)))) found = scan
-      return found !== undefined
-    },
-    timeoutMs: 300_000,
-    intervalMs: 2_000,
-  })
-  process.off("SIGINT", stop)
-  if (!found) log(stopped ? "" : "! Browse wasn't added yet.")
-  if (!found) log(`Once it's added, run \`${cliCommand("install")}\` again to pair it.`)
-  return found
+  try {
+    const deadline = Date.now() + timeoutMs
+    do {
+      const status = await extensionStatus(!args.includes("--no-open") && (offer === "opened" || (offer === "none" && !blocked.length)))
+      if (status?.protocolCompatible === false) return fail(extensionProtocolAdvice(status.protocolVersion, { install: installCommand() }))
+      if (status?.connected) return log(connectedMessage)
+      if (status?.pairingState === "paired-offline") return log(pairedOfflineMessage)
+      if (!folder && offer === "none") {
+        const scan = detectBrowsers()
+        if (!checkStore(scan)) return
+        if (scan.some(d => d.enabled.length)) offer = pairStore(scan)
+      }
+      await new Promise(resolve => setTimeout(resolve, Math.max(0, Math.min(1000, deadline - Date.now()))))
+    } while (!stopped && Date.now() < deadline)
+    if (!env.tty) return log(`! Not connected yet. ${agentNext()}`)
+    log(`! Not connected yet. ${code ? manualPair(pairingCode()) : next}`)
+    process.exitCode = 1
+  } finally { process.off("SIGINT", stop) }
 }
 
-/**
- * After the unpacked steps, starts the relay (so the extension connects the moment it's loaded) and waits up to two
- * minutes for it. Ctrl+C stops waiting without failing setup.
- */
-async function awaitConnection(entry: string) {
-  // Any relay-backed command starts the relay in the background; it keeps running for agents afterwards.
-  spawnSync(process.execPath, [entry, "session", "list", "--json"], { stdio: "ignore", timeout: 30_000 })
-  log("")
-  log("Waiting for the extension to connect (up to 2 minutes; Ctrl+C to skip)…")
-  const stop = () => {
-    log("")
-    log(`Stopped waiting. Once it's loaded, \`${cliCommand("status")}\` shows whether it's connected.`)
-    process.exit(0)
-  }
-  process.once("SIGINT", stop)
-  const ok = await waitForExtension({ connected: async () => (await extensionStatus())?.connected === true, timeoutMs: 120_000, intervalMs: 1_000 })
-  process.off("SIGINT", stop)
-  log(ok
-    ? "✓ Connected. Restart opencode, then ask an agent to open a page."
-    : `! Not connected yet. Finish the steps above, then check with \`${cliCommand("status")}\`.`)
+const connectedMessage = "✓ Connected. Restart your agent, then ask it to open a page."
+const pairedOfflineMessage = "! Not connected yet. Open the browser profile already paired with Browse and make sure the extension is enabled. It reconnects automatically."
+const manualPair = (code: string) => `Open the Extensions menu → Browse → Options, enter ${formatPairingCode(code)} as the pairing code, then click Pair.`
+export const installWaitTimeout = (args: string[], tty: boolean) => waitTimeout(args, tty ? 180 : 90)
+function waitTimeout(args: string[], defaultSeconds = 180) {
+  const seconds = Number(args.includes("--wait-seconds") ? flag(args, "--wait-seconds") : defaultSeconds)
+  if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > 3600) fail("--wait-seconds must be between 1 and 3600.")
+  return seconds * 1000
+}
+function ensureRelay(entry: string) {
+  const started = spawnSync(process.execPath, [entry, "session", "list", "--json"], { encoding: "utf8", timeout: 30_000 })
+  if (started.status !== 0) fail(`Couldn't start the Browse relay: ${started.stderr?.trim() || started.error?.message || `run ${cliCommand("doctor")}`}`)
 }
 
 /**
@@ -572,17 +625,27 @@ async function pair(args: string[]) {
   mkdirSync(files.dir, { recursive: true })
   if (args[0] === "--list") return listPairings()
   if (args[0] === "--revoke") return revokePairing(args[1])
-  if (args.length) {
-    log(`Usage: ${cliCommand("pair")} [--list | --revoke <browser>]`)
+  if (args.length && !(args.length === 2 && args[0] === "--wait-seconds")) {
+    log(`Usage: ${cliCommand("pair")} [--wait-seconds <seconds> | --list | --revoke <browser>]`)
     process.exitCode = 1
     return
   }
-  const code = mintPairingCode()
+  const timeoutMs = Math.min(waitTimeout(args), pairingCodeTtlMs)
+  ensureRelay(readJson<Settings>(files.settings)?.entry ?? process.argv[1]!)
+  const receipt = randomUUID()
+  const code = mintPairingCode(undefined, { receipt })
   log(`Pairing code: ${formatPairingCode(code)}`)
-  log("")
-  log(`It works once, within ${pairingCodeTtlMs / 60_000} minutes. In the browser, open Browse's status page (right-click the`)
-  log("toolbar button, then Options), enter it under Connection and click Connect. The browser then gets a key of its")
-  log(`own; \`${cliCommand("pair --list")}\` shows paired browsers and \`${cliCommand("pair --revoke <browser>")}\` unpairs one.`)
+  log(`${manualPair(code)} It works once, within ${pairingCodeTtlMs / 60_000} minutes.`)
+  log(`Waiting up to ${timeoutMs / 1000}s for that browser. Later, \`${cliCommand("pair --list")}\` shows paired browsers.`)
+  let paired: string | undefined
+  await waitForExtension({ timeoutMs, intervalMs: 500, connected: async () => {
+    const match = Object.values(readBrowserPairings()).find(browser => browser.receipt === receipt && browser.lastSeen !== undefined)
+    paired = match?.name ?? match?.id
+    return paired !== undefined
+  } })
+  if (paired) return log(`✓ Paired ${paired}.`)
+  log(`! Pairing not confirmed. For a fresh code run \`${cliCommand("pair")}\`.`)
+  process.exitCode = 1
 }
 
 /** Paired browsers, with what the relay calls them (browsers.json, browser-links.ts) when it knows. */
@@ -687,7 +750,14 @@ async function confirmSecretRemoval(args: string[]) {
 async function uninstall(args: string[]) {
   await confirmSecretRemoval(args)
   const host = removeLegacyHost()
-  const mcp = [MCP_NAME, LEGACY_MCP_NAME].filter((name) => removeMcp(name))
+  const settings = readJson<Settings>(files.settings)
+  const mcp = [MCP_NAME, LEGACY_MCP_NAME].filter((name) => removeMcp(name, settings?.entry))
+  for (const receipt of settings?.agents ?? []) {
+    try {
+      const result = editAgentConfig(receipt, true)
+      log(result === "conflict" ? `! ${receipt.file} has a changed browse server; left unchanged.` : `✓ ${receipt.name}: ${result}`)
+    } catch { fail(`Couldn't safely remove Browse from ${receipt.file}. Check its syntax and permissions, then re-run uninstall.`) }
+  }
   rmSync(files.dir, { recursive: true, force: true })
   log(`✓ Removed ${files.dir}`)
   if (host) log("✓ Removed the native messaging host of an earlier version")
@@ -695,7 +765,7 @@ async function uninstall(args: string[]) {
   log("Remove the extension from your browser to finish.")
 }
 
-type ExtensionStatus = { connected?: boolean; build?: string | null; origin?: string | null }
+type ExtensionStatus = { connected?: boolean; pairingState?: string; build?: string | null; origin?: string | null; protocolCompatible?: boolean | null; protocolVersion?: number | null }
 
 const relayBase = () => `http://127.0.0.1:${Number(process.env.OPENCODE_BROWSER_PORT) || 19988}`
 
@@ -708,19 +778,23 @@ const relayHeaders = (): Record<string, string> => {
   }
 }
 
-const extensionStatus = () =>
-  fetch(`${relayBase()}/extension/status`, { headers: relayHeaders(), signal: AbortSignal.timeout(3_000) })
+const extensionStatus = (installWaiting = false) =>
+  fetch(`${relayBase()}/extension/status`, { headers: { ...relayHeaders(), ...(installWaiting ? { "x-browse-install": "waiting" } : {}) }, signal: AbortSignal.timeout(3_000) })
     .then((response) => (response.ok ? (response.json() as Promise<ExtensionStatus>) : undefined))
     .catch(() => undefined)
 
 /** The extension connected to the relay, if any; a relay restarted moments ago waits a second or two for it. */
-async function connectedExtension() {
+async function settledExtensionStatus(entry: string) {
   let status = await extensionStatus()
+  if (!status && Object.keys(readBrowserPairings()).length) {
+    ensureRelay(entry)
+    status = await extensionStatus()
+  }
   for (let attempt = 0; status?.connected === false && attempt < 10; attempt++) {
     await new Promise((resolve) => setTimeout(resolve, 500))
     status = await extensionStatus()
   }
-  return status?.connected ? status : undefined
+  return status
 }
 
 /**
@@ -757,7 +831,8 @@ function findOnPath(name: string) {
 // ---- which browsers have the extension -------------------------------------------------------------
 
 export type Profile = { dir: string; name: string }
-export type Match = { browser: Browser; profile: Profile; id: string }
+export type Match = { browser: Browser; profile: Profile; id: string; version?: string }
+const oldStoreBuild = (match: Match) => /^0\.0\.[012]$/.test(match.version ?? "")
 /** blocked: the OS refused to read the browser's data (macOS privacy protection), so it may have the extension. */
 export type Detection = { browser: Browser; blocked: boolean; enabled: Match[]; disabled: Match[] }
 
@@ -765,6 +840,7 @@ export type Detection = { browser: Browser; blocked: boolean; enabled: Match[]; 
 export type Effects = {
   /** Opens a URL in a specific browser (and profile directory); false when it couldn't be handed to one. */
   open(browser: Browser, url: string, profile?: string): boolean
+  openDefault?(url: string): boolean
   /** Shows the folder in the file manager, selected where the OS can, so it can be dragged. */
   reveal(folder: string): boolean
   /** Puts text on the clipboard; false when there is no clipboard tool. */
@@ -775,6 +851,7 @@ export type Effects = {
 export type LocateOptions = {
   allowOpen: boolean
   connected: boolean
+  pairedOffline?: boolean
   /** The folder to load unpacked (a checkout's dist/, or a dev install's). Without one, the extension comes from the store item. */
   folder?: string
   detections: Detection[]
@@ -788,19 +865,19 @@ export type LocateOptions = {
  * Reports the browsers and profiles that have Browse. When none does (and none is connected to the relay),
  * guides installing it: from a checkout or a dev install, loading the unpacked build, with the browser's extensions page
  * opened, the folder revealed and its path copied; from a stable npm install, the Chrome Web Store item, whose page it opens.
- * Nothing opens when the browsers here aren't the ones the user looks at (SSH, no display), there is no terminal,
+ * Nothing opens when the browsers here aren't the ones the user looks at (SSH, no display),
  * with --no-open, or when a browser couldn't be checked and may already have it.
  * Returns "ready" when the extension is there, "off" when it's turned off, else "guided".
  */
 export function locateExtension(options: LocateOptions, effects: Effects = systemEffects): "ready" | "off" | "guided" {
   const { log } = effects
   const listing = options.storeUrl ?? STORE_URL
-  const ready = "✓ Agents can use Browse now. Click its toolbar button on a tab to let them use that tab too."
   const noListing = () =>
     log(`! This package doesn't know its Chrome Web Store item, so it can't install the extension. Install a released version (\`npx @opencode/browse install\`), or set up Browse from a checkout.`)
   const pairLater = () => log(`  Once it's added, run \`${cliCommand("install")}\` again to pair it with the relay.`)
+  if (options.pairedOffline) return log(pairedOfflineMessage), "ready"
   if (options.env.ssh) {
-    if (options.connected) return log(ready), "ready"
+    if (options.connected) return log(connectedMessage), "ready"
     if (options.folder) unpackedSteps({ folder: options.folder, platform: options.env.platform, log })
     else if (listing) log(`Install Browse in your browser from the Chrome Web Store: ${listing}`), pairLater()
     else noListing()
@@ -808,7 +885,8 @@ export function locateExtension(options: LocateOptions, effects: Effects = syste
   }
   reportDetections(options.detections, options.preferred, log)
   // A connected extension is installed, even somewhere the scan doesn't look (a custom profile directory, a snap).
-  if (options.connected || options.detections.some((detection) => detection.enabled.length)) return log(ready), "ready"
+  if (options.connected) return log(connectedMessage), "ready"
+  if (options.detections.some((detection) => detection.enabled.length)) return "ready"
   const off = options.detections.flatMap((detection) => detection.disabled)
   if (off.length) {
     log(`! Browse is turned off in ${off.map((match) => `${match.browser.name} (${match.profile.name})`).join(", ")}. Turn it on in the browser's extensions page.`)
@@ -816,14 +894,13 @@ export function locateExtension(options: LocateOptions, effects: Effects = syste
   }
   const blocked = options.detections.filter((detection) => detection.blocked).map((detection) => detection.browser.name)
   const target = options.preferred ?? options.detections.find((detection) => !detection.blocked)?.browser
-  const interactive = options.allowOpen && options.env.display && options.env.tty
+  const interactive = options.allowOpen && options.env.display
   if (!options.folder) {
     if (!listing) return noListing(), "guided"
-    const opened = interactive && !blocked.length && target !== undefined && effects.open(target, listing)
-    log(`Install Browse from the Chrome Web Store${opened ? ` (opened in ${target.name})` : ""}:`)
+    const opened = interactive && !blocked.length && (target ? effects.open(target, listing) : effects.openDefault?.(listing))
+    log(`Install Browse from the Chrome Web Store${opened ? ` (opened in ${target?.name ?? "your default browser"})` : ""}:`)
     log(`  ${listing}`)
     log(`  Once it's added, install pairs it with the relay (if install isn't waiting for it, run \`${cliCommand("install")}\` again).`)
-    if (blocked.length) log(`  Already installed in ${blocked.join(", ")}? Then you're set.`)
     return "guided"
   }
   // A browser that couldn't be checked may already have it: show the steps, but don't open anything over the user's work.
@@ -836,10 +913,9 @@ export function locateExtension(options: LocateOptions, effects: Effects = syste
     browser: target?.name,
     page,
     opened: act && target !== undefined && effects.open(target, page),
-    revealed: act && effects.reveal(options.folder),
-    copied: act && effects.copy(options.folder),
+    revealed: act && options.env.tty && effects.reveal(options.folder),
+    copied: act && options.env.tty && effects.copy(options.folder),
   })
-  if (blocked.length) log(`Already loaded in ${blocked.join(", ")}? Then you're set.`)
   return "guided"
 }
 
@@ -857,7 +933,7 @@ export function pairStoreExtension(
   effects: Effects = systemEffects,
 ): "opened" | "manual" | "none" {
   const ids = options.storeIds ?? STORE_IDS
-  const matches = options.detections.flatMap((detection) => detection.enabled).filter((match) => ids.includes(match.id))
+  const matches = options.detections.flatMap((detection) => detection.enabled).filter((match) => ids.includes(match.id) && !oldStoreBuild(match))
   const match = matches.find((candidate) => candidate.browser.name === options.preferred?.name) ?? matches[0]
   if (!match) return "none"
   const interactive = options.allowOpen && options.env.display && !options.env.ssh
@@ -865,7 +941,7 @@ export function pairStoreExtension(
     effects.log(`✓ Opened Browse's status page in ${match.browser.name} (${match.profile.name}) to pair it with the relay`)
     return "opened"
   }
-  effects.log(`! To pair Browse in ${match.browser.name} (${match.profile.name}), run \`${cliCommand("pair")}\` and enter the code on its status page (right-click the toolbar button, then Options).`)
+  effects.log(`To pair Browse in ${match.browser.name} (${match.profile.name}): ${manualPair(options.code())}`)
   return "manual"
 }
 
@@ -889,7 +965,6 @@ function unpackedSteps(step: {
   log("  2. Turn on Developer mode")
   log(`  3. Click Load unpacked and choose this folder${step.copied ? ` (path copied: ${paste})` : ""}, or drag it onto the page:`)
   log(`     ${step.folder}${step.revealed ? ` (shown in ${fileManager})` : ""}`)
-  log("  4. Restart opencode")
 }
 
 /** The browser's own extensions page; every Chromium browser also accepts chrome://, these rewrite it to their scheme. */
@@ -923,21 +998,23 @@ function detectBrowsers() {
     if (state.missing) return []
     // Leftover data of an uninstalled browser: nothing to open it with.
     if (state.blocked) return launcher(browser) ? [{ browser, blocked: true, enabled: [], disabled: [] }] : []
+    let blocked = false
     const matches = listProfiles(browser, state.text).flatMap((profile) => {
-      const settings = ["Secure Preferences", "Preferences"].map(
-        (file) =>
-          (parseJson(readLocked(path.join(browser.userData, profile.dir, file)).text) as { extensions?: { settings?: Record<string, ExtensionSetting> } } | undefined)
-            ?.extensions?.settings ?? {},
-      )
+      const settings = ["Secure Preferences", "Preferences"].map(file => {
+        const prefs = readLocked(path.join(browser.userData, profile.dir, file))
+        blocked ||= prefs.blocked
+        return (parseJson(prefs.text) as { extensions?: { settings?: Record<string, ExtensionSetting> } } | undefined)?.extensions?.settings ?? {}
+      })
       const id = [...STORE_IDS, UNPACKED_ID].find((candidate) => settings.some((entries) => entries[candidate]))
       if (!id) return []
       const setting = settings.find((entries) => entries[id])![id]!
-      return [{ browser, profile, id, enabled: !disabled(setting) }]
+      const version = installedExtensionVersion(id, setting)
+      return [{ browser, profile, id, ...(version ? { version } : {}), enabled: !disabled(setting) }]
     })
     return [
       {
         browser,
-        blocked: false,
+        blocked,
         enabled: matches.filter((match) => match.enabled),
         disabled: matches.filter((match) => !match.enabled),
       },
@@ -945,7 +1022,16 @@ function detectBrowsers() {
   })
 }
 
-type ExtensionSetting = { disable_reasons?: unknown }
+type ExtensionSetting = { disable_reasons?: unknown; manifest?: { version?: string }; path?: string }
+
+export function installedExtensionVersion(id: string, setting: ExtensionSetting) {
+  if (setting.manifest?.version) return setting.manifest.version
+  if (!setting.path) return undefined
+  // Chromium omits the cached manifest for unpacked installs. Packed ones also record <id>/<version>_<index>.
+  if (path.isAbsolute(setting.path)) return readJson<{ version?: string }>(path.join(setting.path, "manifest.json"))?.version
+  const packed = /^([a-p]{32})[/\\](\d+(?:\.\d+){0,3})_\d+$/.exec(setting.path)
+  return packed?.[1] === id ? packed[2] : undefined
+}
 
 function disabled(setting: ExtensionSetting) {
   const reasons = setting.disable_reasons
@@ -1044,15 +1130,14 @@ function openInBrowser(browser: Browser, url: string, profile?: string) {
     return true
   }
   if (!web) return false
-  openWithSystem(browser, url)
-  return true
+  return openWithSystem(browser, url)
 }
 
-function openWithSystem(browser: Browser, url: string) {
-  if (process.platform === "darwin") return void spawnSync("open", browser.app ? ["-a", browser.app, url] : [url])
+function openWithSystem(browser: Browser | undefined, url: string) {
+  if (process.platform === "darwin") return spawnSync("open", browser?.app ? ["-a", browser.app, url] : [url]).status === 0
   // rundll32 hands the URL to its handler without cmd parsing the & in it.
-  if (windows) return void spawnSync("rundll32", ["url.dll,FileProtocolHandler", url])
-  spawnSync("xdg-open", [url])
+  if (windows) return spawnSync("rundll32", ["url.dll,FileProtocolHandler", url]).status === 0
+  return spawnSync("xdg-open", [url]).status === 0
 }
 
 /** Shows the folder selected in its parent (Finder, Explorer), or opens the parent (Linux file managers). */
@@ -1085,7 +1170,7 @@ function copyToClipboard(text: string) {
   })
 }
 
-const systemEffects: Effects = { open: openInBrowser, reveal: revealFolder, copy: copyToClipboard, log }
+const systemEffects: Effects = { open: openInBrowser, openDefault: url => openWithSystem(undefined, url), reveal: revealFolder, copy: copyToClipboard, log }
 
 /** The browser's executable, or (macOS) just its app bundle when the executable can't be read. */
 function launcher(browser: Browser): { executable?: string } | undefined {

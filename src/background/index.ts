@@ -1,6 +1,6 @@
 // Service worker: keeps the link to the local browse relay (agent-relay.ts), which drives tabs for agents. The
-// toolbar button lets agents use the current tab, or stops them; the status page (welcome.html, also the options
-// page) shows the connection.
+// toolbar button lets agents use the current tab, or stops them (before setup, it opens the status page); the status
+// page (welcome.html, also the options page) shows the connection.
 import { AGENT_DIAGNOSTICS, STATUS_PORT, type FromStatusPage, type ToStatusPage } from "../shared/protocol"
 import { createAgentRelay } from "./agent-relay"
 import { TabCleanup } from "./tab-cleanup"
@@ -14,6 +14,10 @@ const agents = createAgentRelay({
 })
 
 chrome.action.onClicked.addListener((tab) => {
+  // Before setup (or while the relay refuses this browser, or speaks another version) a click can't reach an agent:
+  // show the status page, which says what to do, instead of queueing it silently.
+  const { status } = agents.state()
+  if (status === "unpaired" || status === "untrusted" || status === "incompatible") return void chrome.runtime.openOptionsPage()
   if (tab.id !== undefined) agents.attachTab(tab.id)
 })
 
@@ -54,7 +58,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 })
 
 chrome.runtime.onInstalled.addListener((details) => {
-  if (details.reason === "install") void chrome.tabs.create({ url: chrome.runtime.getURL("welcome.html") })
+  if (details.reason === "install") void chrome.tabs.create({ url: chrome.runtime.getURL("welcome.html?first-run") })
 })
 
 // Tab-specific badges reset when a tab navigates; the relay's state for it doesn't.

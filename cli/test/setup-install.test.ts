@@ -2,13 +2,51 @@ import { afterAll, describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { installedRuntime, locateExtension, pairStoreExtension, relayNotRestarted, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
+import { parse } from "jsonc-parser"
+import { agentNames, callingAgent, editAgentConfig } from "../src/agent-config.ts"
+import { installedExtensionVersion, installedRuntime, installWaitTimeout, locateExtension, pairStoreExtension, relayNotRestarted, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
 
 const browser = (name: string): Browser => ({ name, userData: `/data/${name}`, manifests: [], defaultIDs: [], executables: [] })
 const chrome = browser("Google Chrome")
 const edge = browser("Microsoft Edge")
 const none = (target: Browser): Detection => ({ browser: target, blocked: false, enabled: [], disabled: [] })
 const folder = "/src/browse/dist"
+
+test("identifies the calling agent, not the editor hosting a regular terminal", () => {
+  expect(callingAgent({ CLAUDECODE: "1", TERM_PROGRAM: "vscode" })).toBe("claude")
+  expect(callingAgent({ CLAUDE_CODE_ENTRYPOINT: "sdk-py" })).toBe("claude")
+  expect(callingAgent({ CODEX_THREAD_ID: "thread" })).toBe("codex")
+  expect(callingAgent({ CURSOR_AGENT: "1", TERM_PROGRAM: "vscode" })).toBe("cursor")
+  expect(callingAgent({ COPILOT_AGENT: "1", TERM_PROGRAM: "vscode" })).toBe("vscode")
+  expect(callingAgent({ AI_AGENT: "github_copilot_vscode_agent" })).toBe("vscode")
+  expect(callingAgent({ TERM_PROGRAM: "vscode", CODEX_HOME: "/home/me/.codex" })).toBeUndefined()
+})
+
+test.each([...agentNames])("%s user config: preserve unrelated settings, install twice, uninstall, refuse collisions", name => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-config-"))
+  try {
+    const key = name === "vscode" ? "servers" : "mcpServers"
+    const toml = name === "codex"
+    const file = path.join(home, toml ? "config.toml" : "mcp.json")
+    const before = toml ? '# my config\nmodel="test"\n[mcp_servers.other]\nurl="https://other"\n' : `{\n// my config\n"unrelated":true, "${key}":{"other":{"url":"https://other"}},\n}`
+    const config = () => toml ? Bun.TOML.parse(fs.readFileSync(file, "utf8")) : parse(fs.readFileSync(file, "utf8"))
+    fs.writeFileSync(file, before)
+    const original = config()
+    const receipt = { name, file, node: "/a path/node", entry: "/a path/browse.mjs" }
+    expect(editAgentConfig(receipt)).toBe("added")
+    expect(config()[toml ? "mcp_servers" : key].browse).toMatchObject({ command: receipt.node, args: [receipt.entry, "mcp"] })
+    const once = fs.readFileSync(file, "utf8")
+    expect(editAgentConfig(receipt)).toBe("unchanged")
+    expect(fs.readFileSync(file, "utf8")).toBe(once)
+    fs.writeFileSync(file, once.replace("/a path/node", "/some-other/server"))
+    expect(editAgentConfig(receipt)).toBe("conflict")
+    expect(editAgentConfig(receipt, true)).toBe("conflict")
+    fs.writeFileSync(file, once)
+    expect(editAgentConfig(receipt, true)).toBe("removed")
+    expect(config()).toEqual(original)
+    expect(fs.readFileSync(file, "utf8")).toContain("my config")
+  } finally { fs.rmSync(home, { recursive: true, force: true }) }
+})
 
 /** Runs locateExtension with recording effects: nothing real is opened, revealed or copied. */
 function run(overrides: Partial<Omit<LocateOptions, "folder">> & { folder?: string | undefined } = {}, results: { open?: boolean } = {}) {
@@ -43,7 +81,6 @@ describe("a checkout install without the extension", () => {
     expect(output).toContain("Load unpacked")
     expect(output).toContain(`${folder} (shown in Finder)`)
     expect(output).toContain("Cmd+Shift+G")
-    expect(output).toContain("Restart opencode")
     expect(output).not.toContain("chromewebstore")
   })
 
@@ -65,7 +102,6 @@ describe("a checkout install without the extension", () => {
 
   test.each([
     ["--no-open", { allowOpen: false }],
-    ["no terminal", { env: { ssh: false, display: true, tty: false, platform: "darwin" as const } }],
     ["no display", { env: { ssh: false, display: false, tty: true, platform: "linux" as const } }],
   ])("only prints the steps with %s", (_, overrides) => {
     const { outcome, calls, output } = run(overrides)
@@ -87,7 +123,8 @@ describe("a checkout install without the extension", () => {
   test("doesn't open anything when a browser couldn't be checked and may already have it", () => {
     const { calls, output } = run({ detections: [none(chrome), { ...none(edge), blocked: true }] })
     expect(calls).toEqual({ open: [], reveal: [], copy: [] })
-    expect(output).toContain("Already loaded in Microsoft Edge?")
+    expect(output).toContain("couldn't check")
+    expect(output).not.toContain("you're set")
   })
 
   test("with no Chromium browser found, names the page without opening it", () => {
@@ -99,9 +136,17 @@ describe("a checkout install without the extension", () => {
 
 describe("install with the extension", () => {
   test("a connected extension is ready", () => {
-    const { outcome, calls } = run({ connected: true })
+    const { outcome, calls, output } = run({ connected: true })
     expect(outcome).toBe("ready")
+    expect(output).toContain("Restart your agent")
     expect(calls).toEqual({ open: [], reveal: [], copy: [] })
+  })
+
+  test("a paired browser that is closed needs no new code or tab", () => {
+    const { calls, output } = run({ pairedOffline: true })
+    expect(output).toContain("Open the browser profile already paired")
+    expect(output).not.toContain("code")
+    expect(calls.open).toEqual([])
   })
 
   test("an installed extension is ready even before the relay runs", () => {
@@ -109,6 +154,7 @@ describe("install with the extension", () => {
     const { outcome, output } = run({ detections: [{ ...none(chrome), enabled: [match] }] })
     expect(outcome).toBe("ready")
     expect(output).toContain("Person 1 (unpacked)")
+    expect(output).not.toContain("Agents can use Browse now")
   })
 
   test("a turned-off extension is reported, not reinstalled", () => {
@@ -122,6 +168,11 @@ describe("install with the extension", () => {
 
 describe("an npm install without the extension", () => {
   const storeUrl = "https://chromewebstore.google.com/detail/abcdefghijklmnopabcdefghijklmnop"
+
+  test("an agent without a terminal opens the store if a display is available", () => {
+    const { calls } = run({ folder: undefined, storeUrl, env: { ssh: false, display: true, tty: false, platform: "darwin" } })
+    expect(calls.open).toEqual([["Google Chrome", storeUrl]])
+  })
 
   test("opens its channel's store page, never the unpacked steps", () => {
     const { outcome, calls, output } = run({ folder: undefined, storeUrl })
@@ -150,6 +201,12 @@ describe("an npm install without the extension", () => {
 describe("pairing the store build", () => {
   const storeId = "abcdefghijklmnopabcdefghijklmnop"
   const profile = { dir: "Profile 2", name: "Work" }
+  test("reads the packed version even when the cached store manifest is absent", () => {
+    expect(installedExtensionVersion(storeId, { path: `${storeId}/0.0.2_0` })).toBe("0.0.2")
+    expect(installedExtensionVersion(storeId, { path: `${storeId}\\0.0.3_1` })).toBe("0.0.3")
+    expect(installedExtensionVersion(storeId, { path: `${storeId}/0.0.2_0`, manifest: { version: "0.0.3" } })).toBe("0.0.3")
+    expect(installedExtensionVersion(storeId, { path: "other/0.0.2_0" })).toBeUndefined()
+  })
   const pair = (detections: Detection[], overrides: { allowOpen?: boolean; ssh?: boolean } = {}) => {
     const opened: [string, string, string | undefined][] = []
     const lines: string[] = []
@@ -173,15 +230,28 @@ describe("pairing the store build", () => {
     expect(opened).toEqual([])
   })
 
+  test("an older store copy in the default browser doesn't hide a compatible second browser", () => {
+    const { opened } = pair([
+      { ...none(chrome), enabled: [{ browser: chrome, profile, id: storeId, version: "0.0.2" }] },
+      { ...none(edge), enabled: [{ browser: edge, profile, id: storeId, version: "0.0.3" }] },
+    ])
+    expect(opened.map(([name]) => name)).toEqual(["Microsoft Edge"])
+  })
+
   test("with --no-open, says how to pair by hand", () => {
     const { outcome, opened, output } = pair([{ ...none(chrome), enabled: [{ browser: chrome, profile, id: storeId }] }], { allowOpen: false })
     expect(outcome).toBe("manual")
     expect(opened).toEqual([])
-    expect(output).toContain("pair")
+    expect(output).toContain("click Pair.")
   })
 })
 
 describe("waiting for the extension", () => {
+  test("install leaves time to report next steps to an agent but keeps the terminal wait", () => {
+    expect(installWaitTimeout([], false)).toBe(90_000)
+    expect(installWaitTimeout([], true)).toBe(180_000)
+    expect(installWaitTimeout(["--wait-seconds", "240"], false)).toBe(240_000)
+  })
   const instant = async () => {}
 
   test("returns as soon as it connects", async () => {

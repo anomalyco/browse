@@ -917,10 +917,11 @@ Common diagnoses:
   not cancel the underlying read or trigger page replacement. A cached
   `page.url()` read can still work; retry the page read after the page settles.
   Ordinary missing-locator timeouts do not receive this diagnostic.
-- `connected:false`: run a relay-backed command and allow the extension startup
-  or alarm wake-up to reconnect. A sleeping extension wakes on a 30-second
-  alarm, so the command waits up to 35 seconds. Reload the unpacked extension
-  only if that loop does not recover.
+- `connected:false`: check `extension.pairingState` and follow `extension.nextStep`.
+  `unpaired` or `refused` means Browse is installed: re-run install to pair it, **not** the store.
+  `paired-offline`: reopen the paired browser profile and enable Browse; its worker wakes every 30 seconds.
+  `not-seen`: the relay hasn't heard from a browser. If Browse is already added, open that browser and
+  rerun install. Otherwise follow install's store or Load unpacked steps.
 - Incompatible extension protocol: update either the extension or npm package;
   exact extension and relay release versions do not need to match.
 - Competing browser/profile connections: the active browser is preserved and
@@ -942,12 +943,10 @@ Common diagnoses:
   unique URL substring or explicit index.
 - All targets disappeared: dismissing Chromium's debugging banner detaches every
   tab. Ask the user to click the toolbar button on it again.
-- Extension not connecting, status page says "Not paired" or "didn't pair": the
-  browser needs its own key from the relay. Unpacked installs are paired by
-  `opencode-browser install` (or `bun run setup`); otherwise run
-  `opencode-browser pair` and have the user enter the code (it works once, within
-  10 minutes) under Connection on the status page. `pair --list` shows paired
-  browsers; `pair --revoke <browser>` unpairs one.
+- Extension installed but not paired: re-run `npx @opencode/browse install` to open its pairing link
+  (from a checkout, `bun run setup`). To pair manually, run `npx @opencode/browse pair`
+  (from the checkout root, `node cli/dist/cli.mjs pair`). This starts the relay. Have the user enter
+  the code in Browse's Options and click Connect. The terminal confirms which browser paired.
 - HTTP 401 from the relay: clients need the relay token from the data root
   (`relay-token`); the CLI and MCP server send it, other CDP clients must add
   `Authorization: Bearer <token>` or `?opencodeBrowserToken=<token>`.

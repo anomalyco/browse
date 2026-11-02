@@ -20,6 +20,9 @@
     --warn: #fbbf24;
   }
 }
+[hidden] {
+  display: none !important;
+}
 body {
   margin: 0;
   background: var(--bg);
@@ -196,4 +199,105 @@ footer {
 }
 .note code {
   font-size: 1em;
+}
+/* The first-run card: the one thing to do next, above everything else. */
+.first-run {
+  padding: 18px 20px 20px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.first-run[data-tone="ok"] {
+  border-color: color-mix(in srgb, var(--ok) 45%, var(--border));
+}
+.first-run[data-tone="warn"] {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+}
+.step-title {
+  font-size: 15px;
+}
+.step-title::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 8px;
+  border-radius: 50%;
+  vertical-align: 2px;
+  background: var(--muted);
+}
+.first-run[data-tone="ok"] .step-title::before {
+  background: var(--ok);
+}
+.first-run[data-tone="warn"] .step-title::before {
+  background: var(--warn);
+}
+.first-run[data-step="checking"] .step-title::before {
+  display: none;
+}
+.first-run p code {
+  font-size: 1em;
+  white-space: nowrap;
+}
+#step-code-label {
+  margin-top: 14px;
+}
+#step-code-label + .command {
+  margin-top: 6px;
+}
+.first-run q {
+  quotes: "“" "”";
+  color: var(--fg);
+}
+.first-run a {
+  color: inherit;
+}
+.first-run .note:empty {
+  display: none;
+}
+.pin {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.pin p {
+  font-size: 0.9em;
+}
+.glyph {
+  width: 1.15em;
+  height: 1.15em;
+  vertical-align: -0.2em;
+  fill: currentColor;
+}
+.pin-menu {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.pin-toolbar,
+.pin-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--fg);
+}
+.pin-toolbar {
+  padding: 0 7px;
+}
+.pin-row {
+  padding-right: 8px;
+}
+.pin-icon {
+  margin-left: 18px;
+  color: #2563eb;
+}
+#connection .status {
+  margin-top: 10px;
 }

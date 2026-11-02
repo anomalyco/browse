@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { channelOf, compareVersions, createAutoUpdater, pruneVersions, readCurrent, readState, runtimeLayout, updateState, validatePending, versionEntry, writeCurrent, type Layout } from "../src/auto-update.ts"
+import { channelOf, compareVersions, createAutoUpdater, installVersion, pruneVersions, readCurrent, readState, runtimeLayout, updateState, validatePending, versionEntry, writeCurrent, type Layout } from "../src/auto-update.ts"
 
 const roots: string[] = []
 afterEach(() => {
@@ -21,6 +21,21 @@ function layoutWith(versions: string[]): Layout {
 }
 
 const installed = (layout: Layout) => fs.readdirSync(layout.versions).sort()
+
+test("install keeps the running package and its dependencies when the npx cache disappears", async () => {
+  const layout = layoutWith([])
+  const cache = path.join(roots.at(-1)!, "cache with spaces", "node_modules")
+  const source = path.join(cache, "@opencode/browse")
+  fs.mkdirSync(path.join(source, "dist"), { recursive: true })
+  fs.writeFileSync(path.join(source, "package.json"), JSON.stringify({ version: "1.2.3", dependencies: { fixture: "1" } }))
+  fs.writeFileSync(path.join(source, "dist/cli.mjs"), 'import version from "fixture"; console.log(version)')
+  fs.mkdirSync(path.join(cache, "fixture"))
+  fs.writeFileSync(path.join(cache, "fixture/package.json"), JSON.stringify({ main: "index.cjs" }))
+  fs.writeFileSync(path.join(cache, "fixture/index.cjs"), 'module.exports = "1.2.3"')
+  const entry = await installVersion({ layout, version: "1.2.3", runningPackage: source })
+  fs.rmSync(cache, { recursive: true })
+  expect((await Bun.$`node ${entry} --version`.text()).trim()).toBe("1.2.3")
+})
 
 describe("channels and versions", () => {
   test("a version's channel follows its prerelease", () => {

@@ -295,6 +295,8 @@ export interface ConnectedBrowser extends Schema.Schema.Type<typeof ConnectedBro
 
 export const ExtensionStatus = Schema.Struct({
   connected: Schema.Boolean,
+  pairingState: Schema.optionalKey(Schema.Literals(["connected", "incompatible", "refused", "unpaired", "paired-offline", "not-seen"])),
+  nextStep: Schema.optionalKey(Schema.String),
   version: Schema.NullOr(Schema.String),
   /** When the connected extension was built: changes when a reload or update took effect. */
   build: Schema.optionalKey(Schema.NullOr(Schema.String)),

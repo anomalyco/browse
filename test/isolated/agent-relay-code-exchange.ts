@@ -40,6 +40,7 @@ class ScriptedRelay {
   static readonly CLOSING = 2
   static readonly CLOSED = 3
   static readonly made: ScriptedRelay[] = []
+  static protocol: { min: number; version: number } | undefined
   readonly received: Message[] = []
   readyState = ScriptedRelay.CONNECTING
   onopen: ((event: unknown) => void) | null = null
@@ -76,7 +77,7 @@ class ScriptedRelay {
       const transcript = { port: PORT, extensionNonce: this.nonces.extension, relayNonce: this.nonces.relay, extensionKey: pairing.ecdh!, relayKey: exchange.publicKey }
       if (pairing.mode === "code") {
         this.exchange = { secret: exchange.secret, transcript }
-        return this.deliver({ method: "auth.challenge", params: { nonce: this.nonces.relay, ecdh: exchange.publicKey } })
+        return this.deliver({ method: "auth.challenge", params: { nonce: this.nonces.relay, ecdh: exchange.publicKey, protocol: ScriptedRelay.protocol } })
       }
       const session = pairingSessionKey(fs.readFileSync(legacyPairingCodePath(root), "utf8").trim(), exchange.secret, transcript)
       this.issue = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url")
@@ -124,7 +125,9 @@ async function until(check: () => boolean | Promise<boolean>) {
 
 test("without a token or a code, it waits unpaired", async () => {
   await until(() => relay.state().status === "unpaired")
-  expect(ScriptedRelay.made).toHaveLength(0)
+  await until(() => last()?.received.length === 1)
+  expect(last().received[0]).toMatchObject({ method: "protocol", params: { unpaired: true } })
+  expect(last().paired).toBe(false)
 })
 
 test("an entered code is exchanged for a token, which never crosses the connection in clear", async () => {
@@ -177,4 +180,13 @@ test("a browser still holding the old shared code is upgraded to a token once", 
   expect(token).toBe(browserToken((await stored("agentRelayProfile")).id, root))
   expect(JSON.stringify(last().received)).not.toContain(legacy)
   expect(await stored("agentRelayPairingCode")).toBeUndefined()
+})
+
+test("first code pairing keeps the protocol range from the challenge, not the later auth.token", async () => {
+  for (const version of [2, 4]) {
+    ScriptedRelay.protocol = { min: version, version }
+    const outcome = await relay.connectTo("localhost", mintPairingCode(root))
+    expect(outcome.status).toBe("incompatible")
+    expect(relay.state().skew).toBe(version === 2 ? "update-cli" : "update-extension")
+  }
 })

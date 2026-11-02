@@ -16,7 +16,8 @@
 // "off" doesn't check. OPENCODE_BROWSER_AUTO_UPDATE overrides the stored mode. The previous version stays installed for
 // `opencode-browser rollback`, which also skips the version it rolled back from until a newer one is published.
 import { spawn } from "node:child_process"
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, closeSync, cpSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { createRequire } from "node:module"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { dataRoot, fromCheckout } from "./paths.ts"
@@ -288,6 +289,29 @@ export async function fetchPublished(options: { readonly registry: string; reado
   return { version, integrity }
 }
 
+/** Copy the running npm package and its resolved runtime dependencies, preserving npm's hoisting and nested
+ * versions. Don't copy unrelated packages, dev dependencies, .bin links or leave links into an evictable npx cache. */
+function copyRunningPackage(source: string, prefix: string) {
+  const modules = path.dirname(path.dirname(source)) // node_modules/@opencode/browse
+  const seen = new Set<string>()
+  const copy = (dir: string) => {
+    if (seen.has(dir)) return
+    seen.add(dir)
+    const target = path.join(prefix, "node_modules", path.relative(modules, dir))
+    cpSync(dir, target, { recursive: true, dereference: true, filter: file => path.basename(file) !== "node_modules" })
+    const manifest = path.join(dir, "package.json")
+    const pkg = JSON.parse(readFileSync(manifest, "utf8"))
+    const require = createRequire(manifest)
+    for (const name of Object.keys({ ...pkg.dependencies, ...pkg.peerDependencies, ...pkg.optionalDependencies })) {
+      const dependency = require.resolve.paths(name)?.map(parent => path.join(parent, name)).find(candidate =>
+        candidate.startsWith(modules + path.sep) && existsSync(path.join(candidate, "package.json")))
+      if (dependency) copy(dependency)
+      else if (!pkg.optionalDependencies?.[name] && !pkg.peerDependenciesMeta?.[name]?.optional) throw new Error(`Missing installed dependency ${name} of ${pkg.name}`)
+    }
+  }
+  copy(source)
+}
+
 /**
  * Installs one version into runtime/versions/<version> and verifies it: npm checks the tarball against the registry's
  * integrity while installing; then the lockfile must record that same integrity for the package, and the installed CLI
@@ -299,6 +323,7 @@ export async function installVersion(options: {
   readonly version: string
   readonly integrity?: string
   readonly spec?: string
+  readonly runningPackage?: string
   readonly registry?: string
   readonly run?: Run
   readonly node?: string
@@ -313,9 +338,12 @@ export async function installVersion(options: {
   mkdirSync(temporary, { recursive: true })
   try {
     writeFileSync(path.join(temporary, "package.json"), "{\"private\":true}\n")
-    const args = ["install", "--prefix", temporary, "--no-audit", "--no-fund", "--ignore-scripts", "--loglevel=error", ...(options.registry ? [`--registry=${options.registry}`] : []), spec]
-    const npm = await run("npm", args, { timeoutMs: 10 * 60_000 })
-    if (npm.status !== 0) throw new Error(`npm install ${spec} failed: ${(npm.stderr || npm.stdout).trim().split("\n").slice(-3).join(" ")}`)
+    if (options.runningPackage) copyRunningPackage(options.runningPackage, temporary)
+    else {
+      const args = ["install", "--prefix", temporary, "--no-audit", "--no-fund", "--ignore-scripts", "--loglevel=error", ...(options.registry ? [`--registry=${options.registry}`] : []), spec]
+      const npm = await run("npm", args, { timeoutMs: 10 * 60_000 })
+      if (npm.status !== 0) throw new Error(`npm install ${spec} failed: ${(npm.stderr || npm.stdout).trim().split("\n").slice(-3).join(" ")}`)
+    }
     const installed = readJson<{ version?: string }>(path.join(temporary, "node_modules", "@opencode", "browse", "package.json"))?.version
     if (!installed) throw new Error(`npm install ${spec} didn't install ${PACKAGE_NAME}`)
     if (options.spec === undefined && installed !== options.version) throw new Error(`npm installed ${installed}, not ${options.version}`)

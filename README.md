@@ -21,12 +21,12 @@ npx @opencode/browse install
 ```
 
 `install` puts the relay in your data folder (`~/.local/share/opencode-browser`), adds the `browse` MCP server to
-opencode, and connects the extension:
+the agent that ran it (or opencode when installed from a regular terminal), and connects the extension:
 
 1. **Add the extension.** `install` opens Browse in the Chrome Web Store; add it to your browser, and `install` pairs
    it once it's there. If it's already there, `install` opens its status page with a one-time pairing code, so it
    pairs without copying anything.
-2. **Restart opencode.**
+2. **Restart your agent.**
 
 That's it. Ask an agent to *"open news.ycombinator.com and tell me the top story"*. Or paste this into opencode:
 *"Install browse with `npx @opencode/browse install`."*
@@ -44,9 +44,10 @@ downloads that build's extension into a folder you load unpacked once (install s
 the folder and reloads the extension. The zip is also at https://anoma.ly/release/browse/extension/dev/chromium.
 
 There's nothing to sign in to. Each browser pairs with the relay once and gets a key of its own (see
-[Security](#security)). If pairing didn't happen by itself, run `npx @opencode/browse pair` and enter the short code it
-prints under **Connection** on the extension's status page (right-click the toolbar button, then **Options**), then
-click **Connect**. `pair --list` shows the paired browsers, and `pair --revoke <browser>` unpairs one.
+[Security](#security)). If pairing didn't happen by itself, run `npx @opencode/browse install` again to open a
+pairing link. To pair by hand, run `npx @opencode/browse pair` (from a checkout: `node cli/dist/cli.mjs pair`).
+It starts the relay and waits. Open **Extensions → Browse → Options**, enter the printed code, and click **Pair**.
+The command confirms which browser paired. `pair --list` shows paired browsers; `pair --revoke <browser>` unpairs one.
 
 ### From source
 
@@ -74,13 +75,20 @@ turn the check off.
 
 ### Other MCP clients
 
-`install` writes the server into opencode's config. For other clients, add an stdio server that runs the installed
-shim, which always runs the current version (from a checkout, use `/path/to/browse/cli/dist/cli.mjs` instead):
+In a regular terminal, `install` configures opencode if installed and offers Claude Code, Cursor, Codex, VS Code
+and Windsurf. It remembers declined offers. When a supported agent runs install, only that client is added.
+You can always choose a client explicitly:
 
-```json
-{
-  "browse": { "command": "node", "args": ["/Users/you/.local/share/opencode-browser/bin/opencode-browser.mjs", "mcp"] }
-}
+```sh
+npx @opencode/browse install --agent cursor   # or claude, codex, vscode, windsurf
+```
+
+For another stdio MCP client, this prints the server entry with the **actual installed path** (npm shim or checkout)
+on macOS or Linux. On Windows, read `entry` from `%LOCALAPPDATA%\opencode-browser\settings.json` instead.
+
+```sh
+root="${OPENCODE_BROWSER_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/opencode-browser}"
+node -p 'JSON.stringify({browse: {command: process.execPath, args: [require(process.argv[1]).entry, "mcp"]}}, null, 2)' "$root/settings.json"
 ```
 
 ### Browser on another computer
