@@ -37,7 +37,7 @@ if (command === "--version" || command === "-v") {
                                  and wait for it)
     --no-open                    Print the steps without opening anything or copying the path
     --no-wait                    Don't wait for the extension to be added or connect
-    --wait-seconds <seconds>     How long to wait for a connection (default 180)
+    --wait-seconds <seconds>     How long to wait for a connection (default 180 in a terminal, 90 otherwise)
     --agent <name>               Configure this client: opencode, claude, cursor, codex, vscode, windsurf (repeatable)
     --all-agents, --yes          Configure all detected clients without prompting
   extension                      Show where to get the extension (the unpacked folder of a checkout or a dev

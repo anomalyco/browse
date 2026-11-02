@@ -4,7 +4,7 @@ import os from "node:os"
 import path from "node:path"
 import { parse } from "jsonc-parser"
 import { agentNames, editAgentConfig } from "../src/agent-config.ts"
-import { installedRuntime, locateExtension, pairStoreExtension, relayNotRestarted, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
+import { installedRuntime, installWaitTimeout, locateExtension, pairStoreExtension, relayNotRestarted, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
 
 const browser = (name: string): Browser => ({ name, userData: `/data/${name}`, manifests: [], defaultIDs: [], executables: [] })
 const chrome = browser("Google Chrome")
@@ -223,6 +223,11 @@ describe("pairing the store build", () => {
 })
 
 describe("waiting for the extension", () => {
+  test("install leaves time to report next steps to an agent but keeps the terminal wait", () => {
+    expect(installWaitTimeout([], false)).toBe(90_000)
+    expect(installWaitTimeout([], true)).toBe(180_000)
+    expect(installWaitTimeout(["--wait-seconds", "240"], false)).toBe(240_000)
+  })
   const instant = async () => {}
 
   test("returns as soon as it connects", async () => {

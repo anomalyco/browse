@@ -408,7 +408,8 @@ async function syncDev() {
 
 async function install(args: string[]) {
   checkNode()
-  const timeoutMs = waitTimeout(args)
+  const tty = !!(process.stdin.isTTY && process.stdout.isTTY)
+  const timeoutMs = installWaitTimeout(args, tty)
   const requested = args.flatMap((arg, i) => arg === "--agent" ? [args[i + 1] ?? ""] : [])
   for (const name of requested) if (!["opencode", ...agentNames].includes(name)) fail(`Unknown agent ${JSON.stringify(name)}. Choose opencode, ${agentNames.join(", ")}.`)
   const opencode = findOpencode(args)
@@ -488,7 +489,7 @@ async function install(args: string[]) {
   const env = {
     ssh,
     display: process.platform !== "linux" || !!(process.env.DISPLAY || process.env.WAYLAND_DISPLAY),
-    tty: !!process.stdout.isTTY,
+    tty,
     platform: process.platform,
   }
   const found = locateExtension({
@@ -508,7 +509,8 @@ async function install(args: string[]) {
   const blocked = detections.filter(d => d.blocked).map(d => d.browser.name)
   if (offer === "none" && blocked.length) log(`Couldn't check ${blocked.join(", ")}. If Browse is already there: ${manualPair(pairingCode())}`)
   const next = `If Browse isn't connected after you add it, run \`${cliCommand("install")}\` again to pair it.`
-  if (!env.tty) log(`Agent: ${offer !== "none" || blocked.length ? "ask the user to finish pairing in Browse's Options" : "ask the user to add Browse in their browser"}. When they say it's added, re-run \`${cliCommand("install")}\` or call the status tool to check the connection.`)
+  const agentNext = () => `Agent: ${offer === "opened" ? "ask the user to open Browse's status page in their browser" : offer === "manual" || blocked.length ? "ask the user to finish pairing in Browse's Options" : folder ? "ask the user to load Browse in their browser" : "ask the user to add Browse in their browser"}. Then re-run \`${cliCommand("install")}\` to finish, or call the browse status tool to check the connection.`
+  if (!env.tty) log(agentNext())
   if (args.includes("--no-wait") || ssh || !env.display) { if (env.tty) log(next); return }
   log(`Waiting for Browse to connect (up to ${timeoutMs / 1000}s; Ctrl+C to skip)…`)
   let stopped = false
@@ -527,6 +529,7 @@ async function install(args: string[]) {
       }
       await new Promise(resolve => setTimeout(resolve, Math.max(0, Math.min(1000, deadline - Date.now()))))
     } while (!stopped && Date.now() < deadline)
+    if (!env.tty) return log(`! Not connected yet. ${agentNext()}`)
     log(`! Not connected yet. ${code ? manualPair(mintPairingCode()) : next}`)
     process.exitCode = 1
   } finally { process.off("SIGINT", stop) }
@@ -534,8 +537,9 @@ async function install(args: string[]) {
 
 const connectedMessage = "✓ Connected.\n✓ Agents can use Browse now. Ask your agent to open a page."
 const manualPair = (code: string) => `Open the Extensions menu → Browse → Options, enter ${formatPairingCode(code)} as the pairing code, then click Connect.`
-function waitTimeout(args: string[]) {
-  const seconds = Number(args.includes("--wait-seconds") ? flag(args, "--wait-seconds") : 180)
+export const installWaitTimeout = (args: string[], tty: boolean) => waitTimeout(args, tty ? 180 : 90)
+function waitTimeout(args: string[], defaultSeconds = 180) {
+  const seconds = Number(args.includes("--wait-seconds") ? flag(args, "--wait-seconds") : defaultSeconds)
   if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > 3600) fail("--wait-seconds must be between 1 and 3600.")
   return seconds * 1000
 }
