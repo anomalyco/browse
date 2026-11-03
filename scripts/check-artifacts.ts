@@ -195,6 +195,46 @@ export async function checkPackageTarball(tarball: string, version: string, exte
   })
 }
 
+/**
+ * A platform package (cli/script/pack.ts): @opencode/browse-<target> at the release version with exactly
+ * package/bin/browse (browse.exe on Windows, mode 755), package.json and LICENSE, the os/cpu/libc npm installs by, and
+ * no install scripts. The install script (../install) downloads it from npm and runs package/bin/browse.
+ */
+export async function checkBinaryTarball(tarball: string, version: string, target: string): Promise<string[]> {
+  const label = path.basename(tarball)
+  const [os, arch, ...rest] = target.split("-")
+  const musl = rest.includes("musl")
+  const executable = `package/bin/${os === "windows" ? "browse.exe" : "browse"}`
+  const problems: string[] = []
+  const listing = (await $`tar -tvzf ${tarball}`.quiet().text()).split("\n").filter(Boolean)
+  const entries = new Map(listing.map((line) => [line.split(/\s+/).pop()!, line.slice(0, 10)]))
+  const expected = ["package/package.json", "package/LICENSE", executable]
+  for (const name of entries.keys()) if (!expected.includes(name)) problems.push(`${label}: unexpected entry ${name}`)
+  for (const name of expected) if (!entries.has(name)) problems.push(`${label}: missing ${name}`)
+  if (entries.has(executable) && entries.get(executable) !== "-rwxr-xr-x") problems.push(`${label}: ${executable} has mode ${entries.get(executable)}, expected -rwxr-xr-x`)
+  if (problems.length) return problems
+  const pkg = JSON.parse(await $`tar -xzOf ${tarball} package/package.json`.quiet().text()) as {
+    name?: string
+    version?: string
+    os?: string[]
+    cpu?: string[]
+    libc?: string[]
+    bin?: unknown
+    scripts?: Record<string, string>
+    publishConfig?: Record<string, unknown>
+  }
+  const want = { name: `@opencode/browse-${target}`, version, os: [os === "windows" ? "win32" : os], cpu: [arch], libc: os === "linux" ? [musl ? "musl" : "glibc"] : undefined }
+  for (const key of ["name", "version", "os", "cpu", "libc"] as const)
+    if (JSON.stringify(pkg[key]) !== JSON.stringify(want[key])) problems.push(`${label}: ${key} is ${JSON.stringify(pkg[key])}, expected ${JSON.stringify(want[key])}`)
+  if (pkg.scripts && Object.keys(pkg.scripts).length) problems.push(`${label}: has scripts; installs must not run code`)
+  if (pkg.bin !== undefined) problems.push(`${label}: has bin; the install script runs package/bin directly`)
+  if (Object.keys(pkg.publishConfig ?? {}).some((key) => key !== "access")) problems.push(`${label}: sets publishConfig beyond access`)
+  const head = Buffer.from(await $`tar -xzOf ${tarball} ${executable} | head -c 4`.quiet().nothrow().arrayBuffer())
+  const magic = os === "windows" ? "4d5a" : os === "darwin" ? "cffaedfe" : "7f454c46"
+  if (!head.toString("hex").startsWith(magic)) problems.push(`${label}: ${executable} isn't a ${os} executable`)
+  return problems
+}
+
 if (import.meta.main) {
   const { values } = parseArgs({ options: { version: { type: "string" }, zip: { type: "string" }, tarball: { type: "string" } } })
   if (!values.version || (!values.zip && !values.tarball)) {

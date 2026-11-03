@@ -66,6 +66,14 @@ jobs:
       - name: Release artifacts check
         run: bun run release:check
 
+      # The release builds a binary per platform (cli/script/compile.ts); this host's one shows a compile break early.
+      - name: Compile and pack the linux-x64 binary
+        working-directory: cli
+        run: |
+          bun script/compile.ts linux-x64
+          ./dist-bin/browse-linux-x64/bin/browse --version
+          bun script/pack.ts
+
       # The scripts the release jobs that hold secrets run (.github/release/); shellcheck comes with the runner image.
       - name: Shellcheck release scripts
         run: shellcheck -x .github/release/*.sh

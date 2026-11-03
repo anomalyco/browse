@@ -6,7 +6,10 @@
 # the environment the workflow sets (BROWSE_VERSION, BROWSE_CHANNEL, BROWSE_NPM_TAG, BROWSE_DRY_RUN, ...).
 
 set -euo pipefail
-shopt -s inherit_errexit
+# macOS /bin/bash (sign-macos.sh) is 3.2, which lacks inherit_errexit.
+if [ "${BASH_VERSINFO[0]}" -gt 4 ] || { [ "${BASH_VERSINFO[0]}" = 4 ] && [ "${BASH_VERSINFO[1]}" -ge 4 ]; }; then
+  shopt -s inherit_errexit
+fi
 
 die() {
   echo "::error::$*" >&2
