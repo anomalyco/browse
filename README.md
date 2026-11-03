@@ -320,7 +320,8 @@ bun run release:check            # the store zip and npm tarball a release would
 ```
 
 `cli/` is the npm package `@opencode/browse` with its own lockfile. The extension and the package share one version;
-[RELEASING.md](RELEASING.md) has the release flow (dev builds from `dev`, `bun run release` fast-forwards `production` for a stable release).
+[RELEASING.md](RELEASING.md) has the release flow (dev builds from every push to `dev`; stable releases only from the
+Release workflow in GitHub Actions).
 
 ## License
 

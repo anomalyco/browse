@@ -1,6 +1,7 @@
 node_modules/
 dist/
-release/
+/release/
 # One-time pairing code written by `install` (see cli/src/browser-pairing.ts)
 relay-pairing.json
 cli/LICENSE
+release-notes.md

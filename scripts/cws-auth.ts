@@ -1,7 +1,7 @@
 // Gets the Chrome Web Store API refresh token the release workflow uses, once, on your own computer:
 //   bun scripts/cws-auth.ts                 prints the refresh token once
 //   bun scripts/cws-auth.ts --set-secret    stores it straight into GitHub (gh secret set CWS_REFRESH_TOKEN
-//                                           --env chrome-web-store), so it never shows on screen
+//                                           --env release), so it never shows on screen
 // It asks for the OAuth client's ID and secret (or reads CWS_CLIENT_ID / CWS_CLIENT_SECRET), opens Google's consent page
 // in your browser with PKCE, receives the code on a one-time 127.0.0.1 redirect, and exchanges it. Nothing is written to
 // disk. Sign in as the Google account that owns (or is a member of) the Chrome Web Store publisher.
@@ -128,14 +128,14 @@ async function main() {
 
   if (values["set-secret"]) {
     const repo = values.repo ?? REPO
-    const result = spawnSync("gh", ["secret", "set", "CWS_REFRESH_TOKEN", "--env", "chrome-web-store", "--repo", repo], {
+    const result = spawnSync("gh", ["secret", "set", "CWS_REFRESH_TOKEN", "--env", "release", "--repo", repo], {
       input: body.refresh_token,
       stdio: ["pipe", "inherit", "inherit"],
     })
     if (result.status !== 0) throw new Error("gh secret set failed (is gh installed and signed in with admin access to the repo?). Run without --set-secret to print the token instead.")
-    console.error(`✓ Stored CWS_REFRESH_TOKEN in the chrome-web-store environment of ${repo}.`)
+    console.error(`✓ Stored CWS_REFRESH_TOKEN in the release environment of ${repo}.`)
   } else {
-    console.error("Refresh token (shown once; store it as the CWS_REFRESH_TOKEN secret of the chrome-web-store environment, then clear your terminal):")
+    console.error("Refresh token (shown once; store it as the CWS_REFRESH_TOKEN secret of the release environment, then clear your terminal):")
     process.stdout.write(`${body.refresh_token}\n`)
   }
 }
