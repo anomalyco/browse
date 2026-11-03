@@ -1,4 +1,4 @@
-# Installs Browse on Windows: downloads the browse binary for this computer into ~\.browse\bin, then hands over to
+# Installs browse on Windows: downloads the browse binary for this computer into ~\.browse\bin, then hands over to
 # `browse install`, which does the rest (PATH, your agents, pairing with your browser). Served at
 # https://opencode.ai/browse/install.ps1; the PowerShell twin of ./install.
 #
@@ -19,7 +19,7 @@
 #       --no-setup          Only install the binary; don't run `browse install`
 # Anything else goes to `browse install`, e.g. --remote, --agent claude or --no-modify-path.
 
-function Install-Browse {
+function Install-browse {
     param([string[]]$Arguments)
     # Everything runs in this function so a failure stops it without closing the window `irm | iex` runs in.
     $ErrorActionPreference = "Stop"
@@ -36,7 +36,7 @@ function Install-Browse {
         switch -Regex ($arg) {
             "^(-h|--help|-Help)$" {
                 Write-Host @"
-Browse installer
+browse installer
 
 Usage:
   irm https://opencode.ai/browse/install.ps1 | iex
@@ -89,7 +89,7 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
         if ($binary) {
             if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "Binary not found at $binary" }
             Write-Host ""
-            Write-Host "Installing Browse from: $binary"
+            Write-Host "Installing browse from: $binary"
             $source = (Resolve-Path -LiteralPath $binary).Path
         } else {
             $arch = $null
@@ -99,7 +99,7 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
                 "^(X64|AMD64)$" { "x64" }
                 # Windows on ARM runs the x64 build under emulation; the baseline build doesn't need AVX2.
                 "^(Arm64|ARM64)$" { "x64-baseline" }
-                default { throw "Unsupported architecture: $arch. Browse runs on 64-bit Windows." }
+                default { throw "Unsupported architecture: $arch. browse runs on 64-bit Windows." }
             }
             if ($target -eq "x64") {
                 $avx2 = $false
@@ -113,14 +113,14 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
             $encoded = "@opencode%2fbrowse-windows-$target"
             if (-not $requested) {
                 try { $version = (Invoke-RestMethod -UseBasicParsing "https://registry.npmjs.org/$encoded/$channel").version } catch { $version = $null }
-                if (-not $version) { throw "Failed to fetch the latest Browse version for windows-$target" }
+                if (-not $version) { throw "Failed to fetch the latest browse version for windows-$target" }
             } else {
                 $version = $requested -replace "^v", ""
                 try { Invoke-RestMethod -UseBasicParsing "https://registry.npmjs.org/$encoded/$version" | Out-Null }
                 catch {
                     $status = $null
                     try { $status = [int]$_.Exception.Response.StatusCode } catch {}
-                    if ($status -eq 404) { throw "Browse $version is not available for windows-$target. Available versions: https://www.npmjs.com/package/${package}?activeTab=versions" }
+                    if ($status -eq 404) { throw "browse $version is not available for windows-$target. Available versions: https://www.npmjs.com/package/${package}?activeTab=versions" }
                     throw "Failed to fetch package information: $($_.Exception.Message)"
                 }
             }
@@ -128,7 +128,7 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
             $filename = "browse-windows-$target-$version.tgz"
             $archive = Join-Path $tmp $filename
             Write-Host ""
-            Write-Host "Installing Browse version: $version"
+            Write-Host "Installing browse version: $version"
             Invoke-WebRequest -UseBasicParsing -Uri "https://registry.npmjs.org/$package/-/$filename" -OutFile $archive
 
             # Windows 10 and later ship bsdtar as System32\tar.exe; another tar on PATH (Git's) can't read C:\ paths.
@@ -157,7 +157,7 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
 
     if ($noSetup) {
         Write-Host ""
-        Write-Host "Run $exe install to add Browse to your agents and pair it with your browser."
+        Write-Host "Run $exe install to add browse to your agents and pair it with your browser."
         return
     }
     Write-Host ""
@@ -165,7 +165,7 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
 }
 
 try {
-    Install-Browse -Arguments $args
+    Install-browse -Arguments $args
 } catch {
     Write-Host "Error: $($_.Exception.Message)" -ForegroundColor Red
     $global:LASTEXITCODE = 1

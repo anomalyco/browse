@@ -569,7 +569,7 @@ export function switchVersion(layout: Layout, version: string, previous: string 
  */
 export function shimSource(): string {
   return `#!/usr/bin/env node
-// Browse's stable entry, written by install (cli/src/auto-update.ts). opencode's browse MCP server runs this
+// browse's stable entry, written by install (cli/src/auto-update.ts). opencode's browse MCP server runs this
 // file, so its configuration never changes when the runtime updates. Don't edit; install rewrites it.
 import { spawn } from "node:child_process"
 import { readFileSync } from "node:fs"

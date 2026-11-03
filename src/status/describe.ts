@@ -22,7 +22,7 @@ export function relayResultText(result: RelayResult["status"], address: string, 
         : `No relay answered ${at}. Check the address, that an agent has started the relay there, and that \`browse set hostname 0.0.0.0\` was run there.`,
     unpaired: `The relay ${at} answered, but this browser isn't paired with it. Run \`browse pair\` there and enter the code it prints.`,
     untrusted: `The relay ${at} didn't accept the pairing. Run \`browse pair\` there and enter the new code it prints.`,
-    conflict: `The relay ${at} answered, but Browse in another browser or profile is connected to it.`,
+    conflict: `The relay ${at} answered, but browse in another browser or profile is connected to it.`,
     incompatible: `The relay ${at} and this extension speak different protocols. Update both, then reconnect.`,
   }[result]
 }
@@ -41,7 +41,7 @@ export function describeStatus(state: AgentRelayState, unpacked: boolean) {
   }
   if (state.status === "connecting") return "Connecting to the relay…"
   if (state.status === "conflict")
-    return "Browse in another browser or profile is connected. Close it there (or quit that browser), then click Reconnect."
+    return "browse in another browser or profile is connected. Close it there (or quit that browser), then click Reconnect."
   if (state.status === "incompatible" && state.skew === "update-cli")
     return `This extension is newer than the browse CLI on this computer. Update the CLI: run \`${installCommand}\` (with automatic updates on, it catches up by itself within a day), then click Reconnect.`
   if (state.status === "incompatible" && state.skew === "update-extension")

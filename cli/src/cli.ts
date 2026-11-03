@@ -127,7 +127,7 @@ const ensureCliRelay = Effect.fnUntraced(function* () {
   const relay = yield* RelayClient.Service
   const readiness = yield* RelayLifecycle.ensureRelay({ relay })
   if (readiness.started) {
-    yield* Console.error(`Started Browse relay at ${relay.endpoint}`)
+    yield* Console.error(`Started browse relay at ${relay.endpoint}`)
   }
   if (readiness.buildProblem) {
     return yield* Effect.fail(new Error(readiness.buildProblem))
@@ -142,7 +142,7 @@ const ensureCliRelayAndExtension = Effect.fnUntraced(function* (sessionId?: stri
     relay,
     sessionId,
     waitForReconnect: RelayLifecycle.shouldWaitForExtensionReconnect(readiness),
-    onWait: Console.error(`Waiting up to ${RelayLifecycle.extensionReconnectWaitMs / 1_000}s for the Browse extension to reconnect`),
+    onWait: Console.error(`Waiting up to ${RelayLifecycle.extensionReconnectWaitMs / 1_000}s for the browse extension to reconnect`),
   })
 })
 
@@ -150,7 +150,7 @@ const resolveSelectedSessionId = Effect.fnUntraced(function* (explicitSessionId:
   const store = yield* SessionStore.Service
   const sessionId = explicitSessionId ?? (yield* store.read)
   if (!sessionId) {
-    return yield* Effect.fail(new Error("No session provided and no current Browse session exists"))
+    return yield* Effect.fail(new Error("No session provided and no current browse session exists"))
   }
   return sessionId
 })
@@ -289,13 +289,13 @@ const serve = Command.make(
     yield* Effect.scoped(
       Effect.gen(function* () {
         const relay = yield* startRelay({ port, additionalExtensionOrigins })
-        yield* Console.log(`Browse relay listening at ${relay.url}`)
-        yield* Console.log(`Browse connects automatically while the browser runs. Run \`${cliCommand("status")}\` to check.`)
+        yield* Console.log(`browse relay listening at ${relay.url}`)
+        yield* Console.log(`browse connects automatically while the browser runs. Run \`${cliCommand("status")}\` to check.`)
         yield* Effect.never
       }),
     )
   }),
-).pipe(Command.withDescription("Start the local Browse relay"))
+).pipe(Command.withDescription("Start the local browse relay"))
 
 const relayRestart = Command.make(
   "restart",
@@ -306,7 +306,7 @@ const relayRestart = Command.make(
     const relay = yield* RelayClient.Service
     yield* Console.error("Restarting the relay leaves browser tabs open but resets in-memory JavaScript state.")
     const readiness = yield* RelayLifecycle.restartRelay({ relay, clientKind: "cli", force })
-    yield* Console.log(`${readiness.started ? "Started" : "Reused concurrent replacement"} Browse relay at ${relay.endpoint} (${readiness.version.buildId})`)
+    yield* Console.log(`${readiness.started ? "Started" : "Reused concurrent replacement"} browse relay at ${relay.endpoint} (${readiness.version.buildId})`)
   }),
 ).pipe(Command.withDescription("Explicitly drain and restart the managed relay using this installation"))
 
@@ -320,7 +320,7 @@ const execute = Command.make(
   {
     code: Argument.String("code").pipe(Argument.variadic({ min: 0 })),
     file: Flag.String("file").pipe(Flag.optional, Flag.withDescription("Read execute code from a file")),
-    session: sessionFlag("Continue an existing Browse session; defaults to the OpenCode agent's session"),
+    session: sessionFlag("Continue an existing browse session; defaults to the OpenCode agent's session"),
     rm: Flag.Boolean("rm").pipe(Flag.withDefault(false), Flag.withDescription("Use a fresh one-shot session and close its tabs afterward")),
     timeoutMs: Flag.Int("timeout-ms").pipe(Flag.optional, Flag.withDescription("Overall script timeout in milliseconds (paused during handoff); defaults to 60000, 0 disables")),
     targetUrl: Flag.String("target-url").pipe(Flag.optional, Flag.withDescription("Use the attached page whose URL contains this text")),
@@ -432,7 +432,7 @@ const sessionNew = Command.make(
     yield* store.write(result.id)
     yield* Console.log(result.id)
   }),
-).pipe(Command.withDescription("Create a Browse session and make it current"))
+).pipe(Command.withDescription("Create a browse session and make it current"))
 
 const sessionList = Command.make(
   "list",
@@ -462,7 +462,7 @@ const sessionList = Command.make(
       return Console.log(`${marker} ${item.id} ${page}${keys}${readOnly}${allowed}`)
     })
   }),
-).pipe(Command.withDescription("List Browse sessions"))
+).pipe(Command.withDescription("List browse sessions"))
 
 const sessionCurrent = Command.make(
   "current",
@@ -491,7 +491,7 @@ const sessionReset = Command.make(
   "reset",
   {
     id: Argument.String("id").pipe(Argument.optional),
-    session: sessionFlag("Reset this Browse session id"),
+    session: sessionFlag("Reset this browse session id"),
   },
   Effect.fn("Cli.sessionReset")(function* ({ id, session }) {
     const relay = yield* RelayClient.Service
@@ -501,12 +501,12 @@ const sessionReset = Command.make(
     if (reset.stopped) yield* Console.error(`Stopped first: ${describeStop(reset.stopped)}`)
     yield* Console.log(reset.session.id)
   }),
-).pipe(Command.withDescription("Reset a Browse session state and page"))
+).pipe(Command.withDescription("Reset a browse session state and page"))
 
 const sessionAdopt = Command.make(
   "adopt",
   {
-    session: sessionFlag("Adopt into this Browse session, creating it when it does not exist yet; omit to create a fresh readable id"),
+    session: sessionFlag("Adopt into this browse session, creating it when it does not exist yet; omit to create a fresh readable id"),
     targetUrl: Flag.String("target-url").pipe(Flag.optional, Flag.withDescription("Adopt the attached page whose URL contains this text")),
     targetIndex: Flag.Int("target-index").pipe(Flag.optional, Flag.withDescription("Adopt the attached page at this zero-based target index")),
     tabId: tabIdFlag("Adopt the user's shared tab with this Chrome tab id (the tab= value in status)"),
@@ -556,7 +556,7 @@ const sessionDelete = Command.make(
   "delete",
   {
     id: Argument.String("id").pipe(Argument.optional),
-    session: sessionFlag("Delete this Browse session id"),
+    session: sessionFlag("Delete this browse session id"),
   },
   Effect.fn("Cli.sessionDelete")(function* ({ id, session }) {
     const relay = yield* RelayClient.Service
@@ -571,7 +571,7 @@ const sessionDelete = Command.make(
     }
     yield* Console.log(sessionId)
   }),
-).pipe(Command.withDescription("Delete a Browse session"))
+).pipe(Command.withDescription("Delete a browse session"))
 
 const sessionAllow = Command.make(
   "allow",
@@ -598,7 +598,7 @@ const sessionAllow = Command.make(
 ).pipe(Command.withDescription("Set the domain allowlist of a session (the current one by default)"))
 
 const session = Command.make("session").pipe(
-  Command.withDescription("Manage Browse sessions"),
+  Command.withDescription("Manage browse sessions"),
   Command.withSubcommands([sessionNew, sessionList, sessionCurrent, sessionUse, sessionReset, sessionAdopt, sessionDelete, sessionAllow]),
 )
 
@@ -671,7 +671,7 @@ const status = Command.make(
     }
     yield* Console.log(`Extension: ${extensionStatus.connected ? "connected" : "disconnected"}${extensionStatus.version ? ` (${extensionStatus.version})` : ""}`)
     if ((extensionStatus.rejectedConnections ?? 0) > 0) {
-      yield* Console.log(`Warning: ${extensionStatus.rejectedConnections} competing browser/profile connection attempt(s) rejected; the active connection was preserved. Use Browse in one browser/profile at a time.`)
+      yield* Console.log(`Warning: ${extensionStatus.rejectedConnections} competing browser/profile connection attempt(s) rejected; the active connection was preserved. Use browse in one browser/profile at a time.`)
     }
     if (extensionStatus.nextStep) yield* Console.log(extensionStatus.nextStep)
     else if ((extensionStatus.pairingFailures ?? 0) > 0 && !extensionStatus.connected) {
@@ -729,7 +729,7 @@ const recordingStart = Command.make(
   "start",
   {
     outputPath: Argument.String("output-path").pipe(Argument.withDescription("Path to write the recording artifact; tabCapture requires .webm, CDP accepts .webm or .mp4")),
-    session: sessionFlag("Record the page for this Browse or CDP session id"),
+    session: sessionFlag("Record the page for this browse or CDP session id"),
     tabId: tabIdFlag("Record this attached Chrome tab id"),
     mode: Flag.String("mode").pipe(Flag.optional, Flag.withDescription("Recording mode: auto, tab-capture, or cdp. auto uses CDP for relay-owned tabs and tabCapture for user-owned tabs")),
     audio: Flag.Boolean("audio").pipe(Flag.withDefault(false), Flag.withDescription("Include tab audio")),
@@ -939,7 +939,7 @@ function formatNetworkResult(result: NetworkStopResponse): string {
 const networkStart = Command.make(
   "start",
   {
-    session: sessionFlag("Capture the default page for this Browse session"),
+    session: sessionFlag("Capture the default page for this browse session"),
     urlFilter: Flag.String("url").pipe(Flag.optional, Flag.withDescription("Capture only requests whose URL contains this text")),
     resourceTypes: Flag.String("resource-type").pipe(Flag.atMost(50), Flag.withDescription("Capture this Playwright resource type; repeat for multiple types")),
     content: Flag.String("content").pipe(Flag.optional, Flag.withDescription("Response and request body mode: embed (default) or omit")),
@@ -1199,10 +1199,10 @@ const deadboltConnect = Command.make(
       yield* emitJson({ connected: true, id: paired.id })
       return
     }
-    yield* Console.log(`Connected Browse to Deadbolt as client ${paired.id}.`)
+    yield* Console.log(`Connected browse to Deadbolt as client ${paired.id}.`)
     yield* Console.log("Agents can use only the logins you allow, in Deadbolt: deadbolt agents allow <site> (narrow with --login, --fields, --expires), or deadbolt agents allow --all for every login")
   }),
-).pipe(Command.withDescription("Pair Browse with Deadbolt (runs `deadbolt agents add-client browse`, which asks you to confirm) and store its client token (0600)"))
+).pipe(Command.withDescription("Pair browse with Deadbolt (runs `deadbolt agents add-client browse`, which asks you to confirm) and store its client token (0600)"))
 
 const deadboltDisconnect = Command.make(
   "disconnect",
@@ -1213,12 +1213,12 @@ const deadboltDisconnect = Command.make(
       catch: (cause) => cause instanceof Error ? cause : new Error("Could not disconnect from Deadbolt"),
     })
     if (!result.removed) {
-      yield* Console.log("Browse isn't connected to Deadbolt")
+      yield* Console.log("browse isn't connected to Deadbolt")
       return
     }
     yield* Console.log(result.revoked ? "Disconnected: the client is removed in Deadbolt and its token deleted here." : "Deleted the client token here. Deadbolt didn't confirm removing the client: check `deadbolt agents clients`.")
   }),
-).pipe(Command.withDescription("Remove Browse's Deadbolt client (in Deadbolt and here)"))
+).pipe(Command.withDescription("Remove browse's Deadbolt client (in Deadbolt and here)"))
 
 const deadboltStatus = Command.make(
   "status",
@@ -1245,7 +1245,7 @@ const deadboltStatus = Command.make(
     if (status && status.reachable) yield* Console.log(`Deadbolt ${status.version ?? ""} (protocol ${status.protocol}) is ${status.unlocked ? "unlocked" : "locked: agent sign-ins are paused until you unlock it"}`)
     else if (status) yield* Console.log(`Deadbolt isn't reachable: ${status.error}`)
   }),
-).pipe(Command.withDescription("Show whether Browse is paired with Deadbolt and whether Deadbolt is reachable and unlocked"))
+).pipe(Command.withDescription("Show whether browse is paired with Deadbolt and whether Deadbolt is reachable and unlocked"))
 
 const deadbolt = Command.make("deadbolt").pipe(
   Command.withDescription("Let agents sign in with the Deadbolt logins you grant them, without seeing any value"),
@@ -1255,7 +1255,7 @@ const deadbolt = Command.make("deadbolt").pipe(
 const journal = Command.make(
   "journal",
   {
-    session: sessionFlag("Show the journal for this Browse session id"),
+    session: sessionFlag("Show the journal for this browse session id"),
     limit: Flag.Int("limit").pipe(Flag.optional, Flag.withDescription("Number of most recent entries to show, defaults to 20")),
     json: jsonFlag,
   },
@@ -1278,7 +1278,7 @@ const journal = Command.make(
       return Console.log(formatJournalEntry(entry))
     })
   }),
-).pipe(Command.withDescription("Show what agents did in a Browse session"))
+).pipe(Command.withDescription("Show what agents did in a browse session"))
 
 const doctor = Command.make(
   "doctor",
@@ -1297,7 +1297,7 @@ const doctor = Command.make(
       yield* failExit
     }
   }),
-).pipe(Command.withDescription("Diagnose the local Browse install and runtime"))
+).pipe(Command.withDescription("Diagnose the local browse install and runtime"))
 
 const skill = Command.make(
   "skill",
@@ -1306,7 +1306,7 @@ const skill = Command.make(
     const { skillText } = yield* Effect.promise(() => import("./skill-text.ts"))
     yield* Console.log(skillText.trimEnd())
   }),
-).pipe(Command.withDescription("Print the Browse agent skill text"))
+).pipe(Command.withDescription("Print the browse agent skill text"))
 
 const tabsCleanup = Command.make(
   "cleanup",
@@ -1382,10 +1382,10 @@ const mcp = Command.make(
     const { runMcpServer } = yield* Effect.promise(() => import("./mcp.ts"))
     yield* runMcpServer
   }),
-).pipe(Command.withDescription("Run the Browse MCP server over stdio"))
+).pipe(Command.withDescription("Run the browse MCP server over stdio"))
 
 export const opencodeBrowser = Command.make("opencode-browser").pipe(
-  Command.withDescription("Control the user's existing browser through the Browse extension"),
+  Command.withDescription("Control the user's existing browser through the browse extension"),
   Command.withSubcommands([serve, relay, execute, session, tabs, settings, status, network, secrets, deadbolt, recording, flightRecorder, journal, doctor, skill, mcp]),
 )
 

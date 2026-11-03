@@ -2,7 +2,7 @@
  * Relay-level CDP guardrails.
  *
  * The relay refuses a small set of CDP methods that would destroy the user's
- * real browser state (Browse drives the user's own browser, with
+ * real browser state (browse drives the user's own browser, with
  * their real logins). Read-only sessions additionally refuse input-dispatching
  * methods so "go look at X" tasks cannot click or type.
  *
@@ -125,7 +125,7 @@ function guardStorageAccess(context: GuardContext): string | null {
   if (allowsAllStorage()) return null
   const everyOrigin = storageMethodsForAllOrigins.get(context.method)
   if (everyOrigin) {
-    return `Browse blocked ${context.method}: ${everyOrigin}. Set ${allowAllStorageEnvironmentVariable}=1 on the relay to allow it.`
+    return `browse blocked ${context.method}: ${everyOrigin}. Set ${allowAllStorageEnvironmentVariable}=1 on the relay to allow it.`
   }
   if (storageMethodsWithoutOrigin.has(context.method)) return null
   const hosts = pageHosts(context.pageUrls?.() ?? [])
@@ -137,7 +137,7 @@ function guardStorageAccess(context: GuardContext): string | null {
         return host === undefined || !hosts.includes(host)
       })
   if (outside === undefined) return null
-  return `Browse blocked ${context.method}: site storage can only be used for the hosts of this session's attached pages (${hosts.length > 0 ? hosts.join(", ") : "none"}), not ${outside}. Set ${allowAllStorageEnvironmentVariable}=1 on the relay to allow it.`
+  return `browse blocked ${context.method}: site storage can only be used for the hosts of this session's attached pages (${hosts.length > 0 ? hosts.join(", ") : "none"}), not ${outside}. Set ${allowAllStorageEnvironmentVariable}=1 on the relay to allow it.`
 }
 
 /** Schemes agents can't open: browser-internal pages, other extensions, DevTools, and local files. */
@@ -162,7 +162,7 @@ function guardNavigation(context: GuardContext): string | null {
   const hint = scheme === "file:"
     ? ` Set ${allowFileUrlsEnvironmentVariable}=1 on the relay to allow file: URLs.`
     : ""
-  return `Browse blocked ${context.method} to a ${scheme} URL: agents can't open browser-internal pages, other extensions, DevTools or local files.${hint}`
+  return `browse blocked ${context.method} to a ${scheme} URL: agents can't open browser-internal pages, other extensions, DevTools or local files.${hint}`
 }
 
 function pageHosts(urls: readonly string[]): string[] {
@@ -205,7 +205,7 @@ function guardCookieWrite(context: GuardContext): string | null {
   for (const cookie of cookies) {
     const domain = cookieDomainOf(cookie)
     if (!domain || !hosts.some((host) => cookieAppliesToHost(domain, host))) {
-      return `Browse blocked ${context.method}: cookies can only be set for the hosts of this session's attached pages (${hosts.length > 0 ? hosts.join(", ") : "none"}), not ${domain ?? "a cookie without a domain or url"}. Set ${allowAllCookiesEnvironmentVariable}=1 on the relay to allow it.`
+      return `browse blocked ${context.method}: cookies can only be set for the hosts of this session's attached pages (${hosts.length > 0 ? hosts.join(", ") : "none"}), not ${domain ?? "a cookie without a domain or url"}. Set ${allowAllCookiesEnvironmentVariable}=1 on the relay to allow it.`
     }
   }
   return null
@@ -218,15 +218,15 @@ function guardCookieWrite(context: GuardContext): string | null {
 export function guardCdpMethod(context: GuardContext): string | null {
   const reason = alwaysBlocked.get(context.method)
   if (reason) {
-    return `Browse blocked ${context.method}: ${reason}. This command is always blocked by the relay.`
+    return `browse blocked ${context.method}: ${reason}. This command is always blocked by the relay.`
   }
   if (context.method.startsWith("WebAuthn.")) {
     // A virtual authenticator would let a script register or answer passkey ceremonies as the user. Passkeys in agent
     // tabs come only from Deadbolt grants, through the relay (passkey-bridge.ts).
-    return `Browse blocked ${context.method}: agents can't drive WebAuthn or add virtual authenticators. Passkey sign-ins in agent tabs use the logins the user granted in Deadbolt. This command is always blocked by the relay.`
+    return `browse blocked ${context.method}: agents can't drive WebAuthn or add virtual authenticators. Passkey sign-ins in agent tabs use the logins the user granted in Deadbolt. This command is always blocked by the relay.`
   }
   if (context.method === "Page.bringToFront" && !allowsForeground()) {
-    return "Browse blocked Page.bringToFront: it raises the user's browser window over their work. Use handoff() when the user needs to act in the tab, or set OPENCODE_BROWSER_ALLOW_FOREGROUND=1 on the relay to allow it."
+    return "browse blocked Page.bringToFront: it raises the user's browser window over their work. Use handoff() when the user needs to act in the tab, or set OPENCODE_BROWSER_ALLOW_FOREGROUND=1 on the relay to allow it."
   }
   if ((context.method === "Storage.setCookies" || context.method === "Network.setCookies" || context.method === "Network.setCookie") && !allowsAllCookies()) {
     const rejection = guardCookieWrite(context)
@@ -244,7 +244,7 @@ export function guardCdpMethod(context: GuardContext): string | null {
     const hosts = pageHosts(context.pageUrls?.() ?? [])
     const host = typeof url === "string" ? pageHosts([url])[0] : undefined
     if (host === undefined || !hosts.includes(host)) {
-      return `Browse blocked Network.loadNetworkResource: it loads URLs with the user's credentials outside the page's same-origin policy, so only the hosts of this session's attached pages (${hosts.length > 0 ? hosts.join(", ") : "none"}) are allowed. Set ${allowAllStorageEnvironmentVariable}=1 on the relay to allow it.`
+      return `browse blocked Network.loadNetworkResource: it loads URLs with the user's credentials outside the page's same-origin policy, so only the hosts of this session's attached pages (${hosts.length > 0 ? hosts.join(", ") : "none"}) are allowed. Set ${allowAllStorageEnvironmentVariable}=1 on the relay to allow it.`
     }
   }
   if (context.readOnly && readOnlyBlockedPrefixes.some((prefix) => context.method.startsWith(prefix))) {

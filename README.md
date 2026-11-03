@@ -26,7 +26,7 @@ the agents you choose, and connects the extension:
 1. **Choose your agents.** Detected agents start checked. Type to filter, use ↑/↓ to move, Space to toggle and
    Enter to confirm. You can uncheck OpenCode, choose an agent you haven't installed yet, or choose none for CLI-only use.
    Your next interactive install starts with your last selection.
-2. **Add the extension.** `install` opens Browse in the Chrome Web Store; add it to your browser, and `install` pairs
+2. **Add the extension.** `install` opens browse in the Chrome Web Store; add it to your browser, and `install` pairs
    it once it's there. If it's already there, `install` opens its setup page with a one-time pairing code, so it
    pairs without copying anything.
 3. **Restart your agent** if it doesn't reload MCP settings automatically.
@@ -49,7 +49,7 @@ the folder and reloads the extension. The zip is also at https://anoma.ly/releas
 There's nothing to sign in to. Each browser pairs with the relay once and gets a key of its own (see
 [Security](#security)). If pairing didn't happen by itself, run `npx @opencode/browse install` again to open a
 pairing link. To pair by hand, run `npx @opencode/browse pair` (from a checkout: `node cli/dist/cli.mjs pair`).
-It starts the relay and waits. Open **Extensions → Browse → Options**, enter the printed code, and click **Pair**.
+It starts the relay and waits. Open **Extensions → browse → Options**, enter the printed code, and click **Pair**.
 The command confirms which browser paired. `pair --list` shows paired browsers; `pair --revoke <browser>` unpairs one.
 
 ### From source
@@ -72,7 +72,7 @@ steps are left for you:
 This needs [Bun](https://bun.sh) as well. A checkout never updates itself: run `node cli/dist/cli.mjs update` in your
 `browse` folder (or ask your agent to update browse), then restart opencode. It pulls the new commits (fast-forward
 only, and never over local changes), rebuilds, and requests an extension reload. If the old extension cannot accept
-the request, **reload Browse on your browser's extensions page (↻)**. The manual equivalent of `update` is
+the request, **reload browse on your browser's extensions page (↻)**. The manual equivalent of `update` is
 `git pull && bun run setup`. When there's an update, `status`, `doctor`, the extension's settings page and the agent (once
 per session) say so; browse checks the clone's remote at most every six hours. Set `OPENCODE_BROWSER_UPDATE_CHECK=0` to
 turn the check off.
@@ -90,7 +90,7 @@ npx @opencode/browse install -y       # detected clients in an ordinary shell (-
 Inside a recognized agent, `install` targets that caller automatically. Without a terminal it configures the caller
 if known, adds OpenCode if installed, and prints commands for other detected clients. No other client is added by
 default in scripts. Re-running install is additive: unchecking a client skips it, not a removal. `uninstall` removes
-the entries Browse wrote, not unrelated servers or conflicting entries.
+the entries browse wrote, not unrelated servers or conflicting entries.
 
 <details><summary>Supported agents and user-level config files</summary>
 
@@ -158,7 +158,7 @@ and the extension connects to it across the network:
 
 Pairing works as it does locally: the browser exchanges the code for a key of its own, and from then on both sides
 prove they hold that key on every connection, so anyone else on the network who reaches the port gets nothing. The
-connection itself isn't encrypted by Browse; use a network that is (Tailscale or WireGuard), not the open internet. Set
+connection itself isn't encrypted by browse; use a network that is (Tailscale or WireGuard), not the open internet. Set
 **Relay** back to `localhost` (or clear it) to go back to a relay on the browser's computer.
 
 ## Using it
@@ -189,7 +189,7 @@ connection itself isn't encrypted by Browse; use a network that is (Tailscale or
   click while a script runs takes the tab back and stops the script. Agents can't close a tab you lent them.
 - **Handoffs:** the page shows a small card with the site's origin. Do the human part, then click **Continue** on the
   card or the toolbar button.
-- **Recordings show only the page.** Nothing from Browse is drawn while a tab is recorded: no cursor, no
+- **Recordings show only the page.** Nothing from browse is drawn while a tab is recorded: no cursor, no
   labels, no handoff card (you get a system notification instead; click it to go to the tab). If notifications are
   turned off for the extension, the card is shown after all, and the recording includes it. For a demo video, ask for
   the ghost cursor with `cursor: true` on `recording_start` (`--cursor` on the CLI).
@@ -249,7 +249,7 @@ provider; see the [privacy policy](store/privacy-policy.md).
 
 ## Security
 
-Browse drives the browser you're signed in to, so it assumes that what an agent reads (a web page, an email)
+browse drives the browser you're signed in to, so it assumes that what an agent reads (a web page, an email)
 may try to steer it, and that other programs on your computer may try to use the relay.
 
 - **Relay token.** Every HTTP request and CDP connection to the relay needs the token in
@@ -268,7 +268,7 @@ may try to steer it, and that other programs on your computer may try to use the
   their own the next time they connect; `pair --revoke legacy` retires that code once they all have.
 - **Sandboxed `execute`.** Agent code runs in a separate JavaScript realm that isolates it from Node: it isn't given
   `process`, `require`, `import()`, `fs` or network modules, only a `files` helper and Playwright file options limited
-  to the temp directory, not Browse's data. The sandbox is a defense in depth, not a hard security boundary:
+  to the temp directory, not browse's data. The sandbox is a defense in depth, not a hard security boundary:
   treat code an agent runs as code running as you. The relay starts with an allowlisted environment (the basics plus
   `OPENCODE_BROWSER_*`, proxy variables and CA certificate paths), so your API keys aren't in it.
 - **CDP guardrails.** Cookie reads return only cookies for the session's own pages; cookie writes are limited to
@@ -313,7 +313,7 @@ may try to steer it, and that other programs on your computer may try to use the
   them by accident or from a prompt-injected page: the relay checks each field's frame origin from the browser's frame
   tree (and the session allowlist) before it asks Deadbolt, which checks the grant and the login's URLs against that
   origin again, and nothing is left typed in a page after a step. But a value typed into a page is in a page the agent
-  controls: a deliberately hostile agent with page-script or network hooks could capture it. Browse refuses Deadbolt
+  controls: a deliberately hostile agent with page-script or network hooks could capture it. browse refuses Deadbolt
   passwords and codes in a session whose code set up request interception or listeners, init scripts, exposed
   functions or a raw CDP session, but it can't tell a listener added with `page.evaluate()` from a normal read, and
   execute code run with `OPENCODE_BROWSER_ALLOW_NODE=1` can read anything the relay can. So grant only what you'd let

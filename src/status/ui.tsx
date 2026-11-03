@@ -103,12 +103,12 @@ export function CopyBox(props: { text: string; label?: string }) {
   )
 }
 
-/** The Browse mark and name, with an optional page name and something on the right. */
+/** The browse mark and name, with an optional page name and something on the right. */
 export function Brand(props: { page?: string; end?: JSX.Element }) {
   return (
     <header class="brand">
       <img src="/icons/icon-48.png" width="24" height="24" alt="" />
-      <span class="brand-name">Browse</span>
+      <span class="brand-name">browse</span>
       <Show when={props.page}>
         <span class="brand-page">{props.page}</span>
       </Show>

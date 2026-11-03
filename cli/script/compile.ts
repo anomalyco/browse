@@ -67,7 +67,7 @@ if (import.meta.main) {
       bytecode: true,
       sourcemap: "none",
       splitting: true,
-      // patchright-core's BiDi-over-CDP bridge (Firefox) requires chromium-bidi lazily; Browse only uses connectOverCDP.
+      // patchright-core's BiDi-over-CDP bridge (Firefox) requires chromium-bidi lazily; browse only uses connectOverCDP.
       external: ["chromium-bidi/*"],
       plugins: [
         {

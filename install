@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installs Browse: downloads the browse binary for this computer into ~/.browse/bin, then hands over to
+# Installs browse: downloads the browse binary for this computer into ~/.browse/bin, then hands over to
 # `browse install`, which does the rest (PATH, your agents, pairing with your browser). Served at
 # https://opencode.ai/browse/install. Platform detection follows opencode's installer.
 set -euo pipefail
@@ -11,7 +11,7 @@ NC='\033[0m'
 
 usage() {
     cat <<EOF
-Browse installer
+browse installer
 
 Usage: install [options] [browse install options]
 
@@ -203,7 +203,7 @@ else
         metadata=$(curl -fsSL "https://registry.npmjs.org/$encoded/$channel" || true)
         specific_version=$(echo "$metadata" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -n 1)
         if [ -z "$specific_version" ]; then
-            echo -e "${RED}Failed to fetch the latest Browse version for $target${NC}"
+            echo -e "${RED}Failed to fetch the latest browse version for $target${NC}"
             exit 1
         fi
     else
@@ -211,7 +211,7 @@ else
         specific_version=$requested_version
         http_status=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/$encoded/$specific_version" || true)
         if [ "$http_status" = "404" ]; then
-            echo -e "${RED}Error: Browse ${specific_version} is not available for $target${NC}"
+            echo -e "${RED}Error: browse ${specific_version} is not available for $target${NC}"
             echo -e "${MUTED}Available versions: https://www.npmjs.com/package/$package?activeTab=versions${NC}"
             exit 1
         fi
@@ -240,7 +240,7 @@ print_message() {
 }
 
 download_and_install() {
-    print_message info "\n${MUTED}Installing ${NC}Browse ${MUTED}version: ${NC}$specific_version"
+    print_message info "\n${MUTED}Installing ${NC}browse ${MUTED}version: ${NC}$specific_version"
     local tmp_dir="${TMPDIR:-/tmp}/browse_install_$$"
     mkdir -p "$tmp_dir"
 
@@ -263,7 +263,7 @@ download_and_install() {
 }
 
 install_from_binary() {
-    print_message info "\n${MUTED}Installing ${NC}Browse ${MUTED}from: ${NC}$binary_path"
+    print_message info "\n${MUTED}Installing ${NC}browse ${MUTED}from: ${NC}$binary_path"
     cp "$binary_path" "$INSTALL_DIR/$installed_binary.new"
     chmod 755 "$INSTALL_DIR/$installed_binary.new"
     mv -f "$INSTALL_DIR/$installed_binary.new" "$INSTALL_DIR/$installed_binary"
@@ -276,7 +276,7 @@ else
 fi
 
 if [ "$no_setup" = "true" ]; then
-    print_message info "\n${MUTED}Run ${NC}$INSTALL_DIR/$installed_binary install ${MUTED}to add Browse to your agents and pair it with your browser.${NC}"
+    print_message info "\n${MUTED}Run ${NC}$INSTALL_DIR/$installed_binary install ${MUTED}to add browse to your agents and pair it with your browser.${NC}"
     exit 0
 fi
 

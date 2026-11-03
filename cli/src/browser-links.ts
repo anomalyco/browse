@@ -33,7 +33,7 @@ export async function computerName(request: Pick<http.IncomingMessage, "socket">
 }
 
 export type BrowserLink = {
-  /** The extension's profile id: one Chrome profile with Browse. */
+  /** The extension's profile id: one Chrome profile with browse. */
   readonly key: string
   /** What agents name it: a slug of the name, unique among known browsers. */
   readonly id: string

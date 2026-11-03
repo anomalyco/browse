@@ -125,7 +125,7 @@ function waitForRelayReady(options: EnsureRelayOptions): Effect.Effect<RelayVers
     }),
     Effect.mapError((error) => isRelayStartingOrUnreachable(error)
       ? new RelayStartFailed({
-        message: `Browse relay did not start at ${options.relay.endpoint}`,
+        message: `browse relay did not start at ${options.relay.endpoint}`,
         endpoint: options.relay.endpoint,
         cause: error,
       })
@@ -221,7 +221,7 @@ function waitForRelayExitOrReplacement(options: {
 }): Effect.Effect<RelayVersion | undefined, Error | RelayClient.RelayClientError> {
   return options.relay.version.pipe(
     Effect.flatMap((version) => isSameRelayInstance(options.version, version)
-      ? Effect.fail(new RelayStillRunning("Browse relay is still draining; no replacement was started"))
+      ? Effect.fail(new RelayStillRunning("browse relay is still draining; no replacement was started"))
       : Effect.succeed(version)),
     Effect.catch((error) => isRelayUnreachable(error) ? Effect.succeed(undefined) : Effect.fail(error)),
     Effect.retry({
@@ -277,7 +277,7 @@ export const ensureExtensionConnected = Effect.fn("RelayLifecycle.ensureExtensio
     return status.connected
       ? Effect.succeed(status)
       : Effect.fail(new ExtensionDisconnected({
-        message: status.nextStep ?? `Browse extension is not connected. Open the browser with Browse installed (\`${installCommand()}\`); it reconnects automatically after relay or browser startup.`,
+        message: status.nextStep ?? `browse extension is not connected. Open the browser with browse installed (\`${installCommand()}\`); it reconnects automatically after relay or browser startup.`,
         needsPairing: status.pairingState === "refused" || status.pairingState === "unpaired",
       }))
   }))
@@ -336,7 +336,7 @@ export function startManagedRelay(
       })
       child.unref()
     },
-    catch: (cause) => cause instanceof Error ? cause : new Error("Failed to start Browse relay", { cause }),
+    catch: (cause) => cause instanceof Error ? cause : new Error("Failed to start browse relay", { cause }),
   })
 }
 

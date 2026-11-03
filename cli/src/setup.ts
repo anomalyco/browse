@@ -1,4 +1,4 @@
-// Setup for Browse, without changing opencode itself:
+// Setup for browse, without changing opencode itself:
 //   install    install the runtime, add the browse MCP server to opencode's config, then check which browsers have the
 //              extension. A stable npm install gets it from the Chrome Web Store item: when no browser has it, install
 //              opens that item's page; when one has it, install opens its status page with a one-time pairing code in
@@ -311,7 +311,7 @@ export function removeMcp(name: string, entry?: string, file = configFile()) {
   return true
 }
 
-/** MCP servers from the separate Browser Control product, which Browse replaces. */
+/** MCP servers from the separate Browser Control product, which browse replaces. */
 function legacyBrowserControl() {
   return Object.entries(mcpServers())
     .filter(([name, server]) => name === "browser-control" || JSON.stringify(server.command ?? "").includes("browser-control"))
@@ -427,10 +427,10 @@ function checkNode() {
   if (compiledBinary()) return
   // `bun run` stands in a bun shim for a missing node.
   if (process.versions.bun)
-    fail("Browse runs on Node.js 22.19 or newer, but this ran under Bun (`bun run` uses Bun when `node` isn't on PATH). Install Node.js from https://nodejs.org, then run setup again.")
+    fail("browse runs on Node.js 22.19 or newer, but this ran under Bun (`bun run` uses Bun when `node` isn't on PATH). Install Node.js from https://nodejs.org, then run setup again.")
   const [major = 0, minor = 0] = process.versions.node.split(".").map(Number)
   if (major < 22 || (major === 22 && minor < 19))
-    fail(`Browse needs Node.js 22.19 or newer; this is ${process.version} (${process.execPath}). Update Node.js (https://nodejs.org), then run setup again.`)
+    fail(`browse needs Node.js 22.19 or newer; this is ${process.version} (${process.execPath}). Update Node.js (https://nodejs.org), then run setup again.`)
 }
 
 /** The dev extension a dev npm install downloads (paths.ts devExtension); undefined for a checkout or a stable release. */
@@ -454,12 +454,12 @@ async function install(args: string[]) {
   const tty = !!(process.stdin.isTTY && process.stdout.isTTY)
   const caller = callingAgent(process.env)
   rail = tty && !caller
-  if (rail) clack.intro("Browse")
-  else if (caller) log(`${agentLabels[caller]} is running this, so Browse is set up for ${agentLabels[caller]}.`)
+  if (rail) clack.intro("browse")
+  else if (caller) log(`${agentLabels[caller]} is running this, so browse is set up for ${agentLabels[caller]}.`)
   await installSteps(args, tty, caller)
   if (!rail) return
   waiting?.stop()
-  clack.outro(process.exitCode ? "Browse isn't fully set up yet. Fix the steps above, then run browse install again."
+  clack.outro(process.exitCode ? "browse isn't fully set up yet. Fix the steps above, then run browse install again."
     : byHand ? "Done. Add the MCP server above to your agent, restart it, then ask it to open a page."
     : "Done. Restart your agents, then ask one to open a page.")
 }
@@ -478,7 +478,7 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
 
   mkdirSync(files.dir, { recursive: true })
   const { entry, version } = await installRuntime()
-  log(`✓ Browse ${version} installed${fromSource ? " (from source)" : ""}`)
+  log(`✓ browse ${version} installed${fromSource ? " (from source)" : ""}`)
   const onPath = args.includes("--no-modify-path") ? undefined : addToPath()
   if (onPath) log(`✓ Added browse to your PATH (${tilde(onPath)}). Open a new terminal to use it.`)
 
@@ -510,7 +510,7 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
       if (mcp && !opencodeConfigs.includes(agent.file)) { opencodeConfigs.push(agent.file); save() }
       if (!mcp) process.exitCode = 1
       log(!mcp ? `! ${label} already has a different server named browse in ${tilde(agent.file)}; left it unchanged.`
-        : mcp.includes("up to date") ? `✓ ${label} already has Browse` : mcp.includes("added") ? `✓ Added Browse to ${label} (${tilde(agent.file)})` : `✓ Updated Browse in ${label} (${tilde(agent.file)})`)
+        : mcp.includes("up to date") ? `✓ ${label} already has browse` : mcp.includes("added") ? `✓ Added browse to ${label} (${tilde(agent.file)})` : `✓ Updated browse in ${label} (${tilde(agent.file)})`)
       continue
     }
     const receipt: AgentReceipt = { name: agent.name, file: agent.file, entry, ...(node ? { node } : {}) }
@@ -530,7 +530,7 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
       }
       if (result === "conflict") process.exitCode = 1
       log(result === "conflict" ? `! ${label} already has a different server named browse in ${tilde(agent.file)}; left it unchanged.`
-        : result === "added" ? `✓ Added Browse to ${label} (${tilde(agent.file)})` : `✓ ${label} already has Browse`)
+        : result === "added" ? `✓ Added browse to ${label} (${tilde(agent.file)})` : `✓ ${label} already has browse`)
     } catch {
       process.exitCode = 1
       log(`! Couldn't edit ${tilde(agent.file)} for ${label}. Check its syntax and permissions, then run ${cliCommand(`install --agent ${agent.name}`)}.`)
@@ -539,7 +539,7 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
   for (const line of restartOutdatedRelay(entry) ?? []) log(line)
   const legacy = selected.includes("opencode") ? legacyBrowserControl() : []
   if (legacy.length)
-    log(`! Browser Control MCP server${legacy.length === 1 ? "" : "s"} ${legacy.map((name) => `"${name}"`).join(", ")} also configured. Browse replaces it; remove ${legacy.length === 1 ? "it" : "them"} from ${configFile()} to avoid two sets of browser tools.`)
+    log(`! Browser Control MCP server${legacy.length === 1 ? "" : "s"} ${legacy.map((name) => `"${name}"`).join(", ")} also configured. browse replaces it; remove ${legacy.length === 1 ? "it" : "them"} from ${configFile()} to avoid two sets of browser tools.`)
   if (args.includes("--remote")) return installRemote(entry, tty)
 
   await syncDev()
@@ -552,7 +552,7 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
     pairUnpacked()
     // A browser already running an older unpacked build keeps its old code until it reloads; ask it to.
     const reload = connected ? await reloadOutdatedExtension(connected, folder) : "current"
-    if (reload === "reloaded") log("✓ Reloaded Browse in your browser")
+    if (reload === "reloaded") log("✓ Reloaded browse in your browser")
     if (reload === "stale")
       return log(`! ${unpackedReloadAdvice}`)
   }
@@ -574,7 +574,7 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
     if (!matches.length || !matches.every(oldStoreBuild)) return true
     writeFileSync(oldStoreMarker(), "2\n")
     ensureRelay(entry)
-    log(`! Found Browse ${matches[0]!.version} in ${matches[0]!.browser.name}. ${extensionProtocolAdvice(2, { install: cliCommand("install") }, "store")}`)
+    log(`! Found browse ${matches[0]!.version} in ${matches[0]!.browser.name}. ${extensionProtocolAdvice(2, { install: cliCommand("install") }, "store")}`)
     process.exitCode = 1
     return false
   }
@@ -601,16 +601,16 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
   const pairStore = (scanned: Detection[]) => pairStoreExtension({ detections: scanned, preferred: defaultBrowser(scanned.map(d => d.browser)), allowOpen: !args.includes("--no-open"), env, code: pairingCode })
   let offer = ssh ? "none" : pairStore(detections)
   const blocked = detections.filter(d => d.blocked).map(d => d.browser.name)
-  if (offer === "none" && blocked.length) log(`Couldn't check ${blocked.join(", ")}. If Browse is already installed there, pair it manually. ${manualPair(pairingCode())}`)
-  const next = folder ? `If Browse is already loaded unpacked: ${unpackedReloadAdvice}` : `If Browse isn't connected after you add it, run \`${cliCommand("install")}\` again to pair it.`
+  if (offer === "none" && blocked.length) log(`Couldn't check ${blocked.join(", ")}. If browse is already installed there, pair it manually. ${manualPair(pairingCode())}`)
+  const next = folder ? `If browse is already loaded unpacked: ${unpackedReloadAdvice}` : `If browse isn't connected after you add it, run \`${cliCommand("install")}\` again to pair it.`
   const agentNext = () => {
-    if (folder && offer === "none" && !blocked.length) return `Agent: if Browse is already loaded unpacked, ask the user: ${unpackedReloadAdvice} Otherwise ask them to load ${folder}. Check the connection with the browse status tool.`
-    return `Agent: ${offer === "opened" ? "ask the user to open Browse's status page in their browser" : offer === "manual" || blocked.length ? "ask the user to finish pairing in Browse's Options" : "ask the user to add Browse in their browser"}. Then re-run \`${cliCommand("install")}\` to finish, or call the browse status tool to check the connection.`
+    if (folder && offer === "none" && !blocked.length) return `Agent: if browse is already loaded unpacked, ask the user: ${unpackedReloadAdvice} Otherwise ask them to load ${folder}. Check the connection with the browse status tool.`
+    return `Agent: ${offer === "opened" ? "ask the user to open browse's status page in their browser" : offer === "manual" || blocked.length ? "ask the user to finish pairing in browse's Options" : "ask the user to add browse in their browser"}. Then re-run \`${cliCommand("install")}\` to finish, or call the browse status tool to check the connection.`
   }
   if (!env.tty) log(agentNext())
   if (args.includes("--no-wait") || ssh || !env.display) { if (env.tty) log(next); return }
-  if (rail) (waiting = clack.spinner({ cancelMessage: "Stopped waiting", onCancel: () => { waiting = undefined } })).start(`Waiting for Browse to connect in your browser (Ctrl+C to skip)`)
-  else log(`Waiting for Browse to connect (up to ${timeoutMs / 1000}s; Ctrl+C to skip)…`)
+  if (rail) (waiting = clack.spinner({ cancelMessage: "Stopped waiting", onCancel: () => { waiting = undefined } })).start(`Waiting for browse to connect in your browser (Ctrl+C to skip)`)
+  else log(`Waiting for browse to connect (up to ${timeoutMs / 1000}s; Ctrl+C to skip)…`)
   let stopped = false
   const stop = () => { stopped = true }
   process.once("SIGINT", stop)
@@ -636,8 +636,8 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
 
 // In a terminal the outro says what to do next.
 const connectedMessage = "✓ Connected to your browser. Restart your agent, then ask it to open a page."
-const pairedOfflineMessage = "! Not connected yet. Open the browser profile already paired with Browse and make sure the extension is enabled. It reconnects automatically."
-const manualPair = (code: string) => `Open the Extensions menu → Browse → Options, enter ${formatPairingCode(code)} as the pairing code, then click Pair.`
+const pairedOfflineMessage = "! Not connected yet. Open the browser profile already paired with browse and make sure the extension is enabled. It reconnects automatically."
+const manualPair = (code: string) => `Open the Extensions menu → browse → Options, enter ${formatPairingCode(code)} as the pairing code, then click Pair.`
 export const installWaitTimeout = (args: string[], tty: boolean) => waitTimeout(args, tty ? 180 : 90)
 function waitTimeout(args: string[], defaultSeconds = 180) {
   const seconds = Number(args.includes("--wait-seconds") ? flag(args, "--wait-seconds") : defaultSeconds)
@@ -647,7 +647,7 @@ function waitTimeout(args: string[], defaultSeconds = 180) {
 function ensureRelay(entry: string) {
   const [file, ...prefix] = entryCommand(entry)
   const started = spawnSync(file!, [...prefix, "session", "list", "--json"], { encoding: "utf8", timeout: 30_000 })
-  if (started.status !== 0) fail(`Couldn't start the Browse relay: ${started.stderr?.trim() || started.error?.message || `run ${cliCommand("doctor")}`}`)
+  if (started.status !== 0) fail(`Couldn't start the browse relay: ${started.stderr?.trim() || started.error?.message || `run ${cliCommand("doctor")}`}`)
 }
 
 /**
@@ -665,10 +665,10 @@ let byHand = false
 
 function showManualMcp(command: readonly string[], caller: AgentName | undefined) {
   const json = manualMcpEntry(command)
-  if (rail) return clack.note(json, "Any agent: add Browse as an MCP server")
-  const intro = byHand ? "Add Browse to your agent as an MCP server (stdio):"
-    : caller ? "Using another agent too? Add Browse to it as an MCP server (stdio):"
-    : "Agent: if you weren't set up above, add Browse to your own MCP config (stdio):"
+  if (rail) return clack.note(json, "Any agent: add browse as an MCP server")
+  const intro = byHand ? "Add browse to your agent as an MCP server (stdio):"
+    : caller ? "Using another agent too? Add browse to it as an MCP server (stdio):"
+    : "Agent: if you weren't set up above, add browse to your own MCP config (stdio):"
   log(`\n${intro}\n${json.split("\n").map((line) => `  ${line}`).join("\n")}\n`)
 }
 
@@ -677,7 +677,7 @@ const tilde = (file: string) => (file === home || file.startsWith(home + path.se
 /**
  * A browse binary (the curl or PowerShell installer) puts its folder on PATH, so `browse` works in a new terminal:
  * the user PATH on Windows, else the shell's startup file, as opencode's installer does. Returns where it was added;
- * nothing when PATH already has it or Browse runs on Node.
+ * nothing when PATH already has it or browse runs on Node.
  */
 function addToPath(): string | undefined {
   if (/(^|[\\/])(node|bun)(\.exe)?$/i.test(process.execPath)) return undefined
@@ -778,8 +778,8 @@ export function printSetupStatus() {
 async function extension() {
   const folder = unpackedFolder()
   if (!folder) {
-    if (!STORE_URL) fail("This package doesn't know its Chrome Web Store item. Install a released version (`npx @opencode/browse install`), or set up Browse from a checkout.")
-    log(`Install Browse from the Chrome Web Store: ${STORE_URL}`)
+    if (!STORE_URL) fail("This package doesn't know its Chrome Web Store item. Install a released version (`npx @opencode/browse install`), or set up browse from a checkout.")
+    log(`Install browse from the Chrome Web Store: ${STORE_URL}`)
     log(`Then run \`${cliCommand("install")}\` again to pair it.`)
     return
   }
@@ -911,11 +911,11 @@ async function set(args: string[]) {
   if (hostname === "127.0.0.1") return
   const tailscale = Object.values(networkInterfaces()).flat().find((address) => address?.family === "IPv4" && /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(address.address))?.address
   log("")
-  log("In the browser on the other computer, open Browse's options (right-click its toolbar button, then Options),")
+  log("In the browser on the other computer, open browse's options (right-click its toolbar button, then Options),")
   log("and under Connection enter:")
   log(`  Relay         ${tailscale ?? "this computer's address"}`)
   log(`  Pairing code  ${formatPairingCode(mintPairingCode())}  (works once, within ${pairingCodeTtlMs / 60_000} minutes; \`${cliCommand("pair")}\` prints another)`)
-  log("The connection isn't encrypted by Browse: use it over Tailscale or a LAN you trust, not the open internet.")
+  log("The connection isn't encrypted by browse: use it over Tailscale or a LAN you trust, not the open internet.")
 }
 
 // ---- install --remote: a browser on another computer ----------------------------------------------
@@ -940,7 +940,7 @@ export function remoteRelayAddresses(interfaces: ReturnType<typeof networkInterf
   return [...new Set(hosts)].map((host) => host + port)
 }
 
-/** What to enter in Browse on the other computer: the relay address (and alternatives), the code and how long it lasts. */
+/** What to enter in browse on the other computer: the relay address (and alternatives), the code and how long it lasts. */
 export function remoteRelayLines(addresses: string[], code: string, ttlMs = pairingCodeTtlMs) {
   return [
     `Relay address  ${addresses[0] ?? "this computer's IP address"}`,
@@ -963,7 +963,7 @@ function magicDnsName() {
 
 /**
  * The rest of `install --remote`, after the agents here are set up: opens the relay to other computers (as `set
- * hostname 0.0.0.0` does), starts it, and prints the address and a one-time pairing code to enter in Browse on the
+ * hostname 0.0.0.0` does), starts it, and prints the address and a one-time pairing code to enter in browse on the
  * other computer. No browser here is looked for, opened or paired.
  */
 async function installRemote(entry: string, tty: boolean) {
@@ -983,16 +983,16 @@ async function installRemote(entry: string, tty: boolean) {
   const onTailnet = Object.values(interfaces).flat().some((address) => address?.family === "IPv4" && tailnetIPv4.test(address.address))
   const addresses = remoteRelayAddresses(interfaces, { port, magicDns: onTailnet ? magicDnsName() : undefined })
   const lines = remoteRelayLines(addresses, mintPairingCode())
-  const where = "In Chrome on the other computer, open Browse, choose \"Connect an agent on another computer\" and enter:"
-  if (rail) clack.note(lines.join("\n"), "Enter this in Browse on the other computer")
+  const where = "In Chrome on the other computer, open browse, choose \"Connect an agent on another computer\" and enter:"
+  if (rail) clack.note(lines.join("\n"), "Enter this in browse on the other computer")
   else {
     log("")
     log(where)
     for (const line of lines) log(line && `  ${line}`)
     log("")
   }
-  if (!onTailnet) log("! Browse doesn't encrypt this connection: use it on a network you trust, or over Tailscale, not the open internet.")
-  if (!tty) log("Agent: give the user the relay address and pairing code above to enter in Browse in their browser. The code works once and expires; if it does, run `" + cliCommand("pair") + "` for a new one.")
+  if (!onTailnet) log("! browse doesn't encrypt this connection: use it on a network you trust, or over Tailscale, not the open internet.")
+  if (!tty) log("Agent: give the user the relay address and pairing code above to enter in browse in their browser. The code works once and expires; if it does, run `" + cliCommand("pair") + "` for a new one.")
 }
 
 /** Stored secret profiles are the one thing uninstall deletes that can't be recaptured without the user. */
@@ -1016,7 +1016,7 @@ async function uninstall(args: string[]) {
     try {
       const result = editAgentConfig(receipt, true)
       log(result === "conflict" ? `! ${receipt.file} has a changed browse server; left unchanged.` : `✓ ${receipt.name}: ${result}`)
-    } catch { fail(`Couldn't safely remove Browse from ${receipt.file}. Check its syntax and permissions, then re-run uninstall.`) }
+    } catch { fail(`Couldn't safely remove browse from ${receipt.file}. Check its syntax and permissions, then re-run uninstall.`) }
   }
   const binary = readCurrent(layout)?.binary
   rmSync(files.dir, { recursive: true, force: true })
@@ -1127,7 +1127,7 @@ export type LocateOptions = {
 }
 
 /**
- * Reports the browsers and profiles that have Browse. When none does (and none is connected to the relay),
+ * Reports the browsers and profiles that have browse. When none does (and none is connected to the relay),
  * guides installing it: from a checkout or a dev install, loading the unpacked build, with the browser's extensions page
  * opened, the folder revealed and its path copied; from a stable npm install, the Chrome Web Store item, whose page it opens.
  * Nothing opens when the browsers here aren't the ones the user looks at (SSH, no display),
@@ -1138,13 +1138,13 @@ export function locateExtension(options: LocateOptions, effects: Effects = syste
   const { log } = effects
   const listing = options.storeUrl ?? STORE_URL
   const noListing = () =>
-    log(`! This package doesn't know its Chrome Web Store item, so it can't install the extension. Install a released version (\`npx @opencode/browse install\`), or set up Browse from a checkout.`)
+    log(`! This package doesn't know its Chrome Web Store item, so it can't install the extension. Install a released version (\`npx @opencode/browse install\`), or set up browse from a checkout.`)
   const pairLater = () => log(`  Once it's added, run \`${cliCommand("install")}\` again to pair it with the relay.`)
   if (options.pairedOffline) return log(pairedOfflineMessage), "ready"
   if (options.env.ssh) {
     if (options.connected) return log(connectedMessage), "ready"
     if (options.folder) unpackedSteps({ folder: options.folder, platform: options.env.platform, log })
-    else if (listing) log(`Install Browse in your browser from the Chrome Web Store: ${listing}`), pairLater()
+    else if (listing) log(`Install browse in your browser from the Chrome Web Store: ${listing}`), pairLater()
     else noListing()
     return "guided"
   }
@@ -1153,17 +1153,17 @@ export function locateExtension(options: LocateOptions, effects: Effects = syste
   if (options.detections.some((detection) => detection.enabled.length)) return "ready"
   const off = options.detections.flatMap((detection) => detection.disabled)
   if (off.length) {
-    log(`! Browse is turned off in ${off.map((match) => `${match.browser.name} (${match.profile.name})`).join(", ")}. Turn it on in the browser's extensions page.`)
+    log(`! browse is turned off in ${off.map((match) => `${match.browser.name} (${match.profile.name})`).join(", ")}. Turn it on in the browser's extensions page.`)
     return "off"
   }
   const blocked = options.detections.filter((detection) => detection.blocked).map((detection) => detection.browser.name)
-  if (blocked.length) log(`! Couldn't check ${blocked.join(", ")} for Browse (${blockedReason()})`)
+  if (blocked.length) log(`! Couldn't check ${blocked.join(", ")} for browse (${blockedReason()})`)
   const target = options.preferred ?? options.detections.find((detection) => !detection.blocked)?.browser
   const interactive = options.allowOpen && options.env.display
   if (!options.folder) {
     if (!listing) return noListing(), "guided"
     const opened = interactive && !blocked.length && (target ? effects.open(target, listing) : effects.openDefault?.(listing))
-    log(`Add Browse to ${target?.name ?? "your browser"} from the Chrome Web Store${opened ? " (opened)" : ""}: ${listing}`)
+    log(`Add browse to ${target?.name ?? "your browser"} from the Chrome Web Store${opened ? " (opened)" : ""}: ${listing}`)
     return "guided"
   }
   // A browser that couldn't be checked may already have it: show the steps, but don't open anything over the user's work.
@@ -1201,10 +1201,10 @@ export function pairStoreExtension(
   if (!match) return "none"
   const interactive = options.allowOpen && options.env.display && !options.env.ssh
   if (interactive && effects.open(match.browser, `chrome-extension://${match.id}/welcome.html#code=${options.code()}`, match.profile.dir)) {
-    effects.log(`✓ Opened Browse in ${match.browser.name} to connect it`)
+    effects.log(`✓ Opened browse in ${match.browser.name} to connect it`)
     return "opened"
   }
-  effects.log(`To connect Browse in ${match.browser.name}: ${manualPair(options.code())}`)
+  effects.log(`To connect browse in ${match.browser.name}: ${manualPair(options.code())}`)
   return "manual"
 }
 
@@ -1223,7 +1223,7 @@ function unpackedSteps(step: {
   const page = step.page ?? "chrome://extensions"
   const fileManager = step.platform === "darwin" ? "Finder" : step.platform === "win32" ? "Explorer" : "your file manager"
   const paste = step.platform === "darwin" ? "press Cmd+Shift+G in the folder picker and paste" : "paste it into the folder picker"
-  log(`Load Browse in ${step.browser ?? "your browser"}: open ${page}${step.opened ? " (opened)" : ""}, turn on Developer mode, click Load unpacked and choose ${step.folder}${step.copied ? ` (path copied: ${paste})` : step.revealed ? ` (shown in ${fileManager})` : ""}`)
+  log(`Load browse in ${step.browser ?? "your browser"}: open ${page}${step.opened ? " (opened)" : ""}, turn on Developer mode, click Load unpacked and choose ${step.folder}${step.copied ? ` (path copied: ${paste})` : step.revealed ? ` (shown in ${fileManager})` : ""}`)
 }
 
 /** The browser's own extensions page; every Chromium browser also accepts chrome://, these rewrite it to their scheme. */
@@ -1250,7 +1250,7 @@ export async function waitForExtension(options: {
   }
 }
 
-/** Every browser with user data here, and the profiles that have Browse. */
+/** Every browser with user data here, and the profiles that have browse. */
 function detectBrowsers() {
   return browsers().flatMap((browser): Detection[] => {
     const state = readLocked(path.join(browser.userData, "Local State"))
@@ -1460,7 +1460,7 @@ function fail(message: string): never {
   if (rail) {
     waiting?.error("Stopped")
     clack.log.error(message)
-    clack.outro("Browse isn't set up yet.")
+    clack.outro("browse isn't set up yet.")
   } else process.stderr.write(message + "\n")
   process.exit(1)
 }

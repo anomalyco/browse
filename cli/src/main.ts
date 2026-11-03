@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// opencode-browser: one command for Browse.
+// opencode-browser: one command for browse.
 //   Setup (setup.ts): install, extension, pair, uninstall. Updating (update.ts): update.
 //   Driving the browser (cli.ts): serve, relay, execute, session, network, secrets, recording, journal,
 //   doctor, skill, mcp, status. The relay is the local server agents use; the extension connects to it.
@@ -35,7 +35,7 @@ if (command === "--version" || command === "-v") {
 } else {
   if (!command || command === "--help" || command === "-h") {
     process.stdout.write(`SETUP
-  install [--opencode <path>]    Install Browse: choose agents for the browse MCP server, check which browsers
+  install [--opencode <path>]    Install browse: choose agents for the browse MCP server, check which browsers
                                  have the extension and pair it (when none does, open its Chrome Web Store
                                  page, or from a checkout or a dev install show the folder to load unpacked,
                                  and wait for it)

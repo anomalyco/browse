@@ -79,10 +79,10 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
   return [
     {
       name: "execute",
-      description: `Execute Playwright JavaScript against the Browse session. Code runs in a sandbox on the relay without process, require, import(), fs, child_process, http/https or Node fetch; save and read files with the files helper inside the execute file roots, and cookie access is limited to the session's pages. The result includes console logs, warnings, a bounded execution-context diagnostic when relevant, and an aftermath summary (URL movement, navigations, error counts, handoffs, and a bot challenge or block page when one appears: hand interactive ones to the user with handoff(), never solve or retry-loop them).${browserNote}`,
+      description: `Execute Playwright JavaScript against the browse session. Code runs in a sandbox on the relay without process, require, import(), fs, child_process, http/https or Node fetch; save and read files with the files helper inside the execute file roots, and cookie access is limited to the session's pages. The result includes console logs, warnings, a bounded execution-context diagnostic when relevant, and an aftermath summary (URL movement, navigations, error counts, handoffs, and a bot challenge or block page when one appears: hand interactive ones to the user with handoff(), never solve or retry-loop them).${browserNote}`,
       inputSchema: objectSchema({
         code: { type: "string", description: "JavaScript code to execute. It receives browser, context, page, state, modules (path, url, util, crypto, buffer, zlib, events, stream), files (dir, path, write, read), fillInput, fillInputs, snapshot(options?) for compact semantic outlines, search, explicit diffs, or automatic deltas, persistent compatible ref(id) locators, webmcp (list/call), screenshot helpers, ariaSnapshot, ghostCursor, handoff, demonstrate, network capture, pageConsole (start/stop capturing the page's own console messages and errors, off by default because pages can detect it), secrets.type(locator, name) to type a stored site secret or a granted Deadbolt login (\"deadbolt:<site>[/<username>]\", { field: \"username\" }, or a password/code with { submit: true }; see secrets_list) only on its allowed origins, without seeing it, secrets.signIn({ site?, username? }) for a whole sign-in (same as the signin tool), and secrets.usePasskey({ site, username }) to pick the passkey account for the tab's next passkey request." },
-        session: { type: "string", description: "Optional existing Browse session id. Explicit ids must already exist; omit this field to use the MCP server's current session, which is created when needed." },
+        session: { type: "string", description: "Optional existing browse session id. Explicit ids must already exist; omit this field to use the MCP server's current session, which is created when needed." },
         targetUrl: { type: "string", description: "Optional URL substring selecting an existing attached page. This does not navigate or open a URL; use page.goto() for that." },
         targetIndex: { type: "integer", minimum: 0, description: "Optional zero-based attached page index selector." },
         browser: browserProperty,
@@ -127,7 +127,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "session_new",
-      description: `Create a Browse session and make it current for this MCP server.${browserNote}`,
+      description: `Create a browse session and make it current for this MCP server.${browserNote}`,
       inputSchema: objectSchema({
         browser: browserProperty,
         id: { type: "string", description: "Optional lowercase session id." },
@@ -172,7 +172,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "session_list",
-      description: "List Browse sessions.",
+      description: "List browse sessions.",
       inputSchema: emptyInputSchema,
       readOnly: true,
       destructive: false,
@@ -181,7 +181,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "session_current",
-      description: "Return this MCP server's current Browse session id.",
+      description: "Return this MCP server's current browse session id.",
       inputSchema: emptyInputSchema,
       readOnly: true,
       destructive: false,
@@ -190,9 +190,9 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "session_use",
-      description: "Set this MCP server's current Browse session id.",
+      description: "Set this MCP server's current browse session id.",
       inputSchema: objectSchema({
-        id: { type: "string", description: "Existing Browse session id." },
+        id: { type: "string", description: "Existing browse session id." },
       }, ["id"]),
       readOnly: false,
       destructive: false,
@@ -206,7 +206,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "session_reset",
-      description: "Reset a Browse session's state and page.",
+      description: "Reset a browse session's state and page.",
       inputSchema: objectSchema({
         id: sessionSchemaProperty,
         session: sessionAliasSchemaProperty,
@@ -223,7 +223,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "session_delete",
-      description: "Delete a Browse session.",
+      description: "Delete a browse session.",
       inputSchema: objectSchema({
         id: sessionSchemaProperty,
         session: sessionAliasSchemaProperty,
@@ -243,9 +243,9 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "session_adopt",
-      description: "Make an attached tab the Browse session's default page for subsequent bare execute calls. Omit targetUrl and targetIndex when only one user-attached tab is available.",
+      description: "Make an attached tab the browse session's default page for subsequent bare execute calls. Omit targetUrl and targetIndex when only one user-attached tab is available.",
       inputSchema: objectSchema({
-        session: { type: "string", description: "Optional existing Browse session id. Explicit ids must already exist; omit this field to use the MCP server's current session, which is created when needed." },
+        session: { type: "string", description: "Optional existing browse session id. Explicit ids must already exist; omit this field to use the MCP server's current session, which is created when needed." },
         targetUrl: { type: "string", description: "Adopt an existing attached page whose URL contains this text. Omit when only one user-attached tab is available. This does not navigate or open a URL." },
         targetIndex: { type: "integer", minimum: 0, description: "Adopt the attached page at this zero-based target index." },
         tabId: { type: "integer", description: "Adopt the user's tab with this Chrome tab id (the tab= value in status)." },
@@ -268,7 +268,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "network_start",
-      description: "Start session-scoped network capture. Browse records normalized Playwright exchanges; HAR is only the optional export format. Bodies are embedded by default with per-body and total memory limits.",
+      description: "Start session-scoped network capture. browse records normalized Playwright exchanges; HAR is only the optional export format. Bodies are embedded by default with per-body and total memory limits.",
       inputSchema: objectSchema({
         session: { type: "string", description: "Optional existing session id. Omit to use or create this MCP server's current session." },
         urlFilter: { type: "string", description: "Capture only request URLs containing this text." },
@@ -372,7 +372,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         audio: { type: "boolean", description: "Capture tab audio in tab-capture mode." },
         frameRate: { type: "integer", minimum: 1, maximum: 60, description: "Requested frame rate." },
         maxDurationMs: { type: "integer", minimum: 1, description: "Maximum recording duration in milliseconds." },
-        cursor: { type: "boolean", description: "Draw the ghost cursor in the recording, for demo videos. Off by default: recordings show only the page, with nothing from Browse in the frame." },
+        cursor: { type: "boolean", description: "Draw the ghost cursor in the recording, for demo videos. Off by default: recordings show only the page, with nothing from browse in the frame." },
       }, ["outputPath"]),
       readOnly: false,
       destructive: false,
@@ -410,7 +410,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "tabs_cleanup",
-      description: "Close tabs agents opened that nobody has used for a while (no agent command and not visited by the user). Tabs the user shared or pinned, the active tab, tabs playing audio, recording, or waiting for a handoff stay open. Call it when you finish a task to leave the user's browser tidy; Browse also does this automatically after the user's idle setting (10 minutes unless they changed it).",
+      description: "Close tabs agents opened that nobody has used for a while (no agent command and not visited by the user). Tabs the user shared or pinned, the active tab, tabs playing audio, recording, or waiting for a handoff stay open. Call it when you finish a task to leave the user's browser tidy; browse also does this automatically after the user's idle setting (10 minutes unless they changed it).",
       inputSchema: objectSchema({
         idleMinutes: { type: "integer", minimum: 0, description: "Close tabs idle at least this long. 0 closes every eligible agent tab. Defaults to the user's setting (10 minutes; still 10 when the user set automatic cleanup to never)." },
       }),
@@ -424,7 +424,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "settings",
-      description: `Read or change the user's Browse settings, the same ones as the extension's options page: where agent tabs open (window), how they're grouped (grouping), when untouched agent tabs close (idleMinutes), the agent cursor (cursor), human-like input (humanInput) and handoff notifications (handoffNotifications). Use it only when the user asks to change how browse behaves, never on your own initiative. Without \`set\` it returns each setting's stored value, the value in effect, and the relay environment variable that overrides it, if any. With \`set\` it validates every value strictly, applies the change at once (the options page updates live) and returns what changed: tell the user what you changed. A setting an environment variable fixes is not changed, and the result says so. Security switches (${securityVariables.join(", ")}) are environment-only and can never be read or changed here.`,
+      description: `Read or change the user's browse settings, the same ones as the extension's options page: where agent tabs open (window), how they're grouped (grouping), when untouched agent tabs close (idleMinutes), the agent cursor (cursor), human-like input (humanInput) and handoff notifications (handoffNotifications). Use it only when the user asks to change how browse behaves, never on your own initiative. Without \`set\` it returns each setting's stored value, the value in effect, and the relay environment variable that overrides it, if any. With \`set\` it validates every value strictly, applies the change at once (the options page updates live) and returns what changed: tell the user what you changed. A setting an environment variable fixes is not changed, and the result says so. Security switches (${securityVariables.join(", ")}) are environment-only and can never be read or changed here.`,
       inputSchema: objectSchema({
         set: {
           type: "object",
@@ -527,7 +527,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "secrets_list",
-      description: "List what agents may type without seeing: site secrets the user stored (names, kinds and allowed origins; type them with secrets.type(target, name) in execute; only the user adds them with `opencode-browser secrets add`), and Deadbolt logins the user granted to Browse for this session's allowed sites (title, username, which values and passkeys, never values; sign in with the signin tool or secrets.signIn(), or type one value with secrets.type(target, \"deadbolt:<site>[/<username>]\", { field })). Passkeys are listed by account (username, displayName). Only the user grants Deadbolt logins, in Deadbolt (`deadbolt agents allow <site>`, or `deadbolt agents allow --all`).",
+      description: "List what agents may type without seeing: site secrets the user stored (names, kinds and allowed origins; type them with secrets.type(target, name) in execute; only the user adds them with `opencode-browser secrets add`), and Deadbolt logins the user granted to browse for this session's allowed sites (title, username, which values and passkeys, never values; sign in with the signin tool or secrets.signIn(), or type one value with secrets.type(target, \"deadbolt:<site>[/<username>]\", { field })). Passkeys are listed by account (username, displayName). Only the user grants Deadbolt logins, in Deadbolt (`deadbolt agents allow <site>`, or `deadbolt agents allow --all`).",
       inputSchema: sessionOnlyInputSchema,
       readOnly: true,
       destructive: false,
@@ -535,7 +535,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       handle: (input) => Effect.gen(function* () {
         const secrets = yield* SiteSecrets.listSecrets()
         if (!Deadbolt.readClient()) {
-          return { secrets, deadbolt: { connected: false, logins: [], passkeys: [], note: "Browse isn't connected to Deadbolt. The user can connect it with `opencode-browser deadbolt connect` and grant logins with `deadbolt agents allow <site>`." } }
+          return { secrets, deadbolt: { connected: false, logins: [], passkeys: [], note: "browse isn't connected to Deadbolt. The user can connect it with `opencode-browser deadbolt connect` and grant logins with `deadbolt agents allow <site>`." } }
         }
         const deadbolt = yield* relay.deadboltLogins({ sessionId: resolveSessionId(input) }).pipe(
           Effect.catch((error) => Effect.succeed({ connected: true, origins: [], logins: [], passkeys: [], error: { code: "unavailable", message: error.message } })),
@@ -545,7 +545,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "signin",
-      description: "Sign in to a site in the session's page with a Deadbolt login the user granted to Browse, without seeing any value. The relay does the whole sign-in in one call: username, submit, password, an authenticator (TOTP) code when asked (split boxes too), \"Use password instead\" toggles, and Sign in with Google when a Google login is granted. A username also picks the passkey account when the site signs in with a passkey. Returns only {status: signed_in | needs_user | needs_choice | not_granted | failed, step, reason}; needs_choice comes with choices [{username, displayName}] when several passkeys could sign in: call again with one username. needs_user means a captcha, a code sent by SMS or email, a push approval or a new-device check: hand it to the user with handoff() in execute. not_granted: tell the user what to allow (`deadbolt agents allow <site>`). Navigate to the sign-in page first, or pass site.",
+      description: "Sign in to a site in the session's page with a Deadbolt login the user granted to browse, without seeing any value. The relay does the whole sign-in in one call: username, submit, password, an authenticator (TOTP) code when asked (split boxes too), \"Use password instead\" toggles, and Sign in with Google when a Google login is granted. A username also picks the passkey account when the site signs in with a passkey. Returns only {status: signed_in | needs_user | needs_choice | not_granted | failed, step, reason}; needs_choice comes with choices [{username, displayName}] when several passkeys could sign in: call again with one username. needs_user means a captcha, a code sent by SMS or email, a push approval or a new-device check: hand it to the user with handoff() in execute. not_granted: tell the user what to allow (`deadbolt agents allow <site>`). Navigate to the sign-in page first, or pass site.",
       inputSchema: objectSchema({
         site: { type: "string", description: "The login's site: a host like github.com, or an exact origin. Defaults to the page's site; the page goes there first when it is elsewhere." },
         username: { type: "string", description: "Which login (and which passkey account), when several are granted for the site." },
@@ -633,7 +633,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "skill",
-      description: "Return the Browse agent skill instructions.",
+      description: "Return the browse agent skill instructions.",
       inputSchema: emptyInputSchema,
       readOnly: true,
       destructive: false,
@@ -725,7 +725,7 @@ const browserTools = new Set(["execute", "session_new"])
 
 /** The one-time note on a tool result: what to tell the user, and that the agent may run the update itself. */
 export function mcpUpdateNote(notice: Pick<UpdateNotice, "summary" | "command">): string {
-  return `Note: Browse has an update: ${notice.summary}. Tell the user they can run \`${notice.command}\` and then restart opencode, or ask you to run it for them.`
+  return `Note: browse has an update: ${notice.summary}. Tell the user they can run \`${notice.command}\` and then restart opencode, or ask you to run it for them.`
 }
 
 /** The implicit session the shim's MCP supervisor picked (auto-update.ts shimSource), when valid. */

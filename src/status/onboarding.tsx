@@ -25,7 +25,7 @@ const installTab = !!fragmentCode
 if (/^#(code|ticket|pair)=/.test(location.hash)) history.replaceState(null, "", location.pathname + location.search)
 
 const settingsUrl = () => chrome.runtime.getURL("settings.html")
-const AGENT_PROMPT = `Set up Browse so you can use my Chrome: run ${installCommand}`
+const AGENT_PROMPT = `Set up browse so you can use my Chrome: run ${installCommand}`
 
 type Where = "here" | "remote"
 type How = "agent" | "manual"
@@ -109,7 +109,7 @@ function Onboarding() {
       number={number}
       title={`Restart ${agent} and try it`}
       done={list().tryIt === "done"}
-      description={list().tryIt === "done" ? "Your agent opened a tab. Browse works." : "Agents load new tools when they start. Then ask it something like:"}
+      description={list().tryIt === "done" ? "Your agent opened a tab. browse works." : "Agents load new tools when they start. Then ask it something like:"}
     >
       <Show when={list().tryIt !== "done"}>
         <Command text={TRY_PROMPT} label="Copy prompt" />
@@ -129,9 +129,9 @@ function Onboarding() {
         connected() ? (
           <AgentDone relay={relay} pairedBy={pairedBy()} />
         ) : how === "agent" ? (
-          "OpenCode, Claude Code, Codex, Cursor or any agent that can run commands. It installs Browse, adds it to itself and connects to this browser."
+          "OpenCode, Claude Code, Codex, Cursor or any agent that can run commands. It installs browse, adds it to itself and connects to this browser."
         ) : (
-          "Downloads Browse, adds it to the agents it finds on this computer and connects to this browser."
+          "Downloads browse, adds it to the agents it finds on this computer and connects to this browser."
         )
       }
     >
@@ -208,7 +208,7 @@ function Onboarding() {
                 number={1}
                 title="On that computer, run"
                 done={connected()}
-                description="Installs Browse there, opens its relay to other computers and prints its address and a pairing code."
+                description="Installs browse there, opens its relay to other computers and prints its address and a pairing code."
               >
                 <Show when={!connected()}>
                   <Command text={remoteInstallCommand} label="Copy command" />
@@ -329,7 +329,7 @@ function AgentDone(props: { relay: Relay; pairedBy: "link" | "code" | undefined 
   )
 }
 
-/** Step 1 on this computer: the prompt or command that installs Browse, and whatever the connection says to do next. */
+/** Step 1 on this computer: the prompt or command that installs browse, and whatever the connection says to do next. */
 function AgentStep(props: {
   relay: Relay
   step: FirstRunStep
@@ -368,7 +368,7 @@ function AgentStep(props: {
                   ? `${capitalized(here(pair().remote))} didn't accept the pairing code: it was mistyped, already used or expired.`
                   : pair().reason === "refused"
                     ? `${capitalized(here(pair().remote))} refused this browser's pairing: it was unpaired there, or that relay is a new install.`
-                    : `Browse found ${here(pair().remote)}, but this browser isn't paired with it yet.`}{" "}
+                    : `browse found ${here(pair().remote)}, but this browser isn't paired with it yet.`}{" "}
                 {pair().remote ? "" : "Run install again: it pairs by itself."}
               </Note>
               <CodeForm
@@ -433,7 +433,7 @@ function AgentStep(props: {
         </Match>
         <Match when={kind() === "conflict"}>
           <Note tone="warn">
-            Browse in another browser or profile holds the relay's connection. Close it there (or quit that browser), then
+            browse in another browser or profile holds the relay's connection. Close it there (or quit that browser), then
             reconnect.
           </Note>
           <div class="actions">

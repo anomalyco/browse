@@ -14,7 +14,7 @@ export function agentFlags(args: string[]) {
       if (arg === "*") { all = true; continue }
       if (arg === "none") { none = true; continue }
       const name = agentName(arg)
-      if (!name) throw new Error(`Unknown agent ${JSON.stringify(arg)}. Choose ${agentNames.join(", ")}, or none to add Browse to another agent yourself.`)
+      if (!name) throw new Error(`Unknown agent ${JSON.stringify(arg)}. Choose ${agentNames.join(", ")}, or none to add browse to another agent yourself.`)
       requested.add(name)
     }
   }
@@ -23,7 +23,7 @@ export function agentFlags(args: string[]) {
 
 export function agentPlan(locations: AgentLocation[], flags: ReturnType<typeof agentFlags>, tty: boolean, caller?: AgentName, remembered?: AgentName[]) {
   const detected = locations.filter(a => a.installed).map(a => a.name)
-  // An agent running install gets Browse itself; with no terminal to ask (CI, a script), every agent found does.
+  // An agent running install gets browse itself; with no terminal to ask (CI, a script), every agent found does.
   const automatic = caller ? [caller] : !tty ? detected : undefined
   if (flags.none) return { picker: false, selected: [] }
   if (flags.requested.length) return { picker: false, selected: flags.requested }
@@ -42,7 +42,7 @@ export async function pickAgents(locations: AgentLocation[], initial: AgentName[
   let last = { query: "", list: shown }
   // Clack's option type distributes over a union of values, so the picker works on plain names.
   const result = await autocompleteMultiselect<string>({
-    message: "Set Browse up in these agents for you?",
+    message: "Set browse up in these agents for you?",
     options() {
       const query = this.userInput.trim().toLowerCase()
       if (query === last.query) return last.list

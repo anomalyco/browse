@@ -1,4 +1,4 @@
-// Where Browse keeps its files: the installed runtime, the relay's log, session catalogs and
+// Where browse keeps its files: the installed runtime, the relay's log, session catalogs and
 // journals, and captured secrets. One root, so `uninstall` can remove it and logs are easy to find.
 //   macOS/Linux: $XDG_DATA_HOME/opencode-browser, else ~/.local/share/opencode-browser
 //   Windows:     %LOCALAPPDATA%\opencode-browser
@@ -134,7 +134,7 @@ export const devExtensionFolder = (root = dataRoot()) => path.join(root, "extens
 /** The store page of an item. */
 export const storeUrl = (id: string) => `https://chromewebstore.google.com/detail/${id}`
 
-/** How to tell the user to install (or update) Browse. */
+/** How to tell the user to install (or update) browse. */
 export function installCommand(): string {
   if (compiledBinary()) return cliCommand("install")
   return fromCheckout() ? `cd ${quoted(path.dirname(packageRoot()))} && bun run setup` : "npx @opencode/browse install"

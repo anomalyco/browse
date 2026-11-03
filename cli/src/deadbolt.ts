@@ -211,7 +211,7 @@ function errorCode(code: unknown): DeadboltErrorCode {
 
 const errorHints: Partial<Record<DeadboltErrorCode, string>> = {
   locked: "Deadbolt is locked, so agent sign-ins are paused until the user unlocks it.",
-  forbidden: "Deadbolt doesn't know this Browse install (its client was removed or revoked). Ask the user to run `opencode-browser deadbolt connect`.",
+  forbidden: "Deadbolt doesn't know this browse install (its client was removed or revoked). Ask the user to run `opencode-browser deadbolt connect`.",
   rate_limited: "Deadbolt is rate-limiting this client; wait before trying again.",
 }
 
@@ -323,7 +323,7 @@ function toLogin(raw: Record<string, unknown>): DeadboltLogin {
 export function connect(options: { readonly root?: string; readonly socket?: string; readonly client?: DeadboltClient } = {}): DeadboltConnection {
   const client = options.client ?? readClient(options.root)
   if (!client) {
-    throw new DeadboltError("not_connected", "Browse isn't connected to Deadbolt. Ask the user to run `opencode-browser deadbolt connect` and to allow the logins agents may use with `deadbolt agents allow <site>`.")
+    throw new DeadboltError("not_connected", "browse isn't connected to Deadbolt. Ask the user to run `opencode-browser deadbolt connect` and to allow the logins agents may use with `deadbolt agents allow <site>`.")
   }
   const socket = options.socket ?? socketPath()
   let protocol: number | undefined
@@ -432,8 +432,8 @@ export function pickLogin(logins: readonly DeadboltLogin[], site: string, userna
   if (candidates.length === 1) return candidates[0]!
   if (candidates.length === 0) {
     throw new DeadboltError("not_granted", username === undefined
-      ? `No Deadbolt login is granted to Browse for ${site}${field ? ` (${field})` : ""}. Ask the user to allow one with \`deadbolt agents allow ${site}\`.`
-      : `No Deadbolt login for ${username} is granted to Browse for ${site}${field ? ` (${field})` : ""}. Ask the user to allow it with \`deadbolt agents allow ${site} --login ${username}\`.`, { site, ...(username ? { login: username } : {}) })
+      ? `No Deadbolt login is granted to browse for ${site}${field ? ` (${field})` : ""}. Ask the user to allow one with \`deadbolt agents allow ${site}\`.`
+      : `No Deadbolt login for ${username} is granted to browse for ${site}${field ? ` (${field})` : ""}. Ask the user to allow it with \`deadbolt agents allow ${site} --login ${username}\`.`, { site, ...(username ? { login: username } : {}) })
   }
   throw new DeadboltError("failed", `Several Deadbolt logins are granted for ${site}; name one: deadbolt:${site}/<username> (${candidates.map((login) => login.username ?? login.title).join(", ")})`)
 }

@@ -14,7 +14,7 @@ export const extensionProtocolVersion = 3
 export const minExtensionProtocolVersion = 3
 
 export const unpackedExtensionId = "afeafocngkodbmaipcngoamamfmekgfo"
-export const unpackedReloadAdvice = "Reload Browse on your browser's extensions page (↻)."
+export const unpackedReloadAdvice = "Reload browse on your browser's extensions page (↻)."
 // A close reason, not an RPC. Older workers just see extension-older; newer workers verify the build locally.
 export const checkoutReloadPrefix = "Extension protocol incompatible: extension-older; reload "
 
@@ -51,13 +51,13 @@ export function extensionProtocolAdvice(version: number | null | undefined, comm
   const skew = extensionProtocolSkew(version)
   const versions = `extension protocol ${version ?? "unknown"}, this relay speaks ${minExtensionProtocolVersion === extensionProtocolVersion ? extensionProtocolVersion : `${minExtensionProtocolVersion} to ${extensionProtocolVersion}`}`
   if (skew === "extension-newer")
-    return `The Browse extension is newer than this browse CLI (${versions}). Update the CLI: run \`${commands.install}\` (an npm install with automatic updates also catches up by itself within a day), then restart opencode.`
+    return `The browse extension is newer than this browse CLI (${versions}). Update the CLI: run \`${commands.install}\` (an npm install with automatic updates also catches up by itself within a day), then restart opencode.`
   if (skew === "extension-older") {
     const store = "The Chrome Web Store updates it within a few hours (to update now, open chrome://extensions, turn on Developer mode and click Update)."
     const next = distribution === "unpacked" ? unpackedReloadAdvice : distribution === "store" ? store : `For an unpacked extension: ${unpackedReloadAdvice} For a store extension: ${store}`
-    return `The Browse extension is older than this browse CLI (${versions}). ${next}`
+    return `The browse extension is older than this browse CLI (${versions}). ${next}`
   }
-  return `The Browse extension and this browse CLI don't speak the same protocol (${versions}). Run \`${commands.install}\` again and update the extension.`
+  return `The browse extension and this browse CLI don't speak the same protocol (${versions}). Run \`${commands.install}\` again and update the extension.`
 }
 
 export type CdpRequest = {

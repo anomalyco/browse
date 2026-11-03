@@ -60,7 +60,7 @@ function Settings() {
     // The background reconnects on the change, and the relay names the browser afresh.
     void (next ? chrome.storage.local.set({ [BROWSER_NAME_KEY]: next }) : chrome.storage.local.remove(BROWSER_NAME_KEY)).then(() => {
       setName(undefined)
-      showToast({ title: next ? "Name saved" : "Name reset", description: "Browse reconnects so agents see it.", variant: "success" })
+      showToast({ title: next ? "Name saved" : "Name reset", description: "browse reconnects so agents see it.", variant: "success" })
     })
   }
 
@@ -236,7 +236,7 @@ function Settings() {
 
 const tips = [
   "Agents open their own tabs in the background of your window, grouped at the start of your tab strip and collapsed unless you're looking at one. Tabs nobody uses for a while close by themselves.",
-  "To let agents use a tab you have open, click the Browse toolbar button on it. Click again to take it back, even while an agent is running.",
+  "To let agents use a tab you have open, click the browse toolbar button on it. Click again to take it back, even while an agent is running.",
   "When an agent needs you (a login, 2FA, a payment), the badge shows WAIT and the page shows a card. Finish, then click Continue or the toolbar button.",
   "Recordings show only the page. If an agent needs you while it records a tab, you get a notification instead of the card; click it to go to the tab.",
 ]

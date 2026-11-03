@@ -1,4 +1,4 @@
-// The link to the Browse relay (ws://127.0.0.1:19988/extension). The relay runs agent sessions
+// The link to the browse relay (ws://127.0.0.1:19988/extension). The relay runs agent sessions
 // for the browse MCP server and the opencode-browser CLI (Playwright `execute`, recordings, handoffs) and drives tabs
 // through this extension; this module runs its commands. The wire protocol is in ../agent-relay/protocol.ts,
 // the relay itself in cli/src/relay.ts.
@@ -517,7 +517,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
           build: __OPENCODE_BROWSER_BUILD__,
           protocolVersion: extensionProtocolVersion,
           profileId: profile.id,
-          profileName: profile.name ?? "Browse",
+          profileName: profile.name ?? "browse",
           // What agents call this browser: the name set on the status page, else the relay names it from these
           // and the computer ("Chrome on MacBook").
           browser: browserBrand(),
@@ -952,7 +952,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       const message = text(error)
       throw new Error(
         /invoked|activeTab/i.test(message)
-          ? `${message.replace(/\.+$/, "")}. Click the Browse toolbar icon on this tab once before recording.`
+          ? `${message.replace(/\.+$/, "")}. Click the browse toolbar icon on this tab once before recording.`
           : message,
       )
     })
@@ -993,13 +993,13 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
 
   const sendRecordingChunk = async (data: Uint8Array) => {
     const current = open()
-    if (!current) throw new Error("The Browse relay is not connected")
+    if (!current) throw new Error("The browse relay is not connected")
     const deadline = Date.now() + 30_000
     while (current.bufferedAmount + data.byteLength > MAX_RECORDING_BUFFER) {
       await sleep(10)
       if (socket !== current || current.readyState !== WebSocket.OPEN)
-        throw new Error("The Browse relay disconnected while receiving recording data")
-      if (Date.now() >= deadline) throw new Error("Timed out sending recording data to the Browse relay")
+        throw new Error("The browse relay disconnected while receiving recording data")
+      if (Date.now() >= deadline) throw new Error("Timed out sending recording data to the browse relay")
     }
     current.send(new Uint8Array(data))
   }
@@ -1476,7 +1476,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       const entries = await log.entries()
       const manifest = chrome.runtime.getManifest()
       return [
-        "Browse diagnostics",
+        "browse diagnostics",
         `extension: ${manifest.version} (${chrome.runtime.id})`,
         `browser: ${navigator.userAgent}`,
         `relay: ws://${host}:${port}/extension, protocol ${extensionProtocolVersion}`,
@@ -1532,7 +1532,7 @@ function serialize(message: JsonObject) {
   return new TextEncoder().encode(data).byteLength <= MAX_MESSAGE ? data : undefined
 }
 
-const ATTACHED_TITLE = "Browse · Agents can use this tab. Click to stop."
+const ATTACHED_TITLE = "browse · Agents can use this tab. Click to stop."
 
 /** How a handoff notification names the agent: its session's chosen name, else "An agent". */
 function sessionName(sessionId?: string) {

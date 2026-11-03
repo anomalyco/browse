@@ -276,11 +276,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     const tabId = getNumber(command.params, "tabId")
     if (tabId !== undefined) {
       const owner = browsers.browserTab(tabId)
-      if (!owner) return Effect.fail(new Error("Browse extension is not connected"))
+      if (!owner) return Effect.fail(new Error("browse extension is not connected"))
       return sendToBrowser(owner.link, { ...command, params: { ...command.params, tabId: owner.tabId } })
     }
     const target = link ?? browsers.defaultLink()
-    return target ? sendToBrowser(target, command) : Effect.fail(new Error("Browse extension is not connected"))
+    return target ? sendToBrowser(target, command) : Effect.fail(new Error("browse extension is not connected"))
   }
   const sendExtensionBestEffort = (command: ExtensionCommandInput, link?: BrowserLink): void => {
     Effect.runPromise(Effect.ignore(sendToExtension(command, link))).catch(() => {})
@@ -292,12 +292,12 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   /** The same, waiting for each; fails only when no browser is connected or every one failed. */
   const sendToEach = (command: ExtensionCommandInput): Effect.Effect<JsonObject, Error> => Effect.gen(function* () {
     const links = browsers.list().filter((link) => link.rpc.connected)
-    if (links.length === 0) return yield* Effect.fail(new Error("Browse extension is not connected"))
+    if (links.length === 0) return yield* Effect.fail(new Error("browse extension is not connected"))
     const results = yield* Effect.forEach(links, (link) => Effect.result(sendToBrowser(link, command)), { concurrency: "unbounded" })
     const succeeded = results.find(Result.isSuccess)
     if (succeeded) return succeeded.success
     const failed = results.find(Result.isFailure)
-    return yield* Effect.fail(failed?.failure ?? new Error("Browse extension is not connected"))
+    return yield* Effect.fail(failed?.failure ?? new Error("browse extension is not connected"))
   })
   /** The dev extension build last reloaded for, so a build that never matches (a checkout's, same ID) reloads only once. */
   let devExtensionReloadedFor: string | undefined
@@ -477,9 +477,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     const notice = updates.current
     sendToEveryBrowser({ method: "update.notice", ...(notice ? { params: { summary: notice.summary, command: notice.command } } : {}) })
   }
-  const attachedBadge = { text: "ON", color: "#7c3aed", title: "Detach from Browse" }
-  const executingBadge = { text: "RUN", color: "#f59e0b", title: "Browse is running a script. Click to stop it and take this tab back." }
-  const waitingBadge = (message: string) => ({ text: "WAIT", color: "#2563eb", title: `Browse is waiting for you: ${message} Click here when you're done.` })
+  const attachedBadge = { text: "ON", color: "#7c3aed", title: "Detach from browse" }
+  const executingBadge = { text: "RUN", color: "#f59e0b", title: "browse is running a script. Click to stop it and take this tab back." }
+  const waitingBadge = (message: string) => ({ text: "WAIT", color: "#2563eb", title: `browse is waiting for you: ${message} Click here when you're done.` })
   const executionBadge = (sessionId: string, executing: boolean) => executing && !sessions.isReadOnly(sessionId) ? executingBadge : attachedBadge
   const setActivityForSessionTabs = (
     opencodeBrowserSessionId: string,
@@ -910,9 +910,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       const pairingState = browsers.connected ? "connected" : rejected ? "incompatible" : lastRefused > recent ? "refused" : lastUnpaired > recent ? "unpaired" : hasPairedBrowser ? "paired-offline" : "not-seen"
       const nextStep = pairingState === "connected" ? undefined
         : pairingState === "incompatible" ? mismatchAdvice(rejected?.version)
-        : pairingState === "refused" || pairingState === "unpaired" ? `${pairingState === "refused" ? "Browse refused the pairing attempt" : "Browse is installed but not paired"}. Run \`${cliCommand("install")}\` again to pair it, or run \`${cliCommand("pair")}\` and enter the new code in Browse's Options.`
-        : pairingState === "paired-offline" ? "Open the browser profile already paired with Browse and enable the extension; it reconnects automatically."
-        : `No browser has contacted this relay yet. If Browse is installed, open that browser and run \`${cliCommand("install")}\` to pair it. Otherwise ${storeId ? `add Browse from ${storeUrl(storeId)}` : `follow the extension steps in \`${installCommand()}\``}.`
+        : pairingState === "refused" || pairingState === "unpaired" ? `${pairingState === "refused" ? "browse refused the pairing attempt" : "browse is installed but not paired"}. Run \`${cliCommand("install")}\` again to pair it, or run \`${cliCommand("pair")}\` and enter the new code in browse's Options.`
+        : pairingState === "paired-offline" ? "Open the browser profile already paired with browse and enable the extension; it reconnects automatically."
+        : `No browser has contacted this relay yet. If browse is installed, open that browser and run \`${cliCommand("install")}\` to pair it. Otherwise ${storeId ? `add browse from ${storeUrl(storeId)}` : `follow the extension steps in \`${installCommand()}\``}.`
       return {
         connected: browsers.connected,
         pairingState,
@@ -964,7 +964,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
     if (!relayReady) {
       response.writeHead(503, { "content-type": "application/json; charset=utf-8", "retry-after": "1" })
-      response.end(JSON.stringify({ error: "Browse relay is starting", code: "relay-starting" }))
+      response.end(JSON.stringify({ error: "browse relay is starting", code: "relay-starting" }))
       return
     }
     const started = performance.now()
@@ -1048,11 +1048,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     Effect.gen(function* () {
       if (!browsers.connected) {
         const rejected = rejectedProtocol()
-        return yield* Effect.fail(new Error(rejected ? mismatchAdvice(rejected.version) : "The Browse extension isn't connected, so its settings can't be read or changed. Ask the user to open the browser with the extension; its options page shows whether it's connected."))
+        return yield* Effect.fail(new Error(rejected ? mismatchAdvice(rejected.version) : "The browse extension isn't connected, so its settings can't be read or changed. Ask the user to open the browser with the extension; its options page shows whether it's connected."))
       }
       const result = yield* sendToExtension({ method, ...(values ? { params: { values } } : {}) }).pipe(
         Effect.mapError((error) => /Invalid extension command/.test(error.message)
-          ? new Error(`The connected Browse extension is too old to read or change settings from here. Update browse (\`${installCommand()}\`) and reload the extension, or change them on its options page.`)
+          ? new Error(`The connected browse extension is too old to read or change settings from here. Update browse (\`${installCommand()}\`) and reload the extension, or change them on its options page.`)
           : error),
       )
       return settingsFromExtension(result)
@@ -1181,7 +1181,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
 
   httpServer.on("upgrade", (request, socket, head) => {
     if (!relayReady) {
-      sendUpgradeError({ socket, status: 404, message: "Browse relay is starting" })
+      sendUpgradeError({ socket, status: 404, message: "browse relay is starting" })
       return
     }
     const requestUrl = new URL(request.url ?? "/", endpointUrl)
@@ -1215,7 +1215,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return
     }
     if (!hasRelayToken(request, authToken) && !secretsEqual(authToken, requestUrl.searchParams.get(relayTokenQueryParam) ?? undefined)) {
-      sendUpgradeError({ socket, status: 401, message: "Missing or invalid Browse relay token" })
+      sendUpgradeError({ socket, status: 401, message: "Missing or invalid browse relay token" })
       return
     }
     if (requestUrl.pathname.startsWith("/devtools/browser/")) {
@@ -1457,7 +1457,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         legacyExtensionReloaded = true
         socket.send(JSON.stringify({ id: 0, method: "runtime.reload" }))
       }
-      socket.close(4005, "Pairing required: update Browse")
+      socket.close(4005, "Pairing required: update browse")
       return undefined
     }
     if (!/^[A-Za-z0-9_-]{22,128}$/.test(extensionNonce)) {
@@ -1489,7 +1489,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
     if (mode === "old") {
       const code = legacyPairingCode()
-      if (code === undefined) return refuse("old extension, no shared code", "Pairing failed: update Browse, then pair it with the code `pair` prints")
+      if (code === undefined) return refuse("old extension, no shared code", "Pairing failed: update browse, then pair it with the code `pair` prints")
       socket.send(JSON.stringify({ method: "auth.challenge", params: { nonce: relayNonce, proof: legacyPairingProof(code, "relay", port, relayNonce, extensionNonce), protocol } }))
       return { ...base, expected: legacyPairingProof(code, "extension", port, extensionNonce, relayNonce) }
     }
@@ -2099,7 +2099,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       }
       if (action === "stop-execution" && sessionId) {
         relayLog("execute.stopped", { tabId, session: sessionId, from: "toolbar" })
-        sessions.stopExecution(sessionId, `The user took tab ${tabId} back (Browse toolbar button) while this script ran, so it was stopped. Don't use that tab again unless the user lends it back; ask the user how to continue.`)
+        sessions.stopExecution(sessionId, `The user took tab ${tabId} back (browse toolbar button) while this script ran, so it was stopped. Don't use that tab again unless the user lends it back; ask the user how to continue.`)
       }
     }
     Effect.runPromise(toggleTab(tabId)).catch((error: unknown) => {
@@ -2448,7 +2448,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       ? registry.listRootTargets().find((target) => target.opencodeBrowserSessionId === sessionId && target.owner === "relay")
       : undefined
     const link = (existing && browsers.browserTab(existing.tabId)?.link) ?? browsers.defaultLink()
-    return link ? Effect.succeed(link) : Effect.fail(new Error("Browse extension is not connected"))
+    return link ? Effect.succeed(link) : Effect.fail(new Error("browse extension is not connected"))
   })
 
   const createAndAttachTab = Effect.fnUntraced(function* (options: {
@@ -2650,11 +2650,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
           if (restored.some((entry, i) => entry !== entries[i])) await sessionCatalog.save(restored)
           return restored
         },
-        catch: (cause) => cause instanceof Error ? cause : new Error("Load Browse session catalog", { cause }),
+        catch: (cause) => cause instanceof Error ? cause : new Error("Load browse session catalog", { cause }),
       })
       yield* Effect.try({
         try: () => sessions.restore(restoredSessions),
-        catch: (cause) => cause instanceof Error ? cause : new Error("Restore Browse sessions", { cause }),
+        catch: (cause) => cause instanceof Error ? cause : new Error("Restore browse sessions", { cause }),
       })
       catalogWritesEnabled = true
       if (managed) {

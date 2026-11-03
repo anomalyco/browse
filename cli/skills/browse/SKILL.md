@@ -1,14 +1,14 @@
 ---
 name: browse
-description: Use the user's existing Chromium-family browser through Browse, with deterministic Playwright. Use when asked to inspect, automate, test, or interact with a visible browser tab; continue an authenticated browser workflow; handle 2FA, passkeys, CAPTCHAs, or payment confirmation; record browser behavior; or capture an authenticated network flow.
+description: Use the user's existing Chromium-family browser through browse, with deterministic Playwright. Use when asked to inspect, automate, test, or interact with a visible browser tab; continue an authenticated browser workflow; handle 2FA, passkeys, CAPTCHAs, or payment confirmation; record browser behavior; or capture an authenticated network flow.
 ---
 
-# Browse
+# browse
 
 The `browse` tools (MCP server `browse`; the same commands as the `opencode-browser`
-CLI) drive the user's browser through the Browse extension.
-Browse is a **driver**, not an agent. The calling agent decides what to
-do; Browse runs deterministic Playwright code in the user's visible
+CLI) drive the user's browser through the browse extension.
+browse is a **driver**, not an agent. The calling agent decides what to
+do; browse runs deterministic Playwright code in the user's visible
 browser.
 
 Use one loop throughout: **inspect, act, verify**. Inspect the real page before
@@ -55,7 +55,7 @@ Completion: one execute returns a page result and a readable session id, or
 ### 2. Choose The Page Deliberately
 
 DevTools-attached tabs
-are excluded from Browse's inventory. `page.title()` reads time out
+are excluded from browse's inventory. `page.title()` reads time out
 after five seconds if the page execution context remains unavailable; the read
 timeout does not close or replace the tab.
 
@@ -119,7 +119,7 @@ exact Playwright accessible name.
 `targetUrl` and `targetIndex` select existing attached pages; they never
 navigate. A URL selector must match exactly one page, and URL and index selectors
 cannot be combined. Adoption makes that tab the session default, closes the
-session's previous relay-created page, and is exclusive to one Browse
+session's previous relay-created page, and is exclusive to one browse
 session. Reset or delete releases an adopted user tab without closing it.
 
 Adoption binds ownership and exact target identity before initializing automation.
@@ -187,7 +187,7 @@ not merely evidence that an action was attempted.
 ### 4. Continue Or Finish Cleanly
 
 Named sessions preserve their default page across short-lived CLI and MCP
-processes. They also survive relay restarts: Browse restores the id,
+processes. They also survive relay restarts: browse restores the id,
 read-only mode, and exact default target. JavaScript `state` and snapshot refs
 are process-local and reset after a relay restart with an explicit warning.
 
@@ -228,7 +228,7 @@ work.
 
 ## Canonical Authenticated Flow
 
-The distinguishing Browse workflow is an authenticated tab plus a
+The distinguishing browse workflow is an authenticated tab plus a
 human-only prompt:
 
 Attach and adopt the existing tab, inspect its real UI, fill ordinary fields,
@@ -237,7 +237,7 @@ After the user completes it, verify the authenticated destination. The same
 session can continue after an MCP process or relay restart.
 
 When the prompt-triggering action may itself block, put only that action in
-`start`. Browse presents and acknowledges WAIT before invoking it:
+`start`. browse presents and acknowledges WAIT before invoking it:
 
 ```js
 await handoff("Complete the security-key prompt, then continue", {
@@ -252,7 +252,7 @@ await page.getByRole("heading", { name: /account|dashboard/i }).waitFor()
 return { authenticatedUrl: page.url(), title: await page.title() }
 ```
 
-After a resolved handoff, Browse waits through transient destination
+After a resolved handoff, browse waits through transient destination
 context replacement before returning, so this verification can remain in the
 same execute.
 
@@ -287,7 +287,7 @@ code; a demonstration records actions, not proof that the workflow succeeded.
 
 ### Bot Challenges And Blocks
 
-After an execute call navigates or fails, Browse looks at the session
+After an execute call navigates or fails, browse looks at the session
 page for a bot challenge or block page (Cloudflare, Turnstile, Akamai, DataDome,
 PerimeterX/HUMAN, Imperva, AWS WAF, reCAPTCHA or hCaptcha walls, generic
 "access denied" and "verify you are human" pages) and reports it as
@@ -399,7 +399,7 @@ diffs include visible page content: inspect for private information before shari
 Execute code can use `page`, `context`, `browser`, persistent `state`, the
 `files` helper, compute-only Node modules through `modules` and the aliases
 `path`, `url`, `util`, `crypto`, `buffer`, `zlib`, `events` and `stream`, plus
-the Browse helpers documented here. Timers, `URL`, `TextEncoder`,
+the browse helpers documented here. Timers, `URL`, `TextEncoder`,
 `Buffer`, `structuredClone` and `crypto.randomUUID()` are available. Use
 `page.evaluate` for `window`, `document`, storage, and same-origin `fetch`
 with page cookies. `page.evaluate` runs in an isolated world, whose `fetch`
@@ -503,12 +503,12 @@ return { tools, result }
 ```
 
 Discovery covers all frames. If the same name appears in multiple frames, pass
-the exact reported frame label as `{ frame }`. Browse re-discovers the
+the exact reported frame label as `{ frame }`. browse re-discovers the
 tool immediately before invoking it, so stale registrations fail directly.
 
 ## Safety
 
-Browse blocks CDP commands that would destroy shared browser state,
+browse blocks CDP commands that would destroy shared browser state,
 including browser close and cookie/cache clearing. Never work around those
 guardrails. Cookies and site storage (IndexedDB, Cache Storage, local storage,
 quota) are limited to the hosts of your session's pages, and navigations to
@@ -546,7 +546,7 @@ match; hostnames are resolved, and the document's real remote IP is checked, so
 a name pointing at a private address is caught too.
 
 With an allowlist, `page.goto()` and `context.newPage()` to another host fail
-with "Browse blocked Page.navigate: session ... has a domain
+with "browse blocked Page.navigate: session ... has a domain
 allowlist". Links, redirects, scripts and form posts that leave the list are
 stopped, or the tab is sent back to `about:blank`; popups that open elsewhere
 are closed. Each one adds a "Domain allowlist:" warning to the execute result.
@@ -568,7 +568,7 @@ await secrets.type(page.getByLabel("Password"), "example")   // or a selector st
 await page.getByRole("button", { name: "Sign in" }).click()
 ```
 
-Browse checks the field's frame URL (from the browser's frame tree,
+browse checks the field's frame URL (from the browser's frame tree,
 not page script) against the secret's allowed origins, and the session's
 allowlist when it has one, right before it inserts the value. It returns
 `{ typed: true, name, origin, kind }`, never the value, and redacts the value
@@ -582,7 +582,7 @@ elsewhere.
 
 ### Signing in with Deadbolt
 
-When the user connected Browse to Deadbolt (`opencode-browser deadbolt
+When the user connected browse to Deadbolt (`opencode-browser deadbolt
 connect`), you can sign in with the logins they granted to agents, without
 seeing any value. `secrets_list` shows them for the session's allowed sites:
 title, username, `granted`, which `fields` (username, password, totp) and
@@ -808,7 +808,7 @@ values fail instead of silently clamping. The start result reports the chosen ra
 Tab capture can include audio; CDP requires `ffmpeg` and has no audio. Use the
 command's `--help` for format options.
 
-Recordings are clean by default: nothing from Browse is drawn in the
+Recordings are clean by default: nothing from browse is drawn in the
 recorded page. The ghost cursor stays off, `screenshotWithLabels` draws its
 labels onto the returned image instead of the page, and a handoff on a tab being
 recorded shows no in-page card: the user gets a system notification and the
@@ -918,12 +918,12 @@ Common diagnoses:
   `page.url()` read can still work; retry the page read after the page settles.
   Ordinary missing-locator timeouts do not receive this diagnostic.
 - `connected:false`: check `extension.pairingState` and follow `extension.nextStep`.
-  `unpaired` or `refused` means Browse is installed: re-run install to pair it, **not** the store.
-  `paired-offline`: reopen the paired browser profile and enable Browse; its worker wakes every 30 seconds.
-  `not-seen`: the relay hasn't heard from a browser. If Browse is already added, open that browser and
+  `unpaired` or `refused` means browse is installed: re-run install to pair it, **not** the store.
+  `paired-offline`: reopen the paired browser profile and enable browse; its worker wakes every 30 seconds.
+  `not-seen`: the relay hasn't heard from a browser. If browse is already added, open that browser and
   rerun install. Otherwise follow install's store or Load unpacked steps.
 - Incompatible extension protocol: follow `extension.nextStep`. For an older unpacked extension after setup,
-  ask the user: “Reload Browse on your browser's extensions page (↻).” Running setup again does not reload older workers.
+  ask the user: “Reload browse on your browser's extensions page (↻).” Running setup again does not reload older workers.
 - Competing browser/profile connections: the active browser is preserved and
   additional connections are rejected. Use one browser/profile per relay;
   repeatedly creating sessions or resetting tabs does not switch browsers.
@@ -946,7 +946,7 @@ Common diagnoses:
 - Extension installed but not paired: re-run `npx @opencode/browse install` to open its pairing link
   (from a checkout, `bun run setup`). To pair manually, run `npx @opencode/browse pair`
   (from the checkout root, `node cli/dist/cli.mjs pair`). This starts the relay. Have the user enter
-  the code in Browse's Options and click Connect. The terminal confirms which browser paired.
+  the code in browse's Options and click Connect. The terminal confirms which browser paired.
 - HTTP 401 from the relay: clients need the relay token from the data root
   (`relay-token`); the CLI and MCP server send it, other CDP clients must add
   `Authorization: Bearer <token>` or `?opencodeBrowserToken=<token>`.
@@ -954,10 +954,10 @@ Common diagnoses:
   and snapshot refs reset. Continue after the warning.
 - Reset/delete after an extension update may wait briefly for target
   re-announcement; if the old relay-owned target is absent from the completed
-  inventory, Browse forgets the dead identity without closing a
+  inventory, browse forgets the dead identity without closing a
   guessed tab.
-- Repeated execution-context errors: run one short follow-up so Browse
-  can health-check the page. A live page is kept: Browse reconnects and
+- Repeated execution-context errors: run one short follow-up so browse
+  can health-check the page. A live page is kept: browse reconnects and
   re-resolves the same tab once, then fails with a `session-page/*-unresponsive`
   diagnosis if the page still does not answer. Blank or unknown URLs are preserved:
   they can contain unsaved content. Only a crashed or
@@ -967,7 +967,7 @@ Common diagnoses:
   stall the main world for automation while rendering normally for the human),
   open a fresh tab with `context.newPage()` or hand the tab to the user.
 - Handoff ends with "page execution context did not become available": the user
-  finished; only Browse's view of the tab is stale. Run a short
+  finished; only browse's view of the tab is stale. Run a short
   follow-up execute so the page is re-checked instead of assuming it was lost.
 - Fill timeout on login fields: inspect first, then try `fillInput` after
   confirming the selector or locator resolves. String selectors search open
@@ -992,7 +992,7 @@ For deeper relay diagnosis, restart with `OPENCODE_BROWSER_DEBUG=1`. Debug trace
 must never include expressions, arguments, results, headers, cookies, or form
 values.
 
-Whenever Browse fails, wedges, replaces a page/session, or behaves
+Whenever browse fails, wedges, replaces a page/session, or behaves
 unexpectedly, create or update a `opencode-browser` project todo with the Browser
 Control version, safe session/page context, exact error, deterministic
 reproduction, expected versus actual behavior, and recovery attempted. Never
