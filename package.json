@@ -21,6 +21,12 @@
     "@types/bun": "1.4.0",
     "@types/chrome": "0.3.4",
     "@typescript/native": "npm:typescript@7.0.2",
-    "vite": "8.2.2"
+    "vite": "8.2.2",
+    "vite-plugin-solid": "^2.11.15"
+  },
+  "dependencies": {
+    "@opencode/ui": "2.2.5",
+    "@solidjs/meta": "^0.29.8",
+    "solid-js": "^1.9.18"
   }
 }

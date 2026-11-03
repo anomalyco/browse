@@ -145,7 +145,7 @@ export async function checkStoreZip(zip: string, version: string, allowlist?: Al
     if ("update_url" in manifest) problems.push(`${label}: manifest has \`update_url\` (the store rejects it)`)
     if (manifest.manifest_version !== 3) problems.push(`${label}: manifest_version is not 3`)
     for (const name of names) if (!STORE_FILE_TYPES.test(name)) problems.push(`${label}: unexpected file type ${name}`)
-    for (const required of ["background.js", "content.js", "welcome.html"]) if (!names.includes(required)) problems.push(`${label}: missing ${required}`)
+    for (const required of ["background.js", "content.js", "welcome.html", "onboarding.html", "settings.html"]) if (!names.includes(required)) problems.push(`${label}: missing ${required}`)
     problems.push(...versionProblems(manifest, version, label), ...capabilityProblems(manifest, allowed, label))
     return problems
   })

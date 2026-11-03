@@ -1,0 +1,132 @@
+.settings {
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 40px 24px 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+.callout {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--v2-state-border-info);
+  border-radius: 12px;
+  background: var(--v2-state-bg-info);
+}
+
+.callout h2 {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.callout p {
+  color: var(--v2-text-text-muted);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.section > h2 {
+  padding-left: 2px;
+  color: var(--v2-text-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+  text-transform: uppercase;
+}
+
+.section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 18px;
+  border: 1px solid var(--v2-border-border-base);
+  border-radius: 12px;
+  background: var(--v2-background-bg-deep);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.row-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.row-label {
+  font-weight: 500;
+}
+
+.row-control {
+  flex: none;
+}
+
+.row-control [data-slot="segmented-control-v2"] {
+  width: 280px;
+}
+
+p.row-text {
+  display: block;
+  color: var(--v2-text-text-muted);
+}
+
+@media (max-width: 560px) {
+  .row[data-wide] {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+}
+
+.status-line {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.status-line .dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--v2-text-text-faint);
+  transform: translateY(-1px);
+}
+
+.status-line[data-state="connected"] .dot {
+  background: var(--v2-state-fg-success);
+}
+
+.status-line[data-state="connecting"] .dot {
+  background: var(--v2-text-text-accent);
+}
+
+.status-line:is([data-state="conflict"], [data-state="incompatible"], [data-state="unpaired"], [data-state="untrusted"]) .dot {
+  background: var(--v2-state-fg-warning);
+}
+
+.tips {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-left: 18px;
+  color: var(--v2-text-text-muted);
+}
+
+footer {
+  color: var(--v2-text-text-faint);
+  font-size: 12px;
+  text-align: center;
+}

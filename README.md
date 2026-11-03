@@ -27,7 +27,7 @@ the agents you choose, and connects the extension:
    Enter to confirm. You can uncheck OpenCode, choose an agent you haven't installed yet, or choose none for CLI-only use.
    Your next interactive install starts with your last selection.
 2. **Add the extension.** `install` opens Browse in the Chrome Web Store; add it to your browser, and `install` pairs
-   it once it's there. If it's already there, `install` opens its status page with a one-time pairing code, so it
+   it once it's there. If it's already there, `install` opens its setup page with a one-time pairing code, so it
    pairs without copying anything.
 3. **Restart your agent** if it doesn't reload MCP settings automatically.
 
@@ -38,7 +38,7 @@ Requirements: Node.js 22.19+, a Chromium browser, and [opencode](https://opencod
 
 **Updates are automatic.** The relay checks npm once a day and installs a new version in the background; it switches
 over when no agent is using the browser, without changing opencode's config or restarting it. Choose *Only tell me* or
-*Don't check* under **Updates** on the extension's status page (or `settings set autoUpdate=notify`, or
+*Don't check* under **Updates** on the extension's settings page (or `settings set autoUpdate=notify`, or
 `OPENCODE_BROWSER_AUTO_UPDATE=off`). `npx @opencode/browse update` updates now, and `npx @opencode/browse rollback` goes
 back to the previous version. The Chrome Web Store updates the extension.
 
@@ -73,7 +73,7 @@ This needs [Bun](https://bun.sh) as well. A checkout never updates itself: run `
 `browse` folder (or ask your agent to update browse), then restart opencode. It pulls the new commits (fast-forward
 only, and never over local changes), rebuilds, and requests an extension reload. If the old extension cannot accept
 the request, **reload Browse on your browser's extensions page (↻)**. The manual equivalent of `update` is
-`git pull && bun run setup`. When there's an update, `status`, `doctor`, the extension's status page and the agent (once
+`git pull && bun run setup`. When there's an update, `status`, `doctor`, the extension's settings page and the agent (once
 per session) say so; browse checks the clone's remote at most every six hours. Set `OPENCODE_BROWSER_UPDATE_CHECK=0` to
 turn the check off.
 
@@ -149,8 +149,8 @@ and the extension connects to it across the network:
    The relay then listens on every network, restarting if it runs. Other computers reach only the extension link;
    the HTTP API and CDP answer on `127.0.0.1` only. The command prints the address and a pairing code for step 2
    (`npx @opencode/browse pair` prints another; each works once, within 10 minutes).
-2. In the browser, open the extension's status page (right-click the toolbar button, then **Options**). Under
-   **Connection**, replace `localhost:19988` in **Relay** with that machine's address (a Tailscale IP or name, with
+2. In the browser, open the extension's settings page (right-click the toolbar button, then **Options**). Under
+   **Connection**, replace `localhost:19988` in **Relay address** with that machine's address (a Tailscale IP or name, with
    `:port` if it isn't 19988), enter the code under **Pairing code**, then click **Connect**. The page says right there
    whether the relay answered and accepted the code.
 

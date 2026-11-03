@@ -1,4 +1,4 @@
-// Messages between the extension's status page (welcome.html) and the background service worker. The page holds
+// Messages between the extension's pages (onboarding.html, settings.html) and the background service worker. The page holds
 // one `chrome.runtime.connect({ name: STATUS_PORT })` port and watches the relay connection through it.
 
 import type { PageStatus } from "../agent-relay/protocol"
