@@ -33,10 +33,10 @@ build   from the tag: install, typecheck, test, release:check (zip + tarball + a
 attest  build provenance for the zip and tarball (Sigstore)
 publish-npm  +  publish-cws   npm latest (--ignore-scripts, provenance) and Chrome Web Store upload + submit
 publish-github-release        the release on v<version>: notes, zip, tarball, SHA256SUMS, attestation
-publish-version-pr            a PR that brings the release commit back to dev, so dev builds count up from it
+push-release-to-dev           pushes the release commit to dev (deploy key), so dev builds count up from it
 ```
 
-Merge the version PR. The store review takes hours to a few days (the job summary shows `PENDING_REVIEW`); a release
+The store review takes hours to a few days (the job summary shows `PENDING_REVIEW`); a release
 fails at `publish-cws` while an earlier version is still in review. npm users get the new version within a day: the
 relay checks once a day and switches when no agent is using the browser.
 
@@ -105,10 +105,10 @@ checks the token against `registry/browse.json` there ([scripts/release-registry
    `release-tag-key.pub` under Settings → Deploy keys with write access, store the private key with
    `gh secret set RELEASE_TAG_KEY --env release < release-tag-key`, and delete both files.
 7. **Rulesets** (Settings → Rules):
-   - branch `dev`: require a pull request with code owner review, block force pushes and deletion.
+   - branch `dev`: require a pull request with code owner review, block force pushes and deletion; bypass:
+     *Repository admin* and *Deploy keys* (the release commit comes back to dev with the deploy key).
    - tags `v*`: restrict creation, updates and deletion; bypass: *Repository admin* and *Deploy keys* (the tag job).
-8. **Actions** (Settings → Actions → General): require actions pinned to a full-length commit SHA, and allow GitHub
-   Actions to create pull requests (the version PR).
+8. **Actions** (Settings → Actions → General): require actions pinned to a full-length commit SHA.
 9. **npm.** Your npm account needs publish rights on `@opencode` (`npm org ls opencode`). Until the package exists, a
    granular token goes in `NPM_TOKEN` of `release`. After the first release, on npmjs.com `@opencode/browse` →
    Settings → Trusted publishing, add GitHub Actions: `anomalyco/browse`, workflow `release.yml`, environment

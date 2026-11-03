@@ -376,29 +376,25 @@ jobs:
           BROWSE_DRY_RUN: ${{ needs.plan.outputs.dry_run }}
           BROWSE_RELEASE_NOTES: ${{ inputs.release_notes }}
 
-  # Brings the release commit back to dev, so dev builds count up from the new version. Pushing to dev is blocked by
-  # the ruleset, so it opens a PR.
-  publish-version-pr:
-    name: Version PR to dev
+  # Brings the release commit back to dev, so dev builds count up from the new version: pushed straight to dev with the
+  # release deploy key (the dev ruleset admits it besides admins), replayed on the newest dev if dev moved. Git only.
+  push-release-to-dev:
+    name: Release commit to dev
     needs: [plan, tag, publish-github-release]
     if: ${{ !cancelled() && needs.plan.outputs.mode == 'stable' && needs.publish-github-release.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    environment: release
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
     steps:
-      - name: Check out release scripts
+      - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-          sparse-checkout: /.github/release/
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
-      - name: Publish
-        run: bash .github/release/publish-version-pr.sh "$SHA"
+          ssh-key: ${{ secrets.RELEASE_TAG_KEY }}
+      - name: Push
+        run: bash .github/release/push-release-to-dev.sh "$SHA"
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
           BROWSE_VERSION: ${{ needs.plan.outputs.version }}
           SHA: ${{ needs.tag.outputs.sha }}
