@@ -34,8 +34,8 @@ export class BrowserCdp {
     })
   }
 
-  static async connect(timeoutMs = 10_000): Promise<BrowserCdp> {
-    const version = await fetch(`http://127.0.0.1:${chromeDebugPort}/json/version`, { signal: AbortSignal.timeout(timeoutMs) }).then((r) => r.json()) as { webSocketDebuggerUrl: string }
+  static async connect(timeoutMs = 10_000, port = chromeDebugPort): Promise<BrowserCdp> {
+    const version = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(timeoutMs) }).then((r) => r.json()) as { webSocketDebuggerUrl: string }
     const ws = new WebSocket(version.webSocketDebuggerUrl)
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("CDP connect timeout")), timeoutMs)
