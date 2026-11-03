@@ -86,6 +86,8 @@ test("plans a single picker, remembering even an intentionally empty selection",
   expect(plan(["-y"], true).selected).toEqual(["opencode", "cursor"])
   expect(plan(["-a", "claude", "vscode", "--agent", "claude", "--yes"], true, "claude")).toEqual({ picker: false, selected: ["claude", "vscode"] })
   expect(plan(["--agent", "*"], false).selected).toEqual([...agentNames])
+  expect(plan(["--agent", "none"], true, "claude")).toEqual({ picker: false, selected: [] })
+  expect(plan(["--agent", "none", "claude"], true).selected).toEqual(["claude"])
   expect(plan(["--all-agents"], true)).toEqual(plan(["-a", "*"], false))
   expect(() => agentFlags(["--agent", "oops"])).toThrow("Unknown agent")
   expect(() => agentFlags(["-a", "--yes"])).toThrow("at least one")

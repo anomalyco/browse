@@ -12,7 +12,7 @@ import { TextInput } from "@opencode/ui/text-input"
 import { unpackedExtensionId, unpackedReloadAdvice } from "../../cli/src/protocol"
 import { firstRunStep, relayProbeResult, shouldProbe, type FirstRunStep, type RelayProbe } from "./first-run"
 import { TRY_PROMPT, checklist } from "./checklist"
-import { installCommand, remoteInstallCommand, windows } from "./install"
+import { byHandInstallCommand, installCommand, manualMcpEntry, remoteInstallCommand, windows } from "./install"
 import { RelayForm } from "./relay-form"
 import { applyColorScheme, Brand, createFlash, createRelay, Note, Rich, type Relay } from "./ui"
 import "./onboarding.css"
@@ -28,7 +28,7 @@ const settingsUrl = () => chrome.runtime.getURL("settings.html")
 const AGENT_PROMPT = `Set up Browse so you can use my Chrome: run ${installCommand}`
 
 type Where = "here" | "remote"
-type How = "agent" | "manual"
+type How = "agent" | "manual" | "other"
 
 function Onboarding() {
   const relay = createRelay()
@@ -130,8 +130,10 @@ function Onboarding() {
           <AgentDone relay={relay} pairedBy={pairedBy()} />
         ) : how === "agent" ? (
           "OpenCode, Claude Code, Codex, Cursor or any agent that can run commands. It installs Browse, adds it to itself and connects to this browser."
+        ) : how === "manual" ? (
+          "Downloads Browse, adds it to the agents it finds on this computer and connects to this browser."
         ) : (
-          "Downloads Browse, adds it to the agents it finds on this computer and connects to this browser. Agent not on its list? Install prints an MCP server entry you can add yourself."
+          "Downloads Browse and connects it to this browser, without setting up an agent."
         )
       }
     >
@@ -139,7 +141,11 @@ function Onboarding() {
         <AgentStep
           relay={relay}
           step={step()}
-          command={how === "agent" ? { text: AGENT_PROMPT, label: "Copy prompt" } : { text: installCommand, label: "Copy command" }}
+          command={
+            how === "agent" ? { text: AGENT_PROMPT, label: "Copy prompt" }
+            : how === "manual" ? { text: installCommand, label: "Copy command" }
+            : { text: byHandInstallCommand, label: "Copy command" }
+          }
           linkNote={linkNote()}
           onPaired={() => setPairedBy("code")}
         />
@@ -183,6 +189,9 @@ function Onboarding() {
                 <Tabs.Trigger class="tab" value="manual">
                   <span>Do it yourself</span>
                 </Tabs.Trigger>
+                <Tabs.Trigger class="tab" value="other">
+                  <span>Other agent</span>
+                </Tabs.Trigger>
                 <Tabs.Indicator class="tab-indicator" />
               </Tabs.List>
               <div class="hr" />
@@ -196,6 +205,19 @@ function Onboarding() {
                 <div class="steps">
                   {installStep("manual")}
                   {tryIt(2, "your agent")}
+                </div>
+              </Tabs.Content>
+              <Tabs.Content class="guide-body" value="other">
+                <div class="steps">
+                  {installStep("other")}
+                  <Step
+                    number={2}
+                    title="Add Browse to your agent"
+                    description="In your agent's MCP settings, add a stdio server. Install prints this entry with the full path for your computer:"
+                  >
+                    <Command text={manualMcpEntry} label="Copy MCP server entry" block />
+                  </Step>
+                  {tryIt(3, "your agent")}
                 </div>
               </Tabs.Content>
             </Tabs>
@@ -282,10 +304,10 @@ function Step(props: { number: number; title: string; description?: JSX.Element;
 }
 
 /** A command or prompt to copy. */
-function Command(props: { text: string; label: string }) {
+function Command(props: { text: string; label: string; block?: boolean }) {
   const [copied, flash] = createFlash("copy", "check")
   return (
-    <div class="cmd">
+    <div class="cmd" classList={{ "cmd-block": props.block }}>
       <div class="cmd-text">
         <code>{props.text}</code>
         <IconButton

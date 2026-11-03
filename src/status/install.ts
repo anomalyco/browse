@@ -10,3 +10,15 @@ export const installCommand = windows ? POWERSHELL : SHELL
 
 /** Installs Browse on another computer and opens its relay to this one. */
 export const remoteInstallCommand = `${SHELL} -s -- --remote`
+
+/** Installs Browse without setting up an agent, for one install doesn't know: it prints the MCP entry instead. */
+export const byHandInstallCommand = windows
+  ? `& ([scriptblock]::Create((${POWERSHELL.replace(" | iex", "")}))) --agent none`
+  : `${SHELL} -s -- --agent none`
+
+/** The stdio MCP server entry for an agent install doesn't know, with the path install puts the binary at. */
+export const manualMcpEntry = `{
+  "mcpServers": {
+    "browse": { "command": "${windows ? "%USERPROFILE%\\\\.browse\\\\bin\\\\browse.exe" : "~/.browse/bin/browse"}", "args": ["mcp"] }
+  }
+}`

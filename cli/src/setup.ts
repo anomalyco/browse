@@ -459,7 +459,9 @@ async function install(args: string[]) {
   await installSteps(args, tty, caller)
   if (!rail) return
   waiting?.stop()
-  clack.outro(process.exitCode ? "Browse isn't fully set up yet. Fix the steps above, then run browse install again." : "Done. Restart your agents, then ask one to open a page.")
+  clack.outro(process.exitCode ? "Browse isn't fully set up yet. Fix the steps above, then run browse install again."
+    : byHand ? "Done. Add the MCP server above to your agent, restart it, then ask it to open a page."
+    : "Done. Restart your agents, then ask one to open a page.")
 }
 
 async function installSteps(args: string[], tty: boolean, caller: AgentName | undefined) {
@@ -528,7 +530,8 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
       log(`! Couldn't edit ${tilde(agent.file)} for ${label}. Check its syntax and permissions, then run ${cliCommand(`install --agent ${agent.name}`)}.`)
     }
   }
-  showManualMcp(entryCommand(entry))
+  byHand = selected.length === 0
+  showManualMcp(entryCommand(entry), caller)
   for (const line of restartOutdatedRelay(entry) ?? []) log(line)
   const legacy = selected.includes("opencode") ? legacyBrowserControl() : []
   if (legacy.length)
@@ -653,10 +656,16 @@ export function manualMcpEntry(command: readonly string[]) {
   return `{\n  "mcpServers": {\n    "browse": ${server}\n  }\n}`
 }
 
-function showManualMcp(command: readonly string[]) {
+/** Set when no agent was picked (`--agent none`, or nothing ticked): the MCP entry is then the step, not an aside. */
+let byHand = false
+
+function showManualMcp(command: readonly string[], caller: AgentName | undefined) {
   const json = manualMcpEntry(command)
-  if (rail) return clack.note(json, "Another agent? Add this MCP server")
-  log(`\nUsing another agent? Add Browse as an MCP server (stdio):\n${json.split("\n").map((line) => `  ${line}`).join("\n")}\n`)
+  if (rail) return clack.note(json, byHand ? "Add Browse to your agent as an MCP server" : "Another agent? Add this MCP server")
+  const intro = byHand ? "Add Browse to your agent as an MCP server (stdio):"
+    : caller ? "Using another agent too? Add Browse to it as an MCP server (stdio):"
+    : "Agent: if you weren't set up above, add Browse to your own MCP config (stdio):"
+  log(`\n${intro}\n${json.split("\n").map((line) => `  ${line}`).join("\n")}\n`)
 }
 
 const tilde = (file: string) => (file === home || file.startsWith(home + path.sep) ? "~" + file.slice(home.length) : file)
