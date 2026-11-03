@@ -189,7 +189,7 @@ function Onboarding() {
                 number={1}
                 title="Start the relay on that computer"
                 done={connected()}
-                description="If it doesn't have Browse yet, run install there first. This lets other computers reach its relay and prints a pairing code."
+                description="Run this on the computer your agent runs on. It prints a pairing code."
               >
                 <Show when={!connected()}>
                   <Command text={REMOTE_SETUP} label="Copy command" />
