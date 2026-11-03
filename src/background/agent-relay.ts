@@ -2,7 +2,7 @@
 // for the browse MCP server and the opencode-browser CLI (Playwright `execute`, recordings, handoffs) and drives tabs
 // through this extension; this module runs its commands. The wire protocol is in ../agent-relay/protocol.ts,
 // the relay itself in cli/src/relay.ts.
-import { extensionProtocolVersion } from "../../cli/src/protocol"
+import { checkoutReloadPrefix, extensionProtocolVersion, unpackedExtensionId } from "../../cli/src/protocol"
 import {
   defaultRelayPort,
   encodeRecordingFrame,
@@ -145,6 +145,29 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   const cdp = { count: 0, errors: 0 }
   const relayTabs = new Set<number>()
   let reloading = false
+  const reload = () => {
+    if (reloading) return
+    // Preserve attached tabs for the next worker, and allow a paired RPC to send its reply first.
+    reloading = true
+    DebuggerHub.freeze()
+    setTimeout(() => {
+      socket?.close(1000, "Extension reloading")
+      chrome.runtime.reload()
+    }, 50)
+  }
+  // The socket was refused, not trusted. Only reload files already installed in *our own* folder,
+  // and only once per target (also if a broken build never picks up the new worker).
+  const reloadCheckout = async (reason: string, mine: number) => {
+    if (chrome.runtime.id !== unpackedExtensionId || !reason.startsWith(checkoutReloadPrefix)) return
+    const build = reason.slice(checkoutReloadPrefix.length)
+    if (!(Date.parse(build) > Date.parse(__OPENCODE_BROWSER_BUILD__))) return
+    const file = await fetch(chrome.runtime.getURL("build.json"), { cache: "no-store" })
+    if (!file.ok || (await file.json()).build !== build) return
+    const key = "agentRelayReloadBuild"
+    if ((await chrome.storage.local.get(key))[key] === build || generation !== mine) return
+    await chrome.storage.local.set({ [key]: build })
+    if (generation === mine) reload()
+  }
   /** Tabs with a recording in progress; cleanup leaves them open. */
   const recordingTabs = new Set<number>()
   /**
@@ -434,6 +457,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         // A newer relay names the side that's behind: "Extension protocol incompatible: extension-newer".
         skew = /extension-newer/.test(event.reason) ? "update-cli" : /extension-older/.test(event.reason) ? "update-extension" : undefined
         setStatus("incompatible")
+        if (!trusted.has(current) && new URL(current.url).hostname === "127.0.0.1")
+          void reloadCheckout(event.reason, mine).catch(() => { /* Missing or incomplete build: keep the manual step. */ })
       }
       else if (presenceOnly) setStatus("unpaired")
       else if (event.code === 4004) setStatus("conflict")
@@ -780,15 +805,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       }
       case "runtime.reload":
         log.add("runtime.reload")
-        // Reloading detaches every tab. Keep the stored attachments (the new worker re-attaches them) and don't
-        // tell the relay, which would otherwise drop its sessions' tabs; it gets them back on the next hello.
-        reloading = true
-        DebuggerHub.freeze()
-        setTimeout(() => {
-          // Browsers only let pages close with 1000 or 3000-4999; any other code throws and the reload never runs.
-          socket?.close(1000, "Extension reloading")
-          chrome.runtime.reload()
-        }, 50)
+        reload()
         return {}
       case "tabs.cleanup": {
         const minutes = typeof params?.idleMinutes === "number" ? Math.max(0, params.idleMinutes) : undefined

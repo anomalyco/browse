@@ -28,7 +28,7 @@ await rm(path.join(here, "dist"), { recursive: true, force: true })
 // Earlier builds copied the extension into the package.
 await rm(path.join(here, "extension"), { recursive: true, force: true })
 
-await bundleCli({ outdir: path.join(here, "dist"), version: pkg.version, store, ...(extension ? { extension } : {}) })
+await bundleCli({ outdir: path.join(here, "dist"), version: pkg.version, buildId: build, store, ...(extension ? { extension } : {}) })
 
 // install compares this with the build a connected unpacked extension reports, to skip a reload that changes nothing.
 await Bun.write(path.join(checkout, "dist", "build.json"), JSON.stringify({ build }) + "\n")

@@ -68,7 +68,8 @@ steps are left for you:
 
 This needs [Bun](https://bun.sh) as well. A checkout never updates itself: run `node cli/dist/cli.mjs update` in your
 `browse` folder (or ask your agent to update browse), then restart opencode. It pulls the new commits (fast-forward
-only, and never over local changes), rebuilds, and reloads the extension for you. The manual equivalent is
+only, and never over local changes), rebuilds, and requests an extension reload. If the old extension cannot accept
+the request, **reload Browse on your browser's extensions page (↻)**. The manual equivalent of `update` is
 `git pull && bun run setup`. When there's an update, `status`, `doctor`, the extension's status page and the agent (once
 per session) say so; browse checks the clone's remote at most every six hours. Set `OPENCODE_BROWSER_UPDATE_CHECK=0` to
 turn the check off.

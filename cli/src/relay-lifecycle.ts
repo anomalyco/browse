@@ -269,7 +269,7 @@ export const ensureExtensionConnected = Effect.fn("RelayLifecycle.ensureExtensio
     }
     if (status.protocolCompatible === false) {
       return Effect.fail(new ExtensionProtocolIncompatible({
-        message: extensionProtocolAdvice(status.protocolVersion, { install: installCommand() }),
+        message: status.nextStep ?? extensionProtocolAdvice(status.protocolVersion, { install: installCommand() }),
         protocolVersion: status.protocolVersion ?? null,
       }))
     }

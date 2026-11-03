@@ -4,7 +4,7 @@ import { Effect, Option, Predicate, Schema } from "effect"
 import { WebSocket, WebSocketServer } from "ws"
 import type { ExecuteTargetSelection } from "./execute.ts"
 import type { CdpEvent, CdpResponse, JsonObject, TargetInfo } from "./protocol.ts"
-import { parseJsonObject } from "./protocol.ts"
+import { parseJsonObject, unpackedExtensionId } from "./protocol.ts"
 import type { OpenCodeBrowserSession } from "./relay-types.ts"
 import { RelayErrorCode } from "./relay-schema.ts"
 
@@ -15,7 +15,7 @@ export const defaultPort = 19988
  * The unpacked build (its ID is pinned by the manifest key). The Chrome Web Store items are release configuration
  * (paths.ts storeConfig): the relay adds them to the allowed origins, so no store ID is hard-coded here.
  */
-export const stableUnpackedExtensionOrigin = "chrome-extension://afeafocngkodbmaipcngoamamfmekgfo"
+export const stableUnpackedExtensionOrigin = `chrome-extension://${unpackedExtensionId}`
 
 export function chromeExtensionOriginForPath(extensionPath: string, platform: NodeJS.Platform = process.platform): string {
   const normalizedPath = platform === "win32" && /^[a-z]:/.test(extensionPath)
