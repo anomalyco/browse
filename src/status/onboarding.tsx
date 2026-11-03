@@ -130,7 +130,7 @@ function Onboarding() {
         connected() ? (
           <AgentDone relay={relay} pairedBy={pairedBy()} />
         ) : how === "agent" ? (
-          "Claude Code, Codex, OpenCode, Cursor or any agent that can run commands. It installs Browse, adds it to itself and connects to this browser."
+          "OpenCode, Claude Code, Codex, Cursor or any agent that can run commands. It installs Browse, adds it to itself and connects to this browser."
         ) : (
           "Downloads Browse, adds it to the agents it finds on this computer and connects to this browser. Nothing else to install."
         )

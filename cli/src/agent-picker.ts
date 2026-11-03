@@ -36,7 +36,7 @@ function fuzzy(query: string, text: string) {
 /** Clack handles raw mode, cancellation and redraw. Space always toggles (including directly after filtering). */
 export async function pickAgents(locations: AgentLocation[], initial: AgentName[]): Promise<AgentName[] | undefined> {
   const selected = new Set(initial)
-  const ordered = [...locations].sort((a, b) => Number(b.installed) - Number(a.installed) || agentLabels[a.name].localeCompare(agentLabels[b.name]))
+  const ordered = [...locations].sort((a, b) => Number(b.name === "opencode") - Number(a.name === "opencode") || Number(b.installed) - Number(a.installed) || agentLabels[a.name].localeCompare(agentLabels[b.name]))
   let query = "", cursor = 0, matches = ordered
   const prompt = new Prompt<AgentName[]>({ render() {
     if (this.state === "cancel") return "Install cancelled."
