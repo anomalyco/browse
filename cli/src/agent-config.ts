@@ -4,10 +4,10 @@ import { isDeepStrictEqual } from "node:util"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
 import { parse as parseToml } from "smol-toml"
 
-export const agentNames = ["claude", "cursor", "codex", "vscode", "windsurf"] as const
+export const agentNames = ["opencode", "claude", "cursor", "codex", "vscode", "windsurf"] as const
 export type AgentName = typeof agentNames[number]
-export const agentLabels: Record<AgentName, string> = { claude: "Claude Code", cursor: "Cursor", codex: "Codex", vscode: "VS Code", windsurf: "Windsurf" }
-export type AgentReceipt = { name: AgentName; file: string; node: string; entry: string }
+export const agentLabels: Record<AgentName, string> = { opencode: "OpenCode", claude: "Claude Code", cursor: "Cursor", codex: "Codex", vscode: "VS Code", windsurf: "Windsurf" }
+export type AgentReceipt = { name: Exclude<AgentName, "opencode">; file: string; node: string; entry: string }
 export type AgentLocation = { name: AgentName; file: string; installed: boolean }
 
 /** Shell markers, not installed binaries or config directories. A plain VS Code terminal isn't its agent. */
@@ -16,11 +16,12 @@ export function callingAgent(env: NodeJS.ProcessEnv): AgentName | undefined {
   if (env.CODEX_THREAD_ID) return "codex"
   if (env.CURSOR_AGENT) return "cursor"
   if (env.AI_AGENT === "github_copilot_vscode_agent" || (env.COPILOT_AGENT === "1" && env.TERM_PROGRAM === "vscode")) return "vscode"
+  if (env.OPENCODE === "1" || env.OPENCODE_SESSION_ID) return "opencode"
   return undefined
 }
 
 /** User scope only; never write a project, workspace or managed config. */
-export function agentLocations(home: string, config: string, onPath: (name: string) => unknown): AgentLocation[] {
+export function agentLocations(home: string, config: string, onPath: (name: string) => unknown, opencodeConfig: string, opencodeBinary?: string): AgentLocation[] {
   const at = (...parts: string[]) => path.join(home, ...parts)
   const support = process.platform === "darwin" ? at("Library/Application Support") : process.platform === "win32" ? process.env.APPDATA ?? at("AppData/Roaming") : config
   const app = (name: string) => process.platform === "darwin" && ["/Applications", at("Applications")].some(d => fs.existsSync(path.join(d, name + ".app")))
@@ -30,6 +31,7 @@ export function agentLocations(home: string, config: string, onPath: (name: stri
   const windsurf = at(".codeium/windsurf/mcp_config.json")
   const claude = process.env.CLAUDE_CONFIG_DIR ? path.join(process.env.CLAUDE_CONFIG_DIR, ".claude.json") : at(".claude.json")
   return [
+    { name: "opencode", file: opencodeConfig, installed: !!opencodeBinary || app("OpenCode") || fs.existsSync(path.join(config, "opencode")) },
     { name: "claude", file: claude, installed: !!onPath("claude") || fs.existsSync(claude) || fs.existsSync(at(".claude")) },
     { name: "cursor", file: at(".cursor/mcp.json"), installed: !!onPath("cursor") || app("Cursor") || fs.existsSync(at(".cursor")) },
     { name: "codex", file: path.join(codex, "config.toml"), installed: !!onPath("codex") || app("Codex") || fs.existsSync(codex) },

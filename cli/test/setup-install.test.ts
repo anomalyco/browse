@@ -4,6 +4,7 @@ import os from "node:os"
 import path from "node:path"
 import { parse } from "jsonc-parser"
 import { agentNames, callingAgent, editAgentConfig } from "../src/agent-config.ts"
+import { agentFlags, agentPlan } from "../src/agent-picker.ts"
 import { installedExtensionVersion, installedRuntime, installWaitTimeout, locateExtension, pairStoreExtension, relayNotRestarted, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
 
 const browser = (name: string): Browser => ({ name, userData: `/data/${name}`, manifests: [], defaultIDs: [], executables: [] })
@@ -22,7 +23,26 @@ test("identifies the calling agent, not the editor hosting a regular terminal", 
   expect(callingAgent({ TERM_PROGRAM: "vscode", CODEX_HOME: "/home/me/.codex" })).toBeUndefined()
 })
 
-test.each([...agentNames])("%s user config: preserve unrelated settings, install twice, uninstall, refuse collisions", name => {
+test("plans a single picker, remembering even an intentionally empty selection", () => {
+  const locations = agentNames.map(name => ({ name, file: name, installed: name === "opencode" || name === "cursor" }))
+  const plan = (args: string[], tty: boolean, caller?: "claude", remembered?: (typeof agentNames[number])[]) => agentPlan(locations, agentFlags(args), tty, caller, remembered)
+  expect(plan([], true)).toEqual({ picker: true, selected: ["opencode", "cursor"] })
+  expect(plan([], true, undefined, ["claude"])).toEqual({ picker: true, selected: ["claude"] })
+  expect(plan([], true, undefined, [])).toEqual({ picker: true, selected: [] })
+  expect(plan([], true, "claude")).toEqual({ picker: false, selected: ["claude"] })
+  expect(plan([], false, "claude", ["cursor"])).toEqual({ picker: false, selected: ["opencode", "claude"] })
+  expect(plan([], false)).toEqual({ picker: false, selected: ["opencode"] })
+  expect(agentPlan([], agentFlags([]), false)).toEqual({ picker: false, selected: [] })
+  expect(plan(["-y"], true)).toEqual(plan(["--yes"], false))
+  expect(plan(["-y"], true).selected).toEqual(["opencode", "cursor"])
+  expect(plan(["-a", "claude", "vscode", "--agent", "claude", "--yes"], true, "claude")).toEqual({ picker: false, selected: ["claude", "vscode"] })
+  expect(plan(["--agent", "*"], false).selected).toEqual([...agentNames])
+  expect(plan(["--all-agents"], true)).toEqual(plan(["-a", "*"], false))
+  expect(() => agentFlags(["--agent", "oops"])).toThrow("Unknown agent")
+  expect(() => agentFlags(["-a", "--yes"])).toThrow("at least one")
+})
+
+test.each(agentNames.filter(n => n !== "opencode"))("%s user config: preserve unrelated settings, install twice, uninstall, refuse collisions", name => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-config-"))
   try {
     const key = name === "vscode" ? "servers" : "mcpServers"

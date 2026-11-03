@@ -20,7 +20,8 @@ import path from "node:path"
 import { createInterface } from "node:readline/promises"
 import { fileURLToPath } from "node:url"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
-import { agentLabels, agentLocations, agentNames, callingAgent, editAgentConfig, type AgentName, type AgentReceipt } from "./agent-config.ts"
+import { agentLabels, agentLocations, callingAgent, editAgentConfig, type AgentName, type AgentReceipt } from "./agent-config.ts"
+import { agentFlags, agentPlan, pickAgents } from "./agent-picker.ts"
 import { describeAutoUpdate, autoUpdateStatus, installVersion, pruneVersions, readCurrent, runtimeLayout, switchVersion, updateState, compareVersions, versionEntry } from "./auto-update.ts"
 import {
   bundledPairingCodeTtlMs,
@@ -92,7 +93,7 @@ const checkoutExtensionDirs = (() => {
   return [path.join(repo, "public"), path.join(repo, "dist")]
 })()
 
-export type Settings = { opencode?: string; entry?: string; version?: string; agents?: AgentReceipt[]; declinedAgents?: AgentName[] }
+export type Settings = { opencode?: string; entry?: string; version?: string; agents?: AgentReceipt[]; opencodeConfigs?: string[]; selectedAgents?: AgentName[]; declinedAgents?: AgentName[] }
 
 export type Browser = {
   name: string
@@ -250,8 +251,7 @@ export function relayNotRestarted(statusJson: string, output: string, command = 
   ]
 }
 
-function mcpServers() {
-  const file = configFile()
+function mcpServers(file = configFile()) {
   const errors: ParseError[] = []
   const config = parse(existsSync(file) ? readFileSync(file, "utf8") : "{}", errors, { allowTrailingComma: true })
   if (errors.length || [config, config?.mcp, config?.mcp?.servers].some(v => v !== undefined && (!v || typeof v !== "object" || Array.isArray(v)))) fail(`Invalid ${file}; left unchanged`)
@@ -276,14 +276,13 @@ function mergedMcpServer(existing: Servers[string] | undefined, command: string[
 }
 
 /** Writes (or updates) the browse MCP server so it runs the installed runtime, keeping the user's settings. */
-function configureMcp(entry: string, previousEntry?: string) {
-  const file = configFile()
+function configureMcp(file: string, entry: string, previousEntry?: string) {
   // A running MCP server keeps its old code after an update, and its relay calls then fail on the build check.
   // Stamping the runtime's fingerprint into the entry changes the config whenever the runtime changes, which
   // makes opencode restart the server with the new code.
-  const existing = mcpServers()[MCP_NAME]
+  const existing = mcpServers(file)[MCP_NAME]
   if (existing && !ownedMcp(existing, previousEntry)) return undefined
-  const renamed = removeMcp(LEGACY_MCP_NAME, previousEntry)
+  const renamed = removeMcp(LEGACY_MCP_NAME, previousEntry, file)
   // The shim of an npm install never changes and swaps the server itself after an update, so its entry stays the same.
   const server = mergedMcpServer(existing, [process.execPath, entry, "mcp"], entry === layout.shim ? "auto-update" : fingerprint(entry))
   if (existing && JSON.stringify(existing) === JSON.stringify(server)) return `"${MCP_NAME}" is up to date`
@@ -295,10 +294,9 @@ function configureMcp(entry: string, previousEntry?: string) {
   return existing ? `"${MCP_NAME}" updated in ${file}` : `"${MCP_NAME}" added to ${file}`
 }
 
-function removeMcp(name: string, entry?: string) {
-  const file = configFile()
+function removeMcp(name: string, entry?: string, file = configFile()) {
   const text = readFileOr(file, "")
-  if (!text || !ownedMcp(mcpServers()[name], entry)) return false
+  if (!text || !ownedMcp(mcpServers(file)[name], entry)) return false
   writeFileSync(file, applyEdits(text, modify(text, ["mcp", "servers", name], undefined, {})))
   return true
 }
@@ -410,48 +408,50 @@ async function install(args: string[]) {
   checkNode()
   const tty = !!(process.stdin.isTTY && process.stdout.isTTY)
   const timeoutMs = installWaitTimeout(args, tty)
-  const requested = args.flatMap((arg, i) => arg === "--agent" ? [args[i + 1] ?? ""] : [])
-  for (const name of requested) if (!["opencode", ...agentNames].includes(name)) fail(`Unknown agent ${JSON.stringify(name)}. Choose opencode, ${agentNames.join(", ")}.`)
+  let flags: ReturnType<typeof agentFlags>
+  try { flags = agentFlags(args) } catch (error) { fail((error as Error).message) }
   const opencode = findOpencode(args)
-  const caller = !requested.length ? callingAgent(process.env) : undefined
-  const allAgents = args.includes("--all-agents") || args.includes("--yes")
+  const caller = callingAgent(process.env)
+  const locations = agentLocations(home, configRoot, findOnPath, configFile(), opencode)
+  const previous = readJson<Settings>(files.settings)
+  const remembered = previous?.selectedAgents ?? (previous?.declinedAgents?.length
+    ? locations.filter(a => a.installed && !previous.declinedAgents!.includes(a.name)).map(a => a.name) : undefined)
+  const plan = agentPlan(locations, flags, tty, caller, remembered)
+  const selected = plan.picker ? await pickAgents(locations, plan.selected) : plan.selected
+  if (!selected) { process.exitCode = 130; return }
 
   mkdirSync(files.dir, { recursive: true })
   const { entry, version } = await installRuntime()
   log(`✓ Browse ${version} installed${fromSource ? " (from source)" : ""}`)
-  const previous = readJson<Settings>(files.settings)
   const agents = previous?.agents ?? []
-  const declined = new Set(previous?.declinedAgents ?? [])
-  const save = () => writeFileSync(files.settings, JSON.stringify({ ...(opencode ? { opencode } : {}), entry, version, agents, declinedAgents: [...declined] } satisfies Settings, null, 2) + "\n")
+  const opencodeConfigs = previous?.opencodeConfigs ?? (previous?.entry ? [configFile()] : [])
+  const selectedAgents = plan.picker ? selected : remembered
+  const save = () => writeFileSync(files.settings, JSON.stringify({ ...(opencode ? { opencode } : {}), entry, version, agents, opencodeConfigs, ...(selectedAgents && { selectedAgents }) } satisfies Settings, null, 2) + "\n")
   save()
   if (removeLegacyHost()) log("✓ Removed the native messaging host of an earlier version")
 
   const node = process.execPath
-  const addOpencode = (opencode && ((!requested.length && !caller) || allAgents || args.includes("--opencode"))) || requested.includes("opencode")
-  if (addOpencode) {
-    const mcp = configureMcp(entry, previous?.entry)
-    log(mcp ? `✓ MCP server ${mcp} (opencode)` : `! opencode already has a different server named browse in ${configFile()}; left unchanged.`)
-  } else if (opencode && caller) log(`To add opencode: ${cliCommand("install --agent opencode")}`)
-  for (const agent of agentLocations(home, configRoot, findOnPath)) {
-    const explicit = requested.includes(agent.name) || agent.name === caller
-    if (!explicit && (!agent.installed || (requested.length && !args.includes("--all-agents")))) continue
-    let consent = explicit || allAgents
-    const label = agentLabels[agent.name]
-    if (!consent && !caller && tty && !declined.has(agent.name)) {
-      const prompt = createInterface({ input: process.stdin, output: process.stdout })
-      consent = /^y(es)?$/i.test((await prompt.question(`Add Browse to ${label}? [y/N] `).finally(() => prompt.close())).trim())
-      if (!consent) { declined.add(agent.name); save() }
+  for (const agent of locations) {
+    if (!selected.includes(agent.name)) {
+      if (!plan.picker && agent.installed && !flags.requested.length) log(`To add ${agentLabels[agent.name]}: ${cliCommand(`install --agent ${agent.name}`)}`)
+      continue
     }
-    if (!consent) { log(`To add ${label}: ${cliCommand(`install --agent ${agent.name}`)}`); continue }
-    const receipt = { name: agent.name, file: agent.file, entry, node }
+    if (agent.name === "opencode") {
+      const mcp = configureMcp(agent.file, entry, previous?.entry)
+      if (mcp && !opencodeConfigs.includes(agent.file)) { opencodeConfigs.push(agent.file); save() }
+      if (!mcp) process.exitCode = 1
+      log(mcp ? `✓ MCP server ${mcp} (OpenCode)` : `! OpenCode already has a different server named browse in ${agent.file}; left unchanged.`)
+      continue
+    }
+    const receipt: AgentReceipt = { name: agent.name, file: agent.file, entry, node }
     try {
       const result = editAgentConfig(receipt)
       if (result === "added") {
         const i = agents.findIndex(a => a.file === agent.file)
         if (i !== -1) agents.splice(i, 1)
         agents.push(receipt)
+        save()
       }
-      if (result !== "conflict" && (declined.delete(agent.name) || result === "added")) save()
       if (result === "conflict") process.exitCode = 1
       log(result === "conflict" ? `! ${agent.name} already has a different browse server; left ${agent.file} unchanged.` : `✓ ${agent.name}: browse ${result} in ${agent.file}`)
     } catch {
@@ -460,7 +460,7 @@ async function install(args: string[]) {
     }
   }
   for (const line of restartOutdatedRelay(entry, node) ?? []) log(line)
-  const legacy = addOpencode ? legacyBrowserControl() : []
+  const legacy = selected.includes("opencode") ? legacyBrowserControl() : []
   if (legacy.length)
     log(`! Browser Control MCP server${legacy.length === 1 ? "" : "s"} ${legacy.map((name) => `"${name}"`).join(", ")} also configured. Browse replaces it; remove ${legacy.length === 1 ? "it" : "them"} from ${configFile()} to avoid two sets of browser tools.`)
 
@@ -760,7 +760,7 @@ async function uninstall(args: string[]) {
   await confirmSecretRemoval(args)
   const host = removeLegacyHost()
   const settings = readJson<Settings>(files.settings)
-  const mcp = [MCP_NAME, LEGACY_MCP_NAME].filter((name) => removeMcp(name, settings?.entry))
+  const mcp = (settings?.opencodeConfigs ?? [configFile()]).flatMap(file => [MCP_NAME, LEGACY_MCP_NAME].filter(name => removeMcp(name, settings?.entry, file)))
   for (const receipt of settings?.agents ?? []) {
     try {
       const result = editAgentConfig(receipt, true)
