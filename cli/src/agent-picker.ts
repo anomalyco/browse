@@ -1,4 +1,4 @@
-import { Prompt, isCancel } from "@clack/core"
+import { autocompleteMultiselect, isCancel } from "@clack/prompts"
 import { agentLabels, agentName, agentNames, type AgentLocation, type AgentName } from "./agent-config.ts"
 
 export function agentFlags(args: string[]) {
@@ -20,48 +20,30 @@ export function agentFlags(args: string[]) {
 
 export function agentPlan(locations: AgentLocation[], flags: ReturnType<typeof agentFlags>, tty: boolean, caller?: AgentName, remembered?: AgentName[]) {
   const detected = locations.filter(a => a.installed).map(a => a.name)
-  const automatic = caller || !tty ? agentNames.filter(n => n === caller || (!tty && n === "opencode" && detected.includes(n))) : undefined
+  // An agent running install gets Browse itself; with no terminal to ask (CI, a script), every agent found does.
+  const automatic = caller ? [caller] : !tty ? detected : undefined
   if (flags.requested.length) return { picker: false, selected: flags.requested }
   if (flags.yes && !caller) return { picker: false, selected: detected }
   if (automatic) return { picker: false, selected: automatic }
   return { picker: true, selected: remembered?.filter(n => agentNames.includes(n)) ?? detected }
 }
 
+/** The searchable agent list: OpenCode first, then the agents found on this computer, ticked. */
+export async function pickAgents(locations: AgentLocation[], initial: AgentName[]): Promise<AgentName[] | undefined> {
+  const ordered = [...locations].sort((a, b) => Number(b.name === "opencode") - Number(a.name === "opencode") || Number(b.installed) - Number(a.installed) || agentLabels[a.name].localeCompare(agentLabels[b.name]))
+  // Clack's option type distributes over a union of values, so the picker works on plain names.
+  const result = await autocompleteMultiselect<string>({
+    message: "Which agents should get Browse?",
+    options: ordered.map((a) => ({ value: a.name, label: agentLabels[a.name], ...(a.installed ? { hint: "found" } : {}) })),
+    initialValues: initial,
+    maxItems: 10,
+    filter: (search, option) => fuzzy(search.toLowerCase(), option.label ?? option.value) || fuzzy(search.toLowerCase(), option.value),
+  })
+  return isCancel(result) ? undefined : ordered.map((a) => a.name).filter((name) => result.includes(name))
+}
+
 function fuzzy(query: string, text: string) {
   let pos = 0
   for (const c of text.toLowerCase()) if (query[pos] === c) pos++
   return pos === query.length
-}
-
-/** Clack handles raw mode, cancellation and redraw. Space always toggles (including directly after filtering). */
-export async function pickAgents(locations: AgentLocation[], initial: AgentName[]): Promise<AgentName[] | undefined> {
-  const selected = new Set(initial)
-  const ordered = [...locations].sort((a, b) => Number(b.name === "opencode") - Number(a.name === "opencode") || Number(b.installed) - Number(a.installed) || agentLabels[a.name].localeCompare(agentLabels[b.name]))
-  let query = "", cursor = 0, matches = ordered
-  const prompt = new Prompt<AgentName[]>({ render() {
-    if (this.state === "cancel") return "Install cancelled."
-    if (this.state === "submit") return `Selected agents: ${[...selected].map(n => agentLabels[n]).join(", ") || "none"}`
-    const count = Math.max(1, Math.min(12, (process.stdout.rows || 24) - 5))
-    const start = Math.max(0, Math.min(cursor - Math.floor(count / 2), matches.length - count))
-    return ["Choose agents for Browse", `Filter: ${query || "_"}`, ...matches.slice(start, start + count).map((a, i) =>
-      `${i + start === cursor ? "❯" : " "} [${selected.has(a.name) ? "x" : " "}] ${agentLabels[a.name]}${a.installed ? " (detected)" : ""}`),
-      ...(matches.length ? [] : ["  No matching agents"]),
-      `↑/↓ move · Space toggle · Enter confirm · Type to filter (${selected.size} selected)`].join("\n")
-  } })
-  prompt.on("key", (char, key) => {
-    if (key.name === "return") { prompt.value = [...selected]; return }
-    if (key.name === "up" || key.name === "down") { cursor = (cursor + (key.name === "up" ? -1 : 1) + matches.length) % (matches.length || 1); return }
-    if (key.name === "space") {
-      const item = matches[cursor]
-      if (item && !selected.delete(item.name)) selected.add(item.name)
-      return
-    }
-    if (key.name === "backspace") query = query.slice(0, -1)
-    else if (char && !key.ctrl && !key.meta && /^[\p{L}\p{N}-]$/u.test(char)) query += char.toLowerCase()
-    else return
-    cursor = 0
-    matches = ordered.filter(a => fuzzy(query, agentLabels[a.name]) || fuzzy(query, a.name))
-  })
-  const result = await prompt.prompt()
-  return isCancel(result) ? undefined : result
 }

@@ -39,6 +39,7 @@
   },
   "devDependencies": {
     "@clack/core": "1.5.1",
+    "@clack/prompts": "1.8.1",
     "@types/bun": "1.4.0",
     "@types/chrome": "0.3.4",
     "@types/node": "26.6.4",

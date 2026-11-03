@@ -19,6 +19,7 @@ import { homedir, networkInterfaces } from "node:os"
 import path from "node:path"
 import { createInterface } from "node:readline/promises"
 import { fileURLToPath } from "node:url"
+import * as clack from "@clack/prompts"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
 import { agentLabels, agentLocations, callingAgent, editAgentConfig, type AgentName, type AgentReceipt } from "./agent-config.ts"
 import { agentFlags, agentPlan, pickAgents } from "./agent-picker.ts"
@@ -405,13 +406,23 @@ async function syncDev() {
 }
 
 async function install(args: string[]) {
-  checkNode()
   const tty = !!(process.stdin.isTTY && process.stdout.isTTY)
+  const caller = callingAgent(process.env)
+  rail = tty && !caller
+  if (rail) clack.intro("Browse")
+  else if (caller) log(`${agentLabels[caller]} is running this, so Browse is set up for ${agentLabels[caller]}.`)
+  await installSteps(args, tty, caller)
+  if (!rail) return
+  waiting?.stop()
+  clack.outro(process.exitCode ? "Browse isn't fully set up yet. Fix the steps above, then run browse install again." : "Done. Restart your agents, then ask one to open a page.")
+}
+
+async function installSteps(args: string[], tty: boolean, caller: AgentName | undefined) {
+  checkNode()
   const timeoutMs = installWaitTimeout(args, tty)
   let flags: ReturnType<typeof agentFlags>
   try { flags = agentFlags(args) } catch (error) { fail((error as Error).message) }
   const opencode = findOpencode(args)
-  const caller = callingAgent(process.env)
   const locations = agentLocations(home, configRoot, findOnPath, configFile(), opencode)
   const previous = readJson<Settings>(files.settings)
   const remembered = previous?.selectedAgents ?? (previous?.declinedAgents?.length
@@ -430,17 +441,22 @@ async function install(args: string[]) {
   save()
   if (removeLegacyHost()) log("✓ Removed the native messaging host of an earlier version")
 
+  const onPath = args.includes("--no-modify-path") ? undefined : addToPath()
+  if (onPath) log(`✓ Added browse to your PATH (${tilde(onPath)}). Open a new terminal to use it.`)
+
   const node = process.execPath
   for (const agent of locations) {
+    const label = agentLabels[agent.name]
     if (!selected.includes(agent.name)) {
-      if (!plan.picker && agent.installed && !flags.requested.length) log(`To add ${agentLabels[agent.name]}: ${cliCommand(`install --agent ${agent.name}`)}`)
+      if (!plan.picker && agent.installed && !flags.requested.length) log(`To add ${label} too: ${cliCommand(`install --agent ${agent.name}`)}`)
       continue
     }
     if (agent.name === "opencode") {
       const mcp = configureMcp(agent.file, entry, previous?.entry)
       if (mcp && !opencodeConfigs.includes(agent.file)) { opencodeConfigs.push(agent.file); save() }
       if (!mcp) process.exitCode = 1
-      log(mcp ? `✓ MCP server ${mcp} (OpenCode)` : `! OpenCode already has a different server named browse in ${agent.file}; left unchanged.`)
+      log(!mcp ? `! ${label} already has a different server named browse in ${tilde(agent.file)}; left it unchanged.`
+        : mcp.includes("up to date") ? `✓ ${label} already has Browse` : mcp.includes("added") ? `✓ Added Browse to ${label} (${tilde(agent.file)})` : `✓ Updated Browse in ${label} (${tilde(agent.file)})`)
       continue
     }
     const receipt: AgentReceipt = { name: agent.name, file: agent.file, entry, node }
@@ -453,13 +469,14 @@ async function install(args: string[]) {
         save()
       }
       if (result === "conflict") process.exitCode = 1
-      log(result === "conflict" ? `! ${agent.name} already has a different browse server; left ${agent.file} unchanged.` : `✓ ${agent.name}: browse ${result} in ${agent.file}`)
+      log(result === "conflict" ? `! ${label} already has a different server named browse in ${tilde(agent.file)}; left it unchanged.`
+        : result === "added" ? `✓ Added Browse to ${label} (${tilde(agent.file)})` : `✓ ${label} already has Browse`)
     } catch {
       process.exitCode = 1
-      log(`! Couldn't edit ${agent.file} for ${agent.name}. Check its syntax and permissions, then run ${cliCommand(`install --agent ${agent.name}`)}.`)
+      log(`! Couldn't edit ${tilde(agent.file)} for ${label}. Check its syntax and permissions, then run ${cliCommand(`install --agent ${agent.name}`)}.`)
     }
   }
-  log(manualMcpInstructions(node, entry))
+  showManualMcp(node, entry)
   for (const line of restartOutdatedRelay(entry, node) ?? []) log(line)
   const legacy = selected.includes("opencode") ? legacyBrowserControl() : []
   if (legacy.length)
@@ -533,7 +550,8 @@ async function install(args: string[]) {
   }
   if (!env.tty) log(agentNext())
   if (args.includes("--no-wait") || ssh || !env.display) { if (env.tty) log(next); return }
-  log(`Waiting for Browse to connect (up to ${timeoutMs / 1000}s; Ctrl+C to skip)…`)
+  if (rail) (waiting = clack.spinner({ cancelMessage: "Stopped waiting", onCancel: () => { waiting = undefined } })).start(`Waiting for Browse to connect in your browser (Ctrl+C to skip)`)
+  else log(`Waiting for Browse to connect (up to ${timeoutMs / 1000}s; Ctrl+C to skip)…`)
   let stopped = false
   const stop = () => { stopped = true }
   process.once("SIGINT", stop)
@@ -572,9 +590,53 @@ function ensureRelay(entry: string) {
 }
 
 /** For an agent install doesn't know: the browse MCP server as the stdio entry most agents' configs take. */
-export function manualMcpInstructions(command: string, entry: string) {
-  const server = { mcpServers: { browse: { command, args: [entry, "mcp"] } } }
-  return `\nUsing another agent? Add Browse as an MCP server (stdio):\n${JSON.stringify(server, null, 2).split("\n").map((line) => `  ${line}`).join("\n")}\n`
+export function manualMcpEntry(command: string, entry: string) {
+  return JSON.stringify({ mcpServers: { browse: { command, args: [entry, "mcp"] } } }, null, 2)
+}
+
+function showManualMcp(command: string, entry: string) {
+  const json = manualMcpEntry(command, entry)
+  if (rail) return clack.note(json, "Another agent? Add this MCP server")
+  log(`\nUsing another agent? Add Browse as an MCP server (stdio):\n${json.split("\n").map((line) => `  ${line}`).join("\n")}\n`)
+}
+
+const tilde = (file: string) => (file === home || file.startsWith(home + path.sep) ? "~" + file.slice(home.length) : file)
+
+/**
+ * A browse binary (the curl or PowerShell installer) puts its folder on PATH, so `browse` works in a new terminal:
+ * the user PATH on Windows, else the shell's startup file, as opencode's installer does. Returns where it was added;
+ * nothing when PATH already has it or Browse runs on Node.
+ */
+function addToPath(): string | undefined {
+  if (/(^|[\\/])(node|bun)(\.exe)?$/i.test(process.execPath)) return undefined
+  const dir = path.dirname(process.execPath)
+  if (process.env.GITHUB_ACTIONS === "true" && process.env.GITHUB_PATH) writeFileSync(process.env.GITHUB_PATH, dir + "\n", { flag: "a" })
+  if ((process.env.PATH ?? "").split(path.delimiter).some((entry) => path.resolve(entry) === dir)) return undefined
+  if (process.platform === "win32") {
+    const script = `$p=[Environment]::GetEnvironmentVariable('Path','User'); if (-not ($p -split ';' -contains '${dir}')) { [Environment]::SetEnvironmentVariable('Path', ($(if ($p) { "$p;" } else { '' }) + '${dir}'), 'User') }`
+    const done = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { stdio: "ignore" })
+    return done.status === 0 ? "Windows user PATH" : undefined
+  }
+  const shell = path.basename(process.env.SHELL ?? "sh")
+  const config = process.env.XDG_CONFIG_HOME ?? path.join(home, ".config")
+  const zdot = process.env.ZDOTDIR ?? home
+  const candidates = shell === "fish" ? [path.join(config, "fish", "config.fish")]
+    : shell === "zsh" ? [path.join(zdot, ".zshrc"), path.join(zdot, ".zshenv"), path.join(config, "zsh", ".zshrc")]
+    : shell === "bash" ? [path.join(home, ".bashrc"), path.join(home, ".bash_profile"), path.join(home, ".profile")]
+    : [path.join(home, ".profile")]
+  // A new Mac has no ~/.zshrc: create the shell's main file rather than leave browse off PATH.
+  const file = candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]!
+  const line = shell === "fish" ? `fish_add_path ${dir}` : `export PATH=${dir}:$PATH`
+  try {
+    const text = existsSync(file) ? readFileSync(file, "utf8") : ""
+    if (text.split("\n").includes(line)) return undefined
+    mkdirSync(path.dirname(file), { recursive: true })
+    writeFileSync(file, `${text && !text.endsWith("\n") ? "\n" : ""}\n# browse\n${line}\n`, { flag: "a" })
+    return file
+  } catch {
+    log(`! Couldn't add browse to your PATH. Add this to ${tilde(file)}: ${line}`)
+    return undefined
+  }
 }
 
 /**
@@ -1201,12 +1263,35 @@ function launcher(browser: Browser): { executable?: string } | undefined {
   return executable ? { executable } : undefined
 }
 
+/**
+ * install in a terminal draws one rail (clack), like the skills CLI: "✓ " lines are steps, "! " lines warnings, and a
+ * line while the spinner waits ends it. Everything else (agents, scripts, other commands) gets the plain lines.
+ */
+let rail = false
+let waiting: ReturnType<typeof clack.spinner> | undefined
+
 function log(line: string) {
-  process.stdout.write(line + "\n")
+  if (!rail) return void process.stdout.write(line + "\n")
+  if (!line.trim()) return
+  const ok = line.startsWith("✓ ")
+  const warn = line.startsWith("! ")
+  const text = ok || warn ? line.slice(2) : line
+  if (waiting) {
+    const spinner = waiting
+    waiting = undefined
+    return warn ? spinner.error(text) : spinner.stop(text)
+  }
+  if (ok) return clack.log.success(text)
+  if (warn) return clack.log.warn(text)
+  clack.log.message(text)
 }
 
 function fail(message: string): never {
-  process.stderr.write(message + "\n")
+  if (rail) {
+    waiting?.error("Stopped")
+    clack.log.error(message)
+    clack.outro("Browse isn't set up yet.")
+  } else process.stderr.write(message + "\n")
   process.exit(1)
 }
 

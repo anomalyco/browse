@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Installs Browse: downloads the browse binary for this computer, then runs `browse install`, which adds Browse to your
-# agents and pairs it with your browser. Served at https://opencode.ai/browse/install. Based on opencode's installer.
+# Installs Browse: downloads the browse binary for this computer into ~/.browse/bin, then hands over to
+# `browse install`, which does the rest (PATH, your agents, pairing with your browser). Served at
+# https://opencode.ai/browse/install. Platform detection follows opencode's installer.
 set -euo pipefail
 APP=browse
 
 MUTED='\033[0;2m'
 RED='\033[0;31m'
-ORANGE='\033[38;5;214m'
 NC='\033[0m'
 
 usage() {
@@ -20,10 +20,9 @@ Options:
     -v, --version <version> Install a specific version (e.g., 0.0.7)
         --channel <tag>     Install the latest version on an npm tag (latest or dev)
     -b, --binary <path>     Install from a local binary instead of downloading
-        --no-modify-path    Don't modify shell config files (.zshrc, .bashrc, etc.)
         --no-setup          Only install the binary; don't run \`browse install\`
 
-Anything else goes to \`browse install\`, e.g. --remote or --agent claude.
+Anything else goes to \`browse install\`, e.g. --remote, --agent claude or --no-modify-path.
 
 Examples:
     curl -fsSL https://opencode.ai/browse/install | bash
@@ -34,7 +33,6 @@ EOF
 
 requested_version=${VERSION:-}
 channel=latest
-no_modify_path=false
 no_setup=false
 binary_path=""
 setup_args=()
@@ -71,10 +69,6 @@ while [[ $# -gt 0 ]]; do
                 echo -e "${RED}Error: --binary requires a path argument${NC}"
                 exit 1
             fi
-            ;;
-        --no-modify-path)
-            no_modify_path=true
-            shift
             ;;
         --no-setup)
             no_setup=true
@@ -281,83 +275,8 @@ else
     download_and_install
 fi
 
-path_added=false
-add_to_path() {
-    local config_file=$1
-    local command=$2
-
-    if grep -Fxq "$command" "$config_file"; then
-        :
-    elif [[ -w $config_file ]]; then
-        echo -e "\n# browse" >> "$config_file"
-        echo "$command" >> "$config_file"
-        path_added=true
-        print_message info "${MUTED}Added ${NC}browse ${MUTED}to \$PATH in ${NC}$config_file"
-    else
-        print_message warning "Manually add the directory to $config_file (or similar):"
-        print_message info "  $command"
-    fi
-}
-
-XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-$HOME/.config}
-
-current_shell=$(basename "${SHELL:-sh}")
-case $current_shell in
-    fish)
-        config_files="$HOME/.config/fish/config.fish"
-    ;;
-    zsh)
-        config_files="${ZDOTDIR:-$HOME}/.zshrc ${ZDOTDIR:-$HOME}/.zshenv $XDG_CONFIG_HOME/zsh/.zshrc $XDG_CONFIG_HOME/zsh/.zshenv"
-    ;;
-    bash)
-        config_files="$HOME/.bashrc $HOME/.bash_profile $HOME/.profile $XDG_CONFIG_HOME/bash/.bashrc $XDG_CONFIG_HOME/bash/.bash_profile"
-    ;;
-    ash|sh)
-        config_files="$HOME/.ashrc $HOME/.profile /etc/profile"
-    ;;
-    *)
-        config_files="$HOME/.bashrc $HOME/.bash_profile $XDG_CONFIG_HOME/bash/.bashrc $XDG_CONFIG_HOME/bash/.bash_profile"
-    ;;
-esac
-
-if [[ "$no_modify_path" != "true" ]]; then
-    config_file=""
-    for file in $config_files; do
-        if [[ -f $file ]]; then
-            config_file=$file
-            break
-        fi
-    done
-
-    # A new Mac has no ~/.zshrc, so create the shell's main config file rather than leaving browse off PATH.
-    if [[ -z $config_file ]]; then
-        case $current_shell in
-            zsh) new_config_file="${ZDOTDIR:-$HOME}/.zshrc" ;;
-            fish) new_config_file="$HOME/.config/fish/config.fish" ;;
-            *) new_config_file="" ;;
-        esac
-        if [[ -n $new_config_file ]] && mkdir -p "$(dirname "$new_config_file")" 2>/dev/null && touch "$new_config_file" 2>/dev/null; then
-            config_file=$new_config_file
-        fi
-    fi
-
-    if [[ -z $config_file ]]; then
-        print_message warning "No config file found for $current_shell. You may need to manually add to PATH:"
-        print_message info "  export PATH=$INSTALL_DIR:\$PATH"
-    elif [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-        case $current_shell in
-            fish) add_to_path "$config_file" "fish_add_path $INSTALL_DIR" ;;
-            *) add_to_path "$config_file" "export PATH=$INSTALL_DIR:\$PATH" ;;
-        esac
-    fi
-fi
-
-if [ -n "${GITHUB_ACTIONS-}" ] && [ "${GITHUB_ACTIONS}" == "true" ]; then
-    echo "$INSTALL_DIR" >> "$GITHUB_PATH"
-fi
-
 if [ "$no_setup" = "true" ]; then
-    print_message info "\n${MUTED}Run ${NC}browse install ${MUTED}to add Browse to your agents and pair it with your browser.${NC}"
+    print_message info "\n${MUTED}Run ${NC}$INSTALL_DIR/$installed_binary install ${MUTED}to add Browse to your agents and pair it with your browser.${NC}"
     exit 0
 fi
 
