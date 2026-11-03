@@ -459,6 +459,7 @@ async function install(args: string[]) {
       log(`! Couldn't edit ${agent.file} for ${agent.name}. Check its syntax and permissions, then run ${cliCommand(`install --agent ${agent.name}`)}.`)
     }
   }
+  log(manualMcpInstructions(node, entry))
   for (const line of restartOutdatedRelay(entry, node) ?? []) log(line)
   const legacy = selected.includes("opencode") ? legacyBrowserControl() : []
   if (legacy.length)
@@ -568,6 +569,12 @@ function waitTimeout(args: string[], defaultSeconds = 180) {
 function ensureRelay(entry: string) {
   const started = spawnSync(process.execPath, [entry, "session", "list", "--json"], { encoding: "utf8", timeout: 30_000 })
   if (started.status !== 0) fail(`Couldn't start the Browse relay: ${started.stderr?.trim() || started.error?.message || `run ${cliCommand("doctor")}`}`)
+}
+
+/** For an agent install doesn't know: the browse MCP server as the stdio entry most agents' configs take. */
+export function manualMcpInstructions(command: string, entry: string) {
+  const server = { mcpServers: { browse: { command, args: [entry, "mcp"] } } }
+  return `\nUsing another agent? Add Browse as an MCP server (stdio):\n${JSON.stringify(server, null, 2).split("\n").map((line) => `  ${line}`).join("\n")}\n`
 }
 
 /**
