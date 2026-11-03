@@ -366,6 +366,8 @@ export function managedRelayLaunch(
   executable = process.execPath,
   execArgv: readonly string[] = process.execArgv,
 ): { readonly executable: string; readonly args: string[] } {
+  // A compiled binary is its own entrypoint: its bundled script path (under /$bunfs) can't be passed back to it.
+  if (globalThis.__OPENCODE_BROWSER_COMPILED__) return { executable, args: ["serve"] }
   return {
     executable,
     args: [...execArgv, managedRelayEntrypoint(entrypoint), "serve"],

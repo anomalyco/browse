@@ -1,9 +1,7 @@
 import { NodeStdio } from "@effect/platform-node"
 import { Config, Context, Effect, Layer, Option, Predicate, Schedule } from "effect"
 import { McpProtocol, McpSchema, McpServer } from "effect/ai"
-import fs from "node:fs/promises"
 import path from "node:path"
-import { fileURLToPath } from "node:url"
 import type { JsonObject } from "./protocol.ts"
 import { getObject, getString, parseTargetSelection } from "./relay-helpers.ts"
 import * as RelayClient from "./relay-client.ts"
@@ -16,7 +14,6 @@ import { createUpdateWatcher, updateJson, type UpdateNotice } from "./update.ts"
 import { securityVariables, settingKeys, settingSpecs } from "./user-settings.ts"
 import { opencodeBrowserVersion } from "./version.ts"
 
-const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 type CurrentSession = { id: string; established: boolean }
 
 type ToolSpec = {
@@ -642,7 +639,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       destructive: false,
       idempotent: true,
       handle: () => Effect.tryPromise({
-        try: () => fs.readFile(path.join(packageRoot, "skills", "browse", "SKILL.md"), "utf8"),
+        try: () => import("./skill-text.ts").then((module) => module.skillText),
         catch: (cause) => new Error("read opencode-browser skill", { cause }),
       }),
     },

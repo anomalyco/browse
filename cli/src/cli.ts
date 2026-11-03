@@ -1303,11 +1303,8 @@ const skill = Command.make(
   "skill",
   {},
   Effect.fn("Cli.skill")(function* () {
-    const fs = yield* FileSystem.FileSystem
-    const text = yield* fs.readFileString(path.join(packageRoot, "skills", "browse", "SKILL.md")).pipe(
-      Effect.mapError((cause) => new Error("read opencode-browser skill", { cause })),
-    )
-    yield* Console.log(text.trimEnd())
+    const { skillText } = yield* Effect.promise(() => import("./skill-text.ts"))
+    yield* Console.log(skillText.trimEnd())
   }),
 ).pipe(Command.withDescription("Print the Browse agent skill text"))
 
@@ -1441,6 +1438,7 @@ export function runCli(rawArgs: ReadonlyArray<string> = process.argv.slice(2)): 
   )
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Run directly (`bun src/cli.ts`), not bundled into a single file with main.ts, which also calls runCli.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href && import.meta.url.endsWith("/cli.ts")) {
   runCli()
 }

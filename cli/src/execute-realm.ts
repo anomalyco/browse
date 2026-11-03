@@ -580,8 +580,12 @@ function trackPromisesOf(realm: ExecuteRealm): () => void {
   }
 }
 
+// Bun (a compiled binary's relay) has no promiseHooks. Fallback: a rejected promise whose own prototype is a realm's
+// Promise.prototype came from that realm. Partial: a sandbox promise re-prototyped (setPrototypeOf, subclasses) is missed.
+const realmsByPromisePrototype = new WeakMap<object, ExecuteRealm>()
+
 export function handleExecuteRealmRejection(promise: Promise<unknown>): boolean {
-  const realm = promiseRealms.get(promise)
+  const realm = promiseRealms.get(promise) ?? (process.versions.bun ? realmsByPromisePrototype.get(Object.getPrototypeOf(promise)) : undefined)
   if (!realm) return false
   realm.dispose(new Error("Unhandled execute rejection; JavaScript state will reset before the next execute"))
   return true
@@ -688,6 +692,7 @@ export class ExecuteRealm {
     this.sandboxFunctionPrototype = (sandboxIntrinsics.Function as FunctionConstructor).prototype
     this.sandboxArrayPrototype = (sandboxIntrinsics.Array as ArrayConstructor).prototype
     this.SandboxPromise = sandboxIntrinsics.Promise as PromiseConstructor
+    if (process.versions.bun) realmsByPromisePrototype.set(this.SandboxPromise.prototype, this)
     this.SandboxError = sandboxIntrinsics.Error as ErrorConstructor
     // Await handles hostile Promise subclasses/species without leaving a rejected
     // original promise unobserved if `.then()` itself throws during conversion.
