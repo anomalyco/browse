@@ -922,8 +922,8 @@ Common diagnoses:
   `paired-offline`: reopen the paired browser profile and enable Browse; its worker wakes every 30 seconds.
   `not-seen`: the relay hasn't heard from a browser. If Browse is already added, open that browser and
   rerun install. Otherwise follow install's store or Load unpacked steps.
-- Incompatible extension protocol: update either the extension or npm package;
-  exact extension and relay release versions do not need to match.
+- Incompatible extension protocol: follow `extension.nextStep`. For an older unpacked extension after setup,
+  ask the user: “Reload Browse on your browser's extensions page (↻).” Running setup again does not reload older workers.
 - Competing browser/profile connections: the active browser is preserved and
   additional connections are rejected. Use one browser/profile per relay;
   repeatedly creating sessions or resetting tabs does not switch browsers.

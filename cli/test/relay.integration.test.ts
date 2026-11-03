@@ -6,7 +6,7 @@ import os from "node:os"
 import path from "node:path"
 import WebSocket from "ws"
 import { dataUrlDocument, stableUnpackedExtensionOrigin } from "../src/relay-helpers.ts"
-import { extensionProtocolVersion } from "../src/protocol.ts"
+import { checkoutReloadPrefix, extensionProtocolVersion, unpackedReloadAdvice } from "../src/protocol.ts"
 import * as ExtensionPairing from "../../src/background/pairing.ts"
 import {
   browserToken,
@@ -236,7 +236,7 @@ async function pairWithCode(relayPort: number, code: string, profileId: string) 
 }
 
 beforeAll(async () => {
-  const started = await startRelay(home)
+  const started = await startRelay(home, { OPENCODE_BROWSER_STORE_ID: "b".repeat(32) })
   relay = started.child
   port = started.port
   base = `http://127.0.0.1:${port}`
@@ -315,6 +315,22 @@ describe("relay", () => {
     expect(extension.closeCode).toBe(4003)
     const status = await (await fetch(`${base}/extension/status`, { headers: { authorization: `Bearer ${token}` } })).json()
     expect(status).toMatchObject({ connected: false, protocolVersion, protocolCompatible: false })
+    if (protocolVersion === 2) expect(status.nextStep).toContain(unpackedReloadAdvice)
+  })
+
+  test("an older protocol gets only a refusal; only the pinned unpacked origin gets a reload hint", async () => {
+    for (const origin of [stableUnpackedExtensionOrigin, `chrome-extension://${"b".repeat(32)}`]) {
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/extension`, { origin })
+      const frames = collect(socket)
+      socket.on("open", () => socket.send(JSON.stringify({ method: "protocol", params: { protocolVersion: 2 } })))
+      const [code, reason] = await new Promise<[number, string]>(resolve => socket.on("close", (code, reason) => resolve([code, reason.toString()])))
+      expect(code).toBe(4003)
+      expect(frames).toEqual([]) // No commands, challenge, or credentials before close.
+      expect(reason.startsWith(checkoutReloadPrefix)).toBe(origin === stableUnpackedExtensionOrigin)
+      const status = await (await fetch(`${base}/extension/status`, { headers: { authorization: `Bearer ${token}` } })).json()
+      expect(status).toMatchObject({ browsers: [], connected: false, origin })
+      expect(status.nextStep.includes(unpackedReloadAdvice)).toBe(origin === stableUnpackedExtensionOrigin)
+    }
   })
 
   test("two browsers pairing get different tokens", async () => {
@@ -1036,6 +1052,12 @@ describe.skipIf(lanAddress === undefined)("a browser on another computer (hostna
       })
     expect(await refused(`ws://${lanAddress}:${remote!.port}/devtools/browser/x`)).toBe(true)
     expect(await refused(`ws://${lanAddress}:${remote!.port}/extension`, "https://evil.example")).toBe(true)
+    const older = new WebSocket(`ws://${lanAddress}:${remote!.port}/extension`, { origin: stableUnpackedExtensionOrigin })
+    const frames = collect(older)
+    older.once("open", () => older.send(JSON.stringify({ method: "protocol", params: { protocolVersion: 2 } })))
+    expect(await new Promise<[number, string]>(resolve => older.once("close", (code, reason) => resolve([code, reason.toString()]))))
+      .toEqual([4003, "Extension protocol incompatible: extension-older"])
+    expect(frames).toEqual([])
     // This computer's agents still use 127.0.0.1.
     expect((await fetch(`http://127.0.0.1:${remote!.port}/version`)).ok).toBe(true)
   })

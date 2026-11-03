@@ -25,6 +25,7 @@ import {
   type ToStatusPage,
 } from "../shared/protocol"
 import { firstRunStep, relayProbeResult, shouldProbe, type FirstRunStep, type RelayProbe } from "./first-run"
+import { unpackedExtensionId, unpackedReloadAdvice } from "../../cli/src/protocol"
 
 // `npx @opencode/browse install` opens this page as welcome.html#code=<one-time code> for a store build
 // (cli/src/setup.ts pairStoreExtension). Take it, then drop it from the URL (address bar and history) before anything else.
@@ -203,7 +204,7 @@ function renderStep() {
   element("step-code-label").hidden = view.codeLabel === undefined
   element("step-code-label").replaceChildren(...rich(view.codeLabel ?? ""))
   element("step-example").hidden = !view.example
-  element("open-extensions").hidden = step.kind !== "update-extension" || step.unpacked
+  element("open-extensions").hidden = step.kind !== "update-extension"
   element("step-reconnect").hidden = step.kind !== "conflict" && step.kind !== "mismatch"
   element("step-actions").hidden = element("open-extensions").hidden && element("step-reconnect").hidden
   const footnote = element("step-footnote")
@@ -297,8 +298,8 @@ function stepView(step: FirstRunStep): StepView {
         command: "npx @opencode/browse@latest install",
       }
     case "update-extension":
-      return step.unpacked
-        ? { title: "Update this extension", text: "It's older than the browse CLI on this computer. Run install again to update it:", tone: "warn", command: INSTALL }
+      return step.unpacked || chrome.runtime.id === unpackedExtensionId
+        ? { title: "Update this extension", text: unpackedReloadAdvice, tone: "warn" }
         : {
             title: "Update this extension",
             text: "It's older than the browse CLI on this computer. Chrome updates it within a few hours; to update now, open the extensions page, turn on Developer mode and click Update.",
@@ -413,7 +414,7 @@ function showRelayResult(result: AgentRelayState["status"] | "invalid-address" |
     unpaired: `The relay ${at} answered, but this browser isn't paired with it. Run \`npx @opencode/browse pair\` there and enter the code it prints.`,
     untrusted: `The relay ${at} didn't accept the pairing. Run \`npx @opencode/browse pair\` there and enter the new code it prints.`,
     conflict: `The relay ${at} answered, but Browse in another browser or profile is connected to it.`,
-    incompatible: `Paired with the relay ${at}, but its version doesn't match this extension. See the status above.`,
+    incompatible: `The relay ${at} and this extension speak different protocols. See the status above.`,
   }[result]
   const note = element("relay-result")
   note.textContent = text
@@ -451,8 +452,8 @@ function describe(state: AgentRelayState) {
   if (state.status === "incompatible" && state.skew === "update-cli")
     return "This extension is newer than the browse CLI on this computer. Update the CLI: run `npx @opencode/browse@latest install` (with automatic updates on, it catches up by itself within a day), then click Reconnect."
   if (state.status === "incompatible" && state.skew === "update-extension")
-    return state.unpacked
-      ? "This extension is older than the browse CLI on this computer. Run the install command again to update it, then click Reconnect."
+    return state.unpacked || chrome.runtime.id === unpackedExtensionId
+      ? unpackedReloadAdvice
       : "This extension is older than the browse CLI on this computer. Chrome updates it within a few hours; to update now, open chrome://extensions, turn on Developer mode and click Update."
   if (state.status === "incompatible")
     return "This extension and the installed CLI don't match. Run the install command again, then click Reconnect."

@@ -37,7 +37,7 @@ import {
 } from "./browser-pairing.ts"
 import { syncDevExtension } from "./dev-extension.ts"
 import { cliCommand, dataRoot, devExtension, devExtensionFolder, installCommand, oldStoreMarker, storeConfig, storeUrl } from "./paths.ts"
-import { extensionProtocolAdvice } from "./protocol.ts"
+import { extensionProtocolAdvice, extensionProtocolSkew, unpackedExtensionId, unpackedReloadAdvice } from "./protocol.ts"
 import { parseHostname, readRelayConfig, writeRelayConfig } from "./relay-config.ts"
 import { relayAuthorization } from "./relay-secrets.ts"
 import { opencodeBrowserVersion } from "./version.ts"
@@ -48,8 +48,6 @@ import { opencodeBrowserVersion } from "./version.ts"
  */
 const store = storeConfig()
 const STORE_IDS = [store.id].filter((id): id is string => !!id)
-/** The unpacked build (a checkout's, or a dev install's); its ID is pinned by the manifest key. */
-const UNPACKED_ID = "afeafocngkodbmaipcngoamamfmekgfo"
 /** The store page; undefined for a package built without the store item (and a checkout). */
 const STORE_URL = store.id ? storeUrl(store.id) : undefined
 const PACKAGE = "@opencode/browse"
@@ -479,8 +477,16 @@ async function install(args: string[]) {
     const reload = connected ? await reloadOutdatedExtension(connected, folder) : "current"
     if (reload === "reloaded") log("✓ Reloaded Browse in your browser")
     if (reload === "stale")
-      log("! Browse didn't reload in your browser. Reload it on the browser's extensions page to finish the update.")
+      return log(`! ${unpackedReloadAdvice}`)
   }
+  // Including --no-wait (checkout update): an incompatible browser is installed, not waiting to be added or paired.
+  const reportMismatch = (status: ExtensionStatus) => {
+    const advice = status.nextStep ?? extensionProtocolAdvice(status.protocolVersion, { install: installCommand() })
+    if (args.includes("--no-wait") && folder && status.origin === `chrome-extension://${unpackedExtensionId}` && extensionProtocolSkew(status.protocolVersion) === "extension-older")
+      return log(`! Not connected yet. ${advice}`) // The files were installed; only a browser action remains.
+    fail(advice)
+  }
+  if (initial?.protocolCompatible === false && initial.origin) return reportMismatch(initial)
   log("")
   // Over SSH the browsers here aren't the ones the user looks at, so they aren't scanned.
   const ssh = !!(process.env.SSH_CONNECTION || process.env.SSH_TTY)
@@ -491,7 +497,7 @@ async function install(args: string[]) {
     if (!matches.length || !matches.every(oldStoreBuild)) return true
     writeFileSync(oldStoreMarker(), "2\n")
     ensureRelay(entry)
-    log(`! Found Browse ${matches[0]!.version} in ${matches[0]!.browser.name}. ${extensionProtocolAdvice(2, { install: cliCommand("install") })}`)
+    log(`! Found Browse ${matches[0]!.version} in ${matches[0]!.browser.name}. ${extensionProtocolAdvice(2, { install: cliCommand("install") }, "store")}`)
     process.exitCode = 1
     return false
   }
@@ -519,8 +525,11 @@ async function install(args: string[]) {
   let offer = ssh ? "none" : pairStore(detections)
   const blocked = detections.filter(d => d.blocked).map(d => d.browser.name)
   if (offer === "none" && blocked.length) log(`Couldn't check ${blocked.join(", ")}. If Browse is already installed there, pair it manually. ${manualPair(pairingCode())}`)
-  const next = `If Browse isn't connected after you add it, run \`${cliCommand("install")}\` again to pair it.`
-  const agentNext = () => `Agent: ${offer === "opened" ? "ask the user to open Browse's status page in their browser" : offer === "manual" || blocked.length ? "ask the user to finish pairing in Browse's Options" : folder ? "ask the user to load Browse in their browser" : "ask the user to add Browse in their browser"}. Then re-run \`${cliCommand("install")}\` to finish, or call the browse status tool to check the connection.`
+  const next = folder ? `If Browse is already loaded unpacked: ${unpackedReloadAdvice}` : `If Browse isn't connected after you add it, run \`${cliCommand("install")}\` again to pair it.`
+  const agentNext = () => {
+    if (folder && offer === "none" && !blocked.length) return `Agent: if Browse is already loaded unpacked, ask the user: ${unpackedReloadAdvice} Otherwise ask them to load ${folder}. Check the connection with the browse status tool.`
+    return `Agent: ${offer === "opened" ? "ask the user to open Browse's status page in their browser" : offer === "manual" || blocked.length ? "ask the user to finish pairing in Browse's Options" : "ask the user to add Browse in their browser"}. Then re-run \`${cliCommand("install")}\` to finish, or call the browse status tool to check the connection.`
+  }
   if (!env.tty) log(agentNext())
   if (args.includes("--no-wait") || ssh || !env.display) { if (env.tty) log(next); return }
   log(`Waiting for Browse to connect (up to ${timeoutMs / 1000}s; Ctrl+C to skip)…`)
@@ -531,7 +540,7 @@ async function install(args: string[]) {
     const deadline = Date.now() + timeoutMs
     do {
       const status = await extensionStatus(!args.includes("--no-open") && (offer === "opened" || (offer === "none" && !blocked.length)))
-      if (status?.protocolCompatible === false) return fail(extensionProtocolAdvice(status.protocolVersion, { install: installCommand() }))
+      if (status?.protocolCompatible === false) return reportMismatch(status)
       if (status?.connected) return log(connectedMessage)
       if (status?.pairingState === "paired-offline") return log(pairedOfflineMessage)
       if (!folder && offer === "none") {
@@ -765,7 +774,7 @@ async function uninstall(args: string[]) {
   log("Remove the extension from your browser to finish.")
 }
 
-type ExtensionStatus = { connected?: boolean; pairingState?: string; build?: string | null; origin?: string | null; protocolCompatible?: boolean | null; protocolVersion?: number | null }
+type ExtensionStatus = { connected?: boolean; pairingState?: string; nextStep?: string; build?: string | null; origin?: string | null; protocolCompatible?: boolean | null; protocolVersion?: number | null }
 
 const relayBase = () => `http://127.0.0.1:${Number(process.env.OPENCODE_BROWSER_PORT) || 19988}`
 
@@ -802,7 +811,7 @@ async function settledExtensionStatus(entry: string) {
  * the folder's build, then checks the reload took effect: the build it reports after reconnecting must be the new one.
  */
 async function reloadOutdatedExtension(before: ExtensionStatus, folder: string): Promise<"reloaded" | "stale" | "current"> {
-  if (before.origin !== `chrome-extension://${UNPACKED_ID}`) return "current"
+  if (before.origin !== `chrome-extension://${unpackedExtensionId}`) return "current"
   const bundled = readJson<{ build?: string }>(path.join(folder, "build.json"))?.build
   if (bundled && before.build === bundled) return "current"
   const sent = await fetch(`${relayBase()}/extension/reload`, {
@@ -1005,7 +1014,7 @@ function detectBrowsers() {
         blocked ||= prefs.blocked
         return (parseJson(prefs.text) as { extensions?: { settings?: Record<string, ExtensionSetting> } } | undefined)?.extensions?.settings ?? {}
       })
-      const id = [...STORE_IDS, UNPACKED_ID].find((candidate) => settings.some((entries) => entries[candidate]))
+      const id = [...STORE_IDS, unpackedExtensionId].find((candidate) => settings.some((entries) => entries[candidate]))
       if (!id) return []
       const setting = settings.find((entries) => entries[id])![id]!
       const version = installedExtensionVersion(id, setting)
@@ -1112,7 +1121,7 @@ function reportDetections(detections: Detection[], preferred: Browser | undefine
   })
 }
 
-const describe = (match: Match) => `${match.profile.name}${match.id === UNPACKED_ID ? " (unpacked)" : ""}`
+const describe = (match: Match) => `${match.profile.name}${match.id === unpackedExtensionId ? " (unpacked)" : ""}`
 const blockedReason = () => (process.platform === "darwin" ? "macOS privacy protection" : "permission denied")
 
 /**

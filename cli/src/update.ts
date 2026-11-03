@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFil
 import path from "node:path"
 import { autoUpdateStatus, compareVersions, npmRuntime } from "./auto-update.ts"
 import { checkoutRoot, cliCommand, dataRoot } from "./paths.ts"
+import { unpackedReloadAdvice } from "./protocol.ts"
 
 /** How long a check result stands before the remote is asked again. */
 export const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000
@@ -354,6 +355,7 @@ export function runUpdate(args: readonly string[], deps: UpdateDeps): number {
   if (!latest) return refuse(`couldn't read ${upstream} after fetching.`, `Run \`git -C ${at} pull --ff-only\` to see why.`)
   if (latest === head || git(["merge-base", "--is-ancestor", latest, "HEAD"]).status === 0) {
     log(`✓ Already up to date: ${short(head)} on ${branch} (${upstream}).`)
+    log(`  If your unpacked extension still reports an older protocol: ${unpackedReloadAdvice}`)
     return 0
   }
   if (git(["merge-base", "--is-ancestor", "HEAD", latest]).status !== 0) {

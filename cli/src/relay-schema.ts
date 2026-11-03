@@ -300,7 +300,7 @@ export const ExtensionStatus = Schema.Struct({
   version: Schema.NullOr(Schema.String),
   /** When the connected extension was built: changes when a reload or update took effect. */
   build: Schema.optionalKey(Schema.NullOr(Schema.String)),
-  /** The connected extension's origin: the store build or the unpacked one. */
+  /** The connected (or protocol-incompatible) extension's origin: the store build or the unpacked one. */
   origin: Schema.optionalKey(Schema.NullOr(Schema.String)),
   protocolVersion: Schema.optionalKey(Schema.NullOr(Schema.Number)),
   protocolCompatible: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),

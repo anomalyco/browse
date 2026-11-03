@@ -18,6 +18,7 @@ import {
 } from "../../cli/src/browser-pairing.ts"
 // Its globals (paths.ts reads one), for this project's typecheck.
 import type {} from "../../cli/src/version.ts"
+import { checkoutReloadPrefix, unpackedExtensionId } from "../../cli/src/protocol.ts"
 import { installChrome, settle } from "../chrome-stub"
 
 // The extension's side of pairing (agent-relay.ts, pairing.ts) against a scripted relay built from the relay's own
@@ -41,6 +42,7 @@ class ScriptedRelay {
   static readonly CLOSED = 3
   static readonly made: ScriptedRelay[] = []
   static protocol: { min: number; version: number } | undefined
+  static refusal: string | undefined
   readonly received: Message[] = []
   readyState = ScriptedRelay.CONNECTING
   onopen: ((event: unknown) => void) | null = null
@@ -62,6 +64,7 @@ class ScriptedRelay {
   send(data: string) {
     const message = JSON.parse(data) as Message
     this.received.push(message)
+    if (message.method === "protocol" && ScriptedRelay.refusal) return this.close(4003, ScriptedRelay.refusal)
     const params = message.params ?? {}
     if (message.method === "hello") {
       const pairing = params.pairing as { nonce: string; mode: string; ecdh?: string }
@@ -189,4 +192,28 @@ test("first code pairing keeps the protocol range from the challenge, not the la
     expect(outcome.status).toBe("incompatible")
     expect(relay.state().skew).toBe(version === 2 ? "update-cli" : "update-extension")
   }
+})
+
+test("a protocol refusal can only reload a newer, matching unpacked folder on loopback", async () => {
+  const running = "2026-10-01T00:00:00.000Z"
+  const newer = "2026-11-01T00:00:00.000Z"
+  const store = chrome.runtime.id
+  Object.assign(globalThis, { __OPENCODE_BROWSER_BUILD__: running })
+  await stub.chrome.storage.local.remove("agentRelayTokens")
+  let reloads = 0
+  const attempt = async (id: string, host: string, disk: string, target: string) => {
+    Object.assign(chrome.runtime, { id, reload: () => { reloads++ } })
+    globalThis.fetch = (async url => String(url).endsWith("/build.json") ? Response.json({ build: disk }) : new Response(null, { status: 404 })) as typeof fetch
+    ScriptedRelay.refusal = checkoutReloadPrefix + target
+    expect((await relay.connectTo(host, "")).status).toBe("incompatible")
+    expect(last().received.map(s => s.method)).toEqual(["protocol"])
+    await Bun.sleep(75) // chrome.runtime.reload runs after the close handler.
+  }
+  await attempt(store, "localhost", newer, newer)
+  await attempt(unpackedExtensionId, "other.test", newer, newer)
+  await attempt(unpackedExtensionId, "localhost", running, running)
+  await attempt(unpackedExtensionId, "localhost", running, newer)
+  expect(reloads).toBe(0)
+  await attempt(unpackedExtensionId, "localhost", newer, newer)
+  expect(reloads).toBe(1)
 })

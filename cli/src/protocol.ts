@@ -13,6 +13,11 @@ export const extensionProtocolVersion = 3
  */
 export const minExtensionProtocolVersion = 3
 
+export const unpackedExtensionId = "afeafocngkodbmaipcngoamamfmekgfo"
+export const unpackedReloadAdvice = "Reload Browse on your browser's extensions page (↻)."
+// A close reason, not an RPC. Older workers just see extension-older; newer workers verify the build locally.
+export const checkoutReloadPrefix = "Extension protocol incompatible: extension-older; reload "
+
 /**
  * Chrome's minimum alarm period. A disconnected extension's MV3 worker sleeps
  * until this alarm fires, so relay clients must wait at least this long.
@@ -42,13 +47,16 @@ export function extensionProtocolSkew(version: number | null | undefined): "exte
 }
 
 /** What to tell the user about a protocol mismatch: update the side that's behind, with the command. */
-export function extensionProtocolAdvice(version: number | null | undefined, commands: { readonly install: string }): string {
+export function extensionProtocolAdvice(version: number | null | undefined, commands: { readonly install: string }, distribution?: "unpacked" | "store"): string {
   const skew = extensionProtocolSkew(version)
   const versions = `extension protocol ${version ?? "unknown"}, this relay speaks ${minExtensionProtocolVersion === extensionProtocolVersion ? extensionProtocolVersion : `${minExtensionProtocolVersion} to ${extensionProtocolVersion}`}`
   if (skew === "extension-newer")
     return `The Browse extension is newer than this browse CLI (${versions}). Update the CLI: run \`${commands.install}\` (an npm install with automatic updates also catches up by itself within a day), then restart opencode.`
-  if (skew === "extension-older")
-    return `The Browse extension is older than this browse CLI (${versions}). Update the extension: the Chrome Web Store updates it within a few hours (to update now, open chrome://extensions, turn on Developer mode and click Update); an unpacked extension updates when you run \`${commands.install}\` again.`
+  if (skew === "extension-older") {
+    const store = "The Chrome Web Store updates it within a few hours (to update now, open chrome://extensions, turn on Developer mode and click Update)."
+    const next = distribution === "unpacked" ? unpackedReloadAdvice : distribution === "store" ? store : `For an unpacked extension: ${unpackedReloadAdvice} For a store extension: ${store}`
+    return `The Browse extension is older than this browse CLI (${versions}). ${next}`
+  }
   return `The Browse extension and this browse CLI don't speak the same protocol (${versions}). Run \`${commands.install}\` again and update the extension.`
 }
 
