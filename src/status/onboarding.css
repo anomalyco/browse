@@ -265,18 +265,6 @@
   overflow-wrap: anywhere;
 }
 
-/* A multi-line snippet (the MCP server entry): kept as written, copy button at the top. */
-.cmd-block .cmd-text {
-  align-items: flex-start;
-  padding: 10px 6px 10px 14px;
-}
-
-.cmd-block .cmd-text code {
-  white-space: pre;
-  overflow-wrap: normal;
-  overflow-x: auto;
-}
-
 @media (hover: hover) and (pointer: fine) {
   .tab:hover {
     color: var(--v2-text-text-base);
