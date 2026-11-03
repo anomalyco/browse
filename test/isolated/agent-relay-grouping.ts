@@ -124,6 +124,22 @@ describe("grouping: one group per session (default)", () => {
     expect(tab(userTab).active).toBe(true)
   })
 
+  test("a separate popup window joins the session without creating or replacing its tab group", async () => {
+    const { user } = await userWindow()
+    const opener = await agentTab("reports")
+    const window = await stub.chrome.windows.create({ type: "popup", url: "https://popup.example/", focused: true })
+    const tabId = window.tabs[0]!.id
+    event("webNavigation.onCreatedNavigationTarget").emit({ sourceTabId: opener.tabId, tabId })
+    await until(() => opened().length === 1)
+    // Root attachment asks the extension to group the popup just like any other new session page.
+    await command("debugger.attach", { tabId })
+    expect(await command("tabs.group", { tabId, sessionId: "reports" })).toEqual({ groupId: -1 })
+    expect(tab(tabId).groupId).toBe(-1)
+    const next = await stub.chrome.tabs.create({ windowId: user.id, url: "about:blank", active: false })
+    expect(await command("tabs.group", { tabId: next.id, sessionId: "reports" })).toEqual({ groupId: opener.groupId })
+    expect(stub.state.groups.size).toBe(1)
+  })
+
   test("ping calls chrome.runtime.getPlatformInfo to keep the MV3 service worker awake without logging noise", async () => {
     let platformCalls = 0
     const orig = stub.chrome.runtime.getPlatformInfo

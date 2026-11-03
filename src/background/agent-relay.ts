@@ -1011,6 +1011,9 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
    */
   const group = async (tabId: number, sessionId: string | undefined, current: WebSocket) => {
     const tab = await chrome.tabs.get(tabId)
+    // window.open(..., "popup") has no tab strip. A group here can't join the opener's group; creating
+    // and naming a separate saved group needlessly blocks Chrome's UI thread during concurrent opens.
+    if ((await chrome.windows.get(tab.windowId)).type === "popup") return chrome.tabGroups.TAB_GROUP_ID_NONE
     const mode = await AgentGroups.mode()
     const existing = tab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE ? undefined : await chrome.tabGroups.get(tab.groupId).catch(() => undefined)
     if (existing && ownedGroup(existing.title) && (mode === "none" || sharedGroup(existing.title) !== (mode === "shared"))) {
