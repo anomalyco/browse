@@ -188,6 +188,8 @@ jobs:
   attest:
     name: Attest build provenance
     needs: [plan, build]
+    # Explicit: on dev runs tag is skipped, and the implicit success() would skip everything downstream of it.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -231,7 +233,7 @@ jobs:
   publish-release-service:
     name: Publish to the release service
     needs: [plan, build, attest]
-    if: needs.plan.outputs.mode == 'dev'
+    if: ${{ !cancelled() && needs.plan.outputs.mode == 'dev' && needs.attest.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment:
@@ -311,7 +313,7 @@ jobs:
   publish-cws:
     name: Publish to the Chrome Web Store
     needs: [plan, build, attest]
-    if: needs.plan.outputs.channel == 'latest'
+    if: ${{ !cancelled() && needs.plan.outputs.channel == 'latest' && needs.attest.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
