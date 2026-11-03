@@ -203,6 +203,25 @@ describe("update command", () => {
     expect(await checkForUpdate(clone)).toMatchObject({ available: false })
   })
 
+  test("the tracked branch was renamed on the remote (main → dev): follows the remote's default branch", async () => {
+    const { clone, remote, dir } = scenario()
+    const before = git(clone, "rev-parse", "HEAD")
+    // GitHub's branch rename: the branch and the default (HEAD) both move to dev.
+    git(remote, "branch", "-m", "main", "dev")
+    const pusher = path.join(dir, "pusher")
+    git(dir, "clone", "-q", "-b", "dev", remote, pusher)
+    const latest = commit(pusher, "after-rename.txt")
+    git(pusher, "push", "-q", "origin", "dev")
+    expect(await checkForUpdate(clone)).toMatchObject({ upstream: "origin/dev", latest, available: true })
+    const { code, output } = update(clone)
+    expect(code).toBe(0)
+    expect(output).toContain("origin/main is gone from the remote; following origin/dev")
+    expect(output).toContain(`Updating browse ${before.slice(0, 7)} → ${latest.slice(0, 7)} (1 new commit on origin/dev):`)
+    expect(git(clone, "rev-parse", "HEAD")).toBe(latest)
+    expect(git(clone, "config", "branch.main.merge")).toBe("refs/heads/dev")
+    expect(await checkForUpdate(clone)).toMatchObject({ upstream: "origin/dev", available: false })
+  })
+
   test("up to date: says so and changes nothing", () => {
     const { clone } = scenario()
     const { code, output, setups } = update(clone)

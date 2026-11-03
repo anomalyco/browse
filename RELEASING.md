@@ -1,19 +1,22 @@
 # Releasing browse
 
 One version ships an extension zip and the npm package `@opencode/browse` (`opencode-browse-<version>.tgz`: the CLI,
-relay and MCP server). The npm package carries no extension. Two channels:
+relay and MCP server). The npm package carries no extension.
+
+Work lands on `dev` (the default branch). `production` holds what was released and moves only by a fast-forward from
+`dev`; nobody commits to it directly. Two channels:
 
 | Channel | Starts from | Version | Publishes | Extension |
 | --- | --- | --- | --- | --- |
-| `dev` | every push to `main` (not Markdown-only) | `<next>-dev.<run>`, e.g. `0.2.1-dev.57` | npm dist-tag `dev`, and the [release service](#the-release-service) channel `dev`; no approval | `browse-extension-<version>.zip`, loaded unpacked |
-| `latest` | `bun run release [patch\|minor\|major]` on `main` (tag `v0.2.1`) | as tagged | npm `latest`, the public Chrome Web Store item, a GitHub release; approved | `opencode-browser-<version>.zip`, the store item |
+| `dev` | every push to `dev` (not Markdown-only) | `<next>-dev.<run>`, e.g. `0.2.1-dev.57` | npm dist-tag `dev`, and the [release service](#the-release-service) channel `dev`; no approval | `browse-extension-<version>.zip`, loaded unpacked |
+| `latest` | `bun run release [patch\|minor\|major]` on `dev`: fast-forwards `production` and runs Release from it | `cli/package.json` | npm `latest`, the public Chrome Web Store item, then the tag `v<version>` and a GitHub release; approved | `opencode-browser-<version>.zip`, the store item |
 
 `<next>` is the patch after the version in `cli/package.json`, so dev builds sort above the last release and below the
 next, and each run is newer than the last (`scripts/version.ts`; a rerun adds `.<attempt>`). The dev version is stamped
 into the checkout in CI, never committed.
 
 **Dev builds never go to the Chrome Web Store**: every upload is reviewed, which is too slow for a build per push. The
-team uses the public store extension; dev builds are for anyone who wants to try `main`.
+team uses the public store extension; dev builds are for anyone who wants to try `dev`.
 
 **How a dev install gets its extension.** The dev zip keeps the manifest `key`, so it loads with the same unpacked ID as a
 checkout's `dist/`, which the relay trusts. The dev CLI has the zip's sha256 baked in (`cli/build.ts`), and the release
@@ -26,24 +29,27 @@ path), pairs it and walks you through **Load unpacked** once (`cli/src/dev-exten
 Rollback works the same way in reverse. A store install is never touched.
 
 ```
-bun run release ──► commit "release: v0.2.1" + tag v0.2.1 ──► git push --atomic origin main v0.2.1
+bun run release ──► commit "release: v0.2.1" on dev ──► git push --atomic origin HEAD:dev HEAD:production (fast-forwards)
+                ──► gh workflow run release.yml --ref production -f ref=production -f channel=stable
                                                                    │
-  verify: installs, typechecks, builds, tests, tag = versions, changelog  ▼
+  verify: production only, v0.2.1 not tagged yet; installs, typechecks, builds, tests, versions, changelog  ▼
   build:  extension zip + npm tarball + artifact checks + SHA256SUMS (once; every later job uses these files)
   attest: build provenance for both (Sigstore)
      ├─► publish-npm  [approve: environment npm]               gh attestation verify, npm publish --provenance --tag latest
      └─► publish-cws  [approve: environment chrome-web-store]  gh attestation verify, upload + submit for review
-              └─► github-release: changelog entry, zip, tarball, SHA256SUMS, attestation
+              └─► github-release: tag v0.2.1 on the released commit, then the release (changelog entry, zip, tarball,
+                  SHA256SUMS, attestation). Last, so a failed run leaves no tag. Tags trigger nothing.
 
-push to main ──► verify ──► build (dev zip, CLI with its sha256) ──► attest
+push to dev ──► verify ──► build (dev zip, CLI with its sha256) ──► attest
                    ──► publish-release [release-dev]  zip + tarball to anoma.ly/release, channel dev (OIDC, no secret)
                    ──► publish-npm     [release-dev]  npm publish --provenance --tag dev
 ```
 
 Every publish job checks, with `gh attestation verify`, that its files are the ones this workflow built and attested. A
-stable tag fails the build when `CWS_ITEM_ID` isn't set. Run the workflow by hand (Actions → Release → Run workflow) with
-`dry_run` on for a rehearsal that publishes nothing; `bun run release:check` does the build and checks locally (it
-builds the dev zip when `cli/package.json` has a dev version).
+stable run fails the build when `CWS_ITEM_ID` isn't set, and refuses any branch but `production`. Run the workflow by hand
+(Actions → Release → Run workflow) with channel `check` for a rehearsal that builds, checks and attests and publishes
+nothing (ref `dev` builds the dev version; any other ref, the version in `cli/package.json`); `bun run release:check` does
+the build and checks locally (it builds the dev zip when `cli/package.json` has a dev version).
 
 ## The release service
 
@@ -68,7 +74,7 @@ load the folder unpacked; `npx @opencode/browse@dev install` does that for you a
 
 Open a PR on [anomalyco/release](https://github.com/anomalyco/release) that adds [scripts/release-registry.json](scripts/release-registry.json)
 as `registry/browse.json` and lists it in `registry/index.ts` (`import browse from "./browse.json"`, add it to `apps`).
-It lets `.github/workflows/release.yml` on `refs/heads/main`, in environment `release-dev`, publish the `extension`
+It lets `.github/workflows/release.yml` on `refs/heads/dev`, in environment `release-dev`, publish the `extension`
 and `cli` artifacts on channel `dev` (repository ID `1435849068`, owner ID `66570915`). Merge it to that repository's
 `dev` branch, then `git push origin dev:production` there (its docs/publishing.md). No bucket or secret is needed.
 
@@ -118,14 +124,17 @@ One Google login publishes; only the approved `chrome-web-store` environment hol
 
 1. **Settings → Environments**, for stable: `npm` and `chrome-web-store`, each with **Required reviewers** (Ryan and at
    least one other maintainer; turn on **Prevent self-review** once two can approve) and **Deployment branches and
-   tags** → *Selected* → a **tag** rule `v*`.
-2. For dev: `release-dev`, with no reviewers and *Selected branches and tags* → a **branch** rule `main` only. It holds
+   tags** → *Selected* → a **branch** rule `production` only.
+2. For dev: `release-dev`, with no reviewers and *Selected branches and tags* → a **branch** rule `dev` only. It holds
    no secrets (the release service and npm both use OIDC); its name is what the release service's registry and npm's
    trusted publisher check.
-3. **Settings → Rules → Rulesets**: a tag ruleset on `v*` restricting creations, updates and deletions to maintainers;
-   a branch ruleset on `main` requiring pull requests and blocking force pushes, with maintainers allowed to bypass
-   (`bun run release` pushes the release commit directly). Anyone who can push to `main` publishes a dev build. Add
-   CODEOWNERS for `.github/` and `scripts/`.
+3. **Settings → Rules → Rulesets**: a branch ruleset on `dev` and `production` requiring pull requests and blocking
+   force pushes and deletion, with maintainers allowed to bypass (`bun run release` pushes the release commit to both
+   directly; the push only ever fast-forwards). Anyone who can push to `dev` publishes a dev build; only what reaches
+   `production` can go stable, and only after the approvals. A tag ruleset on `v*` restricting updates and deletions
+   is fine, but it must let the workflow create tags (add *GitHub Actions* as a bypass actor, or don't restrict
+   creation): the run's last job creates `v<version>` with `GITHUB_TOKEN`. Add CODEOWNERS for `.github/` and
+   `scripts/`.
 4. **Settings → Actions → General**: turn on *Require actions to be pinned to a full-length commit SHA*.
 5. Delete the old `npm-dev` and `chrome-web-store-dev` environments if they exist.
 
@@ -142,20 +151,22 @@ One Google login publishes; only the approved `chrome-web-store` environment hol
 
 ## Cutting a release
 
-**Dev** needs nothing: merge to `main`. Try it with `npx @opencode/browse@dev install`.
+**Dev** needs nothing: merge to `dev`. Try it with `npx @opencode/browse@dev install`.
 
-**Stable**, from an up-to-date `main`:
+**Stable**, from an up-to-date `dev`:
 
 ```sh
 bun run release            # patch (or minor, major, or an exact 0.2.0); the first run drafts changelog/<version>.md and stops
 $EDITOR changelog/0.2.1.md
-bun run release            # bumps the versions, runs release:check, commits "release: v0.2.1", tags v0.2.1,
-                           # then asks and runs git push --atomic origin main v0.2.1
+bun run release            # bumps the versions, runs release:check, commits "release: v0.2.1" on dev, then asks,
+                           # pushes it to dev and production (atomic, fast-forward only) and dispatches Release
+                           # from production with channel stable, and prints the run
 ```
 
-`--no-push` stops after the tag and prints the push command; `--yes` pushes without asking. Open the run under
-**Actions → Release**, check the verify, build and attest jobs, then approve `npm` and `chrome-web-store`. The workflow
-refuses a stable tag that isn't on `main`, and fails while an earlier version is still in store review.
+`--no-push` stops after the commit and prints the push and dispatch commands; `--yes` pushes without asking. It refuses
+when `production` has commits `dev` doesn't (it can't fast-forward). In the run, check the verify, build and attest jobs,
+then approve `npm` and `chrome-web-store`. Never push a release tag by hand: the run tags `v<version>` itself at the end,
+and refuses a version that's already tagged. It fails while an earlier version is still in store review.
 
 The changelog follows the Anomaly format: frontmatter `date` and `summary`, then `## Major` (a `### Title`, a sentence
 or two, an optional `Icon: icons/<slug>.svg`), `## Improvements` and `## Fixes`, one line each, written for the person

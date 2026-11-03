@@ -39,7 +39,7 @@ over when no agent is using the browser, without changing opencode's config or r
 `OPENCODE_BROWSER_AUTO_UPDATE=off`). `npx @opencode/browse update` updates now, and `npx @opencode/browse rollback` goes
 back to the previous version. The Chrome Web Store updates the extension.
 
-**Dev builds**: every push to `main` publishes one. `npx @opencode/browse@dev install` follows the dev channel: it
+**Dev builds**: every push to `dev` publishes one. `npx @opencode/browse@dev install` follows the dev channel: it
 downloads that build's extension into a folder you load unpacked once (install shows where), and each update refreshes
 the folder and reloads the extension. The zip is also at https://anoma.ly/release/browse/extension/dev/chromium.
 
@@ -320,7 +320,7 @@ bun run release:check            # the store zip and npm tarball a release would
 ```
 
 `cli/` is the npm package `@opencode/browse` with its own lockfile. The extension and the package share one version;
-[RELEASING.md](RELEASING.md) has the release flow (dev builds from `main`, `bun run release` for a stable release).
+[RELEASING.md](RELEASING.md) has the release flow (dev builds from `dev`, `bun run release` fast-forwards `production` for a stable release).
 
 ## License
 

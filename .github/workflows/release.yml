@@ -1,38 +1,47 @@
 # Releases browse: the extension zip and the @opencode/browse npm package.
-#   push to main    dev:    <next>-dev.<run> (scripts/version.ts): the unpacked extension zip and the npm tarball to
-#                           Anomaly's release service (anoma.ly/release, channel dev, GitHub OIDC), then npm dist-tag dev,
-#                           all in environment release-dev (no approval); no store upload, no GitHub release
-#   v1.2.3          stable: npm dist-tag latest and the public store item (vars.CWS_ITEM_ID), in environments npm and
-#                           chrome-web-store (approved), and a GitHub release
-#   workflow_dispatch with dry_run (default true): verify, build, check and attest, never publish; from main it builds
-#                   the dev version, and dry_run=false publishes it as a dev build
-# Tags come from `bun run release` (scripts/release.ts). RELEASING.md has the one-time setup.
+#   push to dev       dev:    <next>-dev.<run> (scripts/version.ts): the unpacked extension zip and the npm tarball to
+#                             Anomaly's release service (anoma.ly/release, channel dev, GitHub OIDC), then npm dist-tag dev,
+#                             all in environment release-dev (no approval); no store upload, no tag, no GitHub release
+#   workflow_dispatch with ref (default production) and channel:
+#     check (default)   verify, build, check and attest, never publish; ref dev builds the dev version, any other ref
+#                       rehearses the version in cli/package.json
+#     dev               the dev build above, by hand; only from dev
+#     stable            only from production (ref production): npm dist-tag latest and the public store item
+#                       (vars.CWS_ITEM_ID), in environments npm and chrome-web-store (approved). Only after both published
+#                       does the last job tag v<version> on the released commit and create the GitHub release, so a
+#                       failed run leaves no tag. Tags trigger nothing.
+# `bun run release` (scripts/release.ts) bumps the version on dev, fast-forwards production and dispatches stable.
+# RELEASING.md has the one-time setup.
 #
 # dev:    verify -> build -> attest -> publish-release (release-dev) -> publish-npm (release-dev)
-# stable: verify -> build -> attest -> publish-npm (npm) + publish-cws (chrome-web-store) -> github-release
-# The artifacts are built once in `build` and passed along; nothing is rebuilt after the checks.
+# stable: verify -> build -> attest -> publish-npm (npm) + publish-cws (chrome-web-store) -> github-release (tag + release)
+# The artifacts are built once in `build`, from the one commit `verify` resolved, and passed along; nothing is rebuilt
+# after the checks.
 name: Release
 
 on:
   push:
-    branches: [main]
-    # Docs alone cut no dev build (tag pushes ignore paths).
+    branches: [dev]
+    # Docs alone cut no dev build.
     paths-ignore: ["**/*.md"]
-    tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: "Build, check and attest only; publish nothing"
-        type: boolean
-        default: true
+      ref:
+        description: Branch, tag or commit to build (stable takes production only)
+        required: true
+        default: production
+      channel:
+        description: check (build, check and attest; publish nothing), dev (the dev build; from dev), or stable (from production)
+        type: choice
+        options: [check, dev, stable]
+        default: check
 
 permissions: {}
 
 concurrency:
-  group: release-${{ github.ref }}
-  # Never cancel a release halfway through publishing. Of the main pushes that land during a dev run, only the newest
-  # waits (GitHub replaces an older pending run in the group), so a busy main still publishes about once per run.
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'dev' }}
+  # Never cancel a release halfway through publishing. Of the dev pushes that land during a dev run, only the newest
+  # waits (GitHub replaces an older pending run in the group), so a busy dev branch still publishes about once per run.
   cancel-in-progress: false
 
 jobs:
@@ -43,15 +52,17 @@ jobs:
     permissions:
       contents: read
     outputs:
+      sha: ${{ steps.version.outputs.sha }}
       version: ${{ steps.version.outputs.version }}
       channel: ${{ steps.version.outputs.channel }}
+      mode: ${{ steps.version.outputs.mode }}
+      tag: ${{ steps.version.outputs.tag }}
       publish: ${{ steps.version.outputs.publish }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
           persist-credentials: false
-          # main's history, to check a stable tag is on main.
-          fetch-depth: 0
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -62,44 +73,66 @@ jobs:
           node-version: 24
           package-manager-cache: false
 
-      - name: Version, channel and whether to publish
+      # mode: check | dev | stable; channel: the npm dist-tag (dev | latest); every later job builds and publishes sha.
+      - name: Commit, version, channel and whether to publish
         id: version
         env:
           EVENT: ${{ github.event_name }}
-          REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
-          DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_REF: ${{ inputs.ref }}
+          MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'dev' }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RUN_NUMBER: ${{ github.run_number }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
-          if [ "$REF_TYPE" = branch ] && [ "$REF_NAME" = main ]; then
-            # Stamped into the checkout only (never committed); the build job stamps the same version.
-            version="$(bun scripts/version.ts dev --run "$RUN_NUMBER" --attempt "$RUN_ATTEMPT")"
-          else
-            version="$(node -p 'require("./cli/package.json").version')"
-          fi
-          case "$version" in
-            *-dev.*) channel=dev ;;
-            *) channel=latest ;;
+          sha="$(git rev-parse HEAD)"
+          stable="$(node -p 'require("./cli/package.json").version')"
+          tag=""
+          case "$MODE" in
+            stable)
+              if [ "$EVENT" != workflow_dispatch ] || [ "$REF_NAME" != production ] || [ "$INPUT_REF" != production ]; then
+                echo "::error::Stable releases are dispatched from production with ref production, not ${REF_NAME} (ref ${INPUT_REF})."
+                exit 1
+              fi
+              # The commit the workflow file came from: production must not have moved since the dispatch.
+              if [ "$sha" != "$GITHUB_SHA" ]; then
+                echo "::error::production moved from $GITHUB_SHA to $sha after the dispatch; run it again."
+                exit 1
+              fi
+              version="$stable" channel=latest publish=true tag="v$stable"
+              if gh api "repos/$GH_REPO/git/matching-refs/tags/$tag" --jq '.[].ref' | grep -qx "refs/tags/$tag"; then
+                echo "::error::$tag already exists; release a new version with bun run release."
+                exit 1
+              fi
+              ;;
+            dev)
+              if [ "$REF_NAME" != dev ] || { [ "$EVENT" = workflow_dispatch ] && [ "$INPUT_REF" != dev ]; }; then
+                echo "::error::Dev builds run from dev with ref dev, not ${REF_NAME} (ref ${INPUT_REF})."
+                exit 1
+              fi
+              # Stamped into the checkout only (never committed); the build job stamps the same version.
+              version="$(bun scripts/version.ts dev --run "$RUN_NUMBER" --attempt "$RUN_ATTEMPT")" channel=dev publish=true
+              ;;
+            check)
+              publish=false
+              if [ "$INPUT_REF" = dev ]; then
+                version="$(bun scripts/version.ts dev --run "$RUN_NUMBER" --attempt "$RUN_ATTEMPT")" channel=dev
+              else
+                version="$stable" channel=latest
+              fi
+              ;;
+            *) echo "::error::Unknown channel $MODE."; exit 1 ;;
           esac
-          publish=false
-          if [ "$EVENT" = push ] || [ "$DRY_RUN" = false ]; then publish=true; fi
-          if [ "$publish" = true ] && [ "$REF_TYPE" != tag ] && [ "$channel" != dev ]; then
-            echo "::error::A real (dry_run=false) release must run on a v* tag (or main, for a dev build), not ${REF_NAME}."
-            exit 1
-          fi
           {
+            echo "sha=$sha"
             echo "version=$version"
             echo "channel=$channel"
+            echo "mode=$MODE"
+            echo "tag=$tag"
             echo "publish=$publish"
           } >> "$GITHUB_OUTPUT"
-          echo "Releasing $version on $channel (publish: $publish)"
-
-      - name: Stable tags are on main
-        if: steps.version.outputs.channel == 'latest' && github.ref_type == 'tag'
-        run: |
-          git fetch --no-tags origin main
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::$GITHUB_REF_NAME is not on main; stable releases come from main."; exit 1; }
+          echo "Releasing $version from $sha ($MODE, npm dist-tag $channel, publish: $publish)" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Install (extension)
         run: bun install --frozen-lockfile
@@ -108,23 +141,22 @@ jobs:
         run: bun install --frozen-lockfile
         working-directory: cli
 
-      - name: Versions agree (tag, cli/package.json, package.json, manifest) and the changelog is ready
+      - name: Versions agree (cli/package.json, package.json, manifest) and the changelog is ready
         env:
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
+          TAG: ${{ steps.version.outputs.tag }}
           VERSION: ${{ steps.version.outputs.version }}
           CHANNEL: ${{ steps.version.outputs.channel }}
         run: |
           if [ "$CHANNEL" = dev ]; then
             # Dev builds have no changelog entry; the GitHub commit is their notes.
             bun scripts/release-check.ts --versions-only
-          elif [ "$REF_TYPE" = tag ]; then
-            bun scripts/release-check.ts --versions-only --tag "$REF_NAME" --require-changelog
+          elif [ -n "$TAG" ]; then
+            bun scripts/release-check.ts --versions-only --tag "$TAG" --require-changelog
             bun scripts/changelog.ts check "$VERSION"
           else
-            # A dry run from a branch: the changelog entry comes with `bun run release`, so only warn.
+            # A check run: the changelog entry comes with `bun run release`, so only warn.
             bun scripts/release-check.ts --versions-only
-            bun scripts/changelog.ts check "$VERSION" || echo "::warning::changelog/$VERSION.md is missing or not ready; a release tag would fail here."
+            bun scripts/changelog.ts check "$VERSION" || echo "::warning::changelog/$VERSION.md is missing or not ready; a stable release would fail here."
           fi
 
       - name: Typecheck (extension)
@@ -154,6 +186,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.verify.outputs.sha }}
           persist-credentials: false
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -184,10 +217,9 @@ jobs:
       - name: Build and check the extension zip and npm tarball
         env:
           OPENCODE_BROWSER_STORE_ID: ${{ vars.CWS_ITEM_ID }}
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
+          TAG: ${{ needs.verify.outputs.tag }}
         run: |
-          if [ "$REF_TYPE" = tag ]; then bun scripts/release-check.ts --tag "$REF_NAME" --require-changelog
+          if [ -n "$TAG" ]; then bun scripts/release-check.ts --tag "$TAG" --require-changelog
           else bun scripts/release-check.ts; fi
 
       - name: Release notes
@@ -247,14 +279,14 @@ jobs:
 
   # Dev builds only: the unpacked extension zip and the npm tarball to Anomaly's release service, the way Hex and
   # Deadbolt publish (scripts/release-service.sh). The job's OIDC token is the only credential; the service checks it
-  # against its registry entry for browse (repository, workflow, refs/heads/main, environment release-dev).
+  # against its registry entry for browse (repository, workflow, refs/heads/dev, environment release-dev).
   publish-release:
     name: Publish to the release service
     needs: [verify, attest]
     if: needs.verify.outputs.publish == 'true' && needs.verify.outputs.channel == 'dev'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # No reviewers (every push to main publishes); admits only main (RELEASING.md).
+    # No reviewers (every push to dev publishes); admits only dev (RELEASING.md).
     environment:
       name: release-dev
       url: https://anoma.ly/release/browse/extension/dev/chromium/info
@@ -266,6 +298,7 @@ jobs:
       # Only for scripts/release-service.sh; the files come from the build job.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.verify.outputs.sha }}
           persist-credentials: false
           sparse-checkout: scripts/release-service.sh
           sparse-checkout-cone-mode: false
@@ -290,7 +323,7 @@ jobs:
           RELEASE: https://anoma.ly/release
           BROWSE_VERSION: ${{ needs.verify.outputs.version }}
           BROWSE_RELEASE_CHANNEL: dev
-          NOTES_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+          NOTES_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ needs.verify.outputs.sha }}
         run: |
           sh scripts/release-service.sh publish release
           {
@@ -317,8 +350,8 @@ jobs:
       || (needs.verify.outputs.channel != 'dev' && needs.publish-release.result == 'skipped')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Stable: required reviewers approve before this job starts. Dev: release-dev has no reviewers (every push to
-    # main publishes) and admits only main (RELEASING.md).
+    # Stable: required reviewers approve before this job starts, and npm admits only production. Dev: release-dev has no
+    # reviewers (every push to dev publishes) and admits only dev (RELEASING.md).
     environment:
       name: ${{ needs.verify.outputs.channel == 'dev' && 'release-dev' || 'npm' }}
       url: https://www.npmjs.com/package/@opencode/browse/v/${{ needs.verify.outputs.version }}
@@ -379,7 +412,7 @@ jobs:
     if: needs.verify.outputs.publish == 'true' && needs.verify.outputs.channel == 'latest'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Required reviewers approve first.
+    # Required reviewers approve first; admits only production.
     environment:
       name: chrome-web-store
     permissions:
@@ -389,6 +422,7 @@ jobs:
       # Only for scripts/cws.ts; the zip comes from the build job.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.verify.outputs.sha }}
           persist-credentials: false
           sparse-checkout: |
             scripts
@@ -432,10 +466,12 @@ jobs:
           fi
           bun scripts/cws.ts publish --zip "release/opencode-browser-$VERSION.zip" --version "$VERSION"
 
+  # Last, once npm and the store both have the version: tags v<version> on the released commit and creates the GitHub
+  # release, with the built-in token (contents: write here only). A failed run leaves no tag; tags trigger nothing.
   github-release:
-    name: GitHub release
+    name: Tag and GitHub release
     needs: [verify, attest, publish-npm, publish-cws]
-    if: needs.verify.outputs.publish == 'true' && needs.verify.outputs.channel != 'dev'
+    if: needs.verify.outputs.mode == 'stable' && needs.publish-npm.result == 'success' && needs.publish-cws.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -446,11 +482,29 @@ jobs:
           path: release
           merge-multiple: true
 
+      - name: Tag the released commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.verify.outputs.tag }}
+          SHA: ${{ needs.verify.outputs.sha }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::Unexpected tag $TAG."; exit 1; }
+          existing="$(gh api "repos/$GH_REPO/git/matching-refs/tags/$TAG" --jq ".[] | select(.ref == \"refs/tags/$TAG\") | .object.sha")"
+          if [ -n "$existing" ]; then
+            # A rerun: the tag this run pushed earlier.
+            [ "$existing" = "$SHA" ] || { echo "::error::$TAG already names $existing, not $SHA."; exit 1; }
+            echo "$TAG already names $SHA."
+          else
+            gh api "repos/$GH_REPO/git/refs" -f "ref=refs/tags/$TAG" -f "sha=$SHA" > /dev/null
+            echo "Tagged $SHA as $TAG." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.verify.outputs.tag }}
           VERSION: ${{ needs.verify.outputs.version }}
           ATTESTATION: ${{ needs.attest.outputs.url }}
         run: |
@@ -477,6 +531,6 @@ jobs:
             gh release upload "$TAG" --clobber "opencode-browser-$VERSION.zip" "opencode-browse-$VERSION.tgz" SHA256SUMS attestation.sigstore.json
             gh release edit "$TAG" --notes-file body.md
           else
-            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file body.md \
+            gh release create "$TAG" --verify-tag --latest --title "$TAG" --notes-file body.md \
               "opencode-browser-$VERSION.zip" "opencode-browse-$VERSION.tgz" SHA256SUMS attestation.sigstore.json
           fi
