@@ -38,6 +38,7 @@
     "ws": "8.22.0"
   },
   "devDependencies": {
+    "@clack/core": "1.5.1",
     "@types/bun": "1.4.0",
     "@types/chrome": "0.3.4",
     "@types/node": "26.6.4",
@@ -45,7 +46,8 @@
     "@types/ws": "8.18.2",
     "@typescript/native-preview": "7.0.0-dev.20260707.2",
     "jsonc-parser": "3.3.1",
-    "smol-toml": "1.9.1"
+    "smol-toml": "1.9.1",
+    "yaml": "2.9.1"
   },
   "publishConfig": {
     "access": "public"

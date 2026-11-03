@@ -3,8 +3,9 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { parse } from "jsonc-parser"
-import { agentNames, callingAgent, editAgentConfig } from "../src/agent-config.ts"
-import { installedExtensionVersion, installedRuntime, installWaitTimeout, locateExtension, pairStoreExtension, relayNotRestarted, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
+import { agentLocations, agentNames, callingAgent, editAgentConfig } from "../src/agent-config.ts"
+import { agentFlags, agentPlan } from "../src/agent-picker.ts"
+import { configureMcp, installedExtensionVersion, installedRuntime, installWaitTimeout, locateExtension, pairStoreExtension, relayNotRestarted, removeMcp, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
 
 const browser = (name: string): Browser => ({ name, userData: `/data/${name}`, manifests: [], defaultIDs: [], executables: [] })
 const chrome = browser("Google Chrome")
@@ -20,21 +21,67 @@ test("identifies the calling agent, not the editor hosting a regular terminal", 
   expect(callingAgent({ COPILOT_AGENT: "1", TERM_PROGRAM: "vscode" })).toBe("vscode")
   expect(callingAgent({ AI_AGENT: "github_copilot_vscode_agent" })).toBe("vscode")
   expect(callingAgent({ TERM_PROGRAM: "vscode", CODEX_HOME: "/home/me/.codex" })).toBeUndefined()
+  expect(callingAgent({ GEMINI_CLI: "1" })).toBe("gemini")
+  expect(callingAgent({ OPENCODE_SESSION_ID: "session" })).toBe("opencode")
+  expect(callingAgent({ AMP_CURRENT_THREAD_ID: "thread" })).toBe("amp")
+  expect(callingAgent({ AI_AGENT: "goose@1.2.3" })).toBe("goose")
 })
 
-test.each([...agentNames])("%s user config: preserve unrelated settings, install twice, uninstall, refuse collisions", name => {
+test("OpenCode JSONC keeps comments and other servers across install, reinstall and uninstall", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-openconfig-"))
+  try {
+    const file = path.join(home, "opencode.jsonc"), entry = path.join(home, "cli.mjs")
+    const before = '{\n// keep this\n"mcp": { "servers": { "other": {"type":"local","command":["my-server"]} } }\n}'
+    fs.writeFileSync(file, before)
+    expect(configureMcp(file, entry)).toContain("added")
+    const once = fs.readFileSync(file, "utf8")
+    expect(parse(once).mcp.servers.browse).toMatchObject({ type: "local", command: [process.execPath, entry, "mcp"] })
+    expect(configureMcp(file, entry, entry)).toContain("up to date")
+    expect(fs.readFileSync(file, "utf8")).toBe(once)
+    expect(removeMcp("browse", entry, file)).toBe(true)
+    const after = fs.readFileSync(file, "utf8")
+    expect(parse(after)).toEqual(parse(before))
+    expect(after).toContain("// keep this")
+  } finally { fs.rmSync(home, { recursive: true, force: true }) }
+})
+
+test("plans a single picker, remembering even an intentionally empty selection", () => {
+  const locations = agentNames.map(name => ({ name, file: name, installed: name === "opencode" || name === "cursor" }))
+  const plan = (args: string[], tty: boolean, caller?: "claude", remembered?: (typeof agentNames[number])[]) => agentPlan(locations, agentFlags(args), tty, caller, remembered)
+  expect(plan([], true)).toEqual({ picker: true, selected: ["opencode", "cursor"] })
+  expect(plan([], true, undefined, ["claude"])).toEqual({ picker: true, selected: ["claude"] })
+  expect(plan([], true, undefined, [])).toEqual({ picker: true, selected: [] })
+  expect(plan([], true, "claude")).toEqual({ picker: false, selected: ["claude"] })
+  expect(plan([], false, "claude", ["cursor"])).toEqual({ picker: false, selected: ["opencode", "claude"] })
+  expect(plan([], false)).toEqual({ picker: false, selected: ["opencode"] })
+  expect(agentPlan([], agentFlags([]), false)).toEqual({ picker: false, selected: [] })
+  expect(plan(["-y"], true)).toEqual(plan(["--yes"], false))
+  expect(plan(["-y"], true).selected).toEqual(["opencode", "cursor"])
+  expect(plan(["-a", "claude", "vscode", "--agent", "claude", "--yes"], true, "claude")).toEqual({ picker: false, selected: ["claude", "vscode"] })
+  expect(plan(["--agent", "*"], false).selected).toEqual([...agentNames])
+  expect(plan(["--all-agents"], true)).toEqual(plan(["-a", "*"], false))
+  expect(() => agentFlags(["--agent", "oops"])).toThrow("Unknown agent")
+  expect(() => agentFlags(["-a", "--yes"])).toThrow("at least one")
+})
+
+test.each(agentNames.filter(n => n !== "opencode"))("%s user config: preserve unrelated settings, install twice, uninstall, refuse collisions", name => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-config-"))
   try {
-    const key = name === "vscode" ? "servers" : "mcpServers"
-    const toml = name === "codex"
-    const file = path.join(home, toml ? "config.toml" : "mcp.json")
-    const before = toml ? '# my config\nmodel="test"\n[mcp_servers.other]\nurl="https://other"\n' : `{\n// my config\n"unrelated":true, "${key}":{"other":{"url":"https://other"}},\n}`
-    const config = () => toml ? Bun.TOML.parse(fs.readFileSync(file, "utf8")) : parse(fs.readFileSync(file, "utf8"))
+    const key = name === "vscode" ? "servers" : name === "zed" ? "context_servers" : name === "amp" ? "amp.mcpServers" : name === "kilo" ? "mcp" : "mcpServers"
+    const toml = ["codex", "grok", "vibe"].includes(name)
+    const yaml = name === "goose" || name === "hermes"
+    const yamlKey = name === "goose" ? "extensions" : "mcp_servers"
+    const file = path.join(home, toml ? "config.toml" : yaml ? "config.yaml" : "mcp.json")
+    const before = toml ? `# my config\nmodel="test"\n${name === "vibe" ? '[[mcp_servers]]\nname="other"' : '[mcp_servers.other]'}\nurl="https://other"\n` : yaml ? `# my config\ncustom: &original [a, b]\ncopy: *original\n${yamlKey}:\n  other: { url: https://other } # keep this server\n` : `{\n// my config\n"unrelated":true, "${key}":{"other":{"url":"https://other"}},\n}`
+    const config = () => { const text = fs.readFileSync(file, "utf8"); return yaml ? Bun.YAML.parse(text) : toml ? Bun.TOML.parse(text) : parse(text) }
     fs.writeFileSync(file, before)
     const original = config()
     const receipt = { name, file, node: "/a path/node", entry: "/a path/browse.mjs" }
     expect(editAgentConfig(receipt)).toBe("added")
-    expect(config()[toml ? "mcp_servers" : key].browse).toMatchObject({ command: receipt.node, args: [receipt.entry, "mcp"] })
+    const args = [receipt.entry, "mcp"]
+    const standard = { command: receipt.node, args }
+    const server = name === "vibe" ? config().mcp_servers.find((s: { name: string }) => s.name === "browse") : config()[toml ? "mcp_servers" : yaml ? yamlKey : key].browse
+    expect(server).toEqual(name === "kilo" ? { type: "local", command: [receipt.node, ...args] } : name === "copilot" ? { type: "local", ...standard, tools: ["*"] } : name === "goose" ? { type: "stdio", name: "browse", cmd: receipt.node, args, enabled: true } : name === "vibe" ? { name: "browse", transport: "stdio", ...standard } : ["vscode", "claude", "codebuddy", "droid", "cortex"].includes(name) ? { type: "stdio", ...standard } : standard)
     const once = fs.readFileSync(file, "utf8")
     expect(editAgentConfig(receipt)).toBe("unchanged")
     expect(fs.readFileSync(file, "utf8")).toBe(once)
@@ -45,6 +92,23 @@ test.each([...agentNames])("%s user config: preserve unrelated settings, install
     expect(editAgentConfig(receipt, true)).toBe("removed")
     expect(config()).toEqual(original)
     expect(fs.readFileSync(file, "utf8")).toContain("my config")
+    if (yaml) expect(fs.readFileSync(file, "utf8")).toContain("# keep this server")
+    fs.unlinkSync(file)
+    expect(editAgentConfig(receipt)).toBe("added")
+    expect(editAgentConfig(receipt, true)).toBe("removed")
+  } finally { fs.rmSync(home, { recursive: true, force: true }) }
+})
+
+test("every picker choice has one user-scoped destination; config dirs and binaries count as detected", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-locations-"))
+  try {
+    const config = path.join(home, ".config")
+    fs.mkdirSync(path.join(home, ".qwen"))
+    const locations = agentLocations(home, config, bin => bin === "droid", path.join(config, "opencode/opencode.json"))
+    expect(locations.map(a => a.name).sort()).toEqual([...agentNames].sort())
+    expect(locations.find(a => a.name === "qwen-code")).toMatchObject({ installed: true, file: path.join(home, ".qwen/settings.json") })
+    expect(locations.find(a => a.name === "droid")).toMatchObject({ installed: true, file: path.join(home, ".factory/mcp.json") })
+    expect(locations.find(a => a.name === "junie")?.installed).toBe(false)
   } finally { fs.rmSync(home, { recursive: true, force: true }) }
 })
 

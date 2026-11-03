@@ -31,15 +31,15 @@ if (command === "--version" || command === "-v") {
 } else {
   if (!command || command === "--help" || command === "-h") {
     process.stdout.write(`SETUP
-  install [--opencode <path>]    Install Browse: add the browse MCP server to opencode, check which browsers
+  install [--opencode <path>]    Install Browse: choose agents for the browse MCP server, check which browsers
                                  have the extension and pair it (when none does, open its Chrome Web Store
                                  page, or from a checkout or a dev install show the folder to load unpacked,
                                  and wait for it)
     --no-open                    Print the steps without opening anything or copying the path
     --no-wait                    Don't wait for the extension to be added or connect
     --wait-seconds <seconds>     How long to wait for a connection (default 180 in a terminal, 90 otherwise)
-    --agent <name>               Configure this client: opencode, claude, cursor, codex, vscode, windsurf (repeatable)
-    --all-agents, --yes          Configure all detected clients without prompting
+    -a, --agent <names...>       Configure named agents (repeatable); '*' or --all-agents selects every supported agent
+    -y, --yes                    Skip the picker; use the calling agent or detected agents
   extension                      Show where to get the extension (the unpacked folder of a checkout or a dev
                                  install, or the store page)
   pair [--wait-seconds <seconds>] Start the relay, print a one-time code (valid 10 minutes) and wait for the
