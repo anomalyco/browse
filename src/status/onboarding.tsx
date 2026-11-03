@@ -1,26 +1,20 @@
 // The onboarding page (onboarding.html): opened on install, and by the toolbar button while this browser isn't paired.
-// One page, a live checklist: run install for your agent (or connect to a relay on another computer), pin Browse to
-// the toolbar, try a prompt. Each step checks itself off from the worker's state, chrome.action's toolbar setting and
-// the first agent tab; the step to do now is the first that isn't done.
+// One card, laid out like Console's Connect OpenCode guide: a tab for an agent on this computer and one for an agent on
+// another computer, each a few numbered steps that check themselves off from the worker's state and the first agent
+// tab.
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch, type JSX } from "solid-js"
 import { render } from "solid-js/web"
+import { Tabs } from "@kobalte/core/tabs"
 import { Button } from "@opencode/ui/button"
 import { Icon } from "@opencode/ui/icon"
+import { IconButton } from "@opencode/ui/icon-button"
+import { Menu } from "@opencode/ui/menu"
 import { TextInput } from "@opencode/ui/text-input"
 import { unpackedExtensionId, unpackedReloadAdvice } from "../../cli/src/protocol"
 import { firstRunStep, relayProbeResult, shouldProbe, type FirstRunStep, type RelayProbe } from "./first-run"
-import {
-  TRY_PROMPT,
-  agentLabels,
-  checklist,
-  featuredAgents,
-  installCommand,
-  otherAgents,
-  type AgentName,
-  type StepState,
-} from "./checklist"
+import { TRY_PROMPT, agentLabels, checklist, featuredAgents, installCommand, otherAgents, type AgentName } from "./checklist"
 import { RelayForm } from "./relay-form"
-import { applyColorScheme, Brand, CopyBox, createRelay, Note, Rich, type Relay } from "./ui"
+import { applyColorScheme, Brand, createFlash, createRelay, Note, Rich, type Relay } from "./ui"
 import "./onboarding.css"
 
 // `npx @opencode/browse install` opens the setup page with a one-time code in the fragment (welcome.html#code=…, which
@@ -31,6 +25,9 @@ const installTab = !!fragmentCode
 if (/^#(code|ticket|pair)=/.test(location.hash)) history.replaceState(null, "", location.pathname + location.search)
 
 const settingsUrl = () => chrome.runtime.getURL("settings.html")
+const REMOTE_SETUP = "npx @opencode/browse set hostname 0.0.0.0 && npx @opencode/browse pair"
+
+type Where = "here" | "remote"
 
 function Onboarding() {
   const relay = createRelay()
@@ -38,13 +35,16 @@ function Onboarding() {
   const [installWaiting, setInstallWaiting] = createSignal(installTab)
   const [wasConnected, setWasConnected] = createSignal(false)
   const [tried, setTried] = createSignal(false)
-  const [pinned, setPinned] = createSignal<boolean>()
-  const [pinSkipped, setPinSkipped] = createSignal(false)
   const [pairedBy, setPairedBy] = createSignal<"link" | "code">()
   const [linkNote, setLinkNote] = createSignal<string>()
+  const [agent, setAgent] = createSignal<AgentName>("opencode")
+  const [where, setWhere] = createSignal<Where>()
 
   const step = createMemo(() => firstRunStep(relay.state(), installWaiting() ? "install-waiting" : probe()))
-  const list = createMemo(() => checklist({ state: relay.state(), wasConnected: wasConnected(), pinned: pinned(), pinSkipped: pinSkipped(), tried: tried() }))
+  const list = createMemo(() => checklist({ state: relay.state(), wasConnected: wasConnected(), tried: tried() }))
+  const connected = () => list().agent === "done"
+  // Until the user picks a tab, it follows where the extension already points.
+  const tab = () => where() ?? (relay.state()?.relay.remote ? "remote" : "here")
 
   createEffect(() => {
     const state = relay.state()
@@ -103,21 +103,30 @@ function Onboarding() {
   }
   onCleanup(() => clearTimeout(probeTimer))
 
-  // Chrome hides a new extension's button in the Extensions menu until it's pinned. Chrome 130 says when that
-  // changes; older ones are asked again when the user comes back to the page.
-  const readPinned = () =>
-    chrome.action
-      .getUserSettings()
-      .then((settings) => setPinned(settings.isOnToolbar))
-      .catch(() => undefined)
-  void readPinned()
-  chrome.action.onUserSettingsChanged?.addListener(() => void readPinned())
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") void readPinned()
-  })
+  const tryIt = (number: number) => (
+    <Step
+      number={number}
+      title="Try it"
+      done={list().tryIt === "done"}
+      description={
+        list().tryIt === "done"
+          ? "Your agent opened a tab. Browse works."
+          : connected()
+            ? `Paste this into ${tab() === "here" ? agentLabels[agent()] : "your agent"}. Restart it first if it was open during setup.`
+            : "Once your agent is connected, paste this into it."
+      }
+    >
+      <Show when={list().tryIt !== "done"}>
+        <Command text={TRY_PROMPT} label="Copy prompt" />
+        <Show when={connected()}>
+          <Waiting>Watching for your agent's first tab…</Waiting>
+        </Show>
+      </Show>
+    </Step>
+  )
 
   return (
-    <main class="onboarding" data-finished={list().finished ? "" : undefined}>
+    <main class="page">
       <Brand
         end={
           <Button variant="ghost-muted" size="small" icon="settings-gear" onClick={() => location.assign(settingsUrl())}>
@@ -125,64 +134,170 @@ function Onboarding() {
           </Button>
         }
       />
-      <h1>Connect your agent</h1>
-      <p class="subtitle">Three steps. This page checks each one as it happens.</p>
 
-      <ol class="checklist">
-        <Step number={1} state={list().agent} title="Run this in your terminal" done={<AgentDone relay={relay} pairedBy={pairedBy()} />}>
-          <AgentStep relay={relay} step={step()} linkNote={linkNote()} onPaired={() => setPairedBy("code")} />
-        </Step>
-        <Step number={2} state={list().pin} title="Pin Browse to your toolbar" done={pinned() ? "Pinned. Click it on any tab to hand that tab to your agent." : "Skipped. Browse stays in the Extensions menu."}>
-          <PinStep onSkip={() => setPinSkipped(true)} />
-        </Step>
-        <Step number={3} state={list().tryIt} title="Try it" done="Your agent opened a tab. Browse works.">
-          <p>Paste this into your agent:</p>
-          <CopyBox text={TRY_PROMPT} label="Example prompt" />
-          <Waiting>Watching for your agent's first tab…</Waiting>
-          <p class="hint">If your agent was open during setup, restart it first so it picks up the browse tools.</p>
-        </Step>
-      </ol>
+      <section class="guide" aria-labelledby="guide-title">
+        <header class="guide-head">
+          <h1 id="guide-title" class="guide-title">
+            Connect your agent
+            <Show when={connected()}>
+              <span class="guide-connected">
+                <span aria-hidden="true">·</span>
+                <span class="ok">Connected</span>
+              </span>
+            </Show>
+          </h1>
+          <p class="guide-sub">This page checks each step as it happens.</p>
+        </header>
 
-      <Show when={list().finished}>
-        <section class="finished">
-          <span class="marker" aria-hidden="true">
-            <Icon name="check" size="small" />
+        <Tabs value={tab()} onChange={(value) => setWhere(value as Where)}>
+          <Tabs.List class="tabs" aria-label="Where your agent runs">
+            <Tabs.Trigger class="tab" value="here">
+              <span>This computer</span>
+            </Tabs.Trigger>
+            <Tabs.Trigger class="tab" value="remote">
+              <span>Another computer</span>
+            </Tabs.Trigger>
+            <Tabs.Indicator class="tab-indicator" />
+          </Tabs.List>
+          <div class="hr" />
+
+          <Tabs.Content class="guide-body" value="here">
+            <div class="steps">
+              <Step
+                number={1}
+                title="Run this in your terminal"
+                done={connected()}
+                description={
+                  connected() ? (
+                    <AgentDone relay={relay} pairedBy={pairedBy()} />
+                  ) : (
+                    `Installs the relay, adds the browse tools to ${agentLabels[agent()]} and pairs them with this browser. Needs Node.js 22.19 or newer.`
+                  )
+                }
+              >
+                <Show when={!connected()}>
+                  <AgentStep relay={relay} step={step()} agent={agent()} onAgent={setAgent} linkNote={linkNote()} onPaired={() => setPairedBy("code")} />
+                </Show>
+              </Step>
+              {tryIt(2)}
+            </div>
+          </Tabs.Content>
+
+          <Tabs.Content class="guide-body" value="remote">
+            <div class="steps">
+              <Step
+                number={1}
+                title="Start the relay on that computer"
+                done={connected()}
+                description="If it doesn't have Browse yet, run install there first. This lets other computers reach its relay and prints a pairing code."
+              >
+                <Show when={!connected()}>
+                  <Command text={REMOTE_SETUP} label="Copy command" />
+                </Show>
+              </Step>
+              <Step
+                number={2}
+                title="Enter its address and code"
+                done={connected()}
+                description={
+                  connected() ? (
+                    <AgentDone relay={relay} pairedBy={pairedBy()} />
+                  ) : (
+                    "Use that computer's Tailscale IP or name. The code works once, within 10 minutes."
+                  )
+                }
+              >
+                <Show when={!connected()}>
+                  <RelayForm relay={relay} remote />
+                </Show>
+              </Step>
+              {tryIt(3)}
+            </div>
+          </Tabs.Content>
+        </Tabs>
+
+        <div class="hr" />
+        <footer class="guide-foot">
+          <Button variant="neutral" size="large" onClick={() => location.assign(settingsUrl())}>
+            Open settings
+          </Button>
+          <span class="sep" aria-hidden="true" />
+          <span class="muted">
+            {list().finished
+              ? "You're set. When an agent needs you for a login, the page shows a card."
+              : "Tabs, input, handoffs and updates live there."}
           </span>
-          <div>
-            <h2>You're set</h2>
-            <p>
-              Agents open their own tabs in the background, grouped and collapsed. When one needs you for a login or a
-              payment, the page shows a card and the badge says WAIT.
-            </p>
-            <a class="link" href={settingsUrl()}>
-              Settings
-            </a>
-          </div>
-        </section>
-      </Show>
+        </footer>
+      </section>
     </main>
   )
 }
 
-/** One checklist row: a marker (number, pulse or check), the title, and the body while it's the step to do now. */
-function Step(props: { number: number; state: StepState; title: string; done: JSX.Element; children: JSX.Element }) {
+/** One numbered step on the rail: the number turns into a check once it's done. */
+function Step(props: { number: number; title: string; description?: JSX.Element; done?: boolean; children?: JSX.Element }) {
   return (
-    <li class="step" data-state={props.state} aria-current={props.state === "active" ? "step" : undefined}>
-      <span class="marker" aria-hidden="true">
-        <Show when={props.state === "done"} fallback={props.number}>
-          <Icon name="check" size="small" />
-        </Show>
-      </span>
-      <div class="step-body">
-        <h2>{props.title}</h2>
-        <Switch>
-          <Match when={props.state === "done"}>
-            <p class="done-line">{props.done}</p>
-          </Match>
-          <Match when={props.state === "active"}>{props.children}</Match>
-        </Switch>
+    <div class="step" data-done={props.done ? "" : undefined}>
+      <div class="rail" aria-hidden="true">
+        <span class="num">
+          <Show when={props.done} fallback={props.number}>
+            <Icon name="check" size="small" />
+          </Show>
+        </span>
+        <span class="line" />
       </div>
-    </li>
+      <div class="step-body">
+        <div class="step-text">
+          <h2 class="step-title">{props.title}</h2>
+          <Show when={props.description}>
+            <p class="step-desc">{props.description}</p>
+          </Show>
+        </div>
+        {props.children}
+      </div>
+    </div>
+  )
+}
+
+/** A command or prompt to copy: [menu ▾ | text ⧉]. */
+function Command(props: { text: string; label: string; menu?: JSX.Element }) {
+  const [copied, flash] = createFlash("copy", "check")
+  return (
+    <div class="cmd">
+      <Show when={props.menu}>
+        {props.menu}
+        <span class="cmd-sep" />
+      </Show>
+      <div class="cmd-text">
+        <code>{props.text}</code>
+        <IconButton
+          variant="ghost-muted"
+          size="small"
+          aria-label={props.label}
+          icon={<Icon name={copied() === "check" ? "check" : "copy"} size="small" />}
+          onClick={() => void navigator.clipboard.writeText(props.text).then(flash)}
+        />
+      </div>
+    </div>
+  )
+}
+
+function AgentMenu(props: { agent: AgentName; onAgent: (agent: AgentName) => void }) {
+  return (
+    <Menu placement="bottom-start" gutter={4}>
+      <Menu.Trigger class="cmd-menu" aria-label="Your agent">
+        {agentLabels[props.agent]}
+        <Icon name="chevron-down" size="small" />
+      </Menu.Trigger>
+      <Menu.Portal>
+        <Menu.Content class="agent-menu">
+          <Menu.RadioGroup value={props.agent} onChange={(value) => props.onAgent(value as AgentName)}>
+            <For each={featuredAgents}>{(name) => <Menu.RadioItem value={name} closeOnSelect>{agentLabels[name]}</Menu.RadioItem>}</For>
+            <Menu.Separator />
+            <For each={otherAgents}>{(name) => <Menu.RadioItem value={name} closeOnSelect>{agentLabels[name]}</Menu.RadioItem>}</For>
+          </Menu.RadioGroup>
+        </Menu.Content>
+      </Menu.Portal>
+    </Menu>
   )
 }
 
@@ -190,7 +305,7 @@ function Waiting(props: { children: JSX.Element }) {
   return (
     <p class="waiting" aria-live="polite">
       <span class="pulse" aria-hidden="true" />
-      {props.children}
+      <span>{props.children}</span>
     </p>
   )
 }
@@ -200,25 +315,30 @@ function AgentDone(props: { relay: Relay; pairedBy: "link" | "code" | undefined 
   const remote = () => (state()?.relay.remote ? state()?.relay.address : undefined)
   return (
     <>
-      {props.pairedBy ? "Paired and connected" : "Agent connected"}
+      {props.pairedBy ? "Paired and connected" : "Connected"}
       <Show when={state()?.browser}>
         {(browser) => (
           <>
-            {" · this browser is "}
-            <code>{browser().id}</code>
+            {". This browser is "}
+            <span class="kbd">{browser().id}</span>
           </>
         )}
       </Show>
-      <Show when={remote()}>{(address) => ` · relay at ${address()}`}</Show>
+      <Show when={remote()}>{(address) => <>{" on the relay at "}<span class="kbd">{address()}</span></>}</Show>
+      .
     </>
   )
 }
 
-/** Step 1: the agent picker and install command, and whatever the connection says to do next. */
-function AgentStep(props: { relay: Relay; step: FirstRunStep; linkNote: string | undefined; onPaired: () => void }) {
-  const [agent, setAgent] = createSignal<AgentName>("opencode")
-  const [more, setMore] = createSignal(false)
-  const [remoteOpen, setRemoteOpen] = createSignal(false)
+/** Step 1 on this computer: the install command for the chosen agent, and whatever the connection says to do next. */
+function AgentStep(props: {
+  relay: Relay
+  step: FirstRunStep
+  agent: AgentName
+  onAgent: (agent: AgentName) => void
+  linkNote: string | undefined
+  onPaired: () => void
+}) {
   const here = (remote: string | undefined) => (remote ? `the relay at ${remote}` : "the relay on this computer")
   const capitalized = (text: string) => text.charAt(0).toUpperCase() + text.slice(1)
   const kind = () => props.step.kind
@@ -226,30 +346,10 @@ function AgentStep(props: { relay: Relay; step: FirstRunStep; linkNote: string |
   const unpacked = () => (props.step.kind === "update-extension" ? props.step.unpacked || chrome.runtime.id === unpackedExtensionId : false)
   const showInstall = () => kind() === "install" || (kind() === "pair" && !remote()) || kind() === "mismatch"
 
-  const chips = () => (more() ? [...featuredAgents, ...otherAgents] : featuredAgents.includes(agent()) ? featuredAgents : [...featuredAgents, agent()])
-
   return (
     <>
       <Show when={showInstall()}>
-        <div class="chips" role="radiogroup" aria-label="Your agent">
-          <For each={chips()}>
-            {(name) => (
-              <button type="button" class="chip" role="radio" aria-checked={agent() === name} onClick={() => setAgent(name)}>
-                {agentLabels[name]}
-              </button>
-            )}
-          </For>
-          <Show when={!more()}>
-            <button type="button" class="chip chip-more" onClick={() => setMore(true)}>
-              {otherAgents.length} more
-            </button>
-          </Show>
-        </div>
-        <CopyBox text={installCommand(agent())} label="Install command" />
-        <p class="hint">
-          Installs the relay, adds the browse tools to {agentLabels[agent()]} and pairs them with this browser. Needs
-          Node.js 22.19 or newer.
-        </p>
+        <Command text={installCommand(props.agent)} label="Copy command" menu={<AgentMenu agent={props.agent} onAgent={props.onAgent} />} />
       </Show>
 
       <Switch>
@@ -288,10 +388,10 @@ function AgentStep(props: { relay: Relay; step: FirstRunStep; linkNote: string |
                 Code saved. It pairs as soon as {here(waiting().remote)} runs, within 10 minutes of <code>pair</code>.
               </Waiting>
             ) : (
-              <>
-                <Waiting>Paired with {here(waiting().remote)}. Waiting for your agent to connect…</Waiting>
-                <p class="hint">The relay starts when your agent uses the browse tools. Restart your agent if it was open during setup.</p>
-              </>
+              <Waiting>
+                Paired with {here(waiting().remote)}. The relay starts when your agent uses the browse tools; restart your
+                agent if it was open during setup.
+              </Waiting>
             )
           }
         </Match>
@@ -303,7 +403,7 @@ function AgentStep(props: { relay: Relay; step: FirstRunStep; linkNote: string |
             This extension is newer than the browse CLI on this computer. Run this, then restart your agent. (With automatic
             updates on, the CLI catches up by itself within a day.)
           </Note>
-          <CopyBox text="npx @opencode/browse@latest install" />
+          <Command text="npx @opencode/browse@latest install" label="Copy command" />
         </Match>
         <Match when={kind() === "update-extension"}>
           <Show
@@ -347,16 +447,6 @@ function AgentStep(props: { relay: Relay; step: FirstRunStep; linkNote: string |
       </Switch>
 
       <Show when={props.linkNote}>{(text) => <Note>{text()}</Note>}</Show>
-
-      <div class="disclosure" data-open={remoteOpen() ? "" : undefined}>
-        <button type="button" class="disclosure-toggle" aria-expanded={remoteOpen()} onClick={() => setRemoteOpen(!remoteOpen())}>
-          <Icon name={remoteOpen() ? "chevron-down" : "chevron-right"} size="small" />
-          Agent on another computer? Connect to a relay
-        </button>
-        <Show when={remoteOpen()}>
-          <RelayForm relay={props.relay} help />
-        </Show>
-      </div>
     </>
   )
 }
@@ -398,42 +488,6 @@ function CodeForm(props: { relay: Relay; label: string; onPaired: () => void }) 
       </div>
       <Show when={note()}>{(text) => <Note tone="warn"><Rich text={text()} /></Note>}</Show>
     </form>
-  )
-}
-
-const PUZZLE = "M20.5 11H19V7c0-1.1-.9-2-2-2h-4V3.5a2.5 2.5 0 0 0-5 0V5H4c-1.1 0-2 .9-2 2v3.8h1.5a2.7 2.7 0 0 1 0 5.4H2V20c0 1.1.9 2 2 2h3.8v-1.5a2.7 2.7 0 0 1 5.4 0V22H17c1.1 0 2-.9 2-2v-4h1.5a2.5 2.5 0 0 0 0-5z"
-const PIN = "M16 9V4h1a1 1 0 0 0 0-2H7a1 1 0 0 0 0 2h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"
-
-/** Step 2: where Chrome keeps the button, and Skip. */
-function PinStep(props: { onSkip: () => void }) {
-  return (
-    <>
-      <p>
-        Chrome keeps new extensions in the Extensions menu. Click the puzzle piece, then the pin next to Browse. Then
-        click Browse on any tab to hand that tab to your agent.
-      </p>
-      <div class="pin-visual" aria-hidden="true">
-        <span class="pin-toolbar">
-          <svg viewBox="0 0 24 24">
-            <path d={PUZZLE} />
-          </svg>
-        </span>
-        <Icon name="arrow-right" size="small" />
-        <span class="pin-row">
-          <img src="/icons/icon-16.png" width="16" height="16" alt="" />
-          Browse
-          <svg class="pin-icon" viewBox="0 0 24 24">
-            <path d={PIN} />
-          </svg>
-        </span>
-      </div>
-      <Waiting>Waiting for the pin…</Waiting>
-      <div class="actions">
-        <Button variant="ghost-muted" size="small" onClick={props.onSkip}>
-          Skip
-        </Button>
-      </div>
-    </>
   )
 }
 

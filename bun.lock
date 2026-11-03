@@ -5,6 +5,7 @@
     "": {
       "name": "browse",
       "dependencies": {
+        "@kobalte/core": "0.13.13",
         "@opencode/ui": "2.2.5",
         "@solidjs/meta": "^0.29.8",
         "solid-js": "^1.9.18",

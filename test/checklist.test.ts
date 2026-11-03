@@ -14,33 +14,25 @@ const state = (overrides: Partial<AgentRelayState> = {}): AgentRelayState => ({
 const input = (overrides: Partial<ChecklistInput> = {}): ChecklistInput => ({
   state: state(),
   wasConnected: false,
-  pinned: false,
-  pinSkipped: false,
   tried: false,
   ...overrides,
 })
 
 describe("onboarding checklist", () => {
   test("a fresh install starts on the agent step, with the rest not reached", () => {
-    expect(checklist(input())).toEqual({ agent: "active", pin: "upcoming", tryIt: "upcoming", finished: false })
+    expect(checklist(input())).toEqual({ agent: "active", tryIt: "upcoming", finished: false })
     expect(checklist(input({ state: undefined }))).toMatchObject({ agent: "active" })
   })
 
-  test("connecting the agent moves on to pinning, and pinning (or skipping) to trying it", () => {
+  test("connecting the agent moves on to trying it", () => {
     const connected = state({ status: "connected", pairing: "token" })
-    expect(checklist(input({ state: connected }))).toEqual({ agent: "done", pin: "active", tryIt: "upcoming", finished: false })
-    expect(checklist(input({ state: connected, pinned: true }))).toEqual({ agent: "done", pin: "done", tryIt: "active", finished: false })
-    expect(checklist(input({ state: connected, pinSkipped: true }))).toMatchObject({ pin: "done", tryIt: "active" })
+    expect(checklist(input({ state: connected }))).toEqual({ agent: "done", tryIt: "active", finished: false })
   })
 
   test("an agent tab finishes it", () => {
     const used = state({ status: "connected", pairing: "token", tabs: [{ tabId: 3 }] })
-    expect(checklist(input({ state: used, pinned: true }))).toEqual({ agent: "done", pin: "done", tryIt: "done", finished: true })
-    expect(checklist(input({ state: state({ status: "connected", pairing: "token" }), pinned: true, tried: true })).finished).toBe(true)
-  })
-
-  test("a pin made early shows as done before its turn", () => {
-    expect(checklist(input({ pinned: true }))).toMatchObject({ agent: "active", pin: "done", tryIt: "upcoming" })
+    expect(checklist(input({ state: used }))).toEqual({ agent: "done", tryIt: "done", finished: true })
+    expect(checklist(input({ state: state({ status: "connected", pairing: "token" }), tried: true })).finished).toBe(true)
   })
 
   test("the agent step stays done while a paired relay stops, not when it refuses the browser", () => {

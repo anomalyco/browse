@@ -6,7 +6,8 @@ import { TextInput } from "@opencode/ui/text-input"
 import { relayResultText, relayResultTone, type RelayResult } from "./describe"
 import { Note, Rich, type Relay } from "./ui"
 
-export function RelayForm(props: { relay: Relay; help?: boolean }) {
+/** `remote` is for an agent on another computer: the field stays empty rather than showing this computer's relay. */
+export function RelayForm(props: { relay: Relay; help?: boolean; remote?: boolean }) {
   const [address, setAddress] = createSignal("")
   const [code, setCode] = createSignal("")
   const [edited, setEdited] = createSignal(false)
@@ -15,8 +16,9 @@ export function RelayForm(props: { relay: Relay; help?: boolean }) {
 
   // The field shows where the extension connects (localhost:19988 for this computer), unless the user is editing it.
   createEffect(() => {
-    const current = props.relay.state()?.relay.address
-    if (current !== undefined && !edited()) setAddress(current)
+    const relay = props.relay.state()?.relay
+    if (relay === undefined || edited()) return
+    setAddress(props.remote && !relay.remote ? "" : relay.address)
   })
   // A result doesn't outlive the connection it described.
   createEffect(() => {
@@ -49,7 +51,7 @@ export function RelayForm(props: { relay: Relay; help?: boolean }) {
               setEdited(true)
               setAddress(event.currentTarget.value)
             }}
-            placeholder="localhost:19988"
+            placeholder={props.remote ? "100.64.0.1 or devbox" : "localhost:19988"}
             autocomplete="off"
             spellcheck={false}
           />
