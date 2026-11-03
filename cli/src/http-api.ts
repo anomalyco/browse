@@ -45,7 +45,7 @@ import {
 } from "./relay-schema.ts"
 import { SessionError, type OpenCodeBrowserSessions } from "./session-manager.ts"
 import { checkUrl, normalizeOriginPatterns, OriginPatternError, parseOriginPatterns } from "./domain-policy.ts"
-import type { RecordingRelay, RecordingStartOptions, RecordingTargetOptions } from "./recording-relay.ts"
+import { AmbiguousRecordingTargetError, type RecordingRelay, type RecordingStartOptions, type RecordingTargetOptions } from "./recording-relay.ts"
 import { TargetOwnershipError, type TargetRegistry } from "./target-registry.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "./version.ts"
 import { relayTokenQueryParam, secretsEqual } from "./relay-secrets.ts"
@@ -421,7 +421,7 @@ function handleRecordingRequest(options: {
     }
     if (options.pathname === "/recording/status" && options.request.method === "GET") {
       const target = recordingTargetFromQuery({ registry: options.registry, searchParams: options.requestUrl.searchParams })
-      const result = yield* tryRecordingPromise("recording status", () => options.recordingRelay.statusRecording(target))
+      const result = yield* readRecordingStatus(options.registry, () => options.recordingRelay.statusRecording(target))
       sendJson(options.response, result)
       return
     }
@@ -461,7 +461,8 @@ function handleFlightRecorderRequest(options: {
       return
     }
     if (options.pathname === "/flight-recorder/status" && options.request.method === "GET") {
-      sendJson(options.response, options.flightRecorder.status(recordingTargetFromQuery({ registry: options.registry, searchParams: options.requestUrl.searchParams })))
+      const target = recordingTargetFromQuery({ registry: options.registry, searchParams: options.requestUrl.searchParams })
+      sendJson(options.response, yield* readRecordingStatus(options.registry, () => options.flightRecorder.status(target)))
       return
     }
     if (options.pathname === "/flight-recorder/save-last" && options.request.method === "POST") {
@@ -483,6 +484,21 @@ function handleFlightRecorderRequest(options: {
     }
     options.response.writeHead(404)
     options.response.end("Not found")
+  })
+}
+
+function readRecordingStatus<A>(registry: TargetRegistry, read: () => A | Promise<A>): Effect.Effect<A, Error> {
+  return Effect.tryPromise({
+    try: async () => await read(),
+    catch: (cause) => {
+      if (!(cause instanceof AmbiguousRecordingTargetError)) return cause instanceof Error ? cause : new Error(String(cause))
+      const choices = cause.tabIds.map((tabId) => {
+        const target = registry.getRootTargetByTabId(tabId)
+        const sessionId = target?.opencodeBrowserSessionId ?? target?.sessionId
+        return sessionId ? `sessionId=${sessionId} (tabId=${tabId})` : `tabId=${tabId}`
+      })
+      return new HttpRouteError({ status: 409, code: "target-ambiguous", message: `${cause.message}: ${choices.join(", ")}` })
+    },
   })
 }
 

@@ -670,6 +670,42 @@ describe("relay", () => {
     extension.close()
   }, 20_000)
 
+  for (const endpoint of ["flight-recorder", "recording"]) test(`${endpoint} status lists the active sessions when a selector is needed`, async () => {
+    let nextTab = 180
+    const extension = new FakeExtension(home)
+      .on("tabs.create", () => ({ tabId: ++nextTab }))
+      .on("Target.getTargetInfo", ({ params }) => ({ targetInfo: { targetId: `TARGET-${params?.tabId}`, type: "page", title: "Example", url: "https://example.com/", attached: true } }))
+      .on("recording.start", ({ params }) => ({ success: true, tabId: params?.tabId, startedAt: Date.now() }))
+      .on("recording.status", () => ({ isRecording: true }))
+    const sockets: WebSocket[] = []
+    const sessions = ["capture-a", "capture-b"]
+    const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" }
+    const post = (action: string, body: object) => fetch(`${base}/${endpoint}/${action}`, { method: "POST", headers, body: JSON.stringify(body) })
+    try {
+      expect(await extension.pair()).toBe(true)
+      for (const sessionId of sessions) {
+        const socket = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test?opencodeBrowserSessionId=${sessionId}`, headers)
+        if (!(socket instanceof WebSocket)) throw new Error("CDP connection refused")
+        sockets.push(socket)
+        expect((await cdpCall(socket, 1, "Target.createTarget", { url: "https://example.com/" })).error).toBeUndefined()
+        const options = endpoint === "recording" ? { mode: "tab-capture", outputPath: path.join(home, `${sessionId}.webm`) } : {}
+        expect((await post("start", { sessionId, ...options })).status).toBe(200)
+        const status = await fetch(`${base}/${endpoint}/status?sessionId=${sessionId}`, { headers })
+        expect(status.status).toBe(200)
+        expect(await status.json()).toMatchObject({ tabId: nextTab, [endpoint === "recording" ? "isRecording" : "active"]: true })
+      }
+      const ambiguous = await fetch(`${base}/${endpoint}/status`, { headers })
+      expect(ambiguous.status).toBe(409)
+      const body = await ambiguous.json() as { error: string; code: string }
+      expect(body.code).toBe("target-ambiguous")
+      for (const session of sessions) expect(body.error).toContain(session)
+    } finally {
+      for (const sessionId of sessions) await post("cancel", { sessionId })
+      for (const socket of sockets) socket.close()
+      extension.close()
+    }
+  }, 20_000)
+
   test("stopping or cancelling a recording when none runs is a clean 404, not a 500", async () => {
     const targetInfo = { targetId: "TARGET-77", type: "page", title: "Example", url: "https://example.com/", attached: true, browserContextId: "CTX" }
     const extension = new FakeExtension(home)
