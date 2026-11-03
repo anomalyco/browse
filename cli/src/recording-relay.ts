@@ -1022,6 +1022,12 @@ function parseCancelResult(value: JsonObject): RecordingCancelResult {
   }
 }
 
+export class AmbiguousRecordingTargetError extends Error {
+  constructor(message: string, readonly tabIds: readonly number[]) {
+    super(message)
+  }
+}
+
 export function findByRecordingTarget<T extends { readonly sessionId?: string }>(
   map: ReadonlyMap<number, T>,
   target: RecordingTargetOptions,
@@ -1029,7 +1035,7 @@ export function findByRecordingTarget<T extends { readonly sessionId?: string }>
 ): T | undefined {
   if (target.tabId !== undefined) return map.get(target.tabId)
   if (target.sessionId) return [...map.values()].find((entry) => entry.sessionId === target.sessionId)
-  if (map.size > 1) throw new Error(ambiguousMessage)
+  if (map.size > 1) throw new AmbiguousRecordingTargetError(ambiguousMessage, [...map.keys()])
   return map.values().next().value
 }
 
