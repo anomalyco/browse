@@ -21,12 +21,15 @@ npx @opencode/browse install
 ```
 
 `install` puts the relay in your data folder (`~/.local/share/opencode-browser`), adds the `browse` MCP server to
-the agent that ran it (or opencode when installed from a regular terminal), and connects the extension:
+the agents you choose, and connects the extension:
 
-1. **Add the extension.** `install` opens Browse in the Chrome Web Store; add it to your browser, and `install` pairs
+1. **Choose your agents.** Detected agents start checked. Type to filter, use ↑/↓ to move, Space to toggle and
+   Enter to confirm. You can uncheck OpenCode, choose an agent you haven't installed yet, or choose none for CLI-only use.
+   Your next interactive install starts with your last selection.
+2. **Add the extension.** `install` opens Browse in the Chrome Web Store; add it to your browser, and `install` pairs
    it once it's there. If it's already there, `install` opens its status page with a one-time pairing code, so it
    pairs without copying anything.
-2. **Restart your agent.**
+3. **Restart your agent** if it doesn't reload MCP settings automatically.
 
 That's it. Ask an agent to *"open news.ycombinator.com and tell me the top story"*. Or paste this into opencode:
 *"Install browse with `npx @opencode/browse install`."*
@@ -57,14 +60,14 @@ For contributors, or before a release you need is on npm:
 git clone https://github.com/anomalyco/browse.git && cd browse && bun run setup
 ```
 
-`setup` builds the extension and the CLI, adds the `browse` MCP server to opencode, and puts a one-time pairing code
+`setup` builds the extension and the CLI, adds the `browse` MCP server to your selected agents, and puts a one-time pairing code
 in the extension's folder (good for an hour), which the extension exchanges for its own key when it first connects. Two
 steps are left for you:
 
 1. **Load the extension.** `setup` opens your browser's extensions page, shows the `browse/dist` folder and copies its
    path. Turn on **Developer mode**, click **Load unpacked** and choose that folder (on macOS, press Cmd+Shift+G in the
    picker and paste), or drag the folder onto the page. `setup` waits until the extension connects.
-2. **Restart opencode.**
+2. **Restart your agent** if it doesn't reload MCP settings automatically.
 
 This needs [Bun](https://bun.sh) as well. A checkout never updates itself: run `node cli/dist/cli.mjs update` in your
 `browse` folder (or ask your agent to update browse), then restart opencode. It pulls the new commits (fast-forward
@@ -76,13 +79,58 @@ turn the check off.
 
 ### Other MCP clients
 
-In a regular terminal, `install` configures opencode if installed and offers Claude Code, Cursor, Codex, VS Code
-and Windsurf. It remembers declined offers. When a supported agent runs install, only that client is added.
-You can always choose a client explicitly:
+To skip the picker, name one or more agents. Explicit names take precedence over caller detection:
 
 ```sh
-npx @opencode/browse install --agent cursor   # or claude, codex, vscode, windsurf
+npx @opencode/browse install -a claude cursor --agent gemini
+npx @opencode/browse install -a '*'   # every supported client, including those not installed (--all-agents)
+npx @opencode/browse install -y       # detected clients in an ordinary shell (--yes)
 ```
+
+Inside a recognized agent, `install` targets that caller automatically. Without a terminal it configures the caller
+if known, adds OpenCode if installed, and prints commands for other detected clients. No other client is added by
+default in scripts. Re-running install is additive: unchecking a client skips it, not a removal. `uninstall` removes
+the entries Browse wrote, not unrelated servers or conflicting entries.
+
+<details><summary>Supported agents and user-level config files</summary>
+
+`CONFIG` is `$XDG_CONFIG_HOME` or `~/.config`. `APP` is `~/Library/Application Support` on macOS, `%APPDATA%` on
+Windows, or `CONFIG` on Linux. The paths below are defaults; a client's existing config or location override can apply.
+
+| Agent (flag) | User config | Format / server key |
+| --- | --- | --- |
+| [OpenCode](https://opencode.ai/v2/docs/mcp-servers) (`opencode`) | `CONFIG/opencode/opencode.json` or `.jsonc` | JSONC · `mcp.servers` |
+| [Claude Code](https://code.claude.com/docs/en/mcp-quickstart) (`claude`) | `~/.claude.json` | JSON · `mcpServers` |
+| [Claude Desktop](https://modelcontextprotocol.io/docs/develop/build-server) (`claude-desktop`) | `APP/Claude/claude_desktop_config.json` | JSON · `mcpServers` |
+| [Cursor](https://cursor.com/docs/context/mcp) (`cursor`) | `~/.cursor/mcp.json` | JSON · `mcpServers` |
+| [Codex](https://developers.openai.com/codex/mcp) (`codex`) | `~/.codex/config.toml` | TOML · `mcp_servers` |
+| [VS Code, including Copilot agent mode](https://code.visualstudio.com/docs/agents/reference/mcp-configuration) (`vscode`) | `APP/Code/User/mcp.json` | JSONC · `servers` |
+| [Windsurf](https://docs.windsurf.com/windsurf/cascade/mcp) (`windsurf`) | `~/.codeium/windsurf/mcp_config.json` or existing `CONFIG/devin/mcp_config.json` (`APP/devin` on Windows) | JSON · `mcpServers` |
+| [Amp](https://ampcode.com/manual/mcp) (`amp`) | `~/.config/amp/settings.json` or `.jsonc` | JSONC · literal `amp.mcpServers` |
+| [Antigravity](https://antigravity.google/docs/cli/mcp) (`antigravity`) | `~/.gemini/config/mcp_config.json` | JSON · `mcpServers` |
+| [Augment (Auggie CLI)](https://docs.augmentcode.com/cli/integrations) (`augment`) | `~/.augment/settings.json` | JSON · `mcpServers` |
+| [Cline](https://docs.cline.bot/mcp/configuring-mcp-servers) (`cline`) | `~/.cline/data/settings/cline_mcp_settings.json`; also recognizes the existing VS Code extension file in `APP/Code/User/globalStorage/saoudrizwan.claude-dev/settings/` | JSON · `mcpServers` |
+| [CodeBuddy Code](https://www.codebuddy.ai/docs/cli/mcp) (`codebuddy`) | `~/.codebuddy/.mcp.json` (or existing `mcp.json`) | JSONC · `mcpServers` |
+| [Cortex Code](https://docs.snowflake.com/en/user-guide/cortex-code/cortex-code-mcp) (`cortex`) | `~/.snowflake/cortex/mcp.json` | JSON · `mcpServers` |
+| [Factory Droid](https://docs.factory.ai/cli/configuration/mcp) (`droid`) | `~/.factory/mcp.json` | JSON · `mcpServers` |
+| [Gemini CLI](https://geminicli.com/docs/tools/mcp-server/) (`gemini`) | `~/.gemini/settings.json` | JSON · `mcpServers` |
+| [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers) (`copilot`) | `~/.copilot/mcp-config.json` | JSON · `mcpServers` |
+| [Goose](https://goose-docs.ai/docs/guides/config-file/) (`goose`) | `CONFIG/goose/config.yaml`; Windows: `APP/Block/goose/config/config.yaml` | YAML · `extensions` |
+| [Grok Build](https://docs.x.ai/build/settings) (`grok`) | `~/.grok/config.toml` | TOML · `mcp_servers` |
+| [Hermes Agent](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp) (`hermes`) | `~/.hermes/config.yaml` | YAML · `mcp_servers` |
+| [Junie](https://junie.jetbrains.com/docs/junie-cli-mcp-configuration.html) (`junie`) | `~/.junie/mcp/mcp.json` | JSON · `mcpServers` |
+| [Kilo Code](https://kilo.ai/docs/automate/mcp/using-in-cli) (`kilo`) | `CONFIG/kilo/kilo.json` (also `.jsonc`, `config.json`) | JSONC · `mcp` |
+| [Kimi Code CLI](https://moonshotai.github.io/kimi-cli/en/customization/mcp.html) (`kimi`) | `~/.kimi/mcp.json` | JSON · `mcpServers` |
+| [Kiro](https://kiro.dev/docs/mcp/configuration/) (`kiro`) | `~/.kiro/settings/mcp.json` | JSON · `mcpServers` |
+| [LM Studio](https://lmstudio.ai/blog/lmstudio-v0.3.17) (`lm-studio`) | `~/.lmstudio/mcp.json` | JSON · `mcpServers` |
+| [Mistral Vibe](https://docs.mistral.ai/vibe/code/cli/mcp-servers) (`vibe`) | `~/.vibe/config.toml` | TOML · `[[mcp_servers]]` |
+| [Qoder CLI](https://docs.qoder.com/cli/mcp-reference) (`qoder`) | `~/.qoder/settings.json` | JSON · `mcpServers` |
+| [Qwen Code](https://qwenlm.github.io/qwen-code-docs/en/users/features/mcp/) (`qwen-code`) | `~/.qwen/settings.json` | JSON · `mcpServers` |
+| [Roo Code (VS Code)](https://docs.roocode.com/features/mcp/using-mcp-in-roo) (`roo`) | `APP/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json` | JSON · `mcpServers` |
+| [Warp](https://docs.warp.dev/agents/capabilities/mcp) (`warp`) | `~/.warp/.mcp.json` | JSON · `mcpServers` |
+| [Zed](https://zed.dev/docs/ai/mcp) (`zed`) | macOS: `~/.config/zed/settings.json`; Linux: `CONFIG/zed/settings.json`; Windows: `APP/Zed/settings.json` | JSONC · `context_servers` |
+
+</details>
 
 For another stdio MCP client, this prints the server entry with the **actual installed path** (npm shim or checkout)
 on macOS or Linux. On Windows, read `entry` from `%LOCALAPPDATA%\opencode-browser\settings.json` instead.
