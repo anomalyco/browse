@@ -475,22 +475,27 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
   const remembered = previous?.selectedAgents ?? (previous?.declinedAgents?.length
     ? locations.filter(a => a.installed && !previous.declinedAgents!.includes(a.name)).map(a => a.name) : undefined)
   const plan = agentPlan(locations, flags, tty, caller, remembered)
-  const picked = plan.picker ? await pickAgents(locations, plan.selected) : { agents: plan.selected, other: false }
-  if (!picked) { process.exitCode = 130; return }
-  const selected = picked.agents
 
   mkdirSync(files.dir, { recursive: true })
   const { entry, version } = await installRuntime()
   log(`✓ Browse ${version} installed${fromSource ? " (from source)" : ""}`)
+  const onPath = args.includes("--no-modify-path") ? undefined : addToPath()
+  if (onPath) log(`✓ Added browse to your PATH (${tilde(onPath)}). Open a new terminal to use it.`)
+
+  // First the entry for any agent, then the agents install can set up itself: nobody is stuck if theirs isn't found.
+  const anyFound = locations.some((a) => a.installed)
+  byHand = plan.picker ? !anyFound : plan.selected.length === 0
+  showManualMcp(entryCommand(entry), caller)
+  const selected = plan.picker ? (anyFound ? await pickAgents(locations, plan.selected) : []) : plan.selected
+  if (!selected) { process.exitCode = 130; return }
+  if (plan.picker && anyFound) byHand = selected.length === 0
+
   const agents = previous?.agents ?? []
   const opencodeConfigs = previous?.opencodeConfigs ?? (previous?.entry ? [configFile()] : [])
   const selectedAgents = plan.picker ? selected : remembered
   const save = () => writeFileSync(files.settings, JSON.stringify({ ...(opencode ? { opencode } : {}), entry, version, agents, opencodeConfigs, ...(selectedAgents && { selectedAgents }) } satisfies Settings, null, 2) + "\n")
   save()
   if (removeLegacyHost()) log("✓ Removed the native messaging host of an earlier version")
-
-  const onPath = args.includes("--no-modify-path") ? undefined : addToPath()
-  if (onPath) log(`✓ Added browse to your PATH (${tilde(onPath)}). Open a new terminal to use it.`)
 
   // An npm or checkout install runs the MCP server under this Node; a binary install's executable runs by itself.
   const node = scriptEntry(entry) ? process.execPath : undefined
@@ -531,8 +536,6 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
       log(`! Couldn't edit ${tilde(agent.file)} for ${label}. Check its syntax and permissions, then run ${cliCommand(`install --agent ${agent.name}`)}.`)
     }
   }
-  byHand = picked.other || selected.length === 0
-  showManualMcp(entryCommand(entry), caller)
   for (const line of restartOutdatedRelay(entry) ?? []) log(line)
   const legacy = selected.includes("opencode") ? legacyBrowserControl() : []
   if (legacy.length)
@@ -662,7 +665,7 @@ let byHand = false
 
 function showManualMcp(command: readonly string[], caller: AgentName | undefined) {
   const json = manualMcpEntry(command)
-  if (rail) return clack.note(json, byHand ? "Add Browse to your agent as an MCP server" : "Another agent? Add this MCP server")
+  if (rail) return clack.note(json, "Any agent: add Browse as an MCP server")
   const intro = byHand ? "Add Browse to your agent as an MCP server (stdio):"
     : caller ? "Using another agent too? Add Browse to it as an MCP server (stdio):"
     : "Agent: if you weren't set up above, add Browse to your own MCP config (stdio):"
