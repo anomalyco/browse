@@ -5,7 +5,7 @@ import path from "node:path"
 import { parse } from "jsonc-parser"
 import { agentLocations, agentNames, callingAgent, editAgentConfig } from "../src/agent-config.ts"
 import { agentFlags, agentPlan } from "../src/agent-picker.ts"
-import { configureMcp, installedExtensionVersion, installedRuntime, installWaitTimeout, locateExtension, manualMcpEntry, pairStoreExtension, relayNotRestarted, removeMcp, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
+import { configureMcp, installedExtensionVersion, installedRuntime, installWaitTimeout, locateExtension, manualMcpEntry, pairStoreExtension, relayNotRestarted, remoteRelayAddresses, remoteRelayLines, removeMcp, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
 
 const browser = (name: string): Browser => ({ name, userData: `/data/${name}`, manifests: [], defaultIDs: [], executables: [] })
 const chrome = browser("Google Chrome")
@@ -409,4 +409,25 @@ describe("relayNotRestarted", () => {
     expect(lines[0]).toBe("! Relay not restarted: Relay has raw CDP clients attached; disconnect them before restarting.")
     expect(lines[2]).toMatch(/run: node .*cli[/\\]dist[/\\]cli\.mjs relay restart$/)
   })
+})
+
+test("install --remote prefers the tailnet's addresses, else the LAN's, and prints the code with its lifetime", () => {
+  const address = (value: string, internal = false) => ({ address: value, family: "IPv4" as const, internal, netmask: "255.255.255.0", mac: "00:00:00:00:00:00", cidr: null })
+  const lan = { lo: [address("127.0.0.1", true)], eth0: [address("192.168.1.20")], docker0: [address("172.17.0.1")], wlan0: [address("169.254.3.4"), address("10.0.0.5")] }
+  expect(remoteRelayAddresses(lan)).toEqual(["192.168.1.20", "10.0.0.5"])
+  expect(remoteRelayAddresses(lan, { port: 19988 })).toEqual(["192.168.1.20", "10.0.0.5"])
+  expect(remoteRelayAddresses(lan, { port: 20001 })).toEqual(["192.168.1.20:20001", "10.0.0.5:20001"])
+  const tailnet = { ...lan, tailscale0: [address("100.101.102.103")] }
+  expect(remoteRelayAddresses(tailnet)).toEqual(["100.101.102.103"])
+  expect(remoteRelayAddresses(tailnet, { magicDns: "devbox.tail1234.ts.net" })).toEqual(["devbox.tail1234.ts.net", "100.101.102.103"])
+  expect(remoteRelayAddresses({ lo: [address("127.0.0.1", true)] })).toEqual([])
+
+  expect(remoteRelayLines(["devbox.tail1234.ts.net", "100.101.102.103"], "ABCDEFGH", 10 * 60_000)).toEqual([
+    "Relay address  devbox.tail1234.ts.net",
+    "           or  100.101.102.103",
+    "Pairing code   ABCD-EFGH",
+    "",
+    expect.stringMatching(/^The code works once, within 10 minutes\. For a new one, run: .*pair$/),
+  ])
+  expect(remoteRelayLines([], "ABCDEFGH")[0]).toBe("Relay address  this computer's IP address")
 })

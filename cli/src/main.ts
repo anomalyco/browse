@@ -39,6 +39,8 @@ if (command === "--version" || command === "-v") {
                                  have the extension and pair it (when none does, open its Chrome Web Store
                                  page, or from a checkout or a dev install show the folder to load unpacked,
                                  and wait for it)
+    --remote                     For a browser on another computer: open the relay to other computers and print
+                                 its address and a one-time pairing code instead of pairing a browser here
     --no-open                    Print the steps without opening anything or copying the path
     --no-wait                    Don't wait for the extension to be added or connect
     --wait-seconds <seconds>     How long to wait for a connection (default 180 in a terminal, 90 otherwise)
