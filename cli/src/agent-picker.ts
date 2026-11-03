@@ -1,5 +1,5 @@
 import { Prompt, isCancel } from "@clack/core"
-import { agentLabels, agentNames, type AgentLocation, type AgentName } from "./agent-config.ts"
+import { agentLabels, agentName, agentNames, type AgentLocation, type AgentName } from "./agent-config.ts"
 
 export function agentFlags(args: string[]) {
   const requested = new Set<AgentName>()
@@ -10,7 +10,7 @@ export function agentFlags(args: string[]) {
     while (args[i + 1] && !args[i + 1]!.startsWith("-")) {
       const arg = args[++i]!
       if (arg === "*") { all = true; continue }
-      const name = agentNames.find(n => n === arg)
+      const name = agentName(arg)
       if (!name) throw new Error(`Unknown agent ${JSON.stringify(arg)}. Choose ${agentNames.join(", ")}.`)
       requested.add(name)
     }

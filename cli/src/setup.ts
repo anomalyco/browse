@@ -276,7 +276,7 @@ function mergedMcpServer(existing: Servers[string] | undefined, command: string[
 }
 
 /** Writes (or updates) the browse MCP server so it runs the installed runtime, keeping the user's settings. */
-function configureMcp(file: string, entry: string, previousEntry?: string) {
+export function configureMcp(file: string, entry: string, previousEntry?: string) {
   // A running MCP server keeps its old code after an update, and its relay calls then fail on the build check.
   // Stamping the runtime's fingerprint into the entry changes the config whenever the runtime changes, which
   // makes opencode restart the server with the new code.
@@ -294,7 +294,7 @@ function configureMcp(file: string, entry: string, previousEntry?: string) {
   return existing ? `"${MCP_NAME}" updated in ${file}` : `"${MCP_NAME}" added to ${file}`
 }
 
-function removeMcp(name: string, entry?: string, file = configFile()) {
+export function removeMcp(name: string, entry?: string, file = configFile()) {
   const text = readFileOr(file, "")
   if (!text || !ownedMcp(mcpServers(file)[name], entry)) return false
   writeFileSync(file, applyEdits(text, modify(text, ["mcp", "servers", name], undefined, {})))
