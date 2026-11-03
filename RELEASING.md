@@ -1,14 +1,24 @@
 # Releasing browse
 
-One version ships an extension zip and the npm package `@opencode/browse` (`opencode-browse-<version>.tgz`: the CLI,
-relay and MCP server). The npm package carries no extension.
+One version ships an extension zip, the npm package `@opencode/browse` (`opencode-browse-<version>.tgz`: the CLI,
+relay and MCP server, for `npx`) and the `browse` binaries. The npm package carries no extension.
+
+The binaries are `bun build --compile` executables of the same CLI (`cli/script/compile.ts`), each published like
+opencode's `@opencode/cli-<target>` as an npm package `@opencode/browse-<target>` holding `bin/browse` (`bin/browse.exe`
+on Windows) and a package.json with `os`, `cpu` and, on Linux, `libc`. The [install script](install) picks the target and
+downloads `https://registry.npmjs.org/@opencode/browse-<target>/-/browse-<target>-<version>.tgz`, the version from the
+dist-tag (`latest` or `dev`). Targets: `linux-x64`, `linux-x64-baseline`, `linux-arm64`, `linux-x64-musl`,
+`linux-x64-baseline-musl`, `linux-arm64-musl`, `darwin-arm64`, `darwin-x64`, `darwin-x64-baseline`, `windows-x64`,
+`windows-x64-baseline` (Windows on ARM64 runs x64). Locally: `cd cli && bun script/compile.ts linux-x64 && bun
+script/pack.ts` (no target: all of them; `BUN_COMPILE_RELEASE=bun-v<version>` cross-compiles against verified Bun
+runtimes, as the release does).
 
 Releases run only in GitHub Actions ([.github/workflows/release.yml](.github/workflows/release.yml)). Nobody has release
 secrets locally, and nothing is built, tagged or published from a laptop. Work lands on `dev`, the default branch.
 
 | Mode | Starts from | Version | Publishes |
 | --- | --- | --- | --- |
-| dev | every push to `dev` (not Markdown-only) | `<next patch>-dev.<run>`, e.g. `0.2.1-dev.57` | the [release service](#the-release-service) channel `dev` (`browse-extension-<version>.zip`, loaded unpacked), then npm dist-tag `dev` |
+| dev | every push to `dev` (not Markdown-only) | `<next patch>-dev.<run>`, e.g. `0.2.1-dev.57` | the [release service](#the-release-service) channel `dev` (`browse-extension-<version>.zip`, loaded unpacked), then npm dist-tag `dev` (the binaries, then `@opencode/browse`) |
 | stable | **Actions → Release → Run workflow** on `dev` with a bump or version and release notes | `x.y.z` | tag `v<version>`, npm `latest`, the public Chrome Web Store item (`opencode-browser-<version>.zip`), the GitHub release |
 | check | the same button with bump `check` and no version, on any branch | `cli/package.json` | nothing: builds, checks and attests the stable artifacts and runs every publish script as a dry run |
 
@@ -30,8 +40,12 @@ plan    version from cli/package.json + bump; actor is admin or maintain; notes 
 tag     commits the versions (cli/package.json, package.json, public/manifest.json) and changelog/<version>.md from the
         notes on the dispatched commit, pushes only the tag v<version> (deploy key); git and jq only
 build   from the tag: install, typecheck, test, release:check (zip + tarball + artifact checks), SHA256SUMS digest
-attest  build provenance for the zip and tarball (Sigstore)
-publish-npm  +  publish-cws   npm latest (--ignore-scripts, provenance) and Chrome Web Store upload + submit
+build-binaries  from the tag: compile every target against the pinned Bun release, pack and check the
+        @opencode/browse-<target> tarballs, run the linux-x64 one; no secrets
+sign-macos      optional (repository variable MACOS_SIGNING=true): Developer ID signs the macOS binaries; skipped now
+attest  build provenance for the zip and every tarball (Sigstore)
+publish-npm  +  publish-cws   npm latest (--ignore-scripts, provenance; the platform packages first, then
+        @opencode/browse) and Chrome Web Store upload + submit
 publish-github-release        the release on v<version>: notes, zip, tarball, SHA256SUMS, attestation
 push-release-to-dev           pushes the release commit to dev (deploy key), so dev builds count up from it
 ```
@@ -114,6 +128,26 @@ checks the token against `registry/browse.json` there ([scripts/release-registry
    Settings → Trusted publishing, add GitHub Actions: `anomalyco/browse`, workflow `release.yml`, environment
    `release`. Then delete `NPM_TOKEN`, revoke the token, and choose *Require two-factor authentication and disallow
    tokens*.
+
+   The same goes for the eleven platform packages: trusted publishing can only be configured on a package that already
+   exists, so the first release that has them must publish with `NPM_TOKEN` (a granular token with read and write on
+   the whole `@opencode` scope, so it can create packages). Once `npm view @opencode/browse-linux-x64` shows it, trust
+   them all in one go (one 2FA prompt; tick "skip 2FA for 5 minutes"):
+
+   ```sh
+   for t in linux-x64 linux-x64-baseline linux-arm64 linux-x64-musl linux-x64-baseline-musl linux-arm64-musl \
+     darwin-arm64 darwin-x64 darwin-x64-baseline windows-x64 windows-x64-baseline; do
+     npm trust github "@opencode/browse-$t" --file release.yml --repository anomalyco/browse --environment release --allow-publish -y
+     sleep 2
+   done
+   ```
+
+   `npm trust list @opencode/browse-<target>` checks one. Every package needs its configuration before `NPM_TOKEN` goes.
+10. **macOS signing (optional).** Without it the macOS binaries carry the ad-hoc signature `bun build --compile` gives
+    them, which runs fine from the install script and npm (neither sets quarantine). To sign with a Developer ID:
+    `base64 -i cert.p12 | gh secret set APPLE_SIGNING_CERTIFICATE --env release` (a Developer ID Application
+    certificate exported without a password), then `gh variable set MACOS_SIGNING --body true`; the sign-macos job
+    then runs and publish-npm takes the macOS packages only from it.
 
 ## Undoing a bad release
 
