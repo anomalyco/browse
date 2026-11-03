@@ -543,7 +543,6 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
   if (folder && !pairedOffline) {
     // The unpacked extension finds a one-time code in its own folder and exchanges it for its key, without a step.
     pairUnpacked()
-    log("✓ Put a one-time pairing code in the unpacked extension (good for an hour)")
     // A browser already running an older unpacked build keeps its old code until it reloads; ask it to.
     const reload = connected ? await reloadOutdatedExtension(connected, folder) : "current"
     if (reload === "reloaded") log("✓ Reloaded Browse in your browser")
@@ -628,7 +627,8 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
   } finally { process.off("SIGINT", stop) }
 }
 
-const connectedMessage = "✓ Connected. Restart your agent, then ask it to open a page."
+// In a terminal the outro says what to do next.
+const connectedMessage = "✓ Connected to your browser. Restart your agent, then ask it to open a page."
 const pairedOfflineMessage = "! Not connected yet. Open the browser profile already paired with Browse and make sure the extension is enabled. It reconnects automatically."
 const manualPair = (code: string) => `Open the Extensions menu → Browse → Options, enter ${formatPairingCode(code)} as the pairing code, then click Pair.`
 export const installWaitTimeout = (args: string[], tty: boolean) => waitTimeout(args, tty ? 180 : 90)
@@ -649,7 +649,8 @@ function ensureRelay(entry: string) {
  */
 export function manualMcpEntry(command: readonly string[]) {
   const [file, ...args] = command
-  return JSON.stringify({ mcpServers: { browse: { command: file, args: [...args, "mcp"] } } }, null, 2)
+  const server = JSON.stringify({ command: file, args: [...args, "mcp"] }).replace(/","args":/, '", "args": ').replace(/^\{"command":/, '{ "command": ').replace(/\}$/, " }")
+  return `{\n  "mcpServers": {\n    "browse": ${server}\n  }\n}`
 }
 
 function showManualMcp(command: readonly string[]) {
@@ -1134,7 +1135,6 @@ export function locateExtension(options: LocateOptions, effects: Effects = syste
     else noListing()
     return "guided"
   }
-  reportDetections(options.detections, options.preferred, log)
   // A connected extension is installed, even somewhere the scan doesn't look (a custom profile directory, a snap).
   if (options.connected) return log(connectedMessage), "ready"
   if (options.detections.some((detection) => detection.enabled.length)) return "ready"
@@ -1144,14 +1144,13 @@ export function locateExtension(options: LocateOptions, effects: Effects = syste
     return "off"
   }
   const blocked = options.detections.filter((detection) => detection.blocked).map((detection) => detection.browser.name)
+  if (blocked.length) log(`! Couldn't check ${blocked.join(", ")} for Browse (${blockedReason()})`)
   const target = options.preferred ?? options.detections.find((detection) => !detection.blocked)?.browser
   const interactive = options.allowOpen && options.env.display
   if (!options.folder) {
     if (!listing) return noListing(), "guided"
     const opened = interactive && !blocked.length && (target ? effects.open(target, listing) : effects.openDefault?.(listing))
-    log(`Install Browse from the Chrome Web Store${opened ? ` (opened in ${target?.name ?? "your default browser"})` : ""}:`)
-    log(`  ${listing}`)
-    log(`  Once it's added, install pairs it with the relay (if install isn't waiting for it, run \`${cliCommand("install")}\` again).`)
+    log(`Add Browse to ${target?.name ?? "your browser"} from the Chrome Web Store${opened ? " (opened)" : ""}: ${listing}`)
     return "guided"
   }
   // A browser that couldn't be checked may already have it: show the steps, but don't open anything over the user's work.
@@ -1189,10 +1188,10 @@ export function pairStoreExtension(
   if (!match) return "none"
   const interactive = options.allowOpen && options.env.display && !options.env.ssh
   if (interactive && effects.open(match.browser, `chrome-extension://${match.id}/welcome.html#code=${options.code()}`, match.profile.dir)) {
-    effects.log(`✓ Opened Browse's status page in ${match.browser.name} (${match.profile.name}) to pair it with the relay`)
+    effects.log(`✓ Opened Browse in ${match.browser.name} to connect it`)
     return "opened"
   }
-  effects.log(`To pair Browse in ${match.browser.name} (${match.profile.name}): ${manualPair(options.code())}`)
+  effects.log(`To connect Browse in ${match.browser.name}: ${manualPair(options.code())}`)
   return "manual"
 }
 
@@ -1211,11 +1210,7 @@ function unpackedSteps(step: {
   const page = step.page ?? "chrome://extensions"
   const fileManager = step.platform === "darwin" ? "Finder" : step.platform === "win32" ? "Explorer" : "your file manager"
   const paste = step.platform === "darwin" ? "press Cmd+Shift+G in the folder picker and paste" : "paste it into the folder picker"
-  log("Load the extension in your browser (one time):")
-  log(`  1. Open ${page}${step.browser ? ` in ${step.browser}` : " (or your browser's extensions page)"}${step.opened ? " (opened)" : ""}`)
-  log("  2. Turn on Developer mode")
-  log(`  3. Click Load unpacked and choose this folder${step.copied ? ` (path copied: ${paste})` : ""}, or drag it onto the page:`)
-  log(`     ${step.folder}${step.revealed ? ` (shown in ${fileManager})` : ""}`)
+  log(`Load Browse in ${step.browser ?? "your browser"}: open ${page}${step.opened ? " (opened)" : ""}, turn on Developer mode, click Load unpacked and choose ${step.folder}${step.copied ? ` (path copied: ${paste})` : step.revealed ? ` (shown in ${fileManager})` : ""}`)
 }
 
 /** The browser's own extensions page; every Chromium browser also accepts chrome://, these rewrite it to their scheme. */
@@ -1352,18 +1347,7 @@ function defaultBrowserID() {
   return xdg.status === 0 ? xdg.stdout.trim().replace(/\.desktop$/, "") || undefined : undefined
 }
 
-function reportDetections(detections: Detection[], preferred: Browser | undefined, log: (line: string) => void) {
-  log(`Default browser: ${preferred?.name ?? "unknown"}`)
-  detections.forEach((detection) => {
-    const name = detection.browser.name
-    if (detection.blocked) return log(`  ${name}: couldn't check (${blockedReason()})`)
-    if (detection.enabled.length) return log(`  ${name}: Browse in ${detection.enabled.map(describe).join(", ")}`)
-    if (detection.disabled.length) return log(`  ${name}: Browse turned off in ${detection.disabled.map(describe).join(", ")}`)
-    log(`  ${name}: no Browse`)
-  })
-}
 
-const describe = (match: Match) => `${match.profile.name}${match.id === unpackedExtensionId ? " (unpacked)" : ""}`
 const blockedReason = () => (process.platform === "darwin" ? "macOS privacy protection" : "permission denied")
 
 /**

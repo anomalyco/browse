@@ -167,10 +167,10 @@ describe("a checkout install without the extension", () => {
     const { outcome, calls, output } = run()
     expect(outcome).toBe("guided")
     expect(calls).toEqual({ open: [["Google Chrome", "chrome://extensions"]], reveal: [folder], copy: [folder] })
-    expect(output).toContain("Open chrome://extensions in Google Chrome (opened)")
+    expect(output).toContain("Load Browse in Google Chrome: open chrome://extensions (opened)")
     expect(output).toContain("Developer mode")
     expect(output).toContain("Load unpacked")
-    expect(output).toContain(`${folder} (shown in Finder)`)
+    expect(output).toContain(`${folder} (path copied`)
     expect(output).toContain("Cmd+Shift+G")
     expect(output).not.toContain("chromewebstore")
   })
@@ -178,7 +178,7 @@ describe("a checkout install without the extension", () => {
   test("uses the browser's own scheme for its extensions page", () => {
     const { calls, output } = run({ detections: [none(chrome), none(edge)], preferred: edge })
     expect(calls.open).toEqual([["Microsoft Edge", "edge://extensions"]])
-    expect(output).toContain("Open edge://extensions in Microsoft Edge (opened)")
+    expect(output).toContain("Load Browse in Microsoft Edge: open edge://extensions (opened)")
   })
 
   test("falls back to the first detected browser when the default isn't a known Chromium", () => {
@@ -187,7 +187,7 @@ describe("a checkout install without the extension", () => {
 
   test("doesn't claim the page opened when the browser couldn't be launched", () => {
     const { output } = run({}, { open: false })
-    expect(output).toContain("Open chrome://extensions in Google Chrome")
+    expect(output).toContain("Load Browse in Google Chrome: open chrome://extensions")
     expect(output).not.toContain("(opened)")
   })
 
@@ -214,14 +214,14 @@ describe("a checkout install without the extension", () => {
   test("doesn't open anything when a browser couldn't be checked and may already have it", () => {
     const { calls, output } = run({ detections: [none(chrome), { ...none(edge), blocked: true }] })
     expect(calls).toEqual({ open: [], reveal: [], copy: [] })
-    expect(output).toContain("couldn't check")
+    expect(output).toContain("Couldn't check Microsoft Edge")
     expect(output).not.toContain("you're set")
   })
 
   test("with no Chromium browser found, names the page without opening it", () => {
     const { calls, output } = run({ detections: [], preferred: undefined })
     expect(calls.open).toEqual([])
-    expect(output).toContain("Open chrome://extensions (or your browser's extensions page)")
+    expect(output).toContain("Load Browse in your browser: open chrome://extensions")
   })
 })
 
@@ -244,7 +244,7 @@ describe("install with the extension", () => {
     const match = { browser: chrome, profile: { dir: "Default", name: "Person 1" }, id: "afeafocngkodbmaipcngoamamfmekgfo" }
     const { outcome, output } = run({ detections: [{ ...none(chrome), enabled: [match] }] })
     expect(outcome).toBe("ready")
-    expect(output).toContain("Person 1 (unpacked)")
+    expect(output).toBe("")
     expect(output).not.toContain("Agents can use Browse now")
   })
 
@@ -269,8 +269,7 @@ describe("an npm install without the extension", () => {
     const { outcome, calls, output } = run({ folder: undefined, storeUrl })
     expect(outcome).toBe("guided")
     expect(calls).toEqual({ open: [["Google Chrome", storeUrl]], reveal: [], copy: [] })
-    expect(output).toContain("Chrome Web Store (opened in Google Chrome)")
-    expect(output).toContain("pairs it with the relay")
+    expect(output).toContain("Add Browse to Google Chrome from the Chrome Web Store (opened)")
     expect(output).not.toContain("Load unpacked")
   })
 
@@ -312,7 +311,7 @@ describe("pairing the store build", () => {
     const { outcome, opened, output } = pair([{ ...none(chrome), enabled: [{ browser: chrome, profile, id: storeId }] }])
     expect(outcome).toBe("opened")
     expect(opened).toEqual([["Google Chrome", `chrome-extension://${storeId}/welcome.html#code=ABCD1234`, "Profile 2"]])
-    expect(output).toContain("Google Chrome (Work)")
+    expect(output).toContain("Opened Browse in Google Chrome to connect it")
   })
 
   test("never hands the code to an extension that isn't a configured store item", () => {
