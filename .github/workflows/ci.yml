@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [dev]
   pull_request:
 
 permissions:
@@ -64,6 +65,10 @@ jobs:
       # no key, pairing code, source maps or test hooks), so a problem shows up on the PR rather than at release time.
       - name: Release artifacts check
         run: bun run release:check
+
+      # The scripts the release jobs that hold secrets run (.github/release/); shellcheck comes with the runner image.
+      - name: Shellcheck release scripts
+        run: shellcheck -x .github/release/*.sh
 
   browser:
     name: Execute sandbox in headless Chromium (optional)

@@ -4,8 +4,8 @@
 // display. Dev builds never go to the Chrome Web Store (they're loaded unpacked from the release service), so a dev
 // build's four-part version never has to sort below the stable release that follows it.
 //
-//   bun scripts/version.ts set <version>                       writes the version into the three files
-//   bun scripts/version.ts dev --run <n> [--attempt <n>]       writes the dev version of this run and prints it
+//   bun scripts/version.ts set <version>    writes the version into the three files (the Release workflow's build job
+//                                           stamps a dev build's version, which its plan job computes, this way)
 import { readFile, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { parseArgs } from "node:util"
@@ -28,20 +28,6 @@ export function parseReleaseVersion(version: string): ReleaseVersion {
   if (!run) return { version, channel: "latest", manifest: { version } }
   // A rerun (.<attempt>) keeps the run's manifest version; version_name tells the attempts apart.
   return { version, channel: "dev", manifest: { version: `${core}.${run}`, version_name: version } }
-}
-
-/**
- * The dev build of a workflow run: the next patch after the stable version in cli/package.json, with -dev.<run number>,
- * and .<attempt> on a rerun so no npm version is ever reused. Run numbers only grow and the base only moves forward with
- * releases, so every dev build sorts above the one before it, on npm (auto-update) and in the manifest (0.1.1.42).
- */
-export function devVersion(current: string, run: number, attempt = 1) {
-  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(current)
-  if (!match) throw new Error(`cli/package.json version ${JSON.stringify(current)} isn't a stable release`)
-  if (!Number.isSafeInteger(run) || run < 1 || !Number.isSafeInteger(attempt) || attempt < 1) throw new Error(`Invalid run ${run} (attempt ${attempt})`)
-  if (run > MANIFEST_PART_MAX) throw new Error(`Run ${run} doesn't fit a Chrome manifest version (at most ${MANIFEST_PART_MAX})`)
-  const [, major, minor, patch] = match
-  return `${major}.${minor}.${Number(patch) + 1}-dev.${run}${attempt > 1 ? `.${attempt}` : ""}`
 }
 
 /** The manifest fields for a package version; a development version (0.0.0-dev) maps to 0.0.0. */
@@ -82,22 +68,16 @@ export async function setVersion(version: string) {
   await updateJson("public/manifest.json", (data) => void applyManifestVersion(data, version))
 }
 
-export const currentVersion = async () => (JSON.parse(await readFile(path.join(root, "cli", "package.json"), "utf8")) as { version: string }).version
-
 if (import.meta.main) {
-  const { positionals, values } = parseArgs({ allowPositionals: true, options: { run: { type: "string" }, attempt: { type: "string" } } })
+  const { positionals } = parseArgs({ allowPositionals: true })
   const [command, argument] = positionals
   try {
     if (command === "set" && argument) {
       parseReleaseVersion(argument)
       await setVersion(argument)
       console.log(argument)
-    } else if (command === "dev" && values.run) {
-      const version = devVersion(await currentVersion(), Number(values.run), Number(values.attempt ?? 1))
-      await setVersion(version)
-      console.log(version)
     } else {
-      console.error("usage: bun scripts/version.ts set <version> | dev --run <n> [--attempt <n>]")
+      console.error("usage: bun scripts/version.ts set <version>")
       process.exit(2)
     }
   } catch (error) {

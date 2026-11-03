@@ -11,6 +11,7 @@
 //   - One line each.
 //   ## Fixes
 //   - What works now.
+// The Release workflow writes it from the dispatch's release_notes (.github/release/tag-release.sh).
 // `bun scripts/changelog.ts check <version>` lints one; `notes <version>` prints the GitHub release body.
 import { existsSync, readFileSync } from "node:fs"
 import path from "node:path"
@@ -53,16 +54,18 @@ export function releaseNotes(text: string): string {
   return `${front.summary ? `${front.summary}\n\n` : ""}${entry}\n`
 }
 
-/** A first draft from commit subjects (conventional prefixes sorted into sections), with placeholders to replace. */
-export function draftChangelog(options: { date: string; subjects: string[] }) {
+/**
+ * A first draft of a release's notes from commit subjects (conventional prefixes sorted into sections), with placeholders
+ * to replace: the summary line, then the sections. The Release workflow's tag job turns the notes into
+ * changelog/<version>.md (the summary goes into the frontmatter) and the GitHub release body.
+ */
+export function draftNotes(subjects: string[]) {
   const clean = (subject: string) => subject.replace(/^\w+(\([^)]*\))?!?:\s*/, "").replace(/^./, (c) => c.toUpperCase())
-  const fixes = options.subjects.filter((s) => /^fix(\(|:|!)/.test(s)).map(clean)
-  const improvements = options.subjects.filter((s) => /^(feat|perf)(\(|:|!)/.test(s)).map(clean)
+  const fixes = subjects.filter((s) => /^fix(\(|:|!)/.test(s)).map(clean)
+  const improvements = subjects.filter((s) => /^(feat|perf)(\(|:|!)/.test(s)).map(clean)
   const lines = [
-    "---",
-    `date: ${options.date}`,
-    `summary: ${PLACEHOLDER} one line for the whole release.`,
-    "---",
+    `${PLACEHOLDER} one line for the whole release.`,
+    "",
     "## Major",
     `### ${PLACEHOLDER} title, or delete this section`,
     `${PLACEHOLDER} a sentence or two for the person using it.`,
@@ -70,8 +73,6 @@ export function draftChangelog(options: { date: string; subjects: string[] }) {
     ...(improvements.length ? improvements : [PLACEHOLDER]).map((line) => `- ${line}`),
     "## Fixes",
     ...(fixes.length ? fixes : [PLACEHOLDER]).map((line) => `- ${line}`),
-    "",
-    `<!-- ${PLACEHOLDER}: rewrite each line as what the user sees now, drop internal ones, delete empty sections. -->`,
   ]
   return lines.join("\n") + "\n"
 }

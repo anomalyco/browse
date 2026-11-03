@@ -1,0 +1,3 @@
+# Releases. Jobs that hold a secret, an OIDC token or a write token run only .github/workflows/release.yml and
+# .github/release/, which makes this path the release security boundary.
+/.github/ @thdxr @R44VC0RP

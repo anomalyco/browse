@@ -1,57 +1,133 @@
-# Releases browse: the extension zip and the @opencode/browse npm package.
-#   push to main    dev:    <next>-dev.<run> (scripts/version.ts): the unpacked extension zip and the npm tarball to
-#                           Anomaly's release service (anoma.ly/release, channel dev, GitHub OIDC), then npm dist-tag dev,
-#                           all in environment release-dev (no approval); no store upload, no GitHub release
-#   v1.2.3          stable: npm dist-tag latest and the public store item (vars.CWS_ITEM_ID), in environments npm and
-#                           chrome-web-store (approved), and a GitHub release
-#   workflow_dispatch with dry_run (default true): verify, build, check and attest, never publish; from main it builds
-#                   the dev version, and dry_run=false publishes it as a dev build
-# Tags come from `bun run release` (scripts/release.ts). RELEASING.md has the one-time setup.
-#
-# dev:    verify -> build -> attest -> publish-release (release-dev) -> publish-npm (release-dev)
-# stable: verify -> build -> attest -> publish-npm (npm) + publish-cws (chrome-web-store) -> github-release
-# The artifacts are built once in `build` and passed along; nothing is rebuilt after the checks.
 name: Release
+run-name: "${{ github.event_name == 'workflow_dispatch' && format('Release {0} {1}', inputs.bump, inputs.version) || '' }}"
+
+# Releases browse: the extension zip and the @opencode/browse npm package. RELEASING.md has the flow and the setup.
+#
+#   push to dev                        dev:    <next>-dev.<run> to the release service and npm dist-tag dev
+#   dispatch on dev, bump or version   stable: tag v<version>, npm latest, the Chrome Web Store, the GitHub release;
+#                                              repository admins and maintainers only, release_notes required
+#   dispatch without bump or version   check:  builds, checks and attests the stable artifacts; publishes nothing
+#
+# Builds are separated from publishing:
+# - build runs repository code (bun install, typecheck, tests, scripts/release-check.ts) with no environment, secrets
+#   or id-token, and uploads the artifacts with a SHA256SUMS whose digest it outputs.
+# - tag runs only .github/release/tag-release.sh (git and jq) with the release deploy key.
+# - attest and every publish job check out only .github/release/, verify each artifact against the digest of the job
+#   that made it (and the attestation), and run those scripts on the artifacts as data. They never execute repository
+#   code. Jobs that hold a secret or publish run in environment release, which admits only dev.
+# .github/ (CODEOWNERS) is the security boundary for releases.
 
 on:
   push:
-    branches: [main]
-    # Docs alone cut no dev build (tag pushes ignore paths).
+    branches: [dev]
+    # Docs alone cut no dev build.
     paths-ignore: ["**/*.md"]
-    tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: "Build, check and attest only; publish nothing"
-        type: boolean
-        default: true
+      bump:
+        description: "check: build, check and attest, publish nothing. patch, minor, major: a stable release from dev"
+        required: false
+        type: choice
+        options: [check, patch, minor, major]
+        default: check
+      version:
+        description: Exact stable version instead of a bump (optional)
+        required: false
+        type: string
+      release_notes:
+        description: Required with bump or version. A summary line, then ## Major / ## Improvements / ## Fixes (bun run release drafts them)
+        required: false
+        type: string
 
 permissions: {}
 
 concurrency:
-  group: release-${{ github.ref }}
-  # Never cancel a release halfway through publishing. Of the main pushes that land during a dev run, only the newest
-  # waits (GitHub replaces an older pending run in the group), so a busy main still publishes about once per run.
+  group: release-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && (inputs.bump != 'check' || inputs.version) && 'stable' || github.event_name }}
+  # Never cancel a release halfway through publishing. Of the dev pushes that land during a dev run, only the newest
+  # waits (GitHub replaces an older pending run in the group).
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  verify:
-    name: Verify
-    runs-on: ubuntu-latest
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      version: ${{ steps.plan.outputs.version }}
+      channel: ${{ steps.plan.outputs.channel }}
+      npm_tag: ${{ steps.plan.outputs.npm_tag }}
+      dry_run: ${{ steps.plan.outputs.dry_run }}
+    steps:
+      - name: Check out release scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: /.github/release/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - id: plan
+        name: Plan
+        run: bash .github/release/plan-release.sh
+        env:
+          GH_TOKEN: ${{ github.token }} # reads cli/package.json and the triggering actor's repository role
+          INPUT_BUMP: ${{ inputs.bump }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_RELEASE_NOTES: ${{ inputs.release_notes }}
+
+  # Stable only: commits the versions and changelog/<version>.md on the dispatched dev commit and pushes only the tag
+  # v<version>, with the release deploy key (the only actor besides the code owners the v* tag ruleset admits).
+  # Runs git and jq only.
+  tag:
+    name: Tag
+    needs: plan
+    if: needs.plan.outputs.mode == 'stable'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: release
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.tag.outputs.sha }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          ssh-key: ${{ secrets.RELEASE_TAG_KEY }}
+      - id: tag
+        name: Tag
+        run: bash .github/release/tag-release.sh
+        env:
+          BROWSE_VERSION: ${{ needs.plan.outputs.version }}
+          BROWSE_RELEASE_NOTES: ${{ inputs.release_notes }}
+
+  # ---- Build: repository code; no environment, secrets or id-token -------------------------------------------------
+
+  build:
+    name: Build and check
+    needs: [plan, tag]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.tag.result == 'success' || needs.tag.result == 'skipped') }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
     outputs:
-      version: ${{ steps.version.outputs.version }}
-      channel: ${{ steps.version.outputs.channel }}
-      publish: ${{ steps.version.outputs.publish }}
+      digest: ${{ steps.upload.outputs.digest }}
+    env:
+      MODE: ${{ needs.plan.outputs.mode }}
+      VERSION: ${{ needs.plan.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.tag.outputs.sha || github.sha }}
           persist-credentials: false
-          # main's history, to check a stable tag is on main.
-          fetch-depth: 0
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -62,45 +138,6 @@ jobs:
           node-version: 24
           package-manager-cache: false
 
-      - name: Version, channel and whether to publish
-        id: version
-        env:
-          EVENT: ${{ github.event_name }}
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
-          DRY_RUN: ${{ inputs.dry_run }}
-          RUN_NUMBER: ${{ github.run_number }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: |
-          if [ "$REF_TYPE" = branch ] && [ "$REF_NAME" = main ]; then
-            # Stamped into the checkout only (never committed); the build job stamps the same version.
-            version="$(bun scripts/version.ts dev --run "$RUN_NUMBER" --attempt "$RUN_ATTEMPT")"
-          else
-            version="$(node -p 'require("./cli/package.json").version')"
-          fi
-          case "$version" in
-            *-dev.*) channel=dev ;;
-            *) channel=latest ;;
-          esac
-          publish=false
-          if [ "$EVENT" = push ] || [ "$DRY_RUN" = false ]; then publish=true; fi
-          if [ "$publish" = true ] && [ "$REF_TYPE" != tag ] && [ "$channel" != dev ]; then
-            echo "::error::A real (dry_run=false) release must run on a v* tag (or main, for a dev build), not ${REF_NAME}."
-            exit 1
-          fi
-          {
-            echo "version=$version"
-            echo "channel=$channel"
-            echo "publish=$publish"
-          } >> "$GITHUB_OUTPUT"
-          echo "Releasing $version on $channel (publish: $publish)"
-
-      - name: Stable tags are on main
-        if: steps.version.outputs.channel == 'latest' && github.ref_type == 'tag'
-        run: |
-          git fetch --no-tags origin main
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::$GITHUB_REF_NAME is not on main; stable releases come from main."; exit 1; }
-
       - name: Install (extension)
         run: bun install --frozen-lockfile
 
@@ -108,24 +145,16 @@ jobs:
         run: bun install --frozen-lockfile
         working-directory: cli
 
-      - name: Versions agree (tag, cli/package.json, package.json, manifest) and the changelog is ready
-        env:
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
-          VERSION: ${{ steps.version.outputs.version }}
-          CHANNEL: ${{ steps.version.outputs.channel }}
+      # Stamped into the checkout only (never committed).
+      - name: Stamp the dev version
+        if: needs.plan.outputs.mode == 'dev'
+        run: bun scripts/version.ts set "$VERSION"
+
+      - name: Versions agree (cli/package.json, package.json, manifest) and the changelog is ready
         run: |
-          if [ "$CHANNEL" = dev ]; then
-            # Dev builds have no changelog entry; the GitHub commit is their notes.
-            bun scripts/release-check.ts --versions-only
-          elif [ "$REF_TYPE" = tag ]; then
-            bun scripts/release-check.ts --versions-only --tag "$REF_NAME" --require-changelog
-            bun scripts/changelog.ts check "$VERSION"
-          else
-            # A dry run from a branch: the changelog entry comes with `bun run release`, so only warn.
-            bun scripts/release-check.ts --versions-only
-            bun scripts/changelog.ts check "$VERSION" || echo "::warning::changelog/$VERSION.md is missing or not ready; a release tag would fail here."
-          fi
+          bun scripts/release-check.ts --versions-only
+          [ "$(node -p 'require("./cli/package.json").version')" = "$VERSION" ] || { echo "::error::The checkout isn't version $VERSION."; exit 1; }
+          if [ "$MODE" = stable ]; then bun scripts/changelog.ts check "$VERSION"; fi
 
       - name: Typecheck (extension)
         run: bun run typecheck
@@ -134,349 +163,242 @@ jobs:
         run: bun run typecheck
         working-directory: cli
 
-      - name: Build (extension)
-        run: bun run build
-
-      - name: Build (cli)
-        run: bun build.ts
-        working-directory: cli
-
       - name: Test
         run: bun run test
 
-  build:
-    name: Build and check artifacts
-    needs: verify
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version-file: package.json
-
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24
-          package-manager-cache: false
-
-      - name: Install (extension)
-        run: bun install --frozen-lockfile
-
-      - name: Install (cli)
-        run: bun install --frozen-lockfile
-        working-directory: cli
-
-      - name: Stamp the dev version
-        if: needs.verify.outputs.channel == 'dev'
-        env:
-          VERSION: ${{ needs.verify.outputs.version }}
-        run: bun scripts/version.ts set "$VERSION"
-
-      # The extension zip (the store zip, or a dev build's unpacked zip), the npm tarball (with the store item ID, and a
-      # dev build's zip sha256, baked in: cli/build.ts), the artifact checks and SHA256SUMS: the same script as
-      # `bun run release:check`.
+      # The extension zip (the store zip, or a dev build's unpacked zip) and the npm tarball (with the store item ID,
+      # and a dev build's zip sha256, baked in: cli/build.ts), with the artifact checks: `bun run release:check`.
       - name: Build and check the extension zip and npm tarball
         env:
           OPENCODE_BROWSER_STORE_ID: ${{ vars.CWS_ITEM_ID }}
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
         run: |
-          if [ "$REF_TYPE" = tag ]; then bun scripts/release-check.ts --tag "$REF_NAME" --require-changelog
+          if [ "$MODE" = stable ]; then bun scripts/release-check.ts --tag "v$VERSION" --require-changelog
           else bun scripts/release-check.ts; fi
 
-      - name: Release notes
-        env:
-          VERSION: ${{ needs.verify.outputs.version }}
-        run: bun scripts/changelog.ts notes "$VERSION" > release/NOTES.md || echo "No changelog entry for $VERSION (dry run)." > release/NOTES.md
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - id: upload
+        name: Upload
+        uses: ./.github/release/upload
         with:
-          name: release
-          path: |
-            release/*.zip
-            release/*.tgz
-            release/SHA256SUMS
-            release/NOTES.md
-          if-no-files-found: error
-          retention-days: 30
-
-  attest:
-    name: Attest build provenance
-    needs: [verify, build]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    # Only this job mints an OIDC token for Sigstore, and it runs no repository code.
-    permissions:
-      id-token: write
-      attestations: write
-      contents: read
-    outputs:
-      url: ${{ steps.attest.outputs.attestation-url }}
-    steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: release
+          name: build
           path: release
 
-      - name: Checksums match
-        working-directory: release
-        run: sha256sum -c SHA256SUMS
+  # ---- Attest and publish: only .github/release/ is checked out; artifacts are data ---------------------------------
 
+  # Build provenance for the zip and tarball. No secrets; id-token only for Sigstore.
+  attest:
+    name: Attest build provenance
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.upload.outputs.digest }}
+    steps:
+      - name: Check out release scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: /.github/release/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Download
+        uses: ./.github/release/download
+        with:
+          pattern: build
+          digests: build=${{ needs.build.outputs.digest }}
       - id: attest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-checksums: release/SHA256SUMS
-
+          subject-path: |
+            ${{ runner.temp }}/in/build/*.zip
+            ${{ runner.temp }}/in/build/*.tgz
       - name: Keep the attestation bundle with the release
         env:
           BUNDLE: ${{ steps.attest.outputs.bundle-path }}
-        run: cp "$BUNDLE" release/attestation.sigstore.json
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        run: mkdir -p "$RUNNER_TEMP/attestation" && cp "$BUNDLE" "$RUNNER_TEMP/attestation/attestation.sigstore.json"
+      - id: upload
+        name: Upload
+        uses: ./.github/release/upload
         with:
           name: attestation
-          path: release/attestation.sigstore.json
-          if-no-files-found: error
-          retention-days: 30
+          path: ${{ runner.temp }}/attestation
 
-  # Dev builds only: the unpacked extension zip and the npm tarball to Anomaly's release service, the way Hex and
-  # Deadbolt publish (scripts/release-service.sh). The job's OIDC token is the only credential; the service checks it
-  # against its registry entry for browse (repository, workflow, refs/heads/main, environment release-dev).
-  publish-release:
+  # Dev only: the unpacked extension zip and the npm tarball to Anomaly's release service. The job's OIDC token is the
+  # only credential; the service checks it against its registry entry (workflow, refs/heads/dev, environment release).
+  publish-release-service:
     name: Publish to the release service
-    needs: [verify, attest]
-    if: needs.verify.outputs.publish == 'true' && needs.verify.outputs.channel == 'dev'
-    runs-on: ubuntu-latest
+    needs: [plan, build, attest]
+    if: needs.plan.outputs.mode == 'dev'
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
-    # No reviewers (every push to main publishes); admits only main (RELEASING.md).
     environment:
-      name: release-dev
+      name: release
       url: https://anoma.ly/release/browse/extension/dev/chromium/info
     permissions:
       contents: read
       id-token: write
       attestations: read
     steps:
-      # Only for scripts/release-service.sh; the files come from the build job.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check out release scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: false
-          sparse-checkout: scripts/release-service.sh
+          ref: ${{ github.sha }}
+          sparse-checkout: /.github/release/
           sparse-checkout-cone-mode: false
-
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+          persist-credentials: false
+      - name: Download
+        uses: ./.github/release/download
         with:
-          name: release
-          path: release
-
-      - name: Verify build provenance
+          pattern: build
+          digests: build=${{ needs.build.outputs.digest }}
+      - name: Publish
+        run: bash .github/release/publish-release-service.sh "$RUNNER_TEMP/in/build"
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          (cd release && sha256sum -c SHA256SUMS)
-          for file in release/*.zip release/*.tgz; do
-            gh attestation verify "$file" --repo "$GH_REPO" --signer-workflow "$GH_REPO/.github/workflows/release.yml"
-          done
-
-      - name: Publish
-        env:
-          RELEASE: https://anoma.ly/release
-          BROWSE_VERSION: ${{ needs.verify.outputs.version }}
-          BROWSE_RELEASE_CHANNEL: dev
+          BROWSE_VERSION: ${{ needs.plan.outputs.version }}
+          BROWSE_CHANNEL: ${{ needs.plan.outputs.channel }}
+          BROWSE_DRY_RUN: ${{ needs.plan.outputs.dry_run }}
           NOTES_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
-        run: |
-          sh scripts/release-service.sh publish release
-          {
-            echo "### Release service (dev)"
-            echo
-            echo "- Extension: $RELEASE/browse/extension/dev/chromium"
-            echo "- npm tarball: $RELEASE/browse/cli/dev/npm"
-            for manifest in release/manifest-*.json; do
-              echo
-              echo "#### $(basename "$manifest")"
-              echo '```json'
-              cat "$manifest"
-              echo '```'
-            done
-          } >> "$GITHUB_STEP_SUMMARY"
 
+  # Dev: after the release service has the zip the dev package fetches. Stable and check: publish-release-service is
+  # skipped. A check run publishes with --dry-run and no environment.
   publish-npm:
     name: Publish to npm
-    # Dev: after the release service has the extension zip the package fetches. Stable: publish-release is skipped.
-    needs: [verify, attest, publish-release]
+    needs: [plan, build, attest, publish-release-service]
     if: >-
-      ${{ !cancelled() && needs.verify.outputs.publish == 'true' && needs.attest.result == 'success'
-      && (needs.publish-release.result == 'success'
-      || (needs.verify.outputs.channel != 'dev' && needs.publish-release.result == 'skipped')) }}
-    runs-on: ubuntu-latest
+      ${{ !cancelled() && needs.attest.result == 'success'
+      && (needs.publish-release-service.result == 'success'
+      || (needs.plan.outputs.mode != 'dev' && needs.publish-release-service.result == 'skipped')) }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
-    # Stable: required reviewers approve before this job starts. Dev: release-dev has no reviewers (every push to
-    # main publishes) and admits only main (RELEASING.md).
-    environment:
-      name: ${{ needs.verify.outputs.channel == 'dev' && 'release-dev' || 'npm' }}
-      url: https://www.npmjs.com/package/@opencode/browse/v/${{ needs.verify.outputs.version }}
+    environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
     permissions:
-      # npm trusted publishing (OIDC) and the provenance statement.
-      id-token: write
-      # gh attestation verify, below.
+      contents: read
+      id-token: write # npm trusted publishing and provenance
       attestations: read
     steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - name: Check out release scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          name: release
-          path: release
-
-      # The files about to be published are the ones this run built and attested (not just consistent with SHA256SUMS,
-      # which travels in the same artifact): GitHub's attestation for each digest, signed by this workflow.
-      - name: Verify build provenance
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          for file in release/*.zip release/*.tgz; do
-            gh attestation verify "$file" --repo "$GH_REPO" --signer-workflow "$GH_REPO/.github/workflows/release.yml"
-          done
-
+          ref: ${{ github.sha }}
+          sparse-checkout: /.github/release/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          # npm 11.5.1+ for trusted publishing.
-          node-version: 24
+          node-version: 24 # npm 11.5.1+ for trusted publishing
           package-manager-cache: false
-
-      - name: Publish the built tarball
-        working-directory: release
+      - name: Download
+        uses: ./.github/release/download
+        with:
+          pattern: build
+          digests: build=${{ needs.build.outputs.digest }}
+      - name: Publish
+        run: bash .github/release/publish-npm.sh "$RUNNER_TEMP/in/build"
         env:
-          VERSION: ${{ needs.verify.outputs.version }}
-          CHANNEL: ${{ needs.verify.outputs.channel }}
+          GH_TOKEN: ${{ github.token }}
+          BROWSE_VERSION: ${{ needs.plan.outputs.version }}
+          BROWSE_NPM_TAG: ${{ needs.plan.outputs.npm_tag }}
+          BROWSE_DRY_RUN: ${{ needs.plan.outputs.dry_run }}
           # Temporary until trusted publishing is configured on npmjs.com; then delete the secret and npm uses OIDC.
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          sha256sum -c SHA256SUMS
-          # Only write a token when there is one, so an empty value never stands in for OIDC.
-          if [ -n "$NPM_TOKEN" ]; then
-            printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > "$RUNNER_TEMP/.npmrc"
-            export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/.npmrc"
-          fi
-          unset NPM_TOKEN
-          if [ "$(npm view "@opencode/browse@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
-            echo "@opencode/browse@$VERSION is already on npm; nothing to publish." | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          npm publish "./opencode-browse-$VERSION.tgz" --provenance --access public --tag "$CHANNEL"
-          echo "Published @opencode/browse@$VERSION with dist-tag $CHANNEL." | tee -a "$GITHUB_STEP_SUMMARY"
 
-  # Stable only: every store upload is reviewed, too slow for a build per push, so dev builds never go to the store.
+  # Stable (and check, as a dry run): every store upload is reviewed, too slow for a build per push, so dev builds
+  # never go to the store.
   publish-cws:
     name: Publish to the Chrome Web Store
-    needs: [verify, attest]
-    if: needs.verify.outputs.publish == 'true' && needs.verify.outputs.channel == 'latest'
-    runs-on: ubuntu-latest
+    needs: [plan, build, attest]
+    if: needs.plan.outputs.channel == 'latest'
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
-    # Required reviewers approve first.
-    environment:
-      name: chrome-web-store
+    environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
     permissions:
       contents: read
       attestations: read
     steps:
-      # Only for scripts/cws.ts; the zip comes from the build job.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check out release scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: false
-          sparse-checkout: |
-            scripts
-            package.json
+          ref: ${{ github.sha }}
+          sparse-checkout: /.github/release/
           sparse-checkout-cone-mode: false
-
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+          persist-credentials: false
+      - name: Download
+        uses: ./.github/release/download
         with:
-          bun-version-file: package.json
-
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: release
-          path: release
-
-      # The files about to be published are the ones this run built and attested (not just consistent with SHA256SUMS,
-      # which travels in the same artifact): GitHub's attestation for each digest, signed by this workflow.
-      - name: Verify build provenance
+          pattern: build
+          digests: build=${{ needs.build.outputs.digest }}
+      - name: Upload and submit for review
+        run: bash .github/release/publish-cws.sh "$RUNNER_TEMP/in/build"
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          VERSION: ${{ needs.verify.outputs.version }}
-        run: |
-          for file in "release/opencode-browser-$VERSION.zip" "release/opencode-browse-$VERSION.tgz"; do
-            gh attestation verify "$file" --repo "$GH_REPO" --signer-workflow "$GH_REPO/.github/workflows/release.yml"
-          done
-
-      - name: Upload and submit for review
-        env:
-          VERSION: ${{ needs.verify.outputs.version }}
+          BROWSE_VERSION: ${{ needs.plan.outputs.version }}
+          BROWSE_DRY_RUN: ${{ needs.plan.outputs.dry_run }}
           CWS_CLIENT_ID: ${{ secrets.CWS_CLIENT_ID }}
           CWS_CLIENT_SECRET: ${{ secrets.CWS_CLIENT_SECRET }}
           CWS_REFRESH_TOKEN: ${{ secrets.CWS_REFRESH_TOKEN }}
           CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
           CWS_ITEM_ID: ${{ vars.CWS_ITEM_ID }}
-        run: |
-          (cd release && sha256sum -c SHA256SUMS)
-          if [ -z "$CWS_ITEM_ID" ]; then
-            echo "::error::No store item: set the repository variable CWS_ITEM_ID (RELEASING.md)."
-            exit 1
-          fi
-          bun scripts/cws.ts publish --zip "release/opencode-browser-$VERSION.zip" --version "$VERSION"
 
-  github-release:
+  # Once npm and the store both have the version: the GitHub release on the tag the tag job pushed.
+  publish-github-release:
     name: GitHub release
-    needs: [verify, attest, publish-npm, publish-cws]
-    if: needs.verify.outputs.publish == 'true' && needs.verify.outputs.channel != 'dev'
-    runs-on: ubuntu-latest
+    needs: [plan, build, attest, publish-npm, publish-cws]
+    if: ${{ !cancelled() && needs.plan.outputs.channel == 'latest' && needs.publish-npm.result == 'success' && needs.publish-cws.result == 'success' }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
+    environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
     permissions:
       contents: write
+      attestations: read
     steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - name: Check out release scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          path: release
-          merge-multiple: true
-
-      - name: Create the release
+          ref: ${{ github.sha }}
+          sparse-checkout: /.github/release/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Download
+        uses: ./.github/release/download
+        with:
+          pattern: "{build,attestation}"
+          digests: build=${{ needs.build.outputs.digest }} attestation=${{ needs.attest.outputs.digest }}
+      - name: Publish
+        run: bash .github/release/publish-github-release.sh "$RUNNER_TEMP/in/build" "$RUNNER_TEMP/in/attestation"
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
-          VERSION: ${{ needs.verify.outputs.version }}
-          ATTESTATION: ${{ needs.attest.outputs.url }}
-        run: |
-          cd release
-          sha256sum -c SHA256SUMS
-          {
-            cat NOTES.md
-            echo
-            echo "## Install"
-            echo
-            printf '%snpx @opencode/browse install%s\n' '`' '`'
-            echo
-            echo "## Verify"
-            echo
-            echo "Build provenance: $ATTESTATION"
-            echo
-            echo '```sh'
-            echo "sha256sum -c SHA256SUMS"
-            echo "gh attestation verify opencode-browser-$VERSION.zip --repo $GH_REPO"
-            echo "gh attestation verify opencode-browse-$VERSION.tgz --repo $GH_REPO"
-            echo '```'
-          } > body.md
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" --clobber "opencode-browser-$VERSION.zip" "opencode-browse-$VERSION.tgz" SHA256SUMS attestation.sigstore.json
-            gh release edit "$TAG" --notes-file body.md
-          else
-            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file body.md \
-              "opencode-browser-$VERSION.zip" "opencode-browse-$VERSION.tgz" SHA256SUMS attestation.sigstore.json
-          fi
+          BROWSE_VERSION: ${{ needs.plan.outputs.version }}
+          BROWSE_DRY_RUN: ${{ needs.plan.outputs.dry_run }}
+          BROWSE_RELEASE_NOTES: ${{ inputs.release_notes }}
+
+  # Brings the release commit back to dev, so dev builds count up from the new version. Pushing to dev is blocked by
+  # the ruleset, so it opens a PR.
+  publish-version-pr:
+    name: Version PR to dev
+    needs: [plan, tag, publish-github-release]
+    if: ${{ !cancelled() && needs.plan.outputs.mode == 'stable' && needs.publish-github-release.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out release scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: /.github/release/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Publish
+        run: bash .github/release/publish-version-pr.sh "$SHA"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BROWSE_VERSION: ${{ needs.plan.outputs.version }}
+          SHA: ${{ needs.tag.outputs.sha }}

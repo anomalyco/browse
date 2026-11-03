@@ -2,6 +2,8 @@
 //   update          fast-forwards the clone to the remote branch it tracks and reruns setup's steps (bun install,
 //                   build, install). It refuses, saying what to do, when the clone has local changes, has diverged,
 //                   isn't on a tracking branch, or can't reach the remote, and does nothing when it's up to date.
+//                   When the tracked branch is gone from the remote (browse's `main` became `dev`), it follows the
+//                   remote's default branch instead and points the local branch's upstream there.
 //   update check    asks the remote for its branch head (`git ls-remote`, never a fetch), at most every 6 hours,
 //                   cached in the data root. `status`, `doctor`, the MCP server and the extension's status page show
 //                   its notice. It never blocks startup and fails silently. OPENCODE_BROWSER_UPDATE_CHECK=0 turns it off.
@@ -25,7 +27,7 @@ export type UpdateCheck = {
   readonly checkedAt: number
   /** HEAD when checked: after an update (or any checkout) the result no longer applies. */
   readonly head: string
-  /** The tracked remote branch, e.g. origin/main. */
+  /** The tracked remote branch, e.g. origin/dev (or the remote's default branch, when the tracked one is gone). */
   readonly upstream: string
   /** The remote branch's head; absent when the remote couldn't be asked. */
   readonly latest?: string
@@ -60,15 +62,31 @@ export const gitIn = (repo: string): Git => (args, timeoutMs = 5_000) =>
 
 const short = (sha: string) => sha.slice(0, 7)
 
+/** The remote's default branch (`refs/heads/dev` for browse), from `git ls-remote --symref <remote> HEAD`. */
+async function defaultBranch(remote: string, git: Git) {
+  return parseDefaultBranch(await git(["ls-remote", "--symref", remote, "HEAD"], 10_000))
+}
+
+const parseDefaultBranch = (listed: string | undefined) => /^ref: (refs\/heads\/\S+)\s+HEAD$/m.exec(listed ?? "")?.[1]
+
 /** Asks the remote for the head of the branch HEAD tracks; undefined when there's nothing to compare with. */
 export async function checkForUpdate(repo: string, git: Git = gitIn(repo), now = Date.now()): Promise<UpdateCheck | undefined> {
   const [head, branch] = await Promise.all([git(["rev-parse", "HEAD"]), git(["symbolic-ref", "--short", "-q", "HEAD"])])
   if (!head || !branch) return undefined
   const [remote, merge] = await Promise.all([git(["config", `branch.${branch}.remote`]), git(["config", `branch.${branch}.merge`])])
   if (!remote || !merge || remote === ".") return undefined
-  const upstream = `${remote}/${merge.replace(/^refs\/heads\//, "")}`
+  let upstream = `${remote}/${merge.replace(/^refs\/heads\//, "")}`
+  let listed = await git(["ls-remote", remote, merge], 10_000)
+  // The remote answered but no longer has the branch (main renamed to dev): compare with its default branch.
+  if (listed === "") {
+    const fallback = await defaultBranch(remote, git)
+    if (fallback && fallback !== merge) {
+      upstream = `${remote}/${fallback.replace(/^refs\/heads\//, "")}`
+      listed = await git(["ls-remote", remote, fallback], 10_000)
+    }
+  }
   const base = { repo, checkedAt: now, head, upstream }
-  const latest = (await git(["ls-remote", remote, merge], 10_000))?.split(/\s/)[0]
+  const latest = listed?.split(/\s/)[0]
   if (!latest || !/^[0-9a-f]{40,64}$/.test(latest)) return { ...base, available: false, failed: true }
   if (latest === head) return { ...base, latest, available: false }
   // Known locally (fetched before): it may be behind HEAD (unpushed local commits), and the gap can be counted.
@@ -326,12 +344,12 @@ export function runUpdate(args: readonly string[], deps: UpdateDeps): number {
   const branch = git(["symbolic-ref", "--short", "-q", "HEAD"]).stdout
   const head = git(["rev-parse", "HEAD"]).stdout
   if (!branch)
-    return refuse(`${repo} isn't on a branch (HEAD is detached at ${short(head)}).`, `Check out the branch to follow, e.g. \`git -C ${at} checkout main\`, then run this again.`)
-  const upstream = git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]).stdout
+    return refuse(`${repo} isn't on a branch (HEAD is detached at ${short(head)}).`, `Check out the branch to follow, e.g. \`git -C ${at} checkout dev\`, then run this again.`)
+  let upstream = git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]).stdout
   const remote = git(["config", `branch.${branch}.remote`]).stdout
-  const merge = git(["config", `branch.${branch}.merge`]).stdout
+  let merge = git(["config", `branch.${branch}.merge`]).stdout
   if (!upstream || !remote || !merge || remote === ".")
-    return refuse(`branch ${branch} doesn't track a remote branch.`, `Set one, e.g. \`git -C ${at} branch --set-upstream-to origin/main\`, then run this again.`)
+    return refuse(`branch ${branch} doesn't track a remote branch.`, `Set one, e.g. \`git -C ${at} branch --set-upstream-to origin/dev\`, then run this again.`)
 
   // Tracked files only, staged or not: untracked ones (the pairing code, builds) never stop a fast-forward.
   const changes = git(["diff", "--name-only", "HEAD"]).stdout
@@ -341,6 +359,19 @@ export function runUpdate(args: readonly string[], deps: UpdateDeps): number {
       `${repo} has uncommitted changes (${files.slice(0, 5).join(", ")}${files.length > 5 ? `, and ${files.length - 5} more` : ""}).`,
       `Commit or stash them (\`git -C ${at} stash\`), then run this again.`,
     )
+  }
+
+  // The tracked branch is gone from a reachable remote (browse's main became dev): follow the remote's default branch,
+  // and track it from now on so later checks and updates ask for it directly.
+  if (git(["ls-remote", "--exit-code", remote, merge], 30_000).status === 2) {
+    const fallback = parseDefaultBranch(git(["ls-remote", "--symref", remote, "HEAD"], 30_000).stdout)
+    if (fallback && fallback !== merge) {
+      const gone = upstream
+      merge = fallback
+      upstream = `${remote}/${fallback.replace(/^refs\/heads\//, "")}`
+      git(["config", `branch.${branch}.merge`, merge])
+      log(`${gone} is gone from the remote; following ${upstream}, its default branch, from now on.`)
+    }
   }
 
   const fetched = git(["fetch", "--quiet", remote, merge], 120_000)

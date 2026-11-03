@@ -1,188 +1,132 @@
 # Releasing browse
 
 One version ships an extension zip and the npm package `@opencode/browse` (`opencode-browse-<version>.tgz`: the CLI,
-relay and MCP server). The npm package carries no extension. Two channels:
+relay and MCP server). The npm package carries no extension.
 
-| Channel | Starts from | Version | Publishes | Extension |
-| --- | --- | --- | --- | --- |
-| `dev` | every push to `main` (not Markdown-only) | `<next>-dev.<run>`, e.g. `0.2.1-dev.57` | npm dist-tag `dev`, and the [release service](#the-release-service) channel `dev`; no approval | `browse-extension-<version>.zip`, loaded unpacked |
-| `latest` | `bun run release [patch\|minor\|major]` on `main` (tag `v0.2.1`) | as tagged | npm `latest`, the public Chrome Web Store item, a GitHub release; approved | `opencode-browser-<version>.zip`, the store item |
+Releases run only in GitHub Actions ([.github/workflows/release.yml](.github/workflows/release.yml)). Nobody has release
+secrets locally, and nothing is built, tagged or published from a laptop. Work lands on `dev`, the default branch.
 
-`<next>` is the patch after the version in `cli/package.json`, so dev builds sort above the last release and below the
-next, and each run is newer than the last (`scripts/version.ts`; a rerun adds `.<attempt>`). The dev version is stamped
-into the checkout in CI, never committed.
+| Mode | Starts from | Version | Publishes |
+| --- | --- | --- | --- |
+| dev | every push to `dev` (not Markdown-only) | `<next patch>-dev.<run>`, e.g. `0.2.1-dev.57` | the [release service](#the-release-service) channel `dev` (`browse-extension-<version>.zip`, loaded unpacked), then npm dist-tag `dev` |
+| stable | **Actions → Release → Run workflow** on `dev` with a bump or version and release notes | `x.y.z` | tag `v<version>`, npm `latest`, the public Chrome Web Store item (`opencode-browser-<version>.zip`), the GitHub release |
+| check | the same button with bump `check` and no version, on any branch | `cli/package.json` | nothing: builds, checks and attests the stable artifacts and runs every publish script as a dry run |
 
-**Dev builds never go to the Chrome Web Store**: every upload is reviewed, which is too slow for a build per push. The
-team uses the public store extension; dev builds are for anyone who wants to try `main`.
+There's no `production` branch: browse has no website. If it gets one, the site deploys from `production`, as in
+opencode and Hex; releases still come from `dev`.
 
-**How a dev install gets its extension.** The dev zip keeps the manifest `key`, so it loads with the same unpacked ID as a
-checkout's `dist/`, which the relay trusts. The dev CLI has the zip's sha256 baked in (`cli/build.ts`), and the release
-workflow publishes the zip to the release service before the package goes to npm. `npx @opencode/browse@dev install`
-downloads exactly that zip from `https://anoma.ly/release/browse/files/<sha256>/browse-extension-<version>.zip`, checks
-it, unpacks it into `<data root>/extension` (`~/.local/share/opencode-browser/extension` on Linux; install prints the
-path), pairs it and walks you through **Load unpacked** once (`cli/src/dev-extension.ts`). Auto-update follows npm's
-`dev` tag; when the relay of a newer dev version starts, it puts that version's zip in the same folder and sends
-`runtime.reload` to the connected extension, only when it's the unpacked ID and its build differs from the folder's.
-Rollback works the same way in reverse. A store install is never touched.
+## Cutting a stable release
+
+1. Write the notes: `bun run release --draft` writes `release-notes.md` from the commits since the last tag. The format
+   is a summary line, then `## Major` (a `### Title`, a sentence or two, an optional `Icon: icons/<slug>.svg`),
+   `## Improvements` and `## Fixes`, one line each, written for the person using it. No `TODO` may be left.
+2. Dispatch: **Actions → Release → Run workflow**, branch `dev`, bump `patch`/`minor`/`major` (or an exact version)
+   and the notes. The notes field is a single line in the browser, so `bun run release patch release-notes.md` does
+   the same with `gh workflow run`.
+3. The run (only repository admins and maintainers may start one; `plan` checks the dispatching actor):
 
 ```
-bun run release ──► commit "release: v0.2.1" + tag v0.2.1 ──► git push --atomic origin main v0.2.1
-                                                                   │
-  verify: installs, typechecks, builds, tests, tag = versions, changelog  ▼
-  build:  extension zip + npm tarball + artifact checks + SHA256SUMS (once; every later job uses these files)
-  attest: build provenance for both (Sigstore)
-     ├─► publish-npm  [approve: environment npm]               gh attestation verify, npm publish --provenance --tag latest
-     └─► publish-cws  [approve: environment chrome-web-store]  gh attestation verify, upload + submit for review
-              └─► github-release: changelog entry, zip, tarball, SHA256SUMS, attestation
-
-push to main ──► verify ──► build (dev zip, CLI with its sha256) ──► attest
-                   ──► publish-release [release-dev]  zip + tarball to anoma.ly/release, channel dev (OIDC, no secret)
-                   ──► publish-npm     [release-dev]  npm publish --provenance --tag dev
+plan    version from cli/package.json + bump; actor is admin or maintain; notes well-formed; not on npm yet
+tag     commits the versions (cli/package.json, package.json, public/manifest.json) and changelog/<version>.md from the
+        notes on the dispatched commit, pushes only the tag v<version> (deploy key); git and jq only
+build   from the tag: install, typecheck, test, release:check (zip + tarball + artifact checks), SHA256SUMS digest
+attest  build provenance for the zip and tarball (Sigstore)
+publish-npm  +  publish-cws   npm latest (--ignore-scripts, provenance) and Chrome Web Store upload + submit
+publish-github-release        the release on v<version>: notes, zip, tarball, SHA256SUMS, attestation
+publish-version-pr            a PR that brings the release commit back to dev, so dev builds count up from it
 ```
 
-Every publish job checks, with `gh attestation verify`, that its files are the ones this workflow built and attested. A
-stable tag fails the build when `CWS_ITEM_ID` isn't set. Run the workflow by hand (Actions → Release → Run workflow) with
-`dry_run` on for a rehearsal that publishes nothing; `bun run release:check` does the build and checks locally (it
-builds the dev zip when `cli/package.json` has a dev version).
+Merge the version PR. The store review takes hours to a few days (the job summary shows `PENDING_REVIEW`); a release
+fails at `publish-cws` while an earlier version is still in review. npm users get the new version within a day: the
+relay checks once a day and switches when no agent is using the browser.
+
+**If a job fails**, fix it and rerun the failed jobs. Publishing is idempotent: a version that's already on npm,
+already submitted to the store, or already current on the release service is skipped, and the tag is reused when it
+holds the same tree.
+
+## The security boundary
+
+Every job that holds a secret, an OIDC token or a write token (tag, attest, every publish job) runs only code in
+`.github/`: the workflow file and the shell scripts in [.github/release/](.github/release/), checked out with a sparse
+checkout of `/.github/release/`. Those jobs treat the build artifacts as data: each artifact must match the SHA256SUMS
+digest its job reported and, before publishing, its GitHub attestation from this workflow on `dev`. They never run
+repository code, `bun install` or package lifecycle scripts. Only `build` runs repository code, and it has no
+environment, secrets or id-token. The tag job checks out the repository but runs only `tag-release.sh` (git and jq,
+hooks off).
+
+So `.github/` is what to protect: [.github/CODEOWNERS](.github/CODEOWNERS) makes Dax and Ryan its owners, and the
+rulesets below require their review. The jobs that hold secrets run in the environment `release`, which admits only
+`dev`.
+
+## How a dev install gets its extension
+
+The dev zip keeps the manifest `key`, so it loads with the same unpacked ID as a checkout's `dist/`, which the relay
+trusts. The dev CLI has the zip's sha256 baked in (`cli/build.ts`), and the zip reaches the release service before the
+package reaches npm. `npx @opencode/browse@dev install` downloads exactly that zip from
+`https://anoma.ly/release/browse/files/<sha256>/browse-extension-<version>.zip`, checks it, unpacks it into
+`<data root>/extension`, pairs it and walks you through **Load unpacked** once (`cli/src/dev-extension.ts`). When the
+relay of a newer dev version starts, it puts that version's zip in the same folder and reloads the extension. Dev
+builds never go to the Chrome Web Store: every upload is reviewed, too slow for a build per push.
 
 ## The release service
 
-`https://anoma.ly/release` is Anomaly's update service (repository [anomalyco/release](https://github.com/anomalyco/release),
-a Cloudflare Worker over R2). Hex, Deadbolt and Hokum publish to it the same way: a workflow job in a named environment
-trades its GitHub OIDC token for a publish session with `curl https://anoma.ly/release/client.sh | bash -s -- publish …`,
-uploads content-addressed files, and the service writes `<app>/<artifact>/<channel>.json` manifests. Nothing to store in
-GitHub: the service checks the token against `registry/<app>.json` in that repository. Browse is app `browse`
-(`scripts/release-service.sh`):
+`https://anoma.ly/release` is Anomaly's update service ([anomalyco/release](https://github.com/anomalyco/release)).
+Like Hex and OpenCode, a job in a named environment trades its GitHub OIDC token for a publish session through
+`client.sh` ([.github/release/publish-release-service.sh](.github/release/publish-release-service.sh)); the service
+checks the token against `registry/browse.json` there ([scripts/release-registry.json](scripts/release-registry.json)).
 
 | Artifact | Target | File | Latest link |
 | --- | --- | --- | --- |
 | `extension` | `chromium` | `browse-extension-<version>.zip` | https://anoma.ly/release/browse/extension/dev/chromium |
 | `cli` | `npm` | `opencode-browse-<version>.tgz` | https://anoma.ly/release/browse/cli/dev/npm |
 
-Add `/info` to a link for the version, size and sha256. To try a dev build without npm, download the zip, unzip it and
-load the folder unpacked; `npx @opencode/browse@dev install` does that for you and keeps it updated.
-
 ## One-time setup
 
-### 1. Register browse with the release service
-
-Open a PR on [anomalyco/release](https://github.com/anomalyco/release) that adds [scripts/release-registry.json](scripts/release-registry.json)
-as `registry/browse.json` and lists it in `registry/index.ts` (`import browse from "./browse.json"`, add it to `apps`).
-It lets `.github/workflows/release.yml` on `refs/heads/main`, in environment `release-dev`, publish the `extension`
-and `cli` artifacts on channel `dev` (repository ID `1435849068`, owner ID `66570915`). Merge it to that repository's
-`dev` branch, then `git push origin dev:production` there (its docs/publishing.md). No bucket or secret is needed.
-
-### 2. Chrome Web Store item
-
-The API can update items but not create them, so create the stable item by hand in the
-[developer dashboard](https://chrome.google.com/webstore/devconsole) with Anomaly's publisher.
-
-1. **Check the old ID.** Earlier code pointed at item `mfnicocicmmlkpjnaffgihfjhdgjkdjg`. If it's Anomaly's item, use
-   it below (its ID goes in `CWS_ITEM_ID`) instead of creating a new one.
-2. **Create it.** Build a zip with `bun run release:check` and upload `release/opencode-browser-<version>.zip` with
-   **New item**. Fill in **Store listing** and **Privacy** from [store/listing.md](store/listing.md), set visibility to
-   **Public**, and submit it.
-3. **Repository variables** (IDs, not secrets; the publisher ID is under **Account**):
-
-   ```sh
-   gh variable set CWS_PUBLISHER_ID --repo anomalyco/browse --body <publisher id>
-   gh variable set CWS_ITEM_ID      --repo anomalyco/browse --body <item id>
-   ```
-
-   Every build bakes in the item ID: the relay trusts the store extension, and stable installs open its page. Delete
-   `CWS_DEV_ITEM_ID`, `CWS_DEV_IF_PENDING`, `CWS_BETA_ITEM_ID` and `CWS_ITEM_LISTED` if set.
-
-### 3. Chrome Web Store API credentials
-
-One Google login publishes; only the approved `chrome-web-store` environment holds it.
-
-1. In a Google Cloud project owned by Anomaly, enable the
-   [Chrome Web Store API](https://console.cloud.google.com/apis/library/chromewebstore.googleapis.com).
-2. **OAuth consent screen** ([Google Auth Platform](https://console.cloud.google.com/auth/overview)): *Internal* if
-   the publisher account is in Anomaly's Workspace, otherwise *External* with publishing status **In production** (in
-   *Testing*, refresh tokens expire after 7 days).
-3. **Credentials → Create credentials → OAuth client ID → Desktop app**, named `browse release`.
-4. Store the client (create the environment first, step 4):
-
-   ```sh
-   gh secret set CWS_CLIENT_ID     --env chrome-web-store --repo anomalyco/browse
-   gh secret set CWS_CLIENT_SECRET --env chrome-web-store --repo anomalyco/browse
-   ```
-
-5. Signed in as the Google account with access to the publisher, run `bun scripts/cws-auth.ts --set-secret`. It asks
-   for the client ID and secret, opens Google's consent page, and pipes the refresh token into
-   `gh secret set CWS_REFRESH_TOKEN --env chrome-web-store`; nothing is written to disk.
-6. Check it without publishing: `CWS_CLIENT_ID=… CWS_CLIENT_SECRET=… CWS_REFRESH_TOKEN=… CWS_PUBLISHER_ID=… CWS_ITEM_ID=… bun scripts/cws.ts status`.
-
-### 4. GitHub environments and rules
-
-1. **Settings → Environments**, for stable: `npm` and `chrome-web-store`, each with **Required reviewers** (Ryan and at
-   least one other maintainer; turn on **Prevent self-review** once two can approve) and **Deployment branches and
-   tags** → *Selected* → a **tag** rule `v*`.
-2. For dev: `release-dev`, with no reviewers and *Selected branches and tags* → a **branch** rule `main` only. It holds
-   no secrets (the release service and npm both use OIDC); its name is what the release service's registry and npm's
-   trusted publisher check.
-3. **Settings → Rules → Rulesets**: a tag ruleset on `v*` restricting creations, updates and deletions to maintainers;
-   a branch ruleset on `main` requiring pull requests and blocking force pushes, with maintainers allowed to bypass
-   (`bun run release` pushes the release commit directly). Anyone who can push to `main` publishes a dev build. Add
-   CODEOWNERS for `.github/` and `scripts/`.
-4. **Settings → Actions → General**: turn on *Require actions to be pinned to a full-length commit SHA*.
-5. Delete the old `npm-dev` and `chrome-web-store-dev` environments if they exist.
-
-### 5. npm
-
-1. Make sure your npm account can publish to the `@opencode` scope (`npm org ls opencode`).
-2. **Until trusted publishing is set up**, a granular token (read and write for `@opencode`, 30 days):
-   `gh secret set NPM_TOKEN --env npm --repo anomalyco/browse` and the same with `--env release-dev`.
-3. Cut the first release (below); it creates `@opencode/browse` on npm.
-4. **Trusted publishing.** On npmjs.com, `@opencode/browse` → **Settings** → **Trusted publishing**: add two *GitHub
-   Actions* publishers, organization `anomalyco`, repository `browse`, workflow `release.yml`, one with environment
-   `npm` and one with environment `release-dev`. Then delete both `NPM_TOKEN` secrets, revoke the token, and under
-   **Publishing access** choose *Require two-factor authentication and disallow tokens*. The workflow needs no change.
-
-## Cutting a release
-
-**Dev** needs nothing: merge to `main`. Try it with `npx @opencode/browse@dev install`.
-
-**Stable**, from an up-to-date `main`:
-
-```sh
-bun run release            # patch (or minor, major, or an exact 0.2.0); the first run drafts changelog/<version>.md and stops
-$EDITOR changelog/0.2.1.md
-bun run release            # bumps the versions, runs release:check, commits "release: v0.2.1", tags v0.2.1,
-                           # then asks and runs git push --atomic origin main v0.2.1
-```
-
-`--no-push` stops after the tag and prints the push command; `--yes` pushes without asking. Open the run under
-**Actions → Release**, check the verify, build and attest jobs, then approve `npm` and `chrome-web-store`. The workflow
-refuses a stable tag that isn't on `main`, and fails while an earlier version is still in store review.
-
-The changelog follows the Anomaly format: frontmatter `date` and `summary`, then `## Major` (a `### Title`, a sentence
-or two, an optional `Icon: icons/<slug>.svg`), `## Improvements` and `## Fixes`, one line each, written for the person
-using it. `bun scripts/changelog.ts check <version>` lints it.
-
-After the run, the job summary shows the store review state (usually `PENDING_REVIEW`; review takes hours to a few
-days). npm users get the new version within a day (dev installs too, with their extension): the relay checks once a day
-and switches when no agent is using the browser.
-
-**If a step fails**, fix it and rerun the failed jobs. Publishing is idempotent: a version that's already on npm,
-already submitted to the store, or already current on the release service is skipped.
+1. **Default branch** `dev` (Settings → General).
+2. **Release service.** Open a PR on anomalyco/release adding [scripts/release-registry.json](scripts/release-registry.json)
+   as `registry/browse.json` (listed in `registry/index.ts`): workflow `.github/workflows/release.yml` on
+   `refs/heads/dev` in environment `release`. Merge it there and deploy it (its docs/publishing.md).
+3. **Chrome Web Store item.** The API can't create items, so create it in the
+   [developer dashboard](https://chrome.google.com/webstore/devconsole) with Anomaly's publisher (or reuse
+   `mfnicocicmmlkpjnaffgihfjhdgjkdjg` if it's Anomaly's): upload the zip from `bun run release:check`, fill in the
+   listing from [store/listing.md](store/listing.md), set it **Public**. Then the repository variables (IDs, not
+   secrets): `gh variable set CWS_PUBLISHER_ID --body <id>` and `gh variable set CWS_ITEM_ID --body <id>`.
+4. **Chrome Web Store API.** In an Anomaly Google Cloud project enable the Chrome Web Store API, set the OAuth consent
+   screen to *Internal* (or *External*, **In production**: testing refresh tokens expire in 7 days), and create an
+   OAuth client of type **Desktop app**. Store `CWS_CLIENT_ID` and `CWS_CLIENT_SECRET` with
+   `gh secret set <name> --env release`, then run `bun scripts/cws-auth.ts --set-secret` signed in as the publisher's
+   Google account; it pipes the refresh token into `CWS_REFRESH_TOKEN` of `release`, never to disk.
+5. **Environment `release`** (Settings → Environments): *Deployment branches and tags* → *Selected* → branch `dev`
+   only. No required reviewers: who may release is decided by `plan`'s admin/maintain check and the rulesets. Secrets:
+   `CWS_CLIENT_ID`, `CWS_CLIENT_SECRET`, `CWS_REFRESH_TOKEN`, `RELEASE_TAG_KEY`, and `NPM_TOKEN` until trusted
+   publishing works. Delete the old `npm`, `chrome-web-store`, `release-dev`, `npm-dev` and `chrome-web-store-dev`
+   environments.
+6. **Release deploy key.** `ssh-keygen -t ed25519 -N "" -C "browse release tags" -f release-tag-key`; add
+   `release-tag-key.pub` under Settings → Deploy keys with write access, store the private key with
+   `gh secret set RELEASE_TAG_KEY --env release < release-tag-key`, and delete both files.
+7. **Rulesets** (Settings → Rules):
+   - branch `dev`: require a pull request with code owner review, block force pushes and deletion.
+   - tags `v*`: restrict creation, updates and deletion; bypass: *Repository admin* and *Deploy keys* (the tag job).
+8. **Actions** (Settings → Actions → General): require actions pinned to a full-length commit SHA, and allow GitHub
+   Actions to create pull requests (the version PR).
+9. **npm.** Your npm account needs publish rights on `@opencode` (`npm org ls opencode`). Until the package exists, a
+   granular token goes in `NPM_TOKEN` of `release`. After the first release, on npmjs.com `@opencode/browse` →
+   Settings → Trusted publishing, add GitHub Actions: `anomalyco/browse`, workflow `release.yml`, environment
+   `release`. Then delete `NPM_TOKEN`, revoke the token, and choose *Require two-factor authentication and disallow
+   tokens*.
 
 ## Undoing a bad release
 
-- **npm.** Auto-update only moves forward, so publish a fixed patch release. `npm deprecate @opencode/browse@<bad> "<why>"`
-  warns new installs. A user can run `npx @opencode/browse rollback` to go back to the version they had (auto-update
-  then skips the bad one; a dev install's extension goes back with it).
-- **Chrome Web Store.** Roll back to the previous version in the dashboard
-  ([how](https://developer.chrome.com/docs/webstore/rollback)), or cancel a pending review with `cancelSubmission`.
-- **Release service.** `promote` an earlier dev release (anomalyco/release docs/publishing.md); this only moves the
-  latest links, since a dev CLI fetches its own zip by sha256.
+- **npm.** Auto-update only moves forward, so release a fixed patch. `npm deprecate @opencode/browse@<bad> "<why>"`
+  warns new installs; `npx @opencode/browse rollback` takes a user back to the version they had.
+- **Chrome Web Store.** Roll back in the dashboard ([how](https://developer.chrome.com/docs/webstore/rollback)), or
+  cancel a pending review.
+- **Release service.** `promote` an earlier dev release (anomalyco/release docs/publishing.md).
 
 ## Compatibility between the extension and the CLI
 
-The store extension (store updates) and the CLI (npm auto-update) update independently, so either can be ahead for a
-day or so; a dev install's extension moves with its CLI. The relay accepts extension protocols from
-`minExtensionProtocolVersion` to `extensionProtocolVersion` (`cli/src/protocol.ts`, both 2 today). Bump
-`extensionProtocolVersion` only for a change an older relay can't handle, and raise the minimum only when dropping
-older extensions. When they don't match, the status page, `status`, `doctor` and tool errors name the side that's behind
-and how to update it.
+The store extension and the CLI update independently, so either can be ahead for a day or so; a dev install's
+extension moves with its CLI. The relay accepts extension protocols from `minExtensionProtocolVersion` to
+`extensionProtocolVersion` (`cli/src/protocol.ts`). Bump `extensionProtocolVersion` only for a change an older relay
+can't handle, and raise the minimum only when dropping older extensions. When they don't match, the status page,
+`status`, `doctor` and tool errors name the side that's behind.

@@ -79,7 +79,7 @@ export function storeConfig(env: NodeJS.ProcessEnv = process.env, baked = global
 /** The unpacked extension zip a dev build was built with: content-addressed on the release service, so exactly these bytes. */
 export type DevExtension = { readonly file: string; readonly sha256: string; readonly size: number }
 
-/** Anomaly's release service (github.com/anomalyco/release), where every push to main publishes the dev extension. */
+/** Anomaly's release service (github.com/anomalyco/release), where every push to dev publishes the dev extension. */
 export const RELEASE_SERVICE = "https://anoma.ly/release"
 
 /** The dev extension this package was built with; undefined for stable releases and checkouts. */

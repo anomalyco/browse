@@ -8,7 +8,7 @@
 //                                 between requests once current.json moves.
 //   auto-update.json              the user's mode and what the last check found
 //
-// The relay checks the registry for its channel's dist-tag (latest, or dev for a dev build, which every push to main
+// The relay checks the registry for its channel's dist-tag (latest, or dev for a dev build, which every push to dev
 // publishes) at most once a day.
 // Mode "on" (default) installs a newer version into its own directory, verifies it (the installed package's integrity
 // is the one the registry published for that version, and it runs and reports that version), and once no agent is using
