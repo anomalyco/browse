@@ -1,4 +1,4 @@
-// Switching an npm install's version (auto-update.ts has the layout): `update`, `rollback`, and the two commands the
+// Switching an npm or binary install's version (auto-update.ts has the layout): `update`, `rollback`, and the two commands the
 // relay's updater runs in detached children so nothing waits on its event loop:
 //   runtime-install <version> [--integrity <sri>]   installs and verifies one version, records it as pending
 //   runtime-switch <version>                         switches to an installed version (exit 1 when refused)
@@ -77,7 +77,7 @@ export async function switchTo(layout: Layout, version: string, options: { reado
 function npmOnly(command: string) {
   const runtime = npmRuntime()
   if (runtime) return runtime
-  log(`\`${command}\` is for npm installs (\`${installCommand()}\`); this one isn't.`)
+  log(`\`${command}\` is for installs that update themselves (\`${installCommand()}\`); this one isn't.`)
   process.exitCode = 1
   return undefined
 }

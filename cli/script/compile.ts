@@ -1,13 +1,31 @@
-// Feasibility: compiles the CLI (src/main.ts) into a standalone executable with `bun build --compile`, every npm
-// dependency bundled. Usage: bun script/compile.ts [target...], e.g. bun-linux-x64 bun-darwin-arm64. Output: dist-bin/.
+// Compiles the CLI (src/main.ts, every npm dependency bundled) into standalone executables with `bun build --compile`.
+//   bun script/compile.ts [bun-target...]     e.g. bun-linux-x64 bun-darwin-arm64 bun-windows-x64 bun-linux-x64-musl
+// Default: this computer's platform. Output: dist-bin/<target>/browse (browse.exe on Windows), where <target> is the
+// platform as the install script names it (linux-x64, darwin-arm64, linux-x64-baseline-musl…): the executable's npm
+// package is @opencode/browse-<target>, with the executable at package/bin/browse[.exe].
+// Like build.ts, OPENCODE_BROWSER_STORE_ID bakes in the Chrome Web Store item, and OPENCODE_BROWSER_VERSION overrides
+// package.json's version.
 import path from "node:path"
 
 const here = path.resolve(import.meta.dir, "..")
 const pkg = await Bun.file(path.join(here, "package.json")).json()
-const targets = process.argv.slice(2).length > 0 ? process.argv.slice(2) : [`bun-${process.platform}-${process.arch}`]
+const version: string = process.env.OPENCODE_BROWSER_VERSION?.trim() || pkg.version
+const storeId = process.env.OPENCODE_BROWSER_STORE_ID?.trim()
+if (storeId && !/^[a-p]{32}$/.test(storeId)) throw new Error(`OPENCODE_BROWSER_STORE_ID is not a Chrome Web Store item ID: ${JSON.stringify(storeId)}`)
+const buildId = new Date().toISOString()
+const targets = process.argv.slice(2).length > 0 ? process.argv.slice(2) : [`bun-${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`]
+
+/** bun-linux-x64-musl-baseline → linux-x64-baseline-musl, the install script's order. */
+function platformTarget(bunTarget: string): string {
+  const parts = bunTarget.replace(/^bun-/, "").split("-")
+  const [os, arch] = parts
+  if (!os || !arch) throw new Error(`Not a bun compile target: ${bunTarget}`)
+  return [os, arch, ...(parts.includes("baseline") ? ["baseline"] : []), ...(parts.includes("musl") ? ["musl"] : [])].join("-")
+}
 
 for (const target of targets) {
-  const outfile = path.join(here, "dist-bin", target, target.includes("windows") ? "browse.exe" : "browse")
+  const platform = platformTarget(target)
+  const outfile = path.join(here, "dist-bin", platform, platform.startsWith("windows") ? "browse.exe" : "browse")
   const result = await Bun.build({
     entrypoints: [path.join(here, "src/main.ts")],
     compile: { target: target as Bun.Build.Target, outfile },
@@ -26,14 +44,14 @@ for (const target of targets) {
       },
     ],
     define: {
-      "globalThis.__OPENCODE_BROWSER_VERSION__": JSON.stringify(pkg.version),
-      "globalThis.__OPENCODE_BROWSER_BUILD_ID__": JSON.stringify(new Date().toISOString()),
-      "globalThis.__OPENCODE_BROWSER_STORE__": JSON.stringify({}),
+      "globalThis.__OPENCODE_BROWSER_VERSION__": JSON.stringify(version),
+      "globalThis.__OPENCODE_BROWSER_BUILD_ID__": JSON.stringify(buildId),
+      "globalThis.__OPENCODE_BROWSER_STORE__": JSON.stringify(storeId ? { id: storeId } : {}),
       "globalThis.__OPENCODE_BROWSER_EXTENSION__": "undefined",
       "globalThis.__OPENCODE_BROWSER_COMPILED__": "true",
+      "globalThis.__OPENCODE_BROWSER_TARGET__": JSON.stringify(platform),
     },
   })
   if (!result.success) throw new AggregateError(result.logs, `compile failed for ${target}`)
-  const size = Bun.file(outfile).size
-  console.log(`${target}: ${outfile} (${(size / 1024 / 1024).toFixed(1)} MB)`)
+  console.log(`${platform}: ${outfile} (${(Bun.file(outfile).size / 1024 / 1024).toFixed(1)} MB)`)
 }

@@ -8,11 +8,12 @@ import { extensionProtocolAdvice, extensionReconnectAlarmPeriodMs } from "./prot
 import * as RelayClient from "./relay-client.ts"
 import { RelayShutdownRequest, type ExtensionStatus, type RelayVersion } from "./relay-schema.ts"
 import { npmRuntime } from "./auto-update.ts"
-import { cliCommand, installCommand } from "./paths.ts"
+import { cliCommand, compiledBinary, installCommand, scriptEntry } from "./paths.ts"
 import { opencodeBrowserBuildId } from "./version.ts"
 
 // From source the CLI entry is main.ts next to this file; the published bundle may split into chunks beside cli.mjs.
-const loadedCliEntrypoint = fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "./main.ts" : "./cli.mjs", import.meta.url))
+// A compiled binary is its own entry.
+const loadedCliEntrypoint = compiledBinary() ? process.execPath : fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "./main.ts" : "./cli.mjs", import.meta.url))
 const clientInstanceId = crypto.randomUUID()
 
 export type RelayReadiness = {
@@ -366,8 +367,8 @@ export function managedRelayLaunch(
   executable = process.execPath,
   execArgv: readonly string[] = process.execArgv,
 ): { readonly executable: string; readonly args: string[] } {
-  // A compiled binary is its own entrypoint: its bundled script path (under /$bunfs) can't be passed back to it.
-  if (globalThis.__OPENCODE_BROWSER_COMPILED__) return { executable, args: ["serve"] }
+  // An executable (a binary install's version, or this binary) runs by itself.
+  if (!scriptEntry(entrypoint)) return { executable: entrypoint, args: ["serve"] }
   return {
     executable,
     args: [...execArgv, managedRelayEntrypoint(entrypoint), "serve"],

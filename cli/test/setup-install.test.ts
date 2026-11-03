@@ -5,7 +5,7 @@ import path from "node:path"
 import { parse } from "jsonc-parser"
 import { agentLocations, agentNames, callingAgent, editAgentConfig } from "../src/agent-config.ts"
 import { agentFlags, agentPlan } from "../src/agent-picker.ts"
-import { configureMcp, installedExtensionVersion, installedRuntime, installWaitTimeout, locateExtension, pairStoreExtension, relayNotRestarted, removeMcp, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
+import { configureMcp, installedExtensionVersion, installedRuntime, installWaitTimeout, locateExtension, manualMcpEntry, pairStoreExtension, relayNotRestarted, removeMcp, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
 
 const browser = (name: string): Browser => ({ name, userData: `/data/${name}`, manifests: [], defaultIDs: [], executables: [] })
 const chrome = browser("Google Chrome")
@@ -42,6 +42,33 @@ test("OpenCode JSONC keeps comments and other servers across install, reinstall 
     const after = fs.readFileSync(file, "utf8")
     expect(parse(after)).toEqual(parse(before))
     expect(after).toContain("// keep this")
+  } finally { fs.rmSync(home, { recursive: true, force: true }) }
+})
+
+test("a binary install's entry runs the executable itself, in OpenCode, other agents and the manual entry", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-binary-"))
+  try {
+    const binary = path.join(home, ".browse", "bin", "browse")
+    const opencode = path.join(home, "opencode.json")
+    expect(configureMcp(opencode, binary)).toContain("added")
+    expect(parse(fs.readFileSync(opencode, "utf8")).mcp.servers.browse).toMatchObject({ command: [binary, "mcp"], environment: { OPENCODE_BROWSER_RUNTIME: "auto-update" } })
+    expect(configureMcp(opencode, binary, binary)).toContain("up to date")
+    expect(removeMcp("browse", binary, opencode)).toBe(true)
+
+    const claude = { name: "claude" as const, file: path.join(home, ".claude.json"), entry: binary }
+    expect(editAgentConfig(claude)).toBe("added")
+    expect(parse(fs.readFileSync(claude.file, "utf8")).mcpServers.browse).toEqual({ type: "stdio", command: binary, args: ["mcp"] })
+    // An npm install's receipt for the same file doesn't own the binary entry.
+    expect(editAgentConfig({ ...claude, node: "/usr/bin/node", entry: "/data/bin/opencode-browser.mjs" }, true)).toBe("conflict")
+    expect(editAgentConfig(claude, true)).toBe("removed")
+
+    const codex = { name: "codex" as const, file: path.join(home, "config.toml"), entry: binary }
+    expect(editAgentConfig(codex)).toBe("added")
+    expect(Bun.TOML.parse(fs.readFileSync(codex.file, "utf8"))).toEqual({ mcp_servers: { browse: { command: binary, args: ["mcp"] } } })
+    expect(editAgentConfig(codex, true)).toBe("removed")
+
+    expect(JSON.parse(manualMcpEntry([binary]))).toEqual({ mcpServers: { browse: { command: binary, args: ["mcp"] } } })
+    expect(JSON.parse(manualMcpEntry(["/usr/bin/node", "/x/cli.mjs"]))).toEqual({ mcpServers: { browse: { command: "/usr/bin/node", args: ["/x/cli.mjs", "mcp"] } } })
   } finally { fs.rmSync(home, { recursive: true, force: true }) }
 })
 

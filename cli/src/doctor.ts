@@ -3,7 +3,7 @@ import * as RelayClient from "./relay-client.ts"
 import { relayBuildProblem } from "./relay-lifecycle.ts"
 import type { ExtensionStatus, RelayVersion, SessionSummary, TargetSummary } from "./relay-schema.ts"
 import { extensionProtocolAdvice, extensionProtocolVersion } from "./protocol.ts"
-import { cliCommand, devExtension, fromCheckout, installCommand } from "./paths.ts"
+import { binaryPackage, cliCommand, compiledBinary, devExtension, fromCheckout, installCommand } from "./paths.ts"
 import * as SessionStore from "./session-store.ts"
 import type { UpdateJson } from "./update.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "./version.ts"
@@ -151,7 +151,11 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
       ),
     )
 
-  const readPackageInfo: Effect.Effect<PackageInfo, Error> = readJsonFile("package.json", PackageMetadata).pipe(
+  // A binary carries no package.json or dist/: it is the package, and the artifact.
+  const compiled = compiledBinary()
+  const readPackageInfo: Effect.Effect<PackageInfo, Error> = compiled
+    ? Effect.succeed({ name: binaryPackage() ?? "@opencode/browse", version: opencodeBrowserVersion, bin: { opencodeBrowser: process.execPath } })
+    : readJsonFile("package.json", PackageMetadata).pipe(
     Effect.map((metadata) => ({
       name: metadata.name,
       version: metadata.version,
@@ -210,9 +214,9 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
   const possibleLeakedSessions = sessions.filter((session) => {
     return session.connected && session.id !== current
   })
-  const artifacts: readonly DoctorArtifact[] = [
-    { path: "dist/cli.mjs", exists: distCliExists && distMcpExists },
-  ]
+  const artifacts: readonly DoctorArtifact[] = compiled
+    ? [{ path: process.execPath, exists: true, version: opencodeBrowserVersion }]
+    : [{ path: "dist/cli.mjs", exists: distCliExists && distMcpExists }]
   const checks = buildDoctorChecks({
     packageResult,
     relayResult,

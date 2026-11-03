@@ -9,6 +9,8 @@ declare global {
   var __OPENCODE_BROWSER_BUILD_ID__: string | undefined
   // True in a standalone `bun build --compile` executable (script/compile.ts).
   var __OPENCODE_BROWSER_COMPILED__: boolean | undefined
+  // The executable's platform, as in its npm package @opencode/browse-<target>: linux-x64, darwin-arm64, linux-x64-musl…
+  var __OPENCODE_BROWSER_TARGET__: string | undefined
 }
 
 export const opencodeBrowserVersion: string = globalThis.__OPENCODE_BROWSER_VERSION__ ?? "0.0.0-dev"

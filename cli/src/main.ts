@@ -18,6 +18,10 @@ if (command === "--version" || command === "-v") {
   const { NodeRuntime } = await import("@effect/platform-node")
   const { runMcpServer } = await import("./mcp.ts")
   runMcpServer.pipe(NodeRuntime.runMain)
+} else if (command === "mcp" && globalThis.__OPENCODE_BROWSER_COMPILED__ && process.env.OPENCODE_BROWSER_MCP_DIRECT !== "1") {
+  // A binary install's MCP entry: supervise the server so updates swap it (mcp-supervisor.ts).
+  const { runBinaryMcp } = await import("./mcp-supervisor.ts")
+  await runBinaryMcp(process.argv.slice(3))
 } else if (command === "runtime-install" || command === "runtime-switch") {
   // The relay's auto-update children (auto-update.ts); not for people.
   const { runRuntimeInstall, runRuntimeSwitch } = await import("./runtime-update.ts")

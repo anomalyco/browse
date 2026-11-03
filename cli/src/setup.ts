@@ -38,7 +38,7 @@ import {
   writeExtensionPairing,
 } from "./browser-pairing.ts"
 import { syncDevExtension } from "./dev-extension.ts"
-import { cliCommand, dataRoot, devExtension, devExtensionFolder, installCommand, oldStoreMarker, storeConfig, storeUrl } from "./paths.ts"
+import { cliCommand, compiledBinary, dataRoot, devExtension, devExtensionFolder, entryCommand, installCommand, oldStoreMarker, runningEntry, scriptEntry, storeConfig, storeUrl } from "./paths.ts"
 import { extensionProtocolAdvice, extensionProtocolSkew, unpackedExtensionId, unpackedReloadAdvice } from "./protocol.ts"
 import { parseHostname, readRelayConfig, writeRelayConfig } from "./relay-config.ts"
 import { relayAuthorization } from "./relay-secrets.ts"
@@ -216,10 +216,11 @@ function fingerprint(entry: string) {
  * declines while agents use it (a connected session, a recording); then it keeps the old version, and the lines say
  * so and how to restart it later.
  */
-function restartOutdatedRelay(entry: string, node: string): string[] | undefined {
-  const status = spawnSync(node, [entry, "status", "--json"], { encoding: "utf8", timeout: 15_000 })
+function restartOutdatedRelay(entry: string): string[] | undefined {
+  const [file, ...prefix] = entryCommand(entry)
+  const status = spawnSync(file!, [...prefix, "status", "--json"], { encoding: "utf8", timeout: 15_000 })
   if (!/"stale":\s*true/.test(status.stdout ?? "")) return undefined
-  const restart = spawnSync(node, [entry, "relay", "restart"], { encoding: "utf8", timeout: 60_000 })
+  const restart = spawnSync(file!, [...prefix, "relay", "restart"], { encoding: "utf8", timeout: 60_000 })
   if (restart.status === 0) return ["✓ Relay restarted with the new version"]
   return relayNotRestarted(status.stdout ?? "", `${restart.stderr ?? ""}\n${restart.stdout ?? ""}`)
 }
@@ -259,9 +260,16 @@ function mcpServers(file = configFile()) {
   return (config as { mcp?: { servers?: Servers } }).mcp?.servers ?? {}
 }
 
+/**
+ * A browse server install wrote: `<node> <entry> mcp` or `<executable> mcp`, where the entry is the one install recorded,
+ * the npm shim, a checkout's bundle, or a binary install's executable (this one, or the one current.json names).
+ */
 function ownedMcp(server: Servers[string] | undefined, entry: string | undefined) {
   const command = server?.command
-  return Array.isArray(command) && command.length === 3 && command[2] === "mcp" && [entry, layout.shim, path.join(packageRoot, "dist/cli.mjs")].some(e => e && command[1] === e)
+  if (!Array.isArray(command) || (command.length !== 2 && command.length !== 3) || command.at(-1) !== "mcp") return false
+  const target = command.at(-2)
+  const binary = compiledBinary() ? [process.execPath, readCurrent(layout)?.binary] : []
+  return [entry, layout.shim, path.join(packageRoot, "dist/cli.mjs"), ...binary].some(e => e && target === e)
 }
 
 /**
@@ -284,8 +292,9 @@ export function configureMcp(file: string, entry: string, previousEntry?: string
   const existing = mcpServers(file)[MCP_NAME]
   if (existing && !ownedMcp(existing, previousEntry)) return undefined
   const renamed = removeMcp(LEGACY_MCP_NAME, previousEntry, file)
-  // The shim of an npm install never changes and swaps the server itself after an update, so its entry stays the same.
-  const server = mergedMcpServer(existing, [process.execPath, entry, "mcp"], entry === layout.shim ? "auto-update" : fingerprint(entry))
+  // The shim of an npm install, and a binary install's executable, never move and swap the server themselves after an
+  // update, so their entry stays the same.
+  const server = mergedMcpServer(existing, [...entryCommand(entry), "mcp"], entry === layout.shim || !scriptEntry(entry) ? "auto-update" : fingerprint(entry))
   if (existing && JSON.stringify(existing) === JSON.stringify(server)) return `"${MCP_NAME}" is up to date`
   const text = readFileOr(file, "{}")
   const edits = modify(text, ["mcp", "servers", MCP_NAME], server, { formattingOptions: { tabSize: 2, insertSpaces: true } })
@@ -342,6 +351,7 @@ function removeLegacyHost() {
  * OPENCODE_BROWSER_PACKAGE installs a specific spec instead, for example a local tarball.
  */
 async function installRuntime(): Promise<{ entry: string; version: string }> {
+  if (compiledBinary()) return installBinaryRuntime()
   // From a checkout, run the bundle `bun run build` wrote: Node can't run the TypeScript sources (they use
   // syntax type stripping doesn't cover), and the MCP server runs under Node.
   if (fromSource) {
@@ -376,10 +386,45 @@ async function installRuntime(): Promise<{ entry: string; version: string }> {
   return { entry: layout.shim, version }
 }
 
+/**
+ * A binary install (the install script put this executable in ~/.browse/bin): records this executable as the one agents
+ * run (current.json's `binary`) and keeps a copy of it as its version in runtime/versions, which rollback and the MCP
+ * supervisor use. Returns the executable itself, which stays where it is; updates replace it by rename.
+ */
+async function installBinaryRuntime(): Promise<{ entry: string; version: string }> {
+  const binary = process.execPath
+  const version = opencodeBrowserVersion
+  const before = readCurrent(layout)
+  const existing = versionEntry(layout, version)
+  const same = (left: string, right: string) => {
+    try {
+      return statSync(left).size === statSync(right).size && readFileSync(left).equals(readFileSync(right))
+    } catch {
+      return false
+    }
+  }
+  try {
+    if (!same(existing, binary)) await installVersion({ layout, version, runningBinary: binary })
+  } catch (error) {
+    fail(`Could not install browse ${version}: ${(error as Error).message}`)
+  }
+  const previous = before?.version === version ? before.previous : before?.version
+  switchVersion(layout, version, previous, binary)
+  updateState(layout, ({ pending, skipped, ...state }) => ({
+    ...state,
+    ...(pending && compareVersions(pending, version) > 0 ? { pending } : {}),
+    ...(skipped && skipped !== version ? { skipped } : {}),
+  }))
+  pruneVersions(layout, [version, previous])
+  return { entry: binary, version }
+}
+
 // ---- commands -------------------------------------------------------------------------------------
 
 /** The MCP server and relay run under the Node.js that runs install, so it must be one the package supports. */
 function checkNode() {
+  // A binary install brings its own runtime.
+  if (compiledBinary()) return
   // `bun run` stands in a bun shim for a missing node.
   if (process.versions.bun)
     fail("Browse runs on Node.js 22.19 or newer, but this ran under Bun (`bun run` uses Bun when `node` isn't on PATH). Install Node.js from https://nodejs.org, then run setup again.")
@@ -444,7 +489,8 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
   const onPath = args.includes("--no-modify-path") ? undefined : addToPath()
   if (onPath) log(`✓ Added browse to your PATH (${tilde(onPath)}). Open a new terminal to use it.`)
 
-  const node = process.execPath
+  // An npm or checkout install runs the MCP server under this Node; a binary install's executable runs by itself.
+  const node = scriptEntry(entry) ? process.execPath : undefined
   for (const agent of locations) {
     const label = agentLabels[agent.name]
     if (!selected.includes(agent.name)) {
@@ -459,8 +505,14 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
         : mcp.includes("up to date") ? `✓ ${label} already has Browse` : mcp.includes("added") ? `✓ Added Browse to ${label} (${tilde(agent.file)})` : `✓ Updated Browse in ${label} (${tilde(agent.file)})`)
       continue
     }
-    const receipt: AgentReceipt = { name: agent.name, file: agent.file, entry, node }
+    const receipt: AgentReceipt = { name: agent.name, file: agent.file, entry, ...(node ? { node } : {}) }
     try {
+      // What an earlier install wrote here (an npm install before this binary one, or another Node): replace it.
+      const prior = agents.find(a => a.file === agent.file && a.name === agent.name)
+      if (prior && (prior.entry !== receipt.entry || prior.node !== receipt.node) && editAgentConfig(prior, true) === "removed") {
+        agents.splice(agents.indexOf(prior), 1)
+        save()
+      }
       const result = editAgentConfig(receipt)
       if (result === "added") {
         const i = agents.findIndex(a => a.file === agent.file)
@@ -476,8 +528,8 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
       log(`! Couldn't edit ${tilde(agent.file)} for ${label}. Check its syntax and permissions, then run ${cliCommand(`install --agent ${agent.name}`)}.`)
     }
   }
-  showManualMcp(node, entry)
-  for (const line of restartOutdatedRelay(entry, node) ?? []) log(line)
+  showManualMcp(entryCommand(entry))
+  for (const line of restartOutdatedRelay(entry) ?? []) log(line)
   const legacy = selected.includes("opencode") ? legacyBrowserControl() : []
   if (legacy.length)
     log(`! Browser Control MCP server${legacy.length === 1 ? "" : "s"} ${legacy.map((name) => `"${name}"`).join(", ")} also configured. Browse replaces it; remove ${legacy.length === 1 ? "it" : "them"} from ${configFile()} to avoid two sets of browser tools.`)
@@ -585,17 +637,22 @@ function waitTimeout(args: string[], defaultSeconds = 180) {
   return seconds * 1000
 }
 function ensureRelay(entry: string) {
-  const started = spawnSync(process.execPath, [entry, "session", "list", "--json"], { encoding: "utf8", timeout: 30_000 })
+  const [file, ...prefix] = entryCommand(entry)
+  const started = spawnSync(file!, [...prefix, "session", "list", "--json"], { encoding: "utf8", timeout: 30_000 })
   if (started.status !== 0) fail(`Couldn't start the Browse relay: ${started.stderr?.trim() || started.error?.message || `run ${cliCommand("doctor")}`}`)
 }
 
-/** For an agent install doesn't know: the browse MCP server as the stdio entry most agents' configs take. */
-export function manualMcpEntry(command: string, entry: string) {
-  return JSON.stringify({ mcpServers: { browse: { command, args: [entry, "mcp"] } } }, null, 2)
+/**
+ * For an agent install doesn't know: the browse MCP server as the stdio entry most agents' configs take. `command` runs
+ * the CLI (entryCommand): `[node, entry]`, or a binary install's `[executable]`.
+ */
+export function manualMcpEntry(command: readonly string[]) {
+  const [file, ...args] = command
+  return JSON.stringify({ mcpServers: { browse: { command: file, args: [...args, "mcp"] } } }, null, 2)
 }
 
-function showManualMcp(command: string, entry: string) {
-  const json = manualMcpEntry(command, entry)
+function showManualMcp(command: readonly string[]) {
+  const json = manualMcpEntry(command)
   if (rail) return clack.note(json, "Another agent? Add this MCP server")
   log(`\nUsing another agent? Add Browse as an MCP server (stdio):\n${json.split("\n").map((line) => `  ${line}`).join("\n")}\n`)
 }
@@ -617,16 +674,9 @@ function addToPath(): string | undefined {
     const done = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { stdio: "ignore" })
     return done.status === 0 ? "Windows user PATH" : undefined
   }
-  const shell = path.basename(process.env.SHELL ?? "sh")
-  const config = process.env.XDG_CONFIG_HOME ?? path.join(home, ".config")
-  const zdot = process.env.ZDOTDIR ?? home
-  const candidates = shell === "fish" ? [path.join(config, "fish", "config.fish")]
-    : shell === "zsh" ? [path.join(zdot, ".zshrc"), path.join(zdot, ".zshenv"), path.join(config, "zsh", ".zshrc")]
-    : shell === "bash" ? [path.join(home, ".bashrc"), path.join(home, ".bash_profile"), path.join(home, ".profile")]
-    : [path.join(home, ".profile")]
+  const { candidates, line } = shellPath(dir)
   // A new Mac has no ~/.zshrc: create the shell's main file rather than leave browse off PATH.
   const file = candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]!
-  const line = shell === "fish" ? `fish_add_path ${dir}` : `export PATH=${dir}:$PATH`
   try {
     const text = existsSync(file) ? readFileSync(file, "utf8") : ""
     if (text.split("\n").includes(line)) return undefined
@@ -636,6 +686,44 @@ function addToPath(): string | undefined {
   } catch {
     log(`! Couldn't add browse to your PATH. Add this to ${tilde(file)}: ${line}`)
     return undefined
+  }
+}
+
+/** The shell startup files addToPath picks from, and the line it adds for `dir`. */
+function shellPath(dir: string) {
+  const shell = path.basename(process.env.SHELL ?? "sh")
+  const zdot = process.env.ZDOTDIR ?? home
+  const candidates = shell === "fish" ? [path.join(configRoot, "fish", "config.fish")]
+    : shell === "zsh" ? [path.join(zdot, ".zshrc"), path.join(zdot, ".zshenv"), path.join(configRoot, "zsh", ".zshrc")]
+    : shell === "bash" ? [path.join(home, ".bashrc"), path.join(home, ".bash_profile"), path.join(home, ".profile")]
+    : [path.join(home, ".profile")]
+  return { candidates, line: shell === "fish" ? `fish_add_path ${dir}` : `export PATH=${dir}:$PATH` }
+}
+
+/**
+ * Uninstalling a binary install: removes the executable install recorded and the PATH entry addToPath made for its
+ * folder (the folder too, once empty). Returns what it couldn't remove.
+ */
+function removeBinaryInstall(binary: string): string | undefined {
+  const dir = path.dirname(binary)
+  if (process.platform === "win32") {
+    const script = `$p=[Environment]::GetEnvironmentVariable('Path','User'); if ($p) { [Environment]::SetEnvironmentVariable('Path', (($p -split ';' | Where-Object { $_ -and $_ -ne '${dir}' }) -join ';'), 'User') }`
+    spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { stdio: "ignore" })
+  } else {
+    const { candidates, line } = shellPath(dir)
+    for (const file of candidates) {
+      const text = readFileOr(file, "")
+      const block = `\n# browse\n${line}\n`
+      if (text.includes(block)) writeFileSync(file, text.replace(`\n${block}`, "\n").replace(block, "\n"))
+    }
+  }
+  try {
+    rmSync(binary, { force: true })
+    if (readdirSync(dir).length === 0) rmSync(dir, { recursive: true, force: true })
+    return undefined
+  } catch {
+    // Windows can't delete an executable while it runs (this one, or an agent's MCP server).
+    return binary
   }
 }
 
@@ -649,10 +737,11 @@ export function installedRuntime(settings: Settings | undefined, server: Servers
   if (!entry || (!settings?.version && !existsSync(entry))) return undefined
   // A bundle with the sources beside it is a checkout's build: cli/dist/cli.mjs next to cli/src/main.ts.
   const packageDir = path.dirname(path.dirname(entry))
-  const source = existsSync(path.join(packageDir, "src", "main.ts"))
-  // The shim runs whatever runtime/current.json names, which auto-update moves.
+  const source = scriptEntry(entry) && existsSync(path.join(packageDir, "src", "main.ts"))
+  // The shim, and a binary install's executable, run whatever runtime/current.json names, which auto-update moves.
+  const current = readCurrent(layout)
   const version =
-    (entry === layout.shim ? readCurrent(layout)?.version : undefined) ??
+    (entry === layout.shim || (current?.binary !== undefined && entry === current.binary) ? current?.version : undefined) ??
     settings?.version ??
     (path.resolve(entry) === path.join(packageRoot, "dist", "cli.mjs") ? opencodeBrowserVersion : readJson<{ version?: string }>(path.join(packageDir, "package.json"))?.version)
   return { entry, version, source }
@@ -709,7 +798,7 @@ async function pair(args: string[]) {
     return
   }
   const timeoutMs = Math.min(waitTimeout(args), pairingCodeTtlMs)
-  ensureRelay(readJson<Settings>(files.settings)?.entry ?? process.argv[1]!)
+  ensureRelay(readJson<Settings>(files.settings)?.entry ?? runningEntry())
   const receipt = randomUUID()
   const code = mintPairingCode(undefined, { receipt })
   log(`Pairing code: ${formatPairingCode(code)}`)
@@ -800,7 +889,8 @@ async function set(args: string[]) {
   log(`✓ hostname is ${hostname}`)
   const running = await fetch(`${relayBase()}/version`, { signal: AbortSignal.timeout(2000) }).then((response) => response.ok, () => false)
   if (running) {
-    const restarted = spawnSync(process.execPath, [process.argv[1]!, "relay", "restart"], { stdio: "inherit" })
+    const [file, ...prefix] = entryCommand(runningEntry())
+    const restarted = spawnSync(file!, [...prefix, "relay", "restart"], { stdio: "inherit" })
     if (restarted.status !== 0) log(`! The relay is still running with the old hostname. Run \`${cliCommand("relay restart --force")}\` to apply it.`)
   }
   if (hostname === "127.0.0.1") return
@@ -836,8 +926,13 @@ async function uninstall(args: string[]) {
       log(result === "conflict" ? `! ${receipt.file} has a changed browse server; left unchanged.` : `✓ ${receipt.name}: ${result}`)
     } catch { fail(`Couldn't safely remove Browse from ${receipt.file}. Check its syntax and permissions, then re-run uninstall.`) }
   }
+  const binary = readCurrent(layout)?.binary
   rmSync(files.dir, { recursive: true, force: true })
   log(`✓ Removed ${files.dir}`)
+  if (binary) {
+    const left = removeBinaryInstall(binary)
+    log(left ? `! Couldn't remove ${left} while it runs; delete it once your agents have stopped.` : `✓ Removed ${binary}`)
+  }
   if (host) log("✓ Removed the native messaging host of an earlier version")
   if (mcp.length) log(`✓ Removed the ${mcp.map((name) => `"${name}"`).join(" and ")} MCP server${mcp.length === 1 ? "" : "s"}`)
   log("Remove the extension from your browser to finish.")

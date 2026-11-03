@@ -13,7 +13,7 @@ import { execFile, spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import { autoUpdateStatus, compareVersions, npmRuntime } from "./auto-update.ts"
-import { checkoutRoot, cliCommand, dataRoot } from "./paths.ts"
+import { checkoutRoot, cliCommand, compiledBinary, dataRoot } from "./paths.ts"
 import { unpackedReloadAdvice } from "./protocol.ts"
 
 /** How long a check result stands before the remote is asked again. */
@@ -430,6 +430,12 @@ export async function runUpdateCommand(args: readonly string[]) {
   const log = (line: string) => process.stdout.write(line + "\n")
   const { runNpmUpdate } = await import("./runtime-update.ts")
   if (await runNpmUpdate(args)) return
+  // An executable that `install` hasn't set up (one downloaded and run in place) has nothing to update.
+  if (compiledBinary()) {
+    log(`This browse isn't installed. Run \`${cliCommand("install")}\` to set it up; it updates itself from then on.`)
+    process.exitCode = 1
+    return
+  }
   if (args.includes("--check")) {
     const repo = checkoutRoot()
     if (!repo) return log("Installed from npm: run `npx @opencode/browse@latest install` to update.")
