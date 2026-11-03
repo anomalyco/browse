@@ -2,22 +2,21 @@
 // One card, laid out like Console's Connect OpenCode guide: a tab for an agent on this computer and one for an agent on
 // another computer, each a few numbered steps that check themselves off from the worker's state and the first agent
 // tab.
-import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch, type JSX } from "solid-js"
+import { createEffect, createMemo, createSignal, Match, onCleanup, Show, Switch, type JSX } from "solid-js"
 import { render } from "solid-js/web"
 import { Tabs } from "@kobalte/core/tabs"
 import { Button } from "@opencode/ui/button"
 import { Icon } from "@opencode/ui/icon"
 import { IconButton } from "@opencode/ui/icon-button"
-import { Menu } from "@opencode/ui/menu"
 import { TextInput } from "@opencode/ui/text-input"
 import { unpackedExtensionId, unpackedReloadAdvice } from "../../cli/src/protocol"
 import { firstRunStep, relayProbeResult, shouldProbe, type FirstRunStep, type RelayProbe } from "./first-run"
-import { TRY_PROMPT, agentLabels, checklist, featuredAgents, installCommand, otherAgents, type AgentName } from "./checklist"
+import { TRY_PROMPT, checklist } from "./checklist"
 import { RelayForm } from "./relay-form"
 import { applyColorScheme, Brand, createFlash, createRelay, Note, Rich, type Relay } from "./ui"
 import "./onboarding.css"
 
-// `npx @opencode/browse install` opens the setup page with a one-time code in the fragment (welcome.html#code=…, which
+// `browse install` opens the setup page with a one-time code in the fragment (welcome.html#code=…, which
 // forwards here) for a store build (cli/src/setup.ts pairStoreExtension). Take it, then drop it from the URL (address
 // bar and history) before anything else.
 let fragmentCode = /^#code=([0-9A-Za-z-]{8,9})$/.exec(location.hash)?.[1]
@@ -25,9 +24,12 @@ const installTab = !!fragmentCode
 if (/^#(code|ticket|pair)=/.test(location.hash)) history.replaceState(null, "", location.pathname + location.search)
 
 const settingsUrl = () => chrome.runtime.getURL("settings.html")
-const REMOTE_SETUP = "npx @opencode/browse set hostname 0.0.0.0 && npx @opencode/browse pair"
+const INSTALL = "curl -fsSL https://opencode.ai/browse/install | sh"
+const REMOTE_INSTALL = `${INSTALL} -s -- --remote`
+const AGENT_PROMPT = `Set up Browse so you can use my Chrome: run ${INSTALL}`
 
 type Where = "here" | "remote"
+type How = "agent" | "manual"
 
 function Onboarding() {
   const relay = createRelay()
@@ -37,14 +39,14 @@ function Onboarding() {
   const [tried, setTried] = createSignal(false)
   const [pairedBy, setPairedBy] = createSignal<"link" | "code">()
   const [linkNote, setLinkNote] = createSignal<string>()
-  const [agent, setAgent] = createSignal<AgentName>("opencode")
   const [where, setWhere] = createSignal<Where>()
+  const [how, setHow] = createSignal<How>("agent")
 
   const step = createMemo(() => firstRunStep(relay.state(), installWaiting() ? "install-waiting" : probe()))
   const list = createMemo(() => checklist({ state: relay.state(), wasConnected: wasConnected(), tried: tried() }))
   const connected = () => list().agent === "done"
-  // Until the user picks a tab, it follows where the extension already points.
-  const tab = () => where() ?? (relay.state()?.relay.remote ? "remote" : "here")
+  // Until the user picks, it follows where the extension already points.
+  const remote = () => (where() ?? (relay.state()?.relay.remote ? "remote" : "here")) === "remote"
 
   createEffect(() => {
     const state = relay.state()
@@ -103,24 +105,45 @@ function Onboarding() {
   }
   onCleanup(() => clearTimeout(probeTimer))
 
-  const tryIt = (number: number) => (
+  const tryIt = (number: number, agent: string) => (
     <Step
       number={number}
-      title="Try it"
+      title={`Restart ${agent} and try it`}
       done={list().tryIt === "done"}
-      description={
-        list().tryIt === "done"
-          ? "Your agent opened a tab. Browse works."
-          : connected()
-            ? `Paste this into ${tab() === "here" ? agentLabels[agent()] : "your agent"}. Restart it first if it was open during setup.`
-            : "Once your agent is connected, paste this into it."
-      }
+      description={list().tryIt === "done" ? "Your agent opened a tab. Browse works." : "Agents load new tools when they start. Then ask it something like:"}
     >
       <Show when={list().tryIt !== "done"}>
         <Command text={TRY_PROMPT} label="Copy prompt" />
         <Show when={connected()}>
           <Waiting>Watching for your agent's first tab…</Waiting>
         </Show>
+      </Show>
+    </Step>
+  )
+
+  const installStep = (how: How) => (
+    <Step
+      number={1}
+      title={how === "agent" ? "Paste this into your agent" : "Run this in your terminal"}
+      done={connected()}
+      description={
+        connected() ? (
+          <AgentDone relay={relay} pairedBy={pairedBy()} />
+        ) : how === "agent" ? (
+          "Claude Code, Codex, OpenCode, Cursor or any agent that can run commands. It installs Browse, adds it to itself and connects to this browser."
+        ) : (
+          "Downloads Browse, adds it to the agents it finds on this computer and connects to this browser. Nothing else to install."
+        )
+      }
+    >
+      <Show when={!connected()}>
+        <AgentStep
+          relay={relay}
+          step={step()}
+          command={how === "agent" ? { text: AGENT_PROMPT, label: "Copy prompt" } : { text: INSTALL, label: "Copy command" }}
+          linkNote={linkNote()}
+          onPaired={() => setPairedBy("code")}
+        />
       </Show>
     </Step>
   )
@@ -132,7 +155,7 @@ function Onboarding() {
       <section class="guide" aria-labelledby="guide-title">
         <header class="guide-head">
           <h1 id="guide-title" class="guide-title">
-            Connect your agent
+            {remote() ? "Connect an agent on another computer" : "Connect your agent"}
             <Show when={connected()}>
               <span class="guide-connected">
                 <span aria-hidden="true">·</span>
@@ -140,75 +163,84 @@ function Onboarding() {
               </span>
             </Show>
           </h1>
-          <p class="guide-sub">This page checks each step as it happens.</p>
+          <p class="guide-sub">
+            <Show when={remote()} fallback="This page checks each step as it happens.">
+              For an agent on a server, a dev box or another laptop.{" "}
+              <button type="button" class="link" onClick={() => setWhere("here")}>
+                Agent on this computer?
+              </button>
+            </Show>
+          </p>
         </header>
 
-        <Tabs value={tab()} onChange={(value) => setWhere(value as Where)}>
-          <Tabs.List class="tabs" aria-label="Where your agent runs">
-            <Tabs.Trigger class="tab" value="here">
-              <span>This computer</span>
-            </Tabs.Trigger>
-            <Tabs.Trigger class="tab" value="remote">
-              <span>Another computer</span>
-            </Tabs.Trigger>
-            <Tabs.Indicator class="tab-indicator" />
-          </Tabs.List>
+        <Show
+          when={remote()}
+          fallback={
+            <Tabs value={how()} onChange={(value) => setHow(value as How)}>
+              <Tabs.List class="tabs" aria-label="How to set it up">
+                <Tabs.Trigger class="tab" value="agent">
+                  <span>Ask your agent</span>
+                </Tabs.Trigger>
+                <Tabs.Trigger class="tab" value="manual">
+                  <span>Do it yourself</span>
+                </Tabs.Trigger>
+                <Tabs.Indicator class="tab-indicator" />
+              </Tabs.List>
+              <div class="hr" />
+              <Tabs.Content class="guide-body" value="agent">
+                <div class="steps">
+                  {installStep("agent")}
+                  {tryIt(2, "your agent")}
+                </div>
+              </Tabs.Content>
+              <Tabs.Content class="guide-body" value="manual">
+                <div class="steps">
+                  {installStep("manual")}
+                  {tryIt(2, "your agent")}
+                </div>
+              </Tabs.Content>
+            </Tabs>
+          }
+        >
           <div class="hr" />
-
-          <Tabs.Content class="guide-body" value="here">
+          <div class="guide-body">
             <div class="steps">
               <Step
                 number={1}
-                title="Run this in your terminal"
+                title="On that computer, run"
                 done={connected()}
-                description={
-                  connected() ? (
-                    <AgentDone relay={relay} pairedBy={pairedBy()} />
-                  ) : (
-                    `Installs the relay, adds the browse tools to ${agentLabels[agent()]} and pairs them with this browser. Needs Node.js 22.19 or newer.`
-                  )
-                }
+                description="Installs Browse there, opens its relay to other computers and prints its address and a pairing code."
               >
                 <Show when={!connected()}>
-                  <AgentStep relay={relay} step={step()} agent={agent()} onAgent={setAgent} linkNote={linkNote()} onPaired={() => setPairedBy("code")} />
-                </Show>
-              </Step>
-              {tryIt(2)}
-            </div>
-          </Tabs.Content>
-
-          <Tabs.Content class="guide-body" value="remote">
-            <div class="steps">
-              <Step
-                number={1}
-                title="Start the relay on that computer"
-                done={connected()}
-                description="Run this on the computer your agent runs on. It prints a pairing code."
-              >
-                <Show when={!connected()}>
-                  <Command text={REMOTE_SETUP} label="Copy command" />
+                  <Command text={REMOTE_INSTALL} label="Copy command" />
                 </Show>
               </Step>
               <Step
                 number={2}
                 title="Enter its address and code"
                 done={connected()}
-                description={
-                  connected() ? (
-                    <AgentDone relay={relay} pairedBy={pairedBy()} />
-                  ) : (
-                    "Use that computer's Tailscale IP or name. The code works once, within 10 minutes."
-                  )
-                }
+                description={connected() ? <AgentDone relay={relay} pairedBy={pairedBy()} /> : "The code works once, within 10 minutes."}
               >
                 <Show when={!connected()}>
                   <RelayForm relay={relay} remote />
                 </Show>
               </Step>
-              {tryIt(3)}
+              {tryIt(3, "that agent")}
             </div>
-          </Tabs.Content>
-        </Tabs>
+          </div>
+        </Show>
+
+        <Show when={!remote() && !list().finished}>
+          <div class="hr" />
+          <footer class="guide-foot">
+            <span class="muted">
+              Agent on another computer?{" "}
+              <button type="button" class="link" onClick={() => setWhere("remote")}>
+                Connect to it
+              </button>
+            </span>
+          </footer>
+        </Show>
 
         <Show when={list().finished}>
           <div class="hr" />
@@ -250,15 +282,11 @@ function Step(props: { number: number; title: string; description?: JSX.Element;
   )
 }
 
-/** A command or prompt to copy: [menu ▾ | text ⧉]. */
-function Command(props: { text: string; label: string; menu?: JSX.Element }) {
+/** A command or prompt to copy. */
+function Command(props: { text: string; label: string }) {
   const [copied, flash] = createFlash("copy", "check")
   return (
     <div class="cmd">
-      <Show when={props.menu}>
-        {props.menu}
-        <span class="cmd-sep" />
-      </Show>
       <div class="cmd-text">
         <code>{props.text}</code>
         <IconButton
@@ -270,26 +298,6 @@ function Command(props: { text: string; label: string; menu?: JSX.Element }) {
         />
       </div>
     </div>
-  )
-}
-
-function AgentMenu(props: { agent: AgentName; onAgent: (agent: AgentName) => void }) {
-  return (
-    <Menu placement="bottom-start" gutter={4}>
-      <Menu.Trigger class="cmd-menu" aria-label="Your agent">
-        {agentLabels[props.agent]}
-        <Icon name="chevron-down" size="small" />
-      </Menu.Trigger>
-      <Menu.Portal>
-        <Menu.Content class="agent-menu">
-          <Menu.RadioGroup value={props.agent} onChange={(value) => props.onAgent(value as AgentName)}>
-            <For each={featuredAgents}>{(name) => <Menu.RadioItem value={name} closeOnSelect>{agentLabels[name]}</Menu.RadioItem>}</For>
-            <Menu.Separator />
-            <For each={otherAgents}>{(name) => <Menu.RadioItem value={name} closeOnSelect>{agentLabels[name]}</Menu.RadioItem>}</For>
-          </Menu.RadioGroup>
-        </Menu.Content>
-      </Menu.Portal>
-    </Menu>
   )
 }
 
@@ -322,12 +330,11 @@ function AgentDone(props: { relay: Relay; pairedBy: "link" | "code" | undefined 
   )
 }
 
-/** Step 1 on this computer: the install command for the chosen agent, and whatever the connection says to do next. */
+/** Step 1 on this computer: the prompt or command that installs Browse, and whatever the connection says to do next. */
 function AgentStep(props: {
   relay: Relay
   step: FirstRunStep
-  agent: AgentName
-  onAgent: (agent: AgentName) => void
+  command: { text: string; label: string }
   linkNote: string | undefined
   onPaired: () => void
 }) {
@@ -341,7 +348,7 @@ function AgentStep(props: {
   return (
     <>
       <Show when={showInstall()}>
-        <Command text={installCommand(props.agent)} label="Copy command" menu={<AgentMenu agent={props.agent} onAgent={props.onAgent} />} />
+        <Command text={props.command.text} label={props.command.label} />
       </Show>
 
       <Switch>
@@ -367,7 +374,7 @@ function AgentStep(props: {
               </Note>
               <CodeForm
                 relay={props.relay}
-                label={pair().remote ? "Run `npx @opencode/browse pair` on that computer and enter the code it prints:" : "Or enter the code `npx @opencode/browse pair` prints:"}
+                label={pair().remote ? "Run `browse pair` on that computer and enter the code it prints:" : "Or enter the code `browse pair` prints:"}
                 onPaired={props.onPaired}
               />
             </>
@@ -395,7 +402,7 @@ function AgentStep(props: {
             This extension is newer than the browse CLI on this computer. Run this, then restart your agent. (With automatic
             updates on, the CLI catches up by itself within a day.)
           </Note>
-          <Command text="npx @opencode/browse@latest install" label="Copy command" />
+          <Command text="curl -fsSL https://opencode.ai/browse/install | sh" label="Copy command" />
         </Match>
         <Match when={kind() === "update-extension"}>
           <Show
@@ -453,7 +460,7 @@ function CodeForm(props: { relay: Relay; label: string; onPaired: () => void }) 
     if (message.type !== "relay.result" || !pending()) return
     setPending(false)
     if (message.status === "connected") props.onPaired()
-    if (message.status === "invalid-code") return setNote("That isn't a pairing code. Enter the 8 characters `npx @opencode/browse pair` prints (XXXX-XXXX).")
+    if (message.status === "invalid-code") return setNote("That isn't a pairing code. Enter the 8 characters `browse pair` prints (XXXX-XXXX).")
     setCode("")
     const address = message.address ?? ""
     setNote(message.status === "connecting" ? `The relay ${address.startsWith("localhost:") ? "on this computer" : `at ${address}`} hasn't answered yet. This updates when it does.` : undefined)

@@ -198,7 +198,7 @@ function Settings() {
         <Show when={state()}>{(current) => <StatusLine state={current()} />}</Show>
         <RelayForm relay={relay} />
         <p class="hint">
-          <Rich text="The relay is on this computer (`localhost`) unless your agent runs on another one: then run `npx @opencode/browse set hostname 0.0.0.0` there and enter that computer's Tailscale IP or name. A pairing code is only needed for a new relay, or after this browser was unpaired: run `npx @opencode/browse pair` on the relay's computer and enter the code it prints. It works once, within 10 minutes." />
+          <Rich text="The relay is on this computer (`localhost`) unless your agent runs on another one: then run `browse set hostname 0.0.0.0` there and enter that computer's Tailscale IP or name. A pairing code is only needed for a new relay, or after this browser was unpaired: run `browse pair` on the relay's computer and enter the code it prints. It works once, within 10 minutes." />
         </p>
         <Divider />
         <div class="actions">

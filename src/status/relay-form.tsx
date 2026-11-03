@@ -69,7 +69,7 @@ export function RelayForm(props: { relay: Relay; help?: boolean; remote?: boolea
       </div>
       <Show when={props.help}>
         <p class="hint">
-          <Rich text="On the agent's computer, run `npx @opencode/browse set hostname 0.0.0.0` and `npx @opencode/browse pair`, then enter that computer's Tailscale IP or name and the code it prints. The code works once, within 10 minutes." />
+          <Rich text="On the agent's computer, run `browse set hostname 0.0.0.0` and `browse pair`, then enter that computer's Tailscale IP or name and the code it prints. The code works once, within 10 minutes." />
         </p>
       </Show>
       <div class="actions">

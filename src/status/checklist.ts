@@ -1,7 +1,6 @@
 // The onboarding page's checklist (onboarding.tsx): connect an agent, then try it. Each step is done, the one to do
 // now, or not reached yet; the page shows the first that isn't done as active.
 import type { AgentRelayState } from "../shared/protocol"
-import { agentLabels, agentNames, type AgentName } from "../../cli/src/agent-labels"
 
 export type StepState = "done" | "active" | "upcoming"
 
@@ -32,13 +31,5 @@ export function checklist(input: ChecklistInput): Checklist {
   const tryIt: StepState = tryDone ? "done" : agentDone ? "active" : "upcoming"
   return { agent, tryIt, finished: agent === "done" && tryIt === "done" }
 }
-
-/** The agents shown as chips before "More". */
-export const featuredAgents: AgentName[] = ["opencode", "claude", "codex", "cursor", "vscode", "gemini"]
-export const otherAgents = agentNames.filter((name) => !featuredAgents.includes(name)).sort((a, b) => agentLabels[a].localeCompare(agentLabels[b]))
-export { agentLabels, type AgentName }
-
-/** Install, for one agent: OpenCode is the default the terminal picker offers, any other is named with --agent. */
-export const installCommand = (agent: AgentName) => (agent === "opencode" ? "npx @opencode/browse install" : `npx @opencode/browse install --agent ${agent}`)
 
 export const TRY_PROMPT = "Open news.ycombinator.com and tell me the top story"

@@ -11,16 +11,16 @@ export function relayResultText(result: RelayResult["status"], address: string, 
   const at = local ? `on this computer (${address})` : `at ${address}`
   return {
     "invalid-address": "That isn't an address. Use localhost, or a host or IP with an optional port: 100.64.0.2 or devbox.tailnet.ts.net:19988.",
-    "invalid-code": "That isn't a pairing code. Enter the 8 characters `npx @opencode/browse pair` prints on the relay's computer (XXXX-XXXX).",
+    "invalid-code": "That isn't a pairing code. Enter the 8 characters `browse pair` prints on the relay's computer (XXXX-XXXX).",
     connected: `Connected to the relay ${at}.`,
     connecting: `The relay ${at} hasn't answered yet. This updates when it does.`,
     offline: codeSent
       ? `Code saved. No relay answered ${at} yet; it pairs as soon as one runs there (within 10 minutes of \`pair\`).`
       : local
         ? `No relay answered ${at}. It starts the first time an agent uses the browse tools.`
-        : `No relay answered ${at}. Check the address, that an agent has started the relay there, and that \`npx @opencode/browse set hostname 0.0.0.0\` was run there.`,
-    unpaired: `The relay ${at} answered, but this browser isn't paired with it. Run \`npx @opencode/browse pair\` there and enter the code it prints.`,
-    untrusted: `The relay ${at} didn't accept the pairing. Run \`npx @opencode/browse pair\` there and enter the new code it prints.`,
+        : `No relay answered ${at}. Check the address, that an agent has started the relay there, and that \`browse set hostname 0.0.0.0\` was run there.`,
+    unpaired: `The relay ${at} answered, but this browser isn't paired with it. Run \`browse pair\` there and enter the code it prints.`,
+    untrusted: `The relay ${at} didn't accept the pairing. Run \`browse pair\` there and enter the new code it prints.`,
     conflict: `The relay ${at} answered, but Browse in another browser or profile is connected to it.`,
     incompatible: `The relay ${at} and this extension speak different protocols. Update both, then reconnect.`,
   }[result]
@@ -42,7 +42,7 @@ export function describeStatus(state: AgentRelayState, unpacked: boolean) {
   if (state.status === "conflict")
     return "Browse in another browser or profile is connected. Close it there (or quit that browser), then click Reconnect."
   if (state.status === "incompatible" && state.skew === "update-cli")
-    return "This extension is newer than the browse CLI on this computer. Update the CLI: run `npx @opencode/browse@latest install` (with automatic updates on, it catches up by itself within a day), then click Reconnect."
+    return "This extension is newer than the browse CLI on this computer. Update the CLI: run `curl -fsSL https://opencode.ai/browse/install | sh` (with automatic updates on, it catches up by itself within a day), then click Reconnect."
   if (state.status === "incompatible" && state.skew === "update-extension")
     return state.unpacked || unpacked
       ? unpackedReloadAdvice
@@ -52,8 +52,8 @@ export function describeStatus(state: AgentRelayState, unpacked: boolean) {
   if (state.status === "untrusted" && remote) return `The relay at ${remote} didn't pair with this browser, so it was refused. Enter a new pairing code from it below.`
   if (state.status === "untrusted")
     return state.unpacked
-      ? "The relay on this computer didn't pair with this browser, so it was refused. Run the install command again (or enter a code from `npx @opencode/browse pair` below), then click Connect."
-      : "The relay on this computer didn't pair with this browser, so it was refused. Enter a new code from `npx @opencode/browse pair` below, or update the CLI."
+      ? "The relay on this computer didn't pair with this browser, so it was refused. Run the install command again (or enter a code from `browse pair` below), then click Connect."
+      : "The relay on this computer didn't pair with this browser, so it was refused. Enter a new code from `browse pair` below, or update the CLI."
   if (remote) return `Waiting for the relay at ${remote}. It starts the first time an agent there uses the browse tools.`
   return "Waiting for an agent. The relay starts the first time an agent uses the browse tools."
 }

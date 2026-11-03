@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { AgentRelayState } from "../src/shared/protocol"
-import { checklist, featuredAgents, installCommand, otherAgents, type ChecklistInput } from "../src/status/checklist"
-import { agentNames } from "../cli/src/agent-labels"
+import { checklist, type ChecklistInput } from "../src/status/checklist"
 import { relayResultText, richParts } from "../src/status/describe"
 
 const state = (overrides: Partial<AgentRelayState> = {}): AgentRelayState => ({
@@ -39,18 +38,6 @@ describe("onboarding checklist", () => {
     expect(checklist(input({ state: state({ status: "offline", pairing: "token" }), wasConnected: true })).agent).toBe("done")
     expect(checklist(input({ state: state({ status: "offline", pairing: "token" }) })).agent).toBe("active")
     expect(checklist(input({ state: state({ status: "untrusted", pairing: "token" }), wasConnected: true })).agent).toBe("active")
-  })
-})
-
-describe("agent picker", () => {
-  test("lists every agent install knows once", () => {
-    expect([...featuredAgents, ...otherAgents].sort()).toEqual([...agentNames].sort())
-    expect(featuredAgents[0]).toBe("opencode")
-  })
-
-  test("names the agent in the install command, except OpenCode, the default", () => {
-    expect(installCommand("opencode")).toBe("npx @opencode/browse install")
-    expect(installCommand("claude")).toBe("npx @opencode/browse install --agent claude")
   })
 })
 
