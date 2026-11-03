@@ -475,8 +475,9 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
   const remembered = previous?.selectedAgents ?? (previous?.declinedAgents?.length
     ? locations.filter(a => a.installed && !previous.declinedAgents!.includes(a.name)).map(a => a.name) : undefined)
   const plan = agentPlan(locations, flags, tty, caller, remembered)
-  const selected = plan.picker ? await pickAgents(locations, plan.selected) : plan.selected
-  if (!selected) { process.exitCode = 130; return }
+  const picked = plan.picker ? await pickAgents(locations, plan.selected) : { agents: plan.selected, other: false }
+  if (!picked) { process.exitCode = 130; return }
+  const selected = picked.agents
 
   mkdirSync(files.dir, { recursive: true })
   const { entry, version } = await installRuntime()
@@ -530,7 +531,7 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
       log(`! Couldn't edit ${tilde(agent.file)} for ${label}. Check its syntax and permissions, then run ${cliCommand(`install --agent ${agent.name}`)}.`)
     }
   }
-  byHand = selected.length === 0
+  byHand = picked.other || selected.length === 0
   showManualMcp(entryCommand(entry), caller)
   for (const line of restartOutdatedRelay(entry) ?? []) log(line)
   const legacy = selected.includes("opencode") ? legacyBrowserControl() : []

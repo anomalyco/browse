@@ -33,17 +33,36 @@ export function agentPlan(locations: AgentLocation[], flags: ReturnType<typeof a
 }
 
 /** The searchable agent list: OpenCode first, then the agents found on this computer, ticked. */
-export async function pickAgents(locations: AgentLocation[], initial: AgentName[]): Promise<AgentName[] | undefined> {
+/** The picker's last row: an agent install doesn't know, which gets the MCP server entry to add by hand. */
+export const OTHER_AGENT = "other"
+
+/**
+ * The agent list: the agents found on this computer (ticked) and "Other agent"; typing searches every agent install
+ * knows. Returns the agents picked and whether "Other agent" was.
+ */
+export async function pickAgents(locations: AgentLocation[], initial: AgentName[]): Promise<{ agents: AgentName[]; other: boolean } | undefined> {
   const ordered = [...locations].sort((a, b) => Number(b.name === "opencode") - Number(a.name === "opencode") || Number(b.installed) - Number(a.installed) || agentLabels[a.name].localeCompare(agentLabels[b.name]))
+  // The same option objects every render: clack keeps the cursor by identity, and loses it on fresh ones.
+  const all = ordered.map((a) => ({ value: a.name as string, label: agentLabels[a.name] }))
+  const other = { value: OTHER_AGENT, label: "Other agent (shows how to add Browse yourself)" }
+  const shown = [...all.filter((_, i) => ordered[i]!.installed || initial.includes(ordered[i]!.name)), other]
+  let last = { query: "", list: shown }
   // Clack's option type distributes over a union of values, so the picker works on plain names.
   const result = await autocompleteMultiselect<string>({
-    message: "Which agents should get Browse? (Yours isn't listed? Pick none: you'll get the entry to add yourself.)",
-    options: ordered.map((a) => ({ value: a.name, label: agentLabels[a.name], ...(a.installed ? { hint: "found" } : {}) })),
+    message: "Which agents should get Browse?",
+    options() {
+      const query = this.userInput.trim().toLowerCase()
+      if (query === last.query) return last.list
+      last = { query, list: query ? [...all.filter((o) => fuzzy(query, o.label) || fuzzy(query, o.value)), other] : shown }
+      return last.list
+    },
+    // options() already searched; keep "Other agent" in every result.
+    filter: () => true,
     initialValues: initial,
     maxItems: 10,
-    filter: (search, option) => fuzzy(search.toLowerCase(), option.label ?? option.value) || fuzzy(search.toLowerCase(), option.value),
   })
-  return isCancel(result) ? undefined : ordered.map((a) => a.name).filter((name) => result.includes(name))
+  if (isCancel(result)) return undefined
+  return { agents: ordered.map((a) => a.name).filter((name) => result.includes(name)), other: result.includes(OTHER_AGENT) }
 }
 
 function fuzzy(query: string, text: string) {
