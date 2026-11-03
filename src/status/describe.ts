@@ -2,6 +2,7 @@
 // backticks shows as code.
 import type { AgentRelayState, ToStatusPage } from "../shared/protocol"
 import { unpackedReloadAdvice } from "../../cli/src/protocol"
+import { installCommand } from "./install"
 
 export type RelayResult = Extract<ToStatusPage, { type: "relay.result" }>
 
@@ -42,7 +43,7 @@ export function describeStatus(state: AgentRelayState, unpacked: boolean) {
   if (state.status === "conflict")
     return "Browse in another browser or profile is connected. Close it there (or quit that browser), then click Reconnect."
   if (state.status === "incompatible" && state.skew === "update-cli")
-    return "This extension is newer than the browse CLI on this computer. Update the CLI: run `curl -fsSL https://opencode.ai/browse/install | sh` (with automatic updates on, it catches up by itself within a day), then click Reconnect."
+    return `This extension is newer than the browse CLI on this computer. Update the CLI: run \`${installCommand}\` (with automatic updates on, it catches up by itself within a day), then click Reconnect.`
   if (state.status === "incompatible" && state.skew === "update-extension")
     return state.unpacked || unpacked
       ? unpackedReloadAdvice

@@ -12,6 +12,7 @@ import { TextInput } from "@opencode/ui/text-input"
 import { unpackedExtensionId, unpackedReloadAdvice } from "../../cli/src/protocol"
 import { firstRunStep, relayProbeResult, shouldProbe, type FirstRunStep, type RelayProbe } from "./first-run"
 import { TRY_PROMPT, checklist } from "./checklist"
+import { installCommand, remoteInstallCommand, windows } from "./install"
 import { RelayForm } from "./relay-form"
 import { applyColorScheme, Brand, createFlash, createRelay, Note, Rich, type Relay } from "./ui"
 import "./onboarding.css"
@@ -24,9 +25,7 @@ const installTab = !!fragmentCode
 if (/^#(code|ticket|pair)=/.test(location.hash)) history.replaceState(null, "", location.pathname + location.search)
 
 const settingsUrl = () => chrome.runtime.getURL("settings.html")
-const INSTALL = "curl -fsSL https://opencode.ai/browse/install | sh"
-const REMOTE_INSTALL = `${INSTALL} -s -- --remote`
-const AGENT_PROMPT = `Set up Browse so you can use my Chrome: run ${INSTALL}`
+const AGENT_PROMPT = `Set up Browse so you can use my Chrome: run ${installCommand}`
 
 type Where = "here" | "remote"
 type How = "agent" | "manual"
@@ -124,7 +123,7 @@ function Onboarding() {
   const installStep = (how: How) => (
     <Step
       number={1}
-      title={how === "agent" ? "Paste this into your agent" : "Run this in your terminal"}
+      title={how === "agent" ? "Paste this into your agent" : windows ? "Run this in PowerShell" : "Run this in your terminal"}
       done={connected()}
       description={
         connected() ? (
@@ -140,7 +139,7 @@ function Onboarding() {
         <AgentStep
           relay={relay}
           step={step()}
-          command={how === "agent" ? { text: AGENT_PROMPT, label: "Copy prompt" } : { text: INSTALL, label: "Copy command" }}
+          command={how === "agent" ? { text: AGENT_PROMPT, label: "Copy prompt" } : { text: installCommand, label: "Copy command" }}
           linkNote={linkNote()}
           onPaired={() => setPairedBy("code")}
         />
@@ -212,7 +211,7 @@ function Onboarding() {
                 description="Installs Browse there, opens its relay to other computers and prints its address and a pairing code."
               >
                 <Show when={!connected()}>
-                  <Command text={REMOTE_INSTALL} label="Copy command" />
+                  <Command text={remoteInstallCommand} label="Copy command" />
                 </Show>
               </Step>
               <Step
@@ -402,7 +401,7 @@ function AgentStep(props: {
             This extension is newer than the browse CLI on this computer. Run this, then restart your agent. (With automatic
             updates on, the CLI catches up by itself within a day.)
           </Note>
-          <Command text="curl -fsSL https://opencode.ai/browse/install | sh" label="Copy command" />
+          <Command text={installCommand} label="Copy command" />
         </Match>
         <Match when={kind() === "update-extension"}>
           <Show
