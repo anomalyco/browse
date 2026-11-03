@@ -127,13 +127,7 @@ function Onboarding() {
 
   return (
     <main class="page">
-      <Brand
-        end={
-          <Button variant="ghost-muted" size="small" icon="settings-gear" onClick={() => location.assign(settingsUrl())}>
-            Settings
-          </Button>
-        }
-      />
+      <Brand />
 
       <section class="guide" aria-labelledby="guide-title">
         <header class="guide-head">
@@ -216,18 +210,16 @@ function Onboarding() {
           </Tabs.Content>
         </Tabs>
 
-        <div class="hr" />
-        <footer class="guide-foot">
-          <Button variant="neutral" size="large" onClick={() => location.assign(settingsUrl())}>
-            Open settings
-          </Button>
-          <span class="sep" aria-hidden="true" />
-          <span class="muted">
-            {list().finished
-              ? "You're set. When an agent needs you for a login, the page shows a card."
-              : "Tabs, input, handoffs and updates live there."}
-          </span>
-        </footer>
+        <Show when={list().finished}>
+          <div class="hr" />
+          <footer class="guide-foot">
+            <Button variant="neutral" size="large" onClick={() => location.assign(settingsUrl())}>
+              Open settings
+            </Button>
+            <span class="sep" aria-hidden="true" />
+            <span class="muted">You're set. When an agent needs you for a login, the page shows a card.</span>
+          </footer>
+        </Show>
       </section>
     </main>
   )
