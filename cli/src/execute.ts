@@ -10,7 +10,6 @@ import {
   detectChallenge,
   ExecuteCodeError,
   getAutoReturnExpression,
-  pageHookCall,
   pageVisibleApiSourceWarnings,
   runUserCode,
   userCodeStack,
@@ -76,7 +75,6 @@ import { buildSandboxGlobals } from "./execute/sandbox-globals.ts"
 import { ExecuteSecretsBridge } from "./execute/secrets-bridge.ts"
 import * as NetworkCapture from "./network-capture.ts"
 import { installPageReadTimeout } from "./execute/read-timeout.ts"
-import type { PasskeyChoice } from "./auth/passkey-bridge.ts"
 import { tunePatchright } from "./execute/patchright-tuning.ts"
 import {
   AuthenticatedJsonOutcome,
@@ -123,7 +121,6 @@ export {
   jsonValueWarning,
   isSessionPageConnected,
   maxExecuteResultChars,
-  pageHookCall,
   pageTargetId,
   pageVisibleApiSourceWarnings,
   pdfViewerWarning,
@@ -159,12 +156,6 @@ type ExecuteSandboxOptions = {
   readonly allowedOrigins?: () => readonly string[] | undefined
   /** Allowlist violations the relay saw in this session's tabs since the last execute. */
   readonly drainGuardWarnings?: () => readonly string[]
-  /** Passkey account choice in this session's agent tabs (passkey-bridge.ts), by CDP target id. */
-  readonly passkeys?: {
-    /** Throws when the target isn't an agent tab of this session. An empty username clears the choice. */
-    readonly select: (targetId: string, site: string, username: string) => void
-    readonly choiceSince: (targetId: string, since: number) => readonly PasskeyChoice[] | undefined
-  }
 }
 
 export type ExecuteResult = {
@@ -202,7 +193,6 @@ export class ExecuteSandbox extends DefaultPageHost {
     this.secrets = new ExecuteSecretsBridge({
       networkCapture: this.networkCapture,
       allowedOrigins: () => this.options.allowedOrigins?.(),
-      ...(this.options.passkeys ? { passkeys: this.options.passkeys } : {}),
       addWarningOnce: (warning) => this.addWarningOnce(warning),
     })
     this.realm = this.allowNode ? undefined : this.createRealm()
@@ -217,8 +207,6 @@ export class ExecuteSandbox extends DefaultPageHost {
     return new ExecuteRealm({
       onHostCall: (fn, receiver, args) => {
         this.addWarningOnce(pageVisibleApiWarning(fn, receiver, args))
-        const hook = pageHookCall(fn, args)
-        if (hook) this.secrets.pageHooks.add(hook)
       },
     })
   }
@@ -412,7 +400,6 @@ export class ExecuteSandbox extends DefaultPageHost {
       sandbox.realm = sandbox.allowNode ? undefined : sandbox.createRealm()
       sandbox.state = sandbox.realm?.state ?? {}
       // Routes, listeners, init scripts and CDP sessions belong to the browser connection closed below.
-      sandbox.secrets.pageHooks.clear()
       const browser = sandbox.browser
       sandbox.browser = undefined
       sandbox.unbindDefaultPage(sandbox.defaultPageTargetId, {

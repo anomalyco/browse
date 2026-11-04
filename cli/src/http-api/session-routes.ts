@@ -1,8 +1,6 @@
 import http from "node:http"
 import { Effect } from "effect"
 import * as AuthProfile from "../auth/profile.ts"
-import * as Deadbolt from "../auth/deadbolt.ts"
-import { checkUrl, parseOriginPatterns } from "../auth/domain-policy.ts"
 import { selectTarget } from "../execute.ts"
 import {
   HttpRouteError,
@@ -16,7 +14,6 @@ import {
   AuthProfileRequest,
   AuthRefreshRequest,
   AuthRunRequest,
-  DeadboltLoginsRequest,
   ExecuteRequest,
   NetworkSessionRequest,
   NetworkStartRequest,
@@ -127,32 +124,6 @@ export function handleCliRequest(options: {
   readonly registry: TargetRegistry
 }): Effect.Effect<void, Error> {
   return Effect.gen(function* () {
-    if (options.pathname === "/cli/deadbolt/logins" && options.request.method === "POST") {
-      const request = yield* decodeRequest(DeadboltLoginsRequest, yield* readJsonBody(options.request), "deadbolt logins")
-      const sessionId = request.sessionId
-      const patterns = sessionId ? options.sessions.allowedOrigins(sessionId) : undefined
-      // The allowed sites (bare hosts asked about over https), plus the session's open pages, which carry the ports
-      // and schemes a bare pattern leaves open (local dev servers).
-      const pageOrigins = options.registry.listRootTargets()
-        .filter((target) => sessionId !== undefined && target.opencodeBrowserSessionId === sessionId)
-        .flatMap((target) => {
-          try {
-            const url = new URL(target.targetInfo.url)
-            const allowed = !patterns || patterns.length === 0 || checkUrl(url.href, parseOriginPatterns(patterns)).allowed
-            return (url.protocol === "https:" || url.protocol === "http:") && allowed ? [url.origin] : []
-          } catch {
-            return []
-          }
-        })
-      const origins = Array.from(new Set([...(patterns && patterns.length > 0 ? Deadbolt.originsFromPatterns(patterns) : []), ...pageOrigins]))
-      const listing = yield* Effect.promise(() => Deadbolt.listLogins(origins))
-      sendJson(options.response, {
-        ...listing,
-        origins,
-        ...(patterns && patterns.length > 0 ? {} : { note: "This session has no domain allowlist, so only the sites of its open pages were checked. Set one with session_allowlist to see the logins for the sites it may visit." }),
-      })
-      return
-    }
     if (options.pathname === "/cli/sessions" && options.request.method === "GET") {
       sendJson(options.response, { sessions: options.sessions.listSummaries() })
       return

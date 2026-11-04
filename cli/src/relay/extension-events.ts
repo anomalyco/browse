@@ -7,7 +7,6 @@ import type { ExtensionCommandInput } from "./rpc.ts"
 import type { FlightRecorderRelay } from "../recording-relay/flight-recorder.ts"
 import type { GhostCursorTabs } from "../ghost-cursor.ts"
 import type { HandoffCancellationReason, HandoffRegistry } from "../session-manager/handoff.ts"
-import type { PasskeyBridge } from "../auth/passkey-bridge.ts"
 import type { ProtectedFrameTracker } from "../cdp/protected-frames.ts"
 import { isExtensionEvent, isExtensionResponse, parseJsonObject, type CdpEvent, type JsonObject } from "../protocol.ts"
 import type { RecordingRelay } from "../recording-relay.ts"
@@ -32,7 +31,6 @@ export function createExtensionEventHandler(options: {
   readonly handoffs: HandoffRegistry
   readonly recordingRelay: RecordingRelay
   readonly flightRecorder: FlightRecorderRelay
-  readonly passkeys: PasskeyBridge
   readonly navigationGuard: SessionNavigationGuard
   readonly ghostCursor: GhostCursorTabs
   readonly tabActivity: TabActivity
@@ -71,7 +69,6 @@ export function createExtensionEventHandler(options: {
     handoffs,
     recordingRelay,
     flightRecorder,
-    passkeys,
     navigationGuard,
     ghostCursor,
     tabActivity,
@@ -374,7 +371,6 @@ export function createExtensionEventHandler(options: {
     ) {
       return
     }
-    if (passkeys.handleEvent(tabId, method, params, sourceSessionId === undefined || sourceSessionId === target.sessionId)) return
     if (flightRecorder.handleDebuggerEvent({ tabId, method, params }) || recordingRelay.handleDebuggerEvent({ tabId, method, params })) return
     if (sourceSessionId === undefined || sourceSessionId === target.sessionId) navigationGuard.observeEvent(target, method, params)
     let shouldBroadcast = true
@@ -502,7 +498,6 @@ export function createExtensionEventHandler(options: {
         Effect.runPromise(Effect.ignore(ghostCursor.documentCreated(tabId))).catch(() => {})
         contextDebugLog?.(`main-frame-navigated frame=${boundedToken(frameId)} loader=${boundedToken(getString(frame, "loaderId"))} ${targetDiagnosticIdentity(registry, target)} ${summarizeDiagnosticUrl(frameUrl)}`)
         registry.updateTargetUrl(tabId, frameUrl)
-        passkeys.navigated(tabId)
         blankNavigationWaiters.get(tabId)?.(frameUrl, getString(frame, "loaderId"))
         Effect.runPromise(Effect.ignore(sendDebuggerCommand({ tabId, method: "Emulation.setFocusEmulationEnabled", params: { enabled: tabActivity.isFocused(tabId) } }))).catch(() => {})
       }
