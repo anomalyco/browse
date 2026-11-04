@@ -50,9 +50,9 @@ publish-github-release        the release on v<version>: notes, zip, tarball, SH
 push-release-to-dev           pushes the release commit to dev (deploy key), so dev builds count up from it
 ```
 
-The store review takes hours to a few days (the job summary shows `PENDING_REVIEW`); a release
-fails at `publish-cws` while an earlier version is still in review. npm users get the new version within a day: the
-relay checks once a day and switches when no agent is using the browser.
+The store review takes hours to a few days (the job summary shows `PENDING_REVIEW`); `publish-cws` cancels an
+earlier version still in review, so the newest build is the one reviewed. npm users get the new version within a day:
+the relay checks once a day and switches when no agent is using the browser.
 
 **If a job fails**, fix it and rerun the failed jobs. Publishing is idempotent: a version that's already on npm,
 already submitted to the store, or already current on the release service is skipped, and the tag is reused when it

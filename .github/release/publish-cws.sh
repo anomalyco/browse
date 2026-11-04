@@ -6,8 +6,9 @@
 # and CWS_ITEM_ID (repository variables).
 # Idempotent: when the item already has this version (published or in review), nothing is uploaded again; it reports
 # the state. Publishing uses the item's visibility in the dashboard and submits for review; it doesn't wait for review.
-# An item holds one submission at a time, so it fails while another version is still pending review.
-# A dry run checks the zip, and with credentials also reads the item's status, but uploads nothing.
+# An item holds one submission at a time, so an older version still pending review is cancelled first and this build is
+# the one that gets reviewed.
+# A dry run checks the zip, and with credentials also reads the item's status, but uploads and cancels nothing.
 # CWS_API_BASE and CWS_TOKEN_URL point it at a local fake for testing; they only accept loopback http URLs, so a changed
 # variable can't send the credentials anywhere else.
 . "$(dirname "$0")/lib.sh"
@@ -21,6 +22,21 @@ endpoint() {
   [[ "$value" =~ ^http://(127\.0\.0\.1|localhost|\[::1\])(:[0-9]+)?(/.*)?$ ]] ||
     die "CWS_API_BASE and CWS_TOKEN_URL may only point at a loopback http server (a local fake); got $value"
   printf '%s' "${value%/}"
+}
+# True when stable version $1 is older than stable version $2. Short versions ("1.0") are padded so the loop always
+# has three parts.
+older_version() {
+  local IFS=. i
+  local -a a b
+  read -r -a a <<< "$1.0.0"
+  read -r -a b <<< "$2.0.0"
+  for i in 0 1 2; do
+    if [ "${a[i]}" -ne "${b[i]}" ]; then
+      [ "${a[i]}" -lt "${b[i]}" ]
+      return
+    fi
+  done
+  return 1
 }
 api=$(endpoint "${CWS_API_BASE:-}" https://chromewebstore.googleapis.com)
 token_url=$(endpoint "${CWS_TOKEN_URL:-}" https://oauth2.googleapis.com/token)
@@ -81,13 +97,24 @@ if [ -n "$published" ] || [ -n "$submitted" ]; then
   summary "### Chrome Web Store" "$BROWSE_VERSION is already $([ -n "$published" ] && echo "published" || echo "submitted") on $item: ${published:-$submitted}. Nothing uploaded."
   exit 0
 fi
-# The version waiting in review (or approved and about to publish) blocks another upload.
-pending=$(jq -r '.submittedItemRevisionStatus | select(.state == "PENDING_REVIEW" or .state == "STAGED") | "\(.distributionChannels[0].crxVersion // "unknown") is still \(.state)"' <<< "$before")
-[ -z "$pending" ] || die "$pending on $item; wait for it, or cancel it in the developer dashboard, then rerun this job."
+# The version waiting in review (or approved and about to publish) blocks another upload. A submission of this release's
+# version returned above, so a pending one is a different build: an older one is cancelled below, so the newest build is
+# the one reviewed. A newer one belongs to a later release, so this job stops instead of replacing it.
+pending_state=$(jq -r '.submittedItemRevisionStatus | select(.state == "PENDING_REVIEW" or .state == "STAGED") | .state' <<< "$before")
+pending=$(jq -r --arg state "$pending_state" '.submittedItemRevisionStatus | select(.state == $state) | .distributionChannels[0].crxVersion // empty' <<< "$before")
+if [ -n "$pending_state" ] && { [ -z "$pending" ] || ! older_version "$pending" "$BROWSE_VERSION"; }; then
+  die "${pending:-A submission} is still $pending_state on $item, so $BROWSE_VERSION can't be submitted; finish that release, or cancel it in the developer dashboard and rerun this job."
+fi
 
 if dry_run; then
-  summary "### Chrome Web Store (dry run)" "Would upload $(basename "$zip") ($BROWSE_VERSION) to $item and submit it; the store has $(jq -r '.publishedItemRevisionStatus.distributionChannels[0].crxVersion // "no published version"' <<< "$before")."
+  summary "### Chrome Web Store (dry run)"
+  [ -z "$pending" ] || summary "Would cancel the pending review of $pending so $BROWSE_VERSION gets reviewed instead"
+  summary "Would upload $(basename "$zip") ($BROWSE_VERSION) to $item and submit it; the store has $(jq -r '.publishedItemRevisionStatus.distributionChannels[0].crxVersion // "no published version"' <<< "$before")."
   exit 0
+fi
+if [ -n "$pending" ]; then
+  call POST "$api/v2/$item:cancelSubmission" > /dev/null
+  summary "Cancelled the pending review of $pending so $BROWSE_VERSION gets reviewed instead"
 fi
 
 uploaded=$(call POST "$api/upload/v2/$item:upload" -H "Content-Type: application/zip" --data-binary "@$zip")
