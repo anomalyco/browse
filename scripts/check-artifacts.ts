@@ -5,7 +5,7 @@
 //                  has no manifest `key`, the dev zip (loaded unpacked) has the checkout's key and a build.json
 //   npm tarball    @opencode/browse at the release version, only dist/, skills/ and package metadata (no extension: npm
 //                  installs get it from the store or, for a dev build, the release service), no install scripts, no
-//                  source maps, and it installs with npm and starts its relay
+//                  source maps, and it installs with npm and starts its relay and MCP server
 //   bun scripts/check-artifacts.ts --version 0.1.0 --zip release/opencode-browser-0.1.0.zip --tarball release/opencode-browse-0.1.0.tgz
 import { $ } from "bun"
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
@@ -197,39 +197,103 @@ export async function checkPackageTarball(tarball: string, version: string, exte
 }
 
 /**
- * The tarball installed the way users get it (`npm install`, resolving dependency ranges fresh, no lockfile) and its
- * relay started on a free port with a throwaway home. Catches a transitive dependency that resolves to a version the
- * build doesn't work with, which the file checks above can't see.
+ * The tarball installed the way users get it (`npm install`, resolving dependency ranges fresh, no lockfile), then its
+ * relay started on a free port with a throwaway home and its MCP server asked for its tools, as the binaries are in
+ * the release workflow. Catches a dependency that resolves to a version the build doesn't work with, which the file
+ * checks above can't see.
  */
 export async function checkPackageInstall(tarball: string, version: string): Promise<string[]> {
-  const label = path.basename(tarball)
-  return extracted("browse-install-", async (directory) => {
+  const file = path.resolve(tarball)
+  const label = path.basename(file)
+  const directory = await mkdtemp(path.join(os.tmpdir(), "browse-install-"))
+  try {
     await writeFile(path.join(directory, "package.json"), JSON.stringify({ private: true }))
-    await $`npm install --ignore-scripts --no-audit --no-fund --no-package-lock ${tarball}`.cwd(directory).quiet()
-  }, async (directory) => {
+    const install = await $`npm install --ignore-scripts --no-audit --no-fund --no-package-lock file:${file}`.cwd(directory).quiet().nothrow()
+    if (install.exitCode !== 0) return [`${label}: npm install failed:\n${tail(install.stderr.toString())}`]
+    const cli = path.join(directory, "node_modules", PACKAGE_NAME, "dist", "cli.mjs")
     const port = await freePort()
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("OPENCODE_BROWSER_")))
-    const relay = Bun.spawn(["node", path.join(directory, "node_modules", PACKAGE_NAME, "dist", "cli.mjs"), "serve"], {
-      cwd: directory,
-      env: { ...env, OPENCODE_BROWSER_HOME: path.join(directory, "home"), OPENCODE_BROWSER_PORT: String(port), OPENCODE_BROWSER_UPDATE_CHECK: "0" },
-      stdout: "pipe",
-      stderr: "pipe",
-    })
+    const env = {
+      ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("OPENCODE_BROWSER_"))),
+      OPENCODE_BROWSER_HOME: path.join(directory, "home"),
+      OPENCODE_BROWSER_PORT: String(port),
+      OPENCODE_BROWSER_UPDATE_CHECK: "0",
+      TMPDIR: directory,
+    }
+    const relay = Bun.spawn(["node", cli, "serve"], { cwd: directory, env, stdout: "ignore", stderr: "pipe" })
+    const relayErrors = new Response(relay.stderr).text()
     try {
-      const deadline = Date.now() + 30_000
-      while (Date.now() < deadline && relay.exitCode === null) {
-        const running = await fetch(`http://127.0.0.1:${port}/version`).then((response) => response.json() as Promise<{ version?: string }>).catch(() => undefined)
-        if (running) return running.version === version ? [] : [`${label}: the installed relay reports version ${String(running.version)}, expected ${version}`]
-        await Bun.sleep(250)
+      const running = await relayVersion(port, relay)
+      if (running === undefined) {
+        relay.kill("SIGKILL")
+        return [`${label}: after npm install, \`browse serve\` didn't start:\n${tail(await relayErrors)}`]
       }
-      relay.kill()
-      const output = (await new Response(relay.stderr).text()).trim().split("\n").slice(-8).join("\n")
-      return [`${label}: after npm install, \`browse serve\` didn't start${output ? `:\n${output}` : ""}`]
+      if (running !== version) return [`${label}: the installed relay reports version ${running}, expected ${version}`]
+      const tools = await mcpTools(cli, directory, env)
+      return typeof tools === "number" && tools > 0 ? [] : [`${label}: after npm install, \`browse mcp\` listed no tools:\n${tail(String(tools))}`]
     } finally {
-      relay.kill()
+      relay.kill("SIGKILL")
       await relay.exited
     }
-  })
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+}
+
+const tail = (text: string) => text.trim().split("\n").slice(-8).join("\n")
+
+/** The version a relay reports once it answers /version, or undefined if it exits or 30 seconds pass first. */
+async function relayVersion(port: number, relay: Bun.Subprocess) {
+  const deadline = Date.now() + 30_000
+  while (Date.now() < deadline && relay.exitCode === null) {
+    const response = await fetch(`http://127.0.0.1:${port}/version`, { signal: AbortSignal.timeout(2_000) }).catch(() => undefined)
+    if (response?.ok) return String(((await response.json()) as { version?: unknown }).version)
+    await Bun.sleep(250)
+  }
+  return undefined
+}
+
+/** How many tools the MCP server lists after initialize, or what it printed when it didn't answer in 30 seconds. */
+async function mcpTools(cli: string, cwd: string, env: Record<string, string | undefined>): Promise<number | string> {
+  const mcp = Bun.spawn(["node", cli, "mcp"], { cwd, env, stdin: "pipe", stdout: "pipe", stderr: "pipe" })
+  const errors = new Response(mcp.stderr).text()
+  const reader = mcp.stdout.getReader()
+  const decoder = new TextDecoder()
+  let output = ""
+  const response = async (id: number): Promise<{ result?: { tools?: unknown[] } } | undefined> => {
+    for (;;) {
+      for (const line of output.split("\n")) {
+        try {
+          const message = JSON.parse(line) as { id?: number; result?: { tools?: unknown[] } }
+          if (message.id === id) return message
+        } catch {}
+      }
+      const chunk = await reader.read()
+      if (chunk.done) return undefined
+      output += decoder.decode(chunk.value, { stream: true })
+    }
+  }
+  const send = (message: object) => mcp.stdin.write(`${JSON.stringify(message)}\n`)
+  const timeout = Promise.withResolvers<undefined>()
+  const timer = setTimeout(() => timeout.resolve(undefined), 30_000)
+  try {
+    const listed = await Promise.race([
+      (async () => {
+        send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "release-check", version: "0" } } })
+        if (!(await response(1))) return undefined
+        send({ jsonrpc: "2.0", method: "notifications/initialized" })
+        send({ jsonrpc: "2.0", id: 2, method: "tools/list" })
+        return (await response(2))?.result?.tools?.length
+      })(),
+      timeout.promise,
+    ])
+    if (listed !== undefined) return listed
+    mcp.kill("SIGKILL")
+    return `${output}\n${await errors}`
+  } finally {
+    clearTimeout(timer)
+    mcp.kill("SIGKILL")
+    await mcp.exited
+  }
 }
 
 function freePort() {
