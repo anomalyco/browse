@@ -10,7 +10,7 @@ import {
   sharedGroup,
   sharedTitle,
   type AgentRelayLog,
-} from "./helpers"
+} from "./wire"
 
 export function createRelayGrouping(deps: {
   readonly log: AgentRelayLog

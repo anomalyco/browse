@@ -48,7 +48,7 @@ import {
   text,
   TOKENS_KEY,
   type AgentBadge,
-} from "./agent-relay/helpers"
+} from "./agent-relay/wire"
 import { installPopupAdoption } from "./agent-relay/popups"
 import { createRelayRecording } from "./agent-relay/recording"
 import { DebuggerHub } from "./debugger-hub"

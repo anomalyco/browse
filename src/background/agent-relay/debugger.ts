@@ -1,6 +1,6 @@
 import { isJsonObject, type JsonObject } from "../../agent-relay/protocol"
 import { DebuggerHub } from "../debugger-hub"
-import { FOREIGN_FRAME, number, OWNER, sleep, string, text, type AgentRelayLog } from "./helpers"
+import { FOREIGN_FRAME, number, OWNER, sleep, string, text, type AgentRelayLog } from "./wire"
 
 export function createRelayDebugger(deps: {
   readonly log: AgentRelayLog

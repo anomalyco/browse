@@ -1,7 +1,7 @@
 import type { JsonObject } from "../../agent-relay/protocol"
 import { AgentWindow } from "../agent-window"
 import { TabCleanup } from "../tab-cleanup"
-import { text, type AgentRelayLog } from "./helpers"
+import { text, type AgentRelayLog } from "./wire"
 
 export function installPopupAdoption(deps: {
   readonly log: AgentRelayLog

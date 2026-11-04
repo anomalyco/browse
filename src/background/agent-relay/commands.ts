@@ -31,7 +31,7 @@ import {
   text,
   type AgentBadge,
   type AgentRelayLog,
-} from "./helpers"
+} from "./wire"
 
 export function createRelayCommands(deps: {
   readonly log: AgentRelayLog

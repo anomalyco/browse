@@ -36,7 +36,7 @@ import {
   type AgentRelayLog,
   type Credential,
   type Handshake,
-} from "./helpers"
+} from "./wire"
 
 declare const __OPENCODE_BROWSER_BUILD__: string
 

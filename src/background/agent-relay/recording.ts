@@ -1,6 +1,6 @@
 import type { JsonObject } from "../../agent-relay/protocol"
 import type { OffscreenStartRecordingResult } from "../../agent-relay/recording-types"
-import { MAX_RECORDING_BUFFER, number, sleep, text } from "./helpers"
+import { MAX_RECORDING_BUFFER, number, sleep, text } from "./wire"
 
 export function createRelayRecording(deps: {
   readonly open: () => WebSocket | undefined
