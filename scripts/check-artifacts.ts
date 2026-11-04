@@ -5,10 +5,11 @@
 //                  has no manifest `key`, the dev zip (loaded unpacked) has the checkout's key and a build.json
 //   npm tarball    @opencode/browse at the release version, only dist/, skills/ and package metadata (no extension: npm
 //                  installs get it from the store or, for a dev build, the release service), no install scripts, no
-//                  source maps
+//                  source maps, and it installs with npm and starts its relay
 //   bun scripts/check-artifacts.ts --version 0.1.0 --zip release/opencode-browser-0.1.0.zip --tarball release/opencode-browse-0.1.0.tgz
 import { $ } from "bun"
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises"
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
+import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import { parseArgs } from "node:util"
@@ -196,6 +197,52 @@ export async function checkPackageTarball(tarball: string, version: string, exte
 }
 
 /**
+ * The tarball installed the way users get it (`npm install`, resolving dependency ranges fresh, no lockfile) and its
+ * relay started on a free port with a throwaway home. Catches a transitive dependency that resolves to a version the
+ * build doesn't work with, which the file checks above can't see.
+ */
+export async function checkPackageInstall(tarball: string, version: string): Promise<string[]> {
+  const label = path.basename(tarball)
+  return extracted("browse-install-", async (directory) => {
+    await writeFile(path.join(directory, "package.json"), JSON.stringify({ private: true }))
+    await $`npm install --ignore-scripts --no-audit --no-fund --no-package-lock ${tarball}`.cwd(directory).quiet()
+  }, async (directory) => {
+    const port = await freePort()
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("OPENCODE_BROWSER_")))
+    const relay = Bun.spawn(["node", path.join(directory, "node_modules", PACKAGE_NAME, "dist", "cli.mjs"), "serve"], {
+      cwd: directory,
+      env: { ...env, OPENCODE_BROWSER_HOME: path.join(directory, "home"), OPENCODE_BROWSER_PORT: String(port), OPENCODE_BROWSER_UPDATE_CHECK: "0" },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    try {
+      const deadline = Date.now() + 30_000
+      while (Date.now() < deadline && relay.exitCode === null) {
+        const running = await fetch(`http://127.0.0.1:${port}/version`).then((response) => response.json() as Promise<{ version?: string }>).catch(() => undefined)
+        if (running) return running.version === version ? [] : [`${label}: the installed relay reports version ${String(running.version)}, expected ${version}`]
+        await Bun.sleep(250)
+      }
+      relay.kill()
+      const output = (await new Response(relay.stderr).text()).trim().split("\n").slice(-8).join("\n")
+      return [`${label}: after npm install, \`browse serve\` didn't start${output ? `:\n${output}` : ""}`]
+    } finally {
+      relay.kill()
+      await relay.exited
+    }
+  })
+}
+
+function freePort() {
+  return new Promise<number>((resolve, reject) => {
+    const server = net.createServer().once("error", reject)
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as net.AddressInfo
+      server.close(() => resolve(port))
+    })
+  })
+}
+
+/**
  * A platform package (cli/script/pack.ts): @opencode/browse-<target> at the release version with exactly
  * package/bin/browse (browse.exe on Windows, mode 755), package.json and LICENSE, the os/cpu/libc npm installs by, and
  * no install scripts. The install script (../install) downloads it from npm and runs package/bin/browse.
@@ -244,6 +291,7 @@ if (import.meta.main) {
   const problems = [
     ...(values.zip ? await checkStoreZip(values.zip, values.version, undefined, values.version.includes("-dev.")) : []),
     ...(values.tarball ? await checkPackageTarball(values.tarball, values.version) : []),
+    ...(values.tarball ? await checkPackageInstall(values.tarball, values.version) : []),
   ]
   for (const problem of problems) console.error(`✗ ${problem}`)
   if (problems.length) process.exit(1)
