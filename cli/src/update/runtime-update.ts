@@ -67,8 +67,8 @@ export async function switchTo(layout: Layout, version: string, options: { reado
   const program = Effect.gen(function* () {
     const relay = yield* RelayClient.Service
     const running = yield* Effect.result(relay.version)
-    // No relay: nothing to drain or mix with.
-    if (running._tag === "Failure") {
+    // No relay: nothing to drain or mix with. One that's starting is drained like any other.
+    if (running._tag === "Failure" && running.failure instanceof RelayClient.RelayUnreachable) {
       yield* point
       return undefined
     }
@@ -201,7 +201,7 @@ export async function runNpmUpdate(args: readonly string[], layout?: Layout) {
   const current = readCurrent(lay)!
   const refused = await switchTo(lay, published.version, { previous: current.version, force: args.includes("--force") })
   if (refused?.broken) {
-    skipBroken(lay, published.version, refused.message)
+    skipBroken(lay, published.version, refused.message, true)
     log(`✗ Installed ${published.version}, but ${refused.message}. ${current.version} keeps running, and auto-update skips ${published.version} until a newer version is published.`)
     process.exitCode = 1
     return true
@@ -260,7 +260,7 @@ export async function runRuntimeSwitch(args: readonly string[]) {
     return
   }
   const refused = await switchTo(layout, version, { previous: current.version, force: false })
-  if (refused?.broken) skipBroken(layout, version, refused.message)
+  if (refused?.broken) skipBroken(layout, version, refused.message, true)
   const outcome = refused?.broken ? `failed (${refused.message}); skipping ${version} until a newer version is published` : refused ? `refused (${refused.message})` : "done"
   log(`${new Date().toISOString()} switch ${current.version} → ${version}: ${outcome}`)
   if (refused) process.exitCode = 1

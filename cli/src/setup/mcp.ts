@@ -28,6 +28,7 @@ import {
   packageRoot,
   readFileOr,
   readJson,
+  refuseFormatChange,
   switchInstalled,
   windows,
   type Settings,
@@ -202,8 +203,8 @@ export function removeLegacyHost() {
  * never change opencode's config. Returns the shim and the version. From source (development), runs in place.
  * OPENCODE_BROWSER_PACKAGE installs a specific spec instead, for example a local tarball.
  */
-export async function installRuntime(): Promise<{ entry: string; version: string; waiting?: readonly string[] }> {
-  if (compiledBinary()) return installBinaryRuntime()
+export async function installRuntime(force = false): Promise<{ entry: string; version: string }> {
+  if (compiledBinary()) return installBinaryRuntime(force)
   // From a checkout, run the bundle `bun run build` wrote: Node can't run the TypeScript sources (they use
   // syntax type stripping doesn't cover), and the MCP server runs under Node.
   if (fromSource) {
@@ -213,6 +214,7 @@ export async function installRuntime(): Promise<{ entry: string; version: string
   }
   const spec = process.env.OPENCODE_BROWSER_PACKAGE
   const before = readCurrent(layout)
+  refuseFormatChange(before, opencodeBrowserVersion, false)
   // Already installed (install run again): keep it. Reinstalling would replace the files a running relay still loads.
   const existing = versionEntry(layout, opencodeBrowserVersion)
   const reuse =
@@ -234,11 +236,11 @@ export async function installRuntime(): Promise<{ entry: string; version: string
     failInstall(before, opencodeBrowserVersion, error as Error, spec ?? `${PACKAGE}@${opencodeBrowserVersion}`)
   }
   const version = path.relative(layout.versions, installed).split(path.sep)[0]!
-  const waiting = await switchInstalled(before, version)
+  await switchInstalled(before, version, { force })
   // Earlier versions installed one copy straight into runtime/; the shim replaces it.
   for (const legacy of ["node_modules", "package.json", "package-lock.json"])
     rmSync(path.join(files.runtime, legacy), { recursive: true, force: true })
-  return { entry: layout.shim, version, waiting }
+  return { entry: layout.shim, version }
 }
 
 /**

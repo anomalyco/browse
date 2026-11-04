@@ -157,11 +157,12 @@ export function updateState(layout: Layout, change: (state: AutoUpdateState) => 
 }
 
 /**
- * Records a version that didn't start (verifyStarts, or its relay after a switch): removed unless it's current, no
- * longer pending, and skipped until a newer one is published.
+ * Records a version that didn't start: no longer pending, and skipped until a newer one is published. `installed`: the
+ * copy that failed is the one in runtime/versions (a switch to it failed), which goes unless it's current; one that
+ * failed while installing never got there, and what's there may be another install's.
  */
-export function skipBroken(layout: Layout, version: string, message: string) {
-  if (readCurrent(layout)?.version !== version) rmSync(versionDirectory(layout, version), { recursive: true, force: true })
+export function skipBroken(layout: Layout, version: string, message: string, installed = false) {
+  if (installed && readCurrent(layout)?.version !== version) rmSync(versionDirectory(layout, version), { recursive: true, force: true })
   updateState(layout, ({ pending, ...state }) => ({
     ...state,
     ...(pending && pending !== version ? { pending } : {}),
@@ -593,8 +594,14 @@ export async function verifyStarts(entry: string, version: string, options: { re
     send({ id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "browse-verify", version } } })
     if (typeof (await reply(1))?.protocolVersion !== "string") throw problem(`didn't answer initialize within ${timeoutMs / 1000}s`)
     send({ method: "notifications/initialized" })
-    send({ id: 2, method: "tools/list" })
-    const tools = (await reply(2))?.tools
+    // It registers its tools just after answering initialize: ask until they're there.
+    let tools: unknown
+    for (let id = 2, deadline = Date.now() + timeoutMs; ; id++) {
+      send({ id, method: "tools/list" })
+      tools = (await reply(id))?.tools
+      if ((Array.isArray(tools) && tools.length > 0) || server.exited() || Date.now() > deadline) break
+      await sleep(200)
+    }
     if (!Array.isArray(tools) || tools.length === 0) throw problem("listed no tools")
   } finally {
     await mcp?.stop()

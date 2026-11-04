@@ -225,7 +225,7 @@ describe("the relay's updater", () => {
 describe("checking a version starts before switching to it", () => {
   // A stand-in CLI: `serve` answers /version as 1.0.1 on OPENCODE_BROWSER_PORT and records how it was started, and `mcp`
   // answers initialize and tools/list over stdio. `options` breaks one part of it.
-  const standIn = (mark: string, options: { readonly mcp?: "crash" | "no tools"; readonly busyOnce?: true } = {}) => `
+  const standIn = (mark: string, options: { readonly mcp?: "crash" | "no tools" | "tools late"; readonly busyOnce?: true } = {}) => `
 import http from "node:http"
 import fs from "node:fs"
 import { createInterface } from "node:readline"
@@ -245,7 +245,9 @@ if (process.argv[2] === "serve") {
   createInterface({ input: process.stdin }).on("line", (line) => {
     const message = JSON.parse(line)
     if (message.id === undefined) return
-    const result = message.method === "initialize" ? { protocolVersion: message.params.protocolVersion } : { tools: ${options.mcp === "no tools" ? "[]" : `[{ name: "execute" }]`} }
+    const listed = (globalThis.listed = (globalThis.listed ?? 0) + (message.method === "tools/list" ? 1 : 0))
+    const tools = ${options.mcp === "no tools" ? "[]" : options.mcp === "tools late" ? `listed > 1 ? [{ name: "execute" }] : []` : `[{ name: "execute" }]`}
+    const result = message.method === "initialize" ? { protocolVersion: message.params.protocolVersion } : { tools }
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\\n")
   })
 } else process.exit(2)
@@ -283,7 +285,13 @@ else throw new SyntaxError("The requested module '@effect/platform-node-shared' 
     fs.writeFileSync(versionEntry(layout, "1.0.1"), standIn(path.join(layout.root, "crash.jsonl"), { mcp: "crash" }))
     await expect(verifyStarts(versionEntry(layout, "1.0.1"), "1.0.1")).rejects.toThrow("1.0.1 didn't start: its MCP server exited (SyntaxError: The requested module '@effect/ai' does not provide an export named 'McpServer')")
     fs.writeFileSync(versionEntry(layout, "1.0.1"), standIn(path.join(layout.root, "empty.jsonl"), { mcp: "no tools" }))
-    await expect(verifyStarts(versionEntry(layout, "1.0.1"), "1.0.1")).rejects.toThrow("1.0.1 didn't start: its MCP server listed no tools")
+    await expect(verifyStarts(versionEntry(layout, "1.0.1"), "1.0.1", { timeoutMs: 1_000 })).rejects.toThrow("1.0.1 didn't start: its MCP server listed no tools")
+  })
+
+  test("asks for the MCP server's tools again when it hasn't registered them yet", async () => {
+    const layout = layoutWith(["1.0.1"])
+    fs.writeFileSync(versionEntry(layout, "1.0.1"), standIn(path.join(layout.root, "mark.jsonl"), { mcp: "tools late" }))
+    await verifyStarts(versionEntry(layout, "1.0.1"), "1.0.1")
   })
 
   test("tries once more on another port when something else took the spare one", async () => {
@@ -308,9 +316,14 @@ describe("a version that didn't start", () => {
     const layout = layoutWith(["0.0.1", "0.0.2"])
     writeCurrent(layout, { version: "0.0.1", channel: "latest" })
     updateState(layout, (state) => ({ ...state, checkedAt: Date.now(), latest: "0.0.2", integrity: "sha512-x", pending: "0.0.2" }))
+    // Failed while installing: what's in runtime/versions may be another install's good copy, and stays.
     skipBroken(layout, "0.0.2", "0.0.2 didn't start: SyntaxError: boom")
     expect(readState(layout)).toMatchObject({ skipped: "0.0.2", lastError: { version: "0.0.2", message: "0.0.2 didn't start: SyntaxError: boom" } })
     expect(readState(layout).pending).toBeUndefined()
+    expect(installed(layout)).toEqual(["0.0.1", "0.0.2"])
+    // A switch to the copy in runtime/versions failed: it goes, unless it's current.
+    skipBroken(layout, "0.0.1", "0.0.1 didn't start", true)
+    skipBroken(layout, "0.0.2", "0.0.2 didn't start", true)
     expect(installed(layout)).toEqual(["0.0.1"])
     const status = autoUpdateStatus({ layout, env: {}, runtime: { layout, version: "0.0.1", current: readCurrent(layout)! } })
     expect(describeAutoUpdate(status)).toContain("skipping 0.0.2 (it didn't start; `update` installs it again)")

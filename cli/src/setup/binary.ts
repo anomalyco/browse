@@ -10,25 +10,26 @@ import {
   versionEntry,
 } from "../update/auto-update.ts"
 import { opencodeBrowserVersion } from "../version.ts"
-import { configRoot, failInstall, home, layout, log, readFileOr, switchInstalled, tilde } from "./environment.ts"
+import { configRoot, failInstall, home, layout, log, readFileOr, refuseFormatChange, switchInstalled, tilde } from "./environment.ts"
 
 /**
  * Records this executable as the one agents run (current.json's `binary`) and keeps a copy of it as its version in
  * runtime/versions, which rollback and the MCP supervisor use. Returns the executable itself, which stays where it is;
  * updates replace it by rename.
  */
-export async function installBinaryRuntime(): Promise<{ entry: string; version: string; waiting: readonly string[] }> {
+export async function installBinaryRuntime(force = false): Promise<{ entry: string; version: string }> {
   const binary = process.execPath
   const version = opencodeBrowserVersion
   const before = readCurrent(layout)
   const existing = versionEntry(layout, version)
+  refuseFormatChange(before, version, true)
   try {
     if (!sameFile(existing, binary)) await installVersion({ layout, version, runningBinary: binary })
   } catch (error) {
     failInstall(before, version, error as Error)
   }
-  const waiting = await switchInstalled(before, version, binary)
-  return { entry: binary, version, waiting }
+  await switchInstalled(before, version, { binary, force })
+  return { entry: binary, version }
 }
 
 /**

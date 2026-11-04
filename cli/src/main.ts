@@ -46,6 +46,8 @@ if (command === "--version" || command === "-v") {
     --wait-seconds <seconds>     How long to wait for a connection (default 180 in a terminal, 90 otherwise)
     -a, --agent <names...>       Configure named agents (repeatable); '*' or --all-agents selects every supported agent
     -y, --yes                    Skip the picker; use the calling agent or detected agents
+    --force                      Replacing another version: end a capture, recording or raw CDP client that
+                                 keeps the relay from restarting
   extension                      Show where to get the extension (the unpacked folder of a checkout or a dev
                                  install, or the store page)
   pair [--wait-seconds <seconds>] Start the relay, print a one-time code (valid 10 minutes) and wait for the

@@ -92,6 +92,17 @@ exec "${compiled("0.0.2")}" "$@"
     expect(readCurrent(layout)).toMatchObject({ version: "0.0.1", binary })
   }, 120_000)
 
+  test("an npm `install` of the same version stops, leaving the executable's files, which both formats keep in one folder", async () => {
+    const { layout, binary } = install("same-version")
+    const npx = await npxPackage(root, "0.0.1", "")
+    const env = { PATH: process.env.PATH ?? "", HOME: layout.root, OPENCODE_BROWSER_HOME: layout.root, OPENCODE_BROWSER_PORT: String(await freePort()) }
+    const result = spawnSync("node", [npx, "install", "--yes", "--no-wait", "--no-open"], { env, encoding: "utf8", timeout: 120_000 })
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain("browse 0.0.1 is already installed here as an executable.")
+    expect(fs.existsSync(versionEntry(layout, "0.0.1", true))).toBe(true)
+    expect(readCurrent(layout)).toMatchObject({ version: "0.0.1", binary })
+  }, 60_000)
+
   test("an npm `install` over it whose relay crashes switches through the same check and restore, back to the executable", async () => {
     const { layout, binary } = install("cross-format")
     const port = await freePort()

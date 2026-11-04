@@ -27,6 +27,7 @@ let registry: ReturnType<typeof Bun.serve> | undefined
 let relay: ChildProcess | undefined
 const started: number[] = []
 let npx = ""
+let npxGood = ""
 
 /** One installed version: the bundle, its package.json, and the CLI's dependencies linked beside it. */
 async function installFake(target: Layout, version: string) {
@@ -135,6 +136,7 @@ beforeAll(async () => {
   await packBroken()
   // 0.0.8, run from npx for `install`: it passes the check, and its managed relay crashes.
   npx = await npxPackage(root, "0.0.8", crash(`process.env.OPENCODE_BROWSER_MANAGED_RELAY === "1"`))
+  npxGood = await npxPackage(root, "0.0.9", "")
   writeCurrent(layout, { version: "0.0.1", channel: "latest" })
   writeShim(layout)
   relay = spawn(node, [versionEntry(layout, "0.0.1"), "serve"], {
@@ -272,6 +274,27 @@ describe("auto-update in a running relay", () => {
     // Stopped before agents' configs and the settings it would have written.
     expect(fs.existsSync(settings) ? fs.readFileSync(settings, "utf8") : undefined).toBe(settingsBefore)
     expect(result.stdout).not.toContain("installed")
+  }, 150_000)
+
+  test("`install` while the relay is busy stops, leaving the old version, agents and settings as they were", async () => {
+    const before = await version()
+    const settings = path.join(root, "settings.json")
+    const settingsBefore = fs.existsSync(settings) ? fs.readFileSync(settings, "utf8") : undefined
+    // A raw CDP client keeps the relay busy, so it refuses to drain.
+    const busy = await cdp()
+    try {
+      const result = spawnSync(node, [npxGood, "install", "--yes", "--no-wait", "--no-open"], { env: env(), encoding: "utf8", timeout: 120_000 })
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain(`browse ${before.version} keeps running: the relay didn't restart`)
+      expect(result.stderr).toContain("install` again (add --force to end what's blocking it).")
+      expect(result.stdout).not.toContain("installed")
+      expect(await version()).toMatchObject({ version: before.version, pid: before.pid })
+      expect(readCurrent(layout)?.version).toBe(before.version)
+      expect(readState(layout).pending).not.toBe("0.0.9")
+      expect(fs.existsSync(settings) ? fs.readFileSync(settings, "utf8") : undefined).toBe(settingsBefore)
+    } finally {
+      busy.close()
+    }
   }, 150_000)
 })
 
