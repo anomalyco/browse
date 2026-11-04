@@ -3,10 +3,8 @@
 // Keep it in step with cli/src/protocol.ts and cli/src/recording-protocol.ts.
 
 type JsonPrimitive = string | number | boolean | null
-export type JsonValue = JsonPrimitive | JsonValue[] | { readonly [key: string]: JsonValue }
+type JsonValue = JsonPrimitive | JsonValue[] | { readonly [key: string]: JsonValue }
 export type JsonObject = { readonly [key: string]: JsonValue }
-
-export const extensionProtocolVersion = 2
 
 /** The relay's default port (cli/src/relay-helpers.ts defaultPort). */
 export const defaultRelayPort = 19988
@@ -28,7 +26,7 @@ export type PageStatus = {
   readonly recording?: boolean
 }
 
-export const commandMethods = [
+const commandMethods = [
   "ping",
   "debugger.attach",
   "debugger.detach",

@@ -8,16 +8,15 @@
 import { Effect } from "effect"
 import { existsSync } from "node:fs"
 import {
-  autoUpdateOverride,
   channelOf,
   compareVersions,
+  effectiveMode,
   UPDATE_VERSION,
   fetchPublished,
   installVersion,
   npmRuntime,
   pruneVersions,
   readCurrent,
-  readState,
   registryUrl,
   runtimeLayout,
   switchVersion,
@@ -139,7 +138,7 @@ export async function runNpmUpdate(args: readonly string[], layout?: Layout) {
   const current = readCurrent(lay)!
   const refused = await switchTo(lay, published.version, { previous: current.version, force: args.includes("--force") })
   if (refused) {
-    const automatic = (autoUpdateOverride() ?? readState(lay).mode ?? "on") === "on"
+    const automatic = effectiveMode(lay) === "on"
     log(`! Installed ${published.version}, but the relay didn't restart (${refused}).`)
     log(automatic ? "  It switches to the new version by itself once no agent is using the browser." : `  When no agent is using the browser, run \`${cliCommand("update")}\` again.`)
     return true

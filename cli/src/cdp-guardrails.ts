@@ -137,7 +137,7 @@ function guardStorageAccess(context: GuardContext): string | null {
         return host === undefined || !hosts.includes(host)
       })
   if (outside === undefined) return null
-  return `Browse blocked ${context.method}: site storage can only be used for the hosts of this session's attached pages (${hosts.length > 0 ? hosts.join(", ") : "none"}), not ${outside}. Set ${allowAllStorageEnvironmentVariable}=1 on the relay to allow it.`
+  return `Browse blocked ${context.method}: site storage can only be used for the hosts of this session's attached pages (${formatAllowedHosts(hosts)}), not ${outside}. Set ${allowAllStorageEnvironmentVariable}=1 on the relay to allow it.`
 }
 
 /** Schemes agents can't open: browser-internal pages, other extensions, DevTools, and local files. */
@@ -197,6 +197,10 @@ function cookieDomainOf(cookie: unknown): string | undefined {
   return typeof domain === "string" ? domain : undefined
 }
 
+function formatAllowedHosts(hosts: readonly string[]): string {
+  return hosts.length > 0 ? hosts.join(", ") : "none"
+}
+
 function guardCookieWrite(context: GuardContext): string | null {
   const cookies = context.method === "Network.setCookie"
     ? [context.params]
@@ -205,7 +209,7 @@ function guardCookieWrite(context: GuardContext): string | null {
   for (const cookie of cookies) {
     const domain = cookieDomainOf(cookie)
     if (!domain || !hosts.some((host) => cookieAppliesToHost(domain, host))) {
-      return `Browse blocked ${context.method}: cookies can only be set for the hosts of this session's attached pages (${hosts.length > 0 ? hosts.join(", ") : "none"}), not ${domain ?? "a cookie without a domain or url"}. Set ${allowAllCookiesEnvironmentVariable}=1 on the relay to allow it.`
+      return `Browse blocked ${context.method}: cookies can only be set for the hosts of this session's attached pages (${formatAllowedHosts(hosts)}), not ${domain ?? "a cookie without a domain or url"}. Set ${allowAllCookiesEnvironmentVariable}=1 on the relay to allow it.`
     }
   }
   return null
@@ -244,7 +248,7 @@ export function guardCdpMethod(context: GuardContext): string | null {
     const hosts = pageHosts(context.pageUrls?.() ?? [])
     const host = typeof url === "string" ? pageHosts([url])[0] : undefined
     if (host === undefined || !hosts.includes(host)) {
-      return `Browse blocked Network.loadNetworkResource: it loads URLs with the user's credentials outside the page's same-origin policy, so only the hosts of this session's attached pages (${hosts.length > 0 ? hosts.join(", ") : "none"}) are allowed. Set ${allowAllStorageEnvironmentVariable}=1 on the relay to allow it.`
+      return `Browse blocked Network.loadNetworkResource: it loads URLs with the user's credentials outside the page's same-origin policy, so only the hosts of this session's attached pages (${formatAllowedHosts(hosts)}) are allowed. Set ${allowAllStorageEnvironmentVariable}=1 on the relay to allow it.`
     }
   }
   if (context.readOnly && readOnlyBlockedPrefixes.some((prefix) => context.method.startsWith(prefix))) {

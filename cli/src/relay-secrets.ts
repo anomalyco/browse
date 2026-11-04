@@ -6,6 +6,7 @@
 import crypto from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
+import { ensurePrivateDirectorySync } from "./fs-durability.ts"
 import { dataRoot } from "./paths.ts"
 
 export const relayTokenHeader = "authorization"
@@ -73,6 +74,5 @@ function readSecret(file: string): string | undefined {
 
 /** Creates the data root (or tightens it) so only this user can read it. */
 export function ensurePrivateDirectory(directory = dataRoot()): void {
-  fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
-  if (process.platform !== "win32") fs.chmodSync(directory, 0o700)
+  ensurePrivateDirectorySync(directory)
 }

@@ -40,9 +40,11 @@ export class CdpRouter<Client extends object> {
       clientSessionId,
       targetOwnerSessionId: target.opencodeBrowserSessionId,
       targetOwner: target.owner,
-      clientHasOwnedTarget: clientSessionId !== undefined && this.registry
-        .listRootTargets()
-        .some((candidate) => candidate.opencodeBrowserSessionId === clientSessionId),
+      clientHasOwnedTarget:
+        clientSessionId !== undefined &&
+        target.opencodeBrowserSessionId === undefined &&
+        target.owner !== "user" &&
+        this.registry.listRootTargets().some((candidate) => candidate.opencodeBrowserSessionId === clientSessionId),
     })
   }
 

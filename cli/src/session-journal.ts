@@ -1,6 +1,5 @@
 import { dataRoot } from "./paths.ts"
 import fs from "node:fs"
-import os from "node:os"
 import path from "node:path"
 import { Option, Schema } from "effect"
 import { isNodeError } from "./fs-durability.ts"

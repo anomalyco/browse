@@ -45,8 +45,6 @@ export function createAgentRelayLog() {
   }
 }
 
-export type AgentRelayLog = ReturnType<typeof createAgentRelayLog>
-
 /** One line per entry: an ISO time, the event, then its fields as key=value. */
 export function formatAgentRelayLog(entries: AgentRelayLogEntry[]) {
   return entries

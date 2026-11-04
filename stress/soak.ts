@@ -116,7 +116,7 @@ async function workerLoop(worker: Worker) {
 }
 
 // --- chaos --------------------------------------------------------------------------------------------------------
-const probe = { client: newClient() }
+let probeClient = newClient()
 
 /** Recovered: an execute through a fresh MCP session works again (it restarts the relay when needed). */
 async function waitRecovered(since: number): Promise<{ recovered: boolean; recoveryMs: number; attempts: number }> {
@@ -124,9 +124,9 @@ async function waitRecovered(since: number): Promise<{ recovered: boolean; recov
   while (Date.now() - since < RECOVERY_BOUND_MS) {
     attempts++
     try {
-      if (probe.client.exited !== undefined) { probe.client = newClient(); await probe.client.initialize() }
-      const result = await probe.client.call("execute", { session: "soak-probe", code: "return 1" }, 30_000)
-      if (result.isError && /Session not found/.test(result.text)) { await probe.client.call("session_new", { id: "soak-probe" }, 30_000); continue }
+      if (probeClient.exited !== undefined) { probeClient = newClient(); await probeClient.initialize() }
+      const result = await probeClient.call("execute", { session: "soak-probe", code: "return 1" }, 30_000)
+      if (result.isError && /Session not found/.test(result.text)) { await probeClient.call("session_new", { id: "soak-probe" }, 30_000); continue }
       if (!result.isError && result.data?.value === 1) return { recovered: true, recoveryMs: Date.now() - since, attempts }
     } catch {}
     await sleep(1000)
@@ -256,8 +256,8 @@ process.on("SIGINT", () => { stopping = true; cleanup(); process.exit(130) })
 process.on("SIGTERM", () => { stopping = true; cleanup(); process.exit(143) })
 
 console.log(`soak: ${WORKERS} workers, ${values.minutes} min, chaos every ~${values["chaos-every"]} s (${CHAOS.join(", ")}), results ${dir}`)
-await probe.client.initialize()
-await probe.client.call("session_new", { id: "soak-probe" })
+await probeClient.initialize()
+await probeClient.call("session_new", { id: "soak-probe" })
 for (let i = 0; i < WORKERS; i++) {
   const client = newClient()
   await client.initialize()
@@ -279,8 +279,8 @@ for (const w of workers) for (const left of w.leftover.splice(0)) await w.client
 await sleep(5000)
 const finalSample = await new Sampler().sample(await cdp().catch(() => undefined)).catch(() => ({} as Sample))
 for (const w of workers) await w.client.close()
-await probe.client.call("session_delete", { id: "soak-probe" }).catch(() => undefined)
-await probe.client.close()
+await probeClient.call("session_delete", { id: "soak-probe" }).catch(() => undefined)
+await probeClient.close()
 cdpConnection?.close()
 await fx.close()
 

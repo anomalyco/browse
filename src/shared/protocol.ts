@@ -95,6 +95,8 @@ export const AGENT_DIAGNOSTICS = "agents.diagnostics"
 
 /** chrome.storage.local, set on the status page: where agents open new tabs, "current" (default) or "separate". */
 export const AGENT_WINDOW_KEY = "agentTabsWindow"
+export type AgentWindowPlacement = "current" | "separate"
+export const agentWindowPlacement = (value: unknown): AgentWindowPlacement => (value === "separate" ? "separate" : "current")
 
 // The status page's other settings, all in chrome.storage.local. Each applies from the moment it changes (new tabs,
 // the next cleanup, the next handoff or input); a missing or unknown value reads as the default.
@@ -107,6 +109,8 @@ export const agentGrouping = (value: unknown): AgentGrouping => (value === "shar
 /** Minutes an agent tab may sit untouched before it closes; 0 never closes them automatically. */
 export const IDLE_MINUTES_KEY = "tabCleanupIdleMinutes"
 export const DEFAULT_IDLE_MINUTES = 10
+export const idleMinutesSetting = (value: unknown): number =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : DEFAULT_IDLE_MINUTES
 
 /** Whether the relay draws the agent (ghost) cursor on agent tabs outside recordings: "off" (default) or "always". */
 export const AGENT_CURSOR_KEY = "agentCursor"

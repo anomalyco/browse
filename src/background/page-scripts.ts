@@ -10,7 +10,7 @@ const FILE = "content.js"
 const OWNER = "relay"
 
 /** Injects the page-status script into the tab's top frame; restricted pages (chrome://, the Web Store) refuse it. */
-export async function inject(tabId: number) {
+async function inject(tabId: number) {
   await chrome.scripting
     .executeScript({ target: { tabId }, files: [FILE], injectImmediately: true })
     .catch(() => undefined)

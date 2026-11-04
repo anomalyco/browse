@@ -281,7 +281,6 @@ async function clickHandle(handle: ElementHandle): Promise<void> {
   })
 }
 
-/** After a submit or click: until the URL changes, the field goes away, or `timeoutMs`. */
 /** A cheap fingerprint of a frame's document: its inputs, frames and text length. */
 async function domSignature(frame: Frame): Promise<string> {
   return await frame.evaluate(() => `${document.querySelectorAll("input, iframe, [role='alert']").length}:${document.body?.innerText.length ?? 0}`).catch(() => "")
@@ -317,7 +316,7 @@ export async function waitForProgress(page: Page, field: ElementHandle | undefin
  * that navigated away is already empty.
  */
 export async function clearSecretInputs(frames: Iterable<Frame>, fields: readonly ElementHandle[] = []): Promise<void> {
-  const clearScript = (nodes: readonly Element[]) => {
+  const clearScript = () => {
     const own = (element: Element) => {
       const input = element as HTMLInputElement
       if (!(input instanceof HTMLInputElement) || !input.value) return
@@ -327,7 +326,7 @@ export async function clearSecretInputs(frames: Iterable<Frame>, fields: readonl
       input.dispatchEvent(new Event("input", { bubbles: true }))
       input.dispatchEvent(new Event("change", { bubbles: true }))
     }
-    const all: Element[] = [...nodes]
+    const all: Element[] = []
     const walk = (root: Document | ShadowRoot) => {
       for (const element of Array.from(root.querySelectorAll("input"))) {
         const input = element as HTMLInputElement
@@ -349,7 +348,7 @@ export async function clearSecretInputs(frames: Iterable<Frame>, fields: readonl
   }
   for (const frame of new Set(frames)) {
     if (frame.isDetached()) continue
-    await frame.evaluate(clearScript, []).catch(() => {})
+    await frame.evaluate(clearScript).catch(() => {})
   }
 }
 

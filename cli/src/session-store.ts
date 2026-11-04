@@ -1,7 +1,6 @@
 import { defaultPort } from "./relay-helpers.ts"
 import { dataRoot } from "./paths.ts"
 import { Context, Effect, FileSystem, Layer, Option, Path, Predicate, Schema } from "effect"
-import os from "node:os"
 import { endpointForPort, portConfig } from "./relay-client.ts"
 
 /**
