@@ -46,8 +46,9 @@ item="publishers/$(jq -rn --arg v "$CWS_PUBLISHER_ID" '$v | @uri')/items/$(jq -r
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-# Credentials go to curl through files, never on its command line.
-jq -rn --arg id "$CWS_CLIENT_ID" --arg secret "$CWS_CLIENT_SECRET" --arg refresh "$CWS_REFRESH_TOKEN" \
+# Credentials go to curl through files, never on its command line. -j: no trailing newline, or Google reads the last
+# field as "refresh_token\n" and answers unsupported_grant_type.
+jq -jn --arg id "$CWS_CLIENT_ID" --arg secret "$CWS_CLIENT_SECRET" --arg refresh "$CWS_REFRESH_TOKEN" \
   '"client_id=\($id | @uri)&client_secret=\($secret | @uri)&refresh_token=\($refresh | @uri)&grant_type=refresh_token"' > "$work/form"
 status=$(curl -sS -o "$work/token.json" -w '%{http_code}' -X POST "$token_url" \
   -H "Content-Type: application/x-www-form-urlencoded" --data-binary "@$work/form")
