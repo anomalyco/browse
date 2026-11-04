@@ -79,6 +79,7 @@ if (import.meta.main) {
             }))
           },
         },
+        patchrightFiles(),
       ],
       compile: {
         autoloadBunfig: false,
@@ -122,6 +123,47 @@ if (import.meta.main) {
       ) + "\n",
     )
     console.log(`${name}: ${path.relative(here, binary)} (${(Bun.file(binary).size / 1024 / 1024).toFixed(1)} MB)`)
+  }
+}
+
+/**
+ * patchright-core reads a few of its own files at run time from a path built on __dirname, which a compiled binary
+ * bakes in as the build machine's node_modules (so it only worked where it was built). The ones browse reaches are
+ * written into the bundle instead: package.json and browsers.json (read when the module loads) and the WebP encoder
+ * (screenshots). The rest browse never runs and is left as it is: browser downloads and install
+ * (lib/entry/oopBrowserDownload.js, the browsers.json registry), the app icon of launchApp, the dashboard and skills
+ * the CLI offers agents (lib/tools, lib/vite/dashboard), the Electron loader, the recorder and the trace viewer
+ * (lib/vite/{recorder,traceViewer}, trace-viewer/), its own `run-driver` (cli.js), and xdg-open (utils bundle).
+ */
+function patchrightFiles(): Bun.BunPlugin {
+  return {
+    name: "patchright-files",
+    setup(build) {
+      const root = path.dirname(Bun.resolveSync("patchright-core/package.json", here))
+      const json = (file: string) => readFile(path.join(root, file), "utf8").then((text) => JSON.stringify(JSON.parse(text)))
+      // execute/patchright-tuning.ts reaches patchright-core's internals through createRequire(import.meta.url), which
+      // a compiled binary resolves against its bundle path (/$bunfs/root, no node_modules); a plain require is resolved
+      // while bundling, so the module it names is in the executable. The npm/Node build keeps its runtime require.
+      build.onLoad({ filter: /[\\/]src[\\/]execute[\\/]patchright-tuning\.ts$/ }, async (args) => {
+        const text = await readFile(args.path, "utf8")
+        const contents = text.replaceAll("createRequire(import.meta.url)(", "require(")
+        if (contents === text && text.includes("createRequire("))
+          throw new Error("patchright-tuning.ts no longer calls createRequire(import.meta.url) directly; check how it loads patchright-core")
+        return { contents, loader: "ts" }
+      })
+      build.onLoad({ filter: /[\\/]patchright-core[\\/]lib[\\/][^\\/]+\.js$/ }, async (args) => {
+        let text = await readFile(args.path, "utf8")
+        const packageJson = await json("package.json")
+        const browsersJson = await json("browsers.json")
+        text = text.replace(/require\(([\w$]+)\.default\.join\(packageRoot, "package\.json"\)\)/g, () => `(${packageJson})`)
+        text = text.replace(/require\(([\w$]+)\.default\.join\(packageRoot, "browsers\.json"\)\)/g, () => `(${browsersJson})`)
+        if (text.includes('"webp_codec.wasm"')) {
+          const wasm = (await readFile(path.join(root, "lib", "webp_codec.wasm"))).toString("base64")
+          text = text.replace(/([\w$]+)\.default\.readFileSync\(([\w$]+)\.default\.join\(__dirname, "webp_codec\.wasm"\)\)/g, () => `Buffer.from("${wasm}", "base64")`)
+        }
+        return { contents: text, loader: "js" }
+      })
+    },
   }
 }
 

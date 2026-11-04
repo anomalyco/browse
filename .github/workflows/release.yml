@@ -247,6 +247,56 @@ jobs:
             echo "$target: $actual"
           done
 
+      # The linux-x64 binary as a user gets it: cli/node_modules is moved out of the way, so a file it reads at run time
+      # from a path built on __dirname (the build machine's node_modules, baked into the executable) fails here too.
+      # `browse serve` is the relay install and the MCP server start; `browse mcp` serves the tools. Put back for the
+      # upload.
+      - name: Smoke test the relay and MCP server without node_modules
+        run: |
+          set -eu
+          dir=$(mktemp -d)
+          tar -xzf "$RUNNER_TEMP/binaries/opencode-browse-linux-x64-$VERSION.tgz" -C "$dir"
+          binary="$dir/package/bin/browse"
+          home=$(mktemp -d)
+          port=29988
+          relay=
+          restore() {
+            if [ -n "$relay" ]; then kill "$relay" 2>/dev/null || true; fi
+            if [ -d cli/node_modules.away ]; then mv cli/node_modules.away cli/node_modules; fi
+          }
+          trap restore EXIT
+          mv cli/node_modules cli/node_modules.away
+          env -i HOME="$home" PATH=/usr/bin:/bin OPENCODE_BROWSER_PORT="$port" OPENCODE_BROWSER_MANAGED_RELAY=1 \
+            "$binary" serve > "$RUNNER_TEMP/relay.log" 2>&1 &
+          relay=$!
+          up=
+          for _ in $(seq 1 60); do
+            if curl -sf --max-time 2 "http://127.0.0.1:$port/version" > "$RUNNER_TEMP/version.json"; then up=1; break; fi
+            kill -0 "$relay" 2>/dev/null || break
+            sleep 0.5
+          done
+          if [ -z "$up" ]; then
+            cat "$RUNNER_TEMP/relay.log"
+            echo "::error::The relay from the linux-x64 binary did not answer /version without node_modules."
+            exit 1
+          fi
+          echo "relay: $(cat "$RUNNER_TEMP/version.json")"
+          # Closing its stdin interrupts the MCP server (Effect exits 130), which isn't a failure; the tools are the test.
+          {
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release-smoke","version":"0"}}}'
+            sleep 2
+            printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+            sleep 5
+          } | env -i HOME="$home" PATH=/usr/bin:/bin OPENCODE_BROWSER_PORT="$port" timeout 60 "$binary" mcp > "$RUNNER_TEMP/mcp.json" || true
+          tools=$(grep -o '"name":"[a-z0-9_-]*"' "$RUNNER_TEMP/mcp.json" | wc -l)
+          if [ "$tools" -lt 1 ]; then
+            cat "$RUNNER_TEMP/mcp.json"
+            echo "::error::The linux-x64 binary's MCP server listed no tools without node_modules."
+            exit 1
+          fi
+          echo "mcp: $tools tools"
+
       - id: upload
         name: Upload
         uses: ./.github/release/upload
