@@ -40,7 +40,7 @@ export function selectTarget<T>({
     if (matches.length === 0) {
       throw new TargetSelectionError({
         reason: "not-found",
-        message: `No existing attached page URL includes ${selection.urlIncludes}. Target selectors do not navigate or open pages: use page.goto() in the session page, or attach the intended user tab with the Browse toolbar first.`,
+        message: `No existing attached page URL includes ${selection.urlIncludes}. Target selectors do not navigate or open pages: use page.goto() in the session page, or attach the intended user tab with the browse toolbar first.`,
       })
     }
     if (matches.length > 1) {
@@ -68,7 +68,7 @@ export function selectTarget<T>({
   if (targets.length === 0) {
     throw new TargetSelectionError({
       reason: "not-found",
-      message: "No attached pages available. Attach the intended user tab with the Browse toolbar first.",
+      message: "No attached pages available. Attach the intended user tab with the browse toolbar first.",
     })
   }
   if (targets.length > 1) {

@@ -50,7 +50,7 @@ describe("selectTarget", () => {
   test("reports no attached pages", () => {
     const error = failure(() => select([], {}))
     expect(error.reason).toBe("not-found")
-    expect(error.message).toBe("No attached pages available. Attach the intended user tab with the Browse toolbar first.")
+    expect(error.message).toBe("No attached pages available. Attach the intended user tab with the browse toolbar first.")
   })
 
   test("reports ambiguity with indexes", () => {

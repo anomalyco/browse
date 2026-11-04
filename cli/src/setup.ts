@@ -1,4 +1,4 @@
-// Setup for Browse, without changing opencode itself:
+// Setup for browse, without changing opencode itself:
 //   install    install the runtime, add the browse MCP server to opencode's config, then check which browsers have the
 //              extension. A stable npm install gets it from the Chrome Web Store item: when no browser has it, install
 //              opens that item's page; when one has it, install opens its status page with a one-time pairing code in
@@ -14,17 +14,19 @@
 // remove those leftovers.
 import { mkdirSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
+import * as clack from "@clack/prompts"
 import {
   agentLabels,
   agentLocations,
   callingAgent,
   editAgentConfig,
+  type AgentName,
   type AgentReceipt,
 } from "./setup/agent-config.ts"
 import { agentFlags, agentPlan, pickAgents } from "./setup/agent-picker.ts"
 import { autoUpdateStatus, describeAutoUpdate } from "./update/auto-update.ts"
 import { mintPairingCode, pairingCodeKey, pendingPairingCodeKeys } from "./relay/browser-pairing.ts"
-import { cliCommand, installCommand, oldStoreMarker } from "./paths.ts"
+import { cliCommand, compiledBinary, entryCommand, installCommand, oldStoreMarker, scriptEntry } from "./paths.ts"
 import {
   extensionProtocolAdvice,
   extensionProtocolSkew,
@@ -71,9 +73,11 @@ import {
   manualPair,
   MCP_NAME,
   pairedOfflineMessage,
+  rail,
   readJson,
   STORE_IDS,
   STORE_URL,
+  tilde,
   unpackedFolder,
   type Settings,
 } from "./setup/environment.ts"
@@ -89,6 +93,7 @@ import {
   installedRuntime,
   installRuntime,
   legacyBrowserControl,
+  manualMcpEntry,
   mcpServers,
   relayNotRestarted,
   removeLegacyHost,
@@ -96,6 +101,8 @@ import {
   restartOutdatedRelay,
   type Servers,
 } from "./setup/mcp.ts"
+import { addToPath } from "./setup/binary.ts"
+import { installRemote, remoteRelayAddresses, remoteRelayLines } from "./setup/remote.ts"
 
 export {
   configureMcp,
@@ -104,8 +111,11 @@ export {
   installedRuntime,
   installWaitTimeout,
   locateExtension,
+  manualMcpEntry,
   pairStoreExtension,
   relayNotRestarted,
+  remoteRelayAddresses,
+  remoteRelayLines,
   removeMcp,
   waitForExtension,
   type Browser,
@@ -120,21 +130,54 @@ export {
 
 /** The MCP server and relay run under the Node.js that runs install, so it must be one the package supports. */
 function checkNode() {
+  // A binary install brings its own runtime.
+  if (compiledBinary()) return
   // `bun run` stands in a bun shim for a missing node.
   if (process.versions.bun)
     fail(
-      "Browse runs on Node.js 22.19 or newer, but this ran under Bun (`bun run` uses Bun when `node` isn't on PATH). Install Node.js from https://nodejs.org, then run setup again.",
+      "browse runs on Node.js 22.19 or newer, but this ran under Bun (`bun run` uses Bun when `node` isn't on PATH). Install Node.js from https://nodejs.org, then run setup again.",
     )
   const [major = 0, minor = 0] = process.versions.node.split(".").map(Number)
   if (major < 22 || (major === 22 && minor < 19))
     fail(
-      `Browse needs Node.js 22.19 or newer; this is ${process.version} (${process.execPath}). Update Node.js (https://nodejs.org), then run setup again.`,
+      `browse needs Node.js 22.19 or newer; this is ${process.version} (${process.execPath}). Update Node.js (https://nodejs.org), then run setup again.`,
     )
 }
 
 async function install(args: string[]) {
-  checkNode()
   const tty = !!(process.stdin.isTTY && process.stdout.isTTY)
+  const caller = callingAgent(process.env)
+  rail.active = tty && !caller
+  if (rail.active) clack.intro("browse")
+  else if (caller) log(`${agentLabels[caller]} is running this, so browse is set up for ${agentLabels[caller]}.`)
+  await installSteps(args, tty, caller)
+  if (!rail.active) return
+  rail.waiting?.stop()
+  clack.outro(
+    process.exitCode
+      ? "browse isn't fully set up yet. Fix the steps above, then run browse install again."
+      : byHand
+        ? "Done. Add the MCP server above to your agent, restart it, then ask it to open a page."
+        : "Done. Restart your agents, then ask one to open a page.",
+  )
+}
+
+/** Set when no agent was picked (`--agent none`, or nothing ticked): the MCP entry is then the step, not an aside. */
+let byHand = false
+
+function showManualMcp(command: readonly string[], caller: AgentName | undefined) {
+  const json = manualMcpEntry(command)
+  if (rail.active) return clack.note(json, "Any agent: add browse as an MCP server")
+  const intro = byHand
+    ? "Add browse to your agent as an MCP server (stdio):"
+    : caller
+      ? "Using another agent too? Add browse to it as an MCP server (stdio):"
+      : "Agent: if you weren't set up above, add browse to your own MCP config (stdio):"
+  log(`\n${intro}\n${json.split("\n").map((line) => `  ${line}`).join("\n")}\n`)
+}
+
+async function installSteps(args: string[], tty: boolean, caller: AgentName | undefined) {
+  checkNode()
   const timeoutMs = installWaitTimeout(args, tty)
   let flags: ReturnType<typeof agentFlags>
   try {
@@ -143,7 +186,6 @@ async function install(args: string[]) {
     fail((error as Error).message)
   }
   const opencode = findOpencode(args)
-  const caller = callingAgent(process.env)
   const locations = agentLocations(home, configRoot, findOnPath, configFile(), opencode)
   const previous = readJson<Settings>(files.settings)
   const remembered =
@@ -152,15 +194,23 @@ async function install(args: string[]) {
       ? locations.filter((a) => a.installed && !previous.declinedAgents!.includes(a.name)).map((a) => a.name)
       : undefined)
   const plan = agentPlan(locations, flags, tty, caller, remembered)
-  const selected = plan.picker ? await pickAgents(locations, plan.selected) : plan.selected
+
+  mkdirSync(files.dir, { recursive: true })
+  const { entry, version } = await installRuntime()
+  log(`✓ browse ${version} installed${fromSource ? " (from source)" : ""}`)
+  const onPath = args.includes("--no-modify-path") ? undefined : addToPath()
+  if (onPath) log(`✓ Added browse to your PATH (${tilde(onPath)}). Open a new terminal to use it.`)
+
+  // First the entry for any agent, then the agents install can set up itself: nobody is stuck if theirs isn't found.
+  const anyFound = locations.some((a) => a.installed)
+  byHand = plan.picker ? !anyFound : plan.selected.length === 0
+  showManualMcp(entryCommand(entry), caller)
+  const selected = plan.picker ? (anyFound ? await pickAgents(locations, plan.selected) : []) : plan.selected
   if (!selected) {
     process.exitCode = 130
     return
   }
-
-  mkdirSync(files.dir, { recursive: true })
-  const { entry, version } = await installRuntime()
-  log(`✓ Browse ${version} installed${fromSource ? " (from source)" : ""}`)
+  if (plan.picker && anyFound) byHand = selected.length === 0
   const agents = previous?.agents ?? []
   const opencodeConfigs = previous?.opencodeConfigs ?? (previous?.entry ? [configFile()] : [])
   const selectedAgents = plan.picker ? selected : remembered
@@ -183,11 +233,13 @@ async function install(args: string[]) {
   save()
   if (removeLegacyHost()) log("✓ Removed the native messaging host of an earlier version")
 
-  const node = process.execPath
+  // An npm or checkout install runs the MCP server under this Node; a binary install's executable runs by itself.
+  const node = scriptEntry(entry) ? process.execPath : undefined
   for (const agent of locations) {
+    const label = agentLabels[agent.name]
     if (!selected.includes(agent.name)) {
       if (!plan.picker && agent.installed && !flags.requested.length)
-        log(`To add ${agentLabels[agent.name]}: ${cliCommand(`install --agent ${agent.name}`)}`)
+        log(`To add ${label} too: ${cliCommand(`install --agent ${agent.name}`)}`)
       continue
     }
     if (agent.name === "opencode") {
@@ -198,14 +250,24 @@ async function install(args: string[]) {
       }
       if (!mcp) process.exitCode = 1
       log(
-        mcp
-          ? `✓ MCP server ${mcp} (OpenCode)`
-          : `! OpenCode already has a different server named browse in ${agent.file}; left unchanged.`,
+        !mcp
+          ? `! ${label} already has a different server named browse in ${tilde(agent.file)}; left it unchanged.`
+          : mcp.includes("up to date")
+            ? `✓ ${label} already has browse`
+            : mcp.includes("added")
+              ? `✓ Added browse to ${label} (${tilde(agent.file)})`
+              : `✓ Updated browse in ${label} (${tilde(agent.file)})`,
       )
       continue
     }
-    const receipt: AgentReceipt = { name: agent.name, file: agent.file, entry, node }
+    const receipt: AgentReceipt = { name: agent.name, file: agent.file, entry, ...(node ? { node } : {}) }
     try {
+      // What an earlier install wrote here (an npm install before this binary one, or another Node): replace it.
+      const prior = agents.find((a) => a.file === agent.file && a.name === agent.name)
+      if (prior && (prior.entry !== receipt.entry || prior.node !== receipt.node) && editAgentConfig(prior, true) === "removed") {
+        agents.splice(agents.indexOf(prior), 1)
+        save()
+      }
       const result = editAgentConfig(receipt)
       if (result === "added") {
         const i = agents.findIndex((a) => a.file === agent.file)
@@ -216,22 +278,25 @@ async function install(args: string[]) {
       if (result === "conflict") process.exitCode = 1
       log(
         result === "conflict"
-          ? `! ${agent.name} already has a different browse server; left ${agent.file} unchanged.`
-          : `✓ ${agent.name}: browse ${result} in ${agent.file}`,
+          ? `! ${label} already has a different server named browse in ${tilde(agent.file)}; left it unchanged.`
+          : result === "added"
+            ? `✓ Added browse to ${label} (${tilde(agent.file)})`
+            : `✓ ${label} already has browse`,
       )
     } catch {
       process.exitCode = 1
       log(
-        `! Couldn't edit ${agent.file} for ${agent.name}. Check its syntax and permissions, then run ${cliCommand(`install --agent ${agent.name}`)}.`,
+        `! Couldn't edit ${tilde(agent.file)} for ${label}. Check its syntax and permissions, then run ${cliCommand(`install --agent ${agent.name}`)}.`,
       )
     }
   }
-  for (const line of restartOutdatedRelay(entry, node) ?? []) log(line)
+  for (const line of restartOutdatedRelay(entry) ?? []) log(line)
   const legacy = selected.includes("opencode") ? legacyBrowserControl() : []
   if (legacy.length)
     log(
-      `! Browser Control MCP server${legacy.length === 1 ? "" : "s"} ${legacy.map((name) => `"${name}"`).join(", ")} also configured. Browse replaces it; remove ${legacy.length === 1 ? "it" : "them"} from ${configFile()} to avoid two sets of browser tools.`,
+      `! Browser Control MCP server${legacy.length === 1 ? "" : "s"} ${legacy.map((name) => `"${name}"`).join(", ")} also configured. browse replaces it; remove ${legacy.length === 1 ? "it" : "them"} from ${configFile()} to avoid two sets of browser tools.`,
     )
+  if (args.includes("--remote")) return installRemote(entry, tty)
 
   await syncDev()
   const initial = await settledExtensionStatus(entry)
@@ -241,10 +306,9 @@ async function install(args: string[]) {
   if (folder && !pairedOffline) {
     // The unpacked extension finds a one-time code in its own folder and exchanges it for its key, without a step.
     pairUnpacked()
-    log("✓ Put a one-time pairing code in the unpacked extension (good for an hour)")
     // A browser already running an older unpacked build keeps its old code until it reloads; ask it to.
     const reload = connected ? await reloadOutdatedExtension(connected, folder) : "current"
-    if (reload === "reloaded") log("✓ Reloaded Browse in your browser")
+    if (reload === "reloaded") log("✓ Reloaded browse in your browser")
     if (reload === "stale") return log(`! ${unpackedReloadAdvice}`)
   }
   // Including --no-wait (checkout update): an incompatible browser is installed, not waiting to be added or paired.
@@ -271,7 +335,7 @@ async function install(args: string[]) {
     writeFileSync(oldStoreMarker(), "2\n")
     ensureRelay(entry)
     log(
-      `! Found Browse ${matches[0]!.version} in ${matches[0]!.browser.name}. ${extensionProtocolAdvice(2, { install: cliCommand("install") }, "store")}`,
+      `! Found browse ${matches[0]!.version} in ${matches[0]!.browser.name}. ${extensionProtocolAdvice(2, { install: cliCommand("install") }, "store")}`,
     )
     process.exitCode = 1
     return false
@@ -309,20 +373,20 @@ async function install(args: string[]) {
   const blocked = detections.filter((d) => d.blocked).map((d) => d.browser.name)
   if (offer === "none" && blocked.length)
     log(
-      `Couldn't check ${blocked.join(", ")}. If Browse is already installed there, pair it manually. ${manualPair(pairingCode())}`,
+      `Couldn't check ${blocked.join(", ")}. If browse is already installed there, pair it manually. ${manualPair(pairingCode())}`,
     )
   const next = folder
-    ? `If Browse is already loaded unpacked: ${unpackedReloadAdvice}`
-    : `If Browse isn't connected after you add it, run \`${cliCommand("install")}\` again to pair it.`
+    ? `If browse is already loaded unpacked: ${unpackedReloadAdvice}`
+    : `If browse isn't connected after you add it, run \`${cliCommand("install")}\` again to pair it.`
   const agentNext = () => {
     if (folder && offer === "none" && !blocked.length)
-      return `Agent: if Browse is already loaded unpacked, ask the user: ${unpackedReloadAdvice} Otherwise ask them to load ${folder}. Check the connection with the browse status tool.`
+      return `Agent: if browse is already loaded unpacked, ask the user: ${unpackedReloadAdvice} Otherwise ask them to load ${folder}. Check the connection with the browse status tool.`
     return `Agent: ${
       offer === "opened"
-        ? "ask the user to open Browse's status page in their browser"
+        ? "ask the user to open browse's status page in their browser"
         : offer === "manual" || blocked.length
-          ? "ask the user to finish pairing in Browse's Options"
-          : "ask the user to add Browse in their browser"
+          ? "ask the user to finish pairing in browse's Options"
+          : "ask the user to add browse in their browser"
     }. Then re-run \`${cliCommand("install")}\` to finish, or call the browse status tool to check the connection.`
   }
   if (!env.tty) log(agentNext())
@@ -330,7 +394,14 @@ async function install(args: string[]) {
     if (env.tty) log(next)
     return
   }
-  log(`Waiting for Browse to connect (up to ${timeoutMs / 1000}s; Ctrl+C to skip)…`)
+  if (rail.active)
+    (rail.waiting = clack.spinner({
+      cancelMessage: "Stopped waiting",
+      onCancel: () => {
+        rail.waiting = undefined
+      },
+    })).start("Waiting for browse to connect in your browser (Ctrl+C to skip)")
+  else log(`Waiting for browse to connect (up to ${timeoutMs / 1000}s; Ctrl+C to skip)…`)
   let stopped = false
   const stop = () => {
     stopped = true

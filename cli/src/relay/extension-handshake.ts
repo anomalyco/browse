@@ -148,9 +148,9 @@ export class ExtensionHandshake {
     const pairingState = browsers.connected ? "connected" : rejected ? "incompatible" : this.lastRefused > recent ? "refused" : this.lastUnpaired > recent ? "unpaired" : this.hasPairedBrowser ? "paired-offline" : "not-seen"
     const nextStep = pairingState === "connected" ? undefined
       : pairingState === "incompatible" ? this.mismatchAdvice(rejected?.version)
-      : pairingState === "refused" || pairingState === "unpaired" ? `${pairingState === "refused" ? "Browse refused the pairing attempt" : "Browse is installed but not paired"}. Run \`${cliCommand("install")}\` again to pair it, or run \`${cliCommand("pair")}\` and enter the new code in Browse's Options.`
-      : pairingState === "paired-offline" ? "Open the browser profile already paired with Browse and enable the extension; it reconnects automatically."
-      : `No browser has contacted this relay yet. If Browse is installed, open that browser and run \`${cliCommand("install")}\` to pair it. Otherwise ${storeId ? `add Browse from ${storeUrl(storeId)}` : `follow the extension steps in \`${installCommand()}\``}.`
+      : pairingState === "refused" || pairingState === "unpaired" ? `${pairingState === "refused" ? "browse refused the pairing attempt" : "browse is installed but not paired"}. Run \`${cliCommand("install")}\` again to pair it, or run \`${cliCommand("pair")}\` and enter the new code in browse's Options.`
+      : pairingState === "paired-offline" ? "Open the browser profile already paired with browse and enable the extension; it reconnects automatically."
+      : `No browser has contacted this relay yet. If browse is installed, open that browser and run \`${cliCommand("install")}\` to pair it. Otherwise ${storeId ? `add browse from ${storeUrl(storeId)}` : `follow the extension steps in \`${installCommand()}\``}.`
     return {
       connected: browsers.connected,
       pairingState,
@@ -314,7 +314,7 @@ export class ExtensionHandshake {
         this.legacyExtensionReloaded = true
         socket.send(JSON.stringify({ id: 0, method: "runtime.reload" }))
       }
-      socket.close(4005, "Pairing required: update Browse")
+      socket.close(4005, "Pairing required: update browse")
       return undefined
     }
     if (!/^[A-Za-z0-9_-]{22,128}$/.test(extensionNonce)) {
@@ -345,7 +345,7 @@ export class ExtensionHandshake {
     }
     if (mode === "old") {
       const code = legacyPairingCode()
-      if (code === undefined) return refuse("old extension, no shared code", "Pairing failed: update Browse, then pair it with the code `pair` prints")
+      if (code === undefined) return refuse("old extension, no shared code", "Pairing failed: update browse, then pair it with the code `pair` prints")
       socket.send(JSON.stringify({ method: "auth.challenge", params: { nonce: relayNonce, proof: legacyPairingProof(code, "relay", port, relayNonce, extensionNonce), protocol } }))
       return { ...base, expected: legacyPairingProof(code, "extension", port, extensionNonce, relayNonce) }
     }

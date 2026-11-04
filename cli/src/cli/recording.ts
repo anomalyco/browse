@@ -22,7 +22,7 @@ const recordingStart = Command.make(
     outputPath: Argument.String("output-path").pipe(
       Argument.withDescription("Path to write the recording artifact; tabCapture requires .webm, CDP accepts .webm or .mp4"),
     ),
-    session: sessionFlag("Record the page for this Browse or CDP session id"),
+    session: sessionFlag("Record the page for this browse or CDP session id"),
     tabId: tabIdFlag("Record this attached Chrome tab id"),
     mode: Flag.String("mode").pipe(
       Flag.optional,

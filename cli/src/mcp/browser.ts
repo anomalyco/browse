@@ -1,6 +1,4 @@
 import { Effect } from "effect"
-import fs from "node:fs/promises"
-import path from "node:path"
 import { autoUpdateStatus } from "../update/auto-update.ts"
 import { getObject } from "../relay/helpers.ts"
 import * as RelayLifecycle from "../relay/lifecycle.ts"
@@ -45,7 +43,7 @@ registerMcpTools({
     {
       name: "tabs_cleanup",
       description:
-        "Close tabs agents opened that nobody has used for a while (no agent command and not visited by the user). Tabs the user shared or pinned, the active tab, tabs playing audio, recording, or waiting for a handoff stay open. Call it when you finish a task to leave the user's browser tidy; Browse also does this automatically after the user's idle setting (10 minutes unless they changed it).",
+        "Close tabs agents opened that nobody has used for a while (no agent command and not visited by the user). Tabs the user shared or pinned, the active tab, tabs playing audio, recording, or waiting for a handoff stay open. Call it when you finish a task to leave the user's browser tidy; browse also does this automatically after the user's idle setting (10 minutes unless they changed it).",
       inputSchema: objectSchema({
         idleMinutes: {
           type: "integer",
@@ -65,7 +63,7 @@ registerMcpTools({
     },
     {
       name: "settings",
-      description: `Read or change the user's Browse settings, the same ones as the extension's options page: where agent tabs open (window), how they're grouped (grouping), when untouched agent tabs close (idleMinutes), the agent cursor (cursor), human-like input (humanInput) and handoff notifications (handoffNotifications). Use it only when the user asks to change how browse behaves, never on your own initiative. Without \`set\` it returns each setting's stored value, the value in effect, and the relay environment variable that overrides it, if any. With \`set\` it validates every value strictly, applies the change at once (the options page updates live) and returns what changed: tell the user what you changed. A setting an environment variable fixes is not changed, and the result says so. Security switches (${securityVariables.join(", ")}) are environment-only and can never be read or changed here.`,
+      description: `Read or change the user's browse settings, the same ones as the extension's options page: where agent tabs open (window), how they're grouped (grouping), when untouched agent tabs close (idleMinutes), the agent cursor (cursor), human-like input (humanInput) and handoff notifications (handoffNotifications). Use it only when the user asks to change how browse behaves, never on your own initiative. Without \`set\` it returns each setting's stored value, the value in effect, and the relay environment variable that overrides it, if any. With \`set\` it validates every value strictly, applies the change at once (the options page updates live) and returns what changed: tell the user what you changed. A setting an environment variable fixes is not changed, and the result says so. Security switches (${securityVariables.join(", ")}) are environment-only and can never be read or changed here.`,
       inputSchema: objectSchema({
         set: {
           type: "object",
@@ -97,14 +95,14 @@ registerMcpTools({
     {
       name: "skill",
       requiresRelayCompatibility: false,
-      description: "Return the Browse agent skill instructions.",
+      description: "Return the browse agent skill instructions.",
       inputSchema: emptyInputSchema,
       readOnly: true,
       destructive: false,
       idempotent: true,
       handle: () =>
         Effect.tryPromise({
-          try: () => fs.readFile(path.join(ctx.packageRoot, "skills", "browse", "SKILL.md"), "utf8"),
+          try: () => import("../skill-text.ts").then((module) => module.skillText),
           catch: (cause) => new Error("read opencode-browser skill", { cause }),
         }),
     },

@@ -3,7 +3,7 @@ import * as RelayClient from "./relay/client.ts"
 import { relayBuildProblem } from "./relay/lifecycle.ts"
 import type { ExtensionStatus, RelayVersion, SessionSummary, TargetSummary } from "./relay/schema.ts"
 import { extensionProtocolAdvice, extensionProtocolVersion } from "./protocol.ts"
-import { cliCommand, devExtension, fromCheckout, installCommand } from "./paths.ts"
+import { binaryPackage, cliCommand, compiledBinary, devExtension, fromCheckout, installCommand } from "./paths.ts"
 import * as SessionStore from "./session-manager/store.ts"
 import type { UpdateJson } from "./update.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "./version.ts"
@@ -151,7 +151,11 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
       ),
     )
 
-  const readPackageInfo: Effect.Effect<PackageInfo, Error> = readJsonFile("package.json", PackageMetadata).pipe(
+  // A binary carries no package.json or dist/: it is the package, and the artifact.
+  const compiled = compiledBinary()
+  const readPackageInfo: Effect.Effect<PackageInfo, Error> = compiled
+    ? Effect.succeed({ name: binaryPackage() ?? "@opencode/browse", version: opencodeBrowserVersion, bin: { opencodeBrowser: process.execPath } })
+    : readJsonFile("package.json", PackageMetadata).pipe(
     Effect.map((metadata) => ({
       name: metadata.name,
       version: metadata.version,
@@ -209,9 +213,9 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
   const possibleLeakedSessions = sessions.filter((session) => {
     return session.connected && session.id !== current
   })
-  const artifacts: readonly DoctorArtifact[] = [
-    { path: "dist/cli.mjs", exists: distCliExists },
-  ]
+  const artifacts: readonly DoctorArtifact[] = compiled
+    ? [{ path: process.execPath, exists: true, version: opencodeBrowserVersion }]
+    : [{ path: "dist/cli.mjs", exists: distCliExists }]
   const checks = buildDoctorChecks({
     packageResult,
     relayResult,
@@ -533,13 +537,13 @@ function buildDoctorRecommendations(options: {
       ? [extensionProtocolAdvice(options.extensionResult.value.protocolVersion, { install: installCommand() })]
       : [fromCheckout() || devExtension()
         ? `Run \`${installCommand()}\` and load the extension it points to (Load unpacked on your browser's extensions page).`
-        : `Run \`${installCommand()}\`, and install Browse from the Chrome Web Store page it opens.`]
+        : `Run \`${installCommand()}\`, and install browse from the Chrome Web Store page it opens.`]
     : []
   const artifactRecommendations = options.artifacts.some((artifact) => {
     return !artifact.exists
   }) ? [`Rebuild or reinstall the missing files with \`${installCommand()}\`.`] : []
   const connectionConflictRecommendations = options.extensionResult.ok && (options.extensionResult.value.rejectedConnections ?? 0) > 0
-    ? ["Keep Browse enabled in one browser/profile. To switch, disable it in the current browser before connecting the other; new sessions do not change the active browser."]
+    ? ["Keep browse enabled in one browser/profile. To switch, disable it in the current browser before connecting the other; new sessions do not change the active browser."]
     : []
   const staleSessionRecommendations = options.staleCurrent && options.current ? [
     `Current session ${options.current} is stale; run \`${cliCommand("session new")}\` or \`${cliCommand("session use <id>")}\` after the relay is running.`,
@@ -575,7 +579,7 @@ function summarizeCheckStatus(checks: readonly DoctorCheck[]): DoctorCheckStatus
 
 export function formatDoctorReport(report: DoctorReport): string {
   const lines: string[] = [
-    "Browse doctor",
+    "browse doctor",
     `Status: ${report.status}`,
     `Endpoint: ${report.endpoint}`,
     `CLI: ${report.cli.version} (${report.cli.buildId})`,

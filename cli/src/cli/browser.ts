@@ -1,6 +1,5 @@
-import { Console, Effect, FileSystem, Option, Result } from "effect"
+import { Console, Effect, Option, Result } from "effect"
 import { Argument, Command, Flag } from "effect/cli"
-import path from "node:path"
 import { autoUpdateStatus } from "../update/auto-update.ts"
 import { ExitCode } from "./output.ts"
 import { createDoctorReport, formatDoctorReport, formatTargetSummary } from "../doctor.ts"
@@ -180,7 +179,7 @@ const status = Command.make(
     )
     if ((extensionStatus.rejectedConnections ?? 0) > 0) {
       yield* Console.log(
-        `Warning: ${extensionStatus.rejectedConnections} competing browser/profile connection attempt(s) rejected; the active connection was preserved. Use Browse in one browser/profile at a time.`,
+        `Warning: ${extensionStatus.rejectedConnections} competing browser/profile connection attempt(s) rejected; the active connection was preserved. Use browse in one browser/profile at a time.`,
       )
     }
     if (extensionStatus.nextStep) yield* Console.log(extensionStatus.nextStep)
@@ -257,7 +256,7 @@ const mcp = Command.make(
     const { runMcpServer } = yield* Effect.promise(() => import("../mcp.ts"))
     yield* runMcpServer
   }),
-).pipe(Command.withDescription("Run the Browse MCP server over stdio"))
+).pipe(Command.withDescription("Run the browse MCP server over stdio"))
 
 registerCliCommand(400, () => tabs)
 registerCliCommand(410, () => settings)
@@ -280,19 +279,16 @@ registerCliCommand(810, ({ packageRoot }) =>
         yield* failExit
       }
     }),
-  ).pipe(Command.withDescription("Diagnose the local Browse install and runtime")),
+  ).pipe(Command.withDescription("Diagnose the local browse install and runtime")),
 )
-registerCliCommand(820, ({ packageRoot }) =>
+registerCliCommand(820, () =>
   Command.make(
     "skill",
     {},
     Effect.fn("Cli.skill")(function* () {
-      const fs = yield* FileSystem.FileSystem
-      const text = yield* fs.readFileString(path.join(packageRoot, "skills", "browse", "SKILL.md")).pipe(
-        Effect.mapError((cause) => new Error("read opencode-browser skill", { cause })),
-      )
-      yield* Console.log(text.trimEnd())
+      const { skillText } = yield* Effect.promise(() => import("../skill-text.ts"))
+      yield* Console.log(skillText.trimEnd())
     }),
-  ).pipe(Command.withDescription("Print the Browse agent skill text")),
+  ).pipe(Command.withDescription("Print the browse agent skill text")),
 )
 registerCliCommand(900, () => mcp)

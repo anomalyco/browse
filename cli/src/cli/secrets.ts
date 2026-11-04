@@ -230,14 +230,14 @@ const deadboltConnect = Command.make(
       yield* emitJson({ connected: true, id: paired.id })
       return
     }
-    yield* Console.log(`Connected Browse to Deadbolt as client ${paired.id}.`)
+    yield* Console.log(`Connected browse to Deadbolt as client ${paired.id}.`)
     yield* Console.log(
       "Agents can use only the logins you allow, in Deadbolt: deadbolt agents allow <site> (narrow with --login, --fields, --expires), or deadbolt agents allow --all for every login",
     )
   }),
 ).pipe(
   Command.withDescription(
-    "Pair Browse with Deadbolt (runs `deadbolt agents add-client browse`, which asks you to confirm) and store its client token (0600)",
+    "Pair browse with Deadbolt (runs `deadbolt agents add-client browse`, which asks you to confirm) and store its client token (0600)",
   ),
 )
 
@@ -250,7 +250,7 @@ const deadboltDisconnect = Command.make(
       catch: (cause) => (cause instanceof Error ? cause : new Error("Could not disconnect from Deadbolt")),
     })
     if (!result.removed) {
-      yield* Console.log("Browse isn't connected to Deadbolt")
+      yield* Console.log("browse isn't connected to Deadbolt")
       return
     }
     yield* Console.log(
@@ -259,7 +259,7 @@ const deadboltDisconnect = Command.make(
         : "Deleted the client token here. Deadbolt didn't confirm removing the client: check `deadbolt agents clients`.",
     )
   }),
-).pipe(Command.withDescription("Remove Browse's Deadbolt client (in Deadbolt and here)"))
+).pipe(Command.withDescription("Remove browse's Deadbolt client (in Deadbolt and here)"))
 
 const deadboltStatus = Command.make(
   "status",
@@ -302,7 +302,7 @@ const deadboltStatus = Command.make(
     else if (status) yield* Console.log(`Deadbolt isn't reachable: ${status.error}`)
   }),
 ).pipe(
-  Command.withDescription("Show whether Browse is paired with Deadbolt and whether Deadbolt is reachable and unlocked"),
+  Command.withDescription("Show whether browse is paired with Deadbolt and whether Deadbolt is reachable and unlocked"),
 )
 
 const deadbolt = Command.make("deadbolt").pipe(

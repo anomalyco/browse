@@ -1,4 +1,4 @@
-// The link to the Browse relay (ws://127.0.0.1:19988/extension). The relay runs agent sessions
+// The link to the browse relay (ws://127.0.0.1:19988/extension). The relay runs agent sessions
 // for the browse MCP server and the opencode-browser CLI (Playwright `execute`, recordings, handoffs) and drives tabs
 // through this extension; this module runs its commands. The wire protocol is in ../agent-relay/protocol.ts,
 // the relay itself in cli/src/relay.ts.
@@ -561,7 +561,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       const manifest = chrome.runtime.getManifest()
       const { pairing } = handshake.pairingState()
       return [
-        "Browse diagnostics",
+        "browse diagnostics",
         `extension: ${manifest.version} (${chrome.runtime.id})`,
         `browser: ${navigator.userAgent}`,
         `relay: ws://${host}:${port}/extension, protocol ${extensionProtocolVersion}`,

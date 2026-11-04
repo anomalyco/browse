@@ -459,7 +459,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       ? registry.listRootTargets().find((target) => target.opencodeBrowserSessionId === sessionId && target.owner === "relay")
       : undefined
     const link = (existing && browsers.browserTab(existing.tabId)?.link) ?? browsers.defaultLink()
-    return link ? Effect.succeed(link) : Effect.fail(new Error("Browse extension is not connected"))
+    return link ? Effect.succeed(link) : Effect.fail(new Error("browse extension is not connected"))
   })
 
   const createAndAttachTab = Effect.fnUntraced(function* (createOptions: {
@@ -719,11 +719,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
           if (restored.some((entry, i) => entry !== entries[i])) await sessionCatalog.save(restored)
           return restored
         },
-        catch: (cause) => cause instanceof Error ? cause : new Error("Load Browse session catalog", { cause }),
+        catch: (cause) => cause instanceof Error ? cause : new Error("Load browse session catalog", { cause }),
       })
       yield* Effect.try({
         try: () => sessions.restore(restoredSessions),
-        catch: (cause) => cause instanceof Error ? cause : new Error("Restore Browse sessions", { cause }),
+        catch: (cause) => cause instanceof Error ? cause : new Error("Restore browse sessions", { cause }),
       })
       catalogWritesEnabled = true
       if (managed) {

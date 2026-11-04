@@ -74,7 +74,7 @@ export function buildSandboxGlobals(deps: {
   const requestHandoff = deps.requestHandoff
   const handoff = async (message?: string, options?: HandoffCallOptions) => {
     if (!requestHandoff) {
-      throw new Error("handoff is not available in this sandbox; it requires a relay-backed Browse session")
+      throw new Error("handoff is not available in this sandbox; it requires a relay-backed browse session")
     }
     const handoffMessage = message?.trim() || defaultHandoffMessage
     const timeoutMs = options?.timeoutMs ?? defaultHandoffTimeoutMs

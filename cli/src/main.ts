@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// opencode-browser: one command for Browse.
+// opencode-browser: one command for browse.
 //   Setup (setup.ts): install, extension, pair, uninstall. Updating (update.ts): update.
 //   Driving the browser (cli.ts): serve, relay, execute, session, network, secrets, recording, journal,
 //   doctor, skill, mcp, status. The relay is the local server agents use; the extension connects to it.
@@ -18,6 +18,10 @@ if (command === "--version" || command === "-v") {
   const { NodeRuntime } = await import("@effect/platform-node")
   const { runMcpServer } = await import("./mcp.ts")
   runMcpServer.pipe(NodeRuntime.runMain)
+} else if (command === "mcp" && globalThis.__OPENCODE_BROWSER_COMPILED__ && process.env.OPENCODE_BROWSER_MCP_DIRECT !== "1") {
+  // A binary install's MCP entry: supervise the server so updates swap it (mcp/supervisor.ts).
+  const { runBinaryMcp } = await import("./mcp/supervisor.ts")
+  await runBinaryMcp(process.argv.slice(3))
 } else if (command === "runtime-install" || command === "runtime-switch") {
   // The relay's auto-update children (auto-update.ts); not for people.
   const { runRuntimeInstall, runRuntimeSwitch } = await import("./update/runtime-update.ts")
@@ -31,10 +35,12 @@ if (command === "--version" || command === "-v") {
 } else {
   if (!command || command === "--help" || command === "-h") {
     process.stdout.write(`SETUP
-  install [--opencode <path>]    Install Browse: choose agents for the browse MCP server, check which browsers
+  install [--opencode <path>]    Install browse: choose agents for the browse MCP server, check which browsers
                                  have the extension and pair it (when none does, open its Chrome Web Store
                                  page, or from a checkout or a dev install show the folder to load unpacked,
                                  and wait for it)
+    --remote                     For a browser on another computer: open the relay to other computers and print
+                                 its address and a one-time pairing code instead of pairing a browser here
     --no-open                    Print the steps without opening anything or copying the path
     --no-wait                    Don't wait for the extension to be added or connect
     --wait-seconds <seconds>     How long to wait for a connection (default 180 in a terminal, 90 otherwise)

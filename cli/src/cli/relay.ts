@@ -17,15 +17,15 @@ const serve = Command.make(
     yield* Effect.scoped(
       Effect.gen(function* () {
         const relay = yield* startRelay({ port, additionalExtensionOrigins })
-        yield* Console.log(`Browse relay listening at ${relay.url}`)
+        yield* Console.log(`browse relay listening at ${relay.url}`)
         yield* Console.log(
-          `Browse connects automatically while the browser runs. Run \`${cliCommand("status")}\` to check.`,
+          `browse connects automatically while the browser runs. Run \`${cliCommand("status")}\` to check.`,
         )
         yield* Effect.never
       }),
     )
   }),
-).pipe(Command.withDescription("Start the local Browse relay"))
+).pipe(Command.withDescription("Start the local browse relay"))
 
 const relayRestart = Command.make(
   "restart",
@@ -42,7 +42,7 @@ const relayRestart = Command.make(
     yield* Console.error("Restarting the relay leaves browser tabs open but resets in-memory JavaScript state.")
     const readiness = yield* RelayLifecycle.restartRelay({ relay, clientKind: "cli", force })
     yield* Console.log(
-      `${readiness.started ? "Started" : "Reused concurrent replacement"} Browse relay at ${relay.endpoint} (${readiness.version.buildId})`,
+      `${readiness.started ? "Started" : "Reused concurrent replacement"} browse relay at ${relay.endpoint} (${readiness.version.buildId})`,
     )
   }),
 ).pipe(Command.withDescription("Explicitly drain and restart the managed relay using this installation"))

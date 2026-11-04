@@ -37,7 +37,7 @@ export function createRelayRecording(deps: {
       const message = text(error)
       throw new Error(
         /invoked|activeTab/i.test(message)
-          ? `${message.replace(/\.+$/, "")}. Click the Browse toolbar icon on this tab once before recording.`
+          ? `${message.replace(/\.+$/, "")}. Click the browse toolbar icon on this tab once before recording.`
           : message,
       )
     })
@@ -59,13 +59,13 @@ export function createRelayRecording(deps: {
 
   const sendRecordingChunk = async (data: Uint8Array) => {
     const current = deps.open()
-    if (!current) throw new Error("The Browse relay is not connected")
+    if (!current) throw new Error("The browse relay is not connected")
     const deadline = Date.now() + 30_000
     while (current.bufferedAmount + data.byteLength > MAX_RECORDING_BUFFER) {
       await sleep(10)
       if (deps.currentSocket() !== current || current.readyState !== WebSocket.OPEN)
-        throw new Error("The Browse relay disconnected while receiving recording data")
-      if (Date.now() >= deadline) throw new Error("Timed out sending recording data to the Browse relay")
+        throw new Error("The browse relay disconnected while receiving recording data")
+      if (Date.now() >= deadline) throw new Error("Timed out sending recording data to the browse relay")
     }
     current.send(new Uint8Array(data))
   }

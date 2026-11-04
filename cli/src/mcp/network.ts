@@ -19,7 +19,7 @@ registerMcpTools({
     {
       name: "network_start",
       description:
-        "Start session-scoped network capture. Browse records normalized Playwright exchanges; HAR is only the optional export format. Bodies are embedded by default with per-body and total memory limits.",
+        "Start session-scoped network capture. browse records normalized Playwright exchanges; HAR is only the optional export format. Bodies are embedded by default with per-body and total memory limits.",
       inputSchema: objectSchema({
         session: {
           type: "string",

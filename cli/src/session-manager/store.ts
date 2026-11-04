@@ -4,7 +4,7 @@ import { Context, Effect, FileSystem, Layer, Option, Path, Predicate, Schema } f
 import { endpointForPort, portConfig } from "../relay/client.ts"
 
 /**
- * SessionStore persists the CLI's current Browse session id, scoped
+ * SessionStore persists the CLI's current browse session id, scoped
  * by relay endpoint so switching `OPENCODE_BROWSER_PORT` cannot silently reuse
  * a session id created against a different relay.
  *

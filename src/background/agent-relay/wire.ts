@@ -59,7 +59,7 @@ export const SLOW_CDP = 2_000
 // Another extension's frame in the page (1Password, LastPass, Bitwarden) makes Chrome refuse commands or
 // drop the debugger; evicting the frame and re-attaching recovers.
 export const FOREIGN_FRAME = /Cannot access a chrome-extension:\/\/ URL|Debugger is not attached to the tab/i
-export const ATTACHED_TITLE = "Browse · Agents can use this tab. Click to stop."
+export const ATTACHED_TITLE = "browse · Agents can use this tab. Click to stop."
 export const DEFAULT_PORT = defaultRelayPort
 
 export const CLOSE_CODES: Record<number, string> = {

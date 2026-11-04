@@ -179,7 +179,7 @@ export function createRelayHandshake(deps: {
           build: __OPENCODE_BROWSER_BUILD__,
           protocolVersion: extensionProtocolVersion,
           profileId: profile.id,
-          profileName: profile.name ?? "Browse",
+          profileName: profile.name ?? "browse",
           // What agents call this browser: the name set on the status page, else the relay names it from these
           // and the computer ("Chrome on MacBook").
           browser: browserBrand(),

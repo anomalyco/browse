@@ -4,18 +4,11 @@ import { isDeepStrictEqual } from "node:util"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
 import { parse as parseToml } from "smol-toml"
 import { isMap, parseDocument } from "yaml"
+import { agentLabels, agentNames, type AgentName } from "./agents.ts"
 
-export const agentLabels = {
-  opencode: "OpenCode", claude: "Claude Code", cursor: "Cursor", codex: "Codex", vscode: "VS Code", windsurf: "Windsurf",
-  "claude-desktop": "Claude Desktop", gemini: "Gemini CLI", zed: "Zed", cline: "Cline", roo: "Roo Code (VS Code)",
-  kilo: "Kilo Code", goose: "Goose", amp: "Amp", kiro: "Kiro", droid: "Factory Droid", copilot: "GitHub Copilot CLI",
-  warp: "Warp", "lm-studio": "LM Studio", "qwen-code": "Qwen Code", kimi: "Kimi Code CLI", augment: "Augment (Auggie CLI)",
-  antigravity: "Antigravity", junie: "Junie", codebuddy: "CodeBuddy Code", cortex: "Cortex Code", hermes: "Hermes Agent",
-  grok: "Grok Build", vibe: "Mistral Vibe", qoder: "Qoder CLI",
-}
-export type AgentName = keyof typeof agentLabels
-export const agentNames = Object.keys(agentLabels) as AgentName[]
-export type AgentReceipt = { name: Exclude<AgentName, "opencode">; file: string; node: string; entry: string }
+export { agentLabels, agentNames, type AgentName }
+/** What install wrote: `<node> <entry> mcp`, or `<entry> mcp` when there is no node (a binary install's executable). */
+export type AgentReceipt = { name: Exclude<AgentName, "opencode">; file: string; node?: string; entry: string }
 export type AgentLocation = { name: AgentName; file: string; installed: boolean }
 
 const aliases: Record<string, AgentName> = {
@@ -101,13 +94,13 @@ export function agentLocations(home: string, config: string, onPath: (name: stri
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value)
 type EditResult = "added" | "unchanged" | "removed" | "conflict"
 
-function serverDefinition(name: AgentReceipt["name"], node: string, args: string[]) {
-  if (name === "kilo") return { type: "local", command: [node, ...args] }
-  if (name === "goose") return { type: "stdio", name: "browse", enabled: true, cmd: node, args }
-  if (name === "copilot") return { type: "local", command: node, args, tools: ["*"] }
-  if (name === "vibe") return { name: "browse", transport: "stdio", command: node, args }
-  if (["claude", "vscode", "cortex", "droid", "codebuddy"].includes(name)) return { type: "stdio", command: node, args }
-  return { command: node, args }
+function serverDefinition(name: AgentReceipt["name"], command: string, args: string[]) {
+  if (name === "kilo") return { type: "local", command: [command, ...args] }
+  if (name === "goose") return { type: "stdio", name: "browse", enabled: true, cmd: command, args }
+  if (name === "copilot") return { type: "local", command, args, tools: ["*"] }
+  if (name === "vibe") return { name: "browse", transport: "stdio", command, args }
+  if (["claude", "vscode", "cortex", "droid", "codebuddy"].includes(name)) return { type: "stdio", command, args }
+  return { command, args }
 }
 
 const serverKeys: Partial<Record<AgentName, string>> = { vscode: "servers", zed: "context_servers", kilo: "mcp", amp: "amp.mcpServers", goose: "extensions", hermes: "mcp_servers" }
@@ -134,14 +127,15 @@ export function editAgentConfig(receipt: AgentReceipt, remove = false): EditResu
   const matches = list.filter(s => s?.name === "browse")
   if (matches.length > 1) return "conflict"
   const servers = (container ?? Object.create(null)) as Record<string, unknown>
-  const expected = serverDefinition(name, node, [entry, "mcp"])
+  const [command, args] = node ? [node, [entry, "mcp"]] : [entry, ["mcp"]]
+  const expected = serverDefinition(name, command, args)
   const current = name === "vibe" ? matches[0] : servers.browse
   if (current !== undefined && !isDeepStrictEqual({ ...(object(current) ? current : {}) }, expected)) return "conflict"
   if (remove ? current === undefined : current !== undefined) return "unchanged"
   let after: string
   if (toml) {
     const header = name === "vibe" ? '[[mcp_servers]]\nname = "browse"\ntransport = "stdio"' : "[mcp_servers.browse]"
-    const block = `${header}\ncommand = ${JSON.stringify(node)}\nargs = ${JSON.stringify([entry, "mcp"])}\n`
+    const block = `${header}\ncommand = ${JSON.stringify(command)}\nargs = ${JSON.stringify(args)}\n`
     if (remove && !before.includes(block)) return "conflict"
     after = remove ? before.replace(block, "") : `${before}${before.endsWith("\n") || !before ? "" : "\n"}\n${block}`
     // A matching string could also occur inside a multiline value. Check the *entire* parsed result before writing.

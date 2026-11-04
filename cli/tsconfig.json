@@ -18,6 +18,7 @@
   "include": [
     "src/**/*.ts",
     "build.ts",
-    "bundle.ts"
+    "bundle.ts",
+    "script/**/*.ts"
   ]
 }

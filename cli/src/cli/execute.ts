@@ -115,7 +115,7 @@ const execute = Command.make(
   {
     code: Argument.String("code").pipe(Argument.variadic({ min: 0 })),
     file: Flag.String("file").pipe(Flag.optional, Flag.withDescription("Read execute code from a file")),
-    session: sessionFlag("Continue an existing Browse session; defaults to the OpenCode agent's session"),
+    session: sessionFlag("Continue an existing browse session; defaults to the OpenCode agent's session"),
     rm: Flag.Boolean("rm").pipe(
       Flag.withDefault(false),
       Flag.withDescription("Use a fresh one-shot session and close its tabs afterward"),

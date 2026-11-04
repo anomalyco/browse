@@ -1,7 +1,7 @@
 import type { BrowserContext, Page } from "patchright-core"
 import { timedOut, withTimeout } from "./page-recovery.ts"
 
-export const downloadCapabilityErrorMessage = "Downloads are unavailable in Browse extension-backed tabs: Chromium blocks Browser.setDownloadBehavior and Page.setDownloadBehavior through chrome.debugger, so Playwright cannot retain an artifact for download.saveAs(). Fetch the response in the page and save the returned bytes with files.write() when the site exposes them."
+export const downloadCapabilityErrorMessage = "Downloads are unavailable in browse extension-backed tabs: Chromium blocks Browser.setDownloadBehavior and Page.setDownloadBehavior through chrome.debugger, so Playwright cannot retain an artifact for download.saveAs(). Fetch the response in the page and save the returned bytes with files.write() when the site exposes them."
 const downloadGuardedPages = new WeakSet<Page>()
 const downloadGuardedContexts = new WeakSet<BrowserContext>()
 const viewportZoomGuardedPages = new WeakSet<Page>()

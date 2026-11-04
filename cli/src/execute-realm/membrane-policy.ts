@@ -128,13 +128,22 @@ export const isHiddenKey = (key: PropertyKey): boolean => typeof key === "string
 let activeRealm: ExecuteRealm | undefined
 const promiseRealms = new WeakMap<Promise<unknown>, ExecuteRealm>()
 // The hook is installed only while execute JavaScript runs: promise hooks slow every await in the
-// process. The relay runs under Node; Bun runs the outer tests and has no promiseHooks.
+// process. An npm install's relay runs under Node; a binary install's under Bun, which has no promiseHooks
+// (bunRejectionRealm below).
 let stopPromiseHook: (() => void) | undefined
 
 export function trackPromisesOf(realm: ExecuteRealm): () => void {
   const previous = activeRealm
   activeRealm = realm
-  if (!stopPromiseHook && !process.versions.bun) {
+  if (process.versions.bun) {
+    const entered = { realm, at: Date.now() }
+    lastRealm = entered
+    return () => {
+      activeRealm = previous
+      entered.at = Date.now()
+    }
+  }
+  if (!stopPromiseHook) {
     stopPromiseHook = v8.promiseHooks.createHook({ init(promise: Promise<unknown>) {
       if (activeRealm) promiseRealms.set(promise, activeRealm)
     } }) as () => void
@@ -148,8 +157,30 @@ export function trackPromisesOf(realm: ExecuteRealm): () => void {
   }
 }
 
+// Bun (a binary install's relay) has no promiseHooks, so creation can't be tracked. There a rejected promise whose own
+// prototype is a realm's Promise.prototype came from that realm (the runtime hands a real promise, never a proxy, so
+// reading its prototype runs no sandbox code). Any other (a Promise subclass, a re-prototyped promise) goes to the realm
+// that ran within the last second: the runtime reports a rejection right after the turn that left it unhandled, and
+// every sandbox turn (code, callbacks, timers) enters its realm. Agent code then can't take the relay down; the cost is
+// that a host fault in that window resets that realm instead of stopping the relay.
+const realmsByPromisePrototype = new WeakMap<object, ExecuteRealm>()
+let lastRealm: { readonly realm: ExecuteRealm; at: number } | undefined
+const lastRealmWindowMs = 1000
+
+/** Under Bun, remember which realm a sandbox Promise.prototype belongs to (bunRejectionRealm). */
+export function registerRealmPromisePrototype(prototype: object, realm: ExecuteRealm): void {
+  if (process.versions.bun) realmsByPromisePrototype.set(prototype, realm)
+}
+
+function bunRejectionRealm(promise: Promise<unknown>): ExecuteRealm | undefined {
+  const byPrototype = realmsByPromisePrototype.get(Object.getPrototypeOf(promise) as object)
+  if (byPrototype) return byPrototype
+  if (!lastRealm || lastRealm.realm.isStopped) return undefined
+  return activeRealm === lastRealm.realm || Date.now() - lastRealm.at <= lastRealmWindowMs ? lastRealm.realm : undefined
+}
+
 export function handleExecuteRealmRejection(promise: Promise<unknown>): boolean {
-  const realm = promiseRealms.get(promise)
+  const realm = promiseRealms.get(promise) ?? (process.versions.bun ? bunRejectionRealm(promise) : undefined)
   if (!realm) return false
   realm.dispose(new Error("Unhandled execute rejection; JavaScript state will reset before the next execute"))
   return true

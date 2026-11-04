@@ -12,6 +12,8 @@
     "allowImportingTsExtensions": true,
     "lib": ["es2024", "dom", "dom.iterable"],
     "strict": true,
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js",
     "skipLibCheck": true,
     "types": ["vite/client", "bun", "chrome"]
   },

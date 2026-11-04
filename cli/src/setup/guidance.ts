@@ -1,8 +1,8 @@
 import { cliCommand } from "../paths.ts"
 import {
+  blockedReason,
   extensionsPage,
   oldStoreBuild,
-  reportDetections,
   systemEffects,
   type Browser,
   type Detection,
@@ -24,7 +24,7 @@ export type LocateOptions = {
 }
 
 /**
- * Reports the browsers and profiles that have Browse. When none does (and none is connected to the relay),
+ * Reports the browsers and profiles that have browse. When none does (and none is connected to the relay),
  * guides installing it: from a checkout or a dev install, loading the unpacked build, with the browser's extensions page
  * opened, the folder revealed and its path copied; from a stable npm install, the Chrome Web Store item, whose page it opens.
  * Nothing opens when the browsers here aren't the ones the user looks at (SSH, no display),
@@ -36,42 +36,36 @@ export function locateExtension(options: LocateOptions, effects: Effects = syste
   const listing = options.storeUrl ?? STORE_URL
   const noListing = () =>
     log(
-      `! This package doesn't know its Chrome Web Store item, so it can't install the extension. Install a released version (\`npx @opencode/browse install\`), or set up Browse from a checkout.`,
+      `! This package doesn't know its Chrome Web Store item, so it can't install the extension. Install a released version (\`npx @opencode/browse install\`), or set up browse from a checkout.`,
     )
   const pairLater = () => log(`  Once it's added, run \`${cliCommand("install")}\` again to pair it with the relay.`)
   if (options.pairedOffline) return log(pairedOfflineMessage), "ready"
   if (options.env.ssh) {
     if (options.connected) return log(connectedMessage), "ready"
     if (options.folder) unpackedSteps({ folder: options.folder, platform: options.env.platform, log })
-    else if (listing) log(`Install Browse in your browser from the Chrome Web Store: ${listing}`), pairLater()
+    else if (listing) log(`Install browse in your browser from the Chrome Web Store: ${listing}`), pairLater()
     else noListing()
     return "guided"
   }
-  reportDetections(options.detections, options.preferred, log)
   // A connected extension is installed, even somewhere the scan doesn't look (a custom profile directory, a snap).
   if (options.connected) return log(connectedMessage), "ready"
   if (options.detections.some((detection) => detection.enabled.length)) return "ready"
   const off = options.detections.flatMap((detection) => detection.disabled)
   if (off.length) {
     log(
-      `! Browse is turned off in ${off.map((match) => `${match.browser.name} (${match.profile.name})`).join(", ")}. Turn it on in the browser's extensions page.`,
+      `! browse is turned off in ${off.map((match) => `${match.browser.name} (${match.profile.name})`).join(", ")}. Turn it on in the browser's extensions page.`,
     )
     return "off"
   }
   const blocked = options.detections.filter((detection) => detection.blocked).map((detection) => detection.browser.name)
+  if (blocked.length) log(`! Couldn't check ${blocked.join(", ")} for browse (${blockedReason()})`)
   const target = options.preferred ?? options.detections.find((detection) => !detection.blocked)?.browser
   const interactive = options.allowOpen && options.env.display
   if (!options.folder) {
     if (!listing) return noListing(), "guided"
     const opened =
       interactive && !blocked.length && (target ? effects.open(target, listing) : effects.openDefault?.(listing))
-    log(
-      `Install Browse from the Chrome Web Store${opened ? ` (opened in ${target?.name ?? "your default browser"})` : ""}:`,
-    )
-    log(`  ${listing}`)
-    log(
-      `  Once it's added, install pairs it with the relay (if install isn't waiting for it, run \`${cliCommand("install")}\` again).`,
-    )
+    log(`Add browse to ${target?.name ?? "your browser"} from the Chrome Web Store${opened ? " (opened)" : ""}: ${listing}`)
     return "guided"
   }
   // A browser that couldn't be checked may already have it: show the steps, but don't open anything over the user's work.
@@ -117,16 +111,14 @@ export function pairStoreExtension(
     interactive &&
     effects.open(match.browser, `chrome-extension://${match.id}/welcome.html#code=${options.code()}`, match.profile.dir)
   ) {
-    effects.log(
-      `✓ Opened Browse's status page in ${match.browser.name} (${match.profile.name}) to pair it with the relay`,
-    )
+    effects.log(`✓ Opened browse in ${match.browser.name} to connect it`)
     return "opened"
   }
-  effects.log(`To pair Browse in ${match.browser.name} (${match.profile.name}): ${manualPair(options.code())}`)
+  effects.log(`To connect browse in ${match.browser.name}: ${manualPair(options.code())}`)
   return "manual"
 }
 
-/** The numbered steps for loading the unpacked build, saying what install already did for each. */
+/** The steps for loading the unpacked build, saying what install already did for each. */
 function unpackedSteps(step: {
   folder: string
   platform: NodeJS.Platform
@@ -145,15 +137,9 @@ function unpackedSteps(step: {
     step.platform === "darwin"
       ? "press Cmd+Shift+G in the folder picker and paste"
       : "paste it into the folder picker"
-  log("Load the extension in your browser (one time):")
   log(
-    `  1. Open ${page}${step.browser ? ` in ${step.browser}` : " (or your browser's extensions page)"}${step.opened ? " (opened)" : ""}`,
+    `Load browse in ${step.browser ?? "your browser"}: open ${page}${step.opened ? " (opened)" : ""}, turn on Developer mode, click Load unpacked and choose ${step.folder}${step.copied ? ` (path copied: ${paste})` : step.revealed ? ` (shown in ${fileManager})` : ""}`,
   )
-  log("  2. Turn on Developer mode")
-  log(
-    `  3. Click Load unpacked and choose this folder${step.copied ? ` (path copied: ${paste})` : ""}, or drag it onto the page:`,
-  )
-  log(`     ${step.folder}${step.revealed ? ` (shown in ${fileManager})` : ""}`)
 }
 
 /**

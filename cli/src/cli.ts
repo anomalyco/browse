@@ -36,7 +36,7 @@ export {
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 
 export const opencodeBrowser = Command.make("opencode-browser").pipe(
-  Command.withDescription("Control the user's existing browser through the Browse extension"),
+  Command.withDescription("Control the user's existing browser through the browse extension"),
   Command.withSubcommands(buildRegisteredCliCommands({ packageRoot })),
 )
 
@@ -95,6 +95,7 @@ export function runCli(rawArgs: ReadonlyArray<string> = process.argv.slice(2)): 
   )
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Run directly (`bun src/cli.ts`), not bundled into a single file with main.ts, which also calls runCli.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href && import.meta.url.endsWith("/cli.ts")) {
   runCli()
 }

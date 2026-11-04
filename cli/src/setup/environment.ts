@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import * as clack from "@clack/prompts"
 import type { AgentName, AgentReceipt } from "./agent-config.ts"
 import { runtimeLayout } from "../update/auto-update.ts"
 import { formatPairingCode } from "../relay/browser-pairing.ts"
@@ -76,11 +77,12 @@ export type Settings = {
   declinedAgents?: AgentName[]
 }
 
-export const connectedMessage = "✓ Connected. Restart your agent, then ask it to open a page."
+// In a terminal the outro says what to do next.
+export const connectedMessage = "✓ Connected to your browser. Restart your agent, then ask it to open a page."
 export const pairedOfflineMessage =
-  "! Not connected yet. Open the browser profile already paired with Browse and make sure the extension is enabled. It reconnects automatically."
+  "! Not connected yet. Open the browser profile already paired with browse and make sure the extension is enabled. It reconnects automatically."
 export const manualPair = (code: string) =>
-  `Open the Extensions menu → Browse → Options, enter ${formatPairingCode(code)} as the pairing code, then click Pair.`
+  `Open the Extensions menu → browse → Options, enter ${formatPairingCode(code)} as the pairing code, then click Pair.`
 
 export function flag(args: string[], name: string) {
   const index = args.indexOf(name)
@@ -115,12 +117,36 @@ export function readFileOr(file: string, fallback: string) {
   }
 }
 
+export const tilde = (file: string) => (file === home || file.startsWith(home + path.sep) ? "~" + file.slice(home.length) : file)
+
+/**
+ * install in a terminal draws one rail (clack), like the skills CLI: "✓ " lines are steps, "! " lines warnings, and a
+ * line while the spinner waits ends it. Everything else (agents, scripts, other commands) gets the plain lines.
+ */
+export const rail: { active: boolean; waiting?: ReturnType<typeof clack.spinner> | undefined } = { active: false }
+
 export function log(line: string) {
-  process.stdout.write(line + "\n")
+  if (!rail.active) return void process.stdout.write(line + "\n")
+  if (!line.trim()) return
+  const ok = line.startsWith("✓ ")
+  const warn = line.startsWith("! ")
+  const text = ok || warn ? line.slice(2) : line
+  if (rail.waiting) {
+    const spinner = rail.waiting
+    rail.waiting = undefined
+    return warn ? spinner.error(text) : spinner.stop(text)
+  }
+  if (ok) return clack.log.success(text)
+  if (warn) return clack.log.warn(text)
+  clack.log.message(text)
 }
 
 export function fail(message: string): never {
-  process.stderr.write(message + "\n")
+  if (rail.active) {
+    rail.waiting?.error("Stopped")
+    clack.log.error(message)
+    clack.outro("browse isn't set up yet.")
+  } else process.stderr.write(message + "\n")
   process.exit(1)
 }
 

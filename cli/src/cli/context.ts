@@ -126,7 +126,7 @@ export const ensureCliRelay = Effect.fnUntraced(function* () {
   const relay = yield* RelayClient.Service
   const readiness = yield* RelayLifecycle.ensureRelay({ relay })
   if (readiness.started) {
-    yield* Console.error(`Started Browse relay at ${relay.endpoint}`)
+    yield* Console.error(`Started browse relay at ${relay.endpoint}`)
   }
   if (readiness.buildProblem) {
     return yield* Effect.fail(new Error(readiness.buildProblem))
@@ -142,7 +142,7 @@ export const ensureCliRelayAndExtension = Effect.fnUntraced(function* (sessionId
     sessionId,
     waitForReconnect: RelayLifecycle.shouldWaitForExtensionReconnect(readiness),
     onWait: Console.error(
-      `Waiting up to ${RelayLifecycle.extensionReconnectWaitMs / 1_000}s for the Browse extension to reconnect`,
+      `Waiting up to ${RelayLifecycle.extensionReconnectWaitMs / 1_000}s for the browse extension to reconnect`,
     ),
   })
 })
@@ -151,7 +151,7 @@ export const resolveSelectedSessionId = Effect.fnUntraced(function* (explicitSes
   const store = yield* SessionStore.Service
   const sessionId = explicitSessionId ?? (yield* store.read)
   if (!sessionId) {
-    return yield* Effect.fail(new Error("No session provided and no current Browse session exists"))
+    return yield* Effect.fail(new Error("No session provided and no current browse session exists"))
   }
   return sessionId
 })

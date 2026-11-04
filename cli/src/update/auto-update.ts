@@ -15,12 +15,21 @@
 // the browser, switches current.json and restarts the relay from the new version. "notify" only shows the update;
 // "off" doesn't check. OPENCODE_BROWSER_AUTO_UPDATE overrides the stored mode. The previous version stays installed for
 // `opencode-browser rollback`, which also skips the version it rolled back from until a newer one is published.
+//
+// A binary install (the install script put the executable in ~/.browse/bin) works the same way with executables:
+//   runtime/versions/<version>/browse   each version's executable, from its platform package @opencode/browse-<target>
+//   runtime/current.json                also names `binary`, the executable on PATH that agents' MCP entries run
+// Switching a version replaces `binary` by rename with that version's executable (a running relay or MCP server keeps
+// the file it started from), and `browse mcp` from it supervises the MCP server the way the shim does (mcp/supervisor.ts).
 import { spawn } from "node:child_process"
-import { chmodSync, closeSync, cpSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { createHash } from "node:crypto"
+import { chmodSync, closeSync, copyFileSync, cpSync, existsSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import { dataRoot, fromCheckout } from "../paths.ts"
+import { gunzipSync } from "node:zlib"
+import { binaryName, binaryPackage, compiledBinary, dataRoot, entryCommand, fromCheckout } from "../paths.ts"
+import { opencodeBrowserVersion } from "../version.ts"
 
 export const PACKAGE_NAME = "@opencode/browse"
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -52,8 +61,14 @@ export function runtimeLayout(root = dataRoot()): Layout {
 }
 
 export const versionDirectory = (layout: Layout, version: string) => path.join(layout.versions, version)
-export const versionEntry = (layout: Layout, version: string) =>
-  path.join(versionDirectory(layout, version), "node_modules", "@opencode", "browse", "dist", "cli.mjs")
+/** What runs an installed version: its executable for a binary install, else its npm package's bundle. */
+export const versionEntry = (layout: Layout, version: string, binary = compiledBinary()) =>
+  binary
+    ? path.join(versionDirectory(layout, version), binaryName())
+    : path.join(versionDirectory(layout, version), "node_modules", "@opencode", "browse", "dist", "cli.mjs")
+
+/** The package auto-update installs: this platform's executable for a binary install, else the npm package. */
+const updatePackage = () => (compiledBinary() ? binaryPackage() : undefined) ?? PACKAGE_NAME
 
 export const channelOf = (version: string): Channel => (version.includes("-dev.") ? "dev" : "latest")
 
@@ -92,7 +107,14 @@ function writeJsonAtomic(file: string, value: unknown) {
   renameSync(temporary, file)
 }
 
-export type Current = { readonly version: string; readonly previous?: string; readonly channel: Channel; readonly switchedAt?: string }
+export type Current = {
+  readonly version: string
+  readonly previous?: string
+  readonly channel: Channel
+  readonly switchedAt?: string
+  /** A binary install's executable on PATH, which every switch replaces with the version's executable. */
+  readonly binary?: string
+}
 
 export function readCurrent(layout = runtimeLayout()): Current | undefined {
   const current = readJson<Current>(layout.current)
@@ -146,6 +168,7 @@ const realpath = (file: string) => {
 export function npmRuntime(options: { readonly entry?: string; readonly layout?: Layout; readonly checkout?: boolean } = {}) {
   if (options.checkout ?? fromCheckout()) return undefined
   const layout = options.layout ?? runtimeLayout()
+  if (compiledBinary()) return binaryRuntime(layout)
   const defaultEntry = () => fileURLToPath(import.meta.url.endsWith(".ts") ? import.meta.url : new URL("./cli.mjs", import.meta.url))
   const entry = realpath(options.entry ?? defaultEntry())
   const relative = path.relative(realpath(layout.versions), entry).split(path.sep)
@@ -153,6 +176,19 @@ export function npmRuntime(options: { readonly entry?: string; readonly layout?:
   const current = readCurrent(layout)
   if (!current) return undefined
   return { layout, version: relative[0]!, current }
+}
+
+/**
+ * A binary install this executable belongs to: install recorded it as current.json's `binary`, or it is one of the
+ * installed versions (an MCP server the supervisor started). Anything else (a downloaded executable run in place) isn't.
+ */
+function binaryRuntime(layout: Layout) {
+  const current = readCurrent(layout)
+  if (!current?.binary) return undefined
+  const self = realpath(process.execPath)
+  const inVersions = !path.relative(realpath(layout.versions), self).startsWith("..")
+  if (self !== realpath(current.binary) && !inVersions) return undefined
+  return { layout, version: opencodeBrowserVersion, current }
 }
 
 // ---- settings -----------------------------------------------------------------------------------------
@@ -267,25 +303,27 @@ export const runCommand: Run = (command, args, options = {}) =>
 /** The registry npm installs from: OPENCODE_BROWSER_NPM_REGISTRY, else npm's own configuration, else npmjs.org. */
 export async function registryUrl(run: Run = runCommand, env: NodeJS.ProcessEnv = process.env): Promise<string> {
   const override = env.OPENCODE_BROWSER_NPM_REGISTRY?.trim()
-  const configured = override || (await run("npm", ["config", "get", "registry"], { timeoutMs: 15_000 })).stdout.trim()
+  // A binary install doesn't need npm, which may not be there.
+  const configured = override || (compiledBinary() ? "" : (await run("npm", ["config", "get", "registry"], { timeoutMs: 15_000 })).stdout.trim())
   return /^https?:\/\//.test(configured) ? configured.replace(/\/+$/, "") : DEFAULT_REGISTRY
 }
 
 export type Published = { readonly version: string; readonly integrity: string }
 
-/** The channel's dist-tag and that version's published integrity. */
-export async function fetchPublished(options: { readonly registry: string; readonly channel: Channel; readonly fetch?: typeof fetch }): Promise<Published> {
+/** The channel's dist-tag and that version's published integrity (of this platform's package, for a binary install). */
+export async function fetchPublished(options: { readonly registry: string; readonly channel: Channel; readonly fetch?: typeof fetch; readonly packageName?: string }): Promise<Published> {
   const request = options.fetch ?? fetch
-  const response = await request(`${options.registry}/${PACKAGE_NAME.replace("/", "%2f")}`, {
+  const name = options.packageName ?? updatePackage()
+  const response = await request(`${options.registry}/${name.replace("/", "%2f")}`, {
     headers: { accept: "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8" },
     signal: AbortSignal.timeout(20_000),
   })
-  if (!response.ok) throw new Error(`the registry answered ${response.status} for ${PACKAGE_NAME}`)
+  if (!response.ok) throw new Error(`the registry answered ${response.status} for ${name}`)
   const body = (await response.json()) as { "dist-tags"?: Record<string, string>; versions?: Record<string, { dist?: { integrity?: string } }> }
   const version = body["dist-tags"]?.[options.channel]
-  if (!version) throw new Error(`${PACKAGE_NAME} has no ${options.channel} dist-tag`)
+  if (!version) throw new Error(`${name} has no ${options.channel} dist-tag`)
   const integrity = body.versions?.[version]?.dist?.integrity
-  if (!integrity || !/^sha512-/.test(integrity)) throw new Error(`${PACKAGE_NAME}@${version} has no sha512 integrity in the registry`)
+  if (!integrity || !/^sha512-/.test(integrity)) throw new Error(`${name}@${version} has no sha512 integrity in the registry`)
   return { version, integrity }
 }
 
@@ -327,7 +365,10 @@ export async function installVersion(options: {
   readonly registry?: string
   readonly run?: Run
   readonly node?: string
+  /** A binary install's running executable, to install as this version instead of downloading it. */
+  readonly runningBinary?: string
 }): Promise<string> {
+  if (compiledBinary() || options.runningBinary) return installBinaryVersion(options)
   const run = options.run ?? runCommand
   const { layout } = options
   const spec = options.spec ?? `${PACKAGE_NAME}@${options.version}`
@@ -362,6 +403,108 @@ export async function installVersion(options: {
   } finally {
     rmSync(temporary, { recursive: true, force: true })
   }
+}
+
+/**
+ * A binary install's installVersion: puts this platform's executable for the version in runtime/versions/<version>,
+ * downloaded from its package's tarball and checked against the registry's integrity (or copied from the running
+ * executable), and verifies it runs and reports the version. Built in a temporary directory and renamed into place.
+ */
+async function installBinaryVersion(options: Parameters<typeof installVersion>[0]): Promise<string> {
+  const run = options.run ?? runCommand
+  const { layout } = options
+  mkdirSync(layout.versions, { recursive: true })
+  const temporary = path.join(layout.versions, `.install-${process.pid}-${Date.now()}`)
+  rmSync(temporary, { recursive: true, force: true })
+  mkdirSync(temporary, { recursive: true })
+  try {
+    const file = path.join(temporary, binaryName())
+    const expected = options.runningBinary ? opencodeBrowserVersion : options.version
+    if (options.runningBinary) copyFileSync(options.runningBinary, file)
+    else {
+      const name = updatePackage()
+      if (name === PACKAGE_NAME) throw new Error("this executable doesn't know its platform package")
+      const registry = options.registry ?? (await registryUrl(run))
+      const integrity = options.integrity ?? (await publishedIntegrity(registry, name, options.version))
+      const response = await fetch(`${registry}/${name}/-/${name.split("/")[1]}-${options.version}.tgz`, { signal: AbortSignal.timeout(10 * 60_000) })
+      if (!response.ok) throw new Error(`downloading ${name}@${options.version} failed: the registry answered ${response.status}`)
+      const tgz = new Uint8Array(await response.arrayBuffer())
+      const actual = `sha512-${createHash("sha512").update(tgz).digest("base64")}`
+      if (actual !== integrity) throw new Error(`${name}@${options.version} downloaded with integrity ${actual}, not the registry's ${integrity}`)
+      const executable = tarFile(tgz, `package/bin/${binaryName()}`)
+      if (!executable) throw new Error(`${name}@${options.version} has no bin/${binaryName()}`)
+      writeFileSync(file, executable)
+    }
+    chmodSync(file, 0o755)
+    const reported = await run(file, ["--version"], { timeoutMs: 30_000, env: { ...process.env, OPENCODE_BROWSER_AUTOSTART: "0" } })
+    if (reported.status !== 0 || reported.stdout.trim() !== expected)
+      throw new Error(`browse ${expected} didn't run: \`--version\` printed ${JSON.stringify(reported.stdout.trim() || reported.stderr.trim()).slice(0, 200)}`)
+    const target = versionDirectory(layout, expected)
+    rmSync(target, { recursive: true, force: true })
+    renameSync(temporary, target)
+    return versionEntry(layout, expected, true)
+  } finally {
+    rmSync(temporary, { recursive: true, force: true })
+  }
+}
+
+async function publishedIntegrity(registry: string, name: string, version: string): Promise<string> {
+  const response = await fetch(`${registry}/${name.replace("/", "%2f")}/${version}`, { signal: AbortSignal.timeout(20_000) })
+  if (!response.ok) throw new Error(`the registry answered ${response.status} for ${name}@${version}`)
+  const integrity = ((await response.json()) as { dist?: { integrity?: string } }).dist?.integrity
+  if (!integrity || !/^sha512-/.test(integrity)) throw new Error(`${name}@${version} has no sha512 integrity in the registry`)
+  return integrity
+}
+
+/** One regular file from an npm tarball (gzipped ustar, with pax or GNU long names), or undefined. */
+export function tarFile(tgz: Uint8Array, wanted: string): Buffer | undefined {
+  const tar = gunzipSync(tgz)
+  let offset = 0
+  let longName: string | undefined
+  while (offset + 512 <= tar.length) {
+    const header = tar.subarray(offset, offset + 512)
+    if (header.every((byte) => byte === 0)) return undefined
+    const field = (start: number, length: number) => header.subarray(start, start + length).toString("utf8").replace(/\0[\s\S]*$/, "")
+    const size = parseInt(field(124, 12).trim() || "0", 8)
+    const type = field(156, 1) || "0"
+    const prefix = field(345, 155)
+    const name = longName ?? (prefix ? `${prefix}/${field(0, 100)}` : field(0, 100))
+    longName = undefined
+    const body = tar.subarray(offset + 512, offset + 512 + size)
+    offset += 512 + Math.ceil(size / 512) * 512
+    if (type === "x") longName = /(?:^|\n)\d+ path=([^\n]*)\n/.exec(body.toString("utf8"))?.[1]
+    else if (type === "L") longName = body.toString("utf8").replace(/\0[\s\S]*$/, "")
+    else if (type === "0" && name === wanted) return Buffer.from(body)
+  }
+  return undefined
+}
+
+/**
+ * Puts `source` (a version's executable) at `target` (the executable on PATH) by rename, so a relay or MCP server
+ * still running the old file keeps it: hard-linked when they share a file system, else copied. Windows can't replace
+ * a running executable, but can rename it out of the way; those leftovers go once nothing runs them.
+ */
+export function placeBinary(source: string, target: string) {
+  const staged = `${target}.${process.pid}.new`
+  rmSync(staged, { force: true })
+  try {
+    linkSync(source, staged)
+  } catch {
+    copyFileSync(source, staged)
+  }
+  chmodSync(staged, 0o755)
+  if (process.platform === "win32") {
+    const dir = path.dirname(target)
+    const stale = `${path.basename(target)}.old-`
+    for (const name of readdirSync(dir)) {
+      if (!name.startsWith(stale)) continue
+      try {
+        rmSync(path.join(dir, name), { force: true })
+      } catch {}
+    }
+    if (existsSync(target)) renameSync(target, `${target}.old-${Date.now()}`)
+  }
+  renameSync(staged, target)
 }
 
 /** Whether a process still runs. */
@@ -403,11 +546,16 @@ export function validatePending(layout: Layout): AutoUpdateState {
   return updateState(layout, ({ pending: _pending, ...rest }) => rest)
 }
 
-/** Points new processes at `version`, keeping the version it replaces for rollback. */
-export function switchVersion(layout: Layout, version: string, previous: string | undefined) {
-  if (!existsSync(versionEntry(layout, version))) throw new Error(`${version} isn't installed in ${layout.versions}`)
-  writeCurrent(layout, { version, ...(previous && previous !== version ? { previous } : {}), channel: channelOf(version) })
-  writeShim(layout)
+/**
+ * Points new processes at `version`, keeping the version it replaces for rollback. A binary install also puts the
+ * version's executable at `binary` (by default the one current.json names), unless that already is it.
+ */
+export function switchVersion(layout: Layout, version: string, previous: string | undefined, binary = compiledBinary() ? readCurrent(layout)?.binary : undefined) {
+  const entry = versionEntry(layout, version, binary !== undefined)
+  if (!existsSync(entry)) throw new Error(`${version} isn't installed in ${layout.versions}`)
+  if (binary && !(version === opencodeBrowserVersion && realpath(binary) === realpath(process.execPath))) placeBinary(entry, binary)
+  writeCurrent(layout, { version, ...(previous && previous !== version ? { previous } : {}), channel: channelOf(version), ...(binary ? { binary } : {}) })
+  if (!binary) writeShim(layout)
 }
 
 // ---- the stable shim -------------------------------------------------------------------------------------
@@ -421,7 +569,7 @@ export function switchVersion(layout: Layout, version: string, previous: string 
  */
 export function shimSource(): string {
   return `#!/usr/bin/env node
-// Browse's stable entry, written by install (cli/src/auto-update.ts). opencode's browse MCP server runs this
+// browse's stable entry, written by install (cli/src/auto-update.ts). opencode's browse MCP server runs this
 // file, so its configuration never changes when the runtime updates. Don't edit; install rewrites it.
 import { spawn } from "node:child_process"
 import { readFileSync } from "node:fs"
@@ -703,13 +851,14 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
   }
 }
 
-/** Starts `node <entry> <args>` detached, logging to logs/auto-update.log; returns its pid. */
+/** Starts `node <entry> <args>` (an executable entry: `<entry> <args>`) detached, logging to logs/auto-update.log; returns its pid. */
 export function spawnRuntimeChild(layout: Layout, entry: string, args: readonly string[], onExit: (code: number | null) => void, env: NodeJS.ProcessEnv = process.env): number | undefined {
   const { OPENCODE_BROWSER_MANAGED_RELAY: _managed, OPENCODE_BROWSER_RESTART_REQUEST_ID: _request, ...rest } = env
   mkdirSync(path.join(layout.root, "logs"), { recursive: true })
   const log = openSync(path.join(layout.root, "logs", "auto-update.log"), "a", 0o600)
   try {
-    const child = spawn(process.execPath, [entry, ...args], { detached: true, stdio: ["ignore", log, log], env: { ...rest, OPENCODE_BROWSER_HOME: layout.root } })
+    const [file, ...prefix] = entryCommand(entry)
+    const child = spawn(file!, [...prefix, ...args], { detached: true, stdio: ["ignore", log, log], env: { ...rest, OPENCODE_BROWSER_HOME: layout.root } })
     child.on("error", () => onExit(null))
     child.on("exit", (code) => onExit(code))
     child.unref()

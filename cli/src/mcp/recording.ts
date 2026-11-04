@@ -37,7 +37,7 @@ registerMcpTools({
           cursor: {
             type: "boolean",
             description:
-              "Draw the ghost cursor in the recording, for demo videos. Off by default: recordings show only the page, with nothing from Browse in the frame.",
+              "Draw the ghost cursor in the recording, for demo videos. Off by default: recordings show only the page, with nothing from browse in the frame.",
           },
         },
         ["outputPath"],

@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { spawnSync } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { channelOf, compareVersions, createAutoUpdater, installVersion, pruneVersions, readCurrent, readState, runtimeLayout, updateState, validatePending, versionEntry, writeCurrent, type Layout } from "../src/update/auto-update.ts"
+import { channelOf, compareVersions, createAutoUpdater, installVersion, pruneVersions, readCurrent, readState, runtimeLayout, switchVersion, tarFile, updateState, validatePending, versionEntry, writeCurrent, type Layout } from "../src/update/auto-update.ts"
+import { managedRelayLaunch } from "../src/relay/lifecycle.ts"
 
 const roots: string[] = []
 afterEach(() => {
@@ -35,6 +37,49 @@ test("install keeps the running package and its dependencies when the npx cache 
   const entry = await installVersion({ layout, version: "1.2.3", runningPackage: source })
   fs.rmSync(cache, { recursive: true })
   expect((await Bun.$`node ${entry} --version`.text()).trim()).toBe("1.2.3")
+})
+
+describe("a binary install", () => {
+  test("reads the executable out of its platform package's tarball", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "browse-tarball-"))
+    roots.push(root)
+    fs.mkdirSync(path.join(root, "package", "bin"), { recursive: true })
+    fs.writeFileSync(path.join(root, "package", "package.json"), "{}")
+    fs.writeFileSync(path.join(root, "package", "bin", "browse"), "executable bytes")
+    const made = spawnSync("tar", ["czf", path.join(root, "pkg.tgz"), "-C", root, "package"])
+    expect(made.status).toBe(0)
+    const tgz = fs.readFileSync(path.join(root, "pkg.tgz"))
+    expect(tarFile(tgz, "package/bin/browse")?.toString()).toBe("executable bytes")
+    expect(tarFile(tgz, "package/bin/browse.exe")).toBeUndefined()
+  })
+
+  test("switching puts the version's executable on PATH by rename, and back for rollback", () => {
+    const layout = layoutWith([])
+    const binary = path.join(layout.root, "bin", "browse")
+    fs.mkdirSync(path.dirname(binary), { recursive: true })
+    fs.writeFileSync(binary, "old")
+    for (const version of ["1.0.0", "1.0.1"]) {
+      fs.mkdirSync(path.dirname(versionEntry(layout, version, true)), { recursive: true })
+      fs.writeFileSync(versionEntry(layout, version, true), version)
+    }
+    // A process still running the old executable keeps its file.
+    const running = fs.openSync(binary, "r")
+    switchVersion(layout, "1.0.1", "1.0.0", binary)
+    expect(fs.readFileSync(binary, "utf8")).toBe("1.0.1")
+    expect(fs.readFileSync(running, "utf8")).toBe("old")
+    fs.closeSync(running)
+    expect(readCurrent(layout)).toMatchObject({ version: "1.0.1", previous: "1.0.0", binary })
+    // No npm shim for a binary install.
+    expect(fs.existsSync(layout.shim)).toBe(false)
+    switchVersion(layout, "1.0.0", "1.0.1", binary)
+    expect(fs.readFileSync(binary, "utf8")).toBe("1.0.0")
+    expect(fs.readdirSync(path.dirname(binary))).toEqual(["browse"])
+  })
+
+  test("the relay starts from an executable entry by itself", () => {
+    expect(managedRelayLaunch("/home/u/.browse/bin/browse", "/usr/bin/node", ["--flag"])).toEqual({ executable: "/home/u/.browse/bin/browse", args: ["serve"] })
+    expect(managedRelayLaunch("/pkg/dist/cli.mjs", "/usr/bin/node", [])).toEqual({ executable: "/usr/bin/node", args: ["/pkg/dist/cli.mjs", "serve"] })
+  })
 })
 
 describe("channels and versions", () => {

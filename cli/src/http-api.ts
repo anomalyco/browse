@@ -77,7 +77,7 @@ export function createHttpRequestHandler(options: {
     // The version probe stays open: it reveals nothing sensitive and lets clients of another build or install tell
     // which relay holds the port before they send a token it would reject.
     if (pathname !== "/" && pathname !== "/version" && !hasRelayToken(request, options.authToken)) {
-      sendJson(response, { error: "Missing or invalid Browse relay token", code: "unauthorized" }, 401)
+      sendJson(response, { error: "Missing or invalid browse relay token", code: "unauthorized" }, 401)
       return
     }
     const observational = request.method === "GET" || pathname === "/network/status" || pathname === "/auth/status"

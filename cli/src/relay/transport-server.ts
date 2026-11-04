@@ -77,7 +77,7 @@ export function createRelayTransportServers(deps: TransportServerDeps): {
     }
     if (!isReady()) {
       response.writeHead(503, { "content-type": "application/json; charset=utf-8", "retry-after": "1" })
-      response.end(JSON.stringify({ error: "Browse relay is starting", code: "relay-starting" }))
+      response.end(JSON.stringify({ error: "browse relay is starting", code: "relay-starting" }))
       return
     }
     const started = performance.now()
@@ -100,7 +100,7 @@ export function createRelayTransportServers(deps: TransportServerDeps): {
 
   httpServer.on("upgrade", (request, socket, head) => {
     if (!isReady()) {
-      sendUpgradeError({ socket, status: 404, message: "Browse relay is starting" })
+      sendUpgradeError({ socket, status: 404, message: "browse relay is starting" })
       return
     }
     const requestUrl = new URL(request.url ?? "/", endpointUrl)
@@ -131,7 +131,7 @@ export function createRelayTransportServers(deps: TransportServerDeps): {
       return
     }
     if (!hasRelayToken(request, authToken) && !secretsEqual(authToken, requestUrl.searchParams.get(relayTokenQueryParam) ?? undefined)) {
-      sendUpgradeError({ socket, status: 401, message: "Missing or invalid Browse relay token" })
+      sendUpgradeError({ socket, status: 401, message: "Missing or invalid browse relay token" })
       return
     }
     if (requestUrl.pathname.startsWith("/devtools/browser/")) {

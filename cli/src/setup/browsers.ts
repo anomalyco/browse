@@ -144,7 +144,7 @@ export function extensionsPage(browser: Pick<Browser, "name">) {
   return `${scheme ?? "chrome"}://extensions`
 }
 
-/** Every browser with user data here, and the profiles that have Browse. */
+/** Every browser with user data here, and the profiles that have browse. */
 export function detectBrowsers() {
   return browsers().flatMap((browser): Detection[] => {
     const state = readLocked(path.join(browser.userData, "Local State"))
@@ -224,7 +224,7 @@ function readLocked(file: string) {
   }
 }
 
-function parseJson(text: string | undefined): unknown {
+export function parseJson(text: string | undefined): unknown {
   if (!text) return undefined
   try {
     return JSON.parse(text)
@@ -266,21 +266,7 @@ function defaultBrowserID() {
   return xdg.status === 0 ? xdg.stdout.trim().replace(/\.desktop$/, "") || undefined : undefined
 }
 
-export function reportDetections(detections: Detection[], preferred: Browser | undefined, writeLog: (line: string) => void) {
-  writeLog(`Default browser: ${preferred?.name ?? "unknown"}`)
-  detections.forEach((detection) => {
-    const name = detection.browser.name
-    if (detection.blocked) return writeLog(`  ${name}: couldn't check (${blockedReason()})`)
-    if (detection.enabled.length)
-      return writeLog(`  ${name}: Browse in ${detection.enabled.map(describe).join(", ")}`)
-    if (detection.disabled.length)
-      return writeLog(`  ${name}: Browse turned off in ${detection.disabled.map(describe).join(", ")}`)
-    writeLog(`  ${name}: no Browse`)
-  })
-}
-
-const describe = (match: Match) => `${match.profile.name}${match.id === unpackedExtensionId ? " (unpacked)" : ""}`
-const blockedReason = () => (process.platform === "darwin" ? "macOS privacy protection" : "permission denied")
+export const blockedReason = () => (process.platform === "darwin" ? "macOS privacy protection" : "permission denied")
 
 /**
  * Opens a URL in a specific browser by launching its executable with the URL, which forwards it to a running

@@ -3,7 +3,7 @@ export * as DebuggerHub from "./debugger-hub"
 import { serialQueue } from "./serial"
 
 // The chrome.debugger attachments this extension holds, one per tab, for everything in it that drives tabs: today
-// only the Browse relay's agents. Chrome allows a single attachment per extension per tab, so a tab is either
+// only the browse relay's agents. Chrome allows a single attachment per extension per tab, so a tab is either
 // attached or not.
 
 const attached = new Set<number>()

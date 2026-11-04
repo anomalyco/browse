@@ -17,16 +17,19 @@ import {
   writeExtensionPairing,
 } from "../relay/browser-pairing.ts"
 import { syncDevExtension } from "./dev-extension.ts"
-import { cliCommand, devExtensionFolder, installCommand } from "../paths.ts"
+import { cliCommand, devExtensionFolder, entryCommand, installCommand, runningEntry } from "../paths.ts"
 import { unpackedExtensionId } from "../protocol.ts"
 import { parseHostname, readRelayConfig, writeRelayConfig } from "../relay/config.ts"
 import { relayAuthorization } from "../relay/secrets.ts"
+import { readCurrent } from "../update/auto-update.ts"
+import { removeBinaryInstall } from "./binary.ts"
 import { revealFolder } from "./browsers.ts"
 import {
   checkoutExtensionDirs,
   dev,
   fail,
   files,
+  layout,
   LEGACY_MCP_NAME,
   log,
   manualPair,
@@ -51,7 +54,7 @@ export type ExtensionStatus = {
   protocolVersion?: number | null
 }
 
-const relayBase = () => `http://127.0.0.1:${Number(process.env.OPENCODE_BROWSER_PORT) || 19988}`
+export const relayBase = () => `http://127.0.0.1:${Number(process.env.OPENCODE_BROWSER_PORT) || 19988}`
 
 /** The relay token header; the relay rejects every API request without it. */
 const relayHeaders = (): Record<string, string> => {
@@ -63,12 +66,13 @@ const relayHeaders = (): Record<string, string> => {
 }
 
 export function ensureRelay(entry: string) {
-  const started = spawnSync(process.execPath, [entry, "session", "list", "--json"], {
+  const [file, ...prefix] = entryCommand(entry)
+  const started = spawnSync(file!, [...prefix, "session", "list", "--json"], {
     encoding: "utf8",
     timeout: 30_000,
   })
   if (started.status !== 0)
-    fail(`Couldn't start the Browse relay: ${started.stderr?.trim() || started.error?.message || `run ${cliCommand("doctor")}`}`)
+    fail(`Couldn't start the browse relay: ${started.stderr?.trim() || started.error?.message || `run ${cliCommand("doctor")}`}`)
 }
 
 export const extensionStatus = (installWaiting = false) =>
@@ -156,9 +160,9 @@ export async function extension() {
   if (!folder) {
     if (!STORE_URL)
       fail(
-        "This package doesn't know its Chrome Web Store item. Install a released version (`npx @opencode/browse install`), or set up Browse from a checkout.",
+        "This package doesn't know its Chrome Web Store item. Install a released version (`npx @opencode/browse install`), or set up browse from a checkout.",
       )
-    log(`Install Browse from the Chrome Web Store: ${STORE_URL}`)
+    log(`Install browse from the Chrome Web Store: ${STORE_URL}`)
     log(`Then run \`${cliCommand("install")}\` again to pair it.`)
     return
   }
@@ -181,7 +185,7 @@ export async function pair(args: string[]) {
     return
   }
   const timeoutMs = Math.min(waitTimeout(args), pairingCodeTtlMs)
-  ensureRelay(readJson<Settings>(files.settings)?.entry ?? process.argv[1]!)
+  ensureRelay(readJson<Settings>(files.settings)?.entry ?? runningEntry())
   const receipt = randomUUID()
   const code = mintPairingCode(undefined, { receipt })
   log(`Pairing code: ${formatPairingCode(code)}`)
@@ -293,7 +297,8 @@ export async function set(args: string[]) {
     () => false,
   )
   if (running) {
-    const restarted = spawnSync(process.execPath, [process.argv[1]!, "relay", "restart"], { stdio: "inherit" })
+    const [file, ...prefix] = entryCommand(runningEntry())
+    const restarted = spawnSync(file!, [...prefix, "relay", "restart"], { stdio: "inherit" })
     if (restarted.status !== 0)
       log(`! The relay is still running with the old hostname. Run \`${cliCommand("relay restart --force")}\` to apply it.`)
   }
@@ -304,14 +309,14 @@ export async function set(args: string[]) {
     ?.address
   log("")
   log(
-    "In the browser on the other computer, open Browse's options (right-click its toolbar button, then Options),",
+    "In the browser on the other computer, open browse's options (right-click its toolbar button, then Options),",
   )
   log("and under Connection enter:")
   log(`  Relay         ${tailscale ?? "this computer's address"}`)
   log(
     `  Pairing code  ${formatPairingCode(mintPairingCode())}  (works once, within ${pairingCodeTtlMs / 60_000} minutes; \`${cliCommand("pair")}\` prints another)`,
   )
-  log("The connection isn't encrypted by Browse: use it over Tailscale or a LAN you trust, not the open internet.")
+  log("The connection isn't encrypted by browse: use it over Tailscale or a LAN you trust, not the open internet.")
 }
 
 /** Stored secret profiles are the one thing uninstall deletes that can't be recaptured without the user. */
@@ -342,11 +347,16 @@ export async function uninstall(args: string[]) {
           : `✓ ${receipt.name}: ${result}`,
       )
     } catch {
-      fail(`Couldn't safely remove Browse from ${receipt.file}. Check its syntax and permissions, then re-run uninstall.`)
+      fail(`Couldn't safely remove browse from ${receipt.file}. Check its syntax and permissions, then re-run uninstall.`)
     }
   }
+  const binary = readCurrent(layout)?.binary
   rmSync(files.dir, { recursive: true, force: true })
   log(`✓ Removed ${files.dir}`)
+  if (binary) {
+    const left = removeBinaryInstall(binary)
+    log(left ? `! Couldn't remove ${left} while it runs; delete it once your agents have stopped.` : `✓ Removed ${binary}`)
+  }
   if (host) log("✓ Removed the native messaging host of an earlier version")
   if (mcp.length)
     log(`✓ Removed the ${mcp.map((name) => `"${name}"`).join(" and ")} MCP server${mcp.length === 1 ? "" : "s"}`)

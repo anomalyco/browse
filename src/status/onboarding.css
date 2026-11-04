@@ -1,0 +1,349 @@
+/* The onboarding guide, after Console's Connect OpenCode card (opencode-console features/onboarding). */
+.page {
+  --hair: 0.5px;
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 32px 24px 64px;
+  font-size: 13px;
+  line-height: 20px;
+  letter-spacing: -0.04px;
+}
+
+.guide {
+  margin-top: 24px;
+  border: 0.5px solid var(--v2-border-border-muted);
+  border-radius: 6px;
+  background: var(--v2-background-bg-layer-01);
+  overflow: hidden;
+}
+
+.guide button {
+  cursor: pointer;
+}
+
+.guide-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px;
+}
+
+.guide-title {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 15px;
+  line-height: 20px;
+  font-weight: 530;
+  letter-spacing: 0;
+}
+
+.guide-sub,
+.muted {
+  color: var(--v2-text-text-muted);
+}
+
+/* "· Connected" fades in next to the title once the agent connects. */
+.guide-connected {
+  display: inline-flex;
+  gap: 6px;
+  transition:
+    opacity 250ms var(--ease-out),
+    transform 250ms var(--ease-out);
+  @starting-style {
+    opacity: 0;
+    transform: translateX(-4px);
+  }
+}
+
+.guide-connected .ok {
+  color: var(--v2-state-fg-success);
+}
+
+.tabs {
+  position: relative;
+  display: flex;
+  gap: 2px;
+  height: 48px;
+  padding: 0 16px 0 5px;
+  align-items: stretch;
+}
+
+.tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--v2-text-text-faint);
+  font-weight: 530;
+  line-height: 13px;
+  transition: color 150ms ease;
+}
+
+.tab > span {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 11px;
+  border-radius: 6px;
+  transition: background-color 150ms ease;
+}
+
+.tab[data-selected] {
+  color: var(--v2-text-text-base);
+}
+
+.tab:focus-visible {
+  outline: none;
+}
+
+.tab:focus-visible > span {
+  outline: 2px solid var(--v2-border-border-focus);
+}
+
+.tab-indicator {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent 11px,
+    var(--v2-border-border-inverse) 11px,
+    var(--v2-border-border-inverse) calc(100% - 11px),
+    transparent calc(100% - 11px)
+  );
+  transition:
+    transform 250ms var(--ease-in-out),
+    width 250ms var(--ease-in-out);
+}
+
+.hr {
+  height: 1px;
+  margin: 0 16px;
+  background: linear-gradient(
+    transparent 0.25px,
+    var(--v2-border-border-strong) 0.25px,
+    var(--v2-border-border-strong) 0.75px,
+    transparent 0.75px
+  );
+}
+
+.guide-body {
+  padding: 32px 24px;
+}
+
+.steps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.step {
+  display: flex;
+  gap: 20px;
+  align-items: stretch;
+}
+
+.rail {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 20px;
+}
+
+.num {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 9999px;
+  background: var(--v2-background-bg-button-neutral);
+  box-shadow: var(--v2-elevation-button-neutral);
+  color: var(--v2-text-text-muted);
+  font-size: 11px;
+  line-height: 12px;
+  font-weight: 530;
+  transition:
+    background-color 200ms ease,
+    color 200ms ease;
+}
+
+.step[data-done] .num {
+  background: linear-gradient(rgb(255 255 255 / 0.06), rgb(255 255 255 / 0)), var(--v2-background-bg-inverse);
+  box-shadow: inset 0 0 0 0.5px var(--v2-border-border-base);
+  color: var(--v2-text-text-inverse);
+}
+
+.line {
+  flex: 1;
+  width: var(--hair);
+  min-height: 12px;
+  background: var(--v2-border-border-strong);
+}
+
+.step:last-child .line {
+  display: none;
+}
+
+.step-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+  padding-bottom: 24px;
+}
+
+.step:last-child .step-body {
+  padding-bottom: 0;
+}
+
+.step-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.step-title {
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 530;
+  letter-spacing: 0;
+}
+
+.step-desc {
+  color: var(--v2-text-text-muted);
+}
+
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 2px;
+  background: linear-gradient(rgb(255 255 255 / 0.06), rgb(255 255 255 / 0)), var(--v2-background-bg-layer-02);
+  box-shadow: inset 0 0 0 0.5px var(--v2-border-border-base);
+  color: var(--v2-text-text-base);
+  font-family: var(--font-family-mono);
+  font-size: 12px;
+  line-height: 16px;
+  vertical-align: middle;
+}
+
+/* Command field: [command  ⧉] */
+.cmd {
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: stretch;
+  max-width: 100%;
+  min-height: 32px;
+  border-radius: 6px;
+  background: var(--v2-background-bg-button-neutral);
+  box-shadow: var(--v2-elevation-raised);
+  overflow: hidden;
+}
+
+.cmd-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 4px 4px 12px;
+}
+
+.cmd-text code {
+  font-size: 12.5px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .tab:hover {
+    color: var(--v2-text-text-base);
+  }
+  .tab:hover > span {
+    background: var(--v2-overlay-simple-overlay-hover);
+  }
+}
+
+.guide .link {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.waiting {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  color: var(--v2-text-text-muted);
+}
+
+.pulse {
+  position: relative;
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--v2-state-fg-warning);
+  transform: translateY(-1px);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse {
+    animation: none;
+  }
+}
+
+.code-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.guide-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  padding: 16px;
+}
+
+.sep {
+  flex: none;
+  width: 1px;
+  height: 12px;
+  background: var(--v2-border-border-strong);
+}
+
+@media (max-width: 520px) {
+  .page {
+    padding: 20px 12px 48px;
+  }
+  .guide-body {
+    padding: 24px 16px;
+  }
+  .step {
+    gap: 14px;
+  }
+  .guide-foot .sep {
+    display: none;
+  }
+}

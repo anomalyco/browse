@@ -22,9 +22,9 @@ import { targetDiagnosticIdentity } from "./process-guard.ts"
 
 export type TabGroupingMethod = "tabs.group" | "tabs.ungroup"
 
-export const attachedBadge = { text: "ON", color: "#7c3aed", title: "Detach from Browse" }
-export const executingBadge = { text: "RUN", color: "#f59e0b", title: "Browse is running a script. Click to stop it and take this tab back." }
-export const waitingBadge = (message: string) => ({ text: "WAIT", color: "#2563eb", title: `Browse is waiting for you: ${message} Click here when you're done.` })
+export const attachedBadge = { text: "ON", color: "#7c3aed", title: "Detach from browse" }
+export const executingBadge = { text: "RUN", color: "#f59e0b", title: "browse is running a script. Click to stop it and take this tab back." }
+export const waitingBadge = (message: string) => ({ text: "WAIT", color: "#2563eb", title: `browse is waiting for you: ${message} Click here when you're done.` })
 
 export function createTabPresentation(options: {
   readonly registry: TargetRegistry
@@ -298,7 +298,7 @@ export function createTabPresentation(options: {
       }
       if (action === "stop-execution" && sessionId) {
         relayLog("execute.stopped", { tabId, session: sessionId, from: "toolbar" })
-        sessions.stopExecution(sessionId, `The user took tab ${tabId} back (Browse toolbar button) while this script ran, so it was stopped. Don't use that tab again unless the user lends it back; ask the user how to continue.`)
+        sessions.stopExecution(sessionId, `The user took tab ${tabId} back (browse toolbar button) while this script ran, so it was stopped. Don't use that tab again unless the user lends it back; ask the user how to continue.`)
       }
     }
     Effect.runPromise(toggleTab(tabId)).catch((error: unknown) => {

@@ -24,8 +24,8 @@ export class SessionAdmission {
   assertAdmission(): void {
     if (this.admission !== "open") {
       throw sessionError("inactive", this.admission === "closed"
-        ? "Browse sessions are closing"
-        : "Browse sessions are draining")
+        ? "browse sessions are closing"
+        : "browse sessions are draining")
     }
   }
 
@@ -116,14 +116,14 @@ export class SessionAdmission {
       }
     })
     void this.persistenceTail.catch((error) => {
-      console.error("Failed to persist Browse sessions", error)
+      console.error("Failed to persist browse sessions", error)
     })
   }
 
   flushPersistence(): Effect.Effect<void, Error> {
     return Effect.tryPromise({
       try: () => this.persistenceTail,
-      catch: (cause) => cause instanceof Error ? cause : new Error("Persist Browse sessions", { cause }),
+      catch: (cause) => cause instanceof Error ? cause : new Error("Persist browse sessions", { cause }),
     })
   }
 

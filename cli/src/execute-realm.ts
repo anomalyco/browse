@@ -85,6 +85,7 @@ import {
   intrinsicSource,
   isHiddenKey,
   isObjectLike,
+  registerRealmPromisePrototype,
   shadowFor,
   tagThrownByRealm,
   trackPromisesOf,
@@ -180,6 +181,7 @@ export class ExecuteRealm {
     this.sandboxFunctionPrototype = (sandboxIntrinsics.Function as FunctionConstructor).prototype
     this.sandboxArrayPrototype = (sandboxIntrinsics.Array as ArrayConstructor).prototype
     this.SandboxPromise = sandboxIntrinsics.Promise as PromiseConstructor
+    registerRealmPromisePrototype(this.SandboxPromise.prototype, this)
     this.SandboxError = sandboxIntrinsics.Error as ErrorConstructor
     // Await handles hostile Promise subclasses/species without leaving a rejected
     // original promise unobserved if `.then()` itself throws during conversion.

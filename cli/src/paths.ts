@@ -1,4 +1,4 @@
-// Where Browse keeps its files: the installed runtime, the relay's log, session catalogs and
+// Where browse keeps its files: the installed runtime, the relay's log, session catalogs and
 // journals, and captured secrets. One root, so `uninstall` can remove it and logs are easy to find.
 //   macOS/Linux: $XDG_DATA_HOME/opencode-browser, else ~/.local/share/opencode-browser
 //   Windows:     %LOCALAPPDATA%\opencode-browser
@@ -26,8 +26,37 @@ export const oldStoreMarker = () => path.join(dataRoot(), "old-store-extension")
 
 /** Running from a source checkout (the sources are next to the bundle), not the published npm package. */
 export function fromCheckout(): boolean {
-  return fs.existsSync(path.join(packageRoot(), "src", "main.ts"))
+  return !compiledBinary() && fs.existsSync(path.join(packageRoot(), "src", "main.ts"))
 }
+
+/** A standalone executable (script/compile.ts), which the install script puts in ~/.browse/bin; not Node and npm. */
+export const compiledBinary = (): boolean => globalThis.__OPENCODE_BROWSER_COMPILED__ === true
+
+/** The npm package that carries this executable's platform build, e.g. @opencode/browse-darwin-arm64. */
+export const binaryPackage = (): string | undefined =>
+  globalThis.__OPENCODE_BROWSER_TARGET__ ? `@opencode/browse-${globalThis.__OPENCODE_BROWSER_TARGET__}` : undefined
+
+/** The executable's file name in its package (package/bin/) and in an installed version's directory. */
+export const binaryName = (platform: NodeJS.Platform = process.platform) => (platform === "win32" ? "browse.exe" : "browse")
+
+/** A CLI entry Node runs (a bundle or source file), as opposed to an executable that runs by itself. */
+export const scriptEntry = (entry: string) => /\.[cm]?[jt]s$/.test(entry)
+
+/** The command that runs the CLI at `entry`: `<node> <entry>` for a script, the executable itself otherwise. */
+export const entryCommand = (entry: string, node = process.execPath): string[] => (scriptEntry(entry) ? [node, entry] : [entry])
+
+/** The executable a binary install put on PATH, as runtime/current.json records it (auto-update.ts). */
+function installedBinary(): string | undefined {
+  try {
+    const binary = (JSON.parse(fs.readFileSync(path.join(dataRoot(), "runtime", "current.json"), "utf8")) as { binary?: unknown }).binary
+    return typeof binary === "string" ? binary : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** This process's own CLI entry: the executable, or the script Node runs. */
+export const runningEntry = (): string => (compiledBinary() ? process.execPath : process.argv[1]!)
 
 /** The git clone this runs from (the folder above cli/), or undefined for the published package. */
 export function checkoutRoot(): string | undefined {
@@ -41,6 +70,14 @@ const quoted = (value: string) => (/^[\w@%+=:,./-]+$/.test(value) ? value : JSON
  * checkout's bundle from a checkout (where nothing is on PATH and the package may not be published).
  */
 export function cliCommand(args: string): string {
+  if (compiledBinary()) {
+    // A binary install's executable on PATH (auto-update.ts current.json), not the version an MCP server runs from;
+    // `browse` once its folder is on PATH (install adds it), else its full path.
+    const binary = installedBinary() ?? process.execPath
+    const dir = path.dirname(binary)
+    const onPath = (process.env.PATH ?? "").split(path.delimiter).some((entry) => entry && path.resolve(entry) === dir)
+    return `${onPath ? "browse" : quoted(binary)} ${args}`
+  }
   if (fromCheckout()) return `node ${quoted(path.join(packageRoot(), "dist", "cli.mjs"))} ${args}`
   // An installed runtime (auto-update.ts): its stable shim runs the version this install uses, which npx might not.
   const shim = path.join(dataRoot(), "bin", "opencode-browser.mjs")
@@ -97,7 +134,8 @@ export const devExtensionFolder = (root = dataRoot()) => path.join(root, "extens
 /** The store page of an item. */
 export const storeUrl = (id: string) => `https://chromewebstore.google.com/detail/${id}`
 
-/** How to tell the user to install (or update) Browse. */
+/** How to tell the user to install (or update) browse. */
 export function installCommand(): string {
+  if (compiledBinary()) return cliCommand("install")
   return fromCheckout() ? `cd ${quoted(path.dirname(packageRoot()))} && bun run setup` : "npx @opencode/browse install"
 }

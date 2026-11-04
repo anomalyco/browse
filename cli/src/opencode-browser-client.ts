@@ -116,7 +116,7 @@ export interface AuthenticatedOriginCapability {
 
 export type AuthenticatedOrigin = AuthenticatedOriginCapability
 
-/** Reveal a sensitive response using Browse's Effect runtime. */
+/** Reveal a sensitive response using browse's Effect runtime. */
 export const reveal = <A>(value: Redacted.Redacted<A>): A => Redacted.value(value)
 
 export interface AuthenticatedOriginOptions {
@@ -363,7 +363,7 @@ function decodeOutcome<S extends Schema.Top>(
     Success: (outcome) => {
       if (request.sensitive === true) {
         return Schema.decodeUnknownEffect(Schema.RedactedFromValue(request.response, {
-          label: "Browse authenticated response",
+          label: "browse authenticated response",
           disallowEncode: true,
         }))(outcome.value).pipe(
           Effect.mapError(() => mutation
@@ -435,7 +435,7 @@ function clientError(reason: ClientError["reason"], error: unknown): ClientError
     })
   }
   return new ClientError({
-    message: error instanceof globalThis.Error ? error.message : "Browse request failed",
+    message: error instanceof globalThis.Error ? error.message : "browse request failed",
     reason,
   })
 }

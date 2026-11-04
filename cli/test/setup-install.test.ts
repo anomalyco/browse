@@ -5,7 +5,7 @@ import path from "node:path"
 import { parse } from "jsonc-parser"
 import { agentLocations, agentNames, callingAgent, editAgentConfig } from "../src/setup/agent-config.ts"
 import { agentFlags, agentPlan } from "../src/setup/agent-picker.ts"
-import { configureMcp, installedExtensionVersion, installedRuntime, installWaitTimeout, locateExtension, pairStoreExtension, relayNotRestarted, removeMcp, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
+import { configureMcp, installedExtensionVersion, installedRuntime, installWaitTimeout, locateExtension, manualMcpEntry, pairStoreExtension, relayNotRestarted, remoteRelayAddresses, remoteRelayLines, removeMcp, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
 
 const browser = (name: string): Browser => ({ name, userData: `/data/${name}`, manifests: [], defaultIDs: [], executables: [] })
 const chrome = browser("Google Chrome")
@@ -45,6 +45,33 @@ test("OpenCode JSONC keeps comments and other servers across install, reinstall 
   } finally { fs.rmSync(home, { recursive: true, force: true }) }
 })
 
+test("a binary install's entry runs the executable itself, in OpenCode, other agents and the manual entry", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-binary-"))
+  try {
+    const binary = path.join(home, ".browse", "bin", "browse")
+    const opencode = path.join(home, "opencode.json")
+    expect(configureMcp(opencode, binary)).toContain("added")
+    expect(parse(fs.readFileSync(opencode, "utf8")).mcp.servers.browse).toMatchObject({ command: [binary, "mcp"], environment: { OPENCODE_BROWSER_RUNTIME: "auto-update" } })
+    expect(configureMcp(opencode, binary, binary)).toContain("up to date")
+    expect(removeMcp("browse", binary, opencode)).toBe(true)
+
+    const claude = { name: "claude" as const, file: path.join(home, ".claude.json"), entry: binary }
+    expect(editAgentConfig(claude)).toBe("added")
+    expect(parse(fs.readFileSync(claude.file, "utf8")).mcpServers.browse).toEqual({ type: "stdio", command: binary, args: ["mcp"] })
+    // An npm install's receipt for the same file doesn't own the binary entry.
+    expect(editAgentConfig({ ...claude, node: "/usr/bin/node", entry: "/data/bin/opencode-browser.mjs" }, true)).toBe("conflict")
+    expect(editAgentConfig(claude, true)).toBe("removed")
+
+    const codex = { name: "codex" as const, file: path.join(home, "config.toml"), entry: binary }
+    expect(editAgentConfig(codex)).toBe("added")
+    expect(Bun.TOML.parse(fs.readFileSync(codex.file, "utf8"))).toEqual({ mcp_servers: { browse: { command: binary, args: ["mcp"] } } })
+    expect(editAgentConfig(codex, true)).toBe("removed")
+
+    expect(JSON.parse(manualMcpEntry([binary]))).toEqual({ mcpServers: { browse: { command: binary, args: ["mcp"] } } })
+    expect(JSON.parse(manualMcpEntry(["/usr/bin/node", "/x/cli.mjs"]))).toEqual({ mcpServers: { browse: { command: "/usr/bin/node", args: ["/x/cli.mjs", "mcp"] } } })
+  } finally { fs.rmSync(home, { recursive: true, force: true }) }
+})
+
 test("plans a single picker, remembering even an intentionally empty selection", () => {
   const locations = agentNames.map(name => ({ name, file: name, installed: name === "opencode" || name === "cursor" }))
   const plan = (args: string[], tty: boolean, caller?: "claude", remembered?: (typeof agentNames[number])[]) => agentPlan(locations, agentFlags(args), tty, caller, remembered)
@@ -52,13 +79,15 @@ test("plans a single picker, remembering even an intentionally empty selection",
   expect(plan([], true, undefined, ["claude"])).toEqual({ picker: true, selected: ["claude"] })
   expect(plan([], true, undefined, [])).toEqual({ picker: true, selected: [] })
   expect(plan([], true, "claude")).toEqual({ picker: false, selected: ["claude"] })
-  expect(plan([], false, "claude", ["cursor"])).toEqual({ picker: false, selected: ["opencode", "claude"] })
-  expect(plan([], false)).toEqual({ picker: false, selected: ["opencode"] })
+  expect(plan([], false, "claude", ["cursor"])).toEqual({ picker: false, selected: ["claude"] })
+  expect(plan([], false)).toEqual({ picker: false, selected: ["opencode", "cursor"] })
   expect(agentPlan([], agentFlags([]), false)).toEqual({ picker: false, selected: [] })
   expect(plan(["-y"], true)).toEqual(plan(["--yes"], false))
   expect(plan(["-y"], true).selected).toEqual(["opencode", "cursor"])
   expect(plan(["-a", "claude", "vscode", "--agent", "claude", "--yes"], true, "claude")).toEqual({ picker: false, selected: ["claude", "vscode"] })
   expect(plan(["--agent", "*"], false).selected).toEqual([...agentNames])
+  expect(plan(["--agent", "none"], true, "claude")).toEqual({ picker: false, selected: [] })
+  expect(plan(["--agent", "none", "claude"], true).selected).toEqual(["claude"])
   expect(plan(["--all-agents"], true)).toEqual(plan(["-a", "*"], false))
   expect(() => agentFlags(["--agent", "oops"])).toThrow("Unknown agent")
   expect(() => agentFlags(["-a", "--yes"])).toThrow("at least one")
@@ -140,10 +169,10 @@ describe("a checkout install without the extension", () => {
     const { outcome, calls, output } = run()
     expect(outcome).toBe("guided")
     expect(calls).toEqual({ open: [["Google Chrome", "chrome://extensions"]], reveal: [folder], copy: [folder] })
-    expect(output).toContain("Open chrome://extensions in Google Chrome (opened)")
+    expect(output).toContain("Load browse in Google Chrome: open chrome://extensions (opened)")
     expect(output).toContain("Developer mode")
     expect(output).toContain("Load unpacked")
-    expect(output).toContain(`${folder} (shown in Finder)`)
+    expect(output).toContain(`${folder} (path copied`)
     expect(output).toContain("Cmd+Shift+G")
     expect(output).not.toContain("chromewebstore")
   })
@@ -151,7 +180,7 @@ describe("a checkout install without the extension", () => {
   test("uses the browser's own scheme for its extensions page", () => {
     const { calls, output } = run({ detections: [none(chrome), none(edge)], preferred: edge })
     expect(calls.open).toEqual([["Microsoft Edge", "edge://extensions"]])
-    expect(output).toContain("Open edge://extensions in Microsoft Edge (opened)")
+    expect(output).toContain("Load browse in Microsoft Edge: open edge://extensions (opened)")
   })
 
   test("falls back to the first detected browser when the default isn't a known Chromium", () => {
@@ -160,7 +189,7 @@ describe("a checkout install without the extension", () => {
 
   test("doesn't claim the page opened when the browser couldn't be launched", () => {
     const { output } = run({}, { open: false })
-    expect(output).toContain("Open chrome://extensions in Google Chrome")
+    expect(output).toContain("Load browse in Google Chrome: open chrome://extensions")
     expect(output).not.toContain("(opened)")
   })
 
@@ -187,14 +216,14 @@ describe("a checkout install without the extension", () => {
   test("doesn't open anything when a browser couldn't be checked and may already have it", () => {
     const { calls, output } = run({ detections: [none(chrome), { ...none(edge), blocked: true }] })
     expect(calls).toEqual({ open: [], reveal: [], copy: [] })
-    expect(output).toContain("couldn't check")
+    expect(output).toContain("Couldn't check Microsoft Edge")
     expect(output).not.toContain("you're set")
   })
 
   test("with no Chromium browser found, names the page without opening it", () => {
     const { calls, output } = run({ detections: [], preferred: undefined })
     expect(calls.open).toEqual([])
-    expect(output).toContain("Open chrome://extensions (or your browser's extensions page)")
+    expect(output).toContain("Load browse in your browser: open chrome://extensions")
   })
 })
 
@@ -217,8 +246,8 @@ describe("install with the extension", () => {
     const match = { browser: chrome, profile: { dir: "Default", name: "Person 1" }, id: "afeafocngkodbmaipcngoamamfmekgfo" }
     const { outcome, output } = run({ detections: [{ ...none(chrome), enabled: [match] }] })
     expect(outcome).toBe("ready")
-    expect(output).toContain("Person 1 (unpacked)")
-    expect(output).not.toContain("Agents can use Browse now")
+    expect(output).toBe("")
+    expect(output).not.toContain("Agents can use browse now")
   })
 
   test("a turned-off extension is reported, not reinstalled", () => {
@@ -242,8 +271,7 @@ describe("an npm install without the extension", () => {
     const { outcome, calls, output } = run({ folder: undefined, storeUrl })
     expect(outcome).toBe("guided")
     expect(calls).toEqual({ open: [["Google Chrome", storeUrl]], reveal: [], copy: [] })
-    expect(output).toContain("Chrome Web Store (opened in Google Chrome)")
-    expect(output).toContain("pairs it with the relay")
+    expect(output).toContain("Add browse to Google Chrome from the Chrome Web Store (opened)")
     expect(output).not.toContain("Load unpacked")
   })
 
@@ -285,7 +313,7 @@ describe("pairing the store build", () => {
     const { outcome, opened, output } = pair([{ ...none(chrome), enabled: [{ browser: chrome, profile, id: storeId }] }])
     expect(outcome).toBe("opened")
     expect(opened).toEqual([["Google Chrome", `chrome-extension://${storeId}/welcome.html#code=ABCD1234`, "Profile 2"]])
-    expect(output).toContain("Google Chrome (Work)")
+    expect(output).toContain("Opened browse in Google Chrome to connect it")
   })
 
   test("never hands the code to an extension that isn't a configured store item", () => {
@@ -382,4 +410,25 @@ describe("relayNotRestarted", () => {
     expect(lines[0]).toBe("! Relay not restarted: Relay has raw CDP clients attached; disconnect them before restarting.")
     expect(lines[2]).toMatch(/run: node .*cli[/\\]dist[/\\]cli\.mjs relay restart$/)
   })
+})
+
+test("install --remote prefers the tailnet's addresses, else the LAN's, and prints the code with its lifetime", () => {
+  const address = (value: string, internal = false) => ({ address: value, family: "IPv4" as const, internal, netmask: "255.255.255.0", mac: "00:00:00:00:00:00", cidr: null })
+  const lan = { lo: [address("127.0.0.1", true)], eth0: [address("192.168.1.20")], docker0: [address("172.17.0.1")], wlan0: [address("169.254.3.4"), address("10.0.0.5")] }
+  expect(remoteRelayAddresses(lan)).toEqual(["192.168.1.20", "10.0.0.5"])
+  expect(remoteRelayAddresses(lan, { port: 19988 })).toEqual(["192.168.1.20", "10.0.0.5"])
+  expect(remoteRelayAddresses(lan, { port: 20001 })).toEqual(["192.168.1.20:20001", "10.0.0.5:20001"])
+  const tailnet = { ...lan, tailscale0: [address("100.101.102.103")] }
+  expect(remoteRelayAddresses(tailnet)).toEqual(["100.101.102.103"])
+  expect(remoteRelayAddresses(tailnet, { magicDns: "devbox.tail1234.ts.net" })).toEqual(["devbox.tail1234.ts.net", "100.101.102.103"])
+  expect(remoteRelayAddresses({ lo: [address("127.0.0.1", true)] })).toEqual([])
+
+  expect(remoteRelayLines(["devbox.tail1234.ts.net", "100.101.102.103"], "ABCDEFGH", 10 * 60_000)).toEqual([
+    "Relay address  devbox.tail1234.ts.net",
+    "           or  100.101.102.103",
+    "Pairing code   ABCD-EFGH",
+    "",
+    expect.stringMatching(/^The code works once, within 10 minutes\. For a new one, run: .*pair$/),
+  ])
+  expect(remoteRelayLines([], "ABCDEFGH")[0]).toBe("Relay address  this computer's IP address")
 })

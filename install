@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+# Installs browse: downloads the browse binary for this computer into ~/.browse/bin, then hands over to
+# `browse install`, which does the rest (PATH, your agents, pairing with your browser). Served at
+# https://opencode.ai/browse/install. Platform detection follows opencode's installer.
+set -euo pipefail
+APP=browse
+
+MUTED='\033[0;2m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+usage() {
+    cat <<EOF
+browse installer
+
+Usage: install [options] [browse install options]
+
+Options:
+    -h, --help              Display this help message
+    -v, --version <version> Install a specific version (e.g., 0.0.7)
+        --channel <tag>     Install the latest version on an npm tag (latest or dev)
+    -b, --binary <path>     Install from a local binary instead of downloading
+        --no-setup          Only install the binary; don't run \`browse install\`
+
+Anything else goes to \`browse install\`, e.g. --remote, --agent claude or --no-modify-path.
+
+Examples:
+    curl -fsSL https://opencode.ai/browse/install | bash
+    curl -fsSL https://opencode.ai/browse/install | bash -s -- --remote
+    curl -fsSL https://opencode.ai/browse/install | bash -s -- --version 0.0.7
+EOF
+}
+
+requested_version=${VERSION:-}
+channel=latest
+no_setup=false
+binary_path=""
+setup_args=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        -v|--version)
+            if [[ -n "${2:-}" ]]; then
+                requested_version="$2"
+                shift 2
+            else
+                echo -e "${RED}Error: --version requires a version argument${NC}"
+                exit 1
+            fi
+            ;;
+        --channel)
+            if [[ -n "${2:-}" ]]; then
+                channel="$2"
+                shift 2
+            else
+                echo -e "${RED}Error: --channel requires a tag${NC}"
+                exit 1
+            fi
+            ;;
+        -b|--binary)
+            if [[ -n "${2:-}" ]]; then
+                binary_path="$2"
+                shift 2
+            else
+                echo -e "${RED}Error: --binary requires a path argument${NC}"
+                exit 1
+            fi
+            ;;
+        --no-setup)
+            no_setup=true
+            shift
+            ;;
+        *)
+            setup_args+=("$1")
+            shift
+            ;;
+    esac
+done
+
+INSTALL_DIR=$HOME/.browse/bin
+mkdir -p "$INSTALL_DIR"
+
+raw_os=$(uname -s)
+os=$(echo "$raw_os" | tr '[:upper:]' '[:lower:]')
+case "$raw_os" in
+  Darwin*) os="darwin" ;;
+  Linux*) os="linux" ;;
+  MINGW*|MSYS*|CYGWIN*) os="windows" ;;
+esac
+installed_binary="$APP"
+if [ "$os" = "windows" ]; then
+    installed_binary="$APP.exe"
+fi
+
+if [ -n "$binary_path" ]; then
+    if [ ! -f "$binary_path" ]; then
+        echo -e "${RED}Error: Binary not found at ${binary_path}${NC}"
+        exit 1
+    fi
+    specific_version="local"
+else
+    arch=$(uname -m)
+    if [[ "$arch" == "aarch64" ]]; then
+      arch="arm64"
+    fi
+    if [[ "$arch" == "x86_64" ]]; then
+      arch="x64"
+    fi
+
+    if [ "$os" = "darwin" ] && [ "$arch" = "x64" ]; then
+      rosetta_flag=$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)
+      if [ "$rosetta_flag" = "1" ]; then
+        arch="arm64"
+      fi
+    fi
+
+    # Git Bash and MSYS2 run as emulated x64 on Windows ARM64, so `uname -m` reports x86_64.
+    # The host CPU still shows in the `uname -s` suffix and in PROCESSOR_IDENTIFIER.
+    if [ "$os" = "windows" ] && [ "$arch" = "x64" ]; then
+      if [[ "$raw_os" == *-ARM64 || "${PROCESSOR_IDENTIFIER:-}" == ARM* ]]; then
+        arch="arm64"
+      fi
+    fi
+
+    combo="$os-$arch"
+    case "$combo" in
+      linux-x64|linux-arm64|darwin-x64|darwin-arm64|windows-x64|windows-arm64)
+        ;;
+      *)
+        echo -e "${RED}Unsupported OS/Arch: $os/$arch${NC}"
+        exit 1
+        ;;
+    esac
+
+    is_musl=false
+    if [ "$os" = "linux" ]; then
+      if [ -f /etc/alpine-release ]; then
+        is_musl=true
+      fi
+
+      if command -v ldd >/dev/null 2>&1; then
+        if ldd --version 2>&1 | grep -qi musl; then
+          is_musl=true
+        fi
+      fi
+    fi
+
+    needs_baseline=false
+    if [ "$arch" = "x64" ]; then
+      if [ "$os" = "linux" ]; then
+        if ! grep -qwi avx2 /proc/cpuinfo 2>/dev/null; then
+          needs_baseline=true
+        fi
+      fi
+
+      if [ "$os" = "darwin" ]; then
+        avx2=$(sysctl -n hw.optional.avx2_0 2>/dev/null || echo 0)
+        if [ "$avx2" != "1" ]; then
+          needs_baseline=true
+        fi
+      fi
+
+      if [ "$os" = "windows" ]; then
+        ps="(Add-Type -MemberDefinition \"[DllImport(\"\"kernel32.dll\"\")] public static extern bool IsProcessorFeaturePresent(int ProcessorFeature);\" -Name Kernel32 -Namespace Win32 -PassThru)::IsProcessorFeaturePresent(40)"
+        out=""
+        if command -v powershell.exe >/dev/null 2>&1; then
+          out=$(powershell.exe -NoProfile -NonInteractive -Command "$ps" 2>/dev/null || true)
+        elif command -v pwsh >/dev/null 2>&1; then
+          out=$(pwsh -NoProfile -NonInteractive -Command "$ps" 2>/dev/null || true)
+        fi
+        out=$(echo "$out" | tr -d '\r' | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+        if [ "$out" != "true" ] && [ "$out" != "1" ]; then
+          needs_baseline=true
+        fi
+      fi
+    fi
+
+    # Windows ARM64 runs the x64 build.
+    if [ "$os" = "windows" ] && [ "$arch" = "arm64" ]; then
+      arch="x64"
+    fi
+
+    target="$os-$arch"
+    if [ "$needs_baseline" = "true" ]; then
+      target="$target-baseline"
+    fi
+    if [ "$is_musl" = "true" ]; then
+      target="$target-musl"
+    fi
+
+    if ! command -v tar >/dev/null 2>&1; then
+        echo -e "${RED}Error: 'tar' is required but not installed.${NC}"
+        exit 1
+    fi
+
+    package="@opencode/browse-$target"
+    encoded="@opencode%2fbrowse-$target"
+    if [ -z "$requested_version" ]; then
+        metadata=$(curl -fsSL "https://registry.npmjs.org/$encoded/$channel" || true)
+        specific_version=$(echo "$metadata" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -n 1)
+        if [ -z "$specific_version" ]; then
+            echo -e "${RED}Failed to fetch the latest browse version for $target${NC}"
+            exit 1
+        fi
+    else
+        requested_version="${requested_version#v}"
+        specific_version=$requested_version
+        http_status=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/$encoded/$specific_version" || true)
+        if [ "$http_status" = "404" ]; then
+            echo -e "${RED}Error: browse ${specific_version} is not available for $target${NC}"
+            echo -e "${MUTED}Available versions: https://www.npmjs.com/package/$package?activeTab=versions${NC}"
+            exit 1
+        fi
+        if [ "$http_status" != "200" ]; then
+            echo -e "${RED}Failed to fetch package information${NC}"
+            exit 1
+        fi
+    fi
+
+    filename="browse-$target-$specific_version.tgz"
+    url="https://registry.npmjs.org/$package/-/$filename"
+fi
+
+print_message() {
+    local level=$1
+    local message=$2
+    local color=""
+
+    case $level in
+        info) color="${NC}" ;;
+        warning) color="${NC}" ;;
+        error) color="${RED}" ;;
+    esac
+
+    echo -e "${color}${message}${NC}"
+}
+
+download_and_install() {
+    print_message info "\n${MUTED}Installing ${NC}browse ${MUTED}version: ${NC}$specific_version"
+    local tmp_dir="${TMPDIR:-/tmp}/browse_install_$$"
+    mkdir -p "$tmp_dir"
+
+    local ret=0
+    curl -f -# -L -o "$tmp_dir/$filename" "$url" || ret=$?
+    # curl exits 23 when it cannot write the file, usually because the temporary directory is full.
+    if [ "$ret" -eq 23 ]; then
+        print_message error "Could not write the download to $tmp_dir. Make sure it has enough free space, or set TMPDIR to another directory, then try again." >&2
+    fi
+    if [ "$ret" -ne 0 ]; then
+        exit "$ret"
+    fi
+
+    tar -xzf "$tmp_dir/$filename" -C "$tmp_dir"
+    # Replace by rename, so a relay still running the old binary keeps its file.
+    mv "$tmp_dir/package/bin/$installed_binary" "$INSTALL_DIR/$installed_binary.new"
+    chmod 755 "$INSTALL_DIR/$installed_binary.new"
+    mv -f "$INSTALL_DIR/$installed_binary.new" "$INSTALL_DIR/$installed_binary"
+    rm -rf "$tmp_dir"
+}
+
+install_from_binary() {
+    print_message info "\n${MUTED}Installing ${NC}browse ${MUTED}from: ${NC}$binary_path"
+    cp "$binary_path" "$INSTALL_DIR/$installed_binary.new"
+    chmod 755 "$INSTALL_DIR/$installed_binary.new"
+    mv -f "$INSTALL_DIR/$installed_binary.new" "$INSTALL_DIR/$installed_binary"
+}
+
+if [ -n "$binary_path" ]; then
+    install_from_binary
+else
+    download_and_install
+fi
+
+if [ "$no_setup" = "true" ]; then
+    print_message info "\n${MUTED}Run ${NC}$INSTALL_DIR/$installed_binary install ${MUTED}to add browse to your agents and pair it with your browser.${NC}"
+    exit 0
+fi
+
+echo ""
+# `curl | sh` feeds this script through stdin, so give `browse install` the terminal for its agent picker. An agent
+# running this has no terminal: install then sets up the agent that ran it.
+if [ -t 1 ] && { : </dev/tty; } 2>/dev/null; then
+    exec "$INSTALL_DIR/$installed_binary" install ${setup_args[@]+"${setup_args[@]}"} </dev/tty
+fi
+exec "$INSTALL_DIR/$installed_binary" install ${setup_args[@]+"${setup_args[@]}"}

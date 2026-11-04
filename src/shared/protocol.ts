@@ -1,15 +1,15 @@
-// Messages between the extension's status page (welcome.html) and the background service worker. The page holds
+// Messages between the extension's pages (onboarding.html, settings.html) and the background service worker. The page holds
 // one `chrome.runtime.connect({ name: STATUS_PORT })` port and watches the relay connection through it.
 
 import type { PageStatus } from "../agent-relay/protocol"
 
-/** The link to the Browse relay, which runs agent sessions for the browse MCP server and CLI. */
+/** The link to the browse relay, which runs agent sessions for the browse MCP server and CLI. */
 export type AgentRelayStatus =
   /** No relay is running yet; the CLI or MCP server starts one on demand. */
   | "offline"
   | "connecting"
   | "connected"
-  /** Browse in another browser or profile holds the relay's connection. */
+  /** browse in another browser or profile holds the relay's connection. */
   | "conflict"
   /** The relay speaks another protocol version; updating both fixes it. */
   | "incompatible"

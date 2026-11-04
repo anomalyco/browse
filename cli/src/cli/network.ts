@@ -36,7 +36,7 @@ function formatNetworkResult(result: NetworkStopResponse): string {
 const networkStart = Command.make(
   "start",
   {
-    session: sessionFlag("Capture the default page for this Browse session"),
+    session: sessionFlag("Capture the default page for this browse session"),
     urlFilter: Flag.String("url").pipe(
       Flag.optional,
       Flag.withDescription("Capture only requests whose URL contains this text"),

@@ -9,7 +9,7 @@ registerMcpTools({
     {
       name: "execute",
       listsBrowsers: true,
-      description: `Execute Playwright JavaScript against the Browse session. Code runs in a sandbox on the relay without process, require, import(), fs, child_process, http/https or Node fetch; save and read files with the files helper inside the execute file roots, and cookie access is limited to the session's pages. The result includes console logs, warnings, a bounded execution-context diagnostic when relevant, and an aftermath summary (URL movement, navigations, error counts, handoffs, and a bot challenge or block page when one appears: hand interactive ones to the user with handoff(), never solve or retry-loop them).${ctx.browserNote}`,
+      description: `Execute Playwright JavaScript against the browse session. Code runs in a sandbox on the relay without process, require, import(), fs, child_process, http/https or Node fetch; save and read files with the files helper inside the execute file roots, and cookie access is limited to the session's pages. The result includes console logs, warnings, a bounded execution-context diagnostic when relevant, and an aftermath summary (URL movement, navigations, error counts, handoffs, and a bot challenge or block page when one appears: hand interactive ones to the user with handoff(), never solve or retry-loop them).${ctx.browserNote}`,
       inputSchema: objectSchema(
         {
           code: {
@@ -20,7 +20,7 @@ registerMcpTools({
           session: {
             type: "string",
             description:
-              "Optional existing Browse session id. Explicit ids must already exist; omit this field to use the MCP server's current session, which is created when needed.",
+              "Optional existing browse session id. Explicit ids must already exist; omit this field to use the MCP server's current session, which is created when needed.",
           },
           targetUrl: {
             type: "string",

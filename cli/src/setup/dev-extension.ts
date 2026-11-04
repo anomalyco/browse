@@ -57,7 +57,7 @@ export async function syncDevExtension(extension: DevExtension, options: { reado
       if (!entry.directory) writeFileSync(target, entry.data)
     }
     const manifest = JSON.parse(readFileSync(path.join(staging, "manifest.json"), "utf8")) as { version_name?: string; version?: string; key?: string }
-    if (!manifest.key) throw new Error("the dev extension has no manifest key, so it wouldn't have Browse's unpacked ID")
+    if (!manifest.key) throw new Error("the dev extension has no manifest key, so it wouldn't have browse's unpacked ID")
     writeExtensionPairing(staging, mintPairingCode(root, { ttlMs: bundledPairingCodeTtlMs }))
     const build = (() => {
       try {

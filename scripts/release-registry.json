@@ -1,6 +1,6 @@
 {
   "app": "browse",
-  "description": "Browse, the browser extension and CLI that let agents drive your browser (anomalyco/browse). Its Release workflow publishes the dev channel from every push to dev, in environment release: the unpacked extension zip and the npm tarball. Stable releases go to npm and the Chrome Web Store, not here.",
+  "description": "browse, the browser extension and CLI that let agents drive your browser (anomalyco/browse). Its Release workflow publishes the dev channel from every push to dev, in environment release: the unpacked extension zip and the npm tarball. Stable releases go to npm and the Chrome Web Store, not here.",
   "stages": [
     "production"
   ],

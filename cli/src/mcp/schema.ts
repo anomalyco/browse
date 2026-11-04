@@ -36,7 +36,7 @@ export function browsersNote(browsers: readonly BrowserSummary[]): string {
 
 /** The one-time note on a tool result: what to tell the user, and that the agent may run the update itself. */
 export function mcpUpdateNote(notice: Pick<UpdateNotice, "summary" | "command">): string {
-  return `Note: Browse has an update: ${notice.summary}. Tell the user they can run \`${notice.command}\` and then restart opencode, or ask you to run it for them.`
+  return `Note: browse has an update: ${notice.summary}. Tell the user they can run \`${notice.command}\` and then restart opencode, or ask you to run it for them.`
 }
 
 export function objectSchema(properties: JsonObject, required: readonly string[] = []): JsonObject {

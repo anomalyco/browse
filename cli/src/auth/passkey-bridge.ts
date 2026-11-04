@@ -1,7 +1,7 @@
 /**
  * Passkeys in agent tabs, signed by Deadbolt.
  *
- * In tabs an agent session opened (never the user's own or lent tabs), and only while Browse is connected to Deadbolt,
+ * In tabs an agent session opened (never the user's own or lent tabs), and only while browse is connected to Deadbolt,
  * the relay adds a CDP binding (Runtime.addBinding, under a random name) and a page-world script
  * (Page.addScriptToEvaluateOnNewDocument) to the tab's root target. Without Runtime.enable (which pages can detect)
  * Chrome adds a binding only to the documents that exist when it is added, so the relay adds it again after every
@@ -35,11 +35,11 @@ const selectionTtlMs = 2 * 60_000
 export type PasskeyBridgeOptions = {
   /** Sends a CDP command to a tab's root target. */
   readonly send: (tabId: number, method: string, params: JsonObject) => Promise<JsonObject>
-  /** The tab's Browse session allowlist (undefined: none). */
+  /** The tab's browse session allowlist (undefined: none). */
   readonly allowedOrigins: (tabId: number) => readonly string[] | undefined
   /** Deadbolt, as this install's client; throws DeadboltError (`not_connected` when there is none). */
   readonly deadbolt?: () => Deadbolt.DeadboltConnection
-  /** Whether Browse is connected to Deadbolt at all (default: a client file exists). */
+  /** Whether browse is connected to Deadbolt at all (default: a client file exists). */
   readonly connected?: () => boolean
   readonly log?: (event: string, fields: Record<string, unknown>) => void
 }
@@ -199,7 +199,7 @@ export class PasskeyBridge {
     this.options = options
   }
 
-  /** Adds the binding and hook to an agent tab's root target, when Browse is connected to Deadbolt. */
+  /** Adds the binding and hook to an agent tab's root target, when browse is connected to Deadbolt. */
   async install(tabId: number): Promise<boolean> {
     const connected = this.options.connected ?? (() => Deadbolt.readClient() !== undefined)
     if (!connected()) return false

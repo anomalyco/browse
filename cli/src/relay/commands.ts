@@ -19,11 +19,11 @@ export function createExtensionCommands(options: { readonly browsers: BrowserLin
     const tabId = getNumber(command.params, "tabId")
     if (tabId !== undefined) {
       const owner = browsers.browserTab(tabId)
-      if (!owner) return Effect.fail(new Error("Browse extension is not connected"))
+      if (!owner) return Effect.fail(new Error("browse extension is not connected"))
       return sendToBrowser(owner.link, { ...command, params: { ...command.params, tabId: owner.tabId } })
     }
     const target = link ?? browsers.defaultLink()
-    return target ? sendToBrowser(target, command) : Effect.fail(new Error("Browse extension is not connected"))
+    return target ? sendToBrowser(target, command) : Effect.fail(new Error("browse extension is not connected"))
   }
   const sendExtensionBestEffort = (command: ExtensionCommandInput, link?: BrowserLink): void => {
     Effect.runPromise(Effect.ignore(sendToExtension(command, link))).catch(() => {})
@@ -33,12 +33,12 @@ export function createExtensionCommands(options: { readonly browsers: BrowserLin
   }
   const sendToEach = (command: ExtensionCommandInput): Effect.Effect<JsonObject, Error> => Effect.gen(function* () {
     const links = browsers.list().filter((link) => link.rpc.connected)
-    if (links.length === 0) return yield* Effect.fail(new Error("Browse extension is not connected"))
+    if (links.length === 0) return yield* Effect.fail(new Error("browse extension is not connected"))
     const results = yield* Effect.forEach(links, (link) => Effect.result(sendToBrowser(link, command)), { concurrency: "unbounded" })
     const succeeded = results.find(Result.isSuccess)
     if (succeeded) return succeeded.success
     const failed = results.find(Result.isFailure)
-    return yield* Effect.fail(failed?.failure ?? new Error("Browse extension is not connected"))
+    return yield* Effect.fail(failed?.failure ?? new Error("browse extension is not connected"))
   })
   return { sendToExtension, sendExtensionBestEffort, sendToEveryBrowser, sendToEach }
 }

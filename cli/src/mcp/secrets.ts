@@ -22,7 +22,7 @@ registerMcpTools({
       name: "secrets_list",
       requiresRelayCompatibility: false,
       description:
-        'List what agents may type without seeing: site secrets the user stored (names, kinds and allowed origins; type them with secrets.type(target, name) in execute; only the user adds them with `opencode-browser secrets add`), and Deadbolt logins the user granted to Browse for this session\'s allowed sites (title, username, which values and passkeys, never values; sign in with the signin tool or secrets.signIn(), or type one value with secrets.type(target, "deadbolt:<site>[/<username>]", { field })). Passkeys are listed by account (username, displayName). Only the user grants Deadbolt logins, in Deadbolt (`deadbolt agents allow <site>`, or `deadbolt agents allow --all`).',
+        'List what agents may type without seeing: site secrets the user stored (names, kinds and allowed origins; type them with secrets.type(target, name) in execute; only the user adds them with `opencode-browser secrets add`), and Deadbolt logins the user granted to browse for this session\'s allowed sites (title, username, which values and passkeys, never values; sign in with the signin tool or secrets.signIn(), or type one value with secrets.type(target, "deadbolt:<site>[/<username>]", { field })). Passkeys are listed by account (username, displayName). Only the user grants Deadbolt logins, in Deadbolt (`deadbolt agents allow <site>`, or `deadbolt agents allow --all`).',
       inputSchema: sessionOnlyInputSchema,
       readOnly: true,
       destructive: false,
@@ -37,7 +37,7 @@ registerMcpTools({
                 connected: false,
                 logins: [],
                 passkeys: [],
-                note: "Browse isn't connected to Deadbolt. The user can connect it with `opencode-browser deadbolt connect` and grant logins with `deadbolt agents allow <site>`.",
+                note: "browse isn't connected to Deadbolt. The user can connect it with `opencode-browser deadbolt connect` and grant logins with `deadbolt agents allow <site>`.",
               },
             }
           }
@@ -58,7 +58,7 @@ registerMcpTools({
     {
       name: "signin",
       description:
-        'Sign in to a site in the session\'s page with a Deadbolt login the user granted to Browse, without seeing any value. The relay does the whole sign-in in one call: username, submit, password, an authenticator (TOTP) code when asked (split boxes too), "Use password instead" toggles, and Sign in with Google when a Google login is granted. A username also picks the passkey account when the site signs in with a passkey. Returns only {status: signed_in | needs_user | needs_choice | not_granted | failed, step, reason}; needs_choice comes with choices [{username, displayName}] when several passkeys could sign in: call again with one username. needs_user means a captcha, a code sent by SMS or email, a push approval or a new-device check: hand it to the user with handoff() in execute. not_granted: tell the user what to allow (`deadbolt agents allow <site>`). Navigate to the sign-in page first, or pass site.',
+        'Sign in to a site in the session\'s page with a Deadbolt login the user granted to browse, without seeing any value. The relay does the whole sign-in in one call: username, submit, password, an authenticator (TOTP) code when asked (split boxes too), "Use password instead" toggles, and Sign in with Google when a Google login is granted. A username also picks the passkey account when the site signs in with a passkey. Returns only {status: signed_in | needs_user | needs_choice | not_granted | failed, step, reason}; needs_choice comes with choices [{username, displayName}] when several passkeys could sign in: call again with one username. needs_user means a captcha, a code sent by SMS or email, a push approval or a new-device check: hand it to the user with handoff() in execute. not_granted: tell the user what to allow (`deadbolt agents allow <site>`). Navigate to the sign-in page first, or pass site.',
       inputSchema: objectSchema({
         site: {
           type: "string",

@@ -12,8 +12,9 @@ import {
   updateState,
   versionEntry,
 } from "../update/auto-update.ts"
-import { cliCommand } from "../paths.ts"
+import { cliCommand, compiledBinary, entryCommand, scriptEntry } from "../paths.ts"
 import { opencodeBrowserVersion } from "../version.ts"
+import { installBinaryRuntime } from "./binary.ts"
 import { browsers } from "./browsers.ts"
 import {
   configRoot,
@@ -58,10 +59,11 @@ function fingerprint(entry: string) {
  * declines while agents use it (a connected session, a recording); then it keeps the old version, and the lines say
  * so and how to restart it later.
  */
-export function restartOutdatedRelay(entry: string, node: string): string[] | undefined {
-  const status = spawnSync(node, [entry, "status", "--json"], { encoding: "utf8", timeout: 15_000 })
+export function restartOutdatedRelay(entry: string): string[] | undefined {
+  const [file, ...prefix] = entryCommand(entry)
+  const status = spawnSync(file!, [...prefix, "status", "--json"], { encoding: "utf8", timeout: 15_000 })
   if (!/"stale":\s*true/.test(status.stdout ?? "")) return undefined
-  const restart = spawnSync(node, [entry, "relay", "restart"], { encoding: "utf8", timeout: 60_000 })
+  const restart = spawnSync(file!, [...prefix, "relay", "restart"], { encoding: "utf8", timeout: 60_000 })
   if (restart.status === 0) return ["✓ Relay restarted with the new version"]
   return relayNotRestarted(status.stdout ?? "", `${restart.stderr ?? ""}\n${restart.stdout ?? ""}`)
 }
@@ -114,14 +116,16 @@ export function mcpServers(file = configFile()) {
   return (config as { mcp?: { servers?: Servers } }).mcp?.servers ?? {}
 }
 
+/**
+ * A browse server install wrote: `<node> <entry> mcp` or `<executable> mcp`, where the entry is the one install recorded,
+ * the npm shim, a checkout's bundle, or a binary install's executable (this one, or the one current.json names).
+ */
 function ownedMcp(server: Servers[string] | undefined, entry: string | undefined) {
   const command = server?.command
-  return (
-    Array.isArray(command) &&
-    command.length === 3 &&
-    command[2] === "mcp" &&
-    [entry, layout.shim, path.join(packageRoot, "dist/cli.mjs")].some((e) => e && command[1] === e)
-  )
+  if (!Array.isArray(command) || (command.length !== 2 && command.length !== 3) || command.at(-1) !== "mcp") return false
+  const target = command.at(-2)
+  const binary = compiledBinary() ? [process.execPath, readCurrent(layout)?.binary] : []
+  return [entry, layout.shim, path.join(packageRoot, "dist/cli.mjs"), ...binary].some((e) => e && target === e)
 }
 
 /**
@@ -144,11 +148,12 @@ export function configureMcp(file: string, entry: string, previousEntry?: string
   const existing = mcpServers(file)[MCP_NAME]
   if (existing && !ownedMcp(existing, previousEntry)) return undefined
   const renamed = removeMcp(LEGACY_MCP_NAME, previousEntry, file)
-  // The shim of an npm install never changes and swaps the server itself after an update, so its entry stays the same.
+  // The shim of an npm install, and a binary install's executable, never move and swap the server themselves after an
+  // update, so their entry stays the same.
   const server = mergedMcpServer(
     existing,
-    [process.execPath, entry, "mcp"],
-    entry === layout.shim ? "auto-update" : fingerprint(entry),
+    [...entryCommand(entry), "mcp"],
+    entry === layout.shim || !scriptEntry(entry) ? "auto-update" : fingerprint(entry),
   )
   if (existing && JSON.stringify(existing) === JSON.stringify(server)) return `"${MCP_NAME}" is up to date`
   const text = readFileOr(file, "{}")
@@ -168,7 +173,7 @@ export function removeMcp(name: string, entry?: string, file = configFile()) {
   return true
 }
 
-/** MCP servers from the separate Browser Control product, which Browse replaces. */
+/** MCP servers from the separate Browser Control product, which browse replaces. */
 export function legacyBrowserControl() {
   return Object.entries(mcpServers())
     .filter(([name, server]) => name === "browser-control" || JSON.stringify(server.command ?? "").includes("browser-control"))
@@ -200,6 +205,7 @@ export function removeLegacyHost() {
  * OPENCODE_BROWSER_PACKAGE installs a specific spec instead, for example a local tarball.
  */
 export async function installRuntime(): Promise<{ entry: string; version: string }> {
+  if (compiledBinary()) return installBinaryRuntime()
   // From a checkout, run the bundle `bun run build` wrote: Node can't run the TypeScript sources (they use
   // syntax type stripping doesn't cover), and the MCP server runs under Node.
   if (fromSource) {
@@ -258,13 +264,27 @@ export function installedRuntime(settings: Settings | undefined, server: Servers
   if (!entry || (!settings?.version && !existsSync(entry))) return undefined
   // A bundle with the sources beside it is a checkout's build: cli/dist/cli.mjs next to cli/src/main.ts.
   const packageDir = path.dirname(path.dirname(entry))
-  const source = existsSync(path.join(packageDir, "src", "main.ts"))
-  // The shim runs whatever runtime/current.json names, which auto-update moves.
+  const source = scriptEntry(entry) && existsSync(path.join(packageDir, "src", "main.ts"))
+  // The shim, and a binary install's executable, run whatever runtime/current.json names, which auto-update moves.
+  const current = readCurrent(layout)
   const version =
-    (entry === layout.shim ? readCurrent(layout)?.version : undefined) ??
+    (entry === layout.shim || (current?.binary !== undefined && entry === current.binary) ? current?.version : undefined) ??
     settings?.version ??
     (path.resolve(entry) === path.join(packageRoot, "dist", "cli.mjs")
       ? opencodeBrowserVersion
       : readJson<{ version?: string }>(path.join(packageDir, "package.json"))?.version)
   return { entry, version, source }
+}
+
+/**
+ * For an agent install doesn't know: the browse MCP server as the stdio entry most agents' configs take. `command` runs
+ * the CLI (entryCommand): `[node, entry]`, or a binary install's `[executable]`.
+ */
+export function manualMcpEntry(command: readonly string[]) {
+  const [file, ...args] = command
+  const server = JSON.stringify({ command: file, args: [...args, "mcp"] })
+    .replace(/","args":/, '", "args": ')
+    .replace(/^\{"command":/, '{ "command": ')
+    .replace(/\}$/, " }")
+  return `{\n  "mcpServers": {\n    "browse": ${server}\n  }\n}`
 }
