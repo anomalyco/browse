@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, realpathSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -92,6 +92,21 @@ export function flag(args: string[], name: string) {
 export function findOnPath(name: string) {
   const found = spawnSync(windows ? "where" : "which", [name], { encoding: "utf8" })
   return found.status === 0 ? found.stdout.split(/\r?\n/)[0]?.trim() || undefined : undefined
+}
+
+/**
+ * The node binary to record: the one on PATH when it is the very binary running now (a `node` found on PATH keeps
+ * working across a version manager switch, unlike the path of a running process), otherwise execPath. Never throws:
+ * realpath fails for a PATH entry that vanished, or for a symlink into a node that was uninstalled.
+ */
+export function stableNodePath(execPath = process.execPath, onPath = findOnPath): string {
+  const found = onPath("node")
+  if (!found) return execPath
+  try {
+    return realpathSync(found) === realpathSync(execPath) ? found : execPath
+  } catch {
+    return execPath
+  }
 }
 
 /** The opencode binary (recorded for status): --opencode, $OPENCODE_BIN, or `opencode` on PATH. */

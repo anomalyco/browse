@@ -58,7 +58,7 @@ export function agentLocations(home: string, config: string, onPath: (name: stri
   const windsurf = at(".codeium/windsurf/mcp_config.json")
   const claude = process.env.CLAUDE_CONFIG_DIR ? path.join(process.env.CLAUDE_CONFIG_DIR, ".claude.json") : at(".claude.json")
   return [
-    { name: "opencode", file: opencodeConfig, installed: !!opencodeBinary || app("OpenCode") || fs.existsSync(path.join(config, "opencode")) },
+    { name: "opencode", file: opencodeConfig, installed: !!opencodeBinary || app("OpenCode") || app("OpenCode Beta") || fs.existsSync(path.join(config, "opencode")) },
     { name: "claude", file: claude, installed: !!onPath("claude") || fs.existsSync(claude) || fs.existsSync(at(".claude")) },
     { name: "cursor", file: at(".cursor/mcp.json"), installed: !!onPath("cursor") || app("Cursor") || fs.existsSync(at(".cursor")) },
     { name: "codex", file: path.join(codex, "config.toml"), installed: !!onPath("codex") || app("Codex") || fs.existsSync(codex) },
@@ -104,11 +104,14 @@ function serverDefinition(name: AgentReceipt["name"], command: string, args: str
 }
 
 const serverKeys: Partial<Record<AgentName, string>> = { vscode: "servers", zed: "context_servers", kilo: "mcp", amp: "amp.mcpServers", goose: "extensions", hermes: "mcp_servers" }
+const commandFor = (receipt: Pick<AgentReceipt, "node" | "entry">): [string, string[]] =>
+  receipt.node ? [receipt.node, [receipt.entry, "mcp"]] : [receipt.entry, ["mcp"]]
 
 /** Preserve unrelated settings and comments. Refuse conflicting names, invalid
- * configs and edits made since install. Only the installer that created an entry gets a removal receipt. */
-export function editAgentConfig(receipt: AgentReceipt, remove = false): EditResult {
-  const { name, file, node, entry } = receipt
+ * configs and edits made since install. Only the installer that created an entry gets a removal receipt.
+ * Passing the receipt recorded at install (same agent and file) lets a reinstall replace that owned entry in place. */
+export function editAgentConfig(receipt: AgentReceipt, remove = false, previous?: AgentReceipt): EditResult {
+  const { name, file } = receipt
   const toml = name === "codex" || name === "grok" || name === "vibe"
   const yaml = name === "goose" || name === "hermes"
   const exists = fs.existsSync(file)
@@ -127,23 +130,44 @@ export function editAgentConfig(receipt: AgentReceipt, remove = false): EditResu
   const matches = list.filter(s => s?.name === "browse")
   if (matches.length > 1) return "conflict"
   const servers = (container ?? Object.create(null)) as Record<string, unknown>
-  const [command, args] = node ? [node, [entry, "mcp"]] : [entry, ["mcp"]]
+  const [command, args] = commandFor(receipt)
   const expected = serverDefinition(name, command, args)
   const current = name === "vibe" ? matches[0] : servers.browse
-  if (current !== undefined && !isDeepStrictEqual({ ...(object(current) ? current : {}) }, expected)) return "conflict"
-  if (remove ? current === undefined : current !== undefined) return "unchanged"
+  const actual = current === undefined ? undefined : { ...(object(current) ? current : {}) }
+  // Only the entry this installer wrote last time may be replaced: same agent, same file and the recorded definition.
+  const owned = !remove && previous !== undefined && previous.name === name && previous.file === file
+    ? serverDefinition(previous.name, ...commandFor(previous))
+    : undefined
+  const update = actual !== undefined && !isDeepStrictEqual(actual, expected) && owned !== undefined && isDeepStrictEqual(actual, owned)
+  if (actual !== undefined && !isDeepStrictEqual(actual, expected) && !update) return "conflict"
+  if (remove ? current === undefined : current !== undefined && !update) return "unchanged"
   let after: string
   if (toml) {
     const header = name === "vibe" ? '[[mcp_servers]]\nname = "browse"\ntransport = "stdio"' : "[mcp_servers.browse]"
-    const block = `${header}\ncommand = ${JSON.stringify(command)}\nargs = ${JSON.stringify(args)}\n`
-    if (remove && !before.includes(block)) return "conflict"
-    after = remove ? before.replace(block, "") : `${before}${before.endsWith("\n") || !before ? "" : "\n"}\n${block}`
+    const block = (cmd: string, cmdArgs: string[]) => `${header}\ncommand = ${JSON.stringify(cmd)}\nargs = ${JSON.stringify(cmdArgs)}\n`
+    const next = block(command, args)
+    // Replace the previous block text rather than appending a second table (or a second [[mcp_servers]] element).
+    const was = update && previous ? block(...commandFor(previous)) : next
+    if ((remove || update) && !before.includes(was)) return "conflict"
+    after = remove
+      ? before.replace(was, "")
+      : update
+        ? before.replace(was, () => next)
+        : `${before}${before.endsWith("\n") || !before ? "" : "\n"}\n${next}`
     // A matching string could also occur inside a multiline value. Check the *entire* parsed result before writing.
     const result = parseToml(after)
-    if (name === "vibe") config[key] = remove ? list.filter(s => s !== current) : [...list, Object.assign(Object.create(null), expected)]
-    else if (remove) delete servers.browse
-    else servers.browse = Object.assign(Object.create(null), expected)
-    if (name !== "vibe") config[key] = servers
+    if (name === "vibe") {
+      const replacement = Object.assign(Object.create(null), expected)
+      config[key] = remove
+        ? list.filter(s => s !== current)
+        : update
+          ? list.map(s => (s === current ? replacement : s))
+          : [...list, replacement]
+    } else {
+      if (remove) delete servers.browse
+      else servers.browse = Object.assign(Object.create(null), expected)
+      config[key] = servers
+    }
     if (remove && !Object.keys(config[key] as object).length && result[key] === undefined) delete config[key]
     if (!isDeepStrictEqual(result, config)) return "conflict"
   } else if (doc) {

@@ -31,6 +31,7 @@ import {
   packageRoot,
   readFileOr,
   readJson,
+  stableNodePath,
   windows,
   type Settings,
 } from "./environment.ts"
@@ -40,8 +41,9 @@ export type Servers = Record<
   { type?: unknown; command?: unknown; environment?: unknown; [key: string]: unknown }
 >
 
+/** The agent's config directory: OPENCODE_CONFIG_DIR names it directly, else opencode's folder under the config root. */
 export function configFile() {
-  const directory = path.join(configRoot, "opencode")
+  const directory = process.env.OPENCODE_CONFIG_DIR ?? path.join(configRoot, "opencode")
   const candidates = ["opencode.json", "opencode.jsonc", ".opencode/opencode.json", ".opencode/opencode.jsonc"].map(
     (name) => path.join(directory, name),
   )
@@ -86,6 +88,7 @@ export function relayNotRestarted(statusJson: string, output: string, command = 
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith("Restarting the relay leaves"))
     .join(" ")
+    .replace(/\.$/, "")
   const who =
     sessions.length === 1
       ? `an agent session is active (${sessions[0]})`
@@ -141,7 +144,7 @@ function mergedMcpServer(existing: Servers[string] | undefined, command: string[
 }
 
 /** Writes (or updates) the browse MCP server so it runs the installed runtime, keeping the user's settings. */
-export function configureMcp(file: string, entry: string, previousEntry?: string) {
+export function configureMcp(file: string, entry: string, previousEntry?: string, node = stableNodePath()) {
   // A running MCP server keeps its old code after an update, and its relay calls then fail on the build check.
   // Stamping the runtime's fingerprint into the entry changes the config whenever the runtime changes, which
   // makes opencode restart the server with the new code.
@@ -152,7 +155,7 @@ export function configureMcp(file: string, entry: string, previousEntry?: string
   // update, so their entry stays the same.
   const server = mergedMcpServer(
     existing,
-    [...entryCommand(entry), "mcp"],
+    [...entryCommand(entry, node), "mcp"],
     entry === layout.shim || !scriptEntry(entry) ? "auto-update" : fingerprint(entry),
   )
   if (existing && JSON.stringify(existing) === JSON.stringify(server)) return `"${MCP_NAME}" is up to date`

@@ -132,11 +132,10 @@ Retry after the page settles; do not reset or adopt a different tab to recover.
 Prefer adoption for authenticated browser state rather than reproducing login
 in a fresh page.
 
-Each relay controls one browser/profile at a time. A second extension connection
-cannot replace a healthy active connection. If `status` or `doctor` reports
-rejected competing connections, keep the extension enabled only in the intended
-browser/profile. To switch browsers, disconnect the incumbent extension first;
-creating a new execute session does not switch browsers.
+One relay accepts several browsers at once, each paired with its own key, and a
+session keeps the browser it started in. `status` and `doctor` list the connected
+browsers, which one is the default, and each one's tabs. Creating a new execute
+session does not switch browsers; name the browser on the new session instead.
 
 Completion: the selected page URL is the intended page, and later work either
 retains the returned session id or intentionally uses the MCP process session.
@@ -924,9 +923,9 @@ Common diagnoses:
   rerun install. Otherwise follow install's store or Load unpacked steps.
 - Incompatible extension protocol: follow `extension.nextStep`. For an older unpacked extension after setup,
   ask the user: “Reload browse on your browser's extensions page (↻).” Running setup again does not reload older workers.
-- Competing browser/profile connections: the active browser is preserved and
-  additional connections are rejected. Use one browser/profile per relay;
-  repeatedly creating sessions or resetting tabs does not switch browsers.
+- Refused extension connection: the browser's pairing or protocol handshake
+  failed, and browsers already connected are unaffected. Update or reload the
+  extension in that browser, then pair it again with `browse pair`.
 - Stale relay build: inspect `doctor`, then coordinate an explicit
   `opencode-browser relay restart`. It requires an exact managed instance and
   safe shutdown protocol 2. It refuses while a network capture, recording or

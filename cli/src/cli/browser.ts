@@ -2,7 +2,7 @@ import { Console, Effect, Option, Result } from "effect"
 import { Argument, Command, Flag } from "effect/cli"
 import { autoUpdateStatus } from "../update/auto-update.ts"
 import { ExitCode } from "./output.ts"
-import { createDoctorReport, formatDoctorReport, formatTargetSummary } from "../doctor.ts"
+import { createDoctorReport, formatBrowserList, formatDoctorReport, formatTargetSummary } from "../doctor.ts"
 import { cliCommand, installCommand } from "../paths.ts"
 import { extensionProtocolAdvice } from "../protocol.ts"
 import * as RelayClient from "../relay/client.ts"
@@ -177,9 +177,10 @@ const status = Command.make(
     yield* Console.log(
       `Extension: ${extensionStatus.connected ? "connected" : "disconnected"}${extensionStatus.version ? ` (${extensionStatus.version})` : ""}`,
     )
+    for (const line of formatBrowserList(extensionStatus.browsers)) yield* Console.log(line)
     if ((extensionStatus.rejectedConnections ?? 0) > 0) {
       yield* Console.log(
-        `Warning: ${extensionStatus.rejectedConnections} competing browser/profile connection attempt(s) rejected; the active connection was preserved. Use browse in one browser/profile at a time.`,
+        `Warning: ${extensionStatus.rejectedConnections} extension connection attempt(s) were refused; browsers already connected are unaffected. Run \`${cliCommand("pair")}\` for a new code.`,
       )
     }
     if (extensionStatus.nextStep) yield* Console.log(extensionStatus.nextStep)

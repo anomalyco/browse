@@ -1,7 +1,7 @@
 import { Effect, FileSystem, Path, Schema } from "effect"
 import * as RelayClient from "./relay/client.ts"
 import { relayBuildProblem } from "./relay/lifecycle.ts"
-import type { ExtensionStatus, RelayVersion, SessionSummary, TargetSummary } from "./relay/schema.ts"
+import type { ConnectedBrowser, ExtensionStatus, RelayVersion, SessionSummary, TargetSummary } from "./relay/schema.ts"
 import { extensionProtocolAdvice, extensionProtocolVersion } from "./protocol.ts"
 import { binaryPackage, cliCommand, compiledBinary, devExtension, fromCheckout, installCommand } from "./paths.ts"
 import * as SessionStore from "./session-manager/store.ts"
@@ -54,6 +54,16 @@ export type DoctorCheck = {
   readonly message: string
 }
 
+/** One connected browser as reported by the relay; a plain shape so formatters work without the relay schema. */
+export type DoctorBrowser = {
+  readonly id: string
+  readonly name: string
+  readonly default?: boolean
+  readonly connected?: boolean
+  readonly version?: string | null
+  readonly tabs?: number
+}
+
 export type DoctorReport = {
   readonly status: DoctorCheckStatus
   readonly endpoint: string
@@ -87,6 +97,8 @@ export type DoctorReport = {
     readonly protocolCompatible: boolean | null
     readonly protocolLegacy: boolean | null
     readonly rejectedConnections: number | null
+    /** Every connected browser; the fields above describe the default one. */
+    readonly browsers: readonly ConnectedBrowser[]
     readonly error: string | null
   }
   readonly targets: {
@@ -261,6 +273,7 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
       protocolCompatible: extensionResult.ok ? extensionResult.value.protocolCompatible ?? null : null,
       protocolLegacy: extensionResult.ok ? extensionResult.value.protocolLegacy ?? null : null,
       rejectedConnections: extensionResult.ok ? extensionResult.value.rejectedConnections ?? null : null,
+      browsers: extensionResult.ok ? extensionResult.value.browsers ?? [] : [],
       error: extensionResult.ok ? null : extensionResult.error,
     },
     targets: {
@@ -342,12 +355,7 @@ function buildDoctorChecks(options: {
       message: options.relayResult.ok ? `reachable (${options.relayResult.value.version})` : options.relayResult.error,
     },
     relayBuildCheck({ relayResult: options.relayResult, cliBuildId: opencodeBrowserBuildId }),
-    {
-      id: "extension-connected",
-      label: "extension connection",
-      status: options.extensionResult.ok && options.extensionResult.value.connected ? "ok" : "fail",
-      message: options.extensionResult.ok ? options.extensionResult.value.connected ? `connected${options.extensionResult.value.version ? ` (${options.extensionResult.value.version})` : ""}` : "disconnected" : options.extensionResult.error,
-    },
+    extensionConnectionCheck(options.extensionResult),
     extensionVersionCheck({
       extensionResult: options.extensionResult,
       expectedExtensionVersion: options.expectedExtensionVersion,
@@ -355,10 +363,10 @@ function buildDoctorChecks(options: {
     extensionProtocolCheck(options.extensionResult),
     ...(options.extensionResult.ok && options.extensionResult.value.rejectedConnections !== undefined ? [{
       id: "extension-connection-conflicts",
-      label: "competing browser connections",
+      label: "refused extension connections",
       status: options.extensionResult.value.rejectedConnections > 0 ? "warn" as const : "ok" as const,
       message: options.extensionResult.value.rejectedConnections > 0
-        ? `${options.extensionResult.value.rejectedConnections} connection attempt(s) rejected; the active browser connection was preserved`
+        ? `${options.extensionResult.value.rejectedConnections} connection attempt(s) refused; connected browsers are unaffected`
         : "none observed on this connection",
     }] : []),
     ...(options.extensionResult.ok && options.extensionResult.value.pairingState ? [{
@@ -436,6 +444,19 @@ const makeDoctorCheck = (id: string, label: string) => (status: DoctorCheckStatu
   status,
   message,
 })
+
+export function extensionConnectionCheck(extensionResult: ProbeResult<ExtensionStatus>): DoctorCheck {
+  const check = makeDoctorCheck("extension-connected", "extension connection")
+  if (!extensionResult.ok) {
+    return check("fail", extensionResult.error)
+  }
+  if (!extensionResult.value.connected) {
+    return check("fail", "disconnected")
+  }
+  const version = extensionResult.value.version ? ` (${extensionResult.value.version})` : ""
+  const browsers = formatBrowserSummary(extensionResult.value.browsers)
+  return check("ok", `connected${version}${browsers ? `, ${browsers}` : ""}`)
+}
 
 function unhealthyTargetsCheck(options: {
   readonly targetsResult: ProbeResult<readonly TargetSummary[]>
@@ -543,7 +564,7 @@ function buildDoctorRecommendations(options: {
     return !artifact.exists
   }) ? [`Rebuild or reinstall the missing files with \`${installCommand()}\`.`] : []
   const connectionConflictRecommendations = options.extensionResult.ok && (options.extensionResult.value.rejectedConnections ?? 0) > 0
-    ? ["Keep browse enabled in one browser/profile. To switch, disable it in the current browser before connecting the other; new sessions do not change the active browser."]
+    ? [`A browser's extension connection was refused. Run \`${cliCommand("pair")}\` and enter the new code in that browser; browsers already connected keep their connections.`]
     : []
   const staleSessionRecommendations = options.staleCurrent && options.current ? [
     `Current session ${options.current} is stale; run \`${cliCommand("session new")}\` or \`${cliCommand("session use <id>")}\` after the relay is running.`,
@@ -586,6 +607,7 @@ export function formatDoctorReport(report: DoctorReport): string {
     `Package: ${report.package.name && report.package.version ? `${report.package.name} ${report.package.version}` : report.package.error ?? "unknown"}`,
     `Relay: ${report.relay.reachable ? `reachable (${report.relay.version ?? "unknown"}, ${report.relay.buildId ?? "unknown build"})` : `unreachable (${report.relay.error ?? "unknown error"})`}`,
     `Extension: ${formatExtensionSummary(report)}`,
+    ...formatBrowserList(report.extension.browsers),
     `Targets: active=${formatNullableNumber(report.targets.active)} child=${formatNullableNumber(report.targets.child)} relay-owned=${report.targets.relayOwned.length} unhealthy=${report.targets.unhealthy.length}`,
     `Sessions: current=${report.sessions.current ?? "none"} total=${report.sessions.all.length} connected=${report.sessions.all.filter((session) => {
       return session.connected
@@ -630,6 +652,46 @@ function formatExtensionSummary(report: DoctorReport): string {
 
 function formatNullableNumber(value: number | null): string {
   return value === null ? "unknown" : String(value)
+}
+
+/** The one place that decides which browser is the default: first marked, else first connected, else first. */
+function defaultBrowserIndex(browsers: readonly DoctorBrowser[]): number {
+  const marked = browsers.findIndex((browser) => {
+    return browser.default === true
+  })
+  if (marked !== -1) return marked
+  const connected = browsers.findIndex((browser) => {
+    return browser.connected !== false
+  })
+  return connected === -1 ? 0 : connected
+}
+
+function formatBrowserLine(browser: DoctorBrowser, isDefault: boolean): string {
+  const name = browser.name || browser.id
+  const marks = [
+    isDefault ? "default" : undefined,
+    browser.connected === false ? "starting" : undefined,
+  ].filter((mark): mark is string => mark !== undefined)
+  const tabs = browser.tabs === undefined ? "" : ` ${browser.tabs} tab${browser.tabs === 1 ? "" : "s"}`
+  return `${browser.id} (${[name, ...marks].join(", ")})${tabs}`
+}
+
+/** A `Browsers:` block for a doctor report or `status`; no lines when the relay reported no browsers. */
+export function formatBrowserList(browsers: readonly DoctorBrowser[] | undefined): readonly string[] {
+  if (!browsers || browsers.length === 0) return []
+  const preferred = defaultBrowserIndex(browsers)
+  const lines = browsers.map((browser, index) => {
+    return `- ${formatBrowserLine(browser, index === preferred)}`
+  })
+  return ["Browsers:", ...lines]
+}
+
+/** A one-line browser count naming the same default the list marks; empty when there are no browsers. */
+export function formatBrowserSummary(browsers: readonly DoctorBrowser[] | undefined): string {
+  if (!browsers || browsers.length === 0) return ""
+  const preferred = browsers[defaultBrowserIndex(browsers)]
+  if (!preferred) return ""
+  return `${browsers.length} browser${browsers.length === 1 ? "" : "s"} (default ${preferred.id})`
 }
 
 export function formatTargetSummary(target: TargetSummary, options: { readonly includeSession?: boolean } = {}): string {

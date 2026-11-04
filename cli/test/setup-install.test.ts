@@ -1,11 +1,14 @@
-import { afterAll, describe, expect, test } from "bun:test"
+import { afterAll, afterEach, describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { parse } from "jsonc-parser"
 import { agentLocations, agentNames, callingAgent, editAgentConfig } from "../src/setup/agent-config.ts"
 import { agentFlags, agentPlan } from "../src/setup/agent-picker.ts"
-import { configureMcp, installedExtensionVersion, installedRuntime, installWaitTimeout, locateExtension, manualMcpEntry, pairStoreExtension, relayNotRestarted, remoteRelayAddresses, remoteRelayLines, removeMcp, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
+import { configRoot, stableNodePath } from "../src/setup/environment.ts"
+import { pairedOfflineApplies } from "../src/setup/guidance.ts"
+import { configFile } from "../src/setup/mcp.ts"
+import { configureMcp, installedExtensionVersion, installedRuntime, installExitCode, installWaitTimeout, locateExtension, manualMcpEntry, pairStoreExtension, relayNotRestarted, remoteRelayAddresses, remoteRelayLines, removalsFor, removeMcp, setupStatusLines, storeCheckNeeded, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
 
 const browser = (name: string): Browser => ({ name, userData: `/data/${name}`, manifests: [], defaultIDs: [], executables: [] })
 const chrome = browser("Google Chrome")
@@ -58,17 +61,81 @@ test("a binary install's entry runs the executable itself, in OpenCode, other ag
     const claude = { name: "claude" as const, file: path.join(home, ".claude.json"), entry: binary }
     expect(editAgentConfig(claude)).toBe("added")
     expect(parse(fs.readFileSync(claude.file, "utf8")).mcpServers.browse).toEqual({ type: "stdio", command: binary, args: ["mcp"] })
-    // An npm install's receipt for the same file doesn't own the binary entry.
-    expect(editAgentConfig({ ...claude, node: "/usr/bin/node", entry: "/data/bin/opencode-browser.mjs" }, true)).toBe("conflict")
+    // An npm install's receipt for the same file doesn't own the binary entry, unless passed as the recorded receipt.
+    const npmClaude = { ...claude, node: "/usr/bin/node", entry: "/data/bin/opencode-browser.mjs" }
+    expect(editAgentConfig(npmClaude, true)).toBe("conflict")
+    expect(editAgentConfig(npmClaude, false, claude)).toBe("added")
+    expect(parse(fs.readFileSync(claude.file, "utf8")).mcpServers.browse).toEqual({ type: "stdio", command: "/usr/bin/node", args: ["/data/bin/opencode-browser.mjs", "mcp"] })
+    expect(editAgentConfig(claude, false, npmClaude)).toBe("added")
+    expect(parse(fs.readFileSync(claude.file, "utf8")).mcpServers.browse).toEqual({ type: "stdio", command: binary, args: ["mcp"] })
     expect(editAgentConfig(claude, true)).toBe("removed")
 
     const codex = { name: "codex" as const, file: path.join(home, "config.toml"), entry: binary }
-    expect(editAgentConfig(codex)).toBe("added")
+    const npmCodex = { ...codex, node: "/usr/bin/node", entry: "/data/bin/opencode-browser.mjs" }
+    expect(editAgentConfig(npmCodex)).toBe("added")
+    expect(editAgentConfig(codex, false, npmCodex)).toBe("added")
     expect(Bun.TOML.parse(fs.readFileSync(codex.file, "utf8"))).toEqual({ mcp_servers: { browse: { command: binary, args: ["mcp"] } } })
     expect(editAgentConfig(codex, true)).toBe("removed")
 
     expect(JSON.parse(manualMcpEntry([binary]))).toEqual({ mcpServers: { browse: { command: binary, args: ["mcp"] } } })
     expect(JSON.parse(manualMcpEntry(["/usr/bin/node", "/x/cli.mjs"]))).toEqual({ mcpServers: { browse: { command: "/usr/bin/node", args: ["/x/cli.mjs", "mcp"] } } })
+  } finally { fs.rmSync(home, { recursive: true, force: true }) }
+})
+
+test("install exits cleanly when it stops early and 1 only when waiting timed out", () => {
+  expect(installExitCode("cancelled")).toBe(130)
+  expect(installExitCode("none-selected")).toBe(0)
+  expect(installExitCode("skipped")).toBe(0)
+  expect(installExitCode("timeout")).toBe(1)
+})
+
+test("an unpacked install never aborts on an old store build in another profile", () => {
+  expect(storeCheckNeeded(folder, false)).toBe(false)
+  expect(storeCheckNeeded(folder, true)).toBe(false)
+  expect(storeCheckNeeded(undefined, false)).toBe(true)
+  expect(storeCheckNeeded(undefined, true)).toBe(false)
+})
+
+describe("paired offline only explains a disconnect when a browser here has browse", () => {
+  const match = { browser: chrome, profile: { dir: "Default", name: "Person 1" }, id: "afeafocngkodbmaipcngoamamfmekgfo" }
+
+  test("a closed browser that has the extension, or one that couldn't be checked, does", () => {
+    expect(pairedOfflineApplies(true, [{ ...none(chrome), enabled: [match] }], false)).toBe(true)
+    expect(pairedOfflineApplies(true, [{ ...none(chrome), blocked: true }], false)).toBe(true)
+    expect(pairedOfflineApplies(true, [], true)).toBe(true)
+  })
+
+  test("after the extension was removed, install guides reinstalling it", () => {
+    expect(pairedOfflineApplies(true, [none(chrome)], false)).toBe(false)
+    expect(pairedOfflineApplies(true, [], false)).toBe(false)
+    expect(pairedOfflineApplies(false, [{ ...none(chrome), enabled: [match] }], false)).toBe(false)
+  })
+})
+
+test("a picker's cleanup takes what was left unchecked, not what is still selected", () => {
+  const claude = { name: "claude" as const, file: "/home/me/.claude.json", node: "/usr/bin/node", entry: "/cli.mjs" }
+  const cursor = { name: "cursor" as const, file: "/home/me/.cursor/mcp.json", node: "/usr/bin/node", entry: "/cli.mjs" }
+  const settings = { agents: [claude, cursor], opencodeConfigs: ["/home/me/.config/opencode/opencode.json"] }
+  expect(removalsFor(settings, [], ["opencode", "claude"])).toEqual({ opencodeConfigs: [], agents: [cursor] })
+  expect(removalsFor(settings, settings.opencodeConfigs, ["claude"])).toEqual({ opencodeConfigs: settings.opencodeConfigs, agents: [cursor] })
+  expect(removalsFor(undefined, ["/a.json"], [])).toEqual({ opencodeConfigs: ["/a.json"], agents: [] })
+})
+
+test("cleanup removes only the browse entries install recorded", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-removal-"))
+  try {
+    const agentFile = path.join(home, "mcp.json")
+    const receipt = { name: "claude" as const, file: agentFile, node: "/usr/bin/node", entry: "/cli.mjs" }
+    fs.writeFileSync(agentFile, '{ "unrelated": true }')
+    expect(editAgentConfig(receipt)).toBe("added")
+    const file = path.join(home, "opencode.jsonc")
+    const entry = path.join(home, "cli.mjs")
+    expect(configureMcp(file, entry)).toContain("added")
+    const removals = removalsFor({ agents: [receipt], opencodeConfigs: [file] }, [file], [])
+    for (const stale of removals.agents) expect(editAgentConfig(stale, true)).toBe("removed")
+    for (const stale of removals.opencodeConfigs) expect(removeMcp("browse", entry, stale)).toBe(true)
+    expect(parse(fs.readFileSync(agentFile, "utf8"))).toEqual({ unrelated: true, mcpServers: {} })
+    expect(parse(fs.readFileSync(file, "utf8")).mcp?.servers?.browse).toBeUndefined()
   } finally { fs.rmSync(home, { recursive: true, force: true }) }
 })
 
@@ -106,16 +173,36 @@ test.each(agentNames.filter(n => n !== "opencode"))("%s user config: preserve un
     fs.writeFileSync(file, before)
     const original = config()
     const receipt = { name, file, node: "/a path/node", entry: "/a path/browse.mjs" }
+    const definition = (node: string, entry: string) => name === "kilo" ? { type: "local", command: [node, entry, "mcp"] } : name === "copilot" ? { type: "local", command: node, args: [entry, "mcp"], tools: ["*"] } : name === "goose" ? { type: "stdio", name: "browse", cmd: node, args: [entry, "mcp"], enabled: true } : name === "vibe" ? { name: "browse", transport: "stdio", command: node, args: [entry, "mcp"] } : ["vscode", "claude", "codebuddy", "droid", "cortex"].includes(name) ? { type: "stdio", command: node, args: [entry, "mcp"] } : { command: node, args: [entry, "mcp"] }
+    const server = () => name === "vibe" ? config().mcp_servers.find((s: { name: string }) => s.name === "browse") : config()[toml ? "mcp_servers" : yaml ? yamlKey : key].browse
     expect(editAgentConfig(receipt)).toBe("added")
-    const args = [receipt.entry, "mcp"]
-    const standard = { command: receipt.node, args }
-    const server = name === "vibe" ? config().mcp_servers.find((s: { name: string }) => s.name === "browse") : config()[toml ? "mcp_servers" : yaml ? yamlKey : key].browse
-    expect(server).toEqual(name === "kilo" ? { type: "local", command: [receipt.node, ...args] } : name === "copilot" ? { type: "local", ...standard, tools: ["*"] } : name === "goose" ? { type: "stdio", name: "browse", cmd: receipt.node, args, enabled: true } : name === "vibe" ? { name: "browse", transport: "stdio", ...standard } : ["vscode", "claude", "codebuddy", "droid", "cortex"].includes(name) ? { type: "stdio", ...standard } : standard)
+    expect(server()).toEqual(definition(receipt.node, receipt.entry))
     const once = fs.readFileSync(file, "utf8")
     expect(editAgentConfig(receipt)).toBe("unchanged")
     expect(fs.readFileSync(file, "utf8")).toBe(once)
+
+    // A reinstall replaces the entry this installer recorded, but only when given that receipt.
+    const upgraded = { ...receipt, node: "/new node/node", entry: "/new path/browse.mjs" }
+    expect(editAgentConfig(upgraded)).toBe("conflict")
+    expect(fs.readFileSync(file, "utf8")).toBe(once)
+    expect(editAgentConfig(upgraded, false, { ...receipt, name: name === "claude" ? "cursor" : "claude" })).toBe("conflict")
+    expect(editAgentConfig(upgraded, false, receipt)).toBe("added")
+    expect(server()).toEqual(definition(upgraded.node, upgraded.entry))
+    const updated = fs.readFileSync(file, "utf8")
+    expect(updated).toContain(toml ? "my config" : yaml ? "# keep this server" : "// my config")
+    if (name === "vibe") expect(updated.match(/\[\[mcp_servers\]\]/g)).toHaveLength(2)
+    else if (toml) expect(updated.match(/\[mcp_servers\.browse\]/g)).toHaveLength(1)
+    expect(editAgentConfig(upgraded, false, receipt)).toBe("unchanged")
+    expect(fs.readFileSync(file, "utf8")).toBe(updated)
+    // Removal stays strict: it only takes the definition it would write today, never a previous one.
+    expect(editAgentConfig(receipt, true, upgraded)).toBe("conflict")
+    expect(editAgentConfig(upgraded, true)).toBe("removed")
+    expect(config()).toEqual(original)
+    if (yaml) expect(fs.readFileSync(file, "utf8")).toContain("# keep this server")
+
     fs.writeFileSync(file, once.replace("/a path/node", "/some-other/server"))
     expect(editAgentConfig(receipt)).toBe("conflict")
+    expect(editAgentConfig(receipt, false, receipt)).toBe("conflict")
     expect(editAgentConfig(receipt, true)).toBe("conflict")
     fs.writeFileSync(file, once)
     expect(editAgentConfig(receipt, true)).toBe("removed")
@@ -138,6 +225,15 @@ test("every picker choice has one user-scoped destination; config dirs and binar
     expect(locations.find(a => a.name === "qwen-code")).toMatchObject({ installed: true, file: path.join(home, ".qwen/settings.json") })
     expect(locations.find(a => a.name === "droid")).toMatchObject({ installed: true, file: path.join(home, ".factory/mcp.json") })
     expect(locations.find(a => a.name === "junie")?.installed).toBe(false)
+    // macOS app bundles in ~/Applications count, including the desktop beta build named "OpenCode Beta".
+    if (process.platform === "darwin") {
+      const apps = path.join(home, "Applications")
+      for (const bundle of ["OpenCode", "OpenCode Beta"]) {
+        fs.mkdirSync(path.join(apps, `${bundle}.app`), { recursive: true })
+        expect(agentLocations(home, config, () => undefined, path.join(config, "opencode/opencode.json")).find(a => a.name === "opencode")?.installed).toBe(true)
+        fs.rmSync(path.join(apps, `${bundle}.app`), { recursive: true, force: true })
+      }
+    }
   } finally { fs.rmSync(home, { recursive: true, force: true }) }
 })
 
@@ -275,6 +371,34 @@ describe("an npm install without the extension", () => {
     expect(output).not.toContain("Load unpacked")
   })
 
+  test("with no Chromium browser detected, prints the store page instead of opening it in Safari", () => {
+    const opened: string[] = []
+    const lines: string[] = []
+    const outcome = locateExtension(
+      {
+        allowOpen: true,
+        connected: false,
+        detections: [],
+        preferred: undefined,
+        storeUrl,
+        env: { ssh: false, display: true, tty: true, platform: "darwin" },
+      },
+      {
+        open: (target, url) => (opened.push(`${target.name} ${url}`), true),
+        openDefault: (url) => (opened.push(`default ${url}`), true),
+        reveal: () => true,
+        copy: () => true,
+        log: (line) => lines.push(line),
+      },
+    )
+    expect(outcome).toBe("guided")
+    expect(opened).toEqual([])
+    expect(lines.join("\n")).toContain("Chromium")
+    expect(lines.join("\n")).toContain(storeUrl)
+    expect(lines.join("\n")).toContain("Google Chrome, Brave, Microsoft Edge or Arc")
+    expect(lines.join("\n")).not.toContain("(opened)")
+  })
+
   test("over SSH, prints the store page", () => {
     const { calls, output } = run({ folder: undefined, storeUrl, env: { ssh: true, display: true, tty: true, platform: "linux" } })
     expect(calls.open).toEqual([])
@@ -409,6 +533,100 @@ describe("relayNotRestarted", () => {
     const lines = relayNotRestarted("not json", output)
     expect(lines[0]).toBe("! Relay not restarted: Relay has raw CDP clients attached; disconnect them before restarting.")
     expect(lines[2]).toMatch(/run: node .*cli[/\\]dist[/\\]cli\.mjs relay restart$/)
+  })
+
+  test("a reason that already ends in a period keeps exactly one", () => {
+    expect(relayNotRestarted("not json", "Relay is recording in session x.\n")[0]).toBe("! Relay not restarted: Relay is recording in session x.")
+    expect(relayNotRestarted(status([{ id: "github", connected: true }]), "Relay is recording in session x.")[0]).toBe(
+      "! Relay not restarted: an agent session is active (github) (Relay is recording in session x).",
+    )
+  })
+})
+
+describe("status lines when OpenCode isn't configured", () => {
+  const claude = { name: "claude" as const, file: "/home/me/.claude.json", node: "/usr/bin/node", entry: "/cli.mjs" }
+  const lines = (settings: Parameters<typeof setupStatusLines>[0]["settings"], opencode: string | undefined, mcpConfigured: boolean) =>
+    setupStatusLines({ settings, runtime: undefined, opencode, mcpConfigured, autoUpdate: "Auto-update: on", logs: "/tmp/logs" })
+
+  test("names the agents install wrote browse into instead of saying nothing is configured", () => {
+    const output = lines({ agents: [claude] }, undefined, false).join("\n")
+    expect(output).toContain("Agents:    Claude Code (/home/me/.claude.json)")
+    expect(output).toContain('MCP:       "browse" configured in Claude Code')
+    expect(output).not.toContain("opencode:  not found")
+    expect(output).not.toContain("MCP:       not configured")
+  })
+
+  test("still says nothing is configured without any agent", () => {
+    const output = lines(undefined, undefined, false).join("\n")
+    expect(output).toContain("opencode:  not found")
+    expect(output).toContain("MCP:       not configured")
+  })
+
+  test("keeps the opencode lines when OpenCode is configured", () => {
+    const output = lines(undefined, "/bin/opencode", true).join("\n")
+    expect(output).toContain("opencode:  /bin/opencode")
+    expect(output).toContain('MCP:       "browse" configured')
+    expect(output).not.toContain("Agents:")
+  })
+})
+
+describe("configFile", () => {
+  const previous = process.env.OPENCODE_CONFIG_DIR
+
+  afterEach(() => {
+    if (previous === undefined) delete process.env.OPENCODE_CONFIG_DIR
+    else process.env.OPENCODE_CONFIG_DIR = previous
+  })
+
+  test("OPENCODE_CONFIG_DIR is the config directory itself, and its existing files win in order", () => {
+    const folder = fs.mkdtempSync(path.join(os.tmpdir(), "browse-config-"))
+    try {
+      fs.writeFileSync(path.join(folder, "opencode.jsonc"), "{}")
+      process.env.OPENCODE_CONFIG_DIR = folder
+      expect(configFile()).toBe(path.join(folder, "opencode.jsonc"))
+      fs.writeFileSync(path.join(folder, "opencode.json"), "{}")
+      expect(configFile()).toBe(path.join(folder, "opencode.json"))
+    } finally {
+      fs.rmSync(folder, { recursive: true, force: true })
+    }
+  })
+
+  test("without OPENCODE_CONFIG_DIR it reads opencode's folder under the config root", () => {
+    delete process.env.OPENCODE_CONFIG_DIR
+    const base = path.join(configRoot, "opencode")
+    const file = configFile()
+    expect(file.startsWith(base + path.sep)).toBe(true)
+    expect(path.basename(file)).toMatch(/^opencode\.jsonc?$/)
+  })
+})
+
+describe("stableNodePath", () => {
+  test("prefers the node on PATH when it is the running binary", () => {
+    expect(stableNodePath(process.execPath, () => process.execPath)).toBe(process.execPath)
+  })
+
+  test("follows a symlink to the running binary", () => {
+    const folder = fs.mkdtempSync(path.join(os.tmpdir(), "browse-link-"))
+    const link = path.join(folder, "node")
+    try {
+      fs.symlinkSync(process.execPath, link)
+      expect(stableNodePath(process.execPath, () => link)).toBe(link)
+    } finally {
+      fs.rmSync(folder, { recursive: true, force: true })
+    }
+  })
+
+  test("keeps execPath for another binary, a missing one, or a path that does not resolve", () => {
+    const folder = fs.mkdtempSync(path.join(os.tmpdir(), "browse-node-"))
+    const other = path.join(folder, "node")
+    fs.writeFileSync(other, "")
+    try {
+      expect(stableNodePath(process.execPath, () => other)).toBe(process.execPath)
+      expect(stableNodePath(process.execPath, () => path.join(folder, "gone"))).toBe(process.execPath)
+      expect(stableNodePath(process.execPath, () => undefined)).toBe(process.execPath)
+    } finally {
+      fs.rmSync(folder, { recursive: true, force: true })
+    }
   })
 })
 

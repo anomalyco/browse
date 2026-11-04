@@ -24,9 +24,19 @@ export type LocateOptions = {
 }
 
 /**
+ * Whether a browser already paired with the relay explains why nothing is connected: over SSH the browsers here aren't
+ * scanned, and locally only one that has browse enabled (or couldn't be checked) counts. Running install after the
+ * extension was removed finds neither, and the guidance to reinstall it is the useful answer.
+ */
+export function pairedOfflineApplies(pairedOffline: boolean, detections: Detection[], ssh: boolean) {
+  return pairedOffline && (ssh || detections.some((detection) => detection.blocked || detection.enabled.length > 0))
+}
+
+/**
  * Reports the browsers and profiles that have browse. When none does (and none is connected to the relay),
  * guides installing it: from a checkout or a dev install, loading the unpacked build, with the browser's extensions page
- * opened, the folder revealed and its path copied; from a stable npm install, the Chrome Web Store item, whose page it opens.
+ * opened, the folder revealed and its path copied; from a stable npm install, the Chrome Web Store item, whose page it opens
+ * in a Chromium browser (a Safari-only machine just gets the address: browse can't run there).
  * Nothing opens when the browsers here aren't the ones the user looks at (SSH, no display),
  * with --no-open, or when a browser couldn't be checked and may already have it.
  * Returns "ready" when the extension is there, "off" when it's turned off, else "guided".
@@ -63,6 +73,16 @@ export function locateExtension(options: LocateOptions, effects: Effects = syste
   const interactive = options.allowOpen && options.env.display
   if (!options.folder) {
     if (!listing) return noListing(), "guided"
+    // No Chromium browser here means the default browser may be Safari or Firefox, which can't run the extension:
+    // print the store page rather than opening it where it can't be used.
+    if (!options.env.ssh && options.detections.length === 0) {
+      log(
+        `! browse needs a Chromium browser (Google Chrome, Brave, Microsoft Edge or Arc); it can't be added to Safari or Firefox.`,
+      )
+      log(`Install it from the Chrome Web Store: ${listing}`)
+      pairLater()
+      return "guided"
+    }
     const opened =
       interactive && !blocked.length && (target ? effects.open(target, listing) : effects.openDefault?.(listing))
     log(`Add browse to ${target?.name ?? "your browser"} from the Chrome Web Store${opened ? " (opened)" : ""}: ${listing}`)
