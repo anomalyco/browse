@@ -16,7 +16,7 @@ import { HandoffRegistry } from "./session-manager/handoff.ts"
 import { createHttpRequestHandler } from "./http-api.ts"
 import { forgetTab } from "./execute/human-input.ts"
 import { PasskeyBridge } from "./auth/passkey-bridge.ts"
-import { devExtension, storeConfig } from "./paths.ts"
+import { devExtension, PUBLIC_STORE_ID, storeConfig } from "./paths.ts"
 import { ProtectedFrameTracker } from "./cdp/protected-frames.ts"
 import type { CdpEvent, JsonObject } from "./protocol.ts"
 import { RecordingRelay } from "./recording-relay.ts"
@@ -83,8 +83,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const browserId = crypto.randomUUID()
   const endpointUrl = `http://${formatHostForUrl(host)}:${port}`
   const additionalChromeExtensionOrigins = new Set(options.additionalExtensionOrigins ?? [])
-  const storeId = storeConfig().id
-  if (storeId) additionalChromeExtensionOrigins.add(`chrome-extension://${storeId}`)
+  // The store build installs from, for a checkout too: install points every channel at it (paths.ts PUBLIC_STORE_ID).
+  const storeId = storeConfig().id ?? PUBLIC_STORE_ID
+  additionalChromeExtensionOrigins.add(`chrome-extension://${storeId}`)
   const sessionCatalog = options.sessionCatalogPath === null
     ? undefined
     : new SessionCatalog(options.sessionCatalogPath ?? defaultSessionCatalogPath(port))

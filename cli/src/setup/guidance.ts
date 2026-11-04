@@ -1,7 +1,5 @@
-import { cliCommand } from "../paths.ts"
 import {
   blockedReason,
-  extensionsPage,
   oldStoreBuild,
   systemEffects,
   type Browser,
@@ -14,8 +12,6 @@ export type LocateOptions = {
   allowOpen: boolean
   connected: boolean
   pairedOffline?: boolean
-  /** The folder to load unpacked (a checkout's dist/, or a dev install's). Without one, the extension comes from the store item. */
-  folder?: string
   detections: Detection[]
   preferred: Browser | undefined
   env: { ssh: boolean; display: boolean; tty: boolean; platform: NodeJS.Platform }
@@ -24,32 +20,19 @@ export type LocateOptions = {
 }
 
 /**
- * Reports the browsers and profiles that have browse. When none does (and none is connected to the relay),
- * guides installing it: from a checkout or a dev install, loading the unpacked build, with the browser's extensions page
- * opened, the folder revealed and its path copied; from a stable npm install, the Chrome Web Store item, whose page it opens.
- * Nothing opens when the browsers here aren't the ones the user looks at (SSH, no display),
- * with --no-open, or when a browser couldn't be checked and may already have it.
+ * Reports the browsers and profiles that have browse. Every channel installs the extension from the Chrome Web Store,
+ * so when none has it (and none is connected to the relay) the only step is adding it from there, with its page opened
+ * when install may open things. Nothing opens when the browsers here aren't the ones the user looks at (SSH, no
+ * display), with --no-open, or when a browser couldn't be checked and may already have it.
  * Returns "ready" when the extension is there, "off" when it's turned off, else "guided".
  */
 export function locateExtension(options: LocateOptions, effects: Effects = systemEffects): "ready" | "off" | "guided" {
   const { log } = effects
   const listing = options.storeUrl ?? STORE_URL
-  const noListing = () =>
-    log(
-      `! This package doesn't know its Chrome Web Store item, so it can't install the extension. Install a released version (\`npx @opencode/browse install\`), or set up browse from a checkout.`,
-    )
-  const pairLater = () => log(`  Once it's added, run \`${cliCommand("install")}\` again to pair it with the relay.`)
   if (options.pairedOffline) return log(pairedOfflineMessage), "ready"
-  if (options.env.ssh) {
-    if (options.connected) return log(connectedMessage), "ready"
-    if (options.folder) unpackedSteps({ folder: options.folder, platform: options.env.platform, log })
-    else if (listing) log(`Install browse in your browser from the Chrome Web Store: ${listing}`), pairLater()
-    else noListing()
-    return "guided"
-  }
   // A connected extension is installed, even somewhere the scan doesn't look (a custom profile directory, a snap).
   if (options.connected) return log(connectedMessage), "ready"
-  if (options.detections.some((detection) => detection.enabled.length)) return "ready"
+  if (!options.env.ssh && options.detections.some((detection) => detection.enabled.length)) return "ready"
   const off = options.detections.flatMap((detection) => detection.disabled)
   if (off.length) {
     log(
@@ -60,27 +43,11 @@ export function locateExtension(options: LocateOptions, effects: Effects = syste
   const blocked = options.detections.filter((detection) => detection.blocked).map((detection) => detection.browser.name)
   if (blocked.length) log(`! Couldn't check ${blocked.join(", ")} for browse (${blockedReason()})`)
   const target = options.preferred ?? options.detections.find((detection) => !detection.blocked)?.browser
-  const interactive = options.allowOpen && options.env.display
-  if (!options.folder) {
-    if (!listing) return noListing(), "guided"
-    const opened =
-      interactive && !blocked.length && (target ? effects.open(target, listing) : effects.openDefault?.(listing))
-    log(`Add browse to ${target?.name ?? "your browser"} from the Chrome Web Store${opened ? " (opened)" : ""}: ${listing}`)
-    return "guided"
-  }
-  // A browser that couldn't be checked may already have it: show the steps, but don't open anything over the user's work.
-  const act = interactive && !blocked.length
-  const page = target ? extensionsPage(target) : "chrome://extensions"
-  unpackedSteps({
-    folder: options.folder,
-    platform: options.env.platform,
-    log,
-    browser: target?.name,
-    page,
-    opened: act && target !== undefined && effects.open(target, page),
-    revealed: act && options.env.tty && effects.reveal(options.folder),
-    copied: act && options.env.tty && effects.copy(options.folder),
-  })
+  const interactive = options.allowOpen && options.env.display && !options.env.ssh
+  // A browser that couldn't be checked may already have it: don't open anything over the user's work.
+  const opened =
+    interactive && !blocked.length && (target ? effects.open(target, listing) : effects.openDefault?.(listing))
+  log(`Add browse to ${target?.name ?? "your browser"} from the Chrome Web Store${opened ? " (opened)" : ""}: ${listing}`)
   return "guided"
 }
 
@@ -118,33 +85,9 @@ export function pairStoreExtension(
   return "manual"
 }
 
-/** The steps for loading the unpacked build, saying what install already did for each. */
-function unpackedSteps(step: {
-  folder: string
-  platform: NodeJS.Platform
-  log: (line: string) => void
-  browser?: string | undefined
-  page?: string
-  opened?: boolean
-  revealed?: boolean
-  copied?: boolean
-}) {
-  const { log } = step
-  const page = step.page ?? "chrome://extensions"
-  const fileManager =
-    step.platform === "darwin" ? "Finder" : step.platform === "win32" ? "Explorer" : "your file manager"
-  const paste =
-    step.platform === "darwin"
-      ? "press Cmd+Shift+G in the folder picker and paste"
-      : "paste it into the folder picker"
-  log(
-    `Load browse in ${step.browser ?? "your browser"}: open ${page}${step.opened ? " (opened)" : ""}, turn on Developer mode, click Load unpacked and choose ${step.folder}${step.copied ? ` (path copied: ${paste})` : step.revealed ? ` (shown in ${fileManager})` : ""}`,
-  )
-}
-
 /**
  * Polls until the extension connects to the relay: true when it does, false after timeoutMs. Install waits like
- * this after printing the unpacked steps, so the user sees the moment Load unpacked worked.
+ * this after printing the store step, so the user sees the moment add-from-store worked.
  */
 export async function waitForExtension(options: {
   connected: () => Promise<boolean>

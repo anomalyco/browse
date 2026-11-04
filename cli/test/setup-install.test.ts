@@ -5,6 +5,7 @@ import path from "node:path"
 import { parse } from "jsonc-parser"
 import { agentLocations, agentNames, callingAgent, editAgentConfig } from "../src/setup/agent-config.ts"
 import { agentFlags, agentPlan } from "../src/setup/agent-picker.ts"
+import { STORE_URL } from "../src/setup/environment.ts"
 import { configureMcp, installedExtensionVersion, installedRuntime, installWaitTimeout, locateExtension, manualMcpEntry, pairStoreExtension, relayNotRestarted, remoteRelayAddresses, remoteRelayLines, removeMcp, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
 
 const browser = (name: string): Browser => ({ name, userData: `/data/${name}`, manifests: [], defaultIDs: [], executables: [] })
@@ -142,18 +143,16 @@ test("every picker choice has one user-scoped destination; config dirs and binar
 })
 
 /** Runs locateExtension with recording effects: nothing real is opened, revealed or copied. */
-function run(overrides: Partial<Omit<LocateOptions, "folder">> & { folder?: string | undefined } = {}, results: { open?: boolean } = {}) {
+function run(overrides: Partial<LocateOptions> = {}, results: { open?: boolean } = {}) {
   const calls: { open: [string, string][]; reveal: string[]; copy: string[] } = { open: [], reveal: [], copy: [] }
   const lines: string[] = []
-  const { folder: unpacked = "folder" in overrides ? undefined : folder, ...rest } = overrides
   const options: LocateOptions = {
     allowOpen: true,
     connected: false,
-    ...(unpacked ? { folder: unpacked } : {}),
     detections: [none(chrome)],
     preferred: chrome,
     env: { ssh: false, display: true, tty: true, platform: "darwin" },
-    ...rest,
+    ...overrides,
   }
   const outcome = locateExtension(options, {
     open: (target, url) => (calls.open.push([target.name, url]), results.open ?? true),
@@ -164,53 +163,48 @@ function run(overrides: Partial<Omit<LocateOptions, "folder">> & { folder?: stri
   return { outcome, calls, output: lines.join("\n") }
 }
 
-describe("a checkout install without the extension", () => {
-  test("opens the extensions page, reveals the folder and copies its path", () => {
+describe("install without the extension", () => {
+  test("says to add browse from the Chrome Web Store, and opens its page", () => {
     const { outcome, calls, output } = run()
     expect(outcome).toBe("guided")
-    expect(calls).toEqual({ open: [["Google Chrome", "chrome://extensions"]], reveal: [folder], copy: [folder] })
-    expect(output).toContain("Load browse in Google Chrome: open chrome://extensions (opened)")
-    expect(output).toContain("Developer mode")
-    expect(output).toContain("Load unpacked")
-    expect(output).toContain(`${folder} (path copied`)
-    expect(output).toContain("Cmd+Shift+G")
-    expect(output).not.toContain("chromewebstore")
-  })
-
-  test("uses the browser's own scheme for its extensions page", () => {
-    const { calls, output } = run({ detections: [none(chrome), none(edge)], preferred: edge })
-    expect(calls.open).toEqual([["Microsoft Edge", "edge://extensions"]])
-    expect(output).toContain("Load browse in Microsoft Edge: open edge://extensions (opened)")
+    expect(calls).toEqual({ open: [["Google Chrome", STORE_URL]], reveal: [], copy: [] })
+    expect(output).toBe(`Add browse to Google Chrome from the Chrome Web Store (opened): ${STORE_URL}`)
+    expect(output).not.toContain("unpacked")
+    expect(output).not.toContain("Developer mode")
+    expect(output).not.toContain(folder)
   })
 
   test("falls back to the first detected browser when the default isn't a known Chromium", () => {
-    expect(run({ preferred: undefined }).calls.open).toEqual([["Google Chrome", "chrome://extensions"]])
+    expect(run({ preferred: undefined }).calls.open).toEqual([["Google Chrome", STORE_URL]])
+  })
+
+  test("with no Chromium browser found, names the store without opening it", () => {
+    const { calls, output } = run({ detections: [], preferred: undefined })
+    expect(calls.open).toEqual([])
+    expect(output).toContain(`Add browse to your browser from the Chrome Web Store: ${STORE_URL}`)
   })
 
   test("doesn't claim the page opened when the browser couldn't be launched", () => {
     const { output } = run({}, { open: false })
-    expect(output).toContain("Load browse in Google Chrome: open chrome://extensions")
+    expect(output).toContain(`Add browse to Google Chrome from the Chrome Web Store: ${STORE_URL}`)
     expect(output).not.toContain("(opened)")
   })
 
   test.each([
     ["--no-open", { allowOpen: false }],
     ["no display", { env: { ssh: false, display: false, tty: true, platform: "linux" as const } }],
-  ])("only prints the steps with %s", (_, overrides) => {
+  ])("only prints the line with %s", (_, overrides) => {
     const { outcome, calls, output } = run(overrides)
     expect(outcome).toBe("guided")
     expect(calls).toEqual({ open: [], reveal: [], copy: [] })
-    expect(output).toContain(folder)
+    expect(output).toContain(`Add browse to Google Chrome from the Chrome Web Store: ${STORE_URL}`)
     expect(output).not.toContain("(opened)")
-    expect(output).not.toContain("copied")
   })
 
-  test("over SSH, prints the steps without scanning or opening anything", () => {
+  test("over SSH, prints the line without scanning or opening anything", () => {
     const { calls, output } = run({ env: { ssh: true, display: true, tty: true, platform: "linux" } })
     expect(calls).toEqual({ open: [], reveal: [], copy: [] })
-    expect(output).not.toContain("Default browser")
-    expect(output).toContain("Load unpacked")
-    expect(output).toContain(folder)
+    expect(output).toContain(`Add browse to Google Chrome from the Chrome Web Store: ${STORE_URL}`)
   })
 
   test("doesn't open anything when a browser couldn't be checked and may already have it", () => {
@@ -219,19 +213,13 @@ describe("a checkout install without the extension", () => {
     expect(output).toContain("Couldn't check Microsoft Edge")
     expect(output).not.toContain("you're set")
   })
-
-  test("with no Chromium browser found, names the page without opening it", () => {
-    const { calls, output } = run({ detections: [], preferred: undefined })
-    expect(calls.open).toEqual([])
-    expect(output).toContain("Load browse in your browser: open chrome://extensions")
-  })
 })
 
 describe("install with the extension", () => {
   test("a connected extension is ready", () => {
     const { outcome, calls, output } = run({ connected: true })
     expect(outcome).toBe("ready")
-    expect(output).toContain("Restart your agent")
+    expect(output).toBe("✓ Connected to your browser. Ask your agent to open a page.")
     expect(calls).toEqual({ open: [], reveal: [], copy: [] })
   })
 
@@ -259,34 +247,33 @@ describe("install with the extension", () => {
   })
 })
 
-describe("an npm install without the extension", () => {
+describe("the store item", () => {
   const storeUrl = "https://chromewebstore.google.com/detail/abcdefghijklmnopabcdefghijklmnop"
 
   test("an agent without a terminal opens the store if a display is available", () => {
-    const { calls } = run({ folder: undefined, storeUrl, env: { ssh: false, display: true, tty: false, platform: "darwin" } })
+    const { calls } = run({ storeUrl, env: { ssh: false, display: true, tty: false, platform: "darwin" } })
     expect(calls.open).toEqual([["Google Chrome", storeUrl]])
   })
 
-  test("opens its channel's store page, never the unpacked steps", () => {
-    const { outcome, calls, output } = run({ folder: undefined, storeUrl })
+  test("opens its channel's store page, never unpacked steps", () => {
+    const { outcome, calls, output } = run({ storeUrl })
     expect(outcome).toBe("guided")
     expect(calls).toEqual({ open: [["Google Chrome", storeUrl]], reveal: [], copy: [] })
     expect(output).toContain("Add browse to Google Chrome from the Chrome Web Store (opened)")
-    expect(output).not.toContain("Load unpacked")
+    expect(output).not.toContain("unpacked")
   })
 
   test("over SSH, prints the store page", () => {
-    const { calls, output } = run({ folder: undefined, storeUrl, env: { ssh: true, display: true, tty: true, platform: "linux" } })
+    const { calls, output } = run({ storeUrl, env: { ssh: true, display: true, tty: true, platform: "linux" } })
     expect(calls.open).toEqual([])
     expect(output).toContain(storeUrl)
-    expect(output).not.toContain("Load unpacked")
+    expect(output).not.toContain("unpacked")
   })
 
-  test("a package built without its store item says it can't install the extension", () => {
-    const { outcome, calls, output } = run({ folder: undefined })
-    expect(outcome).toBe("guided")
-    expect(calls.open).toEqual([])
-    expect(output).toContain("doesn't know its Chrome Web Store item")
+  test("a checkout, with no store item baked in, points at browse's public item", () => {
+    const { output } = run()
+    expect(output).toContain("https://chromewebstore.google.com/detail/mfnicocicmmlkpjnaffgihfjhdgjkdjg")
+    expect(output).not.toContain("unpacked")
   })
 })
 

@@ -126,16 +126,14 @@ export async function reloadOutdatedExtension(
   return "stale"
 }
 
-/** Puts this version's dev extension in <data root>/extension (paired); fails install when it can't be downloaded. */
+/**
+ * Puts this version's dev extension in <data root>/extension (paired, for a developer who loads it), silently: install
+ * points every channel at the store build. Fails install when it can't be downloaded.
+ */
 export async function syncDev() {
   if (!dev) return
   try {
-    const result = await syncDevExtension(dev, { root })
-    log(
-      result === "updated"
-        ? `✓ Downloaded the dev extension (${dev.file}) to ${devExtensionFolder(root)}`
-        : `✓ Dev extension ${dev.file} is in ${devExtensionFolder(root)}`,
-    )
+    await syncDevExtension(dev, { root })
   } catch (error) {
     fail(`Could not get the dev extension: ${(error as Error).message}`)
   }

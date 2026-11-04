@@ -78,7 +78,8 @@ The dev zip keeps the manifest `key`, so it loads with the same unpacked ID as a
 trusts. The dev CLI has the zip's sha256 baked in (`cli/build.ts`), and the zip reaches the release service before the
 package reaches npm. `npx @opencode/browse@dev install` downloads exactly that zip from
 `https://anoma.ly/release/browse/files/<sha256>/browse-extension-<version>.zip`, checks it, unpacks it into
-`<data root>/extension`, pairs it and walks you through **Load unpacked** once (`cli/src/dev-extension.ts`). When the
+`<data root>/extension` and pairs it (`cli/src/dev-extension.ts`). Install points at the Chrome Web Store build and
+says nothing about that folder; `browse extension` shows it to a developer loading it unpacked. When the
 relay of a newer dev version starts, it puts that version's zip in the same folder and reloads the extension. Dev
 builds never go to the Chrome Web Store: every upload is reviewed, too slow for a build per push.
 
