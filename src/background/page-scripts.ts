@@ -7,7 +7,6 @@ import { DebuggerHub } from "./debugger-hub"
 // user visits. Injecting twice is harmless; the script keeps its first copy in a document.
 
 const FILE = "content.js"
-const OWNER = "relay"
 
 /** Injects the page-status script into the tab's top frame; restricted pages (chrome://, the Web Store) refuse it. */
 async function inject(tabId: number) {
@@ -34,5 +33,5 @@ export async function send(tabId: number, message: object) {
 // "complete" too.
 chrome.tabs.onUpdated.addListener((tabId, change) => {
   if (change.status !== "loading" && change.status !== "complete") return
-  if (DebuggerHub.tabsOwnedBy(OWNER).includes(tabId)) void inject(tabId)
+  if (DebuggerHub.attachedTabs().includes(tabId)) void inject(tabId)
 })

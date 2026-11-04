@@ -1,5 +1,5 @@
 import { Effect } from "effect"
-import { chromium, errors, type Browser, type BrowserContext, type Frame, type Page } from "patchright-core"
+import { chromium, errors, type Browser, type BrowserContext, type Page } from "patchright-core"
 import { registerAriaSnapshotSelector } from "./snapshot/aria-snapshot.ts"
 import * as AuthProfile from "./auth/profile.ts"
 import * as AuthenticatedOrigin from "./auth/authenticated-origin.ts"
@@ -16,6 +16,8 @@ import {
   wrapCode,
   type SandboxGlobals,
 } from "./execute/code-runner.ts"
+import { DefaultPageHost } from "./execute/default-page.ts"
+import { downloadCapabilityErrorMessage, installDownloadCapabilityGuard, installDownloadCapabilityGuards, installViewportZoomGuard } from "./execute/guards.ts"
 import {
   createExecuteLogCapture,
   emptyExecuteLogSummary,
@@ -26,53 +28,41 @@ import {
 } from "./execute/log-capture.ts"
 import {
   adoptedPageConnectTimeoutMs,
-  applyExplicitMediaFeatures,
   defaultHandoffTimeoutMs,
   defaultPageClosedWarning,
-  defaultPageCrashedWarning,
   defaultPageReattachedWarning,
-  defaultPageRecoveredWarning,
   defaultPageRepairedWarning,
   defaultPageReplacedWarning,
-  downloadCapabilityErrorMessage,
   finishHandoff,
   handoffPageContextTimeoutMs,
-  hasExplicitTargetSelection,
-  installClosedPageReplacementGuard,
-  installDownloadCapabilityGuard,
-  installDownloadCapabilityGuards,
-  installViewportZoomGuard,
   isDisposableSessionPage,
   isMaskedProtectedUiFailure,
   isSessionPageConnected,
-  openPageWithTargetId,
-  pageTargetId,
   pdfViewerWarning,
   playwrightCloseTimeoutMs,
   playwrightConnectTimeoutMs,
   protectedExtensionUiDiagnostic,
   protectedExtensionUiWarning,
   recoverSessionPage,
-  resolvePageTargetId,
   runPlaywrightOperation,
   runSettledPlaywrightOperation,
-  safePageUrl,
-  selectPage,
-  selectTarget,
-  sessionPageHealthCheckTimeoutMs,
   SessionPageRecoveryError,
   SessionPageRepairRequired,
   shouldCloseCurrentPageOnAdopt,
-  showsPdf,
   syntheticInputWarning,
-  TargetSelectionError,
   waitForExactTarget,
   waitForPageContext,
-  waitForPageTarget,
-  type ExecuteTargetSelection,
   type HandoffPageTarget,
   type RequestHandoff,
 } from "./execute/page-recovery.ts"
+import {
+  hasExplicitTargetSelection,
+  pageTargetId,
+  safePageUrl,
+  selectTarget,
+  TargetSelectionError,
+  type ExecuteTargetSelection,
+} from "./execute/target-selection.ts"
 import {
   boundExecuteResult,
   extractExecuteMedia,
@@ -191,37 +181,21 @@ export type ExecuteOptions = {
   readonly targetSelection?: ExecuteTargetSelection
 }
 
-export class ExecuteSandbox {
+export class ExecuteSandbox extends DefaultPageHost {
   private browser: Browser | undefined
-  private page: Page | undefined
-  private defaultPageTargetId: string | undefined
-  /** The default page's target when its page object closed; the same tab may come back (see getSessionPage). */
-  private closedDefaultPage: { readonly targetId: string; readonly ownsPage: boolean } | undefined
-  private ownsPage = false
-  private pageHealthCheckRequired = false
-  private pageCrashed = false
-  private pageProtectedUi = false
-  private pendingTargetRebind: "replaced" | "repaired" | undefined
-  private lastKnownNonBlankUrl: string | undefined
-  private recreatedFromClosedUrl: string | undefined
-  /** Media features the agent set with page.emulateMedia; the relay drops Patchright's defaults otherwise. */
-  private readonly explicitMediaFeatures = new Map<string, string>()
-  private explicitMedia: string | undefined
   /** Full Node access for execute code (OPENCODE_BROWSER_ALLOW_NODE=1); otherwise code runs in a vm realm. */
   private readonly allowNode = executeAllowsNode()
   private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
   private readonly networkCapture = new NetworkCapture.Recorder()
-  private pendingWarnings: string[] = []
   private readonly secrets: ExecuteSecretsBridge
   private realm: ExecuteRealm | undefined
   private state: Record<string, unknown>
-  private boundPageListeners: {
-    readonly page: Page
-    readonly close: () => void
-    readonly navigate: (frame: Frame) => void
-  } | undefined
 
   constructor(readonly options: ExecuteSandboxOptions) {
+    super({
+      ...(options.onDefaultTargetChange ? { onDefaultTargetChange: options.onDefaultTargetChange } : {}),
+      ...(options.pageHealthCheckTimeoutMs === undefined ? {} : { pageHealthCheckTimeoutMs: options.pageHealthCheckTimeoutMs }),
+    })
     this.secrets = new ExecuteSecretsBridge({
       networkCapture: this.networkCapture,
       allowedOrigins: () => this.options.allowedOrigins?.(),
@@ -232,6 +206,10 @@ export class ExecuteSandbox {
     this.state = this.realm?.state ?? {}
   }
 
+  protected bindCaptureToPage(page: Page | undefined): void {
+    this.networkCapture.bindPage(page)
+  }
+
   private createRealm(): ExecuteRealm {
     return new ExecuteRealm({
       onHostCall: (fn, receiver, args) => {
@@ -240,10 +218,6 @@ export class ExecuteSandbox {
         if (hook) this.secrets.pageHooks.add(hook)
       },
     })
-  }
-
-  private addWarningOnce(warning: string | undefined): void {
-    if (warning && !this.pendingWarnings.includes(warning)) this.pendingWarnings.push(warning)
   }
 
   execute(code: string, options: ExecuteOptions = {}): Effect.Effect<ExecuteResult> {
@@ -507,29 +481,6 @@ export class ExecuteSandbox {
     }).pipe(Effect.uninterruptible)
   }
 
-  /** Forget the bound page; a target id is re-resolved exactly on the next execute. */
-  private unbindDefaultPage(
-    targetId: string | undefined,
-    options: {
-      readonly ownsPage?: boolean
-      readonly pageCrashed?: boolean
-      readonly pageProtectedUi?: boolean
-      readonly rebind?: "replaced" | "repaired"
-      readonly notify?: boolean
-    } = {},
-  ): void {
-    this.clearPageListeners()
-    this.page = undefined
-    this.defaultPageTargetId = targetId
-    this.ownsPage = options.ownsPage ?? false
-    this.pageHealthCheckRequired = false
-    this.pageCrashed = options.pageCrashed ?? false
-    this.pageProtectedUi = options.pageProtectedUi ?? false
-    this.pendingTargetRebind = targetId ? options.rebind : undefined
-    this.networkCapture.bindPage(undefined)
-    if (options.notify) this.notifyDefaultTargetChange()
-  }
-
   private async connectContext(): Promise<{ readonly browser: Browser; readonly context: BrowserContext }> {
     if (!this.browser?.isConnected()) {
       const hadBrowser = this.browser !== undefined
@@ -659,122 +610,10 @@ export class ExecuteSandbox {
     })
   }
 
-  markTargetCrashed(targetId: string): boolean {
-    if (this.defaultPageTargetId !== targetId) {
-      return false
-    }
-    this.pageHealthCheckRequired = true
-    this.pageCrashed = true
-    this.addWarningOnce(defaultPageCrashedWarning)
-    return true
-  }
-
-  /** Relay report that protected extension UI started or stopped blocking the default page's tab. */
-  markTargetProtectedUi(targetId: string, protectedUi: boolean): boolean {
-    if (this.defaultPageTargetId !== targetId) {
-      return false
-    }
-    this.pageProtectedUi = protectedUi
-    return true
-  }
-
-  markTargetDetached(targetId: string): boolean {
-    if (this.defaultPageTargetId !== targetId) {
-      return false
-    }
-    if (this.lastKnownNonBlankUrl) {
-      this.recreatedFromClosedUrl = this.lastKnownNonBlankUrl
-    }
-    this.unbindDefaultPage(undefined)
-    this.addWarningOnce(defaultPageClosedWarning)
-    return true
-  }
-
-  markTargetReplaced(previousTargetId: string, targetId: string): boolean {
-    if (this.defaultPageTargetId !== previousTargetId) return false
-    this.unbindDefaultPage(targetId, {
-      ownsPage: this.ownsPage,
-      rebind: "replaced",
-    })
-    return true
-  }
-
-  restore(target: SessionTarget | undefined, warning = "The relay restarted; session JavaScript state and snapshot refs were reset."): void {
-    if (target) {
-      this.unbindDefaultPage(target.id, { ownsPage: target.owner === "relay" })
-    }
-    this.pendingWarnings.push(warning)
-  }
-
-  private notifyDefaultTargetChange(): void {
-    this.options.onDefaultTargetChange?.(this.defaultPageTargetId
-      ? { id: this.defaultPageTargetId, owner: this.ownsPage ? "relay" : "user" }
-      : undefined)
-  }
-
-  private recordNonBlankUrl(url: string | null | undefined): void {
-    if (url && url !== "about:blank" && !url.startsWith("chrome-error://")) {
-      this.lastKnownNonBlankUrl = url
-      this.recreatedFromClosedUrl = undefined
-    }
-  }
-
-  private bindDefaultPage(page: Page, targetId: string | undefined, ownsPage: boolean, notify: boolean): void {
-    this.clearPageListeners()
-    this.page = page
-    if (targetId === undefined || targetId !== this.defaultPageTargetId) {
-      this.pageCrashed = false
-      this.pageProtectedUi = false
-    }
-    this.defaultPageTargetId = targetId
-    this.ownsPage = ownsPage
-    this.pendingTargetRebind = undefined
-    this.recordNonBlankUrl(safePageUrl(page))
-    const close = () => {
-      if (this.page !== page) return
-      if (targetId !== undefined && !this.pageCrashed) this.closedDefaultPage = { targetId, ownsPage: this.ownsPage }
-      if (this.lastKnownNonBlankUrl) {
-        this.recreatedFromClosedUrl = this.lastKnownNonBlankUrl
-      }
-      this.unbindDefaultPage(undefined, {
-        pageCrashed: this.pageCrashed,
-        pageProtectedUi: this.pageProtectedUi,
-        notify: true,
-      })
-    }
-    const navigate = (frame: Frame) => {
-      if (this.page === page && frame === page.mainFrame()) {
-        this.pageCrashed = false
-        this.recordNonBlankUrl(frame.url())
-        page.setDefaultTimeout?.(30_000)
-        if (this.explicitMediaFeatures.size > 0) {
-          void applyExplicitMediaFeatures(page, this.explicitMedia, this.explicitMediaFeatures)
-        }
-      }
-    }
-    this.boundPageListeners = { page, close, navigate }
-    page.once("close", close)
-    page.on("framenavigated", navigate)
-    if (notify) this.notifyDefaultTargetChange()
-  }
-
-  private clearBoundPageListeners(): void {
-    const bound = this.boundPageListeners
-    if (!bound) return
-    bound.page.off("close", bound.close)
-    bound.page.off("framenavigated", bound.navigate)
-    this.boundPageListeners = undefined
-  }
-
-  private clearSnapshotRefs(): void {
+  protected clearSnapshotRefs(): void {
     this.snapshotRefs.removeNavigationListener?.()
     delete this.snapshotRefs.removeNavigationListener
     invalidateSnapshotDocument(this.snapshotRefs)
-  }
-
-  private clearPageListeners(): void {
-    this.clearBoundPageListeners()
-    this.clearSnapshotRefs()
   }
 
   getStatus(): { readonly sessionId?: string; readonly connected: boolean; readonly pageUrl: string | null; readonly stateKeys: string[] } {
@@ -841,123 +680,8 @@ export class ExecuteSandbox {
     }).pipe(Effect.uninterruptible)
   }
 
-  private async getSessionPage({ context, targetSelection }: { readonly context: BrowserContext; readonly targetSelection?: ExecuteTargetSelection }): Promise<Page> {
-    const selection = targetSelection ?? {}
-    if (hasExplicitTargetSelection(selection)) {
-      const selected = selectPage({ pages: context.pages(), selection })
-      if (!selected) {
-        throw new Error("No page matched target selection")
-      }
-      return selected
-    }
-    if (!this.page && this.defaultPageTargetId) {
-      const targetId = this.defaultPageTargetId
-      const rebind = this.pendingTargetRebind
-      const replacement = await waitForPageTarget({ context, targetId, timeoutMs: sessionPageHealthCheckTimeoutMs })
-      if (!replacement) {
-        throw new SessionPageRecoveryError({
-          message: `Playwright did not expose session page target ${targetId} after the browser connection or target changed. Retry after the browser transition settles.`,
-          reason: "target-unavailable",
-          cause: new Error(`Session page target unavailable: ${targetId}`),
-        })
-      }
-      this.bindDefaultPage(replacement, targetId, this.ownsPage, false)
-      if (rebind === "replaced") this.pendingWarnings.push(defaultPageReplacedWarning)
-      if (rebind === "replaced" && await showsPdf(replacement)) this.pendingWarnings.push(pdfViewerWarning)
-      if (rebind !== "repaired") return replacement
-      this.pageHealthCheckRequired = true
-      const checked = await this.checkSessionPage(replacement, { repaired: true })
-      if (checked) {
-        this.pendingWarnings.push(defaultPageRepairedWarning)
-        return checked
-      }
-    }
-    if (this.page && !this.page.isClosed()) {
-      // A tab blocked by protected extension UI cannot answer a probe; the
-      // block is named on the next failure instead of treated as a dead page.
-      if ((this.pageHealthCheckRequired && !this.pageProtectedUi) || this.page.url().startsWith("chrome-error://")) {
-        const page = await this.checkSessionPage(this.page, { repaired: false })
-        if (page) return page
-      } else {
-        return this.page
-      }
-    }
-    // The page object also closes when the relay loses the extension for a moment (its service worker restarted):
-    // the tab lives on and comes back under the same target id, so take it back rather than open another tab.
-    const closed = this.closedDefaultPage
-    this.closedDefaultPage = undefined
-    if (closed && (!this.page || this.page.isClosed())) {
-      const same = await openPageWithTargetId(context, closed.targetId)
-      if (same) {
-        this.bindDefaultPage(same, closed.targetId, closed.ownsPage, true)
-        this.recreatedFromClosedUrl = undefined
-        this.pendingWarnings.push(await showsPdf(same) ? pdfViewerWarning : defaultPageReattachedWarning)
-        return same
-      }
-    }
-    if (this.page?.isClosed()) {
-      if (this.lastKnownNonBlankUrl) {
-        this.recreatedFromClosedUrl = this.lastKnownNonBlankUrl
-      }
-      this.unbindDefaultPage(undefined, {
-        pageCrashed: this.pageCrashed,
-        pageProtectedUi: this.pageProtectedUi,
-        notify: true,
-      })
-      this.pendingWarnings.push(defaultPageClosedWarning)
-    }
-    const page = await context.newPage()
-    const targetId = await resolvePageTargetId(page)
-    this.bindDefaultPage(page, targetId, true, true)
-    if (this.recreatedFromClosedUrl) {
-      installClosedPageReplacementGuard(page, () => {
-        this.recreatedFromClosedUrl = undefined
-      })
-    }
-    return page
-  }
-
   /** fillInput sets values directly: the page sees untrusted input events without key presses. */
   private warnSyntheticInput(): void {
     this.addWarningOnce(syntheticInputWarning)
-  }
-
-  /**
-   * Health-check the current default page. Returns the page when it is usable,
-   * `undefined` after a disposable relay-owned page was closed so the caller
-   * recreates it, throws `SessionPageRepairRequired` when a live relay-owned
-   * page should be re-resolved over a fresh connection, and otherwise fails
-   * with a `SessionPageRecoveryError` diagnosis while keeping the tab.
-   */
-  private async checkSessionPage(page: Page, options: { readonly repaired: boolean }): Promise<Page | undefined> {
-    const timeoutMs = this.options.pageHealthCheckTimeoutMs ?? sessionPageHealthCheckTimeoutMs
-    const sandbox = this
-    const recovery = await Effect.runPromise(recoverSessionPage({
-      ownsPage: this.ownsPage,
-      // Read these after the asynchronous probe: navigation may have recovered
-      // an error document or cleared the crash while its old context failed.
-      get url() { return page.url() },
-      timeoutMs,
-      get crashed() { return sandbox.pageCrashed },
-      repaired: options.repaired,
-      healthCheck: () => waitForPageContext({
-        timeoutMs,
-        evaluate: async () => {
-          await page.evaluate(() => true)
-        },
-      }),
-      close: () => page.close(),
-    }))
-    if (recovery === "use") {
-      this.pageHealthCheckRequired = false
-      this.pageCrashed = false
-      return page
-    }
-    if (recovery === "repair") {
-      throw new SessionPageRepairRequired()
-    }
-    this.unbindDefaultPage(undefined, { notify: true })
-    this.pendingWarnings.push(defaultPageRecoveredWarning)
-    return undefined
   }
 }

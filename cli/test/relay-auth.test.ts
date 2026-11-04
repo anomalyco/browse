@@ -10,7 +10,7 @@ import {
   validateBrowserFetchSite,
   validateHostHeader,
   validateWebSocketOrigin,
-} from "../src/relay/helpers.ts"
+} from "../src/relay/origins.ts"
 import {
   browserTokensPath,
   consumePairingCode,

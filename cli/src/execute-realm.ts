@@ -75,13 +75,13 @@ import {
   sandboxModules,
   type ExecuteFiles,
 } from "./execute-realm/file-roots.ts"
+import { installRealmGlobals, populateHostToSandboxIntrinsics } from "./execute-realm/globals.ts"
 import {
   containsDynamicImport,
   deniedHostClasses,
   deniedHostValues,
   handleExecuteRealmException,
   handleExecuteRealmRejection,
-  hostIntrinsics,
   intrinsicSource,
   isHiddenKey,
   isObjectLike,
@@ -127,14 +127,20 @@ export class ExecuteRealm {
   private readonly sandboxAwait: Function
   private readonly sandboxIntrinsics: Record<string, unknown>
   private readonly hostToSandboxIntrinsic = new Map<unknown, unknown>()
+  // Host value -> the proxy sandbox code sees for it.
   private readonly sandboxProxyByHost = new WeakMap<object, object>()
+  // Sandbox-facing proxy -> the host value it stands for.
   private readonly hostBySandboxProxy = new WeakMap<object, object>()
+  // Sandbox value -> the host-facing proxy host helpers see for it.
   private readonly hostProxyBySandbox = new WeakMap<object, object>()
+  // Host-facing proxy -> the sandbox value it stands for.
   private readonly sandboxByHostProxy = new WeakMap<object, object>()
+  // Host function -> the checkHostCall-guarded proxy host helpers receive instead.
   private readonly guardedHostFunctions = new WeakMap<Function, Function>()
   private readonly forceProxy = new WeakSet<object>()
-  private readonly timers = new Map<number, ReturnType<typeof setTimeout>>()
-  private nextTimer = 0
+  // Timer state and `stopped` are not private: ./execute-realm/globals.ts schedules timers on them.
+  readonly timers = new Map<number, ReturnType<typeof setTimeout>>()
+  nextTimer = 0
   private entryDepth = 0
   private readonly sliceMs = executeSliceMs()
   // Sliding window of VM time: the realm's slices may use at most half of the last three slice
@@ -142,7 +148,7 @@ export class ExecuteRealm {
   // seconds while one full slice, or a few heavy operations back to back, still pass.
   private readonly busyWindowMs = this.sliceMs * 3
   private readonly busySlices: Array<{ readonly start: number; readonly end: number }> = []
-  private stopped: Error | undefined
+  stopped: Error | undefined
   private readonly pendingRuns = new Set<(error: Error) => void>()
   private readonly entryKey = `__execute_${crypto.randomUUID().replaceAll("-", "")}`
   private readonly entryScript: vm.Script
@@ -168,33 +174,7 @@ export class ExecuteRealm {
     })
     const sandboxIntrinsics = new vm.Script(intrinsicSource, { importModuleDynamically } as vm.ScriptOptions).runInContext(this.context) as Record<string, unknown>
     this.sandboxIntrinsics = sandboxIntrinsics
-    const host = hostIntrinsics()
-    for (const name of Object.keys(host)) {
-      const hostValue = host[name]
-      const sandboxValue = sandboxIntrinsics[name]
-      if (!isObjectLike(hostValue) || !isObjectLike(sandboxValue)) continue
-      this.hostToSandboxIntrinsic.set(hostValue, sandboxValue)
-      const hostPrototype = (hostValue as { prototype?: unknown }).prototype
-      const sandboxPrototype = (sandboxValue as { prototype?: unknown }).prototype
-      if (typeof hostValue === "function" && isObjectLike(hostPrototype) && isObjectLike(sandboxPrototype)) {
-        this.hostToSandboxIntrinsic.set(hostPrototype, sandboxPrototype)
-      }
-      // Intrinsic invocation must retain the sandbox proxy as its target. In particular,
-      // a host Function.prototype.call/apply/bind would otherwise unwrap the function
-      // and invoke it without the membrane's apply trap (and checkHostCall).
-      // Brand-checking intrinsics (e.g. TypedArray.prototype.every on Buffer)
-      // need their host receiver; callback arguments still get guarded below.
-      for (const [from, to] of ["Object", "Function", "Reflect"].includes(name) ? [[hostValue, sandboxValue], [hostPrototype, sandboxPrototype]] : []) {
-        if (!isObjectLike(from) || !isObjectLike(to)) continue
-        for (const key of Reflect.ownKeys(from)) {
-          const source = Reflect.getOwnPropertyDescriptor(from, key)?.value
-          const destination = Reflect.getOwnPropertyDescriptor(to, key)?.value
-          if (typeof source === "function" && typeof destination === "function") {
-            this.hostToSandboxIntrinsic.set(source, destination)
-          }
-        }
-      }
-    }
+    populateHostToSandboxIntrinsics(this.hostToSandboxIntrinsic, sandboxIntrinsics)
     const sandboxObject = sandboxIntrinsics.Object as ObjectConstructor
     this.sandboxObjectPrototype = sandboxObject.prototype
     this.sandboxFunctionPrototype = (sandboxIntrinsics.Function as FunctionConstructor).prototype
@@ -213,45 +193,8 @@ export class ExecuteRealm {
     new vm.Script(
       "Object.defineProperty(Error, 'prepareStackTrace', { value: undefined, writable: false, configurable: false }); globalThis.SharedArrayBuffer = undefined; globalThis.Atomics = undefined; globalThis.WeakRef = undefined; globalThis.FinalizationRegistry = undefined",
     ).runInContext(this.context)
-    this.installGlobals()
+    installRealmGlobals(this, this.global)
     for (const module of Object.values(sandboxModules)) this.forceProxy.add(module)
-  }
-
-  private installGlobals(): void {
-    const global = this.global
-    const schedule = (repeat: boolean, callback: (...args: unknown[]) => unknown, delay = 0, ...args: unknown[]) => {
-      // A string callback would be code generation; refuse it rather than failing later.
-      if (typeof callback !== "function") throw new TypeError("The timer callback must be a function")
-      const id = ++this.nextTimer
-      if (this.stopped) return id
-      const fire = () => {
-        if (!repeat) this.timers.delete(id)
-        if (this.stopped) return
-        try { callback(...args) } catch {
-          this.dispose(new Error("Execute timer callback failed; JavaScript state will reset before the next execute"))
-        }
-      }
-      this.timers.set(id, (repeat ? setInterval : setTimeout)(fire, delay))
-      return id
-    }
-    const clear = (id: number) => {
-      const timer = this.timers.get(id)
-      if (timer) clearTimeout(timer)
-      this.timers.delete(id)
-    }
-    const hostGlobals: Record<string, unknown> = {
-      setTimeout: (callback: (...args: unknown[]) => unknown, delay?: number, ...args: unknown[]) => schedule(false, callback, delay, ...args),
-      setInterval: (callback: (...args: unknown[]) => unknown, delay?: number, ...args: unknown[]) => schedule(true, callback, delay, ...args),
-      setImmediate: (callback: (...args: unknown[]) => unknown, ...args: unknown[]) => schedule(false, callback, 0, ...args),
-      clearTimeout: clear, clearInterval: clear, clearImmediate: clear,
-      atob, btoa, URL, URLSearchParams, TextEncoder, TextDecoder, Buffer, AbortController,
-      AbortSignal, Blob, Event, EventTarget, performance, crypto: globalThis.crypto,
-    }
-    for (const [name, value] of Object.entries(hostGlobals)) {
-      if (value === undefined) continue
-      Reflect.defineProperty(global, name, { value: this.toSandbox(value), writable: true, configurable: true, enumerable: false })
-    }
-    new vm.Script("{ const then = Promise.prototype.then; const ready = Promise.resolve(); globalThis.queueMicrotask = callback => Reflect.apply(then, ready, [callback]); }").runInContext(this.context)
   }
 
   /** Pending realm timers, for tests and diagnostics. */

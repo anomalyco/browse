@@ -8,7 +8,7 @@ import type { ExecuteAftermath, ExecuteLogEntry } from "../relay/schema.ts"
 import * as SignIn from "../auth/sign-in.ts"
 import * as SiteSecrets from "../auth/site-secrets.ts"
 import { challengeWaitMs, detectChallenge, type TypeDeadboltResult, type TypeSecretOptions, type TypeSecretResult } from "./code-runner.ts"
-import { pageTargetId } from "./page-recovery.ts"
+import { pageTargetId } from "./target-selection.ts"
 
 const isOpaqueDocumentUrl = (url: string): boolean => /^(?:about|data|blob):/i.test(url)
 

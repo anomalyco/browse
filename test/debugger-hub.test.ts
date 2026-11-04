@@ -8,11 +8,13 @@ const stub = installChrome()
 const calls: string[] = []
 /** Tabs this extension holds a debugger attachment on, as Chrome keeps them across a worker restart. */
 const attached = new Set<number>()
+/** Tabs DevTools or another extension holds: chrome refuses ours and our commands fail on them. */
+const foreign = new Set<number>()
 let slowGet = false
 Object.assign((stub.chrome as unknown as { debugger: object }).debugger, {
   async attach({ tabId }: { tabId: number }) {
     calls.push(`attach ${tabId}`)
-    if (attached.has(tabId)) throw new Error("Another debugger is already attached to the tab")
+    if (attached.has(tabId) || foreign.has(tabId)) throw new Error("Another debugger is already attached to the tab")
     attached.add(tabId)
   },
   async detach({ tabId }: { tabId: number }) {
@@ -43,6 +45,7 @@ beforeEach(async () => {
   stub.state.windows.clear()
   calls.length = 0
   attached.clear()
+  foreign.clear()
   slowGet = false
   await stub.chrome.storage.local.remove("agentRelayAttached")
   window = (await stub.chrome.windows.create({ url: "https://user.example/", focused: true })).id
@@ -52,14 +55,23 @@ describe("relay attachments across a worker restart", () => {
   test("every attached tab reaches storage, even when attaches overlap", async () => {
     const tabs = await Promise.all([1, 2, 3].map((n) => stub.chrome.tabs.create({ windowId: window, url: `https://example.com/${n}`, active: false })))
     slowGet = true
-    await DebuggerHub.attach(tabs[0]!.id, "relay")
+    await DebuggerHub.attach(tabs[0]!.id)
     slowGet = false
-    await Promise.all(tabs.slice(1).map((tab) => DebuggerHub.attach(tab.id, "relay")))
+    await Promise.all(tabs.slice(1).map((tab) => DebuggerHub.attach(tab.id)))
     await new Promise((resolve) => setTimeout(resolve, 100))
     expect((await stored()).map((item) => item.tabId).sort()).toEqual(tabs.map((tab) => tab.id).sort())
-    for (const tab of tabs) await DebuggerHub.detach(tab.id, "relay")
+    for (const tab of tabs) await DebuggerHub.detach(tab.id)
     await settled()
     expect(await stored()).toEqual([])
+    expect(DebuggerHub.attachedTabs()).toEqual([])
+  })
+
+  test("an attachment this worker doesn't own is reported as another debugger's", async () => {
+    const tab = await stub.chrome.tabs.create({ windowId: window, url: "https://example.com/foreign", active: false })
+    // Chrome says "already attached", but a command fails on it: DevTools or another extension holds it.
+    foreign.add(tab.id)
+    await expect(DebuggerHub.attach(tab.id)).rejects.toThrow("Another debugger (DevTools or another extension)")
+    expect(DebuggerHub.attachedTabs()).not.toContain(tab.id)
   })
 
   test("a new worker replaces an inherited attachment with a fresh one, whatever page the tab shows now", async () => {
@@ -69,8 +81,8 @@ describe("relay attachments across a worker restart", () => {
     attached.add(tab.id)
     await DebuggerHub.restore()
     expect(calls).toEqual([`detach ${tab.id}`, `attach ${tab.id}`])
-    expect(DebuggerHub.tabsOwnedBy("relay")).toContain(tab.id)
-    await DebuggerHub.detach(tab.id, "relay")
+    expect(DebuggerHub.attachedTabs()).toContain(tab.id)
+    await DebuggerHub.detach(tab.id)
   })
 
   test("after a reload (attachments gone) only the same page is attached again, never a tab that reused the id", async () => {
@@ -79,6 +91,6 @@ describe("relay attachments across a worker restart", () => {
     await stub.chrome.storage.local.set({ agentRelayAttached: [{ tabId: same.id, url: "https://example.com/same" }, { tabId: other.id, url: "https://example.com/gone" }] })
     await DebuggerHub.restore()
     expect(calls).toEqual([`attach ${same.id}`])
-    await DebuggerHub.detach(same.id, "relay")
+    await DebuggerHub.detach(same.id)
   })
 })
