@@ -134,6 +134,21 @@ export class ExecuteCodeError extends Error {
   }
 }
 
+export const executeFilename = "execute.js"
+
+const stackFramePattern = /^\s+at /
+const userStackFramePattern = new RegExp(`[\\s(]${executeFilename.replace(".", "\\.")}:\\d+:\\d+\\)?$`)
+
+/** The error's stack with only the frames in the agent's code: Browse's own frames are noise and leak install paths. */
+export function userCodeStack(error: Error): string {
+  if (!error.stack) return error.message
+  return error.stack
+    .split("\n")
+    .filter((line) => !stackFramePattern.test(line) || userStackFramePattern.test(line))
+    .join("\n")
+    .trimEnd()
+}
+
 const challengeProbeTimeoutMs = 2_000
 const challengePollMs = 1_000
 const defaultChallengeWaitMs = 15_000
@@ -291,14 +306,14 @@ export async function runUserCode({ code, globals, realm }: { readonly code: str
       const stateIndex = sandboxGlobalKeys.indexOf("state") + 1
       const result = await realm.run({
         source: `(async function (console, ${sandboxGlobalKeys.join(", ")}) {\n"use strict";\n${wrapCodeWithModuleAliases(code, Object.keys(sandboxModules))}\n})`,
-        filename: "execute.js",
+        filename: executeFilename,
         args: values,
         sandboxArgs: new Map([[stateIndex, globals.state]]),
       })
       return { result, ...buildResultMetadata() }
     }
     const AsyncFunction = async function () {}.constructor as new (...args: string[]) => (...args: unknown[]) => Promise<unknown>
-    const fn = new AsyncFunction("console", ...sandboxGlobalKeys, wrapCodeWithModuleAliases(code, Object.keys(nodeModules)))
+    const fn = new AsyncFunction("console", ...sandboxGlobalKeys, `${wrapCodeWithModuleAliases(code, Object.keys(nodeModules))}\n//# sourceURL=${executeFilename}`)
     const result = await fn(...values)
     return { result, ...buildResultMetadata() }
   } catch (cause) {

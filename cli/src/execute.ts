@@ -13,6 +13,7 @@ import {
   pageHookCall,
   pageVisibleApiSourceWarnings,
   runUserCode,
+  userCodeStack,
   wrapCode,
   type SandboxGlobals,
 } from "./execute/code-runner.ts"
@@ -290,7 +291,7 @@ export class ExecuteSandbox extends DefaultPageHost {
               : formatLocatorFailurePageWarning(error instanceof ExecuteCodeError ? error.originalError : error, aftermath, this.recreatedFromClosedUrl),
           )
           return {
-            text: this.secrets.redactOutputText(error instanceof ExecuteCodeError ? error.stack ?? error.message : error.message),
+            text: this.secrets.redactOutputText(error instanceof ExecuteCodeError ? userCodeStack(error) : error.message),
             isError: true,
             logs: this.secrets.redactCaptureLogs(error instanceof ExecuteCodeError ? error.logs : []),
             logSummary,
