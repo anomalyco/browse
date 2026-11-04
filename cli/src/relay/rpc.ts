@@ -10,7 +10,14 @@ import {
   type JsonObject,
   type JsonValue,
 } from "../protocol.ts"
-import type { PendingExtensionRequest } from "./types.ts"
+
+export type ExtensionCommandInput = Omit<ExtensionCommand, "id">
+
+export type PendingExtensionRequest = {
+  readonly resolve: (value: JsonObject) => void
+  readonly reject: (error: Error) => void
+  readonly debuggerTabId?: number
+}
 
 export type ExtensionRpcTimeouts = {
   readonly commandTimeoutMs?: number
@@ -124,7 +131,7 @@ export class ExtensionRpc {
     return true
   }
 
-  send(command: Omit<ExtensionCommand, "id">): Effect.Effect<JsonObject, Error> {
+  send(command: ExtensionCommandInput): Effect.Effect<JsonObject, Error> {
     return Effect.callback<JsonObject, Error>((resume) => {
       const socket = this.socket
       if (this.protocolCompatible === false) {

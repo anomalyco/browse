@@ -11,7 +11,6 @@ import { emptyInputSchema, objectSchema } from "./schema.ts"
 
 registerMcpTools({
   order: 110,
-  nonCompatibilityTools: ["status"],
   build: (ctx) => [
     {
       name: "status",
@@ -94,7 +93,6 @@ registerMcpTools({
 
 registerMcpTools({
   order: 700,
-  nonCompatibilityTools: ["skill"],
   build: (ctx) => [
     {
       name: "skill",

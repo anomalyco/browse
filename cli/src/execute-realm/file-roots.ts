@@ -364,11 +364,17 @@ export function checkHostCall(fn: Function, receiver: unknown, args: readonly un
  * Detectors such as rebrowser's bot-detector check exactly these (documentInterception, exposeFunctionLeak).
  * Returns a warning for the execute result, or undefined. Warnings only: nothing is refused.
  */
-export function pageVisibleApiWarning(fn: Function, receiver: unknown, _args: readonly unknown[]): string | undefined {
-  const name = typeof fn.name === "string" ? fn.name.replace(/^bound /, "") : ""
+export function pageVisibleApiWarningForName(name: string): string | undefined {
   if (name === "addInitScript" || name === "exposeFunction" || name === "exposeBinding") {
     return `${name}() is visible to pages: Patchright injects it by intercepting the main document, which leaves an empty performance nextHopProtocol and readable wrapper functions that bot detectors check. It still works; prefer page.evaluate() after navigation when stealth matters.`
   }
+  return undefined
+}
+
+export function pageVisibleApiWarning(fn: Function, receiver: unknown, _args: readonly unknown[]): string | undefined {
+  const name = typeof fn.name === "string" ? fn.name.replace(/^bound /, "") : ""
+  const directWarning = pageVisibleApiWarningForName(name)
+  if (directWarning) return directWarning
   if (name === "fulfill" && receiver !== null && typeof receiver === "object") {
     let navigation = false
     try {

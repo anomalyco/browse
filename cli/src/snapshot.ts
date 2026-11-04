@@ -11,19 +11,10 @@ import {
   snapshotRefAriaRole,
   snapshotRefIdentity,
 } from "./snapshot/diff-and-format.ts"
-import { fillInput, fillInputs } from "./snapshot/input-fill.ts"
-import { screenshotWithLabels } from "./snapshot/screenshot-labels.ts"
 import {
-  createAriaSnapshotHelper,
-  defaultAriaSnapshotTimeoutMs,
   defaultSnapshotTimeoutMs,
   invalidateSnapshotDocument,
   snapshotRetryDelayMs,
-  type AriaSnapshotHelper,
-  type InputField,
-  type InputTarget,
-  type ScreenshotWithLabelsOptions,
-  type ScreenshotWithLabelsResult,
   type SnapshotEntry,
   type SnapshotHelper,
   type SnapshotRefHelper,
@@ -31,13 +22,12 @@ import {
   type SnapshotRenderedEntry,
 } from "./snapshot/types.ts"
 
+export { fillInput, fillInputs } from "./snapshot/input-fill.ts"
+export { screenshotWithLabels } from "./snapshot/screenshot-labels.ts"
 export {
   createAriaSnapshotHelper,
   defaultAriaSnapshotTimeoutMs,
-  fillInput,
-  fillInputs,
   invalidateSnapshotDocument,
-  screenshotWithLabels,
   type AriaSnapshotHelper,
   type InputField,
   type InputTarget,
@@ -46,7 +36,7 @@ export {
   type SnapshotHelper,
   type SnapshotRefHelper,
   type SnapshotRefRegistry,
-}
+} from "./snapshot/types.ts"
 
 const delay = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds))
@@ -246,11 +236,9 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
     }
 
     const useDiff = options.diff === true || (options.delta === true && compatiblePrevious !== undefined)
+    registry.previousSnapshot = { page, signature, entries }
     if (!useDiff) {
-      const lines = entries.map((entry) => {
-        return formatSnapshotLine(entry, entry.refId)
-      })
-      registry.previousSnapshot = { page, signature, entries }
+      const lines = entries.map((entry) => formatSnapshotLine(entry, entry.refId))
       return options.find === undefined
         ? lines.join("\n")
         : findSnapshotLines(lines, options.find, options.context)
@@ -275,7 +263,6 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       lines.push(formatSnapshotDiffLine("+", operation.entry, operation.entry.refId))
     }
     lines.push(`${additions} ${additions === 1 ? "addition" : "additions"}, ${removals} ${removals === 1 ? "removal" : "removals"}, ${unchanged} unchanged`)
-    registry.previousSnapshot = { page, signature, entries }
     return lines.join("\n")
   }
 

@@ -124,12 +124,18 @@ export class Recorder {
         droppedEntryCount: 0,
       }
     }
+    let responseCount = 0
+    let failureCount = 0
+    for (const entry of active.entries) {
+      if (entry.response) responseCount += 1
+      if (entry.failure) failureCount += 1
+    }
     return {
       active: true,
       startedAt: active.startedAt,
       entryCount: active.entries.length + active.pending.size,
-      responseCount: active.entries.filter((entry) => entry.response).length,
-      failureCount: active.entries.filter((entry) => entry.failure).length,
+      responseCount,
+      failureCount,
       capturedBodyBytes: active.capturedBodyBytes,
       truncatedBodyCount: active.truncatedBodyCount,
       droppedEntryCount: active.droppedEntryCount,
@@ -424,7 +430,7 @@ export class Recorder {
   private recordEntry(active: ActiveCapture, generation: number, entry: CapturedEntry): void {
     if (active.cancelled || generation !== active.finalizeGeneration) return
     active.entries.push(entry)
-    protectEntry(entry, active.liveCollector)
+    void protectEntry(entry, active.liveCollector)
   }
 
   private unbindPage(): void {

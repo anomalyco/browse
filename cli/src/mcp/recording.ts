@@ -81,7 +81,6 @@ registerMcpTools({
 
 registerMcpTools({
   order: 500,
-  nonCompatibilityTools: ["recording_status", "flight_recorder_status"],
   build: (ctx) => [
     {
       name: "recording_status",

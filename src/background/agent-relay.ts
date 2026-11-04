@@ -41,12 +41,10 @@ import {
   CONNECT_TIMEOUT,
   KEEPALIVE,
   OWNER,
-  PAIRING_KEY,
   PORT_KEY,
   serialize,
   STABLE_AFTER,
   text,
-  TOKENS_KEY,
   type AgentBadge,
 } from "./agent-relay/wire"
 import { installPopupAdoption } from "./agent-relay/popups"
@@ -55,7 +53,7 @@ import { DebuggerHub } from "./debugger-hub"
 import { HandoffNotice } from "./handoff-notice"
 import { TabCleanup } from "./tab-cleanup"
 
-export { PAIRING_KEY, TOKENS_KEY, type AgentBadge }
+export type { AgentBadge }
 
 declare const __OPENCODE_BROWSER_BUILD__: string
 

@@ -4,6 +4,7 @@ import { cliCommand } from "../paths.ts"
 import type { AuthenticatedJsonOutcome, AuthenticatedJsonRequest } from "../relay/schema.ts"
 import type { ConnectedTarget, OpenCodeBrowserSession, SessionSummary, SessionTarget } from "../relay/types.ts"
 import type { PersistedSession } from "./catalog.ts"
+import type { SessionAdmission } from "./admission.ts"
 import type { TargetOwnershipChange } from "../cdp/target-registry.ts"
 
 export type { AuthenticatedJsonOutcome, AuthenticatedJsonRequest }
@@ -17,6 +18,18 @@ export type SessionExecuteRecord = {
 
 export type CreatedSessionSummary = SessionSummary & { readonly created?: boolean }
 export type SessionCreateOptions = { readonly readOnly?: boolean; readonly allowedOrigins?: readonly string[]; readonly browser?: string }
+
+export interface SessionContext {
+  readonly sessions: Map<string, OpenCodeBrowserSession>
+  readonly hooks: SessionHooks
+  readonly admission: SessionAdmission
+  readonly resolveWorkSession: (
+    id: string | undefined,
+    createIfMissing: boolean,
+    requestedBrowser?: string,
+  ) => Effect.Effect<{ readonly session: OpenCodeBrowserSession; readonly created: boolean }, Error>
+  readonly resolveBrowser: (requested?: string, session?: OpenCodeBrowserSession) => OpenCodeBrowserSession["browser"]
+}
 
 export type ExecutionResponse = { readonly result: ExecuteResult; readonly session: CreatedSessionSummary }
 
@@ -192,6 +205,13 @@ export function sessionSummary(session: OpenCodeBrowserSession): SessionSummary 
     ...(session.readOnly ? { readOnly: true } : {}),
     ...(session.allowedOrigins ? { allowedOrigins: [...session.allowedOrigins] } : {}),
     ...(session.browser ? { browser: session.browser.id } : {}),
+  }
+}
+
+export function createdSummary(session: OpenCodeBrowserSession, created: boolean): CreatedSessionSummary {
+  return {
+    ...sessionSummary(session),
+    ...(created ? { created: true } : {}),
   }
 }
 

@@ -12,7 +12,6 @@ import "./mcp/session.ts"
 import {
   buildRegisteredMcpTools,
   createMcpToolContext,
-  mcpToolRequiresRelayCompatibility,
   type McpToolSpec,
 } from "./mcp/registry.ts"
 import {
@@ -32,7 +31,6 @@ import { opencodeBrowserVersion } from "./version.ts"
 export {
   browsersNote,
   mcpErrorMessage,
-  mcpToolRequiresRelayCompatibility,
   mcpUpdateNote,
   toolResultForValue,
 }
@@ -85,8 +83,7 @@ const registerTools = Effect.gen(function* () {
       }),
       annotations: Context.empty(),
       handle: (payload: unknown) => {
-        const requiresCompat = spec.requiresRelayCompatibility ?? mcpToolRequiresRelayCompatibility(spec.name)
-        const operation = requiresCompat
+        const operation = spec.requiresRelayCompatibility !== false
           ? RelayLifecycle.ensureRelay({ relay }).pipe(
               Effect.flatMap((readiness) =>
                 readiness.buildProblem ? Effect.fail(new Error(readiness.buildProblem)) : spec.handle(payload),

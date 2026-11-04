@@ -1,7 +1,7 @@
 import { Effect } from "effect"
 import { autoUpdateModes, autoUpdateOverride, autoUpdateStatus, setStoredMode, storedMode, type AutoUpdateMode } from "../update/auto-update.ts"
 import type { BrowserLink, BrowserLinks } from "./browser-links.ts"
-import type { ExtensionRpc } from "./rpc.ts"
+import type { ExtensionCommandInput } from "./rpc.ts"
 import type { GhostCursorTabs } from "../ghost-cursor.ts"
 import { humanInputEnabled, humanInputOverride } from "../execute/human-input.ts"
 import { installCommand } from "../paths.ts"
@@ -19,8 +19,6 @@ import {
   type Settings,
 } from "./user-settings.ts"
 import type { ExtensionHandshake } from "./extension-handshake.ts"
-
-type ExtensionCommandInput = Parameters<ExtensionRpc["send"]>[0]
 
 export function createRelaySettingsSync(options: {
   readonly browsers: BrowserLinks

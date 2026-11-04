@@ -15,7 +15,6 @@ import {
 
 registerMcpTools({
   order: 300,
-  nonCompatibilityTools: ["network_status"],
   build: (ctx) => [
     {
       name: "network_start",

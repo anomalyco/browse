@@ -2,7 +2,7 @@ import http from "node:http"
 import { Effect } from "effect"
 import { pairingScheme } from "./relay/browser-pairing.ts"
 import type { FlightRecorderRelay } from "./recording-relay/flight-recorder.ts"
-import { decodeRequest, hasRelayToken, runRequestEffect, targetSummaries } from "./http-api/errors.ts"
+import { decodeRequest, hasRelayToken, runRequestEffect, sendNotFound, targetSummaries } from "./http-api/errors.ts"
 import { handleFlightRecorderRequest, handleRecordingRequest } from "./http-api/recording-routes.ts"
 import { handleAuthRequest, handleCliRequest, handleClientRequest, handleNetworkRequest } from "./http-api/session-routes.ts"
 import type { JsonObject } from "./protocol.ts"
@@ -10,6 +10,9 @@ import { extensionProtocolVersion, minExtensionProtocolVersion } from "./protoco
 import type { RecordingRelay } from "./recording-relay.ts"
 import {
   formatHostForUrl,
+  getNumber,
+  getObject,
+  getString,
   headerValue,
   readJsonBody,
   sendJson,
@@ -126,8 +129,7 @@ export function createHttpRequestHandler(options: {
     }
     if (pathname === "/extension/revoke" && request.method === "POST") {
       run(Effect.gen(function* () {
-        const body = yield* readJsonBody(request)
-        const key = typeof body === "object" && body !== null && "key" in body && typeof body.key === "string" ? body.key : undefined
+        const key = getString(getObject(yield* readJsonBody(request)), "key")
         if (key === undefined) return sendJson(response, { error: "key is required", code: "invalid-request" }, 400)
         sendJson(response, { dropped: options.revokeBrowser(key) })
       }))
@@ -135,10 +137,8 @@ export function createHttpRequestHandler(options: {
     }
     if (pathname === "/tabs/cleanup" && request.method === "POST") {
       run(Effect.gen(function* () {
-        const body = yield* readJsonBody(request)
-        const idleMinutes = typeof body === "object" && body !== null && "idleMinutes" in body && typeof body.idleMinutes === "number"
-          ? Math.max(0, body.idleMinutes)
-          : undefined
+        const rawIdleMinutes = getNumber(getObject(yield* readJsonBody(request)), "idleMinutes")
+        const idleMinutes = rawIdleMinutes === undefined ? undefined : Math.max(0, rawIdleMinutes)
         sendJson(response, yield* options.cleanupTabs(idleMinutes))
       }))
       return
@@ -151,8 +151,8 @@ export function createHttpRequestHandler(options: {
     }
     if (pathname === "/settings" && request.method === "POST") {
       run(Effect.gen(function* () {
-        const body = yield* readJsonBody(request)
-        sendJson(response, yield* options.settings.set(typeof body === "object" && body !== null && "set" in body ? body.set : undefined))
+        const body = getObject(yield* readJsonBody(request))
+        sendJson(response, yield* options.settings.set(body && "set" in body ? body.set : undefined))
       }))
       return
     }
@@ -162,22 +162,8 @@ export function createHttpRequestHandler(options: {
     }
     if (pathname === "/extension/status") {
       if (request.headers["x-browse-install"] === "waiting") installWaitingUntil = Date.now() + 5_000
-      const extensionStatus = options.extensionStatus()
       sendJson(response, {
-        connected: extensionStatus.connected,
-        pairingState: extensionStatus.pairingState,
-        nextStep: extensionStatus.nextStep,
-        version: extensionStatus.version,
-        ...(extensionStatus.build === undefined ? {} : { build: extensionStatus.build }),
-        ...(extensionStatus.origin === undefined ? {} : { origin: extensionStatus.origin }),
-        ...(extensionStatus.protocolVersion === undefined ? {} : { protocolVersion: extensionStatus.protocolVersion }),
-        ...(extensionStatus.protocolCompatible === undefined ? {} : { protocolCompatible: extensionStatus.protocolCompatible }),
-        ...(extensionStatus.protocolLegacy === undefined ? {} : { protocolLegacy: extensionStatus.protocolLegacy }),
-        ...(extensionStatus.browsers === undefined ? {} : { browsers: extensionStatus.browsers }),
-        ...(extensionStatus.rejectedConnections === undefined ? {} : { rejectedConnections: extensionStatus.rejectedConnections }),
-        ...(extensionStatus.cdpClients === undefined ? {} : { cdpClients: extensionStatus.cdpClients }),
-        ...(extensionStatus.pairingFailures === undefined ? {} : { pairingFailures: extensionStatus.pairingFailures }),
-        ...(extensionStatus.processFaults === undefined ? {} : { processFaults: extensionStatus.processFaults }),
+        ...options.extensionStatus(),
         activeTargets: options.registry.rootTargetCount(),
         childTargets: options.registry.childTargets.size,
         sessions: options.sessions.listSummaries(),
@@ -220,7 +206,6 @@ export function createHttpRequestHandler(options: {
       }))
       return
     }
-    response.writeHead(404)
-    response.end("Not found")
+    sendNotFound(response)
   }
 }

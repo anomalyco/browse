@@ -51,10 +51,8 @@ export class SiteSecretError extends Schema.TaggedError<SiteSecretError>()("Site
 
 export const defaultSiteSecretsDir = (): string => path.join(dataRoot(), "site-secrets")
 
-const namePattern = /^[a-z0-9][a-z0-9._-]{0,63}$/i
-
 function secretPath(baseDir: string, name: string): Effect.Effect<string, SiteSecretError> {
-  return namePattern.test(name)
+  return AuthProfile.profileNamePattern.test(name)
     ? Effect.succeed(path.join(baseDir, `${name}.json`))
     : Effect.fail(new SiteSecretError({ message: `Invalid secret name: ${name} (letters, digits, ".", "_" and "-", up to 64)`, reason: "invalid-name" }))
 }

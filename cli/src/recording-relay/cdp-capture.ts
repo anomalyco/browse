@@ -96,6 +96,7 @@ export async function startCdpRecording(
   options: RecordingStartOptions,
   starting: StartingRecording,
 ): Promise<RecordingStartResult> {
+  const cancelledResult = (): RecordingStartResult => ({ success: false, error: "Recording was cancelled while starting" })
   if (options.audio === true) {
     return { success: false, error: "CDP recording captures video frames only; audio is not supported" }
   }
@@ -104,7 +105,7 @@ export async function startCdpRecording(
     return { success: false, error: "CDP recording output path must end in .webm or .mp4" }
   }
   await fs.mkdir(path.dirname(options.outputPath), { recursive: true })
-  if (starting.cancelled) return { success: false, error: "Recording was cancelled while starting" }
+  if (starting.cancelled) return cancelledResult()
   const frameRate = options.frameRate ?? defaultCdpFrameRate
   let size: { readonly width: number; readonly height: number }
   try {
@@ -112,7 +113,7 @@ export async function startCdpRecording(
   } catch (error) {
     return { success: false, error: `Could not prepare the page for recording: ${error instanceof Error ? error.message : String(error)}` }
   }
-  if (starting.cancelled) return { success: false, error: "Recording was cancelled while starting" }
+  if (starting.cancelled) return cancelledResult()
   let encoder: VideoEncoder
   try {
     encoder = await (context.startVideoEncoder ?? startFfmpegVideoEncoder)({
@@ -127,7 +128,7 @@ export async function startCdpRecording(
   }
   if (starting.cancelled) {
     await encoder.cancel()
-    return { success: false, error: "Recording was cancelled while starting" }
+    return cancelledResult()
   }
   const startedAt = context.now()
   const startedMonotonicAt = context.monotonicNow()

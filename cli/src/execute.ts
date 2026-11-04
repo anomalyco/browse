@@ -665,9 +665,7 @@ export class ExecuteSandbox {
     }
     this.pageHealthCheckRequired = true
     this.pageCrashed = true
-    if (!this.pendingWarnings.includes(defaultPageCrashedWarning)) {
-      this.pendingWarnings.push(defaultPageCrashedWarning)
-    }
+    this.addWarningOnce(defaultPageCrashedWarning)
     return true
   }
 
@@ -688,9 +686,7 @@ export class ExecuteSandbox {
       this.recreatedFromClosedUrl = this.lastKnownNonBlankUrl
     }
     this.unbindDefaultPage(undefined)
-    if (!this.pendingWarnings.includes(defaultPageClosedWarning)) {
-      this.pendingWarnings.push(defaultPageClosedWarning)
-    }
+    this.addWarningOnce(defaultPageClosedWarning)
     return true
   }
 
@@ -923,7 +919,7 @@ export class ExecuteSandbox {
 
   /** fillInput sets values directly: the page sees untrusted input events without key presses. */
   private warnSyntheticInput(): void {
-    if (!this.pendingWarnings.includes(syntheticInputWarning)) this.pendingWarnings.push(syntheticInputWarning)
+    this.addWarningOnce(syntheticInputWarning)
   }
 
   /**

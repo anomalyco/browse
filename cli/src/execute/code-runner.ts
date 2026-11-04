@@ -1,21 +1,13 @@
-import buffer from "node:buffer"
-import crypto from "node:crypto"
-import events from "node:events"
 import fs from "node:fs"
 import http from "node:http"
 import https from "node:https"
 import os from "node:os"
-import path from "node:path"
-import stream from "node:stream"
-import url from "node:url"
-import util from "node:util"
-import zlib from "node:zlib"
 import * as acorn from "acorn"
 import type { Browser, BrowserContext, ConsoleMessage, Frame, Locator, Page } from "patchright-core"
 import { classifyChallenge, probePageScript, probeSelectors, type ChallengeOutcome, type ChallengeProbe } from "./challenge-detection.ts"
 import type * as Deadbolt from "../auth/deadbolt.ts"
 import type { DemonstrationResult } from "./demonstration.ts"
-import { pageVisibleApiWarning, sandboxModules, type ExecuteFiles, type ExecuteRealm } from "../execute-realm.ts"
+import { pageVisibleApiWarningForName, sandboxModules, type ExecuteFiles, type ExecuteRealm } from "../execute-realm.ts"
 import type {
   GhostCursorCalloutOptions,
   GhostCursorCaptionOptions,
@@ -43,7 +35,7 @@ import { createExecuteLogCapture, createSandboxConsole } from "./log-capture.ts"
 import { delay, safePageUrl, timedOut, withTimeout } from "./page-recovery.ts"
 
 // Full Node modules, only with OPENCODE_BROWSER_ALLOW_NODE=1. Sandboxed execute code gets sandboxModules.
-export const nodeModules = { fs, path, os, crypto, url, util, events, stream, buffer, http, https, zlib }
+export const nodeModules = { ...sandboxModules, fs, os, http, https }
 
 export type TypeSecretOptions = {
   /** Clear the field first (default true). */
@@ -210,8 +202,7 @@ export function pageVisibleApiSourceWarnings(code: string): readonly string[] {
   const warnings: string[] = []
   for (const name of ["addInitScript", "exposeFunction", "exposeBinding"]) {
     if (new RegExp(`\\.${name}\\s*\\(`).test(code)) {
-      const named = { [name]: () => {} }[name]!
-      const warning = pageVisibleApiWarning(named, undefined, [])
+      const warning = pageVisibleApiWarningForName(name)
       if (warning) warnings.push(warning)
     }
   }

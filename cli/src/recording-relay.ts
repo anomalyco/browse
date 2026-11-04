@@ -12,7 +12,6 @@ import {
   type CdpCaptureContext,
 } from "./recording-relay/cdp-capture.ts"
 import {
-  AmbiguousRecordingTargetError,
   cdpArtifactType,
   defaultMaxDurationMs,
   findByRecordingTarget,

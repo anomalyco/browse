@@ -1,34 +1,23 @@
 import { Deferred, Effect, Fiber, Option } from "effect"
 import { hasExplicitTargetSelection, type ExecuteTargetSelection } from "../execute.ts"
 import type { OpenCodeBrowserSession } from "../relay/types.ts"
-import type { SessionAdmission } from "./admission.ts"
 import {
   adoptionTipForUrl,
+  createdSummary,
   defaultExecuteTimeoutMs,
   ExecutionDeadline,
   sessionError,
-  sessionSummary,
   shouldAppendAdoptionTip,
   stoppedExecuteResult,
   trySession,
-  type CreatedSessionSummary,
   type ExecutionResponse,
   type RunningExecution,
+  type SessionContext,
   type SessionExecuteRecord,
-  type SessionHooks,
 } from "./types.ts"
 
-export interface ExecutionContext {
-  readonly sessions: Map<string, OpenCodeBrowserSession>
-  readonly hooks: SessionHooks
-  readonly admission: SessionAdmission
+export interface ExecutionContext extends SessionContext {
   readonly runningExecutions: Map<string, RunningExecution>
-  readonly resolveWorkSession: (
-    id: string | undefined,
-    createIfMissing: boolean,
-    requestedBrowser?: string,
-  ) => Effect.Effect<{ readonly session: OpenCodeBrowserSession; readonly created: boolean }, Error>
-  readonly resolveBrowser: (requested?: string, session?: OpenCodeBrowserSession) => OpenCodeBrowserSession["browser"]
   readonly setExecuting: (id: string, executing: boolean) => Effect.Effect<void>
   readonly endStoppedScript: (session: OpenCodeBrowserSession) => Effect.Effect<void>
   readonly stopGraceMs: () => number
@@ -36,10 +25,6 @@ export interface ExecutionContext {
   readonly recordExecute: (record: SessionExecuteRecord) => Effect.Effect<void>
   readonly cleanupCreatedSession: (session: OpenCodeBrowserSession) => Effect.Effect<void>
   readonly stopExecution: (sessionId: string, message: string, diagnostic: string) => void
-}
-
-function createdSummary(session: OpenCodeBrowserSession, created: boolean): CreatedSessionSummary {
-  return { ...sessionSummary(session), ...(created ? { created: true } : {}) }
 }
 
 export function executeInSession(

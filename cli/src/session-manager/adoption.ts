@@ -3,22 +3,17 @@ import type { OpenCodeBrowserSession, SessionTarget } from "../relay/types.ts"
 import type { TargetOwnership, TargetOwnershipChange, TargetOwnershipReservation } from "../cdp/target-registry.ts"
 import type { SessionAdmission } from "./admission.ts"
 import {
+  createdSummary,
   sessionError,
-  sessionSummary,
   trySession,
   type AdoptionResult,
-  type CreatedSessionSummary,
+  type SessionContext,
   type SessionHooks,
 } from "./types.ts"
 
-export type AdoptionContext = {
-  readonly sessions: Map<string, OpenCodeBrowserSession>
-  readonly hooks: SessionHooks
+export interface AdoptionContext extends SessionContext {
   readonly targetOwnership: TargetOwnership
   readonly adoptSemaphore: Semaphore.Semaphore
-  readonly admission: SessionAdmission
-  readonly resolveWorkSession: (id: string | undefined, createIfMissing: boolean, requestedBrowser?: string) => Effect.Effect<{ readonly session: OpenCodeBrowserSession; readonly created: boolean }, Error>
-  readonly resolveBrowser: (requested?: string, session?: OpenCodeBrowserSession) => OpenCodeBrowserSession["browser"]
   readonly createOpenCodeBrowserSession: (id: string, readOnly: boolean, timestamps?: { readonly createdAt: string; readonly updatedAt?: string }) => OpenCodeBrowserSession
   readonly closeOpenCodeBrowserSessionSettled: (session: OpenCodeBrowserSession) => Effect.Effect<void>
   readonly closeRelayTarget: (targetId: string) => Effect.Effect<void, Error>
@@ -103,8 +98,7 @@ export function adoptTargetForSession(
         catch: (cause) => cause instanceof Error ? cause : new Error("Commit target ownership", { cause }),
       })
       const releasedTargetIds = previousTargetId && previousTargetId !== options.targetId ? [previousTargetId] : []
-      const createdSummary: CreatedSessionSummary = { ...sessionSummary(session), ...(resolved.created ? { created: true } : {}) }
-      const value = { adoptedUrl: options.targetUrl, releasedTargetIds, session: createdSummary }
+      const value = { adoptedUrl: options.targetUrl, releasedTargetIds, session: createdSummary(session, resolved.created) }
       yield* Deferred.succeed(result, value)
       return value
     })

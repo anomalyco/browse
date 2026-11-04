@@ -43,12 +43,6 @@ export type StoredFrameEvents = {
   readonly navigated?: JsonObject
 }
 
-export type PendingExtensionRequest = {
-  readonly resolve: (value: JsonObject) => void
-  readonly reject: (error: Error) => void
-  readonly debuggerTabId?: number
-}
-
 /**
  * The sandbox seam used by session management. `ExecuteSandbox` is the real
  * implementation; tests can substitute a fake.

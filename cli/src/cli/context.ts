@@ -2,6 +2,7 @@ import { Config, Console, Effect, Option, Predicate } from "effect"
 import { Flag } from "effect/cli"
 import process from "node:process"
 import { ExitCode, printJson, takeJsonFlag } from "./output.ts"
+import { ensureSessionExists as ensureRelaySessionExists } from "../mcp/schema.ts"
 import * as RelayClient from "../relay/client.ts"
 import { isValidSessionId } from "../relay/helpers.ts"
 import * as RelayLifecycle from "../relay/lifecycle.ts"
@@ -171,13 +172,7 @@ export const resolvePositionalOrFlagSessionId = Effect.fnUntraced(function* (
 export const ensureSessionExists = Effect.fnUntraced(function* (id: string) {
   const relay = yield* RelayClient.Service
   yield* ensureCliRelay()
-  const sessions = yield* relay.sessions
-  const exists = sessions.some((session) => {
-    return session.id === id
-  })
-  if (!exists) {
-    return yield* Effect.fail(new Error(`Session not found: ${id}`))
-  }
+  yield* ensureRelaySessionExists(relay, id)
 })
 
 export const recordingTarget = Effect.fnUntraced(function* (options: {

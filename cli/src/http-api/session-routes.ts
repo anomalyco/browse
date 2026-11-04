@@ -29,7 +29,7 @@ import {
 } from "../relay/schema.ts"
 import type { OpenCodeBrowserSessions } from "../session-manager.ts"
 import type { TargetRegistry } from "../cdp/target-registry.ts"
-import { decodeRequest, noteClient, originPatterns } from "./errors.ts"
+import { decodeRequest, noteClient, originPatterns, sendNotFound } from "./errors.ts"
 
 export function handleClientRequest(options: {
   readonly request: http.IncomingMessage
@@ -53,8 +53,7 @@ export function handleClientRequest(options: {
       sendJson(options.response, yield* options.sessions.authenticatedJson(request))
       return
     }
-    options.response.writeHead(404)
-    options.response.end("Not found")
+    sendNotFound(options.response)
   })
 }
 
@@ -89,8 +88,7 @@ export function handleNetworkRequest(options: {
       sendJson(options.response, yield* options.sessions.networkCancel(request.sessionId))
       return
     }
-    options.response.writeHead(404)
-    options.response.end("Not found")
+    sendNotFound(options.response)
   })
 }
 
@@ -117,8 +115,7 @@ export function handleAuthRequest(options: {
       sendJson(options.response, yield* AuthProfile.run(request))
       return
     }
-    options.response.writeHead(404)
-    options.response.end("Not found")
+    sendNotFound(options.response)
   })
 }
 
@@ -257,7 +254,6 @@ export function handleCliRequest(options: {
       sendJson(options.response, { ...wireResult, session })
       return
     }
-    options.response.writeHead(404)
-    options.response.end("Not found")
+    sendNotFound(options.response)
   })
 }

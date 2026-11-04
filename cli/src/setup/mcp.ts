@@ -229,7 +229,7 @@ export async function installRuntime(): Promise<{ entry: string; version: string
   } catch (error) {
     fail(`Could not install ${spec ?? `${PACKAGE}@${opencodeBrowserVersion}`}: ${(error as Error).message}`)
   }
-  const version = path.basename(path.dirname(path.dirname(path.dirname(path.dirname(path.dirname(installed))))))
+  const version = path.relative(layout.versions, installed).split(path.sep)[0]!
   // Running install again for the same version keeps the version it replaced for rollback.
   const previous = before?.version === version ? before.previous : before?.version
   switchVersion(layout, version, previous)

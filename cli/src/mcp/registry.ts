@@ -30,12 +30,10 @@ export type McpToolContext = {
 
 type RegisteredMcpGroup = {
   readonly order: number
-  readonly nonCompatibilityTools: readonly string[]
   readonly build: (ctx: McpToolContext) => readonly McpToolSpec[]
 }
 
 const groups: RegisteredMcpGroup[] = []
-const nonCompatibilityToolSet = new Set<string>()
 
 /**
  * Register MCP tools from a feature module rather than appending to a central array.
@@ -43,17 +41,12 @@ const nonCompatibilityToolSet = new Set<string>()
  */
 export function registerMcpTools(options: {
   readonly order: number
-  readonly nonCompatibilityTools?: readonly string[]
   readonly build: (ctx: McpToolContext) => readonly McpToolSpec[]
 }): void {
   groups.push({
     order: options.order,
-    nonCompatibilityTools: options.nonCompatibilityTools ?? [],
     build: options.build,
   })
-  for (const name of options.nonCompatibilityTools ?? []) {
-    nonCompatibilityToolSet.add(name)
-  }
 }
 
 export function createMcpToolContext(options: {
@@ -96,8 +89,4 @@ export function buildRegisteredMcpTools(ctx: McpToolContext): readonly McpToolSp
   return [...groups]
     .sort((left, right) => left.order - right.order)
     .flatMap((group) => group.build(ctx))
-}
-
-export function mcpToolRequiresRelayCompatibility(name: string): boolean {
-  return !nonCompatibilityToolSet.has(name)
 }

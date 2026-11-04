@@ -10,7 +10,7 @@ import { CdpRuntime } from "./cdp/runtime.ts"
 import { installedDevExtension, syncDevExtension } from "./setup/dev-extension.ts"
 import { ExecuteSandbox } from "./execute.ts"
 import { pruneStaleExecuteFilesDirectories } from "./execute-realm.ts"
-import type { ExtensionRpc } from "./relay/rpc.ts"
+import type { ExtensionCommandInput } from "./relay/rpc.ts"
 import { FlightRecorderRelay } from "./recording-relay/flight-recorder.ts"
 import { GhostCursorTabs } from "./ghost-cursor.ts"
 import { HandoffRegistry } from "./session-manager/handoff.ts"
@@ -41,12 +41,8 @@ import { createCdpDispatcher } from "./relay/cdp-dispatch.ts"
 import { createExtensionEventHandler } from "./relay/extension-events.ts"
 import { ExtensionHandshake } from "./relay/extension-handshake.ts"
 import {
-  handleRelayProcessFault,
   installRelayProcessGuard,
-  isBenignClosedSessionRejection,
   processAlive,
-  relayProcessFaultSummary,
-  shouldSuppressRelayProcessFault,
   targetDiagnosticIdentity,
 } from "./relay/process-guard.ts"
 import { createRelaySettingsSync } from "./relay/settings-sync.ts"
@@ -107,7 +103,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     catch: (cause) => new Error("Create the relay token", { cause }),
   })
   const browsers = new BrowserLinks()
-  type ExtensionCommandInput = Parameters<ExtensionRpc["send"]>[0]
   const sendToBrowser = (link: BrowserLink, command: ExtensionCommandInput) =>
     link.rpc.send(command).pipe(Effect.map((result) => {
       const tabId = getNumber(result, "tabId")

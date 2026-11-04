@@ -255,8 +255,10 @@ function summary(profile: AuthProfile): AuthProfileSummary {
   }
 }
 
+export const profileNamePattern = /^[a-z0-9][a-z0-9._-]{0,63}$/i
+
 function profilePath(baseDir: string, name: string): Effect.Effect<string, AuthProfileError> {
-  return /^[a-z0-9][a-z0-9._-]{0,63}$/i.test(name)
+  return profileNamePattern.test(name)
     ? Effect.succeed(path.join(baseDir, `${name}.json`))
     : Effect.fail(new AuthProfileError({ message: `Invalid auth profile name: ${name}`, operation: "path", reason: "invalid-name" }))
 }

@@ -17,7 +17,6 @@ import {
 
 registerMcpTools({
   order: 600,
-  nonCompatibilityTools: ["secrets_list", "secrets_status"],
   build: (ctx) => [
     {
       name: "secrets_list",

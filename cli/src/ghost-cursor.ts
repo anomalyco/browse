@@ -2,25 +2,9 @@ import { Effect, Match, Predicate } from "effect"
 import { ghostCursorMotionSource } from "./ghost-cursor/client-motion.ts"
 import { ghostCursorOverlaysSource } from "./ghost-cursor/client-overlays.ts"
 import {
-  clearGhostCursorCallouts,
-  ghostCursorCommandMethod,
-  hideGhostCursor,
-  setGhostCursorCaption,
-  setGhostCursorSpotlight,
-  showGhostCursor,
-  showGhostCursorCallout,
-  showGhostCursorKeys,
-  zoomGhostCursorCamera,
-} from "./ghost-cursor/page-commands.ts"
-import {
   ghostCursorOperations,
-  type GhostCursorCalloutOptions,
-  type GhostCursorCaptionOptions,
-  type GhostCursorClientOptions,
   type GhostCursorMouseAction,
-  type GhostCursorSpotlightOptions,
   type GhostCursorTabState,
-  type GhostCursorZoomOptions,
 } from "./ghost-cursor/types.ts"
 import type { JsonObject } from "./protocol.ts"
 
@@ -34,13 +18,15 @@ export {
   showGhostCursorCallout,
   showGhostCursorKeys,
   zoomGhostCursorCamera,
-  type GhostCursorCalloutOptions,
-  type GhostCursorCaptionOptions,
-  type GhostCursorClientOptions,
-  type GhostCursorMouseAction,
-  type GhostCursorSpotlightOptions,
-  type GhostCursorZoomOptions,
-}
+} from "./ghost-cursor/page-commands.ts"
+export type {
+  GhostCursorCalloutOptions,
+  GhostCursorCaptionOptions,
+  GhostCursorClientOptions,
+  GhostCursorMouseAction,
+  GhostCursorSpotlightOptions,
+  GhostCursorZoomOptions,
+} from "./ghost-cursor/types.ts"
 
 // The cursor and its overlays render in a CDP isolated world the relay creates for the tab (GhostCursorTabs
 // below), inside a closed shadow root on a host element without an id. The page cannot see the script's globals,

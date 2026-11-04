@@ -57,8 +57,8 @@ export type ExtensionCommand = {
   readonly params?: JsonObject
 }
 
-export function parseExtensionCommand(input: string): ExtensionCommand {
-  const parsed: unknown = JSON.parse(input)
+export function parseExtensionCommand(input: string | unknown): ExtensionCommand {
+  const parsed: unknown = typeof input === "string" ? JSON.parse(input) : input
   if (
     !isJsonObject(parsed) ||
     typeof parsed.id !== "number" ||

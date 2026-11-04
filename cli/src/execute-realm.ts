@@ -68,6 +68,7 @@ import {
   executeSliceMs,
   fileRootsEnvironmentVariable,
   pageVisibleApiWarning,
+  pageVisibleApiWarningForName,
   pruneStaleExecuteFilesDirectories,
   removeExecuteFilesDirectory,
   returnsPromise,
@@ -107,6 +108,7 @@ export {
   handleExecuteRealmException,
   handleExecuteRealmRejection,
   pageVisibleApiWarning,
+  pageVisibleApiWarningForName,
   pruneStaleExecuteFilesDirectories,
   removeExecuteFilesDirectory,
   sandboxModules,
@@ -148,12 +150,13 @@ export class ExecuteRealm {
 
   /** Called for every host call sandbox code makes, after the call is allowed (execute warnings). */
   private readonly onHostCall: ((fn: Function, receiver: unknown, args: readonly unknown[]) => void) | undefined
+  private readonly refuseDynamicImport = () => {
+    throw new this.SandboxError("import() is not available in execute code")
+  }
 
   constructor(options: { readonly onHostCall?: (fn: Function, receiver: unknown, args: readonly unknown[]) => void } = {}) {
     this.onHostCall = options.onHostCall
-    const importModuleDynamically = () => {
-      throw new this.SandboxError("import() is not available in execute code")
-    }
+    const importModuleDynamically = this.refuseDynamicImport
     const dontContextify = (vm.constants as unknown as { readonly DONT_CONTEXTIFY?: unknown } | undefined)?.DONT_CONTEXTIFY
     this.context = vm.createContext((dontContextify ?? Object.create(null)) as vm.Context, {
       name: "opencode-browser-execute",
@@ -341,9 +344,7 @@ export class ExecuteRealm {
     /** Sandbox-realm values passed through unchanged (for example `state`). */
     readonly sandboxArgs?: ReadonlyMap<number, unknown>
   }): Promise<unknown> {
-    const importModuleDynamically = () => {
-      throw new this.SandboxError("import() is not available in execute code")
-    }
+    const importModuleDynamically = this.refuseDynamicImport
     // Node rejects import() in a vm context with an error created in the relay's realm, which would hand the
     // sandbox the relay's Function constructor. With code generation from strings off, a static check sees all code.
     if (containsDynamicImport(options.source)) {

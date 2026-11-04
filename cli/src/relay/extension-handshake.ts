@@ -22,7 +22,7 @@ import {
   type HandshakeTranscript,
 } from "./browser-pairing.ts"
 import { installedDevExtension } from "../setup/dev-extension.ts"
-import type { ExtensionRpc } from "./rpc.ts"
+import type { ExtensionCommandInput } from "./rpc.ts"
 import { cliCommand, fromCheckout, installCommand, oldStoreMarker, storeUrl } from "../paths.ts"
 import {
   checkoutReloadPrefix,
@@ -36,7 +36,7 @@ import {
 } from "../protocol.ts"
 import { decodeRecordingFrame, encodeRecordingFrame } from "../recording-relay/protocol.ts"
 import { isLocalPeer } from "./config.ts"
-import { getNumber, getObject, getString, headerValue, stableUnpackedExtensionOrigin } from "./helpers.ts"
+import { getObject, getString, headerValue, stableUnpackedExtensionOrigin } from "./helpers.ts"
 import { relayLog } from "./log.ts"
 import type { ExtensionStatus } from "./schema.ts"
 import { secretsEqual } from "./secrets.ts"
@@ -44,8 +44,6 @@ import type { OpenCodeBrowserSession } from "./types.ts"
 import type { TargetRegistry } from "../cdp/target-registry.ts"
 import { opencodeBrowserBuildId } from "../version.ts"
 import { rawDataToBuffer, relayProcessFaultSummary } from "./process-guard.ts"
-
-type ExtensionCommandInput = Parameters<ExtensionRpc["send"]>[0]
 
 type Challenge = {
   readonly mode: "token" | "code" | "legacy" | "old"
@@ -61,7 +59,6 @@ type Challenge = {
 }
 
 export class ExtensionHandshake {
-  private readonly rejectedExtensionConnections = 0
   private pairingFailures = 0
   private mismatch: (ReturnType<typeof extensionProtocolCompatibility> & { origin: string | undefined }) | undefined
   private lastUnpaired = 0
@@ -172,7 +169,7 @@ export class ExtensionHandshake {
         version: browser.rpc.version ?? null,
         tabs: registry.listRootTargets().filter((target) => browsers.ownerKey(target.tabId) === browser.key).length,
       })),
-      rejectedConnections: this.rejectedExtensionConnections,
+      rejectedConnections: 0,
       pairingFailures: this.pairingFailures,
       cdpClients: this.options.cdpClientCount(),
       processFaults: relayProcessFaultSummary(),

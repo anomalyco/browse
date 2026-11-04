@@ -10,6 +10,22 @@ import * as SiteSecrets from "../auth/site-secrets.ts"
 import { challengeWaitMs, detectChallenge, type TypeDeadboltResult, type TypeSecretOptions, type TypeSecretResult } from "./code-runner.ts"
 import { pageTargetId } from "./page-recovery.ts"
 
+const isOpaqueDocumentUrl = (url: string): boolean => /^(?:about|data|blob):/i.test(url)
+
+const frameOrigin = (url: string): string => {
+  try {
+    return new URL(url).origin
+  } catch {
+    return url.slice(0, 200)
+  }
+}
+
+const elementHasFocus = (handle: ElementHandle): Promise<boolean> =>
+  handle.evaluate((node) => {
+    const element = node as Element
+    return element.ownerDocument.activeElement === element || element.contains(element.ownerDocument.activeElement)
+  })
+
 export class ExecuteSecretsBridge {
   /** Values typed with secrets.type() in this sandbox, mapped to their secret's name, for redaction. */
   private readonly typedSecrets = new Map<string, string>()
@@ -103,14 +119,9 @@ export class ExecuteSecretsBridge {
       if (!frame) throw new Error(`secrets.type: target_not_editable: the element for ${JSON.stringify(name)} is not in a frame`)
       const checkOrigin = (): string => {
         const url = frame.url()
-        let origin: string
-        try {
-          origin = new URL(url).origin
-        } catch {
-          origin = url.slice(0, 200)
-        }
+        const origin = frameOrigin(url)
         const decision = checkUrl(url, secretRules, { httpsOnlyWithoutScheme: true })
-        if (!decision.allowed || /^(?:about|data|blob):/i.test(url)) {
+        if (!decision.allowed || isOpaqueDocumentUrl(url)) {
           throw new Error(`secrets.type: domain_not_allowed: the field's frame is ${origin}, which is not an allowed origin of secret ${JSON.stringify(name)} (${secret.allowedOrigins.join(", ")}). Nothing was typed.`)
         }
         if (sessionRules && !checkUrl(url, sessionRules).allowed) {
@@ -124,8 +135,9 @@ export class ExecuteSecretsBridge {
       }
       if (options.clear !== false) await handle.fill("")
       await handle.focus()
-      const focused = await handle.evaluate((element) => element.ownerDocument.activeElement === element || element.contains(element.ownerDocument.activeElement))
-      if (!focused) throw new Error("secrets.type: target_not_editable: the field did not keep focus. Nothing was typed.")
+      if (!(await elementHasFocus(handle))) {
+        throw new Error("secrets.type: target_not_editable: the field did not keep focus. Nothing was typed.")
+      }
       const origin = checkOrigin()
       const urlBefore = frame.url()
       const text = SiteSecrets.secretText(secret)
@@ -186,13 +198,8 @@ export class ExecuteSecretsBridge {
     }
     const checkOrigin = (): string => {
       const url = frame.url()
-      let origin: string
-      try {
-        origin = new URL(url).origin
-      } catch {
-        origin = url.slice(0, 200)
-      }
-      if (/^(?:about|data|blob):/i.test(url) || !Deadbolt.originOnSite(origin, spec.site)) {
+      const origin = frameOrigin(url)
+      if (isOpaqueDocumentUrl(url) || !Deadbolt.originOnSite(origin, spec.site)) {
         throw new Error(`${label}: domain_not_allowed: the field's frame is ${origin}, which is not on ${spec.site}. Nothing was typed.`)
       }
       if (!this.sessionAllows(url)) {
@@ -207,33 +214,27 @@ export class ExecuteSecretsBridge {
     const connection = this.deadbolt()
     const login = Deadbolt.pickLogin(await connection.logins(origin), spec.site, spec.username, field)
     const values = await connection.fill(origin, login, [field])
-    let value = values[field]
+    const value = values[field]
     if (!value) throw new Deadbolt.DeadboltError("not_found", `The Deadbolt login for ${spec.site} has no ${field}.`)
     const name = `deadbolt:${spec.site}${login.username ? `/${login.username}` : ""} ${field}`
-    try {
-      // Register first, so a capture or result that sees the value already redacts it. Usernames aren't secret
-      // (secrets_list shows them), so they aren't redacted.
-      if (field !== "username") {
-        this.typedSecrets.set(value, name)
-        this.deps.networkCapture.addRedaction(value)
+    // Register first, so a capture or result that sees the value already redacts it. Usernames aren't secret
+    // (secrets_list shows them), so they aren't redacted.
+    if (field !== "username") {
+      this.typedSecrets.set(value, name)
+      this.deps.networkCapture.addRedaction(value)
+    }
+    const characters = handles.length === 1 ? [value] : Array.from(value)
+    if (handles.length > 1 && characters.length !== handles.length) {
+      throw new Error(`${label}: target_not_editable: ${handles.length} code boxes for a ${characters.length}-character code. Nothing was typed.`)
+    }
+    for (const [index, handle] of handles.entries()) {
+      await handle.fill("")
+      await handle.focus()
+      if (!(await elementHasFocus(handle))) {
+        throw new Error(`${label}: target_not_editable: the field did not keep focus.`)
       }
-      const characters = handles.length === 1 ? [value] : Array.from(value)
-      if (handles.length > 1 && characters.length !== handles.length) {
-        throw new Error(`${label}: target_not_editable: ${handles.length} code boxes for a ${characters.length}-character code. Nothing was typed.`)
-      }
-      for (const [index, handle] of handles.entries()) {
-        await handle.fill("")
-        await handle.focus()
-        const focused = await handle.evaluate((node) => {
-          const element = node as Element
-          return element.ownerDocument.activeElement === element || element.contains(element.ownerDocument.activeElement)
-        })
-        if (!focused) throw new Error(`${label}: target_not_editable: the field did not keep focus.`)
-        checkOrigin()
-        await frame.page().keyboard.insertText(characters[index]!)
-      }
-    } finally {
-      value = undefined
+      checkOrigin()
+      await frame.page().keyboard.insertText(characters[index]!)
     }
     if (!this.deps.allowedOrigins()?.length) {
       this.deps.addWarningOnce(`A Deadbolt login was typed in a session without a domain allowlist. A prompt-injected page could steer this session elsewhere after the value is in the page: set one with session_allowlist (or \`session allow\`) before signing in.`)

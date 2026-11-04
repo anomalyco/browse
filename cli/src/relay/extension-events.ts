@@ -3,7 +3,7 @@ import type { WebSocket } from "ws"
 import type { BrowserLink, BrowserLinks } from "./browser-links.ts"
 import type { CdpClientPool } from "../cdp/client-pool.ts"
 import type { CdpRuntime } from "../cdp/runtime.ts"
-import type { ExtensionRpc } from "./rpc.ts"
+import type { ExtensionCommandInput } from "./rpc.ts"
 import type { FlightRecorderRelay } from "../recording-relay/flight-recorder.ts"
 import type { GhostCursorTabs } from "../ghost-cursor.ts"
 import type { HandoffCancellationReason, HandoffRegistry } from "../session-manager/handoff.ts"
@@ -21,8 +21,6 @@ import type { SessionNavigationGuard } from "../session-manager/navigation-guard
 import type { TabActivity } from "../cdp/tab-activity.ts"
 import { shouldExposeChildTarget, type TargetRegistry } from "../cdp/target-registry.ts"
 import { targetDiagnosticIdentity } from "./process-guard.ts"
-
-type ExtensionCommandInput = Parameters<ExtensionRpc["send"]>[0]
 
 export function createExtensionEventHandler(options: {
   readonly registry: TargetRegistry

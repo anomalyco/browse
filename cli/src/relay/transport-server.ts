@@ -64,6 +64,12 @@ export function createRelayTransportServers(deps: TransportServerDeps): {
     debugLog,
   } = deps
 
+  const isSilentProbePath = (pathname: string | undefined): boolean =>
+    pathname === "/version" ||
+    pathname === "/json/version" ||
+    pathname === "/json/version/" ||
+    pathname === "/extension/status"
+
   const httpServer = http.createServer((request, response) => {
     if (!isLocalPeer(request.socket)) {
       response.writeHead(404).end()
@@ -76,12 +82,12 @@ export function createRelayTransportServers(deps: TransportServerDeps): {
     }
     const started = performance.now()
     const requestPath = (request.url ?? "").split("?")[0]
-    if (requestPath !== "/version" && requestPath !== "/json/version" && requestPath !== "/json/version/" && requestPath !== "/extension/status") {
+    if (!isSilentProbePath(requestPath)) {
       onAgentHttpActivity()
     }
     response.once("finish", () => {
       const pathname = (request.url ?? "").split("?")[0]
-      if (pathname === "/version" || pathname === "/json/version" || pathname === "/json/version/" || pathname === "/extension/status") return
+      if (isSilentProbePath(pathname)) return
       relayLog("http", { method: request.method, path: pathname, status: response.statusCode, ms: Math.round(performance.now() - started) })
     })
     relayRequestHandler(request, response)

@@ -99,18 +99,21 @@ export class TargetSelectionError extends Schema.TaggedError<TargetSelectionErro
   },
 ) {}
 
+const operationFailure = (label: string, cause: unknown): PlaywrightOperationError =>
+  new PlaywrightOperationError({
+    message: cause instanceof Error ? cause.message : label,
+    operation: label,
+    reason: "failed",
+    cause,
+  })
+
 export const runPlaywrightOperation = Effect.fn("Execute.playwrightOperation")(<A>(options: {
   readonly label: string
   readonly timeoutMs: number
   readonly run: () => Promise<A>
 }): Effect.Effect<A, Error> => Effect.tryPromise({
     try: options.run,
-    catch: (cause) => new PlaywrightOperationError({
-      message: cause instanceof Error ? cause.message : options.label,
-      operation: options.label,
-      reason: "failed",
-      cause,
-    }),
+    catch: (cause) => operationFailure(options.label, cause),
   }).pipe(
     Effect.timeoutOrElse({
       duration: options.timeoutMs,
@@ -128,12 +131,7 @@ export const runSettledPlaywrightOperation = Effect.fn("Execute.settledPlaywrigh
   readonly run: () => Promise<A>
 }): Effect.Effect<A, Error> => Effect.tryPromise({
   try: options.run,
-  catch: (cause) => new PlaywrightOperationError({
-    message: cause instanceof Error ? cause.message : options.label,
-    operation: options.label,
-    reason: "failed",
-    cause,
-  }),
+  catch: (cause) => operationFailure(options.label, cause),
 }))
 
 /**

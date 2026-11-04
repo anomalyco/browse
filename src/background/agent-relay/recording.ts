@@ -15,15 +15,18 @@ export function createRelayRecording(deps: {
       documentUrls: [url],
     })
     if (existing.length) return
-    offscreen ??= chrome.offscreen
-      .createDocument({
-        url: "offscreen.html",
-        reasons: [chrome.offscreen.Reason.USER_MEDIA],
-        justification: "Record tabs for agents with chrome.tabCapture and MediaRecorder",
-      })
-      .finally(() => {
-        offscreen = undefined
-      })
+    if (!offscreen) {
+      const pending = chrome.offscreen
+        .createDocument({
+          url: "offscreen.html",
+          reasons: [chrome.offscreen.Reason.USER_MEDIA],
+          justification: "Record tabs for agents with chrome.tabCapture and MediaRecorder",
+        })
+        .finally(() => {
+          if (offscreen === pending) offscreen = undefined
+        })
+      offscreen = pending
+    }
     await offscreen
   }
 

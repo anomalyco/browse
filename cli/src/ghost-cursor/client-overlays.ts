@@ -1,3 +1,5 @@
+import { ghostCursorClientVersion } from "./types.ts"
+
 // Second half of ghostCursorClientSource: camera zoom, spotlight, key badges, captions, callouts, and global binding.
 export const ghostCursorOverlaysSource = `  const zoomTo = (payload) => {
     const vw = window.innerWidth;
@@ -272,7 +274,7 @@ export const ghostCursorOverlaysSource = `  const zoomTo = (payload) => {
     stage.appendChild(container);
   };
   globalThis.__opencodeBrowserGhostCursor = {
-    version: 13,
+    version: ${ghostCursorClientVersion},
     show,
     hide,
     restore,

@@ -1,7 +1,7 @@
 import { Effect } from "effect"
 import type { BrowserLink, BrowserLinks } from "./browser-links.ts"
 import type { HandoffPageTarget } from "../execute.ts"
-import type { ExtensionRpc } from "./rpc.ts"
+import type { ExtensionCommandInput } from "./rpc.ts"
 import {
   awaitHandoffAction,
   resolveExactHandoffTarget,
@@ -20,7 +20,6 @@ import type { TabActivity } from "../cdp/tab-activity.ts"
 import type { TargetRegistry } from "../cdp/target-registry.ts"
 import { targetDiagnosticIdentity } from "./process-guard.ts"
 
-type ExtensionCommandInput = Parameters<ExtensionRpc["send"]>[0]
 export type TabGroupingMethod = "tabs.group" | "tabs.ungroup"
 
 export const attachedBadge = { text: "ON", color: "#7c3aed", title: "Detach from Browse" }

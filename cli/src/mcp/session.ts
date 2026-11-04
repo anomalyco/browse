@@ -16,7 +16,6 @@ import {
 
 registerMcpTools({
   order: 200,
-  nonCompatibilityTools: ["session_list", "session_current"],
   build: (ctx) => [
     {
       name: "session_new",

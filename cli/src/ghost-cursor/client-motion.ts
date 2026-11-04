@@ -1,6 +1,8 @@
+import { ghostCursorClientVersion } from "./types.ts"
+
 // First half of ghostCursorClientSource: isolated-world shadow root, cursor SVG, click pulses, and spring/bezier flight loop.
 export const ghostCursorMotionSource = `(() => {
-  if (globalThis.__opencodeBrowserGhostCursor?.version === 13) {
+  if (globalThis.__opencodeBrowserGhostCursor?.version === ${ghostCursorClientVersion}) {
     return;
   }
   globalThis.__opencodeBrowserGhostCursor?.hide?.();
@@ -65,8 +67,6 @@ export const ghostCursorMotionSource = `(() => {
     // The relay only draws the cursor when it should show (a recording, or showGhostCursor), so it stays put.
     mode: "persistent",
     options: defaults,
-    fadeTimer: undefined,
-    removeTimer: undefined,
   };
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
   const smoothstep = (e0, e1, x) => {
@@ -516,29 +516,7 @@ export const ghostCursorMotionSource = `(() => {
     state.arrow = arrow;
     return element;
   };
-  const clearIdleTimers = () => {
-    if (state.fadeTimer !== undefined) window.clearTimeout(state.fadeTimer);
-    if (state.removeTimer !== undefined) window.clearTimeout(state.removeTimer);
-    state.fadeTimer = undefined;
-    state.removeTimer = undefined;
-  };
-  const scheduleIdleFade = () => {
-    if (state.mode !== "auto") return;
-    clearIdleTimers();
-    state.fadeTimer = window.setTimeout(() => {
-      if (state.element) state.element.style.opacity = "0";
-      state.removeTimer = window.setTimeout(() => {
-        state.element?.remove();
-        state.element = null;
-        state.arrow = null;
-        state.removeTimer = undefined;
-        releaseRoot();
-      }, 160);
-      state.fadeTimer = undefined;
-    }, 620);
-  };
   const show = (options) => {
-    clearIdleTimers();
     state.options = mergeOptions(options);
     state.mode = "persistent";
     const element = ensureElement();
@@ -548,7 +526,6 @@ export const ghostCursorMotionSource = `(() => {
     element.dataset.pressed = "false";
   };
   const hide = () => {
-    clearIdleTimers();
     if (state.tickTimer !== undefined) window.clearTimeout(state.tickTimer);
     state.tickTimer = undefined;
     state.previousFrameTime = undefined;
@@ -570,7 +547,6 @@ export const ghostCursorMotionSource = `(() => {
   };
   const restore = (position) => {
     if (typeof position?.x !== "number" || typeof position?.y !== "number") return;
-    clearIdleTimers();
     state.mode = "persistent";
     state.targetX = position.x;
     state.targetY = position.y;
@@ -610,7 +586,6 @@ export const ghostCursorMotionSource = `(() => {
       applyPosition();
       spawnClickPulse(action.x, action.y, "down");
       startLoop();
-      scheduleIdleFade();
       return waitMs(35);
     }
     if (action.type === "up") {
@@ -620,7 +595,6 @@ export const ghostCursorMotionSource = `(() => {
       applyPosition();
       spawnClickPulse(action.x, action.y, "up");
       startLoop();
-      scheduleIdleFade();
       return waitMs(45);
     }
 
@@ -635,7 +609,6 @@ export const ghostCursorMotionSource = `(() => {
       state.vy = 0;
       state.deg = 0;
       applyPosition();
-      scheduleIdleFade();
       return Promise.resolve();
     }
 
@@ -654,7 +627,6 @@ export const ghostCursorMotionSource = `(() => {
       const expectedMs = clamp(120 + Math.sqrt(dist) * 6.2, 120, 310);
       state.activeUntil = performance.now() + expectedMs + 140;
       startLoop();
-      scheduleIdleFade();
       return new Promise((resolve) => {
         const safetyTimer = window.setTimeout(() => {
           state.renderedX = action.x;
@@ -693,7 +665,6 @@ export const ghostCursorMotionSource = `(() => {
     };
     state.activeUntil = performance.now() + durationMs + 150;
     startLoop();
-    scheduleIdleFade();
 
     return new Promise((resolve) => {
       const safetyTimer = window.setTimeout(() => {

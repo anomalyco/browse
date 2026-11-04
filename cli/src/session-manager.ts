@@ -9,12 +9,8 @@ import { SessionAdmission } from "./session-manager/admission.ts"
 import { adoptTargetForSession, closeSessionSettledWithTimeout, sessionRelayTargetIds, type AdoptionContext } from "./session-manager/adoption.ts"
 import { executeInSession, type ExecutionContext } from "./session-manager/execution.ts"
 import {
-  adoptionTipForUrl,
-  defaultExecuteTimeoutMs,
-  SessionError,
   sessionError,
   sessionSummary,
-  shouldAppendAdoptionTip,
   trySession,
   type AdoptionResult,
   type ExecutionResponse,
@@ -286,7 +282,10 @@ export class OpenCodeBrowserSessions {
   }
 
   hasActiveNetworkCapture(): boolean {
-    return this.activeNetworkCaptures().length > 0
+    for (const session of this.sessions.values()) {
+      if (session.sandbox.networkStatus().active) return true
+    }
+    return false
   }
 
   /** Sessions with a network capture running, and since when. */

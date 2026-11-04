@@ -76,17 +76,9 @@ export type GhostCursorKeysPayload = {
   readonly label?: string
 }
 
-export type GhostCursorOperation =
-  | "show"
-  | "hide"
-  | "setCaption"
-  | "showCallout"
-  | "clearCallouts"
-  | "zoomTo"
-  | "setSpotlight"
-  | "showKeys"
+export const ghostCursorClientVersion = 13
 
-export const ghostCursorOperations: ReadonlySet<string> = new Set<GhostCursorOperation>([
+export const ghostCursorOperationList = [
   "show",
   "hide",
   "setCaption",
@@ -95,7 +87,11 @@ export const ghostCursorOperations: ReadonlySet<string> = new Set<GhostCursorOpe
   "zoomTo",
   "setSpotlight",
   "showKeys",
-])
+] as const
+
+export type GhostCursorOperation = (typeof ghostCursorOperationList)[number]
+
+export const ghostCursorOperations: ReadonlySet<string> = new Set<string>(ghostCursorOperationList)
 
 export type GhostCursorPosition = { readonly x: number; readonly y: number }
 

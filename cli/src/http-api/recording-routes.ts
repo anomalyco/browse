@@ -10,7 +10,7 @@ import {
   RecordingTargetRequest,
 } from "../relay/schema.ts"
 import type { TargetRegistry } from "../cdp/target-registry.ts"
-import { decodeRequest, optionalInteger } from "./errors.ts"
+import { decodeRequest, optionalInteger, sendNotFound } from "./errors.ts"
 
 /**
  * A recording request that failed because there was nothing to act on (no recording) is the caller's mistake, not
@@ -68,8 +68,7 @@ export function handleRecordingRequest(options: {
       sendJson(options.response, result, recordingStatusCode(result))
       return
     }
-    options.response.writeHead(404)
-    options.response.end("Not found")
+    sendNotFound(options.response)
   })
 }
 
@@ -117,8 +116,7 @@ export function handleFlightRecorderRequest(options: {
       sendJson(options.response, yield* Effect.promise(() => options.flightRecorder.cancel(target)))
       return
     }
-    options.response.writeHead(404)
-    options.response.end("Not found")
+    sendNotFound(options.response)
   })
 }
 

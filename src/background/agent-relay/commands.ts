@@ -274,22 +274,18 @@ export function createRelayCommands(deps: {
 
   const handle = async (current: WebSocket, data: string) => {
     const command = (() => {
+      let parsed: unknown
       try {
-        return parseExtensionCommand(data)
+        parsed = JSON.parse(data)
+        return parseExtensionCommand(parsed)
       } catch (error) {
         deps.log.add("command.invalid", { error: text(error), data: data.slice(0, 200) })
         current.send(JSON.stringify({ method: "log", params: { level: "error", message: text(error) } }))
         // A command this build doesn't know (an older or newer relay) still gets an answer, so the relay
         // doesn't wait for its timeout.
-        const id = (() => {
-          try {
-            const parsed: unknown = JSON.parse(data)
-            return isJsonObject(parsed) && typeof parsed.id === "number" ? parsed.id : undefined
-          } catch {
-            return undefined
-          }
-        })()
-        if (id !== undefined) current.send(JSON.stringify({ id, error: text(error) }))
+        if (isJsonObject(parsed) && typeof parsed.id === "number") {
+          current.send(JSON.stringify({ id: parsed.id, error: text(error) }))
+        }
         return undefined
       }
     })()

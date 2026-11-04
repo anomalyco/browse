@@ -12,14 +12,11 @@ import {
   emitJson,
   exitCodeForError,
   exitWith,
-  formatRecordingQuality,
-  formatSessionContinuation,
   hoistJsonFlag,
   normalizeCliArguments,
-  resolveExplicitSessionSelector,
   stderrLine,
 } from "./cli/context.ts"
-import { executeJsonEnvelope } from "./cli/execute.ts"
+import "./cli/execute.ts"
 import "./cli/network.ts"
 import "./cli/recording.ts"
 import { buildRegisteredCliCommands } from "./cli/registry.ts"
@@ -32,13 +29,8 @@ import { opencodeBrowserVersion } from "./version.ts"
 
 export {
   agentDefaultSessionId,
-  executeJsonEnvelope,
   exitCodeForError,
-  formatRecordingQuality,
-  formatSessionContinuation,
   hoistJsonFlag,
-  normalizeCliArguments,
-  resolveExplicitSessionSelector,
 }
 
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))

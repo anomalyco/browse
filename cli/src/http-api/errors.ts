@@ -158,3 +158,8 @@ export function originPatterns(raw: readonly string[]): Effect.Effect<readonly s
     catch: (cause) => cause instanceof OriginPatternError ? new Error(cause.message) : new Error("Invalid origin patterns", { cause }),
   })
 }
+
+export function sendNotFound(response: http.ServerResponse): void {
+  response.writeHead(404)
+  response.end("Not found")
+}

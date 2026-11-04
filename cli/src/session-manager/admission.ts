@@ -102,9 +102,10 @@ export class SessionAdmission {
     return Array.from(this.sessions.values(), (session) => persistedSession(session))
   }
 
-  schedulePersistence(sessions = this.persistedSessions()): void {
+  schedulePersistence(): void {
     const hook = this.hooks.onSessionsChanged
     if (!hook) return
+    const sessions = this.persistedSessions()
     const release = this.retainWork()
     const previous = this.persistenceTail
     this.persistenceTail = previous.catch(() => {}).then(async () => {
