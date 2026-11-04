@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { beforeInput, clampPoint, humanInputEnabled, setHumanInput } from "../src/human-input.ts"
+import { beforeInput, clampPoint, humanInputEnabled, setHumanInput } from "../src/execute/human-input.ts"
 
 // Human-like input follows the extension's setting from the next input, without a relay restart, and
 // OPENCODE_BROWSER_HUMAN_INPUT overrides it either way.

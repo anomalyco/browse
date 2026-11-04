@@ -1,90 +1,53 @@
 // Isolated headless check of the guarded-agent features against a real browser: challenge detection, per-session
 // domain allowlists, origin-bound secrets, page-visible API warnings, and Deadbolt sign-ins and passkeys (against a
 // fake Deadbolt socket, test/fake-deadbolt.ts).
-//   bun build.ts && node --no-warnings test/guarded-agents-browser.ts [--browser <chromium executable>]
-// Same isolation as execute-realm-browser.ts: a port-patched copy of the extension in Playwright's Chromium (headless),
-// a fresh OPENCODE_BROWSER_HOME and relay port (BROWSE_TEST_RELAY_PORT / BROWSE_TEST_FIXTURE_PORT, else free ports).
+//   bun run build && (cd cli && bun run build) && node --no-warnings test/guarded-agents-browser.ts [--browser <chromium executable>]
+// Same isolation as execute-realm-browser.ts: the temp root, paired relay, port-patched extension and launch come from
+// startBrowserScene; ports come from BROWSE_TEST_RELAY_PORT and BROWSE_TEST_FIXTURE_PORT, or are free ports.
 import assert from "node:assert/strict"
 import fs from "node:fs"
-import os from "node:os"
 import path from "node:path"
 import http from "node:http"
-import net from "node:net"
-import { spawn, spawnSync } from "node:child_process"
+import { spawnSync } from "node:child_process"
 import { parseArgs } from "node:util"
-import { chromium } from "patchright-core"
-import { relayToken } from "../src/relay-secrets.ts"
-import { bundledPairingCodeTtlMs, mintPairingCode, writeExtensionPairing } from "../src/browser-pairing.ts"
-import { saveClient } from "../src/deadbolt.ts"
+import { relayToken } from "../src/relay/secrets.ts"
+import { saveClient } from "../src/auth/deadbolt.ts"
 import { startFakeDeadbolt } from "./fake-deadbolt.ts"
-
-async function freePort(): Promise<number> {
-  const server = net.createServer()
-  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve) })
-  const { port } = server.address() as net.AddressInfo
-  await new Promise<void>((resolve) => server.close(() => resolve()))
-  return port
-}
-async function portFromEnv(name: string): Promise<number> {
-  const value = process.env[name]
-  if (!value) return await freePort()
-  const port = Number(value)
-  assert.ok(Number.isInteger(port) && port > 0 && port < 65536, `${name} must be a port number`)
-  return port
-}
+import { portFromEnv } from "./support/ports.ts"
+import { startBrowserScene } from "./support/browser-scene.ts"
 
 const { values: options } = parseArgs({ options: { browser: { type: "string" } } })
-const executablePath = options.browser || process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || chromium.executablePath()
-assert.ok(fs.existsSync(executablePath), `No Chromium at ${executablePath}`)
-const tmp = path.join(fs.realpathSync(os.tmpdir()), "opencode")
-fs.mkdirSync(tmp, { recursive: true })
-const root = fs.mkdtempSync(path.join(tmp, "guarded-browser-"))
-const home = path.join(root, "home")
-const runtime = path.join(root, "runtime")
-const extension = path.join(home, "extension")
-const cliRoot = path.resolve(import.meta.dirname, "..")
-const port = await portFromEnv("BROWSE_TEST_RELAY_PORT")
 const fixturePort = await portFromEnv("BROWSE_TEST_FIXTURE_PORT")
 const site = `http://127.0.0.1:${fixturePort}`
 const other = `http://localhost:${fixturePort}`
-const base = `http://127.0.0.1:${port}`
 const secretValue = "s3cr3t-Value!x"
-const env: NodeJS.ProcessEnv = {
-  ...process.env,
-  HOME: root,
-  OPENCODE_BROWSER_HOME: home,
-  OPENCODE_BROWSER_PORT: String(port),
-  OPENCODE_BROWSER_UPDATE_CHECK: "0",
-  OPENCODE_BROWSER_CHALLENGE_WAIT_MS: "4000",
-  OPENCODE_BROWSER_HUMAN_INPUT: "0",
-}
-delete env.OPENCODE_BROWSER_ALLOW_NODE
-fs.mkdirSync(path.join(runtime, "dist"), { recursive: true })
-// The extension build (`bun run build` at the repo root); the npm package doesn't ship it.
-fs.cpSync(path.join(cliRoot, "..", "dist"), extension, { recursive: true })
-fs.cpSync(path.join(cliRoot, "dist"), path.join(runtime, "dist"), { recursive: true })
-fs.symlinkSync(path.join(cliRoot, "node_modules"), path.join(runtime, "node_modules"), "dir")
-for (const entry of fs.readdirSync(extension, { recursive: true })) {
-  const file = path.join(extension, String(entry))
-  if (/\.(js|json)$/.test(file)) fs.writeFileSync(file, fs.readFileSync(file, "utf8").replaceAll("19988", String(port)))
-}
-const cli = path.join(runtime, "dist/cli.mjs")
-// A one-time code in the folder, as install leaves it: the extension exchanges it for its key.
-writeExtensionPairing(extension, mintPairingCode(home, { ttlMs: bundledPairingCodeTtlMs }))
-
 // ---- fake Deadbolt: the relay finds it through OPENCODE_BROWSER_DEADBOLT_SOCKET and the client file in its home.
 const dbPassword = "Db-Pa55word!q7"
 const dbTotp = "123456"
-const fakeDeadbolt = await startFakeDeadbolt({
-  directory: path.join(root, "db"),
-  logins: [
-    { ref: { vault: "v", item: "alice" }, site, title: "Fixture", username: "alice@example.com", values: { username: "alice@example.com", password: dbPassword, totp: dbTotp }, fields: ["username", "password", "totp"], passkeys: true, passkey: { displayName: "Alice" } },
-    { ref: { vault: "v", item: "carol" }, site, title: "Fixture (carol)", username: "carol", values: { username: "carol" }, fields: [], passkeys: true, passkey: { displayName: "Carol" } },
-    { ref: { vault: "v", item: "bob" }, site, title: "Fixture (bob)", username: "bob", values: { username: "bob", password: "bob-password-x" }, fields: [] },
-  ],
+const scene = await startBrowserScene({
+  ...(options.browser === undefined ? {} : { browser: options.browser }),
+  name: "guarded-browser-",
+  env: {
+    BROWSE_TEST_FIXTURE_PORT: String(fixturePort),
+    OPENCODE_BROWSER_CHALLENGE_WAIT_MS: "4000",
+    OPENCODE_BROWSER_HUMAN_INPUT: "0",
+  },
+  async setup({ home, env }) {
+    const fakeDeadbolt = await startFakeDeadbolt({
+      directory: path.join(path.dirname(home), "db"),
+      logins: [
+        { ref: { vault: "v", item: "alice" }, site, title: "Fixture", username: "alice@example.com", values: { username: "alice@example.com", password: dbPassword, totp: dbTotp }, fields: ["username", "password", "totp"], passkeys: true, passkey: { displayName: "Alice" } },
+        { ref: { vault: "v", item: "carol" }, site, title: "Fixture (carol)", username: "carol", values: { username: "carol" }, fields: [], passkeys: true, passkey: { displayName: "Carol" } },
+        { ref: { vault: "v", item: "bob" }, site, title: "Fixture (bob)", username: "bob", values: { username: "bob", password: "bob-password-x" }, fields: [] },
+      ],
+    })
+    await saveClient(fakeDeadbolt.client, home)
+    env.OPENCODE_BROWSER_DEADBOLT_SOCKET = fakeDeadbolt.socket
+    return fakeDeadbolt
+  },
 })
-await saveClient(fakeDeadbolt.client, home)
-env.OPENCODE_BROWSER_DEADBOLT_SOCKET = fakeDeadbolt.socket
+const { cli, env, base, root, home, setupResult: fakeDeadbolt } = scene
+const authorization = `Bearer ${relayToken(home)}`
 
 const page = (title: string, body: string) => `<!doctype html><title>${title}</title><body>${body}</body>`
 let otherHostHits = 0
@@ -202,7 +165,6 @@ pk.onclick = async () => {
 })
 
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
-let authorization = ""
 async function api(route: string, body?: unknown) {
   const response = await fetch(`${base}${route}`, {
     ...(body === undefined ? {} : { method: "POST", body: JSON.stringify(body) }),
@@ -229,27 +191,9 @@ function filesContaining(directory: string, needle: string, skip: string): strin
   return found
 }
 
-const log = fs.openSync(path.join(root, "relay.log"), "w", 0o600)
-const relay = spawn("node", [cli, "serve"], { env, stdio: ["ignore", log, log] })
-let browser: Awaited<ReturnType<typeof chromium.launchPersistentContext>> | undefined
 const report: Record<string, unknown> = { root }
 try {
   await new Promise<void>((resolve, reject) => { fixture.once("error", reject); fixture.listen(fixturePort, "127.0.0.1", resolve) })
-  for (let i = 0; i < 100; i++) {
-    if (await fetch(`${base}/version`).then(r => r.ok, () => false)) break
-    await pause(50)
-  }
-  authorization = `Bearer ${relayToken(home)}`
-  browser = await chromium.launchPersistentContext(path.join(root, "profile"), {
-    executablePath,
-    headless: true,
-    args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`],
-  })
-  for (let i = 0; i < 100; i++) {
-    if ((await api("/extension/status")).connected) break
-    await pause(100)
-  }
-  assert.equal((await api("/extension/status")).connected, true)
 
   // ---- challenge detection ------------------------------------------------------------------------
   await api("/cli/session/new", { id: "guard-challenge" })
@@ -535,8 +479,6 @@ try {
   console.log(JSON.stringify(report, null, 2))
 } finally {
   await fakeDeadbolt.close()
-  await browser?.close()
-  relay.kill("SIGTERM")
   await new Promise<void>(resolve => fixture.close(() => resolve()))
-  fs.closeSync(log)
+  await scene.stop()
 }

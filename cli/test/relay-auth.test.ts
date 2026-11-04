@@ -10,7 +10,7 @@ import {
   validateBrowserFetchSite,
   validateHostHeader,
   validateWebSocketOrigin,
-} from "../src/relay-helpers.ts"
+} from "../src/relay/origins.ts"
 import {
   browserTokensPath,
   consumePairingCode,
@@ -30,8 +30,8 @@ import {
   sessionProof,
   wrapToken,
   writeExtensionPairing,
-} from "../src/browser-pairing.ts"
-import { relayToken, secretsEqual } from "../src/relay-secrets.ts"
+} from "../src/relay/browser-pairing.ts"
+import { relayToken, secretsEqual } from "../src/relay/secrets.ts"
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-auth-"))
 afterAll(() => fs.rmSync(home, { recursive: true, force: true }))

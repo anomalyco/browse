@@ -1,73 +1,25 @@
 // Isolated headless integration check of the execute sandbox against a real browser:
-//   bun build.ts && node --no-warnings test/execute-realm-browser.ts [--browser <chromium executable>]
+//   bun run build && (cd cli && bun run build) && node --no-warnings test/execute-realm-browser.ts [--browser <chromium executable>]
 // The browser is --browser, else PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH, else patchright-core's own Chromium
-// (`node node_modules/patchright-core/cli.js install chromium`). Ports come from BROWSE_TEST_RELAY_PORT and
+// (`node node_modules/patchright-core/cli.js install chromium`). The temp root, paired relay, port-patched
+// extension and launch come from startBrowserScene; ports come from BROWSE_TEST_RELAY_PORT and
 // BROWSE_TEST_FIXTURE_PORT, or are free ports. Never uses the installed relay, its data or the user's profile.
 import assert from "node:assert/strict"
-import fs from "node:fs"
-import os from "node:os"
-import path from "node:path"
 import http from "node:http"
-import net from "node:net"
-import { spawn, spawnSync } from "node:child_process"
+import { spawn } from "node:child_process"
 import { parseArgs } from "node:util"
-import { chromium } from "patchright-core"
-import { relayToken } from "../src/relay-secrets.ts"
-import { bundledPairingCodeTtlMs, mintPairingCode, writeExtensionPairing } from "../src/browser-pairing.ts"
-
-async function freePort(): Promise<number> {
-  const server = net.createServer()
-  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve) })
-  const { port } = server.address() as net.AddressInfo
-  await new Promise<void>((resolve) => server.close(() => resolve()))
-  return port
-}
-async function portFromEnv(name: string): Promise<number> {
-  const value = process.env[name]
-  if (!value) return await freePort()
-  const port = Number(value)
-  assert.ok(Number.isInteger(port) && port > 0 && port < 65536, `${name} must be a port number`)
-  return port
-}
+import { relayToken } from "../src/relay/secrets.ts"
+import { startBrowserScene } from "./support/browser-scene.ts"
 
 const { values: options } = parseArgs({ options: { browser: { type: "string" } } })
-const executablePath = options.browser || process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || chromium.executablePath()
-assert.ok(fs.existsSync(executablePath), `No Chromium at ${executablePath}: pass --browser, set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH or run \`node node_modules/patchright-core/cli.js install chromium\``)
-const tmp = path.join(fs.realpathSync(os.tmpdir()), "opencode")
-fs.mkdirSync(tmp, { recursive: true })
-const root = fs.mkdtempSync(path.join(tmp, "realm3-browser-"))
-const home = path.join(root, "home")
-const runtime = path.join(root, "runtime")
-const extension = path.join(home, "extension")
-const cliRoot = path.resolve(import.meta.dirname, "..")
-const port = await portFromEnv("BROWSE_TEST_RELAY_PORT")
-const fixturePort = await portFromEnv("BROWSE_TEST_FIXTURE_PORT")
-const fixtureUrl = `http://127.0.0.1:${fixturePort}`
-const base = `http://127.0.0.1:${port}`
-const env: NodeJS.ProcessEnv = { ...process.env, HOME: root, OPENCODE_BROWSER_HOME: home, OPENCODE_BROWSER_PORT: String(port), OPENCODE_BROWSER_UPDATE_CHECK: "0" }
-delete env.OPENCODE_BROWSER_ALLOW_NODE
-delete env.OPENCODE_BROWSER_ALLOW_FOREGROUND
-fs.mkdirSync(path.join(runtime, "dist"), { recursive: true })
-// The extension build (`bun run build` at the repo root); the npm package doesn't ship it.
-fs.cpSync(path.join(cliRoot, "..", "dist"), extension, { recursive: true })
-fs.cpSync(path.join(cliRoot, "dist"), path.join(runtime, "dist"), { recursive: true })
-fs.symlinkSync(path.join(cliRoot, "node_modules"), path.join(runtime, "node_modules"), "dir")
-for (const entry of fs.readdirSync(extension, { recursive: true })) {
-  const file = path.join(extension, String(entry))
-  if (/\.(js|json)$/.test(file)) fs.writeFileSync(file, fs.readFileSync(file, "utf8").replaceAll("19988", String(port)))
-}
-const cli = path.join(runtime, "dist/cli.mjs")
-// A one-time code in the folder, as install leaves it: the extension exchanges it for its key.
-writeExtensionPairing(extension, mintPairingCode(home, { ttlMs: bundledPairingCodeTtlMs }))
-const log = fs.openSync(path.join(root, "relay.log"), "w", 0o600)
-const relay = spawn("node", [cli, "serve"], { env, stdio: ["ignore", log, log] })
-let browser: Awaited<ReturnType<typeof chromium.launchPersistentContext>> | undefined
+const scene = await startBrowserScene({ ...(options.browser === undefined ? {} : { browser: options.browser }), name: "realm3-browser-" })
+const { cli, env, base, fixturePort, fixtureUrl } = scene
+const authorization = `Bearer ${relayToken(scene.home)}`
 const fixture = http.createServer((request, response) => {
   response.setHeader("Content-Type", request.url === "/data" ? "application/json" : "text/html")
   response.end(request.url === "/data" ? '{"ok":true}' : '<title>Realm fixture</title><label>Name<input id="name"></label><button onclick="document.querySelector(\'output\').textContent=document.querySelector(\'input\').value">Save</button><output></output>')
 })
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
-let authorization = ""
 async function api(route: string, body?: unknown) {
   const response = await fetch(`${base}${route}`, {
     ...(body === undefined ? {} : { method: "POST", body: JSON.stringify(body) }),
@@ -92,21 +44,6 @@ function cliExecute(code: string): Promise<Record<string, any>> {
 }
 try {
   await new Promise<void>((resolve, reject) => { fixture.once("error", reject); fixture.listen(fixturePort, "127.0.0.1", resolve) })
-  for (let i = 0; i < 100; i++) {
-    if (await fetch(`${base}/version`).then(r => r.ok, () => false)) break
-    await pause(50)
-  }
-  authorization = `Bearer ${relayToken(home)}`
-  browser = await chromium.launchPersistentContext(path.join(root, "profile"), {
-    executablePath,
-    headless: true,
-    args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`],
-  })
-  for (let i = 0; i < 100; i++) {
-    const status = await api("/extension/status")
-    if (status.connected) break
-    await pause(100)
-  }
   assert.equal((await api("/extension/status")).connected, true)
   await api("/cli/session/new", { id: "realm-e2e" })
   const normal = await cliExecute(`
@@ -197,10 +134,8 @@ try {
   const handlerCpuTimeoutMs = Date.now() - handlerStarted
   assert.ok(handlerCpuTimeoutMs < 5_000)
   assert.equal((await execute("return 7", "realm-loop")).value, 7)
-  console.log(JSON.stringify({ normal: "PASS", persistence: "PASS", handoffTimeout: "PASS", escapes: escapes.length, concurrentCpuTimeoutMs, handlerCpuTimeoutMs, rejectionIsolation: "PASS", recovery: "PASS", root }))
+  console.log(JSON.stringify({ normal: "PASS", persistence: "PASS", handoffTimeout: "PASS", escapes: escapes.length, concurrentCpuTimeoutMs, handlerCpuTimeoutMs, rejectionIsolation: "PASS", recovery: "PASS", root: scene.root }))
 } finally {
-  await browser?.close()
-  relay.kill("SIGTERM")
   await new Promise<void>(resolve => fixture.close(() => resolve()))
-  fs.closeSync(log)
+  await scene.stop()
 }

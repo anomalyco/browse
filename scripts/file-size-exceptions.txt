@@ -1,0 +1,2 @@
+# <path> <ceiling>: line ceilings for source files above 1500 and test files above 1000. Ceilings only go down.
+# Refresh with scripts/file-size.sh --update-exceptions.

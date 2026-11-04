@@ -3,7 +3,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { execFileSync } from "node:child_process"
-import type { BrowserCdp } from "./cdp.ts"
+import { EXTENSION_ID, type BrowserCdp } from "./cdp.ts"
 import { dataDir, relayBase, relayJson } from "./env.ts"
 
 const CLK_TCK = 100
@@ -101,7 +101,7 @@ export class Sampler {
     if (cdp && !cdp.closed) {
       try {
         const targets = await cdp.targets()
-        sample.swAlive = targets.some((t) => t.type === "service_worker" && t.url.includes("afeafocngkodbmaipcngoamamfmekgfo"))
+        sample.swAlive = targets.some((t) => t.type === "service_worker" && t.url.includes(EXTENSION_ID))
         const pages = targets.filter((t) => t.type === "page")
         sample.pageTargets = pages.length
         sample.debuggerAttached = pages.filter((t) => t.attached).length

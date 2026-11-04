@@ -1,10 +1,10 @@
 import { Effect, FileSystem, Path, Schema } from "effect"
-import * as RelayClient from "./relay-client.ts"
-import { relayBuildProblem } from "./relay-lifecycle.ts"
-import type { ExtensionStatus, RelayVersion, SessionSummary, TargetSummary } from "./relay-schema.ts"
+import * as RelayClient from "./relay/client.ts"
+import { relayBuildProblem } from "./relay/lifecycle.ts"
+import type { ExtensionStatus, RelayVersion, SessionSummary, TargetSummary } from "./relay/schema.ts"
 import { extensionProtocolAdvice, extensionProtocolVersion } from "./protocol.ts"
 import { binaryPackage, cliCommand, compiledBinary, devExtension, fromCheckout, installCommand } from "./paths.ts"
-import * as SessionStore from "./session-store.ts"
+import * as SessionStore from "./session-manager/store.ts"
 import type { UpdateJson } from "./update.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "./version.ts"
 
@@ -25,7 +25,7 @@ const PackageMetadata = Schema.Struct({
 })
 
 /** The manifest version of the extension built with this CLI version (scripts/version.ts): 1.2.4-dev.42 is 1.2.4.42. */
-export function extensionManifestVersion(version: string) {
+function extensionManifestVersion(version: string) {
   const match = /^(\d+\.\d+\.\d+)(?:-dev\.(\d+)(?:\.\d+)?)?/.exec(version)
   if (!match) return version
   return match[2] ? `${match[1]}.${match[2]}` : match[1]!
@@ -171,9 +171,8 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
       Effect.orElseSucceed(() => false),
     )
 
-  const [packageResult, distCliExists, distMcpExists, currentResult] = yield* Effect.all([
+  const [packageResult, distCliExists, currentResult] = yield* Effect.all([
     probe(readPackageInfo),
-    fileExists("dist/cli.mjs"),
     fileExists("dist/cli.mjs"),
     probe(store.read),
   ])
@@ -216,7 +215,7 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
   })
   const artifacts: readonly DoctorArtifact[] = compiled
     ? [{ path: process.execPath, exists: true, version: opencodeBrowserVersion }]
-    : [{ path: "dist/cli.mjs", exists: distCliExists && distMcpExists }]
+    : [{ path: "dist/cli.mjs", exists: distCliExists }]
   const checks = buildDoctorChecks({
     packageResult,
     relayResult,
@@ -438,7 +437,7 @@ const makeDoctorCheck = (id: string, label: string) => (status: DoctorCheckStatu
   message,
 })
 
-export function unhealthyTargetsCheck(options: {
+function unhealthyTargetsCheck(options: {
   readonly targetsResult: ProbeResult<readonly TargetSummary[]>
   readonly unhealthyTargets: readonly TargetSummary[]
 }): DoctorCheck {
@@ -452,7 +451,7 @@ export function unhealthyTargetsCheck(options: {
   )
 }
 
-export function relayBuildCheck(options: {
+function relayBuildCheck(options: {
   readonly relayResult: ProbeResult<RelayVersion>
   readonly cliBuildId: string
 }): DoctorCheck {
@@ -499,7 +498,7 @@ function extensionVersionCheck(options: {
   )
 }
 
-export function extensionProtocolCheck(extensionResult: ProbeResult<ExtensionStatus>): DoctorCheck {
+function extensionProtocolCheck(extensionResult: ProbeResult<ExtensionStatus>): DoctorCheck {
   const check = makeDoctorCheck("extension-protocol", "extension protocol")
   if (!extensionResult.ok) {
     return check("warn", extensionResult.error)

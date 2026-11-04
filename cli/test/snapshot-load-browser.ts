@@ -4,31 +4,10 @@
 // OPENCODE_BROWSER_HOME, and BROWSE_TEST_RELAY_PORT / BROWSE_TEST_FIXTURE_PORT (else free ports).
 import assert from "node:assert/strict"
 import fs from "node:fs"
-import os from "node:os"
-import path from "node:path"
 import http from "node:http"
-import net from "node:net"
-import { spawn } from "node:child_process"
 import { parseArgs } from "node:util"
-import { chromium } from "patchright-core"
-import { relayToken } from "../src/relay-secrets.ts"
-import { bundledPairingCodeTtlMs, mintPairingCode, writeExtensionPairing } from "../src/browser-pairing.ts"
-
-async function freePort(): Promise<number> {
-  const server = net.createServer()
-  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve) })
-  const { port } = server.address() as net.AddressInfo
-  await new Promise<void>((resolve) => server.close(() => resolve()))
-  return port
-}
-
-async function portFromEnv(name: string): Promise<number> {
-  const value = process.env[name]
-  if (!value) return await freePort()
-  const port = Number(value)
-  assert.ok(Number.isInteger(port) && port > 0 && port < 65536, `${name} must be a port number`)
-  return port
-}
+import { relayToken } from "../src/relay/secrets.ts"
+import { startBrowserScene } from "./support/browser-scene.ts"
 
 function summarize(values: readonly number[]) {
   const sorted = [...values].sort((left, right) => left - right)
@@ -47,43 +26,14 @@ function summarize(values: readonly number[]) {
 }
 
 const { values: options } = parseArgs({ options: { browser: { type: "string" } } })
-const executablePath = options.browser || process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || chromium.executablePath()
-assert.ok(fs.existsSync(executablePath), `No Chromium at ${executablePath}: pass --browser or set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`)
-
-const tmp = path.join(fs.realpathSync(os.tmpdir()), "opencode")
-fs.mkdirSync(tmp, { recursive: true })
-const root = fs.mkdtempSync(path.join(tmp, "snapshot-load-browser-"))
-const home = path.join(root, "home")
-const runtime = path.join(root, "runtime")
-const extension = path.join(home, "extension")
-const cliRoot = path.resolve(import.meta.dirname, "..")
-const port = await portFromEnv("BROWSE_TEST_RELAY_PORT")
-const fixturePort = await portFromEnv("BROWSE_TEST_FIXTURE_PORT")
-const fixtureUrl = `http://127.0.0.1:${fixturePort}`
-const base = `http://127.0.0.1:${port}`
-const env: NodeJS.ProcessEnv = {
-  ...process.env,
-  HOME: root,
-  OPENCODE_BROWSER_HOME: home,
-  OPENCODE_BROWSER_PORT: String(port),
-  OPENCODE_BROWSER_UPDATE_CHECK: "0",
-  OPENCODE_BROWSER_AUTOSTART: "false",
-}
-delete env.OPENCODE_BROWSER_ALLOW_NODE
-delete env.OPENCODE_BROWSER_ALLOW_FOREGROUND
-
-fs.mkdirSync(path.join(runtime, "dist"), { recursive: true })
-fs.cpSync(path.join(cliRoot, "..", "dist"), extension, { recursive: true })
-fs.cpSync(path.join(cliRoot, "dist"), path.join(runtime, "dist"), { recursive: true })
-fs.symlinkSync(path.join(cliRoot, "node_modules"), path.join(runtime, "node_modules"), "dir")
-for (const entry of fs.readdirSync(extension, { recursive: true })) {
-  const file = path.join(extension, String(entry))
-  if (/\.(js|json)$/.test(file) && fs.statSync(file).isFile()) {
-    fs.writeFileSync(file, fs.readFileSync(file, "utf8").replaceAll("19988", String(port)))
-  }
-}
-const cli = path.join(runtime, "dist/cli.mjs")
-writeExtensionPairing(extension, mintPairingCode(home, { ttlMs: bundledPairingCodeTtlMs }))
+const scene = await startBrowserScene({
+  ...(options.browser === undefined ? {} : { browser: options.browser }),
+  name: "snapshot-load-browser-",
+  extraArgs: ["--use-mock-keychain"],
+  env: { OPENCODE_BROWSER_AUTOSTART: "false" },
+})
+const { root, home, base, fixturePort, fixtureUrl } = scene
+const authorization = `Bearer ${relayToken(home)}`
 
 const htmlPage = (title: string, body: string) =>
   `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head><body>${body}</body></html>`
@@ -101,12 +51,6 @@ const fixture = http.createServer((request, response) => {
   response.end(request.url === "/big-table" ? bigDataTableHtml : bigRowsHtml)
 })
 
-const log = fs.openSync(path.join(root, "relay.log"), "w", 0o600)
-const relay = spawn("node", [cli, "serve"], { env, stdio: ["ignore", log, log] })
-let browser: Awaited<ReturnType<typeof chromium.launchPersistentContext>> | undefined
-const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
-let authorization = ""
-
 async function api(route: string, body?: unknown) {
   const response = await fetch(`${base}${route}`, {
     ...(body === undefined ? {} : { method: "POST", body: JSON.stringify(body) }),
@@ -122,24 +66,6 @@ async function execute(sessionId: string, code: string) {
 
 try {
   await new Promise<void>((resolve, reject) => { fixture.once("error", reject); fixture.listen(fixturePort, "127.0.0.1", resolve) })
-  for (let i = 0; i < 100; i++) {
-    if (await fetch(`${base}/version`).then((r) => r.ok, () => false)) break
-    await pause(50)
-  }
-  authorization = `Bearer ${relayToken(home)}`
-  browser = await chromium.launchPersistentContext(path.join(root, "profile"), {
-    executablePath,
-    headless: true,
-    args: [
-      "--use-mock-keychain",
-      `--disable-extensions-except=${extension}`,
-      `--load-extension=${extension}`,
-    ],
-  })
-  for (let i = 0; i < 100; i++) {
-    if ((await api("/extension/status")).connected) break
-    await pause(100)
-  }
   assert.equal((await api("/extension/status")).connected, true)
 
   // Semantics + single-session timings on 5,000-row layout table and 5,000-row data table.
@@ -240,13 +166,7 @@ try {
     concurrent8x3WarmSnapshotMs: summarize(warmConcurrentMs),
   }))
 } finally {
-  await browser?.close().catch(() => {})
-  relay.kill("SIGTERM")
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(() => { relay.kill("SIGKILL"); resolve() }, 2_000)
-    relay.once("exit", () => { clearTimeout(timer); resolve() })
-  })
+  await scene.stop()
   await new Promise<void>((resolve) => fixture.close(() => resolve()))
-  fs.closeSync(log)
   fs.rmSync(root, { recursive: true, force: true })
 }

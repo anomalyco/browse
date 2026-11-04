@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { appendJournalEntry, journalPathForSession, makeJournalEntry, pruneSessionJournals, readJournalEntries, redactJournalText } from "../src/session-journal.ts"
+import { appendJournalEntry, journalPathForSession, makeJournalEntry, pruneSessionJournals, readJournalEntries, redactJournalText } from "../src/session-manager/journal.ts"
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "browse-journal-"))
 afterAll(() => fs.rmSync(scratch, { recursive: true, force: true }))

@@ -1,0 +1,2 @@
+# <key> <ceiling>: existing folder-shape violations (see scripts/folder-shape.sh). Ceilings only go down.
+# Refresh with scripts/folder-shape.sh --update-exceptions.

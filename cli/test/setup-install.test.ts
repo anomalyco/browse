@@ -3,8 +3,8 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { parse } from "jsonc-parser"
-import { agentLocations, agentNames, callingAgent, editAgentConfig } from "../src/agent-config.ts"
-import { agentFlags, agentPlan } from "../src/agent-picker.ts"
+import { agentLocations, agentNames, callingAgent, editAgentConfig } from "../src/setup/agent-config.ts"
+import { agentFlags, agentPlan } from "../src/setup/agent-picker.ts"
 import { configureMcp, installedExtensionVersion, installedRuntime, installWaitTimeout, locateExtension, manualMcpEntry, pairStoreExtension, relayNotRestarted, remoteRelayAddresses, remoteRelayLines, removeMcp, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
 
 const browser = (name: string): Browser => ({ name, userData: `/data/${name}`, manifests: [], defaultIDs: [], executables: [] })

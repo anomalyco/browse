@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
-import type { ConnectedTarget } from "../src/relay-types.ts"
-import { TabActivity } from "../src/tab-activity.ts"
+import type { ConnectedTarget } from "../src/relay/types.ts"
+import { TabActivity } from "../src/cdp/tab-activity.ts"
 
 const target = (tabId: number, owner: "relay" | "user"): ConnectedTarget => ({
   tabId,

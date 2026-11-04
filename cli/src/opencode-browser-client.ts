@@ -1,13 +1,13 @@
 import { NodeHttpClient } from "@effect/platform-node"
 import { Context, Effect, Layer, Match, Redacted, Schema } from "effect"
-import * as AuthenticatedOriginInternal from "./authenticated-origin.ts"
-import * as RelayClient from "./relay-client.ts"
-import * as RelayLifecycle from "./relay-lifecycle.ts"
+import * as AuthenticatedOriginInternal from "./auth/authenticated-origin.ts"
+import * as RelayClient from "./relay/client.ts"
+import * as RelayLifecycle from "./relay/lifecycle.ts"
 import type {
   AuthenticatedJsonMethod,
   AuthenticatedJsonOutcome,
   SessionSummary,
-} from "./relay-schema.ts"
+} from "./relay/schema.ts"
 
 export type Json = Schema.Schema.Type<typeof Schema.Json>
 
@@ -252,30 +252,30 @@ export function origin(originUrl: string, options: OriginClientOptions): OriginC
       Effect.flatMap((cap) => cap.json(request as JsonOptions<Schema.Top> & { readonly sensitive?: false })),
     )) as AuthenticatedOriginCapability["json"]
 
+  const callJson = async <T = unknown>(
+    method: "GET" | "POST",
+    path: `/${string}`,
+    callOptions?: { readonly headers?: Readonly<Record<string, string>>; readonly timeoutMs?: number },
+    body?: Json,
+  ): Promise<T> => {
+    const cap = await resolveOrigin()
+    return (await Effect.runPromise(cap.json({
+      path,
+      method,
+      ...(body === undefined ? {} : { body }),
+      ...(callOptions?.headers ? { headers: callOptions.headers } : {}),
+      ...(callOptions?.timeoutMs === undefined ? {} : { timeoutMs: callOptions.timeoutMs }),
+      response: Schema.Json,
+    }))) as T
+  }
+
   return {
     origin: normalizedOrigin,
     session: options.session,
-    get: async <T = unknown>(path: `/${string}`, callOptions?: { readonly headers?: Readonly<Record<string, string>>; readonly timeoutMs?: number }) => {
-      const cap = await resolveOrigin()
-      return (await Effect.runPromise(cap.json({
-        path,
-        method: "GET",
-        ...(callOptions?.headers ? { headers: callOptions.headers } : {}),
-        ...(callOptions?.timeoutMs === undefined ? {} : { timeoutMs: callOptions.timeoutMs }),
-        response: Schema.Json,
-      }))) as T
-    },
-    post: async <T = unknown>(path: `/${string}`, body?: Json, callOptions?: { readonly headers?: Readonly<Record<string, string>>; readonly timeoutMs?: number }) => {
-      const cap = await resolveOrigin()
-      return (await Effect.runPromise(cap.json({
-        path,
-        method: "POST",
-        ...(body === undefined ? {} : { body }),
-        ...(callOptions?.headers ? { headers: callOptions.headers } : {}),
-        ...(callOptions?.timeoutMs === undefined ? {} : { timeoutMs: callOptions.timeoutMs }),
-        response: Schema.Json,
-      }))) as T
-    },
+    get: <T = unknown>(path: `/${string}`, callOptions?: { readonly headers?: Readonly<Record<string, string>>; readonly timeoutMs?: number }) =>
+      callJson<T>("GET", path, callOptions),
+    post: <T = unknown>(path: `/${string}`, body?: Json, callOptions?: { readonly headers?: Readonly<Record<string, string>>; readonly timeoutMs?: number }) =>
+      callJson<T>("POST", path, callOptions, body),
     json,
   }
 }

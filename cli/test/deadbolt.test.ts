@@ -2,9 +2,9 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import * as Deadbolt from "../src/deadbolt.ts"
-import { parsePasskeyRequest, rpIdAllowed } from "../src/passkey-bridge.ts"
-import { codeKind, defaultSite } from "../src/sign-in.ts"
+import * as Deadbolt from "../src/auth/deadbolt.ts"
+import { parsePasskeyRequest, rpIdAllowed } from "../src/auth/passkey-bridge.ts"
+import { codeKind, defaultSite } from "../src/auth/sign-in.ts"
 import { startFakeDeadbolt, type FakeDeadbolt } from "./fake-deadbolt.ts"
 
 const tempDir = () => fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "db-"))

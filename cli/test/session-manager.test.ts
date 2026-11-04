@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test"
 import { Effect, Fiber } from "effect"
 import { boundExecuteResult, maxExecuteResultChars, type ExecuteResult } from "../src/execute.ts"
 import { ExecuteRealm } from "../src/execute-realm.ts"
-import { HandoffRegistry } from "../src/handoff.ts"
-import type { ConnectedTarget, ExecuteSandboxLike } from "../src/relay-types.ts"
+import { HandoffRegistry } from "../src/session-manager/handoff.ts"
+import type { ConnectedTarget, ExecuteSandboxLike } from "../src/relay/types.ts"
 import { OpenCodeBrowserSessions } from "../src/session-manager.ts"
 
 const ok = (text: string): ExecuteResult => ({

@@ -36,19 +36,18 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
 })
 
 async function handleMessage(message: OffscreenMessage): Promise<OffscreenResult> {
-  if (message.action === "recording.start") {
-    return handleStartRecording(message)
+  switch (message.action) {
+    case "recording.start":
+      return handleStartRecording(message)
+    case "recording.stop":
+      return handleStopRecording(message)
+    case "recording.status":
+      return handleStatusRecording(message)
+    case "recording.cancel":
+      return handleCancelRecordingForTab(message.tabId)
+    case "recording.cancelAll":
+      return handleCancelAllRecordings()
   }
-  if (message.action === "recording.stop") {
-    return handleStopRecording(message)
-  }
-  if (message.action === "recording.status") {
-    return handleStatusRecording(message)
-  }
-  if (message.action === "recording.cancel") {
-    return handleCancelRecordingForTab(message.tabId)
-  }
-  return handleCancelAllRecordings()
 }
 
 function stopMediaTracks(stream: MediaStream | undefined) {

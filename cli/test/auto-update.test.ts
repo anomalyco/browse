@@ -3,8 +3,8 @@ import { spawnSync } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { channelOf, compareVersions, createAutoUpdater, installVersion, pruneVersions, readCurrent, readState, runtimeLayout, switchVersion, tarFile, updateState, validatePending, versionEntry, writeCurrent, type Layout } from "../src/auto-update.ts"
-import { managedRelayLaunch } from "../src/relay-lifecycle.ts"
+import { channelOf, compareVersions, createAutoUpdater, installVersion, pruneVersions, readCurrent, readState, runtimeLayout, switchVersion, tarFile, updateState, validatePending, versionEntry, writeCurrent, type Layout } from "../src/update/auto-update.ts"
+import { managedRelayLaunch } from "../src/relay/lifecycle.ts"
 
 const roots: string[] = []
 afterEach(() => {

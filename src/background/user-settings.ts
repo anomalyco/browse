@@ -4,14 +4,15 @@ import {
   AGENT_CURSOR_KEY,
   AGENT_GROUPING_KEY,
   AGENT_WINDOW_KEY,
-  DEFAULT_IDLE_MINUTES,
   HANDOFF_NOTIFICATIONS_KEY,
   HUMAN_INPUT_KEY,
   IDLE_MINUTES_KEY,
   agentCursor,
   agentGrouping,
+  agentWindowPlacement,
   handoffNotifications,
   humanInput,
+  idleMinutesSetting,
 } from "../shared/protocol"
 
 // The status page's settings for the relay's settings tool (`settings.get`, `settings.set`; cli/src/user-settings.ts).
@@ -41,12 +42,11 @@ const values: Record<Key, readonly (string | number)[]> = {
 /** Every setting as the background reads it (unknown stored values read as the default). */
 export async function read(): Promise<JsonObject> {
   const stored = await chrome.storage.local.get(Object.values(keys))
-  const idle = stored[IDLE_MINUTES_KEY]
   return {
     settings: {
-      window: stored[AGENT_WINDOW_KEY] === "separate" ? "separate" : "current",
+      window: agentWindowPlacement(stored[AGENT_WINDOW_KEY]),
       grouping: agentGrouping(stored[AGENT_GROUPING_KEY]),
-      idleMinutes: typeof idle === "number" && Number.isFinite(idle) && idle >= 0 ? idle : DEFAULT_IDLE_MINUTES,
+      idleMinutes: idleMinutesSetting(stored[IDLE_MINUTES_KEY]),
       cursor: agentCursor(stored[AGENT_CURSOR_KEY]),
       humanInput: humanInput(stored[HUMAN_INPUT_KEY]),
       handoffNotifications: handoffNotifications(stored[HANDOFF_NOTIFICATIONS_KEY]),

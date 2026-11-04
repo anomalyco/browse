@@ -1,14 +1,14 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
 import fs from "node:fs"
-import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import { createInterface } from "node:readline"
 import WebSocket from "ws"
 import { bundleCli } from "../bundle.ts"
-import { processAlive, readCurrent, readState, runtimeLayout, versionEntry, writeCurrent, writeShim, type Layout } from "../src/auto-update.ts"
-import { relayToken } from "../src/relay-secrets.ts"
+import { processAlive, readCurrent, readState, runtimeLayout, versionEntry, writeCurrent, writeShim, type Layout } from "../src/update/auto-update.ts"
+import { relayToken } from "../src/relay/secrets.ts"
+import { freePort } from "./support/ports.ts"
 
 // An npm install's runtime in a temporary data root, with two real versions of this CLI (bundled from source as 0.0.1
 // and 0.0.2), a relay running 0.0.1, and a fake registry whose tarball download never finishes. Node runs the relay, as
@@ -22,14 +22,6 @@ let relayPort = 0
 let registry: ReturnType<typeof Bun.serve> | undefined
 let relay: ChildProcess | undefined
 const started: number[] = []
-
-async function freePort(): Promise<number> {
-  const server = net.createServer()
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
-  const { port } = server.address() as net.AddressInfo
-  await new Promise<void>((resolve) => server.close(() => resolve()))
-  return port
-}
 
 /** One installed version: the bundle, its package.json, and the CLI's dependencies linked beside it. */
 async function installFake(target: Layout, version: string) {
@@ -76,10 +68,14 @@ function cdp(): Promise<WebSocket> {
 
 function cdpCall(socket: WebSocket, id: number, method: string) {
   return new Promise<{ result?: Record<string, unknown> }>((resolve) => {
-    socket.on("message", (data) => {
+    const onMessage = (data: WebSocket.RawData) => {
       const message = JSON.parse(String(data)) as { id?: number }
-      if (message.id === id) resolve(message as { result?: Record<string, unknown> })
-    })
+      if (message.id === id) {
+        socket.off("message", onMessage)
+        resolve(message as { result?: Record<string, unknown> })
+      }
+    }
+    socket.on("message", onMessage)
     socket.send(JSON.stringify({ id, method }))
   })
 }

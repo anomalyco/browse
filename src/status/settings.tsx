@@ -19,14 +19,15 @@ import {
   AGENT_GROUPING_KEY,
   AGENT_WINDOW_KEY,
   BROWSER_NAME_KEY,
-  DEFAULT_IDLE_MINUTES,
   HANDOFF_NOTIFICATIONS_KEY,
   HUMAN_INPUT_KEY,
   IDLE_MINUTES_KEY,
   agentCursor,
   agentGrouping,
+  agentWindowPlacement,
   handoffNotifications,
   humanInput,
+  idleMinutesSetting,
   type AgentRelayState,
   type AutoUpdateMode,
   type RelayOverrides,
@@ -43,11 +44,9 @@ function Settings() {
   const relay = createRelay()
   const state = relay.state
 
-  const [agentWindow, setAgentWindow] = createStored(AGENT_WINDOW_KEY, (value) => (value === "separate" ? "separate" : "current"))
+  const [agentWindow, setAgentWindow] = createStored(AGENT_WINDOW_KEY, agentWindowPlacement)
   const [grouping, setGrouping] = createStored(AGENT_GROUPING_KEY, agentGrouping)
-  const [idle, setIdle] = createStored(IDLE_MINUTES_KEY, (value) =>
-    typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : DEFAULT_IDLE_MINUTES,
-  )
+  const [idle, setIdle] = createStored(IDLE_MINUTES_KEY, idleMinutesSetting)
   const [cursor, setCursor] = createStored(AGENT_CURSOR_KEY, agentCursor)
   const [human, setHuman] = createStored(HUMAN_INPUT_KEY, humanInput)
   const [notifications, setNotifications] = createStored(HANDOFF_NOTIFICATIONS_KEY, handoffNotifications)

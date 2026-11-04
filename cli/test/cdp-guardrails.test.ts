@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { guardCdpMethod, scopeCdpResult } from "../src/cdp-guardrails.ts"
+import { guardCdpMethod, scopeCdpResult } from "../src/cdp/guardrails.ts"
 
 const pageUrls = () => ["https://app.example.com/dashboard", "chrome://newtab/"]
 const cookies = [

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { challengeWarning, classifyChallenge, type ChallengeProbe } from "../src/challenge-detection.ts"
+import { challengeWarning, classifyChallenge, type ChallengeProbe } from "../src/execute/challenge-detection.ts"
 
 function probe(overrides: Partial<ChallengeProbe>): ChallengeProbe {
   const text = overrides.text ?? ""

@@ -1,5 +1,5 @@
 export * as TabCleanup from "./tab-cleanup"
-import { DEFAULT_IDLE_MINUTES, IDLE_MINUTES_KEY } from "../shared/protocol"
+import { DEFAULT_IDLE_MINUTES, IDLE_MINUTES_KEY, idleMinutesSetting } from "../shared/protocol"
 
 // Closes tabs agents opened once nobody has touched them for a while, so agent work doesn't leave a trail of
 // tabs behind. Only tabs an agent created are tracked (the relay's
@@ -10,8 +10,6 @@ import { DEFAULT_IDLE_MINUTES, IDLE_MINUTES_KEY } from "../shared/protocol"
 type Tracked = { touched: number }
 
 const STORAGE_KEY = "tabCleanup"
-/** chrome.storage.local (the status page's "Close idle agent tabs"): minutes a tracked tab may sit unused before it closes; 0 never. */
-export { DEFAULT_IDLE_MINUTES, IDLE_MINUTES_KEY }
 const ALARM = "opencode-browser-tab-cleanup"
 
 const tracked = new Map<number, Tracked>()
@@ -54,8 +52,7 @@ export function guard(check: (tabId: number) => boolean) {
 
 /** The setting: minutes before an untouched agent tab closes, 0 for never. */
 export async function idleMinutes() {
-  const value = (await chrome.storage.local.get(IDLE_MINUTES_KEY))[IDLE_MINUTES_KEY]
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : DEFAULT_IDLE_MINUTES
+  return idleMinutesSetting((await chrome.storage.local.get(IDLE_MINUTES_KEY))[IDLE_MINUTES_KEY])
 }
 
 /**
@@ -128,8 +125,8 @@ function flush() {
     .catch(() => undefined)
 }
 
-/** Resolves once every pending write has reached storage (tests). */
-export async function flushed() {
+/** Resolves once every pending write has reached storage. */
+async function flushed() {
   if (saveTimer !== undefined) flush()
   await writes
 }

@@ -68,7 +68,7 @@ export async function sync(tabId: number, page: PageStatus | undefined, sessionN
 }
 
 /** The setting: "recording" (notify only while the tab is recorded, the default) or "always". */
-export async function mode() {
+async function mode() {
   return handoffNotifications((await chrome.storage.local.get(HANDOFF_NOTIFICATIONS_KEY))[HANDOFF_NOTIFICATIONS_KEY])
 }
 
