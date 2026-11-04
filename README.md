@@ -89,8 +89,9 @@ npx @opencode/browse install -y       # detected clients in an ordinary shell (-
 
 Inside a recognized agent, `install` targets that caller automatically. Without a terminal it configures the caller
 if known, adds OpenCode if installed, and prints commands for other detected clients. No other client is added by
-default in scripts. Re-running install is additive: unchecking a client skips it, not a removal. `uninstall` removes
-the entries browse wrote, not unrelated servers or conflicting entries.
+default in scripts. Flagged and scripted runs are additive (`-a claude` leaves other clients alone); unchecking a
+client in the interactive picker removes the entry browse wrote, and `uninstall` removes all of them without touching
+unrelated servers or conflicting entries.
 
 <details><summary>Supported agents and user-level config files</summary>
 
@@ -359,8 +360,9 @@ Escape hatches. Set them in the environment you start opencode (or your MCP clie
 - `node cli/dist/cli.mjs status` shows the relay, the extension and every tab agents can use.
 - `node cli/dist/cli.mjs doctor` checks the install.
 - Logs: `~/.local/share/opencode-browser/logs/relay.log`.
-- Extension says another browser is connected: only one browser profile can be connected at a time. Close the other
-  one, then click **Reconnect** on the status page.
+- Several browsers or profiles can connect to one relay at the same time (run `npx @opencode/browse pair` for each
+  additional browser, or `node cli/dist/cli.mjs pair` from a checkout). If an older extension says another browser is
+  connected, reload or update browse and click **Reconnect** on the settings page.
 - Extension says it's not paired (or that the relay was refused): run `bun run setup` again, then reload the extension
   on your browser's extensions page.
 - **Load unpacked** fails, or the extension shows errors: load the `browse/dist` folder (built by `setup`), not

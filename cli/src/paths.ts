@@ -66,8 +66,9 @@ export function checkoutRoot(): string | undefined {
 const quoted = (value: string) => (/^[\w@%+=:,./-]+$/.test(value) ? value : JSON.stringify(value))
 
 /**
- * How to tell the user to run `opencode-browser <args>`: through npx from the published package, and with this
- * checkout's bundle from a checkout (where nothing is on PATH and the package may not be published).
+ * How to tell the user to run `opencode-browser <args>`: through npx from the published package (the dev channel when
+ * this build carries a dev extension; see npxCommand), and with this checkout's bundle from a checkout (where nothing is
+ * on PATH and the package may not be published).
  */
 export function cliCommand(args: string): string {
   if (compiledBinary()) {
@@ -83,7 +84,7 @@ export function cliCommand(args: string): string {
   const shim = path.join(dataRoot(), "bin", "opencode-browser.mjs")
   const versions = path.join(dataRoot(), "runtime", "versions")
   if (!path.relative(versions, packageRoot()).startsWith("..") && fs.existsSync(shim)) return `node ${quoted(shim)} ${args}`
-  return `npx @opencode/browse ${args}`
+  return npxCommand(args)
 }
 
 declare global {
@@ -124,6 +125,17 @@ export function devExtension(baked = globalThis.__OPENCODE_BROWSER_EXTENSION__):
   return baked && /^[0-9a-f]{64}$/.test(baked.sha256) && /^[\w.-]+\.zip$/.test(baked.file) ? baked : undefined
 }
 
+/**
+ * How to tell the user to run the published package with `args`: a dev build carries a dev extension (devExtension),
+ * whose extension only the dev channel publishes, so it runs `@opencode/browse@dev`; stable builds run the default tag.
+ * Checkouts and installed runtimes take their own branches in cliCommand/installCommand, so they never see this. Going
+ * through devExtension() rather than the baked global keeps its sha256/filename validation and build.ts's substitution
+ * in one place.
+ */
+export function npxCommand(args: string, dev = devExtension()): string {
+  return `npx @opencode/browse${dev ? "@dev" : ""} ${args}`
+}
+
 /** Where the release service serves a file; OPENCODE_BROWSER_RELEASE_SERVICE points it elsewhere (tests; the sha256 is still checked). */
 export const devExtensionUrl = (extension: DevExtension, env: NodeJS.ProcessEnv = process.env) =>
   `${(env.OPENCODE_BROWSER_RELEASE_SERVICE || RELEASE_SERVICE).replace(/\/+$/, "")}/browse/files/${extension.sha256}/${extension.file}`
@@ -134,8 +146,8 @@ export const devExtensionFolder = (root = dataRoot()) => path.join(root, "extens
 /** The store page of an item. */
 export const storeUrl = (id: string) => `https://chromewebstore.google.com/detail/${id}`
 
-/** How to tell the user to install (or update) browse. */
+/** How to tell the user to install (or update) browse; the npx form follows the dev channel when this build carries a dev extension. */
 export function installCommand(): string {
   if (compiledBinary()) return cliCommand("install")
-  return fromCheckout() ? `cd ${quoted(path.dirname(packageRoot()))} && bun run setup` : "npx @opencode/browse install"
+  return fromCheckout() ? `cd ${quoted(path.dirname(packageRoot()))} && bun run setup` : npxCommand("install")
 }

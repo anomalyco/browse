@@ -77,12 +77,14 @@ import {
   readJson,
   STORE_IDS,
   STORE_URL,
+  stableNodePath,
   tilde,
   unpackedFolder,
   type Settings,
 } from "./setup/environment.ts"
 import {
   locateExtension,
+  pairedOfflineApplies,
   pairStoreExtension,
   waitForExtension,
   type LocateOptions,
@@ -144,6 +146,34 @@ function checkNode() {
     )
 }
 
+/** How install stops without finishing: a cancelled picker, a picker with nothing selected, Ctrl+C while waiting, or the timeout. */
+export type InstallStop = "cancelled" | "none-selected" | "skipped" | "timeout"
+
+/** 130 for a cancelled picker, 1 only when waiting timed out: skipping the wait and picking no agents are both clean. */
+export function installExitCode(stop: InstallStop) {
+  return stop === "cancelled" ? 130 : stop === "timeout" ? 1 : 0
+}
+
+/**
+ * Whether the scan is checked for an old store build. An unpacked install (a checkout's dist/ or a dev install's folder)
+ * runs its own build, so a store copy left in another profile must not abort it.
+ */
+export function storeCheckNeeded(folder: string | undefined, connected: boolean) {
+  return !folder && !connected
+}
+
+/**
+ * What a picker left unchecked: the recorded agents to take browse out of, and the OpenCode configs to clean when
+ * OpenCode itself wasn't chosen.
+ */
+export function removalsFor(previous: Settings | undefined, opencodeConfigs: string[], selected: readonly AgentName[]) {
+  const keep = new Set<AgentName>(selected)
+  return {
+    opencodeConfigs: selected.includes("opencode") ? [] : [...opencodeConfigs],
+    agents: (previous?.agents ?? []).filter((receipt) => !keep.has(receipt.name)),
+  }
+}
+
 async function install(args: string[]) {
   const tty = !!(process.stdin.isTTY && process.stdout.isTTY)
   const caller = callingAgent(process.env)
@@ -201,18 +231,21 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
   const onPath = args.includes("--no-modify-path") ? undefined : addToPath()
   if (onPath) log(`✓ Added browse to your PATH (${tilde(onPath)}). Open a new terminal to use it.`)
 
+  // An npm or checkout install runs the MCP server under a stable Node on PATH; a binary install's executable runs by itself.
+  const node = scriptEntry(entry) ? stableNodePath() : undefined
+
   // First the entry for any agent, then the agents install can set up itself: nobody is stuck if theirs isn't found.
   const anyFound = locations.some((a) => a.installed)
   byHand = plan.picker ? !anyFound : plan.selected.length === 0
-  showManualMcp(entryCommand(entry), caller)
+  showManualMcp(entryCommand(entry, node), caller)
   const selected = plan.picker ? (anyFound ? await pickAgents(locations, plan.selected) : []) : plan.selected
   if (!selected) {
-    process.exitCode = 130
+    process.exitCode = installExitCode("cancelled")
     return
   }
   if (plan.picker && anyFound) byHand = selected.length === 0
-  const agents = previous?.agents ?? []
-  const opencodeConfigs = previous?.opencodeConfigs ?? (previous?.entry ? [configFile()] : [])
+  const agents = previous?.agents ? [...previous.agents] : []
+  const opencodeConfigs = previous?.opencodeConfigs ? [...previous.opencodeConfigs] : previous?.entry ? [configFile()] : []
   const selectedAgents = plan.picker ? selected : remembered
   const save = () =>
     writeFileSync(
@@ -232,9 +265,34 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
     )
   save()
   if (removeLegacyHost()) log("✓ Removed the native messaging host of an earlier version")
+  if (plan.picker && anyFound) {
+    // Takes browse out of what the picker left unchecked: earlier OpenCode configs, then recorded agents. Best effort,
+    // like uninstall: an entry changed since install, or a file that can't be parsed, is left alone and logged.
+    const removals = removalsFor(previous, opencodeConfigs, selected)
+    for (const file of removals.opencodeConfigs) {
+      if (!removeMcp(MCP_NAME, previous?.entry, file)) continue
+      const i = opencodeConfigs.indexOf(file)
+      if (i !== -1) opencodeConfigs.splice(i, 1)
+      log(`✓ Removed browse from OpenCode (${tilde(file)})`)
+    }
+    for (const receipt of removals.agents) {
+      const label = agentLabels[receipt.name]
+      try {
+        const result = editAgentConfig(receipt, true)
+        if (result === "removed") {
+          const i = agents.findIndex((a) => a.file === receipt.file)
+          if (i !== -1) agents.splice(i, 1)
+          log(`✓ Removed browse from ${label} (${tilde(receipt.file)})`)
+        } else if (result === "conflict") {
+          log(`! ${label} has a changed browse server in ${tilde(receipt.file)}; left it unchanged.`)
+        }
+      } catch {
+        log(`! Couldn't remove browse from ${tilde(receipt.file)} for ${label}. Check its syntax and permissions.`)
+      }
+    }
+    save()
+  }
 
-  // An npm or checkout install runs the MCP server under this Node; a binary install's executable runs by itself.
-  const node = scriptEntry(entry) ? process.execPath : undefined
   for (const agent of locations) {
     const label = agentLabels[agent.name]
     if (!selected.includes(agent.name)) {
@@ -243,7 +301,7 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
       continue
     }
     if (agent.name === "opencode") {
-      const mcp = configureMcp(agent.file, entry, previous?.entry)
+      const mcp = configureMcp(agent.file, entry, previous?.entry, node)
       if (mcp && !opencodeConfigs.includes(agent.file)) {
         opencodeConfigs.push(agent.file)
         save()
@@ -261,14 +319,10 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
       continue
     }
     const receipt: AgentReceipt = { name: agent.name, file: agent.file, entry, ...(node ? { node } : {}) }
+    // What an earlier install recorded here (an npm install before a binary one, or another Node): replace in place.
+    const prior = previous?.agents?.find((a) => a.file === agent.file && a.name === agent.name)
     try {
-      // What an earlier install wrote here (an npm install before this binary one, or another Node): replace it.
-      const prior = agents.find((a) => a.file === agent.file && a.name === agent.name)
-      if (prior && (prior.entry !== receipt.entry || prior.node !== receipt.node) && editAgentConfig(prior, true) === "removed") {
-        agents.splice(agents.indexOf(prior), 1)
-        save()
-      }
-      const result = editAgentConfig(receipt)
+      const result = editAgentConfig(receipt, false, prior)
       if (result === "added") {
         const i = agents.findIndex((a) => a.file === agent.file)
         if (i !== -1) agents.splice(i, 1)
@@ -280,7 +334,9 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
         result === "conflict"
           ? `! ${label} already has a different server named browse in ${tilde(agent.file)}; left it unchanged.`
           : result === "added"
-            ? `✓ Added browse to ${label} (${tilde(agent.file)})`
+            ? prior
+              ? `✓ Updated browse in ${label} (${tilde(agent.file)})`
+              : `✓ Added browse to ${label} (${tilde(agent.file)})`
             : `✓ ${label} already has browse`,
       )
     } catch {
@@ -303,8 +359,9 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
   const connected = initial?.connected ? initial : undefined
   const pairedOffline = initial?.pairingState === "paired-offline"
   const folder = unpackedFolder()
-  if (folder && !pairedOffline) {
+  if (folder) {
     // The unpacked extension finds a one-time code in its own folder and exchanges it for its key, without a step.
+    // Refresh it on every run: a paired browser keeps its key, and a new or re-added one needs a fresh code.
     pairUnpacked()
     // A browser already running an older unpacked build keeps its old code until it reloads; ask it to.
     const reload = connected ? await reloadOutdatedExtension(connected, folder) : "current"
@@ -340,23 +397,25 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
     process.exitCode = 1
     return false
   }
-  if (!connected && !checkStore(detections)) return
+  if (storeCheckNeeded(folder, !!connected) && !checkStore(detections)) return
   const env = {
     ssh,
     display: process.platform !== "linux" || !!(process.env.DISPLAY || process.env.WAYLAND_DISPLAY),
     tty,
     platform: process.platform,
   }
+  // A closed browser only explains a disconnect when one here actually has browse: after a removal, guide reinstalling it.
+  const offline = pairedOfflineApplies(pairedOffline, detections, ssh)
   const found = locateExtension({
     allowOpen: !args.includes("--no-open"),
     connected: !!connected,
-    pairedOffline,
+    pairedOffline: offline,
     ...(folder ? { folder } : {}),
     detections,
     preferred: ssh ? undefined : defaultBrowser(detections.map((detection) => detection.browser)),
     env,
   })
-  if (connected || found === "off" || pairedOffline || (!folder && !STORE_URL)) return
+  if (connected || found === "off" || offline || (!folder && !STORE_URL)) return
   ensureRelay(entry)
   let code: string | undefined
   const pairingCode = () =>
@@ -394,18 +453,19 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
     if (env.tty) log(next)
     return
   }
+  let stopped = false
+  const stop = () => {
+    stopped = true
+  }
   if (rail.active)
     (rail.waiting = clack.spinner({
       cancelMessage: "Stopped waiting",
       onCancel: () => {
         rail.waiting = undefined
+        stopped = true
       },
     })).start("Waiting for browse to connect in your browser (Ctrl+C to skip)")
   else log(`Waiting for browse to connect (up to ${timeoutMs / 1000}s; Ctrl+C to skip)…`)
-  let stopped = false
-  const stop = () => {
-    stopped = true
-  }
   process.once("SIGINT", stop)
   try {
     const deadline = Date.now() + timeoutMs
@@ -424,27 +484,66 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
       await new Promise((resolve) => setTimeout(resolve, Math.max(0, Math.min(1000, deadline - Date.now()))))
     } while (!stopped && Date.now() < deadline)
     if (!env.tty) return log(`! Not connected yet. ${agentNext()}`)
+    // Ctrl+C skipped the wait: nothing failed, so leave the exit code as it was and say how to finish.
+    if (stopped)
+      return log(`! Stopped waiting for browse to connect. Run \`${cliCommand("install")}\` again when it's open to finish.`)
     log(`! Not connected yet. ${code ? manualPair(pairingCode()) : next}`)
-    process.exitCode = 1
+    process.exitCode = installExitCode("timeout")
   } finally {
     process.off("SIGINT", stop)
   }
 }
 
-/** Printed before the relay's status by `opencode-browser status`. */
-export function printSetupStatus() {
-  const settings = readJson<Settings>(files.settings)
-  const runtime = installedRuntime(settings, mcpServers()[MCP_NAME])
-  log(
+export type SetupStatusInput = {
+  settings: Settings | undefined
+  runtime: ReturnType<typeof installedRuntime>
+  opencode: string | undefined
+  mcpConfigured: boolean
+  autoUpdate: string
+  logs: string
+}
+
+/**
+ * The lines `status` prints before the relay's: when OpenCode isn't configured but install wrote browse into other
+ * agents, name those instead of saying nothing is configured.
+ */
+export function setupStatusLines(input: SetupStatusInput): string[] {
+  const { settings, runtime, opencode, mcpConfigured } = input
+  const agents = settings?.agents ?? []
+  const named = agents.map((receipt) => agentLabels[receipt.name])
+  return [
     runtime
       ? `Setup:     installed${runtime.source ? " (from source)" : ""}`
       : `Setup:     not installed. Run \`${installCommand()}\`.`,
-  )
-  log(`Version:   ${runtime ? `${runtime.version ?? "unknown"} (${runtime.entry})` : "not installed"}`)
-  log(`opencode:  ${settings?.opencode ?? findOpencode([]) ?? "not found"}`)
-  log(mcpServers()[MCP_NAME] ? `MCP:       "${MCP_NAME}" configured` : "MCP:       not configured")
-  log(describeAutoUpdate(autoUpdateStatus({ layout })))
-  log(`Logs:      ${path.join(files.dir, "logs")}`)
+    `Version:   ${runtime ? `${runtime.version ?? "unknown"} (${runtime.entry})` : "not installed"}`,
+    opencode
+      ? `opencode:  ${opencode}`
+      : named.length
+        ? `Agents:    ${agents.map((receipt, i) => `${named[i]} (${receipt.file})`).join(", ")}`
+        : `opencode:  not found`,
+    mcpConfigured
+      ? `MCP:       "${MCP_NAME}" configured`
+      : named.length
+        ? `MCP:       "${MCP_NAME}" configured in ${named.join(", ")}`
+        : `MCP:       not configured`,
+    input.autoUpdate,
+    `Logs:      ${input.logs}`,
+  ]
+}
+
+/** Printed before the relay's status by `opencode-browser status`. */
+export function printSetupStatus() {
+  const settings = readJson<Settings>(files.settings)
+  const server = mcpServers()[MCP_NAME]
+  for (const line of setupStatusLines({
+    settings,
+    runtime: installedRuntime(settings, server),
+    opencode: settings?.opencode ?? findOpencode([]),
+    mcpConfigured: !!server,
+    autoUpdate: describeAutoUpdate(autoUpdateStatus({ layout })),
+    logs: path.join(files.dir, "logs"),
+  }))
+    log(line)
   log("")
 }
 

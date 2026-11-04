@@ -23,7 +23,7 @@ import {
 } from "./browser-pairing.ts"
 import { installedDevExtension } from "../setup/dev-extension.ts"
 import type { ExtensionCommandInput } from "./rpc.ts"
-import { cliCommand, fromCheckout, installCommand, oldStoreMarker, storeUrl } from "../paths.ts"
+import { cliCommand, devExtension, fromCheckout, installCommand, oldStoreMarker, storeUrl } from "../paths.ts"
 import {
   checkoutReloadPrefix,
   extensionProtocolAdvice,
@@ -58,11 +58,48 @@ type Challenge = {
   readonly issue?: string
 }
 
+/** A refused pairing, and the pending codes it was refused against. */
+export type PairingRefusal = {
+  readonly at: number
+  readonly reason: string
+  /** The pending code keys when the refusal happened: one outside them was minted since (`pair` runs elsewhere). */
+  readonly codes: readonly string[]
+}
+
+// One relay runs per process, and `pair` mints codes from another process, so the refusal is process-wide and is
+// decided against the persisted codes file rather than an in-memory window.
+let pairingRefusal: PairingRefusal | undefined
+
+/** Records a refusal against the codes pending now, replacing any older one. A newer code or a real connection ends it. */
+export function notePairingRefusal(reason: string, options: { readonly now?: number; readonly codes?: readonly string[] } = {}): PairingRefusal {
+  const now = options.now ?? Date.now()
+  const refusal = { at: now, reason, codes: options.codes ?? pendingPairingCodeKeys(undefined, now) }
+  pairingRefusal = refusal
+  return refusal
+}
+
+/** Ends a refusal because something proved the pairing: a matched code, a proven token, or a connected browser. */
+export function clearPairingRefusal(): void {
+  pairingRefusal = undefined
+}
+
+/**
+ * Whether a refusal still stands. Only a code minted since it (a key outside its snapshot) ends it, so a merely
+ * expired or thrown-away code set doesn't. The newer code retires the record, which must not re-arm once it's used.
+ */
+export function pairingRefusalActive(options: { readonly now?: number; readonly codes?: readonly string[] } = {}): boolean {
+  if (!pairingRefusal) return false
+  const known = new Set(pairingRefusal.codes)
+  const current = options.codes ?? pendingPairingCodeKeys(undefined, options.now ?? Date.now())
+  if (!current.some((key) => !known.has(key))) return true
+  pairingRefusal = undefined
+  return false
+}
+
 export class ExtensionHandshake {
   private pairingFailures = 0
   private mismatch: (ReturnType<typeof extensionProtocolCompatibility> & { origin: string | undefined }) | undefined
   private lastUnpaired = 0
-  private lastRefused = 0
   private hasPairedBrowser = Object.keys(readBrowserPairings()).length > 0
   private legacyExtensionReloaded = false
   private devExtensionReloadedFor: string | undefined
@@ -76,7 +113,9 @@ export class ExtensionHandshake {
     readonly clearLiveExtensionState: (key: string, reason: string) => void
     readonly browsersChanged: () => void
     readonly cdpClientCount: () => number
-  }) {}
+  }) {
+    clearPairingRefusal()
+  }
 
   rejectedProtocol(): ReturnType<typeof extensionProtocolCompatibility> | undefined {
     return this.mismatch ?? (fs.existsSync(oldStoreMarker()) ? extensionProtocolCompatibility(2) : undefined)
@@ -145,12 +184,13 @@ export class ExtensionHandshake {
     const link = browsers.defaultLink()
     const rejected = link ? undefined : this.rejectedProtocol()
     const recent = Date.now() - 65_000
-    const pairingState = browsers.connected ? "connected" : rejected ? "incompatible" : this.lastRefused > recent ? "refused" : this.lastUnpaired > recent ? "unpaired" : this.hasPairedBrowser ? "paired-offline" : "not-seen"
+    const pairingState = browsers.connected ? "connected" : rejected ? "incompatible" : pairingRefusalActive() ? "refused" : this.lastUnpaired > recent ? "unpaired" : this.hasPairedBrowser ? "paired-offline" : "not-seen"
+    const unpacked = Boolean(fromCheckout() || devExtension() || installedDevExtension())
     const nextStep = pairingState === "connected" ? undefined
       : pairingState === "incompatible" ? this.mismatchAdvice(rejected?.version)
-      : pairingState === "refused" || pairingState === "unpaired" ? `${pairingState === "refused" ? "browse refused the pairing attempt" : "browse is installed but not paired"}. Run \`${cliCommand("install")}\` again to pair it, or run \`${cliCommand("pair")}\` and enter the new code in browse's Options.`
+      : pairingState === "refused" || pairingState === "unpaired" ? `${pairingState === "refused" ? "The relay rejected browse's pairing code (wrong, used, or expired)" : "browse is installed but not paired"}. Run \`${cliCommand("install")}\` again to pair it, or run \`${cliCommand("pair")}\` and enter the new code in browse's Options.`
       : pairingState === "paired-offline" ? "Open the browser profile already paired with browse and enable the extension; it reconnects automatically."
-      : `No browser has contacted this relay yet. If browse is installed, open that browser and run \`${cliCommand("install")}\` to pair it. Otherwise ${storeId ? `add browse from ${storeUrl(storeId)}` : `follow the extension steps in \`${installCommand()}\``}.`
+      : `No browser has contacted this relay yet. If browse is installed, open that browser and run \`${cliCommand("install")}\` to pair it. Otherwise ${storeId && !unpacked ? `add browse from ${storeUrl(storeId)}` : `follow the extension steps in \`${installCommand()}\``}.`
     return {
       connected: browsers.connected,
       pairingState,
@@ -245,7 +285,7 @@ export class ExtensionHandshake {
           }
           const proof = message.method === "auth.response" ? getString(message.params, "proof") : undefined
           if (challenge.expected === undefined || !secretsEqual(challenge.expected, proof)) {
-            this.pairingRefused()
+            this.pairingRefused("pairing failed")
             relayLog("extension.rejected", { reason: "pairing failed", mode: challenge.mode, profile: getString(getObject(challenge.hello.params), "profileName") })
             socket.close(4006, "Pairing failed: this browser isn't paired with this relay")
             return
@@ -253,7 +293,8 @@ export class ExtensionHandshake {
           if (challenge.issue) issueBrowserToken(challenge.key, undefined, Date.now(), challenge.issue)
           handshaken = true
           this.hasPairedBrowser = true
-          this.lastUnpaired = this.lastRefused = 0
+          this.lastUnpaired = 0
+          clearPairingRefusal()
           const hello = challenge.hello
           waiting = []
           void computer.then((name) => {
@@ -293,9 +334,9 @@ export class ExtensionHandshake {
     })
   }
 
-  private pairingRefused(): void {
+  private pairingRefused(reason: string): void {
     this.pairingFailures += 1
-    this.lastRefused = Date.now()
+    notePairingRefusal(reason)
   }
 
   private challengeExtension(socket: WebSocket, message: JsonObject, origin: string | undefined): Challenge | undefined {
@@ -308,7 +349,7 @@ export class ExtensionHandshake {
     const pairing = getObject(params?.pairing)
     const extensionNonce = getString(pairing, "nonce")
     if (extensionNonce === undefined) {
-      this.pairingRefused()
+      this.pairingRefused("no pairing (extension too old)")
       relayLog("extension.rejected", { reason: "no pairing (extension too old)", version: getString(params, "version") })
       if (!this.legacyExtensionReloaded && origin === stableUnpackedExtensionOrigin) {
         this.legacyExtensionReloaded = true
@@ -329,7 +370,7 @@ export class ExtensionHandshake {
       return undefined
     }
     const refuse = (reason: string, text: string) => {
-      this.pairingRefused()
+      this.pairingRefused(reason)
       relayLog("extension.rejected", { reason, mode, profile: getString(params, "profileName") })
       socket.close(4006, text)
       return undefined
@@ -381,7 +422,8 @@ export class ExtensionHandshake {
           .map((codeKey) => ({ codeKey, session: pairingSessionKey(codeKey, exchange.secret, exchange.transcript) }))
           .find(({ session }) => secretsEqual(sessionProof(session, "extension"), proof))
     if (!match) {
-      this.pairingRefused()
+      // Note before the failure is recorded: the snapshot is the codes pending at the attempt, attempted one included.
+      this.pairingRefused("wrong pairing code")
       const exhausted = recordPairingFailure()
       relayLog("extension.rejected", { reason: "wrong pairing code", exhausted, profile: getString(getObject(challenge.hello.params), "profileName") })
       socket.close(4006, exhausted ? "Too many wrong codes: run `pair` for a new one" : "Pairing failed: that code is wrong, used or expired")
@@ -389,6 +431,7 @@ export class ExtensionHandshake {
     }
     const receipt = consumePairingCode(match.codeKey)
     const token = issueBrowserToken(challenge.key, undefined, Date.now(), undefined, receipt)
+    clearPairingRefusal()
     relayLog("extension.paired", { profile: getString(getObject(challenge.hello.params), "profileName") })
     socket.send(JSON.stringify({ method: "auth.token", params: { proof: sessionProof(match.session, "relay"), wrapped: wrapToken(match.session, token) } }))
     challenge.expected = pairingProof(token, "extension", this.options.port, challenge.extensionNonce, challenge.relayNonce)
@@ -407,6 +450,8 @@ export class ExtensionHandshake {
       replaced.socket.close(4001, "Extension replaced")
       this.options.clearLiveExtensionState(replaced.key, "Extension replaced")
     }
+    // A real connection ends any refusal.
+    clearPairingRefusal()
     link.rpc.markHandshake(getString(message.params, "version"), message.params?.protocolVersion)
     link.build = getString(message.params, "build")
     link.origin = origin
