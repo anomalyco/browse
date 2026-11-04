@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Fiber } from "effect"
-import { boundExecuteResult, maxExecuteResultChars, type ExecuteResult } from "../src/execute.ts"
+import { boundExecuteResult, jsonValueWarning, maxExecuteResultChars, toJsonSafeValue, type ExecuteResult } from "../src/execute.ts"
 import { ExecuteRealm } from "../src/execute-realm.ts"
 import { HandoffRegistry } from "../src/session-manager/handoff.ts"
 import type { ConnectedTarget, ExecuteSandboxLike } from "../src/relay/types.ts"
@@ -245,6 +245,19 @@ describe("execute result size", () => {
     // A large JSON value with a short inspected text is capped as well.
     const rows = Array.from({ length: 20_000 }, (_, i) => ({ row: i, text: "lorem ipsum dolor" }))
     expect(boundExecuteResult("[ ... 20000 items ]", rows, true).hasValue).toBe(false)
+  })
+})
+
+describe("execute JSON value warning", () => {
+  const warningFor = (value: unknown) => jsonValueWarning(value, toJsonSafeValue(value))
+
+  test("code that returns nothing gets no warning", () => {
+    expect(warningFor(undefined)).toBeUndefined()
+  })
+
+  test("a returned class instance still says why it has no JSON value", () => {
+    class Locator {}
+    expect(warningFor(new Locator())).toBe("Execute result could not be represented as JSON value: class instance")
   })
 })
 
