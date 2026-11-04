@@ -25,7 +25,7 @@ export type RelayReadiness = {
 
 export type EnsureRelayOptions = {
   readonly relay: RelayClient.Interface
-  readonly start?: Effect.Effect<void, Error>
+  readonly start?: Effect.Effect<unknown, Error>
   readonly buildId?: string
   readonly retryTimes?: number
   readonly retryDelayMs?: number
@@ -116,7 +116,7 @@ export const ensureRelay = Effect.fn("RelayLifecycle.ensureRelay")(function* (op
   return { version, started: relayWasAbsent, ...(buildProblem ? { buildProblem } : {}) } satisfies RelayReadiness
 })
 
-function waitForRelayReady(options: EnsureRelayOptions): Effect.Effect<RelayVersion, Error | RelayClient.RelayClientError> {
+export function waitForRelayReady(options: EnsureRelayOptions): Effect.Effect<RelayVersion, Error | RelayClient.RelayClientError> {
   return options.relay.version.pipe(
     Effect.retry({
       times: options.retryTimes ?? 200,
@@ -321,7 +321,7 @@ export function startManagedRelay(
   executable = process.execPath,
   execArgv: readonly string[] = process.execArgv,
   options: { readonly restartRequestId?: string } = {},
-): Effect.Effect<void, Error> {
+): Effect.Effect<number | undefined, Error> {
   return Effect.try({
     try: () => {
       if (!entrypoint) {
@@ -335,6 +335,7 @@ export function startManagedRelay(
         env: { ...env, OPENCODE_BROWSER_MANAGED_RELAY: "1", ...(options.restartRequestId ? { OPENCODE_BROWSER_RESTART_REQUEST_ID: options.restartRequestId } : {}) },
       })
       child.unref()
+      return child.pid
     },
     catch: (cause) => cause instanceof Error ? cause : new Error("Failed to start browse relay", { cause }),
   })

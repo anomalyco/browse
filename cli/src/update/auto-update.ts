@@ -12,8 +12,10 @@
 // publishes) at most once a day.
 // Mode "on" (default) installs a newer version into its own directory, verifies it (the installed package's integrity
 // is the one the registry published for that version, and it runs and reports that version), and once no agent is using
-// the browser, switches current.json and restarts the relay from the new version. "notify" only shows the update;
-// "off" doesn't check. OPENCODE_BROWSER_AUTO_UPDATE overrides the stored mode. The previous version stays installed for
+// the browser, switches current.json and restarts the relay from the new version. Installing a version, and switching
+// to one, first runs its relay and MCP server on a spare port (verifyStarts); a version that doesn't start is skipped,
+// like one rolled back from, until a newer one is published, and the running relay is never stopped for it. "notify"
+// only shows the update; "off" doesn't check. OPENCODE_BROWSER_AUTO_UPDATE overrides the stored mode. The previous version stays installed for
 // `opencode-browser rollback`, which also skips the version it rolled back from until a newer one is published.
 //
 // A binary install (the install script put the executable in ~/.browse/bin) works the same way with executables:
@@ -23,9 +25,12 @@
 // the file it started from), and `browse mcp` from it supervises the MCP server the way the shim does (mcp/supervisor.ts).
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
-import { chmodSync, closeSync, copyFileSync, cpSync, existsSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, closeSync, copyFileSync, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { createRequire } from "node:module"
+import { createServer, type AddressInfo } from "node:net"
+import { tmpdir } from "node:os"
 import path from "node:path"
+import { createInterface } from "node:readline"
 import { fileURLToPath } from "node:url"
 import { gunzipSync } from "node:zlib"
 import { binaryName, binaryPackage, compiledBinary, dataRoot, entryCommand, fromCheckout } from "../paths.ts"
@@ -133,7 +138,7 @@ export type AutoUpdateState = {
   readonly failed?: string
   /** Installed and verified, waiting for the browser to be idle. */
   readonly pending?: string
-  /** Rolled back from: not installed again until a newer version is published. */
+  /** Rolled back from, or didn't start: not installed again until a newer version is published. */
   readonly skipped?: string
   readonly lastUpdate?: { readonly from: string; readonly to: string; readonly at: string }
   readonly lastError?: { readonly message: string; readonly at: string; readonly version?: string }
@@ -149,6 +154,21 @@ export function updateState(layout: Layout, change: (state: AutoUpdateState) => 
   const next = change(readState(layout))
   writeJsonAtomic(layout.state, next)
   return next
+}
+
+/**
+ * Records a version that didn't start: no longer pending, and skipped until a newer one is published. `installed`: the
+ * copy that failed is the one in runtime/versions (a switch to it failed), which goes unless it's current; one that
+ * failed while installing never got there, and what's there may be another install's.
+ */
+export function skipBroken(layout: Layout, version: string, message: string, installed = false) {
+  if (installed && readCurrent(layout)?.version !== version) rmSync(versionDirectory(layout, version), { recursive: true, force: true })
+  updateState(layout, ({ pending, ...state }) => ({
+    ...state,
+    ...(pending && pending !== version ? { pending } : {}),
+    skipped: version,
+    lastError: { message, at: new Date().toISOString(), version },
+  }))
 }
 
 // ---- where this process runs from --------------------------------------------------------------------
@@ -263,8 +283,9 @@ export function describeAutoUpdate(status: AutoUpdateStatus): string {
   if (status.install !== "npm") return "Updates:   not an installed runtime"
   const mode = { on: "automatic", notify: "notify only", off: "off" }[status.effective]
   const parts = [`${mode}${status.overriddenBy ? ` (set by ${status.overriddenBy})` : ""}`, `channel ${status.channel ?? "latest"}`]
+  const broken = status.skipped !== undefined && status.lastError?.version === status.skipped
   if (status.pending) parts.push(`${status.pending} installed, switches in when no agent is using the browser`)
-  else if (status.latest && status.latest === status.skipped) parts.push(`skipping ${status.latest} (rolled back from it; \`update\` installs it again)`)
+  else if (status.latest && status.latest === status.skipped) parts.push(`skipping ${status.latest} (${broken ? "it didn't start" : "rolled back from it"}; \`update\` installs it again)`)
   else if (status.latest && status.version && compareVersions(status.latest, status.version) > 0) parts.push(`${status.latest} available`)
   if (status.previous && status.version && compareVersions(status.previous, status.version) < 0) parts.push(`\`rollback\` returns to ${status.previous}`)
   if (status.lastError) parts.push(`last attempt failed: ${status.lastError.message}`)
@@ -352,9 +373,10 @@ function copyRunningPackage(source: string, prefix: string) {
 
 /**
  * Installs one version into runtime/versions/<version> and verifies it: npm checks the tarball against the registry's
- * integrity while installing; then the lockfile must record that same integrity for the package, and the installed CLI
- * must run and report the version. Built in a temporary directory and renamed into place, so a failed install never
- * leaves a half-written version where the shim could find it. Returns the verified entry.
+ * integrity while installing; then the lockfile must record that same integrity for the package, the installed CLI
+ * must run and report the version, and its relay and MCP server must start (verifyStarts, which throws
+ * VersionDoesNotStart). Built in a temporary directory and renamed into place, so a failed install never leaves a
+ * half-written or broken version where the shim could find it. Returns the verified entry.
  */
 export async function installVersion(options: {
   readonly layout: Layout
@@ -367,6 +389,8 @@ export async function installVersion(options: {
   readonly node?: string
   /** A binary install's running executable, to install as this version instead of downloading it. */
   readonly runningBinary?: string
+  /** false: skip verifyStarts (tests with stand-in packages). */
+  readonly verify?: boolean
 }): Promise<string> {
   if (compiledBinary() || options.runningBinary) return installBinaryVersion(options)
   const run = options.run ?? runCommand
@@ -396,6 +420,7 @@ export async function installVersion(options: {
     const reported = await run(options.node ?? process.execPath, [entry, "--version"], { timeoutMs: 30_000, env: { ...process.env, OPENCODE_BROWSER_AUTOSTART: "0" } })
     if (reported.status !== 0 || reported.stdout.trim() !== installed)
       throw new Error(`${PACKAGE_NAME}@${installed} didn't run: \`--version\` printed ${JSON.stringify(reported.stdout.trim() || reported.stderr.trim()).slice(0, 200)}`)
+    if (options.verify !== false) await verifyStarts(entry, installed)
     const target = versionDirectory(layout, installed)
     rmSync(target, { recursive: true, force: true })
     renameSync(temporary, target)
@@ -408,7 +433,8 @@ export async function installVersion(options: {
 /**
  * A binary install's installVersion: puts this platform's executable for the version in runtime/versions/<version>,
  * downloaded from its package's tarball and checked against the registry's integrity (or copied from the running
- * executable), and verifies it runs and reports the version. Built in a temporary directory and renamed into place.
+ * executable), and verifies it runs and reports the version and that it starts. Built in a temporary directory and
+ * renamed into place.
  */
 async function installBinaryVersion(options: Parameters<typeof installVersion>[0]): Promise<string> {
   const run = options.run ?? runCommand
@@ -439,12 +465,150 @@ async function installBinaryVersion(options: Parameters<typeof installVersion>[0
     const reported = await run(file, ["--version"], { timeoutMs: 30_000, env: { ...process.env, OPENCODE_BROWSER_AUTOSTART: "0" } })
     if (reported.status !== 0 || reported.stdout.trim() !== expected)
       throw new Error(`browse ${expected} didn't run: \`--version\` printed ${JSON.stringify(reported.stdout.trim() || reported.stderr.trim()).slice(0, 200)}`)
+    if (options.verify !== false) await verifyStarts(file, expected)
     const target = versionDirectory(layout, expected)
     rmSync(target, { recursive: true, force: true })
     renameSync(temporary, target)
     return versionEntry(layout, expected, true)
   } finally {
     rmSync(temporary, { recursive: true, force: true })
+  }
+}
+
+async function freePort(): Promise<number> {
+  const server = createServer()
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject)
+    server.listen(0, "127.0.0.1", resolve)
+  })
+  const { port } = server.address() as AddressInfo
+  await new Promise<void>((resolve) => server.close(() => resolve()))
+  return port
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+/** A child verifyStarts runs, keeping up to 64 KB of what it printed (stdout too, unless that's its MCP stream). */
+function probeProcess(file: string, args: readonly string[], env: NodeJS.ProcessEnv, captureStdout: boolean) {
+  const child = spawn(file, args, { stdio: ["pipe", "pipe", "pipe"], env })
+  let output = ""
+  let exited = false
+  const capture = (chunk: string) => void (output.length < 64 * 1024 && (output += chunk))
+  child.stderr.setEncoding("utf8").on("data", capture)
+  if (captureStdout) child.stdout.setEncoding("utf8").on("data", capture)
+  child.stdin.on("error", () => {})
+  const closed = new Promise<void>((resolve) => {
+    child.on("error", (error) => {
+      capture(error.message)
+      exited = true
+      resolve()
+    })
+    child.on("close", () => {
+      exited = true
+      resolve()
+    })
+  })
+  return {
+    child,
+    exited: () => exited,
+    output: () => output,
+    /** The error it printed: its first `…Error` line, else its last line. */
+    reason: (fallback: string) => {
+      const lines = output.split("\n").map((line) => line.trim()).filter(Boolean)
+      return (lines.find((line) => /^\w*Error\b/.test(line)) ?? lines.at(-1) ?? fallback).slice(0, 300)
+    },
+    async stop() {
+      if (exited) return
+      child.kill()
+      await Promise.race([closed, sleep(5_000)])
+      if (!exited) child.kill("SIGKILL")
+    },
+  }
+}
+
+/** verifyStarts' failure: the version is there but doesn't run, so auto-update skips it (skipBroken). */
+export class VersionDoesNotStart extends Error {}
+
+/**
+ * Checks that an installed version runs: starts its relay on a spare port, in a throwaway data root (and temporary
+ * directory) with update checks off, until it answers /version as that version, then its MCP server against that relay,
+ * which must answer `initialize` and list its tools. Both entry points, because `--version` loads little of the CLI and
+ * the relay and the MCP server load different parts of it. Throws with the error it printed when either doesn't start.
+ */
+export async function verifyStarts(entry: string, version: string, options: { readonly timeoutMs?: number; readonly env?: NodeJS.ProcessEnv } = {}): Promise<void> {
+  const root = mkdtempSync(path.join(tmpdir(), "browse-verify-"))
+  const temporary = path.join(root, "tmp")
+  mkdirSync(temporary)
+  const { OPENCODE_BROWSER_MANAGED_RELAY: _managed, OPENCODE_BROWSER_RESTART_REQUEST_ID: _request, ...inherited } = options.env ?? process.env
+  const [file, ...prefix] = entryCommand(entry)
+  const timeoutMs = options.timeoutMs ?? 30_000
+  const failure = (reason: string) => new VersionDoesNotStart(`${version} didn't start: ${reason}`)
+  let relay: ReturnType<typeof probeProcess> | undefined
+  let mcp: ReturnType<typeof probeProcess> | undefined
+  try {
+    let env: NodeJS.ProcessEnv
+    for (let attempt = 1; ; attempt++) {
+      const port = await freePort()
+      env = {
+        ...inherited,
+        OPENCODE_BROWSER_HOME: root,
+        OPENCODE_BROWSER_PORT: String(port),
+        OPENCODE_BROWSER_AUTO_UPDATE: "off",
+        OPENCODE_BROWSER_UPDATE_CHECK: "0",
+        OPENCODE_BROWSER_AUTOSTART: "0",
+        TMPDIR: temporary,
+        TMP: temporary,
+        TEMP: temporary,
+      }
+      const started = probeProcess(file!, [...prefix, "serve"], env, true)
+      relay = started
+      let answered: unknown
+      for (const deadline = Date.now() + timeoutMs; answered !== version && !started.exited() && Date.now() < deadline; await sleep(100)) {
+        answered = await fetch(`http://127.0.0.1:${port}/version`, { signal: AbortSignal.timeout(1_000) })
+          .then((response) => (response.ok ? (response.json() as Promise<{ version?: unknown }>) : undefined))
+          .then((body) => body?.version, () => undefined)
+      }
+      if (answered === version) break
+      const exited = started.exited()
+      await started.stop()
+      // Something else took the spare port first: once more, on another.
+      if (attempt === 1 && started.output().includes("EADDRINUSE")) continue
+      throw failure(exited ? started.reason("its relay exited") : `its relay didn't answer within ${timeoutMs / 1000}s`)
+    }
+
+    const server = probeProcess(file!, [...prefix, "mcp"], env, false)
+    mcp = server
+    const replies = new Map<number, { result?: { protocolVersion?: unknown; tools?: unknown } }>()
+    createInterface({ input: server.child.stdout }).on("line", (line) => {
+      try {
+        const message = JSON.parse(line) as { id?: unknown; result?: { protocolVersion?: unknown; tools?: unknown } }
+        if (typeof message.id === "number") replies.set(message.id, message)
+      } catch {}
+    })
+    const send = (message: Record<string, unknown>) => server.child.stdin.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\n")
+    const reply = async (id: number) => {
+      for (const deadline = Date.now() + timeoutMs; !replies.has(id) && !server.exited() && Date.now() < deadline; ) await sleep(50)
+      return replies.get(id)?.result
+    }
+    const problem = (what: string) => failure(server.exited() ? `its MCP server exited (${server.reason("no output")})` : `its MCP server ${what}`)
+    send({ id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "browse-verify", version } } })
+    if (typeof (await reply(1))?.protocolVersion !== "string") throw problem(`didn't answer initialize within ${timeoutMs / 1000}s`)
+    send({ method: "notifications/initialized" })
+    // It registers its tools just after answering initialize: ask until they're there.
+    let tools: unknown
+    for (let id = 2, deadline = Date.now() + timeoutMs; ; id++) {
+      send({ id, method: "tools/list" })
+      tools = (await reply(id))?.tools
+      if ((Array.isArray(tools) && tools.length > 0) || server.exited() || Date.now() > deadline) break
+      await sleep(200)
+    }
+    if (!Array.isArray(tools) || tools.length === 0) throw problem("listed no tools")
+  } finally {
+    await mcp?.stop()
+    await relay?.stop()
+    try {
+      rmSync(root, { recursive: true, force: true, maxRetries: 3 })
+    } catch {}
   }
 }
 
@@ -546,6 +710,18 @@ export function validatePending(layout: Layout): AutoUpdateState {
   return updateState(layout, ({ pending: _pending, ...rest }) => rest)
 }
 
+/** Whether two paths hold the same executable: one file (a hard link, as placeBinary leaves it), else the same bytes. */
+export function sameFile(left: string, right: string): boolean {
+  try {
+    const a = statSync(left)
+    const b = statSync(right)
+    if (a.ino !== 0 && a.dev === b.dev && a.ino === b.ino) return true
+    return a.size === b.size && readFileSync(left).equals(readFileSync(right))
+  } catch {
+    return false
+  }
+}
+
 /**
  * Points new processes at `version`, keeping the version it replaces for rollback. A binary install also puts the
  * version's executable at `binary` (by default the one current.json names), unless that already is it.
@@ -553,7 +729,7 @@ export function validatePending(layout: Layout): AutoUpdateState {
 export function switchVersion(layout: Layout, version: string, previous: string | undefined, binary = compiledBinary() ? readCurrent(layout)?.binary : undefined) {
   const entry = versionEntry(layout, version, binary !== undefined)
   if (!existsSync(entry)) throw new Error(`${version} isn't installed in ${layout.versions}`)
-  if (binary && !(version === opencodeBrowserVersion && realpath(binary) === realpath(process.execPath))) placeBinary(entry, binary)
+  if (binary && !sameFile(entry, binary)) placeBinary(entry, binary)
   writeCurrent(layout, { version, ...(previous && previous !== version ? { previous } : {}), channel: channelOf(version), ...(binary ? { binary } : {}) })
   if (!binary) writeShim(layout)
 }
@@ -599,6 +775,9 @@ if (process.argv[2] !== "mcp") {
   let initialized
   let swapping = false
   let listChanged = false
+  // The version a swap replaced, until the new server answers; and a version whose server exited before it did.
+  let replaced
+  let failed
   const inflight = new Set()
   const queue = []
   const toClient = (line) => process.stdout.write(line + "\\n")
@@ -612,12 +791,20 @@ if (process.argv[2] !== "mcp") {
     child = next
     next.on("exit", (code, signal) => {
       if (next !== child) return
+      // A new version's server that exits before it's ready (a release that doesn't start) gives way to the old one.
+      if (replaced !== undefined) {
+        failed = version
+        version = replaced
+        replaced = undefined
+        return void start(true)
+      }
       process.exit(code ?? (signal ? 1 : 0))
     })
     createInterface({ input: next.stdout }).on("line", (line) => {
       if (next !== child) return
       const message = parse(line)
       if (message && message.id === REPLAY) {
+        replaced = undefined
         if (initialized) toChild(initialized)
         swapping = false
         if (listChanged) toClient(JSON.stringify({ jsonrpc: "2.0", method: "notifications/tools/list_changed" }))
@@ -640,7 +827,7 @@ if (process.argv[2] !== "mcp") {
   // Once current.json names another version, new requests wait for the swap instead of reaching a server whose relay is
   // going away (or already runs the other version); a switch that doesn't happen releases them.
   let heldSince
-  const moved = () => { try { return current() !== version } catch { return false } }
+  const moved = () => { try { const next = current(); return next !== version && next !== failed } catch { return false } }
   const fromClient = (line) => {
     if (swapping) return void queue.push(line)
     if (moved()) {
@@ -656,7 +843,8 @@ if (process.argv[2] !== "mcp") {
   }
 
   // A new version in current.json swaps the server only once the relay runs it too (GET /version), so a server never
-  // talks to a relay of another version. With no relay at all for a few checks, nothing can mix, and it swaps.
+  // talks to a relay of another version. With no relay at all for a few checks, nothing can mix, and it swaps. Never to
+  // a version whose server already failed to start: this server keeps going, whatever current.json and the relay say.
   let checking = false
   let unreachable = 0
   const relayVersion = () => fetch("http://127.0.0.1:" + relayPort + "/version", { signal: AbortSignal.timeout(2000) })
@@ -666,7 +854,7 @@ if (process.argv[2] !== "mcp") {
     if (swapping || checking || inflight.size > 0) return
     let next
     try { next = current() } catch { return }
-    if (next === version) {
+    if (next === version || next === failed) {
       unreachable = 0
       heldSince = undefined
       for (const queued of queue.splice(0)) fromClient(queued)
@@ -687,6 +875,7 @@ if (process.argv[2] !== "mcp") {
     }
     if (swapping || inflight.size > 0 || current() !== next) return
     const old = child
+    replaced = initialize ? version : undefined
     version = next
     heldSince = undefined
     start(true)
@@ -829,6 +1018,8 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
       attempt.pid = spawnChild(["runtime-switch", wanted], (code) => {
         if (switching === attempt) switching = undefined
         if (code !== 0) deps.log("autoupdate.restart_refused", { version: wanted, code })
+        // A version that didn't start is now skipped (runtime-switch's skipBroken): the status page shows it.
+        deps.onChange?.()
       })
     } catch (error) {
       deps.log("autoupdate.error", { error: (error as Error).message })

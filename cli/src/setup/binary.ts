@@ -1,50 +1,34 @@
 // A binary install: the install script (or PowerShell installer) put the bun-compiled executable in ~/.browse/bin.
 // Install records it, puts its folder on PATH, and uninstall takes both back.
 import { spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import {
-  compareVersions,
   installVersion,
-  pruneVersions,
   readCurrent,
-  switchVersion,
-  updateState,
+  sameFile,
   versionEntry,
 } from "../update/auto-update.ts"
 import { opencodeBrowserVersion } from "../version.ts"
-import { configRoot, fail, home, layout, log, readFileOr, tilde } from "./environment.ts"
+import { configRoot, failInstall, home, layout, log, readFileOr, refuseFormatChange, switchInstalled, tilde } from "./environment.ts"
 
 /**
  * Records this executable as the one agents run (current.json's `binary`) and keeps a copy of it as its version in
  * runtime/versions, which rollback and the MCP supervisor use. Returns the executable itself, which stays where it is;
  * updates replace it by rename.
  */
-export async function installBinaryRuntime(): Promise<{ entry: string; version: string }> {
+export async function installBinaryRuntime(force = false): Promise<{ entry: string; version: string }> {
   const binary = process.execPath
   const version = opencodeBrowserVersion
   const before = readCurrent(layout)
   const existing = versionEntry(layout, version)
-  const same = (left: string, right: string) => {
-    try {
-      return statSync(left).size === statSync(right).size && readFileSync(left).equals(readFileSync(right))
-    } catch {
-      return false
-    }
-  }
+  refuseFormatChange(before, version, true)
   try {
-    if (!same(existing, binary)) await installVersion({ layout, version, runningBinary: binary })
+    if (!sameFile(existing, binary)) await installVersion({ layout, version, runningBinary: binary })
   } catch (error) {
-    fail(`Could not install browse ${version}: ${(error as Error).message}`)
+    failInstall(before, version, error as Error)
   }
-  const previous = before?.version === version ? before.previous : before?.version
-  switchVersion(layout, version, previous, binary)
-  updateState(layout, ({ pending, skipped, ...state }) => ({
-    ...state,
-    ...(pending && compareVersions(pending, version) > 0 ? { pending } : {}),
-    ...(skipped && skipped !== version ? { skipped } : {}),
-  }))
-  pruneVersions(layout, [version, previous])
+  await switchInstalled(before, version, { binary, force })
   return { entry: binary, version }
 }
 

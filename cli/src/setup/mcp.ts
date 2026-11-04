@@ -4,12 +4,8 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import path from "node:path"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
 import {
-  compareVersions,
   installVersion,
-  pruneVersions,
   readCurrent,
-  switchVersion,
-  updateState,
   versionEntry,
 } from "../update/auto-update.ts"
 import { cliCommand, compiledBinary, entryCommand, scriptEntry } from "../paths.ts"
@@ -20,6 +16,7 @@ import {
   configRoot,
   fail,
   files,
+  failInstall,
   fromSource,
   layout,
   LEGACY_HOST_NAME,
@@ -31,6 +28,8 @@ import {
   packageRoot,
   readFileOr,
   readJson,
+  refuseFormatChange,
+  switchInstalled,
   windows,
   type Settings,
 } from "./environment.ts"
@@ -204,8 +203,8 @@ export function removeLegacyHost() {
  * never change opencode's config. Returns the shim and the version. From source (development), runs in place.
  * OPENCODE_BROWSER_PACKAGE installs a specific spec instead, for example a local tarball.
  */
-export async function installRuntime(): Promise<{ entry: string; version: string }> {
-  if (compiledBinary()) return installBinaryRuntime()
+export async function installRuntime(force = false): Promise<{ entry: string; version: string }> {
+  if (compiledBinary()) return installBinaryRuntime(force)
   // From a checkout, run the bundle `bun run build` wrote: Node can't run the TypeScript sources (they use
   // syntax type stripping doesn't cover), and the MCP server runs under Node.
   if (fromSource) {
@@ -215,6 +214,7 @@ export async function installRuntime(): Promise<{ entry: string; version: string
   }
   const spec = process.env.OPENCODE_BROWSER_PACKAGE
   const before = readCurrent(layout)
+  refuseFormatChange(before, opencodeBrowserVersion, false)
   // Already installed (install run again): keep it. Reinstalling would replace the files a running relay still loads.
   const existing = versionEntry(layout, opencodeBrowserVersion)
   const reuse =
@@ -233,19 +233,10 @@ export async function installRuntime(): Promise<{ entry: string; version: string
           ...(spec ? { spec } : { runningPackage: packageRoot }),
         })
   } catch (error) {
-    fail(`Could not install ${spec ?? `${PACKAGE}@${opencodeBrowserVersion}`}: ${(error as Error).message}`)
+    failInstall(before, opencodeBrowserVersion, error as Error, spec ?? `${PACKAGE}@${opencodeBrowserVersion}`)
   }
   const version = path.relative(layout.versions, installed).split(path.sep)[0]!
-  // Running install again for the same version keeps the version it replaced for rollback.
-  const previous = before?.version === version ? before.previous : before?.version
-  switchVersion(layout, version, previous)
-  // Installing by hand settles any update the relay was waiting to switch to, and un-skips this version.
-  updateState(layout, ({ pending, skipped, ...state }) => ({
-    ...state,
-    ...(pending && compareVersions(pending, version) > 0 ? { pending } : {}),
-    ...(skipped && skipped !== version ? { skipped } : {}),
-  }))
-  pruneVersions(layout, [version, previous])
+  await switchInstalled(before, version, { force })
   // Earlier versions installed one copy straight into runtime/; the shim replaces it.
   for (const legacy of ["node_modules", "package.json", "package-lock.json"])
     rmSync(path.join(files.runtime, legacy), { recursive: true, force: true })

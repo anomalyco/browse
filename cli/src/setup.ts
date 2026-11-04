@@ -194,7 +194,7 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
   const plan = agentPlan(locations, flags, tty, caller, remembered)
 
   mkdirSync(files.dir, { recursive: true })
-  const { entry, version } = await installRuntime()
+  const { entry, version } = await installRuntime(args.includes("--force"))
   log(`✓ browse ${version} installed${fromSource ? " (from source)" : ""}`)
   const onPath = args.includes("--no-modify-path") ? undefined : addToPath()
   if (onPath) log(`✓ Added browse to your PATH (${tilde(onPath)}). Open a new terminal to use it.`)

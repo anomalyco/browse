@@ -14,14 +14,15 @@ const invokedAs = path.basename(process.argv[1] ?? "")
 if (command === "--version" || command === "-v") {
   const opencodeBrowserVersion = embeddedVersion ?? (await import("./version.ts")).opencodeBrowserVersion
   process.stdout.write(`${opencodeBrowserVersion}\n`)
+} else if (command === "mcp" && globalThis.__OPENCODE_BROWSER_COMPILED__ && process.env.OPENCODE_BROWSER_MCP_DIRECT !== "1") {
+  // A binary install's MCP entry (`browse mcp`): supervise the server so updates swap it (mcp/supervisor.ts). The
+  // server it starts has OPENCODE_BROWSER_MCP_DIRECT=1 and takes the next branch.
+  const { runBinaryMcp } = await import("./mcp/supervisor.ts")
+  await runBinaryMcp(process.argv.slice(3))
 } else if (invokedAs === "opencode-browser-mcp" || (command === "mcp" && process.argv.length === 3)) {
   const { NodeRuntime } = await import("@effect/platform-node")
   const { runMcpServer } = await import("./mcp.ts")
   runMcpServer.pipe(NodeRuntime.runMain)
-} else if (command === "mcp" && globalThis.__OPENCODE_BROWSER_COMPILED__ && process.env.OPENCODE_BROWSER_MCP_DIRECT !== "1") {
-  // A binary install's MCP entry: supervise the server so updates swap it (mcp/supervisor.ts).
-  const { runBinaryMcp } = await import("./mcp/supervisor.ts")
-  await runBinaryMcp(process.argv.slice(3))
 } else if (command === "runtime-install" || command === "runtime-switch") {
   // The relay's auto-update children (auto-update.ts); not for people.
   const { runRuntimeInstall, runRuntimeSwitch } = await import("./update/runtime-update.ts")
@@ -45,6 +46,8 @@ if (command === "--version" || command === "-v") {
     --wait-seconds <seconds>     How long to wait for a connection (default 180 in a terminal, 90 otherwise)
     -a, --agent <names...>       Configure named agents (repeatable); '*' or --all-agents selects every supported agent
     -y, --yes                    Skip the picker; use the calling agent or detected agents
+    --force                      Replacing another version: end a capture, recording or raw CDP client that
+                                 keeps the relay from restarting
   extension                      Show where to get the extension (the unpacked folder of a checkout or a dev
                                  install, or the store page)
   pair [--wait-seconds <seconds>] Start the relay, print a one-time code (valid 10 minutes) and wait for the

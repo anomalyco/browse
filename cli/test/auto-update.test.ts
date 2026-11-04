@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { channelOf, compareVersions, createAutoUpdater, installVersion, pruneVersions, readCurrent, readState, runtimeLayout, switchVersion, tarFile, updateState, validatePending, versionEntry, writeCurrent, type Layout } from "../src/update/auto-update.ts"
+import { autoUpdateStatus, channelOf, compareVersions, createAutoUpdater, describeAutoUpdate, installVersion, processAlive, pruneVersions, readCurrent, readState, runtimeLayout, skipBroken, switchVersion, tarFile, updateState, validatePending, verifyStarts, versionEntry, writeCurrent, type Layout } from "../src/update/auto-update.ts"
 import { managedRelayLaunch } from "../src/relay/lifecycle.ts"
 
 const roots: string[] = []
@@ -34,7 +34,7 @@ test("install keeps the running package and its dependencies when the npx cache 
   fs.mkdirSync(path.join(cache, "fixture"))
   fs.writeFileSync(path.join(cache, "fixture/package.json"), JSON.stringify({ main: "index.cjs" }))
   fs.writeFileSync(path.join(cache, "fixture/index.cjs"), 'module.exports = "1.2.3"')
-  const entry = await installVersion({ layout, version: "1.2.3", runningPackage: source })
+  const entry = await installVersion({ layout, version: "1.2.3", runningPackage: source, verify: false })
   fs.rmSync(cache, { recursive: true })
   expect((await Bun.$`node ${entry} --version`.text()).trim()).toBe("1.2.3")
 })
@@ -195,9 +195,152 @@ describe("the relay's updater", () => {
     expect(readCurrent(layout)?.version).toBe("0.0.1")
   })
 
+  test("tells open status pages once a runtime-switch child exits, so a version it skipped shows", async () => {
+    const layout = layoutWith(["0.0.1", "0.0.2"])
+    writeCurrent(layout, { version: "0.0.1", channel: "latest" })
+    updateState(layout, (state) => ({ ...state, checkedAt: Date.now(), latest: "0.0.2", integrity: "sha512-x", pending: "0.0.2" }))
+    let exit: ((code: number | null) => void) | undefined
+    let changes = 0
+    const updater = createAutoUpdater({
+      runtime: { layout, version: "0.0.1", current: readCurrent(layout)! },
+      isIdle: () => true,
+      log: () => {},
+      onChange: () => void changes++,
+      spawnChild: (_args, onExit) => ((exit = onExit), process.pid),
+      env: {},
+    })
+    await updater.tick()
+    const before = changes
+    exit!(1)
+    expect(changes).toBe(before + 1)
+  })
+
   test("doesn't switch while an agent uses the browser", async () => {
     const { spawned, updater } = setup((state) => ({ ...state, pending: "0.0.2" }), false)
     await updater.tick()
     expect(spawned).toEqual([])
+  })
+})
+
+describe("checking a version starts before switching to it", () => {
+  // A stand-in CLI: `serve` answers /version as 1.0.1 on OPENCODE_BROWSER_PORT and records how it was started, and `mcp`
+  // answers initialize and tools/list over stdio. `options` breaks one part of it.
+  const standIn = (mark: string, options: { readonly mcp?: "crash" | "no tools" | "tools late"; readonly busyOnce?: true } = {}) => `
+import http from "node:http"
+import fs from "node:fs"
+import { createInterface } from "node:readline"
+const mark = ${JSON.stringify(mark)}
+const record = (fields) => fs.appendFileSync(mark, JSON.stringify({ command: process.argv[2], pid: process.pid, ...fields }) + "\\n")
+if (process.argv[2] === "serve") {
+  if (${options.busyOnce === true} && !fs.existsSync(mark)) {
+    record({})
+    console.error("listen EADDRINUSE: address already in use 127.0.0.1:" + process.env.OPENCODE_BROWSER_PORT)
+    process.exit(1)
+  }
+  record({ home: process.env.OPENCODE_BROWSER_HOME, tmp: process.env.TMPDIR, autoUpdate: process.env.OPENCODE_BROWSER_AUTO_UPDATE, managed: process.env.OPENCODE_BROWSER_MANAGED_RELAY })
+  http.createServer((_, response) => response.end(JSON.stringify({ version: "1.0.1" }))).listen(Number(process.env.OPENCODE_BROWSER_PORT), "127.0.0.1")
+} else if (process.argv[2] === "mcp") {
+  ${options.mcp === "crash" ? `throw new SyntaxError("The requested module '@effect/ai' does not provide an export named 'McpServer'")` : ""}
+  record({ port: process.env.OPENCODE_BROWSER_PORT })
+  createInterface({ input: process.stdin }).on("line", (line) => {
+    const message = JSON.parse(line)
+    if (message.id === undefined) return
+    const listed = (globalThis.listed = (globalThis.listed ?? 0) + (message.method === "tools/list" ? 1 : 0))
+    const tools = ${options.mcp === "no tools" ? "[]" : options.mcp === "tools late" ? `listed > 1 ? [{ name: "execute" }] : []` : `[{ name: "execute" }]`}
+    const result = message.method === "initialize" ? { protocolVersion: message.params.protocolVersion } : { tools }
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\\n")
+  })
+} else process.exit(2)
+`
+  const records = (mark: string) => fs.readFileSync(mark, "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, string | number>)
+
+  test("starts its relay and then its MCP server on a spare port, in a throwaway data root with updates off, and stops both", async () => {
+    const layout = layoutWith(["1.0.1"])
+    const mark = path.join(layout.root, "mark.jsonl")
+    fs.writeFileSync(versionEntry(layout, "1.0.1"), standIn(mark))
+    await verifyStarts(versionEntry(layout, "1.0.1"), "1.0.1", { env: { ...process.env, OPENCODE_BROWSER_MANAGED_RELAY: "1" } })
+    const [relay, mcp] = records(mark)
+    expect(relay).toMatchObject({ command: "serve", autoUpdate: "off" })
+    expect(relay!.managed).toBeUndefined()
+    expect(relay!.home).not.toBe(layout.root)
+    // Its temporary files go in the throwaway root too, never the real temporary directory.
+    expect(String(relay!.tmp).startsWith(String(relay!.home))).toBe(true)
+    expect(fs.existsSync(String(relay!.home))).toBe(false)
+    expect(mcp).toMatchObject({ command: "mcp" })
+    for (const started of [relay!, mcp!]) expect(processAlive(Number(started.pid))).toBe(false)
+  })
+
+  test("fails with the error a version prints when its relay can't load, though `--version` works", async () => {
+    const layout = layoutWith(["1.0.1"])
+    fs.writeFileSync(versionEntry(layout, "1.0.1"), `
+if (process.argv[2] === "--version") console.log("1.0.1")
+else throw new SyntaxError("The requested module '@effect/platform-node-shared' does not provide an export named 'NodeWS'")
+`)
+    expect(spawnSync(process.execPath, [versionEntry(layout, "1.0.1"), "--version"], { encoding: "utf8" }).stdout.trim()).toBe("1.0.1")
+    await expect(verifyStarts(versionEntry(layout, "1.0.1"), "1.0.1")).rejects.toThrow("1.0.1 didn't start: SyntaxError: The requested module '@effect/platform-node-shared' does not provide an export named 'NodeWS'")
+  })
+
+  test("fails when the relay starts but the MCP server doesn't load, or lists no tools", async () => {
+    const layout = layoutWith(["1.0.1"])
+    fs.writeFileSync(versionEntry(layout, "1.0.1"), standIn(path.join(layout.root, "crash.jsonl"), { mcp: "crash" }))
+    await expect(verifyStarts(versionEntry(layout, "1.0.1"), "1.0.1")).rejects.toThrow("1.0.1 didn't start: its MCP server exited (SyntaxError: The requested module '@effect/ai' does not provide an export named 'McpServer')")
+    fs.writeFileSync(versionEntry(layout, "1.0.1"), standIn(path.join(layout.root, "empty.jsonl"), { mcp: "no tools" }))
+    await expect(verifyStarts(versionEntry(layout, "1.0.1"), "1.0.1", { timeoutMs: 1_000 })).rejects.toThrow("1.0.1 didn't start: its MCP server listed no tools")
+  })
+
+  test("asks for the MCP server's tools again when it hasn't registered them yet", async () => {
+    const layout = layoutWith(["1.0.1"])
+    fs.writeFileSync(versionEntry(layout, "1.0.1"), standIn(path.join(layout.root, "mark.jsonl"), { mcp: "tools late" }))
+    await verifyStarts(versionEntry(layout, "1.0.1"), "1.0.1")
+  })
+
+  test("tries once more on another port when something else took the spare one", async () => {
+    const layout = layoutWith(["1.0.1"])
+    const mark = path.join(layout.root, "mark.jsonl")
+    fs.writeFileSync(versionEntry(layout, "1.0.1"), standIn(mark, { busyOnce: true }))
+    await verifyStarts(versionEntry(layout, "1.0.1"), "1.0.1")
+    expect(records(mark).map((started) => started.command)).toEqual(["serve", "serve", "mcp"])
+  })
+
+  test("fails when another version answers, or nothing does in time", async () => {
+    const layout = layoutWith(["1.0.2", "1.0.3"])
+    fs.writeFileSync(versionEntry(layout, "1.0.2"), standIn(path.join(layout.root, "mark.jsonl")))
+    fs.writeFileSync(versionEntry(layout, "1.0.3"), "setInterval(() => {}, 1000)")
+    await expect(verifyStarts(versionEntry(layout, "1.0.2"), "1.0.2", { timeoutMs: 1_000 })).rejects.toThrow("1.0.2 didn't start: its relay didn't answer within 1s")
+    await expect(verifyStarts(versionEntry(layout, "1.0.3"), "1.0.3", { timeoutMs: 1_000 })).rejects.toThrow("1.0.3 didn't start: its relay didn't answer within 1s")
+  })
+})
+
+describe("a version that didn't start", () => {
+  test("is no longer pending, and is skipped until a newer version is published", async () => {
+    const layout = layoutWith(["0.0.1", "0.0.2"])
+    writeCurrent(layout, { version: "0.0.1", channel: "latest" })
+    updateState(layout, (state) => ({ ...state, checkedAt: Date.now(), latest: "0.0.2", integrity: "sha512-x", pending: "0.0.2" }))
+    // Failed while installing: what's in runtime/versions may be another install's good copy, and stays.
+    skipBroken(layout, "0.0.2", "0.0.2 didn't start: SyntaxError: boom")
+    expect(readState(layout)).toMatchObject({ skipped: "0.0.2", lastError: { version: "0.0.2", message: "0.0.2 didn't start: SyntaxError: boom" } })
+    expect(readState(layout).pending).toBeUndefined()
+    expect(installed(layout)).toEqual(["0.0.1", "0.0.2"])
+    // A switch to the copy in runtime/versions failed: it goes, unless it's current.
+    skipBroken(layout, "0.0.1", "0.0.1 didn't start", true)
+    skipBroken(layout, "0.0.2", "0.0.2 didn't start", true)
+    expect(installed(layout)).toEqual(["0.0.1"])
+    const status = autoUpdateStatus({ layout, env: {}, runtime: { layout, version: "0.0.1", current: readCurrent(layout)! } })
+    expect(describeAutoUpdate(status)).toContain("skipping 0.0.2 (it didn't start; `update` installs it again)")
+
+    const spawned: string[][] = []
+    const updater = () => createAutoUpdater({
+      runtime: { layout, version: "0.0.1", current: readCurrent(layout)! },
+      isIdle: () => true,
+      log: () => {},
+      spawnChild: (args) => (spawned.push([...args]), process.pid),
+      env: {},
+    })
+    await updater().tick()
+    expect(spawned).toEqual([])
+    // A newer version is published: it's installed as usual.
+    updateState(layout, (state) => ({ ...state, latest: "0.0.3" }))
+    await updater().tick()
+    expect(spawned).toEqual([["runtime-install", "0.0.3", "--integrity", "sha512-x"]])
   })
 })

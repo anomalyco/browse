@@ -5,9 +5,19 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import * as clack from "@clack/prompts"
 import type { AgentName, AgentReceipt } from "./agent-config.ts"
-import { runtimeLayout } from "../update/auto-update.ts"
+import {
+  compareVersions,
+  pruneVersions,
+  runtimeLayout,
+  skipBroken,
+  switchVersion,
+  updateState,
+  VersionDoesNotStart,
+  versionEntry,
+  type Current,
+} from "../update/auto-update.ts"
 import { formatPairingCode } from "../relay/browser-pairing.ts"
-import { dataRoot, devExtension, devExtensionFolder, PUBLIC_STORE_ID, storeConfig, storeUrl } from "../paths.ts"
+import { cliCommand, dataRoot, devExtension, devExtensionFolder, PUBLIC_STORE_ID, storeConfig, storeUrl } from "../paths.ts"
 
 /**
  * The Chrome Web Store item install points users at: the one this package was released with (paths.ts storeConfig), or
@@ -142,11 +152,11 @@ export function log(line: string) {
   clack.log.message(text)
 }
 
-export function fail(message: string): never {
+export function fail(message: string, outro = "browse isn't set up yet."): never {
   if (rail.active) {
     rail.waiting?.error("Stopped")
     clack.log.error(message)
-    clack.outro("browse isn't set up yet.")
+    clack.outro(outro)
   } else process.stderr.write(message + "\n")
   process.exit(1)
 }
@@ -157,4 +167,66 @@ export function waitTimeout(args: string[], defaultSeconds = 180) {
   const seconds = Number(args.includes("--wait-seconds") ? flag(args, "--wait-seconds") : defaultSeconds)
   if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > 3600) fail("--wait-seconds must be between 1 and 3600.")
   return seconds * 1000
+}
+
+/** Another version is installed and runs from runtime/versions, in its own format (npm, or a binary install). */
+const otherWorking = (before: Current | undefined, version: string): before is Current =>
+  before !== undefined && before.version !== version && existsSync(versionEntry(layout, before.version, before.binary !== undefined))
+
+/**
+ * Stops install when installing `version` failed. One that doesn't start is skipped like an update that didn't start,
+ * and a working install stays as it was (a binary install's executable back on PATH, where the install script put the
+ * new one). `what` names what was installed.
+ */
+export function failInstall(before: Current | undefined, version: string, error: Error, what = `browse ${version}`, installed = false): never {
+  if (error instanceof VersionDoesNotStart) {
+    skipBroken(layout, version, error.message, installed)
+    if (otherWorking(before, version)) {
+      if (before.binary) switchVersion(layout, before.version, before.previous, before.binary)
+      fail(`${error.message}. Kept browse ${before.version}; auto-update skips ${version} until a newer version is published.`, `browse ${before.version} is still set up.`)
+    }
+  }
+  fail(`Could not install ${what}: ${error.message}`)
+}
+
+/**
+ * Both formats keep a version in runtime/versions/<version>, so installing the current version in the other format
+ * would replace the files its relay runs from. Stops install instead.
+ */
+export function refuseFormatChange(before: Current | undefined, version: string, binary: boolean) {
+  if (before?.version !== version || (before.binary !== undefined) === binary) return
+  fail(
+    `browse ${version} is already installed here ${before.binary ? "as an executable" : "with npm"}. To install it the other way, run \`${cliCommand("uninstall")}\` first, or install again once a newer version is published.`,
+    `browse ${version} is still set up.`,
+  )
+}
+
+/**
+ * Makes the installed `version` current. Over another working install it switches the way updates do (switchTo):
+ * checked first, and when the new relay fails after the old one stopped, the old one is back. When it doesn't switch
+ * (that, or the relay is busy), install stops with the old version as it was. `binary`: a binary install's executable
+ * on PATH. `force`: end what keeps the relay busy.
+ */
+export async function switchInstalled(before: Current | undefined, version: string, options: { readonly binary?: string; readonly force?: boolean } = {}) {
+  // Running install again for the same version keeps the version it replaced for rollback.
+  const previous = before?.version === version ? before.previous : before?.version
+  if (otherWorking(before, version)) {
+    const { switchTo } = await import("../update/runtime-update.ts")
+    const refused = await switchTo(layout, version, { previous, force: options.force ?? false, ...(options.binary ? { binary: options.binary } : {}) })
+    if (refused?.broken) failInstall(before, version, new VersionDoesNotStart(refused.message), undefined, true)
+    if (refused) {
+      if (before.binary) switchVersion(layout, before.version, before.previous, before.binary)
+      fail(
+        `browse ${before.version} keeps running: the relay didn't restart (${refused.message}). When no agent is using the browser, run \`${cliCommand("install")}\` again (add --force to end what's blocking it).`,
+        `browse ${before.version} is still set up.`,
+      )
+    }
+  } else switchVersion(layout, version, previous, options.binary)
+  // Installing by hand settles any update the relay was waiting to switch to, and un-skips this version.
+  updateState(layout, ({ pending, skipped, ...state }) => ({
+    ...state,
+    ...(pending && compareVersions(pending, version) > 0 ? { pending } : {}),
+    ...(skipped && skipped !== version ? { skipped } : {}),
+  }))
+  pruneVersions(layout, [version, previous])
 }
