@@ -181,8 +181,9 @@ export function toolResultForValue(value: unknown): McpSchema.CallToolResult {
     : []
   const errorText = isError ? getString(object, "text") : undefined
   if (media.length > 0) {
-    const { media: _media, ...structuredContent } = object ?? {}
-    const text = errorText ?? stringifyResult(structuredContent)
+    const { media: _media, ...rest } = object ?? {}
+    const text = errorText ?? stringifyResult(rest)
+    // No structuredContent here: some MCP clients send only structuredContent to the model when it is set, dropping the images.
     return new McpSchema.CallToolResult({
       content: [
         McpSchema.TextContent.make({ text }),
@@ -193,7 +194,6 @@ export function toolResultForValue(value: unknown): McpSchema.CallToolResult {
           }),
         ),
       ],
-      structuredContent,
       isError,
     })
   }
