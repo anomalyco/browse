@@ -67,6 +67,7 @@ import {
 import {
   boundExecuteResult,
   extractExecuteMedia,
+  jsonValueWarning,
   maxExecuteResultChars,
   stringifyResult,
   toJsonSafeValue,
@@ -119,6 +120,7 @@ export {
   installDownloadCapabilityGuard,
   installDownloadCapabilityGuards,
   isDisposableSessionPage,
+  jsonValueWarning,
   isSessionPageConnected,
   maxExecuteResultChars,
   pageHookCall,
@@ -244,7 +246,7 @@ export class ExecuteSandbox extends DefaultPageHost {
         const bounded = boundExecuteResult(stringifyResult(redactedValue), jsonSafeResult.serializable ? jsonSafeResult.value : undefined, jsonSafeResult.serializable)
         const warnings = this.finalizeWarnings(
           logSummary,
-          jsonSafeResult.serializable ? undefined : `Execute result could not be represented as JSON value: ${jsonSafeResult.reason}`,
+          jsonValueWarning(redactedValue, jsonSafeResult),
           bounded.warning,
         )
         return {

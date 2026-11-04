@@ -138,6 +138,12 @@ export function toJsonSafeValue(value: unknown): JsonSafeResult {
   }
 }
 
+/** Why an execute result has no JSON value, or nothing when it has one or the code returned nothing. */
+export function jsonValueWarning(value: unknown, jsonSafe: JsonSafeResult): string | undefined {
+  if (jsonSafe.serializable || value === undefined) return undefined
+  return `Execute result could not be represented as JSON value: ${jsonSafe.reason}`
+}
+
 type JsonSafeConversion =
   | { readonly omit: false; readonly value: unknown }
   | { readonly omit: true; readonly reason: string }
