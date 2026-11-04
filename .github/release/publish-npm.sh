@@ -4,7 +4,7 @@
 # opencode-browse-<version>.tgz (@opencode/browse, the npx package), all with BROWSE_NPM_TAG. Names, the version and the
 # package set come from this script and the environment, never from the tarballs: each package.json is read as data and
 # must match. With a signed dir (sign-macos.sh), the macOS packages must come from it. Lifecycle scripts never run
-# (--ignore-scripts). NPM_TOKEN is used only while trusted publishing isn't set up.
+# (--ignore-scripts). npm authenticates with trusted publishing (OIDC); there is no token.
 . "$(dirname "$0")/lib.sh"
 
 build_dir=$1 binaries_dir=$2 signed_dir=${3:-}
@@ -53,8 +53,6 @@ printf '%s\t%s\n' @opencode/browse "$file" >> "$list"
 
 # A clean directory and config, so nothing from an artifact can redirect the registry.
 printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/npmrc"
-if [ -n "${NPM_TOKEN:-}" ]; then printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" >> "$RUNNER_TEMP/npmrc"; fi
-unset NPM_TOKEN
 export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/npmrc"
 cd "$(mktemp -d)" || exit
 

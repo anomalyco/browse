@@ -460,8 +460,6 @@ jobs:
           BROWSE_VERSION: ${{ needs.plan.outputs.version }}
           BROWSE_NPM_TAG: ${{ needs.plan.outputs.npm_tag }}
           BROWSE_DRY_RUN: ${{ needs.plan.outputs.dry_run }}
-          # Temporary until trusted publishing is configured on npmjs.com; then delete the secret and npm uses OIDC.
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   # Stable (and check, as a dry run): every store upload is reviewed, too slow for a build per push, so dev builds
   # never go to the store.

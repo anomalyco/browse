@@ -112,8 +112,8 @@ checks the token against `registry/browse.json` there ([scripts/release-registry
    Google account; it pipes the refresh token into `CWS_REFRESH_TOKEN` of `release`, never to disk.
 5. **Environment `release`** (Settings → Environments): *Deployment branches and tags* → *Selected* → branch `dev`
    only. No required reviewers: who may release is decided by `plan`'s admin/maintain check and the rulesets. Secrets:
-   `CWS_CLIENT_ID`, `CWS_CLIENT_SECRET`, `CWS_REFRESH_TOKEN`, `RELEASE_TAG_KEY`, and `NPM_TOKEN` until trusted
-   publishing works. Delete the old `npm`, `chrome-web-store`, `release-dev`, `npm-dev` and `chrome-web-store-dev`
+   `CWS_CLIENT_ID`, `CWS_CLIENT_SECRET`, `CWS_REFRESH_TOKEN` and `RELEASE_TAG_KEY`; npm needs none (trusted
+   publishing). Delete the old `npm`, `chrome-web-store`, `release-dev`, `npm-dev` and `chrome-web-store-dev`
    environments.
 6. **Release deploy key.** `ssh-keygen -t ed25519 -N "" -C "browse release tags" -f release-tag-key`; add
    `release-tag-key.pub` under Settings → Deploy keys with write access, store the private key with
@@ -123,11 +123,8 @@ checks the token against `registry/browse.json` there ([scripts/release-registry
      *Repository admin* and *Deploy keys* (the release commit comes back to dev with the deploy key).
    - tags `v*`: restrict creation, updates and deletion; bypass: *Repository admin* and *Deploy keys* (the tag job).
 8. **Actions** (Settings → Actions → General): require actions pinned to a full-length commit SHA.
-9. **npm.** Your npm account needs publish rights on `@opencode` (`npm org ls opencode`). Until the package exists, a
-   granular token goes in `NPM_TOKEN` of `release`. After the first release, on npmjs.com `@opencode/browse` →
-   Settings → Trusted publishing, add GitHub Actions: `anomalyco/browse`, workflow `release.yml`, environment
-   `release`. Then delete `NPM_TOKEN`, revoke the token, and choose *Require two-factor authentication and disallow
-   tokens*.
+9. **npm.** Every package publishes with trusted publishing: `@opencode/browse` and each `@opencode/browse-<target>`
+   trust GitHub Actions in `anomalyco/browse`, workflow `release.yml`. There is no npm token anywhere.
 
    The eleven platform packages are set up already (November 2026): trusted publishing can only be configured on a
    package that exists, so each `@opencode/browse-<target>` was published once by hand as an empty `0.0.0` on the
