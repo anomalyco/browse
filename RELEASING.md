@@ -129,20 +129,16 @@ checks the token against `registry/browse.json` there ([scripts/release-registry
    `release`. Then delete `NPM_TOKEN`, revoke the token, and choose *Require two-factor authentication and disallow
    tokens*.
 
-   The same goes for the eleven platform packages: trusted publishing can only be configured on a package that already
-   exists, so the first release that has them must publish with `NPM_TOKEN` (a granular token with read and write on
-   the whole `@opencode` scope, so it can create packages). Once `npm view @opencode/browse-linux-x64` shows it, trust
-   them all in one go (one 2FA prompt; tick "skip 2FA for 5 minutes"):
+   The eleven platform packages are set up already (November 2026): trusted publishing can only be configured on a
+   package that exists, so each `@opencode/browse-<target>` was published once by hand as an empty `0.0.0` on the
+   `placeholder` tag, then trusted like `@opencode/browse`, with no environment restriction. A new target needs the same:
 
    ```sh
-   for t in linux-x64 linux-x64-baseline linux-arm64 linux-x64-musl linux-x64-baseline-musl linux-arm64-musl \
-     darwin-arm64 darwin-x64 darwin-x64-baseline windows-x64 windows-x64-baseline; do
-     npm trust github "@opencode/browse-$t" --file release.yml --repository anomalyco/browse --environment release --allow-publish -y
-     sleep 2
-   done
+   npm publish --access public --tag placeholder   # in a folder with just package.json (name, version 0.0.0) and a README
+   npm trust github "@opencode/browse-<target>" --file release.yml --repository anomalyco/browse --allow-publish -y
    ```
 
-   `npm trust list @opencode/browse-<target>` checks one. Every package needs its configuration before `NPM_TOKEN` goes.
+   `npm trust list @opencode/browse-<target>` checks one.
 10. **macOS signing (optional).** Without it the macOS binaries carry the ad-hoc signature `bun build --compile` gives
     them, which runs fine from the install script and npm (neither sets quarantine). To sign with a Developer ID:
     `base64 -i cert.p12 | gh secret set APPLE_SIGNING_CERTIFICATE --env release` (a Developer ID Application
