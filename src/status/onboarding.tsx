@@ -2,17 +2,18 @@
 // One card, laid out like Console's Connect OpenCode guide: a tab for an agent on this computer and one for an agent on
 // another computer, each a few numbered steps that check themselves off from the worker's state and the first agent
 // tab.
-import { createEffect, createMemo, createSignal, Match, onCleanup, Show, Switch, type JSX } from "solid-js"
+import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch, type JSX } from "solid-js"
 import { render } from "solid-js/web"
 import { Tabs } from "@kobalte/core/tabs"
 import { Button } from "@opencode/ui/button"
 import { Icon } from "@opencode/ui/icon"
 import { IconButton } from "@opencode/ui/icon-button"
+import { Menu } from "@opencode/ui/menu"
 import { TextInput } from "@opencode/ui/text-input"
 import { unpackedExtensionId, unpackedReloadAdvice } from "../../cli/src/protocol"
 import { firstRunStep, relayProbeResult, shouldProbe, type FirstRunStep, type RelayProbe } from "./first-run"
 import { TRY_PROMPT, checklist } from "./checklist"
-import { installCommand, remoteInstallCommand, windows } from "./install"
+import { installCommand, installMethod, installMethods, remoteInstallMethod, remoteInstallMethods, type InstallMethod } from "./install"
 import { RelayForm } from "./relay-form"
 import { applyColorScheme, Brand, createFlash, createRelay, Note, Rich, type Relay } from "./ui"
 import "./onboarding.css"
@@ -40,10 +41,14 @@ function Onboarding() {
   const [linkNote, setLinkNote] = createSignal<string>()
   const [where, setWhere] = createSignal<Where>()
   const [how, setHow] = createSignal<How>("agent")
+  const [pickedMethod, setPickedMethod] = createSignal(installMethod.id)
+  const [pickedRemoteMethod, setPickedRemoteMethod] = createSignal(remoteInstallMethod.id)
 
   const step = createMemo(() => firstRunStep(relay.state(), installWaiting() ? "install-waiting" : probe()))
   const list = createMemo(() => checklist({ state: relay.state(), wasConnected: wasConnected(), tried: tried() }))
   const connected = () => list().agent === "done"
+  const method = createMemo(() => installMethods.find((option) => option.id === pickedMethod()) ?? installMethod)
+  const remoteMethod = createMemo(() => remoteInstallMethods.find((option) => option.id === pickedRemoteMethod()) ?? remoteInstallMethod)
   // Until the user picks, it follows where the extension already points.
   const remote = () => (where() ?? (relay.state()?.relay.remote ? "remote" : "here")) === "remote"
 
@@ -123,7 +128,7 @@ function Onboarding() {
   const installStep = (how: How) => (
     <Step
       number={1}
-      title={how === "agent" ? "Paste this into your agent" : windows ? "Run this in PowerShell" : "Run this in your terminal"}
+      title={how === "agent" ? "Paste this into your agent" : method().title}
       done={connected()}
       description={
         connected() ? (
@@ -139,7 +144,17 @@ function Onboarding() {
         <AgentStep
           relay={relay}
           step={step()}
-          command={how === "agent" ? { text: AGENT_PROMPT, label: "Copy prompt" } : { text: installCommand, label: "Copy command" }}
+          command={
+            how === "agent" ? (
+              <Command text={AGENT_PROMPT} label="Copy prompt" />
+            ) : (
+              <Command
+                text={method().command}
+                label="Copy command"
+                picker={<MethodMenu methods={installMethods} value={method()} onChange={(option) => setPickedMethod(option.id)} />}
+              />
+            )
+          }
           linkNote={linkNote()}
           onPaired={() => setPairedBy("code")}
         />
@@ -211,7 +226,17 @@ function Onboarding() {
                 description="Installs browse there, opens its relay to other computers and prints its address and a pairing code."
               >
                 <Show when={!connected()}>
-                  <Command text={remoteInstallCommand} label="Copy command" />
+                  <Command
+                    text={remoteMethod().command}
+                    label="Copy command"
+                    picker={
+                      <MethodMenu
+                        methods={remoteInstallMethods}
+                        value={remoteMethod()}
+                        onChange={(option) => setPickedRemoteMethod(option.id)}
+                      />
+                    }
+                  />
                 </Show>
               </Step>
               <Step
@@ -281,11 +306,19 @@ function Step(props: { number: number; title: string; description?: JSX.Element;
   )
 }
 
-/** A command or prompt to copy. */
-function Command(props: { text: string; label: string }) {
+/** A command or prompt to copy: [picker ▾ | text ⧉]. */
+function Command(props: { text: string; label: string; picker?: JSX.Element }) {
   const [copied, flash] = createFlash("copy", "check")
   return (
     <div class="cmd">
+      <Show when={props.picker}>
+        {(picker) => (
+          <>
+            {picker()}
+            <span class="cmd-sep" />
+          </>
+        )}
+      </Show>
       <div class="cmd-text">
         <code>{props.text}</code>
         <IconButton
@@ -297,6 +330,31 @@ function Command(props: { text: string; label: string }) {
         />
       </div>
     </div>
+  )
+}
+
+/** The install method picker that sits on the left of a command box. */
+function MethodMenu(props: { methods: InstallMethod[]; value: InstallMethod; onChange: (method: InstallMethod) => void }) {
+  return (
+    <Menu placement="bottom-start" gutter={4}>
+      <Menu.Trigger class="cmd-menu" aria-label="Install method">
+        {props.value.label}
+        <Icon name="chevron-down" size="small" />
+      </Menu.Trigger>
+      <Menu.Portal>
+        <Menu.Content>
+          <Menu.RadioGroup
+            value={props.value.id}
+            onChange={(id) => {
+              const picked = props.methods.find((option) => option.id === id)
+              if (picked) props.onChange(picked)
+            }}
+          >
+            <For each={props.methods}>{(method) => <Menu.RadioItem value={method.id} closeOnSelect>{method.label}</Menu.RadioItem>}</For>
+          </Menu.RadioGroup>
+        </Menu.Content>
+      </Menu.Portal>
+    </Menu>
   )
 }
 
@@ -333,7 +391,7 @@ function AgentDone(props: { relay: Relay; pairedBy: "link" | "code" | undefined 
 function AgentStep(props: {
   relay: Relay
   step: FirstRunStep
-  command: { text: string; label: string }
+  command: JSX.Element
   linkNote: string | undefined
   onPaired: () => void
 }) {
@@ -346,9 +404,7 @@ function AgentStep(props: {
 
   return (
     <>
-      <Show when={showInstall()}>
-        <Command text={props.command.text} label={props.command.label} />
-      </Show>
+      <Show when={showInstall()}>{props.command}</Show>
 
       <Switch>
         <Match when={kind() === "checking"}>

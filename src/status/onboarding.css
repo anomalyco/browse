@@ -238,7 +238,7 @@
   vertical-align: middle;
 }
 
-/* Command field: [command  ⧉] */
+/* Command field: [picker ▾ | command  ⧉] */
 .cmd {
   display: inline-flex;
   align-self: flex-start;
@@ -249,6 +249,35 @@
   background: var(--v2-background-bg-button-neutral);
   box-shadow: var(--v2-elevation-raised);
   overflow: hidden;
+}
+
+.cmd-menu {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px 0 12px;
+  border: 0;
+  background: transparent;
+  color: var(--v2-text-text-muted);
+  font-weight: 530;
+  white-space: nowrap;
+  transition: background-color 150ms ease;
+}
+
+.cmd-menu[aria-expanded="true"] {
+  background: var(--v2-overlay-simple-overlay-hover);
+}
+
+.cmd-menu:focus-visible {
+  outline: 2px solid var(--v2-border-border-focus);
+  outline-offset: -3px;
+}
+
+.cmd-sep {
+  flex: none;
+  width: var(--hair);
+  background: var(--v2-border-border-strong);
 }
 
 .cmd-text {
@@ -269,7 +298,8 @@
   .tab:hover {
     color: var(--v2-text-text-base);
   }
-  .tab:hover > span {
+  .tab:hover > span,
+  .cmd-menu:hover {
     background: var(--v2-overlay-simple-overlay-hover);
   }
 }
