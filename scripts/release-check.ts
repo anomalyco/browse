@@ -5,14 +5,14 @@
 //    release/browse-extension-<version>.zip for the release service (dev); then release/opencode-browse-<version>.tgz
 //    (npm pack of a fresh cli/ build, with the store item ID from OPENCODE_BROWSER_STORE_ID baked in, and for a dev
 //    build the dev zip's sha256)
-// 3. scripts/check-artifacts.ts on both, then release/SHA256SUMS
+// 3. scripts/check-artifacts.ts on both, an npm install of the tarball that starts its relay, then release/SHA256SUMS
 import { $ } from "bun"
 import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
 import { readFile, rm, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { parseArgs } from "node:util"
-import { checkPackageTarball, checkStoreZip } from "./check-artifacts.ts"
+import { checkPackageInstall, checkPackageTarball, checkStoreZip } from "./check-artifacts.ts"
 import { manifestVersionFields, parseReleaseVersion } from "./version.ts"
 
 const root = path.resolve(import.meta.dir, "..")
@@ -75,6 +75,8 @@ if (import.meta.main) {
 
   const artifactProblems = [...(await checkStoreZip(zip, version, undefined, dev)), ...(await checkPackageTarball(tarball, version, dev ? await sha256(zip) : undefined))]
   if (artifactProblems.length) fail(artifactProblems)
+  const installProblems = await checkPackageInstall(tarball, version)
+  if (installProblems.length) fail(installProblems)
   const sums = await Promise.all([zip, tarball].map(async (file) => `${await sha256(file)}  ${path.basename(file)}`))
   await writeFile(path.join(release, "SHA256SUMS"), sums.join("\n") + "\n")
   console.log(`✓ ${path.basename(zip)} and ${path.basename(tarball)} passed the release checks`)

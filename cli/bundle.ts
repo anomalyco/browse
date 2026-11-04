@@ -23,7 +23,8 @@ export async function bundleCli(options: {
     },
     target: "node",
     format: "esm",
-    // Runtime dependencies stay external; jsonc-parser (a dev dependency) is bundled.
+    // Runtime dependencies stay external. Dev dependencies, Effect among them, are bundled at the versions in bun.lock,
+    // so an npm install can't pair them with releases they don't work with.
     external: Object.keys(pkg.dependencies ?? {}),
     plugins: [
       {
