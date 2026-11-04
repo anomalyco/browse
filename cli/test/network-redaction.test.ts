@@ -34,6 +34,32 @@ describe("SecretCollector", () => {
     expect(cookie?.value).toBe("sid=${BC_SECRET_1}; Path=/; HttpOnly")
   })
 
+  test("still redacts a custom credential header that shares the CORS prefix", () => {
+    const collector = new SecretCollector()
+    const [header] = collector.protectHeaders([{ name: "Access-Control-Token", value: "tok_live_ABCDEF1234567890" }], "request")
+    expect(header?.value).toBe("${BC_SECRET_1}")
+  })
+
+  test("stores no slot for the host, CORS headers or cookie priority", () => {
+    const collector = new SecretCollector()
+    const headers = collector.protectHeaders(
+      [
+        { name: ":authority", value: "myaccount.google.com" },
+        { name: "access-control-allow-credentials", value: "true" },
+        { name: "access-control-allow-headers", value: "authorization, x-csrf-token" },
+        { name: "set-cookie", value: "SIDCC=abcdef123456; expires=Thu, 28-Oct-2027 14:02:16 GMT; path=/; domain=.google.com; priority=high; Partitioned" },
+      ],
+      "response",
+    )
+    expect(headers.map((header) => header.value)).toEqual([
+      "myaccount.google.com",
+      "true",
+      "authorization, x-csrf-token",
+      "SIDCC=${BC_SECRET_1}; expires=Thu, 28-Oct-2027 14:02:16 GMT; path=/; domain=.google.com; priority=high; Partitioned",
+    ])
+    expect(collector.slots().map((slot) => slot.value)).toEqual(["abcdef123456"])
+  })
+
   test("finds a known secret again under a header or URL that does not look secret", () => {
     const collector = new SecretCollector()
     collector.protectHeaders([{ name: "Authorization", value: "Bearer sk_test_SECRETVALUE1234567890" }], "request")
