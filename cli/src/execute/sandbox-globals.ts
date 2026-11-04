@@ -36,11 +36,11 @@ import {
   defaultHandoffTimeoutMs,
   finishHandoff,
   handoffPageContextTimeoutMs,
-  pageTargetId,
   SessionPageRecoveryError,
   SessionPageRepairRequired,
   type RequestHandoff,
 } from "./page-recovery.ts"
+import { pageTargetId } from "./target-selection.ts"
 import type { ExecuteSecretsBridge } from "./secrets-bridge.ts"
 
 export function buildSandboxGlobals(deps: {

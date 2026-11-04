@@ -1,5 +1,6 @@
 import { isJsonObject } from "../../agent-relay/protocol"
 import { AgentGroups } from "./groups"
+import { serialQueue } from "../serial"
 import { TabCleanup } from "../tab-cleanup"
 import {
   autoNamed,
@@ -24,7 +25,6 @@ export function createRelayGrouping(deps: {
    */
   const sessionGroups = new Map<string, number>()
   let sessionGroupsRestored: Promise<void> | undefined
-  let groupQueue: Promise<unknown> = Promise.resolve()
   let recount: ReturnType<typeof setTimeout> | undefined
 
   const restoreSessionGroups = () =>
@@ -44,11 +44,7 @@ export function createRelayGrouping(deps: {
     void chrome.storage.local.set({ [SESSION_GROUPS_KEY]: Object.fromEntries(sessionGroups) }).catch(() => undefined)
   }
 
-  const serially = <T>(run: () => Promise<T>): Promise<T> => {
-    const next = groupQueue.then(run, run)
-    groupQueue = next.catch(() => undefined)
-    return next
-  }
+  const serially = serialQueue()
 
   /** Keeps a shared group's title counting its tabs. */
   const countShared = async (groupId: number) => {

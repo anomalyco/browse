@@ -3,6 +3,7 @@ import type { BrowserContext, Page } from "patchright-core"
 import type { HandoffOutcome } from "../session-manager/handoff.ts"
 import { cliCommand } from "../paths.ts"
 import { runtimeFailureKind } from "../update/runtime-diagnostics.ts"
+import { resolvePageTargetId } from "./target-selection.ts"
 
 export const playwrightCloseTimeoutMs = 2_000
 export const playwrightConnectTimeoutMs = 15_000
@@ -15,18 +16,6 @@ export const handoffPageContextTimeoutMs = 15_000
 export const defaultHandoffTimeoutMs = 10 * 60 * 1_000
 export const defaultHandoffMessage = "Complete the requested task, then use the in-page continue control."
 export const timedOut = Symbol("timed-out")
-
-export const downloadCapabilityErrorMessage = "Downloads are unavailable in Browse extension-backed tabs: Chromium blocks Browser.setDownloadBehavior and Page.setDownloadBehavior through chrome.debugger, so Playwright cannot retain an artifact for download.saveAs(). Fetch the response in the page and save the returned bytes with files.write() when the site exposes them."
-const downloadGuardedPages = new WeakSet<Page>()
-const downloadGuardedContexts = new WeakSet<BrowserContext>()
-const viewportZoomGuardedPages = new WeakSet<Page>()
-
-const explicitMediaOptions = [
-  ["colorScheme", "prefers-color-scheme"],
-  ["reducedMotion", "prefers-reduced-motion"],
-  ["forcedColors", "forced-colors"],
-  ["contrast", "prefers-contrast"],
-] as const
 
 export const defaultPageClosedWarning = "The session default page was closed; created a new page. References to the old page in state are stale."
 export const defaultPageRecoveredWarning = "The session default page was unresponsive; created a new page. References to the old page in state are stale."
@@ -52,11 +41,6 @@ export type RequestHandoff = (options: {
   readonly start?: () => unknown | Promise<unknown>
   readonly cancelStart?: () => Promise<void>
 }) => Promise<HandoffOutcome>
-
-export type ExecuteTargetSelection = {
-  readonly urlIncludes?: string
-  readonly index?: number
-}
 
 export class PlaywrightOperationError extends Schema.TaggedError<PlaywrightOperationError>()(
   "Execute.PlaywrightOperationError",
@@ -90,14 +74,6 @@ const unresponsivePageDiagnosis = (options: { readonly ownsPage: boolean; readon
   ". The tab was kept and was not replaced. This usually means the page is mid-navigation or its main world is stalled for automation (for example, bot protection). ",
   `Retry after the page settles, navigate the tab with page.goto(), open a fresh tab with context.newPage(), or release it with session_reset (CLI: \`${cliCommand("session reset")}\`).`,
 ].join("")
-
-export class TargetSelectionError extends Schema.TaggedError<TargetSelectionError>()(
-  "Execute.TargetSelectionError",
-  {
-    message: Schema.String,
-    reason: Schema.Literals(["invalid", "not-found", "ambiguous"]),
-  },
-) {}
 
 const operationFailure = (label: string, cause: unknown): PlaywrightOperationError =>
   new PlaywrightOperationError({
@@ -391,144 +367,6 @@ export async function waitForExactTarget<T>(options: {
   }
 }
 
-export function installDownloadCapabilityGuard(page: Page): void {
-  if (downloadGuardedPages.has(page)) {
-    return
-  }
-  const waitForEvent = page.waitForEvent.bind(page) as (event: string, ...args: unknown[]) => Promise<unknown>
-  Object.defineProperty(page, "waitForEvent", {
-    configurable: true,
-    value: (event: string, ...args: unknown[]) => {
-      if (event === "download") {
-        return Promise.reject(new Error(downloadCapabilityErrorMessage))
-      }
-      return waitForEvent(event, ...args)
-    },
-  })
-  downloadGuardedPages.add(page)
-}
-
-export function installDownloadCapabilityGuards(context: BrowserContext): void {
-  if (downloadGuardedContexts.has(context)) {
-    return
-  }
-  for (const page of context.pages()) {
-    installDownloadCapabilityGuard(page)
-  }
-  context.on("page", installDownloadCapabilityGuard)
-  downloadGuardedContexts.add(context)
-}
-
-export function hasExplicitTargetSelection(selection: ExecuteTargetSelection | undefined): boolean {
-  return Boolean(selection?.urlIncludes) || selection?.index !== undefined
-}
-
-export function selectTarget<T>({
-  targets,
-  selection,
-  getUrl,
-  getIndex,
-}: {
-  readonly targets: readonly T[]
-  readonly selection: ExecuteTargetSelection
-  readonly getUrl: (target: T) => string
-  readonly getIndex?: (target: T, fallbackIndex: number) => number
-}): T | undefined {
-  if (selection.urlIncludes && selection.index !== undefined) {
-    throw new TargetSelectionError({ reason: "invalid", message: "Use only one target selector: --target-url or --target-index" })
-  }
-  if (selection.urlIncludes) {
-    const matches = targets.filter((candidate) => {
-      return getUrl(candidate).includes(selection.urlIncludes ?? "")
-    })
-    if (matches.length === 0) {
-      throw new TargetSelectionError({
-        reason: "not-found",
-        message: `No existing attached page URL includes ${selection.urlIncludes}. Target selectors do not navigate or open pages: use page.goto() in the session page, or attach the intended user tab with the Browse toolbar first.`,
-      })
-    }
-    if (matches.length > 1) {
-      const candidates = targets.flatMap((candidate, index) => matches.includes(candidate) ? [`[${getIndex ? getIndex(candidate, index) : index}] ${getUrl(candidate)}`] : [])
-      throw new TargetSelectionError({
-        reason: "ambiguous",
-        message: `Multiple attached pages (${matches.length}) match URL ${selection.urlIncludes}; use a more specific --target-url or --target-index. Matches: ${candidates.join(", ")}`,
-      })
-    }
-    return matches[0]
-  }
-  if (selection.index !== undefined) {
-    if (selection.index < 0) {
-      throw new TargetSelectionError({ reason: "invalid", message: "Target index must be a non-negative integer" })
-    }
-    const target = targets[selection.index]
-    if (!target) {
-      throw new TargetSelectionError({
-        reason: "not-found",
-        message: `No existing attached page at index ${selection.index}; ${targets.length} page(s) available. Target selectors do not create pages.`,
-      })
-    }
-    return target
-  }
-  if (targets.length === 0) {
-    throw new TargetSelectionError({
-      reason: "not-found",
-      message: "No attached pages available. Attach the intended user tab with the Browse toolbar first.",
-    })
-  }
-  if (targets.length > 1) {
-    const candidates = targets.map((candidate, index) => `[${getIndex ? getIndex(candidate, index) : index}] ${getUrl(candidate)}`)
-    throw new TargetSelectionError({
-      reason: "ambiguous",
-      message: `Multiple attached pages (${targets.length}); use --target-url or --target-index to choose one. Matches: ${candidates.join(", ")}`,
-    })
-  }
-  return targets[0]
-}
-
-export function selectPage({ pages, selection }: { readonly pages: readonly Page[]; readonly selection: ExecuteTargetSelection }): Page | undefined {
-  return selectTarget({ targets: pages, selection, getUrl: (page) => page.url() })
-}
-
-export async function resolvePageTargetId(page: Page): Promise<string | undefined> {
-  return await Effect.runPromise(
-    runPlaywrightOperation({
-      label: "Resolve session page target id",
-      timeoutMs: playwrightCloseTimeoutMs,
-      run: () => pageTargetId(page),
-    }).pipe(
-      Effect.match({
-        onFailure: () => undefined,
-        onSuccess: (targetId) => targetId,
-      }),
-    ),
-  )
-}
-
-export async function pageTargetId(page: Page): Promise<string> {
-  if (page.isClosed()) {
-    throw new Error("Cannot identify the CDP target for a closed page")
-  }
-  const session = await page.context().newCDPSession(page)
-  try {
-    const result = await session.send("Target.getTargetInfo")
-    const targetId = result.targetInfo?.targetId
-    if (!targetId) {
-      throw new Error("Target.getTargetInfo did not return a target id for the handoff page")
-    }
-    return targetId
-  } finally {
-    await session.detach()
-  }
-}
-
-export function safePageUrl(page: Page): string | null {
-  try {
-    return page.isClosed() ? null : page.url()
-  } catch {
-    return null
-  }
-}
-
 export function installClosedPageReplacementGuard(page: Page, clearRecreatedFromClosedUrl: () => void): void {
   page.setDefaultTimeout?.(2_500)
   const restoreTimeout = () => {
@@ -555,83 +393,4 @@ export function installClosedPageReplacementGuard(page: Page, clearRecreatedFrom
       },
     })
   }
-}
-
-export async function applyExplicitMediaFeatures(
-  page: Page,
-  explicitMedia: string | undefined,
-  explicitMediaFeatures: ReadonlyMap<string, string>,
-): Promise<void> {
-  try {
-    const cdp = await page.context().newCDPSession(page)
-    try {
-      await cdp.send("Emulation.setEmulatedMedia", {
-        ...(explicitMedia ? { media: explicitMedia } : {}),
-        features: [
-          ...Array.from(explicitMediaFeatures, ([name, value]) => ({ name, value })),
-          { name: "__bc_explicit__", value: "1" },
-        ],
-      })
-    } finally {
-      await cdp.detach().catch(() => {})
-    }
-  } catch {}
-}
-
-export function installViewportZoomGuard(options: {
-  readonly page: Page
-  readonly explicitMediaFeatures: Map<string, string>
-  readonly getExplicitMedia: () => string | undefined
-  readonly setExplicitMedia: (media: string | undefined) => void
-  readonly addWarningOnce: (warning: string) => void
-}): void {
-  const { page, explicitMediaFeatures } = options
-  if (viewportZoomGuardedPages.has(page)) return
-  if (typeof page.emulateMedia === "function") {
-    const originalEmulateMedia = page.emulateMedia.bind(page)
-    Object.defineProperty(page, "emulateMedia", {
-      configurable: true,
-      value: async (mediaOptions?: Parameters<Page["emulateMedia"]>[0]) => {
-        for (const [option, feature] of explicitMediaOptions) {
-          if (!mediaOptions || !(option in mediaOptions)) continue
-          const value = mediaOptions[option]
-          if (typeof value === "string") explicitMediaFeatures.set(feature, value)
-          else explicitMediaFeatures.delete(feature)
-        }
-        if (mediaOptions && "media" in mediaOptions) options.setExplicitMedia(mediaOptions.media ?? undefined)
-        await originalEmulateMedia(mediaOptions)
-        if (explicitMediaFeatures.size > 0) {
-          await applyExplicitMediaFeatures(page, options.getExplicitMedia(), explicitMediaFeatures)
-        }
-      },
-    })
-  }
-  if (typeof page.setViewportSize === "function") {
-    const originalSetViewportSize = page.setViewportSize.bind(page)
-    Object.defineProperty(page, "setViewportSize", {
-      configurable: true,
-      value: async (size: { width: number; height: number }) => {
-        await originalSetViewportSize(size)
-        try {
-          const measured = await withTimeout(
-            page.evaluate(() => ({
-              innerWidth: window.innerWidth,
-              innerHeight: window.innerHeight,
-              dpr: window.devicePixelRatio,
-            })),
-            1_000,
-          )
-          if (
-            measured !== timedOut
-            && (Math.abs(measured.innerWidth - size.width) > 2 || Math.abs(measured.innerHeight - size.height) > 2)
-          ) {
-            options.addWarningOnce(
-              `Viewport size ${size.width}x${size.height} resulted in CSS viewport ${measured.innerWidth}x${measured.innerHeight} (devicePixelRatio=${Number(measured.dpr.toFixed(3))}) due to browser zoom on this origin.`,
-            )
-          }
-        } catch {}
-      },
-    })
-  }
-  viewportZoomGuardedPages.add(page)
 }

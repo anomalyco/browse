@@ -2,18 +2,21 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { performance } from "node:perf_hooks"
 import type { JsonObject } from "../protocol.ts"
-import { getNumber, getObject, getString } from "../relay/helpers.ts"
 import type { FlightRecorderSaveResponse, FlightRecorderStatusResponse } from "../relay/schema.ts"
+import { startFfmpegVideoEncoder } from "./ffmpeg-encoder.ts"
+import {
+  acknowledgeScreencastFrame,
+  parseScreencastFrame,
+  prepareCdpScreencastViewport,
+  startCdpScreencast,
+} from "./screencast.ts"
 import {
   cdpArtifactType,
   findByRecordingTarget,
-  prepareCdpScreencastViewport,
-  startFfmpegVideoEncoder,
-  startScreenshotFallback,
   type RecordingTargetOptions,
   type SendDebuggerCommand,
   type StartVideoEncoder,
-} from "../recording-relay.ts"
+} from "./types.ts"
 
 const defaultRetentionMs = 60_000
 const defaultFrameRate = 60
@@ -129,12 +132,7 @@ export class FlightRecorderRelay {
         cursor: options.cursor === true,
       }
       this.active.set(options.tabId, recorder)
-      await this.options.sendDebuggerCommand({
-        tabId: options.tabId,
-        method: "Page.startScreencast",
-        params: { format: "jpeg", quality: 90, everyNthFrame: 1 },
-      })
-      recorder.stopFallback = startScreenshotFallback({
+      const stopFallback = await startCdpScreencast({
         sendDebuggerCommand: this.options.sendDebuggerCommand,
         tabId: options.tabId,
         frameRate,
@@ -145,6 +143,7 @@ export class FlightRecorderRelay {
           this.handleDebuggerEvent({ tabId: options.tabId, method: "Page.screencastFrame", params })
         },
       })
+      if (stopFallback) recorder.stopFallback = stopFallback
       return this.statusFor(recorder)
     } catch (error) {
       this.active.delete(options.tabId)
@@ -242,16 +241,16 @@ export class FlightRecorderRelay {
     if (options.method !== "Page.screencastFrame") return false
     const recorder = this.active.get(options.tabId)
     if (!recorder) return false
-    const frameSessionId = getNumber(options.params, "sessionId")
-    if (frameSessionId !== undefined) {
-      recorder.screencastFrameSeen = true
-      void this.options.sendDebuggerCommand({
-        tabId: recorder.tabId,
-        method: "Page.screencastFrameAck",
-        params: { sessionId: frameSessionId },
-      }).catch(() => {})
-    }
-    const frameData = getString(options.params, "data")
+    const screencastFrame = parseScreencastFrame(options.params)
+    acknowledgeScreencastFrame({
+      sendDebuggerCommand: this.options.sendDebuggerCommand,
+      tabId: recorder.tabId,
+      frame: screencastFrame,
+      onSeen: () => {
+        recorder.screencastFrameSeen = true
+      },
+    })
+    const frameData = screencastFrame.data
     if (frameData === undefined) return true
     recorder.sourceFrameCount += 1
     if (frameData.length > Math.ceil(maxBufferedBytes * 4 / 3) + 4) {
@@ -263,7 +262,7 @@ export class FlightRecorderRelay {
       recorder.droppedFrameCount += 1
       return true
     }
-    const surfaceWidth = getNumber(getObject(options.params?.metadata), "deviceWidth")
+    const surfaceWidth = screencastFrame.deviceWidth
     const frame: BufferedFrame = {
       data,
       receivedAt: this.monotonicNow(),

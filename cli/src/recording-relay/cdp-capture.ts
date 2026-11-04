@@ -1,8 +1,9 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 import type { JsonObject } from "../protocol.ts"
-import { getNumber, getObject, getString } from "../relay/helpers.ts"
-import { prepareCdpScreencastViewport, startFfmpegVideoEncoder, startScreenshotFallback } from "./ffmpeg-encoder.ts"
+import { getString } from "../relay/helpers.ts"
+import { startFfmpegVideoEncoder } from "./ffmpeg-encoder.ts"
+import { acknowledgeScreencastFrame, parseScreencastFrame, prepareCdpScreencastViewport, startCdpScreencast } from "./screencast.ts"
 import {
   cdpArtifactType,
   cdpJpegQuality,
@@ -37,29 +38,29 @@ export function handleCdpScreencastFrame(
   recording: CdpRecording,
   options: { readonly tabId: number; readonly params: JsonObject | undefined },
 ): boolean {
-  const frameSessionId = getNumber(options.params, "sessionId")
-  if (frameSessionId !== undefined) {
-    recording.screencastFrameSeen = true
-    void context.sendDebuggerCommand({
-      tabId: recording.tabId,
-      method: "Page.screencastFrameAck",
-      params: { sessionId: frameSessionId },
-    }).catch((error: unknown) => {
+  const frame = parseScreencastFrame(options.params)
+  acknowledgeScreencastFrame({
+    sendDebuggerCommand: context.sendDebuggerCommand,
+    tabId: recording.tabId,
+    frame,
+    onSeen: () => {
+      recording.screencastFrameSeen = true
+    },
+    onError: (error) => {
       if (!recording.stopped && !recording.stopping) console.error("CDP recording frame acknowledgement failed", error)
-    })
-  }
-  const frameData = getString(options.params, "data")
+    },
+  })
+  const frameData = frame.data
   if (recording.stopped || recording.stopping || frameData === undefined) {
     return true
   }
-  const metadata = getObject(options.params?.metadata)
   recording.sourceFrameCount += 1
   if (recording.pendingFrameCount >= maxPendingCdpFrames || recording.writeError) {
     recording.droppedFrameCount += 1
     return true
   }
-  const deviceWidth = getNumber(metadata, "deviceWidth")
-  const deviceHeight = getNumber(metadata, "deviceHeight")
+  const deviceWidth = frame.deviceWidth
+  const deviceHeight = frame.deviceHeight
   if (deviceWidth !== undefined) recording.sourceWidth = deviceWidth
   if (deviceHeight !== undefined) recording.sourceHeight = deviceHeight
   const buffer = Buffer.from(frameData, "base64")
@@ -156,36 +157,30 @@ export async function startCdpRecording(
     fallbackFrameCount: 0,
   }
   context.activeRecordings.set(options.tabId, recording)
+  let stopFallback: (() => void) | undefined
   try {
-    await context.sendDebuggerCommand({
+    stopFallback = await startCdpScreencast({
+      sendDebuggerCommand: context.sendDebuggerCommand,
       tabId: recording.tabId,
-      method: "Page.startScreencast",
-      params: {
-        format: "jpeg",
-        quality: cdpJpegQuality,
-        everyNthFrame: 1,
+      frameRate,
+      quality: cdpJpegQuality,
+      hasScreencastFrames: () => recording.screencastFrameSeen === true,
+      active: () => context.activeRecordings.get(recording.tabId) === recording && !recording.stopped && !recording.stopping,
+      onFrame: (params) => {
+        recording.fallbackFrameCount += 1
+        context.onFallbackFrame(recording.tabId, params)
       },
+      shouldContinue: () => !starting.cancelled && context.activeRecordings.get(recording.tabId) === recording,
     })
   } catch (error) {
     await cleanupCdpRecording(context, recording)
     return { success: false, error: `Could not start CDP screencast: ${error instanceof Error ? error.message : String(error)}` }
   }
-  if (starting.cancelled || context.activeRecordings.get(recording.tabId) !== recording) {
+  if (stopFallback === undefined) {
     await cleanupCdpRecording(context, recording)
     return { success: false, error: "Recording was cancelled while starting" }
   }
-  recording.stopFallback = startScreenshotFallback({
-    sendDebuggerCommand: context.sendDebuggerCommand,
-    tabId: recording.tabId,
-    frameRate,
-    quality: cdpJpegQuality,
-    hasScreencastFrames: () => recording.screencastFrameSeen === true,
-    active: () => context.activeRecordings.get(recording.tabId) === recording && !recording.stopped && !recording.stopping,
-    onFrame: (params) => {
-      recording.fallbackFrameCount += 1
-      context.onFallbackFrame(recording.tabId, params)
-    },
-  })
+  recording.stopFallback = stopFallback
   context.armMaxDuration(recording, options.maxDurationMs)
   return {
     success: true,

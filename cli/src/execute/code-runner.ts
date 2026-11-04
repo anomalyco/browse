@@ -32,7 +32,8 @@ import type {
 } from "../snapshot.ts"
 import type { WebMcpHelper } from "./webmcp.ts"
 import { createExecuteLogCapture, createSandboxConsole } from "./log-capture.ts"
-import { delay, safePageUrl, timedOut, withTimeout } from "./page-recovery.ts"
+import { delay, timedOut, withTimeout } from "./page-recovery.ts"
+import { safePageUrl } from "./target-selection.ts"
 
 // Full Node modules, only with OPENCODE_BROWSER_ALLOW_NODE=1. Sandboxed execute code gets sandboxModules.
 export const nodeModules = { ...sandboxModules, fs, os, http, https }

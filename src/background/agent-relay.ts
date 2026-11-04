@@ -40,7 +40,6 @@ import {
   CLOSE_CODES,
   CONNECT_TIMEOUT,
   KEEPALIVE,
-  OWNER,
   PORT_KEY,
   serialize,
   STABLE_AFTER,
@@ -457,7 +456,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   void chrome.alarms.create(ALARM, { periodInMinutes: extensionReconnectAlarmPeriodMs / 60_000 })
   void DebuggerHub.restore()
     .then(async () => {
-      DebuggerHub.tabsOwnedBy(OWNER).forEach((tabId) => relayTabs.add(tabId))
+      DebuggerHub.attachedTabs().forEach((tabId) => relayTabs.add(tabId))
       // Tabs the previous worker was opening for an agent when it stopped (never tracked, or tracked but never
       // attached): the relay doesn't know them, so nothing would use them again. Close them.
       const orphans = [

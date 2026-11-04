@@ -23,7 +23,6 @@ import {
   ATTACHED_TITLE,
   MAX_MESSAGE,
   number,
-  OWNER,
   relayAutoUpdate,
   serialize,
   sessionName,
@@ -103,7 +102,7 @@ export function createRelayCommands(deps: {
       case "debugger.attach": {
         const tabId = number(params, "tabId")
         TabCleanup.touch(tabId)
-        await DebuggerHub.attach(tabId, OWNER)
+        await DebuggerHub.attach(tabId)
         deps.relayTabs.add(tabId)
         deps.notify()
         return {}
@@ -111,7 +110,7 @@ export function createRelayCommands(deps: {
       case "debugger.detach": {
         const tabId = number(params, "tabId")
         deps.forget(tabId)
-        await DebuggerHub.detach(tabId, OWNER)
+        await DebuggerHub.detach(tabId)
         await deps.ungroup(tabId, { finished: true })
         return {}
       }

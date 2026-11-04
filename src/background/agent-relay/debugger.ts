@@ -1,6 +1,6 @@
 import { isJsonObject, type JsonObject } from "../../agent-relay/protocol"
 import { DebuggerHub } from "../debugger-hub"
-import { FOREIGN_FRAME, number, OWNER, sleep, string, text, type AgentRelayLog } from "./wire"
+import { FOREIGN_FRAME, number, sleep, string, text, type AgentRelayLog } from "./wire"
 
 export function createRelayDebugger(deps: {
   readonly log: AgentRelayLog
@@ -11,7 +11,7 @@ export function createRelayDebugger(deps: {
 }) {
   /** Re-attaches the relay to a tab whose debugger dropped; true when it is attached again. */
   const reattach = (tabId: number) =>
-    DebuggerHub.attach(tabId, OWNER).then(
+    DebuggerHub.attach(tabId).then(
       () => {
         // A new attachment starts without the relay's focus emulation, which keeps a background tab from throttling.
         void chrome.debugger.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => undefined)

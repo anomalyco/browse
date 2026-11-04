@@ -2,88 +2,15 @@ import { execFile, spawn } from "node:child_process"
 import crypto from "node:crypto"
 import { once } from "node:events"
 import fs from "node:fs/promises"
-import { performance } from "node:perf_hooks"
-import { Predicate } from "effect"
 import { terminateChildProcess } from "../update/child-process.ts"
 import { mjpegMatroskaFrame, mjpegMatroskaHeader } from "./mjpeg-matroska.ts"
-import type { JsonObject } from "../protocol.ts"
-import { getObject, getString } from "../relay/helpers.ts"
 import {
-  fallbackCdpHeight,
-  fallbackCdpWidth,
-  type SendDebuggerCommand,
   type StartVideoEncoder,
   type VideoEncoder,
 } from "./types.ts"
 
-/**
- * The size to record at. Never brings the tab to the front: that raises the browser window over the user's work.
- * A background tab keeps rendering through focus emulation (set at attach); when the screencast still sends no
- * frames, startScreenshotFallback fills in.
- */
-export async function prepareCdpScreencastViewport(
-  sendDebuggerCommand: SendDebuggerCommand,
-  tabId: number,
-): Promise<{ readonly width: number; readonly height: number }> {
-  const metrics = await sendDebuggerCommand({ tabId, method: "Page.getLayoutMetrics", params: {} })
-  return cdpRecordingSize(metrics)
-}
-
-/** How long a screencast may stay silent before screenshots stand in for it. */
-const screencastFallbackGraceMs = 1_500
-/** Screenshots are slower than screencast frames; this many per second at most. */
-const maxFallbackFrameRate = 10
-
-/**
- * Chrome sends no screencast frames for a tab it doesn't paint (a background tab in some builds, an occluded window).
- * Once a screencast has been silent for a moment, polls Page.captureScreenshot and hands each image to `onFrame` as
- * screencast frame params (without a sessionId, so nothing is acknowledged), until a real frame arrives or the
- * recording ends. Returns a stop function.
- */
-export function startScreenshotFallback(options: {
-  readonly sendDebuggerCommand: SendDebuggerCommand
-  readonly tabId: number
-  readonly frameRate: number
-  readonly quality: number
-  readonly hasScreencastFrames: () => boolean
-  readonly active: () => boolean
-  readonly onFrame: (params: JsonObject) => void
-}): () => void {
-  let stopped = false
-  const running = () => !stopped && options.active() && !options.hasScreencastFrames()
-  const intervalMs = Math.round(1_000 / Math.max(1, Math.min(options.frameRate, maxFallbackFrameRate)))
-  void (async () => {
-    await sleep(screencastFallbackGraceMs)
-    while (running()) {
-      const started = performance.now()
-      const screenshot = await options.sendDebuggerCommand({
-        tabId: options.tabId,
-        method: "Page.captureScreenshot",
-        params: { format: "jpeg", quality: options.quality, fromSurface: true, captureBeyondViewport: false },
-      }).catch(() => undefined)
-      const data = screenshot ? getString(screenshot, "data") : undefined
-      if (data !== undefined && running()) options.onFrame({ data, metadata: {} })
-      await sleep(Math.max(0, intervalMs - (performance.now() - started)))
-    }
-  })()
-  return () => {
-    stopped = true
-  }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-function cdpRecordingSize(metrics: JsonObject): { readonly width: number; readonly height: number } {
-  const viewport = getObject(metrics.cssVisualViewport) ?? getObject(metrics.visualViewport)
-  const viewportWidth = Predicate.isNumber(viewport?.clientWidth) ? viewport.clientWidth : fallbackCdpWidth
-  const viewportHeight = Predicate.isNumber(viewport?.clientHeight) ? viewport.clientHeight : fallbackCdpHeight
-  return {
-    width: Math.max(2, Math.floor(viewportWidth) & ~1),
-    height: Math.max(2, Math.floor(viewportHeight) & ~1),
-  }
-}
+// Screencast capture lives in ./screencast.ts; re-exported here so existing importers keep working.
+export { cdpRecordingSize, prepareCdpScreencastViewport, startScreenshotFallback } from "./screencast.ts"
 
 export async function startFfmpegVideoEncoder(options: Parameters<StartVideoEncoder>[0]): Promise<VideoEncoder> {
   // Preserve start-time dependency errors even though geometry arrives later.

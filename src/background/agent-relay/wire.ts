@@ -21,7 +21,6 @@ export type Handshake = {
   session?: { key: Uint8Array; relayNonce: string }
 }
 
-export const OWNER = "relay"
 /** Overrides the relay port, for development and isolated tests. */
 export const PORT_KEY = "agentRelayPort"
 export const PROFILE_KEY = "agentRelayProfile"
