@@ -2,7 +2,6 @@ import { Console, Effect, Option } from "effect"
 import { Argument, Command, Flag } from "effect/cli"
 import path from "node:path"
 import process from "node:process"
-import * as Deadbolt from "../auth/deadbolt.ts"
 import * as RelayClient from "../relay/client.ts"
 import * as SiteSecrets from "../auth/site-secrets.ts"
 import {
@@ -218,97 +217,4 @@ const secrets = Command.make("secrets").pipe(
   Command.withSubcommands([secretsAdd, secretsList, secretsRemove, secretsStatus, secretsRefresh, secretsRun]),
 )
 
-const deadboltConnect = Command.make(
-  "connect",
-  { json: jsonFlag },
-  Effect.fn("Cli.deadboltConnect")(function* ({ json }) {
-    const paired = yield* Effect.tryPromise({
-      try: () => Deadbolt.pair(),
-      catch: (cause) => (cause instanceof Error ? cause : new Error("Could not connect to Deadbolt")),
-    })
-    if (json) {
-      yield* emitJson({ connected: true, id: paired.id })
-      return
-    }
-    yield* Console.log(`Connected browse to Deadbolt as client ${paired.id}.`)
-    yield* Console.log(
-      "Agents can use only the logins you allow, in Deadbolt: deadbolt agents allow <site> (narrow with --login, --fields, --expires), or deadbolt agents allow --all for every login",
-    )
-  }),
-).pipe(
-  Command.withDescription(
-    "Pair browse with Deadbolt (runs `deadbolt agents add-client browse`, which asks you to confirm) and store its client token (0600)",
-  ),
-)
-
-const deadboltDisconnect = Command.make(
-  "disconnect",
-  {},
-  Effect.fn("Cli.deadboltDisconnect")(function* () {
-    const result = yield* Effect.try({
-      try: () => Deadbolt.unpair(),
-      catch: (cause) => (cause instanceof Error ? cause : new Error("Could not disconnect from Deadbolt")),
-    })
-    if (!result.removed) {
-      yield* Console.log("browse isn't connected to Deadbolt")
-      return
-    }
-    yield* Console.log(
-      result.revoked
-        ? "Disconnected: the client is removed in Deadbolt and its token deleted here."
-        : "Deleted the client token here. Deadbolt didn't confirm removing the client: check `deadbolt agents clients`.",
-    )
-  }),
-).pipe(Command.withDescription("Remove browse's Deadbolt client (in Deadbolt and here)"))
-
-const deadboltStatus = Command.make(
-  "status",
-  { json: jsonFlag },
-  Effect.fn("Cli.deadboltStatus")(function* ({ json }) {
-    const client = Deadbolt.readClient()
-    const socket = Deadbolt.socketPath()
-    const status = client
-      ? yield* Effect.promise(() =>
-          Deadbolt.connect({ client, socket })
-            .status()
-            .then(
-              (value) => ({ reachable: true as const, ...value }),
-              (error: unknown) => ({
-                reachable: false as const,
-                error: error instanceof Error ? error.message : String(error),
-              }),
-            ),
-        )
-      : undefined
-    const report = {
-      connected: client !== undefined,
-      ...(client ? { id: client.id } : {}),
-      socket,
-      ...(status ? { deadbolt: status } : {}),
-    }
-    if (json) {
-      yield* emitJson(report)
-      return
-    }
-    if (!client) {
-      yield* Console.log("Not connected to Deadbolt. Run `opencode-browser deadbolt connect`.")
-      return
-    }
-    yield* Console.log(`Connected as Deadbolt client ${client.id}; socket ${socket}`)
-    if (status && status.reachable)
-      yield* Console.log(
-        `Deadbolt ${status.version ?? ""} (protocol ${status.protocol}) is ${status.unlocked ? "unlocked" : "locked: agent sign-ins are paused until you unlock it"}`,
-      )
-    else if (status) yield* Console.log(`Deadbolt isn't reachable: ${status.error}`)
-  }),
-).pipe(
-  Command.withDescription("Show whether browse is paired with Deadbolt and whether Deadbolt is reachable and unlocked"),
-)
-
-const deadbolt = Command.make("deadbolt").pipe(
-  Command.withDescription("Let agents sign in with the Deadbolt logins you grant them, without seeing any value"),
-  Command.withSubcommands([deadboltConnect, deadboltDisconnect, deadboltStatus]),
-)
-
 registerCliCommand(610, () => secrets)
-registerCliCommand(620, () => deadbolt)

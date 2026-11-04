@@ -210,8 +210,6 @@ export function buildSandboxGlobals(deps: {
     },
     secrets: {
       type: (target, name, typeOptions) => deps.secrets.typeSecret(page, target, name, typeOptions),
-      signIn: (signInOptions) => deps.secrets.signIn(page, signInOptions),
-      usePasskey: (passkeyOptions) => deps.secrets.usePasskey(passkeyOptions?.page ?? page, passkeyOptions),
     },
     handoffTracker,
   }

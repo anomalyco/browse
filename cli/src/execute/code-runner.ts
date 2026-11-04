@@ -5,7 +5,6 @@ import os from "node:os"
 import * as acorn from "acorn"
 import type { Browser, BrowserContext, ConsoleMessage, Frame, Locator, Page } from "patchright-core"
 import { classifyChallenge, probePageScript, probeSelectors, type ChallengeOutcome, type ChallengeProbe } from "./challenge-detection.ts"
-import type * as Deadbolt from "../auth/deadbolt.ts"
 import type { DemonstrationResult } from "./demonstration.ts"
 import { pageVisibleApiWarningForName, sandboxModules, type ExecuteFiles, type ExecuteRealm } from "../execute-realm.ts"
 import type {
@@ -19,7 +18,6 @@ import type * as NetworkCapture from "../network-capture.ts"
 import { PageConsole } from "./console.ts"
 import type { ExecuteAftermath, ExecuteLogEntry, ExecuteLogSummary } from "../relay/schema.ts"
 import type { ScreenshotDiffOptions, ScreenshotDiffResult } from "../snapshot/screenshot-diff.ts"
-import type * as SignIn from "../auth/sign-in.ts"
 import type * as SiteSecrets from "../auth/site-secrets.ts"
 import type {
   AriaSnapshotHelper,
@@ -43,17 +41,9 @@ export type TypeSecretOptions = {
   readonly clear?: boolean
   /** How long to wait for the target element, in milliseconds (default 10000). */
   readonly timeout?: number
-  /** For a Deadbolt login (`deadbolt:<site>[/<username>]`): which value to type (default "password"). */
-  readonly field?: Deadbolt.DeadboltField
-  /**
-   * For a Deadbolt password or code (required for them): submit the field's form in the same call, wait for the page
-   * to move on, then empty any password and code inputs left in that frame.
-   */
-  readonly submit?: boolean
 }
 
 export type TypeSecretResult = { readonly typed: true; readonly name: string; readonly origin: string; readonly kind: SiteSecrets.SiteSecretKind }
-export type TypeDeadboltResult = { readonly typed: true; readonly name: string; readonly origin: string; readonly field: Deadbolt.DeadboltField; readonly submitted?: boolean; readonly progressed?: boolean }
 
 export type HandoffCallOptions = {
   readonly timeoutMs?: number
@@ -112,9 +102,7 @@ export type SandboxGlobals = {
     readonly stop: (page?: Page) => Promise<{ readonly capturing: boolean }>
   }
   readonly secrets: {
-    readonly type: (target: Locator | string, name: string, options?: TypeSecretOptions) => Promise<TypeSecretResult | TypeDeadboltResult>
-    readonly signIn: (options?: SignIn.SignInOptions) => Promise<SignIn.SignInResult>
-    readonly usePasskey: (options: { readonly site: string; readonly username: string; readonly page?: Page }) => Promise<{ readonly selected: true; readonly site: string; readonly username: string }>
+    readonly type: (target: Locator | string, name: string, options?: TypeSecretOptions) => Promise<TypeSecretResult>
   }
   readonly handoffTracker: { count: number }
 }
@@ -198,19 +186,6 @@ export async function detectChallenge(page: Page, options: { readonly waitMs: nu
     waitedMs,
     recommendation: current.kind === "block" ? "stop" : "handoff",
   }
-}
-
-const requestEvents = new Set(["request", "requestfinished", "requestfailed", "response", "websocket", "route"])
-
-/**
- * Calls from execute code that can watch what a page sends or types: request interception and listeners, page
- * scripts added before navigation, exposed functions, raw CDP sessions. Returns a label, or undefined.
- */
-export function pageHookCall(fn: Function, args: readonly unknown[]): string | undefined {
-  const name = typeof fn.name === "string" ? fn.name.replace(/^bound /, "") : ""
-  if (["route", "routeFromHAR", "routeWebSocket", "addInitScript", "exposeBinding", "exposeFunction", "newCDPSession", "waitForRequest", "waitForResponse"].includes(name)) return `${name}()`
-  if (["on", "once", "addListener", "prependListener", "waitForEvent"].includes(name) && typeof args[0] === "string" && requestEvents.has(args[0])) return `${name}("${args[0]}")`
-  return undefined
 }
 
 /** Full-Node execute code bypasses the realm's call observer, so look for the page-visible APIs in its source. */

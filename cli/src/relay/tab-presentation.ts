@@ -10,7 +10,6 @@ import {
   type HandoffOutcome,
   type HandoffRegistry,
 } from "../session-manager/handoff.ts"
-import type { PasskeyBridge } from "../auth/passkey-bridge.ts"
 import { makePageStatus, type JsonObject, type PageStatus } from "../protocol.ts"
 import { relayLog } from "./log.ts"
 import type { ConnectedTarget } from "./types.ts"
@@ -30,7 +29,6 @@ export function createTabPresentation(options: {
   readonly registry: TargetRegistry
   readonly browsers: BrowserLinks
   readonly handoffs: HandoffRegistry
-  readonly passkeys: PasskeyBridge
   readonly tabActivity: TabActivity
   readonly mainFrameIdsByTab: Map<number, string>
   readonly sendToExtension: (command: ExtensionCommandInput, link?: BrowserLink) => Effect.Effect<JsonObject, Error>
@@ -46,7 +44,6 @@ export function createTabPresentation(options: {
     registry,
     browsers,
     handoffs,
-    passkeys,
     tabActivity,
     mainFrameIdsByTab,
     sendToExtension,
@@ -313,9 +310,6 @@ export function createTabPresentation(options: {
     contextDebugLog?.(`target-attached kind=root ${targetDiagnosticIdentity(registry, committedTarget)} ${summarizeDiagnosticUrl(committedTarget.targetInfo.url)}`)
     if (committedTarget.opencodeBrowserSessionId) {
       pruneInvisibleAnnouncementsForSession(committedTarget.opencodeBrowserSessionId)
-    }
-    if (committedTarget.owner === "relay" && committedTarget.opencodeBrowserSessionId) {
-      void passkeys.install(tabId)
     }
     if (browsers.browserTab(tabId)?.link.rpc.connected) {
       refreshTabGrouping(tabId)

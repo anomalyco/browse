@@ -15,7 +15,6 @@ import { GhostCursorTabs } from "./ghost-cursor.ts"
 import { HandoffRegistry } from "./session-manager/handoff.ts"
 import { createHttpRequestHandler } from "./http-api.ts"
 import { forgetTab } from "./execute/human-input.ts"
-import { PasskeyBridge } from "./auth/passkey-bridge.ts"
 import { devExtension, PUBLIC_STORE_ID, storeConfig } from "./paths.ts"
 import { ProtectedFrameTracker } from "./cdp/protected-frames.ts"
 import type { CdpEvent, JsonObject } from "./protocol.ts"
@@ -145,14 +144,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const ownersAcrossReconnect = new Map<string, { readonly sessionId?: string; readonly owner: "relay" | "user"; readonly browser: string }>()
   const sweptBrowsers = new Set<string>()
 
-  const passkeys = new PasskeyBridge({
-    send: (tabId, method, params) => Effect.runPromise(sendDebuggerCommand({ tabId, method, params })),
-    allowedOrigins: (tabId) => {
-      const sessionId = registry.tabTargets.get(tabId)?.opencodeBrowserSessionId
-      return sessionId ? sessions.allowedOrigins(sessionId) : undefined
-    },
-    log: (event, fields) => relayLog(event, fields),
-  })
   const recordingRelay = new RecordingRelay({
     sendToExtension: (command) => Effect.runPromise(sendToExtension(command)),
     sendDebuggerCommand: (command) => Effect.runPromise(sendDebuggerCommand(command)),
@@ -193,7 +184,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     registry,
     browsers,
     handoffs,
-    passkeys,
     tabActivity,
     mainFrameIdsByTab,
     sendToExtension,
@@ -264,20 +254,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         onDefaultTargetChange,
         allowedOrigins: () => sessions.allowedOrigins(id),
         drainGuardWarnings: () => navigationGuard.drainWarnings(id),
-        passkeys: {
-          select: (targetId, site, username) => {
-            const target = registry.targetsByTargetId.get(targetId)
-            if (!target || !("owner" in target) || target.owner !== "relay" || target.opencodeBrowserSessionId !== id) {
-              throw new Error("secrets.usePasskey: passkeys are answered only in tabs this session opened")
-            }
-            if (username) passkeys.select(target.tabId, site, username)
-            else passkeys.clearSelection(target.tabId)
-          },
-          choiceSince: (targetId, since) => {
-            const target = registry.targetsByTargetId.get(targetId)
-            return target && target.opencodeBrowserSessionId === id ? passkeys.choiceSince(target.tabId, since) : undefined
-          },
-        },
         isRecordingTarget: (targetId) => {
           const target = registry.targetsByTargetId.get(targetId)
           return target !== undefined && isTabRecorded(target.tabId)
@@ -497,7 +473,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     navigationGuard.forgetTab(tabId)
     ghostCursor.forget(tabId)
     forgetTab(tabId)
-    passkeys.forget(tabId)
     for (const [sessionId, childTabId] of suppressedChildSessions) {
       if (childTabId === tabId) suppressedChildSessions.delete(sessionId)
     }
@@ -582,7 +557,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     handoffs,
     recordingRelay,
     flightRecorder,
-    passkeys,
     navigationGuard,
     ghostCursor,
     tabActivity,
