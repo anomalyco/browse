@@ -1,6 +1,6 @@
 // Switching an npm or binary install's version (auto-update.ts has the layout): `update`, `rollback`, and the two commands the
 // relay's updater runs in detached children so nothing waits on its event loop:
-//   runtime-install <version> [--integrity <sri>]   installs and verifies one version (it starts), records it as pending
+//   runtime-install <version> [--integrity <sri>]   installs and verifies one version (installVersion), records it as pending
 //   runtime-switch <version>                         switches to an installed version (exit 1 when refused or broken)
 // A switch first runs the version's relay and MCP server on a spare port (verifyStarts), and a version that doesn't
 // start never replaces the running relay; auto-update then skips it until a newer one is published. Then it drains the
@@ -9,7 +9,7 @@
 // changes: no MCP server swaps, and nothing runs a mix of versions. --force ends what's blocking it. If the new relay
 // still fails to start, it's stopped, current.json goes back and the old version's relay starts again at once.
 import { Effect } from "effect"
-import { existsSync, rmSync } from "node:fs"
+import { existsSync } from "node:fs"
 import {
   channelOf,
   compareVersions,
@@ -27,13 +27,14 @@ import {
   switchVersion,
   updateState,
   verifyStarts,
-  versionDirectory,
+  VersionDoesNotStart,
   versionEntry,
+  writeCurrent,
   type AutoUpdateState,
   type Current,
   type Layout,
 } from "./auto-update.ts"
-import { cliCommand, installCommand } from "../paths.ts"
+import { cliCommand, compiledBinary, installCommand, scriptEntry } from "../paths.ts"
 import * as RelayClient from "../relay/client.ts"
 import * as RelayLifecycle from "../relay/lifecycle.ts"
 
@@ -46,12 +47,13 @@ export type Refusal = { readonly message: string; readonly broken?: true }
  * Switches to an installed `version`: checks that its relay starts (on a spare port), drains the running relay, then
  * points current.json at the version (keeping `previous` for rollback) and starts its relay. Undefined when it switched,
  * else why not; current.json is then as it was, and when the old relay had already stopped, it's started again.
+ * `binary`: a binary install's executable on PATH, when it isn't current.json's yet (install over an npm install).
  */
-export async function switchTo(layout: Layout, version: string, options: { readonly previous: string | undefined; readonly force: boolean }): Promise<Refusal | undefined> {
+export async function switchTo(layout: Layout, version: string, options: { readonly previous: string | undefined; readonly force: boolean; readonly binary?: string }): Promise<Refusal | undefined> {
   const entry = versionEntry(layout, version)
   if (!existsSync(entry)) return { message: `${version} isn't installed` }
   // Before anything stops a relay that works.
-  const unstartable = await verifyStarts(layout, version).then(() => undefined, (error: Error) => error.message)
+  const unstartable = await verifyStarts(entry, version).then(() => undefined, (error: Error) => error.message)
   if (unstartable) return { message: unstartable, broken: true }
   const before: Current | undefined = readCurrent(layout)
   let switched = false
@@ -59,7 +61,7 @@ export async function switchTo(layout: Layout, version: string, options: { reado
   /** The new version's relay process, once started. */
   let candidate: number | undefined
   const point = Effect.sync(() => {
-    switchVersion(layout, version, options.previous)
+    switchVersion(layout, version, options.previous, options.binary)
     switched = true
   })
   const program = Effect.gen(function* () {
@@ -96,17 +98,23 @@ export async function switchTo(layout: Layout, version: string, options: { reado
   const restore = (previous: Current) =>
     Effect.gen(function* () {
       if (candidate !== undefined && processAlive(candidate)) process.kill(candidate, "SIGKILL")
-      yield* Effect.try({ try: () => switchVersion(layout, previous.version, previous.previous, previous.binary), catch: (cause) => cause as Error })
+      // In the format it had: an npm install's current.json back as it was, a binary install's executable back on PATH.
+      yield* Effect.try({
+        try: () => (previous.binary ? switchVersion(layout, previous.version, previous.previous, previous.binary) : writeCurrent(layout, previous)),
+        catch: (cause) => cause as Error,
+      })
       const relay = yield* RelayClient.Service
       const answering = yield* Effect.result(relay.version)
+      const back = versionEntry(layout, previous.version, previous.binary !== undefined)
+      // An npm version runs under Node, which a binary install's process isn't.
       if (answering._tag === "Failure" && answering.failure instanceof RelayClient.RelayUnreachable)
-        yield* RelayLifecycle.startManagedRelay(versionEntry(layout, previous.version))
-      const back = yield* RelayLifecycle.waitForRelayReady({ relay })
-      if (back.version !== previous.version) return yield* Effect.fail(new Error(`a relay of version ${back.version} answered instead`))
+        yield* RelayLifecycle.startManagedRelay(back, compiledBinary() && scriptEntry(back) ? "node" : process.execPath, compiledBinary() ? [] : process.execArgv)
+      const answered = yield* RelayLifecycle.waitForRelayReady({ relay })
+      if (answered.version !== previous.version) return yield* Effect.fail(new Error(`a relay of version ${answered.version} answered instead`))
     })
   const message = (error: unknown) => (error as Error).message ?? String(error)
   return Effect.runPromise(program.pipe(
-    Effect.catch((error) => Effect.succeed<Refusal>({ message: message(error), ...(launched ? { broken: true as const } : {}) })),
+    Effect.catch((error) => Effect.succeed<Refusal>(launched ? { message: `${version} didn't start: ${message(error)}`, broken: true } : { message: message(error) })),
     Effect.flatMap((refused) =>
       refused && switched && before
         ? restore(before).pipe(
@@ -180,7 +188,10 @@ export async function runNpmUpdate(args: readonly string[], layout?: Layout) {
   }
   log(`Installing ${published.version} (you have ${runtime.version})…`)
   const entry = await installVersion({ layout: lay, version: published.version, integrity: published.integrity, ...(process.env.OPENCODE_BROWSER_NPM_REGISTRY ? { registry: await registryUrl() } : {}) }).catch((error: Error) => {
-    log(`✗ ${error.message}`)
+    if (error instanceof VersionDoesNotStart) {
+      skipBroken(lay, published.version, error.message)
+      log(`✗ ${error.message}. ${runtime.version} keeps running, and auto-update skips ${published.version} until a newer version is published.`)
+    } else log(`✗ ${error.message}`)
     process.exitCode = 1
     return undefined
   })
@@ -221,30 +232,20 @@ export async function runRuntimeInstall(args: readonly string[]) {
   const clear = (installing: AutoUpdateState["installing"]) => (installing?.pid === process.pid ? undefined : installing)
   try {
     await installVersion({ layout, version, ...(integrity ? { integrity } : {}), ...(process.env.OPENCODE_BROWSER_NPM_REGISTRY ? { registry: await registryUrl() } : {}) })
-    // Installed means it runs: one that doesn't start goes, and isn't installed again until a newer one is published.
-    const unstartable = await verifyStarts(layout, version).then(() => undefined, (error: Error) => error.message)
-    if (unstartable) {
-      rmSync(versionDirectory(layout, version), { recursive: true, force: true })
-      skipBroken(layout, version, unstartable)
-      updateState(layout, ({ installing, ...state }) => {
-        const still = clear(installing)
-        return { ...state, ...(still ? { installing: still } : {}) }
-      })
-      log(`${new Date().toISOString()} install of ${version} failed (${unstartable}); skipping ${version} until a newer version is published`)
-      process.exitCode = 1
-      return
-    }
     updateState(layout, ({ installing, lastError: _error, ...state }) => {
       const still = clear(installing)
       return { ...state, ...(still ? { installing: still } : {}), pending: version }
     })
     log(`${new Date().toISOString()} installed ${version}`)
   } catch (error) {
+    const message = (error as Error).message
+    // One that doesn't start isn't installed again until a newer one is published; any other failure is retried tomorrow.
+    if (error instanceof VersionDoesNotStart) skipBroken(layout, version, message)
     updateState(layout, ({ installing, ...state }) => {
       const still = clear(installing)
-      return { ...state, ...(still ? { installing: still } : {}), lastError: { message: (error as Error).message, at: new Date().toISOString(), version } }
+      return { ...state, ...(still ? { installing: still } : {}), ...(error instanceof VersionDoesNotStart ? {} : { lastError: { message, at: new Date().toISOString(), version } }) }
     })
-    log(`${new Date().toISOString()} install of ${version} failed: ${(error as Error).message}`)
+    log(`${new Date().toISOString()} install of ${version} failed${error instanceof VersionDoesNotStart ? ` (${message}); skipping ${version} until a newer version is published` : `: ${message}`}`)
     process.exitCode = 1
   }
 }

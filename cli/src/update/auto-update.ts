@@ -156,8 +156,12 @@ export function updateState(layout: Layout, change: (state: AutoUpdateState) => 
   return next
 }
 
-/** Records a version that didn't start (verifyStarts): no longer pending, and skipped until a newer one is published. */
+/**
+ * Records a version that didn't start (verifyStarts, or its relay after a switch): removed unless it's current, no
+ * longer pending, and skipped until a newer one is published.
+ */
 export function skipBroken(layout: Layout, version: string, message: string) {
+  if (readCurrent(layout)?.version !== version) rmSync(versionDirectory(layout, version), { recursive: true, force: true })
   updateState(layout, ({ pending, ...state }) => ({
     ...state,
     ...(pending && pending !== version ? { pending } : {}),
@@ -368,9 +372,10 @@ function copyRunningPackage(source: string, prefix: string) {
 
 /**
  * Installs one version into runtime/versions/<version> and verifies it: npm checks the tarball against the registry's
- * integrity while installing; then the lockfile must record that same integrity for the package, and the installed CLI
- * must run and report the version. Built in a temporary directory and renamed into place, so a failed install never
- * leaves a half-written version where the shim could find it. Returns the verified entry.
+ * integrity while installing; then the lockfile must record that same integrity for the package, the installed CLI
+ * must run and report the version, and its relay and MCP server must start (verifyStarts, which throws
+ * VersionDoesNotStart). Built in a temporary directory and renamed into place, so a failed install never leaves a
+ * half-written or broken version where the shim could find it. Returns the verified entry.
  */
 export async function installVersion(options: {
   readonly layout: Layout
@@ -383,6 +388,8 @@ export async function installVersion(options: {
   readonly node?: string
   /** A binary install's running executable, to install as this version instead of downloading it. */
   readonly runningBinary?: string
+  /** false: skip verifyStarts (tests with stand-in packages). */
+  readonly verify?: boolean
 }): Promise<string> {
   if (compiledBinary() || options.runningBinary) return installBinaryVersion(options)
   const run = options.run ?? runCommand
@@ -412,6 +419,7 @@ export async function installVersion(options: {
     const reported = await run(options.node ?? process.execPath, [entry, "--version"], { timeoutMs: 30_000, env: { ...process.env, OPENCODE_BROWSER_AUTOSTART: "0" } })
     if (reported.status !== 0 || reported.stdout.trim() !== installed)
       throw new Error(`${PACKAGE_NAME}@${installed} didn't run: \`--version\` printed ${JSON.stringify(reported.stdout.trim() || reported.stderr.trim()).slice(0, 200)}`)
+    if (options.verify !== false) await verifyStarts(entry, installed)
     const target = versionDirectory(layout, installed)
     rmSync(target, { recursive: true, force: true })
     renameSync(temporary, target)
@@ -424,7 +432,8 @@ export async function installVersion(options: {
 /**
  * A binary install's installVersion: puts this platform's executable for the version in runtime/versions/<version>,
  * downloaded from its package's tarball and checked against the registry's integrity (or copied from the running
- * executable), and verifies it runs and reports the version. Built in a temporary directory and renamed into place.
+ * executable), and verifies it runs and reports the version and that it starts. Built in a temporary directory and
+ * renamed into place.
  */
 async function installBinaryVersion(options: Parameters<typeof installVersion>[0]): Promise<string> {
   const run = options.run ?? runCommand
@@ -455,6 +464,7 @@ async function installBinaryVersion(options: Parameters<typeof installVersion>[0
     const reported = await run(file, ["--version"], { timeoutMs: 30_000, env: { ...process.env, OPENCODE_BROWSER_AUTOSTART: "0" } })
     if (reported.status !== 0 || reported.stdout.trim() !== expected)
       throw new Error(`browse ${expected} didn't run: \`--version\` printed ${JSON.stringify(reported.stdout.trim() || reported.stderr.trim()).slice(0, 200)}`)
+    if (options.verify !== false) await verifyStarts(file, expected)
     const target = versionDirectory(layout, expected)
     rmSync(target, { recursive: true, force: true })
     renameSync(temporary, target)
@@ -515,20 +525,23 @@ function probeProcess(file: string, args: readonly string[], env: NodeJS.Process
   }
 }
 
+/** verifyStarts' failure: the version is there but doesn't run, so auto-update skips it (skipBroken). */
+export class VersionDoesNotStart extends Error {}
+
 /**
  * Checks that an installed version runs: starts its relay on a spare port, in a throwaway data root (and temporary
  * directory) with update checks off, until it answers /version as that version, then its MCP server against that relay,
  * which must answer `initialize` and list its tools. Both entry points, because `--version` loads little of the CLI and
  * the relay and the MCP server load different parts of it. Throws with the error it printed when either doesn't start.
  */
-export async function verifyStarts(layout: Layout, version: string, options: { readonly timeoutMs?: number; readonly env?: NodeJS.ProcessEnv } = {}): Promise<void> {
+export async function verifyStarts(entry: string, version: string, options: { readonly timeoutMs?: number; readonly env?: NodeJS.ProcessEnv } = {}): Promise<void> {
   const root = mkdtempSync(path.join(tmpdir(), "browse-verify-"))
   const temporary = path.join(root, "tmp")
   mkdirSync(temporary)
   const { OPENCODE_BROWSER_MANAGED_RELAY: _managed, OPENCODE_BROWSER_RESTART_REQUEST_ID: _request, ...inherited } = options.env ?? process.env
-  const [file, ...prefix] = entryCommand(versionEntry(layout, version))
+  const [file, ...prefix] = entryCommand(entry)
   const timeoutMs = options.timeoutMs ?? 30_000
-  const failure = (reason: string) => new Error(`${version} didn't start: ${reason}`)
+  const failure = (reason: string) => new VersionDoesNotStart(`${version} didn't start: ${reason}`)
   let relay: ReturnType<typeof probeProcess> | undefined
   let mcp: ReturnType<typeof probeProcess> | undefined
   try {

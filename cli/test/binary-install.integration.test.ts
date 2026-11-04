@@ -7,6 +7,7 @@ import { createInterface } from "node:readline"
 import { compileCli, targets } from "../script/compile.ts"
 import { processAlive, readCurrent, runtimeLayout, versionEntry, writeCurrent } from "../src/update/auto-update.ts"
 import { freePort } from "./support/ports.ts"
+import { crash, npxPackage } from "./support/versions.ts"
 
 // A binary install in a temporary data root, with two executables compiled from source as 0.0.1 and 0.0.2: bin/browse
 // is the executable on PATH that agents' MCP entries run (`browse mcp`), runtime/versions/<version>/browse each
@@ -90,4 +91,28 @@ exec "${compiled("0.0.2")}" "$@"
     expect(back.version).toBe("0.0.1")
     expect(readCurrent(layout)).toMatchObject({ version: "0.0.1", binary })
   }, 120_000)
+
+  test("an npm `install` over it whose relay crashes switches through the same check and restore, back to the executable", async () => {
+    const { layout, binary } = install("cross-format")
+    const port = await freePort()
+    const env = { PATH: process.env.PATH ?? "", HOME: layout.root, OPENCODE_BROWSER_HOME: layout.root, OPENCODE_BROWSER_PORT: String(port), OPENCODE_BROWSER_AUTO_UPDATE: "off" }
+    const version = () => fetch(`http://127.0.0.1:${port}/version`).then((response) => response.json() as Promise<{ version: string; pid: number }>)
+    const relay = spawn(binary, ["serve"], { env: { ...env, OPENCODE_BROWSER_MANAGED_RELAY: "1" }, stdio: "ignore", detached: true })
+    pids.push(relay.pid!)
+    for (let tries = 0; !(await version().catch(() => undefined)); tries++) {
+      if (tries > 200) throw new Error("the 0.0.1 relay didn't start")
+      await Bun.sleep(100)
+    }
+    // 0.0.3 from npx: it passes the check, and its managed relay crashes.
+    const npx = await npxPackage(root, "0.0.3", crash(`process.env.OPENCODE_BROWSER_MANAGED_RELAY === "1"`))
+    const result = spawnSync("node", [npx, "install", "--yes", "--no-wait", "--no-open"], { env, encoding: "utf8", timeout: 120_000 })
+    const back = await version()
+    pids.push(back.pid)
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain("Kept browse 0.0.1; auto-update skips 0.0.3 until a newer version is published.")
+    expect(back.version).toBe("0.0.1")
+    expect(back.pid).not.toBe(relay.pid)
+    expect(readCurrent(layout)).toMatchObject({ version: "0.0.1", binary })
+    expect(spawnSync(binary, ["--version"], { encoding: "utf8" }).stdout.trim()).toBe("0.0.1")
+  }, 150_000)
 })

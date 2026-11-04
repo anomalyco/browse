@@ -1,13 +1,25 @@
 import { spawnSync } from "node:child_process"
-import { existsSync, readFileSync, rmSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import * as clack from "@clack/prompts"
 import type { AgentName, AgentReceipt } from "./agent-config.ts"
-import { runtimeLayout, skipBroken, verifyStarts, versionDirectory, versionEntry, type Current } from "../update/auto-update.ts"
+import {
+  compareVersions,
+  effectiveMode,
+  pruneVersions,
+  runtimeLayout,
+  skipBroken,
+  switchVersion,
+  updateState,
+  VersionDoesNotStart,
+  versionEntry,
+  type Current,
+} from "../update/auto-update.ts"
+import type { Refusal } from "../update/runtime-update.ts"
 import { formatPairingCode } from "../relay/browser-pairing.ts"
-import { dataRoot, devExtension, devExtensionFolder, PUBLIC_STORE_ID, storeConfig, storeUrl } from "../paths.ts"
+import { cliCommand, dataRoot, devExtension, devExtensionFolder, PUBLIC_STORE_ID, storeConfig, storeUrl } from "../paths.ts"
 
 /**
  * The Chrome Web Store item install points users at: the one this package was released with (paths.ts storeConfig), or
@@ -142,11 +154,11 @@ export function log(line: string) {
   clack.log.message(text)
 }
 
-export function fail(message: string): never {
+export function fail(message: string, outro = "browse isn't set up yet."): never {
   if (rail.active) {
     rail.waiting?.error("Stopped")
     clack.log.error(message)
-    clack.outro("browse isn't set up yet.")
+    clack.outro(outro)
   } else process.stderr.write(message + "\n")
   process.exit(1)
 }
@@ -159,17 +171,55 @@ export function waitTimeout(args: string[], defaultSeconds = 180) {
   return seconds * 1000
 }
 
+/** Another version is installed and runs from runtime/versions, in its own format (npm, or a binary install). */
+const otherWorking = (before: Current | undefined, version: string): before is Current =>
+  before !== undefined && before.version !== version && existsSync(versionEntry(layout, before.version, before.binary !== undefined))
+
 /**
- * Before install replaces a working version with `version`: checks that `version` starts (verifyStarts). When it
- * doesn't, it's removed and skipped like an update that didn't start, and the version install found is returned (and
- * stays current); else undefined.
+ * Stops install when installing `version` failed. One that doesn't start is skipped like an update that didn't start,
+ * and a working install stays as it was (a binary install's executable back on PATH, where the install script put the
+ * new one). `what` names what was installed.
  */
-export async function keepWorking(before: Current | undefined, version: string): Promise<Current | undefined> {
-  if (!before || before.version === version || !existsSync(versionEntry(layout, before.version))) return undefined
-  const unstartable = await verifyStarts(layout, version).then(() => undefined, (error: Error) => error.message)
-  if (!unstartable) return undefined
-  rmSync(versionDirectory(layout, version), { recursive: true, force: true })
-  skipBroken(layout, version, unstartable)
-  log(`! ${unstartable}. Keeping browse ${before.version}; auto-update skips ${version} until a newer version is published.`)
-  return before
+export function failInstall(before: Current | undefined, version: string, error: Error, what = `browse ${version}`): never {
+  if (error instanceof VersionDoesNotStart) {
+    skipBroken(layout, version, error.message)
+    if (otherWorking(before, version)) {
+      if (before.binary) switchVersion(layout, before.version, before.previous, before.binary)
+      fail(`${error.message}. Kept browse ${before.version}; auto-update skips ${version} until a newer version is published.`, `browse ${before.version} is still set up.`)
+    }
+  }
+  fail(`Could not install ${what}: ${error.message}`)
+}
+
+/**
+ * Makes the installed `version` current. Over another working install it switches the way updates do (switchTo):
+ * checked first, and when the new relay fails after the old one stopped, the old one is back and install stops. When
+ * the relay is busy, the old version keeps running and `version` waits as pending; the lines returned say so.
+ * `binary`: a binary install's executable on PATH.
+ */
+export async function switchInstalled(before: Current | undefined, version: string, binary?: string): Promise<readonly string[]> {
+  // Running install again for the same version keeps the version it replaced for rollback.
+  const previous = before?.version === version ? before.previous : before?.version
+  let refused: Refusal | undefined
+  if (otherWorking(before, version)) {
+    const { switchTo } = await import("../update/runtime-update.ts")
+    refused = await switchTo(layout, version, { previous, force: false, ...(binary ? { binary } : {}) })
+    if (refused?.broken) failInstall(before, version, new VersionDoesNotStart(refused.message))
+    if (refused && before.binary) switchVersion(layout, before.version, before.previous, before.binary)
+  } else switchVersion(layout, version, previous, binary)
+  // Installing by hand settles any update the relay was waiting to switch to (this one, when it waits), and un-skips this version.
+  updateState(layout, ({ pending, skipped, ...state }) => ({
+    ...state,
+    ...(refused ? { pending: version } : pending && compareVersions(pending, version) > 0 ? { pending } : {}),
+    ...(skipped && skipped !== version ? { skipped } : {}),
+  }))
+  if (refused)
+    return [
+      `! browse ${before!.version} keeps running: the relay didn't restart (${refused.message}).`,
+      effectiveMode(layout) === "on"
+        ? `  It switches to ${version} by itself once no agent is using the browser.`
+        : `  When no agent is using the browser, run \`${cliCommand("install")}\` again.`,
+    ]
+  pruneVersions(layout, [version, previous])
+  return []
 }

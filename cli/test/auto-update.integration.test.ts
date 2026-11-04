@@ -10,12 +10,13 @@ import { bundleCli } from "../bundle.ts"
 import { processAlive, readCurrent, readState, runtimeLayout, updateState, versionEntry, writeCurrent, writeShim, type Layout } from "../src/update/auto-update.ts"
 import { relayToken } from "../src/relay/secrets.ts"
 import { freePort } from "./support/ports.ts"
+import { crash, npxPackage, prepend } from "./support/versions.ts"
 
 // An npm install's runtime in a temporary data root, with two real versions of this CLI (bundled from source as 0.0.1
 // and 0.0.2), two whose relay crashes on startup (0.0.4 always, 0.0.5 only as the managed relay, so it passes the check
-// before a switch), one whose managed relay is slow to start (0.0.7), a relay running 0.0.1, and a fake registry whose
-// 0.0.3 tarball never finishes downloading and whose 0.0.6 crashes on `serve`. Node runs the relay, as in a real
-// install. No browser.
+// before a switch), one whose managed relay is slow to start (0.0.7), a relay running 0.0.1, a fake registry whose
+// 0.0.3 tarball never finishes downloading and whose 0.0.6 crashes on `serve`, and a 0.0.8 as npx leaves it whose
+// managed relay crashes, for `install`. Node runs the relay, as in a real install. No browser.
 
 const cliRoot = path.resolve(import.meta.dir, "..")
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "browse-autoupdate-it-"))
@@ -25,6 +26,7 @@ let relayPort = 0
 let registry: ReturnType<typeof Bun.serve> | undefined
 let relay: ChildProcess | undefined
 const started: number[] = []
+let npx = ""
 
 /** One installed version: the bundle, its package.json, and the CLI's dependencies linked beside it. */
 async function installFake(target: Layout, version: string) {
@@ -37,14 +39,6 @@ async function installFake(target: Layout, version: string) {
     fs.symlinkSync(path.join(cliRoot, "node_modules", name), path.join(modules, name), "dir")
   }
 }
-
-/** Puts `code` at the top of a bundled entry, which runs before the CLI does anything. */
-function prepend(entry: string, code: string) {
-  const [first = "", ...rest] = fs.readFileSync(entry, "utf8").split("\n")
-  fs.writeFileSync(entry, (first.startsWith("#!") ? [first, code, ...rest] : [code, first, ...rest]).join("\n"))
-}
-
-const crash = (when: string) => `if (process.argv[2] === "serve" && ${when}) throw new SyntaxError("The requested module '@effect/platform-node-shared' does not provide an export named 'NodeWS'")`
 
 /** A version whose `serve` crashes the way a release with a missing dependency export does (`--version` still works). */
 async function installBroken(target: Layout, version: string, when: string) {
@@ -139,6 +133,8 @@ beforeAll(async () => {
   await installFake(layout, "0.0.7")
   prepend(versionEntry(layout, "0.0.7"), `if (process.argv[2] === "serve" && process.env.OPENCODE_BROWSER_MANAGED_RELAY === "1") { process.getBuiltinModule("node:fs").writeFileSync(process.env.OPENCODE_BROWSER_HOME + "/late.pid", String(process.pid)); await new Promise((resolve) => setTimeout(resolve, 20_000)) }`)
   await packBroken()
+  // 0.0.8, run from npx for `install`: it passes the check, and its managed relay crashes.
+  npx = await npxPackage(root, "0.0.8", crash(`process.env.OPENCODE_BROWSER_MANAGED_RELAY === "1"`))
   writeCurrent(layout, { version: "0.0.1", channel: "latest" })
   writeShim(layout)
   relay = spawn(node, [versionEntry(layout, "0.0.1"), "serve"], {
@@ -211,6 +207,7 @@ describe("auto-update in a running relay", () => {
     expect(await version()).toMatchObject({ version: before.version, pid: before.pid })
     expect(readCurrent(layout)?.version).toBe(before.version)
     expect(readState(layout)).toMatchObject({ skipped: "0.0.4", lastError: { version: "0.0.4" } })
+    expect(fs.existsSync(path.join(layout.versions, "0.0.4"))).toBe(false)
     expect(readState(layout).pending).toBeUndefined()
   }, 60_000)
 
@@ -226,6 +223,7 @@ describe("auto-update in a running relay", () => {
     expect(now.pid).not.toBe(before.pid)
     expect(readCurrent(layout)).toMatchObject({ version: before.version })
     expect(readState(layout).skipped).toBe("0.0.5")
+    expect(fs.existsSync(path.join(layout.versions, "0.0.5"))).toBe(false)
   }, 60_000)
 
   test("a new relay still starting when the switch gives up on it is stopped before the old version comes back", async () => {
@@ -254,6 +252,26 @@ describe("auto-update in a running relay", () => {
     expect(fs.existsSync(path.join(layout.versions, "0.0.6"))).toBe(false)
     expect(readState(layout)).toMatchObject({ skipped: "0.0.6", lastError: { version: "0.0.6" } })
     expect(readState(layout).pending).toBeUndefined()
+  }, 150_000)
+
+  test("`install` over a working install switches the way updates do: a relay that crashes leaves the old version running", async () => {
+    const before = await version()
+    const settings = path.join(root, "settings.json")
+    const settingsBefore = fs.existsSync(settings) ? fs.readFileSync(settings, "utf8") : undefined
+    const result = spawnSync(node, [npx, "install", "--yes", "--no-wait", "--no-open"], { env: env(), encoding: "utf8", timeout: 120_000 })
+    const now = await version()
+    started.push(now.pid)
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain("0.0.8 didn't start: browse relay did not start at")
+    expect(result.stderr).toContain(`Kept browse ${before.version}; auto-update skips 0.0.8 until a newer version is published.`)
+    expect(now.version).toBe(before.version)
+    expect(now.pid).not.toBe(before.pid)
+    expect(readCurrent(layout)?.version).toBe(before.version)
+    expect(fs.existsSync(path.join(layout.versions, "0.0.8"))).toBe(false)
+    expect(readState(layout).skipped).toBe("0.0.8")
+    // Stopped before agents' configs and the settings it would have written.
+    expect(fs.existsSync(settings) ? fs.readFileSync(settings, "utf8") : undefined).toBe(settingsBefore)
+    expect(result.stdout).not.toContain("installed")
   }, 150_000)
 })
 

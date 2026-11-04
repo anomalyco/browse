@@ -4,24 +4,20 @@ import { spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import {
-  compareVersions,
   installVersion,
-  pruneVersions,
   readCurrent,
   sameFile,
-  switchVersion,
-  updateState,
   versionEntry,
 } from "../update/auto-update.ts"
 import { opencodeBrowserVersion } from "../version.ts"
-import { configRoot, fail, home, keepWorking, layout, log, readFileOr, tilde } from "./environment.ts"
+import { configRoot, failInstall, home, layout, log, readFileOr, switchInstalled, tilde } from "./environment.ts"
 
 /**
  * Records this executable as the one agents run (current.json's `binary`) and keeps a copy of it as its version in
  * runtime/versions, which rollback and the MCP supervisor use. Returns the executable itself, which stays where it is;
  * updates replace it by rename.
  */
-export async function installBinaryRuntime(): Promise<{ entry: string; version: string }> {
+export async function installBinaryRuntime(): Promise<{ entry: string; version: string; waiting: readonly string[] }> {
   const binary = process.execPath
   const version = opencodeBrowserVersion
   const before = readCurrent(layout)
@@ -29,23 +25,10 @@ export async function installBinaryRuntime(): Promise<{ entry: string; version: 
   try {
     if (!sameFile(existing, binary)) await installVersion({ layout, version, runningBinary: binary })
   } catch (error) {
-    fail(`Could not install browse ${version}: ${(error as Error).message}`)
+    failInstall(before, version, error as Error)
   }
-  const kept = await keepWorking(before, version)
-  // The install script already put this executable on PATH: the version that works goes back there.
-  if (kept) {
-    switchVersion(layout, kept.version, kept.previous, binary)
-    return { entry: binary, version: kept.version }
-  }
-  const previous = before?.version === version ? before.previous : before?.version
-  switchVersion(layout, version, previous, binary)
-  updateState(layout, ({ pending, skipped, ...state }) => ({
-    ...state,
-    ...(pending && compareVersions(pending, version) > 0 ? { pending } : {}),
-    ...(skipped && skipped !== version ? { skipped } : {}),
-  }))
-  pruneVersions(layout, [version, previous])
-  return { entry: binary, version }
+  const waiting = await switchInstalled(before, version, binary)
+  return { entry: binary, version, waiting }
 }
 
 /**
