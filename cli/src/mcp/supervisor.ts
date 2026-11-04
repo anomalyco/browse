@@ -42,6 +42,9 @@ export async function runBinaryMcp(args: readonly string[]) {
   let initialized: string | undefined
   let swapping = false
   let listChanged = false
+  // The version a swap replaced, until the new server answers; and a version whose server exited before it did.
+  let replaced: string | undefined
+  let failed: string | undefined
   const inflight = new Set<unknown>()
   const queue: string[] = []
   const toClient = (line: string) => process.stdout.write(line + "\n")
@@ -61,12 +64,20 @@ export async function runBinaryMcp(args: readonly string[]) {
     child = next
     next.on("exit", (code, signal) => {
       if (next !== child) return
+      // A new version's server that exits before it's ready (a release that doesn't start) gives way to the old one.
+      if (replaced !== undefined) {
+        failed = version
+        version = replaced
+        replaced = undefined
+        return void start(true)
+      }
       process.exit(code ?? (signal ? 1 : 0))
     })
     createInterface({ input: next.stdout }).on("line", (line) => {
       if (next !== child) return
       const message = parse(line)
       if (message && message.id === REPLAY) {
+        replaced = undefined
         if (initialized) toChild(initialized)
         swapping = false
         if (listChanged) toClient(JSON.stringify({ jsonrpc: "2.0", method: "notifications/tools/list_changed" }))
@@ -105,7 +116,8 @@ export async function runBinaryMcp(args: readonly string[]) {
   }
 
   // A new version in current.json swaps the server only once the relay runs it too (GET /version), so a server never
-  // talks to a relay of another version. With no relay at all for a few checks, nothing can mix, and it swaps.
+  // talks to a relay of another version. With no relay at all for a few checks, nothing can mix, and it swaps, unless
+  // that version's server already failed to start.
   let checking = false
   let unreachable = 0
   const relayVersion = () =>
@@ -126,7 +138,7 @@ export async function runBinaryMcp(args: readonly string[]) {
     checking = false
     unreachable = running === undefined ? unreachable + 1 : 0
     // Held requests don't wait forever for a relay that never reports the new version: they go to the current server.
-    if (running !== next && unreachable < 3) {
+    if (running !== next && (unreachable < 3 || next === failed)) {
       if (heldSince !== undefined && Date.now() - heldSince > 15000) {
         heldSince = undefined
         for (const line of queue.splice(0)) {
@@ -139,6 +151,7 @@ export async function runBinaryMcp(args: readonly string[]) {
     }
     if (swapping || inflight.size > 0 || current() !== next) return
     const old = child
+    replaced = initialize ? version : undefined
     version = next
     heldSince = undefined
     start(true)

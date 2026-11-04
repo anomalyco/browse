@@ -3,7 +3,8 @@ import { spawnSync } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { channelOf, compareVersions, createAutoUpdater, installVersion, pruneVersions, readCurrent, readState, runtimeLayout, switchVersion, tarFile, updateState, validatePending, versionEntry, writeCurrent, type Layout } from "../src/update/auto-update.ts"
+import { autoUpdateStatus, channelOf, compareVersions, createAutoUpdater, describeAutoUpdate, installVersion, processAlive, pruneVersions, readCurrent, readState, runtimeLayout, switchVersion, tarFile, updateState, validatePending, verifyStarts, versionEntry, writeCurrent, type Layout } from "../src/update/auto-update.ts"
+import { skipBroken } from "../src/update/runtime-update.ts"
 import { managedRelayLaunch } from "../src/relay/lifecycle.ts"
 
 const roots: string[] = []
@@ -199,5 +200,75 @@ describe("the relay's updater", () => {
     const { spawned, updater } = setup((state) => ({ ...state, pending: "0.0.2" }), false)
     await updater.tick()
     expect(spawned).toEqual([])
+  })
+})
+
+describe("checking a version starts before switching to it", () => {
+  // A stand-in CLI whose `serve` answers /version as 1.0.1 on OPENCODE_BROWSER_PORT and records how it was started.
+  const serving = (mark: string) => `
+import http from "node:http"
+import fs from "node:fs"
+if (process.argv[2] !== "serve") process.exit(2)
+fs.writeFileSync(${JSON.stringify(mark)}, JSON.stringify({ pid: process.pid, home: process.env.OPENCODE_BROWSER_HOME, autoUpdate: process.env.OPENCODE_BROWSER_AUTO_UPDATE, managed: process.env.OPENCODE_BROWSER_MANAGED_RELAY }))
+http.createServer((_, response) => response.end(JSON.stringify({ version: "1.0.1" }))).listen(Number(process.env.OPENCODE_BROWSER_PORT), "127.0.0.1")
+`
+
+  test("starts its relay on a spare port in a throwaway data root, with updates off, and stops it", async () => {
+    const layout = layoutWith(["1.0.1"])
+    const mark = path.join(layout.root, "mark.json")
+    fs.writeFileSync(versionEntry(layout, "1.0.1"), serving(mark))
+    await verifyStarts(layout, "1.0.1", { env: { ...process.env, OPENCODE_BROWSER_MANAGED_RELAY: "1" } })
+    const started = JSON.parse(fs.readFileSync(mark, "utf8")) as { pid: number; home: string; autoUpdate: string; managed?: string }
+    expect(started.home).not.toBe(layout.root)
+    expect(fs.existsSync(started.home)).toBe(false)
+    expect(started.autoUpdate).toBe("off")
+    expect(started.managed).toBeUndefined()
+    expect(processAlive(started.pid)).toBe(false)
+  })
+
+  test("fails with the error a version prints when its relay can't load, though `--version` works", async () => {
+    const layout = layoutWith(["1.0.1"])
+    fs.writeFileSync(versionEntry(layout, "1.0.1"), `
+if (process.argv[2] === "--version") console.log("1.0.1")
+else throw new SyntaxError("The requested module '@effect/platform-node-shared' does not provide an export named 'NodeWS'")
+`)
+    expect(spawnSync(process.execPath, [versionEntry(layout, "1.0.1"), "--version"], { encoding: "utf8" }).stdout.trim()).toBe("1.0.1")
+    await expect(verifyStarts(layout, "1.0.1")).rejects.toThrow("1.0.1 didn't start: SyntaxError: The requested module '@effect/platform-node-shared' does not provide an export named 'NodeWS'")
+  })
+
+  test("fails when another version answers, or nothing does in time", async () => {
+    const layout = layoutWith(["1.0.2", "1.0.3"])
+    fs.writeFileSync(versionEntry(layout, "1.0.2"), serving(path.join(layout.root, "mark.json")))
+    fs.writeFileSync(versionEntry(layout, "1.0.3"), "setInterval(() => {}, 1000)")
+    await expect(verifyStarts(layout, "1.0.2", { timeoutMs: 1_000 })).rejects.toThrow("1.0.2 didn't start: its relay didn't answer within 1s")
+    await expect(verifyStarts(layout, "1.0.3", { timeoutMs: 1_000 })).rejects.toThrow("1.0.3 didn't start: its relay didn't answer within 1s")
+  })
+})
+
+describe("a version that didn't start", () => {
+  test("is no longer pending, and is skipped until a newer version is published", async () => {
+    const layout = layoutWith(["0.0.1", "0.0.2"])
+    writeCurrent(layout, { version: "0.0.1", channel: "latest" })
+    updateState(layout, (state) => ({ ...state, checkedAt: Date.now(), latest: "0.0.2", integrity: "sha512-x", pending: "0.0.2" }))
+    skipBroken(layout, "0.0.2", "0.0.2 didn't start: SyntaxError: boom")
+    expect(readState(layout)).toMatchObject({ skipped: "0.0.2", lastError: { version: "0.0.2", message: "0.0.2 didn't start: SyntaxError: boom" } })
+    expect(readState(layout).pending).toBeUndefined()
+    const status = autoUpdateStatus({ layout, env: {}, runtime: { layout, version: "0.0.1", current: readCurrent(layout)! } })
+    expect(describeAutoUpdate(status)).toContain("skipping 0.0.2 (it didn't start; `update` installs it again)")
+
+    const spawned: string[][] = []
+    const updater = () => createAutoUpdater({
+      runtime: { layout, version: "0.0.1", current: readCurrent(layout)! },
+      isIdle: () => true,
+      log: () => {},
+      spawnChild: (args) => (spawned.push([...args]), process.pid),
+      env: {},
+    })
+    await updater().tick()
+    expect(spawned).toEqual([])
+    // A newer version is published: it's installed as usual.
+    updateState(layout, (state) => ({ ...state, latest: "0.0.3" }))
+    await updater().tick()
+    expect(spawned).toEqual([["runtime-install", "0.0.3", "--integrity", "sha512-x"]])
   })
 })

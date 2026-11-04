@@ -6,13 +6,14 @@ import path from "node:path"
 import { createInterface } from "node:readline"
 import WebSocket from "ws"
 import { bundleCli } from "../bundle.ts"
-import { processAlive, readCurrent, readState, runtimeLayout, versionEntry, writeCurrent, writeShim, type Layout } from "../src/update/auto-update.ts"
+import { processAlive, readCurrent, readState, runtimeLayout, updateState, versionEntry, writeCurrent, writeShim, type Layout } from "../src/update/auto-update.ts"
 import { relayToken } from "../src/relay/secrets.ts"
 import { freePort } from "./support/ports.ts"
 
 // An npm install's runtime in a temporary data root, with two real versions of this CLI (bundled from source as 0.0.1
-// and 0.0.2), a relay running 0.0.1, and a fake registry whose tarball download never finishes. Node runs the relay, as
-// in a real install. No browser.
+// and 0.0.2), two whose relay crashes on startup (0.0.4 always, 0.0.5 only as the managed relay, so it passes the check
+// before a switch), a relay running 0.0.1, and a fake registry whose tarball download never finishes. Node runs the
+// relay, as in a real install. No browser.
 
 const cliRoot = path.resolve(import.meta.dir, "..")
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "browse-autoupdate-it-"))
@@ -33,6 +34,15 @@ async function installFake(target: Layout, version: string) {
     if (name.startsWith(".") || name === "@opencode") continue
     fs.symlinkSync(path.join(cliRoot, "node_modules", name), path.join(modules, name), "dir")
   }
+}
+
+/** A version whose `serve` crashes the way a release with a missing dependency export does (`--version` still works). */
+async function installBroken(target: Layout, version: string, when: string) {
+  await installFake(target, version)
+  const entry = versionEntry(target, version)
+  const [first = "", ...rest] = fs.readFileSync(entry, "utf8").split("\n")
+  const crash = `if (process.argv[2] === "serve" && ${when}) throw new SyntaxError("The requested module '@effect/platform-node-shared' does not provide an export named 'NodeWS'")`
+  fs.writeFileSync(entry, (first.startsWith("#!") ? [first, crash, ...rest] : [crash, first, ...rest]).join("\n"))
 }
 
 const env = (extra: Record<string, string> = {}): NodeJS.ProcessEnv => ({
@@ -98,6 +108,8 @@ beforeAll(async () => {
   })
   await installFake(layout, "0.0.1")
   await installFake(layout, "0.0.2")
+  await installBroken(layout, "0.0.4", "true")
+  await installBroken(layout, "0.0.5", `process.env.OPENCODE_BROWSER_MANAGED_RELAY === "1"`)
   writeCurrent(layout, { version: "0.0.1", channel: "latest" })
   writeShim(layout)
   relay = spawn(node, [versionEntry(layout, "0.0.1"), "serve"], {
@@ -159,6 +171,33 @@ describe("auto-update in a running relay", () => {
     expect(now.version).toBe("0.0.2")
     expect(readCurrent(layout)).toMatchObject({ version: "0.0.2", previous: "0.0.1" })
   }, 90_000)
+
+  test("a version whose relay doesn't start never stops the running relay, and is skipped from then on", async () => {
+    const before = await version()
+    updateState(layout, (state) => ({ ...state, pending: "0.0.4" }))
+    const result = spawnSync(node, [versionEntry(layout, before.version), "runtime-switch", "0.0.4"], { env: env(), encoding: "utf8", timeout: 60_000 })
+    expect(result.status).toBe(1)
+    expect(result.stdout).toContain("0.0.4 didn't start: SyntaxError: The requested module '@effect/platform-node-shared' does not provide an export named 'NodeWS'")
+    expect(result.stdout).toContain("skipping 0.0.4 until a newer version is published")
+    expect(await version()).toMatchObject({ version: before.version, pid: before.pid })
+    expect(readCurrent(layout)?.version).toBe(before.version)
+    expect(readState(layout)).toMatchObject({ skipped: "0.0.4", lastError: { version: "0.0.4" } })
+    expect(readState(layout).pending).toBeUndefined()
+  }, 60_000)
+
+  test("when the new relay fails after the old one stopped, the old version's relay is back before the switch ends", async () => {
+    const before = await version()
+    const result = spawnSync(node, [versionEntry(layout, before.version), "runtime-switch", "0.0.5"], { env: env(), encoding: "utf8", timeout: 60_000 })
+    expect(result.status).toBe(1)
+    expect(result.stdout).toContain("skipping 0.0.5 until a newer version is published")
+    // Restarted by the switch itself, not by the next agent's call.
+    const now = await version()
+    started.push(now.pid)
+    expect(now.version).toBe(before.version)
+    expect(now.pid).not.toBe(before.pid)
+    expect(readCurrent(layout)).toMatchObject({ version: before.version })
+    expect(readState(layout).skipped).toBe("0.0.5")
+  }, 60_000)
 })
 
 describe("the shim's MCP supervisor", () => {
@@ -231,6 +270,49 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     } finally {
       shim.kill("SIGKILL")
       await fakeRelay.stop(true)
+      fs.rmSync(shimRoot, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  test("goes back to the old server when the new version's server exits on startup, rather than exiting itself", async () => {
+    const shimRoot = fs.mkdtempSync(path.join(os.tmpdir(), "browse-shim-it-"))
+    const shimLayout = runtimeLayout(shimRoot)
+    const launches = path.join(shimRoot, "launches")
+    for (const [stubVersion, source] of [["9.0.1", stub("9.0.1")], ["9.0.2", `import fs from "node:fs"; fs.appendFileSync(${JSON.stringify(launches)}, "x"); process.exit(1)`]] as const) {
+      fs.mkdirSync(path.dirname(versionEntry(shimLayout, stubVersion)), { recursive: true })
+      fs.writeFileSync(versionEntry(shimLayout, stubVersion), source)
+    }
+    writeCurrent(shimLayout, { version: "9.0.1", channel: "latest" })
+    writeShim(shimLayout)
+    // No relay: the switch stopped it, so after a few checks the shim swaps to 9.0.2.
+    const shim = spawn(node, [shimLayout.shim, "mcp"], { env: { PATH: process.env.PATH ?? "", OPENCODE_BROWSER_HOME: shimRoot, OPENCODE_BROWSER_PORT: String(await freePort()) }, stdio: ["pipe", "pipe", "inherit"] })
+    const answers = new Map<number, Record<string, string>>()
+    createInterface({ input: shim.stdout! }).on("line", (line) => {
+      const message = JSON.parse(line) as { id?: number; result?: Record<string, string> }
+      if (message.id !== undefined) answers.set(message.id, message.result ?? {})
+    })
+    let id = 0
+    const call = async (method: string) => {
+      const mine = ++id
+      shim.stdin!.write(JSON.stringify({ jsonrpc: "2.0", id: mine, method }) + "\n")
+      return until(() => answers.get(mine), 5_000)
+    }
+    try {
+      await call("initialize")
+      const first = await call("whoami")
+      writeCurrent(shimLayout, { version: "9.0.2", previous: "9.0.1", channel: "latest" })
+      await until(() => fs.existsSync(launches), 10_000)
+      await Bun.sleep(4_000)
+      expect(shim.exitCode).toBeNull()
+      // Tried once, not again on every check while current.json still names it.
+      expect(fs.readFileSync(launches, "utf8")).toBe("x")
+      // The switch is undone: the agent's calls carry on, in the same session.
+      writeCurrent(shimLayout, { version: "9.0.1", channel: "latest" })
+      const after = await call("whoami")
+      expect(after.version).toBe("9.0.1")
+      expect(after.session).toBe(first.session)
+    } finally {
+      shim.kill("SIGKILL")
       fs.rmSync(shimRoot, { recursive: true, force: true })
     }
   }, 30_000)

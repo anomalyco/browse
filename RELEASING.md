@@ -145,8 +145,10 @@ checks the token against `registry/browse.json` there ([scripts/release-registry
 
 ## Undoing a bad release
 
-- **npm.** Auto-update only moves forward, so release a fixed patch. `npm deprecate @opencode/browse@<bad> "<why>"`
-  warns new installs; `npx @opencode/browse rollback` takes a user back to the version they had.
+- **npm.** Auto-update only moves forward, so release a fixed patch. Installs never switch to a version whose relay
+  doesn't start: they keep the version they have and skip that one until a newer version is published.
+  `npm deprecate @opencode/browse@<bad> "<why>"` warns new installs; `npx @opencode/browse rollback` takes a user back
+  to the version they had.
 - **Chrome Web Store.** Roll back in the dashboard ([how](https://developer.chrome.com/docs/webstore/rollback)), or
   cancel a pending review.
 - **Release service.** `promote` an earlier dev release (anomalyco/release docs/publishing.md).
