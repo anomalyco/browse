@@ -6,7 +6,6 @@
       "name": "@opencode/browse",
       "dependencies": {
         "@effect/platform-node": "4.0.1",
-        "@effect/platform-node-shared": "4.0.1",
         "acorn": "8.18.0",
         "effect": "4.0.1",
         "patchright-core": "1.63.0",

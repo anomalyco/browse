@@ -1,13 +1,13 @@
 import { NodeHttpClient } from "@effect/platform-node"
 import { Context, Effect, Layer, Match, Redacted, Schema } from "effect"
-import * as AuthenticatedOriginInternal from "./authenticated-origin.ts"
-import * as RelayClient from "./relay-client.ts"
-import * as RelayLifecycle from "./relay-lifecycle.ts"
+import * as AuthenticatedOriginInternal from "./auth/authenticated-origin.ts"
+import * as RelayClient from "./relay/client.ts"
+import * as RelayLifecycle from "./relay/lifecycle.ts"
 import type {
   AuthenticatedJsonMethod,
   AuthenticatedJsonOutcome,
   SessionSummary,
-} from "./relay-schema.ts"
+} from "./relay/schema.ts"
 
 export type Json = Schema.Schema.Type<typeof Schema.Json>
 

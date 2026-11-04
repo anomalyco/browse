@@ -6,8 +6,8 @@ import path from "node:path"
 import { createInterface } from "node:readline"
 import WebSocket from "ws"
 import { bundleCli } from "../bundle.ts"
-import { processAlive, readCurrent, readState, runtimeLayout, versionEntry, writeCurrent, writeShim, type Layout } from "../src/auto-update.ts"
-import { relayToken } from "../src/relay-secrets.ts"
+import { processAlive, readCurrent, readState, runtimeLayout, versionEntry, writeCurrent, writeShim, type Layout } from "../src/update/auto-update.ts"
+import { relayToken } from "../src/relay/secrets.ts"
 import { freePort } from "./support/ports.ts"
 
 // An npm install's runtime in a temporary data root, with two real versions of this CLI (bundled from source as 0.0.1

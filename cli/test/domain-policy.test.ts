@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { checkNavigationUrl, checkUrl, explicitlyAllowsHost, isPrivateAddress, normalizeOriginPatterns, OriginPatternError, parseOriginPatterns } from "../src/domain-policy.ts"
+import { checkNavigationUrl, checkUrl, explicitlyAllowsHost, isPrivateAddress, normalizeOriginPatterns, OriginPatternError, parseOriginPatterns } from "../src/auth/domain-policy.ts"
 
 const rules = (...patterns: string[]) => parseOriginPatterns(patterns)
 

@@ -20,7 +20,7 @@ if (command === "--version" || command === "-v") {
   runMcpServer.pipe(NodeRuntime.runMain)
 } else if (command === "runtime-install" || command === "runtime-switch") {
   // The relay's auto-update children (auto-update.ts); not for people.
-  const { runRuntimeInstall, runRuntimeSwitch } = await import("./runtime-update.ts")
+  const { runRuntimeInstall, runRuntimeSwitch } = await import("./update/runtime-update.ts")
   await (command === "runtime-install" ? runRuntimeInstall : runRuntimeSwitch)(process.argv.slice(3))
 } else if (command === "update") {
   const { runUpdateCommand } = await import("./update.ts")

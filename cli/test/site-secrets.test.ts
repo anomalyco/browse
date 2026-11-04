@@ -3,8 +3,8 @@ import { Effect } from "effect"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { SecretCollector } from "../src/network-redaction.ts"
-import { addSecret, listSecrets, readSecret, removeSecret, totpCode } from "../src/site-secrets.ts"
+import { SecretCollector } from "../src/network-capture/redaction.ts"
+import { addSecret, listSecrets, readSecret, removeSecret, totpCode } from "../src/auth/site-secrets.ts"
 
 const tempDir = () => fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "guarded-site-secrets-"))
 

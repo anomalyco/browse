@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { channelOf, compareVersions, createAutoUpdater, installVersion, pruneVersions, readCurrent, readState, runtimeLayout, updateState, validatePending, versionEntry, writeCurrent, type Layout } from "../src/auto-update.ts"
+import { channelOf, compareVersions, createAutoUpdater, installVersion, pruneVersions, readCurrent, readState, runtimeLayout, updateState, validatePending, versionEntry, writeCurrent, type Layout } from "../src/update/auto-update.ts"
 
 const roots: string[] = []
 afterEach(() => {

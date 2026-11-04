@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { FlightRecorderRelay } from "../src/flight-recorder.ts"
+import { FlightRecorderRelay } from "../src/recording-relay/flight-recorder.ts"
 import { makePageStatus } from "../src/protocol.ts"
 import type { SendDebuggerCommand } from "../src/recording-relay.ts"
 

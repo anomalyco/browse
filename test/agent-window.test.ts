@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from "bun:test"
 import { installChrome, settle } from "./chrome-stub"
 
 const stub = installChrome()
-const { AgentWindow } = await import("../src/background/agent-window")
+const { AgentWindow } = await import("../src/background/agent-relay/window")
 
 /** The user's window, focused, at the given bounds. */
 async function userWindow(bounds: { left: number; top: number; width: number; height: number }) {
