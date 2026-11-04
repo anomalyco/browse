@@ -104,12 +104,12 @@ function Onboarding() {
   }
   onCleanup(() => clearTimeout(probeTimer))
 
-  const tryIt = (number: number, agent: string) => (
+  const tryIt = (number: number) => (
     <Step
       number={number}
-      title={`Restart ${agent} and try it`}
+      title="Try it"
       done={list().tryIt === "done"}
-      description={list().tryIt === "done" ? "Your agent opened a tab. browse works." : "Agents load new tools when they start. Then ask it something like:"}
+      description={list().tryIt === "done" ? "Your agent opened a tab. browse works." : "Ask your agent something like:"}
     >
       <Show when={list().tryIt !== "done"}>
         <Command text={TRY_PROMPT} label="Copy prompt" />
@@ -189,13 +189,13 @@ function Onboarding() {
               <Tabs.Content class="guide-body" value="agent">
                 <div class="steps">
                   {installStep("agent")}
-                  {tryIt(2, "your agent")}
+                  {tryIt(2)}
                 </div>
               </Tabs.Content>
               <Tabs.Content class="guide-body" value="manual">
                 <div class="steps">
                   {installStep("manual")}
-                  {tryIt(2, "your agent")}
+                  {tryIt(2)}
                 </div>
               </Tabs.Content>
             </Tabs>
@@ -224,7 +224,7 @@ function Onboarding() {
                   <RelayForm relay={relay} remote />
                 </Show>
               </Step>
-              {tryIt(3, "that agent")}
+              {tryIt(3)}
             </div>
           </div>
         </Show>
@@ -386,10 +386,7 @@ function AgentStep(props: {
                 Code saved. It pairs as soon as {here(waiting().remote)} runs, within 10 minutes of <code>pair</code>.
               </Waiting>
             ) : (
-              <Waiting>
-                Paired with {here(waiting().remote)}. The relay starts when your agent uses the browse tools; restart your
-                agent if it was open during setup.
-              </Waiting>
+              <Waiting>Paired with {here(waiting().remote)}. The relay starts when your agent uses the browse tools.</Waiting>
             )
           }
         </Match>

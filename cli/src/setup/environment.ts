@@ -7,16 +7,17 @@ import * as clack from "@clack/prompts"
 import type { AgentName, AgentReceipt } from "./agent-config.ts"
 import { runtimeLayout } from "../update/auto-update.ts"
 import { formatPairingCode } from "../relay/browser-pairing.ts"
-import { dataRoot, devExtension, devExtensionFolder, storeConfig, storeUrl } from "../paths.ts"
+import { dataRoot, devExtension, devExtensionFolder, PUBLIC_STORE_ID, storeConfig, storeUrl } from "../paths.ts"
 
 /**
- * The Chrome Web Store item this package was released with (paths.ts storeConfig). Only this ID counts as the store
- * build: install hands a pairing code to the extension with this ID, so it must be ours.
+ * The Chrome Web Store item install points users at: the one this package was released with (paths.ts storeConfig), or
+ * browse's public item for a checkout and a package built without one. Install hands a pairing code to the extension
+ * with this ID, so it must be ours.
  */
-const store = storeConfig()
-export const STORE_IDS = [store.id].filter((id): id is string => !!id)
-/** The store page; undefined for a package built without the store item (and a checkout). */
-export const STORE_URL = store.id ? storeUrl(store.id) : undefined
+const storeId = storeConfig().id ?? PUBLIC_STORE_ID
+export const STORE_IDS = [storeId]
+/** The store page every channel installs the extension from. */
+export const STORE_URL = storeUrl(storeId)
 export const PACKAGE = "@opencode/browse"
 export const MCP_NAME = "browse"
 /** The MCP server's name before it was renamed to `browse`. */
@@ -78,7 +79,7 @@ export type Settings = {
 }
 
 // In a terminal the outro says what to do next.
-export const connectedMessage = "✓ Connected to your browser. Restart your agent, then ask it to open a page."
+export const connectedMessage = "✓ Connected to your browser. Ask your agent to open a page."
 export const pairedOfflineMessage =
   "! Not connected yet. Open the browser profile already paired with browse and make sure the extension is enabled. It reconnects automatically."
 export const manualPair = (code: string) =>

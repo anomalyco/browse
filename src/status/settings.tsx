@@ -84,7 +84,7 @@ function Settings() {
         {(update) => (
           <section class="callout">
             <h2>Update available</h2>
-            <p>{capitalized(update().summary)}. Run this in a terminal (or ask your agent to update browse), then restart your agent:</p>
+            <p>{capitalized(update().summary)}. Run this in a terminal (or ask your agent to update browse):</p>
             <CopyBox text={update().command} />
           </section>
         )}

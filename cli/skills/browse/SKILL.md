@@ -899,8 +899,7 @@ with the command it names. If the user asks you to update browse, run that
 command yourself (`node <browse>/cli/dist/cli.mjs update`): it fast-forwards the
 git clone and reruns setup, and refuses with the fix when the clone has local
 changes or has diverged. Pass its refusal on rather than resolving git state
-yourself. The update takes effect after the user restarts opencode, so finish
-browser work first and tell them to restart.
+yourself. Finish in-flight browser work before you run it.
 
 ## Troubleshooting
 
@@ -921,7 +920,7 @@ Common diagnoses:
   `unpaired` or `refused` means browse is installed: re-run install to pair it, **not** the store.
   `paired-offline`: reopen the paired browser profile and enable browse; its worker wakes every 30 seconds.
   `not-seen`: the relay hasn't heard from a browser. If browse is already added, open that browser and
-  rerun install. Otherwise follow install's store or Load unpacked steps.
+  rerun install. Otherwise follow install's store step.
 - Incompatible extension protocol: follow `extension.nextStep`. For an older unpacked extension after setup,
   ask the user: “Reload browse on your browser's extensions page (↻).” Running setup again does not reload older workers.
 - Competing browser/profile connections: the active browser is preserved and

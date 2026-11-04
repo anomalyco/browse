@@ -29,7 +29,6 @@ the agents you choose, and connects the extension:
 2. **Add the extension.** `install` opens browse in the Chrome Web Store; add it to your browser, and `install` pairs
    it once it's there. If it's already there, `install` opens its setup page with a one-time pairing code, so it
    pairs without copying anything.
-3. **Restart your agent** if it doesn't reload MCP settings automatically.
 
 That's it. Ask an agent to *"open news.ycombinator.com and tell me the top story"*. Or paste this into opencode:
 *"Install browse with `npx @opencode/browse install`."*
@@ -43,8 +42,9 @@ over when no agent is using the browser, without changing opencode's config or r
 back to the previous version. The Chrome Web Store updates the extension.
 
 **Dev builds**: every push to `dev` publishes one. `npx @opencode/browse@dev install` follows the dev channel: it
-downloads that build's extension into a folder you load unpacked once (install shows where), and each update refreshes
-the folder and reloads the extension. The zip is also at https://anoma.ly/release/browse/extension/dev/chromium.
+downloads that build's extension into `<data root>/extension`, which you load unpacked once (`npx @opencode/browse
+extension` shows the folder), and each update refreshes the folder and reloads the extension. The zip is also at
+https://anoma.ly/release/browse/extension/dev/chromium.
 
 There's nothing to sign in to. Each browser pairs with the relay once and gets a key of its own (see
 [Security](#security)). If pairing didn't happen by itself, run `npx @opencode/browse install` again to open a
@@ -61,16 +61,12 @@ git clone https://github.com/anomalyco/browse.git && cd browse && bun run setup
 ```
 
 `setup` builds the extension and the CLI, adds the `browse` MCP server to your selected agents, and puts a one-time pairing code
-in the extension's folder (good for an hour), which the extension exchanges for its own key when it first connects. Two
-steps are left for you:
-
-1. **Load the extension.** `setup` opens your browser's extensions page, shows the `browse/dist` folder and copies its
-   path. Turn on **Developer mode**, click **Load unpacked** and choose that folder (on macOS, press Cmd+Shift+G in the
-   picker and paste), or drag the folder onto the page. `setup` waits until the extension connects.
-2. **Restart your agent** if it doesn't reload MCP settings automatically.
+in `browse/dist` (good for an hour), which the extension exchanges for its own key when it first connects. `install` points
+every channel at the Chrome Web Store build; to use the build from your checkout instead, run
+`node cli/dist/cli.mjs extension`, which shows the `browse/dist` folder to load unpacked.
 
 This needs [Bun](https://bun.sh) as well. A checkout never updates itself: run `node cli/dist/cli.mjs update` in your
-`browse` folder (or ask your agent to update browse), then restart opencode. It pulls the new commits (fast-forward
+`browse` folder (or ask your agent to update browse). It pulls the new commits (fast-forward
 only, and never over local changes), rebuilds, and requests an extension reload. If the old extension cannot accept
 the request, **reload browse on your browser's extensions page (↻)**. The manual equivalent of `update` is
 `git pull && bun run setup`. When there's an update, `status`, `doctor`, the extension's settings page and the agent (once

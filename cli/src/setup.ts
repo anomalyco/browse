@@ -1,11 +1,11 @@
 // Setup for browse, without changing opencode itself:
 //   install    install the runtime, add the browse MCP server to opencode's config, then check which browsers have the
-//              extension. A stable npm install gets it from the Chrome Web Store item: when no browser has it, install
-//              opens that item's page; when one has it, install opens its status page with a one-time pairing code in
-//              the URL fragment so it pairs without a step. A checkout loads its own build (dist/) unpacked, and a dev
-//              npm install the dev extension it downloads from the release service into <data root>/extension
-//              (dev-extension.ts): install puts a one-time code in that folder, reloads a connected one that's out of
-//              date, and guides loading it when no browser has it
+//              extension. Every channel installs it from the Chrome Web Store item: when no browser has it, install
+//              says to add it there and opens that item's page; when one has it, install opens its status page with a
+//              one-time pairing code in the URL fragment so it pairs without a step. A checkout also pairs its own
+//              build (dist/), and a dev npm install the dev extension it downloads from the release service into
+//              <data root>/extension (dev-extension.ts): install writes a one-time code into that folder and reloads a
+//              connected one that's out of date, without mentioning either
 //   extension  show the unpacked extension folder (for "Load unpacked"), or a stable npm install's store page
 //   pair       print a one-time pairing code for a browser; --list shows paired browsers, --revoke unpairs one
 //   set        set hostname: where the relay listens (relay-config.ts)
@@ -31,7 +31,6 @@ import {
   extensionProtocolAdvice,
   extensionProtocolSkew,
   unpackedExtensionId,
-  unpackedReloadAdvice,
 } from "./protocol.ts"
 import {
   defaultBrowser,
@@ -76,7 +75,6 @@ import {
   rail,
   readJson,
   STORE_IDS,
-  STORE_URL,
   tilde,
   unpackedFolder,
   type Settings,
@@ -157,8 +155,8 @@ async function install(args: string[]) {
     process.exitCode
       ? "browse isn't fully set up yet. Fix the steps above, then run browse install again."
       : byHand
-        ? "Done. Add the MCP server above to your agent, restart it, then ask it to open a page."
-        : "Done. Restart your agents, then ask one to open a page.",
+        ? "Done. Add the MCP server above to your agent, then ask it to open a page."
+        : "Done. Ask your agent to open a page.",
   )
 }
 
@@ -306,10 +304,10 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
   if (folder && !pairedOffline) {
     // The unpacked extension finds a one-time code in its own folder and exchanges it for its key, without a step.
     pairUnpacked()
-    // A browser already running an older unpacked build keeps its old code until it reloads; ask it to.
+    // A browser already running an older unpacked build keeps its old code until it reloads; ask it to, silently:
+    // install never talks about unpacked builds.
     const reload = connected ? await reloadOutdatedExtension(connected, folder) : "current"
     if (reload === "reloaded") log("✓ Reloaded browse in your browser")
-    if (reload === "stale") return log(`! ${unpackedReloadAdvice}`)
   }
   // Including --no-wait (checkout update): an incompatible browser is installed, not waiting to be added or paired.
   const reportMismatch = (status: ExtensionStatus) => {
@@ -351,12 +349,11 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
     allowOpen: !args.includes("--no-open"),
     connected: !!connected,
     pairedOffline,
-    ...(folder ? { folder } : {}),
     detections,
     preferred: ssh ? undefined : defaultBrowser(detections.map((detection) => detection.browser)),
     env,
   })
-  if (connected || found === "off" || pairedOffline || (!folder && !STORE_URL)) return
+  if (connected || found === "off" || pairedOffline) return
   ensureRelay(entry)
   let code: string | undefined
   const pairingCode = () =>
@@ -375,18 +372,14 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
     log(
       `Couldn't check ${blocked.join(", ")}. If browse is already installed there, pair it manually. ${manualPair(pairingCode())}`,
     )
-  const next = folder
-    ? `If browse is already loaded unpacked: ${unpackedReloadAdvice}`
-    : `If browse isn't connected after you add it, run \`${cliCommand("install")}\` again to pair it.`
+  const next = `If browse isn't connected after you add it, run \`${cliCommand("install")}\` again to pair it.`
   const agentNext = () => {
-    if (folder && offer === "none" && !blocked.length)
-      return `Agent: if browse is already loaded unpacked, ask the user: ${unpackedReloadAdvice} Otherwise ask them to load ${folder}. Check the connection with the browse status tool.`
     return `Agent: ${
       offer === "opened"
         ? "ask the user to open browse's status page in their browser"
         : offer === "manual" || blocked.length
           ? "ask the user to finish pairing in browse's Options"
-          : "ask the user to add browse in their browser"
+          : "ask the user to add browse from the Chrome Web Store"
     }. Then re-run \`${cliCommand("install")}\` to finish, or call the browse status tool to check the connection.`
   }
   if (!env.tty) log(agentNext())
@@ -416,7 +409,7 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
       if (status?.protocolCompatible === false) return reportMismatch(status)
       if (status?.connected) return log(connectedMessage)
       if (status?.pairingState === "paired-offline") return log(pairedOfflineMessage)
-      if (!folder && offer === "none") {
+      if (offer === "none") {
         const scan = detectBrowsers()
         if (!checkStore(scan)) return
         if (scan.some((d) => d.enabled.length)) offer = pairStore(scan)

@@ -96,6 +96,12 @@ declare global {
 /** A Chrome Web Store extension ID: 32 letters a to p. */
 const STORE_ITEM_ID = /^[a-p]{32}$/
 
+/**
+ * browse's public Chrome Web Store item (the CWS_ITEM_ID repository variable, RELEASING.md). A checkout, or a package
+ * built without one, still points users at this item: every channel installs browse from the store.
+ */
+export const PUBLIC_STORE_ID = "mfnicocicmmlkpjnaffgihfjhdgjkdjg"
+
 export type StoreConfig = {
   /** The public store item, when the release that built this package was configured with one. */
   readonly id?: string
