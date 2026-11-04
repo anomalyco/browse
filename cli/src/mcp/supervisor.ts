@@ -100,7 +100,10 @@ export async function runBinaryMcp(args: readonly string[]) {
   // Once current.json names another version, new requests wait for the swap instead of reaching a server whose relay is
   // going away (or already runs the other version); a switch that doesn't happen releases them.
   let heldSince: number | undefined
-  const moved = () => current() !== version
+  const moved = () => {
+    const next = current()
+    return next !== version && next !== failed
+  }
   const fromClient = (line: string) => {
     if (swapping) return void queue.push(line)
     if (moved()) {
@@ -116,8 +119,8 @@ export async function runBinaryMcp(args: readonly string[]) {
   }
 
   // A new version in current.json swaps the server only once the relay runs it too (GET /version), so a server never
-  // talks to a relay of another version. With no relay at all for a few checks, nothing can mix, and it swaps, unless
-  // that version's server already failed to start.
+  // talks to a relay of another version. With no relay at all for a few checks, nothing can mix, and it swaps. Never to
+  // a version whose server already failed to start: this server keeps going, whatever current.json and the relay say.
   let checking = false
   let unreachable = 0
   const relayVersion = () =>
@@ -127,7 +130,7 @@ export async function runBinaryMcp(args: readonly string[]) {
   const maybeSwap = async () => {
     if (swapping || checking || inflight.size > 0) return
     const next = current()
-    if (next === version) {
+    if (next === version || next === failed) {
       unreachable = 0
       heldSince = undefined
       for (const queued of queue.splice(0)) fromClient(queued)
@@ -138,7 +141,7 @@ export async function runBinaryMcp(args: readonly string[]) {
     checking = false
     unreachable = running === undefined ? unreachable + 1 : 0
     // Held requests don't wait forever for a relay that never reports the new version: they go to the current server.
-    if (running !== next && (unreachable < 3 || next === failed)) {
+    if (running !== next && unreachable < 3) {
       if (heldSince !== undefined && Date.now() - heldSince > 15000) {
         heldSince = undefined
         for (const line of queue.splice(0)) {

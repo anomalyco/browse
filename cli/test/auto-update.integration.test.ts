@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { spawn, spawnSync, type ChildProcess } from "node:child_process"
+import { createHash } from "node:crypto"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -12,8 +13,9 @@ import { freePort } from "./support/ports.ts"
 
 // An npm install's runtime in a temporary data root, with two real versions of this CLI (bundled from source as 0.0.1
 // and 0.0.2), two whose relay crashes on startup (0.0.4 always, 0.0.5 only as the managed relay, so it passes the check
-// before a switch), a relay running 0.0.1, and a fake registry whose tarball download never finishes. Node runs the
-// relay, as in a real install. No browser.
+// before a switch), one whose managed relay is slow to start (0.0.7), a relay running 0.0.1, and a fake registry whose
+// 0.0.3 tarball never finishes downloading and whose 0.0.6 crashes on `serve`. Node runs the relay, as in a real
+// install. No browser.
 
 const cliRoot = path.resolve(import.meta.dir, "..")
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "browse-autoupdate-it-"))
@@ -36,13 +38,31 @@ async function installFake(target: Layout, version: string) {
   }
 }
 
+/** Puts `code` at the top of a bundled entry, which runs before the CLI does anything. */
+function prepend(entry: string, code: string) {
+  const [first = "", ...rest] = fs.readFileSync(entry, "utf8").split("\n")
+  fs.writeFileSync(entry, (first.startsWith("#!") ? [first, code, ...rest] : [code, first, ...rest]).join("\n"))
+}
+
+const crash = (when: string) => `if (process.argv[2] === "serve" && ${when}) throw new SyntaxError("The requested module '@effect/platform-node-shared' does not provide an export named 'NodeWS'")`
+
 /** A version whose `serve` crashes the way a release with a missing dependency export does (`--version` still works). */
 async function installBroken(target: Layout, version: string, when: string) {
   await installFake(target, version)
-  const entry = versionEntry(target, version)
-  const [first = "", ...rest] = fs.readFileSync(entry, "utf8").split("\n")
-  const crash = `if (process.argv[2] === "serve" && ${when}) throw new SyntaxError("The requested module '@effect/platform-node-shared' does not provide an export named 'NodeWS'")`
-  fs.writeFileSync(entry, (first.startsWith("#!") ? [first, crash, ...rest] : [crash, first, ...rest]).join("\n"))
+  prepend(versionEntry(target, version), crash(when))
+}
+
+/** 0.0.6 as the registry's tarball: a package whose `serve` crashes, for runtime-install to install. */
+let brokenTarball: { bytes: Buffer; integrity: string } | undefined
+async function packBroken() {
+  const staging = path.join(root, "pack-0.0.6")
+  await bundleCli({ outdir: path.join(staging, "package", "dist"), version: "0.0.6" })
+  prepend(path.join(staging, "package", "dist", "cli.mjs"), crash("true"))
+  fs.writeFileSync(path.join(staging, "package", "package.json"), JSON.stringify({ name: "@opencode/browse", version: "0.0.6", type: "module" }))
+  const file = path.join(staging, "browse-0.0.6.tgz")
+  spawnSync("tar", ["czf", file, "-C", staging, "package"])
+  const bytes = fs.readFileSync(file)
+  brokenTarball = { bytes, integrity: `sha512-${createHash("sha512").update(bytes).digest("base64")}` }
 }
 
 const env = (extra: Record<string, string> = {}): NodeJS.ProcessEnv => ({
@@ -98,11 +118,16 @@ beforeAll(async () => {
     hostname: "127.0.0.1",
     fetch(request) {
       const url = new URL(request.url)
+      if (url.pathname.endsWith("/browse-0.0.6.tgz")) return new Response(new Uint8Array(brokenTarball!.bytes))
       if (url.pathname.includes("/-/")) return new Promise<Response>(() => {})
+      const tarball = (published: string) => `http://127.0.0.1:${registry!.port}/@opencode/browse/-/browse-${published}.tgz`
       return Response.json({
         name: "@opencode/browse",
         "dist-tags": { latest: "0.0.3" },
-        versions: { "0.0.3": { name: "@opencode/browse", version: "0.0.3", dist: { tarball: `http://127.0.0.1:${registry!.port}/@opencode/browse/-/browse-0.0.3.tgz`, integrity: `sha512-${Buffer.alloc(64).toString("base64")}` } } },
+        versions: {
+          "0.0.3": { name: "@opencode/browse", version: "0.0.3", dist: { tarball: tarball("0.0.3"), integrity: `sha512-${Buffer.alloc(64).toString("base64")}` } },
+          "0.0.6": { name: "@opencode/browse", version: "0.0.6", dist: { tarball: tarball("0.0.6"), integrity: brokenTarball!.integrity } },
+        },
       })
     },
   })
@@ -110,6 +135,10 @@ beforeAll(async () => {
   await installFake(layout, "0.0.2")
   await installBroken(layout, "0.0.4", "true")
   await installBroken(layout, "0.0.5", `process.env.OPENCODE_BROWSER_MANAGED_RELAY === "1"`)
+  // 0.0.7's managed relay is slow: still starting when the switch gives up on it.
+  await installFake(layout, "0.0.7")
+  prepend(versionEntry(layout, "0.0.7"), `if (process.argv[2] === "serve" && process.env.OPENCODE_BROWSER_MANAGED_RELAY === "1") { process.getBuiltinModule("node:fs").writeFileSync(process.env.OPENCODE_BROWSER_HOME + "/late.pid", String(process.pid)); await new Promise((resolve) => setTimeout(resolve, 20_000)) }`)
+  await packBroken()
   writeCurrent(layout, { version: "0.0.1", channel: "latest" })
   writeShim(layout)
   relay = spawn(node, [versionEntry(layout, "0.0.1"), "serve"], {
@@ -198,6 +227,33 @@ describe("auto-update in a running relay", () => {
     expect(readCurrent(layout)).toMatchObject({ version: before.version })
     expect(readState(layout).skipped).toBe("0.0.5")
   }, 60_000)
+
+  test("a new relay still starting when the switch gives up on it is stopped before the old version comes back", async () => {
+    const before = await version()
+    const result = spawnSync(node, [versionEntry(layout, before.version), "runtime-switch", "0.0.7"], { env: env(), encoding: "utf8", timeout: 60_000 })
+    expect(result.status).toBe(1)
+    const late = Number(fs.readFileSync(path.join(root, "late.pid"), "utf8"))
+    expect(processAlive(late)).toBe(false)
+    const now = await version()
+    started.push(now.pid)
+    expect(now.version).toBe(before.version)
+    expect(readCurrent(layout)).toMatchObject({ version: before.version })
+  }, 60_000)
+
+  test("runtime-install removes a version that doesn't start and skips it, rather than leaving it pending", async () => {
+    const running = (await version()).version
+    // Not spawnSync: the registry answers npm from this process.
+    const child = spawn(node, [versionEntry(layout, running), "runtime-install", "0.0.6"], { env: env(), stdio: ["ignore", "pipe", "inherit"] })
+    let stdout = ""
+    child.stdout!.setEncoding("utf8").on("data", (chunk: string) => void (stdout += chunk))
+    const status = await new Promise<number | null>((resolve) => child.on("close", resolve))
+    const result = { status, stdout }
+    expect(result.status).toBe(1)
+    expect(result.stdout).toContain("install of 0.0.6 failed (0.0.6 didn't start: SyntaxError: The requested module '@effect/platform-node-shared' does not provide an export named 'NodeWS')")
+    expect(fs.existsSync(path.join(layout.versions, "0.0.6"))).toBe(false)
+    expect(readState(layout)).toMatchObject({ skipped: "0.0.6", lastError: { version: "0.0.6" } })
+    expect(readState(layout).pending).toBeUndefined()
+  }, 150_000)
 })
 
 describe("the shim's MCP supervisor", () => {
@@ -274,7 +330,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     }
   }, 30_000)
 
-  test("goes back to the old server when the new version's server exits on startup, rather than exiting itself", async () => {
+  // With no relay (the switch stopped it), and with a relay that reports the new version while its MCP server crashes.
+  for (const reported of [undefined, "9.0.2"] as const)
+  test(`goes back to the old server when the new version's server exits on startup, rather than exiting itself (relay ${reported ?? "gone"})`, async () => {
     const shimRoot = fs.mkdtempSync(path.join(os.tmpdir(), "browse-shim-it-"))
     const shimLayout = runtimeLayout(shimRoot)
     const launches = path.join(shimRoot, "launches")
@@ -284,8 +342,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     }
     writeCurrent(shimLayout, { version: "9.0.1", channel: "latest" })
     writeShim(shimLayout)
-    // No relay: the switch stopped it, so after a few checks the shim swaps to 9.0.2.
-    const shim = spawn(node, [shimLayout.shim, "mcp"], { env: { PATH: process.env.PATH ?? "", OPENCODE_BROWSER_HOME: shimRoot, OPENCODE_BROWSER_PORT: String(await freePort()) }, stdio: ["pipe", "pipe", "inherit"] })
+    const fakeRelay = reported ? Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ version: reported }) }) : undefined
+    const shim = spawn(node, [shimLayout.shim, "mcp"], { env: { PATH: process.env.PATH ?? "", OPENCODE_BROWSER_HOME: shimRoot, OPENCODE_BROWSER_PORT: String(fakeRelay?.port ?? (await freePort())) }, stdio: ["pipe", "pipe", "inherit"] })
     const answers = new Map<number, Record<string, string>>()
     createInterface({ input: shim.stdout! }).on("line", (line) => {
       const message = JSON.parse(line) as { id?: number; result?: Record<string, string> }
@@ -302,10 +360,15 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       const first = await call("whoami")
       writeCurrent(shimLayout, { version: "9.0.2", previous: "9.0.1", channel: "latest" })
       await until(() => fs.existsSync(launches), 10_000)
+      // While current.json still names 9.0.2, calls go to the 9.0.1 server at once, not after a held window.
+      const during = await call("whoami")
+      expect(during.version).toBe("9.0.1")
+      expect(during.session).toBe(first.session)
       await Bun.sleep(4_000)
       expect(shim.exitCode).toBeNull()
-      // Tried once, not again on every check while current.json still names it.
+      // Tried once, not again on every check, whatever the relay reports.
       expect(fs.readFileSync(launches, "utf8")).toBe("x")
+      expect((await call("whoami")).version).toBe("9.0.1")
       // The switch is undone: the agent's calls carry on, in the same session.
       writeCurrent(shimLayout, { version: "9.0.1", channel: "latest" })
       const after = await call("whoami")
@@ -313,6 +376,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       expect(after.session).toBe(first.session)
     } finally {
       shim.kill("SIGKILL")
+      await fakeRelay?.stop(true)
       fs.rmSync(shimRoot, { recursive: true, force: true })
     }
   }, 30_000)

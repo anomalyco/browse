@@ -15,9 +15,8 @@ const here = path.resolve(import.meta.dir, "..")
 const outdir = path.join(here, "dist-bin")
 const pkg = await Bun.file(path.join(here, "package.json")).json()
 const version: string = pkg.version
-const channel = version.includes("-dev.") ? "dev" : "latest"
 
-type Target = { os: "linux" | "darwin" | "win32"; arch: "x64" | "arm64"; abi?: "musl"; avx2?: false }
+export type Target = { os: "linux" | "darwin" | "win32"; arch: "x64" | "arm64"; abi?: "musl"; avx2?: false }
 
 // The targets the install script picks from (../install). Windows on ARM64 runs the x64 build.
 export const targets: Target[] = [
@@ -39,6 +38,63 @@ export function targetName(item: Target) {
   return [item.os === "win32" ? "windows" : item.os, item.arch, item.avx2 === false ? "baseline" : undefined, item.abi].filter(Boolean).join("-")
 }
 
+/** Compiles the CLI for one target into the executable `outfile` (the tests compile throwaway versions with it too). */
+export async function compileCli(options: {
+  readonly item: Target
+  readonly outfile: string
+  readonly version: string
+  readonly build: string
+  readonly storeId?: string
+  readonly extension?: { readonly file: string; readonly sha256: string; readonly size: number }
+}) {
+  const target = targetName(options.item)
+  const channel = options.version.includes("-dev.") ? "dev" : "latest"
+  const executablePath = await bunRuntime(options.item)
+  const result = await Bun.build({
+    entrypoints: [path.join(here, "src/main.ts")],
+    tsconfig: path.join(here, "tsconfig.json"),
+    format: "esm",
+    minify: true,
+    bytecode: true,
+    sourcemap: "none",
+    splitting: true,
+    // patchright-core's BiDi-over-CDP bridge (Firefox) requires chromium-bidi lazily; browse only uses connectOverCDP.
+    external: ["chromium-bidi/*"],
+    plugins: [
+      {
+        // jsonc-parser's default entry is UMD with runtime requires; its ESM build bundles cleanly (bundle.ts).
+        name: "jsonc-parser-esm",
+        setup(build) {
+          build.onResolve({ filter: /^jsonc-parser$/ }, () => ({
+            path: path.join(path.dirname(Bun.resolveSync("jsonc-parser/package.json", here)), "lib/esm/main.js"),
+          }))
+        },
+      },
+      patchrightFiles(),
+    ],
+    compile: {
+      autoloadBunfig: false,
+      autoloadDotenv: false,
+      autoloadTsconfig: false,
+      autoloadPackageJson: false,
+      target: `bun-${target}` as Bun.Build.CompileTarget,
+      ...(executablePath ? { executablePath } : {}),
+      outfile: options.outfile,
+      execArgv: [`--user-agent=browse/${channel}/${options.version}`, "--use-system-ca", "--"],
+      windows: {},
+    },
+    define: {
+      "globalThis.__OPENCODE_BROWSER_VERSION__": JSON.stringify(options.version),
+      "globalThis.__OPENCODE_BROWSER_BUILD_ID__": JSON.stringify(options.build),
+      "globalThis.__OPENCODE_BROWSER_STORE__": JSON.stringify(options.storeId ? { id: options.storeId } : {}),
+      "globalThis.__OPENCODE_BROWSER_EXTENSION__": options.extension ? JSON.stringify(options.extension) : "undefined",
+      "globalThis.__OPENCODE_BROWSER_COMPILED__": "true",
+      "globalThis.__OPENCODE_BROWSER_TARGET__": JSON.stringify(target),
+    },
+  })
+  if (!result.success) throw new AggregateError(result.logs, `compile failed for ${target}`)
+}
+
 if (import.meta.main) {
   const requested = process.argv.slice(2).map((arg) => arg.replace(/^bun-/, ""))
   const unknown = requested.filter((name) => !targets.some((item) => targetName(item) === name))
@@ -58,50 +114,7 @@ if (import.meta.main) {
     const target = targetName(item)
     const name = `browse-${target}`
     const binary = path.join(outdir, name, "bin", item.os === "win32" ? "browse.exe" : "browse")
-    const executablePath = await bunRuntime(item)
-    const result = await Bun.build({
-      entrypoints: [path.join(here, "src/main.ts")],
-      tsconfig: path.join(here, "tsconfig.json"),
-      format: "esm",
-      minify: true,
-      bytecode: true,
-      sourcemap: "none",
-      splitting: true,
-      // patchright-core's BiDi-over-CDP bridge (Firefox) requires chromium-bidi lazily; browse only uses connectOverCDP.
-      external: ["chromium-bidi/*"],
-      plugins: [
-        {
-          // jsonc-parser's default entry is UMD with runtime requires; its ESM build bundles cleanly (bundle.ts).
-          name: "jsonc-parser-esm",
-          setup(build) {
-            build.onResolve({ filter: /^jsonc-parser$/ }, () => ({
-              path: path.join(path.dirname(Bun.resolveSync("jsonc-parser/package.json", here)), "lib/esm/main.js"),
-            }))
-          },
-        },
-        patchrightFiles(),
-      ],
-      compile: {
-        autoloadBunfig: false,
-        autoloadDotenv: false,
-        autoloadTsconfig: false,
-        autoloadPackageJson: false,
-        target: `bun-${target}` as Bun.Build.CompileTarget,
-        ...(executablePath ? { executablePath } : {}),
-        outfile: binary,
-        execArgv: [`--user-agent=browse/${channel}/${version}`, "--use-system-ca", "--"],
-        windows: {},
-      },
-      define: {
-        "globalThis.__OPENCODE_BROWSER_VERSION__": JSON.stringify(version),
-        "globalThis.__OPENCODE_BROWSER_BUILD_ID__": JSON.stringify(build),
-        "globalThis.__OPENCODE_BROWSER_STORE__": JSON.stringify(storeId ? { id: storeId } : {}),
-        "globalThis.__OPENCODE_BROWSER_EXTENSION__": extension ? JSON.stringify(extension) : "undefined",
-        "globalThis.__OPENCODE_BROWSER_COMPILED__": "true",
-        "globalThis.__OPENCODE_BROWSER_TARGET__": JSON.stringify(target),
-      },
-    })
-    if (!result.success) throw new AggregateError(result.logs, `compile failed for ${target}`)
+    await compileCli({ item, outfile: binary, version, build, ...(storeId ? { storeId } : {}), ...(extension ? { extension } : {}) })
     await NativeArch.verify(binary, item.arch)
 
     await Bun.write(

@@ -1,11 +1,11 @@
 import { spawnSync } from "node:child_process"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, rmSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import * as clack from "@clack/prompts"
 import type { AgentName, AgentReceipt } from "./agent-config.ts"
-import { runtimeLayout } from "../update/auto-update.ts"
+import { runtimeLayout, skipBroken, verifyStarts, versionDirectory, versionEntry, type Current } from "../update/auto-update.ts"
 import { formatPairingCode } from "../relay/browser-pairing.ts"
 import { dataRoot, devExtension, devExtensionFolder, PUBLIC_STORE_ID, storeConfig, storeUrl } from "../paths.ts"
 
@@ -157,4 +157,19 @@ export function waitTimeout(args: string[], defaultSeconds = 180) {
   const seconds = Number(args.includes("--wait-seconds") ? flag(args, "--wait-seconds") : defaultSeconds)
   if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > 3600) fail("--wait-seconds must be between 1 and 3600.")
   return seconds * 1000
+}
+
+/**
+ * Before install replaces a working version with `version`: checks that `version` starts (verifyStarts). When it
+ * doesn't, it's removed and skipped like an update that didn't start, and the version install found is returned (and
+ * stays current); else undefined.
+ */
+export async function keepWorking(before: Current | undefined, version: string): Promise<Current | undefined> {
+  if (!before || before.version === version || !existsSync(versionEntry(layout, before.version))) return undefined
+  const unstartable = await verifyStarts(layout, version).then(() => undefined, (error: Error) => error.message)
+  if (!unstartable) return undefined
+  rmSync(versionDirectory(layout, version), { recursive: true, force: true })
+  skipBroken(layout, version, unstartable)
+  log(`! ${unstartable}. Keeping browse ${before.version}; auto-update skips ${version} until a newer version is published.`)
+  return before
 }

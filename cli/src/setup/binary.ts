@@ -1,19 +1,20 @@
 // A binary install: the install script (or PowerShell installer) put the bun-compiled executable in ~/.browse/bin.
 // Install records it, puts its folder on PATH, and uninstall takes both back.
 import { spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import {
   compareVersions,
   installVersion,
   pruneVersions,
   readCurrent,
+  sameFile,
   switchVersion,
   updateState,
   versionEntry,
 } from "../update/auto-update.ts"
 import { opencodeBrowserVersion } from "../version.ts"
-import { configRoot, fail, home, layout, log, readFileOr, tilde } from "./environment.ts"
+import { configRoot, fail, home, keepWorking, layout, log, readFileOr, tilde } from "./environment.ts"
 
 /**
  * Records this executable as the one agents run (current.json's `binary`) and keeps a copy of it as its version in
@@ -25,17 +26,16 @@ export async function installBinaryRuntime(): Promise<{ entry: string; version: 
   const version = opencodeBrowserVersion
   const before = readCurrent(layout)
   const existing = versionEntry(layout, version)
-  const same = (left: string, right: string) => {
-    try {
-      return statSync(left).size === statSync(right).size && readFileSync(left).equals(readFileSync(right))
-    } catch {
-      return false
-    }
-  }
   try {
-    if (!same(existing, binary)) await installVersion({ layout, version, runningBinary: binary })
+    if (!sameFile(existing, binary)) await installVersion({ layout, version, runningBinary: binary })
   } catch (error) {
     fail(`Could not install browse ${version}: ${(error as Error).message}`)
+  }
+  const kept = await keepWorking(before, version)
+  // The install script already put this executable on PATH: the version that works goes back there.
+  if (kept) {
+    switchVersion(layout, kept.version, kept.previous, binary)
+    return { entry: binary, version: kept.version }
   }
   const previous = before?.version === version ? before.previous : before?.version
   switchVersion(layout, version, previous, binary)

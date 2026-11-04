@@ -36,9 +36,9 @@ That's it. Ask an agent to *"open news.ycombinator.com and tell me the top story
 Requirements: Node.js 22.19+, a Chromium browser, and [opencode](https://opencode.ai) or another MCP client.
 
 **Updates are automatic.** The relay checks npm once a day and installs a new version in the background; it switches
-over when no agent is using the browser, without changing opencode's config or restarting it. Before switching, it
-starts the new version's relay on a spare port, and if that fails it keeps the version you have and skips the new one
-until a newer version is published. Choose *Only tell me* or
+over when no agent is using the browser, without changing opencode's config or restarting it. Each new version first
+has to start its relay and MCP server in a test run. A version that fails is skipped until a newer one is published,
+and if a switch fails anyway, browse goes straight back to the version you had. Choose *Only tell me* or
 *Don't check* under **Updates** on the extension's settings page (or `settings set autoUpdate=notify`, or
 `OPENCODE_BROWSER_AUTO_UPDATE=off`). `npx @opencode/browse update` updates now, and `npx @opencode/browse rollback` goes
 back to the previous version. The Chrome Web Store updates the extension.

@@ -14,14 +14,15 @@ const invokedAs = path.basename(process.argv[1] ?? "")
 if (command === "--version" || command === "-v") {
   const opencodeBrowserVersion = embeddedVersion ?? (await import("./version.ts")).opencodeBrowserVersion
   process.stdout.write(`${opencodeBrowserVersion}\n`)
+} else if (command === "mcp" && globalThis.__OPENCODE_BROWSER_COMPILED__ && process.env.OPENCODE_BROWSER_MCP_DIRECT !== "1") {
+  // A binary install's MCP entry (`browse mcp`): supervise the server so updates swap it (mcp/supervisor.ts). The
+  // server it starts has OPENCODE_BROWSER_MCP_DIRECT=1 and takes the next branch.
+  const { runBinaryMcp } = await import("./mcp/supervisor.ts")
+  await runBinaryMcp(process.argv.slice(3))
 } else if (invokedAs === "opencode-browser-mcp" || (command === "mcp" && process.argv.length === 3)) {
   const { NodeRuntime } = await import("@effect/platform-node")
   const { runMcpServer } = await import("./mcp.ts")
   runMcpServer.pipe(NodeRuntime.runMain)
-} else if (command === "mcp" && globalThis.__OPENCODE_BROWSER_COMPILED__ && process.env.OPENCODE_BROWSER_MCP_DIRECT !== "1") {
-  // A binary install's MCP entry: supervise the server so updates swap it (mcp/supervisor.ts).
-  const { runBinaryMcp } = await import("./mcp/supervisor.ts")
-  await runBinaryMcp(process.argv.slice(3))
 } else if (command === "runtime-install" || command === "runtime-switch") {
   // The relay's auto-update children (auto-update.ts); not for people.
   const { runRuntimeInstall, runRuntimeSwitch } = await import("./update/runtime-update.ts")

@@ -1,15 +1,15 @@
 // Switching an npm or binary install's version (auto-update.ts has the layout): `update`, `rollback`, and the two commands the
 // relay's updater runs in detached children so nothing waits on its event loop:
-//   runtime-install <version> [--integrity <sri>]   installs and verifies one version, records it as pending
+//   runtime-install <version> [--integrity <sri>]   installs and verifies one version (it starts), records it as pending
 //   runtime-switch <version>                         switches to an installed version (exit 1 when refused or broken)
-// A switch first starts the version's relay on a spare port, and a version that doesn't start never replaces the running
-// relay; auto-update then skips it until a newer one is published. Then it drains the running relay (the same safe
-// restart as `relay restart`, refused while a capture, a recording or a raw CDP client is busy). Only once it has stopped
-// does current.json move and the new version's relay start, so on a refusal nothing changes: no MCP server swaps, and
-// nothing runs a mix of versions. --force ends what's blocking it. If the new relay still fails to start, current.json
-// goes back and the old version's relay starts again at once.
+// A switch first runs the version's relay and MCP server on a spare port (verifyStarts), and a version that doesn't
+// start never replaces the running relay; auto-update then skips it until a newer one is published. Then it drains the
+// running relay (the same safe restart as `relay restart`, refused while a capture, a recording or a raw CDP client is
+// busy). Only once it has stopped does current.json move and the new version's relay start, so on a refusal nothing
+// changes: no MCP server swaps, and nothing runs a mix of versions. --force ends what's blocking it. If the new relay
+// still fails to start, it's stopped, current.json goes back and the old version's relay starts again at once.
 import { Effect } from "effect"
-import { existsSync } from "node:fs"
+import { existsSync, rmSync } from "node:fs"
 import {
   channelOf,
   compareVersions,
@@ -18,13 +18,16 @@ import {
   fetchPublished,
   installVersion,
   npmRuntime,
+  processAlive,
   pruneVersions,
   readCurrent,
   registryUrl,
   runtimeLayout,
+  skipBroken,
   switchVersion,
   updateState,
   verifyStarts,
+  versionDirectory,
   versionEntry,
   type AutoUpdateState,
   type Current,
@@ -53,6 +56,8 @@ export async function switchTo(layout: Layout, version: string, options: { reado
   const before: Current | undefined = readCurrent(layout)
   let switched = false
   let launched = false
+  /** The new version's relay process, once started. */
+  let candidate: number | undefined
   const point = Effect.sync(() => {
     switchVersion(layout, version, options.previous)
     switched = true
@@ -75,37 +80,44 @@ export async function switchTo(layout: Layout, version: string, options: { reado
       onShutdownAccepted: point,
       start: Effect.suspend(() => (switched ? Effect.void : point)).pipe(
         Effect.andThen(RelayLifecycle.startManagedRelay(entry)),
-        Effect.tap(() => Effect.sync(() => void (launched = true))),
+        Effect.map((pid) => {
+          launched = true
+          candidate = pid
+        }),
       ),
     })
     // Another relay can start in the gap (an old MCP server's next call); it must be the new version.
     const now = yield* relay.version
     return now.version === version ? undefined : { message: `a relay of version ${now.version} started first` }
   })
-  // The old relay stopped and the switch failed after all: its version again, and its relay now rather than at the next
-  // agent's call.
-  const restore = Effect.gen(function* () {
-    if (!switched || !before) return
-    yield* Effect.try({ try: () => switchVersion(layout, before.version, before.previous, before.binary), catch: (cause) => cause })
-    const relay = yield* RelayClient.Service
-    yield* RelayLifecycle.ensureRelay({ relay, start: RelayLifecycle.startManagedRelay(versionEntry(layout, before.version)) })
-  }).pipe(Effect.ignore)
+  // The old relay stopped and the switch failed after all. The new relay goes (one still starting would take the port),
+  // and the old version and its relay come back now rather than at the next agent's call. We stopped that relay, so
+  // this starts it whatever OPENCODE_BROWSER_AUTOSTART says.
+  const restore = (previous: Current) =>
+    Effect.gen(function* () {
+      if (candidate !== undefined && processAlive(candidate)) process.kill(candidate, "SIGKILL")
+      yield* Effect.try({ try: () => switchVersion(layout, previous.version, previous.previous, previous.binary), catch: (cause) => cause as Error })
+      const relay = yield* RelayClient.Service
+      const answering = yield* Effect.result(relay.version)
+      if (answering._tag === "Failure" && answering.failure instanceof RelayClient.RelayUnreachable)
+        yield* RelayLifecycle.startManagedRelay(versionEntry(layout, previous.version))
+      const back = yield* RelayLifecycle.waitForRelayReady({ relay })
+      if (back.version !== previous.version) return yield* Effect.fail(new Error(`a relay of version ${back.version} answered instead`))
+    })
+  const message = (error: unknown) => (error as Error).message ?? String(error)
   return Effect.runPromise(program.pipe(
-    Effect.catch((error) => Effect.succeed<Refusal>({ message: (error as Error).message ?? String(error), ...(launched ? { broken: true as const } : {}) })),
-    Effect.tap((refused) => (refused ? restore : Effect.void)),
+    Effect.catch((error) => Effect.succeed<Refusal>({ message: message(error), ...(launched ? { broken: true as const } : {}) })),
+    Effect.flatMap((refused) =>
+      refused && switched && before
+        ? restore(before).pipe(
+            Effect.as(refused),
+            Effect.catch((error) => Effect.succeed<Refusal>({ ...refused, message: `${refused.message}; restarting ${before.version} failed too: ${message(error)}` })),
+          )
+        : Effect.succeed(refused),
+    ),
     Effect.provide(RelayClient.layerFetch),
-    Effect.catch((error) => Effect.succeed<Refusal>({ message: (error as Error).message ?? String(error) })),
+    Effect.catch((error) => Effect.succeed<Refusal>({ message: message(error) })),
   ))
-}
-
-/** Records a version whose relay didn't start: no longer pending, and skipped until a newer one is published. */
-export function skipBroken(layout: Layout, version: string, message: string) {
-  updateState(layout, ({ pending, ...state }) => ({
-    ...state,
-    ...(pending && pending !== version ? { pending } : {}),
-    skipped: version,
-    lastError: { message, at: new Date().toISOString(), version },
-  }))
 }
 
 function npmOnly(command: string) {
@@ -140,7 +152,7 @@ export async function runRollback(args: readonly string[]) {
     process.exitCode = 1
     return
   }
-  updateState(layout, ({ pending: _pending, ...state }) => ({ ...state, skipped: current.version, lastUpdate: { from: current.version, to: previous, at: new Date().toISOString() } }))
+  updateState(layout, ({ pending: _pending, lastError: _error, ...state }) => ({ ...state, skipped: current.version, lastUpdate: { from: current.version, to: previous, at: new Date().toISOString() } }))
   log(`✓ Rolled back ${current.version} → ${previous}. Auto-update skips ${current.version} until a newer version is published.`)
   log("  Running MCP servers switch to it between requests; restart opencode if a tool still reports the old version.")
 }
@@ -189,7 +201,7 @@ export async function runNpmUpdate(args: readonly string[], layout?: Layout) {
     log(automatic ? "  It switches to the new version by itself once no agent is using the browser." : `  When no agent is using the browser, run \`${cliCommand("update")}\` again.`)
     return true
   }
-  updateState(lay, ({ pending: _pending, ...state }) => ({ ...state, lastUpdate: { from: current.version, to: published.version, at: new Date().toISOString() } }))
+  updateState(lay, ({ pending: _pending, lastError: _error, ...state }) => ({ ...state, lastUpdate: { from: current.version, to: published.version, at: new Date().toISOString() } }))
   pruneVersions(lay)
   log(`✓ Updated ${current.version} → ${published.version}.`)
   return true
@@ -209,6 +221,19 @@ export async function runRuntimeInstall(args: readonly string[]) {
   const clear = (installing: AutoUpdateState["installing"]) => (installing?.pid === process.pid ? undefined : installing)
   try {
     await installVersion({ layout, version, ...(integrity ? { integrity } : {}), ...(process.env.OPENCODE_BROWSER_NPM_REGISTRY ? { registry: await registryUrl() } : {}) })
+    // Installed means it runs: one that doesn't start goes, and isn't installed again until a newer one is published.
+    const unstartable = await verifyStarts(layout, version).then(() => undefined, (error: Error) => error.message)
+    if (unstartable) {
+      rmSync(versionDirectory(layout, version), { recursive: true, force: true })
+      skipBroken(layout, version, unstartable)
+      updateState(layout, ({ installing, ...state }) => {
+        const still = clear(installing)
+        return { ...state, ...(still ? { installing: still } : {}) }
+      })
+      log(`${new Date().toISOString()} install of ${version} failed (${unstartable}); skipping ${version} until a newer version is published`)
+      process.exitCode = 1
+      return
+    }
     updateState(layout, ({ installing, lastError: _error, ...state }) => {
       const still = clear(installing)
       return { ...state, ...(still ? { installing: still } : {}), pending: version }
