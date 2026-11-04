@@ -3,7 +3,7 @@
   --hair: 0.5px;
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
-  max-width: 680px;
+  max-width: 720px;
   margin: 0 auto;
   padding: 32px 24px 64px;
   font-size: 13px;
@@ -282,16 +282,36 @@
 
 .cmd-text {
   display: inline-flex;
+  flex: 1 1 auto;
   align-items: center;
   gap: 8px;
   min-width: 0;
   padding: 4px 4px 4px 12px;
 }
 
+/* One line, whatever the command is: the code area scrolls instead of wrapping, so the picker and copy button stay put. */
 .cmd-text code {
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: 12.5px;
   line-height: 18px;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.cmd-text code::-webkit-scrollbar {
+  height: 4px;
+}
+
+.cmd-text code::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.cmd-text code::-webkit-scrollbar-thumb {
+  border-radius: 2px;
+  background: var(--v2-border-border-strong);
 }
 
 @media (hover: hover) and (pointer: fine) {
