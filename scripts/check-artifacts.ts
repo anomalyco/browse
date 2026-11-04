@@ -259,11 +259,12 @@ async function mcpTools(cli: string, cwd: string, env: Record<string, string | u
   const reader = mcp.stdout.getReader()
   const decoder = new TextDecoder()
   let output = ""
-  const response = async (id: number): Promise<{ result?: { tools?: unknown[] } } | undefined> => {
+  type Response = { id?: number; result?: { protocolVersion?: string; tools?: unknown[] } }
+  const response = async (id: number): Promise<Response | undefined> => {
     for (;;) {
       for (const line of output.split("\n")) {
         try {
-          const message = JSON.parse(line) as { id?: number; result?: { tools?: unknown[] } }
+          const message = JSON.parse(line) as Response
           if (message.id === id) return message
         } catch {}
       }
@@ -279,7 +280,7 @@ async function mcpTools(cli: string, cwd: string, env: Record<string, string | u
     const listed = await Promise.race([
       (async () => {
         send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "release-check", version: "0" } } })
-        if (!(await response(1))) return undefined
+        if (!(await response(1))?.result?.protocolVersion) return undefined
         send({ jsonrpc: "2.0", method: "notifications/initialized" })
         send({ jsonrpc: "2.0", id: 2, method: "tools/list" })
         return (await response(2))?.result?.tools?.length
