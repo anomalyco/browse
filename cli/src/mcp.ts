@@ -135,7 +135,7 @@ const registerTools = Effect.gen(function* () {
 export const mcpServerLayer = McpServer.layerStdio({
   name: "browse",
   version: opencodeBrowserVersion,
-  protocols: [McpProtocol.v2025_06_18, McpProtocol.v2025_11_25, McpProtocol.v2025_03_26, McpProtocol.v2024_11_05],
+  protocols: [McpProtocol.v2026_07_28, McpProtocol.v2025_11_25, McpProtocol.v2025_06_18, McpProtocol.v2025_03_26, McpProtocol.v2024_11_05],
 })
 
 export const mcpToolsLayer = Layer.effectDiscard(registerTools)
