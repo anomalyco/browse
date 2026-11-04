@@ -1,483 +1,155 @@
-import { Effect, Predicate, Schema } from "effect"
-import { installPageReadTimeout } from "./page-read-timeout.ts"
-import { chromium, errors, type Browser, type BrowserContext, type ConsoleMessage, type ElementHandle, type Frame, type Locator, type Page } from "patchright-core"
-import * as acorn from "acorn"
-import fs from "node:fs"
-import path from "node:path"
-import os from "node:os"
-import crypto from "node:crypto"
-import url from "node:url"
-import util from "node:util"
-import events from "node:events"
-import stream from "node:stream"
-import buffer from "node:buffer"
-import http from "node:http"
-import https from "node:https"
-import zlib from "node:zlib"
-import {
-  clearGhostCursorCallouts,
-  hideGhostCursor as hideGhostCursorOnPage,
-  setGhostCursorCaption,
-  setGhostCursorSpotlight,
-  showGhostCursor as showGhostCursorOnPage,
-  showGhostCursorCallout,
-  showGhostCursorKeys,
-  zoomGhostCursorCamera,
-  type GhostCursorCalloutOptions,
-  type GhostCursorCaptionOptions,
-  type GhostCursorClientOptions,
-  type GhostCursorSpotlightOptions,
-  type GhostCursorZoomOptions,
-} from "./ghost-cursor.ts"
-import type { HandoffOutcome } from "./handoff.ts"
+import { Effect } from "effect"
+import { chromium, errors, type Browser, type BrowserContext, type Frame, type Page } from "patchright-core"
+import { registerAriaSnapshotSelector } from "./aria-snapshot.ts"
 import * as AuthProfile from "./auth-profile.ts"
 import * as AuthenticatedOrigin from "./authenticated-origin.ts"
+import { challengeWarning } from "./challenge-detection.ts"
+import { executeAllowsNode, ExecuteRealm, pageVisibleApiWarning } from "./execute-realm.ts"
+import {
+  challengeWaitMs,
+  detectChallenge,
+  ExecuteCodeError,
+  getAutoReturnExpression,
+  pageHookCall,
+  pageVisibleApiSourceWarnings,
+  runUserCode,
+  wrapCode,
+  type SandboxGlobals,
+} from "./execute/code-runner.ts"
+import {
+  createExecuteLogCapture,
+  emptyExecuteLogSummary,
+  formatLocatorFailurePageWarning,
+  formatLogCompactionWarning,
+  formatNodeContextWarning,
+  formatPointerInterceptionWarning,
+} from "./execute/log-capture.ts"
+import {
+  adoptedPageConnectTimeoutMs,
+  applyExplicitMediaFeatures,
+  defaultHandoffTimeoutMs,
+  defaultPageClosedWarning,
+  defaultPageCrashedWarning,
+  defaultPageReattachedWarning,
+  defaultPageRecoveredWarning,
+  defaultPageRepairedWarning,
+  defaultPageReplacedWarning,
+  downloadCapabilityErrorMessage,
+  finishHandoff,
+  handoffPageContextTimeoutMs,
+  hasExplicitTargetSelection,
+  installClosedPageReplacementGuard,
+  installDownloadCapabilityGuard,
+  installDownloadCapabilityGuards,
+  installViewportZoomGuard,
+  isDisposableSessionPage,
+  isMaskedProtectedUiFailure,
+  isSessionPageConnected,
+  openPageWithTargetId,
+  pageTargetId,
+  pdfViewerWarning,
+  playwrightCloseTimeoutMs,
+  playwrightConnectTimeoutMs,
+  protectedExtensionUiDiagnostic,
+  protectedExtensionUiWarning,
+  recoverSessionPage,
+  resolvePageTargetId,
+  runPlaywrightOperation,
+  runSettledPlaywrightOperation,
+  safePageUrl,
+  selectPage,
+  selectTarget,
+  sessionPageHealthCheckTimeoutMs,
+  SessionPageRecoveryError,
+  SessionPageRepairRequired,
+  shouldCloseCurrentPageOnAdopt,
+  showsPdf,
+  syntheticInputWarning,
+  TargetSelectionError,
+  waitForExactTarget,
+  waitForPageContext,
+  waitForPageTarget,
+  type ExecuteTargetSelection,
+  type HandoffPageTarget,
+  type RequestHandoff,
+} from "./execute/page-recovery.ts"
+import {
+  boundExecuteResult,
+  extractExecuteMedia,
+  maxExecuteResultChars,
+  stringifyResult,
+  toJsonSafeValue,
+} from "./execute/result-formatting.ts"
+import { buildSandboxGlobals } from "./execute/sandbox-globals.ts"
+import { ExecuteSecretsBridge } from "./execute/secrets-bridge.ts"
 import * as NetworkCapture from "./network-capture.ts"
-import { PageConsole } from "./page-console.ts"
-import { cliCommand } from "./paths.ts"
+import { installPageReadTimeout } from "./page-read-timeout.ts"
+import type { PasskeyChoice } from "./passkey-bridge.ts"
 import { tunePatchright } from "./patchright-tuning.ts"
-import { AuthenticatedJsonOutcome, type AuthenticatedJsonRequest, type ExecuteAftermath, type ExecuteLogEntry, type ExecuteLogSummary, type ExecuteMedia } from "./relay-schema.ts"
+import {
+  AuthenticatedJsonOutcome,
+  type AuthenticatedJsonRequest,
+  type ExecuteAftermath,
+  type ExecuteLogEntry,
+  type ExecuteLogSummary,
+  type ExecuteMedia,
+} from "./relay-schema.ts"
+import { relayToken } from "./relay-secrets.ts"
 import type { SessionTarget } from "./relay-types.ts"
-import { executionContextFailureDiagnostic, runtimeFailureKind } from "./runtime-diagnostics.ts"
-import { registerAriaSnapshotSelector } from "./aria-snapshot.ts"
+import { executionContextFailureDiagnostic } from "./runtime-diagnostics.ts"
 import {
   createAriaSnapshotHelper,
   createSnapshotHelpers,
   defaultAriaSnapshotTimeoutMs,
-  fillInput,
   fillInputs,
   invalidateSnapshotDocument,
-  screenshotWithLabels,
-  type AriaSnapshotHelper,
-  type InputField,
-  type InputTarget,
-  type ScreenshotWithLabelsOptions,
-  type ScreenshotWithLabelsResult,
-  type SnapshotHelper,
-  type SnapshotRefHelper,
   type SnapshotRefRegistry,
 } from "./snapshot.ts"
-import { createScreenshotDiff, type ScreenshotDiffOptions, type ScreenshotDiffResult } from "./screenshot-diff.ts"
-import { createWebMcpHelper, type WebMcpHelper } from "./webmcp.ts"
-import { startDemonstrationRecorder, type DemonstrationResult } from "./demonstration.ts"
-import { relayToken } from "./relay-secrets.ts"
-import * as SiteSecrets from "./site-secrets.ts"
-import * as Deadbolt from "./deadbolt.ts"
-import * as SignIn from "./sign-in.ts"
-import type { PasskeyChoice } from "./passkey-bridge.ts"
-import { checkUrl, parseOriginPatterns } from "./domain-policy.ts"
-import { challengeWarning, classifyChallenge, probePageScript, probeSelectors, type ChallengeOutcome, type ChallengeProbe } from "./challenge-detection.ts"
-import { createExecuteFiles, executeAllowsNode, ExecuteRealm, pageVisibleApiWarning, sandboxModules, type ExecuteFiles } from "./execute-realm.ts"
 
-export { createAriaSnapshotHelper, createSnapshotHelpers, defaultAriaSnapshotTimeoutMs, fillInputs }
+export {
+  boundExecuteResult,
+  createAriaSnapshotHelper,
+  createExecuteLogCapture,
+  createSnapshotHelpers,
+  defaultAriaSnapshotTimeoutMs,
+  defaultPageClosedWarning,
+  defaultPageReattachedWarning,
+  defaultPageRepairedWarning,
+  defaultPageReplacedWarning,
+  detectChallenge,
+  downloadCapabilityErrorMessage,
+  extractExecuteMedia,
+  fillInputs,
+  finishHandoff,
+  formatNodeContextWarning,
+  formatPointerInterceptionWarning,
+  getAutoReturnExpression,
+  hasExplicitTargetSelection,
+  installDownloadCapabilityGuard,
+  installDownloadCapabilityGuards,
+  isDisposableSessionPage,
+  isSessionPageConnected,
+  maxExecuteResultChars,
+  pageHookCall,
+  pageTargetId,
+  pageVisibleApiSourceWarnings,
+  pdfViewerWarning,
+  recoverSessionPage,
+  runPlaywrightOperation,
+  runUserCode,
+  selectTarget,
+  shouldCloseCurrentPageOnAdopt,
+  TargetSelectionError,
+  toJsonSafeValue,
+  waitForExactTarget,
+  waitForPageContext,
+  wrapCode,
+  type ExecuteTargetSelection,
+  type HandoffPageTarget,
+  type RequestHandoff,
+}
 
 tunePatchright()
-
-// Full Node modules, only with OPENCODE_BROWSER_ALLOW_NODE=1. Sandboxed execute code gets sandboxModules.
-const nodeModules = { fs, path, os, crypto, url, util, events, stream, buffer, http, https, zlib }
-
-const playwrightCloseTimeoutMs = 2_000
-const playwrightConnectTimeoutMs = 15_000
-// CdpRuntime can spend two 3s observation windows replaying shared contexts.
-// Leave room for that healthy reconnect path while bounding adopted setup.
-const adoptedPageConnectTimeoutMs = 8_000
-const sessionPageHealthCheckTimeoutMs = 3_000
-const sessionPageHealthRetryDelayMs = 100
-const handoffPageContextTimeoutMs = 15_000
-const timedOut = Symbol("timed-out")
-export const downloadCapabilityErrorMessage = "Downloads are unavailable in Browse extension-backed tabs: Chromium blocks Browser.setDownloadBehavior and Page.setDownloadBehavior through chrome.debugger, so Playwright cannot retain an artifact for download.saveAs(). Fetch the response in the page and save the returned bytes with files.write() when the site exposes them."
-const downloadGuardedPages = new WeakSet<Page>()
-const downloadGuardedContexts = new WeakSet<BrowserContext>()
-const viewportZoomGuardedPages = new WeakSet<Page>()
-
-class PlaywrightOperationError extends Schema.TaggedError<PlaywrightOperationError>()(
-  "Execute.PlaywrightOperationError",
-  {
-    message: Schema.String,
-    operation: Schema.String,
-    reason: Schema.Literals(["failed", "timeout"]),
-    cause: Schema.optionalKey(Schema.Defect()),
-  },
-) {}
-
-class SessionPageRecoveryError extends Schema.TaggedError<SessionPageRecoveryError>()(
-  "Execute.SessionPageRecoveryError",
-  {
-    message: Schema.String,
-    reason: Schema.Literals(["adopted-unresponsive", "adopted-initialization-timeout", "owned-unresponsive", "close-failed", "target-unavailable"]),
-    cause: Schema.Defect(),
-  },
-) {}
-
-/** Internal signal: the relay-owned page is alive but Playwright's view of it is stale; reconnect before retrying. */
-class SessionPageRepairRequired extends Error {
-  constructor() {
-    super("Session page repair required")
-  }
-}
-
-const unresponsivePageDiagnosis = (options: { readonly ownsPage: boolean; readonly repaired: boolean }): string => [
-  `The ${options.ownsPage ? "relay-owned" : "adopted"} session page is unresponsive: the tab is open but its execution context did not answer automation within the health-check budget`,
-  options.repaired ? " even after reconnecting to the relay" : "",
-  ". The tab was kept and was not replaced. This usually means the page is mid-navigation or its main world is stalled for automation (for example, bot protection). ",
-  `Retry after the page settles, navigate the tab with page.goto(), open a fresh tab with context.newPage(), or release it with session_reset (CLI: \`${cliCommand("session reset")}\`).`,
-].join("")
-
-export class TargetSelectionError extends Schema.TaggedError<TargetSelectionError>()(
-  "Execute.TargetSelectionError",
-  {
-    message: Schema.String,
-    reason: Schema.Literals(["invalid", "not-found", "ambiguous"]),
-  },
-) {}
-
-export const runPlaywrightOperation = Effect.fn("Execute.playwrightOperation")(<A>(options: {
-  readonly label: string
-  readonly timeoutMs: number
-  readonly run: () => Promise<A>
-}): Effect.Effect<A, Error> => Effect.tryPromise({
-    try: options.run,
-    catch: (cause) => new PlaywrightOperationError({
-      message: cause instanceof Error ? cause.message : options.label,
-      operation: options.label,
-      reason: "failed",
-      cause,
-    }),
-  }).pipe(
-    Effect.timeoutOrElse({
-      duration: options.timeoutMs,
-      orElse: () => Effect.fail(new PlaywrightOperationError({
-        message: `${options.label} timed out after ${options.timeoutMs}ms`,
-        operation: options.label,
-        reason: "timeout",
-      })),
-    }),
-  )
-)
-
-const runSettledPlaywrightOperation = Effect.fn("Execute.settledPlaywrightOperation")(<A>(options: {
-  readonly label: string
-  readonly run: () => Promise<A>
-}): Effect.Effect<A, Error> => Effect.tryPromise({
-  try: options.run,
-  catch: (cause) => new PlaywrightOperationError({
-    message: cause instanceof Error ? cause.message : options.label,
-    operation: options.label,
-    reason: "failed",
-    cause,
-  }),
-}))
-
-/**
- * Decide what to do with a default page that failed or needs a health check.
- *
- * Only a relay-owned page with nothing left to lose (a crashed renderer,
- * `about:blank`, or a `chrome-error://` document) is closed and recreated. Any
- * other live page is kept: an unresponsive execution context is a symptom of
- * Playwright's stale view of the tab or of the page itself, not proof that the
- * tab is gone, and the tab may hold login or form state the user produced.
- */
-export const recoverSessionPage = Effect.fn("Execute.recoverSessionPage")(function* (options: {
-  readonly ownsPage: boolean
-  readonly url: string
-  readonly timeoutMs: number
-  readonly healthCheck: () => Promise<void>
-  readonly close: () => Promise<void>
-  readonly crashed?: boolean
-  readonly repaired?: boolean
-}) {
-  const healthFailure = yield* runPlaywrightOperation({
-    label: "Session page health check",
-    timeoutMs: options.timeoutMs,
-    run: options.healthCheck,
-  }).pipe(
-    Effect.match({
-      onFailure: (error) => error,
-      onSuccess: () => undefined,
-    }),
-  )
-  if (!healthFailure) {
-    return "use" as const
-  }
-  if (!options.ownsPage) {
-    return yield* new SessionPageRecoveryError({
-      message: unresponsivePageDiagnosis({ ownsPage: false, repaired: options.repaired === true }),
-      reason: "adopted-unresponsive",
-      cause: healthFailure,
-    })
-  }
-  if (!isDisposableSessionPage(options)) {
-    if (options.repaired) {
-      return yield* new SessionPageRecoveryError({
-        message: unresponsivePageDiagnosis({ ownsPage: true, repaired: true }),
-        reason: "owned-unresponsive",
-        cause: healthFailure,
-      })
-    }
-    return "repair" as const
-  }
-  const closeFailure = yield* runPlaywrightOperation({
-    label: "Close unhealthy session page",
-    timeoutMs: options.timeoutMs,
-    run: options.close,
-  }).pipe(
-    Effect.match({
-      onFailure: (error) => error,
-      onSuccess: () => undefined,
-    }),
-  )
-  if (closeFailure) {
-    return yield* new SessionPageRecoveryError({
-      message: `The unhealthy relay-owned session page could not be closed. Reset the session (session_reset, or \`${cliCommand("session reset")}\`) before continuing.`,
-      reason: "close-failed",
-      cause: closeFailure,
-    })
-  }
-  return "recreate" as const
-})
-
-/** A relay-owned page whose document holds no user-produced state worth preserving. */
-export function isDisposableSessionPage(options: { readonly url: string; readonly crashed?: boolean }): boolean {
-  // Blank documents can hold setContent output, forms, and opener-written state.
-  // An unknown URL is not evidence that the document is safe to discard either.
-  return options.crashed === true || options.url.startsWith("chrome-error://")
-}
-
-export async function waitForPageContext(options: {
-  readonly evaluate: () => Promise<void>
-  readonly timeoutMs: number
-  readonly retryDelayMs?: number
-  readonly delay?: (milliseconds: number) => Promise<void>
-}): Promise<void> {
-  const retryDelayMs = options.retryDelayMs ?? sessionPageHealthRetryDelayMs
-  const deadline = Date.now() + options.timeoutMs
-  let lastError: unknown
-  while (true) {
-    const remainingMs = deadline - Date.now()
-    if (remainingMs <= 0) break
-    try {
-      const result = await withTimeout(options.evaluate(), remainingMs)
-      if (result === timedOut) break
-      return
-    } catch (error) {
-      lastError = error
-      const kind = runtimeFailureKind(error)
-      if (kind !== "context-destroyed" && kind !== "context-missing") throw error
-      const retryInMs = Math.min(retryDelayMs, Math.max(0, deadline - Date.now()))
-      if (retryInMs > 0) await (options.delay ?? delay)(retryInMs)
-    }
-  }
-  throw lastError ?? new Error(`Execution context not available: it did not become available within ${options.timeoutMs}ms`)
-}
-
-export async function finishHandoff(options: {
-  readonly outcome: HandoffOutcome
-  readonly message: string
-  readonly timeoutMs: number
-  readonly evaluate: () => Promise<void>
-  readonly contextTimeoutMs?: number
-  readonly retryDelayMs?: number
-  readonly delay?: (milliseconds: number) => Promise<void>
-}): Promise<void> {
-  if (options.outcome === "timeout") {
-    throw new Error(`Handoff timed out after ${options.timeoutMs}ms waiting for the user: ${options.message}`)
-  }
-  if (options.outcome !== "resolved" && options.outcome.reason === "session-stopped") {
-    throw new Error(`Handoff cancelled because its session was stopped, deleted or reset: ${options.message}`)
-  }
-  if (options.outcome !== "resolved") {
-    const targetEvent = options.outcome.reason === "target-crashed" ? "crashed" : "detached"
-    throw new Error(`Handoff cancelled because its target ${targetEvent}: ${options.message}`)
-  }
-  const contextTimeoutMs = options.contextTimeoutMs ?? sessionPageHealthCheckTimeoutMs
-  try {
-    await waitForPageContext({
-      evaluate: options.evaluate,
-      timeoutMs: contextTimeoutMs,
-      ...(options.retryDelayMs === undefined ? {} : { retryDelayMs: options.retryDelayMs }),
-      ...(options.delay === undefined ? {} : { delay: options.delay }),
-    })
-  } catch (error) {
-    const kind = runtimeFailureKind(error)
-    if (kind !== "context-destroyed" && kind !== "context-missing") throw error
-    // The user finished the handoff; only Browse's view of the page is stale. Keep that
-    // distinction visible and let the next execute health-check and repair the same tab.
-    throw new Error(
-      `Handoff resolved (${options.message}), but the page execution context did not become available within ${contextTimeoutMs}ms: ${error instanceof Error ? error.message : String(error)}. The tab was kept; run a short follow-up execute so Browse can re-check it.`,
-      { cause: error },
-    )
-  }
-}
-
-export function isSessionPageConnected(options: {
-  readonly browserConnected: boolean
-  readonly pageUrl: string | null
-  readonly healthCheckRequired: boolean
-}): boolean {
-  return options.browserConnected && options.pageUrl !== null && !options.healthCheckRequired
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds))
-}
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | typeof timedOut> {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => resolve(timedOut), timeoutMs)
-    promise.then(
-      (value) => {
-        clearTimeout(timeout)
-        resolve(value)
-      },
-      (error: unknown) => {
-        clearTimeout(timeout)
-        reject(error)
-      },
-    )
-  })
-}
-
-type SandboxGlobals = {
-  readonly browser: Browser
-  readonly context: BrowserContext
-  readonly page: Page
-  readonly state: Record<string, unknown>
-  readonly modules: Readonly<Record<string, unknown>>
-  readonly files: ExecuteFiles
-  readonly fillInput: (target: InputTarget, value: string) => Promise<void>
-  readonly fillInputs: (page: Page, fields: ReadonlyArray<InputField>) => Promise<void>
-  readonly screenshotWithLabels: (options?: ScreenshotWithLabelsOptions) => Promise<ScreenshotWithLabelsResult>
-  readonly screenshotDiff: (options: ScreenshotDiffOptions) => Promise<ScreenshotDiffResult>
-  readonly ariaSnapshot: AriaSnapshotHelper
-  readonly snapshot: SnapshotHelper
-  readonly ref: SnapshotRefHelper
-  readonly webmcp: WebMcpHelper
-  readonly showGhostCursor: (options?: ShowGhostCursorOptions) => Promise<void>
-  readonly hideGhostCursor: (options?: HideGhostCursorOptions) => Promise<void>
-  readonly ghostCursor: {
-    readonly show: (options?: ShowGhostCursorOptions) => Promise<void>
-    readonly hide: (options?: HideGhostCursorOptions) => Promise<void>
-    readonly caption: (title: string | null, options?: GhostCursorCaptionOptions & { readonly page?: Page }) => Promise<void>
-    readonly clearCaption: (options?: { readonly page?: Page }) => Promise<void>
-    readonly callout: (target: Locator | string, label: string, options?: GhostCursorCalloutOptions & { readonly page?: Page }) => Promise<void>
-    readonly clearCallouts: (options?: { readonly page?: Page }) => Promise<void>
-    readonly zoom: (target: Locator | string | { readonly x: number; readonly y: number } | null, options?: GhostCursorZoomOptions & { readonly page?: Page }) => Promise<void>
-    readonly resetZoom: (options?: { readonly durationMs?: number; readonly page?: Page }) => Promise<void>
-    readonly spotlight: (target: Locator | string | null, options?: GhostCursorSpotlightOptions & { readonly page?: Page }) => Promise<void>
-    readonly clearSpotlight: (options?: { readonly page?: Page }) => Promise<void>
-    readonly keys: (keys: string | readonly string[], label?: string, options?: { readonly page?: Page }) => Promise<void>
-  }
-  readonly handoff: (message?: string, options?: HandoffCallOptions) => Promise<void>
-  readonly demonstrate: (message?: string, options?: HandoffCallOptions) => Promise<DemonstrationResult>
-  readonly network: {
-    readonly start: (options?: NetworkCapture.NetworkCaptureOptions) => Promise<NetworkCapture.NetworkCaptureStatus>
-    readonly status: () => NetworkCapture.NetworkCaptureStatus
-    readonly stop: (options?: NetworkCapture.NetworkCaptureStopOptions) => Promise<NetworkCapture.NetworkCaptureResult>
-    readonly cancel: () => Promise<{ readonly cancelled: boolean }>
-  }
-  readonly pageConsole: {
-    readonly start: (page?: Page) => Promise<{ readonly capturing: boolean }>
-    readonly stop: (page?: Page) => Promise<{ readonly capturing: boolean }>
-  }
-  readonly secrets: {
-    readonly type: (target: Locator | string, name: string, options?: TypeSecretOptions) => Promise<TypeSecretResult | TypeDeadboltResult>
-    readonly signIn: (options?: SignIn.SignInOptions) => Promise<SignIn.SignInResult>
-    readonly usePasskey: (options: { readonly site: string; readonly username: string; readonly page?: Page }) => Promise<{ readonly selected: true; readonly site: string; readonly username: string }>
-  }
-  readonly handoffTracker: { count: number }
-}
-
-type TypeSecretOptions = {
-  /** Clear the field first (default true). */
-  readonly clear?: boolean
-  /** How long to wait for the target element, in milliseconds (default 10000). */
-  readonly timeout?: number
-  /** For a Deadbolt login (`deadbolt:<site>[/<username>]`): which value to type (default "password"). */
-  readonly field?: Deadbolt.DeadboltField
-  /**
-   * For a Deadbolt password or code (required for them): submit the field's form in the same call, wait for the page
-   * to move on, then empty any password and code inputs left in that frame.
-   */
-  readonly submit?: boolean
-}
-
-type TypeSecretResult = { readonly typed: true; readonly name: string; readonly origin: string; readonly kind: SiteSecrets.SiteSecretKind }
-type TypeDeadboltResult = { readonly typed: true; readonly name: string; readonly origin: string; readonly field: Deadbolt.DeadboltField; readonly submitted?: boolean; readonly progressed?: boolean }
-
-type HandoffCallOptions = {
-  readonly timeoutMs?: number
-  readonly page?: Page
-  readonly start?: () => unknown | Promise<unknown>
-}
-
-export type HandoffPageTarget = {
-  readonly targetId: string
-}
-
-export type RequestHandoff = (options: {
-  readonly message: string
-  readonly timeoutMs: number
-  readonly target: HandoffPageTarget
-  readonly start?: () => unknown | Promise<unknown>
-  readonly cancelStart?: () => Promise<void>
-}) => Promise<HandoffOutcome>
-
-const defaultHandoffTimeoutMs = 10 * 60 * 1_000
-
-const defaultHandoffMessage = "Complete the requested task, then use the in-page continue control."
-
-const explicitMediaOptions = [
-  ["colorScheme", "prefers-color-scheme"],
-  ["reducedMotion", "prefers-reduced-motion"],
-  ["forcedColors", "forced-colors"],
-  ["contrast", "prefers-contrast"],
-] as const
-
-type ShowGhostCursorOptions = GhostCursorClientOptions & {
-  readonly page?: Page
-}
-
-type HideGhostCursorOptions = {
-  readonly page?: Page
-}
-
-export type ExecuteTargetSelection = {
-  readonly urlIncludes?: string
-  readonly index?: number
-}
-
-export const defaultPageClosedWarning = "The session default page was closed; created a new page. References to the old page in state are stale."
-const defaultPageRecoveredWarning = "The session default page was unresponsive; created a new page. References to the old page in state are stale."
-const defaultPageCrashedWarning = "The session default page target crashed; checking it before the next execute."
-export const defaultPageRepairedWarning = "The session default page stopped answering automation; Browse reconnected and re-resolved the same tab. References to the old page in state are stale."
-const protectedExtensionUiWarning = "Chromium blocked protected extension UI, possibly a password manager. Ask the user to finish or dismiss it in the browser, then retry."
-const protectedExtensionUiDiagnostic = "target/cross-extension-page"
-const syntheticInputWarning = "fillInput/fillInputs set the value with synthetic input events (isTrusted: false, no key presses), which pages and bot protection can tell apart from typing. Prefer locator.fill() or locator.pressSequentially()."
-
-/**
- * Playwright rewrites Chrome's "Cannot access a chrome-extension:// URL of
- * different extension" rejection into a generic destroyed-context error and
- * retries locators until they time out. When the relay reports that the tab is
- * blocked by protected extension UI, those masked failures are the block.
- */
-function isMaskedProtectedUiFailure(cause: unknown): boolean {
-  const kind = runtimeFailureKind(cause)
-  return kind === "context-destroyed" || kind === "context-missing" || kind === "timeout"
-}
-/** The default page's tab came back under the same target after Chrome dropped the debugger (see getSessionPage). */
-export const defaultPageReattachedWarning = "Chrome re-attached the debugger to the session default page's tab (it drops it when a tab opens a PDF in its viewer, when another extension's frame appears, or when the extension restarts), which closes the page object; `page` refers to the same tab again. References to the old page in state are stale."
-/** How to get a PDF out of Chrome's viewer, whose content isn't in the page's DOM. */
-export const pdfViewerWarning = "This tab shows a PDF in Chrome's viewer, whose text isn't in the DOM. page.url() is the file's URL; save the file with: const b64 = await page.evaluate(async () => { const bytes = new Uint8Array(await (await fetch(location.href)).arrayBuffer()); let s = \"\"; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); return btoa(s) }); await files.write(\"file.pdf\", Buffer.from(b64, \"base64\"))"
-export const defaultPageReplacedWarning = "The session default page target was replaced; rebound to the same browser tab. References to the old page in state are stale."
-
-export const shouldCloseCurrentPageOnAdopt = (options: {
-  readonly hasCurrentPage: boolean
-  readonly ownsCurrentPage: boolean
-  readonly currentPageIsSelected: boolean
-  readonly currentPageIsClosed: boolean
-}): boolean => {
-  return options.hasCurrentPage && options.ownsCurrentPage && !options.currentPageIsSelected && !options.currentPageIsClosed
-}
 
 type ExecuteSandboxOptions = {
   readonly endpointUrl: string
@@ -515,21 +187,6 @@ export type ExecuteResult = {
   readonly setupFailed?: true
 }
 
-class ExecuteCodeError extends Error {
-  constructor(
-    readonly originalError: Error,
-    readonly logs: readonly ExecuteLogEntry[],
-    readonly logSummary: ExecuteLogSummary,
-    readonly aftermath?: ExecuteAftermath,
-  ) {
-    super(originalError.message, { cause: originalError })
-    this.name = originalError.name
-    if (originalError.stack) {
-      this.stack = originalError.stack
-    }
-  }
-}
-
 export type ExecuteOptions = {
   readonly targetSelection?: ExecuteTargetSelection
 }
@@ -552,25 +209,35 @@ export class ExecuteSandbox {
   private explicitMedia: string | undefined
   /** Full Node access for execute code (OPENCODE_BROWSER_ALLOW_NODE=1); otherwise code runs in a vm realm. */
   private readonly allowNode = executeAllowsNode()
-  private realm = this.allowNode ? undefined : this.createRealm()
-  private state: Record<string, unknown> = this.realm?.state ?? {}
   private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
   private readonly networkCapture = new NetworkCapture.Recorder()
   private pendingWarnings: string[] = []
+  private readonly secrets: ExecuteSecretsBridge
+  private realm: ExecuteRealm | undefined
+  private state: Record<string, unknown>
   private boundPageListeners: {
     readonly page: Page
     readonly close: () => void
     readonly navigate: (frame: Frame) => void
   } | undefined
 
-  constructor(readonly options: ExecuteSandboxOptions) {}
+  constructor(readonly options: ExecuteSandboxOptions) {
+    this.secrets = new ExecuteSecretsBridge({
+      networkCapture: this.networkCapture,
+      allowedOrigins: () => this.options.allowedOrigins?.(),
+      ...(this.options.passkeys ? { passkeys: this.options.passkeys } : {}),
+      addWarningOnce: (warning) => this.addWarningOnce(warning),
+    })
+    this.realm = this.allowNode ? undefined : this.createRealm()
+    this.state = this.realm?.state ?? {}
+  }
 
   private createRealm(): ExecuteRealm {
     return new ExecuteRealm({
       onHostCall: (fn, receiver, args) => {
         this.addWarningOnce(pageVisibleApiWarning(fn, receiver, args))
         const hook = pageHookCall(fn, args)
-        if (hook) this.pageHooks.add(hook)
+        if (hook) this.secrets.pageHooks.add(hook)
       },
     })
   }
@@ -597,7 +264,7 @@ export class ExecuteSandbox {
           })
         await this.networkCapture.settleForOutput()
         const extracted = extractExecuteMedia(result)
-        const redactedValue = this.redactOutputValue(extracted.value)
+        const redactedValue = this.secrets.redactOutputValue(extracted.value)
         const jsonSafeResult = toJsonSafeValue(redactedValue)
         const bounded = boundExecuteResult(stringifyResult(redactedValue), jsonSafeResult.serializable ? jsonSafeResult.value : undefined, jsonSafeResult.serializable)
         const warnings = this.finalizeWarnings(
@@ -610,10 +277,10 @@ export class ExecuteSandbox {
           ...(bounded.hasValue ? { value: bounded.value } : {}),
           ...(extracted.media.length > 0 ? { media: extracted.media } : {}),
           isError: false,
-          logs: this.redactCaptureLogs(logs),
+          logs: this.secrets.redactCaptureLogs(logs),
           logSummary,
           warnings,
-          aftermath: this.redactCaptureAftermath(aftermath),
+          aftermath: this.secrets.redactCaptureAftermath(aftermath),
         }
       },
       catch: (cause) => {
@@ -649,13 +316,13 @@ export class ExecuteSandbox {
               : formatLocatorFailurePageWarning(error instanceof ExecuteCodeError ? error.originalError : error, aftermath, this.recreatedFromClosedUrl),
           )
           return {
-            text: this.redactOutputText(error instanceof ExecuteCodeError ? error.stack ?? error.message : error.message),
+            text: this.secrets.redactOutputText(error instanceof ExecuteCodeError ? error.stack ?? error.message : error.message),
             isError: true,
-            logs: this.redactCaptureLogs(error instanceof ExecuteCodeError ? error.logs : []),
+            logs: this.secrets.redactCaptureLogs(error instanceof ExecuteCodeError ? error.logs : []),
             logSummary,
             warnings,
-            ...(diagnostic ? { diagnostic: this.redactOutputText(diagnostic) } : {}),
-            ...(aftermath ? { aftermath: this.redactCaptureAftermath(aftermath) } : {}),
+            ...(diagnostic ? { diagnostic: this.secrets.redactOutputText(diagnostic) } : {}),
+            ...(aftermath ? { aftermath: this.secrets.redactCaptureAftermath(aftermath) } : {}),
             ...(error instanceof ExecuteCodeError ? {} : { setupFailed: true as const }),
           }
         },
@@ -744,312 +411,11 @@ export class ExecuteSandbox {
     if (logCompactionWarning) {
       warnings.push(logCompactionWarning)
     }
-    return warnings.map((warning) => this.redactOutputText(warning))
+    return warnings.map((warning) => this.secrets.redactOutputText(warning))
   }
 
   redactNetworkCaptureText(text: string): string {
-    return this.redactOutputText(text)
-  }
-
-  /** Values typed with secrets.type() in this sandbox, mapped to their secret's name, for redaction. */
-  private readonly typedSecrets = new Map<string, string>()
-
-  private redactTypedSecrets(text: string): string {
-    let output = text
-    for (const [value, name] of [...this.typedSecrets].sort(([left], [right]) => right.length - left.length)) {
-      output = output.split(value).join(`[secret ${name}]`)
-    }
-    return output
-  }
-
-  private redactOutputText(text: string): string {
-    return this.redactTypedSecrets(this.networkCapture.redactText(text))
-  }
-
-  private redactOutputUrl(url: string): string {
-    return this.redactTypedSecrets(this.networkCapture.redactUrl(url))
-  }
-
-  private redactOutputValue(value: unknown): unknown {
-    const redacted = this.networkCapture.redactValue(value)
-    if (this.typedSecrets.size === 0) return redacted
-    const visit = (item: unknown, depth: number): unknown => {
-      if (typeof item === "string") return this.redactTypedSecrets(item)
-      if (typeof item === "number" && this.typedSecrets.has(String(item))) return `[secret ${this.typedSecrets.get(String(item))}]`
-      if (depth > 32 || item === null || typeof item !== "object" || Buffer.isBuffer(item)) return item
-      if (Array.isArray(item)) return item.map((entry) => visit(entry, depth + 1))
-      const prototype = Object.getPrototypeOf(item)
-      if (prototype !== Object.prototype && prototype !== null) return item
-      return Object.fromEntries(Object.entries(item).map(([key, entry]) => [key, visit(entry, depth + 1)]))
-    }
-    return visit(redacted, 0)
-  }
-
-  /**
-   * secrets.type(target, name): type a stored site secret into a field without the value entering the realm. The
-   * field's frame URL (Playwright's frame tree, fed by CDP, not page script) must match the secret's allowed origins,
-   * and the session's allowlist when it has one, right before the value is inserted.
-   */
-  private async typeSecret(page: Page, target: Locator | string, name: string, options: TypeSecretOptions = {}): Promise<TypeSecretResult | TypeDeadboltResult> {
-    if (typeof name !== "string" || !name) throw new Error("secrets.type(target, name): name must be the name of a stored secret")
-    const deadboltSpec = Deadbolt.parseDeadboltName(name)
-    if (deadboltSpec) return await this.typeDeadboltSecret(page, target, name, deadboltSpec, options)
-    const secret = await Effect.runPromise(SiteSecrets.readSecret(name)).catch((error: unknown) => {
-      throw new Error(`secrets.type: ${error instanceof Error ? error.message : "could not read the secret"}`)
-    })
-    const secretRules = parseOriginPatterns(secret.allowedOrigins)
-    const sessionPatterns = this.options.allowedOrigins?.()
-    const sessionRules = sessionPatterns && sessionPatterns.length > 0 ? parseOriginPatterns(sessionPatterns) : undefined
-    const locator = typeof target === "string" ? page.locator(target) : target
-    if (!locator || typeof (locator as Locator).elementHandle !== "function") {
-      throw new Error("secrets.type(target, name): target must be a selector string or a Locator")
-    }
-    const handle = await locator.elementHandle({ timeout: options.timeout ?? 10_000 })
-    try {
-      const frame = await handle.ownerFrame()
-      if (!frame) throw new Error(`secrets.type: target_not_editable: the element for ${JSON.stringify(name)} is not in a frame`)
-      const checkOrigin = (): string => {
-        const url = frame.url()
-        let origin: string
-        try {
-          origin = new URL(url).origin
-        } catch {
-          origin = url.slice(0, 200)
-        }
-        const decision = checkUrl(url, secretRules, { httpsOnlyWithoutScheme: true })
-        if (!decision.allowed || /^(?:about|data|blob):/i.test(url)) {
-          throw new Error(`secrets.type: domain_not_allowed: the field's frame is ${origin}, which is not an allowed origin of secret ${JSON.stringify(name)} (${secret.allowedOrigins.join(", ")}). Nothing was typed.`)
-        }
-        if (sessionRules && !checkUrl(url, sessionRules).allowed) {
-          throw new Error(`secrets.type: domain_not_allowed: the field's frame is ${origin}, which is outside this session's domain allowlist. Nothing was typed.`)
-        }
-        return origin
-      }
-      checkOrigin()
-      if (!(await handle.isEditable().catch(() => false))) {
-        throw new Error(`secrets.type: target_not_editable: the target is not an editable field. Nothing was typed.`)
-      }
-      if (options.clear !== false) await handle.fill("")
-      await handle.focus()
-      const focused = await handle.evaluate((element) => element.ownerDocument.activeElement === element || element.contains(element.ownerDocument.activeElement))
-      if (!focused) throw new Error("secrets.type: target_not_editable: the field did not keep focus. Nothing was typed.")
-      const origin = checkOrigin()
-      const urlBefore = frame.url()
-      const text = SiteSecrets.secretText(secret)
-      // Register first, so a capture or result that sees the value already redacts it.
-      this.typedSecrets.set(text, name)
-      this.networkCapture.addRedaction(text)
-      await frame.page().keyboard.insertText(text)
-      if (frame.url() !== urlBefore) {
-        this.addWarningOnce(`secrets.type: the field's frame navigated while ${JSON.stringify(name)} was typed; check where it went before submitting.`)
-      }
-      if (!sessionRules) {
-        this.addWarningOnce(`secrets.type typed ${JSON.stringify(name)} in a session without a domain allowlist. A prompt-injected page could steer this session elsewhere after the value is in the page: set one with session_allowlist (or \`session allow\`) before using secrets.`)
-      }
-      return { typed: true, name, origin, kind: secret.kind }
-    } finally {
-      await handle.dispose().catch(() => {})
-    }
-  }
-
-  private deadboltConnection: Deadbolt.DeadboltConnection | undefined
-  /** Request interception, page scripts or raw CDP this sandbox's code set up (pageHookCall); Deadbolt values aren't typed then. */
-  private readonly pageHooks = new Set<string>()
-
-  /**
-   * Deadbolt passwords and codes aren't typed into a session whose code set up request interception, request
-   * listeners, init scripts, exposed functions or a raw CDP session: those would see the value in the page or on the
-   * wire. (Listeners added with page.evaluate can't be told apart from normal page reads; that limit is documented.)
-   */
-  private refuseWithPageHooks(label: string): void {
-    if (this.pageHooks.size === 0) return
-    throw new Error(`${label}: page_hooks: this session's code used ${[...this.pageHooks].sort().join(", ")}, which could capture what is typed, so Deadbolt passwords and codes aren't typed here. Reset the session (session_reset) and sign in before setting those up. Nothing was typed.`)
-  }
-
-  /** This install's Deadbolt client, reconnected when `deadbolt connect` stored another one. */
-  private deadbolt(): Deadbolt.DeadboltConnection {
-    const client = Deadbolt.readClient()
-    if (!this.deadboltConnection || !client || this.deadboltConnection.client.id !== client.id || this.deadboltConnection.client.token !== client.token) {
-      this.deadboltConnection = Deadbolt.connect(client ? { client } : {})
-    }
-    return this.deadboltConnection
-  }
-
-  private sessionAllows(url: string): boolean {
-    const patterns = this.options.allowedOrigins?.()
-    return !patterns || patterns.length === 0 || checkUrl(url, parseOriginPatterns(patterns)).allowed
-  }
-
-  /**
-   * Types one value of a Deadbolt login into a field, or one character per box into split code boxes. The fields'
-   * frame origin (Playwright's CDP-fed frame tree) must be on the login's site and in the session's allowlist; Deadbolt
-   * checks the grant and the login's URLs against that origin before it answers. The value is registered for
-   * redaction before it is typed and dropped right after.
-   */
-  private async typeDeadbolt(handles: readonly ElementHandle[], spec: SignIn.LoginSpec, field: Deadbolt.DeadboltField, label: string): Promise<{ readonly origin: string; readonly login: Deadbolt.DeadboltLogin }> {
-    if (!["username", "password", "totp"].includes(field)) throw new Error(`${label}: field must be "username", "password" or "totp"`)
-    if (handles.length === 0) throw new Error(`${label}: target_not_editable: no field to type into`)
-    if (field !== "username") this.refuseWithPageHooks(label)
-    const frame = await handles[0]!.ownerFrame()
-    if (!frame) throw new Error(`${label}: target_not_editable: the field is not in a frame`)
-    for (const handle of handles.slice(1)) {
-      if ((await handle.ownerFrame()) !== frame) throw new Error(`${label}: target_not_editable: the code boxes are in different frames`)
-    }
-    const checkOrigin = (): string => {
-      const url = frame.url()
-      let origin: string
-      try {
-        origin = new URL(url).origin
-      } catch {
-        origin = url.slice(0, 200)
-      }
-      if (/^(?:about|data|blob):/i.test(url) || !Deadbolt.originOnSite(origin, spec.site)) {
-        throw new Error(`${label}: domain_not_allowed: the field's frame is ${origin}, which is not on ${spec.site}. Nothing was typed.`)
-      }
-      if (!this.sessionAllows(url)) {
-        throw new Error(`${label}: domain_not_allowed: the field's frame is ${origin}, which is outside this session's domain allowlist. Nothing was typed.`)
-      }
-      return origin
-    }
-    const origin = checkOrigin()
-    for (const handle of handles) {
-      if (!(await handle.isEditable().catch(() => false))) throw new Error(`${label}: target_not_editable: the target is not an editable field. Nothing was typed.`)
-    }
-    const connection = this.deadbolt()
-    const login = Deadbolt.pickLogin(await connection.logins(origin), spec.site, spec.username, field)
-    const values = await connection.fill(origin, login, [field])
-    let value = values[field]
-    if (!value) throw new Deadbolt.DeadboltError("not_found", `The Deadbolt login for ${spec.site} has no ${field}.`)
-    const name = `deadbolt:${spec.site}${login.username ? `/${login.username}` : ""} ${field}`
-    try {
-      // Register first, so a capture or result that sees the value already redacts it. Usernames aren't secret
-      // (secrets_list shows them), so they aren't redacted.
-      if (field !== "username") {
-        this.typedSecrets.set(value, name)
-        this.networkCapture.addRedaction(value)
-      }
-      const characters = handles.length === 1 ? [value] : Array.from(value)
-      if (handles.length > 1 && characters.length !== handles.length) {
-        throw new Error(`${label}: target_not_editable: ${handles.length} code boxes for a ${characters.length}-character code. Nothing was typed.`)
-      }
-      for (const [index, handle] of handles.entries()) {
-        await handle.fill("")
-        await handle.focus()
-        const focused = await handle.evaluate((node) => {
-          const element = node as Element
-          return element.ownerDocument.activeElement === element || element.contains(element.ownerDocument.activeElement)
-        })
-        if (!focused) throw new Error(`${label}: target_not_editable: the field did not keep focus.`)
-        checkOrigin()
-        await frame.page().keyboard.insertText(characters[index]!)
-      }
-    } finally {
-      value = undefined
-    }
-    if (!this.options.allowedOrigins?.()?.length) {
-      this.addWarningOnce(`A Deadbolt login was typed in a session without a domain allowlist. A prompt-injected page could steer this session elsewhere after the value is in the page: set one with session_allowlist (or \`session allow\`) before signing in.`)
-    }
-    return { origin, login }
-  }
-
-  /**
-   * secrets.type with a Deadbolt login. A username may be typed on its own; a password or code only with
-   * `{submit: true}`: typed, submitted (the form's submit control, else Enter) and waited on in the same call, after
-   * which password and code inputs left in that frame are emptied, so the value isn't sitting in a page the agent's
-   * next call can read. Prefer secrets.signIn().
-   */
-  private async typeDeadboltSecret(page: Page, target: Locator | string, name: string, spec: SignIn.LoginSpec, options: TypeSecretOptions): Promise<TypeDeadboltResult> {
-    const field = options.field ?? "password"
-    if (field !== "username" && options.submit !== true) {
-      throw new Error(`secrets.type: submit_required: a Deadbolt ${field} is typed only with { submit: true }, which submits the form in the same call and clears the field afterwards. Prefer secrets.signIn(). Nothing was typed.`)
-    }
-    const locator = typeof target === "string" ? page.locator(target) : target
-    if (!locator || typeof (locator as Locator).elementHandle !== "function") {
-      throw new Error("secrets.type(target, name): target must be a selector string or a Locator")
-    }
-    const handle = await locator.elementHandle({ timeout: options.timeout ?? 10_000 })
-    const frame = await handle.ownerFrame()
-    let typed = false
-    try {
-      const { origin } = await this.typeDeadbolt([handle], spec, field, "secrets.type").catch((error: unknown) => {
-        if (error instanceof Deadbolt.DeadboltError) throw new Error(`secrets.type: ${error.code}: ${error.message} Nothing was typed.`)
-        throw error
-      })
-      typed = true
-      if (options.submit !== true) return { typed: true, name, origin, field }
-      const submitControl = await handle.evaluateHandle((node) => {
-        const form = (node as HTMLInputElement).form
-        if (!form) return null
-        return form.querySelector("button[type=submit], input[type=submit], button:not([type])")
-      })
-      const button = submitControl.asElement()
-      if (button) await button.click({ timeout: 5_000 }).catch(() => handle.press("Enter"))
-      else await handle.press("Enter")
-      const progressed = await SignIn.waitForProgress(frame?.page() ?? page, handle, 15_000)
-      return { typed: true, name, origin, field, submitted: true, progressed }
-    } finally {
-      if (typed && field !== "username") await SignIn.clearSecretInputs(frame ? [frame] : [], [handle])
-      await handle.dispose().catch(() => {})
-    }
-  }
-
-  /**
-   * secrets.usePasskey({site, username}): the account for the next passkey request (navigator.credentials.get) in
-   * the page's tab, used once, for two minutes. Deadbolt still checks the grant; the ref stays in the relay.
-   */
-  private async usePasskey(page: Page, options: { readonly site: string; readonly username: string }): Promise<{ readonly selected: true; readonly site: string; readonly username: string }> {
-    const site = typeof options?.site === "string" ? options.site.trim().toLowerCase() : ""
-    const username = typeof options?.username === "string" ? options.username.trim() : ""
-    if (!site || !username) throw new Error("secrets.usePasskey({ site, username }): site and username are required")
-    if (!this.options.passkeys) throw new Error("secrets.usePasskey: passkeys aren't available in this relay")
-    this.options.passkeys.select(await pageTargetId(page), site, username)
-    return { selected: true, site, username }
-  }
-
-  /** secrets.signIn(): the whole sign-in in the relay (sign-in.ts); only {status, step, reason} comes back. */
-  private async signIn(page: Page, options: SignIn.SignInOptions = {}): Promise<SignIn.SignInResult> {
-    if (options !== null && typeof options !== "object") throw new Error("secrets.signIn(options): options must be an object like { site, username }")
-    const site = typeof options?.site === "string" ? options.site : undefined
-    const username = typeof options?.username === "string" ? options.username : undefined
-    const timeoutMs = typeof options?.timeoutMs === "number" && options.timeoutMs > 0 ? Math.min(options.timeoutMs, 300_000) : undefined
-    return await SignIn.signIn({
-      page,
-      context: page.context(),
-      type: async (handles, spec, field) => (await this.typeDeadbolt(handles, spec, field, "secrets.signIn")).login,
-      logins: (origin) => this.deadbolt().logins(origin),
-      passkeyAccounts: async (origin) => (await this.deadbolt().site(origin)).passkeys,
-      challenge: async (target) => {
-        const outcome = await detectChallenge(target, { waitMs: challengeWaitMs() }).catch(() => undefined)
-        return outcome && outcome.status === "blocked" ? outcome : undefined
-      },
-      allowed: (url) => this.sessionAllows(url),
-      ...(this.options.passkeys ? {
-        passkeys: {
-          select: async (target, passkeySite, passkeyUsername) => this.options.passkeys!.select(await pageTargetId(target), passkeySite, passkeyUsername),
-          choiceSince: async (target, since) => this.options.passkeys!.choiceSince(await pageTargetId(target), since),
-        },
-      } : {}),
-    }, { ...(site ? { site } : {}), ...(username ? { username } : {}), ...(timeoutMs ? { timeoutMs } : {}) })
-  }
-
-  private redactCaptureLogs(logs: readonly ExecuteLogEntry[]): readonly ExecuteLogEntry[] {
-    return logs.map((log) => ({
-      ...log,
-      text: this.redactOutputText(log.text),
-      ...(log.location ? {
-        location: { ...log.location, url: this.redactOutputUrl(log.location.url) },
-      } : {}),
-    }))
-  }
-
-  private redactCaptureAftermath(aftermath: ExecuteAftermath): ExecuteAftermath {
-    return {
-      ...aftermath,
-      startUrl: aftermath.startUrl ? this.redactOutputUrl(aftermath.startUrl) : aftermath.startUrl,
-      endUrl: aftermath.endUrl ? this.redactOutputUrl(aftermath.endUrl) : aftermath.endUrl,
-      navigations: aftermath.navigations.map((url) => this.redactOutputUrl(url)),
-      ...(aftermath.challenge ? { challenge: { ...aftermath.challenge, url: this.redactOutputUrl(aftermath.challenge.url) } } : {}),
-    }
+    return this.secrets.redactOutputText(text)
   }
 
   /**
@@ -1069,7 +435,7 @@ export class ExecuteSandbox {
       sandbox.realm = sandbox.allowNode ? undefined : sandbox.createRealm()
       sandbox.state = sandbox.realm?.state ?? {}
       // Routes, listeners, init scripts and CDP sessions belong to the browser connection closed below.
-      sandbox.pageHooks.clear()
+      sandbox.secrets.pageHooks.clear()
       const browser = sandbox.browser
       sandbox.browser = undefined
       sandbox.unbindDefaultPage(sandbox.defaultPageTargetId, {
@@ -1253,7 +619,15 @@ export class ExecuteSandbox {
       page = await this.getSessionPage({ context, ...(targetSelection ? { targetSelection } : {}) })
     }
     installPageReadTimeout(page)
-    this.installViewportZoomGuard(page)
+    installViewportZoomGuard({
+      page,
+      explicitMediaFeatures: this.explicitMediaFeatures,
+      getExplicitMedia: () => this.explicitMedia,
+      setExplicitMedia: (media) => {
+        this.explicitMedia = media
+      },
+      addWarningOnce: (warning) => this.addWarningOnce(warning),
+    })
     this.networkCapture.bindPage(this.page)
     return { browser, context, page }
   }
@@ -1267,161 +641,22 @@ export class ExecuteSandbox {
 
   private async getGlobals(options: ExecuteOptions): Promise<SandboxGlobals> {
     const { browser, context, page } = await this.acquireSessionPage(options.targetSelection)
-    const showGhostCursor = async (options?: ShowGhostCursorOptions) => {
-      const { page: targetPage = page, ...cursorOptions } = options ?? {}
-      await showGhostCursorOnPage({ page: targetPage, cursorOptions })
-    }
-    const hideGhostCursor = async (options?: HideGhostCursorOptions) => {
-      await hideGhostCursorOnPage({ page: options?.page ?? page })
-    }
-    const ariaSnapshot = createAriaSnapshotHelper(page)
-    const { snapshot, ref } = createSnapshotHelpers(page, this.snapshotRefs)
-    const screenshotDiff = createScreenshotDiff(page)
-    const handoffTracker = { count: 0 }
-    const requestHandoff = this.options.requestHandoff
-    const handoff = async (message?: string, options?: HandoffCallOptions) => {
-      if (!requestHandoff) {
-        throw new Error("handoff is not available in this sandbox; it requires a relay-backed Browse session")
-      }
-      const handoffMessage = message?.trim() || defaultHandoffMessage
-      const timeoutMs = options?.timeoutMs ?? defaultHandoffTimeoutMs
-      const handoffPage = options?.page ?? page
-      if (handoffPage.isClosed() || handoffPage.context() !== context) {
-        throw new Error("handoff requires an open page in the current browser context")
-      }
-      const followsDefaultPage = handoffPage === this.page
-      const targetId = await pageTargetId(handoffPage)
-      const outcome = await requestHandoff({
-        message: handoffMessage,
-        timeoutMs,
-        target: { targetId },
-        ...(options?.start ? { start: options.start } : {}),
-        ...(options?.start ? { cancelStart: () => Effect.runPromise(this.disconnectSettled()) } : {}),
-      })
-      await finishHandoff({
-        outcome,
-        message: handoffMessage,
-        timeoutMs,
-        contextTimeoutMs: handoffPageContextTimeoutMs,
-        evaluate: async () => {
-          try {
-            const currentPage = followsDefaultPage ? await this.getSessionPage({ context }) : handoffPage
-            await currentPage.evaluate(() => true)
-          } catch (error) {
-            if ((error instanceof SessionPageRecoveryError && error.reason === "target-unavailable") || error instanceof SessionPageRepairRequired) {
-              throw new Error("Execution context is not available while the handoff destination settles", { cause: error })
-            }
-            throw error
-          }
-        },
-      })
-      handoffTracker.count += 1
-    }
-    const demonstrate = async (message?: string, options?: HandoffCallOptions) => {
-      const demonstrationPage = options?.page ?? page
-      if (demonstrationPage.isClosed() || demonstrationPage.context() !== context) {
-        throw new Error("demonstrate requires an open page in the current browser context")
-      }
-      const recorder = await startDemonstrationRecorder(demonstrationPage)
-      try {
-        await handoff(message ?? "Demonstrate the browser flow, then continue", { ...options, page: demonstrationPage })
-      } catch (error) {
-        await recorder.stop().catch(() => {})
-        throw error
-      }
-      return await recorder.stop()
-    }
-    return {
+    return buildSandboxGlobals({
       browser,
       context,
       page,
       state: this.state,
-      modules: this.realm ? this.realm.proxyAsObject({ ...sandboxModules }) : nodeModules,
-      files: this.realm ? this.realm.proxyAsObject(createExecuteFiles()) : createExecuteFiles(),
-      fillInput: async (target, value) => {
-        await fillInput({ page, target, value })
-        this.warnSyntheticInput()
-      },
-      fillInputs: async (targetPage, fields) => {
-        await fillInputs(targetPage, fields)
-        this.warnSyntheticInput()
-      },
-      screenshotWithLabels: async (screenshotOptions = {}) => {
-        const labelsPage = screenshotOptions.page ?? page
-        // A recorded tab must not show the labels: they go onto the image instead.
-        const recorded = this.options.isRecordingTarget
-          ? this.options.isRecordingTarget(await pageTargetId(labelsPage).catch(() => ""))
-          : false
-        return await screenshotWithLabels({
-          ...screenshotOptions,
-          page: labelsPage,
-          registry: this.snapshotRefs,
-          ...(recorded ? { offPage: true } : {}),
-        })
-      },
-      // Named property functions: the execute realm checks their file options by name.
-      screenshotDiff: (diffOptions) => screenshotDiff(diffOptions),
-      ariaSnapshot,
-      snapshot,
-      ref,
-      webmcp: createWebMcpHelper(page),
-      showGhostCursor,
-      hideGhostCursor,
-      ghostCursor: {
-        show: showGhostCursor,
-        hide: hideGhostCursor,
-        caption: async (title, captionOptions) => {
-          const { page: targetPage = page, ...rest } = captionOptions ?? {}
-          await setGhostCursorCaption({ page: targetPage, title, captionOptions: rest })
-        },
-        clearCaption: async (clearOptions) => {
-          await setGhostCursorCaption({ page: clearOptions?.page ?? page, title: null })
-        },
-        callout: async (target, label, calloutOptions) => {
-          const { page: targetPage = page, ...rest } = calloutOptions ?? {}
-          await showGhostCursorCallout({ page: targetPage, target, label, calloutOptions: rest })
-        },
-        clearCallouts: async (clearOptions) => {
-          await clearGhostCursorCallouts({ page: clearOptions?.page ?? page })
-        },
-        zoom: async (target, zoomOptions) => {
-          const { page: targetPage = page, ...rest } = zoomOptions ?? {}
-          await zoomGhostCursorCamera({ page: targetPage, target, zoomOptions: rest })
-        },
-        resetZoom: async (resetOptions) => {
-          const { page: targetPage = page, ...rest } = resetOptions ?? {}
-          await zoomGhostCursorCamera({ page: targetPage, target: null, zoomOptions: rest })
-        },
-        spotlight: async (target, spotlightOptions) => {
-          const { page: targetPage = page, ...rest } = spotlightOptions ?? {}
-          await setGhostCursorSpotlight({ page: targetPage, target, spotlightOptions: rest })
-        },
-        clearSpotlight: async (clearOptions) => {
-          await setGhostCursorSpotlight({ page: clearOptions?.page ?? page, target: null })
-        },
-        keys: async (keys, label, keyOptions) => {
-          await showGhostCursorKeys({ page: keyOptions?.page ?? page, keys, ...(label ? { label } : {}) })
-        },
-      },
-      handoff,
-      demonstrate,
-      network: {
-        start: (options) => Effect.runPromise(this.networkCapture.start(page, options)),
-        status: () => this.networkCapture.status(),
-        stop: (options) => Effect.runPromise(this.networkCapture.stop(options)),
-        cancel: () => Effect.runPromise(this.networkCapture.cancel()),
-      },
-      pageConsole: {
-        start: (target) => PageConsole.start(target ?? page),
-        stop: (target) => PageConsole.stop(target ?? page),
-      },
-      secrets: {
-        type: (target, name, typeOptions) => this.typeSecret(page, target, name, typeOptions),
-        signIn: (signInOptions) => this.signIn(page, signInOptions),
-        usePasskey: (passkeyOptions) => this.usePasskey(passkeyOptions?.page ?? page, passkeyOptions),
-      },
-      handoffTracker,
-    }
+      realm: this.realm,
+      snapshotRefs: this.snapshotRefs,
+      networkCapture: this.networkCapture,
+      secrets: this.secrets,
+      requestHandoff: this.options.requestHandoff,
+      isRecordingTarget: this.options.isRecordingTarget,
+      isDefaultPage: (candidate) => candidate === this.page,
+      resolveDefaultPage: () => this.getSessionPage({ context }),
+      disconnectSettled: () => this.disconnectSettled(),
+      warnSyntheticInput: () => this.warnSyntheticInput(),
+    })
   }
 
   markTargetCrashed(targetId: string): boolean {
@@ -1517,7 +752,7 @@ export class ExecuteSandbox {
         this.recordNonBlankUrl(frame.url())
         page.setDefaultTimeout?.(30_000)
         if (this.explicitMediaFeatures.size > 0) {
-          void this.applyExplicitMediaFeatures(page)
+          void applyExplicitMediaFeatures(page, this.explicitMedia, this.explicitMediaFeatures)
         }
       }
     }
@@ -1679,111 +914,16 @@ export class ExecuteSandbox {
     const targetId = await resolvePageTargetId(page)
     this.bindDefaultPage(page, targetId, true, true)
     if (this.recreatedFromClosedUrl) {
-      this.installClosedPageReplacementGuard(page)
+      installClosedPageReplacementGuard(page, () => {
+        this.recreatedFromClosedUrl = undefined
+      })
     }
     return page
-  }
-
-  private installClosedPageReplacementGuard(page: Page): void {
-    page.setDefaultTimeout?.(2_500)
-    const restoreTimeout = () => {
-      this.recreatedFromClosedUrl = undefined
-      page.setDefaultTimeout?.(30_000)
-    }
-    if (typeof page.goto === "function") {
-      const originalGoto = page.goto.bind(page)
-      Object.defineProperty(page, "goto", {
-        configurable: true,
-        value: async (...args: Parameters<Page["goto"]>) => {
-          restoreTimeout()
-          return await originalGoto(...args)
-        },
-      })
-    }
-    if (typeof page.setContent === "function") {
-      const originalSetContent = page.setContent.bind(page)
-      Object.defineProperty(page, "setContent", {
-        configurable: true,
-        value: async (...args: Parameters<Page["setContent"]>) => {
-          restoreTimeout()
-          return await originalSetContent(...args)
-        },
-      })
-    }
   }
 
   /** fillInput sets values directly: the page sees untrusted input events without key presses. */
   private warnSyntheticInput(): void {
     if (!this.pendingWarnings.includes(syntheticInputWarning)) this.pendingWarnings.push(syntheticInputWarning)
-  }
-
-  private async applyExplicitMediaFeatures(page: Page): Promise<void> {
-    try {
-      const cdp = await page.context().newCDPSession(page)
-      try {
-        await cdp.send("Emulation.setEmulatedMedia", {
-          ...(this.explicitMedia ? { media: this.explicitMedia } : {}),
-          features: [
-            ...Array.from(this.explicitMediaFeatures, ([name, value]) => ({ name, value })),
-            { name: "__bc_explicit__", value: "1" },
-          ],
-        })
-      } finally {
-        await cdp.detach().catch(() => {})
-      }
-    } catch {}
-  }
-
-  private installViewportZoomGuard(page: Page): void {
-    if (viewportZoomGuardedPages.has(page)) return
-    if (typeof page.emulateMedia === "function") {
-      const originalEmulateMedia = page.emulateMedia.bind(page)
-      Object.defineProperty(page, "emulateMedia", {
-        configurable: true,
-        value: async (options?: Parameters<Page["emulateMedia"]>[0]) => {
-          for (const [option, feature] of explicitMediaOptions) {
-            if (!options || !(option in options)) continue
-            const value = options[option]
-            if (typeof value === "string") this.explicitMediaFeatures.set(feature, value)
-            else this.explicitMediaFeatures.delete(feature)
-          }
-          if (options && "media" in options) this.explicitMedia = options.media ?? undefined
-          await originalEmulateMedia(options)
-          if (this.explicitMediaFeatures.size > 0) {
-            await this.applyExplicitMediaFeatures(page)
-          }
-        },
-      })
-    }
-    if (typeof page.setViewportSize === "function") {
-      const originalSetViewportSize = page.setViewportSize.bind(page)
-      Object.defineProperty(page, "setViewportSize", {
-        configurable: true,
-        value: async (size: { width: number; height: number }) => {
-          await originalSetViewportSize(size)
-          try {
-            const measured = await withTimeout(
-              page.evaluate(() => ({
-                innerWidth: window.innerWidth,
-                innerHeight: window.innerHeight,
-                dpr: window.devicePixelRatio,
-              })),
-              1_000,
-            )
-            if (
-              measured !== timedOut
-              && (Math.abs(measured.innerWidth - size.width) > 2 || Math.abs(measured.innerHeight - size.height) > 2)
-            ) {
-              const warning = `Viewport size ${size.width}x${size.height} resulted in CSS viewport ${measured.innerWidth}x${measured.innerHeight} (devicePixelRatio=${Number(measured.dpr.toFixed(3))}) due to browser zoom on this origin.`
-              if (!this.pendingWarnings.includes(warning)) {
-                this.pendingWarnings.push(warning)
-              }
-            }
-          } catch {}
-        },
-      })
-    }
-    viewportZoomGuardedPages.add(page)
   }
 
   /**
@@ -1822,949 +962,6 @@ export class ExecuteSandbox {
     }
     this.unbindDefaultPage(undefined, { notify: true })
     this.pendingWarnings.push(defaultPageRecoveredWarning)
-    return undefined
-  }
-}
-
-/** Whether the page shows Chrome's PDF viewer. */
-async function showsPdf(page: Page): Promise<boolean> {
-  return await Effect.runPromise(runPlaywrightOperation({
-    label: "Check for the PDF viewer",
-    timeoutMs: playwrightCloseTimeoutMs,
-    run: () => page.evaluate(() => document.contentType === "application/pdf"),
-  }).pipe(Effect.orElseSucceed(() => false)))
-}
-
-/** The open page with this target id right now, without waiting for one to appear. */
-async function openPageWithTargetId(context: BrowserContext, targetId: string): Promise<Page | undefined> {
-  const pages = context.pages().filter((page) => !page.isClosed())
-  const ids = await Promise.all(pages.map((page) => resolvePageTargetId(page)))
-  const index = ids.indexOf(targetId)
-  return index === -1 ? undefined : pages[index]
-}
-
-async function waitForPageTarget(options: {
-  readonly context: BrowserContext
-  readonly targetId: string
-  readonly timeoutMs: number
-}): Promise<Page | undefined> {
-  return await waitForExactTarget({
-    targetId: options.targetId,
-    timeoutMs: options.timeoutMs,
-    candidates: () => options.context.pages(),
-    getTargetId: resolvePageTargetId,
-  })
-}
-
-export async function waitForExactTarget<T>(options: {
-  readonly targetId: string
-  readonly timeoutMs: number
-  readonly candidates: () => readonly T[]
-  readonly getTargetId: (candidate: T) => Promise<string | undefined>
-  readonly delay?: (milliseconds: number) => Promise<void>
-}): Promise<T | undefined> {
-  const deadline = Date.now() + options.timeoutMs
-  const cachedTargetIds = new Map<T, string | undefined>()
-  const inFlightTargetIds = new Map<T, Promise<{ readonly candidate: T; readonly targetId: string | undefined }>>()
-  while (true) {
-    const remainingMs = deadline - Date.now()
-    if (remainingMs <= 0) return undefined
-    const candidates = options.candidates()
-    for (const candidate of candidates) {
-      const cached = cachedTargetIds.get(candidate)
-      if (cached === options.targetId) return candidate
-      if (cached !== undefined || inFlightTargetIds.has(candidate)) continue
-      inFlightTargetIds.set(candidate, options.getTargetId(candidate).then(
-        (targetId) => ({ candidate, targetId }),
-        () => ({ candidate, targetId: undefined }),
-      ))
-    }
-    const retryInMs = Math.min(sessionPageHealthRetryDelayMs, Math.max(0, deadline - Date.now()))
-    if (retryInMs <= 0) return undefined
-    if (inFlightTargetIds.size > 0) {
-      const resolved = await withTimeout(Promise.race(inFlightTargetIds.values()), retryInMs)
-      if (resolved !== timedOut) {
-        inFlightTargetIds.delete(resolved.candidate)
-        if (resolved.targetId !== undefined) cachedTargetIds.set(resolved.candidate, resolved.targetId)
-        if (resolved.targetId === options.targetId) return resolved.candidate
-      }
-      continue
-    }
-    await (options.delay ?? delay)(retryInMs)
-  }
-}
-
-export function installDownloadCapabilityGuard(page: Page): void {
-  if (downloadGuardedPages.has(page)) {
-    return
-  }
-  const waitForEvent = page.waitForEvent.bind(page) as (event: string, ...args: unknown[]) => Promise<unknown>
-  Object.defineProperty(page, "waitForEvent", {
-    configurable: true,
-    value: (event: string, ...args: unknown[]) => {
-      if (event === "download") {
-        return Promise.reject(new Error(downloadCapabilityErrorMessage))
-      }
-      return waitForEvent(event, ...args)
-    },
-  })
-  downloadGuardedPages.add(page)
-}
-
-export function installDownloadCapabilityGuards(context: BrowserContext): void {
-  if (downloadGuardedContexts.has(context)) {
-    return
-  }
-  for (const page of context.pages()) {
-    installDownloadCapabilityGuard(page)
-  }
-  context.on("page", installDownloadCapabilityGuard)
-  downloadGuardedContexts.add(context)
-}
-
-export function hasExplicitTargetSelection(selection: ExecuteTargetSelection | undefined): boolean {
-  return Boolean(selection?.urlIncludes) || selection?.index !== undefined
-}
-
-export function selectTarget<T>({
-  targets,
-  selection,
-  getUrl,
-  getIndex,
-}: {
-  readonly targets: readonly T[]
-  readonly selection: ExecuteTargetSelection
-  readonly getUrl: (target: T) => string
-  readonly getIndex?: (target: T, fallbackIndex: number) => number
-}): T | undefined {
-  if (selection.urlIncludes && selection.index !== undefined) {
-    throw new TargetSelectionError({ reason: "invalid", message: "Use only one target selector: --target-url or --target-index" })
-  }
-  if (selection.urlIncludes) {
-    const matches = targets.filter((candidate) => {
-      return getUrl(candidate).includes(selection.urlIncludes ?? "")
-    })
-    if (matches.length === 0) {
-      throw new TargetSelectionError({
-        reason: "not-found",
-        message: `No existing attached page URL includes ${selection.urlIncludes}. Target selectors do not navigate or open pages: use page.goto() in the session page, or attach the intended user tab with the Browse toolbar first.`,
-      })
-    }
-    if (matches.length > 1) {
-      const candidates = targets.flatMap((candidate, index) => matches.includes(candidate) ? [`[${getIndex ? getIndex(candidate, index) : index}] ${getUrl(candidate)}`] : [])
-      throw new TargetSelectionError({
-        reason: "ambiguous",
-        message: `Multiple attached pages (${matches.length}) match URL ${selection.urlIncludes}; use a more specific --target-url or --target-index. Matches: ${candidates.join(", ")}`,
-      })
-    }
-    return matches[0]
-  }
-  if (selection.index !== undefined) {
-    if (selection.index < 0) {
-      throw new TargetSelectionError({ reason: "invalid", message: "Target index must be a non-negative integer" })
-    }
-    const target = targets[selection.index]
-    if (!target) {
-      throw new TargetSelectionError({
-        reason: "not-found",
-        message: `No existing attached page at index ${selection.index}; ${targets.length} page(s) available. Target selectors do not create pages.`,
-      })
-    }
-    return target
-  }
-  if (targets.length === 0) {
-    throw new TargetSelectionError({
-      reason: "not-found",
-      message: "No attached pages available. Attach the intended user tab with the Browse toolbar first.",
-    })
-  }
-  if (targets.length > 1) {
-    const candidates = targets.map((candidate, index) => `[${getIndex ? getIndex(candidate, index) : index}] ${getUrl(candidate)}`)
-    throw new TargetSelectionError({
-      reason: "ambiguous",
-      message: `Multiple attached pages (${targets.length}); use --target-url or --target-index to choose one. Matches: ${candidates.join(", ")}`,
-    })
-  }
-  return targets[0]
-}
-
-function selectPage({ pages, selection }: { readonly pages: readonly Page[]; readonly selection: ExecuteTargetSelection }): Page | undefined {
-  return selectTarget({ targets: pages, selection, getUrl: (page) => page.url() })
-}
-
-async function resolvePageTargetId(page: Page): Promise<string | undefined> {
-  return await Effect.runPromise(
-    runPlaywrightOperation({
-      label: "Resolve session page target id",
-      timeoutMs: playwrightCloseTimeoutMs,
-      run: () => pageTargetId(page),
-    }).pipe(
-      Effect.match({
-        onFailure: () => undefined,
-        onSuccess: (targetId) => targetId,
-      }),
-    ),
-  )
-}
-
-export async function pageTargetId(page: Page): Promise<string> {
-  if (page.isClosed()) {
-    throw new Error("Cannot identify the CDP target for a closed page")
-  }
-  const session = await page.context().newCDPSession(page)
-  try {
-    const result = await session.send("Target.getTargetInfo")
-    const targetId = result.targetInfo?.targetId
-    if (!targetId) {
-      throw new Error("Target.getTargetInfo did not return a target id for the handoff page")
-    }
-    return targetId
-  } finally {
-    await session.detach()
-  }
-}
-
-
-const maxTrackedNavigations = 25
-const maxCapturedPageLogs = 50
-const maxCapturedScriptLogs = 100
-
-type ExecuteLogCaptureSnapshot = {
-  readonly logs: readonly ExecuteLogEntry[]
-  readonly summary: ExecuteLogSummary
-  readonly consoleErrorCount: number
-  readonly pageErrorCount: number
-}
-
-export function createExecuteLogCapture(limits: {
-  readonly page?: number
-  readonly script?: number
-} = {}): {
-  readonly add: (entry: ExecuteLogEntry) => void
-  readonly snapshot: () => ExecuteLogCaptureSnapshot
-} {
-  const pageLimit = limits.page ?? maxCapturedPageLogs
-  const scriptLimit = limits.script ?? maxCapturedScriptLogs
-  const logs: ExecuteLogEntry[] = []
-  const pageEntryIndexes = new Map<string, number>()
-  let pageEntries = 0
-  let scriptEntries = 0
-  let totalCount = 0
-  let repeatedCount = 0
-  let omittedCount = 0
-  let consoleErrorCount = 0
-  let pageErrorCount = 0
-
-  const add = (entry: ExecuteLogEntry): void => {
-    totalCount += 1
-    if (entry.type === "error") {
-      consoleErrorCount += 1
-    } else if (entry.type === "pageerror") {
-      pageErrorCount += 1
-    }
-
-    if (entry.source === "page") {
-      const key = pageLogKey(entry)
-      const existingIndex = pageEntryIndexes.get(key)
-      if (existingIndex !== undefined) {
-        const existing = logs[existingIndex]
-        if (existing) {
-          logs[existingIndex] = { ...existing, repeatCount: (existing.repeatCount ?? 0) + 1 }
-          repeatedCount += 1
-          return
-        }
-      }
-      if (pageEntries >= pageLimit) {
-        omittedCount += 1
-        return
-      }
-      pageEntryIndexes.set(key, logs.length)
-      pageEntries += 1
-      logs.push(entry)
-      return
-    }
-
-    if (scriptEntries >= scriptLimit) {
-      omittedCount += 1
-      return
-    }
-    scriptEntries += 1
-    logs.push(entry)
-  }
-
-  return {
-    add,
-    snapshot: () => ({
-      logs: [...logs],
-      summary: {
-        totalCount,
-        returnedCount: logs.length,
-        repeatedCount,
-        omittedCount,
-      },
-      consoleErrorCount,
-      pageErrorCount,
-    }),
-  }
-}
-
-function pageLogKey(entry: ExecuteLogEntry): string {
-  const routineCategory = routinePageLogCategory(entry)
-  if (routineCategory) {
-    return JSON.stringify([entry.type, routineCategory])
-  }
-  return JSON.stringify([
-    entry.type,
-    entry.text,
-    entry.location?.url ?? null,
-    entry.location?.lineNumber ?? null,
-    entry.location?.columnNumber ?? null,
-  ])
-}
-
-function routinePageLogCategory(entry: ExecuteLogEntry): string | undefined {
-  if (entry.source !== "page") return undefined
-  const text = entry.text.toLowerCase()
-  if (/^(?:error with permissions-policy header|permissions-policy header warning|permissions policy violation|\[violation\] potential permissions policy violation)/.test(text)) {
-    return "browser-permissions-policy"
-  }
-  if (!text.includes("err_blocked_by_client")) return undefined
-  const resource = entry.location?.url.toLowerCase() ?? ""
-  const analyticsMarkers = [
-    "google-analytics.com",
-    "googletagmanager.com",
-    "doubleclick.net",
-    "connect.facebook.net",
-    "/analytics",
-    "analytics.",
-  ]
-  return analyticsMarkers.some((marker) => resource.includes(marker)) ? "blocked-analytics-resource" : undefined
-}
-
-function emptyExecuteLogSummary(): ExecuteLogSummary {
-  return {
-    totalCount: 0,
-    returnedCount: 0,
-    repeatedCount: 0,
-    omittedCount: 0,
-  }
-}
-
-function formatLogCompactionWarning(summary: ExecuteLogSummary): string | undefined {
-  if (summary.repeatedCount === 0 && summary.omittedCount === 0) {
-    return undefined
-  }
-  return `Captured ${summary.totalCount} console/page events: returned ${summary.returnedCount}, folded ${summary.repeatedCount} repeated page entries, and omitted ${summary.omittedCount} after limits (page=${maxCapturedPageLogs}, script=${maxCapturedScriptLogs}). Aftermath error counts include all events.`
-}
-
-const nodeOnlyGlobalPattern = /^(process|require|fs|os|http|https|child_process|fetch|module|__dirname|__filename) is not defined$/
-const pageOnlyGlobalPattern = /^(window|document|localStorage|sessionStorage|location|navigator|getComputedStyle) is not defined$/
-
-/** Explain failures caused by treating Node-side execute code as page code. */
-export function formatNodeContextWarning(error: Error): string | undefined {
-  const pageGlobal = error.name === "ReferenceError" ? pageOnlyGlobalPattern.exec(error.message)?.[1] : undefined
-  if (pageGlobal) {
-    return `Execute code runs in Node, where \`${pageGlobal}\` is undefined. Read page globals inside page.evaluate(() => ...).`
-  }
-  const nodeGlobal = error.name === "ReferenceError" ? nodeOnlyGlobalPattern.exec(error.message)?.[1] : undefined
-  if (nodeGlobal) {
-    return `Execute code runs in a sandbox without \`${nodeGlobal}\` (no process, require, fs, os, child_process, http/https or Node fetch). Save or read files with files.write(name, data) / files.read(path), fetch through page.evaluate(() => fetch(...)), or ask the user to set OPENCODE_BROWSER_ALLOW_NODE=1 on the relay for full Node access.`
-  }
-  if (error.name === "TypeError" && error.message.startsWith("Failed to parse URL from ")) {
-    return "Execute code runs in Node, so fetch has no page origin or cookies. Use page.evaluate(() => fetch(...)) for same-origin requests."
-  }
-  if (error.name === "TypeError" && /The "cb" argument must be of type function/i.test(error.message)) {
-    return "The execute `fs` alias is callback-style `node:fs`; use `await fs.promises.writeFile(...)` / `await fs.promises.readFile(...)` or `fs.writeFileSync(...)`."
-  }
-  return undefined
-}
-
-const pointerInterceptionPattern = /(<[a-zA-Z][^>\n]*>[^\n]*?)\s+intercepts pointer events/
-const locatorFailurePattern = /waiting for locator\(|waiting for getBy|strict mode violation:/i
-
-/** Extract the covering element when Playwright times out because another element intercepts pointer events. */
-export function formatPointerInterceptionWarning(error: unknown): string | undefined {
-  if (!(error instanceof Error)) return undefined
-  const blocker = pointerInterceptionPattern.exec(error.message)?.[1]
-  if (!blocker) return undefined
-  return `Pointer action was blocked because ${blocker} intercepts pointer events. Dismiss the covering dialog/banner or scroll the target clear of sticky chrome instead of retrying the same click.`
-}
-
-function formatBoundedPageUrl(rawUrl: string): string {
-  try {
-    const parsed = new URL(rawUrl)
-    return parsed.origin === "null" ? rawUrl.slice(0, 96) : `${parsed.origin}${parsed.pathname}`.slice(0, 120)
-  } catch {
-    return rawUrl.slice(0, 96)
-  }
-}
-
-function formatLocatorFailurePageWarning(
-  error: unknown,
-  aftermath: ExecuteAftermath | undefined,
-  recreatedFromClosedUrl?: string,
-): string | undefined {
-  if (!(error instanceof Error) || !locatorFailurePattern.test(error.message)) return undefined
-  const rawUrl = aftermath?.endUrl ?? aftermath?.startUrl
-  if (rawUrl !== "about:blank") return undefined
-  if (recreatedFromClosedUrl) {
-    return `Locator failed on about:blank because the previous session page (${formatBoundedPageUrl(recreatedFromClosedUrl)}) was closed. Call page.goto(...) to reopen it before querying controls.`
-  }
-  return "Locator failed on page about:blank. Navigate with page.goto(...) or adopt an attached tab before querying controls."
-}
-
-const challengeProbeTimeoutMs = 2_000
-const challengePollMs = 1_000
-const defaultChallengeWaitMs = 15_000
-
-/** How long execute waits for a non-interactive challenge to clear (OPENCODE_BROWSER_CHALLENGE_WAIT_MS, 0 to 60000). */
-function challengeWaitMs(): number {
-  const value = Number(process.env.OPENCODE_BROWSER_CHALLENGE_WAIT_MS)
-  return Number.isInteger(value) && value >= 0 && value <= 60_000 && process.env.OPENCODE_BROWSER_CHALLENGE_WAIT_MS !== "" ? value : defaultChallengeWaitMs
-}
-
-async function probeChallengePage(page: Page): Promise<ChallengeProbe | undefined> {
-  if (page.isClosed()) return undefined
-  const url = page.url()
-  if (!/^https?:/i.test(url)) return undefined
-  // Patchright evaluates in an isolated world: the page's scripts can't see the probe.
-  const probed = await withTimeout(page.evaluate(probePageScript, [...probeSelectors]), challengeProbeTimeoutMs)
-  if (probed === timedOut) return undefined
-  return { ...probed, url: page.url(), frameUrls: page.frames().map((frame) => frame.url()).slice(0, 50) }
-}
-
-/** Classify the page; wait out a non-interactive challenge for up to `waitMs`. Undefined when there's none. */
-export async function detectChallenge(page: Page, options: { readonly waitMs: number }): Promise<ChallengeOutcome | undefined> {
-  const first = await probeChallengePage(page).catch(() => undefined)
-  const detected = first && classifyChallenge(first)
-  if (!first || !detected) return undefined
-  const started = Date.now()
-  let current = detected
-  let url = first.url
-  while (current.kind === "non-interactive" && Date.now() - started < options.waitMs) {
-    await delay(Math.min(challengePollMs, Math.max(0, options.waitMs - (Date.now() - started))))
-    if (page.isClosed()) return undefined
-    // A probe that fails mid-navigation (the challenge often clears by navigating) counts as still waiting.
-    const probe = await probeChallengePage(page).catch(() => null)
-    if (probe === null) continue
-    if (probe === undefined) return { ...current, status: "cleared", url, waitedMs: Date.now() - started, recommendation: "continue" }
-    const next = classifyChallenge(probe)
-    url = probe.url
-    if (!next) return { ...current, status: "cleared", url, waitedMs: Date.now() - started, recommendation: "continue" }
-    current = next
-  }
-  const waitedMs = current === detected && detected.kind !== "non-interactive" ? 0 : Date.now() - started
-  return {
-    ...current,
-    status: "blocked",
-    url,
-    waitedMs,
-    recommendation: current.kind === "block" ? "stop" : "handoff",
-  }
-}
-
-const requestEvents = new Set(["request", "requestfinished", "requestfailed", "response", "websocket", "route"])
-
-/**
- * Calls from execute code that can watch what a page sends or types: request interception and listeners, page
- * scripts added before navigation, exposed functions, raw CDP sessions. Returns a label, or undefined.
- */
-export function pageHookCall(fn: Function, args: readonly unknown[]): string | undefined {
-  const name = typeof fn.name === "string" ? fn.name.replace(/^bound /, "") : ""
-  if (["route", "routeFromHAR", "routeWebSocket", "addInitScript", "exposeBinding", "exposeFunction", "newCDPSession", "waitForRequest", "waitForResponse"].includes(name)) return `${name}()`
-  if (["on", "once", "addListener", "prependListener", "waitForEvent"].includes(name) && typeof args[0] === "string" && requestEvents.has(args[0])) return `${name}("${args[0]}")`
-  return undefined
-}
-
-/** Full-Node execute code bypasses the realm's call observer, so look for the page-visible APIs in its source. */
-export function pageVisibleApiSourceWarnings(code: string): readonly string[] {
-  const warnings: string[] = []
-  for (const name of ["addInitScript", "exposeFunction", "exposeBinding"]) {
-    if (new RegExp(`\\.${name}\\s*\\(`).test(code)) {
-      const named = { [name]: () => {} }[name]!
-      const warning = pageVisibleApiWarning(named, undefined, [])
-      if (warning) warnings.push(warning)
-    }
-  }
-  return warnings
-}
-
-export async function runUserCode({ code, globals, realm }: { readonly code: string; readonly globals: SandboxGlobals; readonly realm?: ExecuteRealm }): Promise<{
-  readonly result: unknown
-  readonly logs: readonly ExecuteLogEntry[]
-  readonly logSummary: ExecuteLogSummary
-  readonly aftermath: ExecuteAftermath
-}> {
-  const logCapture = createExecuteLogCapture()
-  const navigations: string[] = []
-  const onConsole = (message: ConsoleMessage) => {
-    logCapture.add({
-      source: "page",
-      type: message.type(),
-      text: message.text(),
-      location: message.location(),
-    })
-  }
-  const onPageError = (error: Error) => {
-    logCapture.add({
-      source: "page",
-      type: "pageerror",
-      text: error.stack ?? error.message,
-    })
-  }
-  const onFrameNavigated = (frame: Frame) => {
-    if (frame !== globals.page.mainFrame() || navigations.length >= maxTrackedNavigations) {
-      return
-    }
-    navigations.push(frame.url())
-  }
-  const sandboxConsole = createSandboxConsole({ addLog: logCapture.add })
-  const startUrl = safePageUrl(globals.page)
-  globals.page.on("console", onConsole)
-  globals.page.on("pageerror", onPageError)
-  const stopListening = PageConsole.listen(globals.page, logCapture.add)
-  globals.page.on("framenavigated", onFrameNavigated)
-  const buildResultMetadata = () => {
-    const captured = logCapture.snapshot()
-    return {
-      logs: captured.logs,
-      logSummary: captured.summary,
-      aftermath: {
-        startUrl,
-        endUrl: safePageUrl(globals.page),
-        navigations,
-        consoleErrorCount: captured.consoleErrorCount,
-        pageErrorCount: captured.pageErrorCount,
-        handoffs: globals.handoffTracker.count,
-      },
-    } satisfies { readonly logs: readonly ExecuteLogEntry[]; readonly logSummary: ExecuteLogSummary; readonly aftermath: ExecuteAftermath }
-  }
-  try {
-    const values = [sandboxConsole, ...sandboxGlobalKeys.map((key) => globals[key])]
-    if (realm) {
-      const stateIndex = sandboxGlobalKeys.indexOf("state") + 1
-      const result = await realm.run({
-        source: `(async function (console, ${sandboxGlobalKeys.join(", ")}) {\n"use strict";\n${wrapCodeWithModuleAliases(code, Object.keys(sandboxModules))}\n})`,
-        filename: "execute.js",
-        args: values,
-        sandboxArgs: new Map([[stateIndex, globals.state]]),
-      })
-      return { result, ...buildResultMetadata() }
-    }
-    const AsyncFunction = async function () {}.constructor as new (...args: string[]) => (...args: unknown[]) => Promise<unknown>
-    const fn = new AsyncFunction("console", ...sandboxGlobalKeys, wrapCodeWithModuleAliases(code, Object.keys(nodeModules)))
-    const result = await fn(...values)
-    return { result, ...buildResultMetadata() }
-  } catch (cause) {
-    const error = cause instanceof Error ? cause : new Error("execute sandbox code", { cause })
-    const metadata = buildResultMetadata()
-    throw new ExecuteCodeError(error, metadata.logs, metadata.logSummary, metadata.aftermath)
-  } finally {
-    globals.page.off("console", onConsole)
-    globals.page.off("pageerror", onPageError)
-    globals.page.off("framenavigated", onFrameNavigated)
-    stopListening()
-  }
-}
-
-const sandboxGlobalKeys = [
-  "browser",
-  "context",
-  "page",
-  "state",
-  "modules",
-  "files",
-  "fillInput",
-  "fillInputs",
-  "screenshotWithLabels",
-  "screenshotDiff",
-  "ariaSnapshot",
-  "snapshot",
-  "ref",
-  "webmcp",
-  "showGhostCursor",
-  "hideGhostCursor",
-  "ghostCursor",
-  "handoff",
-  "demonstrate",
-  "network",
-  "pageConsole",
-  "secrets",
-] as const satisfies readonly (keyof Omit<SandboxGlobals, "handoffTracker">)[]
-
-function safePageUrl(page: Page): string | null {
-  try {
-    return page.isClosed() ? null : page.url()
-  } catch {
-    return null
-  }
-}
-
-function createSandboxConsole(options: { readonly addLog: (entry: ExecuteLogEntry) => void }): Pick<Console, "debug" | "error" | "info" | "log" | "warn"> {
-  const capture = (type: ExecuteLogEntry["type"], values: readonly unknown[]) => {
-    options.addLog({
-      source: "script",
-      type,
-      text: values.map(formatLogValue).join(" "),
-    })
-  }
-  return {
-    debug: (...values: readonly unknown[]) => {
-      capture("debug", values)
-    },
-    error: (...values: readonly unknown[]) => {
-      capture("error", values)
-    },
-    info: (...values: readonly unknown[]) => {
-      capture("info", values)
-    },
-    log: (...values: readonly unknown[]) => {
-      capture("log", values)
-    },
-    warn: (...values: readonly unknown[]) => {
-      capture("warn", values)
-    },
-  }
-}
-
-function formatLogValue(value: unknown): string {
-  if (Predicate.isString(value)) {
-    return value
-  }
-  return util.inspect(value, { depth: 4, colors: false, maxArrayLength: 100, maxStringLength: 1000 })
-}
-
-export function getAutoReturnExpression(code: string): string | null {
-  try {
-    const ast = acorn.parse(code, {
-      ecmaVersion: "latest",
-      allowAwaitOutsideFunction: true,
-      allowReturnOutsideFunction: true,
-      sourceType: "script",
-    })
-    if (ast.body.length !== 1) {
-      return null
-    }
-    const statement = ast.body[0]
-    if (statement?.type !== "ExpressionStatement") {
-      return null
-    }
-    const expression = statement.expression
-    if (expression.type === "AssignmentExpression" || expression.type === "UpdateExpression") {
-      return null
-    }
-    if (expression.type === "UnaryExpression" && expression.operator === "delete") {
-      return null
-    }
-    if (expression.type === "SequenceExpression" && expression.expressions.some((item) => {
-      return item.type === "AssignmentExpression"
-    })) {
-      return null
-    }
-    return code.slice(expression.start, expression.end)
-  } catch {
-    return null
-  }
-}
-
-export function wrapCode(code: string): string {
-  const expression = getAutoReturnExpression(code)
-  if (expression) {
-    return `return await (${expression})`
-  }
-  return code
-}
-
-function wrapCodeWithModuleAliases(code: string, aliases: readonly string[]): string {
-  return `const { ${aliases.join(", ")} } = modules;\n{\n${wrapCode(code)}\n}`
-}
-
-/** The most text (and JSON value) an execute returns; an agent's context can't take more, and the relay copies it. */
-export const maxExecuteResultChars = 100_000
-
-/**
- * Caps what an execute returns. A result past the limit keeps the start of its text, drops its JSON value, and says
- * how to keep all of it: write it to a file inside the execute and read the parts needed.
- */
-export function boundExecuteResult(text: string, value: unknown, hasValue: boolean): { readonly text: string; readonly value?: unknown; readonly hasValue: boolean; readonly warning?: string } {
-  const valueChars = hasValue && value !== null && typeof value === "object" ? safeJsonStringify(value)?.length ?? 0 : typeof value === "string" ? value.length : 0
-  const size = Math.max(text.length, valueChars)
-  if (size <= maxExecuteResultChars) return { text, value, hasValue }
-  const warning = `The result is ${size.toLocaleString("en-US")} characters, more than the ${maxExecuteResultChars.toLocaleString("en-US")} an execute returns: the text shows its start and the JSON value is left out. To keep all of it, write it to a file in the execute (await files.write("result.json", JSON.stringify(data))) and return only what you need, or read parts back later with files.read(files.path("result.json")).`
-  return {
-    text: text.length > maxExecuteResultChars ? `${text.slice(0, maxExecuteResultChars)}\n… [truncated ${(text.length - maxExecuteResultChars).toLocaleString("en-US")} characters]` : text,
-    hasValue: false,
-    warning,
-  }
-}
-
-function stringifyResult(result: unknown): string {
-  if (Predicate.isString(result)) {
-    return result
-  }
-  if (result === undefined) {
-    return "undefined"
-  }
-  return util.inspect(result, { depth: 3, colors: false, maxArrayLength: 50, maxStringLength: 4000 })
-}
-
-type JsonSafeResult =
-  | { readonly serializable: true; readonly value: unknown }
-  | { readonly serializable: false; readonly reason: string }
-
-const maxJsonSafeDepth = 8
-const maxJsonSafeBytes = 32 * 1024
-
-export function extractExecuteMedia(value: unknown): { readonly value: unknown; readonly media: readonly ExecuteMedia[] } {
-  const media: ExecuteMedia[] = []
-  const seen = new WeakMap<object, unknown>()
-
-  const replace = (item: unknown): unknown => {
-    if (Buffer.isBuffer(item)) {
-      const mimeType = imageMimeType(item)
-      if (!mimeType) return item
-      const image = {
-        type: "image" as const,
-        mimeType,
-        data: item.toString("base64"),
-        size: item.byteLength,
-      }
-      media.push(image)
-      return { type: image.type, mimeType: image.mimeType, size: image.size }
-    }
-    if (!Predicate.isObjectOrArray(item)) return item
-    const previous = seen.get(item)
-    if (previous !== undefined) return previous
-    if (Array.isArray(item)) {
-      const output: unknown[] = []
-      seen.set(item, output)
-      for (const value of item) output.push(replace(value))
-      return output
-    }
-    if (item instanceof Map) {
-      const output = new Map<unknown, unknown>()
-      seen.set(item, output)
-      for (const [key, value] of item) output.set(replace(key), replace(value))
-      return output
-    }
-    if (item instanceof Set) {
-      const output = new Set<unknown>()
-      seen.set(item, output)
-      for (const value of item) output.add(replace(value))
-      return output
-    }
-    if (!isPlainJsonContainer(item)) return item
-    const output: Record<string, unknown> = {}
-    seen.set(item, output)
-    for (const key of safeObjectKeys(item) ?? []) {
-      try {
-        output[key] = replace(item[key as keyof typeof item])
-      } catch {
-        // Match structured-result conversion: skip inaccessible properties.
-      }
-    }
-    return output
-  }
-
-  return { value: replace(value), media }
-}
-
-function imageMimeType(value: Buffer): string | undefined {
-  if (value.length >= 8 && value.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
-    return "image/png"
-  }
-  if (value.length >= 3 && value[0] === 0xff && value[1] === 0xd8 && value[2] === 0xff) {
-    return "image/jpeg"
-  }
-  if (value.length >= 12 && value.subarray(0, 4).toString("ascii") === "RIFF" && value.subarray(8, 12).toString("ascii") === "WEBP") {
-    return "image/webp"
-  }
-  return undefined
-}
-
-/**
- * Best-effort structured execute value for machine consumers.
- *
- * Only plain JSON-ish data is preserved, with Map converted to a plain object
- * when all keys are strings and Set converted to an array. Class instances (for
- * example Playwright Page/Locator/Response objects) are not serialized: a
- * top-level instance omits `value` entirely, while nested instances are omitted
- * from object branches and become `null` in array branches. Throwing proxies or
- * other unexpected conversion failures also omit `value`; throwing getters on
- * otherwise plain objects are skipped property-by-property. Oversized values are
- * also omitted so `value` stays compact for agents; `text` remains the human
- * fallback for every result.
- */
-export function toJsonSafeValue(value: unknown): JsonSafeResult {
-  try {
-    const seen = new WeakSet<object>()
-    const converted = convertJsonSafe(value, { seen, depth: 0 })
-    if (converted.omit) {
-      return { serializable: false, reason: converted.reason }
-    }
-    const jsonText = safeJsonStringify(converted.value)
-    if (jsonText === undefined) {
-      return { serializable: false, reason: "JSON serialization failed" }
-    }
-    if (Buffer.byteLength(jsonText, "utf8") > maxJsonSafeBytes) {
-      return { serializable: false, reason: `JSON value exceeds ${maxJsonSafeBytes} bytes` }
-    }
-    return { serializable: true, value: converted.value }
-  } catch (cause) {
-    return { serializable: false, reason: cause instanceof Error && cause.message ? cause.message : "JSON conversion failed" }
-  }
-}
-
-type JsonSafeConversion =
-  | { readonly omit: false; readonly value: unknown }
-  | { readonly omit: true; readonly reason: string }
-
-function convertJsonSafe(value: unknown, options: { readonly seen: WeakSet<object>; readonly depth: number }): JsonSafeConversion {
-  if (value === null || Predicate.isString(value) || Predicate.isBoolean(value)) {
-    return { omit: false, value }
-  }
-  if (Predicate.isNumber(value)) {
-    return { omit: false, value: Number.isFinite(value) ? value : null }
-  }
-  if (Predicate.isBigInt(value)) {
-    return { omit: false, value: value.toString() }
-  }
-  if (value === undefined) {
-    return { omit: true, reason: "undefined" }
-  }
-  if (Predicate.isFunction(value)) {
-    return { omit: true, reason: "function value" }
-  }
-  if (Predicate.isSymbol(value)) {
-    return { omit: true, reason: "symbol value" }
-  }
-  if (!Predicate.isObjectOrArray(value)) {
-    return { omit: true, reason: "unsupported value" }
-  }
-  const isMap = value instanceof Map
-  const isSet = !isMap && value instanceof Set
-  if (!isMap && !isSet && !isPlainJsonContainer(value)) {
-    return { omit: true, reason: "class instance" }
-  }
-  if (options.seen.has(value)) {
-    return { omit: true, reason: "circular reference" }
-  }
-  if (options.depth >= maxJsonSafeDepth) {
-    return { omit: true, reason: "maximum object depth exceeded" }
-  }
-  options.seen.add(value)
-  try {
-    if (isMap) {
-      try {
-        const output: Record<string, unknown> = {}
-        let entries: IterableIterator<[unknown, unknown]>
-        try {
-          entries = value.entries()
-        } catch {
-          return { omit: true, reason: "map entries unavailable" }
-        }
-        for (const [key, item] of entries) {
-          if (!Predicate.isString(key)) {
-            return { omit: true, reason: "map contains non-string key" }
-          }
-          const converted = convertJsonSafe(item, { seen: options.seen, depth: options.depth + 1 })
-          if (!converted.omit) output[key] = converted.value
-        }
-        return { omit: false, value: output }
-      } catch {
-        return { omit: true, reason: "map iteration failed" }
-      }
-    }
-    if (isSet) {
-      try {
-        const output: unknown[] = []
-        let values: IterableIterator<unknown>
-        try {
-          values = value.values()
-        } catch {
-          return { omit: true, reason: "set values unavailable" }
-        }
-        for (const item of values) {
-          const converted = convertJsonSafe(item, { seen: options.seen, depth: options.depth + 1 })
-          output.push(converted.omit ? null : converted.value)
-        }
-        return { omit: false, value: output }
-      } catch {
-        return { omit: true, reason: "set iteration failed" }
-      }
-    }
-    if (Array.isArray(value)) {
-      let length: number
-      try {
-        length = value.length
-      } catch {
-        return { omit: true, reason: "array length unavailable" }
-      }
-      const items: unknown[] = []
-      for (let index = 0; index < length; index++) {
-        let item: unknown
-        try {
-          item = value[index]
-        } catch {
-          items.push(null)
-          continue
-        }
-        const converted = convertJsonSafe(item, { seen: options.seen, depth: options.depth + 1 })
-        items.push(converted.omit ? null : converted.value)
-      }
-      return {
-        omit: false,
-        value: items,
-      }
-    }
-    const output: Record<string, unknown> = {}
-    const keys = safeObjectKeys(value)
-    if (!keys) {
-      return { omit: true, reason: "object keys unavailable" }
-    }
-    for (const key of keys) {
-      let item: unknown
-      try {
-        item = value[key as keyof typeof value]
-      } catch {
-        continue
-      }
-      const converted = convertJsonSafe(item, { seen: options.seen, depth: options.depth + 1 })
-      if (!converted.omit) {
-        output[key] = converted.value
-      }
-    }
-    return { omit: false, value: output }
-  } finally {
-    options.seen.delete(value)
-  }
-}
-
-function isPlainJsonContainer<T extends object>(value: T): boolean {
-  if (Array.isArray(value)) {
-    return true
-  }
-  let prototype: unknown
-  try {
-    prototype = Object.getPrototypeOf(value)
-  } catch {
-    return false
-  }
-  return prototype === Object.prototype || prototype === null
-}
-
-function safeObjectKeys<T extends object>(value: T): string[] | undefined {
-  try {
-    return Object.keys(value)
-  } catch {
-    return undefined
-  }
-}
-
-function safeJsonStringify(value: unknown): string | undefined {
-  try {
-    return JSON.stringify(value)
-  } catch {
     return undefined
   }
 }

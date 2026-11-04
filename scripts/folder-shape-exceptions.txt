@@ -1,0 +1,7 @@
+# <key> <ceiling>: existing folder-shape violations (see scripts/folder-shape.sh). Ceilings only go down.
+# Refresh with scripts/folder-shape.sh --update-exceptions.
+cli/src/ 80
+cli/src/cdp-* 6
+cli/src/relay-* 10
+cli/src/session-* 5
+src/background/agent-* 4
