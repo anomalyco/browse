@@ -11,7 +11,7 @@ import {
   switchVersion,
   updateState,
   versionEntry,
-} from "../auto-update.ts"
+} from "../update/auto-update.ts"
 import { cliCommand } from "../paths.ts"
 import { opencodeBrowserVersion } from "../version.ts"
 import { browsers } from "./browsers.ts"

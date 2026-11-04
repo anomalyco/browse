@@ -1,5 +1,5 @@
 import { Effect } from "effect"
-import * as RelayLifecycle from "../relay-lifecycle.ts"
+import * as RelayLifecycle from "../relay/lifecycle.ts"
 import { registerMcpTools } from "./registry.ts"
 import { objectSchema, parseExecuteArguments } from "./schema.ts"
 

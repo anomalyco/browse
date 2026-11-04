@@ -1,9 +1,9 @@
 import { Effect } from "effect"
 import { chromium, errors, type Browser, type BrowserContext, type Frame, type Page } from "patchright-core"
-import { registerAriaSnapshotSelector } from "./aria-snapshot.ts"
-import * as AuthProfile from "./auth-profile.ts"
-import * as AuthenticatedOrigin from "./authenticated-origin.ts"
-import { challengeWarning } from "./challenge-detection.ts"
+import { registerAriaSnapshotSelector } from "./snapshot/aria-snapshot.ts"
+import * as AuthProfile from "./auth/profile.ts"
+import * as AuthenticatedOrigin from "./auth/authenticated-origin.ts"
+import { challengeWarning } from "./execute/challenge-detection.ts"
 import { executeAllowsNode, ExecuteRealm, pageVisibleApiWarning } from "./execute-realm.ts"
 import {
   challengeWaitMs,
@@ -83,9 +83,9 @@ import {
 import { buildSandboxGlobals } from "./execute/sandbox-globals.ts"
 import { ExecuteSecretsBridge } from "./execute/secrets-bridge.ts"
 import * as NetworkCapture from "./network-capture.ts"
-import { installPageReadTimeout } from "./page-read-timeout.ts"
-import type { PasskeyChoice } from "./passkey-bridge.ts"
-import { tunePatchright } from "./patchright-tuning.ts"
+import { installPageReadTimeout } from "./execute/read-timeout.ts"
+import type { PasskeyChoice } from "./auth/passkey-bridge.ts"
+import { tunePatchright } from "./execute/patchright-tuning.ts"
 import {
   AuthenticatedJsonOutcome,
   type AuthenticatedJsonRequest,
@@ -93,10 +93,10 @@ import {
   type ExecuteLogEntry,
   type ExecuteLogSummary,
   type ExecuteMedia,
-} from "./relay-schema.ts"
-import { relayToken } from "./relay-secrets.ts"
-import type { SessionTarget } from "./relay-types.ts"
-import { executionContextFailureDiagnostic } from "./runtime-diagnostics.ts"
+} from "./relay/schema.ts"
+import { relayToken } from "./relay/secrets.ts"
+import type { SessionTarget } from "./relay/types.ts"
+import { executionContextFailureDiagnostic } from "./update/runtime-diagnostics.ts"
 import {
   createAriaSnapshotHelper,
   createSnapshotHelpers,

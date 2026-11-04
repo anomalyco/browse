@@ -11,8 +11,8 @@ import http from "node:http"
 import { spawn } from "node:child_process"
 import { parseArgs } from "node:util"
 import { chromium } from "patchright-core"
-import { relayToken } from "../src/relay-secrets.ts"
-import { bundledPairingCodeTtlMs, mintPairingCode, writeExtensionPairing } from "../src/browser-pairing.ts"
+import { relayToken } from "../src/relay/secrets.ts"
+import { bundledPairingCodeTtlMs, mintPairingCode, writeExtensionPairing } from "../src/relay/browser-pairing.ts"
 import { portFromEnv } from "./support/ports.ts"
 
 const { values: options } = parseArgs({ options: { browser: { type: "string" } } })

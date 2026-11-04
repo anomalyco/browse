@@ -1,8 +1,8 @@
 import { Console, Effect, Option } from "effect"
 import { Command, Flag } from "effect/cli"
 import path from "node:path"
-import * as RelayClient from "../relay-client.ts"
-import type { NetworkStatusResponse, NetworkStopResponse } from "../relay-schema.ts"
+import * as RelayClient from "../relay/client.ts"
+import type { NetworkStatusResponse, NetworkStopResponse } from "../relay/schema.ts"
 import {
   ensureCliRelay,
   ensureCliRelayAndExtension,

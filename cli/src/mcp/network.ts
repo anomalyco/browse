@@ -1,6 +1,6 @@
 import { Effect } from "effect"
 import path from "node:path"
-import * as RelayLifecycle from "../relay-lifecycle.ts"
+import * as RelayLifecycle from "../relay/lifecycle.ts"
 import { registerMcpTools } from "./registry.ts"
 import {
   ensureSessionExists,

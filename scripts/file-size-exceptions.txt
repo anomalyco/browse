@@ -1,7 +1,2 @@
 # <path> <ceiling>: line ceilings for source files above 1500 and test files above 1000. Ceilings only go down.
 # Refresh with scripts/file-size.sh --update-exceptions.
-cli/src/execute.ts 2770
-cli/src/relay.ts 2772
-cli/src/snapshot.ts 1991
-cli/test/relay.integration.test.ts 1281
-src/background/agent-relay.ts 1601

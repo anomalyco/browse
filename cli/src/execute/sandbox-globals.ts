@@ -1,6 +1,6 @@
 import { Effect } from "effect"
 import type { Browser, BrowserContext, Page } from "patchright-core"
-import { startDemonstrationRecorder } from "../demonstration.ts"
+import { startDemonstrationRecorder } from "./demonstration.ts"
 import { createExecuteFiles, sandboxModules, type ExecuteRealm } from "../execute-realm.ts"
 import {
   clearGhostCursorCallouts,
@@ -13,8 +13,8 @@ import {
   zoomGhostCursorCamera,
 } from "../ghost-cursor.ts"
 import type * as NetworkCapture from "../network-capture.ts"
-import { PageConsole } from "../page-console.ts"
-import { createScreenshotDiff } from "../screenshot-diff.ts"
+import { PageConsole } from "./console.ts"
+import { createScreenshotDiff } from "../snapshot/screenshot-diff.ts"
 import {
   createAriaSnapshotHelper,
   createSnapshotHelpers,
@@ -23,7 +23,7 @@ import {
   screenshotWithLabels,
   type SnapshotRefRegistry,
 } from "../snapshot.ts"
-import { createWebMcpHelper } from "../webmcp.ts"
+import { createWebMcpHelper } from "./webmcp.ts"
 import {
   nodeModules,
   type HandoffCallOptions,

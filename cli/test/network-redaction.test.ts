@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { looksLikeTokenSegment, SecretCollector } from "../src/network-redaction.ts"
+import { looksLikeTokenSegment, SecretCollector } from "../src/network-capture/redaction.ts"
 
 // The HAR export protects each entry structurally (names that look secret), then replaces known values wherever
 // else they appear in URLs and headers (network-capture.ts redactEntryKnownValues, minimum length 8).

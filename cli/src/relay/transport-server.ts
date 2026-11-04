@@ -1,21 +1,21 @@
 import http from "node:http"
 import { Effect } from "effect"
 import { type WebSocket, WebSocketServer } from "ws"
-import type { BrowserLink } from "../browser-links.ts"
-import type { CdpClientPool } from "../cdp-client-pool.ts"
-import type { CdpRuntime } from "../cdp-runtime.ts"
+import type { BrowserLink } from "./browser-links.ts"
+import type { CdpClientPool } from "../cdp/client-pool.ts"
+import type { CdpRuntime } from "../cdp/runtime.ts"
 import { hasRelayToken } from "../http-api.ts"
 import type { RecordingRelay } from "../recording-relay.ts"
-import { isLocalPeer } from "../relay-config.ts"
+import { isLocalPeer } from "./config.ts"
 import {
   headerValue,
   sendCdpResponse,
   validateHostHeader,
   validateWebSocketOrigin,
-} from "../relay-helpers.ts"
-import { relayLog } from "../relay-log.ts"
-import { relayTokenQueryParam, secretsEqual } from "../relay-secrets.ts"
-import type { RelayShutdown } from "../relay-shutdown.ts"
+} from "./helpers.ts"
+import { relayLog } from "./log.ts"
+import { relayTokenQueryParam, secretsEqual } from "./secrets.ts"
+import type { RelayShutdown } from "./shutdown.ts"
 import type { OpenCodeBrowserSessions } from "../session-manager.ts"
 import type { ExtensionHandshake } from "./extension-handshake.ts"
 import { sendUpgradeError } from "./process-guard.ts"

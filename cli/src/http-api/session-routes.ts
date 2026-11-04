@@ -1,8 +1,8 @@
 import http from "node:http"
 import { Effect } from "effect"
-import * as AuthProfile from "../auth-profile.ts"
-import * as Deadbolt from "../deadbolt.ts"
-import { checkUrl, parseOriginPatterns } from "../domain-policy.ts"
+import * as AuthProfile from "../auth/profile.ts"
+import * as Deadbolt from "../auth/deadbolt.ts"
+import { checkUrl, parseOriginPatterns } from "../auth/domain-policy.ts"
 import { selectTarget } from "../execute.ts"
 import {
   HttpRouteError,
@@ -10,7 +10,7 @@ import {
   readJsonBody,
   requiredSessionId,
   sendJson,
-} from "../relay-helpers.ts"
+} from "../relay/helpers.ts"
 import {
   AuthenticatedJsonRequest,
   AuthProfileRequest,
@@ -26,9 +26,9 @@ import {
   SessionEnsureRequest,
   SessionIdRequest,
   SessionNewRequest,
-} from "../relay-schema.ts"
+} from "../relay/schema.ts"
 import type { OpenCodeBrowserSessions } from "../session-manager.ts"
-import type { TargetRegistry } from "../target-registry.ts"
+import type { TargetRegistry } from "../cdp/target-registry.ts"
 import { decodeRequest, noteClient, originPatterns } from "./errors.ts"
 
 export function handleClientRequest(options: {

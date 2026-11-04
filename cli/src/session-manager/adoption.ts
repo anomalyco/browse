@@ -1,6 +1,6 @@
 import { Deferred, Effect, Fiber, Result, Semaphore } from "effect"
-import type { OpenCodeBrowserSession, SessionTarget } from "../relay-types.ts"
-import type { TargetOwnership, TargetOwnershipChange, TargetOwnershipReservation } from "../target-registry.ts"
+import type { OpenCodeBrowserSession, SessionTarget } from "../relay/types.ts"
+import type { TargetOwnership, TargetOwnershipChange, TargetOwnershipReservation } from "../cdp/target-registry.ts"
 import type { SessionAdmission } from "./admission.ts"
 import {
   sessionError,

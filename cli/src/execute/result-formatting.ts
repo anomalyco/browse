@@ -1,6 +1,6 @@
 import util from "node:util"
 import { Predicate } from "effect"
-import type { ExecuteMedia } from "../relay-schema.ts"
+import type { ExecuteMedia } from "../relay/schema.ts"
 
 /** The most text (and JSON value) an execute returns; an agent's context can't take more, and the relay copies it. */
 export const maxExecuteResultChars = 100_000

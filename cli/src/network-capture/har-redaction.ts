@@ -1,9 +1,9 @@
 import path from "node:path"
 import { Effect, Predicate } from "effect"
 import type { Response } from "patchright-core"
-import * as AuthProfile from "../auth-profile.ts"
+import * as AuthProfile from "../auth/profile.ts"
 import { writeJsonFileAtomically } from "../fs-durability.ts"
-import { looksLikeTokenSegment, SecretCollector } from "../network-redaction.ts"
+import { looksLikeTokenSegment, SecretCollector } from "./redaction.ts"
 import {
   NetworkCaptureError,
   type ActiveCapture,

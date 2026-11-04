@@ -1,7 +1,7 @@
 import http from "node:http"
 import { Effect } from "effect"
-import { pairingScheme } from "./browser-pairing.ts"
-import type { FlightRecorderRelay } from "./flight-recorder.ts"
+import { pairingScheme } from "./relay/browser-pairing.ts"
+import type { FlightRecorderRelay } from "./recording-relay/flight-recorder.ts"
 import { decodeRequest, hasRelayToken, runRequestEffect, targetSummaries } from "./http-api/errors.ts"
 import { handleFlightRecorderRequest, handleRecordingRequest } from "./http-api/recording-routes.ts"
 import { handleAuthRequest, handleCliRequest, handleClientRequest, handleNetworkRequest } from "./http-api/session-routes.ts"
@@ -15,12 +15,12 @@ import {
   sendJson,
   validateBrowserFetchSite,
   validateHostHeader,
-} from "./relay-helpers.ts"
-import { RelayShutdownRequest, type ExtensionStatus } from "./relay-schema.ts"
-import { relayTokenQueryParam } from "./relay-secrets.ts"
-import type { RelayShutdown } from "./relay-shutdown.ts"
+} from "./relay/helpers.ts"
+import { RelayShutdownRequest, type ExtensionStatus } from "./relay/schema.ts"
+import { relayTokenQueryParam } from "./relay/secrets.ts"
+import type { RelayShutdown } from "./relay/shutdown.ts"
 import type { OpenCodeBrowserSessions } from "./session-manager.ts"
-import type { TargetRegistry } from "./target-registry.ts"
+import type { TargetRegistry } from "./cdp/target-registry.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "./version.ts"
 
 export { hasRelayToken } from "./http-api/errors.ts"

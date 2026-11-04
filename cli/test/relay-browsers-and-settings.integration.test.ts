@@ -4,8 +4,8 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import WebSocket from "ws"
-import { revokeBrowserToken } from "../src/browser-pairing.ts"
-import { stableUnpackedExtensionOrigin } from "../src/relay-helpers.ts"
+import { revokeBrowserToken } from "../src/relay/browser-pairing.ts"
+import { stableUnpackedExtensionOrigin } from "../src/relay/helpers.ts"
 import {
   cdpCall,
   collect,

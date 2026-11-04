@@ -4,10 +4,10 @@ import { once } from "node:events"
 import fs from "node:fs/promises"
 import { performance } from "node:perf_hooks"
 import { Predicate } from "effect"
-import { terminateChildProcess } from "../child-process.ts"
-import { mjpegMatroskaFrame, mjpegMatroskaHeader } from "../mjpeg-matroska.ts"
+import { terminateChildProcess } from "../update/child-process.ts"
+import { mjpegMatroskaFrame, mjpegMatroskaHeader } from "./mjpeg-matroska.ts"
 import type { JsonObject } from "../protocol.ts"
-import { getObject, getString } from "../relay-helpers.ts"
+import { getObject, getString } from "../relay/helpers.ts"
 import {
   fallbackCdpHeight,
   fallbackCdpWidth,

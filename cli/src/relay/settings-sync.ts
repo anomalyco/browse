@@ -1,13 +1,13 @@
 import { Effect } from "effect"
-import { autoUpdateModes, autoUpdateOverride, autoUpdateStatus, setStoredMode, storedMode, type AutoUpdateMode } from "../auto-update.ts"
-import type { BrowserLink, BrowserLinks } from "../browser-links.ts"
-import type { ExtensionRpc } from "../extension-rpc.ts"
+import { autoUpdateModes, autoUpdateOverride, autoUpdateStatus, setStoredMode, storedMode, type AutoUpdateMode } from "../update/auto-update.ts"
+import type { BrowserLink, BrowserLinks } from "./browser-links.ts"
+import type { ExtensionRpc } from "./rpc.ts"
 import type { GhostCursorTabs } from "../ghost-cursor.ts"
-import { humanInputEnabled, humanInputOverride } from "../human-input.ts"
+import { humanInputEnabled, humanInputOverride } from "../execute/human-input.ts"
 import { installCommand } from "../paths.ts"
 import type { JsonObject } from "../protocol.ts"
-import { HttpRouteError } from "../relay-helpers.ts"
-import { relayLog } from "../relay-log.ts"
+import { HttpRouteError } from "./helpers.ts"
+import { relayLog } from "./log.ts"
 import {
   describeChanges,
   describeSettings,
@@ -17,7 +17,7 @@ import {
   settingsToExtension,
   type SettingOverrides,
   type Settings,
-} from "../user-settings.ts"
+} from "./user-settings.ts"
 import type { ExtensionHandshake } from "./extension-handshake.ts"
 
 type ExtensionCommandInput = Parameters<ExtensionRpc["send"]>[0]

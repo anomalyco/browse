@@ -11,9 +11,9 @@ import {
   mintPairingCode,
   readBrowserPairings,
   revokeBrowserToken,
-} from "../src/browser-pairing.ts"
+} from "../src/relay/browser-pairing.ts"
 import { checkoutReloadPrefix, extensionProtocolVersion, unpackedReloadAdvice } from "../src/protocol.ts"
-import { dataUrlDocument, stableUnpackedExtensionOrigin } from "../src/relay-helpers.ts"
+import { dataUrlDocument, stableUnpackedExtensionOrigin } from "../src/relay/helpers.ts"
 import { isBenignClosedSessionRejection } from "../src/relay.ts"
 import {
   cdpCall,

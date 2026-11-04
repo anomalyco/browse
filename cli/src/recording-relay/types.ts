@@ -2,8 +2,8 @@ import type fs from "node:fs/promises"
 import path from "node:path"
 import { Option, Predicate, Schema } from "effect"
 import type { JsonObject } from "../protocol.ts"
-import type { RecordingCancelResponse, RecordingQuality, RecordingStatusResponse, RecordingTargetRequest } from "../relay-schema.ts"
-import type { ConnectedTarget } from "../relay-types.ts"
+import type { RecordingCancelResponse, RecordingQuality, RecordingStatusResponse, RecordingTargetRequest } from "../relay/schema.ts"
+import type { ConnectedTarget } from "../relay/types.ts"
 
 export const defaultMaxDurationMs = 15 * 60 * 1_000
 export const defaultCdpFrameRate = 60

@@ -1,7 +1,7 @@
 import { Schema } from "effect"
 import type { Request, Response } from "patchright-core"
-import type * as AuthProfile from "../auth-profile.ts"
-import type { SecretCollector } from "../network-redaction.ts"
+import type * as AuthProfile from "../auth/profile.ts"
+import type { SecretCollector } from "./redaction.ts"
 
 export type NetworkCaptureOptions = {
   readonly urlFilter?: string

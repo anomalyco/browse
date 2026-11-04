@@ -12,7 +12,7 @@
 import { execFile, spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs"
 import path from "node:path"
-import { autoUpdateStatus, compareVersions, npmRuntime } from "./auto-update.ts"
+import { autoUpdateStatus, compareVersions, npmRuntime } from "./update/auto-update.ts"
 import { checkoutRoot, cliCommand, dataRoot } from "./paths.ts"
 import { unpackedReloadAdvice } from "./protocol.ts"
 
@@ -428,7 +428,7 @@ export function runUpdate(args: readonly string[], deps: UpdateDeps): number {
 /** `opencode-browser update [--check]`. */
 export async function runUpdateCommand(args: readonly string[]) {
   const log = (line: string) => process.stdout.write(line + "\n")
-  const { runNpmUpdate } = await import("./runtime-update.ts")
+  const { runNpmUpdate } = await import("./update/runtime-update.ts")
   if (await runNpmUpdate(args)) return
   if (args.includes("--check")) {
     const repo = checkoutRoot()

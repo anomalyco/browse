@@ -12,8 +12,8 @@ import type {
   OffscreenStopRecordingResult,
 } from "../../agent-relay/recording-types"
 import type { AgentRelayUpdate, RelayAutoUpdate, RelayOverrides } from "../../shared/protocol"
-import { AgentGroups } from "../agent-groups"
-import { AgentWindow } from "../agent-window"
+import { AgentGroups } from "./groups"
+import { AgentWindow } from "./window"
 import { DebuggerHub } from "../debugger-hub"
 import { HandoffNotice } from "../handoff-notice"
 import { PageScripts } from "../page-scripts"

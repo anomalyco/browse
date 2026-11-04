@@ -1,7 +1,7 @@
 import { Console, Effect, Option } from "effect"
 import { Argument, Command, Flag } from "effect/cli"
 import path from "node:path"
-import * as RelayClient from "../relay-client.ts"
+import * as RelayClient from "../relay/client.ts"
 import {
   emitJson,
   ensureCliRelay,

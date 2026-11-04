@@ -1,7 +1,7 @@
 import path from "node:path"
 import { Effect, Semaphore } from "effect"
 import type { Page, Request, Response } from "patchright-core"
-import * as AuthProfile from "./auth-profile.ts"
+import * as AuthProfile from "./auth/profile.ts"
 import {
   bodyCanFit,
   bodyWithTimeout,
@@ -32,7 +32,7 @@ import {
   type NetworkCaptureStopOptions,
   type PendingEntry,
 } from "./network-capture/types.ts"
-import { SecretCollector } from "./network-redaction.ts"
+import { SecretCollector } from "./network-capture/redaction.ts"
 
 export {
   defaultNetworkCaptureMaxDurationMs,

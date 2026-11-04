@@ -1,8 +1,8 @@
 import { Effect } from "effect"
 import path from "node:path"
-import * as Deadbolt from "../deadbolt.ts"
-import * as RelayLifecycle from "../relay-lifecycle.ts"
-import * as SiteSecrets from "../site-secrets.ts"
+import * as Deadbolt from "../auth/deadbolt.ts"
+import * as RelayLifecycle from "../relay/lifecycle.ts"
+import * as SiteSecrets from "../auth/site-secrets.ts"
 import { registerMcpTools } from "./registry.ts"
 import {
   objectSchema,

@@ -1,8 +1,8 @@
 import { Console, Effect, Option } from "effect"
 import { Argument, Command, Flag } from "effect/cli"
-import * as RelayClient from "../relay-client.ts"
-import { defaultJournalBaseDir, formatJournalEntry, readJournalEntries } from "../session-journal.ts"
-import * as SessionStore from "../session-store.ts"
+import * as RelayClient from "../relay/client.ts"
+import { defaultJournalBaseDir, formatJournalEntry, readJournalEntries } from "../session-manager/journal.ts"
+import * as SessionStore from "../session-manager/store.ts"
 import {
   emitJson,
   ensureCliRelay,

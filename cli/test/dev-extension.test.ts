@@ -4,7 +4,7 @@ import { createHash } from "node:crypto"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { installedDevExtension, syncDevExtension, unzip } from "../src/dev-extension.ts"
+import { installedDevExtension, syncDevExtension, unzip } from "../src/setup/dev-extension.ts"
 import { devExtensionFolder, devExtensionUrl, type DevExtension } from "../src/paths.ts"
 
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "browse-dev-extension-"))

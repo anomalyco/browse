@@ -5,7 +5,7 @@ import { CliError, Command } from "effect/cli"
 import path from "node:path"
 import process from "node:process"
 import { fileURLToPath, pathToFileURL } from "node:url"
-import { ExitCode, failure } from "./cli-output.ts"
+import { ExitCode, failure } from "./cli/output.ts"
 import "./cli/browser.ts"
 import {
   agentDefaultSessionId,
@@ -26,8 +26,8 @@ import { buildRegisteredCliCommands } from "./cli/registry.ts"
 import "./cli/relay.ts"
 import "./cli/secrets.ts"
 import "./cli/session.ts"
-import * as RelayClient from "./relay-client.ts"
-import * as SessionStore from "./session-store.ts"
+import * as RelayClient from "./relay/client.ts"
+import * as SessionStore from "./session-manager/store.ts"
 import { opencodeBrowserVersion } from "./version.ts"
 
 export {

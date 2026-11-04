@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs"
 import { networkInterfaces } from "node:os"
 import path from "node:path"
 import { createInterface } from "node:readline/promises"
-import { editAgentConfig } from "../agent-config.ts"
+import { editAgentConfig } from "./agent-config.ts"
 import {
   bundledPairingCodeTtlMs,
   formatPairingCode,
@@ -15,12 +15,12 @@ import {
   removeLegacyPairingCode,
   revokeBrowserToken,
   writeExtensionPairing,
-} from "../browser-pairing.ts"
-import { syncDevExtension } from "../dev-extension.ts"
+} from "../relay/browser-pairing.ts"
+import { syncDevExtension } from "./dev-extension.ts"
 import { cliCommand, devExtensionFolder, installCommand } from "../paths.ts"
 import { unpackedExtensionId } from "../protocol.ts"
-import { parseHostname, readRelayConfig, writeRelayConfig } from "../relay-config.ts"
-import { relayAuthorization } from "../relay-secrets.ts"
+import { parseHostname, readRelayConfig, writeRelayConfig } from "../relay/config.ts"
+import { relayAuthorization } from "../relay/secrets.ts"
 import { revealFolder } from "./browsers.ts"
 import {
   checkoutExtensionDirs,

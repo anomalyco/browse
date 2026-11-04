@@ -1,6 +1,6 @@
 import { Predicate } from "effect"
 import type { Locator, Page } from "patchright-core"
-import { ariaSnapshotWithoutTextControlValues } from "../aria-snapshot.ts"
+import { ariaSnapshotWithoutTextControlValues } from "./aria-snapshot.ts"
 
 export type AriaSnapshotTarget = Locator | string
 

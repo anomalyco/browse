@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { HandoffRegistry, resolveExactHandoffTarget, toolbarClickAction } from "../src/handoff.ts"
+import { HandoffRegistry, resolveExactHandoffTarget, toolbarClickAction } from "../src/session-manager/handoff.ts"
 
 const target = { tabId: 7, targetId: "T7", targetSessionId: "S7" }
 

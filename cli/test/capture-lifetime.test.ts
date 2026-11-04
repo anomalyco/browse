@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
 import type { Page } from "patchright-core"
 import { Recorder } from "../src/network-capture.ts"
-import { RelayShutdown, type RelayBusy } from "../src/relay-shutdown.ts"
+import { RelayShutdown, type RelayBusy } from "../src/relay/shutdown.ts"
 
 // A network capture nobody stopped used to keep `relay restart` (and so `update`) refusing forever. Captures now end
 // by themselves after a maximum duration, the refusal says what blocks the restart, and a forced restart ends it.

@@ -1,5 +1,5 @@
 import { isJsonObject } from "../../agent-relay/protocol"
-import { AgentGroups } from "../agent-groups"
+import { AgentGroups } from "./groups"
 import { TabCleanup } from "../tab-cleanup"
 import {
   autoNamed,

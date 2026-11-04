@@ -1,6 +1,6 @@
 import { Deferred, Effect, Fiber, Option } from "effect"
 import { hasExplicitTargetSelection, type ExecuteTargetSelection } from "../execute.ts"
-import type { OpenCodeBrowserSession } from "../relay-types.ts"
+import type { OpenCodeBrowserSession } from "../relay/types.ts"
 import type { SessionAdmission } from "./admission.ts"
 import {
   adoptionTipForUrl,

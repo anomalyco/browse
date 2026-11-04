@@ -1,7 +1,7 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 import type { JsonObject } from "../protocol.ts"
-import { getNumber, getObject, getString } from "../relay-helpers.ts"
+import { getNumber, getObject, getString } from "../relay/helpers.ts"
 import { prepareCdpScreencastViewport, startFfmpegVideoEncoder, startScreenshotFallback } from "./ffmpeg-encoder.ts"
 import {
   cdpArtifactType,

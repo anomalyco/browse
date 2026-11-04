@@ -3,9 +3,9 @@ import { existsSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import type { AgentName, AgentReceipt } from "../agent-config.ts"
-import { runtimeLayout } from "../auto-update.ts"
-import { formatPairingCode } from "../browser-pairing.ts"
+import type { AgentName, AgentReceipt } from "./agent-config.ts"
+import { runtimeLayout } from "../update/auto-update.ts"
+import { formatPairingCode } from "../relay/browser-pairing.ts"
 import { dataRoot, devExtension, devExtensionFolder, storeConfig, storeUrl } from "../paths.ts"
 
 /**

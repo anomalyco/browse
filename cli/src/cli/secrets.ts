@@ -2,9 +2,9 @@ import { Console, Effect, Option } from "effect"
 import { Argument, Command, Flag } from "effect/cli"
 import path from "node:path"
 import process from "node:process"
-import * as Deadbolt from "../deadbolt.ts"
-import * as RelayClient from "../relay-client.ts"
-import * as SiteSecrets from "../site-secrets.ts"
+import * as Deadbolt from "../auth/deadbolt.ts"
+import * as RelayClient from "../relay/client.ts"
+import * as SiteSecrets from "../auth/site-secrets.ts"
 import {
   decodeCliOperands,
   emitJson,

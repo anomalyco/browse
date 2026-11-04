@@ -15,7 +15,7 @@ import {
   sessionProof,
   wrapToken,
   type HandshakeTranscript,
-} from "../../cli/src/browser-pairing.ts"
+} from "../../cli/src/relay/browser-pairing.ts"
 // Its globals (paths.ts reads one), for this project's typecheck.
 import type {} from "../../cli/src/version.ts"
 import { checkoutReloadPrefix, unpackedExtensionId } from "../../cli/src/protocol.ts"

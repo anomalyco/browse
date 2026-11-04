@@ -1,15 +1,15 @@
 import http from "node:http"
 import { Effect, Predicate } from "effect"
-import type { FlightRecorderRelay } from "../flight-recorder.ts"
+import type { FlightRecorderRelay } from "../recording-relay/flight-recorder.ts"
 import { AmbiguousRecordingTargetError, type RecordingRelay, type RecordingStartOptions, type RecordingTargetOptions } from "../recording-relay.ts"
-import { HttpRouteError, readJsonBody, sendJson } from "../relay-helpers.ts"
+import { HttpRouteError, readJsonBody, sendJson } from "../relay/helpers.ts"
 import {
   FlightRecorderSaveRequest,
   FlightRecorderStartRequest,
   RecordingStartRequest,
   RecordingTargetRequest,
-} from "../relay-schema.ts"
-import type { TargetRegistry } from "../target-registry.ts"
+} from "../relay/schema.ts"
+import type { TargetRegistry } from "../cdp/target-registry.ts"
 import { decodeRequest, optionalInteger } from "./errors.ts"
 
 /**

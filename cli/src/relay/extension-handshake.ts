@@ -2,7 +2,7 @@ import crypto from "node:crypto"
 import fs from "node:fs"
 import type http from "node:http"
 import { WebSocket, type RawData } from "ws"
-import { computerName, type BrowserLink, type BrowserLinks } from "../browser-links.ts"
+import { computerName, type BrowserLink, type BrowserLinks } from "./browser-links.ts"
 import {
   browserToken,
   consumePairingCode,
@@ -20,9 +20,9 @@ import {
   touchBrowserPairing,
   wrapToken,
   type HandshakeTranscript,
-} from "../browser-pairing.ts"
-import { installedDevExtension } from "../dev-extension.ts"
-import type { ExtensionRpc } from "../extension-rpc.ts"
+} from "./browser-pairing.ts"
+import { installedDevExtension } from "../setup/dev-extension.ts"
+import type { ExtensionRpc } from "./rpc.ts"
 import { cliCommand, fromCheckout, installCommand, oldStoreMarker, storeUrl } from "../paths.ts"
 import {
   checkoutReloadPrefix,
@@ -34,14 +34,14 @@ import {
   parseJsonObject,
   type JsonObject,
 } from "../protocol.ts"
-import { decodeRecordingFrame, encodeRecordingFrame } from "../recording-protocol.ts"
-import { isLocalPeer } from "../relay-config.ts"
-import { getNumber, getObject, getString, headerValue, stableUnpackedExtensionOrigin } from "../relay-helpers.ts"
-import { relayLog } from "../relay-log.ts"
-import type { ExtensionStatus } from "../relay-schema.ts"
-import { secretsEqual } from "../relay-secrets.ts"
-import type { OpenCodeBrowserSession } from "../relay-types.ts"
-import type { TargetRegistry } from "../target-registry.ts"
+import { decodeRecordingFrame, encodeRecordingFrame } from "../recording-relay/protocol.ts"
+import { isLocalPeer } from "./config.ts"
+import { getNumber, getObject, getString, headerValue, stableUnpackedExtensionOrigin } from "./helpers.ts"
+import { relayLog } from "./log.ts"
+import type { ExtensionStatus } from "./schema.ts"
+import { secretsEqual } from "./secrets.ts"
+import type { OpenCodeBrowserSession } from "./types.ts"
+import type { TargetRegistry } from "../cdp/target-registry.ts"
 import { opencodeBrowserBuildId } from "../version.ts"
 import { rawDataToBuffer, relayProcessFaultSummary } from "./process-guard.ts"
 

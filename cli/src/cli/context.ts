@@ -1,12 +1,12 @@
 import { Config, Console, Effect, Option, Predicate } from "effect"
 import { Flag } from "effect/cli"
 import process from "node:process"
-import { ExitCode, printJson, takeJsonFlag } from "../cli-output.ts"
-import * as RelayClient from "../relay-client.ts"
-import { isValidSessionId } from "../relay-helpers.ts"
-import * as RelayLifecycle from "../relay-lifecycle.ts"
-import type { RecordingQuality } from "../relay-schema.ts"
-import * as SessionStore from "../session-store.ts"
+import { ExitCode, printJson, takeJsonFlag } from "./output.ts"
+import * as RelayClient from "../relay/client.ts"
+import { isValidSessionId } from "../relay/helpers.ts"
+import * as RelayLifecycle from "../relay/lifecycle.ts"
+import type { RecordingQuality } from "../relay/schema.ts"
+import * as SessionStore from "../session-manager/store.ts"
 
 export const sessionIdConfig = Config.option(Config.String("OPENCODE_BROWSER_SESSION"))
 export const agentSessionIdConfig = Config.option(Config.String("OPENCODE_SESSION_ID"))

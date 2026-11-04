@@ -12,9 +12,9 @@ import util from "node:util"
 import zlib from "node:zlib"
 import * as acorn from "acorn"
 import type { Browser, BrowserContext, ConsoleMessage, Frame, Locator, Page } from "patchright-core"
-import { classifyChallenge, probePageScript, probeSelectors, type ChallengeOutcome, type ChallengeProbe } from "../challenge-detection.ts"
-import type * as Deadbolt from "../deadbolt.ts"
-import type { DemonstrationResult } from "../demonstration.ts"
+import { classifyChallenge, probePageScript, probeSelectors, type ChallengeOutcome, type ChallengeProbe } from "./challenge-detection.ts"
+import type * as Deadbolt from "../auth/deadbolt.ts"
+import type { DemonstrationResult } from "./demonstration.ts"
 import { pageVisibleApiWarning, sandboxModules, type ExecuteFiles, type ExecuteRealm } from "../execute-realm.ts"
 import type {
   GhostCursorCalloutOptions,
@@ -24,11 +24,11 @@ import type {
   GhostCursorZoomOptions,
 } from "../ghost-cursor.ts"
 import type * as NetworkCapture from "../network-capture.ts"
-import { PageConsole } from "../page-console.ts"
-import type { ExecuteAftermath, ExecuteLogEntry, ExecuteLogSummary } from "../relay-schema.ts"
-import type { ScreenshotDiffOptions, ScreenshotDiffResult } from "../screenshot-diff.ts"
-import type * as SignIn from "../sign-in.ts"
-import type * as SiteSecrets from "../site-secrets.ts"
+import { PageConsole } from "./console.ts"
+import type { ExecuteAftermath, ExecuteLogEntry, ExecuteLogSummary } from "../relay/schema.ts"
+import type { ScreenshotDiffOptions, ScreenshotDiffResult } from "../snapshot/screenshot-diff.ts"
+import type * as SignIn from "../auth/sign-in.ts"
+import type * as SiteSecrets from "../auth/site-secrets.ts"
 import type {
   AriaSnapshotHelper,
   InputField,
@@ -38,7 +38,7 @@ import type {
   SnapshotHelper,
   SnapshotRefHelper,
 } from "../snapshot.ts"
-import type { WebMcpHelper } from "../webmcp.ts"
+import type { WebMcpHelper } from "./webmcp.ts"
 import { createExecuteLogCapture, createSandboxConsole } from "./log-capture.ts"
 import { delay, safePageUrl, timedOut, withTimeout } from "./page-recovery.ts"
 

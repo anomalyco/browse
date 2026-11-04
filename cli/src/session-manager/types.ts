@@ -1,10 +1,10 @@
 import { Deferred, Effect, Schema } from "effect"
 import { defaultPageClosedWarning, type ExecuteResult } from "../execute.ts"
 import { cliCommand } from "../paths.ts"
-import type { AuthenticatedJsonOutcome, AuthenticatedJsonRequest } from "../relay-schema.ts"
-import type { ConnectedTarget, OpenCodeBrowserSession, SessionSummary, SessionTarget } from "../relay-types.ts"
-import type { PersistedSession } from "../session-catalog.ts"
-import type { TargetOwnershipChange } from "../target-registry.ts"
+import type { AuthenticatedJsonOutcome, AuthenticatedJsonRequest } from "../relay/schema.ts"
+import type { ConnectedTarget, OpenCodeBrowserSession, SessionSummary, SessionTarget } from "../relay/types.ts"
+import type { PersistedSession } from "./catalog.ts"
+import type { TargetOwnershipChange } from "../cdp/target-registry.ts"
 
 export type { AuthenticatedJsonOutcome, AuthenticatedJsonRequest }
 

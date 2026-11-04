@@ -1,7 +1,7 @@
 import { Effect, Predicate } from "effect"
 import type { Frame, Locator, Page } from "patchright-core"
 import { runPlaywrightOperation } from "./execute.ts"
-import { runtimeFailureKind } from "./runtime-diagnostics.ts"
+import { runtimeFailureKind } from "./update/runtime-diagnostics.ts"
 import { browserCapture, type captureSnapshotInBrowser } from "./snapshot/browser-capture.ts"
 import {
   diffSnapshotEntries,

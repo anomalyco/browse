@@ -4,10 +4,10 @@ import net from "node:net"
 import path from "node:path"
 import WebSocket from "ws"
 import * as ExtensionPairing from "../../src/background/pairing.ts"
-import { browserToken, issueBrowserToken, legacyPairingProof, pairingProof } from "../src/browser-pairing.ts"
+import { browserToken, issueBrowserToken, legacyPairingProof, pairingProof } from "../src/relay/browser-pairing.ts"
 import { extensionProtocolVersion } from "../src/protocol.ts"
-import { stableUnpackedExtensionOrigin } from "../src/relay-helpers.ts"
-import { relayToken } from "../src/relay-secrets.ts"
+import { stableUnpackedExtensionOrigin } from "../src/relay/helpers.ts"
+import { relayToken } from "../src/relay/secrets.ts"
 
 export type Command = { readonly id: number; readonly method: string; readonly params?: Record<string, unknown> }
 

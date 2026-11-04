@@ -1,5 +1,5 @@
 import type { JsonObject } from "../../agent-relay/protocol"
-import { AgentWindow } from "../agent-window"
+import { AgentWindow } from "./window"
 import { TabCleanup } from "../tab-cleanup"
 import { text, type AgentRelayLog } from "./wire"
 

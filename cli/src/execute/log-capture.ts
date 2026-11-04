@@ -1,6 +1,6 @@
 import util from "node:util"
 import { Predicate } from "effect"
-import type { ExecuteAftermath, ExecuteLogEntry, ExecuteLogSummary } from "../relay-schema.ts"
+import type { ExecuteAftermath, ExecuteLogEntry, ExecuteLogSummary } from "../relay/schema.ts"
 
 const maxCapturedPageLogs = 50
 const maxCapturedScriptLogs = 100

@@ -1,6 +1,6 @@
 import type { Effect } from "effect"
 import type { JsonObject } from "../protocol.ts"
-import type * as RelayClient from "../relay-client.ts"
+import type * as RelayClient from "../relay/client.ts"
 import type { UpdateNotice } from "../update.ts"
 import { browsersNote, optionalStringField, type BrowserSummary, type CurrentSession } from "./schema.ts"
 

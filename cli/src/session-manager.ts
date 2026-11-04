@@ -1,10 +1,10 @@
 import { Deferred, Effect, Option, Semaphore } from "effect"
 import { ExecuteSandbox, type ExecuteTargetSelection } from "./execute.ts"
 import type { NetworkCaptureOptions, NetworkCaptureResult, NetworkCaptureStatus, NetworkCaptureStopOptions } from "./network-capture.ts"
-import { generateSessionId } from "./relay-helpers.ts"
-import type { AuthenticatedJsonOutcome, AuthenticatedJsonRequest } from "./relay-schema.ts"
-import type { ConnectedTarget, ExecuteSandboxLike, OpenCodeBrowserSession, SessionSummary, SessionTarget } from "./relay-types.ts"
-import type { PersistedSession } from "./session-catalog.ts"
+import { generateSessionId } from "./relay/helpers.ts"
+import type { AuthenticatedJsonOutcome, AuthenticatedJsonRequest } from "./relay/schema.ts"
+import type { ConnectedTarget, ExecuteSandboxLike, OpenCodeBrowserSession, SessionSummary, SessionTarget } from "./relay/types.ts"
+import type { PersistedSession } from "./session-manager/catalog.ts"
 import { SessionAdmission } from "./session-manager/admission.ts"
 import { adoptTargetForSession, closeSessionSettledWithTimeout, sessionRelayTargetIds, type AdoptionContext } from "./session-manager/adoption.ts"
 import { executeInSession, type ExecutionContext } from "./session-manager/execution.ts"
@@ -28,7 +28,7 @@ import {
   MemoryTargetOwnership,
   type TargetOwnership,
   type TargetOwnershipChange,
-} from "./target-registry.ts"
+} from "./cdp/target-registry.ts"
 
 export {
   adoptionTipForUrl,

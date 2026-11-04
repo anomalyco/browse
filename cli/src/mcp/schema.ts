@@ -1,9 +1,9 @@
 import { Effect, Predicate } from "effect"
 import { McpSchema } from "effect/ai"
 import type { JsonObject } from "../protocol.ts"
-import * as RelayClient from "../relay-client.ts"
-import { getObject, getString, parseTargetSelection } from "../relay-helpers.ts"
-import type { ConnectedBrowser, TargetSelection } from "../relay-schema.ts"
+import * as RelayClient from "../relay/client.ts"
+import { getObject, getString, parseTargetSelection } from "../relay/helpers.ts"
+import type { ConnectedBrowser, TargetSelection } from "../relay/schema.ts"
 import type { UpdateNotice } from "../update.ts"
 
 export type CurrentSession = { id: string; established: boolean }

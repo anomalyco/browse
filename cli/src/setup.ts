@@ -20,10 +20,10 @@ import {
   callingAgent,
   editAgentConfig,
   type AgentReceipt,
-} from "./agent-config.ts"
-import { agentFlags, agentPlan, pickAgents } from "./agent-picker.ts"
-import { autoUpdateStatus, describeAutoUpdate } from "./auto-update.ts"
-import { mintPairingCode, pairingCodeKey, pendingPairingCodeKeys } from "./browser-pairing.ts"
+} from "./setup/agent-config.ts"
+import { agentFlags, agentPlan, pickAgents } from "./setup/agent-picker.ts"
+import { autoUpdateStatus, describeAutoUpdate } from "./update/auto-update.ts"
+import { mintPairingCode, pairingCodeKey, pendingPairingCodeKeys } from "./relay/browser-pairing.ts"
 import { cliCommand, installCommand, oldStoreMarker } from "./paths.ts"
 import {
   extensionProtocolAdvice,
@@ -384,7 +384,7 @@ export async function runSetup(command: string, args: string[]) {
   if (command === "pair") return pair(args)
   if (command === "set") return set(args)
   if (command === "rollback") {
-    const { runRollback } = await import("./runtime-update.ts")
+    const { runRollback } = await import("./update/runtime-update.ts")
     return runRollback(args)
   }
 }

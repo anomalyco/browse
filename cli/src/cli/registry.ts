@@ -1,6 +1,6 @@
 import type { Command } from "effect/cli"
-import type * as RelayClient from "../relay-client.ts"
-import type * as SessionStore from "../session-store.ts"
+import type * as RelayClient from "../relay/client.ts"
+import type * as SessionStore from "../session-manager/store.ts"
 
 export type CliServices = RelayClient.Service | SessionStore.Service | Command.Environment
 

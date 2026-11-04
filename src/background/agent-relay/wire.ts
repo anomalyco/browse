@@ -1,6 +1,6 @@
 import { defaultRelayPort, isJsonObject, type JsonObject } from "../../agent-relay/protocol"
 import { autoUpdateMode, BROWSER_NAME_KEY, type RelayAutoUpdate } from "../../shared/protocol"
-import type { createAgentRelayLog } from "../agent-relay-log"
+import type { createAgentRelayLog } from "./log"
 import type { ecdhKeyPair, PairingCode } from "../pairing"
 
 export type AgentRelayLog = ReturnType<typeof createAgentRelayLog>

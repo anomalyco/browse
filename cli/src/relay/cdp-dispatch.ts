@@ -1,28 +1,28 @@
 import { Effect } from "effect"
 import { WebSocket } from "ws"
-import type { BrowserLinks } from "../browser-links.ts"
-import type { CdpClientPool } from "../cdp-client-pool.ts"
-import { guardCdpMethod, scopeCdpResult } from "../cdp-guardrails.ts"
-import type { CdpRouter } from "../cdp-router.ts"
-import type { CdpRuntime } from "../cdp-runtime.ts"
+import type { BrowserLinks } from "./browser-links.ts"
+import type { CdpClientPool } from "../cdp/client-pool.ts"
+import { guardCdpMethod, scopeCdpResult } from "../cdp/guardrails.ts"
+import type { CdpRouter } from "../cdp/router.ts"
+import type { CdpRuntime } from "../cdp/runtime.ts"
 import {
   removeDefaultLightColorSchemeEmulation,
   replayChildFrameNavigation,
   replayChildTargetsForParent,
   replayTargetCreated,
-} from "../cdp-shims.ts"
+} from "../cdp/shims.ts"
 import { ghostCursorCommandMethod, type GhostCursorTabs } from "../ghost-cursor.ts"
-import { beforeInput } from "../human-input.ts"
+import { beforeInput } from "../execute/human-input.ts"
 import { isCdpRequest, parseJsonObject, type CdpRequest, type JsonObject } from "../protocol.ts"
-import { dataUrlDocument, getIdText, getNumber, getObject, getString, sendCdpResponse } from "../relay-helpers.ts"
-import { relayLog } from "../relay-log.ts"
-import type { RelayShutdown } from "../relay-shutdown.ts"
-import type { ChildTarget, ConnectedTarget } from "../relay-types.ts"
-import { boundedToken, runtimeFailureKind, summarizeRuntimeEvaluate } from "../runtime-diagnostics.ts"
+import { dataUrlDocument, getIdText, getNumber, getObject, getString, sendCdpResponse } from "./helpers.ts"
+import { relayLog } from "./log.ts"
+import type { RelayShutdown } from "./shutdown.ts"
+import type { ChildTarget, ConnectedTarget } from "./types.ts"
+import { boundedToken, runtimeFailureKind, summarizeRuntimeEvaluate } from "../update/runtime-diagnostics.ts"
 import type { OpenCodeBrowserSessions } from "../session-manager.ts"
-import type { SessionNavigationGuard } from "../session-navigation-guard.ts"
-import type { TabActivity } from "../tab-activity.ts"
-import type { TargetRegistry } from "../target-registry.ts"
+import type { SessionNavigationGuard } from "../session-manager/navigation-guard.ts"
+import type { TabActivity } from "../cdp/tab-activity.ts"
+import type { TargetRegistry } from "../cdp/target-registry.ts"
 import { targetDiagnosticIdentity } from "./process-guard.ts"
 
 export function createCdpDispatcher(options: {

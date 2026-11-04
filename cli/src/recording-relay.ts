@@ -3,7 +3,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { performance } from "node:perf_hooks"
 import type { ExtensionCommand, JsonObject } from "./protocol.ts"
-import { decodeRecordingFrame } from "./recording-protocol.ts"
+import { decodeRecordingFrame } from "./recording-relay/protocol.ts"
 import {
   cancelCdpRecording,
   handleCdpScreencastFrame,
@@ -40,7 +40,7 @@ import {
   type StartVideoEncoder,
   type TabCaptureRecording,
 } from "./recording-relay/types.ts"
-import { getNumber, getObject } from "./relay-helpers.ts"
+import { getNumber, getObject } from "./relay/helpers.ts"
 
 export {
   prepareCdpScreencastViewport,

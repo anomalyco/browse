@@ -24,8 +24,8 @@ import {
   type BrowserSummary,
   type CurrentSession,
 } from "./mcp/schema.ts"
-import * as RelayClient from "./relay-client.ts"
-import * as RelayLifecycle from "./relay-lifecycle.ts"
+import * as RelayClient from "./relay/client.ts"
+import * as RelayLifecycle from "./relay/lifecycle.ts"
 import { createUpdateWatcher } from "./update.ts"
 import { opencodeBrowserVersion } from "./version.ts"
 

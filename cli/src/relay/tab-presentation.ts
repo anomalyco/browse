@@ -1,7 +1,7 @@
 import { Effect } from "effect"
-import type { BrowserLink, BrowserLinks } from "../browser-links.ts"
+import type { BrowserLink, BrowserLinks } from "./browser-links.ts"
 import type { HandoffPageTarget } from "../execute.ts"
-import type { ExtensionRpc } from "../extension-rpc.ts"
+import type { ExtensionRpc } from "./rpc.ts"
 import {
   awaitHandoffAction,
   resolveExactHandoffTarget,
@@ -9,15 +9,15 @@ import {
   type HandoffCancellationReason,
   type HandoffOutcome,
   type HandoffRegistry,
-} from "../handoff.ts"
-import type { PasskeyBridge } from "../passkey-bridge.ts"
+} from "../session-manager/handoff.ts"
+import type { PasskeyBridge } from "../auth/passkey-bridge.ts"
 import { makePageStatus, type JsonObject, type PageStatus } from "../protocol.ts"
-import { relayLog } from "../relay-log.ts"
-import type { ConnectedTarget } from "../relay-types.ts"
-import { summarizeDiagnosticUrl } from "../runtime-diagnostics.ts"
+import { relayLog } from "./log.ts"
+import type { ConnectedTarget } from "./types.ts"
+import { summarizeDiagnosticUrl } from "../update/runtime-diagnostics.ts"
 import type { OpenCodeBrowserSessions } from "../session-manager.ts"
-import type { TabActivity } from "../tab-activity.ts"
-import type { TargetRegistry } from "../target-registry.ts"
+import type { TabActivity } from "../cdp/tab-activity.ts"
+import type { TargetRegistry } from "../cdp/target-registry.ts"
 import { targetDiagnosticIdentity } from "./process-guard.ts"
 
 type ExtensionCommandInput = Parameters<ExtensionRpc["send"]>[0]

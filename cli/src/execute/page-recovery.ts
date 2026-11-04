@@ -1,8 +1,8 @@
 import { Effect, Schema } from "effect"
 import type { BrowserContext, Page } from "patchright-core"
-import type { HandoffOutcome } from "../handoff.ts"
+import type { HandoffOutcome } from "../session-manager/handoff.ts"
 import { cliCommand } from "../paths.ts"
-import { runtimeFailureKind } from "../runtime-diagnostics.ts"
+import { runtimeFailureKind } from "../update/runtime-diagnostics.ts"
 
 export const playwrightCloseTimeoutMs = 2_000
 export const playwrightConnectTimeoutMs = 15_000

@@ -1,4 +1,4 @@
-import * as AuthProfile from "./auth-profile.ts"
+import * as AuthProfile from "./auth/profile.ts"
 
 export type Summary = AuthProfile.AuthProfileSummary
 export type RunResult = AuthProfile.AuthRunResult

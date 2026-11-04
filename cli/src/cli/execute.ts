@@ -1,9 +1,9 @@
 import { Console, Effect, FileSystem, Option, Predicate, Result, Schema } from "effect"
 import { Argument, Command, Flag } from "effect/cli"
 import path from "node:path"
-import { ExitCode } from "../cli-output.ts"
-import * as RelayClient from "../relay-client.ts"
-import type { ExecuteAftermath, ExecuteLogEntry, ExecuteResponse } from "../relay-schema.ts"
+import { ExitCode } from "./output.ts"
+import * as RelayClient from "../relay/client.ts"
+import type { ExecuteAftermath, ExecuteLogEntry, ExecuteResponse } from "../relay/schema.ts"
 import {
   agentDefaultSessionId,
   agentSessionIdConfig,

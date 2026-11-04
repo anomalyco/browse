@@ -27,8 +27,8 @@ import {
   type RelayOverrides,
   type RelaySettings,
 } from "../shared/protocol"
-import { createAgentRelayLog, formatAgentRelayLog } from "./agent-relay-log"
-import { AgentGroups } from "./agent-groups"
+import { createAgentRelayLog, formatAgentRelayLog } from "./agent-relay/log"
+import { AgentGroups } from "./agent-relay/groups"
 import { createRelayCommands } from "./agent-relay/commands"
 import { createRelayDebugger } from "./agent-relay/debugger"
 import { createRelayGrouping } from "./agent-relay/grouping"

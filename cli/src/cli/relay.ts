@@ -1,8 +1,8 @@
 import { Console, Effect } from "effect"
 import { Command, Flag } from "effect/cli"
 import { cliCommand } from "../paths.ts"
-import * as RelayClient from "../relay-client.ts"
-import * as RelayLifecycle from "../relay-lifecycle.ts"
+import * as RelayClient from "../relay/client.ts"
+import * as RelayLifecycle from "../relay/lifecycle.ts"
 import { registerCliCommand } from "./registry.ts"
 
 const serve = Command.make(
@@ -10,7 +10,7 @@ const serve = Command.make(
   {},
   Effect.fn("Cli.serve")(function* () {
     const [{ startRelay }, { parseAdditionalExtensionOrigins }] = yield* Effect.promise(() =>
-      Promise.all([import("../relay.ts"), import("../relay-helpers.ts")]),
+      Promise.all([import("../relay.ts"), import("../relay/helpers.ts")]),
     )
     const port = yield* RelayClient.portConfig
     const additionalExtensionOrigins = parseAdditionalExtensionOrigins(yield* RelayClient.extensionOriginsConfig)
