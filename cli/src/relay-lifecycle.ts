@@ -374,7 +374,7 @@ export function managedRelayLaunch(
 
 export function managedRelayEntrypoint(entrypoint: string): string {
   const name = path.basename(entrypoint)
-  if (name === "mcp-main.ts" || name === "index.ts" || name === "opencode-browser-client.ts" || name === "cli.ts")
+  if (name === "index.ts" || name === "opencode-browser-client.ts" || name === "cli.ts")
     return path.join(path.dirname(entrypoint), "main.ts")
   return entrypoint
 }

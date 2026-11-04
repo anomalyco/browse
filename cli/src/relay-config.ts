@@ -5,6 +5,7 @@
 //             WebSocket, where pairing applies; agents, the CLI and CDP clients use 127.0.0.1 either way.
 import fs from "node:fs"
 import path from "node:path"
+import { writePrivateJsonFileSync } from "./fs-durability.ts"
 import { dataRoot } from "./paths.ts"
 
 export const hostnames = ["127.0.0.1", "0.0.0.0"] as const
@@ -32,11 +33,7 @@ export function readRelayConfig(root = dataRoot()): RelayConfig {
 }
 
 export function writeRelayConfig(config: RelayConfig, root = dataRoot()) {
-  fs.mkdirSync(root, { recursive: true, mode: 0o700 })
-  const file = relayConfigPath(root)
-  const temporary = `${file}.${process.pid}.tmp`
-  fs.writeFileSync(temporary, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 })
-  fs.renameSync(temporary, file)
+  writePrivateJsonFileSync(relayConfigPath(root), config, { ensureParent: true })
 }
 
 /** Where the relay listens. */

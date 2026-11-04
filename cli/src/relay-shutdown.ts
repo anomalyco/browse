@@ -50,13 +50,20 @@ export class RelayShutdown {
     return State.$is("Stopping")(this.state) || State.$is("Closing")(this.state)
   }
 
+  private drainAndSettle(): Effect.Effect<void, Error> {
+    const control = this
+    return Effect.gen(function* () {
+      yield* Effect.all([control.options.drain, control.idle.await], { concurrency: "unbounded" })
+      yield* control.idle.await
+      yield* control.options.settle
+    })
+  }
+
   close(): Effect.Effect<void, Error> {
     const control = this
     return Effect.gen(function* () {
       control.state = State.Closing()
-      yield* Effect.all([control.options.drain, control.idle.await], { concurrency: "unbounded" })
-      yield* control.idle.await
-      yield* control.options.settle
+      yield* control.drainAndSettle()
     })
   }
 
@@ -111,9 +118,7 @@ export class RelayShutdown {
         const drain = Effect.gen(function* () {
           const busy = control.options.busy()
           if (busy) return yield* control.busyError(busy)
-          yield* Effect.all([control.options.drain, control.idle.await], { concurrency: "unbounded" })
-          yield* control.idle.await
-          yield* control.options.settle
+          yield* control.drainAndSettle()
           const remaining = control.options.busy()
           if (remaining) return yield* control.busyError(remaining)
         })

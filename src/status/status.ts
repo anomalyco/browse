@@ -10,15 +10,16 @@ import {
   AGENT_GROUPING_KEY,
   AGENT_WINDOW_KEY,
   BROWSER_NAME_KEY,
-  DEFAULT_IDLE_MINUTES,
   HANDOFF_NOTIFICATIONS_KEY,
   HUMAN_INPUT_KEY,
   IDLE_MINUTES_KEY,
   STATUS_PORT,
   agentCursor,
   agentGrouping,
+  agentWindowPlacement,
   handoffNotifications,
   humanInput,
+  idleMinutesSetting,
   type AgentRelayState,
   type FromStatusPage,
   type RelayOverrides,
@@ -227,6 +228,7 @@ type StepView = {
 }
 
 const INSTALL = "npx @opencode/browse install"
+const isUnpackedExtension = (unpacked: boolean | undefined) => Boolean(unpacked || chrome.runtime.id === unpackedExtensionId)
 
 function stepView(step: FirstRunStep): StepView {
   const here = (remote: string | undefined) => (remote ? `the relay at ${remote}` : "the relay on this computer")
@@ -298,7 +300,7 @@ function stepView(step: FirstRunStep): StepView {
         command: "npx @opencode/browse@latest install",
       }
     case "update-extension":
-      return step.unpacked || chrome.runtime.id === unpackedExtensionId
+      return isUnpackedExtension(step.unpacked)
         ? { title: "Update this extension", text: unpackedReloadAdvice, tone: "warn" }
         : {
             title: "Update this extension",
@@ -452,7 +454,7 @@ function describe(state: AgentRelayState) {
   if (state.status === "incompatible" && state.skew === "update-cli")
     return "This extension is newer than the browse CLI on this computer. Update the CLI: run `npx @opencode/browse@latest install` (with automatic updates on, it catches up by itself within a day), then click Reconnect."
   if (state.status === "incompatible" && state.skew === "update-extension")
-    return state.unpacked || chrome.runtime.id === unpackedExtensionId
+    return isUnpackedExtension(state.unpacked)
       ? unpackedReloadAdvice
       : "This extension is older than the browse CLI on this computer. Chrome updates it within a few hours; to update now, open chrome://extensions, turn on Developer mode and click Update."
   if (state.status === "incompatible")
@@ -494,15 +496,10 @@ function bindChoice(name: string, key: string, read: (stored: unknown) => string
     })
 }
 // Where agents open new tabs (agent-window.ts) and how they're grouped (agent-relay.ts), read when an agent opens one.
-bindChoice("agent-window", AGENT_WINDOW_KEY, (value) => (value === "separate" ? "separate" : "current"))
+bindChoice("agent-window", AGENT_WINDOW_KEY, agentWindowPlacement)
 bindChoice("agent-grouping", AGENT_GROUPING_KEY, agentGrouping)
 // Minutes before an untouched agent tab closes, 0 for never (tab-cleanup.ts).
-bindChoice(
-  "idle-minutes",
-  IDLE_MINUTES_KEY,
-  (value) => String(typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : DEFAULT_IDLE_MINUTES),
-  Number,
-)
+bindChoice("idle-minutes", IDLE_MINUTES_KEY, (value) => String(idleMinutesSetting(value)), Number)
 // Sent to the relay, which applies them from the next input.
 bindChoice("agent-cursor", AGENT_CURSOR_KEY, agentCursor)
 bindChoice("human-input", HUMAN_INPUT_KEY, humanInput)

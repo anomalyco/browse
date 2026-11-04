@@ -14,7 +14,7 @@ const invokedAs = path.basename(process.argv[1] ?? "")
 if (command === "--version" || command === "-v") {
   const opencodeBrowserVersion = embeddedVersion ?? (await import("./version.ts")).opencodeBrowserVersion
   process.stdout.write(`${opencodeBrowserVersion}\n`)
-} else if (invokedAs === "opencode-browser-mcp") {
+} else if (invokedAs === "opencode-browser-mcp" || (command === "mcp" && process.argv.length === 3)) {
   const { NodeRuntime } = await import("@effect/platform-node")
   const { runMcpServer } = await import("./mcp.ts")
   runMcpServer.pipe(NodeRuntime.runMain)

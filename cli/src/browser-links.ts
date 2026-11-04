@@ -12,6 +12,7 @@ import os from "node:os"
 import path from "node:path"
 import type { WebSocket } from "ws"
 import { ExtensionRpc } from "./extension-rpc.ts"
+import { writePrivateJsonFileSync } from "./fs-durability.ts"
 import { dataRoot } from "./paths.ts"
 import { isLocalPeer } from "./relay-config.ts"
 
@@ -59,7 +60,7 @@ export type BrowserLink = {
 type Known = Record<string, { readonly id: string; readonly name: string }>
 
 /** "Chrome on Dax's MacBook Pro" -> "chrome-daxs-macbook-pro". */
-export function browserSlug(name: string): string {
+function browserSlug(name: string): string {
   const slug = name.toLowerCase().replace(/['’]/g, "").replace(/\bon\b/g, " ").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
   return slug.slice(0, 40).replace(/-+$/, "") || "browser"
 }
@@ -74,7 +75,7 @@ export class BrowserLinks {
   private readonly fromRelay = new Map<number, { readonly key: string; readonly tabId: number }>()
   private known: Known | undefined
 
-  constructor(private readonly options: { readonly root?: string; readonly rpc?: () => ExtensionRpc } = {}) {}
+  constructor(private readonly options: { readonly root?: string } = {}) {}
 
   private get file() {
     return path.join(this.options.root ?? dataRoot(), "browsers.json")
@@ -102,8 +103,7 @@ export class BrowserLinks {
     for (let n = 2; taken.has(id); n++) id = `${base}-${n}`
     known[key] = { id, name }
     try {
-      fs.mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 })
-      fs.writeFileSync(this.file, `${JSON.stringify(known, null, 2)}\n`, { mode: 0o600 })
+      writePrivateJsonFileSync(this.file, known, { ensureParent: true })
     } catch {
       // The id still works for this relay's life.
     }
@@ -116,15 +116,12 @@ export class BrowserLinks {
    */
   connect(options: { readonly key: string; readonly name: string; readonly socket: WebSocket }): { readonly link: BrowserLink; readonly replaced?: BrowserLink } {
     const replaced = this.links.get(options.key)
-    if (replaced) {
-      this.disconnect(replaced.socket)
-      replaced.rpc.rejectPending(new Error("Extension replaced"))
-    }
+    if (replaced) this.disconnect(replaced.socket)
     const link: BrowserLink = {
       key: options.key,
       id: this.identify(options.key, options.name),
       name: options.name,
-      rpc: this.options.rpc?.() ?? new ExtensionRpc(),
+      rpc: new ExtensionRpc(),
       socket: options.socket,
       generation: ++this.generation,
       connectedAt: Date.now(),

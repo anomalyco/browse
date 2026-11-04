@@ -51,28 +51,20 @@ export type OffscreenMessage =
   | OffscreenCancelRecordingMessage
   | OffscreenCancelAllRecordingsMessage
 
-export type OffscreenStartRecordingResult =
-  | {
-    readonly success: true
-    readonly tabId: number
-    readonly startedAt: number
-    readonly mimeType: string
-  }
-  | {
-    readonly success: false
-    readonly error: string
-  }
+type OffscreenOutcome<T extends Record<string, unknown> = Record<never, never>> =
+  | ({ readonly success: true } & T)
+  | { readonly success: false; readonly error: string }
 
-export type OffscreenStopRecordingResult =
-  | {
-    readonly success: true
-    readonly tabId: number
-    readonly duration: number
-  }
-  | {
-    readonly success: false
-    readonly error: string
-  }
+export type OffscreenStartRecordingResult = OffscreenOutcome<{
+  readonly tabId: number
+  readonly startedAt: number
+  readonly mimeType: string
+}>
+
+export type OffscreenStopRecordingResult = OffscreenOutcome<{
+  readonly tabId: number
+  readonly duration: number
+}>
 
 export type OffscreenStatusRecordingResult = {
   readonly isRecording: boolean
@@ -80,19 +72,11 @@ export type OffscreenStatusRecordingResult = {
   readonly startedAt?: number
 }
 
-export type OffscreenCancelRecordingResult =
-  | {
-    readonly success: true
-    readonly tabId: number
-  }
-  | {
-    readonly success: false
-    readonly error: string
-  }
+export type OffscreenCancelRecordingResult = OffscreenOutcome<{
+  readonly tabId: number
+}>
 
-export type OffscreenCancelAllRecordingsResult =
-  | { readonly success: true }
-  | { readonly success: false; readonly error: string }
+export type OffscreenCancelAllRecordingsResult = OffscreenOutcome
 
 export type OffscreenResult =
   | OffscreenStartRecordingResult

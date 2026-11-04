@@ -336,7 +336,7 @@ describe("Node escape corpus", () => {
     const outcomes = runInNode([
       "const value=Buffer.from('x'); return [value.buffer.byteLength, value.length, new TextDecoder().decode(value.buffer).includes('REALM_FAKE_SECRET')]",
       "return [host.buffer.buffer.byteLength, host.buffer.length]",
-      "return [Buffer.allocUnsafe(64),Buffer.allocUnsafeSlow(64),host.modules.buffer.SlowBuffer(64)].every(value=>value.every(byte=>byte===0))",
+      "return [Buffer.allocUnsafe(64),Buffer.allocUnsafeSlow(64),...(typeof host.modules.buffer.SlowBuffer==='function'?[host.modules.buffer.SlowBuffer(64)]:[])].every(value=>value.every(byte=>byte===0))",
     ], playwrightShapes + "; const marker = Buffer.from('REALM_FAKE_SECRET'.repeat(10));")
     expect(values(outcomes)).toEqual([{ value: [1, 1, false] }, { value: [4, 4] }, { value: true }])
   })

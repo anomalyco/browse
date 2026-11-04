@@ -25,14 +25,14 @@
 import crypto from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
+import { writePrivateJsonFileSync } from "./fs-durability.ts"
 import { dataRoot } from "./paths.ts"
-import { ensurePrivateDirectory } from "./relay-secrets.ts"
 
 const legacyContext = "opencode-browser-pairing-v2"
 const context = "opencode-browser-pairing-v3"
 export { context as pairingScheme }
 const crockford = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-export const pairingCodeLength = 8
+const pairingCodeLength = 8
 /** PBKDF2 over the code: one key costs both sides a few milliseconds, every possible code a search that can't finish. */
 const codeKeyIterations = 100_000
 const codeKeySalt = `${context}|code`
@@ -46,7 +46,7 @@ export const maxPairingFailures = 5
 const maxPendingCodes = 5
 
 /** The pairing file inside an unpacked extension; fetched by the extension with chrome.runtime.getURL. */
-export const extensionPairingFileName = "relay-pairing.json"
+const extensionPairingFileName = "relay-pairing.json"
 
 export const pairingCodesPath = (root = dataRoot()) => path.join(root, "pairing-codes.json")
 export const browserTokensPath = (root = dataRoot()) => path.join(root, "browser-tokens.json")
@@ -90,7 +90,7 @@ function writePendingCodes(root: string, pending: PendingCodes): void {
     fs.rmSync(pairingCodesPath(root), { force: true })
     return
   }
-  writePrivateJson(pairingCodesPath(root), pending)
+  writePrivateJsonFileSync(pairingCodesPath(root), pending, { ensureParent: true })
 }
 
 /** A new single-use code; only its slow hash is stored. The oldest pending codes go past five. */
@@ -127,7 +127,7 @@ export function recordPairingFailure(root = dataRoot(), now = Date.now()): boole
 
 /** Writes a fresh code into an unpacked extension, which exchanges it once for its token. Never in a package or zip. */
 export function writeExtensionPairing(extensionDirectory: string, code: string): void {
-  writePrivateJson(path.join(extensionDirectory, extensionPairingFileName), { code })
+  writePrivateJsonFileSync(path.join(extensionDirectory, extensionPairingFileName), { code })
 }
 
 // ---- tokens ----------------------------------------------------------------------------------------------------
@@ -157,8 +157,7 @@ export function readBrowserPairings(root = dataRoot()): Record<string, BrowserPa
 }
 
 function writeBrowserPairings(root: string, pairings: Record<string, BrowserPairing>): void {
-  ensurePrivateDirectory(root)
-  writePrivateJson(browserTokensPath(root), pairings)
+  writePrivateJsonFileSync(browserTokensPath(root), pairings, { ensureParent: true })
 }
 
 export function browserToken(key: string, root = dataRoot()): string | undefined {
@@ -217,7 +216,7 @@ export function legacyPairingProof(code: string, role: "relay" | "extension", po
 // ---- the handshake ---------------------------------------------------------------------------------------------
 
 /** The relay link the proofs are bound to: a listener on another port can't pass the handshake through. */
-export function pairingEndpoint(port: number): string {
+function pairingEndpoint(port: number): string {
   return `127.0.0.1:${port}/extension`
 }
 
@@ -267,10 +266,4 @@ export function sessionProof(sessionKey: Buffer, role: "relay" | "extension"): s
 export function wrapToken(sessionKey: Buffer, token: string): string {
   const mask = crypto.createHmac("sha256", sessionKey).update(`${context}|wrap`).digest()
   return Buffer.from(Buffer.from(token, "base64url").map((byte, index) => byte ^ mask[index]!)).toString("base64url")
-}
-
-function writePrivateJson(file: string, value: unknown): void {
-  const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`
-  fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
-  fs.renameSync(temporary, file)
 }

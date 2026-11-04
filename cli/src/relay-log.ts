@@ -1,3 +1,4 @@
+import { ensurePrivateDirectorySync } from "./fs-durability.ts"
 import { dataRoot } from "./paths.ts"
 import fs from "node:fs"
 import os from "node:os"
@@ -13,9 +14,7 @@ export function managedRelayLogPath(home = os.homedir()): string {
 export function appendManagedRelayProcessLog(message: string, home = os.homedir()): void {
   try {
     const logPath = managedRelayLogPath(home)
-    const directory = path.dirname(logPath)
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
-    fs.chmodSync(directory, 0o700)
+    ensurePrivateDirectorySync(path.dirname(logPath))
     const entry = `${new Date().toISOString()} ${message.slice(0, maxEntryCharacters)}\n`
     const stat = fs.statSync(logPath, { throwIfNoEntry: false })
     // Keep the previous file instead of truncating, so a rotation never drops the lines before a failure.

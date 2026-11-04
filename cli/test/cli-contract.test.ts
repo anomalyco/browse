@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { execFile, spawnSync } from "node:child_process"
 import http from "node:http"
-import net from "node:net"
+import type net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import fs from "node:fs"
@@ -10,20 +10,9 @@ import { agentDefaultSessionId, exitCodeForError, hoistJsonFlag } from "../src/c
 import { ExitCode, failure } from "../src/cli-output.ts"
 import { RelayUnreachable } from "../src/relay-client.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "../src/version.ts"
+import { freePort as unusedPort } from "./support/ports.ts"
 
 const execFileAsync = promisify(execFile)
-
-async function unusedPort(): Promise<number> {
-  return await new Promise((resolve, reject) => {
-    const server = net.createServer()
-    server.once("error", reject)
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address()
-      const port = typeof address === "object" && address ? address.port : 0
-      server.close((error) => error ? reject(error) : resolve(port))
-    })
-  })
-}
 
 describe("CLI contract helpers", () => {
   test("hoistJsonFlag moves --json before -- and leaves operands after -- untouched", () => {

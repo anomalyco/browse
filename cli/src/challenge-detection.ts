@@ -61,8 +61,8 @@ export type ChallengeProbe = {
 /** Element markers the probe checks. Keep in sync with `classifyChallenge`. */
 export const probeSelectors = [
   // Cloudflare
-  "#challenge-form", "#challenge-running", "#challenge-stage", "#cf-challenge-running", "#cf-please-wait", ".cf-turnstile",
-  "#cf-error-details", "#cf-wrapper .cf-error-type",
+  "#challenge-form", "#challenge-running", "#challenge-stage", "#cf-challenge-running", ".cf-turnstile",
+  "#cf-error-details",
   // Akamai Bot Manager
   "#sec-if-cpt-container", "#sec-cpt-if", "#sec-text-if",
   // DataDome

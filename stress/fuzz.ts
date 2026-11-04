@@ -321,10 +321,11 @@ log.write({ done: true, rounds: round, stats })
 const points = samples.filter((s) => s.at > started + 60_000)
 const rssSlope = slope(points.map((s) => [(s.at - started) / 3_600_000, s.rss]))
 const fdSlope = slope(points.map((s) => [(s.at - started) / 3_600_000, s.fds]))
-const anomalies = fs.readFileSync(log.file, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((r) => r.anomaly)
+const logLines = fs.readFileSync(log.file, "utf8").trim().split("\n").filter(Boolean)
+const anomalies = logLines.map((l) => JSON.parse(l)).filter((r) => r.anomaly)
 const kinds = new Map<string, number>()
 for (const a of anomalies) kinds.set(a.anomaly, (kinds.get(a.anomaly) ?? 0) + 1)
-const fiveXX = fs.readFileSync(log.file, "utf8").split("\n").filter((l) => l.includes('"5xx"')).length
+const fiveXX = logLines.filter((l) => l.includes('"5xx"')).length
 const md = [
   `# Fuzz`,
   ``,

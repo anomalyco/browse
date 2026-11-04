@@ -1,7 +1,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { Schema } from "effect"
-import { isUnsupportedDirectorySyncError } from "./fs-durability.ts"
+import { ensurePrivateDirectorySync, isUnsupportedDirectorySyncError } from "./fs-durability.ts"
 import { RelayShutdownRequest } from "./relay-schema.ts"
 
 const requestFields = {
@@ -27,8 +27,7 @@ export type RelayLifecycleEvent = typeof RelayLifecycleEvent.Type
 // Synchronous bounded writes cannot finish out of order after request cancellation.
 export function appendRelayLifecycleEvent(filePath: string, event: RelayLifecycleEvent): void {
   const directory = path.dirname(filePath)
-  fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
-  fs.chmodSync(directory, 0o700)
+  ensurePrivateDirectorySync(directory)
   const entry = `${JSON.stringify({ ...Schema.encodeSync(RelayLifecycleEvent)(event), timestamp: new Date().toISOString() })}\n`
   const file = fs.openSync(filePath, "a+", 0o600)
   try {

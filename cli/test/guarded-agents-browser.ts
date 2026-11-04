@@ -9,7 +9,6 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import http from "node:http"
-import net from "node:net"
 import { spawn, spawnSync } from "node:child_process"
 import { parseArgs } from "node:util"
 import { chromium } from "patchright-core"
@@ -17,21 +16,7 @@ import { relayToken } from "../src/relay-secrets.ts"
 import { bundledPairingCodeTtlMs, mintPairingCode, writeExtensionPairing } from "../src/browser-pairing.ts"
 import { saveClient } from "../src/deadbolt.ts"
 import { startFakeDeadbolt } from "./fake-deadbolt.ts"
-
-async function freePort(): Promise<number> {
-  const server = net.createServer()
-  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve) })
-  const { port } = server.address() as net.AddressInfo
-  await new Promise<void>((resolve) => server.close(() => resolve()))
-  return port
-}
-async function portFromEnv(name: string): Promise<number> {
-  const value = process.env[name]
-  if (!value) return await freePort()
-  const port = Number(value)
-  assert.ok(Number.isInteger(port) && port > 0 && port < 65536, `${name} must be a port number`)
-  return port
-}
+import { portFromEnv } from "./support/ports.ts"
 
 const { values: options } = parseArgs({ options: { browser: { type: "string" } } })
 const executablePath = options.browser || process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || chromium.executablePath()

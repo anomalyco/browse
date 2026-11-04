@@ -80,7 +80,7 @@ function scheduleKeepFirst(windowId: number) {
 }
 
 /** Opens a group so the user sees its tabs, for example when an agent waits for them on one. */
-export async function expand(groupId: number) {
+async function expand(groupId: number) {
   await chrome.tabGroups.update(groupId, { collapsed: false }).catch(() => undefined)
 }
 
