@@ -19,10 +19,12 @@ const lanes = process.argv.slice(2, 4).map(spec => {
   return { id, port: Number(port), unit }
 })
 const remote = process.argv[4] ?? ""
-assert(lanes.length === 2 && lanes[0]!.id !== lanes[1]!.id && net.isIPv4(remote) && !remote.startsWith("127."))
+// On a shared machine exercise the same routing/leak assertions, never namespace-only destructive chaos.
+const affinityOnly = remote === "--affinity-only"
+assert(lanes.length === 2 && lanes[0]!.id !== lanes[1]!.id && (affinityOnly || (net.isIPv4(remote) && !remote.startsWith("127."))))
 const sudo = (...args: string[]) => execFileSync("sudo", ["-n", ...args], { encoding: "utf8" }).trim()
-const ns = sudo("ip", "netns", "identify", String(process.pid))
-assert(ns && !sudo("ip", "route", "show", "default"), "requires a named namespace without a default route")
+const ns = !affinityOnly && sudo("ip", "netns", "identify", String(process.pid))
+assert(affinityOnly || (ns && !sudo("ip", "route", "show", "default")), "requires a named namespace without a default route")
 function killTestPid(pid: number | undefined) {
   assert(pid && pid > 1 && sudo("ip", "netns", "identify", String(pid)) === ns, "not a test namespace process")
   process.kill(pid, "SIGKILL")
@@ -102,7 +104,7 @@ async function chaos() {
   }
 }
 
-await Promise.all([chaos(), ...clients.map(worker)])
+await Promise.all([affinityOnly ? undefined : chaos(), ...clients.map(worker)])
 for (const id of pending) await clients[0]!.call("session_delete", { id }).catch(() => {})
 await Promise.all(clients.map(c => c.close())); await fx.close(); await sleep(5000)
 const after = await Promise.all([pages(0), pages(1)])

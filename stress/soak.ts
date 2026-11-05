@@ -35,6 +35,7 @@ const CHAOS_MEAN_MS = Number(values["chaos-every"]) * 1000
 const CHAOS = values.chaos!.split(",").filter((c) => c && c !== "none")
 const RECOVERY_BOUND_MS = Number(values["recovery-bound"]) * 1000
 const MIN_SUCCESS = Number(values["min-success"])
+const canary = !!process.env.BROWSE_STRESS_BINARY
 
 const dir = runDir("soak")
 const tasksLog = new Jsonl(dir, "tasks.jsonl")
@@ -52,6 +53,10 @@ async function cdp(): Promise<BrowserCdp> {
   cdpConnection = await BrowserCdp.connect()
   return cdpConnection
 }
+
+// A new profile's onboarding page may hide its original blank tab. Exempt only that pre-run identity, not
+// about:blank tabs created by the workers (those are genuine leaks).
+const launchTab = canary ? (await (await cdp()).extensionView()).tabs.find(t => t.url === "about:blank" && t.groupId === -1)?.id : undefined
 
 type Window = { from: number; to: number }
 const chaosWindows: Window[] = []
@@ -167,11 +172,13 @@ const chaosActions: Record<string, () => Promise<Record<string, unknown>>> = {
     return { closed }
   },
   "chrome-restart": async () => {
-    sudo(["systemctl", "restart", "browse-chrome"])
+    sudo(["systemctl", "restart", canary ? "browse-canary-browser@chrome.service" : "browse-chrome"])
     cdpConnection?.close()
     return {}
   },
   "network-drop": async () => {
+    // A root-owned, time-bounded unit affects only the canary UID, even if this soak dies.
+    if (canary) { sudo(["systemctl", "start", "browse-canary-drop.service"]); return { scope: "canary" } }
     const ms = 10_000 + Math.floor(Math.random() * 15_000)
     netDown()
     try { await sleep(ms) } finally { netUp() }
@@ -197,6 +204,13 @@ const chaosActions: Record<string, () => Promise<Record<string, unknown>>> = {
     const held = (await relayJson<any[]>("/json/list")).filter((t) => t.opencodeBrowserSessionId?.startsWith("soak-w"))
     const victim = held[Math.floor(Math.random() * held.length)]
     if (!victim) return { skipped: "no agent tab" }
+    if (canary) {
+      await c.evalInExtension(`chrome.tabs.update(${Number(victim.tabId)}, {active:true}).then(t => chrome.windows.update(t.windowId,{focused:true}))`)
+      execFileSync("xdotool", ["key", "--clearmodifiers", "ctrl+shift+y"], { timeout: 3000 })
+      await sleep(500)
+      if ((await relayJson<any[]>("/json/list")).some(t => t.tabId === victim.tabId && t.opencodeBrowserSessionId === victim.opencodeBrowserSessionId)) throw new Error("toolbar shortcut did not release the tab")
+      return { tabId: victim.tabId }
+    }
     const hooked = await c.evalInExtension<boolean>(`typeof globalThis.__opencodeBrowserTest?.toolbarClick === "function"`)
     if (!hooked) throw new Error("the extension has no test hooks; build it with OPENCODE_BROWSER_TEST_HOOKS=1 (stress/exe/deploy.sh does)")
     await c.evalInExtension(`globalThis.__opencodeBrowserTest.toolbarClick(${Number(victim.tabId)})`)
@@ -205,10 +219,12 @@ const chaosActions: Record<string, () => Promise<Record<string, unknown>>> = {
 }
 
 async function chaosLoop() {
+  let order: string[] = []
   // First event after a warm-up so the baseline metrics are clean.
   await sleep(Math.min(120_000, CHAOS_MEAN_MS))
   while (!stopping && Date.now() < deadline - 60_000) {
-    const type = CHAOS[Math.floor(Math.random() * CHAOS.length)]!
+    if (!order.length) order = [...CHAOS]
+    const type = order.splice(Math.floor(Math.random() * order.length), 1)[0]!
     const at = Date.now()
     let detail: Record<string, unknown> = {}
     let error: string | undefined
@@ -226,7 +242,7 @@ async function chaosLoop() {
 const samples: (Sample & { at: number })[] = []
 const pidChanges: { at: number; from: unknown; to: unknown }[] = []
 async function metricsLoop() {
-  const sampler = new Sampler()
+  const sampler = new Sampler(launchTab)
   let lastPid: unknown
   while (!stopping) {
     const at = Date.now()
@@ -250,7 +266,7 @@ function readTasks(): any[] {
 }
 
 // --- run ----------------------------------------------------------------------------------------------------------
-const cleanup = () => { try { netUp() } catch {} }
+const cleanup = () => { if (!canary && CHAOS.includes("network-drop")) try { netUp() } catch {} }
 process.on("exit", cleanup)
 process.on("SIGINT", () => { stopping = true; cleanup(); process.exit(130) })
 process.on("SIGTERM", () => { stopping = true; cleanup(); process.exit(143) })
@@ -268,8 +284,8 @@ const chaos = CHAOS.length ? chaosLoop() : Promise.resolve()
 const loops = workers.map((w) => workerLoop(w))
 await chaos
 // Workers finish their current task; one that can't within the bound is stuck.
-const ended = Date.now()
 const settle = await Promise.race([Promise.all(loops).then(() => "settled"), sleep(Math.max(0, deadline - Date.now()) + 180_000).then(() => "timeout")])
+const ended = Date.now()
 stopping = true
 const stuck = workers.filter((w) => w.busySince).map((w) => ({ worker: w.id, task: w.task, busyMs: Date.now() - w.busySince! }))
 await sleep(1000)
@@ -277,7 +293,7 @@ await metrics.catch(() => undefined)
 for (const w of workers) for (const left of w.leftover.splice(0)) await w.client.call("session_delete", { id: left }, 30_000).catch(() => undefined)
 // Session deletes close their tabs asynchronously.
 await sleep(5000)
-const finalSample = await new Sampler().sample(await cdp().catch(() => undefined)).catch(() => ({} as Sample))
+const finalSample = await new Sampler(launchTab).sample(await cdp().catch(() => undefined)).catch(() => ({} as Sample))
 for (const w of workers) await w.client.close()
 await probeClient.call("session_delete", { id: "soak-probe" }).catch(() => undefined)
 await probeClient.close()
@@ -311,6 +327,7 @@ const memoryOk = perHour("relayRssMb") < 50 && perHour("relayFds") < 50 && perHo
 const criteria = [
   { name: `calm success rate >= ${MIN_SUCCESS}`, ok: successCalm >= MIN_SUCCESS, value: successCalm.toFixed(3) },
   { name: `every chaos event recovered within ${RECOVERY_BOUND_MS / 1000} s`, ok: chaosEvents.every((e) => e.recovered), value: `${chaosEvents.filter((e) => e.recovered).length}/${chaosEvents.length}` },
+  ...(canary ? [{ name: "requested chaos actually injected", ok: CHAOS.every(type => chaosEvents.some(e => e.type === type && !e.error && !e.skipped)) && !chaosEvents.some(e => e.error), value: chaosEvents.filter(e => e.error).map(e => `${e.type}: ${e.error}`).join(", ") }] : []),
   { name: "no stuck workers after the run", ok: stuck.length === 0 && settle === "settled", value: JSON.stringify(stuck) },
   { name: "no unexplained relay restarts (crash loops)", ok: unexplainedRestarts.length === 0, value: String(unexplainedRestarts.length) },
   { name: "bounded growth (relay RSS < 50 MB/h, fds < 50/h, tabs < 10/h)", ok: memoryOk, value: "" },

@@ -12,9 +12,9 @@ export class McpClient {
   stderr = ""
   exited: number | null | undefined = undefined
 
-  constructor(command: string[] = [process.execPath, cli, "mcp"], env: NodeJS.ProcessEnv = {}) {
+  constructor(command: string[] = process.env.BROWSE_STRESS_BINARY ? [process.env.BROWSE_STRESS_BINARY, "mcp"] : [process.execPath, cli, "mcp"], env: NodeJS.ProcessEnv = {}) {
     this.child = spawn(command[0]!, command.slice(1), {
-      env: { ...process.env, OPENCODE_BROWSER_UPDATE_CHECK: "0", ...env },
+      env: { ...process.env, OPENCODE_BROWSER_UPDATE_CHECK: process.env.OPENCODE_BROWSER_UPDATE_CHECK ?? "0", ...env },
       stdio: ["pipe", "pipe", "pipe"],
     })
     this.child.stdout!.setEncoding("utf8")
@@ -26,6 +26,11 @@ export class McpClient {
       this.pending.clear()
     })
     this.child.stdin!.on("error", () => undefined)
+    this.child.on("error", (error) => {
+      this.exited = null
+      for (const entry of this.pending.values()) { clearTimeout(entry.timer); entry.reject(error) }
+      this.pending.clear()
+    })
   }
 
   get pid() { return this.child.pid }

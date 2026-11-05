@@ -45,7 +45,7 @@ function dirBytes(dir: string): number {
 }
 
 function chromeProcesses(): { count: number; rssMb: number; byType: Record<string, { count: number; rssMb: number }> } {
-  const out = execFileSync("ps", ["-eo", "rss=,args="], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 })
+  const out = execFileSync("ps", [...(process.platform === "linux" && process.env.BROWSE_STRESS_BINARY ? ["-u", String(process.getuid!()), "-o"] : ["-eo"]), "rss=,args="], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 })
   const byType: Record<string, { count: number; rssMb: number }> = {}
   let count = 0
   let rssKb = 0
@@ -68,6 +68,8 @@ export type Sample = Record<string, number | string | boolean | null | object>
 
 export class Sampler {
   private last?: { pid: number; ticks: number; at: number }
+  private launchTab?: number
+  constructor(launchTab?: number) { this.launchTab = launchTab }
 
   async sample(cdp: BrowserCdp | undefined): Promise<Sample> {
     const at = Date.now()
@@ -81,6 +83,9 @@ export class Sampler {
       if (this.last && this.last.pid === pid) sample.relayCpuPct = Math.round((((stat.cpuTicks - this.last.ticks) / CLK_TCK) / ((at - this.last.at) / 1000)) * 1000) / 10
       this.last = { pid, ticks: stat.cpuTicks, at }
     }
+    if (pid && process.platform === "darwin" && process.env.BROWSE_STRESS_BINARY) {
+      try { sample.relayRssMb = Math.round(Number(execFileSync("ps", ["-p", String(pid), "-o", "rss="], { encoding: "utf8" }).trim()) / 1024) } catch {}
+    }
     try {
       const status = await relayJson("/extension/status", undefined, 5000)
       sample.extensionConnected = status.connected === true
@@ -92,7 +97,7 @@ export class Sampler {
     } catch {
       sample.extensionConnected = false
     }
-    try {
+    if (!process.env.BROWSE_STRESS_BINARY || process.platform === "linux") try {
       const chrome = chromeProcesses()
       sample.chromeProcesses = chrome.count
       sample.chromeRssMb = chrome.rssMb
@@ -119,7 +124,7 @@ export class Sampler {
         sample.sessionTabs = [...held].filter((id) => existing.has(id)).length
         sample.untrackedSessionTabs = [...held].filter((id) => existing.has(id) && !tracked.has(id)).length
         // The extension's own pages (its welcome page after a reinstall) aren't agent tabs.
-        sample.orphanTabs = view.tabs.filter((t) => !t.active && !held.has(t.id) && !t.url.startsWith("chrome-extension://")).length
+        sample.orphanTabs = view.tabs.filter((t) => !t.active && !held.has(t.id) && !t.url.startsWith("chrome-extension://") && !(t.id === this.launchTab && t.url === "about:blank")).length
       } catch (error) {
         sample.cdpError = String(error).slice(0, 120)
       }
