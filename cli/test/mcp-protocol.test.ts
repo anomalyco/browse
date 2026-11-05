@@ -96,6 +96,32 @@ describe("binary auto-update", () => {
 })
 
 describe("MCP protocol versions", () => {
+  test("the first session_new and bound execute survive a worker reconnect", async () => {
+    const relay = await startRelay(home)
+    const mcp = server(undefined, relay.port)
+    const attach = () => new RelayHarness.FakeExtension(home, relay.port)
+      .on("tabs.create", () => ({ tabId: 7 }))
+      .on("Target.getTargetInfo", () => ({ targetInfo: { targetId: "RECONNECTED", type: "page", title: "", url: "about:blank", attached: true, browserContextId: "CTX" } }))
+      .on("Page.getFrameTree", () => ({ frameTree: { frame: { id: "RECONNECTED", loaderId: "L", url: "about:blank", securityOrigin: "null", mimeType: "text/html" } } }))
+    let extension = attach()
+    try {
+      expect(await extension.pair()).toBe(true)
+      await mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } })
+      mcp.notify("notifications/initialized")
+      for (const [name, args] of [["session_new", { id: "survivor" }], ["execute", { session: "survivor", code: "return 42" }]] as const) {
+        extension.close()
+        expect(await RelayHarness.until(() => extension.closeCode !== undefined)).toBe(true)
+        const first = mcp.request("tools/call", { name, arguments: args })
+        await Bun.sleep(350)
+        extension = attach()
+        expect(await extension.pair()).toBe(true)
+        const { result } = await first
+        expect(result?.isError, JSON.stringify(result)).toBe(false)
+        expect(result?.structuredContent).toMatchObject({ session: { id: "survivor" }, ...(name === "execute" ? { value: 42 } : {}) })
+      }
+    } finally { extension.close(); mcp.close(); await stopRelay(relay.child) }
+  }, 15_000)
+
   test("advertises all tools on the first handshake, without waiting for browser discovery", async () => {
     const relay = await startRelay(home)
     const proxy = Bun.serve({
