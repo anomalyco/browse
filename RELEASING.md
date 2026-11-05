@@ -43,9 +43,11 @@ build   from the tag: install, typecheck, test, release:check (zip + tarball + a
 build-binaries  from the tag: compile every target against the pinned Bun release, pack and check the
         @opencode/browse-<target> tarballs, run the linux-x64 one; no secrets
 sign-macos      optional (repository variable MACOS_SIGNING=true): Developer ID signs the macOS binaries; skipped now
+artifact        smoke the uploaded package, installer, binary and zip on Linux, macOS arm64 and Windows
 attest  build provenance for the zip and every tarball (Sigstore)
-publish-npm  +  publish-cws   npm latest (--ignore-scripts, provenance; the platform packages first, then
-        @opencode/browse) and Chrome Web Store upload + submit
+publish-npm     npm latest (--ignore-scripts, provenance; the platform packages first, then @opencode/browse)
+verify-published  smoke the npm version on the same three OSes (skipped for check); only then submit to the store
+publish-cws     Chrome Web Store upload + submit
 publish-github-release        the release on v<version>: notes, zip, tarball, SHA256SUMS, attestation
 push-release-to-dev           pushes the release commit to dev (deploy key), so dev builds count up from it
 ```
@@ -64,7 +66,7 @@ Every job that holds a secret, an OIDC token or a write token (tag, attest, ever
 `.github/`: the workflow file and the shell scripts in [.github/release/](.github/release/), checked out with a sparse
 checkout of `/.github/release/`. Those jobs treat the build artifacts as data: each artifact must match the SHA256SUMS
 digest its job reported and, before publishing, its GitHub attestation from this workflow on `dev`. They never run
-repository code, `bun install` or package lifecycle scripts. Only `build` runs repository code, and it has no
+repository code, `bun install` or package lifecycle scripts. Build and [artifact eval](evals/README.md) jobs run repository code with no
 environment, secrets or id-token. The tag job checks out the repository but runs only `tag-release.sh` (git and jq,
 hooks off).
 
@@ -145,6 +147,7 @@ checks the token against `registry/browse.json` there ([scripts/release-registry
 
 ## Undoing a bad release
 
+- **Failed stable verification.** The rollback job restores each of the 12 npm `latest` tags to its own pre-publish value if it still points at the failed version. [OIDC dist-tag](https://docs.npmjs.com/trusted-publishers/#managing-dist-tags-with-trusted-publishing) needs **Allow npm dist-tag** on each package's trusted publisher, separately from **Allow npm publish**. Without permission, the job fails and its summary lists the exact maintainer commands. No npm token is used; dev tags are never rolled back by this job. Restoring tags protects new installs, not users already running the version.
 - **npm.** Auto-update only moves forward, so release a fixed patch. `npm deprecate @opencode/browse@<bad> "<why>"`
   warns new installs; `npx @opencode/browse rollback` takes a user back to the version they had.
 - **Chrome Web Store.** Roll back in the dashboard ([how](https://developer.chrome.com/docs/webstore/rollback)), or

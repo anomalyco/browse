@@ -1,0 +1,17 @@
+{
+  "pr": [
+    { "name": "typecheck-extension", "cmd": ["bun", "run", "typecheck"] },
+    { "name": "typecheck-cli", "cwd": "cli", "cmd": ["bun", "run", "typecheck"] },
+    { "name": "shellcheck", "cmd": ["bash", "-c", "shellcheck -x .github/release/*.sh install"] },
+    { "name": "build-extension", "cmd": ["bun", "run", "build"] },
+    { "name": "build-cli", "cwd": "cli", "cmd": ["bun", "build.ts"] },
+    { "name": "test-extension", "cmd": ["bun", "test", "./test"] },
+    { "name": "test-cli", "cwd": "cli", "cmd": ["bun", "run", "test"] },
+    { "name": "release-check", "cmd": ["bun", "run", "release:check"] },
+    { "name": "compile-and-pack", "cmd": ["bun", "evals/compile.ts"] },
+    { "name": "execute-realm-browser", "cwd": "cli", "cmd": ["node", "--no-warnings", "test/execute-realm-browser.ts"] },
+    { "name": "guarded-agents-browser", "cwd": "cli", "cmd": ["node", "--no-warnings", "test/guarded-agents-browser.ts"] },
+    { "name": "snapshot-load-browser", "cwd": "cli", "cmd": ["node", "--no-warnings", "test/snapshot-load-browser.ts"] }
+  ],
+  "artifact": ["prepare", "binary", "npm", "installer", "extension-zip"]
+}
