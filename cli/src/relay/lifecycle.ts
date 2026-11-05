@@ -4,7 +4,7 @@ import crypto from "node:crypto"
 import path from "node:path"
 import process from "node:process"
 import { fileURLToPath } from "node:url"
-import { extensionProtocolAdvice, extensionReconnectAlarmPeriodMs } from "../protocol.ts"
+import { browserUnresponsive, extensionProtocolAdvice, extensionReconnectAlarmPeriodMs } from "../protocol.ts"
 import * as RelayClient from "./client.ts"
 import { RelayShutdownRequest, type ExtensionStatus, type RelayVersion } from "./schema.ts"
 import { npmRuntime } from "../update/auto-update.ts"
@@ -48,7 +48,7 @@ class RelayStartFailed extends Schema.TaggedError<RelayStartFailed>()(
 
 export class ExtensionDisconnected extends Schema.TaggedError<ExtensionDisconnected>()(
   "RelayLifecycle.ExtensionDisconnected",
-  { message: Schema.String, needsPairing: Schema.optionalKey(Schema.Boolean) },
+  { message: Schema.String, needsPairing: Schema.optionalKey(Schema.Boolean), unresponsive: Schema.optionalKey(Schema.Boolean) },
 ) {}
 
 export class ExtensionProtocolIncompatible extends Schema.TaggedError<ExtensionProtocolIncompatible>()(
@@ -260,7 +260,14 @@ export const ensureExtensionConnected = Effect.fn("RelayLifecycle.ensureExtensio
   /** Runs once, when the first probe finds the extension disconnected. */
   readonly onWait?: Effect.Effect<void>
 }) {
-  const check = options.relay.extensionStatus.pipe(Effect.flatMap((status): Effect.Effect<
+  const responsiveStatus = options.relay.extensionStatus.pipe(Effect.tap(status => {
+    const profile = status.sessions?.find(s => s.id === options.sessionId)?.browser
+    if (status.browsers?.some(b => b.unresponsive && (profile ? b.id === profile : !status.connected))) {
+      return Effect.fail(new ExtensionDisconnected({ message: browserUnresponsive, unresponsive: true }))
+    }
+    return Effect.void
+  }))
+  const check = responsiveStatus.pipe(Effect.flatMap((status): Effect.Effect<
     ExtensionStatus,
     ExtensionProtocolIncompatible | ExtensionDisconnected
   > => {
@@ -294,7 +301,7 @@ export const ensureExtensionConnected = Effect.fn("RelayLifecycle.ensureExtensio
     Effect.retry({
       times: options.retryTimes ?? Math.ceil(extensionReconnectWaitMs / extensionReconnectProbeMs),
       schedule: Schedule.spaced(options.retryDelayMs ?? extensionReconnectProbeMs),
-      while: (error) => (error instanceof ExtensionDisconnected && !error.needsPairing) || isRelayStartingOrUnreachable(error),
+      while: (error) => (error instanceof ExtensionDisconnected && !error.needsPairing && !error.unresponsive) || isRelayStartingOrUnreachable(error),
     }),
   )
 })

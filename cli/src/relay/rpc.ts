@@ -3,6 +3,7 @@ import { WebSocket } from "ws"
 import { installCommand } from "../paths.ts"
 import {
   extensionProtocolAdvice,
+  browserUnresponsive,
   extensionProtocolCompatibility,
   type ExtensionCommand,
   type ExtensionProtocolCompatibility,
@@ -36,6 +37,8 @@ export type ExtensionRpcTimeouts = {
 export class ExtensionRpc {
   private socket: WebSocket | undefined
   private ready = false
+  unresponsive = false
+  private replies = 0
   private nextRequestId = 1
   private readonly pendingRequests = new Map<number, PendingExtensionRequest>()
   private livenessProbe: { readonly timeout: NodeJS.Timeout; readonly socket: WebSocket; readonly onPong: () => void } | undefined
@@ -47,7 +50,7 @@ export class ExtensionRpc {
   constructor(private readonly timeouts: ExtensionRpcTimeouts = {}) {}
 
   get connected(): boolean {
-    return this.socket?.readyState === WebSocket.OPEN && this.ready && this.protocolCompatible !== false
+    return this.socket?.readyState === WebSocket.OPEN && this.ready && !this.unresponsive && this.protocolCompatible !== false
   }
 
   get acceptsEvents(): boolean {
@@ -92,6 +95,7 @@ export class ExtensionRpc {
     this.cancelLivenessProbe()
     this.socket = socket
     this.ready = false
+    this.unresponsive = false
     this.version = undefined
     this.protocolVersion = undefined
     this.protocolCompatible = undefined
@@ -118,7 +122,14 @@ export class ExtensionRpc {
     }
   }
 
+  noteResponse(): void {
+    this.replies++
+    this.unresponsive = false
+  }
+
   handleResponse(response: ExtensionResponse): boolean {
+    // Even a late reply to a timed-out heartbeat proves the worker is running again.
+    this.noteResponse()
     const pending = this.pendingRequests.get(response.id)
     if (!pending) {
       return false
@@ -144,12 +155,14 @@ export class ExtensionRpc {
       }
 
       const id = this.nextRequestId++
+      const replies = this.replies
       const message: ExtensionCommand = { ...command, id }
       let completed = false
       // A page.evaluate that awaits a promise runs as long as the page's work does; Playwright's own timeouts
       // govern it, so the relay adds none.
       const timeoutMs = awaitsPagePromise(command)
         ? undefined
+        : command.method === "ping" ? 4_000
         : command.method === "debugger.sendCommand"
         ? this.timeouts.debuggerCommandTimeoutMs ?? 60_000
         : this.timeouts.commandTimeoutMs ?? 15_000
@@ -163,6 +176,12 @@ export class ExtensionRpc {
         resume(effect)
       }
       const timeout = timeoutMs === undefined ? undefined : setTimeout(() => {
+        if (command.method === "ping") {
+          // Other replies also prove liveness; a slow page command alone is never a dead browser.
+          if (this.replies !== replies) return finish(Effect.succeed({}))
+          this.unresponsive = true
+          return finish(Effect.fail(new Error(browserUnresponsive)))
+        }
         // Fail only this command. Close the socket only if the websocket
         // itself is unresponsive to a protocol-level ping.
         this.probeLiveness(socket)

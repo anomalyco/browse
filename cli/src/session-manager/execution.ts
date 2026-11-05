@@ -56,6 +56,10 @@ export function executeInSession(
         return yield* sessionError("inactive", `Session is no longer active: ${session.id}`, session.id)
       }
       yield* trySession(() => ctx.resolveBrowser(options.browser, session))
+      // Don't dispatch user code into a sleeping browser: it could otherwise run long after its caller gave up.
+      if (session.browser?.key && ctx.hooks.checkBrowserResponsive) yield* ctx.hooks.checkBrowserResponsive(session.browser.key).pipe(
+        Effect.mapError(error => sessionError("browser-unavailable", error.message, session.id)),
+      )
       started = true
       session.updatedAt = new Date().toISOString()
       yield* ctx.setExecuting(session.id, true)

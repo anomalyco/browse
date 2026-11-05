@@ -287,6 +287,7 @@ export const ConnectedBrowser = Schema.Struct({
   /** Sessions that don't name a browser use this one. */
   default: Schema.Boolean,
   connected: Schema.Boolean,
+  unresponsive: Schema.optionalKey(Schema.Boolean),
   version: Schema.NullOr(Schema.String),
   tabs: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
 })
