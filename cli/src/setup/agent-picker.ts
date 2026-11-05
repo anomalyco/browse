@@ -1,5 +1,17 @@
-import { autocompleteMultiselect, isCancel } from "@clack/prompts"
+import { styleText } from "node:util"
+import { AutocompletePrompt, isCancel } from "@clack/core"
+import {
+  limitOptions,
+  S_BAR,
+  S_BAR_END,
+  S_CHECKBOX_INACTIVE,
+  S_CHECKBOX_SELECTED,
+  settings,
+  symbol,
+} from "@clack/prompts"
 import { agentLabels, agentName, agentNames, type AgentLocation, type AgentName } from "./agent-config.ts"
+
+export type AgentOption = { value: AgentName; label: string }
 
 export function agentFlags(args: string[]) {
   const requested = new Set<AgentName>()
@@ -32,17 +44,28 @@ export function agentPlan(locations: AgentLocation[], flags: ReturnType<typeof a
   return { picker: true, selected: remembered?.filter(n => agentNames.includes(n)) ?? detected }
 }
 
-/** The searchable agent list: OpenCode first, then the agents found on this computer, ticked. */
-/** The agents found on this computer, ticked; typing searches every agent install knows. */
+/** One agent row: a pointer in a fixed-width column, its checkbox, then its name bright when focused and dim otherwise. */
+export function agentRow(option: AgentOption, active: boolean, selected: AgentName[]) {
+  const box = selected.includes(option.value) ? styleText("green", S_CHECKBOX_SELECTED) : styleText("dim", S_CHECKBOX_INACTIVE)
+  if (active) return `${styleText("cyan", "❯")} ${box} ${option.label}`
+  return `  ${box} ${styleText("dim", option.label)}`
+}
+
+/** The collapsed line after Enter: the picked agents by name, not "2 items selected". */
+export function agentSummary(labels: string[]) {
+  return labels.length ? labels.join(", ") : "none"
+}
+
+/** The searchable agent list: OpenCode first, then the agents found on this computer, ticked; typing searches every agent install knows. */
 export async function pickAgents(locations: AgentLocation[], initial: AgentName[]): Promise<AgentName[] | undefined> {
   const ordered = [...locations].sort((a, b) => Number(b.name === "opencode") - Number(a.name === "opencode") || Number(b.installed) - Number(a.installed) || agentLabels[a.name].localeCompare(agentLabels[b.name]))
   // The same option objects every render: clack keeps the cursor by identity, and loses it on fresh ones.
-  const all = ordered.map((a) => ({ value: a.name as string, label: agentLabels[a.name] }))
+  const all = ordered.map((a) => ({ value: a.name, label: agentLabels[a.name] }))
   const shown = all.filter((_, i) => ordered[i]!.installed || initial.includes(ordered[i]!.name))
   let last = { query: "", list: shown }
-  // Clack's option type distributes over a union of values, so the picker works on plain names.
-  const result = await autocompleteMultiselect<string>({
-    message: "Set browse up in these agents for you?",
+  // Clack focuses the last initial selection, so listing OpenCode last starts the cursor on the top row.
+  const start = [...initial].sort((a, b) => Number(a === "opencode") - Number(b === "opencode"))
+  const prompt = new AutocompletePrompt<AgentOption>({
     options() {
       const query = this.userInput.trim().toLowerCase()
       if (query === last.query) return last.list
@@ -50,10 +73,44 @@ export async function pickAgents(locations: AgentLocation[], initial: AgentName[
       return last.list
     },
     filter: () => true,
-    initialValues: initial,
-    maxItems: 10,
+    multiple: true,
+    initialValue: start,
+    // Clack's own autocompleteMultiselect only dims unfocused rows and collapses to a count; this is its frame with a
+    // pointer on the focused row and the picked names in the summary, so the rail stays consistent.
+    render() {
+      const guide = settings.withGuide
+      const head = `${guide ? `${styleText("gray", S_BAR)}\n` : ""}${symbol(this.state)}  Set browse up in these agents for you?`
+      const summary = agentSummary(ordered.filter((agent) => this.selectedValues.includes(agent.name)).map((agent) => agentLabels[agent.name]))
+      if (this.state === "submit") return `${head}\n${guide ? `${styleText("gray", S_BAR)}  ` : ""}${styleText("dim", summary)}`
+      if (this.state === "cancel") return `${head}\n${guide ? `${styleText("gray", S_BAR)}  ` : ""}${styleText(["strikethrough", "dim"], this.userInput)}`
+      const color = this.state === "error" ? "yellow" : "cyan"
+      const rail = guide ? styleText(color, S_BAR) : ""
+      const at = guide ? `${rail}  ` : ""
+      const count = this.filteredOptions.length !== this.options.length ? ` (${this.filteredOptions.length} match${this.filteredOptions.length === 1 ? "" : "es"})` : ""
+      const search = this.isNavigating || this.userInput === "" ? styleText("dim", this.userInput) : this.userInputWithCursor
+      const top = [
+        ...head.split("\n"),
+        `${at}${styleText("dim", "Search:")} ${search}${styleText("dim", count)}`,
+        ...(this.filteredOptions.length === 0 && this.userInput ? [`${at}${styleText("yellow", "No matches found")}`] : []),
+        ...(this.state === "error" ? [`${at}${styleText("yellow", this.error)}`] : []),
+      ]
+      const footer = [
+        `${at}${styleText("dim", "↑/↓")} to navigate • ${styleText("dim", this.isNavigating ? "Space/Tab:" : "Tab:")} select • ${styleText("dim", "Enter:")} confirm • ${styleText("dim", "Type:")} to search`,
+        guide ? styleText(color, S_BAR_END) : "",
+      ]
+      const rows = limitOptions({
+        cursor: this.cursor,
+        options: this.filteredOptions,
+        style: (option, active) => agentRow(option, active, this.selectedValues),
+        maxItems: 10,
+        columnPadding: guide ? 3 : 0,
+        rowPadding: top.length + footer.length,
+      })
+      return [...top, ...rows.map((row) => `${at}${row}`), ...footer].join("\n")
+    },
   })
-  if (isCancel(result)) return undefined
+  const result = await prompt.prompt()
+  if (isCancel(result) || !result) return undefined
   return ordered.map((a) => a.name).filter((name) => result.includes(name))
 }
 
