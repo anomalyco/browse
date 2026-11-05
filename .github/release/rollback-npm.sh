@@ -13,7 +13,7 @@ case "$1" in
     tags='{}'
     for name in "${names[@]}"; do
       old=$(latest "$name")
-      stable_version "$old" && [[ "$old" != "$BROWSE_VERSION" ]] || die "No prior stable latest on $name ($old)"
+      if ! stable_version "$old" || [[ "$old" == "$BROWSE_VERSION" ]]; then die "No prior stable latest on $name ($old)"; fi
       tags=$(jq -c --arg n "$name" --arg v "$old" '. + {($n): $v}' <<< "$tags")
     done
     echo "tags=$tags" >> "$GITHUB_OUTPUT"
@@ -23,7 +23,7 @@ case "$1" in
       'If automatic recovery fails, verify latest still points at the failed release and run these commands as a maintainer:' '```sh'
     for name in "${names[@]}"; do
       old=$(jq -er --arg n "$name" '.[$n]' <<< "$PREVIOUS_LATEST")
-      stable_version "$old" && [[ "$old" != "$BROWSE_VERSION" ]] || die "Invalid snapshot for $name"
+      if ! stable_version "$old" || [[ "$old" == "$BROWSE_VERSION" ]]; then die "Invalid snapshot for $name"; fi
       summary "npm dist-tag add $name@$old latest"
     done
     summary '```'
