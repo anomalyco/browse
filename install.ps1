@@ -125,6 +125,9 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
                 }
             }
 
+        }
+
+        $download = {
             $filename = "browse-windows-$target-$version.tgz"
             $archive = Join-Path $tmp $filename
             Write-Host ""
@@ -138,6 +141,31 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
             if ($LASTEXITCODE -ne 0) { throw "Could not extract $filename" }
             $source = Join-Path $tmp "package\bin\browse.exe"
             if (-not (Test-Path -LiteralPath $source)) { throw "$filename has no package\bin\browse.exe" }
+        }
+        if (-not $binary) {
+            foreach ($delay in 0, 15, 30, 60, 75) {
+                if ($delay) {
+                    Write-Warning "The $version tarball isn't available yet; retrying in ${delay}s."
+                    Start-Sleep -Seconds $delay
+                }
+                try { . $download; break } catch {
+                    $response = $_.Exception.Response
+                    if ([int]$response.StatusCode -ne 404) { throw }
+                    if ($delay -ne 75) { continue }
+                    if ($requested -or $channel -notin 'latest', 'dev') { throw }
+                    # Windows PowerShell uses HttpWebResponse; PowerShell Core uses HttpResponseMessage.
+                    $uri = if ($response.ResponseUri) { $response.ResponseUri } else { $response.RequestMessage.RequestUri }
+                    $versions = (Invoke-RestMethod -UseBasicParsing ([uri]::new($uri, "/$encoded"))).versions.PSObject.Properties.Name
+                    $pattern = if ($channel -eq 'dev') { '^\d+\.\d+\.\d+-dev\.\d+(\.\d+)?$' } else { '^\d+\.\d+\.\d+$' }
+                    $ordered = @($versions | Where-Object { $_ -match $pattern } | Sort-Object -Descending -Property { [version]($_ -split '-')[0] }, { [long]($_ -split '\.')[3] }, { [long]($_ -split '\.')[4] })
+                    $index = [array]::IndexOf($ordered, $version)
+                    if ($index -lt 0 -or $index + 1 -ge $ordered.Count) { throw }
+                    $previous = $ordered[$index + 1]
+                    Write-Warning "browse $version is still unavailable; falling back to $previous ($channel)."
+                    $version = $previous
+                    . $download
+                }
+            }
         }
 
         # A running browse.exe (the relay) can't be overwritten, but it can be renamed: move it aside, then put the new
