@@ -59,16 +59,18 @@ export function addToPath(): string | undefined {
   if (process.env.GITHUB_ACTIONS === "true" && process.env.GITHUB_PATH) writeFileSync(process.env.GITHUB_PATH, dir + "\n", { flag: "a" })
   if ((process.env.PATH ?? "").split(path.delimiter).some((entry) => path.resolve(entry) === dir)) return undefined
   if (process.platform === "win32") {
-    const script = `$p=[Environment]::GetEnvironmentVariable('Path','User'); if (-not ($p -split ';' -contains '${dir}')) { [Environment]::SetEnvironmentVariable('Path', ($(if ($p) { "$p;" } else { '' }) + '${dir}'), 'User') }`
-    const done = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { stdio: "ignore" })
-    return done.status === 0 ? "Windows user PATH" : undefined
+    return editWindowsPath(dir, "add") ? "Windows user PATH" : undefined
   }
-  const { candidates, line } = shellPath(dir)
+  const { candidates, line, legacyLine } = shellPath(dir)
   // A new Mac has no ~/.zshrc: create the shell's main file rather than leave browse off PATH.
   const file = candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]!
   try {
     const text = existsSync(file) ? readFileSync(file, "utf8") : ""
     if (text.split("\n").includes(line)) return undefined
+    if (text.includes(`\n# browse\n${legacyLine}\n`)) {
+      writeFileSync(file, text.replace(`\n# browse\n${legacyLine}\n`, () => `\n# browse\n${line}\n`))
+      return file
+    }
     mkdirSync(path.dirname(file), { recursive: true })
     writeFileSync(file, `${text && !text.endsWith("\n") ? "\n" : ""}\n# browse\n${line}\n`, { flag: "a" })
     return file
@@ -76,6 +78,30 @@ export function addToPath(): string | undefined {
     log(`! Couldn't add browse to your PATH. Add this to ${tilde(file)}: ${line}`)
     return undefined
   }
+}
+
+function editWindowsPath(dir: string, action: "add" | "remove"): boolean {
+  // Environment.GetEnvironmentVariable expands %VAR% and SetEnvironmentVariable always writes REG_SZ.
+  const script = `
+    $ErrorActionPreference = 'Stop'
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    $raw = $key.GetValue('Path', $null, 'DoNotExpandEnvironmentNames')
+    $kind = if ($null -eq $raw) { 'ExpandString' } else { $key.GetValueKind('Path') }
+    $parts = $raw -split ';'
+    $dir = $env:BROWSE_PATH_ENTRY
+    ${action === "add" ? `if ($parts -contains $dir) { exit 0 }; $new = if ($raw) { "$raw;$dir" } else { $dir }` : `if ($parts -notcontains $dir) { exit 0 }; $new = ($parts -ne $dir) -join ';'`}
+    $key.SetValue('Path', $new, [Microsoft.Win32.RegistryValueKind]$kind)
+    $key.Close()
+    # Notify Explorer so new shells see the change, as SetEnvironmentVariable(User) did.
+    Add-Type -Namespace Browse -Name Env -MemberDefinition '[DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hwnd, uint msg, UIntPtr w, string l, uint flags, uint ms, out UIntPtr result);'
+    $result = [UIntPtr]::Zero
+    [void][Browse.Env]::SendMessageTimeout([IntPtr]65535, 26, [UIntPtr]::Zero, 'Environment', 2, 500, [ref]$result)
+    Write-Output 'changed'`
+  const done = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    env: { ...process.env, BROWSE_PATH_ENTRY: dir }, windowsHide: true, encoding: "utf8",
+  })
+  if (done.status !== 0) log(`! Couldn't ${action === "add" ? "add browse to" : "remove browse from"} your Windows user PATH: ${dir}`)
+  return done.status === 0 && done.stdout.trim() === "changed"
 }
 
 /** The shell startup files addToPath picks from, and the line it adds for `dir`. */
@@ -90,7 +116,9 @@ function shellPath(dir: string) {
         : shell === "bash"
           ? [path.join(home, ".bashrc"), path.join(home, ".bash_profile"), path.join(home, ".profile")]
           : [path.join(home, ".profile")]
-  return { candidates, line: shell === "fish" ? `fish_add_path ${dir}` : `export PATH=${dir}:$PATH` }
+  const fish = shell === "fish"
+  const quoted = `'${(fish ? dir.replaceAll("\\", "\\\\") : dir).replaceAll("'", "'\\''")}'`
+  return { candidates, line: fish ? `fish_add_path ${quoted}` : `export PATH=${quoted}:"$PATH"`, legacyLine: fish ? `fish_add_path ${dir}` : `export PATH=${dir}:$PATH` }
 }
 
 /**
@@ -100,14 +128,15 @@ function shellPath(dir: string) {
 export function removeBinaryInstall(binary: string): string | undefined {
   const dir = path.dirname(binary)
   if (process.platform === "win32") {
-    const script = `$p=[Environment]::GetEnvironmentVariable('Path','User'); if ($p) { [Environment]::SetEnvironmentVariable('Path', (($p -split ';' | Where-Object { $_ -and $_ -ne '${dir}' }) -join ';'), 'User') }`
-    spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { stdio: "ignore" })
+    editWindowsPath(dir, "remove")
   } else {
-    const { candidates, line } = shellPath(dir)
+    const { candidates, line, legacyLine } = shellPath(dir)
     for (const file of candidates) {
       const text = readFileOr(file, "")
-      const block = `\n# browse\n${line}\n`
-      if (text.includes(block)) writeFileSync(file, text.replace(`\n${block}`, "\n").replace(block, "\n"))
+      for (const entry of [line, legacyLine]) {
+        const block = `\n# browse\n${entry}\n`
+        if (text.includes(block)) { writeFileSync(file, text.replace(`\n${block}`, "\n").replace(block, "\n")); break }
+      }
     }
   }
   try {
