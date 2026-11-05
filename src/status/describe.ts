@@ -49,12 +49,14 @@ export function describeStatus(state: AgentRelayState, unpacked: boolean) {
       ? unpackedReloadAdvice
       : "This extension is older than the browse CLI on this computer. Chrome updates it within a few hours; to update now, open chrome://extensions, turn on Developer mode and click Update."
   if (state.status === "incompatible") return "This extension and the installed CLI don't match. Run the install command again, then click Reconnect."
-  if (state.status === "unpaired") return "Not paired yet. Run the install command from the setup page, or enter a pairing code below; until then no agent can use this browser."
-  if (state.status === "untrusted" && remote) return `The relay at ${remote} didn't pair with this browser, so it was refused. Enter a new pairing code from it below.`
+  if (state.status === "unpaired")
+    return "Not paired yet. Run the install command from the setup page, or enter a pairing code under Advanced; until then no agent can use this browser."
+  if (state.status === "untrusted" && remote)
+    return `The relay at ${remote} didn't pair with this browser, so it was refused. Run \`browse pair\` there, then enter the code under Advanced.`
   if (state.status === "untrusted")
     return state.unpacked
-      ? "The relay on this computer didn't pair with this browser, so it was refused. Run the install command again (or enter a code from `browse pair` below), then click Connect."
-      : "The relay on this computer didn't pair with this browser, so it was refused. Enter a new code from `browse pair` below, or update the CLI."
+      ? "The relay on this computer didn't pair with this browser, so it was refused. Run the install command again, or enter a code from `browse pair` under Advanced."
+      : "The relay on this computer didn't pair with this browser, so it was refused. Enter a new code from `browse pair` under Advanced, or update the CLI."
   if (remote) return `Waiting for the relay at ${remote}. It starts the first time an agent there uses the browse tools.`
   return "Waiting for an agent. The relay starts the first time an agent uses the browse tools."
 }
