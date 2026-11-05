@@ -123,6 +123,7 @@ jobs:
       contents: read
     outputs:
       digest: ${{ steps.upload.outputs.digest }}
+      cli_build: ${{ steps.artifacts.outputs.cli_build }}
     env:
       MODE: ${{ needs.plan.outputs.mode }}
       VERSION: ${{ needs.plan.outputs.version }}
@@ -172,11 +173,13 @@ jobs:
       # The extension zip (the store zip, or a dev build's unpacked zip) and the npm tarball (with the store item ID,
       # and a dev build's zip sha256, baked in: cli/build.ts), with the artifact checks: `bun run release:check`.
       - name: Build and check the extension zip and npm tarball
+        id: artifacts
         env:
           OPENCODE_BROWSER_STORE_ID: ${{ vars.CWS_ITEM_ID }}
         run: |
           if [ "$MODE" = stable ]; then bun scripts/release-check.ts --tag "v$VERSION" --require-changelog
           else bun scripts/release-check.ts; fi
+          echo "cli_build=$(node -p 'require("./dist/build.json").build')" >> "$GITHUB_OUTPUT"
 
       - id: upload
         name: Upload
@@ -230,6 +233,7 @@ jobs:
       - name: Compile and pack
         working-directory: cli
         env:
+          OPENCODE_BROWSER_BUILD: ${{ needs.build.outputs.cli_build }}
           OPENCODE_BROWSER_STORE_ID: ${{ vars.CWS_ITEM_ID }}
         run: |
           [ "$(node -p 'require("./package.json").version')" = "$VERSION" ] || { echo "::error::The checkout isn't version $VERSION."; exit 1; }
