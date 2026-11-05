@@ -18,6 +18,9 @@ log() { printf '\n== %s\n' "$*"; }
 # package pulls in nodejs 18; noVNC comes from its release tarball instead). Node 24 lives in /usr/local.
 export PATH="/usr/local/bin:$HOME/.bun/bin:$PATH"
 
+# Add only the release canary on an already provisioned/shared box. Do not rebuild or restart its checkout lane.
+if [[ ${1:-} == --canary-only ]]; then exec bash "$(dirname "$0")/../canary/provision.sh" "$CFT_DIR/current"; fi
+
 log "apt packages"
 export DEBIAN_FRONTEND=noninteractive
 PKGS=(xvfb fluxbox x11vnc websockify xdotool x11-utils tmux curl unzip jq rsync ffmpeg iptables iproute2
@@ -95,3 +98,5 @@ done
 node cli/dist/cli.mjs status || true
 node cli/dist/cli.mjs doctor || true
 sleep 1; curl -fsS -o /dev/null -w "noVNC on :$NOVNC_PORT -> HTTP %{http_code}\n" "http://127.0.0.1:$NOVNC_PORT/vnc.html" || true
+
+bash "$REPO/stress/canary/provision.sh" "$CFT_DIR/current"

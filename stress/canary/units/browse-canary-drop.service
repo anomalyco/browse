@@ -1,0 +1,8 @@
+[Unit]
+Description=15-second browse canary network fault (kernel-enforced expiry)
+Requires=browse-canary-network.service
+After=browse-canary-network.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/browse-canary/stress/canary/network.sh drop

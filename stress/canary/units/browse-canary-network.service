@@ -1,0 +1,8 @@
+[Unit]
+Description=Isolate browse canary traffic from the checkout relay
+Before=browse-canary-install.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /opt/browse-canary/stress/canary/network.sh

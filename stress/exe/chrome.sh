@@ -31,6 +31,9 @@ try:
 except Exception:
     prefs = {}
 prefs.setdefault("extensions", {}).setdefault("ui", {})["developer_mode"] = True
+if os.environ.get("BROWSE_CANARY_SHORTCUT") == "1":
+    prefs["extensions"].setdefault("commands", {})["linux:Ctrl+Shift+Y"] = {
+        "extension": "afeafocngkodbmaipcngoamamfmekgfo", "command_name": "_execute_action", "global": False}
 ext = prefs["extensions"].get("settings", {}).get("afeafocngkodbmaipcngoamamfmekgfo")
 if ext:
     ext.pop("disable_reasons", None)
@@ -46,6 +49,6 @@ exec "$CHROME" \
   --load-extension="$EXT" \
   --no-first-run --no-default-browser-check --password-store=basic \
   --disable-dev-shm-usage \
-  --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 \
+  --remote-debugging-port="${BROWSE_STRESS_CHROME_PORT:-9222}" --remote-debugging-address=127.0.0.1 \
   --window-size=1880,1040 --window-position=0,0 \
   about:blank
