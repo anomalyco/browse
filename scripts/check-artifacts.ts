@@ -128,7 +128,7 @@ export async function checkStoreZip(zip: string, version: string, allowlist?: Al
   const allowed = allowlist ?? (await readAllowlist())
   const label = path.basename(zip)
   const listing = (await $`unzip -Z1 ${zip}`.quiet().text()).split("\n").filter(Boolean)
-  const unsafe = listing.filter((name) => name.startsWith("/") || name.split("/").includes(".."))
+  const unsafe = listing.filter((name) => name.startsWith("/") || /[:\\]/.test(name) || name.split("/").includes(".."))
   if (unsafe.length) return [`${label}: unsafe entry paths ${unsafe.join(", ")}`]
   // Symbolic links, found in the archive listing (unzip would follow or refuse them).
   const links = (await $`unzip -Z ${zip}`.quiet().text()).split("\n").filter((line) => /^l[rwx-]{9}/.test(line)).map((line) => line.split(/\s+/).pop())
@@ -233,7 +233,7 @@ export async function checkCliRuntime(command: string[], cwd: string, version: s
   const env = { ...smokeEnv(cwd), OPENCODE_BROWSER_PORT: String(port) }
   const actual = await $`${command} --version`.cwd(cwd).env(env).quiet().text()
   if (actual.trim() !== version) return [`--version printed ${JSON.stringify(actual.trim())}, expected ${version}`]
-  const relay = Bun.spawn([...command, "serve"], { cwd, env, stdout: "ignore", stderr: "pipe" })
+  const relay = Bun.spawn([...command, "serve"], { cwd, env: { ...env, OPENCODE_BROWSER_MANAGED_RELAY: "1" }, stdout: "ignore", stderr: "pipe" })
   const errors = new Response(relay.stderr).text()
   try {
     const running = await relayVersion(port, relay)
@@ -256,7 +256,11 @@ async function relayVersion(port: number, relay: Bun.Subprocess) {
   const deadline = Date.now() + 30_000
   while (Date.now() < deadline && relay.exitCode === null) {
     const response = await fetch(`http://127.0.0.1:${port}/version`, { signal: AbortSignal.timeout(2_000) }).catch(() => undefined)
-    if (response?.ok) return String(((await response.json()) as { version?: unknown }).version)
+    if (response?.ok) {
+      const info = await response.json() as { pid?: number; version?: string }
+      if (info.pid !== relay.pid) throw new Error(`A different relay (PID ${info.pid}) answered on ${port}, expected PID ${relay.pid}`)
+      return String(info.version)
+    }
     await Bun.sleep(250)
   }
   return undefined

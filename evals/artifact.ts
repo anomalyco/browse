@@ -73,13 +73,17 @@ async function withoutBuildDeps<T>(check: () => Promise<T>) {
 
 async function installer() {
   // A real npm-layout mirror. 404 any other target/path rather than serving whatever binary happens to be there.
+  const served = new Set<string>()
   const mirror = !published && Bun.serve({ hostname: "127.0.0.1", port: await freeSmokePort(), async fetch(req) {
     const pathname = decodeURIComponent(new URL(req.url).pathname)
     for (const t of [target, ...(target.endsWith("-x64") ? [`${target}-baseline`] : [])]) {
       const file = Bun.file(binaryTar(t))
       if (!await file.exists()) continue
       if (pathname === `/@opencode/browse-${t}/${version}`) return Response.json({ version })
-      if (pathname === `/@opencode/browse-${t}/-/browse-${t}-${version}.tgz`) return new Response(file)
+      if (pathname === `/@opencode/browse-${t}/-/browse-${t}-${version}.tgz`) {
+        served.add(t)
+        return new Response(file)
+      }
     }
     console.error(`Mirror has no ${pathname}`)
     return new Response(null, { status: 404 })
@@ -88,6 +92,7 @@ async function installer() {
     const env = { ...smokeEnv(cwd), ...(mirror ? { BROWSE_INSTALL_BASE_URL: `http://127.0.0.1:${mirror.port}` } : {}) }
     const args = win ? ["pwsh", "-NoProfile", "-NonInteractive", "-File", path.join(root, "install.ps1")] : ["bash", path.join(root, "install")]
     await $`${args} --version ${version} --no-setup --no-modify-path`.cwd(cwd).env(env)
+    if (mirror && !served.size) throw new Error("Installer did not download this run's platform tarball from the mirror")
     return await checkCliRuntime([path.join(cwd, ".browse/bin", exe)], cwd, version, false)
   } finally { if (mirror) await mirror.stop(true) }
 }
