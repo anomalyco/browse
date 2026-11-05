@@ -90,6 +90,10 @@ export class RelayRejected extends Schema.TaggedError<RelayRejected>()(
   },
 ) {}
 
+export class RelayTimedOut extends Schema.TaggedError<RelayTimedOut>()(
+  "RelayClient.RelayTimedOut", { message: Schema.String, path: Schema.String },
+) {}
+
 export class RelayDecodeFailed extends Schema.TaggedError<RelayDecodeFailed>()(
   "RelayClient.RelayDecodeFailed",
   {
@@ -116,7 +120,7 @@ export class RelayConfigInvalid extends Schema.TaggedError<RelayConfigInvalid>()
   },
 ) {}
 
-export type RelayClientError = RelayUnreachable | RelayRejected | RelayDecodeFailed | RelayEncodeFailed
+export type RelayClientError = RelayUnreachable | RelayRejected | RelayDecodeFailed | RelayEncodeFailed | RelayTimedOut
 
 export interface Interface {
   readonly endpoint: string
@@ -245,7 +249,14 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
     Effect.suspend(() => httpClient.execute(authorize(HttpClientRequest.get(new URL(path, endpoint))))).pipe(
       Effect.mapError(transportError(path)),
       Effect.flatMap((response) => handleResponse(response, path, schema)),
+      Effect.timeoutOrElse({ duration: 5000, orElse: () => Effect.fail(new RelayTimedOut({
+        message: `The relay on port ${new URL(endpoint).port} isn't answering (${path} timed out).`, path,
+      })) }),
     )
+
+  // Writes can legitimately wait for a human handoff or a command with no deadline. Probe the relay while waiting,
+  // rather than shortening those operations or retrying a write whose outcome we don't know.
+  const checkWhileWaiting = Effect.sleep(30_000).pipe(Effect.andThen(getJson("/version", RelayVersion)), Effect.forever)
 
   const postJson = <A>(
     path: string,
@@ -261,6 +272,7 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
     Effect.flatMap((request) => httpClient.execute(authorize(request)).pipe(
       Effect.mapError(transportError(path)),
       Effect.flatMap((response) => handleResponse(response, path, schema)),
+      Effect.raceFirst(checkWhileWaiting),
     )),
   )
 

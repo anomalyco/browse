@@ -41,6 +41,7 @@ export const exitWith = (code: number) =>
 
 const hostErrorTags = new Set([
   "RelayClient.RelayUnreachable",
+  "RelayClient.RelayTimedOut",
   "RelayLifecycle.RelayStartFailed",
   "RelayLifecycle.ExtensionDisconnected",
 ])

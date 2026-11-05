@@ -44,6 +44,26 @@ describe("CLI contract helpers", () => {
 describe("CLI process exit codes and session defaults", () => {
   const cliEntry = path.resolve(import.meta.dirname, "../src/main.ts")
 
+  test("a silent listener fails status and session list without trying to start another relay", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-silent-"))
+    const server = http.createServer(() => { /* accept the request but never send even the headers */ })
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve))
+    const port = (server.address() as net.AddressInfo).port
+    try {
+      await Promise.all([["status"], ["session", "list"]].map(async args => {
+        const result = await execFileAsync(process.execPath, [cliEntry, ...args], {
+          env: { ...process.env, OPENCODE_BROWSER_HOME: home, OPENCODE_BROWSER_PORT: String(port), OPENCODE_BROWSER_UPDATE_CHECK: "0" }, timeout: 9000,
+        }).catch((error: { code: number; stderr: string }) => error)
+        expect(result).toMatchObject({ code: ExitCode.host })
+        expect(result.stderr).toContain(`relay on port ${port} isn't answering`)
+      }))
+    } finally {
+      server.closeAllConnections()
+      server.close()
+      fs.rmSync(home, { recursive: true, force: true })
+    }
+  }, 12_000)
+
   test("--json before status exits 4 with pure JSON stdout and stderr line when relay is stopped", async () => {
     const port = await unusedPort()
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-cli-contract-"))
