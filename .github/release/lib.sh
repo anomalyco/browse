@@ -6,6 +6,9 @@
 # the environment the workflow sets (BROWSE_VERSION, BROWSE_CHANNEL, BROWSE_NPM_TAG, BROWSE_DRY_RUN, ...).
 
 set -euo pipefail
+# Platform suffixes accepted by publish-npm and its dist-tag rollback. Never take package names from artifacts.
+# shellcheck disable=SC2034 # Used by scripts sourcing this library.
+browse_targets='linux-x64 linux-x64-baseline linux-arm64 linux-x64-musl linux-x64-baseline-musl linux-arm64-musl darwin-arm64 darwin-x64 darwin-x64-baseline windows-x64 windows-x64-baseline'
 # macOS /bin/bash (sign-macos.sh) is 3.2, which lacks inherit_errexit.
 if [ "${BASH_VERSINFO[0]}" -gt 4 ] || { [ "${BASH_VERSINFO[0]}" = 4 ] && [ "${BASH_VERSINFO[1]}" -ge 4 ]; }; then
   shopt -s inherit_errexit

@@ -17,106 +17,73 @@ jobs:
     name: Typecheck, build and test
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    outputs:
+      artifact: ${{ steps.inputs.outputs.artifact }}
+      version: ${{ steps.inputs.outputs.version }}
+      build-id: ${{ steps.build.outputs.artifact-id }}
+      binaries-id: ${{ steps.binaries.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 2 # The PR merge commit and its base parent, including for forks
           persist-credentials: false
-
-      # Bun from package.json's packageManager field.
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version-file: package.json
-
-      # The MCP server and relay run under Node (cli/package.json engines), and the execute sandbox tests run in it too.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           package-manager-cache: false
-
-      - name: Install (extension)
-        run: bun install --frozen-lockfile
-
-      - name: Install (cli)
-        run: bun install --frozen-lockfile
-        working-directory: cli
-
-      - name: Typecheck (extension)
-        run: bun run typecheck
-
-      - name: Typecheck (cli)
-        run: bun run typecheck
-        working-directory: cli
-
-      - name: Build (extension)
-        run: bun run build
-
-      - name: Build (cli)
-        run: bun build.ts
-        working-directory: cli
-
-      - name: Test (extension)
-        run: bun test ./test
-
-      - name: Test (cli)
-        run: bun run test
-        working-directory: cli
-
-      # The store zip and npm tarball the release workflow would build, with its artifact checks (permission allowlist,
-      # no key, pairing code, source maps or test hooks), so a problem shows up on the PR rather than at release time.
-      - name: Release artifacts check
-        run: bun run release:check
-
-      # The release builds a binary per platform (cli/script/compile.ts); this host's one shows a compile break early.
-      - name: Compile and pack the linux-x64 binary
-        working-directory: cli
+      - id: inputs
+        name: Select artifact targets
         run: |
-          bun script/compile.ts linux-x64
-          ./dist-bin/browse-linux-x64/bin/browse --version
-          bun script/pack.ts
-
-      # The scripts the release jobs that hold secrets run (.github/release/); shellcheck comes with the runner image.
-      - name: Shellcheck release scripts
-        run: shellcheck -x .github/release/*.sh
-
-  browser:
-    name: Execute sandbox in headless Chromium (optional)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    # Informational: a real-browser check of the execute sandbox; a failure here doesn't fail CI.
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version-file: package.json
-
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24
-          package-manager-cache: false
-
-      - name: Install (extension)
-        run: bun install --frozen-lockfile
-
-      - name: Install (cli)
-        run: bun install --frozen-lockfile
+          artifact=true
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            changed=$(git diff --name-only HEAD^1 HEAD -- cli install install.ps1 scripts ':(glob)**/package*.json' ':(glob)**/bun.lock*' .github evals)
+            if [[ -z "$changed" ]]; then artifact=false; fi
+          fi
+          echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
+          echo "version=$(node -p 'require("./cli/package.json").version')" >> "$GITHUB_OUTPUT"
+      - run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile
         working-directory: cli
-
-      - name: Build (extension)
-        run: bun run build
-
-      - name: Build (cli)
-        run: bun build.ts
-        working-directory: cli
-
-      # The Chromium the pinned patchright-core expects, with its system libraries.
       - name: Install Chromium
         run: node node_modules/patchright-core/cli.js install --with-deps --no-shell chromium
         working-directory: cli
+      - name: PR checks
+        env:
+          EVAL_EXTRA_TARGETS: ${{ steps.inputs.outputs.artifact == 'true' && 'darwin-arm64 windows-x64 windows-x64-baseline' || '' }}
+        run: bun evals/run.ts pr
+      - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: eval-pr-${{ github.run_attempt }}
+          path: evals/results/
+          if-no-files-found: error
+      - id: build
+        if: steps.inputs.outputs.artifact == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: eval-input-build-${{ github.run_attempt }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 3
+      - id: binaries
+        if: steps.inputs.outputs.artifact == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: eval-input-binaries-${{ github.run_attempt }}
+          path: cli/dist-bin/npm/
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
 
-      - name: Execute sandbox browser harness
-        run: node --no-warnings test/execute-realm-browser.ts
-        working-directory: cli
+  artifact:
+    needs: check
+    if: needs.check.outputs.artifact == 'true'
+    uses: ./.github/workflows/artifact.yml
+    with:
+      ref: ${{ github.sha }}
+      version: ${{ needs.check.outputs.version }}
+      build-id: ${{ needs.check.outputs.build-id }}
+      binaries-id: ${{ needs.check.outputs.binaries-id }}

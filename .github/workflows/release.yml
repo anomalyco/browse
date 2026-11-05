@@ -67,6 +67,7 @@ jobs:
       channel: ${{ steps.plan.outputs.channel }}
       npm_tag: ${{ steps.plan.outputs.npm_tag }}
       dry_run: ${{ steps.plan.outputs.dry_run }}
+      previous_latest: ${{ steps.previous.outputs.tags }}
     steps:
       - name: Check out release scripts
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -83,6 +84,12 @@ jobs:
           INPUT_BUMP: ${{ inputs.bump }}
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_RELEASE_NOTES: ${{ inputs.release_notes }}
+      - id: previous
+        if: steps.plan.outputs.mode == 'stable'
+        name: Remember each package's latest tag before publishing
+        run: bash .github/release/rollback-npm.sh snapshot
+        env:
+          BROWSE_VERSION: ${{ steps.plan.outputs.version }}
 
   # Stable only: commits the versions and changelog/<version>.md on the dispatched dev commit and pushes only the tag
   # v<version>, with the release deploy key (the only actor besides the code owners the v* tag ruleset admits).
@@ -123,6 +130,7 @@ jobs:
       contents: read
     outputs:
       digest: ${{ steps.upload.outputs.digest }}
+      id: ${{ steps.upload.outputs.id }}
     env:
       MODE: ${{ needs.plan.outputs.mode }}
       VERSION: ${{ needs.plan.outputs.version }}
@@ -199,6 +207,7 @@ jobs:
       contents: read
     outputs:
       digest: ${{ steps.upload.outputs.digest }}
+      id: ${{ steps.upload.outputs.id }}
     env:
       MODE: ${{ needs.plan.outputs.mode }}
       VERSION: ${{ needs.plan.outputs.version }}
@@ -247,56 +256,6 @@ jobs:
             echo "$target: $actual"
           done
 
-      # The linux-x64 binary as a user gets it: cli/node_modules is moved out of the way, so a file it reads at run time
-      # from a path built on __dirname (the build machine's node_modules, baked into the executable) fails here too.
-      # `browse serve` is the relay install and the MCP server start; `browse mcp` serves the tools. Put back for the
-      # upload.
-      - name: Smoke test the relay and MCP server without node_modules
-        run: |
-          set -eu
-          dir=$(mktemp -d)
-          tar -xzf "$RUNNER_TEMP/binaries/opencode-browse-linux-x64-$VERSION.tgz" -C "$dir"
-          binary="$dir/package/bin/browse"
-          home=$(mktemp -d)
-          port=29988
-          relay=
-          restore() {
-            if [ -n "$relay" ]; then kill "$relay" 2>/dev/null || true; fi
-            if [ -d cli/node_modules.away ]; then mv cli/node_modules.away cli/node_modules; fi
-          }
-          trap restore EXIT
-          mv cli/node_modules cli/node_modules.away
-          env -i HOME="$home" PATH=/usr/bin:/bin OPENCODE_BROWSER_PORT="$port" OPENCODE_BROWSER_MANAGED_RELAY=1 \
-            "$binary" serve > "$RUNNER_TEMP/relay.log" 2>&1 &
-          relay=$!
-          up=
-          for _ in $(seq 1 60); do
-            if curl -sf --max-time 2 "http://127.0.0.1:$port/version" > "$RUNNER_TEMP/version.json"; then up=1; break; fi
-            kill -0 "$relay" 2>/dev/null || break
-            sleep 0.5
-          done
-          if [ -z "$up" ]; then
-            cat "$RUNNER_TEMP/relay.log"
-            echo "::error::The relay from the linux-x64 binary did not answer /version without node_modules."
-            exit 1
-          fi
-          echo "relay: $(cat "$RUNNER_TEMP/version.json")"
-          # Closing its stdin interrupts the MCP server (Effect exits 130), which isn't a failure; the tools are the test.
-          {
-            printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release-smoke","version":"0"}}}'
-            sleep 2
-            printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
-            printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
-            sleep 5
-          } | env -i HOME="$home" PATH=/usr/bin:/bin OPENCODE_BROWSER_PORT="$port" timeout 60 "$binary" mcp > "$RUNNER_TEMP/mcp.json" || true
-          tools=$(grep -o '"name":"[a-z0-9_-]*"' "$RUNNER_TEMP/mcp.json" | wc -l)
-          if [ "$tools" -lt 1 ]; then
-            cat "$RUNNER_TEMP/mcp.json"
-            echo "::error::The linux-x64 binary's MCP server listed no tools without node_modules."
-            exit 1
-          fi
-          echo "mcp: $tools tools"
-
       - id: upload
         name: Upload
         uses: ./.github/release/upload
@@ -319,6 +278,7 @@ jobs:
       contents: read
     outputs:
       digest: ${{ steps.upload.outputs.digest }}
+      id: ${{ steps.upload.outputs.id }}
     steps:
       - name: Check out release scripts
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -367,16 +327,32 @@ jobs:
           rm -f "$RUNNER_TEMP/cert.p12"
           security delete-keychain build.keychain || true
 
+  # Test the immutable uploads (including signed macOS binaries when enabled) on fresh runners, not rebuilds.
+  artifact:
+    needs: [plan, tag, build, build-binaries, sign-macos]
+    if: >-
+      ${{ !cancelled() && needs.build.result == 'success' && needs.build-binaries.result == 'success'
+      && (needs.sign-macos.result == 'success' || needs.sign-macos.result == 'skipped') }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/artifact.yml
+    with:
+      ref: ${{ needs.tag.outputs.sha || github.sha }}
+      version: ${{ needs.plan.outputs.version }}
+      build-id: ${{ needs.build.outputs.id }}
+      binaries-id: ${{ needs.build-binaries.outputs.id }}
+      signed-id: ${{ needs.sign-macos.outputs.id }}
+
   # ---- Attest and publish: only .github/release/ is checked out; artifacts are data ---------------------------------
 
   # Build provenance for the zip and every tarball (the signed macOS ones too, when sign-macos ran). No secrets; id-token
   # only for Sigstore.
   attest:
     name: Attest build provenance
-    needs: [plan, build, build-binaries, sign-macos]
+    needs: [plan, build, build-binaries, sign-macos, artifact]
     # Explicit: on dev runs tag is skipped, and the implicit success() would skip everything downstream of it.
     if: >-
-      ${{ !cancelled() && needs.build.result == 'success' && needs.build-binaries.result == 'success'
+      ${{ !cancelled() && needs.artifact.result == 'success' && needs.build.result == 'success' && needs.build-binaries.result == 'success'
       && (needs.sign-macos.result == 'success' || needs.sign-macos.result == 'skipped') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -511,12 +487,51 @@ jobs:
           BROWSE_NPM_TAG: ${{ needs.plan.outputs.npm_tag }}
           BROWSE_DRY_RUN: ${{ needs.plan.outputs.dry_run }}
 
+  verify-published:
+    needs: [plan, tag, build, publish-npm]
+    if: ${{ !cancelled() && needs.plan.outputs.mode != 'check' && needs.publish-npm.result == 'success' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/artifact.yml
+    with:
+      ref: ${{ needs.tag.outputs.sha || github.sha }}
+      version: ${{ needs.plan.outputs.version }}
+      build-id: ${{ needs.build.outputs.id }}
+      published: true
+
+  rollback-npm:
+    needs: [plan, verify-published]
+    if: ${{ !cancelled() && needs.plan.outputs.mode == 'stable' && needs.verify-published.result == 'failure' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: /.github/release/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: bash .github/release/rollback-npm.sh restore
+        env:
+          BROWSE_VERSION: ${{ needs.plan.outputs.version }}
+          PREVIOUS_LATEST: ${{ needs.plan.outputs.previous_latest }}
+
   # Stable (and check, as a dry run): every store upload is reviewed, too slow for a build per push, so dev builds
   # never go to the store.
   publish-cws:
     name: Publish to the Chrome Web Store
-    needs: [plan, build, attest]
-    if: ${{ !cancelled() && needs.plan.outputs.channel == 'latest' && needs.attest.result == 'success' }}
+    needs: [plan, build, attest, verify-published]
+    if: >-
+      ${{ !cancelled() && needs.plan.outputs.channel == 'latest' && needs.attest.result == 'success'
+      && (needs.verify-published.result == 'success' || needs.plan.outputs.mode == 'check') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
