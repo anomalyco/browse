@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process"
 import { randomUUID } from "node:crypto"
-import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs"
 import { networkInterfaces } from "node:os"
 import path from "node:path"
 import { createInterface } from "node:readline/promises"
@@ -21,6 +21,7 @@ import { cliCommand, devExtensionFolder, entryCommand, installCommand, runningEn
 import { unpackedExtensionId } from "../protocol.ts"
 import { parseHostname, readRelayConfig, writeRelayConfig } from "../relay/config.ts"
 import { relayAuthorization } from "../relay/secrets.ts"
+import { opencodeBrowserBuildId } from "../version.ts"
 import { readCurrent } from "../update/auto-update.ts"
 import { removeBinaryInstall } from "./binary.ts"
 import { revealFolder } from "./browsers.ts"
@@ -329,8 +330,48 @@ async function confirmSecretRemoval(args: string[]) {
   if (!/^y(es)?$/i.test(answer.trim())) fail("Uninstall cancelled; nothing was removed.")
 }
 
+/** Stop only a managed instance that recorded its identity in this install. Never start a relay during uninstall. */
+async function stopInstalledRelay() {
+  const base = relayBase()
+  const audit = path.join(files.dir, "relays", new URL(base).port, "lifecycle.jsonl")
+  if (!existsSync(audit)) return
+  const probe = async () => {
+    try {
+      const response = await fetch(`${base}/version`, { redirect: "error", signal: AbortSignal.timeout(2000) })
+      return response.ok ? await response.json() as { managed?: boolean; instanceId?: string; shutdownProtocol?: number } : undefined
+    } catch (error) {
+      const e = error as { code?: string; cause?: { code?: string } }
+      if (error instanceof SyntaxError) return undefined // Another HTTP server, not a browse version response.
+      if (["ECONNREFUSED", "ConnectionRefused"].includes(e.cause?.code ?? e.code ?? "")) return undefined
+      throw error
+    }
+  }
+  const relay = await probe()
+  if (!relay?.managed || !relay.instanceId) return
+  const ours = readFileSync(audit, "utf8").trim().split("\n").some(line => {
+    const event = JSON.parse(line)
+    return event._tag === "Ready" && event.instanceId === relay.instanceId
+  })
+  if (!ours) return
+  if (relay.shutdownProtocol !== 2) throw new Error("Stop the legacy relay manually, then run uninstall again.")
+  const response = await fetch(`${base}/shutdown`, {
+    method: "POST", redirect: "error", headers: { ...relayHeaders(), "content-type": "application/json" }, signal: AbortSignal.timeout(15_000),
+    body: JSON.stringify({ instanceId: relay.instanceId, requestId: randomUUID(), reason: "explicit-restart", force: true,
+      client: { kind: "cli", instanceId: randomUUID(), buildId: opencodeBrowserBuildId } }),
+  })
+  if (!response.ok || !(await response.json() as { stopping?: boolean }).stopping) throw new Error("The running relay refused shutdown. Stop it manually, then run uninstall again.")
+  for (let n = 0; n < 100; n++) {
+    const current = await probe()
+    if (!current) return
+    if (current.instanceId !== relay.instanceId) throw new Error("Another relay started during uninstall; no files were removed.")
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  throw new Error("The relay is still stopping. Run uninstall again once it exits.")
+}
+
 export async function uninstall(args: string[]) {
   await confirmSecretRemoval(args)
+  await stopInstalledRelay()
   const host = removeLegacyHost()
   const settings = readJson<Settings>(files.settings)
   const mcp = (settings?.opencodeConfigs ?? [configFile()]).flatMap((file) =>
@@ -349,11 +390,16 @@ export async function uninstall(args: string[]) {
     }
   }
   const binary = readCurrent(layout)?.binary
-  rmSync(files.dir, { recursive: true, force: true })
-  log(`✓ Removed ${files.dir}`)
+  try {
+    rmSync(files.dir, { recursive: true, force: true })
+    log(`✓ Removed ${files.dir}`)
+  } catch (error) {
+    if (process.platform !== "win32" || !["EBUSY", "EPERM", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error
+    log(`! Couldn't remove all of ${files.dir}; close running browse agents and remove the remaining files.`)
+  }
   if (binary) {
     const left = removeBinaryInstall(binary)
-    log(left ? `! Couldn't remove ${left} while it runs; delete it once your agents have stopped.` : `✓ Removed ${binary}`)
+    log(left ? `! Couldn't remove ${left}. After uninstall exits, close any browse agents using the file(s) and delete them.` : `✓ Removed ${binary}`)
   }
   if (host) log("✓ Removed the native messaging host of an earlier version")
   if (mcp.length)
