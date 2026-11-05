@@ -111,12 +111,18 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
 
             $package = "@opencode/browse-windows-$target"
             $encoded = "@opencode%2fbrowse-windows-$target"
+            # CI-only mirror for the packed tarball. Production always uses npm over HTTPS.
+            $registry = "https://registry.npmjs.org"
+            if ($env:BROWSE_INSTALL_BASE_URL) {
+                $registry = $env:BROWSE_INSTALL_BASE_URL.TrimEnd('/')
+                if ($registry -notmatch '\Ahttp://127\.0\.0\.1:[0-9]+\z') { throw 'BROWSE_INSTALL_BASE_URL must be a loopback test mirror (http://127.0.0.1:PORT)' }
+            }
             if (-not $requested) {
-                try { $version = (Invoke-RestMethod -UseBasicParsing "https://registry.npmjs.org/$encoded/$channel").version } catch { $version = $null }
+                try { $version = (Invoke-RestMethod -UseBasicParsing "$registry/$encoded/$channel").version } catch { $version = $null }
                 if (-not $version) { throw "Failed to fetch the latest browse version for windows-$target" }
             } else {
                 $version = $requested -replace "^v", ""
-                try { Invoke-RestMethod -UseBasicParsing "https://registry.npmjs.org/$encoded/$version" | Out-Null }
+                try { Invoke-RestMethod -UseBasicParsing "$registry/$encoded/$version" | Out-Null }
                 catch {
                     $status = $null
                     try { $status = [int]$_.Exception.Response.StatusCode } catch {}
@@ -129,7 +135,7 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
             $archive = Join-Path $tmp $filename
             Write-Host ""
             Write-Host "Installing browse version: $version"
-            Invoke-WebRequest -UseBasicParsing -Uri "https://registry.npmjs.org/$package/-/$filename" -OutFile $archive
+            Invoke-WebRequest -UseBasicParsing -Uri "$registry/$package/-/$filename" -OutFile $archive
 
             # Windows 10 and later ship bsdtar as System32\tar.exe; another tar on PATH (Git's) can't read C:\ paths.
             $tar = Join-Path $env:SystemRoot "System32\tar.exe"

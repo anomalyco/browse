@@ -199,8 +199,14 @@ else
 
     package="@opencode/browse-$target"
     encoded="@opencode%2fbrowse-$target"
+    # CI serves the packed tarball on loopback. Never accept a remote HTTP mirror.
+    registry=https://registry.npmjs.org
+    if [[ -n "${BROWSE_INSTALL_BASE_URL:-}" ]]; then
+        registry=${BROWSE_INSTALL_BASE_URL%/}
+        [[ "$registry" =~ ^http://127\.0\.0\.1:[0-9]+$ ]] || { echo 'BROWSE_INSTALL_BASE_URL must be a loopback test mirror (http://127.0.0.1:PORT)' >&2; exit 1; }
+    fi
     if [ -z "$requested_version" ]; then
-        metadata=$(curl -fsSL "https://registry.npmjs.org/$encoded/$channel" || true)
+        metadata=$(curl -fsSL "$registry/$encoded/$channel" || true)
         specific_version=$(echo "$metadata" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -n 1)
         if [ -z "$specific_version" ]; then
             echo -e "${RED}Failed to fetch the latest browse version for $target${NC}"
@@ -209,7 +215,7 @@ else
     else
         requested_version="${requested_version#v}"
         specific_version=$requested_version
-        http_status=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/$encoded/$specific_version" || true)
+        http_status=$(curl -s -o /dev/null -w "%{http_code}" "$registry/$encoded/$specific_version" || true)
         if [ "$http_status" = "404" ]; then
             echo -e "${RED}Error: browse ${specific_version} is not available for $target${NC}"
             echo -e "${MUTED}Available versions: https://www.npmjs.com/package/$package?activeTab=versions${NC}"
@@ -222,7 +228,7 @@ else
     fi
 
     filename="browse-$target-$specific_version.tgz"
-    url="https://registry.npmjs.org/$package/-/$filename"
+    url="$registry/$package/-/$filename"
 fi
 
 print_message() {
