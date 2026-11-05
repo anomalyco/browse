@@ -1,5 +1,5 @@
 import { Config, Effect, Result, Schedule, Schema } from "effect"
-import { spawn } from "node:child_process"
+import { execFileSync, spawn } from "node:child_process"
 import crypto from "node:crypto"
 import path from "node:path"
 import process from "node:process"
@@ -329,10 +329,20 @@ export function startManagedRelay(
       }
       const launch = managedRelayLaunch(entrypoint, executable, execArgv)
       const { OPENCODE_BROWSER_RESTART_REQUEST_ID: _inheritedRestartRequestId, ...env } = relayEnvironment(process.env)
+      const childEnv = { ...env, OPENCODE_BROWSER_MANAGED_RELAY: "1", ...(options.restartRequestId ? { OPENCODE_BROWSER_RESTART_REQUEST_ID: options.restartRequestId } : {}) }
+      if (process.platform === "win32") {
+        // A detached spawn can still inherit extra pipe handles from cmd / PowerShell 5.1. ShellExecute starts a
+        // separate hidden console without those handles. Start-Process takes one Windows command line, not argv.
+        const args = launch.args.map(s => `"${s.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`).join(" ")
+        execFileSync(path.join(process.env.SystemRoot!, "System32/WindowsPowerShell/v1.0/powershell.exe"),
+          ["-NoProfile", "-NonInteractive", "-Command", "Start-Process -ErrorAction Stop -WindowStyle Hidden -FilePath $env:BROWSE_EXE -ArgumentList $env:BROWSE_ARGS"],
+          { env: { ...childEnv, BROWSE_EXE: launch.executable, BROWSE_ARGS: args }, windowsHide: true, stdio: "ignore" })
+        return
+      }
       const child = spawn(launch.executable, launch.args, {
         detached: true,
         stdio: "ignore",
-        env: { ...env, OPENCODE_BROWSER_MANAGED_RELAY: "1", ...(options.restartRequestId ? { OPENCODE_BROWSER_RESTART_REQUEST_ID: options.restartRequestId } : {}) },
+        env: childEnv,
       })
       child.unref()
     },
