@@ -67,6 +67,7 @@ if (import.meta.main) {
       bytecode: true,
       sourcemap: "none",
       splitting: true,
+      naming: { entry: "[name].[ext]", chunk: "[name]-[hash].[ext]" },
       // patchright-core's BiDi-over-CDP bridge (Firefox) requires chromium-bidi lazily; browse only uses connectOverCDP.
       external: ["chromium-bidi/*"],
       plugins: [
@@ -141,16 +142,6 @@ function patchrightFiles(): Bun.BunPlugin {
     setup(build) {
       const root = path.dirname(Bun.resolveSync("patchright-core/package.json", here))
       const json = (file: string) => readFile(path.join(root, file), "utf8").then((text) => JSON.stringify(JSON.parse(text)))
-      // execute/patchright-tuning.ts reaches patchright-core's internals through createRequire(import.meta.url), which
-      // a compiled binary resolves against its bundle path (/$bunfs/root, no node_modules); a plain require is resolved
-      // while bundling, so the module it names is in the executable. The npm/Node build keeps its runtime require.
-      build.onLoad({ filter: /[\\/]src[\\/]execute[\\/]patchright-tuning\.ts$/ }, async (args) => {
-        const text = await readFile(args.path, "utf8")
-        const contents = text.replaceAll("createRequire(import.meta.url)(", "require(")
-        if (contents === text && text.includes("createRequire("))
-          throw new Error("patchright-tuning.ts no longer calls createRequire(import.meta.url) directly; check how it loads patchright-core")
-        return { contents, loader: "ts" }
-      })
       build.onLoad({ filter: /[\\/]patchright-core[\\/]lib[\\/][^\\/]+\.js$/ }, async (args) => {
         let text = await readFile(args.path, "utf8")
         const packageJson = await json("package.json")

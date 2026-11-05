@@ -1,4 +1,3 @@
-import { createRequire } from "node:module"
 import { relayLog } from "../relay/log.ts"
 
 type Progress = { race<T>(promise: Promise<T>): Promise<T> }
@@ -27,8 +26,7 @@ type ServerPage = { mainFrame(): Frame }
  * The classes aren't exported; they're reached through the first page's main frame. If a Patchright update renames
  * these internals, nothing breaks: lookups stay correct but slower, and relay.log says so.
  */
-export function tunePatchright() {
-  const { server } = createRequire(import.meta.url)("patchright-core/lib/coreBundle") as { server?: { Page?: { prototype: ServerPage } } }
+export function tunePatchright({ server }: { server?: { Page?: { prototype: ServerPage } } }) {
   const page = server?.Page?.prototype
   const mainFrame = page?.mainFrame
   if (!page || typeof mainFrame !== "function") {

@@ -1,5 +1,5 @@
 import { Effect } from "effect"
-import { chromium, errors, type Browser, type BrowserContext, type Page } from "patchright-core"
+import type { Browser, BrowserContext, Page } from "patchright-core"
 import { registerAriaSnapshotSelector } from "./snapshot/aria-snapshot.ts"
 import * as AuthProfile from "./auth/profile.ts"
 import * as AuthenticatedOrigin from "./auth/authenticated-origin.ts"
@@ -139,7 +139,8 @@ export {
   type RequestHandoff,
 }
 
-tunePatchright()
+const { chromium, errors, internals } = await import("./execute/coreBundle.ts")
+tunePatchright(internals)
 
 type ExecuteSandboxOptions = {
   readonly endpointUrl: string

@@ -44,8 +44,16 @@ export function relayProcessFaultSummary(): { readonly suppressed: number; reado
 }
 
 export function shouldSuppressRelayProcessFault(cause: unknown): boolean {
+  if (isPatchrightProtocolError(cause)) return true
   const errorText = cause instanceof Error ? `${cause.message}\n${cause.stack ?? ""}` : String(cause)
   return /playwright-core|patchright-core|coreBundle|Duplicate target/i.test(errorText)
+}
+
+// Patchright sets all three fields in its ProtocolError constructor, even when method or logs are undefined.
+// The class is private and its name can be minified. The message alone isn't proof of a Patchright fault.
+function isPatchrightProtocolError(cause: unknown): boolean {
+  return cause instanceof Error && Object.hasOwn(cause, "method") && Object.hasOwn(cause, "logs") && "type" in cause
+    && (cause.type === "error" || cause.type === "closed" || cause.type === "crashed")
 }
 
 /**
@@ -55,7 +63,8 @@ export function shouldSuppressRelayProcessFault(cause: unknown): boolean {
  * instead (benignRejections).
  */
 export function isBenignClosedSessionRejection(cause: unknown): boolean {
-  if (!(cause instanceof Error) || !/patchright-core|playwright-core|coreBundle/.test(cause.stack ?? "")) return false
+  if (!(cause instanceof Error)) return false
+  if (!isPatchrightProtocolError(cause) && !/patchright-core|playwright-core|coreBundle/.test(cause.stack ?? "")) return false
   return /^Protocol error \([\w.]+\): .*(session closed|Target closed|Extension disconnected|extension is not connected|Unknown CDP session|Detached while handling command|Relay closed)/i.test(cause.message)
 }
 

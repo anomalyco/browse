@@ -14,7 +14,7 @@ import {
 } from "../src/relay/browser-pairing.ts"
 import { checkoutReloadPrefix, extensionProtocolVersion, unpackedReloadAdvice } from "../src/protocol.ts"
 import { dataUrlDocument, stableUnpackedExtensionOrigin } from "../src/relay/helpers.ts"
-import { isBenignClosedSessionRejection } from "../src/relay.ts"
+import { isBenignClosedSessionRejection, shouldSuppressRelayProcessFault } from "../src/relay.ts"
 import {
   cdpCall,
   collect,
@@ -603,7 +603,16 @@ describe("process faults", () => {
     expect(isBenignClosedSessionRejection(fault("Protocol error (Network.setCacheDisabled): Extension disconnected"))).toBe(true)
     expect(isBenignClosedSessionRejection(fault("Protocol error (Network.setCacheDisabled): Unknown CDP session bc-tab-12 for Network.setCacheDisabled"))).toBe(true)
     expect(isBenignClosedSessionRejection(fault("Protocol error (Runtime.evaluate): Cannot find context with specified id"))).toBe(false)
-    expect(isBenignClosedSessionRejection(new Error("Protocol error (Network.setCacheDisabled): session closed"))).toBe(false)
+    const message = "Protocol error (Network.setCacheDisabled): session closed"
+    const relayError = new Error(message)
+    expect(isBenignClosedSessionRejection(relayError)).toBe(false)
+    expect(shouldSuppressRelayProcessFault(relayError)).toBe(false)
+    for (const type of ["error", "closed", "crashed"]) {
+      const anonymous = Object.assign(new Error(message), { type, method: "Network.setCacheDisabled", logs: undefined })
+      expect(isBenignClosedSessionRejection(anonymous)).toBe(true)
+      expect(shouldSuppressRelayProcessFault(anonymous)).toBe(true)
+    }
+    expect(shouldSuppressRelayProcessFault(Object.assign(relayError, { method: "Network.setCacheDisabled", logs: undefined, type: "other" }))).toBe(false)
   })
 })
 
