@@ -1,8 +1,8 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Installs browse: downloads the browse binary for this computer into ~/.browse/bin, then hands over to
 # `browse install`, which does the rest (PATH, your agents, pairing with your browser). Served at
 # https://opencode.ai/browse/install. Platform detection follows opencode's installer.
-set -euo pipefail
+set -eu
 APP=browse
 
 MUTED='\033[0;2m'
@@ -35,38 +35,42 @@ requested_version=${VERSION:-}
 channel=latest
 no_setup=false
 binary_path=""
-setup_args=()
-
-while [[ $# -gt 0 ]]; do
+# Consume the installer's options, rotating setup arguments to the end without splitting or evaluating them.
+remaining=$#
+while [ "$remaining" -gt 0 ]; do
+    remaining=$((remaining - 1))
     case "$1" in
         -h|--help)
             usage
             exit 0
             ;;
         -v|--version)
-            if [[ -n "${2:-}" ]]; then
+            if [ "$remaining" -gt 0 ] && [ -n "${2:-}" ]; then
                 requested_version="$2"
+                remaining=$((remaining - 1))
                 shift 2
             else
-                echo -e "${RED}Error: --version requires a version argument${NC}"
+                printf '%b\n' "${RED}Error: --version requires a version argument${NC}"
                 exit 1
             fi
             ;;
         --channel)
-            if [[ -n "${2:-}" ]]; then
+            if [ "$remaining" -gt 0 ] && [ -n "${2:-}" ]; then
                 channel="$2"
+                remaining=$((remaining - 1))
                 shift 2
             else
-                echo -e "${RED}Error: --channel requires a tag${NC}"
+                printf '%b\n' "${RED}Error: --channel requires a tag${NC}"
                 exit 1
             fi
             ;;
         -b|--binary)
-            if [[ -n "${2:-}" ]]; then
+            if [ "$remaining" -gt 0 ] && [ -n "${2:-}" ]; then
                 binary_path="$2"
+                remaining=$((remaining - 1))
                 shift 2
             else
-                echo -e "${RED}Error: --binary requires a path argument${NC}"
+                printf '%b\n' "${RED}Error: --binary requires a path argument${NC}"
                 exit 1
             fi
             ;;
@@ -75,7 +79,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         *)
-            setup_args+=("$1")
+            set -- "$@" "$1"
             shift
             ;;
     esac
@@ -98,16 +102,16 @@ fi
 
 if [ -n "$binary_path" ]; then
     if [ ! -f "$binary_path" ]; then
-        echo -e "${RED}Error: Binary not found at ${binary_path}${NC}"
+        printf '%b\n' "${RED}Error: Binary not found at ${binary_path}${NC}"
         exit 1
     fi
     specific_version="local"
 else
     arch=$(uname -m)
-    if [[ "$arch" == "aarch64" ]]; then
+    if [ "$arch" = "aarch64" ]; then
       arch="arm64"
     fi
-    if [[ "$arch" == "x86_64" ]]; then
+    if [ "$arch" = "x86_64" ]; then
       arch="x64"
     fi
 
@@ -121,9 +125,7 @@ else
     # Git Bash and MSYS2 run as emulated x64 on Windows ARM64, so `uname -m` reports x86_64.
     # The host CPU still shows in the `uname -s` suffix and in PROCESSOR_IDENTIFIER.
     if [ "$os" = "windows" ] && [ "$arch" = "x64" ]; then
-      if [[ "$raw_os" == *-ARM64 || "${PROCESSOR_IDENTIFIER:-}" == ARM* ]]; then
-        arch="arm64"
-      fi
+      case "$raw_os:${PROCESSOR_IDENTIFIER:-}" in *-ARM64:*|*:ARM*) arch="arm64" ;; esac
     fi
 
     combo="$os-$arch"
@@ -131,7 +133,7 @@ else
       linux-x64|linux-arm64|darwin-x64|darwin-arm64|windows-x64|windows-arm64)
         ;;
       *)
-        echo -e "${RED}Unsupported OS/Arch: $os/$arch${NC}"
+        printf '%b\n' "${RED}Unsupported OS/Arch: $os/$arch${NC}"
         exit 1
         ;;
     esac
@@ -193,7 +195,7 @@ else
     fi
 
     if ! command -v tar >/dev/null 2>&1; then
-        echo -e "${RED}Error: 'tar' is required but not installed.${NC}"
+        printf '%b\n' "${RED}Error: 'tar' is required but not installed.${NC}"
         exit 1
     fi
 
@@ -203,7 +205,7 @@ else
         metadata=$(curl -fsSL "https://registry.npmjs.org/$encoded/$channel" || true)
         specific_version=$(echo "$metadata" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -n 1)
         if [ -z "$specific_version" ]; then
-            echo -e "${RED}Failed to fetch the latest browse version for $target${NC}"
+            printf '%b\n' "${RED}Failed to fetch the latest browse version for $target${NC}"
             exit 1
         fi
     else
@@ -211,12 +213,12 @@ else
         specific_version=$requested_version
         http_status=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/$encoded/$specific_version" || true)
         if [ "$http_status" = "404" ]; then
-            echo -e "${RED}Error: browse ${specific_version} is not available for $target${NC}"
-            echo -e "${MUTED}Available versions: https://www.npmjs.com/package/$package?activeTab=versions${NC}"
+            printf '%b\n' "${RED}Error: browse ${specific_version} is not available for $target${NC}"
+            printf '%b\n' "${MUTED}Available versions: https://www.npmjs.com/package/$package?activeTab=versions${NC}"
             exit 1
         fi
         if [ "$http_status" != "200" ]; then
-            echo -e "${RED}Failed to fetch package information${NC}"
+            printf '%b\n' "${RED}Failed to fetch package information${NC}"
             exit 1
         fi
     fi
@@ -225,10 +227,10 @@ else
     url="https://registry.npmjs.org/$package/-/$filename"
 fi
 
-print_message() {
-    local level=$1
-    local message=$2
-    local color=""
+print_message() (
+    level=$1
+    message=$2
+    color=""
 
     case $level in
         info) color="${NC}" ;;
@@ -236,34 +238,34 @@ print_message() {
         error) color="${RED}" ;;
     esac
 
-    echo -e "${color}${message}${NC}"
-}
+    printf '%b\n' "${color}${message}${NC}"
+)
 
-download_and_install() {
+download_and_install() (
     print_message info "\n${MUTED}Installing ${NC}browse ${MUTED}version: ${NC}$specific_version"
-    local tmp_dir="${TMPDIR:-/tmp}/browse_install_$$"
+    tmp_dir="${TMPDIR:-/tmp}/browse_install_$$"
     mkdir -p "$tmp_dir"
 
-    local ret status delay previous pattern
     for delay in 0 15 30 60 75; do
         if [ "$delay" != 0 ]; then
             print_message warning "The $specific_version tarball isn't available yet; retrying in ${delay}s." >&2
             sleep "$delay"
         fi
         ret=0
-        status=$(curl -f -# -L -w '%{http_code}' -o "$tmp_dir/$filename" "$url") || ret=$?
-        [[ "$ret" == 22 && "$status" == 404 ]] || break
+        http_status=$(curl -f -# -L -w '%{http_code}' -o "$tmp_dir/$filename" "$url") || ret=$?
+        { [ "$ret" = 22 ] && [ "$http_status" = 404 ]; } || break
     done
     # A pin must never silently install another version. Only fall back within the requested release channel.
-    if [[ "$ret" == 22 && "$status" == 404 && -z "$requested_version" && ( "$channel" == latest || "$channel" == dev ) ]]; then
+    if [ "$ret" = 22 ] && [ "$http_status" = 404 ] && [ -z "$requested_version" ] && { [ "$channel" = latest ] || [ "$channel" = dev ]; }; then
         pattern='[0-9]+\.[0-9]+\.[0-9]+'
-        if [[ "$channel" == dev ]]; then pattern+='-dev\.[0-9]+(\.[0-9]+)?'; fi
+        if [ "$channel" = dev ]; then pattern="${pattern}"'-dev\.[0-9]+(\.[0-9]+)?'; fi
         # The platform manifests contain only browse versions. Sort numeric components (including dev run/rerun).
-        previous=$(curl -fsSL -H 'Accept: application/vnd.npm.install-v1+json' "${url%/$package/-/*}/$encoded" | tr ',' '\n' |
+        curl -fsSL -H 'Accept: application/vnd.npm.install-v1+json' "https://registry.npmjs.org/$encoded" -o "$tmp_dir/versions.json"
+        previous=$(tr ',' '\n' <"$tmp_dir/versions.json" |
             sed -nE "s/.*\"version\":[[:space:]]*\"($pattern)\".*/\\1/p" |
             LC_ALL=C sort -u -t . -k1,1nr -k2,2nr -k3,3nr -k4,4nr -k5,5nr |
             awk -v current="$specific_version" 'prev == current {print} {prev=$0}')
-        if [[ -n "$previous" ]]; then
+        if [ -n "$previous" ]; then
             print_message warning "browse $specific_version is still unavailable; falling back to $previous ($channel)." >&2
             ret=0
             curl -f -# -L -o "$tmp_dir/$filename" "${url%/*}/browse-$target-$previous.tgz" || ret=$?
@@ -283,7 +285,7 @@ download_and_install() {
     chmod 755 "$INSTALL_DIR/$installed_binary.new"
     mv -f "$INSTALL_DIR/$installed_binary.new" "$INSTALL_DIR/$installed_binary"
     rm -rf "$tmp_dir"
-}
+)
 
 install_from_binary() {
     print_message info "\n${MUTED}Installing ${NC}browse ${MUTED}from: ${NC}$binary_path"
@@ -309,6 +311,6 @@ echo ""
 if [ -t 1 ] && { : </dev/tty; } 2>/dev/null; then
     # Bun on macOS can poll the pty slave, but not the /dev/tty alias.
     { tty_path=$(tty <&3 2>/dev/null) || tty_path=/dev/tty; } 3<&1
-    exec "$INSTALL_DIR/$installed_binary" install ${setup_args[@]+"${setup_args[@]}"} <"$tty_path"
+    exec "$INSTALL_DIR/$installed_binary" install "$@" <"$tty_path"
 fi
-exec "$INSTALL_DIR/$installed_binary" install ${setup_args[@]+"${setup_args[@]}"}
+exec "$INSTALL_DIR/$installed_binary" install "$@"
