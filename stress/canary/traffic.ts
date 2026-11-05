@@ -9,7 +9,7 @@ const probe = process.argv.includes("--probe"), site = process.argv.includes("--
 const fx = probe || site ? undefined : await startFixtures(fixturePort), session = `canary-${Date.now()}`
 const npx = process.argv.includes("--npx")
 // A second install format is a client here; it must never replace the binary canary's relay during an outage.
-const client = new McpClient(npx ? ["npx", "--yes", "@opencode/browse@dev", "mcp"] : undefined, npx ? { OPENCODE_BROWSER_AUTOSTART: "false" } : {})
+const client = new McpClient(npx ? ["npx", "--yes", "@opencode/browse@dev", "mcp"] : undefined, npx || process.argv.includes("--no-autostart") ? { OPENCODE_BROWSER_AUTOSTART: "false" } : {})
 let created = false
 async function task() {
   const hello = await client.initialize()

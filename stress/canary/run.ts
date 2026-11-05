@@ -24,7 +24,7 @@ const webhook = process.env.CANARY_SLACK_WEBHOOK
 delete process.env.CANARY_SLACK_WEBHOOK // never pass it to browsers, fuzz, npm or the product
 const node = (name: string, ...args: string[]) => [process.execPath, path.join(stress, name + ".ts"), ...args]
 const stateFile = path.join(root, "state.json")
-type State = { build?: string; commit?: string; tested?: string; day?: string; site?: number; seen?: { version: string; commit: string; since: number; switchedAt?: number; assisted?: boolean; forcedAt?: number }; outage?: { since: number; incident?: boolean; hard?: boolean }; previous: Record<string, Status>; current: Record<string, Status>; alerted: string[] }
+type State = { build?: string; commit?: string; tested?: string; day?: string; site?: number; trafficAt?: number; seen?: { version: string; commit: string; since: number; switchedAt?: number; assisted?: boolean; forcedAt?: number }; outage?: { since: number; incident?: boolean; hard?: boolean }; previous: Record<string, Status>; current: Record<string, Status>; alerted: string[] }
 fs.mkdirSync(root, { recursive: true, mode: 0o700 })
 const state: State = fs.existsSync(stateFile) ? readJson(stateFile) : { previous: {}, current: {}, alerted: [] }
 const save = () => saveJson(stateFile, state)
@@ -217,15 +217,18 @@ async function cycle() {
 
   // During an upgrade leave the live relay idle so its own updater can choose when to switch. Every hour also
   // leave a quiet stretch for idle/reconnect behaviour; an absent browser always gets a real user probe.
-  const quiet = !once && !state.outage && s.connected && (!!state.seen || new Date().getMinutes() >= 42)
+  // Leave the updater its 15-minute idle window, but a moving dist-tag must not suppress MCP traffic forever.
+  const quiet = !once && !state.outage && s.connected && Date.now() - (state.trafficAt ?? 0) < 20 * minute && (!!state.seen || new Date().getMinutes() >= 42)
   if (!quiet) {
     const trafficStart = Date.now()
+    const observe = state.seen ? ["--no-autostart"] : []
     const row = await check("fixture-traffic", async dir => {
-      const e = await command(dir, node("canary/traffic"), 2)
+      const e = await command(dir, node("canary/traffic", ...observe), 2)
       e.metrics = await metrics(); return e
     })
     // A broken form assertion is a regression, not proof the whole browser is unreachable.
-    const reachable = row.status === "pass" || (await check("reachability", dir => command(dir, node("canary/traffic", "--probe"), 1.5), { regress: false })).status === "pass"
+    const reachable = row.status === "pass" || (await check("reachability", dir => command(dir, node("canary/traffic", "--probe", ...observe), 1.5), { regress: false })).status === "pass"
+    state.trafficAt = Date.now(); save()
     await health(reachable, trafficStart)
     if (!once && row.status === "pass" && !state.seen && Date.now() - (state.site ?? 0) > 3_600_000) {
       await check("public-traffic", dir => command(dir, node("canary/traffic", "--site"), 2), { report: true }); state.site = Date.now(); save()
