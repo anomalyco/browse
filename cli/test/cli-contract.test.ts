@@ -44,6 +44,21 @@ describe("CLI contract helpers", () => {
 describe("CLI process exit codes and session defaults", () => {
   const cliEntry = path.resolve(import.meta.dirname, "../src/main.ts")
 
+  test("pair reports a running relay build mismatch, not a startup failure", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-pair-mismatch-"))
+    const relay = Bun.serve({ hostname: "127.0.0.1", port: await unusedPort(), fetch: () =>
+      Response.json({ version: "0.0.1", buildId: "2026-01-01T00:00:00Z" }) })
+    try {
+      const result = await execFileAsync(process.execPath, [cliEntry, "pair"], {
+        env: { ...process.env, HOME: home, OPENCODE_BROWSER_HOME: home, OPENCODE_BROWSER_PORT: String(relay.port) }, timeout: 5000,
+      }).catch((error: { code: number; stderr: string }) => error)
+      expect(result).toMatchObject({ code: 1 })
+      expect(result.stderr).toContain("Running relay build 2026-01-01")
+      expect(result.stderr).toContain("relay restart")
+      expect(result.stderr).not.toContain("Couldn't start")
+    } finally { await relay.stop(true); fs.rmSync(home, { recursive: true, force: true }) }
+  })
+
   test("a silent listener fails status and session list without trying to start another relay", async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-silent-"))
     const server = http.createServer(() => { /* accept the request but never send even the headers */ })

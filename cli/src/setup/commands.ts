@@ -73,7 +73,7 @@ export function ensureRelay(entry: string) {
     timeout: 30_000,
   })
   if (started.status !== 0)
-    fail(`Couldn't start the browse relay: ${started.stderr?.trim() || started.error?.message || `run ${cliCommand("doctor")}`}`)
+    fail(started.stderr?.trim() || `Couldn't reach the browse relay: ${started.error?.message || `run ${cliCommand("doctor")}`}`)
 }
 
 export const extensionStatus = (installWaiting = false) =>
