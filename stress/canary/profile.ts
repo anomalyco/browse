@@ -1,7 +1,7 @@
 // A new Chrome uses the bundled code left by the release installer. The second browser needs its own one-time
 // code; relaunches of either must reconnect with their existing pairing, never auto-repair it.
 import assert from "node:assert/strict"
-import { execFileSync } from "node:child_process"
+import { spawnSync } from "node:child_process"
 import { BrowserCdp } from "../lib/cdp.ts"
 import { relayJson, sleep } from "../lib/env.ts"
 
@@ -18,8 +18,11 @@ while (Date.now() < deadline) {
       if (!stored.agentRelayAddress) {
         const settings: Record<string, string> = { browserName: id, agentRelayAddress: "127.0.0.1:19770" }
         if (browser === "brave") {
-          const output = execFileSync(process.env.BROWSE_STRESS_BINARY!, ["pair"], { encoding: "utf8", timeout: 15_000 })
-          const code = output.match(/Pairing code:\s*([0-9A-Z]{4}-[0-9A-Z]{4})/i)?.[1]
+          // `pair` waits for the new browser before returning. Its one-second wait expires (exit 1) because
+          // we haven't entered the code yet; the code itself remains valid. Never throw its captured stdout.
+          const pair = spawnSync(process.env.BROWSE_STRESS_BINARY!, ["pair", "--wait-seconds", "1"], { encoding: "utf8", timeout: 15_000 })
+          assert(!pair.error && (pair.status === 0 || pair.status === 1), "could not request a browser pairing code")
+          const code = pair.stdout.match(/Pairing code:\s*([0-9A-Z]{4}-[0-9A-Z]{4})/i)?.[1]
           assert(code, "pair did not return a one-time code")
           settings.agentRelayPairingCode = code
         }
