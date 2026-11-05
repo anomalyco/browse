@@ -1,4 +1,5 @@
 import { Effect, Predicate } from "effect"
+import * as RelayLifecycle from "../relay/lifecycle.ts"
 import { registerMcpTools } from "./registry.ts"
 import {
   emptyInputSchema,
@@ -45,6 +46,8 @@ registerMcpTools({
           const readOnly = optionalBooleanField(input, "readOnly")
           const allowedOrigins = optionalStringArrayField(input, "allowedOrigins")
           const browser = optionalStringField(input, "browser")
+          // A browser that's reconnecting (worker or relay restart) is back within seconds: wait, as execute does.
+          yield* RelayLifecycle.ensureExtensionConnected({ relay: ctx.relay, waitForReconnect: true })
           const session = yield* ctx.relay.sessionNew(requestedId, {
             ...(readOnly ? { readOnly: true } : {}),
             ...(allowedOrigins ? { allowedOrigins } : {}),

@@ -264,9 +264,16 @@ export const ensureExtensionConnected = Effect.fn("RelayLifecycle.ensureExtensio
     ExtensionStatus,
     ExtensionProtocolIncompatible | ExtensionDisconnected
   > => {
-    // For an existing session, let its operation check the bound profile and report disconnect/revocation.
-    if (options.sessionId && status.sessions?.some((session) => session.id === options.sessionId && session.browser)) {
-      return Effect.succeed(status)
+    // On a reconnect, another online profile can't satisfy a bound session's wait.
+    const bound = options.sessionId ? status.sessions?.find((session) => session.id === options.sessionId && session.browser) : undefined
+    if (bound) {
+      const browser = status.browsers?.find((candidate) => candidate.id === bound.browser)
+      // Outside a reconnect wait let the operation report its precise revocation or mismatch error as before.
+      if (!options.waitForReconnect || browser?.connected || status.protocolCompatible === false) return Effect.succeed(status)
+      return Effect.fail(new ExtensionDisconnected({
+        message: `Session ${bound.id} belongs to browser '${bound.browser}', which isn't connected. Reconnect it or start a new session.`,
+        needsPairing: status.pairingState === "refused" || status.pairingState === "unpaired",
+      }))
     }
     if (status.protocolCompatible === false) {
       return Effect.fail(new ExtensionProtocolIncompatible({

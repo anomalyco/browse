@@ -1,4 +1,5 @@
 import { Effect } from "effect"
+import * as RelayClient from "../relay/client.ts"
 import * as RelayLifecycle from "../relay/lifecycle.ts"
 import { registerMcpTools } from "./registry.ts"
 import { objectSchema, parseExecuteArguments } from "./schema.ts"
@@ -49,8 +50,9 @@ registerMcpTools({
         Effect.gen(function* () {
           const args = yield* Effect.try(() => parseExecuteArguments(input))
           const sessionId = args.session ?? ctx.currentSession.id
-          yield* RelayLifecycle.ensureExtensionConnected({ relay: ctx.relay, sessionId, waitForReconnect: true })
-          const result = yield* ctx.relay.execute({
+          const connected = RelayLifecycle.ensureExtensionConnected({ relay: ctx.relay, sessionId, waitForReconnect: true })
+          yield* connected
+          const run = ctx.relay.execute({
             sessionId,
             code: args.code,
             createIfMissing: !args.session,
@@ -58,6 +60,12 @@ registerMcpTools({
             ...(args.targetSelection ? { targetSelection: args.targetSelection } : {}),
             ...(args.browser ? { browser: args.browser } : {}),
           })
+          // The status check and the call race the browser's link closing (a worker restart): when the relay answers
+          // that the session's browser isn't connected, wait for it once more and run once more.
+          const result = yield* run.pipe(Effect.catchIf(
+            (error): error is RelayClient.RelayRejected => error instanceof RelayClient.RelayRejected && error.code === "browser-unavailable",
+            () => connected.pipe(Effect.andThen(run)),
+          ))
           const recreated = !args.session && ctx.currentSession.established && result.session.created === true
           ctx.establishCurrentSession(sessionId)
           return {
