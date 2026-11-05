@@ -283,7 +283,10 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
 
   return Service.of({
     endpoint,
-    version: getJson("/version", RelayVersion),
+    version: getJson("/version", RelayVersion).pipe(Effect.mapError((error) =>
+      error instanceof RelayDecodeFailed || (error instanceof RelayRejected && !error.code && error.status === 404)
+        ? new RelayDecodeFailed({ message: `Relay port ${new URL(endpoint).port} is in use by another program (not a browse /version response).`, path: "/version", cause: error })
+        : error)),
     shutdown: (request) => postJson("/shutdown", { ...request }, RelayShutdownResponse),
     extensionStatus: getJson("/extension/status", ExtensionStatus),
     targets: getJson("/json/list", TargetSummaries),
