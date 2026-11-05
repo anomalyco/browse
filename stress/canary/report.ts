@@ -16,7 +16,8 @@ for (const hours of [24, 168]) {
   console.log(`## Canary · last ${hours === 24 ? "24 h" : "7 d"}\n\n| Check | Pass / runs | Pass rate | Flaky | Skipped |\n|---|---:|---:|---:|---:|`)
   for (const check of [...new Set(recent.map(r => r.check))].sort()) {
     const checks = recent.filter(r => r.check === check), n = checks.filter(r => r.status !== "skipped").length, pass = checks.filter(r => r.status === "pass").length
-    console.log(`| ${check} | ${pass}/${n} | ${n ? (pass / n * 100).toFixed(1) + "%" : "—"} | ${checks.filter(r => r.status === "flaky").length} | ${checks.length - n} |`)
+    const known = checks.filter(r => r.knownIssue)
+    console.log(`| ${check}${known.length ? ` ([${known.length} known failure${known.length > 1 ? "s" : ""}](${known.at(-1)!.knownIssue}))` : ""} | ${pass}/${n} | ${n ? (pass / n * 100).toFixed(1) + "%" : "—"} | ${checks.filter(r => r.status === "flaky").length} | ${checks.length - n} |`)
   }
   const durations = (prefix: string, key: "updateMs" | "recoveryMs", forced?: boolean) => {
     const ms = recent.flatMap(r => !r.check.startsWith(prefix) || r.metrics[key] === undefined || (forced !== undefined && !!r.metrics.forced !== forced) ? [] : [r.metrics[key]!])

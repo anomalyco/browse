@@ -8,6 +8,7 @@ import { parseArgs } from "node:util"
 import { chromeDebugPort, dataDir, fixturePort, relayJson, relayPort, sleep } from "../lib/env.ts"
 import { BrowserCdp } from "../lib/cdp.ts"
 import { Sampler } from "../lib/metrics.ts"
+import { npxSmoke } from "./npx.ts"
 import { command, readJson, record, root, saveJson, type Evidence, type Metrics, type Status } from "./results.ts"
 
 const { values } = parseArgs({ options: { once: { type: "boolean" }, "soak-minutes": { type: "string" } } })
@@ -23,7 +24,7 @@ const webhook = process.env.CANARY_SLACK_WEBHOOK
 delete process.env.CANARY_SLACK_WEBHOOK // never pass it to browsers, fuzz, npm or the product
 const node = (name: string, ...args: string[]) => [process.execPath, path.join(stress, name + ".ts"), ...args]
 const stateFile = path.join(root, "state.json")
-type State = { build?: string; commit?: string; tested?: string; day?: string; site?: number; seen?: { version: string; commit: string; since: number; switchedAt?: number; assisted?: boolean; forcedAt?: number }; outage?: { since: number; incident?: boolean; hard?: boolean }; previous: Record<string, Status>; current: Record<string, Status>; alerted: string[] }
+type State = { build?: string; commit?: string; tested?: string; day?: string; site?: number; trafficAt?: number; seen?: { version: string; commit: string; since: number; switchedAt?: number; assisted?: boolean; forcedAt?: number }; outage?: { since: number; incident?: boolean; hard?: boolean }; previous: Record<string, Status>; current: Record<string, Status>; alerted: string[] }
 fs.mkdirSync(root, { recursive: true, mode: 0o700 })
 const state: State = fs.existsSync(stateFile) ? readJson(stateFile) : { previous: {}, current: {}, alerted: [] }
 const save = () => saveJson(stateFile, state)
@@ -39,9 +40,9 @@ async function alert(message: string, id: string) {
 }
 async function check(id: string, run: (dir: string) => Promise<Evidence>, opts: { tier?: string; report?: boolean; incident?: string; regress?: boolean } = {}) {
   const line = await record(id, opts.tier ?? "stress", version, commit, !opts.report, run)
-  if (line.status === "fail" && !opts.report) failed = true
+  if (line.blockingFailed.length) failed = true
   if (opts.incident) await alert(opts.incident, line.id)
-  else if (opts.regress !== false && !opts.report && line.status === "fail" && version === state.build && state.previous[id] === "pass" && !state.alerted.includes(id)) {
+  else if (opts.regress !== false && line.blockingFailed.length && version === state.build && state.previous[id] === "pass" && !state.alerted.includes(id)) {
     state.alerted.push(id); save(); await alert(`${id} regressed on ${version}`, line.id)
   }
   if (state.build === version) { state.current[id] = line.status; save() }
@@ -175,7 +176,7 @@ async function suite(kind: "release" | "nightly" | "short") {
   if (kind !== "nightly" || state.outage) return
   await check("fuzz", dir => observed(dir, node("fuzz", "--minutes", "15"), 22))
   if (state.outage) return
-  await check("npx-smoke", dir => command(dir, node("canary/traffic", "--npx"), 5))
+  await check("npx-smoke", npxSmoke)
   await check("multi-soak", async dir => {
     if (!fs.existsSync("/usr/bin/brave-browser")) return { status: "skipped", note: "Brave stable not installed" }
     try {
@@ -216,15 +217,18 @@ async function cycle() {
 
   // During an upgrade leave the live relay idle so its own updater can choose when to switch. Every hour also
   // leave a quiet stretch for idle/reconnect behaviour; an absent browser always gets a real user probe.
-  const quiet = !once && !state.outage && s.connected && (!!state.seen || new Date().getMinutes() >= 42)
+  // Leave the updater its 15-minute idle window, but a moving dist-tag must not suppress MCP traffic forever.
+  const quiet = !once && !state.outage && s.connected && Date.now() - (state.trafficAt ?? 0) < 20 * minute && (!!state.seen || new Date().getMinutes() >= 42)
   if (!quiet) {
     const trafficStart = Date.now()
+    const observe = state.seen ? ["--no-autostart"] : []
     const row = await check("fixture-traffic", async dir => {
-      const e = await command(dir, node("canary/traffic"), 2)
+      const e = await command(dir, node("canary/traffic", ...observe), 2)
       e.metrics = await metrics(); return e
     })
     // A broken form assertion is a regression, not proof the whole browser is unreachable.
-    const reachable = row.status === "pass" || (await check("reachability", dir => command(dir, node("canary/traffic", "--probe"), 1.5), { regress: false })).status === "pass"
+    const reachable = row.status === "pass" || (await check("reachability", dir => command(dir, node("canary/traffic", "--probe", ...observe), 1.5), { regress: false })).status === "pass"
+    state.trafficAt = Date.now(); save()
     await health(reachable, trafficStart)
     if (!once && row.status === "pass" && !state.seen && Date.now() - (state.site ?? 0) > 3_600_000) {
       await check("public-traffic", dir => command(dir, node("canary/traffic", "--site"), 2), { report: true }); state.site = Date.now(); save()

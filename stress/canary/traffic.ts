@@ -1,18 +1,24 @@
 // One ordinary stdio client (or the nightly npx client); the fixture assertion isn't a CLI status proxy.
 import assert from "node:assert/strict"
 import { exec, McpClient } from "../lib/mcp.ts"
-import { fixturePort } from "../lib/env.ts"
+import { fixturePort, relayJson } from "../lib/env.ts"
 import { startFixtures } from "../lib/fixtures.ts"
+import { knownNpxSkew } from "./npx.ts"
 
 const probe = process.argv.includes("--probe"), site = process.argv.includes("--site")
 const fx = probe || site ? undefined : await startFixtures(fixturePort), session = `canary-${Date.now()}`
 const npx = process.argv.includes("--npx")
 // A second install format is a client here; it must never replace the binary canary's relay during an outage.
-const client = new McpClient(npx ? ["npx", "--yes", "@opencode/browse@dev", "mcp"] : undefined, npx ? { OPENCODE_BROWSER_AUTOSTART: "false" } : {})
+const client = new McpClient(npx ? ["npx", "--yes", "@opencode/browse@dev", "mcp"] : undefined, npx || process.argv.includes("--no-autostart") ? { OPENCODE_BROWSER_AUTOSTART: "false" } : {})
 let created = false
-try {
-  await client.initialize()
+async function task() {
+  const hello = await client.initialize()
   const fresh = await client.call("session_new", { id: session }, 30_000)
+  if (npx && fresh.isError && await knownNpxSkew(fresh.text, hello.serverInfo?.version, await relayJson("/version"))) {
+    console.error(fresh.text)
+    process.exitCode = 54
+    return
+  }
   assert(!fresh.isError, fresh.text)
   created = true
   if (probe) {
@@ -25,7 +31,8 @@ try {
     assert.equal(value, session)
   }
   console.log("MCP session_new → navigate → verify: pass")
-} finally {
+}
+try { await task() } finally {
   try { if (created) { const del = await client.call("session_delete", { id: session }, 10_000); assert(!del.isError, del.text) } }
   finally { await client.close(); await fx?.close() }
 }
