@@ -8,6 +8,7 @@ import { parseArgs } from "node:util"
 import { chromeDebugPort, dataDir, fixturePort, relayJson, relayPort, sleep } from "../lib/env.ts"
 import { BrowserCdp } from "../lib/cdp.ts"
 import { Sampler } from "../lib/metrics.ts"
+import { npxSmoke } from "./npx.ts"
 import { command, readJson, record, root, saveJson, type Evidence, type Metrics, type Status } from "./results.ts"
 
 const { values } = parseArgs({ options: { once: { type: "boolean" }, "soak-minutes": { type: "string" } } })
@@ -39,9 +40,9 @@ async function alert(message: string, id: string) {
 }
 async function check(id: string, run: (dir: string) => Promise<Evidence>, opts: { tier?: string; report?: boolean; incident?: string; regress?: boolean } = {}) {
   const line = await record(id, opts.tier ?? "stress", version, commit, !opts.report, run)
-  if (line.status === "fail" && !opts.report) failed = true
+  if (line.blockingFailed.length) failed = true
   if (opts.incident) await alert(opts.incident, line.id)
-  else if (opts.regress !== false && !opts.report && line.status === "fail" && version === state.build && state.previous[id] === "pass" && !state.alerted.includes(id)) {
+  else if (opts.regress !== false && line.blockingFailed.length && version === state.build && state.previous[id] === "pass" && !state.alerted.includes(id)) {
     state.alerted.push(id); save(); await alert(`${id} regressed on ${version}`, line.id)
   }
   if (state.build === version) { state.current[id] = line.status; save() }
@@ -175,7 +176,7 @@ async function suite(kind: "release" | "nightly" | "short") {
   if (kind !== "nightly" || state.outage) return
   await check("fuzz", dir => observed(dir, node("fuzz", "--minutes", "15"), 22))
   if (state.outage) return
-  await check("npx-smoke", dir => command(dir, node("canary/traffic", "--npx"), 5))
+  await check("npx-smoke", npxSmoke)
   await check("multi-soak", async dir => {
     if (!fs.existsSync("/usr/bin/brave-browser")) return { status: "skipped", note: "Brave stable not installed" }
     try {

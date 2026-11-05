@@ -23,7 +23,7 @@ if [[ ! -x /usr/bin/brave-browser ]]; then
   install_brave() {
     curl -fsSL https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg | sudo tee /usr/share/keyrings/brave-browser-archive-keyring.gpg >/dev/null &&
       curl -fsSL https://brave-browser-apt-release.s3.brave.com/brave-browser.sources | sudo tee /etc/apt/sources.list.d/brave-browser-release.sources >/dev/null &&
-      sudo apt-get update -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/brave-browser-release.sources -o Dir::Etc::sourceparts=- &&
+      sudo apt-get update -qq &&
       sudo apt-get install -y --no-install-recommends brave-browser
   }
   install_brave || echo 'Brave stable not available: nightly will record the matrix check as skipped' >&2
