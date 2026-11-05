@@ -10,14 +10,16 @@ import path from "node:path"
 import { execFileSync } from "node:child_process"
 import { parseArgs } from "node:util"
 import { BrowserCdp } from "./lib/cdp.ts"
-import { fixturePort, relayJson, runDir, sleep } from "./lib/env.ts"
+import { fixturePort, relayJson, relayPort, runDir, sleep } from "./lib/env.ts"
 import { startFixtures } from "./lib/fixtures.ts"
 import { exec, McpClient } from "./lib/mcp.ts"
 import { relayPid, Sampler, type Sample } from "./lib/metrics.ts"
 import { Jsonl, mdEscape, oneLine, percentile, slope } from "./lib/results.ts"
 import { scenarios, type Ctx } from "./scenarios.ts"
 
-const ALL_CHAOS = ["relay-kill9", "sw-stop", "close-agent-tabs", "close-windows", "chrome-restart", "network-drop", "session-delete", "mcp-kill", "tabs-cleanup", "toolbar-stop"]
+const canary = !!process.env.BROWSE_STRESS_BINARY
+const ALL_CHAOS = ["relay-kill9", "sw-stop", "close-agent-tabs", "close-windows", "chrome-restart", "network-drop", "session-delete", "mcp-kill", "tabs-cleanup", "toolbar-stop",
+  ...(canary ? [] : ["relay-freeze", "chrome-freeze", "relay-port-drop", "extension-reload"])]
 const { values } = parseArgs({ options: {
   workers: { type: "string", default: "8" },
   minutes: { type: "string", default: "60" },
@@ -35,7 +37,7 @@ const CHAOS_MEAN_MS = Number(values["chaos-every"]) * 1000
 const CHAOS = values.chaos!.split(",").filter((c) => c && c !== "none")
 const RECOVERY_BOUND_MS = Number(values["recovery-bound"]) * 1000
 const MIN_SUCCESS = Number(values["min-success"])
-const canary = !!process.env.BROWSE_STRESS_BINARY
+if (CHAOS.some(c => !ALL_CHAOS.includes(c))) throw new Error("Unknown or unsupported chaos event for this runner")
 
 const dir = runDir("soak")
 const tasksLog = new Jsonl(dir, "tasks.jsonl")
@@ -150,6 +152,13 @@ const NET_RULES = [
 ]
 function netDown() { for (const rule of NET_RULES) sudo(["iptables", "-I", ...rule]) }
 function netUp() { for (const rule of NET_RULES) { try { sudo(["iptables", "-D", ...rule]) } catch {} } }
+// The relay's own port (the extension's link and the MCP servers' API), as a VPN flap or firewall would cut it.
+const RELAY_RULES = [["INPUT", "-p", "tcp", "--dport", String(relayPort), "-j", "DROP"], ["OUTPUT", "-p", "tcp", "--dport", String(relayPort), "-j", "DROP"]]
+function relayPortDown() { for (const rule of RELAY_RULES) sudo(["iptables", "-I", ...rule]) }
+function relayPortUp() { for (const rule of RELAY_RULES) { try { sudo(["iptables", "-D", ...rule]) } catch {} } }
+let frozen: number[] = []
+let droppingRelay = false
+function signalAll(pids: number[], signal: NodeJS.Signals) { for (const pid of pids) { try { process.kill(pid, signal) } catch {} } }
 
 const chaosActions: Record<string, () => Promise<Record<string, unknown>>> = {
   "relay-kill9": async () => {
@@ -183,6 +192,38 @@ const chaosActions: Record<string, () => Promise<Record<string, unknown>>> = {
     netDown()
     try { await sleep(ms) } finally { netUp() }
     return { ms }
+  },
+  // The machine sleeps: the relay (or the browser) gets no CPU for a while, longer than the link's keepalive (20 s).
+  "relay-freeze": async () => {
+    const pid = await relayPid()
+    if (!pid) return { skipped: "no relay" }
+    const ms = 25_000 + Math.floor(Math.random() * 20_000)
+    frozen = [pid]
+    process.kill(pid, "SIGSTOP")
+    try { await sleep(ms) } finally { signalAll(frozen, "SIGCONT"); frozen = [] }
+    return { pid, ms }
+  },
+  "chrome-freeze": async () => {
+    const { processInfo } = await (await cdp()).send("SystemInfo.getProcessInfo") as { processInfo: { id: number }[] }
+    const pids = processInfo.map(p => p.id)
+    frozen = pids
+    const ms = 25_000 + Math.floor(Math.random() * 20_000)
+    signalAll(pids, "SIGSTOP")
+    try { await sleep(ms) } finally { signalAll(frozen, "SIGCONT"); frozen = [] }
+    cdpConnection?.close()
+    return { processes: pids.length, ms }
+  },
+  "relay-port-drop": async () => {
+    const ms = 25_000 + Math.floor(Math.random() * 20_000)
+    droppingRelay = true
+    try { relayPortDown(); await sleep(ms) } finally { relayPortUp(); droppingRelay = false }
+    return { ms }
+  },
+  // The user reloads the extension (or the store updates it): the worker restarts with new state and reconnects.
+  "extension-reload": async () => {
+    const c = await cdp()
+    await c.evalInExtension(`setTimeout(() => chrome.runtime.reload(), 50); true`)
+    return {}
   },
   "session-delete": async () => {
     const busy = workers.filter((w) => w.session)
@@ -266,7 +307,11 @@ function readTasks(): any[] {
 }
 
 // --- run ----------------------------------------------------------------------------------------------------------
-const cleanup = () => { if (!canary && CHAOS.includes("network-drop")) try { netUp() } catch {} }
+const cleanup = () => {
+  if (!canary && CHAOS.includes("network-drop")) try { netUp() } catch {}
+  if (droppingRelay) relayPortUp()
+  signalAll(frozen, "SIGCONT")
+}
 process.on("exit", cleanup)
 process.on("SIGINT", () => { stopping = true; cleanup(); process.exit(130) })
 process.on("SIGTERM", () => { stopping = true; cleanup(); process.exit(143) })
