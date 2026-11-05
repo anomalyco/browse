@@ -71,8 +71,8 @@ export function mjpegMatroskaHeader(width: number, height: number): Buffer {
   ]))
   const streamInfo = element(info, Buffer.concat([
     element(timestampScale, unsignedInteger(1_000_000)),
-    element(muxingApp, Buffer.from("opencode-browser")),
-    element(writingApp, Buffer.from("opencode-browser")),
+    element(muxingApp, Buffer.from("browse")),
+    element(writingApp, Buffer.from("browse")),
   ]))
   const track = element(trackEntry, Buffer.concat([
     element(trackNumber, unsignedInteger(1)),

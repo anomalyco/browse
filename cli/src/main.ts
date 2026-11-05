@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// opencode-browser: one command for browse.
+// browse: one command for setup, updates and driving the browser.
 //   Setup (setup.ts): install, extension, pair, uninstall. Updating (update.ts): update.
 //   Driving the browser (cli.ts): serve, relay, execute, session, network, secrets, recording, journal,
 //   doctor, skill, mcp, status. The relay is the local server agents use; the extension connects to it.
-// `opencode-browser mcp` runs the MCP server over stdio (as does the bundle invoked as `opencode-browser-mcp`).
+// `browse mcp` runs the MCP server over stdio (as does the bundle invoked as `opencode-browser-mcp`).
 import path from "node:path"
 
 const embeddedVersion = globalThis.__OPENCODE_BROWSER_VERSION__

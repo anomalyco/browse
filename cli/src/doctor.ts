@@ -160,7 +160,7 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
       name: metadata.name,
       version: metadata.version,
       bin: {
-        opencodeBrowser: metadata.bin?.["opencode-browser"] ?? null,
+        opencodeBrowser: metadata.bin?.browse ?? null,
       },
     })),
   )
@@ -313,7 +313,7 @@ function buildDoctorChecks(options: {
     ? [
       {
         id: "bin-opencode-browser",
-        label: "opencode-browser bin",
+        label: "browse bin",
         status: options.packageResult.value.bin.opencodeBrowser ? "ok" : "fail",
         message: options.packageResult.value.bin.opencodeBrowser ?? "missing from package.json bin",
       },

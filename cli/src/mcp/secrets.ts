@@ -1,6 +1,7 @@
 import { Effect } from "effect"
 import path from "node:path"
 import * as SiteSecrets from "../auth/site-secrets.ts"
+import { cliCommand } from "../paths.ts"
 import { registerMcpTools } from "./registry.ts"
 import {
   objectSchema,
@@ -20,7 +21,7 @@ registerMcpTools({
       name: "secrets_list",
       requiresRelayCompatibility: false,
       description:
-        'List what agents may type without seeing: site secrets the user stored (names, kinds and allowed origins; type them with secrets.type(target, name) in execute; only the user adds them with `opencode-browser secrets add`).',
+        `List what agents may type without seeing: site secrets the user stored (names, kinds and allowed origins; type them with secrets.type(target, name) in execute; only the user adds them with \`${cliCommand("secrets add")}\`).`,
       inputSchema: sessionOnlyInputSchema,
       readOnly: true,
       destructive: false,

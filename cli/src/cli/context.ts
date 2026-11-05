@@ -67,7 +67,7 @@ export function hoistJsonFlag(args: ReadonlyArray<string>): {
 // Written directly so the line survives --json mode, where Console.log is silenced.
 export const stderrLine = (message: string) =>
   Effect.sync(() => {
-    process.stderr.write(`opencode-browser: ${message.split("\n")[0]!.slice(0, 300)}\n`)
+    process.stderr.write(`browse: ${message.split("\n")[0]!.slice(0, 300)}\n`)
   })
 export const emitJson = (value: unknown) => Effect.sync(() => printJson(value))
 export const printOr = (json: boolean, value: unknown, text: string) => (json ? emitJson(value) : Console.log(text))

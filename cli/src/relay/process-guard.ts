@@ -99,11 +99,11 @@ function rethrowProcessFault(cause: unknown): never {
 
 function logProcessFault(kind: RelayProcessFaultKind, cause: unknown, detail: Record<string, unknown>, disposition: string): void {
   const errorText = cause instanceof Error ? cause.stack ?? cause.message : String(cause)
-  const message = `[opencode-browser relay] ${kind}; ${disposition}\n${errorText}`
+  const message = `[browse relay] ${kind}; ${disposition}\n${errorText}`
   console.error(message)
   if (process.env.OPENCODE_BROWSER_MANAGED_RELAY === "1") appendManagedRelayProcessLog(message)
   if (debugEnvironmentEnabled(process.env.OPENCODE_BROWSER_DEBUG)) {
-    console.error(`[opencode-browser relay] ${kind} detail`, detail)
+    console.error(`[browse relay] ${kind} detail`, detail)
   }
 }
 

@@ -37,7 +37,7 @@ describe("CLI contract helpers", () => {
   test("exitCodeForError maps relay/extension unavailability to ExitCode.host (4)", () => {
     expect(exitCodeForError(new RelayUnreachable({ message: "down", endpoint: "http://127.0.0.1:19988", path: "/version", cause: null }))).toBe(ExitCode.host)
     expect(exitCodeForError(new Error("boom"))).toBe(ExitCode.failure)
-    expect(failure("opencode-browser status", "relay_unavailable", "down", { exitCode: ExitCode.host }).error.exitCode).toBe(4)
+    expect(failure("browse status", "relay_unavailable", "down", { exitCode: ExitCode.host }).error.exitCode).toBe(4)
   })
 })
 
@@ -90,7 +90,7 @@ describe("CLI process exit codes and session defaults", () => {
       expect(run.status).toBe(ExitCode.host)
       const parsed = JSON.parse(run.stdout) as { relay: { running: boolean } }
       expect(parsed.relay.running).toBe(false)
-      expect(run.stderr).toContain("opencode-browser:")
+      expect(run.stderr).toContain("browse:")
     } finally {
       fs.rmSync(home, { recursive: true, force: true })
     }

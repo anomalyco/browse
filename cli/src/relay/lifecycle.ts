@@ -339,7 +339,7 @@ export function startManagedRelay(
   return Effect.try({
     try: () => {
       if (!entrypoint) {
-        throw new Error("Cannot locate the opencode-browser CLI entrypoint")
+        throw new Error("Cannot locate the browse CLI entrypoint")
       }
       const launch = managedRelayLaunch(entrypoint, executable, execArgv)
       const { OPENCODE_BROWSER_RESTART_REQUEST_ID: _inheritedRestartRequestId, ...env } = relayEnvironment(process.env)
