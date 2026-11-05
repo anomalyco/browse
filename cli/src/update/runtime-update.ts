@@ -14,6 +14,7 @@ import {
   UPDATE_VERSION,
   fetchPublished,
   installVersion,
+  InstallVerificationError,
   npmRuntime,
   pruneVersions,
   readCurrent,
@@ -171,7 +172,8 @@ export async function runRuntimeInstall(args: readonly string[]) {
   } catch (error) {
     updateState(layout, ({ installing, ...state }) => {
       const still = clear(installing)
-      return { ...state, ...(still ? { installing: still } : {}), lastError: { message: (error as Error).message, at: new Date().toISOString(), version } }
+      const attempts = 1 + (state.lastError?.version === version ? state.lastError.attempts ?? 1 : 0)
+      return { ...state, ...(still ? { installing: still } : {}), lastError: { message: (error as Error).message, at: new Date().toISOString(), version, attempts, verification: error instanceof InstallVerificationError } }
     })
     log(`${new Date().toISOString()} install of ${version} failed: ${(error as Error).message}`)
     process.exitCode = 1

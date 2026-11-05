@@ -171,6 +171,23 @@ describe("the relay's updater", () => {
     expect(spawned).toEqual([])
   })
 
+  test.each([[1, 15], [2, 60], [3, 240], [4, 240]])("retries a download after failure %i at %i minutes, not at the next daily version check", async (attempts, minutes) => {
+    const failure = { message: "the registry answered 404", version: "0.0.2", at: new Date(Date.now() - (minutes - 1) * 60_000).toISOString(), attempts }
+    const { layout, spawned, updater } = setup((state) => ({ ...state, lastError: failure }))
+    await updater.tick()
+    expect(spawned).toEqual([])
+    updateState(layout, (state) => ({ ...state, lastError: { ...failure, at: new Date(Date.now() - minutes * 60_000).toISOString() } }))
+    await updater.tick()
+    expect(spawned).toEqual([["runtime-install", "0.0.2", "--integrity", "sha512-x"]])
+  })
+
+  test("a version that failed verification is still held for a day", async () => {
+    const failure = { message: "wrong integrity", version: "0.0.2", at: new Date(Date.now() - 5 * 3600_000).toISOString(), verification: true }
+    const { spawned, updater } = setup((state) => ({ ...state, lastError: failure }))
+    await updater.tick()
+    expect(spawned).toEqual([])
+  })
+
   test("an installer that died after installing counts as installed, even if its state write was lost", async () => {
     const { layout, updater } = setup((state) => ({ ...state, installing: { version: "0.0.2", pid: 2 ** 22 + 12345, startedAt: Date.now() } }))
     await updater.tick()

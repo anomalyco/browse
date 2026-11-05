@@ -244,8 +244,31 @@ download_and_install() {
     local tmp_dir="${TMPDIR:-/tmp}/browse_install_$$"
     mkdir -p "$tmp_dir"
 
-    local ret=0
-    curl -f -# -L -o "$tmp_dir/$filename" "$url" || ret=$?
+    local ret status delay previous pattern
+    for delay in 0 15 30 60 75; do
+        if [ "$delay" != 0 ]; then
+            print_message warning "The $specific_version tarball isn't available yet; retrying in ${delay}s." >&2
+            sleep "$delay"
+        fi
+        ret=0
+        status=$(curl -f -# -L -w '%{http_code}' -o "$tmp_dir/$filename" "$url") || ret=$?
+        [[ "$ret" == 22 && "$status" == 404 ]] || break
+    done
+    # A pin must never silently install another version. Only fall back within the requested release channel.
+    if [[ "$ret" == 22 && "$status" == 404 && -z "$requested_version" && ( "$channel" == latest || "$channel" == dev ) ]]; then
+        pattern='[0-9]+\.[0-9]+\.[0-9]+'
+        if [[ "$channel" == dev ]]; then pattern+='-dev\.[0-9]+(\.[0-9]+)?'; fi
+        # The platform manifests contain only browse versions. Sort numeric components (including dev run/rerun).
+        previous=$(curl -fsSL -H 'Accept: application/vnd.npm.install-v1+json' "${url%/$package/-/*}/$encoded" | tr ',' '\n' |
+            sed -nE "s/.*\"version\":[[:space:]]*\"($pattern)\".*/\\1/p" |
+            LC_ALL=C sort -u -t . -k1,1nr -k2,2nr -k3,3nr -k4,4nr -k5,5nr |
+            awk -v current="$specific_version" 'prev == current {print} {prev=$0}')
+        if [[ -n "$previous" ]]; then
+            print_message warning "browse $specific_version is still unavailable; falling back to $previous ($channel)." >&2
+            ret=0
+            curl -f -# -L -o "$tmp_dir/$filename" "${url%/*}/browse-$target-$previous.tgz" || ret=$?
+        fi
+    fi
     # curl exits 23 when it cannot write the file, usually because the temporary directory is full.
     if [ "$ret" -eq 23 ]; then
         print_message error "Could not write the download to $tmp_dir. Make sure it has enough free space, or set TMPDIR to another directory, then try again." >&2
@@ -284,6 +307,8 @@ echo ""
 # `curl | sh` feeds this script through stdin, so give `browse install` the terminal for its agent picker. An agent
 # running this has no terminal: install then sets up the agent that ran it.
 if [ -t 1 ] && { : </dev/tty; } 2>/dev/null; then
-    exec "$INSTALL_DIR/$installed_binary" install ${setup_args[@]+"${setup_args[@]}"} </dev/tty
+    # Bun on macOS can poll the pty slave, but not the /dev/tty alias.
+    { tty_path=$(tty <&3 2>/dev/null) || tty_path=/dev/tty; } 3<&1
+    exec "$INSTALL_DIR/$installed_binary" install ${setup_args[@]+"${setup_args[@]}"} <"$tty_path"
 fi
 exec "$INSTALL_DIR/$installed_binary" install ${setup_args[@]+"${setup_args[@]}"}

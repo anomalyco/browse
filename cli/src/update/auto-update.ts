@@ -136,7 +136,7 @@ export type AutoUpdateState = {
   /** Rolled back from: not installed again until a newer version is published. */
   readonly skipped?: string
   readonly lastUpdate?: { readonly from: string; readonly to: string; readonly at: string }
-  readonly lastError?: { readonly message: string; readonly at: string; readonly version?: string }
+  readonly lastError?: { readonly message: string; readonly at: string; readonly version?: string; readonly attempts?: number; readonly verification?: boolean }
   /** An installer running in its own process (`runtime-install`), so npm never blocks the relay. */
   readonly installing?: { readonly version: string; readonly pid: number; readonly startedAt: number }
 }
@@ -310,6 +310,9 @@ export async function registryUrl(run: Run = runCommand, env: NodeJS.ProcessEnv 
 
 export type Published = { readonly version: string; readonly integrity: string }
 
+/** We received the package but it failed integrity, contents or executable verification. */
+export class InstallVerificationError extends Error {}
+
 /** The channel's dist-tag and that version's published integrity (of this platform's package, for a binary install). */
 export async function fetchPublished(options: { readonly registry: string; readonly channel: Channel; readonly fetch?: typeof fetch; readonly packageName?: string }): Promise<Published> {
   const request = options.fetch ?? fetch
@@ -383,19 +386,23 @@ export async function installVersion(options: {
     else {
       const args = ["install", "--prefix", temporary, "--no-audit", "--no-fund", "--ignore-scripts", "--loglevel=error", ...(options.registry ? [`--registry=${options.registry}`] : []), spec]
       const npm = await run("npm", args, { timeoutMs: 10 * 60_000 })
-      if (npm.status !== 0) throw new Error(`npm install ${spec} failed: ${(npm.stderr || npm.stdout).trim().split("\n").slice(-3).join(" ")}`)
+      if (npm.status !== 0) {
+        const output = npm.stderr || npm.stdout
+        const message = `npm install ${spec} failed: ${output.trim().split("\n").slice(-3).join(" ")}`
+        throw /\bEINTEGRITY\b/.test(output) ? new InstallVerificationError(message) : new Error(message)
+      }
     }
     const installed = readJson<{ version?: string }>(path.join(temporary, "node_modules", "@opencode", "browse", "package.json"))?.version
-    if (!installed) throw new Error(`npm install ${spec} didn't install ${PACKAGE_NAME}`)
-    if (options.spec === undefined && installed !== options.version) throw new Error(`npm installed ${installed}, not ${options.version}`)
+    if (!installed) throw new InstallVerificationError(`npm install ${spec} didn't install ${PACKAGE_NAME}`)
+    if (options.spec === undefined && installed !== options.version) throw new InstallVerificationError(`npm installed ${installed}, not ${options.version}`)
     if (options.integrity) {
       const locked = readJson<{ packages?: Record<string, { integrity?: string; version?: string }> }>(path.join(temporary, "package-lock.json"))?.packages?.["node_modules/@opencode/browse"]
-      if (locked?.integrity !== options.integrity) throw new Error(`${PACKAGE_NAME}@${installed} installed with integrity ${locked?.integrity ?? "unknown"}, not the registry's ${options.integrity}`)
+      if (locked?.integrity !== options.integrity) throw new InstallVerificationError(`${PACKAGE_NAME}@${installed} installed with integrity ${locked?.integrity ?? "unknown"}, not the registry's ${options.integrity}`)
     }
     const entry = path.join(temporary, "node_modules", "@opencode", "browse", "dist", "cli.mjs")
     const reported = await run(options.node ?? process.execPath, [entry, "--version"], { timeoutMs: 30_000, env: { ...process.env, OPENCODE_BROWSER_AUTOSTART: "0" } })
     if (reported.status !== 0 || reported.stdout.trim() !== installed)
-      throw new Error(`${PACKAGE_NAME}@${installed} didn't run: \`--version\` printed ${JSON.stringify(reported.stdout.trim() || reported.stderr.trim()).slice(0, 200)}`)
+      throw new InstallVerificationError(`${PACKAGE_NAME}@${installed} didn't run: \`--version\` printed ${JSON.stringify(reported.stdout.trim() || reported.stderr.trim()).slice(0, 200)}`)
     const target = versionDirectory(layout, installed)
     rmSync(target, { recursive: true, force: true })
     renameSync(temporary, target)
@@ -430,15 +437,15 @@ async function installBinaryVersion(options: Parameters<typeof installVersion>[0
       if (!response.ok) throw new Error(`downloading ${name}@${options.version} failed: the registry answered ${response.status}`)
       const tgz = new Uint8Array(await response.arrayBuffer())
       const actual = `sha512-${createHash("sha512").update(tgz).digest("base64")}`
-      if (actual !== integrity) throw new Error(`${name}@${options.version} downloaded with integrity ${actual}, not the registry's ${integrity}`)
+      if (actual !== integrity) throw new InstallVerificationError(`${name}@${options.version} downloaded with integrity ${actual}, not the registry's ${integrity}`)
       const executable = tarFile(tgz, `package/bin/${binaryName()}`)
-      if (!executable) throw new Error(`${name}@${options.version} has no bin/${binaryName()}`)
+      if (!executable) throw new InstallVerificationError(`${name}@${options.version} has no bin/${binaryName()}`)
       writeFileSync(file, executable)
     }
     chmodSync(file, 0o755)
     const reported = await run(file, ["--version"], { timeoutMs: 30_000, env: { ...process.env, OPENCODE_BROWSER_AUTOSTART: "0" } })
     if (reported.status !== 0 || reported.stdout.trim() !== expected)
-      throw new Error(`browse ${expected} didn't run: \`--version\` printed ${JSON.stringify(reported.stdout.trim() || reported.stderr.trim()).slice(0, 200)}`)
+      throw new InstallVerificationError(`browse ${expected} didn't run: \`--version\` printed ${JSON.stringify(reported.stdout.trim() || reported.stderr.trim()).slice(0, 200)}`)
     const target = versionDirectory(layout, expected)
     rmSync(target, { recursive: true, force: true })
     renameSync(temporary, target)
@@ -746,7 +753,7 @@ const SWITCH_TIMEOUT_MS = 5 * 60_000
  * installed by a detached `runtime-install` child, and once it's installed and the browser is idle, a detached
  * `runtime-switch` child drains this relay, points current.json at the new version and starts its relay (refused while
  * busy, and then nothing changes). Nothing on the relay's event loop waits for npm. Never throws; failures are kept in
- * auto-update.json and tried again on the next day's check.
+ * auto-update.json. Downloads retry with backoff; packages that fail verification wait for the daily check.
  */
 export function createAutoUpdater(deps: AutoUpdaterDeps) {
   const env = deps.env ?? process.env
@@ -807,7 +814,14 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
         deps.log("autoupdate.installer_gone", { version: installing.version })
       }
       if (state.pending !== wanted) {
-        if (state.lastError?.version === wanted && now() - Date.parse(state.lastError.at) < checkIntervalMs) return
+        if (state.lastError?.version === wanted) {
+          const failure = state.lastError
+          const attempts = failure.attempts ?? 1
+          const backoff = (attempts <= 1 ? 15 : attempts === 2 ? 60 : 240) * 60_000
+          const delay = failure.verification ? checkIntervalMs : Math.min(backoff, checkIntervalMs)
+          const age = now() - Date.parse(failure.at)
+          if (age >= 0 && age < delay) return
+        }
         deps.log("autoupdate.installing", { version: wanted })
         const pid = spawnChild(["runtime-install", wanted, ...(state.integrity ? ["--integrity", state.integrity] : [])], (code) => {
           deps.log(code === 0 ? "autoupdate.installed" : "autoupdate.install_failed", { version: wanted, code })
