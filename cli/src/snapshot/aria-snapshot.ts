@@ -1,6 +1,7 @@
-import { selectors, type BrowserContext, type Frame, type Locator, type Page } from "patchright-core"
+import type { BrowserContext, Frame, Locator, Page } from "patchright-core"
 import { runtimeFailureKind } from "../update/runtime-diagnostics.ts"
 
+const { selectors } = await import("../execute/coreBundle.ts")
 const redactionCleanupErrorMessage = "browse could not confirm ARIA snapshot value-redaction cleanup"
 // Keep the engine as source text so bundlers cannot inject Node-only helpers into the browser function.
 const redactionSelectorSource = `({
