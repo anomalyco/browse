@@ -17,5 +17,5 @@
     "skipLibCheck": true,
     "types": ["vite/client", "bun", "chrome"]
   },
-  "include": ["src", "test", "vite.config.ts", "vite.content.config.ts", "scripts"]
+  "include": ["src", "test", "vite.config.ts", "vite.content.config.ts", "scripts", "evals/*.ts"]
 }
