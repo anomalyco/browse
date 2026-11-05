@@ -2,7 +2,7 @@
   "pr": [
     { "name": "typecheck-extension", "cmd": ["bun", "run", "typecheck"] },
     { "name": "typecheck-cli", "cwd": "cli", "cmd": ["bun", "run", "typecheck"] },
-    { "name": "shellcheck", "cmd": ["bash", "-c", "shellcheck --rcfile=.github/release/.shellcheckrc -x .github/release/*.sh install"] },
+    { "name": "shellcheck", "cmd": ["bash", "-c", "shellcheck -x .github/release/*.sh install"] },
     { "name": "build-extension", "cmd": ["bun", "run", "build"] },
     { "name": "build-cli", "cwd": "cli", "cmd": ["bun", "build.ts"] },
     { "name": "test-extension", "cmd": ["bun", "test", "./test"] },

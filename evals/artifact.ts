@@ -11,6 +11,8 @@ const published = source === "published"
 const dev = version.includes("-dev.")
 const win = process.platform === "win32"
 const exe = win ? "browse.exe" : "browse"
+// Git Bash's GNU tar treats D:\... as a remote host. Match the native tar used by install.ps1.
+const tar = win ? path.join(process.env.SystemRoot!, "System32/tar.exe") : "tar"
 const zipName = `${dev ? "browse-extension" : "opencode-browser"}-${version}.zip`
 const build = process.env.EVAL_BUILD_DIR ?? path.join(root, "release")
 const binaries = process.env.EVAL_BINARIES_DIR ?? path.join(root, "cli/dist-bin/npm")
@@ -36,7 +38,7 @@ async function publishedZip() {
   let url = `https://github.com/anomalyco/browse/releases/download/v${version}/${zipName}`
   if (dev) {
     // The release service's channel URL moves; the published CLI names its exact immutable extension zip.
-    await $`tar -xzf ${npmTar} -C ${cwd} package/dist`
+    await $`${tar} -xzf ${npmTar} -C ${cwd} package/dist`
     const dist = path.join(cwd, "package/dist")
     let digest: string | undefined
     for (const file of await readdir(dist)) {
@@ -109,7 +111,7 @@ switch (step) {
     }
     break
   case "binary":
-    await $`tar -xzf ${binaryTar(target)} -C ${cwd} ${`package/bin/${exe}`}`
+    await $`${tar} -xzf ${binaryTar(target)} -C ${cwd} ${`package/bin/${exe}`}`
     problems = await withoutBuildDeps(() => checkCliRuntime([path.join(cwd, "package/bin", exe)], cwd, version))
     break
   case "npm": problems = await checkPackageInstall(npmTar, version); break
