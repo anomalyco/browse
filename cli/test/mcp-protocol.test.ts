@@ -86,6 +86,22 @@ describe("MCP protocol versions", () => {
     }
   }, 30_000)
 
+  test("a silent relay returns a tool error instead of hanging an MCP call", async () => {
+    const silent = Bun.serve({ hostname: "127.0.0.1", port: await freePort(), fetch: () => new Promise<Response>(() => {}) })
+    const mcp = server(undefined, silent.port!)
+    try {
+      await mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } })
+      mcp.notify("notifications/initialized")
+      const call = await Promise.race([mcp.request("tools/call", { name: "status", arguments: {} }),
+        Bun.sleep(9000).then(() => { throw new Error("tools/call never answered") })])
+      expect(call.result?.isError).toBe(true)
+      expect(JSON.stringify(call.result?.content)).toContain(`relay on port ${silent.port} isn't answering`)
+    } finally {
+      mcp.close()
+      await silent.stop(true)
+    }
+  }, 12_000)
+
   test("a client that initializes with 2025-11-25 lists and calls tools", async () => {
     const mcp = server()
     const init = await mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } })
