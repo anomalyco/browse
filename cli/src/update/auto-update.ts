@@ -562,7 +562,7 @@ export function switchVersion(layout: Layout, version: string, previous: string 
   if (!existsSync(entry)) throw new Error(`${version} isn't installed in ${layout.versions}`)
   if (binary && !(version === opencodeBrowserVersion && realpath(binary) === realpath(process.execPath))) placeBinary(entry, binary)
   writeCurrent(layout, { version, ...(previous && previous !== version ? { previous } : {}), channel: channelOf(version), ...(binary ? { binary } : {}) })
-  if (!binary) writeShim(layout)
+  if (!binary || existsSync(layout.shim)) writeShim(layout)
 }
 
 // ---- the stable shim -------------------------------------------------------------------------------------
@@ -586,12 +586,19 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const runtime = path.join(root, "runtime")
-const current = () => JSON.parse(readFileSync(path.join(runtime, "current.json"), "utf8")).version
+const installed = () => JSON.parse(readFileSync(path.join(runtime, "current.json"), "utf8"))
+const current = () => installed().version
 const entry = (version) => path.join(runtime, "versions", version, "node_modules", "@opencode", "browse", "dist", "cli.mjs")
 process.env.OPENCODE_BROWSER_HOME ??= root
 const relayPort = Number(process.env.OPENCODE_BROWSER_PORT) || 19988
 
-if (process.argv[2] !== "mcp") {
+const binary = installed().binary
+if (binary) {
+  // An agent still runs the npm entry after a binary install. The executable supplies its own MCP supervisor.
+  const child = spawn(binary, process.argv.slice(2), { stdio: "inherit" })
+  for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => child.kill(signal))
+  child.on("exit", (code, signal) => { process.exitCode = code ?? (signal ? 1 : 0) })
+} else if (process.argv[2] !== "mcp") {
   process.argv[1] = entry(current())
   await import(pathToFileURL(entry(current())).href)
 } else {

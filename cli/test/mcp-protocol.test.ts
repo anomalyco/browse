@@ -1,10 +1,11 @@
 import { runtimeLayout, switchVersion, versionEntry } from "../src/update/auto-update.ts"
 import * as RelayHarness from "./relay-harness.ts"
 import { afterAll, describe, expect, test } from "bun:test"
-import { spawn } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { pathToFileURL } from "node:url"
 import { bundleCli } from "../bundle.ts"
 import { startRelay, stopRelay } from "./relay-harness.ts"
 import { freePort } from "./support/ports.ts"
@@ -60,6 +61,9 @@ describe("binary auto-update", () => {
       fs.renameSync(path.join(cli, "dist-bin", `browse-${target}`, "bin", path.basename(outfile)), outfile)
     }
     const binary = path.join(home, path.basename(versionEntry(layout, versions[0], true)))
+    // An earlier npm install left this stable entry in an agent's config. The new version contains only a binary.
+    fs.mkdirSync(path.dirname(layout.shim), { recursive: true })
+    fs.writeFileSync(layout.shim, `await import(${JSON.stringify(pathToFileURL(versionEntry(layout, versions[0], false)).href)})`)
     switchVersion(layout, versions[0], undefined, binary)
     const port = await RelayHarness.freePort()
     const env = { ...process.env, HOME: home, OPENCODE_BROWSER_HOME: home, OPENCODE_BROWSER_PORT: String(port), OPENCODE_BROWSER_MANAGED_RELAY: "1", OPENCODE_BROWSER_UPDATE_CHECK: "0" }
@@ -72,6 +76,14 @@ describe("binary auto-update", () => {
       for (let n = 0; n < 100 && !await relayVersion().catch(() => false); n++) await Bun.sleep(50)
       extension = new RelayHarness.FakeExtension(home, port)
       expect(await extension.pair()).toBe(true)
+      const shimVersion = spawnSync("node", [layout.shim, "--version"], { env, encoding: "utf8", timeout: 5000 })
+      expect(shimVersion.stdout.trim(), shimVersion.stderr).toBe(versions[0])
+      const legacy = server(["node", layout.shim], port)
+      try {
+        await legacy.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "legacy", version: "0" } })
+        legacy.notify("notifications/initialized")
+        expect((await legacy.request("tools/list")).result?.tools).toHaveLength(29)
+      } finally { legacy.close() }
       await mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } })
       mcp.notify("notifications/initialized")
       // A warm relay may still be populating tool descriptions on older builds.
