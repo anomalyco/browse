@@ -1,5 +1,5 @@
 // The link to the browse relay (ws://127.0.0.1:19988/extension). The relay runs agent sessions
-// for the browse MCP server and the opencode-browser CLI (Playwright `execute`, recordings, handoffs) and drives tabs
+// for the browse MCP server and the browse CLI (Playwright `execute`, recordings, handoffs) and drives tabs
 // through this extension; this module runs its commands. The wire protocol is in ../agent-relay/protocol.ts,
 // the relay itself in cli/src/relay.ts.
 import { checkoutReloadPrefix, extensionProtocolVersion, unpackedExtensionId } from "../../cli/src/protocol"
@@ -378,7 +378,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       } else if (presenceOnly) setStatus("unpaired")
       else if (event.code === 4004) setStatus("conflict")
       else if (event.code === 4006) setStatus("untrusted")
-      // A missing relay is normal until an agent's browse tools (or the opencode-browser CLI) start one.
+      // A missing relay is normal until an agent's browse tools (or the browse CLI) start one.
       else setStatus(openedAt === undefined ? "offline" : "connecting")
       handshake.settle(mine)
       if (!presenceOnly) schedule(quiet && openedAt === undefined)
