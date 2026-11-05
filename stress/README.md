@@ -99,6 +99,36 @@ which the harness reaches over the debugging port; pages can't.
 the token, foreign `Host` headers and non-extension origins are refused, an unpaired `/extension` client never
 displaces the real extension, and the MCP server never exits on bad input.
 
+## Installed artifacts (what users run)
+
+`installed.ts` drives browse the way a user has it, not the checkout: the binary the curl installer put in a throwaway
+`$HOME` (or the npm shim), a headed Chrome for Testing with the **release zip** as the store extension, paired through
+install's link or by typing the code into the settings page. Each scenario injects one fault a user meets and records how
+long browse took to work again and whether the user had to do anything:
+
+```sh
+stress/exe/installed-setup.sh curl            # curl installer into ~/u/home-curl
+stress/exe/installed-setup.sh curl 0.0.6 old  # a pinned version into ~/u/home-curl-old
+stress/exe/installed-setup.sh npm             # npm installer into ~/u/home-npm
+node stress/installed.ts [--user curl] [--port 19988] [--debug-port 9222] [--extension ~/u/ext-0.0.8-store] [--only a,b]
+```
+
+The extension folders under `~/u/ext-*` are the release zips with the store's public key added to `manifest.json`, so
+loaded unpacked they get the store id (`mfnicocicmmlkpjnaffgihfjhdgjkdjg`), which is the only store origin the relay
+accepts. Get the key from the store's CRX header (`clients2.google.com/service/update2/crx?…x=id%3D<id>%26uc`,
+CRX3 `sha256_with_rsa.public_key`). Several users can run side by side on different relay ports and debugging ports.
+
+Scenarios: `first-pairing`, `repair-after-revoke`, `relay-kill9`, `relay-restart`, `chrome-restart`, `chrome-crash`,
+`sw-stop`, `extension-reload`, `extension-update` (old build in, reload, new build in, reload), `sleep` (relay and
+browser SIGSTOPped), `sleep-chrome-only`, `sleep-relay-only`, `network-drop` (the relay port), `two-browsers`,
+`remote-pairing` (`install --remote`, a second profile pairs at the box's network address), `npm-to-binary` (the curl
+installer over an npm install), `many-agents`, `agents-die`, `idle`. The long ones (`sleep-*`, `idle`, `remote-pairing`,
+`npm-to-binary`, `repair-after-revoke`) run only with `--only`.
+
+**Soak chaos events added for connection stress:** `relay-freeze` and `chrome-freeze` (SIGSTOP for 25 to 45 s, the
+machine sleeping), `relay-port-drop` (iptables drops the relay's port, a VPN flap) and `extension-reload`. Run these
+on a disposable Linux stress VM; the canary retains its original chaos set and restricted network helper.
+
 ## Driving the box from a Mac
 
 The MCP server can run on the box over SSH, so an agent on a Mac drives the box's browser:

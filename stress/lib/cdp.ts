@@ -13,6 +13,8 @@ export class BrowserCdp {
   private pending = new Map<number, Pending>()
   private listeners = new Set<(message: any) => void>()
   closed = false
+  /** The extension whose service worker `evalInExtension` reaches: the checkout's unpacked build unless told otherwise. */
+  extensionId = process.env.BROWSE_STRESS_EXTENSION_ID || EXTENSION_ID
 
   private constructor(ws: WebSocket) {
     this.ws = ws
@@ -64,7 +66,7 @@ export class BrowserCdp {
   }
 
   async extensionWorker(): Promise<any | undefined> {
-    return (await this.targets()).find((t) => t.type === "service_worker" && t.url.startsWith(`chrome-extension://${EXTENSION_ID}/`))
+    return (await this.targets()).find((t) => t.type === "service_worker" && t.url.startsWith(`chrome-extension://${this.extensionId}/`))
   }
 
   /** Evaluates an expression in the extension's service worker (chrome.* APIs available). */
