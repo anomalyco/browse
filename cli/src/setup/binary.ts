@@ -1,7 +1,7 @@
 // A binary install: the install script (or PowerShell installer) put the bun-compiled executable in ~/.browse/bin.
 // Install records it, puts its folder on PATH, and uninstall takes both back.
 import { spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import {
   compareVersions,
@@ -139,12 +139,14 @@ export function removeBinaryInstall(binary: string): string | undefined {
       }
     }
   }
-  try {
-    rmSync(binary, { force: true })
-    if (readdirSync(dir).length === 0) rmSync(dir, { recursive: true, force: true })
-    return undefined
-  } catch {
-    // Windows can't delete an executable while it runs (this one, or an agent's MCP server).
-    return binary
+  if (!existsSync(dir)) return undefined
+  const prefix = path.basename(binary) + ".old-"
+  const stale = process.platform !== "win32" ? [] : readdirSync(dir).filter(name =>
+    name.startsWith(prefix) && /^(?:[a-f\d]{8}|\d{13})$/i.test(name.slice(prefix.length)))
+  const left = []
+  for (const file of [binary, ...stale.map(name => path.join(dir, name))]) {
+    try { rmSync(file, { force: true }) } catch { left.push(file) } // A running exe may be locked; still clean the others.
   }
+  if (readdirSync(dir).length === 0) rmdirSync(dir)
+  return left.length ? left.join(", ") : undefined
 }
