@@ -4,6 +4,21 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { spawnSync } from "node:child_process"
 
+test.skipIf(process.platform === "win32")("the streamed installer accepts POSIX sh and preserves setup arguments", () => {
+  const home = mkdtempSync(path.join(tmpdir(), "browse installer-"))
+  try {
+    const stub = path.join(home, "test binary")
+    writeFileSync(stub, `#!/bin/sh\nprintf '<%s>\\n' "$@"\n`)
+    for (const shell of ["sh", "dash", "bash", "zsh"].filter(name => Bun.which(name))) {
+      const run = spawnSync(shell, ["-s", "--", "--remote", "--binary", stub, "two words", "", "*"], {
+        env: { PATH: process.env.PATH, HOME: home }, input: readFileSync(path.join(import.meta.dir, "../../install")), encoding: "utf8",
+      })
+      expect(run.status, `${shell}: ${run.stderr}`).toBe(0)
+      expect(run.stdout).toEndWith("<install>\n<--remote>\n<two words>\n<>\n<*>\n")
+    }
+  } finally { rmSync(home, { recursive: true, force: true }) }
+})
+
 test.skipIf(process.platform === "win32")("the installed PATH line works in sh with spaces and shell metacharacters", () => {
   const home = mkdtempSync(path.join(tmpdir(), "Jane O'Neil $home-"))
   const dir = path.join(home, ".browse/bin"), binary = path.join(dir, "browse")
