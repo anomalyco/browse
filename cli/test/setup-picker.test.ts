@@ -8,9 +8,9 @@ const claude: AgentOption = { value: "claude", label: "Claude Code" }
 
 describe("agent picker", () => {
   test("the focused row gets the pointer and a bright name; others dim", () => {
-    expect(plain(agentRow(opencode, true, ["opencode"]))).toBe("● ◼ OpenCode")
-    expect(plain(agentRow(opencode, false, ["opencode"]))).toBe("○ ◼ OpenCode")
-    expect(plain(agentRow(claude, false, []))).toBe("○ ◻ Claude Code")
+    expect(plain(agentRow(opencode, true, ["opencode"]))).toBe("❯ ◼ OpenCode")
+    expect(plain(agentRow(opencode, false, ["opencode"]))).toBe("  ◼ OpenCode")
+    expect(plain(agentRow(claude, false, []))).toBe("  ◻ Claude Code")
   })
 
   test("the collapsed summary names the picked agents, in the order shown, or none", () => {

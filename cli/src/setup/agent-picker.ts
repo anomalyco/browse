@@ -6,8 +6,6 @@ import {
   S_BAR_END,
   S_CHECKBOX_INACTIVE,
   S_CHECKBOX_SELECTED,
-  S_RADIO_ACTIVE,
-  S_RADIO_INACTIVE,
   settings,
   symbol,
 } from "@clack/prompts"
@@ -46,11 +44,11 @@ export function agentPlan(locations: AgentLocation[], flags: ReturnType<typeof a
   return { picker: true, selected: remembered?.filter(n => agentNames.includes(n)) ?? detected }
 }
 
-/** One agent row: a pointer on the focused row, its checkbox, then its name bright when focused and dim otherwise. */
+/** One agent row: a pointer in a fixed-width column, its checkbox, then its name bright when focused and dim otherwise. */
 export function agentRow(option: AgentOption, active: boolean, selected: AgentName[]) {
   const box = selected.includes(option.value) ? styleText("green", S_CHECKBOX_SELECTED) : styleText("dim", S_CHECKBOX_INACTIVE)
-  if (active) return `${styleText("green", S_RADIO_ACTIVE)} ${box} ${option.label}`
-  return `${styleText("dim", S_RADIO_INACTIVE)} ${box} ${styleText("dim", option.label)}`
+  if (active) return `${styleText("cyan", "❯")} ${box} ${option.label}`
+  return `  ${box} ${styleText("dim", option.label)}`
 }
 
 /** The collapsed line after Enter: the picked agents by name, not "2 items selected". */
