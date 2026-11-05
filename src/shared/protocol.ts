@@ -13,7 +13,7 @@ export type AgentRelayStatus =
   | "conflict"
   /** The relay speaks another protocol version; updating both fixes it. */
   | "incompatible"
-  /** Not paired with this relay yet: it needs a code from `opencode-browser pair`. */
+  /** Not paired with this relay yet: it needs a code from `browse pair`. */
   | "unpaired"
   /** The relay didn't pair: a wrong or used code, a revoked browser, an older relay, or a program posing as one. */
   | "untrusted"
@@ -78,6 +78,8 @@ export const autoUpdateMode = (value: unknown): AutoUpdateMode | undefined => (v
 /** The relay's update state: an npm install updates itself; a checkout updates with `update`. */
 export type RelayAutoUpdate = {
   install: "npm" | "checkout" | "other"
+  /** The command that runs the relay's CLI in a terminal: `browse` for a binary install, `npx @opencode/browse` for npm. */
+  cli?: string
   mode: AutoUpdateMode
   effective: AutoUpdateMode
   overriddenBy?: string

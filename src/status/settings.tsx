@@ -406,7 +406,7 @@ function updateFacts(autoUpdate: NonNullable<AgentRelayState["autoUpdate"]>) {
     autoUpdate.pending ? `${autoUpdate.pending} is ready and switches in once no agent is using the browser.` : "",
     !autoUpdate.pending && autoUpdate.latest && autoUpdate.latest !== autoUpdate.version ? `Newest: ${autoUpdate.latest}.` : "",
     autoUpdate.previous && autoUpdate.version && autoUpdate.previous !== autoUpdate.version
-      ? `\`opencode-browser rollback\` switches to ${autoUpdate.previous}.`
+      ? `\`${autoUpdate.cli ?? "npx @opencode/browse"} rollback\` switches to ${autoUpdate.previous}.`
       : "",
   ]
     .filter(Boolean)

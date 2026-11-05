@@ -65,26 +65,36 @@ export function checkoutRoot(): string | undefined {
 
 const quoted = (value: string) => (/^[\w@%+=:,./-]+$/.test(value) ? value : JSON.stringify(value))
 
-/**
- * How to tell the user to run `opencode-browser <args>`: through npx from the published package, and with this
- * checkout's bundle from a checkout (where nothing is on PATH and the package may not be published).
- */
-export function cliCommand(args: string): string {
-  if (compiledBinary()) {
-    // A binary install's executable on PATH (auto-update.ts current.json), not the version an MCP server runs from;
-    // `browse` once its folder is on PATH (install adds it), else its full path.
-    const binary = installedBinary() ?? process.execPath
-    const dir = path.dirname(binary)
-    const onPath = (process.env.PATH ?? "").split(path.delimiter).some((entry) => entry && path.resolve(entry) === dir)
-    return `${onPath ? "browse" : quoted(binary)} ${args}`
-  }
-  if (fromCheckout()) return `node ${quoted(path.join(packageRoot(), "dist", "cli.mjs"))} ${args}`
-  // An installed runtime (auto-update.ts): its stable shim runs the version this install uses, which npx might not.
-  const shim = path.join(dataRoot(), "bin", "opencode-browser.mjs")
-  const versions = path.join(dataRoot(), "runtime", "versions")
-  if (!path.relative(versions, packageRoot()).startsWith("..") && fs.existsSync(shim)) return `node ${quoted(shim)} ${args}`
-  return `npx @opencode/browse ${args}`
+/** How this CLI was installed, for the command a person types to run it (cliPrefix). */
+export type CliInstall =
+  | { readonly kind: "binary"; readonly binary: string; readonly pathEnv?: string | undefined }
+  | { readonly kind: "npm"; readonly version?: string | undefined }
+  | { readonly kind: "checkout"; readonly bundle: string }
+
+export function cliInstall(): CliInstall {
+  // A binary install's executable on PATH (auto-update.ts current.json), not the version an MCP server runs from.
+  if (compiledBinary()) return { kind: "binary", binary: installedBinary() ?? process.execPath, pathEnv: process.env.PATH }
+  if (fromCheckout()) return { kind: "checkout", bundle: path.join(packageRoot(), "dist", "cli.mjs") }
+  return { kind: "npm", version: globalThis.__OPENCODE_BROWSER_VERSION__ }
 }
+
+/**
+ * The command that runs browse in a terminal: `browse` for a binary install once its folder is on PATH (install adds
+ * it), else the executable's full path; `npx @opencode/browse` (`@dev` on the dev channel) for an npm install, which
+ * puts nothing on PATH; and this checkout's bundle from a checkout, where the package may not be published.
+ */
+export function cliPrefix(install: CliInstall = cliInstall()): string {
+  if (install.kind === "binary") {
+    const dir = path.dirname(install.binary)
+    const onPath = (install.pathEnv ?? "").split(path.delimiter).some((entry) => entry && path.resolve(entry) === dir)
+    return onPath ? "browse" : quoted(install.binary)
+  }
+  if (install.kind === "checkout") return `node ${quoted(install.bundle)}`
+  return install.version?.includes("-dev.") ? "npx @opencode/browse@dev" : "npx @opencode/browse"
+}
+
+/** How to tell the user to run `browse <args>` (cliPrefix). */
+export const cliCommand = (args: string, install: CliInstall = cliInstall()): string => `${cliPrefix(install)} ${args}`
 
 declare global {
   // Injected by build.ts: the store item from the release workflow's repository variables (RELEASING.md), and for a
@@ -142,6 +152,5 @@ export const storeUrl = (id: string) => `https://chromewebstore.google.com/detai
 
 /** How to tell the user to install (or update) browse. */
 export function installCommand(): string {
-  if (compiledBinary()) return cliCommand("install")
-  return fromCheckout() ? `cd ${quoted(path.dirname(packageRoot()))} && bun run setup` : "npx @opencode/browse install"
+  return fromCheckout() ? `cd ${quoted(path.dirname(packageRoot()))} && bun run setup` : cliCommand("install")
 }
