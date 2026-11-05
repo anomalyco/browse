@@ -1,0 +1,19 @@
+[Unit]
+Description=browse released-dev canary schedule
+After=browse-canary-browser@chrome.service browse-canary-install.service browse-canary-network.service
+Requires=browse-canary-network.service
+Wants=browse-canary-browser@chrome.service browse-canary-install.service
+
+[Service]
+User=canary
+EnvironmentFile=/etc/browse-canary.env
+EnvironmentFile=-/etc/browse-canary-alerts.env
+WorkingDirectory=/home/canary
+UMask=0077
+ExecStart=/usr/local/bin/node /opt/browse-canary/stress/canary/run.ts
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

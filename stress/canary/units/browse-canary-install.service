@@ -1,0 +1,16 @@
+[Unit]
+Description=browse canary dev-channel user install
+Requires=browse-canary-network.service
+After=browse-canary-network.service network-online.target
+Wants=network-online.target
+PartOf=browse-canary.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=canary
+EnvironmentFile=/etc/browse-canary.env
+UMask=0077
+WorkingDirectory=/home/canary
+ExecStart=/bin/bash /opt/browse-canary/stress/canary/bootstrap.sh
+TimeoutStartSec=5min

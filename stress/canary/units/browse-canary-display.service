@@ -1,0 +1,8 @@
+[Unit]
+Description=Private Xvfb and window manager for headed canary browsers
+PartOf=browse-canary.service
+
+[Service]
+User=canary
+UMask=0077
+ExecStart=/usr/bin/xvfb-run -n 98 -f /home/canary/.Xauthority -s "-screen 0 1920x1080x24 -nolisten tcp" /usr/bin/fluxbox

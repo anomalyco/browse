@@ -34,6 +34,29 @@ stress/exe/deploy.sh                                       # copy this working t
 `deploy.sh` rsyncs uncommitted work too (nothing is pushed), keeping the box's `.git`, `node_modules`, builds and
 pairing code.
 
+## Canary
+
+`bash stress/exe/provision.sh --canary-only` adds the release lane to a provisioned box without rebuilding its checkout
+or restarting `browse-chrome`. User `canary` installs the published dev binary via the real Bash installer. Its headed
+Chrome for Testing uses the installer's checksum-verified dev zip, a private Xvfb and relay `:19770`; the kernel blocks
+that user's access to `:19988`. Every ~5 min the daemon checks npm. It observes the live relay **and loaded extension**
+switching, allows an idle update window, and flags and forces `browse update` after an hour. Each build gets core
+scenarios and 30 min of chaos. At ~03:00 local time (or next idle slot) it runs 60 min of all chaos, 15 min of fuzz,
+an npx MCP smoke, then 30 min of two-browser affinity checks if Brave installed. Network faults affect only `canary`;
+the toolbar fault uses a real keyboard shortcut. Runs are serial. Between them it submits a fixture form, occasionally
+visits example.com, samples RSS/fds/tabs and leaves quiet time before reconnecting. At 6 min down it tries a user relay
+restart; at 30 min it restarts its own browser and forces the relay restart. Both actions are recorded.
+
+```sh
+sudo -Hu canary /usr/local/bin/node /opt/browse-canary/stress/canary/report.ts   # last 24 h + 7 d
+sudo systemctl stop browse-canary     # pause (disable --now to keep paused after reboot); start to resume
+```
+
+History and private run folders (`result.json`, `summary.md`, `run.log` and the harness artifacts) live under
+`/home/canary/canary`. Optional: set `CANARY_SLACK_WEBHOOK` in root-only `/etc/browse-canary-alerts.env` and restart
+`browse-canary`; unset means journal only. Alerts link to the host with the run path (or `CANARY_RESULTS_URL/<run>/`
+if an existing private artifact viewer is configured). No success alerts. The canary doesn't publish results.
+
 ## Runners
 
 All of them run on the box from `~/browse`, write JSONL plus a `summary.md` under `~/stress-results/<time>-<kind>/`

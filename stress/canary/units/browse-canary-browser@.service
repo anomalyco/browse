@@ -1,0 +1,14 @@
+[Unit]
+Description=Headed canary %i, released extension, persistent profile
+Requires=browse-canary-display.service browse-canary-install.service
+After=browse-canary-display.service browse-canary-install.service
+PartOf=browse-canary.service
+
+[Service]
+User=canary
+EnvironmentFile=/etc/browse-canary.env
+UMask=0077
+ExecStart=/bin/bash /opt/browse-canary/stress/canary/browser.sh %i
+ExecStartPost=/usr/local/bin/node /opt/browse-canary/stress/canary/profile.ts %i
+TimeoutStartSec=90
+TimeoutStopSec=10
