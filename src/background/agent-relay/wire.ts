@@ -170,6 +170,7 @@ export function relayAutoUpdate(input: unknown): RelayAutoUpdate | undefined {
   if (!mode || !effective) return undefined
   const short = (value: unknown) => (typeof value === "string" && value.length <= 100 ? value : undefined)
   const optional = {
+    cli: short(input.cli),
     overriddenBy: short(input.overriddenBy),
     version: short(input.version),
     channel: short(input.channel),

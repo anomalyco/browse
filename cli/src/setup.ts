@@ -153,7 +153,7 @@ async function install(args: string[]) {
   rail.waiting?.stop()
   clack.outro(
     process.exitCode
-      ? "browse isn't fully set up yet. Fix the steps above, then run browse install again."
+      ? `browse isn't fully set up yet. Fix the steps above, then run ${installCommand()} again.`
       : byHand
         ? "Done. Add the MCP server above to your agent, then ask it to open a page."
         : "Done. Ask your agent to open a page.",
@@ -292,7 +292,7 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
   const legacy = selected.includes("opencode") ? legacyBrowserControl() : []
   if (legacy.length)
     log(
-      `! Browser Control MCP server${legacy.length === 1 ? "" : "s"} ${legacy.map((name) => `"${name}"`).join(", ")} also configured. browse replaces it; remove ${legacy.length === 1 ? "it" : "them"} from ${configFile()} to avoid two sets of browser tools.`,
+      `! Also configured: ${legacy.map((name) => `"${name}"`).join(", ")}, ${legacy.length === 1 ? "an older browser MCP server" : "older browser MCP servers"} that browse replaces. Remove ${legacy.length === 1 ? "it" : "them"} from ${configFile()} to avoid two sets of browser tools.`,
     )
   if (args.includes("--remote")) return installRemote(entry, tty)
 
@@ -424,7 +424,7 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
   }
 }
 
-/** Printed before the relay's status by `opencode-browser status`. */
+/** Printed before the relay's status by `browse status`. */
 export function printSetupStatus() {
   const settings = readJson<Settings>(files.settings)
   const runtime = installedRuntime(settings, mcpServers()[MCP_NAME])

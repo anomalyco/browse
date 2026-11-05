@@ -316,7 +316,7 @@ function installArgs(args: readonly string[]) {
   return [...passed, "--no-wait"]
 }
 
-/** `opencode-browser update`: returns the exit code. */
+/** `browse update`: returns the exit code. */
 export function runUpdate(args: readonly string[], deps: UpdateDeps): number {
   const { log } = deps
   const refuse = (problem: string, fix: string) => {
@@ -425,7 +425,7 @@ export function runUpdate(args: readonly string[], deps: UpdateDeps): number {
   return 0
 }
 
-/** `opencode-browser update [--check]`. */
+/** `browse update [--check]`. */
 export async function runUpdateCommand(args: readonly string[]) {
   const log = (line: string) => process.stdout.write(line + "\n")
   const { runNpmUpdate } = await import("./update/runtime-update.ts")

@@ -82,7 +82,7 @@ function npmOnly(command: string) {
   return undefined
 }
 
-/** `opencode-browser rollback [--force]`. */
+/** `browse rollback [--force]`. */
 export async function runRollback(args: readonly string[]) {
   const runtime = npmOnly("rollback")
   if (!runtime) return
@@ -106,7 +106,7 @@ export async function runRollback(args: readonly string[]) {
   log("  Running MCP servers switch to it between requests; restart opencode if a tool still reports the old version.")
 }
 
-/** `opencode-browser update [--check] [--force]` for an npm install. */
+/** `browse update [--check] [--force]` for an npm install. */
 export async function runNpmUpdate(args: readonly string[], layout?: Layout) {
   const runtime = npmRuntime(layout ? { layout } : {})
   if (!runtime) return false

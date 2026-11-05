@@ -1,5 +1,5 @@
 // The extension side of the browse relay's protocol (version 2). The relay (cli/src/relay.ts)
-// runs agent sessions for the browse MCP server and the opencode-browser CLI, and drives tabs through this extension.
+// runs agent sessions for the browse MCP server and the browse CLI, and drives tabs through this extension.
 // Keep it in step with cli/src/protocol.ts and cli/src/recording-protocol.ts.
 
 type JsonPrimitive = string | number | boolean | null

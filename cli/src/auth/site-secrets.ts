@@ -19,7 +19,7 @@ import { Effect, Schema } from "effect"
 import * as AuthProfile from "./profile.ts"
 import { normalizeOriginPatterns } from "./domain-policy.ts"
 import { isNodeError, writeJsonFileAtomically } from "../fs-durability.ts"
-import { dataRoot } from "../paths.ts"
+import { cliCommand, dataRoot } from "../paths.ts"
 
 const StoredSiteSecret = Schema.Struct({
   version: Schema.Literal(1),
@@ -67,7 +67,7 @@ export const readSecret = Effect.fn("SiteSecrets.read")(function* (name: string,
   const text = yield* Effect.tryPromise({
     try: () => fs.readFile(filePath, "utf8"),
     catch: (cause) => isNodeError(cause) && cause.code === "ENOENT"
-      ? new SiteSecretError({ message: `Secret not found: ${name}. Ask the user to add it with \`opencode-browser secrets add ${name} --origin <origin>\`.`, reason: "not-found" })
+      ? new SiteSecretError({ message: `Secret not found: ${name}. Ask the user to add it with \`${cliCommand(`secrets add ${name} --origin <origin>`)}\`.`, reason: "not-found" })
       : new SiteSecretError({ message: `Could not read secret ${name}`, reason: "read-failed", cause }),
   })
   return yield* Effect.try({

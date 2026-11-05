@@ -14,7 +14,7 @@
 // is the one the registry published for that version, and it runs and reports that version), and once no agent is using
 // the browser, switches current.json and restarts the relay from the new version. "notify" only shows the update;
 // "off" doesn't check. OPENCODE_BROWSER_AUTO_UPDATE overrides the stored mode. The previous version stays installed for
-// `opencode-browser rollback`, which also skips the version it rolled back from until a newer one is published.
+// `browse rollback`, which also skips the version it rolled back from until a newer one is published.
 //
 // A binary install (the install script put the executable in ~/.browse/bin) works the same way with executables:
 //   runtime/versions/<version>/browse   each version's executable, from its platform package @opencode/browse-<target>
@@ -28,7 +28,7 @@ import { createRequire } from "node:module"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { gunzipSync } from "node:zlib"
-import { binaryName, binaryPackage, compiledBinary, dataRoot, entryCommand, fromCheckout } from "../paths.ts"
+import { binaryName, binaryPackage, cliPrefix, compiledBinary, dataRoot, entryCommand, fromCheckout } from "../paths.ts"
 import { opencodeBrowserVersion } from "../version.ts"
 
 export const PACKAGE_NAME = "@opencode/browse"
@@ -219,6 +219,8 @@ export function setStoredMode(mode: AutoUpdateMode, layout = runtimeLayout()) {
 /** What status, the settings tool and the options page show about updates. */
 export type AutoUpdateStatus = {
   readonly install: "npm" | "checkout" | "other"
+  /** The command that runs this install's CLI in a terminal (cliPrefix), for commands the options page shows. */
+  readonly cli: string
   readonly mode: AutoUpdateMode
   readonly effective: AutoUpdateMode
   readonly overriddenBy?: string
@@ -243,6 +245,7 @@ export function autoUpdateStatus(options: { readonly layout?: Layout; readonly e
   const install = runtime ? "npm" : fromCheckout() ? "checkout" : current ? "npm" : "other"
   return {
     install,
+    cli: cliPrefix(),
     mode: storedMode(layout),
     effective: install === "npm" ? (override ?? storedMode(layout)) : "off",
     ...(override ? { overriddenBy: env.OPENCODE_BROWSER_AUTO_UPDATE !== undefined ? "OPENCODE_BROWSER_AUTO_UPDATE" : "OPENCODE_BROWSER_UPDATE_CHECK" } : {}),

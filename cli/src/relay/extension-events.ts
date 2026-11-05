@@ -229,7 +229,7 @@ export function createExtensionEventHandler(options: {
       const text = getString(message.params, "message")
       if (!text) return
       const level = message.params?.level === "error" || message.params?.level === "warn" ? message.params.level : "log"
-      console[level](`[opencode-browser extension] ${text}`)
+      console[level](`[browse extension] ${text}`)
       return
     }
     if (extensionMethod === "ready") {

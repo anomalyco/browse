@@ -388,7 +388,7 @@ describe("relayNotRestarted", () => {
   })
 
   test("when a capture or recording blocks the restart, it offers --force", () => {
-    const blocked = "Relay has a network capture in session x; stop them, or run `opencode-browser relay restart --force` to end them (discarding what they captured) and restart"
+    const blocked = "Relay has a network capture in session x; stop them, or run `browse relay restart --force` to end them (discarding what they captured) and restart"
     expect(relayNotRestarted("not json", blocked, "cmd")[2]).toBe("  When no agent is using the browser, run: cmd (or cmd --force to end what's blocking it now)")
   })
 

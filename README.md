@@ -17,8 +17,13 @@ It works in Chrome, Edge, Brave, Arc, Helium, Vivaldi, Opera and Chromium.
 ## Install
 
 ```sh
-npx @opencode/browse install
+curl -fsSL https://opencode.ai/browse/install | bash
 ```
+
+On Windows, run `irm https://opencode.ai/browse/install.ps1 | iex` in PowerShell. With Node.js,
+`npx @opencode/browse install` works too. The installer puts the `browse` command on your PATH and runs
+`browse install`. Commands in this README are written `browse <command>`; after an npx install, run them as
+`npx @opencode/browse <command>`.
 
 `install` puts the relay in your data folder (`~/.local/share/opencode-browser`), adds the `browse` MCP server to
 the agents you choose, and connects the extension:
@@ -33,22 +38,23 @@ the agents you choose, and connects the extension:
 That's it. Ask an agent to *"open news.ycombinator.com and tell me the top story"*. Or paste this into opencode:
 *"Install browse with `npx @opencode/browse install`."*
 
-Requirements: Node.js 22.19+, a Chromium browser, and [opencode](https://opencode.ai) or another MCP client.
+Requirements: a Chromium browser, and [opencode](https://opencode.ai) or another MCP client. The npx install also needs
+Node.js 22.19+.
 
 **Updates are automatic.** The relay checks npm once a day and installs a new version in the background; it switches
 over when no agent is using the browser, without changing opencode's config or restarting it. Choose *Only tell me* or
 *Don't check* under **Updates** on the extension's settings page (or `settings set autoUpdate=notify`, or
-`OPENCODE_BROWSER_AUTO_UPDATE=off`). `npx @opencode/browse update` updates now, and `npx @opencode/browse rollback` goes
+`OPENCODE_BROWSER_AUTO_UPDATE=off`). `browse update` updates now, and `browse rollback` goes
 back to the previous version. The Chrome Web Store updates the extension.
 
 **Dev builds**: every push to `dev` publishes one. `npx @opencode/browse@dev install` follows the dev channel: it
-downloads that build's extension into `<data root>/extension`, which you load unpacked once (`npx @opencode/browse
-extension` shows the folder), and each update refreshes the folder and reloads the extension. The zip is also at
+downloads that build's extension into `<data root>/extension`, which you load unpacked once (`browse extension` shows
+the folder), and each update refreshes the folder and reloads the extension. The zip is also at
 https://anoma.ly/release/browse/extension/dev/chromium.
 
 There's nothing to sign in to. Each browser pairs with the relay once and gets a key of its own (see
-[Security](#security)). If pairing didn't happen by itself, run `npx @opencode/browse install` again to open a
-pairing link. To pair by hand, run `npx @opencode/browse pair` (from a checkout: `node cli/dist/cli.mjs pair`).
+[Security](#security)). If pairing didn't happen by itself, run `browse install` again to open a
+pairing link. To pair by hand, run `browse pair` (from a checkout: `node cli/dist/cli.mjs pair`).
 It starts the relay and waits. Open **Extensions → browse → Options**, enter the printed code, and click **Pair**.
 The command confirms which browser paired. `pair --list` shows paired browsers; `pair --revoke <browser>` unpairs one.
 
@@ -78,9 +84,9 @@ turn the check off.
 To skip the picker, name one or more agents. Explicit names take precedence over caller detection:
 
 ```sh
-npx @opencode/browse install -a claude cursor --agent gemini
-npx @opencode/browse install -a '*'   # every supported client, including those not installed (--all-agents)
-npx @opencode/browse install -y       # detected clients in an ordinary shell (--yes)
+browse install -a claude cursor --agent gemini
+browse install -a '*'   # every supported client, including those not installed (--all-agents)
+browse install -y       # detected clients in an ordinary shell (--yes)
 ```
 
 Inside a recognized agent, `install` targets that caller automatically. Without a terminal it configures the caller
@@ -141,16 +147,16 @@ node -p 'JSON.stringify({browse: {command: process.execPath, args: [require(proc
 When opencode runs on one machine and your browser on another (over Tailscale, say), the relay runs next to opencode
 and the extension connects to it across the network:
 
-1. On the opencode machine, run `npx @opencode/browse install`, then `npx @opencode/browse set hostname 0.0.0.0`.
+1. On the opencode machine, install browse, then run `browse set hostname 0.0.0.0`.
    The relay then listens on every network, restarting if it runs. Other computers reach only the extension link;
    the HTTP API and CDP answer on `127.0.0.1` only. The command prints the address and a pairing code for step 2
-   (`npx @opencode/browse pair` prints another; each works once, within 10 minutes).
+   (`browse pair` prints another; each works once, within 10 minutes).
 2. In the browser, open the extension's settings page (right-click the toolbar button, then **Options**). Under
    **Connection**, replace `localhost:19988` in **Relay address** with that machine's address (a Tailscale IP or name, with
    `:port` if it isn't 19988), enter the code under **Pairing code**, then click **Connect**. The page says right there
    whether the relay answered and accepted the code.
 
-`npx @opencode/browse set hostname 127.0.0.1` goes back to this computer only.
+`browse set hostname 127.0.0.1` goes back to this computer only.
 
 Pairing works as it does locally: the browser exchanges the code for a key of its own, and from then on both sides
 prove they hold that key on every connection, so anyone else on the network who reaches the port gets nothing. The
@@ -277,7 +283,7 @@ may try to steer it, and that other programs on your computer may try to use the
   Subresources (images, fetch, iframes, workers) are not blocked: request interception is shared with Playwright's
   `page.route()`, so the relay can't own it reliably. Browsing through a local proxy makes every document look like
   it came from the proxy's address, so name the hosts you need exactly.
-- **Site secrets.** `opencode-browser secrets add <name> --origin https://example.com` stores a password, key or (with
+- **Site secrets.** `browse secrets add <name> --origin https://example.com` stores a password, key or (with
   `--totp`) a TOTP seed, read from stdin or a hidden prompt, in `~/.local/share/opencode-browser/site-secrets/`
   (0700/0600). An agent types it with `secrets.type(locator, "<name>")`: the relay checks the field's frame URL from
   the browser's frame tree against the secret's origins (and the session's allowlist) right before it inserts the

@@ -103,7 +103,7 @@ registerMcpTools({
       handle: () =>
         Effect.tryPromise({
           try: () => import("../skill-text.ts").then((module) => module.skillText),
-          catch: (cause) => new Error("read opencode-browser skill", { cause }),
+          catch: (cause) => new Error("read browse skill", { cause }),
         }),
     },
   ],

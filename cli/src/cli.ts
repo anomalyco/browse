@@ -35,7 +35,7 @@ export {
 
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 
-export const opencodeBrowser = Command.make("opencode-browser").pipe(
+export const opencodeBrowser = Command.make("browse").pipe(
   Command.withDescription("Control the user's existing browser through the browse extension"),
   Command.withSubcommands(buildRegisteredCliCommands({ packageRoot })),
 )
@@ -49,7 +49,7 @@ const mainLayer = Layer.mergeAll(RelayClient.layerFetch, SessionStore.layer).pip
 export function runCli(rawArgs: ReadonlyArray<string> = process.argv.slice(2)): void {
   const cliArgs = hoistJsonFlag(rawArgs)
   const subcommand = cliArgs.argv.find((arg) => !arg.startsWith("-"))
-  const commandName = subcommand ? `opencode-browser ${subcommand}` : "opencode-browser"
+  const commandName = subcommand ? `browse ${subcommand}` : "browse"
 
   // Effect CLI parse errors exit 2 and, in --json mode, print a structured failure envelope.
   const reportUsageError = (error: CliError.CliError) =>
