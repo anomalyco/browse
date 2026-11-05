@@ -34,10 +34,13 @@ export function RelayForm(props: { relay: Relay; help?: boolean; remote?: boolea
 
   const submit = (event: SubmitEvent) => {
     event.preventDefault()
+    // Read what was typed before `edited` flips: the effect above then puts the relay's current address back in the
+    // field, which is what the message carried before (a typed address never reached the extension).
+    const message = { type: "relay.connect" as const, address: address(), code: code() }
     setEdited(false)
     setPending(true)
     setResult(undefined)
-    props.relay.send({ type: "relay.connect", address: address(), code: code() })
+    props.relay.send(message)
   }
 
   return (
