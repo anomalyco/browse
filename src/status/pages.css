@@ -169,6 +169,18 @@ p code,
   gap: 12px;
 }
 
+/* A hairline between the cards' sections, softening at both ends. */
+.hr {
+  height: 1px;
+  margin: 0 16px;
+  background: linear-gradient(
+    transparent 0.25px,
+    var(--v2-border-border-strong) 0.25px,
+    var(--v2-border-border-strong) 0.75px,
+    transparent 0.75px
+  );
+}
+
 .relay-fields > *,
 .inline-form [data-component="text-input-v2"] {
   min-width: 0;

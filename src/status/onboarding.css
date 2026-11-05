@@ -122,17 +122,6 @@
     width 250ms var(--ease-in-out);
 }
 
-.hr {
-  height: 1px;
-  margin: 0 16px;
-  background: linear-gradient(
-    transparent 0.25px,
-    var(--v2-border-border-strong) 0.25px,
-    var(--v2-border-border-strong) 0.75px,
-    transparent 0.75px
-  );
-}
-
 .guide-body {
   padding: 32px 24px;
 }
