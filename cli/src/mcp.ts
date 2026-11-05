@@ -107,10 +107,7 @@ const registerTools = Effect.gen(function* () {
     ),
     Effect.orElseSucceed((): readonly BrowserSummary[] => []),
   )
-  let browsers = yield* connectedBrowsers.pipe(
-    Effect.timeoutOption(1_000),
-    Effect.map(Option.getOrElse((): readonly BrowserSummary[] => [])),
-  )
+  let browsers: readonly BrowserSummary[] = []
   const buildSpecs = (currentBrowsers: readonly BrowserSummary[]) =>
     buildRegisteredMcpTools(
       createMcpToolContext({
@@ -129,7 +126,7 @@ const registerTools = Effect.gen(function* () {
     const specs = buildSpecs(browsers).filter((spec) => spec.listsBrowsers === true)
     yield* Effect.forEach(specs, register, { discard: true })
   })
-  yield* refreshBrowsers.pipe(Effect.repeat(Schedule.spaced("5 seconds")), Effect.forkDetach)
+  yield* refreshBrowsers.pipe(Effect.repeat(Schedule.spaced("5 seconds")), Effect.forkScoped)
 })
 
 export const mcpServerLayer = McpServer.layerStdio({
@@ -141,8 +138,9 @@ export const mcpServerLayer = McpServer.layerStdio({
 export const mcpToolsLayer = Layer.effectDiscard(registerTools)
 
 export const runMcpServer: Effect.Effect<never, Error> = Layer.launch(
-  mcpToolsLayer.pipe(
-    Layer.provide(mcpServerLayer),
+  mcpServerLayer.pipe(
+    // Populate the shared McpServer before stdio can answer initialize or server/discover.
+    Layer.provide(mcpToolsLayer.pipe(Layer.provide(McpServer.McpServer.layer))),
     Layer.provide(NodeStdio.layer),
     Layer.provide(RelayClient.layerFetchMcp),
   ),
