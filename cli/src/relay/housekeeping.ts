@@ -4,7 +4,7 @@ import type { CdpClientPool } from "../cdp/client-pool.ts"
 import type { RootTargetLifecycle } from "../cdp/root-target-lifecycle.ts"
 import type { TabActivity } from "../cdp/tab-activity.ts"
 import type { TargetRegistry } from "../cdp/target-registry.ts"
-import type { JsonObject } from "../protocol.ts"
+import { browserUnresponsive, type JsonObject } from "../protocol.ts"
 import type { FlightRecorderRelay } from "../recording-relay/flight-recorder.ts"
 import type { RecordingRelay } from "../recording-relay.ts"
 import type { OpenCodeBrowserSessions } from "../session-manager.ts"
@@ -205,7 +205,17 @@ export function createRelayHousekeeping(options: {
     orphanTimer = setInterval(collectOrphans, Math.max(1_000, Math.min(30_000, Math.floor(clientGoneGraceMs / 2))))
     orphanTimer.unref()
     if (keepaliveIntervalMs > 0) {
-      keepaliveTimer = setInterval(() => sendToEveryBrowser({ method: "ping" }), keepaliveIntervalMs)
+      keepaliveTimer = setInterval(() => {
+        for (const link of browsers.list()) {
+          if (!link.rpc.connected && !link.rpc.unresponsive) continue
+          void Effect.runPromise(link.rpc.send({ method: "ping" })).catch(() => {
+            if (!link.rpc.unresponsive || browsers.byKey(link.key) !== link) return
+            for (const session of sessions.sessions.values()) {
+              if (session.browser?.key === link.key) sessions.stopExecution(session.id, browserUnresponsive, "browser-unresponsive")
+            }
+          })
+        }
+      }, keepaliveIntervalMs)
       keepaliveTimer.unref()
     }
     if (idleTabTtlMs > 0) {

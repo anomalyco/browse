@@ -42,6 +42,7 @@ export type AdoptionResult = {
 export const defaultExecuteTimeoutMs = 60_000
 
 export type SessionHooks = {
+  readonly checkBrowserResponsive?: (key: string) => Effect.Effect<void, Error>
   /** Select once on creation, otherwise check the stored profile and any requested selector. */
   readonly resolveBrowser?: (requested?: string, session?: OpenCodeBrowserSession) => { readonly id: string; readonly key: string } | { readonly error: string; readonly unavailable?: true }
   readonly targetBrowserKey?: (tabId: number) => string | undefined

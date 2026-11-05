@@ -26,6 +26,7 @@ import type { ExtensionCommandInput } from "./rpc.ts"
 import { cliCommand, fromCheckout, installCommand, oldStoreMarker, storeUrl } from "../paths.ts"
 import {
   checkoutReloadPrefix,
+  browserUnresponsive,
   extensionProtocolAdvice,
   extensionProtocolCompatibility,
   extensionProtocolVersion,
@@ -118,6 +119,7 @@ export class ExtensionHandshake {
       if (!key) return { error: `Session ${session.id} has no identifiable browser in its saved catalog. Start a new session and select its browser.` }
       const bound = browsers.byKey(key)
       const belongs = `Session ${session.id} belongs to browser '${bound?.id ?? session.browser?.id ?? key}'`
+      if (bound?.rpc.unresponsive) return { error: `${belongs}. ${browserUnresponsive}`, unavailable: true }
       if (bound?.rpc.protocolCompatible === false) return { error: `${belongs}. ${extensionProtocolAdvice(bound.rpc.protocolVersion, { install: installCommand() })}` }
       if (!bound?.rpc.connected) {
         const recovery = browserToken(key) ? "which isn't connected. Reconnect it"
@@ -130,6 +132,7 @@ export class ExtensionHandshake {
       return bound
     }
     const link = requested ? browsers.byId(requested) : browsers.defaultLink()
+    if (link?.rpc.unresponsive) return { error: browserUnresponsive, unavailable: true }
     if (link) return link
     const rejected = !browsers.connected && this.rejectedProtocol()
     if (rejected) return { error: this.mismatchAdvice(rejected.version), unavailable: true }
@@ -147,6 +150,7 @@ export class ExtensionHandshake {
     const recent = Date.now() - 65_000
     const pairingState = browsers.connected ? "connected" : rejected ? "incompatible" : this.lastRefused > recent ? "refused" : this.lastUnpaired > recent ? "unpaired" : this.hasPairedBrowser ? "paired-offline" : "not-seen"
     const nextStep = pairingState === "connected" ? undefined
+      : link?.rpc.unresponsive ? browserUnresponsive
       : pairingState === "incompatible" ? this.mismatchAdvice(rejected?.version)
       : pairingState === "refused" || pairingState === "unpaired" ? `${pairingState === "refused" ? "browse refused the pairing attempt" : "browse is installed but not paired"}. Run \`${cliCommand("install")}\` again to pair it, or run \`${cliCommand("pair")}\` and enter the new code in browse's Options.`
       : pairingState === "paired-offline" ? "Open the browser profile already paired with browse and enable the extension; it reconnects automatically."
@@ -166,6 +170,7 @@ export class ExtensionHandshake {
         name: browser.name,
         default: browser === link,
         connected: browser.rpc.connected,
+        ...(browser.rpc.unresponsive ? { unresponsive: true } : {}),
         version: browser.rpc.version ?? null,
         tabs: registry.listRootTargets().filter((target) => browsers.ownerKey(target.tabId) === browser.key).length,
       })),

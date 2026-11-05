@@ -214,6 +214,7 @@ export function createExtensionEventHandler(options: {
     if (!isExtensionEvent(parsed)) {
       return
     }
+    link.rpc.noteResponse()
     const message = relayTabIds(link, parsed)
     const { socket, generation, announcedRootTabIds, announcedAgentTabIds } = link
     const mine = (tabId: number) => browsers.ownerKey(tabId) === link.key

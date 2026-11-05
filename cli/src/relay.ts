@@ -272,6 +272,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         const link = handshake.resolveSessionBrowser(requested, session)
         return "error" in link ? link : { id: link.id, key: link.key }
       },
+      checkBrowserResponsive: (key) => {
+        const link = browsers.byKey(key)
+        return link ? link.rpc.send({ method: "ping" }).pipe(Effect.asVoid)
+          : Effect.fail(new Error("The browser disconnected before execution."))
+      },
       targetBrowserKey: (tabId) => browsers.ownerKey(tabId),
       getUserAttachedPageUrls: (session) => registry.listRootTargets()
         .filter((target) => target.owner === "user" && browsers.ownerKey(target.tabId) === session.browser?.key)
