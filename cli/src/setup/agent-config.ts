@@ -1,4 +1,5 @@
 import fs from "node:fs"
+import { randomUUID } from "node:crypto"
 import path from "node:path"
 import { isDeepStrictEqual } from "node:util"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
@@ -94,6 +95,48 @@ export function agentLocations(home: string, config: string, onPath: (name: stri
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value)
 type EditResult = "added" | "unchanged" | "removed" | "conflict"
 
+/** The command array of the browse server in an agent config, if it has one (for migration). */
+export function browseServerCommand(name: AgentName, file: string): string[] | undefined {
+  if (!fs.existsSync(file)) return undefined
+  const before = fs.readFileSync(file, "utf8")
+  const toml = name === "codex" || name === "grok" || name === "vibe"
+  const yaml = name === "goose" || name === "hermes"
+  try {
+    let current: unknown
+    if (yaml) {
+      const config = parseDocument(before, { merge: true }).toJS() as Record<string, unknown>
+      const key = name === "goose" ? "extensions" : "mcp_servers"
+      current = object(config[key]) ? (config[key] as Record<string, unknown>).browse : undefined
+    } else if (toml) {
+      const config = parseToml(before) as Record<string, unknown>
+      if (name === "vibe") {
+        const list = Array.isArray(config.mcp_servers) ? config.mcp_servers : []
+        current = list.find((entry) => object(entry) && entry.name === "browse")
+      } else current = object(config.mcp_servers) ? (config.mcp_servers as Record<string, unknown>).browse : undefined
+    } else {
+      const config = parse(before, [], { allowTrailingComma: true }) as Record<string, unknown>
+      if (name === "opencode") {
+        const mcp = object(config.mcp) ? config.mcp : undefined
+        const servers = mcp && object(mcp.servers) ? mcp.servers : undefined
+        current = servers?.browse
+      } else {
+        const key = serverKeys[name] ?? "mcpServers"
+        const container = config[key]
+        current = Array.isArray(container)
+          ? container.find((entry) => object(entry) && entry.name === "browse")
+          : object(container) ? container.browse : undefined
+      }
+    }
+    if (!object(current)) return undefined
+    const command = current.command ?? current.cmd
+    const args = Array.isArray(current.args) ? current.args.filter((arg): arg is string => typeof arg === "string") : []
+    if (Array.isArray(command)) return command.filter((part): part is string => typeof part === "string")
+    return typeof command === "string" ? [command, ...args] : undefined
+  } catch {
+    return undefined
+  }
+}
+
 function serverDefinition(name: AgentReceipt["name"], command: string, args: string[]) {
   if (name === "kilo") return { type: "local", command: [command, ...args] }
   if (name === "goose") return { type: "stdio", name: "browse", enabled: true, cmd: command, args }
@@ -161,6 +204,16 @@ export function editAgentConfig(receipt: AgentReceipt, remove = false): EditResu
   }
   fs.mkdirSync(path.dirname(file), { recursive: true })
   if (exists && fs.readFileSync(file, "utf8") !== before) throw new Error(`${file} changed during setup; try again`)
-  fs.writeFileSync(file, after, { mode: 0o600, flag: exists ? "w" : "wx" })
+  // Write beside the target and rename: a crash never leaves a half-written agent config, and the existing file's mode
+  // stays as it was (0600 for a new one).
+  const mode = exists ? fs.statSync(file).mode & 0o777 : 0o600
+  const temporary = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${randomUUID()}.tmp`)
+  try {
+    fs.writeFileSync(temporary, after, { mode, flag: "wx" })
+    fs.chmodSync(temporary, mode)
+    fs.renameSync(temporary, file)
+  } finally {
+    fs.rmSync(temporary, { force: true })
+  }
   return remove ? "removed" : "added"
 }

@@ -37,7 +37,7 @@ export {
 } from "./session-manager/types.ts"
 
 /**
- * Session ids an MCP server picks for itself (the shim's supervisor and `browse mcp` both use eight hex characters).
+ * Session ids an MCP server picks for itself (the MCP supervisor and `browse mcp` both use eight hex characters).
  * Shared with the relay's orphan collector so both agree on which sessions nobody named.
  */
 const mcpSessionPattern = /^mcp-[0-9a-f]{8}$/i

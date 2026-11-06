@@ -2,7 +2,7 @@ import crypto from "node:crypto"
 import path from "node:path"
 import { Config, Effect, Option } from "effect"
 import type { WebSocket } from "ws"
-import { createAutoUpdater, npmRuntime } from "./update/auto-update.ts"
+import { createAutoUpdater, installedRuntime } from "./update/auto-update.ts"
 import { BrowserLinks, type BrowserLink } from "./relay/browser-links.ts"
 import { CdpClientPool } from "./cdp/client-pool.ts"
 import { CdpRouter } from "./cdp/router.ts"
@@ -15,7 +15,7 @@ import { GhostCursorTabs } from "./ghost-cursor.ts"
 import { HandoffRegistry } from "./session-manager/handoff.ts"
 import { createHttpRequestHandler } from "./http-api.ts"
 import { forgetTab } from "./execute/human-input.ts"
-import { devExtension, PUBLIC_STORE_ID, storeConfig } from "./paths.ts"
+import { devExtension, PUBLIC_STORE_ID, stateRoot, storeConfig } from "./paths.ts"
 import { ProtectedFrameTracker } from "./cdp/protected-frames.ts"
 import type { CdpEvent, JsonObject } from "./protocol.ts"
 import { RecordingRelay } from "./recording-relay.ts"
@@ -382,7 +382,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const restartTimeoutMs = yield* Config.Int("OPENCODE_BROWSER_RESTART_TIMEOUT_MS").pipe(Config.withDefault(10_000))
   const clientGoneGraceMs = yield* Config.Int("OPENCODE_BROWSER_CLIENT_GONE_GRACE_MS").pipe(Config.withDefault(60_000))
   const restartRequestId = yield* Config.option(Config.String("OPENCODE_BROWSER_RESTART_REQUEST_ID"))
-  const lifecycleLogPath = path.join(path.dirname(defaultSessionCatalogPath(port)), "lifecycle.jsonl")
+  const lifecycleLogPath = path.join(stateRoot(), "relays", String(port), "lifecycle.jsonl")
   const audit = (event: RelayLifecycleEvent) => Effect.try(() => appendRelayLifecycleEvent(lifecycleLogPath, event))
 
   function setProtectedUi(tabId: number, protectedUi: boolean): void {
@@ -716,7 +716,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       relayReady = true
       void updates.refresh()
       startTimers()
-      const runtime = managed ? npmRuntime() : undefined
+      const runtime = managed ? installedRuntime() : undefined
       if (runtime) {
         autoUpdater = createAutoUpdater({
           runtime,

@@ -1,4 +1,4 @@
-import { dataRoot } from "../paths.ts"
+import { stateRoot } from "../paths.ts"
 import fs from "node:fs"
 import path from "node:path"
 import { Option, Schema } from "effect"
@@ -8,7 +8,7 @@ import { isValidSessionId } from "../relay/helpers.ts"
 /**
  * Session journal: an auditable per-session record of what agents did to the
  * user's browser. The relay appends one JSON line per execute call to
- * `<data root>/sessions/<id>/journal.jsonl` (see paths.ts); the CLI `journal` command
+ * `<state root>/sessions/<id>/journal.jsonl` (see paths.ts); the CLI `journal` command
  * reads the file locally and renders a human-readable timeline.
  *
  * Journals hold agent code, which often types credentials, so directories are
@@ -37,7 +37,7 @@ export interface JournalEntry extends Schema.Schema.Type<typeof JournalEntry> {}
 const decodeJournalEntry = Schema.decodeUnknownOption(JournalEntry)
 
 export const defaultJournalBaseDir = (): string => {
-  return path.join(dataRoot(), "sessions")
+  return path.join(stateRoot(), "sessions")
 }
 
 export function journalPathForSession(baseDir: string, sessionId: string): string {

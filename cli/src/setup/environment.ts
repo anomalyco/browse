@@ -5,9 +5,18 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import * as clack from "@clack/prompts"
 import type { AgentName, AgentReceipt } from "./agent-config.ts"
-import { runtimeLayout } from "../update/auto-update.ts"
 import { formatPairingCode } from "../relay/browser-pairing.ts"
-import { dataRoot, devExtension, devExtensionFolder, PUBLIC_STORE_ID, storeConfig, storeUrl } from "../paths.ts"
+import {
+  cacheRoot,
+  configRoot as browseConfigRoot,
+  dataRoot,
+  devExtension,
+  devExtensionFolder,
+  PUBLIC_STORE_ID,
+  stateRoot,
+  storeConfig,
+  storeUrl,
+} from "../paths.ts"
 
 /**
  * The Chrome Web Store item install points users at: the one this package was released with (paths.ts storeConfig), or
@@ -29,12 +38,16 @@ export const windows = process.platform === "win32"
 export const home = homedir()
 export const root = dataRoot()
 export const configRoot = process.env.XDG_CONFIG_HOME ?? path.join(home, ".config")
-export const layout = runtimeLayout(root)
+/** browse's own XDG folders (paths.ts): uninstall removes them, status and doctor show them. */
+export const paths = {
+  config: browseConfigRoot(),
+  data: dataRoot(),
+  state: stateRoot(),
+  cache: cacheRoot(),
+}
 export const files = {
-  dir: root,
-  /** Installed versions of this package (auto-update.ts): the MCP server runs from here through the shim, not the npx cache. */
-  runtime: path.join(root, "runtime"),
-  settings: path.join(root, "settings.json"),
+  dir: paths.data,
+  settings: path.join(paths.config, "settings.json"),
 }
 /**
  * Files the native messaging host of earlier versions left behind. Not session.json: it has only ever been at
@@ -65,8 +78,8 @@ export const checkoutExtensionDirs = (() => {
 /** The dev extension a dev npm install downloads (paths.ts devExtension); undefined for a checkout or a stable release. */
 export const dev = fromSource ? undefined : devExtension()
 
-/** The folder to load unpacked: a checkout's dist/, which `bun run setup` builds, or a dev install's <data root>/extension. */
-export const unpackedFolder = (): string | undefined => checkoutExtensionDirs[1] ?? (dev ? devExtensionFolder(root) : undefined)
+/** The folder to load unpacked: a checkout's dist/, which `bun run setup` builds, or a dev install's <cache root>/extension. */
+export const unpackedFolder = (): string | undefined => checkoutExtensionDirs[1] ?? (dev ? devExtensionFolder(paths.cache) : undefined)
 
 export type Settings = {
   opencode?: string

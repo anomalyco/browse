@@ -1,37 +1,57 @@
-// `browse mcp` from a binary install: the npm shim's supervisor (auto-update.ts shimSource), for executables. Agents'
-// MCP entries run the executable on PATH, which an update replaces by rename while their server keeps running. This
-// supervisor starts the current version's server (runtime/versions/<version>/browse mcp), forwards stdio
-// (newline-delimited JSON-RPC), and once current.json names another version, the relay runs it and no request is in
-// flight, starts the new server, replays the client's `initialize` to it (its answer is dropped) and carries on; while it
-// swaps, client messages wait. Keep it in step with the shim.
+// `browse mcp` from an installed binary or npm global package: supervise the server so an update swaps it. Agents'
+// MCP entries run a stable path (the executable, or the global package's CLI bundle), which the installer replaces in
+// place. This supervisor starts that path, forwards stdio (newline-delimited JSON-RPC), and once the installed version
+// changes and the relay runs it (or no relay exists), starts the new server, replays the client's `initialize` to it
+// (its answer is dropped) and carries on; while it swaps, client messages wait. An npx entry or a downloaded executable
+// has nothing supervising it, and serves directly.
 import { spawn, type ChildProcessByStdio } from "node:child_process"
 import type { Readable, Writable } from "node:stream"
-import { existsSync } from "node:fs"
+import { existsSync, statSync } from "node:fs"
+import path from "node:path"
 import { createInterface } from "node:readline"
-import { npmRuntime, readCurrent, versionEntry } from "../update/auto-update.ts"
+import { entryCommand } from "../paths.ts"
+import { installedRuntime, installedVersion, type Runtime } from "../update/auto-update.ts"
 
 /** Set for the server a supervisor starts, so it serves instead of supervising again. */
 export const directEnvironmentVariable = "OPENCODE_BROWSER_MCP_DIRECT"
 
 type Message = { id?: unknown; method?: unknown; params?: unknown; result?: { capabilities?: { tools?: { listChanged?: unknown } } } }
 
+/** The file whose change means a new version: the executable, or the npm package's manifest. */
+const watchedFile = (runtime: Runtime) =>
+  runtime.kind === "binary" ? runtime.entry : path.join(path.dirname(path.dirname(runtime.entry)), "package.json")
+
+/** The installed version, re-read only when the watched file changes. */
+function versionReader(runtime: Runtime, initial: string) {
+  let version = initial
+  let stamp = ""
+  return () => {
+    try {
+      const stat = statSync(watchedFile(runtime))
+      const next = `${stat.mtimeMs}:${stat.size}`
+      if (next === stamp) return version
+      stamp = next
+      version = installedVersion(runtime) ?? version
+      return version
+    } catch {
+      return version
+    }
+  }
+}
+
 export async function runBinaryMcp(args: readonly string[]) {
-  const runtime = npmRuntime()
-  if (!runtime) {
-    // Not an installed binary (a downloaded executable run in place): nothing updates it, so serve directly.
+  const runtime = installedRuntime()
+  if (!runtime || runtime.kind === "npx") {
+    // Not an installed binary or global npm package: nothing updates it, so serve directly.
     process.env[directEnvironmentVariable] = "1"
     const { runCli } = await import("../cli.ts")
     return runCli()
   }
-  const { layout } = runtime
   const REPLAY = "opencode-browser-shim-initialize"
   const relayPort = Number(process.env.OPENCODE_BROWSER_PORT) || 19988
-  const current = () => readCurrent(layout)?.version ?? runtime.version
-  // A version whose directory is gone (removed by hand) runs as the executable on PATH, which is the current one.
-  const command = (version: string) => {
-    const entry = versionEntry(layout, version, true)
-    return existsSync(entry) ? entry : runtime.current.binary ?? process.execPath
-  }
+  const current = versionReader(runtime, installedVersion(runtime) ?? runtime.version)
+  // A stable entry path, replaced in place by the installer.
+  const command = () => runtime.entry
   // Every server this supervisor starts keeps one implicit session, and the relay watches this process (not the
   // server it replaces), so an update doesn't end the agent's session or close its tabs.
   process.env.OPENCODE_BROWSER_MCP_SESSION ??= "mcp-" + Math.random().toString(16).slice(2, 10).padEnd(8, "0")
@@ -67,7 +87,8 @@ export async function runBinaryMcp(args: readonly string[]) {
   }
 
   const start = (replay: boolean) => {
-    const next = spawn(command(version), ["mcp", ...args], { stdio: ["pipe", "pipe", "inherit"], env: { ...process.env, [directEnvironmentVariable]: "1" } })
+    const [file, ...prefix] = entryCommand(command())
+    const next = spawn(file!, [...prefix, "mcp", ...args], { stdio: ["pipe", "pipe", "inherit"], env: { ...process.env, [directEnvironmentVariable]: "1" } })
     // A server that exits mid-write (an old one being replaced) must not take the supervisor down with EPIPE.
     next.stdin.on("error", () => {})
     child = next
@@ -98,7 +119,7 @@ export async function runBinaryMcp(args: readonly string[]) {
     }
   }
 
-  // Once current.json names another version, new requests wait for the swap instead of reaching a server whose relay is
+  // Once the installed version changes, new requests wait for the swap instead of reaching a server whose relay is
   // going away (or already runs the other version); a switch that doesn't happen releases them.
   let heldSince: number | undefined
   const moved = () => current() !== version
@@ -117,8 +138,8 @@ export async function runBinaryMcp(args: readonly string[]) {
     forward(line)
   }
 
-  // A new version in current.json swaps the server only once the relay runs it too (GET /version), so a server never
-  // talks to a relay of another version. With no relay at all for a few checks, nothing can mix, and it swaps.
+  // A new version swaps the server only once the relay runs it too (GET /version), so a server never talks to a relay
+  // of another version. With no relay at all for a few checks, nothing can mix, and it swaps.
   let checking = false
   let unreachable = 0
   const relayVersion = () =>
@@ -162,4 +183,10 @@ export async function runBinaryMcp(args: readonly string[]) {
     setTimeout(() => process.exit(0), 5000).unref()
   })
   setInterval(() => void maybeSwap(), 1000).unref()
+}
+
+/** Whether this process should supervise its MCP server (an installed binary or global npm package). */
+export function supervisesMcp(): boolean {
+  const runtime = installedRuntime()
+  return !!runtime && runtime.kind !== "npx" && existsSync(runtime.entry)
 }

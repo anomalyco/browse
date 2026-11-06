@@ -26,7 +26,7 @@ import crypto from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 import { writePrivateJsonFileSync } from "../fs-durability.ts"
-import { dataRoot } from "../paths.ts"
+import { dataRoot, stateRoot } from "../paths.ts"
 
 const legacyContext = "opencode-browser-pairing-v2"
 const context = "opencode-browser-pairing-v3"
@@ -48,7 +48,7 @@ const maxPendingCodes = 5
 /** The pairing file inside an unpacked extension; fetched by the extension with chrome.runtime.getURL. */
 const extensionPairingFileName = "relay-pairing.json"
 
-export const pairingCodesPath = (root = dataRoot()) => path.join(root, "pairing-codes.json")
+export const pairingCodesPath = (root = stateRoot()) => path.join(root, "pairing-codes.json")
 export const browserTokensPath = (root = dataRoot()) => path.join(root, "browser-tokens.json")
 /** The one code earlier versions shared with every extension. */
 export const legacyPairingCodePath = (root = dataRoot()) => path.join(root, "extension-pairing")
@@ -94,7 +94,7 @@ function writePendingCodes(root: string, pending: PendingCodes): void {
 }
 
 /** A new single-use code; only its slow hash is stored. The oldest pending codes go past five. */
-export function mintPairingCode(root = dataRoot(), options: { readonly now?: number; readonly ttlMs?: number; readonly receipt?: string } = {}): string {
+export function mintPairingCode(root = stateRoot(), options: { readonly now?: number; readonly ttlMs?: number; readonly receipt?: string } = {}): string {
   const now = options.now ?? Date.now()
   const code = Array.from(crypto.randomBytes(pairingCodeLength), (byte) => crockford[byte & 31]).join("")
   const pending = readPendingCodes(root, now)
@@ -105,19 +105,19 @@ export function mintPairingCode(root = dataRoot(), options: { readonly now?: num
 }
 
 /** The keys of the codes that are pending and unexpired. */
-export function pendingPairingCodeKeys(root = dataRoot(), now = Date.now()): string[] {
+export function pendingPairingCodeKeys(root = stateRoot(), now = Date.now()): string[] {
   return readPendingCodes(root, now).codes.map((entry) => entry.key)
 }
 
 /** Uses up a code once an extension proved it; the failure count starts over. */
-export function consumePairingCode(key: string, root = dataRoot(), now = Date.now()): string | undefined {
+export function consumePairingCode(key: string, root = stateRoot(), now = Date.now()): string | undefined {
   const pending = readPendingCodes(root, now)
   writePendingCodes(root, { codes: pending.codes.filter((entry) => entry.key !== key), failures: 0 })
   return pending.codes.find(entry => entry.key === key)?.receipt
 }
 
 /** Counts a wrong code; at the limit every pending code is thrown away. Returns whether that happened. */
-export function recordPairingFailure(root = dataRoot(), now = Date.now()): boolean {
+export function recordPairingFailure(root = stateRoot(), now = Date.now()): boolean {
   const pending = readPendingCodes(root, now)
   const failures = pending.failures + 1
   const exhausted = failures >= maxPairingFailures

@@ -17,12 +17,12 @@ import {
   writeExtensionPairing,
 } from "../relay/browser-pairing.ts"
 import { syncDevExtension } from "./dev-extension.ts"
-import { cliCommand, devExtensionFolder, entryCommand, installCommand, runningEntry } from "../paths.ts"
+import { cliCommand, compiledBinary, devExtensionFolder, entryCommand, installedBinaryPath, installCommand, runningEntry } from "../paths.ts"
+import { runCommand } from "../update/auto-update.ts"
 import { unpackedExtensionId } from "../protocol.ts"
 import { parseHostname, readRelayConfig, writeRelayConfig } from "../relay/config.ts"
 import { relayAuthorization } from "../relay/secrets.ts"
 import { opencodeBrowserBuildId } from "../version.ts"
-import { readCurrent } from "../update/auto-update.ts"
 import { removeBinaryInstall } from "./binary.ts"
 import { revealFolder } from "./browsers.ts"
 import {
@@ -30,13 +30,13 @@ import {
   dev,
   fail,
   files,
-  layout,
+  fromSource,
   LEGACY_MCP_NAME,
   log,
   manualPair,
   MCP_NAME,
+  paths,
   readJson,
-  root,
   STORE_URL,
   unpackedFolder,
   waitTimeout,
@@ -128,13 +128,13 @@ export async function reloadOutdatedExtension(
 }
 
 /**
- * Puts this version's dev extension in <data root>/extension (paired, for a developer who loads it), silently: install
+ * Puts this version's dev extension in <cache root>/extension (paired, for a developer who loads it), silently: install
  * points every channel at the store build. Fails install when it can't be downloaded.
  */
 export async function syncDev() {
   if (!dev) return
   try {
-    await syncDevExtension(dev, { root })
+    await syncDevExtension(dev, { root: paths.cache })
   } catch (error) {
     fail(`Could not get the dev extension: ${(error as Error).message}`)
   }
@@ -146,7 +146,7 @@ export async function syncDev() {
  * extension that already has its key ignores it.
  */
 export function pairUnpacked() {
-  const directories = [...checkoutExtensionDirs, ...(dev ? [devExtensionFolder(root)] : [])].filter((directory) =>
+  const directories = [...checkoutExtensionDirs, ...(dev ? [devExtensionFolder(paths.cache)] : [])].filter((directory) =>
     existsSync(path.join(directory, "manifest.json")),
   )
   if (directories.length === 0) return
@@ -333,7 +333,7 @@ async function confirmSecretRemoval(args: string[]) {
 /** Stop only a managed instance that recorded its identity in this install. Never start a relay during uninstall. */
 async function stopInstalledRelay() {
   const base = relayBase()
-  const audit = path.join(files.dir, "relays", new URL(base).port, "lifecycle.jsonl")
+  const audit = path.join(paths.state, "relays", new URL(base).port, "lifecycle.jsonl")
   if (!existsSync(audit)) return
   const probe = async () => {
     try {
@@ -389,17 +389,23 @@ export async function uninstall(args: string[]) {
       fail(`Couldn't safely remove browse from ${receipt.file}. Check its syntax and permissions, then re-run uninstall.`)
     }
   }
-  const binary = readCurrent(layout)?.binary
-  try {
-    rmSync(files.dir, { recursive: true, force: true })
-    log(`✓ Removed ${files.dir}`)
-  } catch (error) {
-    if (process.platform !== "win32" || !["EBUSY", "EPERM", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error
-    log(`! Couldn't remove all of ${files.dir}; close running browse agents and remove the remaining files.`)
+  const binary = installedBinaryPath()
+  for (const directory of [paths.data, paths.config, paths.state, paths.cache]) {
+    try {
+      rmSync(directory, { recursive: true, force: true })
+      log(`✓ Removed ${directory}`)
+    } catch (error) {
+      if (process.platform !== "win32" || !["EBUSY", "EPERM", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error
+      log(`! Couldn't remove all of ${directory}; close running browse agents and remove the remaining files.`)
+    }
   }
-  if (binary) {
+  if (existsSync(binary)) {
     const left = removeBinaryInstall(binary)
     log(left ? `! Couldn't remove ${left}. After uninstall exits, close any browse agents using the file(s) and delete them.` : `✓ Removed ${binary}`)
+  }
+  if (!compiledBinary() && !fromSource) {
+    const npm = await runCommand("npm", ["uninstall", "-g", "@opencode/browse"], { timeoutMs: 120_000 })
+    log(npm.status === 0 ? "✓ Removed the global npm package" : `! Couldn't remove the global npm package: ${(npm.stderr || npm.stdout).trim() || "npm uninstall failed"}`)
   }
   if (host) log("✓ Removed the native messaging host of an earlier version")
   if (mcp.length)

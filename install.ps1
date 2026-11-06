@@ -1,6 +1,6 @@
-# Installs browse on Windows: downloads the browse binary for this computer into ~\.browse\bin, then hands over to
-# `browse install`, which does the rest (PATH, your agents, pairing with your browser). Served at
-# https://opencode.ai/browse/install.ps1; the PowerShell twin of ./install.
+# Installs browse on Windows: downloads the browse binary for this computer into %USERPROFILE%\.local\bin (or
+# %XDG_BIN_HOME%), then hands over to `browse install`, which does the rest (PATH, your agents, pairing with your
+# browser). Served at https://opencode.ai/browse/install.ps1; the PowerShell twin of ./install.
 #
 #   irm https://opencode.ai/browse/install.ps1 | iex
 #
@@ -79,7 +79,7 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
     # Windows PowerShell 5.1 may still default to TLS 1.0, which the npm registry refuses.
     try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 
-    $installDir = Join-Path $env:USERPROFILE ".browse\bin"
+    $installDir = if ($env:XDG_BIN_HOME -and [IO.Path]::IsPathRooted($env:XDG_BIN_HOME)) { $env:XDG_BIN_HOME } else { Join-Path $env:USERPROFILE ".local\bin" }
     $exe = Join-Path $installDir "browse.exe"
     New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 

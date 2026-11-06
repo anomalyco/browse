@@ -35,12 +35,13 @@ export function agentFlags(args: string[]) {
 
 export function agentPlan(locations: AgentLocation[], flags: ReturnType<typeof agentFlags>, tty: boolean, caller?: AgentName, remembered?: AgentName[]) {
   const detected = locations.filter(a => a.installed).map(a => a.name)
-  // An agent running install gets browse itself; with no terminal to ask (CI, a script), every agent found does.
-  const automatic = caller ? [caller] : !tty ? detected : undefined
+  // An agent running install gets browse itself. With no terminal and no caller, nothing says which agent asked, so
+  // no config is touched: install prints the entry and the --agent command instead.
   if (flags.none) return { picker: false, selected: [] }
   if (flags.requested.length) return { picker: false, selected: flags.requested }
-  if (flags.yes && !caller) return { picker: false, selected: detected }
-  if (automatic) return { picker: false, selected: automatic }
+  if (caller) return { picker: false, selected: [caller] }
+  if (flags.yes) return { picker: false, selected: detected }
+  if (!tty) return { picker: false, selected: [] }
   return { picker: true, selected: remembered?.filter(n => agentNames.includes(n)) ?? detected }
 }
 

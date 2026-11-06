@@ -4,7 +4,7 @@
 // `settings` MCP tool and CLI command, so the options page updates live and the relay hears of cursor and input changes
 // the way it does for changes made on the page. Environment variables on the relay override some of them; security
 // switches are environment-only and never settable here. autoUpdate is the relay's own (auto-update.ts keeps it in the
-// data root, so it works without the extension); the relay merges it in and never sends it to the extension.
+// state root, so it works without the extension); the relay merges it in and never sends it to the extension.
 import type { JsonObject } from "../protocol.ts"
 import { cliCommand } from "../paths.ts"
 
@@ -24,7 +24,7 @@ export const settingSpecs: Record<SettingKey, { readonly label: string; readonly
   cursor: { label: "Agent cursor on agent tabs outside recordings (pages can detect it)", values: ["off", "always"], variable: "OPENCODE_BROWSER_GHOST_CURSOR" },
   humanInput: { label: "Human-like input (off is faster, but easier for sites to flag)", values: ["on", "off"], variable: "OPENCODE_BROWSER_HUMAN_INPUT" },
   handoffNotifications: { label: "System notification on a handoff (only while recorded, or every handoff)", values: ["recording", "always"] },
-  autoUpdate: { label: "npm installs: install updates automatically when idle, only notify, or never check", values: ["on", "notify", "off"], variable: "OPENCODE_BROWSER_AUTO_UPDATE" },
+  autoUpdate: { label: "installs: install updates automatically when idle, only notify, or never check", values: ["on", "notify", "off"], variable: "OPENCODE_BROWSER_AUTO_UPDATE" },
 }
 
 /** Environment-only switches that relax a guard or reach the network; the settings tool never touches them. */

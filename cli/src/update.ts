@@ -5,15 +5,15 @@
 //                   When the tracked branch is gone from the remote (browse's `main` became `dev`), it follows the
 //                   remote's default branch instead and points the local branch's upstream there.
 //   update check    asks the remote for its branch head (`git ls-remote`, never a fetch), at most every 6 hours,
-//                   cached in the data root. `status`, `doctor`, the MCP server and the extension's status page show
+//                   cached in the cache root. `status`, `doctor`, the MCP server and the extension's status page show
 //                   its notice. It never blocks startup and fails silently. OPENCODE_BROWSER_UPDATE_CHECK=0 turns it off.
-// An npm install (`npx @opencode/browse install`) has no clone: it updates itself (auto-update.ts), `update` installs
-// the newest version on its channel now (runtime-update.ts), and the notice shows a newer version in "notify" mode.
+// An installed binary or npm global install (`browse install`) reruns the installer (auto-update.ts); `update` installs
+// the newest version on its channel now, and the notice shows a newer version in "notify" mode. npx is a no-op.
 import { execFile, spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs"
 import path from "node:path"
-import { autoUpdateStatus, compareVersions, npmRuntime } from "./update/auto-update.ts"
-import { checkoutRoot, cliCommand, compiledBinary, dataRoot } from "./paths.ts"
+import { autoUpdateStatus, compareVersions, installedRuntime } from "./update/auto-update.ts"
+import { cacheRoot, checkoutRoot, cliCommand, compiledBinary } from "./paths.ts"
 import { unpackedReloadAdvice } from "./protocol.ts"
 
 /** How long a check result stands before the remote is asked again. */
@@ -189,7 +189,7 @@ export async function updateNotice(options: { readonly repo?: string; readonly d
     }
     const repo = options.repo ?? checkoutRoot()
     if (!repo || !updateCheckEnabled() || !existsSync(path.join(repo, ".git"))) return undefined
-    const check = await cachedUpdateCheck({ repo, dataDir: options.dataDir ?? dataRoot(), ...(options.git ? { git: options.git } : {}) })
+    const check = await cachedUpdateCheck({ repo, dataDir: options.dataDir ?? cacheRoot(), ...(options.git ? { git: options.git } : {}) })
     return check?.available ? { summary: describeUpdate(check), command: cliCommand("update"), check } : undefined
   } catch {
     return undefined
@@ -197,15 +197,16 @@ export async function updateNotice(options: { readonly repo?: string; readonly d
 }
 
 /**
- * An npm install's notice, from what the relay's last daily check found: shown when a newer version waits and auto-update
- * won't install it by itself (notify mode, or its last attempt failed). false when this isn't an npm install.
+ * An installed binary or npm global install's notice, from what the relay's last daily check found: shown when a newer
+ * version waits and auto-update won't install it by itself (notify mode, or its last attempt failed). false when this
+ * isn't such an install.
  */
 export function npmUpdateNotice(): UpdateNotice | undefined | false {
-  const runtime = npmRuntime()
+  const runtime = installedRuntime()
   if (!runtime) return false
   const status = autoUpdateStatus({ runtime })
   const latest = status.latest
-  if (!latest || compareVersions(latest, runtime.version) <= 0 || status.effective === "off" || latest === status.skipped) return undefined
+  if (!latest || compareVersions(latest, runtime.version) <= 0 || status.effective === "off") return undefined
   if (status.effective === "on" && !status.lastError) return undefined
   const check: UpdateCheck = { repo: "npm", checkedAt: Date.now(), head: runtime.version, upstream: `npm ${status.channel ?? "latest"}`, latest, available: true }
   return { summary: `browse ${latest} is available (you have ${runtime.version})`, command: cliCommand("update"), check }
@@ -428,8 +429,8 @@ export function runUpdate(args: readonly string[], deps: UpdateDeps): number {
 /** `browse update [--check]`. */
 export async function runUpdateCommand(args: readonly string[]) {
   const log = (line: string) => process.stdout.write(line + "\n")
-  const { runNpmUpdate } = await import("./update/runtime-update.ts")
-  if (await runNpmUpdate(args)) return
+  const { runInstalledUpdate } = await import("./update/runtime-update.ts")
+  if (await runInstalledUpdate(args)) return
   // An executable that `install` hasn't set up (one downloaded and run in place) has nothing to update.
   if (compiledBinary()) {
     log(`This browse isn't installed. Run \`${cliCommand("install")}\` to set it up; it updates itself from then on.`)
@@ -441,7 +442,7 @@ export async function runUpdateCommand(args: readonly string[]) {
     if (!repo) return log("Installed from npm: run `npx @opencode/browse@latest install` to update.")
     // Ask the remote now, whatever the cache says.
     const check = await checkForUpdate(repo)
-    if (check) writeCache(path.join(dataRoot(), CACHE_FILE), check)
+    if (check) writeCache(path.join(cacheRoot(), CACHE_FILE), check)
     if (!check) return log("Can't check: this clone isn't on a branch that tracks a remote.")
     if (check.failed) return log(`Can't check: ${check.upstream} couldn't be reached.`)
     return log(check.available ? formatUpdateNotice({ summary: describeUpdate(check), command: cliCommand("update") }) : `✓ Up to date with ${check.upstream}.`)

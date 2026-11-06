@@ -81,7 +81,7 @@ The dev zip keeps the manifest `key`, so it loads with the same unpacked ID as a
 trusts. The dev CLI has the zip's sha256 baked in (`cli/build.ts`), and the zip reaches the release service before the
 package reaches npm. `npx @opencode/browse@dev install` downloads exactly that zip from
 `https://anoma.ly/release/browse/files/<sha256>/browse-extension-<version>.zip`, checks it, unpacks it into
-`<data root>/extension` and pairs it (`cli/src/dev-extension.ts`). Install points at the Chrome Web Store build and
+`<cache root>/extension` and pairs it (`cli/src/dev-extension.ts`). Install points at the Chrome Web Store build and
 says nothing about that folder; `browse extension` shows it to a developer loading it unpacked. When the
 relay of a newer dev version starts, it puts that version's zip in the same folder and reloads the extension. Dev
 builds never go to the Chrome Web Store: every upload is reviewed, too slow for a build per push.
@@ -149,7 +149,8 @@ checks the token against `registry/browse.json` there ([scripts/release-registry
 ## Undoing a bad release
 
 - **npm.** Auto-update only moves forward, so release a fixed patch. `npm deprecate @opencode/browse@<bad> "<why>"`
-  warns new installs; `npx @opencode/browse rollback` takes a user back to the version they had.
+  warns new installs; a user can rerun the installer with `--version <good>` (or `npm install -g
+  @opencode/browse@<good>`) to go back.
 - **Chrome Web Store.** Roll back in the dashboard ([how](https://developer.chrome.com/docs/webstore/rollback)), or
   cancel a pending review.
 - **Release service.** `promote` an earlier dev release (anomalyco/release docs/publishing.md).

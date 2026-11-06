@@ -21,12 +21,12 @@ curl -fsSL https://opencode.ai/browse/install | bash
 ```
 
 On Windows, run `irm https://opencode.ai/browse/install.ps1 | iex` in PowerShell. With Node.js,
-`npx @opencode/browse install` works too. The installer puts the `browse` command on your PATH and runs
-`browse install`. Commands in this README are written `browse <command>`; after an npx install, run them as
-`npx @opencode/browse <command>`.
+`npx @opencode/browse install` works too: it installs the package globally so agents run `browse` from PATH. The
+installer puts the `browse` command in `~/.local/bin` (`$XDG_BIN_HOME` when set) and runs `browse install`.
 
-`install` puts the relay in your data folder (`~/.local/share/opencode-browser`), adds the `browse` MCP server to
-the agents you choose, and connects the extension:
+`install` keeps its files in the XDG folders (`~/.config/browse`, `~/.local/share/browse`, `~/.local/state/browse`
+and `~/.cache/browse`; each honours its `XDG_*` variable), adds the `browse` MCP server to the agents you choose, and
+connects the extension:
 
 1. **Choose your agents.** Detected agents start checked. Type to filter, use ↑/↓ to move, Space to toggle and
    Enter to confirm. You can uncheck OpenCode, choose an agent you haven't installed yet, or choose none for CLI-only use.
@@ -41,15 +41,17 @@ That's it. Ask an agent to *"open news.ycombinator.com and tell me the top story
 Requirements: a Chromium browser, and [opencode](https://opencode.ai) or another MCP client. The npx install also needs
 Node.js 22.19+.
 
-**Updates are automatic.** The relay checks npm once a day and installs a new version in the background; it switches
-over when no agent is using the browser, without changing opencode's config or restarting it. Choose *Only tell me* or
-*Don't check* under **Updates** on the extension's settings page (or `settings set autoUpdate=notify`, or
+**Updates are automatic.** The relay checks npm once a day and, in the background, reruns whatever installed browse:
+the install script for a binary install (which replaces `~/.local/bin/browse`), or `npm install -g
+@opencode/browse@<version>` for an npm one. It restarts the relay when no agent is using the browser, without changing
+opencode's config. Running MCP servers swap to the new build between tool calls. Choose *Only tell me* or *Don't check*
+under **Updates** on the extension's settings page (or `settings set autoUpdate=notify`, or
 `OPENCODE_BROWSER_AUTO_UPDATE=off`). Agents can read the current value from `status`, but the MCP `settings` tool
-can't read or change update behaviour; it stays with you. `browse update` updates now, and `browse rollback` goes
-back to the previous version. The Chrome Web Store updates the extension.
+can't read or change update behaviour; it stays with you. `browse update` updates now; to go back, rerun the installer
+with `--version <version>`, or `npm install -g @opencode/browse@<version>`. The Chrome Web Store updates the extension.
 
 **Dev builds**: every push to `dev` publishes one. `npx @opencode/browse@dev install` follows the dev channel: it
-downloads that build's extension into `<data root>/extension`, which you load unpacked once (`browse extension` shows
+downloads that build's extension into `<cache root>/extension`, which you load unpacked once (`browse extension` shows
 the folder), and each update refreshes the folder and reloads the extension. The zip is also at
 https://anoma.ly/release/browse/extension/dev/chromium.
 
@@ -135,13 +137,15 @@ Windows, or `CONFIG` on Linux. The paths below are defaults; a client's existing
 
 </details>
 
-For another stdio MCP client, this prints the server entry with the **actual installed path** (npm shim or checkout)
-on macOS or Linux. On Windows, read `entry` from `%LOCALAPPDATA%\opencode-browser\settings.json` instead.
+For another stdio MCP client, add the `browse` command with the `mcp` argument. That works for a binary install and a
+global npm install, and keeps working when node changes under nvm/fnm:
 
-```sh
-root="${OPENCODE_BROWSER_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/opencode-browser}"
-node -p 'JSON.stringify({browse: {command: process.execPath, args: [require(process.argv[1]).entry, "mcp"]}}, null, 2)' "$root/settings.json"
+```json
+{ "mcpServers": { "browse": { "command": "browse", "args": ["mcp"] } } }
 ```
+
+`browse install --agent '*'` writes this for every agent it knows. An npx-only client can run
+`npx @opencode/browse mcp` instead, but that entry updates only when npx resolves a newer package.
 
 ### Browser on another computer
 
@@ -257,7 +261,7 @@ browse drives the browser you're signed in to, so it assumes that what an agent 
 may try to steer it, and that other programs on your computer may try to use the relay.
 
 - **Relay token.** Every HTTP request and CDP connection to the relay needs the token in
-  `~/.local/share/opencode-browser/relay-token` (readable only by you): an `Authorization: Bearer` header, or
+  `~/.local/share/browse/relay-token` (readable only by you): an `Authorization: Bearer` header, or
   `?opencodeBrowserToken=` on the CDP WebSocket URL. The MCP server and CLI read it for you. The relay listens on
   `127.0.0.1` only and refuses cross-site browser requests and foreign `Host` headers.
 - **Pairing.** `pair` prints a short code (`XXXX-XXXX`) that works once, within 10 minutes; five wrong codes in a row
@@ -287,7 +291,7 @@ may try to steer it, and that other programs on your computer may try to use the
   `page.route()`, so the relay can't own it reliably. Browsing through a local proxy makes every document look like
   it came from the proxy's address, so name the hosts you need exactly.
 - **Site secrets.** `browse secrets add <name> --origin https://example.com` stores a password, key or (with
-  `--totp`) a TOTP seed, read from stdin or a hidden prompt, in `~/.local/share/opencode-browser/site-secrets/`
+  `--totp`) a TOTP seed, read from stdin or a hidden prompt, in `~/.local/share/browse/site-secrets/`
   (0700/0600). An agent types it with `secrets.type(locator, "<name>")`: the relay checks the field's frame URL from
   the browser's frame tree against the secret's origins (and the session's allowlist) right before it inserts the
   value, so a cross-origin iframe or a redirect gets nothing. The value never enters the execute sandbox, results,
@@ -319,7 +323,7 @@ Escape hatches. Set them in the environment you start opencode (or your MCP clie
 | `OPENCODE_BROWSER_AGENT_WINDOW=separate` | Open agent tabs in a separate window (`current`: in the user's window), overriding the options page's *Where agents open their tabs* |
 | `OPENCODE_BROWSER_EXECUTE_SLICE_MS=2000` | Longest `execute` JavaScript may run without yielding before it is stopped (50 to 60000; every session waits meanwhile) |
 | `OPENCODE_BROWSER_GHOST_CURSOR=1` | Show the agent cursor on every agent tab outside recordings (pages can see it); `0` keeps it off. Overrides the options page's *Agent cursor* |
-| `OPENCODE_BROWSER_AUTO_UPDATE=notify` | npm installs: only show new versions (`off`: don't check; `on`: install them when idle, the default). Overrides the status page's *Updates* |
+| `OPENCODE_BROWSER_AUTO_UPDATE=notify` | Installs: only show new versions (`off`: don't check; `on`: install them when idle, the default). Overrides the status page's *Updates* |
 | `OPENCODE_BROWSER_HUMAN_INPUT=0` | Send input at full speed instead of human-like paths and pacing; `1` keeps them on. Overrides the options page's *Human-like input* |
 | `OPENCODE_BROWSER_CHALLENGE_WAIT_MS=15000` | How long `execute` waits for a bot check the browser clears by itself (0 to 60000; 0 reports it without waiting) |
 
@@ -327,7 +331,7 @@ Escape hatches. Set them in the environment you start opencode (or your MCP clie
 
 - `node cli/dist/cli.mjs status` shows the relay, the extension and every tab agents can use.
 - `node cli/dist/cli.mjs doctor` checks the install.
-- Logs: `~/.local/share/opencode-browser/logs/relay.log`.
+- Logs: `~/.local/state/browse/logs/relay.log`.
 - Extension says another browser is connected: only one browser profile can be connected at a time. Close the other
   one, then click **Reconnect** on the status page.
 - Extension says it's not paired (or that the relay was refused): run `bun run setup` again, then reload the extension

@@ -1,51 +1,46 @@
-// A binary install: the install script (or PowerShell installer) put the bun-compiled executable in ~/.browse/bin.
-// Install records it, puts its folder on PATH, and uninstall takes both back.
+// A binary install: the install script (or PowerShell installer) puts the bun-compiled executable in ~/.local/bin
+// ($XDG_BIN_HOME when set). Install records that path, puts its folder on PATH, and uninstall takes both back.
 import { spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
-import {
-  compareVersions,
-  installVersion,
-  pruneVersions,
-  readCurrent,
-  switchVersion,
-  updateState,
-  versionEntry,
-} from "../update/auto-update.ts"
+import { installedBinaryPath } from "../paths.ts"
 import { opencodeBrowserVersion } from "../version.ts"
-import { configRoot, fail, home, layout, log, readFileOr, tilde } from "./environment.ts"
+import { configRoot, fail, home, log, readFileOr, tilde } from "./environment.ts"
 
 /**
- * Records this executable as the one agents run (current.json's `binary`) and keeps a copy of it as its version in
- * runtime/versions, which rollback and the MCP supervisor use. Returns the executable itself, which stays where it is;
- * updates replace it by rename.
+ * Makes sure this executable is the install's stable one: the installer already put it at ~/.local/bin/browse; an
+ * executable someone downloaded and ran is copied there by rename. Returns the path, which stays where it is; updates
+ * replace the file in place, so every agent entry keeps working.
  */
 export async function installBinaryRuntime(): Promise<{ entry: string; version: string }> {
-  const binary = process.execPath
-  const version = opencodeBrowserVersion
-  const before = readCurrent(layout)
-  const existing = versionEntry(layout, version)
+  const target = installedBinaryPath()
   const same = (left: string, right: string) => {
     try {
-      return statSync(left).size === statSync(right).size && readFileSync(left).equals(readFileSync(right))
+      return realpathSync(left) === realpathSync(right)
     } catch {
       return false
     }
   }
-  try {
-    if (!same(existing, binary)) await installVersion({ layout, version, runningBinary: binary })
-  } catch (error) {
-    fail(`Could not install browse ${version}: ${(error as Error).message}`)
+  if (!same(target, process.execPath)) {
+    try {
+      mkdirSync(path.dirname(target), { recursive: true, mode: 0o755 })
+      const staged = `${target}.${process.pid}.new`
+      rmSync(staged, { force: true })
+      copyFileSync(process.execPath, staged)
+      chmodSync(staged, 0o755)
+      if (process.platform === "win32") {
+        for (const name of readdirSync(path.dirname(target))) {
+          if (!name.startsWith(`${path.basename(target)}.old-`)) continue
+          try { rmSync(path.join(path.dirname(target), name), { force: true }) } catch {}
+        }
+        if (existsSync(target)) renameSync(target, `${target}.old-${Date.now()}`)
+      }
+      renameSync(staged, target)
+    } catch (error) {
+      fail(`Could not install browse ${opencodeBrowserVersion} to ${target}: ${(error as Error).message}`)
+    }
   }
-  const previous = before?.version === version ? before.previous : before?.version
-  switchVersion(layout, version, previous, binary)
-  updateState(layout, ({ pending, skipped, ...state }) => ({
-    ...state,
-    ...(pending && compareVersions(pending, version) > 0 ? { pending } : {}),
-    ...(skipped && skipped !== version ? { skipped } : {}),
-  }))
-  pruneVersions(layout, [version, previous])
-  return { entry: binary, version }
+  return { entry: target, version: opencodeBrowserVersion }
 }
 
 /**
@@ -53,9 +48,8 @@ export async function installBinaryRuntime(): Promise<{ entry: string; version: 
  * the user PATH on Windows, else the shell's startup file, as opencode's installer does. Returns where it was added;
  * nothing when PATH already has it or browse runs on Node.
  */
-export function addToPath(): string | undefined {
+export function addToPath(dir = path.dirname(process.execPath)): string | undefined {
   if (/(^|[\\/])(node|bun)(\.exe)?$/i.test(process.execPath)) return undefined
-  const dir = path.dirname(process.execPath)
   if (process.env.GITHUB_ACTIONS === "true" && process.env.GITHUB_PATH) writeFileSync(process.env.GITHUB_PATH, dir + "\n", { flag: "a" })
   if ((process.env.PATH ?? "").split(path.delimiter).some((entry) => path.resolve(entry) === dir)) return undefined
   if (process.platform === "win32") {
