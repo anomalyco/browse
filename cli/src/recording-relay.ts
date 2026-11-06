@@ -109,7 +109,7 @@ export class RecordingRelay {
     return this.activeRecordings.has(tabId) || this.startingRecordings.has(tabId)
   }
 
-  /** Whether the tab's recording asked for the ghost cursor (recording_start cursor: true). */
+  /** Whether the tab's recording asked for the ghost cursor (the recording tool's start action with cursor: true). */
   showsGhostCursor(tabId: number): boolean {
     return this.cursorTabs.has(tabId) && this.isRecordingTab(tabId)
   }

@@ -1,91 +1,104 @@
 import { Effect } from "effect"
 import path from "node:path"
-import {
-  FlightRecorderCancelResponse,
-  FlightRecorderSaveResponse,
-  FlightRecorderStatusResponse,
-  RecordingCancelResponse,
-  RecordingStartResponse,
-  RecordingStatusResponse,
-  RecordingStopResponse,
-} from "../relay/schema.ts"
 import { registerMcpTools } from "./registry.ts"
 import {
+  FlightRecorderToolOutput,
+  RecordingToolOutput,
   objectSchema,
   optionalBooleanField,
   optionalPositiveIntegerField,
   optionalStringField,
+  requiredAction,
   requiredStringField,
   requireObject,
-  sessionOnlyInputSchema,
   sessionSchemaProperty,
 } from "./schema.ts"
+
+const recordingActions = ["start", "stop", "status", "cancel"] as const
+const flightRecorderActions = ["start", "status", "save_last", "cancel"] as const
 
 registerMcpTools({
   order: 400,
   build: (ctx) => [
     {
-      name: "recording_start",
+      name: "recording",
       description:
-        "Start recording the current session tab. CDP mode records video to WebM or MP4; tab-capture mode supports WebM and optional audio.",
+        "Record the current session tab. Actions: start begins recording (CDP mode records video to WebM or MP4; tab-capture mode supports WebM and optional audio; outputPath is required); stop finalizes the artifact; status returns bounded status and quality counters; cancel discards the unfinished artifact.",
       inputSchema: objectSchema(
         {
+          action: {
+            type: "string",
+            enum: [...recordingActions],
+            description: "start begins, stop finalizes, status reports, cancel discards the recording.",
+          },
           session: sessionSchemaProperty,
           outputPath: {
             type: "string",
-            description: "Recording artifact path, resolved against the MCP process working directory.",
+            description: "For start: recording artifact path, resolved against the MCP process working directory.",
           },
           mode: {
             type: "string",
             enum: ["auto", "tab-capture", "cdp"],
-            description: "Recording backend. Defaults to auto.",
+            description: "For start: recording backend. Defaults to auto.",
           },
-          audio: { type: "boolean", description: "Capture tab audio in tab-capture mode." },
-          frameRate: { type: "integer", minimum: 1, maximum: 60, description: "Requested frame rate." },
-          maxDurationMs: { type: "integer", minimum: 1, description: "Maximum recording duration in milliseconds." },
+          audio: { type: "boolean", description: "For start: capture tab audio in tab-capture mode." },
+          frameRate: { type: "integer", minimum: 1, maximum: 60, description: "For start: requested frame rate." },
+          maxDurationMs: {
+            type: "integer",
+            minimum: 1,
+            description: "For start: maximum recording duration in milliseconds.",
+          },
           cursor: {
             type: "boolean",
             description:
-              "Draw the ghost cursor in the recording, for demo videos. Off by default: recordings show only the page, with nothing from browse in the frame.",
+              "For start: draw the ghost cursor in the recording, for demo videos. Off by default: recordings show only the page, with nothing from browse in the frame.",
           },
         },
-        ["outputPath"],
+        ["action"],
       ),
       readOnly: false,
-      destructive: false,
+      destructive: true,
       idempotent: false,
-      outputSchema: RecordingStartResponse,
-      handle: (input) => {
-        const object = requireObject(input)
-        const mode = optionalStringField(object, "mode")
-        if (mode !== undefined && mode !== "auto" && mode !== "tab-capture" && mode !== "cdp") {
-          return Effect.fail(new Error("mode must be auto, tab-capture, or cdp"))
-        }
-        const frameRate = optionalPositiveIntegerField(object, "frameRate")
-        if (frameRate !== undefined && frameRate > 60) return Effect.fail(new Error("frameRate must be at most 60"))
-        const maxDurationMs = optionalPositiveIntegerField(object, "maxDurationMs")
-        const audio = optionalBooleanField(object, "audio")
-        const cursor = optionalBooleanField(object, "cursor")
-        return ctx.relay.recordingStart({
-          sessionId: ctx.resolveSessionId(object),
-          outputPath: path.resolve(requiredStringField(object, "outputPath")),
-          ...(mode ? { mode } : {}),
-          ...(audio === undefined ? {} : { audio }),
-          ...(frameRate === undefined ? {} : { frameRate }),
-          ...(maxDurationMs === undefined ? {} : { maxDurationMs }),
-          ...(cursor === undefined ? {} : { cursor }),
-        })
-      },
-    },
-    {
-      name: "recording_stop",
-      description: "Stop the active recording for a session and finalize its artifact.",
-      inputSchema: sessionOnlyInputSchema,
-      readOnly: false,
-      destructive: false,
-      idempotent: false,
-      outputSchema: RecordingStopResponse,
-      handle: (input) => ctx.relay.recordingStop({ sessionId: ctx.resolveSessionId(input) }),
+      openWorld: false,
+      requiresRelayCompatibility: (input) => optionalStringField(input, "action") !== "status",
+      outputSchema: RecordingToolOutput,
+      handle: (input) =>
+        Effect.gen(function* () {
+          const action = yield* Effect.try(() => requiredAction(input, recordingActions))
+          const object = requireObject(input)
+          const sessionId = ctx.resolveSessionId(object)
+          if (action === "status") {
+            return { action, session: sessionId, ...(yield* ctx.relay.recordingStatus({ sessionId })) }
+          }
+          if (action === "cancel") {
+            return { action, session: sessionId, ...(yield* ctx.relay.recordingCancel({ sessionId })) }
+          }
+          if (action === "stop") {
+            return { action, session: sessionId, ...(yield* ctx.relay.recordingStop({ sessionId })) }
+          }
+          const mode = optionalStringField(object, "mode")
+          if (mode !== undefined && mode !== "auto" && mode !== "tab-capture" && mode !== "cdp") {
+            return yield* Effect.fail(new Error("mode must be auto, tab-capture, or cdp"))
+          }
+          const frameRate = optionalPositiveIntegerField(object, "frameRate")
+          if (frameRate !== undefined && frameRate > 60) return yield* Effect.fail(new Error("frameRate must be at most 60"))
+          const maxDurationMs = optionalPositiveIntegerField(object, "maxDurationMs")
+          const audio = optionalBooleanField(object, "audio")
+          const cursor = optionalBooleanField(object, "cursor")
+          return {
+            action,
+            session: sessionId,
+            ...(yield* ctx.relay.recordingStart({
+              sessionId,
+              outputPath: path.resolve(requiredStringField(object, "outputPath")),
+              ...(mode ? { mode } : {}),
+              ...(audio === undefined ? {} : { audio }),
+              ...(frameRate === undefined ? {} : { frameRate }),
+              ...(maxDurationMs === undefined ? {} : { maxDurationMs }),
+              ...(cursor === undefined ? {} : { cursor }),
+            })),
+          }
+        }),
     },
   ],
 })
@@ -94,115 +107,89 @@ registerMcpTools({
   order: 500,
   build: (ctx) => [
     {
-      name: "recording_status",
-      requiresRelayCompatibility: false,
-      description: "Return bounded status and quality counters for a session recording.",
-      inputSchema: sessionOnlyInputSchema,
-      readOnly: true,
-      destructive: false,
-      idempotent: true,
-      outputSchema: RecordingStatusResponse,
-      handle: (input) => ctx.relay.recordingStatus({ sessionId: ctx.resolveSessionId(input) }),
-    },
-    {
-      name: "recording_cancel",
-      description: "Cancel a session recording and discard its unfinished artifact.",
-      inputSchema: sessionOnlyInputSchema,
-      readOnly: false,
-      destructive: true,
-      idempotent: true,
-      outputSchema: RecordingCancelResponse,
-      handle: (input) => ctx.relay.recordingCancel({ sessionId: ctx.resolveSessionId(input) }),
-    },
-    {
-      name: "flight_recorder_start",
+      name: "flight_recorder",
       description:
-        "Start a rolling in-memory video buffer for the current session tab. Saving a clip does not stop buffering.",
-      inputSchema: objectSchema({
-        session: sessionSchemaProperty,
-        retentionMs: {
-          type: "integer",
-          minimum: 1000,
-          maximum: 120000,
-          description: "Rolling retention window. Defaults to 60000.",
-        },
-        frameRate: {
-          type: "integer",
-          minimum: 1,
-          maximum: 60,
-          description: "Saved clip frame rate. Defaults to 60.",
-        },
-        cursor: { type: "boolean", description: "Draw the ghost cursor in the buffered video. Off by default." },
-      }),
-      readOnly: false,
-      destructive: false,
-      idempotent: false,
-      outputSchema: FlightRecorderStatusResponse,
-      handle: (input) => {
-        const object = requireObject(input)
-        const retentionMs = optionalPositiveIntegerField(object, "retentionMs")
-        const frameRate = optionalPositiveIntegerField(object, "frameRate")
-        const cursor = optionalBooleanField(object, "cursor")
-        return ctx.relay.flightRecorderStart({
-          sessionId: ctx.resolveSessionId(object),
-          ...(retentionMs === undefined ? {} : { retentionMs }),
-          ...(frameRate === undefined ? {} : { frameRate }),
-          ...(cursor === undefined ? {} : { cursor }),
-        })
-      },
-    },
-    {
-      name: "flight_recorder_status",
-      requiresRelayCompatibility: false,
-      description: "Return bounded rolling-buffer duration, frame, byte, and drop counters.",
-      inputSchema: sessionOnlyInputSchema,
-      readOnly: true,
-      destructive: false,
-      idempotent: true,
-      outputSchema: FlightRecorderStatusResponse,
-      handle: (input) => ctx.relay.flightRecorderStatus({ sessionId: ctx.resolveSessionId(input) }),
-    },
-    {
-      name: "flight_recorder_save_last",
-      description: "Encode and save the most recent buffered browser video without stopping the flight recorder.",
+        "Keep a rolling in-memory video buffer for the current session tab. Actions: start begins buffering; status returns bounded rolling-buffer duration, frame, byte and drop counters; save_last encodes and saves the most recent buffered video without stopping the buffer (outputPath is required); cancel stops and discards the buffer.",
       inputSchema: objectSchema(
         {
+          action: {
+            type: "string",
+            enum: [...flightRecorderActions],
+            description: "start begins buffering, status reports, save_last saves a clip, cancel discards the buffer.",
+          },
           session: sessionSchemaProperty,
+          retentionMs: {
+            type: "integer",
+            minimum: 1000,
+            maximum: 120000,
+            description: "For start: rolling retention window. Defaults to 60000.",
+          },
+          frameRate: {
+            type: "integer",
+            minimum: 1,
+            maximum: 60,
+            description: "For start: saved clip frame rate. Defaults to 60.",
+          },
+          cursor: {
+            type: "boolean",
+            description: "For start: draw the ghost cursor in the buffered video. Off by default.",
+          },
           outputPath: {
             type: "string",
-            description: "Fresh .webm or .mp4 path, resolved against the MCP process working directory.",
+            description:
+              "For save_last: fresh .webm or .mp4 path, resolved against the MCP process working directory.",
           },
           durationMs: {
             type: "integer",
             minimum: 1,
-            description: "Recent duration to save. Defaults to 30000 and cannot exceed retention.",
+            description: "For save_last: recent duration to save. Defaults to 30000 and cannot exceed retention.",
           },
         },
-        ["outputPath"],
+        ["action"],
       ),
       readOnly: false,
-      destructive: false,
-      idempotent: false,
-      outputSchema: FlightRecorderSaveResponse,
-      handle: (input) => {
-        const object = requireObject(input)
-        const durationMs = optionalPositiveIntegerField(object, "durationMs")
-        return ctx.relay.flightRecorderSaveLast({
-          sessionId: ctx.resolveSessionId(object),
-          outputPath: path.resolve(requiredStringField(object, "outputPath")),
-          ...(durationMs === undefined ? {} : { durationMs }),
-        })
-      },
-    },
-    {
-      name: "flight_recorder_cancel",
-      description: "Stop and discard a session's rolling video buffer.",
-      inputSchema: sessionOnlyInputSchema,
-      readOnly: false,
       destructive: true,
-      idempotent: true,
-      outputSchema: FlightRecorderCancelResponse,
-      handle: (input) => ctx.relay.flightRecorderCancel({ sessionId: ctx.resolveSessionId(input) }),
+      idempotent: false,
+      openWorld: false,
+      requiresRelayCompatibility: (input) => optionalStringField(input, "action") !== "status",
+      outputSchema: FlightRecorderToolOutput,
+      handle: (input) =>
+        Effect.gen(function* () {
+          const action = yield* Effect.try(() => requiredAction(input, flightRecorderActions))
+          const object = requireObject(input)
+          const sessionId = ctx.resolveSessionId(object)
+          if (action === "status") {
+            return { action, session: sessionId, ...(yield* ctx.relay.flightRecorderStatus({ sessionId })) }
+          }
+          if (action === "cancel") {
+            return { action, session: sessionId, ...(yield* ctx.relay.flightRecorderCancel({ sessionId })) }
+          }
+          if (action === "save_last") {
+            const durationMs = optionalPositiveIntegerField(object, "durationMs")
+            return {
+              action,
+              session: sessionId,
+              ...(yield* ctx.relay.flightRecorderSaveLast({
+                sessionId,
+                outputPath: path.resolve(requiredStringField(object, "outputPath")),
+                ...(durationMs === undefined ? {} : { durationMs }),
+              })),
+            }
+          }
+          const retentionMs = optionalPositiveIntegerField(object, "retentionMs")
+          const frameRate = optionalPositiveIntegerField(object, "frameRate")
+          const cursor = optionalBooleanField(object, "cursor")
+          return {
+            action,
+            session: sessionId,
+            ...(yield* ctx.relay.flightRecorderStart({
+              sessionId,
+              ...(retentionMs === undefined ? {} : { retentionMs }),
+              ...(frameRate === undefined ? {} : { frameRate }),
+              ...(cursor === undefined ? {} : { cursor }),
+            })),
+          }
+        }),
     },
   ],
 })

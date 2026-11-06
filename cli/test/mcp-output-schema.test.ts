@@ -6,6 +6,7 @@ import { buildRegisteredMcpTools, createMcpToolContext, type McpToolSpec } from 
 import {
   ExecuteToolOutput,
   StatusToolOutput,
+  agentSettingKeys,
   executeToolOutput,
   executeToolResult,
   executeToolText,
@@ -57,23 +58,13 @@ describe("tool output schemas", () => {
       "session_new",
       "session_allowlist",
       "session_list",
-      "session_current",
       "session_use",
       "session_reset",
       "session_delete",
       "session_adopt",
-      "network_start",
-      "network_status",
-      "network_stop",
-      "network_cancel",
-      "recording_start",
-      "recording_stop",
-      "recording_status",
-      "recording_cancel",
-      "flight_recorder_start",
-      "flight_recorder_status",
-      "flight_recorder_save_last",
-      "flight_recorder_cancel",
+      "network",
+      "recording",
+      "flight_recorder",
       "tabs_cleanup",
       "settings",
       "secrets_list",
@@ -91,17 +82,189 @@ describe("tool output schemas", () => {
     }
   })
 
+  test("tool annotations describe what each tool can do", () => {
+    const byName = new Map(specs().map((spec) => [spec.name, spec]))
+    const annotation = (name: string) => {
+      const spec = byName.get(name)!
+      return { readOnly: spec.readOnly, destructive: spec.destructive, idempotent: spec.idempotent, openWorld: spec.openWorld }
+    }
+    expect(annotation("execute")).toEqual({ readOnly: false, destructive: true, idempotent: false, openWorld: true })
+    expect(annotation("status")).toEqual({ readOnly: true, destructive: false, idempotent: true, openWorld: false })
+    expect(annotation("session_delete")).toEqual({ readOnly: false, destructive: true, idempotent: true, openWorld: false })
+    expect(annotation("session_reset")).toEqual({ readOnly: false, destructive: true, idempotent: false, openWorld: false })
+    expect(annotation("tabs_cleanup")).toEqual({ readOnly: false, destructive: true, idempotent: true, openWorld: false })
+    expect(annotation("network")).toEqual({ readOnly: false, destructive: true, idempotent: false, openWorld: false })
+    expect(annotation("secrets_refresh")).toEqual({ readOnly: false, destructive: true, idempotent: false, openWorld: true })
+    expect(annotation("settings")).toEqual({ readOnly: false, destructive: false, idempotent: true, openWorld: false })
+    for (const spec of specs()) expect(typeof spec.openWorld, spec.name).toBe("boolean")
+  })
+
   test("settings schema accepts both the read and the change result", () => {
     const spec = specs().find((candidate) => candidate.name === "settings")!
     const setting = { value: "shared", effective: "shared", allowed: ["shared", "window"], description: "Grouping" }
-    expect(Schema.is(spec.outputSchema!)({ settings: { grouping: setting }, note: "read" })).toBe(true)
+    const settings = Object.fromEntries(agentSettingKeys.map((key) => [key, setting]))
+    expect(Schema.is(spec.outputSchema!)({ settings, note: "read" })).toBe(true)
     expect(Schema.is(spec.outputSchema!)({
       changed: [{ key: "grouping", from: "window", to: "shared" }],
       unchanged: [],
       overridden: [],
-      settings: { grouping: setting },
+      settings,
       message: "changed",
     })).toBe(true)
+  })
+
+  test("merged action tools produce valid structured results for every action", async () => {
+    const networkReport = {
+      active: true,
+      startedAt: "2026-01-01T00:00:00.000Z",
+      entryCount: 1,
+      responseCount: 1,
+      failureCount: 0,
+      capturedBodyBytes: 10,
+      truncatedBodyCount: 0,
+      droppedEntryCount: 0,
+      urlFilter: "/api/",
+    }
+    const quality = {
+      width: 1280,
+      height: 720,
+      frameRate: 30,
+      sourceFrameCount: 30,
+      encodedSourceFrameCount: 30,
+      coalescedFrameCount: 0,
+      droppedFrameCount: 0,
+      achievedSourceFrameRate: 30,
+      achievedEncodedSourceFrameRate: 30,
+      screenshotFallback: false,
+    }
+    const relay = {
+      sessions: Effect.succeed([{ id: "mcp-1234abcd" }]),
+      sessionEnsure: () => Effect.void,
+      extensionStatus: Effect.succeed({ connected: true }),
+      networkStart: () => Effect.succeed(networkReport),
+      networkStatus: () => Effect.succeed(networkReport),
+      networkStop: () => Effect.succeed({
+        ...networkReport,
+        active: false,
+        stoppedAt: "2026-01-01T00:01:00.000Z",
+        updatedSecretRefs: [],
+        observedSecretRefs: [],
+      }),
+      networkCancel: () => Effect.succeed({ cancelled: true }),
+      recordingStart: () => Effect.succeed({
+        success: true,
+        tabId: 1,
+        startedAt: 1,
+        path: "/tmp/a.webm",
+        mimeType: "video/webm",
+        mode: "tab-capture",
+        artifactType: "webm",
+        frameRate: 30,
+      }),
+      recordingStop: () => Effect.succeed({
+        success: true,
+        tabId: 1,
+        duration: 1000,
+        path: "/tmp/a.webm",
+        size: 100,
+        mode: "tab-capture",
+        artifactType: "webm",
+        frameCount: 2,
+        quality,
+      }),
+      recordingStatus: () => Effect.succeed({ isRecording: false }),
+      recordingCancel: () => Effect.succeed({ success: true }),
+      flightRecorderStart: () => Effect.succeed({
+        active: true,
+        tabId: 1,
+        sessionId: "mcp-1234abcd",
+        startedAt: 1,
+        retentionMs: 60_000,
+        frameRate: 60,
+      }),
+      flightRecorderStatus: () => Effect.succeed({
+        active: true,
+        tabId: 1,
+        sessionId: "mcp-1234abcd",
+        startedAt: 1,
+        retentionMs: 60_000,
+        retainedDurationMs: 1000,
+        frameRate: 60,
+        bufferedFrames: 10,
+        bufferedBytes: 1000,
+        sourceFrameCount: 10,
+        droppedFrameCount: 0,
+        saving: false,
+      }),
+      flightRecorderSaveLast: () => Effect.succeed({
+        path: "/tmp/a.webm",
+        durationMs: 30_000,
+        frameCount: 10,
+        sourceFrameCount: 10,
+        droppedFrameCount: 0,
+      }),
+      flightRecorderCancel: () => Effect.succeed({ cancelled: true }),
+    } as unknown as RelayClient.Interface
+    const ctx = createMcpToolContext({
+      relay,
+      currentSession: { id: "mcp-1234abcd", established: true },
+      packageRoot: "/tmp/browse",
+    })
+    const byName = new Map(buildRegisteredMcpTools(ctx).map((spec) => [spec.name, spec]))
+    const cases: Record<string, ReadonlyArray<{ action: string; [key: string]: unknown }>> = {
+      network: [
+        { action: "start" },
+        { action: "status" },
+        { action: "stop", outputPath: "/tmp/a.har" },
+        { action: "cancel" },
+      ],
+      recording: [
+        { action: "start", outputPath: "/tmp/a.webm", cursor: true },
+        { action: "stop" },
+        { action: "status" },
+        { action: "cancel" },
+      ],
+      flight_recorder: [
+        { action: "start" },
+        { action: "status" },
+        { action: "save_last", outputPath: "/tmp/a.webm", durationMs: 30_000 },
+        { action: "cancel" },
+      ],
+    }
+    for (const [name, actions] of Object.entries(cases)) {
+      const spec = byName.get(name)!
+      expect(spec, name).toBeDefined()
+      for (const args of actions) {
+        const value = await Effect.runPromise(spec.handle({ session: "mcp-1234abcd", ...args }))
+        const result = toolResultForValue(value, { outputSchema: spec.outputSchema! })
+        expect(result.isError, `${name} ${args.action}`).toBe(false)
+        expect(result.structuredContent, `${name} ${args.action}`).toBeDefined()
+        expect(Schema.is(spec.outputSchema!)(result.structuredContent), `${name} ${args.action}`).toBe(true)
+      }
+    }
+  })
+
+  test("settings never expose or change update behaviour", async () => {
+    const setting = { value: "shared", effective: "shared", allowed: ["shared", "window"], description: "Grouping" }
+    const settings = Object.fromEntries(agentSettingKeys.map((key) => [key, setting]))
+    const relay = {
+      settingsGet: Effect.succeed({
+        settings: { ...settings, autoUpdate: { ...setting, allowed: ["on", "notify", "off"] } },
+        note: "read",
+      }),
+    } as unknown as RelayClient.Interface
+    const ctx = createMcpToolContext({
+      relay,
+      currentSession: { id: "mcp-1234abcd", established: true },
+      packageRoot: "/tmp/browse",
+    })
+    const spec = buildRegisteredMcpTools(ctx).find((candidate) => candidate.name === "settings")!
+    const read = await Effect.runPromise(spec.handle({}) as Effect.Effect<{ settings: Record<string, unknown> }, Error>)
+    expect(read.settings).not.toHaveProperty("autoUpdate")
+    expect(Object.keys(read.settings).sort()).toEqual([...agentSettingKeys].sort())
+    expect(Schema.is(spec.outputSchema!)(read)).toBe(true)
+    const failure = await Effect.runPromise(Effect.flip(spec.handle({ set: { autoUpdate: "notify" } }) as Effect.Effect<unknown, Error>))
+    expect(failure.message).toContain("browse settings set autoUpdate")
   })
 
   test("execute structured content validates against its schema and carries the value once", () => {

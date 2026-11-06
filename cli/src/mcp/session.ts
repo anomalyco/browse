@@ -23,8 +23,7 @@ registerMcpTools({
   build: (ctx) => [
     {
       name: "session_new",
-      listsBrowsers: true,
-      description: `Create a browse session and make it current for this MCP server.${ctx.browserNote}`,
+      description: "Create a browse session and make it current for this MCP server.",
       inputSchema: objectSchema({
         browser: ctx.browserProperty,
         id: { type: "string", description: "Optional lowercase session id." },
@@ -43,6 +42,7 @@ registerMcpTools({
       readOnly: false,
       destructive: false,
       idempotent: false,
+      openWorld: false,
       outputSchema: SessionContainer,
       handle: (input) =>
         Effect.gen(function* () {
@@ -80,6 +80,7 @@ registerMcpTools({
       readOnly: false,
       destructive: false,
       idempotent: true,
+      openWorld: false,
       outputSchema: SessionContainer,
       handle: (input) =>
         Effect.gen(function* () {
@@ -98,20 +99,10 @@ registerMcpTools({
       inputSchema: emptyInputSchema,
       readOnly: true,
       destructive: false,
-      idempotent: false,
+      idempotent: true,
+      openWorld: false,
       outputSchema: SessionsContainer,
       handle: () => ctx.relay.sessions.pipe(Effect.map((sessions) => ({ sessions }))),
-    },
-    {
-      name: "session_current",
-      requiresRelayCompatibility: false,
-      description: "Return this MCP server's current browse session id.",
-      inputSchema: emptyInputSchema,
-      readOnly: true,
-      destructive: false,
-      idempotent: true,
-      outputSchema: CurrentSessionToolOutput,
-      handle: () => Effect.succeed({ currentSession: ctx.currentSession.id }),
     },
     {
       name: "session_use",
@@ -125,6 +116,7 @@ registerMcpTools({
       readOnly: false,
       destructive: false,
       idempotent: true,
+      openWorld: false,
       outputSchema: CurrentSessionToolOutput,
       handle: (input) =>
         Effect.gen(function* () {
@@ -144,6 +136,7 @@ registerMcpTools({
       readOnly: false,
       destructive: true,
       idempotent: false,
+      openWorld: false,
       outputSchema: SessionResetResponse,
       handle: (input) =>
         Effect.gen(function* () {
@@ -163,6 +156,7 @@ registerMcpTools({
       readOnly: false,
       destructive: true,
       idempotent: true,
+      openWorld: false,
       outputSchema: SessionDeleteToolOutput,
       handle: (input) =>
         Effect.gen(function* () {
@@ -203,6 +197,7 @@ registerMcpTools({
       readOnly: false,
       destructive: false,
       idempotent: false,
+      openWorld: false,
       outputSchema: SessionAdoptResponse,
       handle: (input) =>
         Effect.gen(function* () {

@@ -252,12 +252,12 @@ export const scenarios: Scenario[] = [
     assert(result.isError && /timed out/i.test(result.text), `synthetic click continued the handoff: ${result.text.slice(0, 200)}`)
   } },
   { name: "network-capture", tags: ["network", "soak"], run: async ({ client, session, fx, artifacts }) => {
-    const start = await client.call("network_start", { session, urlFilter: "/api/" })
+    const start = await client.call("network", { action: "start", session, urlFilter: "/api/" })
     assert(!start.isError, start.text)
     const nav = await client.call("execute", { session, code: `await page.goto(${j(fx.url("/network"))}); await page.locator('#out', {hasText: '3 rows'}).waitFor(); return 1` })
     assert(!nav.isError, nav.text)
     const har = path.join(artifacts, `${session}.har`)
-    const stop = await client.call("network_stop", { session, outputPath: har })
+    const stop = await client.call("network", { action: "stop", session, outputPath: har })
     assert(!stop.isError, stop.text)
     const parsed = JSON.parse(fs.readFileSync(har, "utf8"))
     const entries = parsed.log.entries as any[]
@@ -266,21 +266,21 @@ export const scenarios: Scenario[] = [
     fs.rmSync(har, { force: true })
   } },
   { name: "network-cancel", tags: ["network"], run: async ({ client, session, fx }) => {
-    assert(!(await client.call("network_start", { session })).isError, "start")
+    assert(!(await client.call("network", { action: "start", session })).isError, "start")
     await client.call("execute", { session, code: `await page.goto(${j(fx.url("/network"))})` })
-    const cancel = await client.call("network_cancel", { session })
+    const cancel = await client.call("network", { action: "cancel", session })
     assert(!cancel.isError, cancel.text)
-    const status = await client.call("network_status", { session })
+    const status = await client.call("network", { action: "status", session })
     assert(!/"active":\s*true/.test(status.text), `capture still active: ${status.text.slice(0, 200)}`)
   } },
   { name: "recording", tags: ["recording", "soak"], timeoutMs: 120_000, run: async ({ client, session, fx, artifacts }) => {
     await client.call("execute", { session, code: `await page.goto(${j(fx.url("/animate"))})` })
     const file = path.join(artifacts, `${session}.webm`)
-    const start = await client.call("recording_start", { session, outputPath: file, maxDurationMs: 30_000 })
-    assert(!start.isError, `recording_start: ${start.text.slice(0, 300)}`)
+    const start = await client.call("recording", { action: "start", session, outputPath: file, maxDurationMs: 30_000 })
+    assert(!start.isError, `recording start: ${start.text.slice(0, 300)}`)
     await client.call("execute", { session, code: `await page.mouse.move(100, 100); await page.waitForTimeout(3000); return 1` })
-    const stop = await client.call("recording_stop", { session }, 60_000)
-    assert(!stop.isError, `recording_stop: ${stop.text.slice(0, 300)}`)
+    const stop = await client.call("recording", { action: "stop", session }, 60_000)
+    assert(!stop.isError, `recording stop: ${stop.text.slice(0, 300)}`)
     const size = fs.existsSync(file) ? fs.statSync(file).size : 0
     assert(size > 10_000, `recording is ${size} bytes`)
     const probe = spawnSync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", file], { encoding: "utf8" })
@@ -292,15 +292,15 @@ export const scenarios: Scenario[] = [
   { name: "recording-cancel", tags: ["recording"], run: async ({ client, session, fx, artifacts }) => {
     await client.call("execute", { session, code: `await page.goto(${j(fx.url("/animate"))})` })
     const file = path.join(artifacts, `${session}-cancel.webm`)
-    assert(!(await client.call("recording_start", { session, outputPath: file })).isError, "start")
+    assert(!(await client.call("recording", { action: "start", session, outputPath: file })).isError, "start")
     await sleep(1000)
-    const cancel = await client.call("recording_cancel", { session })
+    const cancel = await client.call("recording", { action: "cancel", session })
     assert(!cancel.isError, cancel.text)
-    const status = await client.call("recording_status", { session })
-    assert(!/"active":\s*true|"recording":\s*true/.test(status.text), `still recording: ${status.text.slice(0, 200)}`)
-    const again = await client.call("recording_start", { session, outputPath: file, maxDurationMs: 2000 })
+    const status = await client.call("recording", { action: "status", session })
+    assert(!/"isRecording":\s*true/.test(status.text), `still recording: ${status.text.slice(0, 200)}`)
+    const again = await client.call("recording", { action: "start", session, outputPath: file, maxDurationMs: 2000 })
     assert(!again.isError, `restart after cancel: ${again.text.slice(0, 200)}`)
-    await client.call("recording_stop", { session }, 60_000)
+    await client.call("recording", { action: "stop", session }, 60_000)
     fs.rmSync(file, { force: true })
   } },
   { name: "session-reset", tags: ["sessions", "soak"], run: async ({ client, session, fx }) => {

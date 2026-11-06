@@ -1,5 +1,5 @@
 import { NodeStdio } from "@effect/platform-node"
-import { Config, Context, Effect, Layer, Option, Schedule } from "effect"
+import { Config, Context, Effect, Layer, Option } from "effect"
 import { McpProtocol, McpSchema, McpServer } from "effect/ai"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -15,13 +15,11 @@ import {
   type McpToolSpec,
 } from "./mcp/registry.ts"
 import {
-  browsersNote,
   mcpErrorMessage,
   mcpUpdateNote,
   toolOutputJson,
   toolResult,
   toolResultForValue,
-  type BrowserSummary,
   type CurrentSession,
 } from "./mcp/schema.ts"
 import * as RelayClient from "./relay/client.ts"
@@ -30,7 +28,6 @@ import { createUpdateWatcher } from "./update.ts"
 import { opencodeBrowserVersion } from "./version.ts"
 
 export {
-  browsersNote,
   mcpErrorMessage,
   mcpUpdateNote,
   toolResultForValue,
@@ -98,12 +95,15 @@ const registerTools = Effect.gen(function* () {
           readOnlyHint: spec.readOnly,
           destructiveHint: spec.destructive,
           idempotentHint: spec.idempotent,
-          openWorldHint: true,
+          openWorldHint: spec.openWorld,
         },
       }),
       annotations: Context.empty(),
       handle: (payload: unknown) => {
-        const operation = spec.requiresRelayCompatibility !== false
+        const requiresRelay = typeof spec.requiresRelayCompatibility === "function"
+          ? spec.requiresRelayCompatibility(payload)
+          : spec.requiresRelayCompatibility !== false
+        const operation = requiresRelay
           ? RelayLifecycle.ensureRelay({ relay }).pipe(
               Effect.flatMap((readiness) =>
                 readiness.buildProblem ? Effect.fail(new Error(readiness.buildProblem)) : spec.handle(payload),
@@ -120,34 +120,17 @@ const registerTools = Effect.gen(function* () {
         )
       },
     })
-  // The connected browsers, as the descriptions of execute and session_new list them. The relay is asked every few
-  // seconds; when the browsers change, those two tools are registered again, which tells the client (list_changed).
-  const connectedBrowsers = relay.extensionStatus.pipe(
-    Effect.map((status): readonly BrowserSummary[] =>
-      (status.browsers ?? []).map(({ id, name, default: isDefault }) => ({ id, name, default: isDefault })),
-    ),
-    Effect.orElseSucceed((): readonly BrowserSummary[] => []),
+  // Tools are registered once, with fixed descriptions and schemas. Connected browsers change without touching this
+  // list: status reports them.
+  const specs = buildRegisteredMcpTools(
+    createMcpToolContext({
+      relay,
+      currentSession,
+      packageRoot,
+      update: () => updates.current,
+    }),
   )
-  let browsers: readonly BrowserSummary[] = []
-  const buildSpecs = (currentBrowsers: readonly BrowserSummary[]) =>
-    buildRegisteredMcpTools(
-      createMcpToolContext({
-        relay,
-        currentSession,
-        packageRoot,
-        update: () => updates.current,
-        browsers: currentBrowsers,
-      }),
-    )
-  yield* Effect.forEach(buildSpecs(browsers), register, { discard: true })
-  const refreshBrowsers = Effect.gen(function* () {
-    const next = yield* connectedBrowsers
-    if (browsersNote(next) === browsersNote(browsers)) return
-    browsers = next
-    const specs = buildSpecs(browsers).filter((spec) => spec.listsBrowsers === true)
-    yield* Effect.forEach(specs, register, { discard: true })
-  })
-  yield* refreshBrowsers.pipe(Effect.repeat(Schedule.spaced("5 seconds")), Effect.forkScoped)
+  yield* Effect.forEach(specs, register, { discard: true })
 })
 
 export const mcpServerLayer = McpServer.layerStdio({

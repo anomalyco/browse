@@ -44,7 +44,8 @@ Node.js 22.19+.
 **Updates are automatic.** The relay checks npm once a day and installs a new version in the background; it switches
 over when no agent is using the browser, without changing opencode's config or restarting it. Choose *Only tell me* or
 *Don't check* under **Updates** on the extension's settings page (or `settings set autoUpdate=notify`, or
-`OPENCODE_BROWSER_AUTO_UPDATE=off`). `browse update` updates now, and `browse rollback` goes
+`OPENCODE_BROWSER_AUTO_UPDATE=off`). Agents can read the current value from `status`, but the MCP `settings` tool
+can't read or change update behaviour; it stays with you. `browse update` updates now, and `browse rollback` goes
 back to the previous version. The Chrome Web Store updates the extension.
 
 **Dev builds**: every push to `dev` publishes one. `npx @opencode/browse@dev install` follows the dev channel: it
@@ -194,7 +195,7 @@ connection itself isn't encrypted by browse; use a network that is (Tailscale or
 - **Recordings show only the page.** Nothing from browse is drawn while a tab is recorded: no cursor, no
   labels, no handoff card (you get a system notification instead; click it to go to the tab). If notifications are
   turned off for the extension, the card is shown after all, and the recording includes it. For a demo video, ask for
-  the ghost cursor with `cursor: true` on `recording_start` (`--cursor` on the CLI).
+  the ghost cursor with `cursor: true` on the `recording` tool (`action: "start"`; `--cursor` on the CLI).
 - **Status:** the extension's options page shows whether the relay is connected and paired, and can copy diagnostics.
 
 ## Tools
@@ -202,16 +203,16 @@ connection itself isn't encrypted by browse; use a network that is (Tailscale or
 | Tool | What it does |
 | --- | --- |
 | `execute` | Run Playwright code against the session's page (`page`, `context`, `snapshot()`, `handoff()`, …) |
-| `session_new`, `session_list`, `session_use`, `session_current`, `session_reset`, `session_delete` | Named sessions, each with its own tabs; they survive restarts |
+| `session_new`, `session_list`, `session_use`, `session_reset`, `session_delete` | Named sessions, each with its own tabs; they survive restarts |
 | `session_adopt` | Take over a tab you handed over with the toolbar button |
 | `session_allowlist` | Limit a session's tabs to the sites you name (also `allowedOrigins` on `session_new`) |
-| `network_start`, `network_status`, `network_stop`, `network_cancel` | Capture traffic to a redacted HAR |
-| `recording_start`, `recording_stop`, `recording_status`, `recording_cancel` | Record a tab to MP4 or WebM (`cursor: true` draws the ghost cursor) |
-| `flight_recorder_start`, `flight_recorder_save_last`, … | Keep the last minute of video, save it when something breaks |
+| `network` (`action`: `start`, `status`, `stop`, `cancel`) | Capture traffic to a redacted HAR |
+| `recording` (`action`: `start`, `stop`, `status`, `cancel`) | Record a tab to MP4 or WebM (`cursor: true` draws the ghost cursor) |
+| `flight_recorder` (`action`: `start`, `status`, `save_last`, `cancel`) | Keep the last minute of video, save it when something breaks |
 | `secrets_list` | Site secrets you stored for the session's sites; agents type them with `secrets.type()` only on their sites, without seeing them |
 | `secrets_status`, `secrets_refresh`, `secrets_run` | Reuse captured credentials while keeping their values out of transcripts and artifacts |
 | `tabs_cleanup` | Close the agent's idle tabs |
-| `settings` | Read or change the settings below when the user asks (never the security switches); the options page updates live |
+| `settings` | Read or change the settings below when the user asks (never the security switches or update behaviour); the options page updates live |
 | `status` | Connection status |
 
 The agent reference is [`cli/skills/browse/SKILL.md`](cli/skills/browse/SKILL.md)
