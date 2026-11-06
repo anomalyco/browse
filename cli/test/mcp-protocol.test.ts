@@ -82,7 +82,7 @@ describe("binary auto-update", () => {
       try {
         await legacy.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "legacy", version: "0" } })
         legacy.notify("notifications/initialized")
-        expect((await legacy.request("tools/list")).result?.tools).toHaveLength(29)
+        expect((await legacy.request("tools/list")).result?.tools).toHaveLength(28)
       } finally { legacy.close() }
       await mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } })
       mcp.notify("notifications/initialized")
@@ -156,7 +156,7 @@ describe("MCP protocol versions", () => {
           const init = await mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } })
           expect(init.result?.capabilities).toHaveProperty("tools")
           mcp.notify("notifications/initialized")
-          expect((await mcp.request("tools/list")).result?.tools).toHaveLength(29)
+          expect((await mcp.request("tools/list")).result?.tools).toHaveLength(28)
         } finally { mcp.close() }
       }
     } finally {
@@ -200,6 +200,7 @@ describe("MCP protocol versions", () => {
     const mcp = server()
     const init = await mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } })
     expect(init.result?.protocolVersion).toBe("2025-11-25")
+    expect(init.result?.instructions).toContain("snapshot()")
     mcp.notify("notifications/initialized")
     expect(((await mcp.request("tools/list")).result?.tools as unknown[]).length).toBeGreaterThan(0)
     expect((await mcp.request("tools/call", { name: "session_current", arguments: {} })).result?.isError).toBe(false)

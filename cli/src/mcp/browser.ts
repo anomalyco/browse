@@ -92,23 +92,3 @@ registerMcpTools({
     },
   ],
 })
-
-registerMcpTools({
-  order: 700,
-  build: (ctx) => [
-    {
-      name: "skill",
-      requiresRelayCompatibility: false,
-      description: "Return the browse agent skill instructions.",
-      inputSchema: emptyInputSchema,
-      readOnly: true,
-      destructive: false,
-      idempotent: true,
-      handle: () =>
-        Effect.tryPromise({
-          try: () => import("../skill-text.ts").then((module) => module.skillText),
-          catch: (cause) => new Error("read browse skill", { cause }),
-        }),
-    },
-  ],
-})
