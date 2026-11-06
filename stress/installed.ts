@@ -14,7 +14,7 @@ import { fixturePort, runDir, sleep } from "./lib/env.ts"
 import { startFixtures, type Fixtures } from "./lib/fixtures.ts"
 import { spawnSync } from "node:child_process"
 import {
-  Chrome, cli, dropRelayPort, extensionConnected, extensionLog, formatExtensionLog, mcp, npmShim, pairViaLink,
+  Chrome, cli, dropRelayPort, extensionConnected, extensionLog, formatExtensionLog, mcp, pairViaLink,
   pairViaSettings, pairingCode, relayLogSince, relayLogSize, relayPid, replaceExtension, status, swConsole, user,
   userEnv, waitFor, type User,
 } from "./lib/installed.ts"
@@ -481,26 +481,26 @@ const scenarios: Scenario[] = [
     },
   },
   {
-    // An npm install (`npx @opencode/browse install`, the shim entry) with a paired browser; then the user runs the curl
-    // installer in the same $HOME. The agent configs move to the binary, the relay restarts on it, the pairing stays,
-    // and an agent still running the old npm entry keeps working.
+    // An npm install takes over one $HOME; then the user runs the curl installer in the same $HOME. The agent configs
+    // move to the binary, the relay restarts on it, the pairing stays, and an agent still running the old npm entry
+    // keeps working.
     name: "npm-to-binary",
     async run(ctx) {
-      const shim = npmShim(ctx.u)
-      if (!fs.existsSync(shim)) throw new Error(`${shim} missing: run installed-setup.sh npm for this user first`)
-      const oldAgent = mcp(ctx.u, {}, shim)
+      const oldEntry = ctx.u.binary
+      if (!fs.existsSync(oldEntry)) throw new Error(`${oldEntry} missing: run installed-setup.sh npm for this user first`)
+      const oldAgent = mcp(ctx.u, {}, oldEntry)
       await oldAgent.initialize()
       const oldSession = `npm-${Date.now().toString(36)}`
       const created = await oldAgent.call("session_new", { id: oldSession }, 60_000)
       if (created.isError) throw new Error(`session_new over the npm entry: ${created.text.slice(0, 300)}`)
       await exec(oldAgent, oldSession, `await page.goto(${JSON.stringify(ctx.fx.url("/form"))}); return 1`, 60_000)
-      const before = status(ctx.u, { binary: shim })
+      const before = status(ctx.u, { binary: oldEntry })
       const t = Date.now()
       const install = spawnSync("bash", ["-c", "curl -fsSL https://opencode.ai/browse/install | bash -s -- --no-wait"], { encoding: "utf8", env: userEnv(ctx.u), cwd: ctx.u.home, timeout: 300_000 })
       ctx.artifact("npm-to-binary-install.txt", install.stdout + install.stderr)
       if (install.status !== 0) throw new Error(`curl installer exited ${install.status}: ${(install.stdout + install.stderr).slice(-400)}`)
       const installMs = Date.now() - t
-      const settings = JSON.parse(fs.readFileSync(path.join(ctx.u.dataDir, "settings.json"), "utf8")) as { entry: string; version: string }
+      const settings = JSON.parse(fs.readFileSync(path.join(ctx.u.configDir, "settings.json"), "utf8")) as { entry: string; version: string }
       const opencode = fs.readFileSync(path.join(ctx.u.home, ".config/opencode/opencode.json"), "utf8")
       const after = status(ctx.u)
       const connected = await waitFor(() => extensionConnected(ctx.u), { timeoutMs: 60_000, label: "extension connected after the migration" })
@@ -511,7 +511,7 @@ const scenarios: Scenario[] = [
       return {
         recoverMs: connected.ms,
         manual: "no",
-        note: `installer ${installMs} ms; entry ${settings.entry.endsWith("/browse") ? "binary" : settings.entry}; opencode.json ${opencode.includes(".browse/bin/browse") ? "points at the binary" : "UNCHANGED"}; relay ${before.relay.buildId} -> ${after.relay.buildId} (${after.relay.running ? "running" : "down"}); old npm agent ${oldStill.ms >= 0 ? `still works (${oldStill.ms} ms)` : `broken: ${oldStill.lastError}`}; new binary agent ${fresh.ms} ms`,
+        note: `installer ${installMs} ms; entry ${settings.entry.endsWith("/browse") ? "binary" : settings.entry}; opencode.json ${opencode.includes(".local/bin/browse") ? "points at the binary" : "UNCHANGED"}; relay ${before.relay.buildId} -> ${after.relay.buildId} (${after.relay.running ? "running" : "down"}); old npm agent ${oldStill.ms >= 0 ? `still works (${oldStill.ms} ms)` : `broken: ${oldStill.lastError}`}; new binary agent ${fresh.ms} ms`,
       }
     },
   },

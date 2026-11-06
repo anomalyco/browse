@@ -23,7 +23,10 @@ export type User = {
   /** Chrome's --remote-debugging-port for this user's browser (harness only). */
   readonly debugPort: number
   readonly binary: string
+  readonly configDir: string
   readonly dataDir: string
+  readonly stateDir: string
+  readonly cacheDir: string
   readonly profile: string
 }
 
@@ -31,26 +34,32 @@ export function user(name: string, options: { port?: number; debugPort?: number;
   if (!/^[\w-]+$/.test(name)) throw new Error(`Invalid test user: ${name}`)
   const root = options.root ?? path.join(os.homedir(), "u")
   const home = path.join(root, `home-${name}`)
-  const binary = path.join(home, ".browse/bin/browse")
-  const shim = path.join(home, ".local/share/opencode-browser/bin/opencode-browser.mjs")
+  const binary = path.join(home, ".local/bin/browse")
   return {
     name,
     home,
     port: options.port ?? 19988,
     debugPort: options.debugPort ?? 9222,
-    // An npm-only install has the shim and no binary: its commands run through node.
-    binary: options.binary ?? (!fs.existsSync(binary) && fs.existsSync(shim) ? shim : binary),
-    dataDir: path.join(home, ".local/share/opencode-browser"),
+    binary: options.binary ?? binary,
+    configDir: path.join(home, ".config/browse"),
+    dataDir: path.join(home, ".local/share/browse"),
+    stateDir: path.join(home, ".local/state/browse"),
+    cacheDir: path.join(home, ".cache/browse"),
     profile: path.join(home, "chrome-profile"),
   }
 }
 
-/** The environment a command of this user runs with: its HOME, its relay port, no update check noise. */
+/** The environment a command of this user runs with: its HOME and XDG folders, its relay port, no update check noise. */
 export function userEnv(u: User, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
-  const { OPENCODE_BROWSER_HOME: _home, ...base } = process.env
+  const { OPENCODE_BROWSER_HOME: _home, XDG_CONFIG_HOME: _config, XDG_DATA_HOME: _data, XDG_STATE_HOME: _state, XDG_CACHE_HOME: _cache, XDG_BIN_HOME: _bin, ...base } = process.env
   return {
     ...base,
     HOME: u.home,
+    XDG_CONFIG_HOME: path.join(u.home, ".config"),
+    XDG_DATA_HOME: path.join(u.home, ".local/share"),
+    XDG_STATE_HOME: path.join(u.home, ".local/state"),
+    XDG_CACHE_HOME: path.join(u.home, ".cache"),
+    XDG_BIN_HOME: path.join(u.home, ".local/bin"),
     DISPLAY,
     OPENCODE_BROWSER_PORT: String(u.port),
     OPENCODE_BROWSER_UPDATE_CHECK: process.env.OPENCODE_BROWSER_UPDATE_CHECK ?? "0",
@@ -112,19 +121,19 @@ export function relayPid(u: User): number | undefined {
 }
 
 export function relayLog(u: User, lines = 80): string {
-  const file = path.join(u.dataDir, "logs/relay.log")
+  const file = path.join(u.stateDir, "logs/relay.log")
   if (!fs.existsSync(file)) return ""
   return fs.readFileSync(file, "utf8").split("\n").slice(-lines).join("\n")
 }
 
 export function relayLogSize(u: User): number {
-  const file = path.join(u.dataDir, "logs/relay.log")
+  const file = path.join(u.stateDir, "logs/relay.log")
   return fs.existsSync(file) ? fs.statSync(file).size : 0
 }
 
 /** Relay log lines appended since `from` (a size from relayLogSize). */
 export function relayLogSince(u: User, from: number): string {
-  const file = path.join(u.dataDir, "logs/relay.log")
+  const file = path.join(u.stateDir, "logs/relay.log")
   if (!fs.existsSync(file)) return ""
   const fd = fs.openSync(file, "r")
   try {
@@ -140,14 +149,8 @@ export function relayLogSince(u: User, from: number): string {
 
 /** An MCP stdio client on the user's installed binary, as the user's agent would start it. */
 export function mcp(u: User, env: NodeJS.ProcessEnv = {}, binary = u.binary): McpClient {
-  // An npm install's entry is the shim script, run by node (what install writes into the agent's MCP config).
   const command = binary.endsWith(".mjs") ? [process.execPath, binary, "mcp"] : [binary, "mcp"]
   return new McpClient(command, userEnv(u, env))
-}
-
-/** The npm install's stable MCP entry (auto-update.ts shim). */
-export function npmShim(u: User): string {
-  return path.join(u.dataDir, "bin/opencode-browser.mjs")
 }
 
 /** `browse pair` prints a one-time code; the command keeps waiting for the browser, so it runs detached. */

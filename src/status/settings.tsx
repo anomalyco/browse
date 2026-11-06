@@ -405,9 +405,6 @@ function updateFacts(autoUpdate: NonNullable<AgentRelayState["autoUpdate"]>) {
     autoUpdate.version ? `Installed: ${autoUpdate.version}${autoUpdate.channel === "dev" ? " (dev channel)" : ""}.` : "",
     autoUpdate.pending ? `${autoUpdate.pending} is ready and switches in once no agent is using the browser.` : "",
     !autoUpdate.pending && autoUpdate.latest && autoUpdate.latest !== autoUpdate.version ? `Newest: ${autoUpdate.latest}.` : "",
-    autoUpdate.previous && autoUpdate.version && autoUpdate.previous !== autoUpdate.version
-      ? `\`${autoUpdate.cli ?? "npx @opencode/browse"} rollback\` switches to ${autoUpdate.previous}.`
-      : "",
   ]
     .filter(Boolean)
     .join(" ")

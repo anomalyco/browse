@@ -84,6 +84,25 @@ describe("migration from the old layouts", () => {
     }
   })
 
+  test("keeps ~/.browse when an agent config still points at the old binary", () => {
+    const { home, old } = legacyHome()
+    // A malformed agent config can't be rewritten safely; deleting the executable would leave it pointing at nothing.
+    write(path.join(home, ".claude.json"), `{"mcpServers":{"browse":{"command":${JSON.stringify(path.join(old, "bin", "browse"))}`)
+    const previousHome = process.env.OPENCODE_BROWSER_HOME
+    delete process.env.OPENCODE_BROWSER_HOME
+    try {
+      migrateLegacy(home)
+      expect(fs.existsSync(path.join(old, "bin", "browse"))).toBe(true)
+      expect(fs.readFileSync(path.join(home, ".claude.json"), "utf8")).toContain(path.join(old, "bin", "browse"))
+      // The next run still retries instead of treating the move as finished.
+      expect(migrateLegacy(home).removed).not.toContain(old)
+      expect(fs.existsSync(path.join(old, "bin", "browse"))).toBe(true)
+    } finally {
+      if (previousHome === undefined) delete process.env.OPENCODE_BROWSER_HOME
+      else process.env.OPENCODE_BROWSER_HOME = previousHome
+    }
+  })
+
   test("never overwrites a file the new version already has", () => {
     const { home, old } = legacyHome()
     write(path.join(home, ".config", "browse", "settings.json"), "{\"entry\":\"new\"}\n")

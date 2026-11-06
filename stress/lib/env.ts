@@ -6,7 +6,14 @@ import path from "node:path"
 
 export const repo = process.env.BROWSE_REPO ?? path.join(os.homedir(), "browse")
 export const cli = path.join(repo, "cli/dist/cli.mjs")
-export const dataDir = process.env.OPENCODE_BROWSER_HOME ?? path.join(os.homedir(), ".local/share/opencode-browser")
+const home = os.homedir()
+const xdg = (variable: string, fallback: string) => path.join(process.env[variable] ?? path.join(home, fallback), "browse")
+export const configDir = xdg("XDG_CONFIG_HOME", ".config")
+export const dataDir = xdg("XDG_DATA_HOME", ".local/share")
+export const stateDir = xdg("XDG_STATE_HOME", ".local/state")
+export const cacheDir = xdg("XDG_CACHE_HOME", ".cache")
+export const binDir = process.env.XDG_BIN_HOME ?? path.join(home, ".local", "bin")
+export const binaryPath = path.join(binDir, "browse")
 export const relayPort = Number(process.env.OPENCODE_BROWSER_PORT) || 19988
 export const relayBase = `http://127.0.0.1:${relayPort}`
 /** Chrome's --remote-debugging-port, used only by the harness (handoff clicks, SW stops, ground-truth tab counts). */
