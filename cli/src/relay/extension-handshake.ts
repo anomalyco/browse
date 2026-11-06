@@ -46,6 +46,15 @@ import type { TargetRegistry } from "../cdp/target-registry.ts"
 import { opencodeBrowserBuildId } from "../version.ts"
 import { rawDataToBuffer, relayProcessFaultSummary } from "./process-guard.ts"
 
+/** Before pairing a socket may only send its small handshake; after pairing the ws server's 256 MiB limit applies. */
+export const maxPreAuthMessageBytes = 64 * 1024
+/** An extension socket that hasn't paired this long after connecting is refused. */
+export const preAuthHandshakeTimeoutMs = 10_000
+
+function rawDataByteLength(data: RawData): number {
+  return Array.isArray(data) ? data.reduce((total, chunk) => total + chunk.byteLength, 0) : data.byteLength
+}
+
 type Challenge = {
   readonly mode: "token" | "code" | "legacy" | "old"
   readonly hello: JsonObject
@@ -194,6 +203,13 @@ export class ExtensionHandshake {
     let link: BrowserLink | undefined
     const computer = computerName(request)
     let waiting: { readonly data: RawData; readonly isBinary: boolean }[] | undefined
+    // An unpaired socket gets only the time a handshake needs, so idle connections can't sit on the relay.
+    const handshakeTimer = setTimeout(() => {
+      if (handshaken) return
+      relayLog("extension.rejected", { reason: "handshake timeout", ms: preAuthHandshakeTimeoutMs })
+      socket.close(1008, "Handshake timed out")
+    }, preAuthHandshakeTimeoutMs)
+    handshakeTimer.unref()
     const handle = (data: RawData, isBinary: boolean) => {
       if (!link || browsers.ofSocket(socket) !== link || !link.rpc.acceptsEvents) return
       if (isBinary) {
@@ -209,6 +225,14 @@ export class ExtensionHandshake {
     }
     let challenge: Challenge | undefined
     socket.on("message", (data, isBinary) => {
+      if (!handshaken) {
+        const bytes = rawDataByteLength(data)
+        if (bytes > maxPreAuthMessageBytes) {
+          relayLog("extension.rejected", { reason: "message too large before pairing", bytes })
+          socket.close(1009, "Message too large before pairing")
+          return
+        }
+      }
       try {
         if (waiting) {
           waiting.push({ data, isBinary })
@@ -257,6 +281,7 @@ export class ExtensionHandshake {
           }
           if (challenge.issue) issueBrowserToken(challenge.key, undefined, Date.now(), challenge.issue)
           handshaken = true
+          clearTimeout(handshakeTimer)
           this.hasPairedBrowser = true
           this.lastUnpaired = this.lastRefused = 0
           const hello = challenge.hello
@@ -289,6 +314,7 @@ export class ExtensionHandshake {
       relayLog("extension.error", { error: error.message, code: (error as NodeJS.ErrnoException).code })
     })
     socket.on("close", (code, reason) => {
+      clearTimeout(handshakeTimer)
       const gone = browsers.disconnect(socket)
       relayLog("extension.close", { code, reason: reason.toString() || undefined, browser: gone?.id, current: gone !== undefined })
       if (gone) {
