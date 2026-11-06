@@ -3,9 +3,11 @@
 # for review, with the Chrome Web Store API v2 and curl.
 #
 # Environment: CWS_CLIENT_ID, CWS_CLIENT_SECRET, CWS_REFRESH_TOKEN (secrets of the release environment), CWS_PUBLISHER_ID
-# and CWS_ITEM_ID (repository variables).
+# and CWS_ITEM_ID (repository variables), GH_TOKEN and GITHUB_REPOSITORY (to read the previous release's zip).
 # Idempotent: when the item already has this version (published or in review), nothing is uploaded again; it reports
-# the state. Publishing uses the item's visibility in the dashboard and submits for review; it doesn't wait for review.
+# the state. It also uploads nothing when the zip is the extension the store already has, unchanged apart from the
+# manifest version (and version_name): the store keeps that version and the release goes on without another review.
+# Publishing uses the item's visibility in the dashboard and submits for review; it doesn't wait for review.
 # An item holds one submission at a time, so an older version still pending review is cancelled first and this build is
 # the one that gets reviewed.
 # A dry run checks the zip, and with credentials also reads the item's status, but uploads and cancels nothing.
@@ -38,6 +40,48 @@ older_version() {
   done
   return 1
 }
+# Prints the version of the newest stable release other than this one (no "v"), fails with 1 when there is none and
+# 2 when the releases can't be read. release.yml creates a GitHub release only after this job succeeded, and every
+# release carries opencode-browser-<version>.zip, so that asset is the extension the store last received. A rerun of
+# this version skips its own release and compares with the one before.
+previous_release() {
+  local tags tag
+  tags=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --limit 30 --json tagName --jq '.[].tagName') || return 2
+  while IFS= read -r tag; do
+    [ "$tag" = "v$BROWSE_VERSION" ] && continue
+    [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+    printf '%s' "${tag#v}"
+    return 0
+  done <<< "$tags"
+  return 1
+}
+# same_extension <dir> <other dir>: true when both unpacked zips hold the same files byte for byte, once the
+# manifest's version fields (the only ones a release changes) are dropped. Archive metadata, order and timestamps
+# don't matter to the store; file contents do.
+same_extension() {
+  local dir file
+  for dir in "$1" "$2"; do
+    file="$dir/manifest.json"
+    jq 'del(.version, .version_name)' "$file" > "$file.normalized" && mv "$file.normalized" "$file"
+  done
+  diff <(cd "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) \
+    <(cd "$2" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > /dev/null
+}
+# compare_with <version>: downloads that release's extension zip and compares it with this build. True when the
+# extension is the same; when the asset can't be read, note says why and it's false, so the upload happens as before.
+compare_with() {
+  local version=$1 dir="$work/release-$1"
+  note=""
+  mkdir -p "$dir/zip" "$dir/unpacked" "$work/current"
+  if ! gh release download "v$version" --repo "$GITHUB_REPOSITORY" --pattern "opencode-browser-$version.zip" \
+    --dir "$dir/zip" --clobber 2> "$work/download.err"; then
+    note="Couldn't download opencode-browser-$version.zip from v$version ($(head -n 1 "$work/download.err")), so there's nothing to compare with."
+    return 1
+  fi
+  if [ ! -f "$work/current/manifest.json" ]; then unzip -q "$zip" -d "$work/current"; fi
+  unzip -q "$dir/zip/opencode-browser-$version.zip" -d "$dir/unpacked"
+  same_extension "$work/current" "$dir/unpacked"
+}
 api=$(endpoint "${CWS_API_BASE:-}" https://chromewebstore.googleapis.com)
 token_url=$(endpoint "${CWS_TOKEN_URL:-}" https://oauth2.googleapis.com/token)
 poll=${CWS_POLL_SECONDS:-5}
@@ -51,8 +95,32 @@ packaged=$(unzip -p "$zip" manifest.json | jq -r .version)
 [ "$packaged" = "$BROWSE_VERSION" ] || die "$zip has manifest version $packaged, not $BROWSE_VERSION"
 if unzip -p "$zip" manifest.json | jq -e 'has("key")' > /dev/null; then die "$zip has a manifest key; the store rejects it"; fi
 
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+# Compare with the previous release's zip. Nothing else in the zip may change for a skip: a build with only the
+# version bumped is the extension the store reviewed last time. When there is nothing to compare with (no earlier
+# release, or its asset can't be read), note says why and the upload happens as before.
+previous="" same_version="" unchanged=false note=""
+if previous=$(previous_release 2> "$work/release-list.err"); then
+  if compare_with "$previous"; then
+    same_version=$previous
+    unchanged=true
+  fi
+else
+  case $? in
+    2) note="Couldn't read the earlier releases ($(head -n 1 "$work/release-list.err")), so there's nothing to compare with." ;;
+    *) note="This is the first release, so there's nothing to compare with." ;;
+  esac
+fi
+
 if dry_run && [ -z "${CWS_REFRESH_TOKEN:-}" ]; then
-  summary "### Chrome Web Store (dry run)" "Would upload $(basename "$zip") ($BROWSE_VERSION) to item ${CWS_ITEM_ID:-<CWS_ITEM_ID>} and submit it for review."
+  if [ "$unchanged" = true ]; then
+    summary "### Chrome Web Store (dry run)" "Would skip the upload: the extension is identical to v$same_version apart from the manifest version, so the store would keep that version; nothing submitted."
+  else
+    summary "### Chrome Web Store (dry run)" "Would upload $(basename "$zip") ($BROWSE_VERSION) to item ${CWS_ITEM_ID:-<CWS_ITEM_ID>} and submit it for review."
+    [ -z "$note" ] || summary "$note"
+  fi
   exit 0
 fi
 for name in CWS_CLIENT_ID CWS_CLIENT_SECRET CWS_REFRESH_TOKEN CWS_PUBLISHER_ID CWS_ITEM_ID; do
@@ -60,8 +128,6 @@ for name in CWS_CLIENT_ID CWS_CLIENT_SECRET CWS_REFRESH_TOKEN CWS_PUBLISHER_ID C
 done
 item="publishers/$(jq -rn --arg v "$CWS_PUBLISHER_ID" '$v | @uri')/items/$(jq -rn --arg v "$CWS_ITEM_ID" '$v | @uri')"
 
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
 # Credentials go to curl through files, never on its command line. -j: no trailing newline, or Google reads the last
 # field as "refresh_token\n" and answers unsupported_grant_type.
 jq -jn --arg id "$CWS_CLIENT_ID" --arg secret "$CWS_CLIENT_SECRET" --arg refresh "$CWS_REFRESH_TOKEN" \
@@ -97,11 +163,35 @@ if [ -n "$published" ] || [ -n "$submitted" ]; then
   summary "### Chrome Web Store" "$BROWSE_VERSION is already $([ -n "$published" ] && echo "published" || echo "submitted") on $item: ${published:-$submitted}. Nothing uploaded."
   exit 0
 fi
-# The version waiting in review (or approved and about to publish) blocks another upload. A submission of this release's
-# version returned above, so a pending one is a different build: an older one is cancelled below, so the newest build is
-# the one reviewed. A newer one belongs to a later release, so this job stops instead of replacing it.
+# The revision waiting in review (or approved and about to publish), if any.
 pending_state=$(jq -r '.submittedItemRevisionStatus | select(.state == "PENDING_REVIEW" or .state == "STAGED") | .state' <<< "$before")
 pending=$(jq -r --arg state "$pending_state" '.submittedItemRevisionStatus | select(.state == $state) | .distributionChannels[0].crxVersion // empty' <<< "$before")
+# What the store has of the extension: a pending submission (older, so it's cancelled below unless this build is the
+# same extension) or else the published version. When that isn't the newest release, compare with the store's own
+# release instead: a chain of releases that changed nothing but the version leaves the store a few versions behind,
+# and those still skip, while a store version with no release asset (an upload whose release then failed) or no
+# version at all never skips by mistake.
+store=${pending:-$(jq -r '.publishedItemRevisionStatus.distributionChannels[0].crxVersion // empty' <<< "$before")}
+if [ "$store" != "$previous" ]; then
+  unchanged=false
+  if [ -z "$store" ]; then
+    [ -n "$note" ] || note="The store has no published version, so there's nothing to compare with."
+  elif compare_with "$store"; then
+    same_version=$store
+    unchanged=true
+  fi
+fi
+if [ "$unchanged" = true ]; then
+  if dry_run; then
+    summary "### Chrome Web Store (dry run)" "Would skip the upload: the extension is unchanged since $same_version and the store has that version; nothing submitted."
+  else
+    summary "The extension is unchanged since $same_version, so the store keeps that version; nothing submitted"
+  fi
+  exit 0
+fi
+# A pending submission blocks another upload. One of this release's version returned above, so this is a different
+# build: an older one is cancelled below, so the newest build is the one reviewed. A newer one belongs to a later
+# release, so this job stops instead of replacing it.
 if [ -n "$pending_state" ] && { [ -z "$pending" ] || ! older_version "$pending" "$BROWSE_VERSION"; }; then
   die "${pending:-A submission} is still $pending_state on $item, so $BROWSE_VERSION can't be submitted; finish that release, or cancel it in the developer dashboard and rerun this job."
 fi
@@ -110,8 +200,10 @@ if dry_run; then
   summary "### Chrome Web Store (dry run)"
   [ -z "$pending" ] || summary "Would cancel the pending review of $pending so $BROWSE_VERSION gets reviewed instead"
   summary "Would upload $(basename "$zip") ($BROWSE_VERSION) to $item and submit it; the store has $(jq -r '.publishedItemRevisionStatus.distributionChannels[0].crxVersion // "no published version"' <<< "$before")."
+  [ -z "$note" ] || summary "$note"
   exit 0
 fi
+[ -z "$note" ] || summary "$note Uploading $BROWSE_VERSION as usual."
 if [ -n "$pending" ]; then
   call POST "$api/v2/$item:cancelSubmission" > /dev/null
   summary "Cancelled the pending review of $pending so $BROWSE_VERSION gets reviewed instead"
