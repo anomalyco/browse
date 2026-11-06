@@ -621,6 +621,15 @@ if (binary) {
   const toClient = (line) => process.stdout.write(line + "\\n")
   const toChild = (line) => child.stdin.write(line + "\\n")
   const parse = (line) => { try { return JSON.parse(line) } catch { return undefined } }
+  // A request is in flight until its response; a cancelled request never gets one, so its client tells us to forget it.
+  const trackRequest = (message) => {
+    if (!message) return
+    if (message.id !== undefined && message.method !== undefined) inflight.add(message.id)
+    if (message.method !== "notifications/cancelled" || !message.params || typeof message.params !== "object") return
+    const cancelled = message.params.requestId
+    if (cancelled !== undefined) inflight.delete(cancelled)
+  }
+  const forward = (line) => { trackRequest(parse(line)); toChild(line) }
 
   const start = (replay) => {
     const next = spawn(process.execPath, [entry(version), "mcp"], { stdio: ["pipe", "pipe", "inherit"], env: process.env })
@@ -659,17 +668,18 @@ if (binary) {
   let heldSince
   const moved = () => { try { return current() !== version } catch { return false } }
   const fromClient = (line) => {
+    const message = parse(line)
+    // A cancellation drops the request at once, even while client messages wait: it may be the one blocking the swap.
+    if (message && message.method === "notifications/cancelled") trackRequest(message)
     if (swapping) return void queue.push(line)
     if (moved()) {
       heldSince ??= Date.now()
       queue.push(line)
       return void maybeSwap()
     }
-    const message = parse(line)
     if (message && message.method === "initialize") initialize = message
     if (message && message.method === "notifications/initialized") initialized = line
-    if (message && message.id !== undefined && message.method !== undefined) inflight.add(message.id)
-    toChild(line)
+    forward(line)
   }
 
   // A new version in current.json swaps the server only once the relay runs it too (GET /version), so a server never
@@ -680,7 +690,15 @@ if (binary) {
     .then((response) => (response.ok ? response.json() : undefined))
     .then((body) => (body && typeof body.version === "string" ? body.version : undefined), () => undefined)
   const maybeSwap = async () => {
-    if (swapping || checking || inflight.size > 0) return
+    if (swapping || checking) return
+    // Held requests go to the current server at the deadline even when a request still looks in flight: a cancelled
+    // request may never answer, and waiting for it would wedge the swap forever.
+    if (heldSince !== undefined && Date.now() - heldSince > 15000) {
+      heldSince = undefined
+      const released = queue.splice(0)
+      for (const line of released) forward(line)
+    }
+    if (inflight.size > 0) return
     let next
     try { next = current() } catch { return }
     if (next === version) {
@@ -694,14 +712,7 @@ if (binary) {
     checking = false
     unreachable = running === undefined ? unreachable + 1 : 0
     // Held requests don't wait forever for a relay that never reports the new version: they go to the current server.
-    if (running !== next && unreachable < 3) {
-      if (heldSince !== undefined && Date.now() - heldSince > 15000) {
-        heldSince = undefined
-        const released = queue.splice(0)
-        for (const line of released) { const message = parse(line); if (message && message.id !== undefined && message.method !== undefined) inflight.add(message.id); toChild(line) }
-      }
-      return
-    }
+    if (running !== next && unreachable < 3) return
     if (swapping || inflight.size > 0 || current() !== next) return
     const old = child
     version = next

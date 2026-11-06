@@ -52,7 +52,15 @@ export class SessionCatalog {
       return sessions
     } catch (error) {
       const detail = error instanceof Error && error.message ? `: ${error.message}` : ""
-      throw new Error(`Could not decode browse session catalog at ${this.filePath}${detail}`, { cause: error })
+      // A corrupt catalog must not keep the relay from starting: keep it for inspection and begin empty.
+      const corruptPath = `${this.filePath}.corrupt-${Date.now()}`
+      try {
+        await fs.rename(this.filePath, corruptPath)
+        console.error(`Browse session catalog at ${this.filePath} was unreadable${detail}; moved it to ${corruptPath} and started with no saved sessions`)
+      } catch (moveError) {
+        console.error(`Browse session catalog at ${this.filePath} was unreadable${detail}; could not move it aside (${moveError instanceof Error ? moveError.message : String(moveError)}), starting with no saved sessions`)
+      }
+      return []
     }
   }
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Effect } from "effect"
+import { Effect, Exit } from "effect"
 import type { Page } from "patchright-core"
 import { Recorder } from "../src/network-capture.ts"
 import { RelayShutdown, type RelayBusy } from "../src/relay/shutdown.ts"
@@ -82,5 +82,24 @@ describe("restarting past a forgotten capture", () => {
     const state = { busy: { reason: "recordings", detail: "a recording of tab 7" } as RelayBusy | undefined, released: 0 }
     await Effect.runPromise(shutdown(state).request(request(true)))
     expect(state.released).toBe(1)
+  })
+
+  test("close gives up on a settle that never finishes after its timeout", async () => {
+    const control = new RelayShutdown({
+      instanceId: "relay-1",
+      managed: true,
+      timeoutMs: 50,
+      drain: Effect.void,
+      resume: () => {},
+      busy: () => undefined,
+      settle: Effect.never,
+      quiescent: () => true,
+      audit: () => Effect.void,
+      stop: () => {},
+    })
+    const started = Date.now()
+    const exit = await Effect.runPromise(Effect.exit(control.close()))
+    expect(Exit.isFailure(exit)).toBe(true)
+    expect(Date.now() - started).toBeLessThan(1_000)
   })
 })

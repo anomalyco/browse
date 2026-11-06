@@ -56,7 +56,10 @@ export class RelayShutdown {
       yield* Effect.all([control.options.drain, control.idle.await], { concurrency: "unbounded" })
       yield* control.idle.await
       yield* control.options.settle
-    })
+    }).pipe(Effect.timeoutOrElse({
+      duration: control.options.timeoutMs ?? 10_000,
+      orElse: () => Effect.fail(control.busyError("timeout")),
+    }))
   }
 
   close(): Effect.Effect<void, Error> {
