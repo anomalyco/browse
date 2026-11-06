@@ -28,6 +28,7 @@ registerMcpTools({
       readOnly: true,
       destructive: false,
       idempotent: true,
+      openWorld: false,
       outputSchema: SecretsListToolOutput,
       handle: () =>
         Effect.gen(function* () {
@@ -44,6 +45,7 @@ registerMcpTools({
       readOnly: true,
       destructive: false,
       idempotent: true,
+      openWorld: false,
       outputSchema: AuthProfileSummary,
       handle: (input) => ctx.relay.authStatus({ name: requiredStringField(input, "name") }),
     },
@@ -63,6 +65,7 @@ registerMcpTools({
       readOnly: false,
       destructive: true,
       idempotent: false,
+      openWorld: true,
       outputSchema: NetworkStopResponse,
       handle: (input) => {
         const object = requireObject(input)
@@ -93,6 +96,7 @@ registerMcpTools({
       readOnly: false,
       destructive: true,
       idempotent: false,
+      openWorld: false,
       outputSchema: AuthRunResponse,
       handle: (input) => {
         const object = requireObject(input)

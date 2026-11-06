@@ -233,9 +233,8 @@ async function fuzzExtensionEndpoint() {
   if (status && status.connected !== true) anomaly("extension-displaced", { origin, closed })
 }
 
-const TOOLS = ["execute", "status", "session_new", "session_list", "session_current", "session_use", "session_reset", "session_delete", "session_adopt",
-  "network_start", "network_status", "network_stop", "network_cancel", "recording_start", "recording_stop", "recording_status", "recording_cancel",
-  "flight_recorder_start", "flight_recorder_status", "flight_recorder_save_last", "flight_recorder_cancel", "secrets_status", "secrets_refresh",
+const TOOLS = ["execute", "status", "session_new", "session_list", "session_use", "session_reset", "session_delete", "session_adopt",
+  "network", "recording", "flight_recorder", "secrets_status", "secrets_refresh",
   "tabs_cleanup", "skill", "settings", "no_such_tool"]
 let mcp: McpClient | undefined
 async function fuzzMcp() {

@@ -9,8 +9,7 @@ registerMcpTools({
   build: (ctx) => [
     {
       name: "execute",
-      listsBrowsers: true,
-      description: `Execute Playwright JavaScript against the browse session. Code runs in a sandbox on the relay without process, require, import(), fs, child_process, http/https or Node fetch; save and read files with the files helper inside the execute file roots, and cookie access is limited to the session's pages. The result includes console logs, warnings, a bounded execution-context diagnostic when relevant, and an aftermath summary (URL movement, navigations, error counts, handoffs, and a bot challenge or block page when one appears: hand interactive ones to the user with handoff(), never solve or retry-loop them).${ctx.browserNote}`,
+      description: `Execute Playwright JavaScript against the browse session. Code runs in a sandbox on the relay without process, require, import(), fs, child_process, http/https or Node fetch; save and read files with the files helper inside the execute file roots, and cookie access is limited to the session's pages. The result includes console logs, warnings, a bounded execution-context diagnostic when relevant, and an aftermath summary (URL movement, navigations, error counts, handoffs, and a bot challenge or block page when one appears: hand interactive ones to the user with handoff(), never solve or retry-loop them).`,
       inputSchema: objectSchema(
         {
           code: {
@@ -46,6 +45,7 @@ registerMcpTools({
       readOnly: false,
       destructive: true,
       idempotent: false,
+      openWorld: true,
       outputSchema: ExecuteToolOutput,
       result: executeToolResult,
       handle: (input) =>

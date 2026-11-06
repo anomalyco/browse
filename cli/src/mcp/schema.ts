@@ -4,24 +4,23 @@ import type { JsonObject } from "../protocol.ts"
 import * as RelayClient from "../relay/client.ts"
 import { getObject, getString, parseTargetSelection } from "../relay/helpers.ts"
 import {
+  AuthProfileSummary,
   ExecuteAftermath,
   ExecuteLogEntry,
   ExecuteLogSummary,
   ExtensionStatus,
-  NetworkStatusResponse,
+  RecordingQuality,
   RelayVersion,
   SessionDeleted,
   SettingsGetResponse,
   SettingsSetResponse,
-  type ConnectedBrowser,
   type ExecuteResponse,
   type TargetSelection,
 } from "../relay/schema.ts"
+import { settingKeys, type SettingKey } from "../relay/user-settings.ts"
 import type { UpdateNotice } from "../update.ts"
 
 export type CurrentSession = { id: string; established: boolean }
-
-export type BrowserSummary = Pick<ConnectedBrowser, "id" | "name" | "default">
 
 export type ExecuteArguments = {
   readonly code: string
@@ -35,16 +34,6 @@ export type AdoptArguments = {
   readonly session?: string | undefined
   readonly targetSelection?: TargetSelection
   readonly tabId?: number
-}
-
-/**
- * With more than one browser connected, which ones and which is the default, for the execute and session_new
- * descriptions. With one or none it's empty, so the descriptions (and the agent's prompt cache) stay the same.
- */
-export function browsersNote(browsers: readonly BrowserSummary[]): string {
-  if (browsers.length < 2) return ""
-  const list = browsers.map((browser) => `${browser.id} (${browser.name}${browser.default ? ", default" : ""})`).join(", ")
-  return ` Connected browsers: ${list}. Pass browser to use one other than the default.`
 }
 
 /** The one-time note on a tool result: what to tell the user, and that the agent may run the update itself. */
@@ -104,13 +93,104 @@ export const SessionDeleteToolOutput = SessionDeleted.pipe(Schema.fieldsAssign({
   currentSession: Schema.String,
 }))
 
-export const NetworkToolStatus = NetworkStatusResponse.pipe(Schema.fieldsAssign({
+/**
+ * The result of any `network` action: one object root with the fields the chosen action returns. Action-specific
+ * fields are optional so structuredContent validates for every action.
+ */
+export const NetworkToolOutput = Schema.Struct({
+  action: Schema.Literals(["start", "status", "stop", "cancel"]),
   session: Schema.String,
-}))
+  active: Schema.optionalKey(Schema.Boolean),
+  startedAt: Schema.optionalKey(Schema.String),
+  entryCount: Schema.optionalKey(Schema.Number),
+  responseCount: Schema.optionalKey(Schema.Number),
+  failureCount: Schema.optionalKey(Schema.Number),
+  capturedBodyBytes: Schema.optionalKey(Schema.Number),
+  truncatedBodyCount: Schema.optionalKey(Schema.Number),
+  droppedEntryCount: Schema.optionalKey(Schema.Number),
+  urlFilter: Schema.optionalKey(Schema.String),
+  resourceTypes: Schema.optionalKey(Schema.Array(Schema.String)),
+  content: Schema.optionalKey(Schema.Literals(["omit", "embed"])),
+  secrets: Schema.optionalKey(Schema.String),
+  endsAt: Schema.optionalKey(Schema.String),
+  ended: Schema.optionalKey(Schema.String),
+  stoppedAt: Schema.optionalKey(Schema.String),
+  outputPath: Schema.optionalKey(Schema.String),
+  authProfile: Schema.optionalKey(AuthProfileSummary),
+  updatedSecretRefs: Schema.optionalKey(Schema.Array(Schema.String)),
+  observedSecretRefs: Schema.optionalKey(Schema.Array(Schema.String)),
+  endpoints: Schema.optionalKey(Schema.Array(Schema.Struct({
+    method: Schema.String,
+    url: Schema.String,
+    status: Schema.optionalKey(Schema.Number),
+    count: Schema.Number,
+    requestHeaders: Schema.optionalKey(Schema.Array(Schema.String)),
+    requestKeys: Schema.optionalKey(Schema.Array(Schema.String)),
+    responseKeys: Schema.optionalKey(Schema.Array(Schema.String)),
+  }))),
+  cancelled: Schema.optionalKey(Schema.Boolean),
+})
+
+/** The result of any `recording` action, with action-specific fields optional. */
+export const RecordingToolOutput = Schema.Struct({
+  action: Schema.Literals(["start", "stop", "status", "cancel"]),
+  session: Schema.String,
+  success: Schema.optionalKey(Schema.Boolean),
+  tabId: Schema.optionalKey(Schema.Number),
+  startedAt: Schema.optionalKey(Schema.Number),
+  path: Schema.optionalKey(Schema.String),
+  mimeType: Schema.optionalKey(Schema.String),
+  mode: Schema.optionalKey(Schema.Literals(["tab-capture", "cdp"])),
+  artifactType: Schema.optionalKey(Schema.Literals(["webm", "mp4"])),
+  frameRate: Schema.optionalKey(Schema.Number),
+  duration: Schema.optionalKey(Schema.Number),
+  size: Schema.optionalKey(Schema.Number),
+  frameCount: Schema.optionalKey(Schema.Number),
+  quality: Schema.optionalKey(RecordingQuality),
+  isRecording: Schema.optionalKey(Schema.Boolean),
+  error: Schema.optionalKey(Schema.String),
+})
+
+/** The result of any `flight_recorder` action, with action-specific fields optional. */
+export const FlightRecorderToolOutput = Schema.Struct({
+  action: Schema.Literals(["start", "status", "save_last", "cancel"]),
+  session: Schema.String,
+  active: Schema.optionalKey(Schema.Boolean),
+  tabId: Schema.optionalKey(Schema.Number),
+  sessionId: Schema.optionalKey(Schema.String),
+  startedAt: Schema.optionalKey(Schema.Number),
+  retentionMs: Schema.optionalKey(Schema.Number),
+  retainedDurationMs: Schema.optionalKey(Schema.Number),
+  frameRate: Schema.optionalKey(Schema.Number),
+  bufferedFrames: Schema.optionalKey(Schema.Number),
+  bufferedBytes: Schema.optionalKey(Schema.Number),
+  sourceFrameCount: Schema.optionalKey(Schema.Number),
+  droppedFrameCount: Schema.optionalKey(Schema.Number),
+  saving: Schema.optionalKey(Schema.Boolean),
+  path: Schema.optionalKey(Schema.String),
+  durationMs: Schema.optionalKey(Schema.Number),
+  frameCount: Schema.optionalKey(Schema.Number),
+  cancelled: Schema.optionalKey(Schema.Boolean),
+})
+
+/** Settings the MCP tool may read and change. Update behaviour is the user's to set, never an agent's. */
+export type AgentSettingKey = Exclude<SettingKey, "autoUpdate">
+export const agentSettingKeys: readonly AgentSettingKey[] = settingKeys.filter(
+  (key): key is AgentSettingKey => key !== "autoUpdate",
+)
+const AgentSettingValue = Schema.Union([Schema.String, Schema.Number])
+const AgentSettingReport = Schema.Struct({
+  value: AgentSettingValue,
+  effective: AgentSettingValue,
+  allowed: Schema.Array(AgentSettingValue),
+  description: Schema.String,
+  overriddenBy: Schema.optionalKey(Schema.String),
+})
+export const AgentSettings = Schema.Record(Schema.Literals(agentSettingKeys), AgentSettingReport)
 
 /** Either the read result or the change result, with a single object root so older MCP clients still see the schema. */
 export const SettingsToolOutput = Schema.Struct({
-  settings: SettingsGetResponse.fields.settings,
+  settings: AgentSettings,
   note: Schema.optionalKey(SettingsGetResponse.fields.note),
   changed: Schema.optionalKey(SettingsSetResponse.fields.changed),
   unchanged: Schema.optionalKey(SettingsSetResponse.fields.unchanged),
@@ -258,6 +338,15 @@ export function requiredStringField(input: unknown, field: string): string {
     throw new Error(`${field} is required`)
   }
   return value
+}
+
+/** The `action` of a merged tool, validated against the actions that tool has. */
+export function requiredAction<const Action extends string>(input: unknown, actions: readonly Action[]): Action {
+  const action = optionalStringField(input, "action")
+  if (!action || !(actions as readonly string[]).includes(action)) {
+    throw new Error(`action must be one of ${actions.join(", ")}`)
+  }
+  return action as Action
 }
 
 export function optionalStringField(input: unknown, field: string): string | undefined {

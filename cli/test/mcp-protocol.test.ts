@@ -82,7 +82,7 @@ describe("binary auto-update", () => {
       try {
         await legacy.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "legacy", version: "0" } })
         legacy.notify("notifications/initialized")
-        expect((await legacy.request("tools/list")).result?.tools).toHaveLength(28)
+        expect((await legacy.request("tools/list")).result?.tools).toHaveLength(18)
       } finally { legacy.close() }
       await mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } })
       mcp.notify("notifications/initialized")
@@ -156,7 +156,7 @@ describe("MCP protocol versions", () => {
           const init = await mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } })
           expect(init.result?.capabilities).toHaveProperty("tools")
           mcp.notify("notifications/initialized")
-          expect((await mcp.request("tools/list")).result?.tools).toHaveLength(28)
+          expect((await mcp.request("tools/list")).result?.tools).toHaveLength(18)
         } finally { mcp.close() }
       }
     } finally {
@@ -203,20 +203,64 @@ describe("MCP protocol versions", () => {
     expect(init.result?.instructions).toContain("snapshot()")
     mcp.notify("notifications/initialized")
     expect(((await mcp.request("tools/list")).result?.tools as unknown[]).length).toBeGreaterThan(0)
-    expect((await mcp.request("tools/call", { name: "session_current", arguments: {} })).result?.isError).toBe(false)
+    expect((await mcp.request("tools/call", { name: "secrets_list", arguments: {} })).result?.isError).toBe(false)
     mcp.close()
   }, 30_000)
 
   test("a 2026-07-28 client discovers the server and calls tools without initializing", async () => {
-    const mcp = server()
-    const discover = await mcp.request("server/discover", { _meta: modernMeta })
-    expect(discover.result?.supportedVersions).toContain("2026-07-28")
-    expect(((await mcp.request("tools/list", { _meta: modernMeta })).result?.tools as unknown[]).length).toBeGreaterThan(0)
-    const first = await mcp.request("tools/call", { name: "session_current", arguments: {}, _meta: modernMeta })
-    const second = await mcp.request("tools/call", { name: "session_current", arguments: {}, _meta: modernMeta })
-    expect(first.result?.isError).toBe(false)
-    // Without protocol sessions, the server's implicit browse session still lasts for the connection.
-    expect(second.result?.structuredContent).toEqual(first.result?.structuredContent)
-    mcp.close()
+    const relay = await startRelay(home)
+    const mcp = server(undefined, relay.port)
+    try {
+      const discover = await mcp.request("server/discover", { _meta: modernMeta })
+      expect(discover.result?.supportedVersions).toContain("2026-07-28")
+      expect(((await mcp.request("tools/list", { _meta: modernMeta })).result?.tools as unknown[]).length).toBeGreaterThan(0)
+      const first = await mcp.request("tools/call", { name: "status", arguments: {}, _meta: modernMeta })
+      const second = await mcp.request("tools/call", { name: "status", arguments: {}, _meta: modernMeta })
+      expect(first.result?.isError).toBe(false)
+      // Without protocol sessions, the server's implicit browse session still lasts for the connection.
+      const currentSession = (first.result?.structuredContent as { currentSession?: string }).currentSession
+      expect(currentSession).toMatch(/^mcp-/)
+      expect((second.result?.structuredContent as { currentSession?: string }).currentSession).toBe(currentSession)
+    } finally {
+      mcp.close()
+      await stopRelay(relay.child)
+    }
+  }, 30_000)
+
+  test("tools are fixed text, and annotations say what each tool can do", async () => {
+    const relay = await startRelay(home)
+    const first = new RelayHarness.FakeExtension(home, relay.port)
+    let second: RelayHarness.FakeExtension | undefined
+    let mcp: ReturnType<typeof server> | undefined
+    try {
+      expect(await first.pair({ hello: { profileId: "static-one", name: "Chrome on One" } })).toBe(true)
+      second = new RelayHarness.FakeExtension(home, relay.port)
+      expect(await second.pair({ hello: { profileId: "static-two", name: "Chrome on Two" } })).toBe(true)
+      mcp = server(undefined, relay.port)
+      await mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } })
+      mcp.notify("notifications/initialized")
+      const before = await mcp.request("tools/list")
+      const tools = before.result?.tools as Array<{ name: string; annotations?: Record<string, unknown> }>
+      const annotations = (name: string) => tools.find((tool) => tool.name === name)?.annotations
+      expect(annotations("execute")).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true })
+      expect(annotations("status")).toMatchObject({ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false })
+      expect(annotations("session_delete")).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false })
+      expect(annotations("tabs_cleanup")).toMatchObject({ destructiveHint: true, openWorldHint: false })
+      expect(annotations("network")).toMatchObject({ readOnlyHint: false, destructiveHint: true, openWorldHint: false })
+      expect(annotations("secrets_refresh")).toMatchObject({ readOnlyHint: false, destructiveHint: true, openWorldHint: true })
+      // A browser joining or leaving changes no description or schema, so the client's prompt cache survives.
+      second.close()
+      await Bun.sleep(6_000)
+      const after = await mcp.request("tools/list")
+      expect(after.result).toEqual(before.result)
+      const status = await mcp.request("tools/call", { name: "status", arguments: {} })
+      const browsers = (status.result?.structuredContent as { status?: { browsers?: Array<{ name: string }> } }).status?.browsers
+      expect(browsers?.map((browser) => browser.name)).toEqual(["Chrome on One"])
+    } finally {
+      first.close()
+      second?.close()
+      mcp?.close()
+      await stopRelay(relay.child)
+    }
   }, 30_000)
 })

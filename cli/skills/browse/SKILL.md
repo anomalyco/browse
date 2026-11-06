@@ -300,8 +300,8 @@ browse secrets run github -- ./github-cli repositories
 ```
 
 A capture ends by itself after 30 minutes, and when the MCP server that started
-it exits; stop it before then. MCP exposes the equivalent `network_*` and
-`secrets_*` tools.
+it exits; stop it before then. MCP exposes the same capture with the `network`
+tool (`action: "start"` / `"stop"`) and the profiles with the `secrets_*` tools.
 
 ## Recording
 
@@ -313,7 +313,7 @@ browse recording stop --session github
 `--mode auto` uses tab capture for user-owned tabs and CDP for relay-owned tabs.
 Tab capture can include audio; CDP requires `ffmpeg` and has no audio.
 Recordings are clean by default: the ghost cursor stays off unless you pass
-`--cursor` (`cursor: true` on `recording_start`), and a handoff on a recorded tab
+`--cursor` (`cursor: true` with `action: "start"` on `recording`), and a handoff on a recorded tab
 shows a system notification instead of the in-page card.
 
 For failures that are hard to reproduce, keep a rolling buffer and save recent
@@ -346,7 +346,9 @@ how they're grouped (`grouping`), when untouched agent tabs close (`idleMinutes`
 the agent cursor (`cursor`), human-like input (`humanInput`) and handoff
 notifications (`handoffNotifications`). Tell the user what changed. Security
 switches (`OPENCODE_BROWSER_ALLOW_*`, `OPENCODE_BROWSER_UPDATE_CHECK`) are
-environment-only and no tool changes them.
+environment-only and no tool changes them. Update behaviour is not available to
+the tool either: only the user changes it (`browse settings set autoUpdate=…`
+or the extension's options page), and `status` reports the current value.
 
 ## Updating browse
 
