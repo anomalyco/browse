@@ -8,6 +8,7 @@ import { browserUnresponsive, type JsonObject } from "../protocol.ts"
 import type { FlightRecorderRelay } from "../recording-relay/flight-recorder.ts"
 import type { RecordingRelay } from "../recording-relay.ts"
 import type { OpenCodeBrowserSessions } from "../session-manager.ts"
+import { isMcpSession } from "../session-manager.ts"
 import type { HandoffRegistry } from "../session-manager/handoff.ts"
 import { startJournalRetention } from "../session-manager/journal.ts"
 import { createUpdateWatcher } from "../update.ts"
@@ -17,6 +18,24 @@ import { relayLog } from "./log.ts"
 import { processAlive } from "./process-guard.ts"
 import type { ExtensionCommandInput } from "./rpc.ts"
 import { RelayShutdown } from "./shutdown.ts"
+
+/** The pieces of the relay a tab's busy check needs; separate so the check is testable without a whole relay. */
+export type TabBusyDependencies = {
+  readonly registry: Pick<TargetRegistry, "getRootTargetByTabId">
+  readonly sessions: Pick<OpenCodeBrowserSessions, "sessions" | "isExecuting" | "hasPendingWork">
+  readonly handoffs: Pick<HandoffRegistry, "pendingForTab">
+  readonly isTabRecorded: (tabId: number) => boolean
+}
+
+/** Whether a tab is in use: a handoff waits on it, it is recorded, or its owning session is executing or capturing. */
+export function tabIsBusy(tabId: number, deps: TabBusyDependencies): boolean {
+  if (deps.handoffs.pendingForTab(tabId) !== undefined || deps.isTabRecorded(tabId)) return true
+  const sessionId = deps.registry.getRootTargetByTabId(tabId)?.opencodeBrowserSessionId
+  if (sessionId === undefined) return false
+  const session = deps.sessions.sessions.get(sessionId)
+  if (!session) return false
+  return deps.sessions.isExecuting(sessionId) || deps.sessions.hasPendingWork(sessionId) || session.sandbox.networkStatus().active
+}
 
 /** The relay's periodic work: orphan collection, idle tab reaping, keepalives and update checks. */
 export function createRelayHousekeeping(options: {
@@ -87,16 +106,18 @@ export function createRelayHousekeeping(options: {
   }
 
   const releaseRelayTarget = Effect.fnUntraced(function* (targetId: string) {
+    const first = registry.targetsByTargetId.get(targetId)
+    // Nothing to release, or the user's tab: don't wait on the browser for either.
+    if (!first || first.owner !== "relay") return
     const deadline = (yield* Clock.currentTimeMillis) + releaseTargetGraceMs
     while (true) {
       const target = registry.targetsByTargetId.get(targetId)
-      const link = target ? browsers.browserTab(target.tabId)?.link : undefined
-      if (target && link && (link.rpc.connected || link.rpc.protocolLegacy === true)) {
-        if (target.owner !== "relay") return
+      if (!target || target.owner !== "relay") return
+      const link = browsers.browserTab(target.tabId)?.link
+      if (link && (link.rpc.connected || link.rpc.protocolLegacy === true)) {
         yield* sendToExtension({ method: "tabs.remove", params: { tabId: target.tabId } })
         return
       }
-      if (link?.rpc.connected && link.rpc.protocolLegacy === false) return
       const remaining = deadline - (yield* Clock.currentTimeMillis)
       if (remaining <= 0) return
       yield* Effect.sleep(Math.min(50, remaining))
@@ -156,7 +177,7 @@ export function createRelayHousekeeping(options: {
       const id = session.id
       Effect.runPromise(Effect.gen(function* () {
         if (yield* sessions.networkEnd(id, `its client (process ${pid}) exited`)) relayLog("session.capture.ended", { session: id, reason: "client gone", pid })
-        if (!/^mcp-[0-9a-f]{8}$/.test(id) || sessions.isExecuting(id) || sessions.hasPendingWork(id)) return
+        if (!isMcpSession(id) || sessions.isExecuting(id) || sessions.hasPendingWork(id)) return
         const tabs = registry.listRootTargets().filter((target) => target.opencodeBrowserSessionId === id).map((target) => target.tabId)
         if (tabs.some((tabId) => handoffs.pendingForTab(tabId) || isTabRecorded(tabId))) return
         if (activeHandoffTabs.has(id)) return
@@ -183,10 +204,7 @@ export function createRelayHousekeeping(options: {
     lastAgentActivity = Date.now()
   }
 
-  function isTabBusy(tabId: number): boolean {
-    return handoffs.pendingForTab(tabId) !== undefined || isTabRecorded(tabId) ||
-      Array.from(sessions.sessions.keys()).some((id) => sessions.isExecuting(id) || sessions.hasPendingWork(id) || sessions.sessions.get(id)?.sandbox.networkStatus().active)
-  }
+  const isTabBusy = (tabId: number): boolean => tabIsBusy(tabId, { registry, sessions, handoffs, isTabRecorded })
 
   const detachIdleUserTarget = Effect.fnUntraced(function* (targetId: string) {
     const target = registry.targetsByTargetId.get(targetId)

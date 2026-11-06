@@ -24,6 +24,8 @@ export type ExtensionRpcTimeouts = {
   readonly commandTimeoutMs?: number
   readonly debuggerCommandTimeoutMs?: number
   readonly livenessProbeTimeoutMs?: number
+  /** An evaluate that awaits a page promise can run long, but not forever: a hung one would also hang relay shutdown. */
+  readonly awaitPromiseTimeoutMs?: number
 }
 
 /**
@@ -159,9 +161,9 @@ export class ExtensionRpc {
       const message: ExtensionCommand = { ...command, id }
       let completed = false
       // A page.evaluate that awaits a promise runs as long as the page's work does; Playwright's own timeouts
-      // govern it, so the relay adds none.
+      // usually govern it, but a hung promise must not hold the relay open forever.
       const timeoutMs = awaitsPagePromise(command)
-        ? undefined
+        ? this.timeouts.awaitPromiseTimeoutMs ?? 5 * 60_000
         : command.method === "ping" ? 4_000
         : command.method === "debugger.sendCommand"
         ? this.timeouts.debuggerCommandTimeoutMs ?? 60_000
@@ -175,7 +177,7 @@ export class ExtensionRpc {
         this.pendingRequests.delete(id)
         resume(effect)
       }
-      const timeout = timeoutMs === undefined ? undefined : setTimeout(() => {
+      const timeout = setTimeout(() => {
         if (command.method === "ping") {
           // Other replies also prove liveness; a slow page command alone is never a dead browser.
           if (this.replies !== replies) return finish(Effect.succeed({}))

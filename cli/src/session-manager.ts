@@ -36,6 +36,21 @@ export {
   type SessionStopReport,
 } from "./session-manager/types.ts"
 
+/**
+ * Session ids an MCP server picks for itself (the shim's supervisor and `browse mcp` both use eight hex characters).
+ * Shared with the relay's orphan collector so both agree on which sessions nobody named.
+ */
+const mcpSessionPattern = /^mcp-[0-9a-f]{8}$/i
+
+export function isMcpSession(id: string): boolean {
+  return mcpSessionPattern.test(id)
+}
+
+/** Sessions browse names itself (an MCP server's implicit session, a generated id, or an opencode session). */
+export function isAutoNamedSession(id: string): boolean {
+  return isMcpSession(id) || /^[a-z]+-[a-z]+-\d{3}$/.test(id) || id.startsWith("oc-")
+}
+
 export class OpenCodeBrowserSessions {
   readonly sessions = new Map<string, OpenCodeBrowserSession>()
   private readonly createSandbox: (id: string, onDefaultTargetChange: (target: SessionTarget | undefined) => void) => ExecuteSandboxLike
@@ -390,6 +405,7 @@ export class OpenCodeBrowserSessions {
         const session = manager.createOpenCodeBrowserSession(id, existing.readOnly)
         if (existing.allowedOrigins) session.allowedOrigins = existing.allowedOrigins
         if (existing.browser) session.browser = existing.browser
+        if (existing.clientPid !== undefined) session.clientPid = existing.clientPid
         manager.sessions.set(id, session)
         yield* manager.admission.commitPersistence(() => Effect.sync(() => {
           manager.sessions.set(id, existing)
@@ -546,7 +562,7 @@ export class OpenCodeBrowserSessions {
     return session ? sessionSummary(session) : undefined
   }
 
-  /** Reaps idle auto-named/oc-* sessions and disconnects idle explicit sessions. */
+  /** Reaps idle auto-named and oc-* sessions; explicit (named) sessions keep their state and are never reset here. */
   reapIdleSessions(options: {
     readonly now?: number
     readonly maxIdleMs: number
@@ -557,6 +573,7 @@ export class OpenCodeBrowserSessions {
       const now = options.now ?? Date.now()
       const reaped: string[] = []
       for (const session of Array.from(manager.sessions.values())) {
+        if (!isAutoNamedSession(session.id)) continue
         if (manager.isExecuting(session.id) || manager.hasPendingWork(session.id) || session.sandbox.networkStatus().active) {
           continue
         }
@@ -567,11 +584,7 @@ export class OpenCodeBrowserSessions {
         const targetIds = sessionRelayTargetIds(manager.hooks, session)
         if (session.target) targetIds.add(session.target.id)
         if (Array.from(targetIds).some((id) => options.isTargetBusy?.(id))) continue
-        const autoNamed = /^mcp-[0-9a-f]{6,}$/i.test(session.id) || /^[a-z]+-[a-z]+-\d{3}$/.test(session.id) || session.id.startsWith("oc-")
-        const done = yield* (autoNamed
-          ? manager.delete(session.id).pipe(Effect.map((r) => r.deleted))
-          : manager.reset(session.id).pipe(Effect.map(Boolean))
-        ).pipe(Effect.orElseSucceed(() => false))
+        const done = yield* manager.delete(session.id).pipe(Effect.map((result) => result.deleted), Effect.orElseSucceed(() => false))
         if (done) reaped.push(session.id)
       }
       return reaped
@@ -723,10 +736,12 @@ export class OpenCodeBrowserSessions {
       while (true) {
         const pending = Array.from(sessionRelayTargetIds(this.hooks, session)).filter((id) => !closed.has(id))
         if (pending.length === 0) return
-        for (const targetId of pending) {
-          yield* this.closeRelayTarget(targetId).pipe(Effect.ignore)
-          closed.add(targetId)
-        }
+        // Each release may poll for up to the grace period; run a few at once instead of one after another.
+        yield* Effect.forEach(pending, (targetId) =>
+          this.closeRelayTarget(targetId).pipe(
+            Effect.ignore,
+            Effect.andThen(Effect.sync(() => { closed.add(targetId) })),
+          ), { concurrency: 4, discard: true })
       }
     })
   }

@@ -10,12 +10,16 @@ import { DEFAULT_IDLE_MINUTES, IDLE_MINUTES_KEY, idleMinutesSetting } from "../s
 type Tracked = { touched: number }
 
 const STORAGE_KEY = "tabCleanup"
+const SESSION_KEY = "tabCleanupSession"
 const ALARM = "opencode-browser-tab-cleanup"
 
 const tracked = new Map<number, Tracked>()
 let restored: Promise<void> | undefined
 let saveTimer: ReturnType<typeof setTimeout> | undefined
 let writes: Promise<unknown> = Promise.resolve()
+/** Bumped when the browser starts; a restore already reading the old list must not apply it. */
+let generation = 0
+let browserSession: Promise<boolean> | undefined
 /** Touches are written at most this often; which tabs are tracked is written at once. */
 const TOUCH_SAVE_MS = 2_000
 /** Tabs that must stay open whatever their age, for example while a handoff waits for the user or a recording runs. */
@@ -92,12 +96,36 @@ export async function cleanup(options: { minutes?: number } = {}) {
   return closed
 }
 
+/**
+ * Whether the stored list belongs to this browser session. Session storage is cleared on a browser restart (and an
+ * extension reload), while tab ids are reused after a restart: an id stored last time may name one of the user's tabs
+ * now. In that case the old list is dropped rather than used to close tabs.
+ */
+function currentBrowserSession() {
+  browserSession ??= (async () => {
+    const stored = (await chrome.storage.session.get(SESSION_KEY).catch(() => ({}))) as Record<string, unknown>
+    if (stored[SESSION_KEY] === true) return true
+    await chrome.storage.session.set({ [SESSION_KEY]: true }).catch(() => undefined)
+    return false
+  })()
+  return browserSession
+}
+
 function restore() {
-  restored ??= chrome.storage.local.get(STORAGE_KEY).then((stored) => {
+  const mine = generation
+  restored ??= (async () => {
+    if (!(await currentBrowserSession())) {
+      tracked.clear()
+      await chrome.storage.local.remove([STORAGE_KEY, CREATING_KEY]).catch(() => undefined)
+      return
+    }
+    const stored = await chrome.storage.local.get(STORAGE_KEY)
+    // A startup may have cleared the list while this read was in flight.
+    if (mine !== generation) return
     const saved = (stored[STORAGE_KEY] ?? {}) as Record<string, Tracked>
     for (const [tabId, entry] of Object.entries(saved))
       if (!tracked.has(Number(tabId))) tracked.set(Number(tabId), entry)
-  })
+  })()
   return restored
 }
 
@@ -119,9 +147,14 @@ function save(options: { soon?: boolean } = {}) {
 function flush() {
   clearTimeout(saveTimer)
   saveTimer = undefined
+  const mine = generation
   writes = writes
     .then(() => restore())
-    .then(() => chrome.storage.local.set({ [STORAGE_KEY]: Object.fromEntries(tracked) }))
+    .then(() => {
+      // The browser started while this write was queued: the startup handler removed the old list.
+      if (mine !== generation) return
+      return chrome.storage.local.set({ [STORAGE_KEY]: Object.fromEntries(tracked) })
+    })
     .catch(() => undefined)
 }
 
@@ -213,9 +246,11 @@ function updateCreating(change: (list: Creating[]) => Creating[]) {
 }
 
 // The user switching to a tab counts as using it; a tab the user moves out of the agent's group is theirs now.
-// Kept in local storage so an extension reload or update doesn't forget which tabs agents opened; tab ids
-// don't survive a browser restart, so the list starts over then.
+// Kept in local storage so a service worker restart doesn't forget which tabs agents opened. Session storage marks the
+// browser session; when it is gone (a browser restart or an extension reload), the list starts over rather than trust
+// tab ids that may have been reused.
 chrome.runtime.onStartup.addListener(() => {
+  generation += 1
   tracked.clear()
   void chrome.storage.local.remove([STORAGE_KEY, CREATING_KEY])
 })

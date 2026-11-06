@@ -334,26 +334,34 @@ describe("execute timeouts, disconnects, one-shot cleanup, and idle reaping", ()
     expect(sessions.listSummaries()).toEqual([])
   })
 
-  test("reapIdleSessions deletes idle oc-* and auto-named sessions and resets idle named sessions", async () => {
+  test("reapIdleSessions deletes idle auto-named sessions and never touches explicit sessions", async () => {
     const closed: string[] = []
-    const targets = [rootTab("agent-tab", "oc-ses_abc"), rootTab("named-tab", "named")]
+    const targets = [rootTab("agent-tab", "oc-ses_abc"), rootTab("mcp-tab", "mcp-12345678"), rootTab("named-tab", "named")]
     const sessions = new OpenCodeBrowserSessions("http://127.0.0.1:0", () => new FakeSandbox(async () => ok("x")), {
       lifecycleTimeoutMs: 5_000,
       getTargets: () => targets,
       onReleaseRelayTarget: (id) => Effect.sync(() => { closed.push(id) }),
     })
-    await run(sessions.execute({ sessionId: "oc-ses_abc", code: "...", createIfMissing: true }))
-    await run(sessions.execute({ sessionId: "named", code: "...", createIfMissing: true }))
-    sessions.sessions.get("oc-ses_abc")!.updatedAt = new Date(0).toISOString()
-    sessions.sessions.get("named")!.updatedAt = new Date(0).toISOString()
+    for (const id of ["oc-ses_abc", "mcp-12345678", "named"]) await run(sessions.execute({ sessionId: id, code: "...", createIfMissing: true }))
+    sessions.noteClient("named", 4242)
+    for (const session of sessions.sessions.values()) session.updatedAt = new Date(0).toISOString()
 
-    expect(await run(sessions.reapIdleSessions({ maxIdleMs: 100, now: 101, isTargetBusy: (id) => id === "named-tab" }))).toEqual(["oc-ses_abc"])
+    // A session id with six hex characters is not one of the eight MCP makes up, so it is explicit and stays.
+    await run(sessions.execute({ sessionId: "mcp-abcdef", code: "...", createIfMissing: true }))
+    sessions.sessions.get("mcp-abcdef")!.updatedAt = new Date(0).toISOString()
+
+    expect(await run(sessions.reapIdleSessions({ maxIdleMs: 100, now: 101, isTargetBusy: (id) => id === "mcp-tab" }))).toEqual(["oc-ses_abc"])
     expect(sessions.sessions.has("oc-ses_abc")).toBe(false)
+    expect(sessions.sessions.has("mcp-12345678")).toBe(true)
     expect(sessions.sessions.has("named")).toBe(true)
 
-    expect(await run(sessions.reapIdleSessions({ maxIdleMs: 100, now: 101 }))).toEqual(["named"])
-    expect(closed).toEqual(["agent-tab", "named-tab"])
-    expect(sessions.sessions.has("named")).toBe(true)
+    expect(await run(sessions.reapIdleSessions({ maxIdleMs: 100, now: 101 }))).toEqual(["mcp-12345678"])
+    expect(closed).toEqual(["agent-tab", "mcp-tab"])
+    expect(sessions.sessions.get("named")?.clientPid).toBe(4242)
+
+    // A user-requested reset keeps the client pid so orphan collection still knows who owns it.
+    expect(await run(sessions.reset("named"))).toMatchObject({ session: { id: "named" } })
+    expect(sessions.sessions.get("named")?.clientPid).toBe(4242)
   })
 
   test("sweepOrphanedRelayTargets closes only relay-owned targets without a session", async () => {

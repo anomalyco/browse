@@ -168,6 +168,7 @@ import { createInterface } from "node:readline"
 createInterface({ input: process.stdin }).on("line", (line) => {
   const message = JSON.parse(line)
   if (message.id === undefined) return
+  if (message.method === "hang") return
   const result = message.method === "initialize"
     ? { capabilities: { tools: { listChanged: true } }, serverInfo: { name: "browse", version: ${JSON.stringify(stubVersion)} } }
     : { version: ${JSON.stringify(stubVersion)}, session: process.env.OPENCODE_BROWSER_MCP_SESSION, clientPid: process.env.OPENCODE_BROWSER_CLIENT_PID, ppid: String(process.ppid) }
@@ -228,6 +229,50 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       expect(swapped.clientPid).toBe(String(shim.pid))
       expect(swapped.ppid).toBe(String(shim.pid))
       expect(notifications).toContain("notifications/tools/list_changed")
+    } finally {
+      shim.kill("SIGKILL")
+      await fakeRelay.stop(true)
+      fs.rmSync(shimRoot, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  test("a cancelled request doesn't keep the supervisor from swapping", async () => {
+    const shimRoot = fs.mkdtempSync(path.join(os.tmpdir(), "browse-shim-cancel-it-"))
+    const shimLayout = runtimeLayout(shimRoot)
+    for (const stubVersion of ["9.0.1", "9.0.2"]) {
+      fs.mkdirSync(path.dirname(versionEntry(shimLayout, stubVersion)), { recursive: true })
+      fs.writeFileSync(versionEntry(shimLayout, stubVersion), stub(stubVersion))
+    }
+    writeCurrent(shimLayout, { version: "9.0.1", channel: "latest" })
+    writeShim(shimLayout)
+    let relayVersion = "9.0.1"
+    const fakeRelay = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ version: relayVersion }) })
+    const shim = spawn(node, [shimLayout.shim, "mcp"], { env: { PATH: process.env.PATH ?? "", OPENCODE_BROWSER_HOME: shimRoot, OPENCODE_BROWSER_PORT: String(fakeRelay.port) }, stdio: ["pipe", "pipe", "inherit"] })
+    const answers = new Map<number, Record<string, string>>()
+    createInterface({ input: shim.stdout! }).on("line", (line) => {
+      const message = JSON.parse(line) as { id?: number; result?: Record<string, string> }
+      if (message.id !== undefined) answers.set(message.id, message.result ?? {})
+    })
+    const send = (message: Record<string, unknown>) => shim.stdin!.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\n")
+    let id = 0
+    const call = async (method: string) => {
+      const mine = ++id
+      send({ id: mine, method })
+      return until(() => answers.get(mine), 5_000)
+    }
+    try {
+      await call("initialize")
+      expect((await call("whoami")).version).toBe("9.0.1")
+
+      // The server never answers this one; the client cancels it, so it must not stay in flight forever.
+      const hanging = ++id
+      send({ id: hanging, method: "hang" })
+      await Bun.sleep(300)
+      send({ method: "notifications/cancelled", params: { requestId: hanging } })
+
+      writeCurrent(shimLayout, { version: "9.0.2", previous: "9.0.1", channel: "latest" })
+      relayVersion = "9.0.2"
+      expect((await call("whoami")).version).toBe("9.0.2")
     } finally {
       shim.kill("SIGKILL")
       await fakeRelay.stop(true)

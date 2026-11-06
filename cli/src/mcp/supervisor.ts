@@ -13,7 +13,7 @@ import { npmRuntime, readCurrent, versionEntry } from "../update/auto-update.ts"
 /** Set for the server a supervisor starts, so it serves instead of supervising again. */
 export const directEnvironmentVariable = "OPENCODE_BROWSER_MCP_DIRECT"
 
-type Message = { id?: unknown; method?: unknown; result?: { capabilities?: { tools?: { listChanged?: unknown } } } }
+type Message = { id?: unknown; method?: unknown; params?: unknown; result?: { capabilities?: { tools?: { listChanged?: unknown } } } }
 
 export async function runBinaryMcp(args: readonly string[]) {
   const runtime = npmRuntime()
@@ -53,6 +53,18 @@ export async function runBinaryMcp(args: readonly string[]) {
       return undefined
     }
   }
+  // A request is in flight until its response; a cancelled request never gets one, so its client tells us to forget it.
+  const trackRequest = (message: Message | undefined) => {
+    if (!message) return
+    if (message.id !== undefined && message.method !== undefined) inflight.add(message.id)
+    if (message.method !== "notifications/cancelled" || !message.params || typeof message.params !== "object") return
+    const cancelled = (message.params as { requestId?: unknown }).requestId
+    if (cancelled !== undefined) inflight.delete(cancelled)
+  }
+  const forward = (line: string) => {
+    trackRequest(parse(line))
+    toChild(line)
+  }
 
   const start = (replay: boolean) => {
     const next = spawn(command(version), ["mcp", ...args], { stdio: ["pipe", "pipe", "inherit"], env: { ...process.env, [directEnvironmentVariable]: "1" } })
@@ -91,17 +103,18 @@ export async function runBinaryMcp(args: readonly string[]) {
   let heldSince: number | undefined
   const moved = () => current() !== version
   const fromClient = (line: string) => {
+    const message = parse(line)
+    // A cancellation drops the request at once, even while client messages wait: it may be the one blocking the swap.
+    if (message?.method === "notifications/cancelled") trackRequest(message)
     if (swapping) return void queue.push(line)
     if (moved()) {
       heldSince ??= Date.now()
       queue.push(line)
       return void maybeSwap()
     }
-    const message = parse(line)
     if (message?.method === "initialize") initialize = message
     if (message?.method === "notifications/initialized") initialized = line
-    if (message && message.id !== undefined && message.method !== undefined) inflight.add(message.id)
-    toChild(line)
+    forward(line)
   }
 
   // A new version in current.json swaps the server only once the relay runs it too (GET /version), so a server never
@@ -113,7 +126,14 @@ export async function runBinaryMcp(args: readonly string[]) {
       .then((response) => (response.ok ? (response.json() as Promise<{ version?: unknown }>) : undefined))
       .then((body) => (body && typeof body.version === "string" ? body.version : undefined), () => undefined)
   const maybeSwap = async () => {
-    if (swapping || checking || inflight.size > 0) return
+    if (swapping || checking) return
+    // Held requests go to the current server at the deadline even when a request still looks in flight: a cancelled
+    // request may never answer, and waiting for it would wedge the swap forever.
+    if (heldSince !== undefined && Date.now() - heldSince > 15000) {
+      heldSince = undefined
+      for (const line of queue.splice(0)) forward(line)
+    }
+    if (inflight.size > 0) return
     const next = current()
     if (next === version) {
       unreachable = 0
@@ -126,17 +146,7 @@ export async function runBinaryMcp(args: readonly string[]) {
     checking = false
     unreachable = running === undefined ? unreachable + 1 : 0
     // Held requests don't wait forever for a relay that never reports the new version: they go to the current server.
-    if (running !== next && unreachable < 3) {
-      if (heldSince !== undefined && Date.now() - heldSince > 15000) {
-        heldSince = undefined
-        for (const line of queue.splice(0)) {
-          const message = parse(line)
-          if (message && message.id !== undefined && message.method !== undefined) inflight.add(message.id)
-          toChild(line)
-        }
-      }
-      return
-    }
+    if (running !== next && unreachable < 3) return
     if (swapping || inflight.size > 0 || current() !== next) return
     const old = child
     version = next
