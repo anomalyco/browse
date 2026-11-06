@@ -212,9 +212,11 @@ connection itself isn't encrypted by browse; use a network that is (Tailscale or
 | `secrets_status`, `secrets_refresh`, `secrets_run` | Reuse captured credentials while keeping their values out of transcripts and artifacts |
 | `tabs_cleanup` | Close the agent's idle tabs |
 | `settings` | Read or change the settings below when the user asks (never the security switches); the options page updates live |
-| `status`, `skill` | Connection status, and the full agent guide |
+| `status` | Connection status |
 
-The agent guide is [`cli/skills/browse/SKILL.md`](cli/skills/browse/SKILL.md). Everything is also a CLI:
+The agent reference is [`cli/skills/browse/SKILL.md`](cli/skills/browse/SKILL.md)
+(`browse skill` prints it). The MCP server also sends a short usage guide in its
+initialize instructions. Everything is also a CLI:
 `node cli/dist/cli.mjs --help`.
 
 ## How it works
