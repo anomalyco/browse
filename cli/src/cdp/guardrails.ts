@@ -3,8 +3,12 @@
  *
  * The relay refuses a small set of CDP methods that would destroy the user's
  * real browser state (browse drives the user's own browser, with
- * their real logins). Read-only sessions additionally refuse input-dispatching
- * methods so "go look at X" tasks cannot click or type.
+ * their real logins). Browser permission grants and resets are refused too:
+ * an agent can't make the browser answer a site's permission prompt for the
+ * user. Read-only sessions are limited to an allowlist of methods that inspect
+ * pages: snapshots (Runtime evaluation, Accessibility and DOM reads),
+ * screenshots, page information and event subscriptions. Everything else,
+ * including input, navigation and cookie writes, is refused.
  *
  * Cookies are scoped to the client's attached pages: cookie reads return only
  * cookies that apply to those pages' hosts, and cookie writes are refused for
@@ -39,9 +43,78 @@ const alwaysBlocked = new Map<string, string>([
   ["Storage.clearDataForOrigin", "it would erase a site's cookies and stored data in the user's browser"],
   ["Storage.clearDataForStorageKey", "it would erase a site's stored data in the user's browser"],
   ["Browser.close", "it would close the user's browser"],
+  ["Browser.grantPermissions", "it would grant a site permissions the user never approved"],
+  ["Browser.setPermission", "it would change a site permission without the user's approval"],
+  ["Browser.resetPermissions", "it would reset the user's site permissions"],
 ])
 
-const readOnlyBlockedPrefixes = ["Input."] as const
+/**
+ * Methods a read-only session may use: attaching to a tab, page information,
+ * snapshots, screenshots and event subscriptions. Everything else is refused.
+ */
+const readOnlyAllowedMethods = new Set([
+  // Attaching to a tab and reading its page information.
+  "Browser.getVersion",
+  "Browser.getWindowForTarget",
+  "Browser.setDownloadBehavior",
+  "Target.attachToBrowserTarget",
+  "Target.attachToTarget",
+  "Target.detachFromTarget",
+  "Target.getTargetInfo",
+  "Target.getTargets",
+  "Target.setAutoAttach",
+  "Target.setDiscoverTargets",
+  "Page.getFrameTree",
+  "Page.getLayoutMetrics",
+  "Page.getNavigationHistory",
+  "Page.getResourceTree",
+  // Screenshots.
+  "Page.captureScreenshot",
+  // Snapshots and page reads evaluate in the page: CDP has no read-only evaluation. Playwright also installs its
+  // isolated world and selector scripts this way, and releases the objects it reads back.
+  "Page.addScriptToEvaluateOnNewDocument",
+  "Page.createIsolatedWorld",
+  "Page.setLifecycleEventsEnabled",
+  "Runtime.callFunctionOn",
+  "Runtime.evaluate",
+  "Runtime.getProperties",
+  "Runtime.releaseObject",
+  "Runtime.releaseObjectGroup",
+  "Runtime.runIfWaitingForDebugger",
+  "Accessibility.getAXNodeAndAncestors",
+  "Accessibility.getFullAXTree",
+  "Accessibility.getPartialAXTree",
+  "Accessibility.getRootAXNode",
+  "Accessibility.queryAXTree",
+  "DOM.describeNode",
+  "DOM.getAttributes",
+  "DOM.getBoxModel",
+  "DOM.getContentQuads",
+  "DOM.getDocument",
+  "DOM.getFrameOwner",
+  "DOM.getNodeForLocation",
+  "DOM.querySelector",
+  "DOM.querySelectorAll",
+  "DOM.resolveNode",
+  // Cookie reads; the relay narrows the result to the session's page hosts.
+  "Network.getAllCookies",
+  "Network.getCookies",
+  "Storage.getCookies",
+  // Playwright sends these while attaching. The relay normalizes their effects (focus and media emulation), and
+  // disabling the cache does not change page content.
+  "Emulation.setEmulatedMedia",
+  "Emulation.setFocusEmulationEnabled",
+  "Network.setCacheDisabled",
+])
+
+/** Domains whose enable/disable pair only subscribes to events. */
+const readOnlySubscriptionDomains = ["Accessibility.", "DOM.", "Log.", "Network.", "Page.", "Performance.", "Runtime."] as const
+
+function isReadOnlyAllowed(method: string): boolean {
+  if (readOnlyAllowedMethods.has(method)) return true
+  if (!method.endsWith(".enable") && !method.endsWith(".disable")) return false
+  return readOnlySubscriptionDomains.some((domain) => method.startsWith(domain))
+}
 
 export type GuardContext = {
   readonly method: string
@@ -228,6 +301,10 @@ export function guardCdpMethod(context: GuardContext): string | null {
     // A virtual authenticator would let a script register or answer passkey ceremonies as the user.
     return `browse blocked ${context.method}: agents can't drive WebAuthn or add virtual authenticators. This command is always blocked by the relay.`
   }
+  if (context.readOnly && !isReadOnlyAllowed(context.method)) {
+    const session = context.sessionId ? `Session ${context.sessionId}` : "This session"
+    return `${session} is read-only: ${context.method} is blocked because this tab is read-only. Read-only sessions can take snapshots and screenshots, read page information and subscribe to events. Use a session created without --read-only to interact with pages.`
+  }
   if (context.method === "Page.bringToFront" && !allowsForeground()) {
     return "browse blocked Page.bringToFront: it raises the user's browser window over their work. Use handoff() when the user needs to act in the tab, or set OPENCODE_BROWSER_ALLOW_FOREGROUND=1 on the relay to allow it."
   }
@@ -249,10 +326,6 @@ export function guardCdpMethod(context: GuardContext): string | null {
     if (host === undefined || !hosts.includes(host)) {
       return `browse blocked Network.loadNetworkResource: it loads URLs with the user's credentials outside the page's same-origin policy, so only the hosts of this session's attached pages (${formatAllowedHosts(hosts)}) are allowed. Set ${allowAllStorageEnvironmentVariable}=1 on the relay to allow it.`
     }
-  }
-  if (context.readOnly && readOnlyBlockedPrefixes.some((prefix) => context.method.startsWith(prefix))) {
-    const session = context.sessionId ? `Session ${context.sessionId}` : "This session"
-    return `${session} is read-only: ${context.method} is blocked. Use a session created without --read-only to interact with pages.`
   }
   return null
 }

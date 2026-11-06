@@ -41,10 +41,91 @@ describe("guardCdpMethod", () => {
     expect(guardCdpMethod({ method: "OpenCodeBrowser.ghostCursor", readOnly: false })).toBeNull()
   })
 
-  test("read-only sessions cannot dispatch input", () => {
-    expect(guardCdpMethod({ method: "Input.dispatchMouseEvent", readOnly: true, sessionId: "look" })).toContain("Session look is read-only")
-    expect(guardCdpMethod({ method: "Input.dispatchMouseEvent", readOnly: false })).toBeNull()
-    expect(guardCdpMethod({ method: "Page.captureScreenshot", readOnly: true })).toBeNull()
+  test("read-only sessions can take snapshots and screenshots", () => {
+    for (const method of [
+      // Snapshot and page reads.
+      "Page.getFrameTree",
+      "Page.getNavigationHistory",
+      "Page.createIsolatedWorld",
+      "Page.addScriptToEvaluateOnNewDocument",
+      "Runtime.evaluate",
+      "Runtime.callFunctionOn",
+      "Runtime.getProperties",
+      "Runtime.releaseObject",
+      "Accessibility.getFullAXTree",
+      "Accessibility.getPartialAXTree",
+      "DOM.getDocument",
+      "DOM.describeNode",
+      "DOM.querySelectorAll",
+      "DOM.getBoxModel",
+      // Screenshots.
+      "Page.captureScreenshot",
+      "Page.getLayoutMetrics",
+      // Page information and attachment.
+      "Target.getTargets",
+      "Target.getTargetInfo",
+      "Target.attachToTarget",
+      "Target.setAutoAttach",
+      "Page.getResourceTree",
+    ]) {
+      expect(guardCdpMethod({ method, readOnly: true, sessionId: "look" })).toBeNull()
+    }
+  })
+
+  test("read-only sessions may subscribe to events but nothing else", () => {
+    for (const method of [
+      "Page.enable", "Page.disable",
+      "Runtime.enable", "Runtime.disable",
+      "DOM.enable", "DOM.disable",
+      "Accessibility.enable", "Accessibility.disable",
+      "Network.enable", "Network.disable",
+      "Log.enable", "Log.disable",
+      "Performance.enable", "Performance.disable",
+    ]) {
+      expect(guardCdpMethod({ method, readOnly: true, sessionId: "look" })).toBeNull()
+    }
+    // Turning on request interception or spawning/attaching to a new target is not a read.
+    for (const method of ["Fetch.enable", "Debugger.enable", "Cast.enable", "Overlay.enable"]) {
+      expect(guardCdpMethod({ method, readOnly: true, sessionId: "look" })).toContain("this tab is read-only")
+    }
+  })
+
+  test("read-only sessions cannot navigate, click or write cookies", () => {
+    const refused = [
+      { method: "Page.navigate", params: { url: "https://example.com/" } },
+      { method: "Target.createTarget", params: { url: "https://example.com/" } },
+      { method: "Target.closeTarget", params: { targetId: "TARGET" } },
+      { method: "Input.dispatchMouseEvent", params: { type: "mousePressed", x: 1, y: 1 } },
+      { method: "Input.dispatchKeyEvent", params: { type: "keyDown" } },
+      { method: "Network.setCookie", params: { name: "x", value: "1", domain: "app.example.com" } },
+      { method: "Storage.setCookies", params: { cookies: [{ name: "x", value: "1", domain: "app.example.com" }] } },
+      { method: "Page.bringToFront" },
+      { method: "Emulation.setScriptExecutionDisabled", params: { value: true } },
+    ]
+    for (const { method, params } of refused) {
+      const message = guardCdpMethod({ method, readOnly: true, sessionId: "look", pageUrls, ...(params ? { params } : {}) })
+      expect(message).toContain("Session look is read-only")
+      expect(message).toContain("this tab is read-only")
+      expect(message).toContain(method)
+    }
+  })
+
+  test("writable sessions still allow interaction and cookie writes", () => {
+    expect(guardCdpMethod({ method: "Input.dispatchMouseEvent", readOnly: false, pageUrls })).toBeNull()
+    expect(guardCdpMethod({ method: "Page.navigate", readOnly: false, params: { url: "https://example.com/" } })).toBeNull()
+    expect(guardCdpMethod({ method: "Target.createTarget", readOnly: false, params: { url: "https://example.com/" } })).toBeNull()
+    expect(guardCdpMethod({ method: "Network.setCookie", readOnly: false, pageUrls, params: { name: "x", value: "1", domain: "app.example.com" } })).toBeNull()
+    expect(guardCdpMethod({ method: "Runtime.evaluate", readOnly: false })).toBeNull()
+  })
+
+  test("browser permission grants are refused for every session", () => {
+    for (const method of ["Browser.grantPermissions", "Browser.setPermission", "Browser.resetPermissions"]) {
+      for (const readOnly of [false, true]) {
+        const message = guardCdpMethod({ method, readOnly, sessionId: "look", params: { origin: "https://app.example.com", permissions: ["geolocation"] } })
+        expect(message).toContain(`browse blocked ${method}`)
+        expect(message).toContain("always blocked")
+      }
+    }
   })
 
   test("cookie writes are limited to the hosts of the session's pages", () => {
