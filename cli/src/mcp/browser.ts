@@ -4,8 +4,9 @@ import { getObject } from "../relay/helpers.ts"
 import * as RelayLifecycle from "../relay/lifecycle.ts"
 import { updateJson } from "../update.ts"
 import { securityVariables, settingKeys, settingSpecs } from "../relay/user-settings.ts"
+import { TabsCleanupResponse } from "../relay/schema.ts"
 import { registerMcpTools } from "./registry.ts"
-import { emptyInputSchema, objectSchema } from "./schema.ts"
+import { emptyInputSchema, objectSchema, SettingsToolOutput, StatusToolOutput } from "./schema.ts"
 
 registerMcpTools({
   order: 110,
@@ -18,6 +19,7 @@ registerMcpTools({
       readOnly: true,
       destructive: false,
       idempotent: false,
+      outputSchema: StatusToolOutput,
       handle: () =>
         Effect.gen(function* () {
           const [version, status] = yield* Effect.all([ctx.relay.version, ctx.relay.extensionStatus])
@@ -55,6 +57,7 @@ registerMcpTools({
       readOnly: false,
       destructive: true,
       idempotent: true,
+      outputSchema: TabsCleanupResponse,
       handle: (input) => {
         const value =
           typeof input === "object" && input !== null && "idleMinutes" in input ? input.idleMinutes : undefined
@@ -77,6 +80,7 @@ registerMcpTools({
       readOnly: false,
       destructive: false,
       idempotent: true,
+      outputSchema: SettingsToolOutput,
       handle: (input) => {
         const set = getObject(input)?.set
         if (set === undefined) return ctx.relay.settingsGet

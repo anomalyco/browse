@@ -1,9 +1,22 @@
-import { Effect, Predicate } from "effect"
+import { Effect, Option, Predicate, Schema } from "effect"
 import { McpSchema } from "effect/ai"
 import type { JsonObject } from "../protocol.ts"
 import * as RelayClient from "../relay/client.ts"
 import { getObject, getString, parseTargetSelection } from "../relay/helpers.ts"
-import type { ConnectedBrowser, TargetSelection } from "../relay/schema.ts"
+import {
+  ExecuteAftermath,
+  ExecuteLogEntry,
+  ExecuteLogSummary,
+  ExtensionStatus,
+  NetworkStatusResponse,
+  RelayVersion,
+  SessionDeleted,
+  SettingsGetResponse,
+  SettingsSetResponse,
+  type ConnectedBrowser,
+  type ExecuteResponse,
+  type TargetSelection,
+} from "../relay/schema.ts"
 import type { UpdateNotice } from "../update.ts"
 
 export type CurrentSession = { id: string; established: boolean }
@@ -57,6 +70,139 @@ export const sessionAliasSchemaProperty = { type: "string", description: "Same a
 export const sessionOnlyInputSchema = objectSchema({
   session: sessionSchemaProperty,
 })
+
+/**
+ * The execute tool's structured result. The agent's return value appears once (as `value`), and only context that has
+ * content is included: no empty warnings, zero-count log summaries or uneventful aftermath.
+ */
+export const ExecuteToolOutput = Schema.Struct({
+  session: Schema.String,
+  value: Schema.optionalKey(Schema.Unknown),
+  logs: Schema.optionalKey(Schema.Array(ExecuteLogEntry)),
+  logSummary: Schema.optionalKey(ExecuteLogSummary),
+  warnings: Schema.optionalKey(Schema.Array(Schema.String)),
+  diagnostic: Schema.optionalKey(Schema.String),
+  aftermath: Schema.optionalKey(ExecuteAftermath),
+  notice: Schema.optionalKey(Schema.String),
+})
+
+export const StatusToolOutput = Schema.Struct({
+  endpoint: Schema.String,
+  currentSession: Schema.String,
+  version: RelayVersion,
+  status: ExtensionStatus,
+  buildProblem: Schema.optionalKey(Schema.String),
+  update: Schema.optionalKey(Schema.Json),
+  autoUpdate: Schema.Json,
+})
+
+export const CurrentSessionToolOutput = Schema.Struct({
+  currentSession: Schema.String,
+})
+
+export const SessionDeleteToolOutput = SessionDeleted.pipe(Schema.fieldsAssign({
+  currentSession: Schema.String,
+}))
+
+export const NetworkToolStatus = NetworkStatusResponse.pipe(Schema.fieldsAssign({
+  session: Schema.String,
+}))
+
+/** Either the read result or the change result, with a single object root so older MCP clients still see the schema. */
+export const SettingsToolOutput = Schema.Struct({
+  settings: SettingsGetResponse.fields.settings,
+  note: Schema.optionalKey(SettingsGetResponse.fields.note),
+  changed: Schema.optionalKey(SettingsSetResponse.fields.changed),
+  unchanged: Schema.optionalKey(SettingsSetResponse.fields.unchanged),
+  overridden: Schema.optionalKey(SettingsSetResponse.fields.overridden),
+  message: Schema.optionalKey(SettingsSetResponse.fields.message),
+})
+
+export const SecretsListToolOutput = Schema.Struct({
+  secrets: Schema.Array(Schema.Struct({
+    name: Schema.String,
+    kind: Schema.Literals(["password", "totp"]),
+    allowedOrigins: Schema.Array(Schema.String),
+    createdAt: Schema.String,
+    updatedAt: Schema.String,
+  })),
+})
+
+/** The JSON Schema a tool advertises from its Effect Schema (the same conversion Effect's McpServer uses). */
+export function toolOutputJson(schema: Schema.Constraint): JsonObject {
+  const document = Schema.toJsonSchemaDocument(schema)
+  const json = Object.keys(document.definitions).length === 0
+    ? document.schema
+    : { ...document.schema, $defs: document.definitions }
+  return json as unknown as JsonObject
+}
+
+function logSummaryHasContent(summary: ExecuteLogSummary | undefined): boolean {
+  return summary !== undefined && (
+    summary.totalCount > 0 || summary.returnedCount > 0 || summary.repeatedCount > 0 || summary.omittedCount > 0
+  )
+}
+
+function aftermathHasContent(aftermath: ExecuteAftermath | undefined): boolean {
+  return aftermath !== undefined && (
+    aftermath.startUrl !== aftermath.endUrl ||
+    aftermath.navigations.length > 0 ||
+    aftermath.consoleErrorCount > 0 ||
+    aftermath.pageErrorCount > 0 ||
+    aftermath.handoffs > 0 ||
+    aftermath.challenge !== undefined
+  )
+}
+
+export function executeToolOutput(result: ExecuteResponse & { readonly notice?: string }): typeof ExecuteToolOutput.Type {
+  return {
+    session: result.session.id,
+    ...(result.value === undefined ? {} : { value: result.value }),
+    ...(result.logs.length > 0 ? { logs: result.logs } : {}),
+    ...(logSummaryHasContent(result.logSummary) ? { logSummary: result.logSummary } : {}),
+    ...(result.warnings && result.warnings.length > 0 ? { warnings: result.warnings } : {}),
+    ...(result.diagnostic ? { diagnostic: result.diagnostic } : {}),
+    ...(aftermathHasContent(result.aftermath) ? { aftermath: result.aftermath } : {}),
+    ...(result.notice ? { notice: result.notice } : {}),
+  }
+}
+
+/**
+ * The text fallback for an execute. A string return is the agent's own readable text, not JSON; a structured return is
+ * its compact JSON value. That keeps one copy of the value outside the structured result.
+ */
+export function executeToolText(result: ExecuteResponse & { readonly notice?: string }): string {
+  const text = result.isError
+    ? result.text
+    : Predicate.isString(result.value)
+      ? result.value
+      : result.value === undefined
+        ? result.text
+        : JSON.stringify(result.value)
+  return result.notice ? `${text}\n\n${result.notice}` : text
+}
+
+/** The MCP result for one execute: images keep their content blocks and text, everything else gets structured output. */
+export function executeToolResult(value: unknown): McpSchema.CallToolResult {
+  const result = value as ExecuteResponse & { readonly notice?: string }
+  if (result.media && result.media.length > 0) {
+    return new McpSchema.CallToolResult({
+      content: [
+        McpSchema.TextContent.make({ text: result.text }),
+        ...result.media.map((image) => McpSchema.ImageContent.make({
+          data: new Uint8Array(Buffer.from(image.data, "base64")),
+          mimeType: image.mimeType,
+        })),
+      ],
+      isError: result.isError,
+    })
+  }
+  return toolResultForValue(executeToolOutput(result), {
+    outputSchema: ExecuteToolOutput,
+    text: executeToolText(result),
+    isError: result.isError,
+  })
+}
 
 export const ensureSessionExists = Effect.fnUntraced(function* (relay: RelayClient.Interface, id: string) {
   const sessions = yield* relay.sessions
@@ -163,12 +309,25 @@ function stringifyResult(value: unknown): string {
   if (Predicate.isString(value)) {
     return value
   }
-  return JSON.stringify(value, null, 2)
+  // Compact, not pretty-printed: this text block is only the backwards-compatible fallback for structuredContent.
+  return JSON.stringify(value)
 }
 
-export function toolResultForValue(value: unknown): McpSchema.CallToolResult {
+function encodedStructuredContent(value: unknown, schema: Schema.ConstraintEncoder<unknown, never> | undefined): unknown {
+  if (!schema) return value
+  const encoded = Schema.encodeUnknownOption(schema)(value)
+  return Option.isSome(encoded) ? encoded.value : undefined
+}
+
+export type ToolResultOptions = {
+  readonly outputSchema?: Schema.ConstraintEncoder<unknown, never>
+  readonly text?: string
+  readonly isError?: boolean
+}
+
+export function toolResultForValue(value: unknown, options: ToolResultOptions = {}): McpSchema.CallToolResult {
   const object = getObject(value)
-  const isError = object?.isError === true
+  const isError = options.isError ?? object?.isError === true
   const media = Array.isArray(object?.media)
     ? object.media.flatMap((item) => {
         const image = getObject(item)
@@ -182,7 +341,7 @@ export function toolResultForValue(value: unknown): McpSchema.CallToolResult {
   const errorText = isError ? getString(object, "text") : undefined
   if (media.length > 0) {
     const { media: _media, ...rest } = object ?? {}
-    const text = errorText ?? stringifyResult(rest)
+    const text = options.text ?? errorText ?? stringifyResult(rest)
     // No structuredContent here: some MCP clients send only structuredContent to the model when it is set, dropping the images.
     return new McpSchema.CallToolResult({
       content: [
@@ -197,8 +356,13 @@ export function toolResultForValue(value: unknown): McpSchema.CallToolResult {
       isError,
     })
   }
-  const text = errorText ?? stringifyResult(value)
-  return toolResult({ text, ...(object ? { structuredContent: object } : {}), isError })
+  const text = options.text ?? errorText ?? stringifyResult(value)
+  const structuredContent = object ? encodedStructuredContent(object, options.outputSchema) : undefined
+  return toolResult({
+    text,
+    ...(structuredContent === undefined ? {} : { structuredContent }),
+    isError,
+  })
 }
 
 export function mcpErrorMessage(tool: string, message: string): string {

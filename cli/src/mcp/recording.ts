@@ -1,5 +1,14 @@
 import { Effect } from "effect"
 import path from "node:path"
+import {
+  FlightRecorderCancelResponse,
+  FlightRecorderSaveResponse,
+  FlightRecorderStatusResponse,
+  RecordingCancelResponse,
+  RecordingStartResponse,
+  RecordingStatusResponse,
+  RecordingStopResponse,
+} from "../relay/schema.ts"
 import { registerMcpTools } from "./registry.ts"
 import {
   objectSchema,
@@ -45,6 +54,7 @@ registerMcpTools({
       readOnly: false,
       destructive: false,
       idempotent: false,
+      outputSchema: RecordingStartResponse,
       handle: (input) => {
         const object = requireObject(input)
         const mode = optionalStringField(object, "mode")
@@ -74,6 +84,7 @@ registerMcpTools({
       readOnly: false,
       destructive: false,
       idempotent: false,
+      outputSchema: RecordingStopResponse,
       handle: (input) => ctx.relay.recordingStop({ sessionId: ctx.resolveSessionId(input) }),
     },
   ],
@@ -90,6 +101,7 @@ registerMcpTools({
       readOnly: true,
       destructive: false,
       idempotent: true,
+      outputSchema: RecordingStatusResponse,
       handle: (input) => ctx.relay.recordingStatus({ sessionId: ctx.resolveSessionId(input) }),
     },
     {
@@ -99,6 +111,7 @@ registerMcpTools({
       readOnly: false,
       destructive: true,
       idempotent: true,
+      outputSchema: RecordingCancelResponse,
       handle: (input) => ctx.relay.recordingCancel({ sessionId: ctx.resolveSessionId(input) }),
     },
     {
@@ -124,6 +137,7 @@ registerMcpTools({
       readOnly: false,
       destructive: false,
       idempotent: false,
+      outputSchema: FlightRecorderStatusResponse,
       handle: (input) => {
         const object = requireObject(input)
         const retentionMs = optionalPositiveIntegerField(object, "retentionMs")
@@ -145,6 +159,7 @@ registerMcpTools({
       readOnly: true,
       destructive: false,
       idempotent: true,
+      outputSchema: FlightRecorderStatusResponse,
       handle: (input) => ctx.relay.flightRecorderStatus({ sessionId: ctx.resolveSessionId(input) }),
     },
     {
@@ -168,6 +183,7 @@ registerMcpTools({
       readOnly: false,
       destructive: false,
       idempotent: false,
+      outputSchema: FlightRecorderSaveResponse,
       handle: (input) => {
         const object = requireObject(input)
         const durationMs = optionalPositiveIntegerField(object, "durationMs")
@@ -185,6 +201,7 @@ registerMcpTools({
       readOnly: false,
       destructive: true,
       idempotent: true,
+      outputSchema: FlightRecorderCancelResponse,
       handle: (input) => ctx.relay.flightRecorderCancel({ sessionId: ctx.resolveSessionId(input) }),
     },
   ],

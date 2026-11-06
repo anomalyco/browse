@@ -2,7 +2,7 @@ import { Effect } from "effect"
 import * as RelayClient from "../relay/client.ts"
 import * as RelayLifecycle from "../relay/lifecycle.ts"
 import { registerMcpTools } from "./registry.ts"
-import { objectSchema, parseExecuteArguments } from "./schema.ts"
+import { ExecuteToolOutput, executeToolResult, objectSchema, parseExecuteArguments } from "./schema.ts"
 
 registerMcpTools({
   order: 100,
@@ -46,6 +46,8 @@ registerMcpTools({
       readOnly: false,
       destructive: true,
       idempotent: false,
+      outputSchema: ExecuteToolOutput,
+      result: executeToolResult,
       handle: (input) =>
         Effect.gen(function* () {
           const args = yield* Effect.try(() => parseExecuteArguments(input))

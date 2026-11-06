@@ -1,7 +1,10 @@
 import { Effect, Predicate } from "effect"
 import * as RelayLifecycle from "../relay/lifecycle.ts"
+import { SessionAdoptResponse, SessionContainer, SessionResetResponse, SessionsContainer } from "../relay/schema.ts"
 import { registerMcpTools } from "./registry.ts"
 import {
+  CurrentSessionToolOutput,
+  SessionDeleteToolOutput,
   emptyInputSchema,
   ensureSessionExists,
   objectSchema,
@@ -40,6 +43,7 @@ registerMcpTools({
       readOnly: false,
       destructive: false,
       idempotent: false,
+      outputSchema: SessionContainer,
       handle: (input) =>
         Effect.gen(function* () {
           const requestedId = optionalStringField(input, "id")
@@ -76,6 +80,7 @@ registerMcpTools({
       readOnly: false,
       destructive: false,
       idempotent: true,
+      outputSchema: SessionContainer,
       handle: (input) =>
         Effect.gen(function* () {
           const sessionId = ctx.resolveSessionId(input)
@@ -94,6 +99,7 @@ registerMcpTools({
       readOnly: true,
       destructive: false,
       idempotent: false,
+      outputSchema: SessionsContainer,
       handle: () => ctx.relay.sessions.pipe(Effect.map((sessions) => ({ sessions }))),
     },
     {
@@ -104,6 +110,7 @@ registerMcpTools({
       readOnly: true,
       destructive: false,
       idempotent: true,
+      outputSchema: CurrentSessionToolOutput,
       handle: () => Effect.succeed({ currentSession: ctx.currentSession.id }),
     },
     {
@@ -118,6 +125,7 @@ registerMcpTools({
       readOnly: false,
       destructive: false,
       idempotent: true,
+      outputSchema: CurrentSessionToolOutput,
       handle: (input) =>
         Effect.gen(function* () {
           const id = yield* Effect.try(() => requiredStringField(input, "id"))
@@ -136,6 +144,7 @@ registerMcpTools({
       readOnly: false,
       destructive: true,
       idempotent: false,
+      outputSchema: SessionResetResponse,
       handle: (input) =>
         Effect.gen(function* () {
           const id = ctx.resolveSessionId(input, "id")
@@ -154,6 +163,7 @@ registerMcpTools({
       readOnly: false,
       destructive: true,
       idempotent: true,
+      outputSchema: SessionDeleteToolOutput,
       handle: (input) =>
         Effect.gen(function* () {
           const id = ctx.resolveSessionId(input, "id")
@@ -193,6 +203,7 @@ registerMcpTools({
       readOnly: false,
       destructive: false,
       idempotent: false,
+      outputSchema: SessionAdoptResponse,
       handle: (input) =>
         Effect.gen(function* () {
           const args = yield* Effect.try(() => parseAdoptArguments(input))
@@ -204,10 +215,7 @@ registerMcpTools({
             ...(args.tabId === undefined ? {} : { tabId: args.tabId }),
           })
           ctx.establishCurrentSession(sessionId)
-          return {
-            ...result,
-            confirmation: `Adopted session '${result.session.id}' default page: ${result.adoptedUrl}`,
-          }
+          return result
         }),
     },
   ],

@@ -1,4 +1,5 @@
-import type { Effect } from "effect"
+import type { Effect, Schema } from "effect"
+import type { McpSchema } from "effect/ai"
 import type { JsonObject } from "../protocol.ts"
 import type * as RelayClient from "../relay/client.ts"
 import type { UpdateNotice } from "../update.ts"
@@ -14,6 +15,10 @@ export type McpToolSpec = {
   readonly requiresRelayCompatibility?: boolean
   readonly listsBrowsers?: boolean
   readonly handle: (input: unknown) => Effect.Effect<unknown, Error>
+  /** The Effect schema of this tool's structured result, advertised to clients as a JSON Schema. */
+  readonly outputSchema?: Schema.ConstraintEncoder<unknown, never>
+  /** Overrides the generic tool result (execute shapes its value and context itself). */
+  readonly result?: (value: unknown) => McpSchema.CallToolResult
 }
 
 export type McpToolContext = {

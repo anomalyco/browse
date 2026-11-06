@@ -14,10 +14,12 @@ describe("toolResultForValue", () => {
     expect(result.isError).toBe(false)
   })
 
-  test("results without images keep structuredContent", () => {
+  test("results without images keep structuredContent and one compact text fallback", () => {
     const value = { text: "ok", value: { title: "Example" }, isError: false }
     const result = toolResultForValue(value)
     expect(result.content.map((item) => item.type)).toEqual(["text"])
     expect(result.structuredContent).toEqual(value)
+    expect(result.content).toHaveLength(1)
+    expect((result.content[0] as { text: string }).text).toBe(JSON.stringify(value))
   })
 })
