@@ -34,7 +34,7 @@ await step("initialize", async () => (await client.initialize()).serverInfo)
 await step("tools/list", async () => {
   const { tools } = await client.request("tools/list")
   const names = tools.map((t: any) => t.name)
-  for (const required of ["execute", "session_new", "network_start", "recording_start", "status"]) check(names.includes(required), `missing tool ${required}`)
+  for (const required of ["execute", "session_new", "network", "recording", "status"]) check(names.includes(required), `missing tool ${required}`)
   return names.length
 })
 await step("status", async () => {
@@ -54,10 +54,10 @@ if (!values.remote) {
   await step("execute: fill + click", async () => { const v = await run(`await page.getByLabel('Name').fill('smoke'); await page.getByRole('button', {name: 'Save'}).click(); return await page.locator('output').textContent()`); check(v === "smoke", v); return v })
   await step("execute: screenshot", async () => { const n = await run(`return (await page.screenshot()).length`); check(n > 1000, n); return n })
   await step("network capture", async () => {
-    check(!(await client.call("network_start", { session })).isError, "network_start")
+    check(!(await client.call("network", { action: "start", session })).isError, "network start")
     await run(`await page.goto(${JSON.stringify(fx.url("/network"))}); await page.locator('#out', {hasText: '3 rows'}).waitFor()`)
     const har = path.join(out, "smoke.har")
-    const stop = await client.call("network_stop", { session, outputPath: har })
+    const stop = await client.call("network", { action: "stop", session, outputPath: har })
     check(!stop.isError, stop.text)
     const entries = JSON.parse(fs.readFileSync(har, "utf8")).log.entries.length
     check(entries >= 3, `${entries} entries`)
@@ -66,10 +66,10 @@ if (!values.remote) {
   await step("recording", async () => {
     await run(`await page.goto(${JSON.stringify(fx.url("/animate"))})`)
     const file = path.join(out, "smoke.webm")
-    const start = await client.call("recording_start", { session, outputPath: file })
+    const start = await client.call("recording", { action: "start", session, outputPath: file })
     check(!start.isError, start.text)
     await run(`await page.waitForTimeout(2500)`)
-    const stop = await client.call("recording_stop", { session }, 60_000)
+    const stop = await client.call("recording", { action: "stop", session }, 60_000)
     check(!stop.isError, stop.text)
     const size = fs.statSync(file).size
     check(size > 10_000, `${size} bytes`)

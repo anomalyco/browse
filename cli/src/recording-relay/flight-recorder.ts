@@ -46,7 +46,7 @@ type ActiveFlightRecorder = {
   /** A real screencast frame arrived; screenshot polling (for a tab Chrome doesn't paint) stops then. */
   screencastFrameSeen?: boolean
   stopFallback?: () => void
-  /** Draw the ghost cursor in the buffered page (flight_recorder_start cursor: true). */
+  /** Draw the ghost cursor in the buffered page (the flight_recorder tool's start action with cursor: true). */
   readonly cursor: boolean
 }
 
