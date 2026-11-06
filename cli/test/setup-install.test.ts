@@ -36,7 +36,7 @@ test("OpenCode JSONC keeps comments and other servers across install, reinstall 
     fs.writeFileSync(file, before)
     expect(configureMcp(file, entry)).toContain("added")
     const once = fs.readFileSync(file, "utf8")
-    expect(parse(once).mcp.servers.browse).toMatchObject({ type: "local", command: [process.execPath, entry, "mcp"] })
+    expect(parse(once).mcp.servers.browse).toMatchObject({ type: "local", command: ["node", entry, "mcp"] })
     expect(configureMcp(file, entry, entry)).toContain("up to date")
     expect(fs.readFileSync(file, "utf8")).toBe(once)
     expect(removeMcp("browse", entry, file)).toBe(true)
@@ -49,7 +49,7 @@ test("OpenCode JSONC keeps comments and other servers across install, reinstall 
 test("a binary install's entry runs the executable itself, in OpenCode, other agents and the manual entry", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-binary-"))
   try {
-    const binary = path.join(home, ".browse", "bin", "browse")
+    const binary = path.join(home, ".local", "bin", "browse")
     const opencode = path.join(home, "opencode.json")
     expect(configureMcp(opencode, binary)).toContain("added")
     expect(parse(fs.readFileSync(opencode, "utf8")).mcp.servers.browse).toMatchObject({ command: [binary, "mcp"], environment: { OPENCODE_BROWSER_RUNTIME: "auto-update" } })
@@ -81,7 +81,8 @@ test("plans a single picker, remembering even an intentionally empty selection",
   expect(plan([], true, undefined, [])).toEqual({ picker: true, selected: [] })
   expect(plan([], true, "claude")).toEqual({ picker: false, selected: ["claude"] })
   expect(plan([], false, "claude", ["cursor"])).toEqual({ picker: false, selected: ["claude"] })
-  expect(plan([], false)).toEqual({ picker: false, selected: ["opencode", "cursor"] })
+  expect(plan([], false)).toEqual({ picker: false, selected: [] })
+  expect(plan(["-y"], false)).toEqual({ picker: false, selected: ["opencode", "cursor"] })
   expect(agentPlan([], agentFlags([]), false)).toEqual({ picker: false, selected: [] })
   expect(plan(["-y"], true)).toEqual(plan(["--yes"], false))
   expect(plan(["-y"], true).selected).toEqual(["opencode", "cursor"])
@@ -126,6 +127,19 @@ test.each(agentNames.filter(n => n !== "opencode"))("%s user config: preserve un
     fs.unlinkSync(file)
     expect(editAgentConfig(receipt)).toBe("added")
     expect(editAgentConfig(receipt, true)).toBe("removed")
+  } finally { fs.rmSync(home, { recursive: true, force: true }) }
+})
+
+test("an agent config write is atomic and keeps the file's mode", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-atomic-"))
+  try {
+    const file = path.join(home, "mcp.json")
+    fs.writeFileSync(file, "{}\n", { mode: 0o640 })
+    if (process.platform !== "win32") fs.chmodSync(file, 0o640)
+    expect(editAgentConfig({ name: "claude", file, entry: "/a path/browse" })).toBe("added")
+    expect(fs.readdirSync(home)).toEqual(["mcp.json"])
+    if (process.platform !== "win32") expect(fs.statSync(file).mode & 0o777).toBe(0o640)
+    expect(JSON.parse(fs.readFileSync(file, "utf8")).mcpServers.browse.command).toBe("/a path/browse")
   } finally { fs.rmSync(home, { recursive: true, force: true }) }
 })
 
@@ -365,7 +379,7 @@ describe("status recognises the install", () => {
   })
 
   test("the version install recorded", () => {
-    expect(installedRuntime({ entry, version: "0.0.9" }, undefined)).toEqual({ entry, version: "0.0.9", source: true })
+    expect(installedRuntime({ entry, version: "0.0.9" }, undefined)).toEqual({ entry, version: "1.2.3", source: true })
   })
 
   test("nothing installed", () => {

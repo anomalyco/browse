@@ -4,28 +4,45 @@
 //   Driving the browser (cli.ts): serve, relay, execute, session, network, secrets, recording, journal,
 //   doctor, skill, mcp, status. The relay is the local server agents use; the extension connects to it.
 // `browse mcp` runs the MCP server over stdio (as does the bundle invoked as `opencode-browser-mcp`).
+import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
 
 const embeddedVersion = globalThis.__OPENCODE_BROWSER_VERSION__
-const setupCommands = new Set(["install", "uninstall", "extension", "pair", "rollback", "set"])
+const setupCommands = new Set(["install", "uninstall", "extension", "pair", "set"])
 const command = process.argv[2]
 const invokedAs = path.basename(process.argv[1] ?? "")
+
+// Earlier layouts (~/.browse, and the old opencode-browser data root) move to the XDG folders on the first run.
+// opencode briefly shows the update, and no other command pays for the import.
+const legacyDataRoot = process.platform === "win32"
+  ? path.join(process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local"), "opencode-browser")
+  : path.join(process.env.XDG_DATA_HOME ?? path.join(os.homedir(), ".local", "share"), "opencode-browser")
+if (command !== "--version" && command !== "-v" && !process.env.OPENCODE_BROWSER_HOME &&
+  [path.join(os.homedir(), ".browse"), legacyDataRoot].some((root) => fs.existsSync(root))) {
+  try {
+    const { migrateLegacy } = await import("./setup/migrate.ts")
+    migrateLegacy()
+  } catch {
+    // Migration must never stop browse from starting; the next run tries again.
+  }
+}
 
 if (command === "--version" || command === "-v") {
   const opencodeBrowserVersion = embeddedVersion ?? (await import("./version.ts")).opencodeBrowserVersion
   process.stdout.write(`${opencodeBrowserVersion}\n`)
-} else if (command === "mcp" && globalThis.__OPENCODE_BROWSER_COMPILED__ && process.env.OPENCODE_BROWSER_MCP_DIRECT !== "1") {
-  // A binary install's MCP entry: supervise the server so updates swap it (mcp/supervisor.ts).
+} else if (command === "mcp" && process.env.OPENCODE_BROWSER_MCP_DIRECT !== "1" && (await import("./mcp/supervisor.ts")).supervisesMcp()) {
+  // An installed binary or npm global package: supervise the server so updates swap it (mcp/supervisor.ts).
   const { runBinaryMcp } = await import("./mcp/supervisor.ts")
   await runBinaryMcp(process.argv.slice(3))
 } else if (invokedAs === "opencode-browser-mcp" || (command === "mcp" && process.argv.length === 3)) {
   const { NodeRuntime } = await import("@effect/platform-node")
   const { runMcpServer } = await import("./mcp.ts")
   runMcpServer.pipe(NodeRuntime.runMain)
-} else if (command === "runtime-install" || command === "runtime-switch") {
+} else if (command === "self-update" || command === "runtime-switch") {
   // The relay's auto-update children (auto-update.ts); not for people.
-  const { runRuntimeInstall, runRuntimeSwitch } = await import("./update/runtime-update.ts")
-  await (command === "runtime-install" ? runRuntimeInstall : runRuntimeSwitch)(process.argv.slice(3))
+  const { runSelfUpdate, runRuntimeSwitch } = await import("./update/runtime-update.ts")
+  await (command === "self-update" ? runSelfUpdate : runRuntimeSwitch)(process.argv.slice(3))
 } else if (command === "update") {
   const { runUpdateCommand } = await import("./update.ts")
   await runUpdateCommand(process.argv.slice(3))
@@ -54,13 +71,15 @@ if (command === "--version" || command === "-v") {
                                  \`--revoke legacy\` retires the shared code of earlier versions
   set hostname <address>         Where the relay listens: 127.0.0.1 (this computer, the default) or 0.0.0.0
                                  (browsers on other computers can connect too, after pairing)
-  update [--check]               Update now. A git clone install pulls the newer commits (fast-forward only)
-                                 and runs setup again; an npm install installs the newest version on its
-                                 channel and switches to it; --check only says whether there's an update
-  rollback [--force]             npm installs: go back to the version before the last update (and skip
-                                 the one rolled back from until a newer one is published)
+  update [--check]               Update now: rerun whatever installed browse (the install script for a binary
+                                 install, npm install -g for an npm one); --check only says whether there's an
+                                 update. A git clone pulls the newer commits and runs setup again.
   uninstall [--yes]              Remove everything install set up (--yes skips confirming that stored
                                  secret profiles are deleted)
+
+browse keeps its files in $XDG_CONFIG_HOME/browse, $XDG_DATA_HOME/browse, $XDG_STATE_HOME/browse and
+$XDG_CACHE_HOME/browse (defaults under ~/.config, ~/.local/share, ~/.local/state and ~/.cache), and the
+executable in ~/.local/bin (or $XDG_BIN_HOME).
 
 `)
   }

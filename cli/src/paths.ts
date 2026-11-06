@@ -1,35 +1,63 @@
-// Where browse keeps its files: the installed runtime, the relay's log, session catalogs and
-// journals, and captured secrets. One root, so `uninstall` can remove it and logs are easy to find.
-//   macOS/Linux: $XDG_DATA_HOME/opencode-browser, else ~/.local/share/opencode-browser
-//   Windows:     %LOCALAPPDATA%\opencode-browser
-// OPENCODE_BROWSER_HOME overrides it (isolated test relays).
+// Where browse keeps its files, on every OS (the same scheme opencode uses on macOS):
+//   config  $XDG_CONFIG_HOME/browse      settings.json, config.json
+//   data    $XDG_DATA_HOME/browse        session catalogs, secrets, auth profiles, paired browsers
+//   state   $XDG_STATE_HOME/browse       logs, journals, current session, pairing codes, update state
+//   cache   $XDG_CACHE_HOME/browse       update checks and the dev extension (re-creatable)
+//   bin     $XDG_BIN_HOME              the installer's executable (XDG_BIN_HOME, else ~/.local/bin)// Unset variables fall back to ~/.config, ~/.local/share, ~/.local/state, ~/.cache and ~/.local/bin;
+// Windows uses the same paths under %USERPROFILE%. OPENCODE_BROWSER_HOME overrides all of them for isolated
+// test relays (the executable then lives in <root>/bin).
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
-export function dataRoot(home = os.homedir()): string {
-  const override = process.env.OPENCODE_BROWSER_HOME
-  if (override) return override
-  if (process.platform === "win32")
-    return path.join(process.env.LOCALAPPDATA ?? path.join(home, "AppData", "Local"), "opencode-browser")
-  const xdg = home === os.homedir() ? process.env.XDG_DATA_HOME : undefined
-  return path.join(xdg ?? path.join(home, ".local", "share"), "opencode-browser")
+const override = (home: string) =>
+  home === os.homedir() && process.env.OPENCODE_BROWSER_HOME ? process.env.OPENCODE_BROWSER_HOME : undefined
+
+const xdgRoot = (variable: string, fallback: string, home: string) => {
+  const configured = home === os.homedir() ? process.env[variable] : undefined
+  return path.join(configured && path.isAbsolute(configured) ? configured : path.join(home, fallback), "browse")
 }
+
+export function configRoot(home = os.homedir()): string {
+  return override(home) ?? xdgRoot("XDG_CONFIG_HOME", ".config", home)
+}
+
+export function dataRoot(home = os.homedir()): string {
+  return override(home) ?? xdgRoot("XDG_DATA_HOME", ".local/share", home)
+}
+
+export function stateRoot(home = os.homedir()): string {
+  return override(home) ?? xdgRoot("XDG_STATE_HOME", ".local/state", home)
+}
+
+export function cacheRoot(home = os.homedir()): string {
+  return override(home) ?? xdgRoot("XDG_CACHE_HOME", ".cache", home)
+}
+
+/** The installer's folder: $XDG_BIN_HOME when set, else ~/.local/bin (the same on Windows under %USERPROFILE%). */
+export function binRoot(home = os.homedir()): string {
+  if (override(home)) return path.join(override(home)!, "bin")
+  const configured = home === os.homedir() ? process.env.XDG_BIN_HOME : undefined
+  return configured && path.isAbsolute(configured) ? configured : path.join(home, ".local", "bin")
+}
+
+/** Where the install script puts the executable. */
+export const installedBinaryPath = (home = os.homedir()) => path.join(binRoot(home), binaryName())
 
 /** This package's root: cli/ in a checkout (src/paths.ts, or the dist/cli.mjs bundle), else the installed package. */
 const packageRoot = () => path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 
 // The store's v0.0.2 never dials a relay without a long code. Install records that it saw this build;
 // the relay can then explain the mismatch even though it received no hello. A new install/hello clears it.
-export const oldStoreMarker = () => path.join(dataRoot(), "old-store-extension")
+export const oldStoreMarker = () => path.join(stateRoot(), "old-store-extension")
 
 /** Running from a source checkout (the sources are next to the bundle), not the published npm package. */
 export function fromCheckout(): boolean {
   return !compiledBinary() && fs.existsSync(path.join(packageRoot(), "src", "main.ts"))
 }
 
-/** A standalone executable (script/compile.ts), which the install script puts in ~/.browse/bin; not Node and npm. */
+/** A standalone executable (script/compile.ts), which the install script puts in ~/.local/bin; not Node and npm. */
 export const compiledBinary = (): boolean => globalThis.__OPENCODE_BROWSER_COMPILED__ === true
 
 /** The npm package that carries this executable's platform build, e.g. @opencode/browse-darwin-arm64. */
@@ -45,14 +73,10 @@ export const scriptEntry = (entry: string) => /\.[cm]?[jt]s$/.test(entry)
 /** The command that runs the CLI at `entry`: `<node> <entry>` for a script, the executable itself otherwise. */
 export const entryCommand = (entry: string, node = process.execPath): string[] => (scriptEntry(entry) ? [node, entry] : [entry])
 
-/** The executable a binary install put on PATH, as runtime/current.json records it (auto-update.ts). */
-function installedBinary(): string | undefined {
-  try {
-    const binary = (JSON.parse(fs.readFileSync(path.join(dataRoot(), "runtime", "current.json"), "utf8")) as { binary?: unknown }).binary
-    return typeof binary === "string" ? binary : undefined
-  } catch {
-    return undefined
-  }
+/** The executable a binary install put on PATH, when it is there. */
+export function installedBinary(): string | undefined {
+  const binary = installedBinaryPath()
+  return fs.existsSync(binary) ? binary : undefined
 }
 
 /** This process's own CLI entry: the executable, or the script Node runs. */
@@ -68,20 +92,19 @@ const quoted = (value: string) => (/^[\w@%+=:,./-]+$/.test(value) ? value : JSON
 /** How this CLI was installed, for the command a person types to run it (cliPrefix). */
 export type CliInstall =
   | { readonly kind: "binary"; readonly binary: string; readonly pathEnv?: string | undefined }
-  | { readonly kind: "npm"; readonly version?: string | undefined }
+  | { readonly kind: "npm"; readonly version?: string | undefined; readonly npx?: boolean | undefined }
   | { readonly kind: "checkout"; readonly bundle: string }
 
 export function cliInstall(): CliInstall {
-  // A binary install's executable on PATH (auto-update.ts current.json), not the version an MCP server runs from.
   if (compiledBinary()) return { kind: "binary", binary: installedBinary() ?? process.execPath, pathEnv: process.env.PATH }
   if (fromCheckout()) return { kind: "checkout", bundle: path.join(packageRoot(), "dist", "cli.mjs") }
-  return { kind: "npm", version: globalThis.__OPENCODE_BROWSER_VERSION__ }
+  return { kind: "npm", version: globalThis.__OPENCODE_BROWSER_VERSION__, npx: /[/\\]_npx[/\\]/.test(process.argv[1] ?? "") }
 }
 
 /**
- * The command that runs browse in a terminal: `browse` for a binary install once its folder is on PATH (install adds
- * it), else the executable's full path; `npx @opencode/browse` (`@dev` on the dev channel) for an npm install, which
- * puts nothing on PATH; and this checkout's bundle from a checkout, where the package may not be published.
+ * The command that runs browse in a terminal: `browse` for a binary or global npm install on PATH (install adds the
+ * binary's folder), the executable's full path when it isn't on PATH, `npx @opencode/browse` (`@dev` on the dev
+ * channel) for an npx run, and this checkout's bundle from a checkout, where the package may not be published.
  */
 export function cliPrefix(install: CliInstall = cliInstall()): string {
   if (install.kind === "binary") {
@@ -90,7 +113,8 @@ export function cliPrefix(install: CliInstall = cliInstall()): string {
     return onPath ? "browse" : quoted(install.binary)
   }
   if (install.kind === "checkout") return `node ${quoted(install.bundle)}`
-  return install.version?.includes("-dev.") ? "npx @opencode/browse@dev" : "npx @opencode/browse"
+  if (install.npx) return install.version?.includes("-dev.") ? "npx @opencode/browse@dev" : "npx @opencode/browse"
+  return "browse"
 }
 
 /** How to tell the user to run `browse <args>` (cliPrefix). */
@@ -145,7 +169,7 @@ export const devExtensionUrl = (extension: DevExtension, env: NodeJS.ProcessEnv 
   `${(env.OPENCODE_BROWSER_RELEASE_SERVICE || RELEASE_SERVICE).replace(/\/+$/, "")}/browse/files/${extension.sha256}/${extension.file}`
 
 /** The folder a dev install's unpacked extension lives in (loaded once with Load unpacked; updates replace its files). */
-export const devExtensionFolder = (root = dataRoot()) => path.join(root, "extension")
+export const devExtensionFolder = (root = cacheRoot()) => path.join(root, "extension")
 
 /** The store page of an item. */
 export const storeUrl = (id: string) => `https://chromewebstore.google.com/detail/${id}`

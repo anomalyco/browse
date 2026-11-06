@@ -1,6 +1,6 @@
 #!/bin/sh
-# Installs browse: downloads the browse binary for this computer into ~/.browse/bin, then hands over to
-# `browse install`, which does the rest (PATH, your agents, pairing with your browser). Served at
+# Installs browse: downloads the browse binary for this computer into ~/.local/bin ($XDG_BIN_HOME when set), then hands
+# over to `browse install`, which does the rest (PATH, your agents, pairing with your browser). Served at
 # https://opencode.ai/browse/install. Platform detection follows opencode's installer.
 set -eu
 APP=browse
@@ -85,7 +85,12 @@ while [ "$remaining" -gt 0 ]; do
     esac
 done
 
-INSTALL_DIR=$HOME/.browse/bin
+INSTALL_DIR=${XDG_BIN_HOME:-$HOME/.local/bin}
+# XDG paths must be absolute; a relative one would put browse in the current directory.
+case "$INSTALL_DIR" in
+    /*) ;;
+    *) INSTALL_DIR=$HOME/.local/bin ;;
+esac
 mkdir -p "$INSTALL_DIR"
 
 raw_os=$(uname -s)

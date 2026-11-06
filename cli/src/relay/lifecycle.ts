@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url"
 import { browserUnresponsive, extensionProtocolAdvice, extensionReconnectAlarmPeriodMs } from "../protocol.ts"
 import * as RelayClient from "./client.ts"
 import { RelayShutdownRequest, type ExtensionStatus, type RelayVersion } from "./schema.ts"
-import { npmRuntime } from "../update/auto-update.ts"
+import { compareVersions, installedRuntime, installedVersion } from "../update/auto-update.ts"
 import { cliCommand, compiledBinary, installCommand, scriptEntry } from "../paths.ts"
 import { opencodeBrowserBuildId } from "../version.ts"
 
@@ -59,11 +59,13 @@ export class ExtensionProtocolIncompatible extends Schema.TaggedError<ExtensionP
   },
 ) {}
 
-/** This process runs an installed npm version that current.json no longer names (auto-update.ts). */
+/** This process runs an installed runtime that the path now has a newer version behind (auto-update.ts). */
 function supersededRuntime(): boolean {
   try {
-    const runtime = npmRuntime()
-    return runtime !== undefined && runtime.current.version !== runtime.version
+    const runtime = installedRuntime()
+    if (!runtime) return false
+    const onDisk = installedVersion(runtime)
+    return !!onDisk && compareVersions(onDisk, runtime.version) > 0
   } catch {
     return false
   }
@@ -107,8 +109,8 @@ export const ensureRelay = Effect.fn("RelayLifecycle.ensureRelay")(function* (op
     if (!autoStart) {
       return yield* Effect.fail(new Error(`Automatic relay startup is disabled; no relay is available at ${options.relay.endpoint}`))
     }
-    // An npm install's older version, after an update moved current.json: the new version's relay is on its way, and
-    // starting this one would race it (and run a mix); wait for it instead.
+    // An installed runtime whose path now holds a newer version: the new version's relay is on its way, and starting
+    // this one would race it (and run a mix); wait for it instead.
     if (!supersededRuntime()) yield* options.start ?? startManagedRelay()
   }
   const version = yield* waitForRelayReady(options)
@@ -138,11 +140,11 @@ export const restartRelay = Effect.fn("RelayLifecycle.restartRelay")(function* (
   /** End captures and recordings and disconnect raw CDP clients rather than be refused. */
   readonly force?: boolean
   /**
-   * `update` and `rollback`: `start` launches another installed build, newer or older than this CLI's, so the checks that
-   * compare the relay's build with this CLI's (no downgrade, the replacement is this build) don't apply.
+   * `update`: `start` launches the newly installed entry, so the checks that compare the relay's build with this CLI's
+   * (no downgrade, the replacement is this build) don't apply.
    */
   readonly otherBuild?: boolean
-  /** Runs once the old relay accepted the shutdown, before it exits (switchTo moves current.json here). */
+  /** Runs once the old relay accepted the shutdown, before it exits. */
   readonly onShutdownAccepted?: Effect.Effect<void>
 }) {
   const buildId = options.buildId ?? opencodeBrowserBuildId

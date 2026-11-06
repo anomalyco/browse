@@ -272,8 +272,8 @@ browse refuses navigations to `file:`, `chrome:`, `chrome-extension:`,
 shared browser state, including browser close and cookie/cache clearing. Never
 work around those guardrails.
 
-Every execute is journaled under `<data root>/sessions/<id>/journal.jsonl`
-(`~/.local/share/opencode-browser` on macOS and Linux). Never place credentials
+Every execute is journaled under `<state root>/sessions/<id>/journal.jsonl`
+(`~/.local/state/browse` on macOS and Linux). Never place credentials
 directly in execute source.
 
 ## Network capture

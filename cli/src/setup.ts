@@ -18,6 +18,7 @@ import * as clack from "@clack/prompts"
 import {
   agentLabels,
   agentLocations,
+  agentNames,
   callingAgent,
   editAgentConfig,
   type AgentName,
@@ -67,11 +68,11 @@ import {
   fromSource,
   home,
   installWaitTimeout,
-  layout,
   log,
   manualPair,
   MCP_NAME,
   pairedOfflineMessage,
+  paths,
   rail,
   readJson,
   STORE_IDS,
@@ -193,16 +194,22 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
       : undefined)
   const plan = agentPlan(locations, flags, tty, caller, remembered)
 
-  mkdirSync(files.dir, { recursive: true })
+  mkdirSync(path.dirname(files.settings), { recursive: true, mode: 0o700 })
+  mkdirSync(files.dir, { recursive: true, mode: 0o700 })
   const { entry, version } = await installRuntime()
   log(`✓ browse ${version} installed${fromSource ? " (from source)" : ""}`)
-  const onPath = args.includes("--no-modify-path") ? undefined : addToPath()
+  const onPath = args.includes("--no-modify-path") ? undefined : path.isAbsolute(entry) && !scriptEntry(entry) ? addToPath(path.dirname(entry)) : undefined
   if (onPath) log(`✓ Added browse to your PATH (${tilde(onPath)}). Open a new terminal to use it.`)
 
   // First the entry for any agent, then the agents install can set up itself: nobody is stuck if theirs isn't found.
   const anyFound = locations.some((a) => a.installed)
   byHand = plan.picker ? !anyFound : plan.selected.length === 0
-  showManualMcp(entryCommand(entry), caller)
+  const undetected = !tty && !caller && !plan.selected.length && !flags.requested.length && !flags.yes && !flags.none
+  if (undetected) {
+    log("! Couldn't detect which agent is running browse, so no agent was configured.")
+    log(`  Agents: ${agentNames.join(", ")}. Rerun with \`${cliCommand("install --agent <name>")}\`, or add the MCP entry below by hand.`)
+  }
+  showManualMcp(entryCommand(entry, "node"), caller)
   const selected = plan.picker ? (anyFound ? await pickAgents(locations, plan.selected) : []) : plan.selected
   if (!selected) {
     process.exitCode = 130
@@ -232,7 +239,7 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
   if (removeLegacyHost()) log("✓ Removed the native messaging host of an earlier version")
 
   // An npm or checkout install runs the MCP server under this Node; a binary install's executable runs by itself.
-  const node = scriptEntry(entry) ? process.execPath : undefined
+  const node = scriptEntry(entry) ? "node" : undefined
   for (const agent of locations) {
     const label = agentLabels[agent.name]
     if (!selected.includes(agent.name)) {
@@ -436,8 +443,9 @@ export function printSetupStatus() {
   log(`Version:   ${runtime ? `${runtime.version ?? "unknown"} (${runtime.entry})` : "not installed"}`)
   log(`opencode:  ${settings?.opencode ?? findOpencode([]) ?? "not found"}`)
   log(mcpServers()[MCP_NAME] ? `MCP:       "${MCP_NAME}" configured` : "MCP:       not configured")
-  log(describeAutoUpdate(autoUpdateStatus({ layout })))
-  log(`Logs:      ${path.join(files.dir, "logs")}`)
+  log(describeAutoUpdate(autoUpdateStatus()))
+  log(`Files:     ${paths.config}, ${paths.data}, ${paths.state}, ${paths.cache}`)
+  log(`Logs:      ${path.join(paths.state, "logs")}`)
   log("")
 }
 
@@ -447,8 +455,4 @@ export async function runSetup(command: string, args: string[]) {
   if (command === "uninstall") return uninstall(args)
   if (command === "pair") return pair(args)
   if (command === "set") return set(args)
-  if (command === "rollback") {
-    const { runRollback } = await import("./update/runtime-update.ts")
-    return runRollback(args)
-  }
 }

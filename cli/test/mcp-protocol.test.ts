@@ -1,11 +1,9 @@
-import { runtimeLayout, switchVersion, versionEntry } from "../src/update/auto-update.ts"
 import * as RelayHarness from "./relay-harness.ts"
 import { afterAll, describe, expect, test } from "bun:test"
 import { spawn, spawnSync } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { pathToFileURL } from "node:url"
 import { bundleCli } from "../bundle.ts"
 import { startRelay, stopRelay } from "./relay-harness.ts"
 import { freePort } from "./support/ports.ts"
@@ -46,25 +44,23 @@ function server(command = [process.execPath, path.join(import.meta.dir, "..", "s
 
 describe("binary auto-update", () => {
   test("an installed binary switches MCP builds between tool calls on the same connection", async () => {
-    const layout = runtimeLayout(home)
     const versions = ["1.0.0", "1.0.1"] as const
     // Build under a throwaway package root so neither the checkout's version nor its dist-bin is touched.
     const cli = path.join(home, "cli")
     fs.cpSync(path.join(import.meta.dir, "../script"), path.join(cli, "script"), { recursive: true })
     for (const name of ["node_modules", "src", "tsconfig.json"]) fs.symlinkSync(path.join(import.meta.dir, "..", name), path.join(cli, name))
     const target = `${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`
+    const binary = path.join(home, "bin", process.platform === "win32" ? "browse.exe" : "browse")
+    const staged = `${binary}.next`
+    // The install keeps one stable executable path; an update replaces the file in place. Build 1.0.1 aside for now.
     for (const version of versions) {
-      const outfile = versionEntry(layout, version, true)
-      fs.mkdirSync(path.dirname(outfile), { recursive: true })
       fs.writeFileSync(path.join(cli, "package.json"), JSON.stringify({ version }))
       await Bun.$`${process.execPath} ${path.join(cli, "script/compile.ts")} ${target}`.quiet()
-      fs.renameSync(path.join(cli, "dist-bin", `browse-${target}`, "bin", path.basename(outfile)), outfile)
+      const built = path.join(cli, "dist-bin", `browse-${target}`, "bin", path.basename(binary))
+      fs.mkdirSync(path.dirname(binary), { recursive: true })
+      fs.copyFileSync(built, version === versions[0] ? binary : staged)
+      fs.chmodSync(version === versions[0] ? binary : staged, 0o755)
     }
-    const binary = path.join(home, path.basename(versionEntry(layout, versions[0], true)))
-    // An earlier npm install left this stable entry in an agent's config. The new version contains only a binary.
-    fs.mkdirSync(path.dirname(layout.shim), { recursive: true })
-    fs.writeFileSync(layout.shim, `await import(${JSON.stringify(pathToFileURL(versionEntry(layout, versions[0], false)).href)})`)
-    switchVersion(layout, versions[0], undefined, binary)
     const port = await RelayHarness.freePort()
     const env = { ...process.env, HOME: home, OPENCODE_BROWSER_HOME: home, OPENCODE_BROWSER_PORT: String(port), OPENCODE_BROWSER_MANAGED_RELAY: "1", OPENCODE_BROWSER_UPDATE_CHECK: "0" }
     const relay = spawn(binary, ["serve"], { env, stdio: "ignore" })
@@ -76,14 +72,6 @@ describe("binary auto-update", () => {
       for (let n = 0; n < 100 && !await relayVersion().catch(() => false); n++) await Bun.sleep(50)
       extension = new RelayHarness.FakeExtension(home, port)
       expect(await extension.pair()).toBe(true)
-      const shimVersion = spawnSync("node", [layout.shim, "--version"], { env, encoding: "utf8", timeout: 5000 })
-      expect(shimVersion.stdout.trim(), shimVersion.stderr).toBe(versions[0])
-      const legacy = server(["node", layout.shim], port)
-      try {
-        await legacy.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "legacy", version: "0" } })
-        legacy.notify("notifications/initialized")
-        expect((await legacy.request("tools/list")).result?.tools).toHaveLength(18)
-      } finally { legacy.close() }
       await mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } })
       mcp.notify("notifications/initialized")
       // A warm relay may still be populating tool descriptions on older builds.
@@ -94,6 +82,8 @@ describe("binary auto-update", () => {
       const create = (id: string) => mcp.request("tools/call", { name: "session_new", arguments: { id } })
       const first = await create("before-update")
       expect(first.result?.isError, JSON.stringify(first)).toBe(false)
+      // The installer replaces the executable by rename, then the relay is restarted from the same path.
+      fs.renameSync(staged, binary)
       const update = await Bun.$`${binary} runtime-switch ${versions[1]}`.env(env).quiet().nothrow()
       expect(update.exitCode, update.text()).toBe(0)
       const running = await relayVersion()

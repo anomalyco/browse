@@ -1,5 +1,5 @@
 import { defaultPort } from "../relay/helpers.ts"
-import { dataRoot } from "../paths.ts"
+import { stateRoot } from "../paths.ts"
 import { Context, Effect, FileSystem, Layer, Option, Path, Predicate, Schema } from "effect"
 import { endpointForPort, portConfig } from "../relay/client.ts"
 
@@ -40,7 +40,7 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("opencode-browser-cli/SessionStore") {}
 
 const defaultFilePath = (): string => {
-  return `${dataRoot()}/session.json`
+  return `${stateRoot()}/session.json`
 }
 
 export const make = Effect.fn("SessionStore.make")(function* (options?: {

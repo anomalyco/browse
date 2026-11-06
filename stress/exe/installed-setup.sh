@@ -23,15 +23,18 @@ case "$kind" in
     else
       curl -fsSL https://opencode.ai/browse/install | bash -s -- --no-wait
     fi
-    "$home/.browse/bin/browse" --version
+    "$home/.local/bin/browse" --version
     ;;
   npm)
     home="$root/home-npm"
     mkdir -p "$home"
     export HOME="$home"
+    export XDG_BIN_HOME="$home/.local/bin"
+    # A throwaway global prefix, so `npm install -g` in installRuntime stays inside this HOME.
+    export npm_config_prefix="$home/.local"
     cd "$home"
     npx -y @opencode/browse@latest install --no-wait
-    ls "$home/.local/share/opencode-browser"
+    ls "$home/.local/share/browse"
     ;;
   extensions)
     # From a Mac: fetch the release zips, add the store key (from the store's CRX header) and rsync ~/u/ext-* here.

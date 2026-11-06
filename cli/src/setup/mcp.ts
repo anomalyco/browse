@@ -3,15 +3,7 @@ import { createHash } from "node:crypto"
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
-import {
-  compareVersions,
-  installVersion,
-  pruneVersions,
-  readCurrent,
-  switchVersion,
-  updateState,
-  versionEntry,
-} from "../update/auto-update.ts"
+import { runCommand, installedVersion } from "../update/auto-update.ts"
 import { cliCommand, compiledBinary, entryCommand, scriptEntry } from "../paths.ts"
 import { opencodeBrowserVersion } from "../version.ts"
 import { installBinaryRuntime } from "./binary.ts"
@@ -21,7 +13,6 @@ import {
   fail,
   files,
   fromSource,
-  layout,
   LEGACY_HOST_NAME,
   LEGACY_MCP_NAME,
   LEGACY_REGISTRY_ROOTS,
@@ -34,6 +25,9 @@ import {
   windows,
   type Settings,
 } from "./environment.ts"
+
+/** Where earlier versions kept the npm shim agents ran; install adopts and removes those entries. */
+export const legacyShimPath = () => path.join(files.dir, "bin", "opencode-browser.mjs")
 
 export type Servers = Record<
   string,
@@ -118,14 +112,13 @@ export function mcpServers(file = configFile()) {
 
 /**
  * A browse server install wrote: `<node> <entry> mcp` or `<executable> mcp`, where the entry is the one install recorded,
- * the npm shim, a checkout's bundle, or a binary install's executable (this one, or the one current.json names).
+ * a checkout's bundle, or a binary install's executable on PATH.
  */
 function ownedMcp(server: Servers[string] | undefined, entry: string | undefined) {
   const command = server?.command
   if (!Array.isArray(command) || (command.length !== 2 && command.length !== 3) || command.at(-1) !== "mcp") return false
   const target = command.at(-2)
-  const binary = compiledBinary() ? [process.execPath, readCurrent(layout)?.binary] : []
-  return [entry, layout.shim, path.join(packageRoot, "dist/cli.mjs"), ...binary].some((e) => e && target === e)
+  return [entry, legacyShimPath(), path.join(packageRoot, "dist/cli.mjs")].some((e) => e && target === e)
 }
 
 /**
@@ -148,12 +141,13 @@ export function configureMcp(file: string, entry: string, previousEntry?: string
   const existing = mcpServers(file)[MCP_NAME]
   if (existing && !ownedMcp(existing, previousEntry)) return undefined
   const renamed = removeMcp(LEGACY_MCP_NAME, previousEntry, file)
-  // The shim of an npm install, and a binary install's executable, never move and swap the server themselves after an
-  // update, so their entry stays the same.
+  // An installed binary or npm package supervises its server and swaps it after an update, so its entry stays the same.
+  // A checkout has no supervisor: its fingerprint changes the config, making the agent restart the server.
+  const stable = !scriptEntry(entry) || !fromSource
   const server = mergedMcpServer(
     existing,
-    [...entryCommand(entry), "mcp"],
-    entry === layout.shim || !scriptEntry(entry) ? "auto-update" : fingerprint(entry),
+    [...entryCommand(entry, "node"), "mcp"],
+    stable ? "auto-update" : fingerprint(entry),
   )
   if (existing && JSON.stringify(existing) === JSON.stringify(server)) return `"${MCP_NAME}" is up to date`
   const text = readFileOr(file, "{}")
@@ -198,11 +192,17 @@ export function removeLegacyHost() {
   return leftovers.length + keys.length > 0
 }
 
+/** npm's global package root (`npm root -g`), where a global install keeps the package agents run. */
+async function npmGlobalRoot(): Promise<string | undefined> {
+  const result = await runCommand("npm", ["root", "-g"], { timeoutMs: 20_000 })
+  const root = result.status === 0 ? result.stdout.trim() : ""
+  return root && path.isAbsolute(root) ? root : undefined
+}
+
 /**
- * Installs this exact version into the data root (runtime/versions/<version>, auto-update.ts), points runtime/current.json
- * at it and writes the stable shim, so the MCP server keeps working after the npx cache is cleared and later updates
- * never change opencode's config. Returns the shim and the version. From source (development), runs in place.
- * OPENCODE_BROWSER_PACKAGE installs a specific spec instead, for example a local tarball.
+ * Installs this version where agents can keep running it: the executable in ~/.local/bin for a binary install, a global
+ * npm package for an npm one, or the checkout's bundle from source. There is no private runtime or shim any more:
+ * updates replace that same path, and the installer owns PATH and agent entries.
  */
 export async function installRuntime(): Promise<{ entry: string; version: string }> {
   if (compiledBinary()) return installBinaryRuntime()
@@ -214,42 +214,26 @@ export async function installRuntime(): Promise<{ entry: string; version: string
     return { entry: bundle, version: opencodeBrowserVersion }
   }
   const spec = process.env.OPENCODE_BROWSER_PACKAGE
-  const before = readCurrent(layout)
-  // Already installed (install run again): keep it. Reinstalling would replace the files a running relay still loads.
-  const existing = versionEntry(layout, opencodeBrowserVersion)
-  const reuse =
-    !spec &&
-    existsSync(existing) &&
-    readFileSync(existing).equals(readFileSync(path.join(packageRoot, "dist", "cli.mjs"))) &&
-    spawnSync(process.execPath, [existing, "--version"], { encoding: "utf8", timeout: 30_000 }).stdout?.trim() ===
-      opencodeBrowserVersion
-  let installed: string
-  try {
-    installed = reuse
-      ? existing
-      : await installVersion({
-          layout,
-          version: opencodeBrowserVersion,
-          ...(spec ? { spec } : { runningPackage: packageRoot }),
-        })
-  } catch (error) {
-    fail(`Could not install ${spec ?? `${PACKAGE}@${opencodeBrowserVersion}`}: ${(error as Error).message}`)
+  const globalRoot = await npmGlobalRoot()
+  const at = (...parts: string[]) => (globalRoot ? path.join(globalRoot, ...parts) : undefined)
+  const globalPackage = at("@opencode", "browse")
+  const alreadyGlobal = !!(globalPackage && path.resolve(packageRoot) === path.resolve(globalPackage))
+  if (!alreadyGlobal || spec) {
+    // npx's cache is evictable, so an npm install becomes a global one: agents then run a stable path, and updates are
+    // `npm install -g` (auto-update.ts). The channel matches this build.
+    const target = spec ?? `${PACKAGE}@${opencodeBrowserVersion.includes("-dev.") ? "dev" : "latest"}`
+    const installed = await runCommand("npm", ["install", "-g", target], { timeoutMs: 10 * 60_000 })
+    if (installed.status !== 0)
+      fail(`Could not install ${target} globally: ${(installed.stderr || installed.stdout).trim().split("\n").slice(-3).join(" ")}`)
   }
-  const version = path.relative(layout.versions, installed).split(path.sep)[0]!
-  // Running install again for the same version keeps the version it replaced for rollback.
-  const previous = before?.version === version ? before.previous : before?.version
-  switchVersion(layout, version, previous)
-  // Installing by hand settles any update the relay was waiting to switch to, and un-skips this version.
-  updateState(layout, ({ pending, skipped, ...state }) => ({
-    ...state,
-    ...(pending && compareVersions(pending, version) > 0 ? { pending } : {}),
-    ...(skipped && skipped !== version ? { skipped } : {}),
-  }))
-  pruneVersions(layout, [version, previous])
-  // Earlier versions installed one copy straight into runtime/; the shim replaces it.
-  for (const legacy of ["node_modules", "package.json", "package-lock.json"])
-    rmSync(path.join(files.runtime, legacy), { recursive: true, force: true })
-  return { entry: layout.shim, version }
+  const root = await npmGlobalRoot()
+  if (!root) fail("Could not find npm's global package folder (`npm root -g`); is npm on PATH?")
+  const entry = path.join(root, "@opencode", "browse", "dist", "cli.mjs")
+  if (!existsSync(entry)) fail(`npm didn't install ${PACKAGE} in ${root}; run \`npm install -g ${PACKAGE}\` and try again.`)
+  const version = readJson<{ version?: string }>(path.join(root, "@opencode", "browse", "package.json"))?.version ?? opencodeBrowserVersion
+  // Agents run `browse` from PATH, not an absolute node and package path: nvm/fnm change node between sessions, and the
+  // global npm bin folder is on PATH whenever npm is. The supervisor and npm keep it current.
+  return { entry: "browse", version }
 }
 
 /**
@@ -261,18 +245,19 @@ export function installedRuntime(settings: Settings | undefined, server: Servers
     ? server.command.filter((part): part is string => typeof part === "string")
     : []
   const entry = settings?.entry ?? command.find((part) => /cli\.m?js$/.test(part))
-  if (!entry || (!settings?.version && !existsSync(entry))) return undefined
+  if (!entry || (entry !== "browse" && !settings?.version && !existsSync(entry))) return undefined
   // A bundle with the sources beside it is a checkout's build: cli/dist/cli.mjs next to cli/src/main.ts.
   const packageDir = path.dirname(path.dirname(entry))
   const source = scriptEntry(entry) && existsSync(path.join(packageDir, "src", "main.ts"))
-  // The shim, and a binary install's executable, run whatever runtime/current.json names, which auto-update moves.
-  const current = readCurrent(layout)
-  const version =
-    (entry === layout.shim || (current?.binary !== undefined && entry === current.binary) ? current?.version : undefined) ??
-    settings?.version ??
-    (path.resolve(entry) === path.join(packageRoot, "dist", "cli.mjs")
-      ? opencodeBrowserVersion
-      : readJson<{ version?: string }>(path.join(packageDir, "package.json"))?.version)
+  // The installed path reports its own version after an update, even when settings.json still has the old one.
+  const onDisk = entry === "browse"
+    ? spawnSync("browse", ["--version"], { encoding: "utf8", timeout: 15_000 }).stdout?.trim() || undefined
+    : existsSync(entry)
+      ? installedVersion({ kind: scriptEntry(entry) ? "npm" : "binary", entry, version: settings?.version ?? opencodeBrowserVersion })
+      : undefined
+  const version = onDisk ?? settings?.version ?? (path.resolve(entry) === path.join(packageRoot, "dist", "cli.mjs")
+    ? opencodeBrowserVersion
+    : readJson<{ version?: string }>(path.join(packageDir, "package.json"))?.version)
   return { entry, version, source }
 }
 

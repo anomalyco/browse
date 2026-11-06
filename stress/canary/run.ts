@@ -5,7 +5,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { parseArgs } from "node:util"
-import { chromeDebugPort, dataDir, fixturePort, relayJson, relayPort, sleep } from "../lib/env.ts"
+import { binaryPath, cacheDir, chromeDebugPort, dataDir, fixturePort, relayJson, relayPort, sleep } from "../lib/env.ts"
 import { BrowserCdp } from "../lib/cdp.ts"
 import { Sampler } from "../lib/metrics.ts"
 import { npxSmoke } from "./npx.ts"
@@ -13,8 +13,8 @@ import { command, readJson, record, root, saveJson, type Evidence, type Metrics,
 
 const { values } = parseArgs({ options: { once: { type: "boolean" }, "soak-minutes": { type: "string" } } })
 const once = !!values.once, short = Number(values["soak-minutes"] ?? 2), minute = 60_000
-const binary = path.join(os.homedir(), ".browse/bin/browse"), stress = path.resolve(import.meta.dirname, "..")
-assert(process.env.BROWSE_STRESS_BINARY === binary && dataDir === path.join(os.homedir(), ".local/share/opencode-browser"), "requires isolated canary install and data HOME")
+const binary = binaryPath, stress = path.resolve(import.meta.dirname, "..")
+assert(process.env.BROWSE_STRESS_BINARY === binary && dataDir === path.join(os.homedir(), ".local/share/browse"), "requires isolated canary install and data HOME")
 assert([relayPort, chromeDebugPort, fixturePort].every(p => Number.isInteger(p) && p >= 19700 && p <= 19799) && new Set([relayPort, chromeDebugPort, fixturePort]).size === 3, "dedicated canary ports required")
 assert(once ? fs.realpathSync(os.homedir()).startsWith(path.join(fs.realpathSync(os.tmpdir()), "opencode/browse-canary.")) : os.userInfo().username === "canary", "--once requires a temp opencode/browse-canary.* HOME; service requires user canary")
 assert(!once || (Number.isFinite(short) && short > 0 && short <= 30))
@@ -54,9 +54,9 @@ async function snapshot() {
   const ext = await relayJson("/extension/status", undefined, 3000).catch(() => undefined)
   let matched = false
   try {
-    const zip = readJson<{ version: string; build: string }>(path.join(dataDir, "extension.json"))
-    const current = readJson<{ version: string; channel: string }>(path.join(dataDir, "runtime/current.json"))
-    matched = !!zip.build && zip.version === v?.version && current.version === zip.version && current.channel === "dev" && ext?.connected && zip.build === ext.build
+    const zip = readJson<{ version: string; build: string }>(path.join(cacheDir, "extension.json"))
+    const installed = spawnSync(binary, ["--version"], { encoding: "utf8", timeout: 15_000 }).stdout?.trim()
+    matched = !!zip.build && zip.version === v?.version && installed === zip.version && installed.includes("-dev.") && ext?.connected && zip.build === ext.build
   } catch { /* files may not exist during a failed update */ }
   return { version: v?.version, connected: ext?.connected === true, matched }
 }
@@ -116,7 +116,7 @@ async function health(ok: boolean, since: number) {
       if (listener.error || (listener.status !== 0 && listener.status !== 1)) throw new Error("cannot identify the canary listener")
       if (listener.stdout.trim()) {
         const pid = Number(listener.stdout.trim()), exe = fs.readlinkSync(`/proc/${pid}/exe`).replace(/ \(deleted\)$/, "")
-        assert(pid > 1 && (exe === binary || (exe.startsWith(`${dataDir}/runtime/versions/`) && path.basename(exe) === "browse")), "refusing to kill an unknown listener")
+        assert(pid > 1 && exe === fs.realpathSync(binary), "refusing to kill an unknown listener")
         process.kill(pid, "SIGKILL"); fs.appendFileSync(path.join(dir, "run.log"), `killed canary relay ${pid}\n`)
       }
       const relay = await command(dir, [binary, "session", "list", "--json"], 2)

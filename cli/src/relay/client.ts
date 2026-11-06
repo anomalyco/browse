@@ -361,7 +361,7 @@ const layer: Layer.Layer<Service, RelayConfigInvalid, HttpClient.HttpClient> = L
 export const layerFetch: Layer.Layer<Service, RelayConfigInvalid> = layer.pipe(Layer.provide(NodeHttpClient.layerNodeHttp))
 
 /**
- * The process the relay watches for this MCP server: the auto-update shim's supervisor when it runs one (it outlives
+ * The process the relay watches for this MCP server: the MCP supervisor when it runs one (it outlives
  * the servers it swaps on an update, so the session and its tabs survive), else this process.
  */
 function mcpClientPid(): number {

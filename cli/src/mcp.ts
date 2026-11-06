@@ -53,7 +53,7 @@ Leave the browser tidy: call \`tabs_cleanup\` (\`idleMinutes: 0\` for every elig
 
 \`browse doctor\` and \`status\` explain setup and connection problems. \`browse skill\` prints the longer agent reference.`
 
-/** The implicit session the shim's MCP supervisor picked (auto-update.ts shimSource), when valid. */
+/** The implicit session the MCP supervisor picked (mcp/supervisor.ts), when valid. */
 function shimSession(): string | undefined {
   const value = process.env.OPENCODE_BROWSER_MCP_SESSION
   return value && /^mcp-[0-9a-f]{8}$/.test(value) ? value : undefined
@@ -64,7 +64,7 @@ const registerTools = Effect.gen(function* () {
   const relay = yield* RelayClient.Service
   const configuredSession = Option.getOrUndefined(yield* Config.option(Config.String("OPENCODE_BROWSER_SESSION")))
   const currentSession: CurrentSession = {
-    // Under the auto-update shim, every server it starts for one opencode session keeps the same implicit session.
+    // Under the MCP supervisor, every server it starts for one opencode session keeps the same implicit session.
     id: configuredSession || shimSession() || `mcp-${crypto.randomUUID().slice(0, 8)}`,
     established: Boolean(configuredSession),
   }

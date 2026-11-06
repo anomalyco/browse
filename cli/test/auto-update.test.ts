@@ -1,86 +1,44 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { spawnSync } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { channelOf, compareVersions, createAutoUpdater, installVersion, pruneVersions, readCurrent, readState, runtimeLayout, switchVersion, tarFile, updateState, validatePending, versionEntry, writeCurrent, type Layout } from "../src/update/auto-update.ts"
-import { managedRelayLaunch } from "../src/relay/lifecycle.ts"
+import {
+  autoUpdateStatus,
+  channelOf,
+  compareVersions,
+  createAutoUpdater,
+  describeAutoUpdate,
+  installedVersion,
+  installKind,
+  readState,
+  runInstaller,
+  updateState,
+  type Runtime,
+} from "../src/update/auto-update.ts"
 
 const roots: string[] = []
 afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true })
 })
 
-function layoutWith(versions: string[]): Layout {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "browse-autoupdate-"))
-  roots.push(root)
-  const layout = runtimeLayout(root)
-  for (const version of versions) {
-    fs.mkdirSync(path.dirname(versionEntry(layout, version)), { recursive: true })
-    fs.writeFileSync(versionEntry(layout, version), "")
-  }
-  return layout
+function fakeHome() {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-autoupdate-"))
+  roots.push(home)
+  fs.mkdirSync(path.join(home, ".local/bin"), { recursive: true })
+  return home
 }
 
-const installed = (layout: Layout) => fs.readdirSync(layout.versions).sort()
+/** A shell executable that reports `version` for --version. */
+function executable(file: string, version: string) {
+  fs.writeFileSync(file, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo ${version}; exit 0; fi\nexit 0\n`, { mode: 0o755 })
+  fs.chmodSync(file, 0o755)
+}
 
-test("install keeps the running package and its dependencies when the npx cache disappears", async () => {
-  const layout = layoutWith([])
-  const cache = path.join(roots.at(-1)!, "cache with spaces", "node_modules")
-  const source = path.join(cache, "@opencode/browse")
-  fs.mkdirSync(path.join(source, "dist"), { recursive: true })
-  fs.writeFileSync(path.join(source, "package.json"), JSON.stringify({ version: "1.2.3", dependencies: { fixture: "1" } }))
-  fs.writeFileSync(path.join(source, "dist/cli.mjs"), 'import version from "fixture"; console.log(version)')
-  fs.mkdirSync(path.join(cache, "fixture"))
-  fs.writeFileSync(path.join(cache, "fixture/package.json"), JSON.stringify({ main: "index.cjs" }))
-  fs.writeFileSync(path.join(cache, "fixture/index.cjs"), 'module.exports = "1.2.3"')
-  const entry = await installVersion({ layout, version: "1.2.3", runningPackage: source })
-  fs.rmSync(cache, { recursive: true })
-  expect((await Bun.$`node ${entry} --version`.text()).trim()).toBe("1.2.3")
-})
-
-describe("a binary install", () => {
-  test("reads the executable out of its platform package's tarball", () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "browse-tarball-"))
-    roots.push(root)
-    fs.mkdirSync(path.join(root, "package", "bin"), { recursive: true })
-    fs.writeFileSync(path.join(root, "package", "package.json"), "{}")
-    fs.writeFileSync(path.join(root, "package", "bin", "browse"), "executable bytes")
-    const made = spawnSync("tar", ["czf", path.join(root, "pkg.tgz"), "-C", root, "package"])
-    expect(made.status).toBe(0)
-    const tgz = fs.readFileSync(path.join(root, "pkg.tgz"))
-    expect(tarFile(tgz, "package/bin/browse")?.toString()).toBe("executable bytes")
-    expect(tarFile(tgz, "package/bin/browse.exe")).toBeUndefined()
-  })
-
-  test("switching puts the version's executable on PATH by rename, and back for rollback", () => {
-    const layout = layoutWith([])
-    const binary = path.join(layout.root, "bin", "browse")
-    fs.mkdirSync(path.dirname(binary), { recursive: true })
-    fs.writeFileSync(binary, "old")
-    for (const version of ["1.0.0", "1.0.1"]) {
-      fs.mkdirSync(path.dirname(versionEntry(layout, version, true)), { recursive: true })
-      fs.writeFileSync(versionEntry(layout, version, true), version)
-    }
-    // A process still running the old executable keeps its file.
-    const running = fs.openSync(binary, "r")
-    switchVersion(layout, "1.0.1", "1.0.0", binary)
-    expect(fs.readFileSync(binary, "utf8")).toBe("1.0.1")
-    expect(fs.readFileSync(running, "utf8")).toBe("old")
-    fs.closeSync(running)
-    expect(readCurrent(layout)).toMatchObject({ version: "1.0.1", previous: "1.0.0", binary })
-    // No npm shim for a binary install.
-    expect(fs.existsSync(layout.shim)).toBe(false)
-    switchVersion(layout, "1.0.0", "1.0.1", binary)
-    expect(fs.readFileSync(binary, "utf8")).toBe("1.0.0")
-    expect(fs.readdirSync(path.dirname(binary))).toEqual(["browse"])
-  })
-
-  test("the relay starts from an executable entry by itself", () => {
-    expect(managedRelayLaunch("/home/u/.browse/bin/browse", "/usr/bin/node", ["--flag"])).toEqual({ executable: "/home/u/.browse/bin/browse", args: ["serve"] })
-    expect(managedRelayLaunch("/pkg/dist/cli.mjs", "/usr/bin/node", [])).toEqual({ executable: "/usr/bin/node", args: ["/pkg/dist/cli.mjs", "serve"] })
-  })
-})
+function runtimeAt(home: string, version: string): Runtime {
+  const entry = path.join(home, ".local/bin", "browse")
+  executable(entry, version)
+  return { kind: "binary", entry, version }
+}
 
 describe("channels and versions", () => {
   test("a version's channel follows its prerelease", () => {
@@ -99,122 +57,99 @@ describe("channels and versions", () => {
   })
 })
 
-describe("pruning", () => {
-  test("never removes the current, previous or pending version", () => {
-    const layout = layoutWith(["0.0.1", "0.0.2", "0.0.3", "0.0.4", "0.0.5"])
-    writeCurrent(layout, { version: "0.0.3", previous: "0.0.2", channel: "latest" })
-    updateState(layout, (state) => ({ ...state, pending: "0.0.5" }))
-    pruneVersions(layout)
-    expect(installed(layout)).toEqual(["0.0.2", "0.0.3", "0.0.5"])
-  })
-
-  test("keeps another process's install in progress, removes an abandoned one", () => {
-    const layout = layoutWith(["0.0.1"])
-    writeCurrent(layout, { version: "0.0.1", channel: "latest" })
-    const live = `.install-${process.pid}-1`
-    // A pid that isn't running: past the usual pid range.
-    const dead = `.install-${2 ** 22 + 12345}-1`
-    for (const name of [live, dead]) fs.mkdirSync(path.join(layout.versions, name))
-    pruneVersions(layout)
-    expect(installed(layout)).toEqual([live, "0.0.1"].sort())
+describe("where this process runs from", () => {
+  test("npx's cache is recognized, and a checkout is not an installed runtime", () => {
+    expect(installKind("/home/u/.npm/_npx/abc/node_modules/@opencode/browse/dist/cli.mjs", false)).toBe("npx")
+    expect(installKind("/home/u/.local/share/pnpm/global/5/node_modules/@opencode/browse/dist/cli.mjs", false)).toBe("npm")
   })
 })
 
-describe("a pending version whose directory is gone", () => {
-  test("is cleared", () => {
-    const layout = layoutWith(["0.0.1"])
-    updateState(layout, (state) => ({ ...state, pending: "0.0.2" }))
-    expect(validatePending(layout).pending).toBeUndefined()
-    expect(readState(layout).pending).toBeUndefined()
+describe("updating reruns the installer", () => {
+  test("a binary install runs the install script, which replaces the executable in place", async () => {
+    const home = fakeHome()
+    const runtime = runtimeAt(home, "0.0.1")
+    // The fake install script is a local stand-in for https://opencode.ai/browse/install: it replaces the binary and
+    // ignores the version arguments it is given.
+    const installer = path.join(home, "install")
+    fs.writeFileSync(installer, `#!/bin/sh\ncat > "$HOME/.local/bin/browse" <<'EOF'\n#!/bin/sh\nif [ "$1" = "--version" ]; then echo 0.0.2; exit 0; fi\nexit 0\nEOF\nchmod 755 "$HOME/.local/bin/browse"\n`)
+    const installed = await runInstaller({
+      runtime,
+      version: "0.0.2",
+      env: { ...process.env, HOME: home, OPENCODE_BROWSER_INSTALL_SCRIPT: installer },
+    })
+    expect(installed).toBe("0.0.2")
+    expect(installedVersion(runtime)).toBe("0.0.2")
+    expect(fs.readdirSync(path.join(home, ".local/bin"))).toEqual(["browse"])
   })
 
-  test("is installed again instead of failing to switch on every tick", async () => {
-    const layout = layoutWith(["0.0.1"])
-    writeCurrent(layout, { version: "0.0.1", channel: "latest" })
-    updateState(layout, (state) => ({ ...state, checkedAt: Date.now(), latest: "0.0.2", integrity: "sha512-x", pending: "0.0.2" }))
-    const spawned: string[][] = []
-    const events: string[] = []
-    const updater = createAutoUpdater({
-      runtime: { layout, version: "0.0.1", current: readCurrent(layout)! },
-      isIdle: () => true,
-      log: (event) => events.push(event),
-      spawnChild: (args) => (spawned.push([...args]), 4242),
+  test("an npm install runs npm install -g at the requested version", async () => {
+    const calls: string[][] = []
+    const installed = await runInstaller({
+      runtime: { kind: "npm", entry: "/prefix/node_modules/@opencode/browse/dist/cli.mjs", version: "1.0.0" },
+      version: "1.0.1",
+      run: async (command, args) => {
+        calls.push([command, ...args])
+        return { status: 0, stdout: "", stderr: "" }
+      },
       env: {},
     })
-    await updater.tick()
-    expect(spawned).toEqual([["runtime-install", "0.0.2", "--integrity", "sha512-x"]])
-    expect(readState(layout).installing).toMatchObject({ version: "0.0.2", pid: 4242 })
-    expect(events).not.toContain("autoupdate.error")
+    expect(calls).toEqual([["npm", "install", "-g", "@opencode/browse@1.0.1"]])
+    // The stub installed nothing, so the caller keeps the version it asked for.
+    expect(installed).toBe("1.0.1")
+  })
+
+  test("npx is a no-op: npx resolves the package itself", async () => {
+    let ran = false
+    expect(await runInstaller({ runtime: { kind: "npx", entry: "/tmp/_npx/x/cli.mjs", version: "1.0.0" }, version: "2.0.0", run: async () => ((ran = true), { status: 0, stdout: "", stderr: "" }) })).toBe("1.0.0")
+    expect(ran).toBe(false)
   })
 })
 
 describe("the relay's updater", () => {
-  const setup = (state: Parameters<typeof updateState>[1], idle = true) => {
-    const layout = layoutWith(["0.0.1", "0.0.2"])
-    writeCurrent(layout, { version: "0.0.1", channel: "latest" })
-    updateState(layout, (rest) => state({ ...rest, checkedAt: Date.now(), latest: "0.0.2", integrity: "sha512-x" }))
-    const spawned: string[][] = []
-    const events: string[] = []
-    const updater = createAutoUpdater({
-      runtime: { layout, version: "0.0.1", current: readCurrent(layout)! },
-      isIdle: () => idle,
-      log: (event) => events.push(event),
-      spawnChild: (args) => (spawned.push([...args]), process.pid),
-      env: {},
-    })
-    return { layout, spawned, events, updater }
-  }
-
-  test("waits for an installer that is still running", async () => {
-    const { spawned, updater } = setup((state) => ({ ...state, installing: { version: "0.0.2", pid: process.pid, startedAt: Date.now() } }))
-    await updater.tick()
-    expect(spawned).toEqual([])
+  test("installs with self-update in its own process, then restarts the relay once idle", async () => {
+    const home = fakeHome()
+    process.env.OPENCODE_BROWSER_HOME = home
+    try {
+      const runtime = runtimeAt(home, "0.0.1")
+      updateState(() => ({ checkedAt: Date.now(), latest: "0.0.2" }))
+      const spawned: string[][] = []
+      const callbacks: ((code: number | null) => void)[] = []
+      const updater = createAutoUpdater({
+        runtime,
+        isIdle: () => true,
+        log: () => {},
+        spawnChild: (args, onExit) => (spawned.push([...args]), callbacks.push(onExit), 2 ** 22 + 12345),
+        env: {},
+      })
+      await updater.tick()
+      expect(spawned).toEqual([["self-update", "0.0.2", "--channel", "latest"]])
+      expect(readState().installing).toMatchObject({ version: "0.0.2" })
+      // The installer child finishes and replaces the executable; the next tick restarts the relay from it.
+      executable(runtime.entry, "0.0.2")
+      callbacks[0]!(0)
+      await Bun.sleep(0)
+      await updater.tick()
+      expect(spawned[1]).toEqual(["runtime-switch", "0.0.2"])
+    } finally {
+      delete process.env.OPENCODE_BROWSER_HOME
+    }
   })
+})
 
-  test.each([[1, 15], [2, 60], [3, 240], [4, 240]])("retries a download after failure %i at %i minutes, not at the next daily version check", async (attempts, minutes) => {
-    const failure = { message: "the registry answered 404", version: "0.0.2", at: new Date(Date.now() - (minutes - 1) * 60_000).toISOString(), attempts }
-    const { layout, spawned, updater } = setup((state) => ({ ...state, lastError: failure }))
-    await updater.tick()
-    expect(spawned).toEqual([])
-    updateState(layout, (state) => ({ ...state, lastError: { ...failure, at: new Date(Date.now() - minutes * 60_000).toISOString() } }))
-    await updater.tick()
-    expect(spawned).toEqual([["runtime-install", "0.0.2", "--integrity", "sha512-x"]])
-  })
-
-  test("a version that failed verification is still held for a day", async () => {
-    const failure = { message: "wrong integrity", version: "0.0.2", at: new Date(Date.now() - 5 * 3600_000).toISOString(), verification: true }
-    const { spawned, updater } = setup((state) => ({ ...state, lastError: failure }))
-    await updater.tick()
-    expect(spawned).toEqual([])
-  })
-
-  test("an installer that died after installing counts as installed, even if its state write was lost", async () => {
-    const { layout, updater } = setup((state) => ({ ...state, installing: { version: "0.0.2", pid: 2 ** 22 + 12345, startedAt: Date.now() } }))
-    await updater.tick()
-    expect(readState(layout).installing).toBeUndefined()
-    expect(readState(layout).lastError).toBeUndefined()
-    expect(readState(layout).pending).toBe("0.0.2")
-  })
-
-  test("records an installer that died without finishing", async () => {
-    const { layout, events, updater } = setup((state) => ({ ...state, installing: { version: "0.0.2", pid: 2 ** 22 + 12345, startedAt: Date.now() } }))
-    fs.rmSync(path.join(layout.versions, "0.0.2"), { recursive: true })
-    await updater.tick()
-    expect(events).toContain("autoupdate.installer_gone")
-    expect(readState(layout).installing).toBeUndefined()
-    expect(readState(layout).lastError?.version).toBe("0.0.2")
-  })
-
-  test("switches through a runtime-switch child, never by moving current.json itself", async () => {
-    const { layout, spawned, updater } = setup((state) => ({ ...state, pending: "0.0.2" }))
-    await updater.tick()
-    expect(spawned).toEqual([["runtime-switch", "0.0.2"]])
-    expect(readCurrent(layout)?.version).toBe("0.0.1")
-  })
-
-  test("doesn't switch while an agent uses the browser", async () => {
-    const { spawned, updater } = setup((state) => ({ ...state, pending: "0.0.2" }), false)
-    await updater.tick()
-    expect(spawned).toEqual([])
+describe("status", () => {
+  test("says how each install updates", () => {
+    const home = fakeHome()
+    process.env.OPENCODE_BROWSER_HOME = home
+    try {
+      const runtime = runtimeAt(home, "0.0.1")
+      updateState(() => ({ checkedAt: Date.now(), latest: "0.0.2" }))
+      const status = autoUpdateStatus({ runtime, env: {} })
+      expect(status.install).toBe("binary")
+      expect(status.effective).toBe("on")
+      expect(describeAutoUpdate(status)).toContain("0.0.2 available")
+      expect(describeAutoUpdate(autoUpdateStatus({ runtime: { ...runtime, kind: "npx" }, env: {} }))).toContain("npx resolves")
+    } finally {
+      delete process.env.OPENCODE_BROWSER_HOME
+    }
   })
 })

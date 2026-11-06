@@ -1,4 +1,4 @@
-// The relay's own config, config.json in the data root, changed with `browse set <key> <value>`. It's the relay's
+// The relay's own config, config.json in the config root, changed with `browse set <key> <value>`. It's the relay's
 // alone: not a setting of the extension's options page, and not something the agents' `settings` tool can change.
 //   hostname  where the relay listens: 127.0.0.1 (default, this computer only) or 0.0.0.0 (every network, for
 //             browsers on other computers). Connections from other computers only ever reach the extension's
@@ -6,13 +6,13 @@
 import fs from "node:fs"
 import path from "node:path"
 import { writePrivateJsonFileSync } from "../fs-durability.ts"
-import { dataRoot } from "../paths.ts"
+import { configRoot } from "../paths.ts"
 
 export const hostnames = ["127.0.0.1", "0.0.0.0"] as const
 export type Hostname = (typeof hostnames)[number]
 export type RelayConfig = { hostname?: Hostname }
 
-export const relayConfigPath = (root = dataRoot()) => path.join(root, "config.json")
+export const relayConfigPath = (root = configRoot()) => path.join(root, "config.json")
 
 export function parseHostname(input: unknown): Hostname | undefined {
   if (typeof input !== "string") return undefined
@@ -22,7 +22,7 @@ export function parseHostname(input: unknown): Hostname | undefined {
   return undefined
 }
 
-export function readRelayConfig(root = dataRoot()): RelayConfig {
+export function readRelayConfig(root = configRoot()): RelayConfig {
   try {
     const value = JSON.parse(fs.readFileSync(relayConfigPath(root), "utf8")) as { hostname?: unknown } | null
     const hostname = parseHostname(value?.hostname)
@@ -32,12 +32,12 @@ export function readRelayConfig(root = dataRoot()): RelayConfig {
   }
 }
 
-export function writeRelayConfig(config: RelayConfig, root = dataRoot()) {
+export function writeRelayConfig(config: RelayConfig, root = configRoot()) {
   writePrivateJsonFileSync(relayConfigPath(root), config, { ensureParent: true })
 }
 
 /** Where the relay listens. */
-export const relayHostname = (root = dataRoot()): Hostname => readRelayConfig(root).hostname ?? "127.0.0.1"
+export const relayHostname = (root = configRoot()): Hostname => readRelayConfig(root).hostname ?? "127.0.0.1"
 
 /** A connection from this computer, which may use everything the relay serves; others get the extension link only. */
 export function isLocalPeer(socket: { readonly remoteAddress?: string | undefined }) {

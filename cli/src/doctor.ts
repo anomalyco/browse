@@ -3,7 +3,7 @@ import * as RelayClient from "./relay/client.ts"
 import { relayBuildProblem } from "./relay/lifecycle.ts"
 import type { ExtensionStatus, RelayVersion, SessionSummary, TargetSummary } from "./relay/schema.ts"
 import { extensionProtocolAdvice, extensionProtocolVersion } from "./protocol.ts"
-import { binaryPackage, cliCommand, compiledBinary, devExtension, fromCheckout, installCommand } from "./paths.ts"
+import { binaryPackage, cacheRoot, cliCommand, compiledBinary, configRoot, dataRoot, devExtension, fromCheckout, installCommand, stateRoot } from "./paths.ts"
 import * as SessionStore from "./session-manager/store.ts"
 import type { UpdateJson } from "./update.ts"
 import { opencodeBrowserBuildId, opencodeBrowserVersion } from "./version.ts"
@@ -57,6 +57,12 @@ export type DoctorCheck = {
 export type DoctorReport = {
   readonly status: DoctorCheckStatus
   readonly endpoint: string
+  readonly paths: {
+    readonly config: string
+    readonly data: string
+    readonly state: string
+    readonly cache: string
+  }
   readonly cli: {
     readonly version: string
     readonly buildId: string
@@ -234,6 +240,12 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
   const report: DoctorReport = {
     status: summarizeCheckStatus(checks),
     endpoint: relay.endpoint,
+    paths: {
+      config: configRoot(),
+      data: dataRoot(),
+      state: stateRoot(),
+      cache: cacheRoot(),
+    },
     cli: { version: opencodeBrowserVersion, buildId: opencodeBrowserBuildId },
     package: {
       path: path.join(options.packageRoot, "package.json"),
@@ -582,6 +594,7 @@ export function formatDoctorReport(report: DoctorReport): string {
     "browse doctor",
     `Status: ${report.status}`,
     `Endpoint: ${report.endpoint}`,
+    `Paths: config=${report.paths.config} data=${report.paths.data} state=${report.paths.state} cache=${report.paths.cache}`,
     `CLI: ${report.cli.version} (${report.cli.buildId})`,
     `Package: ${report.package.name && report.package.version ? `${report.package.name} ${report.package.version}` : report.package.error ?? "unknown"}`,
     `Relay: ${report.relay.reachable ? `reachable (${report.relay.version ?? "unknown"}, ${report.relay.buildId ?? "unknown build"})` : `unreachable (${report.relay.error ?? "unknown error"})`}`,

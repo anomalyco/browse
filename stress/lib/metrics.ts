@@ -4,7 +4,7 @@ import fs from "node:fs"
 import path from "node:path"
 import { execFileSync } from "node:child_process"
 import type { BrowserCdp } from "./cdp.ts"
-import { dataDir, relayBase, relayJson } from "./env.ts"
+import { dataDir, relayBase, relayJson, stateDir } from "./env.ts"
 
 const CLK_TCK = 100
 
@@ -129,9 +129,9 @@ export class Sampler {
         sample.cdpError = String(error).slice(0, 120)
       }
     }
-    sample.journalBytes = dirBytes(path.join(dataDir, "sessions"))
+    sample.journalBytes = dirBytes(path.join(stateDir, "sessions"))
     sample.dataDirBytes = dirBytes(dataDir)
-    try { sample.relayLogBytes = fs.statSync(path.join(dataDir, "logs/relay.log")).size } catch {}
+    try { sample.relayLogBytes = fs.statSync(path.join(stateDir, "logs/relay.log")).size } catch {}
     return sample
   }
 }

@@ -1,79 +1,40 @@
-// Auto-update for npm installs (`npx @opencode/browse install`). A checkout never auto-updates: it has `update`.
+// Auto-update for installs, by rerunning whatever installed browse. A checkout never auto-updates: it has `update`.
 //
-// Layout in the data root:
-//   runtime/versions/<version>/   one npm prefix per installed version (node_modules/@opencode/browse/dist/cli.mjs)
-//   runtime/current.json          { version, previous, channel }: the version every new process runs
-//   bin/opencode-browser.mjs      the stable shim opencode's MCP entry runs; it reads current.json, so the config
-//                                 never changes. For `mcp` it supervises the server and swaps it for the new version
-//                                 between requests once current.json moves.
-//   auto-update.json              the user's mode and what the last check found
+// Layout: one state file, auto-update.json in the state root (logs are beside it in logs/). There is no versions
+// directory, no current.json and no shim any more:
+//   binary install  the install script replaces ~/.local/bin/browse by atomic rename (Windows renames the running
+//                   executable aside first); running processes keep their old inode on unix.
+//   npm global      `npm install -g @opencode/browse@<version>` replaces the package in place.
+//   npx             no-op: npx resolves the package itself, and install never writes npx entries.
 //
 // The relay checks the registry for its channel's dist-tag (latest, or dev for a dev build, which every push to dev
-// publishes) at most once a day.
-// Mode "on" (default) installs a newer version into its own directory, verifies it (the installed package's integrity
-// is the one the registry published for that version, and it runs and reports that version), and once no agent is using
-// the browser, switches current.json and restarts the relay from the new version. "notify" only shows the update;
-// "off" doesn't check. OPENCODE_BROWSER_AUTO_UPDATE overrides the stored mode. The previous version stays installed for
-// `browse rollback`, which also skips the version it rolled back from until a newer one is published.
-//
-// A binary install (the install script put the executable in ~/.browse/bin) works the same way with executables:
-//   runtime/versions/<version>/browse   each version's executable, from its platform package @opencode/browse-<target>
-//   runtime/current.json                also names `binary`, the executable on PATH that agents' MCP entries run
-// Switching a version replaces `binary` by rename with that version's executable (a running relay or MCP server keeps
-// the file it started from), and `browse mcp` from it supervises the MCP server the way the shim does (mcp/supervisor.ts).
-import { spawn } from "node:child_process"
-import { createHash } from "node:crypto"
-import { chmodSync, closeSync, copyFileSync, cpSync, existsSync, linkSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs"
-import { createRequire } from "node:module"
+// publishes) at most once a day. Mode "on" (default) runs the installer in its own process, then once no agent is using
+// the browser restarts the relay from the same entry path. "notify" only shows the update; "off" doesn't check.
+// OPENCODE_BROWSER_AUTO_UPDATE overrides the stored mode. Installed binaries and npm global installs supervise their MCP
+// server (mcp/supervisor.ts): it notices the installed version change and swaps the server between requests once the
+// relay runs it. The installer and npm do their own integrity checks; there is no separate checksum path here.
+import { spawn, spawnSync } from "node:child_process"
+import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, realpathSync, writeFileSync } from "node:fs"
+import os from "node:os"
 import path from "node:path"
-import { fileURLToPath } from "node:url"
-import { gunzipSync } from "node:zlib"
-import { binaryName, binaryPackage, cliPrefix, compiledBinary, dataRoot, entryCommand, fromCheckout } from "../paths.ts"
+import { cliPrefix, compiledBinary, entryCommand, fromCheckout, installedBinary, stateRoot } from "../paths.ts"
 import { opencodeBrowserVersion } from "../version.ts"
 
 export const PACKAGE_NAME = "@opencode/browse"
 const DAY_MS = 24 * 60 * 60 * 1000
 const DEFAULT_REGISTRY = "https://registry.npmjs.org"
+const INSTALL_SCRIPT = "https://opencode.ai/browse/install"
+const INSTALL_SCRIPT_WINDOWS = "https://opencode.ai/browse/install.ps1"
 
 export const autoUpdateModes = ["on", "notify", "off"] as const
 export type AutoUpdateMode = (typeof autoUpdateModes)[number]
 export type Channel = "latest" | "dev"
-
-export type Layout = {
-  readonly root: string
-  readonly runtime: string
-  readonly versions: string
-  readonly current: string
-  readonly shim: string
-  readonly state: string
-}
-
-export function runtimeLayout(root = dataRoot()): Layout {
-  const runtime = path.join(root, "runtime")
-  return {
-    root,
-    runtime,
-    versions: path.join(runtime, "versions"),
-    current: path.join(runtime, "current.json"),
-    shim: path.join(root, "bin", "opencode-browser.mjs"),
-    state: path.join(root, "auto-update.json"),
-  }
-}
-
-export const versionDirectory = (layout: Layout, version: string) => path.join(layout.versions, version)
-/** What runs an installed version: its executable for a binary install, else its npm package's bundle. */
-export const versionEntry = (layout: Layout, version: string, binary = compiledBinary()) =>
-  binary
-    ? path.join(versionDirectory(layout, version), binaryName())
-    : path.join(versionDirectory(layout, version), "node_modules", "@opencode", "browse", "dist", "cli.mjs")
-
-/** The package auto-update installs: this platform's executable for a binary install, else the npm package. */
-const updatePackage = () => (compiledBinary() ? binaryPackage() : undefined) ?? PACKAGE_NAME
-
-export const channelOf = (version: string): Channel => (version.includes("-dev.") ? "dev" : "latest")
+export type InstallKind = "binary" | "npm" | "npx" | "checkout" | "other"
 
 /** A version auto-update installs: 1.2.3, or 1.2.4-dev.42 (1.2.4-dev.42.2 for a rerun). */
 export const UPDATE_VERSION = /^(\d+)\.(\d+)\.(\d+)(?:-dev\.(\d+)(?:\.(\d+))?)?$/
+
+export const channelOf = (version: string): Channel => (version.includes("-dev.") ? "dev" : "latest")
 
 /** Orders versions as semver does for these shapes: a dev build below its release, then by run. Anything else sorts as unknown (never newer). */
 export function compareVersions(left: string, right: string): number {
@@ -90,7 +51,81 @@ export function compareVersions(left: string, right: string): number {
   return 0
 }
 
-// ---- files ------------------------------------------------------------------------------------------
+// ---- where this process runs from --------------------------------------------------------------------
+
+/** What kind of install this process runs from. */
+export function installKind(entry = process.argv[1] ?? "", checkout = fromCheckout()): InstallKind {
+  if (checkout) return "checkout"
+  if (compiledBinary()) return "binary"
+  const normalized = entry.replaceAll("\\", "/")
+  if (/\/_npx\/|\/npm-cache\/_npx\//.test(normalized)) return "npx"
+  return entry ? "npm" : "other"
+}
+
+export type Runtime = {
+  readonly kind: "binary" | "npm" | "npx"
+  /** The stable path new processes start from: the executable, or the npm package's CLI bundle. */
+  readonly entry: string
+  /** The version this process runs. */
+  readonly version: string
+}
+
+const packageVersion = (entry: string): string | undefined => {
+  try {
+    const manifest = path.join(path.dirname(path.dirname(entry)), "package.json")
+    const version = (JSON.parse(readFileSync(manifest, "utf8")) as { version?: unknown }).version
+    return typeof version === "string" ? version : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** npm's bin is a symlink; the package manifest lives beside the real bundle. */
+const realEntry = (entry: string) => {
+  try {
+    return realpathSync(entry)
+  } catch {
+    return entry
+  }
+}
+
+/** The installed runtime this process belongs to, or undefined for a checkout or an uninstalled executable. */
+export function installedRuntime(entry = process.argv[1] ?? process.execPath): Runtime | undefined {
+  const kind = installKind(entry)
+  if (kind === "binary") {
+    const binary = installedBinary()
+    if (binary) return { kind, entry: binary, version: opencodeBrowserVersion }
+    // A downloaded executable run in place has nothing to update.
+    return undefined
+  }
+  if (kind !== "npm" && kind !== "npx") return undefined
+  const resolved = realEntry(entry)
+  return { kind, entry: resolved, version: packageVersion(resolved) ?? opencodeBrowserVersion }
+}
+
+/** The version currently on disk at the runtime's stable entry (a binary reports it with --version). */
+export function installedVersion(runtime: Runtime): string | undefined {
+  if (runtime.kind === "binary") {
+    const result = spawnSync(runtime.entry, ["--version"], { encoding: "utf8", timeout: 15_000, env: { ...process.env, OPENCODE_BROWSER_AUTOSTART: "0" } })
+    return result.status === 0 ? result.stdout.trim() || undefined : undefined
+  }
+  return packageVersion(runtime.entry)
+}
+
+// ---- state -------------------------------------------------------------------------------------------
+
+export type AutoUpdateState = {
+  readonly mode?: AutoUpdateMode
+  readonly checkedAt?: number
+  readonly latest?: string
+  readonly failed?: string
+  readonly lastUpdate?: { readonly from: string; readonly to: string; readonly at: string }
+  readonly lastError?: { readonly message: string; readonly at: string; readonly version?: string; readonly attempts?: number }
+  /** An installer running in its own process (`self-update`), so npm never blocks the relay. */
+  readonly installing?: { readonly version: string; readonly pid: number; readonly startedAt: number }
+}
+
+export const autoUpdateStatePath = () => path.join(stateRoot(), "auto-update.json")
 
 function readJson<T>(file: string): T | undefined {
   try {
@@ -101,94 +136,21 @@ function readJson<T>(file: string): T | undefined {
 }
 
 function writeJsonAtomic(file: string, value: unknown) {
-  mkdirSync(path.dirname(file), { recursive: true })
+  mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
   const temporary = `${file}.${process.pid}.tmp`
   writeFileSync(temporary, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 })
+  chmodSync(temporary, 0o600)
   renameSync(temporary, file)
 }
 
-export type Current = {
-  readonly version: string
-  readonly previous?: string
-  readonly channel: Channel
-  readonly switchedAt?: string
-  /** A binary install's executable on PATH, which every switch replaces with the version's executable. */
-  readonly binary?: string
+export function readState(): AutoUpdateState {
+  return readJson<AutoUpdateState>(autoUpdateStatePath()) ?? {}
 }
 
-export function readCurrent(layout = runtimeLayout()): Current | undefined {
-  const current = readJson<Current>(layout.current)
-  return current && typeof current.version === "string" ? current : undefined
-}
-
-export function writeCurrent(layout: Layout, current: Current) {
-  writeJsonAtomic(layout.current, { ...current, switchedAt: new Date().toISOString() })
-}
-
-export type AutoUpdateState = {
-  readonly mode?: AutoUpdateMode
-  readonly checkedAt?: number
-  readonly latest?: string
-  readonly integrity?: string
-  readonly failed?: string
-  /** Installed and verified, waiting for the browser to be idle. */
-  readonly pending?: string
-  /** Rolled back from: not installed again until a newer version is published. */
-  readonly skipped?: string
-  readonly lastUpdate?: { readonly from: string; readonly to: string; readonly at: string }
-  readonly lastError?: { readonly message: string; readonly at: string; readonly version?: string; readonly attempts?: number; readonly verification?: boolean }
-  /** An installer running in its own process (`runtime-install`), so npm never blocks the relay. */
-  readonly installing?: { readonly version: string; readonly pid: number; readonly startedAt: number }
-}
-
-export function readState(layout = runtimeLayout()): AutoUpdateState {
-  return readJson<AutoUpdateState>(layout.state) ?? {}
-}
-
-export function updateState(layout: Layout, change: (state: AutoUpdateState) => AutoUpdateState) {
-  const next = change(readState(layout))
-  writeJsonAtomic(layout.state, next)
+export function updateState(change: (state: AutoUpdateState) => AutoUpdateState): AutoUpdateState {
+  const next = change(readState())
+  writeJsonAtomic(autoUpdateStatePath(), next)
   return next
-}
-
-// ---- where this process runs from --------------------------------------------------------------------
-
-const realpath = (file: string) => {
-  try {
-    return realpathSync(file)
-  } catch {
-    return path.resolve(file)
-  }
-}
-
-/**
- * The installed npm runtime this process runs from, or undefined: a checkout, npx's cache, or anything else outside
- * runtime/versions/<version>/ in the data root. Only such an install updates itself.
- */
-export function npmRuntime(options: { readonly entry?: string; readonly layout?: Layout; readonly checkout?: boolean } = {}) {
-  if (options.checkout ?? fromCheckout()) return undefined
-  const layout = options.layout ?? runtimeLayout()
-  if (compiledBinary()) return binaryRuntime(layout)
-  const defaultEntry = () => fileURLToPath(import.meta.url.endsWith(".ts") ? import.meta.url : new URL("./cli.mjs", import.meta.url))
-  const entry = realpath(options.entry ?? defaultEntry())
-  const relative = path.relative(realpath(layout.versions), entry).split(path.sep)
-  if (relative.length !== 6 || relative[0] === ".." || relative.slice(1).join("/") !== "node_modules/@opencode/browse/dist/cli.mjs") return undefined
-  const current = readCurrent(layout)
-  if (!current) return undefined
-  return { layout, version: relative[0]!, current }
-}
-
-/**
- * A binary install this executable belongs to: install recorded it as current.json's `binary`, or it is one of the
- * installed versions (an MCP server the supervisor started). Anything else (a downloaded executable run in place) isn't.
- */
-function binaryRuntime(layout: Layout) {
-  const current = readCurrent(layout)
-  if (!current?.binary) return undefined
-  const self = realpath(process.execPath)
-  const inVersions = !path.relative(realpath(layout.versions), self).startsWith("..")
-  if (self !== realpath(current.binary) && !inVersions) return undefined
-  return { layout, version: opencodeBrowserVersion, current }
 }
 
 // ---- settings -----------------------------------------------------------------------------------------
@@ -203,22 +165,22 @@ export function autoUpdateOverride(env: NodeJS.ProcessEnv = process.env): AutoUp
   return undefined
 }
 
-export function storedMode(layout = runtimeLayout()): AutoUpdateMode {
-  const mode = readState(layout).mode
+export function storedMode(): AutoUpdateMode {
+  const mode = readState().mode
   return mode && (autoUpdateModes as readonly string[]).includes(mode) ? mode : "on"
 }
 
-export function effectiveMode(layout = runtimeLayout(), env: NodeJS.ProcessEnv = process.env): AutoUpdateMode {
-  return autoUpdateOverride(env) ?? storedMode(layout)
+export function effectiveMode(env: NodeJS.ProcessEnv = process.env): AutoUpdateMode {
+  return autoUpdateOverride(env) ?? storedMode()
 }
 
-export function setStoredMode(mode: AutoUpdateMode, layout = runtimeLayout()) {
-  updateState(layout, (state) => ({ ...state, mode }))
+export function setStoredMode(mode: AutoUpdateMode) {
+  updateState((state) => ({ ...state, mode }))
 }
 
 /** What status, the settings tool and the options page show about updates. */
 export type AutoUpdateStatus = {
-  readonly install: "npm" | "checkout" | "other"
+  readonly install: InstallKind
   /** The command that runs this install's CLI in a terminal (cliPrefix), for commands the options page shows. */
   readonly cli: string
   readonly mode: AutoUpdateMode
@@ -227,33 +189,25 @@ export type AutoUpdateStatus = {
   readonly version?: string
   readonly channel?: Channel
   readonly latest?: string
-  readonly pending?: string
-  readonly previous?: string
-  readonly skipped?: string
   readonly checkedAt?: string
   readonly lastUpdate?: AutoUpdateState["lastUpdate"]
   readonly lastError?: AutoUpdateState["lastError"]
 }
 
-export function autoUpdateStatus(options: { readonly layout?: Layout; readonly env?: NodeJS.ProcessEnv; readonly runtime?: ReturnType<typeof npmRuntime> } = {}): AutoUpdateStatus {
-  const layout = options.layout ?? runtimeLayout()
+export function autoUpdateStatus(options: { readonly env?: NodeJS.ProcessEnv; readonly runtime?: Runtime } = {}): AutoUpdateStatus {
   const env = options.env ?? process.env
-  const runtime = options.runtime === undefined ? npmRuntime({ layout }) : options.runtime
-  const state = readState(layout)
+  const runtime = options.runtime === undefined ? installedRuntime() : options.runtime
+  const state = readState()
   const override = autoUpdateOverride(env)
-  const current = runtime?.current ?? readCurrent(layout)
-  const install = runtime ? "npm" : fromCheckout() ? "checkout" : current ? "npm" : "other"
+  const install = runtime?.kind ?? installKind()
   return {
     install,
     cli: cliPrefix(),
-    mode: storedMode(layout),
-    effective: install === "npm" ? (override ?? storedMode(layout)) : "off",
+    mode: storedMode(),
+    effective: install === "binary" || install === "npm" ? (override ?? storedMode()) : "off",
     ...(override ? { overriddenBy: env.OPENCODE_BROWSER_AUTO_UPDATE !== undefined ? "OPENCODE_BROWSER_AUTO_UPDATE" : "OPENCODE_BROWSER_UPDATE_CHECK" } : {}),
-    ...(current ? { version: current.version, channel: current.channel } : {}),
-    ...(current?.previous && existsSync(versionEntry(layout, current.previous)) ? { previous: current.previous } : {}),
+    ...(runtime ? { version: runtime.version, channel: channelOf(runtime.version) } : {}),
     ...(state.latest ? { latest: state.latest } : {}),
-    ...(state.pending ? { pending: state.pending } : {}),
-    ...(state.skipped ? { skipped: state.skipped } : {}),
     ...(state.checkedAt ? { checkedAt: new Date(state.checkedAt).toISOString() } : {}),
     ...(state.lastUpdate ? { lastUpdate: state.lastUpdate } : {}),
     ...(state.lastError ? { lastError: state.lastError } : {}),
@@ -263,24 +217,22 @@ export function autoUpdateStatus(options: { readonly layout?: Layout; readonly e
 /** One line for `status`. */
 export function describeAutoUpdate(status: AutoUpdateStatus): string {
   if (status.install === "checkout") return "Updates:   checkout install; `update` pulls new commits"
-  if (status.install !== "npm") return "Updates:   not an installed runtime"
+  if (status.install === "npx") return "Updates:   npx resolves the package itself; `update` is a no-op"
+  if (status.install !== "binary" && status.install !== "npm") return "Updates:   not an installed runtime"
   const mode = { on: "automatic", notify: "notify only", off: "off" }[status.effective]
   const parts = [`${mode}${status.overriddenBy ? ` (set by ${status.overriddenBy})` : ""}`, `channel ${status.channel ?? "latest"}`]
-  if (status.pending) parts.push(`${status.pending} installed, switches in when no agent is using the browser`)
-  else if (status.latest && status.latest === status.skipped) parts.push(`skipping ${status.latest} (rolled back from it; \`update\` installs it again)`)
-  else if (status.latest && status.version && compareVersions(status.latest, status.version) > 0) parts.push(`${status.latest} available`)
-  if (status.previous && status.version && compareVersions(status.previous, status.version) < 0) parts.push(`\`rollback\` returns to ${status.previous}`)
+  if (status.latest && status.version && compareVersions(status.latest, status.version) > 0) parts.push(`${status.latest} available; the installer runs when no agent is using the browser`)
   if (status.lastError) parts.push(`last attempt failed: ${status.lastError.message}`)
   return `Updates:   ${parts.join("; ")}`
 }
 
-// ---- registry and install ----------------------------------------------------------------------------
+// ---- registry and installer ----------------------------------------------------------------------------
 
 export type Run = (command: string, args: readonly string[], options?: { readonly timeoutMs?: number; readonly env?: NodeJS.ProcessEnv }) => Promise<{ status: number | null; stdout: string; stderr: string }>
 
 /**
- * Runs a command without blocking the event loop: the relay keeps serving agents and the extension while npm installs
- * an update (minutes on a slow network).
+ * Runs a command without blocking the event loop: the relay keeps serving agents and the extension while the installer
+ * downloads an update (minutes on a slow network).
  */
 export const runCommand: Run = (command, args, options = {}) =>
   new Promise((resolve) => {
@@ -311,210 +263,77 @@ export async function registryUrl(run: Run = runCommand, env: NodeJS.ProcessEnv 
   return /^https?:\/\//.test(configured) ? configured.replace(/\/+$/, "") : DEFAULT_REGISTRY
 }
 
-export type Published = { readonly version: string; readonly integrity: string }
+export type Published = { readonly version: string }
 
-/** We received the package but it failed integrity, contents or executable verification. */
-export class InstallVerificationError extends Error {}
-
-/** The channel's dist-tag and that version's published integrity (of this platform's package, for a binary install). */
+/** The channel's dist-tag. */
 export async function fetchPublished(options: { readonly registry: string; readonly channel: Channel; readonly fetch?: typeof fetch; readonly packageName?: string }): Promise<Published> {
   const request = options.fetch ?? fetch
-  const name = options.packageName ?? updatePackage()
+  const name = options.packageName ?? PACKAGE_NAME
   const response = await request(`${options.registry}/${name.replace("/", "%2f")}`, {
     headers: { accept: "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8" },
     signal: AbortSignal.timeout(20_000),
   })
   if (!response.ok) throw new Error(`the registry answered ${response.status} for ${name}`)
-  const body = (await response.json()) as { "dist-tags"?: Record<string, string>; versions?: Record<string, { dist?: { integrity?: string } }> }
+  const body = (await response.json()) as { "dist-tags"?: Record<string, string> }
   const version = body["dist-tags"]?.[options.channel]
   if (!version) throw new Error(`${name} has no ${options.channel} dist-tag`)
-  const integrity = body.versions?.[version]?.dist?.integrity
-  if (!integrity || !/^sha512-/.test(integrity)) throw new Error(`${name}@${version} has no sha512 integrity in the registry`)
-  return { version, integrity }
+  return { version }
 }
 
-/** Copy the running npm package and its resolved runtime dependencies, preserving npm's hoisting and nested
- * versions. Don't copy unrelated packages, dev dependencies, .bin links or leave links into an evictable npx cache. */
-function copyRunningPackage(source: string, prefix: string) {
-  const modules = path.dirname(path.dirname(source)) // node_modules/@opencode/browse
-  const seen = new Set<string>()
-  const copy = (dir: string) => {
-    if (seen.has(dir)) return
-    seen.add(dir)
-    const target = path.join(prefix, "node_modules", path.relative(modules, dir))
-    cpSync(dir, target, { recursive: true, dereference: true, filter: file => path.basename(file) !== "node_modules" })
-    const manifest = path.join(dir, "package.json")
-    const pkg = JSON.parse(readFileSync(manifest, "utf8"))
-    const require = createRequire(manifest)
-    for (const name of Object.keys({ ...pkg.dependencies, ...pkg.peerDependencies, ...pkg.optionalDependencies })) {
-      const dependency = require.resolve.paths(name)?.map(parent => path.join(parent, name)).find(candidate =>
-        candidate.startsWith(modules + path.sep) && existsSync(path.join(candidate, "package.json")))
-      if (dependency) copy(dependency)
-      else if (!pkg.optionalDependencies?.[name] && !pkg.peerDependenciesMeta?.[name]?.optional) throw new Error(`Missing installed dependency ${name} of ${pkg.name}`)
-    }
-  }
-  copy(source)
-}
-
-/**
- * Installs one version into runtime/versions/<version> and verifies it: npm checks the tarball against the registry's
- * integrity while installing; then the lockfile must record that same integrity for the package, and the installed CLI
- * must run and report the version. Built in a temporary directory and renamed into place, so a failed install never
- * leaves a half-written version where the shim could find it. Returns the verified entry.
- */
-export async function installVersion(options: {
-  readonly layout: Layout
-  readonly version: string
-  readonly integrity?: string
-  readonly spec?: string
-  readonly runningPackage?: string
-  readonly registry?: string
+export type InstallerOptions = {
+  readonly runtime: Runtime
+  readonly version?: string
+  readonly channel?: Channel
   readonly run?: Run
-  readonly node?: string
-  /** A binary install's running executable, to install as this version instead of downloading it. */
-  readonly runningBinary?: string
-}): Promise<string> {
-  if (compiledBinary() || options.runningBinary) return installBinaryVersion(options)
-  const run = options.run ?? runCommand
-  const { layout } = options
-  const spec = options.spec ?? `${PACKAGE_NAME}@${options.version}`
-  if (spec.startsWith("-") || /[\s"'`&|<>^%!;]/.test(spec)) throw new Error(`Invalid package spec ${JSON.stringify(spec)}`)
-  mkdirSync(layout.versions, { recursive: true })
-  const temporary = path.join(layout.versions, `.install-${process.pid}-${Date.now()}`)
-  rmSync(temporary, { recursive: true, force: true })
-  mkdirSync(temporary, { recursive: true })
-  try {
-    writeFileSync(path.join(temporary, "package.json"), "{\"private\":true}\n")
-    if (options.runningPackage) copyRunningPackage(options.runningPackage, temporary)
-    else {
-      const args = ["install", "--prefix", temporary, "--no-audit", "--no-fund", "--ignore-scripts", "--loglevel=error", ...(options.registry ? [`--registry=${options.registry}`] : []), spec]
-      const npm = await run("npm", args, { timeoutMs: 10 * 60_000 })
-      if (npm.status !== 0) {
-        const output = npm.stderr || npm.stdout
-        const message = `npm install ${spec} failed: ${output.trim().split("\n").slice(-3).join(" ")}`
-        throw /\bEINTEGRITY\b/.test(output) ? new InstallVerificationError(message) : new Error(message)
-      }
-    }
-    const installed = readJson<{ version?: string }>(path.join(temporary, "node_modules", "@opencode", "browse", "package.json"))?.version
-    if (!installed) throw new InstallVerificationError(`npm install ${spec} didn't install ${PACKAGE_NAME}`)
-    if (options.spec === undefined && installed !== options.version) throw new InstallVerificationError(`npm installed ${installed}, not ${options.version}`)
-    if (options.integrity) {
-      const locked = readJson<{ packages?: Record<string, { integrity?: string; version?: string }> }>(path.join(temporary, "package-lock.json"))?.packages?.["node_modules/@opencode/browse"]
-      if (locked?.integrity !== options.integrity) throw new InstallVerificationError(`${PACKAGE_NAME}@${installed} installed with integrity ${locked?.integrity ?? "unknown"}, not the registry's ${options.integrity}`)
-    }
-    const entry = path.join(temporary, "node_modules", "@opencode", "browse", "dist", "cli.mjs")
-    const reported = await run(options.node ?? process.execPath, [entry, "--version"], { timeoutMs: 30_000, env: { ...process.env, OPENCODE_BROWSER_AUTOSTART: "0" } })
-    if (reported.status !== 0 || reported.stdout.trim() !== installed)
-      throw new InstallVerificationError(`${PACKAGE_NAME}@${installed} didn't run: \`--version\` printed ${JSON.stringify(reported.stdout.trim() || reported.stderr.trim()).slice(0, 200)}`)
-    const target = versionDirectory(layout, installed)
-    rmSync(target, { recursive: true, force: true })
-    renameSync(temporary, target)
-    return versionEntry(layout, installed)
-  } finally {
-    rmSync(temporary, { recursive: true, force: true })
-  }
+  readonly fetch?: typeof fetch
+  readonly env?: NodeJS.ProcessEnv
+  readonly platform?: NodeJS.Platform
 }
 
 /**
- * A binary install's installVersion: puts this platform's executable for the version in runtime/versions/<version>,
- * downloaded from its package's tarball and checked against the registry's integrity (or copied from the running
- * executable), and verifies it runs and reports the version. Built in a temporary directory and renamed into place.
+ * Reruns whatever installed browse. Binary installs download the install script and run it non-interactively with
+ * --no-setup, so it only replaces the executable (the PATH and agent entries install wrote stay). npm global installs run
+ * npm install -g. npx is a no-op. Returns the version now installed.
  */
-async function installBinaryVersion(options: Parameters<typeof installVersion>[0]): Promise<string> {
+export async function runInstaller(options: InstallerOptions): Promise<string> {
   const run = options.run ?? runCommand
-  const { layout } = options
-  mkdirSync(layout.versions, { recursive: true })
-  const temporary = path.join(layout.versions, `.install-${process.pid}-${Date.now()}`)
-  rmSync(temporary, { recursive: true, force: true })
-  mkdirSync(temporary, { recursive: true })
+  const env = options.env ?? process.env
+  const platform = options.platform ?? process.platform
+  if (options.runtime.kind === "npx") return options.runtime.version
+  if (options.runtime.kind === "npm") {
+    const spec = `${PACKAGE_NAME}@${options.version ?? options.channel ?? "latest"}`
+    const npm = await run("npm", ["install", "-g", spec], { timeoutMs: 10 * 60_000, env })
+    if (npm.status !== 0) throw new Error(`npm install -g ${spec} failed: ${(npm.stderr || npm.stdout).trim().split("\n").slice(-3).join(" ")}`)
+    const version = installedVersion(options.runtime) ?? options.version ?? options.channel ?? "latest"
+    if (options.version && compareVersions(version, options.version) < 0)
+      throw new Error(`npm install -g ${spec} left ${version}, not the requested ${options.version}`)
+    return version
+  }
+  const scriptUrl = env.OPENCODE_BROWSER_INSTALL_SCRIPT || (platform === "win32" ? INSTALL_SCRIPT_WINDOWS : INSTALL_SCRIPT)
+  const script = existsSync(scriptUrl)
+    ? readFileSync(scriptUrl, "utf8")
+    : await (options.fetch ?? fetch)(scriptUrl, { signal: AbortSignal.timeout(60_000) }).then(async (response) => {
+        if (!response.ok) throw new Error(`couldn't download the installer (${response.status})`)
+        return response.text()
+      })
+  const directory = mkdtempSync(path.join(os.tmpdir(), "browse-install-"))
+  const file = path.join(directory, platform === "win32" ? "install.ps1" : "install")
+  const args = [...(options.version ? ["--version", options.version] : options.channel ? ["--channel", options.channel] : []), "--no-setup"]
   try {
-    const file = path.join(temporary, binaryName())
-    const expected = options.runningBinary ? opencodeBrowserVersion : options.version
-    if (options.runningBinary) copyFileSync(options.runningBinary, file)
-    else {
-      const name = updatePackage()
-      if (name === PACKAGE_NAME) throw new Error("this executable doesn't know its platform package")
-      const registry = options.registry ?? (await registryUrl(run))
-      const integrity = options.integrity ?? (await publishedIntegrity(registry, name, options.version))
-      const response = await fetch(`${registry}/${name}/-/${name.split("/")[1]}-${options.version}.tgz`, { signal: AbortSignal.timeout(10 * 60_000) })
-      if (!response.ok) throw new Error(`downloading ${name}@${options.version} failed: the registry answered ${response.status}`)
-      const tgz = new Uint8Array(await response.arrayBuffer())
-      const actual = `sha512-${createHash("sha512").update(tgz).digest("base64")}`
-      if (actual !== integrity) throw new InstallVerificationError(`${name}@${options.version} downloaded with integrity ${actual}, not the registry's ${integrity}`)
-      const executable = tarFile(tgz, `package/bin/${binaryName()}`)
-      if (!executable) throw new InstallVerificationError(`${name}@${options.version} has no bin/${binaryName()}`)
-      writeFileSync(file, executable)
-    }
-    chmodSync(file, 0o755)
-    const reported = await run(file, ["--version"], { timeoutMs: 30_000, env: { ...process.env, OPENCODE_BROWSER_AUTOSTART: "0" } })
-    if (reported.status !== 0 || reported.stdout.trim() !== expected)
-      throw new InstallVerificationError(`browse ${expected} didn't run: \`--version\` printed ${JSON.stringify(reported.stdout.trim() || reported.stderr.trim()).slice(0, 200)}`)
-    const target = versionDirectory(layout, expected)
-    rmSync(target, { recursive: true, force: true })
-    renameSync(temporary, target)
-    return versionEntry(layout, expected, true)
+    writeFileSync(file, script, { mode: platform === "win32" ? 0o600 : 0o700 })
+    const command = platform === "win32" ? "powershell.exe" : "sh"
+    const argv = platform === "win32" ? ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", file, ...args] : [file, ...args]
+    const installed = await run(command, argv, { timeoutMs: 10 * 60_000, env })
+    if (installed.status !== 0)
+      throw new Error(`the installer failed: ${(installed.stderr || installed.stdout).trim().split("\n").slice(-3).join(" ")}`)
   } finally {
-    rmSync(temporary, { recursive: true, force: true })
+    rmSync(directory, { recursive: true, force: true })
   }
-}
-
-async function publishedIntegrity(registry: string, name: string, version: string): Promise<string> {
-  const response = await fetch(`${registry}/${name.replace("/", "%2f")}/${version}`, { signal: AbortSignal.timeout(20_000) })
-  if (!response.ok) throw new Error(`the registry answered ${response.status} for ${name}@${version}`)
-  const integrity = ((await response.json()) as { dist?: { integrity?: string } }).dist?.integrity
-  if (!integrity || !/^sha512-/.test(integrity)) throw new Error(`${name}@${version} has no sha512 integrity in the registry`)
-  return integrity
-}
-
-/** One regular file from an npm tarball (gzipped ustar, with pax or GNU long names), or undefined. */
-export function tarFile(tgz: Uint8Array, wanted: string): Buffer | undefined {
-  const tar = gunzipSync(tgz)
-  let offset = 0
-  let longName: string | undefined
-  while (offset + 512 <= tar.length) {
-    const header = tar.subarray(offset, offset + 512)
-    if (header.every((byte) => byte === 0)) return undefined
-    const field = (start: number, length: number) => header.subarray(start, start + length).toString("utf8").replace(/\0[\s\S]*$/, "")
-    const size = parseInt(field(124, 12).trim() || "0", 8)
-    const type = field(156, 1) || "0"
-    const prefix = field(345, 155)
-    const name = longName ?? (prefix ? `${prefix}/${field(0, 100)}` : field(0, 100))
-    longName = undefined
-    const body = tar.subarray(offset + 512, offset + 512 + size)
-    offset += 512 + Math.ceil(size / 512) * 512
-    if (type === "x") longName = /(?:^|\n)\d+ path=([^\n]*)\n/.exec(body.toString("utf8"))?.[1]
-    else if (type === "L") longName = body.toString("utf8").replace(/\0[\s\S]*$/, "")
-    else if (type === "0" && name === wanted) return Buffer.from(body)
-  }
-  return undefined
-}
-
-/**
- * Puts `source` (a version's executable) at `target` (the executable on PATH) by rename, so a relay or MCP server
- * still running the old file keeps it: hard-linked when they share a file system, else copied. Windows can't replace
- * a running executable, but can rename it out of the way; those leftovers go once nothing runs them.
- */
-export function placeBinary(source: string, target: string) {
-  const staged = `${target}.${process.pid}.new`
-  rmSync(staged, { force: true })
-  try {
-    linkSync(source, staged)
-  } catch {
-    copyFileSync(source, staged)
-  }
-  chmodSync(staged, 0o755)
-  if (process.platform === "win32") {
-    const dir = path.dirname(target)
-    const stale = `${path.basename(target)}.old-`
-    for (const name of readdirSync(dir)) {
-      if (!name.startsWith(stale)) continue
-      try {
-        rmSync(path.join(dir, name), { force: true })
-      } catch {}
-    }
-    if (existsSync(target)) renameSync(target, `${target}.old-${Date.now()}`)
-  }
-  renameSync(staged, target)
+  const version = installedVersion(options.runtime)
+  if (!version) throw new Error(`the installer ran, but ${options.runtime.entry} doesn't report a version`)
+  if (options.version && compareVersions(version, options.version) < 0)
+    throw new Error(`the installer left ${version}, not the requested ${options.version}`)
+  return version
 }
 
 /** Whether a process still runs. */
@@ -528,235 +347,16 @@ export function processAlive(pid: number): boolean {
   }
 }
 
-/**
- * Removes installed versions nothing needs. Never removes the current, previous or pending version (whatever the caller
- * passes), nor a temporary install whose process still runs.
- */
-export function pruneVersions(layout: Layout, keep: readonly (string | undefined)[] = []) {
-  let names: string[] = []
-  try {
-    names = readdirSync(layout.versions)
-  } catch {
-    return
-  }
-  const current = readCurrent(layout)
-  const kept = new Set([...keep, current?.version, current?.previous, readState(layout).pending].filter((name): name is string => !!name))
-  for (const name of names) {
-    if (kept.has(name)) continue
-    const temporary = /^\.install-(\d+)-\d+$/.exec(name)
-    if (temporary && processAlive(Number(temporary[1]))) continue
-    rmSync(path.join(layout.versions, name), { recursive: true, force: true })
-  }
-}
-
-/** Clears `pending` when its directory is gone (removed by hand, or by an older version's pruning). */
-export function validatePending(layout: Layout): AutoUpdateState {
-  const state = readState(layout)
-  if (!state.pending || existsSync(versionEntry(layout, state.pending))) return state
-  return updateState(layout, ({ pending: _pending, ...rest }) => rest)
-}
-
-/**
- * Points new processes at `version`, keeping the version it replaces for rollback. A binary install also puts the
- * version's executable at `binary` (by default the one current.json names), unless that already is it.
- */
-export function switchVersion(layout: Layout, version: string, previous: string | undefined, binary = compiledBinary() ? readCurrent(layout)?.binary : undefined) {
-  const entry = versionEntry(layout, version, binary !== undefined)
-  if (!existsSync(entry)) throw new Error(`${version} isn't installed in ${layout.versions}`)
-  if (binary && !(version === opencodeBrowserVersion && realpath(binary) === realpath(process.execPath))) placeBinary(entry, binary)
-  writeCurrent(layout, { version, ...(previous && previous !== version ? { previous } : {}), channel: channelOf(version), ...(binary ? { binary } : {}) })
-  if (!binary || existsSync(layout.shim)) writeShim(layout)
-}
-
-// ---- the stable shim -------------------------------------------------------------------------------------
-
-/**
- * bin/opencode-browser.mjs. Plain JavaScript that every version writes the same way, with no imports from a version, so
- * removing a version never breaks it. `mcp` runs a small supervisor: it starts the current version's MCP server,
- * forwards stdio (newline-delimited JSON-RPC), and when current.json names another version and no request is in flight,
- * starts the new server, replays the client's `initialize` to it (its answer is dropped), and carries on; while it
- * swaps, client messages wait. Any other command runs the current version in this process.
- */
-export function shimSource(): string {
-  return `#!/usr/bin/env node
-// browse's stable entry, written by install (cli/src/auto-update.ts). opencode's browse MCP server runs this
-// file, so its configuration never changes when the runtime updates. Don't edit; install rewrites it.
-import { spawn } from "node:child_process"
-import { readFileSync } from "node:fs"
-import path from "node:path"
-import { createInterface } from "node:readline"
-import { fileURLToPath, pathToFileURL } from "node:url"
-
-const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
-const runtime = path.join(root, "runtime")
-const installed = () => JSON.parse(readFileSync(path.join(runtime, "current.json"), "utf8"))
-const current = () => installed().version
-const entry = (version) => path.join(runtime, "versions", version, "node_modules", "@opencode", "browse", "dist", "cli.mjs")
-process.env.OPENCODE_BROWSER_HOME ??= root
-const relayPort = Number(process.env.OPENCODE_BROWSER_PORT) || 19988
-
-const binary = installed().binary
-if (binary) {
-  // An agent still runs the npm entry after a binary install. The executable supplies its own MCP supervisor.
-  const child = spawn(binary, process.argv.slice(2), { stdio: "inherit" })
-  for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => child.kill(signal))
-  child.on("exit", (code, signal) => { process.exitCode = code ?? (signal ? 1 : 0) })
-} else if (process.argv[2] !== "mcp") {
-  process.argv[1] = entry(current())
-  await import(pathToFileURL(entry(current())).href)
-} else {
-  const REPLAY = "opencode-browser-shim-initialize"
-  // Every server this supervisor starts keeps one implicit session, and the relay watches this process (not the
-  // server it replaces), so an update doesn't end the agent's session or close its tabs.
-  process.env.OPENCODE_BROWSER_MCP_SESSION ??= "mcp-" + Math.random().toString(16).slice(2, 10).padEnd(8, "0")
-  process.env.OPENCODE_BROWSER_CLIENT_PID = String(process.pid)
-  let version = current()
-  let child
-  let initialize
-  let initialized
-  let swapping = false
-  let listChanged = false
-  const inflight = new Set()
-  const queue = []
-  const toClient = (line) => process.stdout.write(line + "\\n")
-  const toChild = (line) => child.stdin.write(line + "\\n")
-  const parse = (line) => { try { return JSON.parse(line) } catch { return undefined } }
-  // A request is in flight until its response; a cancelled request never gets one, so its client tells us to forget it.
-  const trackRequest = (message) => {
-    if (!message) return
-    if (message.id !== undefined && message.method !== undefined) inflight.add(message.id)
-    if (message.method !== "notifications/cancelled" || !message.params || typeof message.params !== "object") return
-    const cancelled = message.params.requestId
-    if (cancelled !== undefined) inflight.delete(cancelled)
-  }
-  const forward = (line) => { trackRequest(parse(line)); toChild(line) }
-
-  const start = (replay) => {
-    const next = spawn(process.execPath, [entry(version), "mcp"], { stdio: ["pipe", "pipe", "inherit"], env: process.env })
-    // A server that exits mid-write (an old one being replaced) must not take the supervisor down with EPIPE.
-    next.stdin.on("error", () => {})
-    child = next
-    next.on("exit", (code, signal) => {
-      if (next !== child) return
-      process.exit(code ?? (signal ? 1 : 0))
-    })
-    createInterface({ input: next.stdout }).on("line", (line) => {
-      if (next !== child) return
-      const message = parse(line)
-      if (message && message.id === REPLAY) {
-        if (initialized) toChild(initialized)
-        swapping = false
-        if (listChanged) toClient(JSON.stringify({ jsonrpc: "2.0", method: "notifications/tools/list_changed" }))
-        for (const queued of queue.splice(0)) fromClient(queued)
-        return
-      }
-      if (message && message.id !== undefined && message.method === undefined) {
-        inflight.delete(message.id)
-        if (message.result && message.result.capabilities && message.result.capabilities.tools) listChanged = message.result.capabilities.tools.listChanged === true
-      }
-      toClient(line)
-      void maybeSwap()
-    })
-    if (replay && initialize) {
-      swapping = true
-      toChild(JSON.stringify({ ...initialize, id: REPLAY }))
-    }
-  }
-
-  // Once current.json names another version, new requests wait for the swap instead of reaching a server whose relay is
-  // going away (or already runs the other version); a switch that doesn't happen releases them.
-  let heldSince
-  const moved = () => { try { return current() !== version } catch { return false } }
-  const fromClient = (line) => {
-    const message = parse(line)
-    // A cancellation drops the request at once, even while client messages wait: it may be the one blocking the swap.
-    if (message && message.method === "notifications/cancelled") trackRequest(message)
-    if (swapping) return void queue.push(line)
-    if (moved()) {
-      heldSince ??= Date.now()
-      queue.push(line)
-      return void maybeSwap()
-    }
-    if (message && message.method === "initialize") initialize = message
-    if (message && message.method === "notifications/initialized") initialized = line
-    forward(line)
-  }
-
-  // A new version in current.json swaps the server only once the relay runs it too (GET /version), so a server never
-  // talks to a relay of another version. With no relay at all for a few checks, nothing can mix, and it swaps.
-  let checking = false
-  let unreachable = 0
-  const relayVersion = () => fetch("http://127.0.0.1:" + relayPort + "/version", { signal: AbortSignal.timeout(2000) })
-    .then((response) => (response.ok ? response.json() : undefined))
-    .then((body) => (body && typeof body.version === "string" ? body.version : undefined), () => undefined)
-  const maybeSwap = async () => {
-    if (swapping || checking) return
-    // Held requests go to the current server at the deadline even when a request still looks in flight: a cancelled
-    // request may never answer, and waiting for it would wedge the swap forever.
-    if (heldSince !== undefined && Date.now() - heldSince > 15000) {
-      heldSince = undefined
-      const released = queue.splice(0)
-      for (const line of released) forward(line)
-    }
-    if (inflight.size > 0) return
-    let next
-    try { next = current() } catch { return }
-    if (next === version) {
-      unreachable = 0
-      heldSince = undefined
-      for (const queued of queue.splice(0)) fromClient(queued)
-      return
-    }
-    checking = true
-    const running = await relayVersion()
-    checking = false
-    unreachable = running === undefined ? unreachable + 1 : 0
-    // Held requests don't wait forever for a relay that never reports the new version: they go to the current server.
-    if (running !== next && unreachable < 3) return
-    if (swapping || inflight.size > 0 || current() !== next) return
-    const old = child
-    version = next
-    heldSince = undefined
-    start(true)
-    old.stdin.end()
-    setTimeout(() => old.kill(), 5000).unref()
-  }
-
-  start(false)
-  createInterface({ input: process.stdin }).on("line", fromClient).on("close", () => {
-    child.stdin.end()
-    setTimeout(() => process.exit(0), 5000).unref()
-  })
-  setInterval(() => void maybeSwap(), 1000).unref()
-}
-`
-}
-
-export function writeShim(layout: Layout) {
-  mkdirSync(path.dirname(layout.shim), { recursive: true })
-  const source = shimSource()
-  try {
-    if (readFileSync(layout.shim, "utf8") === source) return
-  } catch {}
-  const temporary = `${layout.shim}.${process.pid}.tmp`
-  writeFileSync(temporary, source)
-  chmodSync(temporary, 0o755)
-  renameSync(temporary, layout.shim)
-}
-
 // ---- the relay's updater -------------------------------------------------------------------------------------
 
 export type AutoUpdaterDeps = {
-  readonly runtime: NonNullable<ReturnType<typeof npmRuntime>>
+  readonly runtime: Runtime
   /** No agent is using the browser: nothing in flight, no capture, recording, handoff or raw client, and quiet for a while. */
   readonly isIdle: () => boolean
   readonly log: (event: string, fields?: Record<string, unknown>) => void
   /** The notice changed (status page, MCP note). */
   readonly onChange?: () => void
-  /**
-   * Starts a detached child process of this version's CLI (`runtime-install`, `runtime-switch`); onExit gets its exit
-   * code (null when it couldn't start). Children run on their own, so npm and the restart never block the relay.
-   */
+  /** Starts a detached child process of this version's CLI (`self-update`, `runtime-switch`); onExit gets its exit code. */
   readonly spawnChild?: (args: readonly string[], onExit: (code: number | null) => void) => number | undefined
   readonly env?: NodeJS.ProcessEnv
   readonly fetch?: typeof fetch
@@ -764,36 +364,28 @@ export type AutoUpdaterDeps = {
   readonly now?: () => number
 }
 
-/** How long an installer may run before the relay gives up on it (npm's own timeout is 10 minutes). */
+/** How long an installer may run before the relay gives up on it (the script's own timeout is 10 minutes). */
 const INSTALL_TIMEOUT_MS = 15 * 60_000
 /** How long a runtime-switch child may run (a drain is bounded by the relay's restart timeout, a start by seconds). */
 const SWITCH_TIMEOUT_MS = 5 * 60_000
 
 /**
  * The relay's background updater. tick() checks at most once per checkIntervalMs; in "on" mode a newer version is
- * installed by a detached `runtime-install` child, and once it's installed and the browser is idle, a detached
- * `runtime-switch` child drains this relay, points current.json at the new version and starts its relay (refused while
- * busy, and then nothing changes). Nothing on the relay's event loop waits for npm. Never throws; failures are kept in
- * auto-update.json. Downloads retry with backoff; packages that fail verification wait for the daily check.
+ * installed by a detached `self-update` child (the installer), and once the browser is idle a detached
+ * `runtime-switch` child drains this relay and starts the new entry. Nothing on the relay's event loop waits for the
+ * download. Never throws; failures are kept in auto-update.json.
  */
 export function createAutoUpdater(deps: AutoUpdaterDeps) {
   const env = deps.env ?? process.env
   const now = deps.now ?? Date.now
-  const { layout, version: running } = deps.runtime
+  const { runtime } = deps
+  const running = runtime.version
   const checkIntervalMs = Number(env.OPENCODE_BROWSER_AUTO_UPDATE_INTERVAL_MS) || DAY_MS
-  const spawnChild = deps.spawnChild ?? ((args, onExit) => spawnRuntimeChild(layout, versionEntry(layout, running), args, onExit, env))
+  const spawnChild = deps.spawnChild ?? ((args, onExit) => spawnRuntimeChild(runtime, args, onExit, env))
   let busy = false
   /** A runtime-switch child in flight; a stuck one is given up on after SWITCH_TIMEOUT_MS. */
   let switching: { pid: number | undefined; startedAt: number } | undefined
   let timer: NodeJS.Timeout | undefined
-
-  // The relay now runs what it was waiting to switch to: record it, and drop versions nothing needs.
-  const settled = readState(layout)
-  if (settled.pending === running) {
-    updateState(layout, ({ pending: _pending, lastError: _error, ...state }) => ({ ...state, lastUpdate: { from: deps.runtime.current.previous ?? "unknown", to: running, at: new Date(now()).toISOString() } }))
-    deps.log("autoupdate.switched", { version: running, previous: deps.runtime.current.previous })
-    pruneVersions(layout, [running])
-  }
 
   async function tick() {
     if (switching && (now() - switching.startedAt > SWITCH_TIMEOUT_MS || (switching.pid !== undefined && !processAlive(switching.pid)))) {
@@ -803,68 +395,69 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
     if (busy || switching) return
     busy = true
     try {
-      const mode = effectiveMode(layout, env)
+      const mode = effectiveMode(env)
       if (mode === "off") return
-      let state = validatePending(layout)
+      let state = readState()
       if (!state.checkedAt || now() - state.checkedAt >= checkIntervalMs || now() < state.checkedAt) {
         const channel = channelOf(running)
         try {
           const published = await fetchPublished({ registry: await registryUrl(deps.run, env), channel, ...(deps.fetch ? { fetch: deps.fetch } : {}) })
-          state = updateState(layout, ({ failed: _failed, ...rest }) => ({ ...rest, checkedAt: now(), latest: published.version, integrity: published.integrity }))
+          state = updateState(({ failed: _failed, ...rest }) => ({ ...rest, checkedAt: now(), latest: published.version }))
           deps.log("autoupdate.checked", { channel, latest: published.version, running })
         } catch (error) {
-          state = updateState(layout, (rest) => ({ ...rest, checkedAt: now(), failed: (error as Error).message }))
+          state = updateState((rest) => ({ ...rest, checkedAt: now(), failed: (error as Error).message }))
           deps.log("autoupdate.check_failed", { error: (error as Error).message })
         }
         deps.onChange?.()
       }
       const latest = state.latest
-      const wanted = latest && compareVersions(latest, running) > 0 && latest !== state.skipped ? latest : undefined
+      const wanted = latest && compareVersions(latest, running) > 0 ? latest : undefined
       if (!wanted || mode !== "on") return
 
       // An installer in its own process: wait for it, or record that it died without saying how it went.
       const installing = state.installing
       if (installing) {
-        if (processAlive(installing.pid) && now() - installing.startedAt < INSTALL_TIMEOUT_MS) return
-        // The installed directory is the proof (the child's own state write may have lost a race with this process's).
-        const done = existsSync(versionEntry(layout, installing.version))
-        state = updateState(layout, ({ installing: _installing, ...rest }) => ({
+        const alive = processAlive(installing.pid) && now() - installing.startedAt < INSTALL_TIMEOUT_MS
+        if (alive) return
+        const installed = installedVersion(runtime)
+        state = updateState(({ installing: _installing, ...rest }) => ({
           ...rest,
-          ...(done ? { pending: installing.version } : rest.pending === installing.version ? {} : { lastError: { message: "the installer stopped without finishing", at: new Date(now()).toISOString(), version: installing.version } }),
+          ...(installed && compareVersions(installed, installing.version) >= 0 ? {} : { lastError: { message: "the installer stopped without finishing", at: new Date(now()).toISOString(), version: installing.version } }),
         }))
         deps.log("autoupdate.installer_gone", { version: installing.version })
       }
-      if (state.pending !== wanted) {
-        if (state.lastError?.version === wanted) {
-          const failure = state.lastError
-          const attempts = failure.attempts ?? 1
-          const backoff = (attempts <= 1 ? 15 : attempts === 2 ? 60 : 240) * 60_000
-          const delay = failure.verification ? checkIntervalMs : Math.min(backoff, checkIntervalMs)
-          const age = now() - Date.parse(failure.at)
-          if (age >= 0 && age < delay) return
-        }
-        deps.log("autoupdate.installing", { version: wanted })
-        const pid = spawnChild(["runtime-install", wanted, ...(state.integrity ? ["--integrity", state.integrity] : [])], (code) => {
-          deps.log(code === 0 ? "autoupdate.installed" : "autoupdate.install_failed", { version: wanted, code })
+      const installed = installedVersion(runtime)
+      if (installed && compareVersions(installed, wanted) >= 0) {
+        // Another process installed it already. Restart the relay with it once nothing is using the browser.
+        if (!deps.isIdle()) return
+        switching = { pid: undefined, startedAt: now() }
+        deps.log("autoupdate.switching", { from: running, to: installed })
+        switching.pid = spawnChild(["runtime-switch", installed], (code) => {
+          if (switching) switching = undefined
+          if (code !== 0) deps.log("autoupdate.restart_refused", { version: installed, code })
           deps.onChange?.()
-          // Switch as soon as it's ready rather than at the next tick.
-          if (code === 0) void tick()
         })
-        if (pid) updateState(layout, (rest) => ({ ...rest, installing: { version: wanted, pid, startedAt: now() } }))
         return
       }
-      if (!deps.isIdle()) return
-      const current = readCurrent(layout)
-      if (!current || current.version !== running) return
-      // runtime-switch drains this relay and only then moves current.json and starts the new relay; when the drain is
-      // refused (an agent started meanwhile), it changes nothing and the next idle tick tries again.
-      const attempt = { pid: undefined as number | undefined, startedAt: now() }
-      switching = attempt
-      deps.log("autoupdate.switching", { from: running, to: wanted })
-      attempt.pid = spawnChild(["runtime-switch", wanted], (code) => {
-        if (switching === attempt) switching = undefined
-        if (code !== 0) deps.log("autoupdate.restart_refused", { version: wanted, code })
+      if (state.lastError?.version === wanted) {
+        const failure = state.lastError
+        const attempts = failure.attempts ?? 1
+        const backoff = (attempts <= 1 ? 15 : attempts === 2 ? 60 : 240) * 60_000
+        const age = now() - Date.parse(failure.at)
+        if (age >= 0 && age < Math.min(backoff, checkIntervalMs)) return
+      }
+      deps.log("autoupdate.installing", { version: wanted })
+      const pid = spawnChild(["self-update", wanted, "--channel", channelOf(running)], (code) => {
+        deps.log(code === 0 ? "autoupdate.installed" : "autoupdate.install_failed", { version: wanted, code })
+        updateState(({ installing: _installing, ...rest }) => ({
+          ...rest,
+          ...(code === 0 ? {} : { lastError: { message: "the installer failed", at: new Date(now()).toISOString(), version: wanted, attempts: 1 + (rest.lastError?.version === wanted ? rest.lastError.attempts ?? 1 : 0) } }),
+        }))
+        deps.onChange?.()
+        // Switch as soon as it's ready rather than at the next tick.
+        if (code === 0) void tick()
       })
+      if (pid) updateState((rest) => ({ ...rest, installing: { version: wanted, pid, startedAt: now() } }))
     } catch (error) {
       deps.log("autoupdate.error", { error: (error as Error).message })
     } finally {
@@ -886,14 +479,15 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
   }
 }
 
-/** Starts `node <entry> <args>` (an executable entry: `<entry> <args>`) detached, logging to logs/auto-update.log; returns its pid. */
-export function spawnRuntimeChild(layout: Layout, entry: string, args: readonly string[], onExit: (code: number | null) => void, env: NodeJS.ProcessEnv = process.env): number | undefined {
+/** Starts `<entry> <args>` detached, logging to stateRoot/logs/auto-update.log; returns its pid. */
+export function spawnRuntimeChild(runtime: Runtime, args: readonly string[], onExit: (code: number | null) => void, env: NodeJS.ProcessEnv = process.env): number | undefined {
   const { OPENCODE_BROWSER_MANAGED_RELAY: _managed, OPENCODE_BROWSER_RESTART_REQUEST_ID: _request, ...rest } = env
-  mkdirSync(path.join(layout.root, "logs"), { recursive: true })
-  const log = openSync(path.join(layout.root, "logs", "auto-update.log"), "a", 0o600)
+  const directory = path.join(stateRoot(), "logs")
+  mkdirSync(directory, { recursive: true, mode: 0o700 })
+  const log = openSync(path.join(directory, "auto-update.log"), "a", 0o600)
   try {
-    const [file, ...prefix] = entryCommand(entry)
-    const child = spawn(file!, [...prefix, ...args], { detached: true, stdio: ["ignore", log, log], env: { ...rest, OPENCODE_BROWSER_HOME: layout.root } })
+    const [file, ...prefix] = entryCommand(runtime.entry)
+    const child = spawn(file!, [...prefix, ...args], { detached: true, stdio: ["ignore", log, log], env: rest })
     child.on("error", () => onExit(null))
     child.on("exit", (code) => onExit(code))
     child.unref()
