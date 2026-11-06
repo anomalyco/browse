@@ -18,6 +18,7 @@ import {
   browsersNote,
   mcpErrorMessage,
   mcpUpdateNote,
+  toolOutputJson,
   toolResult,
   toolResultForValue,
   type BrowserSummary,
@@ -74,6 +75,7 @@ const registerTools = Effect.gen(function* () {
         name: spec.name,
         description: spec.description,
         inputSchema: spec.inputSchema,
+        ...(spec.outputSchema ? { outputSchema: toolOutputJson(spec.outputSchema) } : {}),
         annotations: {
           readOnlyHint: spec.readOnly,
           destructiveHint: spec.destructive,
@@ -93,7 +95,8 @@ const registerTools = Effect.gen(function* () {
         return operation.pipe(
           Effect.match({
             onFailure: (error) => toolResult({ text: mcpErrorMessage(spec.name, error.message), isError: true }),
-            onSuccess: (value) => toolResultForValue(value),
+            onSuccess: (value) =>
+              spec.result ? spec.result(value) : toolResultForValue(value, spec.outputSchema ? { outputSchema: spec.outputSchema } : {}),
           }),
           Effect.map((result) => withUpdateNote(spec.name, result)),
         )

@@ -1,8 +1,10 @@
 import { Effect } from "effect"
 import path from "node:path"
 import * as RelayLifecycle from "../relay/lifecycle.ts"
+import { NetworkCancelResponse, NetworkStopResponse } from "../relay/schema.ts"
 import { registerMcpTools } from "./registry.ts"
 import {
+  NetworkToolStatus,
   ensureSessionExists,
   objectSchema,
   optionalPositiveIntegerField,
@@ -62,6 +64,7 @@ registerMcpTools({
       readOnly: false,
       destructive: false,
       idempotent: false,
+      outputSchema: NetworkToolStatus,
       handle: (input) =>
         Effect.gen(function* () {
           const object = requireObject(input)
@@ -106,6 +109,7 @@ registerMcpTools({
       readOnly: true,
       destructive: false,
       idempotent: true,
+      outputSchema: NetworkToolStatus,
       handle: (input) => {
         const sessionId = ctx.resolveSessionId(input)
         return ctx.relay.networkStatus({ sessionId }).pipe(Effect.map((result) => ({ session: sessionId, ...result })))
@@ -127,6 +131,7 @@ registerMcpTools({
       readOnly: false,
       destructive: false,
       idempotent: false,
+      outputSchema: NetworkStopResponse,
       handle: (input) =>
         Effect.gen(function* () {
           const sessionId = ctx.resolveSessionId(input)
@@ -149,6 +154,7 @@ registerMcpTools({
       readOnly: false,
       destructive: true,
       idempotent: true,
+      outputSchema: NetworkCancelResponse,
       handle: (input) => ctx.relay.networkCancel({ sessionId: ctx.resolveSessionId(input) }),
     },
   ],

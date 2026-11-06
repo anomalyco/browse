@@ -129,7 +129,9 @@ describe("MCP protocol versions", () => {
         expect(await extension.pair()).toBe(true)
         const { result } = await first
         expect(result?.isError, JSON.stringify(result)).toBe(false)
-        expect(result?.structuredContent).toMatchObject({ session: { id: "survivor" }, ...(name === "execute" ? { value: 42 } : {}) })
+        expect(result?.structuredContent).toMatchObject(
+          name === "execute" ? { session: "survivor", value: 42 } : { session: { id: "survivor" } },
+        )
       }
     } finally { extension.close(); mcp.close(); await stopRelay(relay.child) }
   }, 15_000)

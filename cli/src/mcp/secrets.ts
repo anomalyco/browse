@@ -2,8 +2,10 @@ import { Effect } from "effect"
 import path from "node:path"
 import * as SiteSecrets from "../auth/site-secrets.ts"
 import { cliCommand } from "../paths.ts"
+import { AuthProfileSummary, AuthRunResponse, NetworkStopResponse } from "../relay/schema.ts"
 import { registerMcpTools } from "./registry.ts"
 import {
+  SecretsListToolOutput,
   objectSchema,
   optionalPositiveIntegerField,
   optionalStringArrayField,
@@ -26,6 +28,7 @@ registerMcpTools({
       readOnly: true,
       destructive: false,
       idempotent: true,
+      outputSchema: SecretsListToolOutput,
       handle: () =>
         Effect.gen(function* () {
           const secrets = yield* SiteSecrets.listSecrets()
@@ -41,6 +44,7 @@ registerMcpTools({
       readOnly: true,
       destructive: false,
       idempotent: true,
+      outputSchema: AuthProfileSummary,
       handle: (input) => ctx.relay.authStatus({ name: requiredStringField(input, "name") }),
     },
     {
@@ -59,6 +63,7 @@ registerMcpTools({
       readOnly: false,
       destructive: true,
       idempotent: false,
+      outputSchema: NetworkStopResponse,
       handle: (input) => {
         const object = requireObject(input)
         const timeoutMs = optionalPositiveIntegerField(object, "timeoutMs")
@@ -88,6 +93,7 @@ registerMcpTools({
       readOnly: false,
       destructive: true,
       idempotent: false,
+      outputSchema: AuthRunResponse,
       handle: (input) => {
         const object = requireObject(input)
         const args = optionalStringArrayField(object, "args")
