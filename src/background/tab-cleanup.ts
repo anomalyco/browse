@@ -148,9 +148,10 @@ export async function cleanup(options: { minutes?: number } = {}) {
 }
 
 /**
- * Whether the stored list belongs to this browser session. Session storage is cleared on a browser restart (and an
- * extension reload), while tab ids are reused after a restart: an id stored last time may name one of the user's tabs
- * now. In that case the old list is dropped rather than used to close tabs.
+ * Whether the stored list belongs to this browser session. Session storage is cleared on a browser restart and on an
+ * extension reload, while tab ids are reused after a restart: an id stored last time may name one of the user's tabs
+ * now. A missing marker therefore doesn't discard the list; restore() keeps an entry only while that tab is still in
+ * one of browse's groups, so a reused id that now names a user's tab is dropped.
  */
 function currentBrowserSession() {
   browserSession ??= (async () => {
@@ -162,19 +163,37 @@ function currentBrowserSession() {
   return browserSession
 }
 
+/** Loads the stored list once; after a session reset, only ids still in a browse-owned group are trusted. */
 function restore() {
   const mine = generation
   restored ??= (async () => {
-    if (!(await currentBrowserSession())) {
-      tracked.clear()
-      await chrome.storage.local.remove([STORAGE_KEY, CREATING_KEY]).catch(() => undefined)
-      return
-    }
+    const sameSession = await currentBrowserSession()
     const stored = await chrome.storage.local.get(STORAGE_KEY)
     // A startup may have cleared the list while this read was in flight.
     if (mine !== generation) return
     const saved = (stored[STORAGE_KEY] ?? {}) as Record<string, Tracked>
-    for (const [tabId, entry] of Object.entries(saved))
+    if (sameSession) {
+      for (const [tabId, entry] of Object.entries(saved))
+        if (!tracked.has(Number(tabId))) tracked.set(Number(tabId), entry)
+      return
+    }
+    const kept: Record<string, Tracked> = {}
+    for (const [tabId, entry] of Object.entries(saved)) {
+      const tab = await chrome.tabs.get(Number(tabId)).catch(() => undefined)
+      if (!tab || tab.pinned || tab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) continue
+      const group = await chrome.tabGroups.get(tab.groupId).catch(() => undefined)
+      if (!group || !ownedGroup(group.title)) continue
+      kept[tabId] = entry
+    }
+    if (mine !== generation) return
+    await chrome.storage.local.remove(CREATING_KEY).catch(() => undefined)
+    if (mine !== generation) return
+    await chrome.storage.local.set({ [STORAGE_KEY]: kept }).catch(() => undefined)
+    if (mine !== generation) {
+      await chrome.storage.local.remove([STORAGE_KEY, CREATING_KEY]).catch(() => undefined)
+      return
+    }
+    for (const [tabId, entry] of Object.entries(kept))
       if (!tracked.has(Number(tabId))) tracked.set(Number(tabId), entry)
   })()
   return restored
