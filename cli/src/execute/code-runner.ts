@@ -7,6 +7,7 @@ import type { Browser, BrowserContext, ConsoleMessage, Frame, Locator, Page } fr
 import { classifyChallenge, probePageScript, probeSelectors, type ChallengeOutcome, type ChallengeProbe } from "./challenge-detection.ts"
 import type { DemonstrationResult } from "./demonstration.ts"
 import { pageVisibleApiWarningForName, sandboxModules, type ExecuteFiles, type ExecuteRealm } from "../execute-realm.ts"
+import { ExecuteRejectionScope } from "./rejection-scope.ts"
 import type {
   GhostCursorCalloutOptions,
   GhostCursorCaptionOptions,
@@ -225,7 +226,12 @@ const sandboxGlobalKeys = [
   "secrets",
 ] as const satisfies readonly (keyof Omit<SandboxGlobals, "handoffTracker">)[]
 
-export async function runUserCode({ code, globals, realm }: { readonly code: string; readonly globals: SandboxGlobals; readonly realm?: ExecuteRealm }): Promise<{
+export async function runUserCode({ code, globals, realm, onUnhandledRejection }: {
+  readonly code: string
+  readonly globals: SandboxGlobals
+  readonly realm?: ExecuteRealm
+  readonly onUnhandledRejection?: (warning: string) => void
+}): Promise<{
   readonly result: unknown
   readonly logs: readonly ExecuteLogEntry[]
   readonly logSummary: ExecuteLogSummary
@@ -289,8 +295,18 @@ export async function runUserCode({ code, globals, realm }: { readonly code: str
     }
     const AsyncFunction = async function () {}.constructor as new (...args: string[]) => (...args: unknown[]) => Promise<unknown>
     const fn = new AsyncFunction("console", ...sandboxGlobalKeys, `${wrapCodeWithModuleAliases(code, Object.keys(nodeModules))}\n//# sourceURL=${executeFilename}`)
-    const result = await fn(...values)
-    return { result, ...buildResultMetadata() }
+    // Full Node execute code has no realm to tag its promises. Node's promise hook tags the synchronous call and
+    // continuations inherit it; Bun has no hook, so the process guard's generic fallback contains those rejections.
+    const scope = process.versions.bun || !onUnhandledRejection
+      ? undefined
+      : new ExecuteRejectionScope({ onRejection: onUnhandledRejection })
+    scope?.begin()
+    try {
+      const result = await (scope ? scope.invoke(() => fn(...values)) : fn(...values))
+      return { result, ...buildResultMetadata() }
+    } finally {
+      scope?.end()
+    }
   } catch (cause) {
     const error = cause instanceof Error ? cause : new Error("execute sandbox code", { cause })
     const metadata = buildResultMetadata()

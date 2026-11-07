@@ -191,7 +191,7 @@ const status = Command.make(
     if ((extensionStatus.processFaults?.suppressed ?? 0) > 0) {
       const faults = extensionStatus.processFaults!
       yield* Console.log(
-        `Warning: the relay survived ${faults.suppressed} Playwright fault(s)${faults.lastAt ? `, last at ${faults.lastAt}` : ""}${faults.lastMessage ? `: ${faults.lastMessage}` : ""}. See the relay log.`,
+        `Warning: the relay survived ${faults.suppressed} process fault(s)${faults.lastAt ? `, last at ${faults.lastAt}` : ""}${faults.lastMessage ? `: ${faults.lastMessage}` : ""}. See the relay log.`,
       )
     }
     if (extensionStatus.protocolVersion !== undefined && extensionStatus.protocolVersion !== null) {
