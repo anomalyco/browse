@@ -358,10 +358,105 @@ const fileOptionKeys = new Set(["path", "dir", "har", "storageState"])
 const alwaysFileOptionKeys = new Set(["outputPath", "baseline", "certPath", "keyPath", "pfxPath", "tracesDir", "downloadsPath"])
 const forbiddenOptionKeys = new Set(["executablePath", "recordHar", "recordVideo"])
 
-function checkFileOptions(value: unknown, method: string, includeMethodKeys: boolean, depth = 0): void {
+/** Methods whose `path` is written by the call, unlike addScriptTag's or setInputFiles' input paths. */
+const fileOutputMethods = new Set([
+  "screenshot", "pdf", "storageState", "start", "stop", "startChunk", "stopChunk", "startTracing", "stopTracing",
+  "screenshotWithLabels", "screenshotDiff",
+])
+
+const isFileOutputOption = (method: string, key: string): boolean =>
+  (key === "path" || key === "outputPath") && fileOutputMethods.has(method)
+
+/** A file an allowed host call wrote, and whether it already existed before the call. */
+export type ExecuteFileOutput = {
+  readonly path: string
+  /** False when this call created the file; only those are reset to 0600, so a user's own file keeps its mode. */
+  readonly existed: boolean
+}
+
+function fileExists(target: string): boolean {
+  try {
+    fs.lstatSync(target)
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false
+    throw error
+  }
+}
+
+/**
+ * Creates the folders an output file needs as 0700, like files.write. Playwright makes them with the
+ * process umask instead, so under 0002 a screenshot would create 0775 folders and 0664 files, which
+ * assertExecuteFilePath then refuses on the very next files.path/read/write.
+ */
+function ensureExecuteOutputDirectory(directory: string): void {
+  const created: string[] = []
+  for (let current = directory; ; current = path.dirname(current)) {
+    try {
+      fs.statSync(current)
+      break
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+      created.push(current)
+    }
+    if (path.dirname(current) === current) break
+  }
+  if (created.length === 0) return
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
+  // mkdir's mode applies only to the folders it creates and the umask filters it: pin them private.
+  for (const folder of created) fs.chmodSync(folder, 0o700)
+}
+
+/**
+ * Resets files this host call created to 0600. Opens through O_NOFOLLOW and rechecks the inode, like
+ * openExecuteFile, so a symlink or replacement swapped in meanwhile is left alone.
+ */
+function secureExecuteFileOutputs(outputs: readonly ExecuteFileOutput[]): void {
+  const uid = process.getuid?.()
+  if (uid === undefined) return
+  for (const output of outputs) {
+    if (output.existed) continue
+    try {
+      const before = fs.lstatSync(output.path)
+      if (!before.isFile() || before.uid !== uid || before.nlink !== 1) continue
+      const descriptor = fs.openSync(output.path, fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK)
+      try {
+        const opened = fs.fstatSync(descriptor)
+        const current = fs.lstatSync(output.path)
+        if (!opened.isFile() || opened.uid !== uid || opened.nlink !== 1 || current.isSymbolicLink() || current.dev !== opened.dev || current.ino !== opened.ino) continue
+        fs.fchmodSync(descriptor, 0o600)
+      } finally {
+        fs.closeSync(descriptor)
+      }
+    } catch {
+      // The call may have failed before writing, or removed its output itself.
+    }
+  }
+}
+
+/** Makes the files a host call created owner-only once it settles, for any host call with file outputs. */
+export function completeExecuteFileOutputs(result: unknown, outputs: readonly ExecuteFileOutput[]): unknown {
+  if (outputs.length === 0) return result
+  if (!util.types.isPromise(result)) {
+    secureExecuteFileOutputs(outputs)
+    return result
+  }
+  return (result as Promise<unknown>).then(
+    (value) => {
+      secureExecuteFileOutputs(outputs)
+      return value
+    },
+    (error: unknown) => {
+      secureExecuteFileOutputs(outputs)
+      throw error
+    },
+  )
+}
+
+function checkFileOptions(value: unknown, method: string, includeMethodKeys: boolean, outputs: ExecuteFileOutput[], depth = 0): void {
   if (depth > 4 || value === null || typeof value !== "object") return
   if (Array.isArray(value)) {
-    for (const item of value) checkFileOptions(item, method, includeMethodKeys, depth + 1)
+    for (const item of value) checkFileOptions(item, method, includeMethodKeys, outputs, depth + 1)
     return
   }
   // Option bags are plain objects; Playwright objects passed as arguments (a page, a locator) are not options.
@@ -370,9 +465,16 @@ function checkFileOptions(value: unknown, method: string, includeMethodKeys: boo
   for (const [key, item] of Object.entries(value)) {
     if (forbiddenOptionKeys.has(key)) throw new ExecuteFileAccessError(`${method}: the ${key} option is not available in execute code`)
     if (typeof item === "string" && (alwaysFileOptionKeys.has(key) || (includeMethodKeys && fileOptionKeys.has(key)))) {
-      Reflect.set(value, key, assertExecuteFilePath(item, `${method}({ ${key} })`))
+      const operation = `${method}({ ${key} })`
+      let resolved = assertExecuteFilePath(item, operation)
+      if (isFileOutputOption(method, key)) {
+        ensureExecuteOutputDirectory(path.dirname(resolved))
+        resolved = assertExecuteFilePath(resolved, operation)
+        outputs.push({ path: resolved, existed: fileExists(resolved) })
+      }
+      Reflect.set(value, key, resolved)
     } else {
-      checkFileOptions(item, method, includeMethodKeys, depth + 1)
+      checkFileOptions(item, method, includeMethodKeys, outputs, depth + 1)
     }
   }
 }
@@ -389,7 +491,7 @@ export function returnsPromise(fn: Function): boolean {
 }
 
 /** Enforce the execute file roots and refused APIs for one host call made by sandboxed code. */
-export function checkHostCall(fn: Function, receiver: unknown, args: readonly unknown[]): void {
+export function checkHostCall(fn: Function, receiver: unknown, args: readonly unknown[]): readonly ExecuteFileOutput[] {
   const name = typeof fn.name === "string" ? fn.name.replace(/^bound /, "") : ""
   if (receiver !== null && typeof receiver === "object") {
     const constructor = Reflect.getOwnPropertyDescriptor(receiver, "constructor")?.value
@@ -410,7 +512,9 @@ export function checkHostCall(fn: Function, receiver: unknown, args: readonly un
     checkFileStrings(args[0], name)
   }
   const includeMethodKeys = fileOptionMethods.has(name)
-  for (const arg of args) checkFileOptions(arg, name || "call", includeMethodKeys)
+  const outputs: ExecuteFileOutput[] = []
+  for (const arg of args) checkFileOptions(arg, name || "call", includeMethodKeys, outputs)
+  return outputs
 }
 
 /**

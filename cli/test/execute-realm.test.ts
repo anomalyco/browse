@@ -712,4 +712,52 @@ describe("execute file access", () => {
     expect(() => checkHostCall(send, {}, ["Page.bringToFront"])).toThrow(/bringToFront\(\) is blocked/)
     expect(() => checkHostCall(send, {}, ["Page.navigate", { url: "https://example.com" }])).not.toThrow()
   })
+
+  test.skipIf(process.platform === "win32")("Playwright file outputs are owner-only under a permissive umask", async () => {
+    const files = createExecuteFiles()
+    const output = path.join(files.dir, "shots", "nested", "page.png")
+    const page = {
+      // Like Playwright: recursive mkdir and writeFile, both filtered by the process umask.
+      async screenshot(options: { path?: string }) {
+        if (!options.path) return "buffer"
+        fs.mkdirSync(path.dirname(options.path), { recursive: true })
+        fs.writeFileSync(options.path, "png")
+        return "saved"
+      },
+    }
+    const previous = process.umask(0o002)
+    try {
+      const result = await run(`
+        const saved = await host.page.screenshot({ path: host.files.path("shots/nested/page.png") });
+        const output = host.files.path("shots/nested/page.png");
+        return [saved, output, await host.files.read(output, "utf8")];
+      `, { page, files })
+      expect(result).toEqual(["saved", output, "png"])
+    } finally {
+      process.umask(previous)
+    }
+    expect(fs.statSync(path.join(files.dir, "shots")).mode & 0o777).toBe(0o700)
+    expect(fs.statSync(path.join(files.dir, "shots", "nested")).mode & 0o777).toBe(0o700)
+    expect(fs.statSync(output).mode & 0o777).toBe(0o600)
+    fs.rmSync(path.join(files.dir, "shots"), { recursive: true, force: true })
+  })
+
+  test("file-output methods get private folders, input paths are left alone", () => {
+    const files = createExecuteFiles()
+    const methods = [
+      ["screenshot", "path"], ["pdf", "path"], ["storageState", "path"], ["screenshotWithLabels", "path"],
+      ["screenshotDiff", "path"], ["stop", "outputPath"],
+    ] as const
+    for (const [method, key] of methods) {
+      const output = path.join(files.dir, `${method}-output`, "file")
+      const fn = ({ [method]: () => {} } as Record<string, () => void>)[method]!
+      checkHostCall(fn, {}, [{ [key]: output }])
+      expect(fs.statSync(path.dirname(output)).mode & 0o777, method).toBe(0o700)
+    }
+    // addScriptTag reads its path; Playwright's own mkdir is not involved, so nothing is created for it.
+    const input = path.join(files.dir, "input", "file.js")
+    expect(() => checkHostCall(function addScriptTag() {}, {}, [{ path: input }])).not.toThrow()
+    expect(fs.existsSync(path.dirname(input))).toBe(false)
+    for (const [method] of methods) fs.rmSync(path.join(files.dir, `${method}-output`), { recursive: true, force: true })
+  })
 })
