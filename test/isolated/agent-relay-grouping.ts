@@ -61,6 +61,7 @@ beforeEach(async () => {
   stub.state.windows.clear()
   stub.state.tabs.clear()
   stub.state.groups.clear()
+  stub.state.calls.length = 0
   stub.state.activations.length = 0
   stub.state.focusedWindowId = undefined
   socket().received.length = 0
@@ -161,6 +162,26 @@ describe("grouping: one shared group for all agents (default)", () => {
     // A tab closing counts down.
     await stub.chrome.tabs.remove(second.tabId)
     await until(() => group(first.groupId)?.title === `Agents · 1${MARKER}${MARKER}`)
+  })
+
+  test("the relay removing two tabs of one group concurrently ungroups each before removing it", async () => {
+    await userWindow()
+    const first = await agentTab("github")
+    const second = await agentTab("linear")
+    expect(second.groupId).toBe(first.groupId)
+    stub.state.calls.length = 0
+    await Promise.all([
+      command("tabs.remove", { tabId: first.tabId }),
+      command("tabs.remove", { tabId: second.tabId }),
+    ])
+    for (const tabId of [first.tabId, second.tabId]) {
+      const ungroup = stub.state.calls.indexOf(`ungroup:${tabId}`)
+      const remove = stub.state.calls.indexOf(`remove:${tabId}`)
+      expect(ungroup).toBeGreaterThanOrEqual(0)
+      expect(remove).toBeGreaterThan(ungroup)
+    }
+    expect(stub.state.calls.filter((call) => call.startsWith("ungroup:"))).toHaveLength(2)
+    expect(stub.state.groups.size).toBe(0)
   })
 
   test("concurrent sessions still make one group", async () => {

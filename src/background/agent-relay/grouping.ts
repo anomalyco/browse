@@ -171,7 +171,7 @@ export function createRelayGrouping(deps: {
     if (grouped && !ownedGroup(current?.title)) return
     if (!deps.isReloading() && (await TabCleanup.isTracked(tabId))) {
       deps.log.add("tab.closed", { tabId, reason: "agent finished with it" })
-      await chrome.tabs.remove(tabId).catch(() => undefined)
+      await TabCleanup.closeAgentTab(tabId).catch(() => undefined)
       return
     }
     if (grouped) await chrome.tabs.ungroup(tabId).catch(() => undefined)

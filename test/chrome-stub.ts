@@ -95,6 +95,8 @@ export function createChrome() {
     groups,
     /** Every chrome.windows.update({ focused: true }) and chrome.tabs.update({ active: true }), in order. */
     activations: [] as ({ windowId: number } | { tabId: number })[],
+    /** Tab calls that change groups, in order, so tests can check ungroup comes before remove. */
+    calls: [] as string[],
     /** The displays chrome.windows.create bounds are checked against. */
     displays: [{ left: 0, top: 0, width: 1512, height: 982 }] as Bounds[],
     focusedWindowId: undefined as number | undefined,
@@ -145,6 +147,7 @@ export function createChrome() {
       if (!windows.delete(id)) throw new Error(`No window with id: ${id}.`)
       for (const tab of tabs.values()) if (tab.windowId === id) tabs.delete(tab.id)
       windowsApi.onRemoved.emit(id)
+      dropEmptyGroups()
     },
   })
   const addTab = (windowId: number, url: string, active: boolean) => {
@@ -205,25 +208,38 @@ export function createChrome() {
         for (const tabId of ids) {
           const tab = tabs.get(tabId)
           if (!tab) throw new Error(`No tab with id: ${tabId}.`)
-          tab.groupId = id
+          if (tab.groupId !== id) {
+            tab.groupId = id
+            tabUpdated(tab)
+          }
         }
         // Like Chrome, a new group starts expanded, in its tabs' window.
         if (!groups.has(id)) groups.set(id, { id, windowId: tabs.get(ids[0]!)!.windowId, title: "", color: "grey", collapsed: false })
+        dropEmptyGroups()
         return id
       },
       async remove(tabIds: number | number[]) {
         for (const tabId of Array.isArray(tabIds) ? tabIds : [tabIds]) {
           const tab = tabs.get(tabId)
           if (!tab) throw new Error(`No tab with id: ${tabId}.`)
+          state.calls.push(`remove:${tabId}`)
           tabs.delete(tabId)
           ;((chrome.tabs as unknown as { onRemoved: StubEvent }).onRemoved).emit(tabId, { windowId: tab.windowId, isWindowClosing: false })
         }
+        dropEmptyGroups()
       },
       async ungroup(tabIds: number | number[]) {
         for (const tabId of Array.isArray(tabIds) ? tabIds : [tabIds]) {
           const tab = tabs.get(tabId)
-          if (tab) tab.groupId = -1
+          if (tab) {
+            state.calls.push(`ungroup:${tabId}`)
+            if (tab.groupId !== -1) {
+              tab.groupId = -1
+              tabUpdated(tab)
+            }
+          }
         }
+        dropEmptyGroups()
       },
     }),
     tabGroups: lenient({
@@ -267,6 +283,17 @@ export function createChrome() {
       },
     }),
   }, true)
+  /** Chrome removes a group when its last tab is removed or ungrouped. Saved groups aren't modelled. */
+  const dropEmptyGroups = () => {
+    for (const group of [...groups.values()]) {
+      if ([...tabs.values()].some((tab) => tab.groupId === group.id)) continue
+      groups.delete(group.id)
+      ;((chrome.tabGroups as unknown as { onRemoved: StubEvent }).onRemoved).emit({ ...group })
+    }
+  }
+  const tabUpdated = (tab: Tab) => {
+    ;((chrome.tabs as unknown as { onUpdated: StubEvent }).onUpdated).emit(tab.id, { groupId: tab.groupId }, { ...tab })
+  }
   return { chrome, state }
 }
 
