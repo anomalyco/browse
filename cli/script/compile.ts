@@ -51,7 +51,7 @@ if (import.meta.main) {
   const extension = zip
     ? await readFile(zip).then((bytes) => ({ file: path.basename(zip), sha256: createHash("sha256").update(bytes).digest("hex"), size: bytes.length }))
     : undefined
-  const build = new Date().toISOString()
+  const build = process.env.OPENCODE_BROWSER_BUILD ?? new Date().toISOString()
 
   await rm(outdir, { recursive: true, force: true })
   for (const item of selected) {

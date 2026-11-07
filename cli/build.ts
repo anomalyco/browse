@@ -22,7 +22,7 @@ const extension = zip
   ? await readFile(zip).then((bytes) => ({ file: path.basename(zip), sha256: createHash("sha256").update(bytes).digest("hex"), size: bytes.length }))
   : undefined
 
-const build = new Date().toISOString()
+const build = process.env.OPENCODE_BROWSER_BUILD ?? new Date().toISOString()
 await $`bun run build`.cwd(checkout).env({ ...process.env, OPENCODE_BROWSER_BUILD: build }).quiet()
 await rm(path.join(here, "dist"), { recursive: true, force: true })
 // Earlier builds copied the extension into the package.
