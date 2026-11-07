@@ -68,7 +68,9 @@ export function createRelayCommands(deps: {
   readonly setUpdateNotice: (notice: AgentRelayUpdate | undefined) => void
   readonly sendCommand: (params: JsonObject | undefined) => Promise<JsonObject>
   readonly group: (tabId: number, sessionId: string | undefined, current: WebSocket) => Promise<number>
-  readonly ungroup: (tabId: number, options?: { finished?: boolean }) => Promise<void>
+  readonly ungroup: (tabId: number, options?: { finished?: boolean; released?: boolean }) => Promise<void>
+  /** True for the first `tabs.ungroup` after a debugging-bar cancel of a tab an agent opened: it must stay as it is. */
+  readonly consumeCanceledUngroup: (tabId: number) => boolean
   readonly startRecording: (params: JsonObject | undefined) => Promise<JsonObject>
   readonly recordingCall: <Result>(action: string, tabId: number) => Promise<Result>
 }) {
@@ -167,9 +169,13 @@ export function createRelayCommands(deps: {
             current,
           ),
         }
-      case "tabs.ungroup":
-        await deps.ungroup(number(params, "tabId"))
+      case "tabs.ungroup": {
+        const tabId = number(params, "tabId")
+        // An older relay follows every debugging-bar cancel with this; a tab an agent opened stays grouped and tracked.
+        if (deps.consumeCanceledUngroup(tabId)) return {}
+        await deps.ungroup(tabId)
         return {}
+      }
       case "action.setAttached": {
         const tabId = number(params, "tabId")
         if (params?.attached === true) deps.badges.set(tabId, { text: "ON", title: ATTACHED_TITLE })

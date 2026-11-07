@@ -46,6 +46,9 @@ export function createRelayGrouping(deps: {
 
   const serially = serialQueue()
 
+  /** Undoes a group the relay made itself. A tab it is still responsible for keeps its idle tracking. */
+  const undoGroup = (tabId: number) => TabCleanup.relayUngroup(tabId, () => chrome.tabs.ungroup(tabId).catch(() => undefined))
+
   /** Keeps a shared group's title counting its tabs. */
   const countShared = async (groupId: number) => {
     const item = await chrome.tabGroups.get(groupId).catch(() => undefined)
@@ -84,7 +87,7 @@ export function createRelayGrouping(deps: {
       if (deps.currentSocket() !== current) throw new Error("The relay reconnected while grouping the tab")
       groupId = await chrome.tabs.group({ tabIds: [tabId], createProperties: { windowId: tab.windowId } })
       if (deps.currentSocket() !== current) {
-        await chrome.tabs.ungroup(tabId).catch(() => undefined)
+        await undoGroup(tabId)
         throw new Error("The relay reconnected while grouping the tab")
       }
       await chrome.tabGroups.update(groupId, { title: sharedTitle(1), color: GROUP_COLOR })
@@ -134,7 +137,7 @@ export function createRelayGrouping(deps: {
     const groupId = await chrome.tabs.group({ tabIds: [tabId], createProperties: { windowId: tab.windowId } })
     // chrome.tabs.group changes the tab before it resolves, so a stale command undoes its anonymous group.
     if (deps.currentSocket() !== current) {
-      await chrome.tabs.ungroup(tabId).catch(() => undefined)
+      await undoGroup(tabId)
       throw new Error("The relay reconnected while grouping the tab")
     }
     await chrome.tabGroups.update(groupId, { title, color: GROUP_COLOR })
@@ -160,21 +163,23 @@ export function createRelayGrouping(deps: {
    * The relay is done with a tab. A tab an agent opened closes with its group rather than spilling into the
    * user's tabs; a tab the user lent an agent just leaves the group. With grouping off an agent's tab has no group:
    * it closes when the relay detaches it (`finished`, the toolbar button on it) like a grouped one does. A tab in a
-   * group of the user's own is theirs and stays.
+   * group of the user's own is theirs and stays. `released` is the user taking the tab back from the browser's
+   * debugging bar: it leaves the group and idle cleanup tracks it no more, but it stays open.
    */
-  const ungroup = async (tabId: number, options: { finished?: boolean } = {}) => {
+  const ungroup = async (tabId: number, options: { finished?: boolean; released?: boolean } = {}) => {
     const tab = await chrome.tabs.get(tabId).catch(() => undefined)
     if (!tab) return
+    if (options.released) TabCleanup.forget(tabId)
     const grouped = tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE
-    if (!grouped && !options.finished) return
+    if (!grouped && !options.finished && !options.released) return
     const current = grouped ? await chrome.tabGroups.get(tab.groupId).catch(() => undefined) : undefined
     if (grouped && !ownedGroup(current?.title)) return
-    if (!deps.isReloading() && (await TabCleanup.isTracked(tabId))) {
+    if (!options.released && !deps.isReloading() && (await TabCleanup.isTracked(tabId))) {
       deps.log.add("tab.closed", { tabId, reason: "agent finished with it" })
       await TabCleanup.closeAgentTab(tabId).catch(() => undefined)
       return
     }
-    if (grouped) await chrome.tabs.ungroup(tabId).catch(() => undefined)
+    if (grouped) await undoGroup(tabId)
   }
 
   /**

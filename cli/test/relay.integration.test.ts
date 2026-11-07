@@ -465,6 +465,67 @@ describe("relay", () => {
     third.close()
   }, 30_000)
 
+  test("the browser's debugging bar dismissal stops the script, keeps agent tabs grouped and warns the next execute", async () => {
+    const info = (tabId: number) => ({ targetId: `TARGET-${tabId}`, type: "page", title: "Example", url: "https://example.com/", attached: true, browserContextId: "CTX" })
+    const userTab = 240
+    let next = 230
+    const extension = new FakeExtension(home, port)
+      .on("tabs.create", () => ({ tabId: ++next }))
+      .on("Target.getTargetInfo", (command) => ({ targetInfo: info(Number(command.params?.tabId)) }))
+      .on("Page.getFrameTree", (command) => {
+        const targetId = `TARGET-${Number(command.params?.tabId)}`
+        return { frameTree: { frame: { id: targetId, loaderId: "L", url: "https://example.com/", domainAndRegistry: "", securityOrigin: "https://example.com", mimeType: "text/html", secureContextType: "Secure", crossOriginIsolatedContextType: "NotIsolated", gatedAPIFeatures: [] } } }
+      })
+    // A tab the user attached with the toolbar: the relay must still ungroup it for an older extension.
+    expect(await extension.pair({ attachedTabs: [userTab] })).toBe(true)
+    expect(await until(() => extension.commands.some((command) => command.method === "debugger.sendCommand" && command.params?.method === "Page.enable" && command.params?.tabId === userTab), 10_000)).toBe(true)
+    const post = (route: string, body: unknown) => fetch(`${base}${route}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    })
+    type Result = { isError: boolean; text: string; warnings: string[] }
+    const execute = async (sessionId: string, code: string) =>
+      await (await post("/cli/execute", { sessionId, code, createIfMissing: true })).json() as Result
+    const ungroups = (tabId: number) => extension.commands.filter((command) => command.method === "tabs.ungroup" && command.params?.tabId === tabId).length
+    try {
+      // A script that never settles: the user clicks the bar's button while it runs. Chromium detaches every tab,
+      // the agent's and the user's, so the relay hears both.
+      const runningSession = "debugging-bar-running"
+      const running = execute(runningSession, "await new Promise(() => {})")
+      expect(await until(() => extension.commands.some((command) => command.method === "pageStatus.set" && (command.params?.status as { state?: string } | undefined)?.state === "running"), 10_000)).toBe(true)
+      // Let the session page finish opening so user code is the thing that runs when the user cancels.
+      await Bun.sleep(200)
+      const runningTab = next
+      const userUngroups = ungroups(userTab)
+      extension.emit("debugger.detached", { tabId: runningTab, reason: "canceled_by_user" })
+      extension.emit("debugger.detached", { tabId: userTab, reason: "canceled_by_user" })
+      const stopped = await running
+      expect(stopped.isError).toBe(true)
+      expect(stopped.text).toContain("dismissed the browser's debugging bar")
+      expect(stopped.text).toContain("disconnects browse from every tab")
+
+      // An agent-opened tab keeps its group (an ungroup here would close it in the extension); a tab the user lent
+      // is still ungrouped.
+      expect(ungroups(runningTab)).toBe(0)
+      expect(await until(() => ungroups(userTab) > userUngroups)).toBe(true)
+
+      // The next execute in a session whose page was released that way says so and opens a new page.
+      const idleSession = "debugging-bar-idle"
+      expect((await execute(idleSession, "return 1")).isError).toBe(false)
+      const idleTab = next
+      extension.emit("debugger.detached", { tabId: idleTab, reason: "canceled_by_user" })
+      expect(await until(() => extension.commands.some((command) => command.method === "pageStatus.clear" && command.params?.tabId === idleTab))).toBe(true)
+      expect(ungroups(idleTab)).toBe(0)
+      const nextRun = await execute(idleSession, "return 1")
+      expect(nextRun.warnings.join("\n")).toContain("dismissed the browser's debugging bar")
+      expect(nextRun.warnings.join("\n")).toContain("tabs an agent opened stay open")
+      expect(nextRun.warnings.join("\n")).not.toContain("The session default page was closed")
+    } finally {
+      extension.close()
+    }
+  }, 30_000)
+
   test("a tab the extension re-attached after Chrome dropped the debugger (a PDF opening) is set up again", async () => {
     const targetInfo = { targetId: "TARGET-75", type: "page", title: "Doc", url: "https://example.com/doc.pdf", attached: true, browserContextId: "CTX" }
     const extension = new FakeExtension(home, port)

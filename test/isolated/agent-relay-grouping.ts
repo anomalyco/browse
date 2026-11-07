@@ -54,6 +54,38 @@ async function agentTab(sessionId: string, url = "https://example.com/") {
   return { tabId, groupId }
 }
 
+/** Waits until the extension finished releasing every tab Chromium detached at once. */
+async function canceledAtOnce(tabIds: readonly number[]) {
+  await until(() =>
+    tabIds.every((tabId) =>
+      socket().received.some((message) =>
+        message.method === "debugger.detached" && message.params?.tabId === tabId && message.params?.reason === "canceled_by_user") &&
+      relay.badge(tabId) === undefined &&
+      !relay.state().tabs.some((entry) => entry.tabId === tabId),
+    ),
+  )
+}
+
+/** What the relay sends after a debugger detach: clear the status, ungroup, reset the badge. */
+async function relayDetachFollowUp(tabId: number) {
+  await command("tabs.ungroup", { tabId })
+  await command("pageStatus.clear", { tabId })
+  await command("action.setAttached", { tabId, attached: false })
+}
+
+/** What the relay sends after a toolbar lend: attach, ungroup (a user tab has no session), status and badge. */
+async function relayLendFollowUp(tabId: number) {
+  await command("debugger.attach", { tabId })
+  await command("tabs.ungroup", { tabId })
+  await command("pageStatus.set", { tabId, status: { state: "attached", owner: "user" } })
+  await command("action.setAttached", { tabId, attached: true })
+}
+
+/** Waits until the extension asked the relay to toggle the tab this many times. */
+async function toolbarClicked(tabId: number, atLeast = 1) {
+  await until(() => socket().received.filter((message) => message.method === "toolbar.clicked" && message.params?.tabId === tabId).length >= atLeast)
+}
+
 const group = (groupId: number) => stub.state.groups.get(groupId)
 const tab = (tabId: number) => stub.state.tabs.get(tabId)!
 
@@ -250,6 +282,118 @@ describe("grouping: one shared group for all agents (default)", () => {
     expect(stub.state.tabs.has(agent.tabId)).toBe(false)
     await command("debugger.detach", { tabId: userTab })
     expect(tab(userTab).groupId).toBe(-1)
+  })
+
+  test("a debugging bar cancel leaves agent tabs grouped and tracked, and releases a lent tab", async () => {
+    await stub.chrome.storage.local.set({ agentTabsGrouping: "shared" })
+    const { userTab } = await userWindow()
+    const first = await agentTab("github")
+    const second = await agentTab("linear")
+    await command("debugger.attach", { tabId: userTab })
+    expect((await command("tabs.group", { tabId: userTab, sessionId: "github" })).groupId).toBe(first.groupId)
+    const canceled = [first.tabId, second.tabId, userTab]
+    for (const tabId of canceled) await command("action.setBadge", { tabId, text: "RUN" })
+    // Chromium detaches every tab at once when the bar's button is clicked.
+    for (const tabId of canceled) event("debugger.onDetach").emit({ tabId }, "canceled_by_user")
+    await canceledAtOnce(canceled)
+    // Then the relay follows each detach with what it sends today.
+    for (const tabId of canceled) await relayDetachFollowUp(tabId)
+    // Tabs the agent opened stay open, in the shared group, and on the idle timer.
+    for (const agent of [first, second]) {
+      expect(stub.state.tabs.has(agent.tabId)).toBe(true)
+      expect(tab(agent.tabId).groupId).toBe(first.groupId)
+      expect(await TabCleanup.isTracked(agent.tabId)).toBe(true)
+    }
+    // The tab the user lent is theirs again: open, out of the group, untracked.
+    expect(stub.state.tabs.has(userTab)).toBe(true)
+    expect(tab(userTab).groupId).toBe(-1)
+    expect(await TabCleanup.isTracked(userTab)).toBe(false)
+    for (const tabId of canceled) expect(relay.badge(tabId)).toBeUndefined()
+    // Idle cleanup still closes the agent's tabs, never the user's.
+    const closed = await TabCleanup.cleanup({ minutes: 0 })
+    expect(closed.map((tab) => tab.tabId).sort()).toEqual([first.tabId, second.tabId].sort())
+    expect(stub.state.tabs.has(userTab)).toBe(true)
+  })
+
+  test("a debugging bar cancel leaves a lent tab in one of the user's own groups where it is", async () => {
+    const { userTab } = await userWindow()
+    const ownGroup = await stub.chrome.tabs.group({ tabIds: [userTab] })
+    await stub.chrome.tabGroups.update(ownGroup, { title: "Work" })
+    await command("debugger.attach", { tabId: userTab })
+    event("debugger.onDetach").emit({ tabId: userTab }, "canceled_by_user")
+    await canceledAtOnce([userTab])
+    await relayDetachFollowUp(userTab)
+    expect(tab(userTab).groupId).toBe(ownGroup)
+    expect(group(ownGroup)!.title).toBe("Work")
+    expect(stub.state.tabs.has(userTab)).toBe(true)
+    expect(await TabCleanup.isTracked(userTab)).toBe(false)
+  })
+
+  test("lending a canceled agent tab makes it a normal lent tab, and taking it back keeps it", async () => {
+    await stub.chrome.storage.local.set({ agentTabsGrouping: "shared" })
+    await userWindow()
+    const stillMarked = await agentTab("github")
+    const markerGone = await agentTab("linear")
+    for (const tabId of [stillMarked.tabId, markerGone.tabId]) event("debugger.onDetach").emit({ tabId }, "canceled_by_user")
+    await canceledAtOnce([stillMarked.tabId, markerGone.tabId])
+    // An old relay follows the cancel with an ungroup, which consumes the mark; a new relay does not, so the mark is
+    // still there when the user lends the tab. Both must make the lend a normal lent tab.
+    await relayDetachFollowUp(markerGone.tabId)
+    for (const tabId of [stillMarked.tabId, markerGone.tabId]) {
+      await relay.attachTab(tabId)
+      await toolbarClicked(tabId)
+      await relayLendFollowUp(tabId)
+      // Lending hands the tab to the user: open, out of the agent group, and no longer closed by idle cleanup.
+      expect(stub.state.tabs.has(tabId)).toBe(true)
+      expect(tab(tabId).groupId).toBe(-1)
+      expect(await TabCleanup.isTracked(tabId)).toBe(false)
+      // Taking it back with the toolbar leaves it open too.
+      await relay.attachTab(tabId)
+      await toolbarClicked(tabId, 2)
+      await command("debugger.detach", { tabId })
+      await command("pageStatus.clear", { tabId })
+      await command("action.setAttached", { tabId, attached: false })
+      expect(stub.state.tabs.has(tabId)).toBe(true)
+      expect(await TabCleanup.isTracked(tabId)).toBe(false)
+    }
+  })
+
+  test("a debugging bar cancel keeps each session's tabs in its own group", async () => {
+    await stub.chrome.storage.local.set({ agentTabsGrouping: "session" })
+    await userWindow()
+    const first = await agentTab("github")
+    const second = await agentTab("linear")
+    expect(first.groupId).not.toBe(second.groupId)
+    const canceled = [first.tabId, second.tabId]
+    for (const tabId of canceled) event("debugger.onDetach").emit({ tabId }, "canceled_by_user")
+    await canceledAtOnce(canceled)
+    for (const tabId of canceled) await relayDetachFollowUp(tabId)
+    expect(tab(first.tabId).groupId).toBe(first.groupId)
+    expect(tab(second.tabId).groupId).toBe(second.groupId)
+    expect(group(first.groupId)!.title).toBe(`github${MARKER}`)
+    expect(group(second.groupId)!.title).toBe(`linear${MARKER}`)
+    expect(await TabCleanup.isTracked(first.tabId)).toBe(true)
+    expect(await TabCleanup.isTracked(second.tabId)).toBe(true)
+    expect(await TabCleanup.cleanup({ minutes: 0 })).toHaveLength(2)
+  })
+
+  test("with grouping off, a debugging bar cancel keeps agent tabs open and tracked", async () => {
+    await stub.chrome.storage.local.set({ agentTabsGrouping: "none" })
+    const { userTab } = await userWindow()
+    const agent = await agentTab("github")
+    expect(agent.groupId).toBe(-1)
+    await command("debugger.attach", { tabId: userTab })
+    const canceled = [agent.tabId, userTab]
+    for (const tabId of canceled) event("debugger.onDetach").emit({ tabId }, "canceled_by_user")
+    await canceledAtOnce(canceled)
+    for (const tabId of canceled) await relayDetachFollowUp(tabId)
+    expect(stub.state.tabs.has(agent.tabId)).toBe(true)
+    expect(tab(agent.tabId).groupId).toBe(-1)
+    expect(await TabCleanup.isTracked(agent.tabId)).toBe(true)
+    expect(stub.state.tabs.has(userTab)).toBe(true)
+    expect(await TabCleanup.isTracked(userTab)).toBe(false)
+    expect((await TabCleanup.cleanup({ minutes: 0 })).map((tab) => tab.tabId)).toEqual([agent.tabId])
+    expect(stub.state.tabs.has(userTab)).toBe(true)
   })
 })
 

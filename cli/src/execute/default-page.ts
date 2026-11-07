@@ -2,6 +2,7 @@ import { Effect } from "effect"
 import type { BrowserContext, Frame, Page } from "patchright-core"
 import { applyExplicitMediaFeatures } from "./guards.ts"
 import {
+  debuggingBarDismissedWarning,
   defaultPageClosedWarning,
   defaultPageCrashedWarning,
   defaultPageReattachedWarning,
@@ -60,6 +61,8 @@ export abstract class DefaultPageHost {
   protected pendingTargetRebind: "replaced" | "repaired" | undefined
   protected lastKnownNonBlankUrl: string | undefined
   protected recreatedFromClosedUrl: string | undefined
+  /** The user released the default page from the browser's debugging bar: say so when the next page is created. */
+  protected pageReleasedByDebuggingBar = false
   /** Media features the agent set with page.emulateMedia; the relay drops Patchright's defaults otherwise. */
   protected readonly explicitMediaFeatures = new Map<string, string>()
   protected explicitMedia: string | undefined
@@ -130,15 +133,17 @@ export abstract class DefaultPageHost {
     return true
   }
 
-  markTargetDetached(targetId: string): boolean {
+  markTargetDetached(targetId: string, options: { readonly releasedByUser?: boolean } = {}): boolean {
     if (this.defaultPageTargetId !== targetId) {
       return false
     }
-    if (this.lastKnownNonBlankUrl) {
-      this.recreatedFromClosedUrl = this.lastKnownNonBlankUrl
-    }
+    const releasedByUser = options.releasedByUser === true
+    // A released page was not closed: don't let a later locator failure say the previous page "was closed".
+    if (releasedByUser) this.recreatedFromClosedUrl = undefined
+    else if (this.lastKnownNonBlankUrl) this.recreatedFromClosedUrl = this.lastKnownNonBlankUrl
+    this.pageReleasedByDebuggingBar = releasedByUser
     this.unbindDefaultPage(undefined)
-    this.addWarningOnce(defaultPageClosedWarning)
+    this.addWarningOnce(releasedByUser ? debuggingBarDismissedWarning : defaultPageClosedWarning)
     return true
   }
 
@@ -181,6 +186,8 @@ export abstract class DefaultPageHost {
     this.defaultPageTargetId = targetId
     this.ownsPage = ownsPage
     this.pendingTargetRebind = undefined
+    // A rebind (adoption, replacement, the next execute) is not the page the user released, so drop any stale notice.
+    this.pageReleasedByDebuggingBar = false
     this.recordNonBlankUrl(safePageUrl(page))
     const close = () => {
       if (this.page !== page) return
@@ -287,6 +294,12 @@ export abstract class DefaultPageHost {
         notify: true,
       })
       this.pendingWarnings.push(defaultPageClosedWarning)
+    }
+    // The warning was queued when the user released the tab; a stopped script may have drained it, so say it again
+    // here rather than let the next execute silently open a new page.
+    if (this.pageReleasedByDebuggingBar) {
+      this.pageReleasedByDebuggingBar = false
+      this.addWarningOnce(debuggingBarDismissedWarning)
     }
     const page = await context.newPage()
     const targetId = await resolvePageTargetId(page)

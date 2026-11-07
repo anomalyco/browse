@@ -1,6 +1,6 @@
 import { Effect } from "effect"
 import type { BrowserLink, BrowserLinks } from "./browser-links.ts"
-import type { HandoffPageTarget } from "../execute.ts"
+import { debuggingBarDismissedStop, type HandoffPageTarget } from "../execute.ts"
 import type { ExtensionCommandInput } from "./rpc.ts"
 import {
   awaitHandoffAction,
@@ -303,6 +303,22 @@ export function createTabPresentation(options: {
     })
   }
 
+  /**
+   * The user clicked the browser's debugging bar button, which detaches the debugger and leaves the tab open. A
+   * script running on the tab is stopped with a message naming what happened; the tab itself is released by the
+   * caller (detachTargetState with releasedByUser).
+   */
+  function handleDebuggingBarCancel(tabId: number): void {
+    const sessions = getSessions()
+    const target = registry.tabTargets.get(tabId)
+    if (!target) return
+    const sessionId = pageStatusSessionId(target) ?? activeHandoffSessionIdForTab(tabId)
+    if (sessionId && sessions.isExecuting(sessionId)) {
+      relayLog("execute.stopped", { tabId, session: sessionId, from: "debugging-bar" })
+      sessions.stopExecution(sessionId, debuggingBarDismissedStop, "debugging-bar-cancel")
+    }
+  }
+
   function presentAttachedTarget(committedTarget: ConnectedTarget): void {
     tabActivity.touch(committedTarget.tabId)
     const tabId = committedTarget.tabId
@@ -338,6 +354,7 @@ export function createTabPresentation(options: {
     requestHandoff,
     onSessionExecuteStateChange,
     handleToolbarClick,
+    handleDebuggingBarCancel,
     presentAttachedTarget,
   }
 }

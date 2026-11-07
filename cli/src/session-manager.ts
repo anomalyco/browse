@@ -344,9 +344,9 @@ export class OpenCodeBrowserSessions {
     return this.collectSessionIds((session) => session.sandbox.markTargetProtectedUi(targetId, protectedUi))
   }
 
-  markTargetDetached(targetId: string): string[] {
+  markTargetDetached(targetId: string, options: { readonly releasedByUser?: boolean } = {}): string[] {
     return this.collectSessionIds((session) => {
-      const detached = session.sandbox.markTargetDetached(targetId)
+      const detached = session.sandbox.markTargetDetached(targetId, options)
       if (session.target?.id === targetId && session.target.owner === "user") {
         this.notifyTargetOwnershipChange(this.targetOwnership.releaseTargetOwnership(targetId, session.id))
       }

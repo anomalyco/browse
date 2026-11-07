@@ -532,11 +532,13 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   function detachTargetState(tabId: number, detachOptions: {
     readonly preserveSessionTarget?: boolean
     readonly updateExtension?: boolean
+    readonly releasedByUser?: boolean
   } = {}): void {
     rootLifecycle.invalidate(tabId)
     if (detachOptions.updateExtension !== false) {
       sendExtensionBestEffort({ method: "pageStatus.clear", params: { tabId } })
-      presentation.scheduleTabGrouping(tabId, "tabs.ungroup")
+      // An agent-opened tab stays in its group and on the idle timer after a cancel, so an ungroup here would close it.
+      if (detachOptions.releasedByUser !== true || registry.tabTargets.get(tabId)?.owner !== "relay") presentation.scheduleTabGrouping(tabId, "tabs.ungroup")
       sendExtensionBestEffort({ method: "action.setAttached", params: { tabId, attached: false } })
       void recordingRelay.abortRecordingForTab({ tabId, reason: "Tab detached" }).catch((error: unknown) => {
         console.error("Failed to abort recording for detached tab", error)
@@ -548,7 +550,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     const detached = registry.detachRootTargetState(tabId)
     if (detached) {
       presentation.cancelTargetHandoffs(detached.target, "target-detached")
-      if (!detachOptions.preserveSessionTarget) sessions.markTargetDetached(detached.target.targetInfo.targetId)
+      if (!detachOptions.preserveSessionTarget) sessions.markTargetDetached(detached.target.targetInfo.targetId, { releasedByUser: detachOptions.releasedByUser === true })
       contextDebugLog?.(`target-detached kind=root ${targetDiagnosticIdentity(registry, detached.target)}`)
     }
     cdpClients.detachTab(tabId, { destroyed: true })
@@ -627,6 +629,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     refreshPageStatus: presentation.refreshPageStatus,
     refreshTabGrouping: presentation.refreshTabGrouping,
     handleToolbarClick: presentation.handleToolbarClick,
+    handleDebuggingBarCancel: presentation.handleDebuggingBarCancel,
     cancelTargetHandoffs: presentation.cancelTargetHandoffs,
     detachTargetState,
     detachChildTargetState,
