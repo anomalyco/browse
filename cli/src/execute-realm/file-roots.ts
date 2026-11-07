@@ -146,6 +146,11 @@ export function isInside(child: string, parent: string, platform: NodeJS.Platfor
   return relative === "" || (!paths.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${paths.sep}`))
 }
 
+/** Whether two paths name the same place under the platform's case rules. */
+function isSamePath(a: string, b: string): boolean {
+  return isInside(a, b) && isInside(b, a)
+}
+
 /** Resolve the real location a path refers to (following an existing symlink, or the nearest existing parent). */
 function realTarget(target: string): string {
   let current = path.resolve(target)
@@ -387,6 +392,8 @@ export type ExecuteHostCall = {
   readonly trace?: ExecuteTraceStart
   /** stopTracing: the receiver whose remembered path is an output and is forgotten when prepared. */
   readonly traceStop?: object
+  /** stopTracing: the remembered path, checked only after prepare drops the memory. */
+  readonly tracePath?: string
 }
 
 /** A file an allowed host call wrote, and whether it already existed before the call. */
@@ -463,13 +470,13 @@ function ensureExecuteOutputDirectory(directory: string): void {
     }
     if (stat) {
       if (!stat.isDirectory() || stat.isSymbolicLink()) throw outputDirectoryError(current)
-      if (current !== root && uid !== undefined && (stat.uid !== uid || (stat.mode & 0o022) !== 0)) throw outputDirectoryError(current)
-    } else if (current === root) {
+      if (!isSamePath(current, root) && uid !== undefined && (stat.uid !== uid || (stat.mode & 0o022) !== 0)) throw outputDirectoryError(current)
+    } else if (isSamePath(current, root)) {
       throw outputDirectoryError(current)
     } else {
       missing.push(current)
     }
-    if (current === root) break
+    if (isSamePath(current, root)) break
     const parent = path.dirname(current)
     if (parent === current) throw outputDirectoryError(current)
     current = parent
@@ -535,8 +542,9 @@ function secureExecuteFileOutputs(outputs: readonly ExecuteFileOutput[]): void {
  */
 export function prepareExecuteFileOutputs(call: ExecuteHostCall): PreparedExecuteFileOutputs {
   if (call.traceStop !== undefined) startedTraces.delete(call.traceStop)
+  const candidates = call.tracePath === undefined ? call.outputs : [...call.outputs, { path: call.tracePath }]
   const outputs: ExecuteFileOutput[] = []
-  for (const candidate of call.outputs) {
+  for (const candidate of candidates) {
     ensureExecuteOutputDirectory(path.dirname(candidate.path))
     const resolved = assertExecuteFilePath(candidate.path, "execute file output")
     outputs.push({ path: resolved, existed: fileExists(resolved) })
@@ -656,9 +664,9 @@ export function checkHostCall(fn: Function, receiver: unknown, args: readonly un
   }
   if (name === "stopTracing" && isObject(receiver)) {
     const remembered = startedTraces.get(receiver)
-    // The remembered path could have left the roots or grown a symlink since startTracing.
-    const outputs = remembered === undefined ? candidates : [...candidates, { path: assertExecuteFilePath(remembered, "stopTracing()") }]
-    return { outputs, traceStop: receiver }
+    // Unasserted: prepare drops the memory first, so a remembered path that now fails the guard
+    // refuses this stop once instead of making every later stopTracing() fail the same way.
+    return remembered === undefined ? { outputs: candidates, traceStop: receiver } : { outputs: candidates, traceStop: receiver, tracePath: remembered }
   }
   return { outputs: candidates }
 }

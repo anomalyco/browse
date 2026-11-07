@@ -921,13 +921,13 @@ describe("execute file access", () => {
       await run(`await host.browser.stopTracing(); return null;`, { browser })
       expect(fs.statSync(path.dirname(output)).mode & 0o777).toBe(0o700)
       expect(fs.statSync(output).mode & 0o777).toBe(0o600)
-      // A stop refused before it can prepare must drop the remembered path for the next one.
+      // A remembered path that stops passing the guard is refused once, then forgotten.
       prepareExecuteFileOutputs(checkHostCall(function startTracing() {}, browser, [null, { path: output }])).commitTrace?.()
-      const stopping = checkHostCall(function stopTracing() {}, browser, [])
-      expect(stopping.outputs).toHaveLength(1)
       fs.chmodSync(path.dirname(output), 0o777)
+      const stopping = checkHostCall(function stopTracing() {}, browser, [])
+      expect(stopping.tracePath).toBe(output)
       expect(() => prepareExecuteFileOutputs(stopping)).toThrow(/owned directories/)
-      expect(checkHostCall(function stopTracing() {}, browser, []).outputs).toHaveLength(0)
+      expect(() => checkHostCall(function stopTracing() {}, browser, [])).not.toThrow()
     } finally {
       process.umask(previous)
       fs.rmSync(path.join(files.dir, "traces"), { recursive: true, force: true })
