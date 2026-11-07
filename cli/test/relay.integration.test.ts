@@ -549,6 +549,44 @@ describe("relay", () => {
     extension.close()
   }, 20_000)
 
+  test("a tab re-attached while its session is executing keeps focus emulation on", async () => {
+    const tabId = 76
+    const targetInfo = { targetId: "TARGET-76", type: "page", title: "Example", url: "https://example.com/", attached: true, browserContextId: "CTX" }
+    const extension = new FakeExtension(home, port)
+      .on("tabs.create", () => ({ tabId }))
+      .on("Target.getTargetInfo", () => ({ targetInfo }))
+      .on("Page.getFrameTree", () => ({ frameTree: { frame: { id: "TARGET-76", loaderId: "L", url: "https://example.com/", domainAndRegistry: "", securityOrigin: "https://example.com", mimeType: "text/html", secureContextType: "Secure", crossOriginIsolatedContextType: "NotIsolated", gatedAPIFeatures: [] } } }))
+    expect(await extension.pair()).toBe(true)
+    const post = (route: string, body: unknown) => fetch(`${base}${route}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    })
+    // A script that never settles: its session stays executing while the tab is re-attached underneath it.
+    const running = post("/cli/execute", { sessionId: "reattach-focus", code: "await new Promise(() => {})", createIfMissing: true })
+      .then((response) => response.json()) as Promise<{ isError: boolean }>
+    expect(await until(() => extension.commands.some((command) => command.method === "pageStatus.set" && (command.params?.status as { state?: string } | undefined)?.state === "running"), 10_000)).toBe(true)
+    const focus = (enabled: boolean) => (command: { params?: Record<string, unknown> }) =>
+      command.params?.tabId === tabId && command.params?.method === "Emulation.setFocusEmulationEnabled" && (command.params?.params as { enabled?: boolean } | undefined)?.enabled === enabled
+    expect(await until(() => extension.commands.some(focus(true)))).toBe(true)
+    const enables = () => extension.commands.filter((command) => command.params?.tabId === tabId && command.params?.method === "Page.enable").length
+    const before = enables()
+    // Chrome dropped the debugger (a PDF opening) and the extension attached the tab again: a fresh session with no domains on.
+    extension.emit("debugger.detached", { tabId, reason: "target_closed", reattached: true })
+    expect(await until(() => enables() > before)).toBe(true)
+    const reattachEnableIndex = extension.commands
+      .map((command, index) => ({ command, index }))
+      .filter(({ command }) => command.params?.tabId === tabId && command.params?.method === "Page.enable")[before]!.index
+    const focusAfterReattach = () => extension.commands.slice(reattachEnableIndex + 1).find((command) =>
+      command.params?.tabId === tabId && command.params?.method === "Emulation.setFocusEmulationEnabled")
+    expect(await until(() => focusAfterReattach() !== undefined)).toBe(true)
+    // Focus was still claimed by the executing session, so the reattach must not turn emulation back off.
+    expect((focusAfterReattach()?.params?.params as { enabled?: boolean } | undefined)?.enabled).toBe(true)
+    extension.emit("debugger.detached", { tabId, reason: "canceled_by_user" })
+    expect((await running).isError).toBe(true)
+    extension.close()
+  }, 30_000)
+
   for (const endpoint of ["flight-recorder", "recording"]) test(`${endpoint} status lists the active sessions when a selector is needed`, async () => {
     let nextTab = 180
     const extension = new FakeExtension(home, port)
@@ -603,32 +641,40 @@ describe("relay", () => {
     extension.close()
   }, 20_000)
 
-  test("a screenshot of a hidden tab that doesn't answer is released by a small capture, not left to time out", async () => {
-    const targetInfo = { targetId: "TARGET-79", type: "page", title: "Example", url: "https://example.com/", attached: true, browserContextId: "CTX" }
-    // Like Chrome on a background tab: a capture waits until the next capture request reaches the tab.
-    let release: (() => void) | undefined
+  for (const [index, shotCase] of [
+    { name: "png", params: { format: "png" } },
+    { name: "jpeg with a clip", params: { format: "jpeg", quality: 80, clip: { x: 0, y: 0, width: 300, height: 200, scale: 1 } } },
+  ].entries()) test(`a screenshot of a hidden tab that doesn't answer is released by a capture with the same params (${shotCase.name})`, async () => {
+    const tabId = 79 + index
+    const targetInfo = { targetId: `TARGET-${tabId}`, type: "page", title: "Example", url: "https://example.com/", attached: true, browserContextId: "CTX" }
+    // Like Chrome on a background tab: a capture waits until another capture reaches the tab. Chromium then resolves
+    // every pending surface snapshot with the image of the capture that just completed.
     const captures: Record<string, unknown>[] = []
+    let pending: ((image: string) => void) | undefined
+    const imageFor = (params: Record<string, unknown>) => JSON.stringify(params)
     const extension = new FakeExtension(home, port)
-      .on("tabs.create", () => ({ tabId: 79 }))
+      .on("tabs.create", () => ({ tabId }))
       .on("Target.getTargetInfo", () => ({ targetInfo }))
       .on("Page.captureScreenshot", (command) => {
-        captures.push(command.params?.params as Record<string, unknown>)
-        const previous = release
-        release = undefined
-        previous?.()
-        if (captures.length > 1) return { data: "nudge" }
-        return new Promise((resolve) => { release = () => resolve({ data: "full" }) })
+        const params = command.params?.params as Record<string, unknown>
+        captures.push(params)
+        const release = pending
+        pending = undefined
+        release?.(imageFor(params))
+        return new Promise((resolve) => { pending = (image) => resolve({ data: image }) })
       })
     expect(await extension.pair()).toBe(true)
-    const socket = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test?opencodeBrowserSessionId=shot`, { authorization: `Bearer ${token}` })
+    const socket = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test?opencodeBrowserSessionId=shot-${index}`, { authorization: `Bearer ${token}` })
     if (!(socket instanceof WebSocket)) throw new Error("CDP connection refused")
     await cdpCall(socket, 1, "Target.createTarget", { url: "https://example.com/" })
-    const sessionId = String((await cdpCall(socket, 2, "Target.attachToTarget", { targetId: "TARGET-79", flatten: true })).result?.sessionId)
+    const sessionId = String((await cdpCall(socket, 2, "Target.attachToTarget", { targetId: `TARGET-${tabId}`, flatten: true })).result?.sessionId)
     const started = Date.now()
-    const shot = await cdpCall(socket, 3, "Page.captureScreenshot", { format: "png" }, sessionId)
-    expect(shot.result).toEqual({ data: "full" })
+    const shot = await cdpCall(socket, 3, "Page.captureScreenshot", shotCase.params, sessionId)
     expect(Date.now() - started).toBeLessThan(3_000)
-    expect(captures[1]).toMatchObject({ clip: { width: 1, height: 1 } })
+    // The nudge carried the client's own params, so the pending capture got the full image rather than a 1x1 bitmap.
+    expect(captures[0]).toEqual(shotCase.params)
+    expect(captures[1]).toEqual(shotCase.params)
+    expect(shot.result).toEqual({ data: imageFor(shotCase.params) })
     socket.close()
     extension.close()
   }, 20_000)

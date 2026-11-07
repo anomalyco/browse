@@ -101,6 +101,9 @@ export function createCdpDispatcher(options: {
     yield* ghostCursor.mouseEvent(mouseOptions.tabId, mouseOptions.message.params)
   })
 
+  // A hidden tab can leave Page.captureScreenshot pending until another capture reaches it. The nudge releases it, but
+  // Chromium answers every pending surface snapshot with the image of the capture that just completed, so the nudge
+  // must ask for the same frame as the original: a smaller one would hand the client a blank bitmap tiled to full size.
   function captureScreenshotNudged(command: { readonly tabId: number; readonly method: string; readonly params: JsonObject }) {
     const nudges = Effect.gen(function* () {
       for (const delayMs of [600, 1_000, 1_500, 2_000, 3_000, 5_000, 8_000]) {
@@ -109,7 +112,7 @@ export function createCdpDispatcher(options: {
         yield* Effect.forkDetach(sendDebuggerCommand({
           tabId: command.tabId,
           method: "Page.captureScreenshot",
-          params: { format: "jpeg", quality: 1, clip: { x: 0, y: 0, width: 1, height: 1, scale: 1 } },
+          params: command.params,
         }).pipe(Effect.ignore))
       }
       return yield* Effect.never

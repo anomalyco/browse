@@ -374,6 +374,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       announceChild: announceAttachedChildTarget,
     },
     reportError: (message, error) => console.error(message, error),
+    focused: (tabId) => tabActivity.isFocused(tabId),
     attachCommandTimeoutMs: attachTimeoutMs,
   })
 
