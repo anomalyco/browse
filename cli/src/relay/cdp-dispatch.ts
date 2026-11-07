@@ -101,7 +101,21 @@ export function createCdpDispatcher(options: {
     yield* ghostCursor.mouseEvent(mouseOptions.tabId, mouseOptions.message.params)
   })
 
+  // A hidden tab can leave Page.captureScreenshot pending until another capture reaches it. The nudge is what releases
+  // it, and Chromium answers every pending capture with the surface's bitmap tiled out to its own size, so the nudge
+  // must keep the surface the size the original asked for: a 1x1 clip shrank it and the client got a blank image.
+  // Encoding is per request, so the nudge can be a cheap JPEG. A clip already gives the same surface size, and
+  // captureBeyondViewport would re-apply the original's temporary full-page preferences and leave them behind, so it
+  // is dropped when there is a clip.
+  function captureScreenshotNudgeParams(params: JsonObject): JsonObject {
+    const nudge: JsonObject = { ...params, format: "jpeg", quality: 1 }
+    if (nudge.clip === undefined) return nudge
+    const { captureBeyondViewport: _fullPage, ...clipped } = nudge
+    return clipped
+  }
+
   function captureScreenshotNudged(command: { readonly tabId: number; readonly method: string; readonly params: JsonObject }) {
+    const nudgeParams = captureScreenshotNudgeParams(command.params)
     const nudges = Effect.gen(function* () {
       for (const delayMs of [600, 1_000, 1_500, 2_000, 3_000, 5_000, 8_000]) {
         yield* Effect.sleep(delayMs)
@@ -109,7 +123,7 @@ export function createCdpDispatcher(options: {
         yield* Effect.forkDetach(sendDebuggerCommand({
           tabId: command.tabId,
           method: "Page.captureScreenshot",
-          params: { format: "jpeg", quality: 1, clip: { x: 0, y: 0, width: 1, height: 1, scale: 1 } },
+          params: nudgeParams,
         }).pipe(Effect.ignore))
       }
       return yield* Effect.never

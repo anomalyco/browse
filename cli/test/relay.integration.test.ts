@@ -603,32 +603,45 @@ describe("relay", () => {
     extension.close()
   }, 20_000)
 
-  test("a screenshot of a hidden tab that doesn't answer is released by a small capture, not left to time out", async () => {
-    const targetInfo = { targetId: "TARGET-79", type: "page", title: "Example", url: "https://example.com/", attached: true, browserContextId: "CTX" }
-    // Like Chrome on a background tab: a capture waits until the next capture request reaches the tab.
-    let release: (() => void) | undefined
+  for (const [index, shotCase] of ([
+    { name: "png", params: { format: "png" } },
+    { name: "jpeg with a clip", params: { format: "jpeg", quality: 80, clip: { x: 0, y: 0, width: 300, height: 200, scale: 1 } } },
+    { name: "full page", params: { format: "png", captureBeyondViewport: true, clip: { x: 0, y: 0, width: 1280, height: 4000, scale: 1 } } },
+  ] as { name: string; params: Record<string, unknown> }[]).entries()) test(`a screenshot of a hidden tab that doesn't answer is released by a nudge at the same size (${shotCase.name})`, async () => {
+    const tabId = 79 + index
+    const targetInfo = { targetId: `TARGET-${tabId}`, type: "page", title: "Example", url: "https://example.com/", attached: true, browserContextId: "CTX" }
+    // Like Chrome on a background tab: a capture waits until another capture reaches the tab. Chromium answers every
+    // pending capture with the surface's bitmap tiled out to its own size, so the image depends on the completing
+    // capture's clip (the thing that sets the surface size).
     const captures: Record<string, unknown>[] = []
+    let pending: ((image: string) => void) | undefined
+    const imageFor = (clip: unknown) => JSON.stringify(clip ?? "viewport")
     const extension = new FakeExtension(home, port)
-      .on("tabs.create", () => ({ tabId: 79 }))
+      .on("tabs.create", () => ({ tabId }))
       .on("Target.getTargetInfo", () => ({ targetInfo }))
       .on("Page.captureScreenshot", (command) => {
-        captures.push(command.params?.params as Record<string, unknown>)
-        const previous = release
-        release = undefined
-        previous?.()
-        if (captures.length > 1) return { data: "nudge" }
-        return new Promise((resolve) => { release = () => resolve({ data: "full" }) })
+        const params = command.params?.params as Record<string, unknown>
+        captures.push(params)
+        const release = pending
+        pending = undefined
+        release?.(imageFor(params.clip))
+        return new Promise((resolve) => { pending = (image) => resolve({ data: image }) })
       })
     expect(await extension.pair()).toBe(true)
-    const socket = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test?opencodeBrowserSessionId=shot`, { authorization: `Bearer ${token}` })
+    const socket = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test?opencodeBrowserSessionId=shot-${index}`, { authorization: `Bearer ${token}` })
     if (!(socket instanceof WebSocket)) throw new Error("CDP connection refused")
     await cdpCall(socket, 1, "Target.createTarget", { url: "https://example.com/" })
-    const sessionId = String((await cdpCall(socket, 2, "Target.attachToTarget", { targetId: "TARGET-79", flatten: true })).result?.sessionId)
+    const sessionId = String((await cdpCall(socket, 2, "Target.attachToTarget", { targetId: `TARGET-${tabId}`, flatten: true })).result?.sessionId)
     const started = Date.now()
-    const shot = await cdpCall(socket, 3, "Page.captureScreenshot", { format: "png" }, sessionId)
-    expect(shot.result).toEqual({ data: "full" })
+    const shot = await cdpCall(socket, 3, "Page.captureScreenshot", shotCase.params, sessionId)
     expect(Date.now() - started).toBeLessThan(3_000)
-    expect(captures[1]).toMatchObject({ clip: { width: 1, height: 1 } })
+    expect(captures[0]).toEqual(shotCase.params)
+    // The nudge keeps the original's clip, so the surface stays the size the client asked for and the pending capture
+    // gets that bitmap rather than a blank one. It is a cheap JPEG, and drops the full-page preference with a clip.
+    const nudge: Record<string, unknown> = { ...shotCase.params, format: "jpeg", quality: 1 }
+    if (shotCase.params.clip !== undefined) delete nudge.captureBeyondViewport
+    expect(captures[1]).toEqual(nudge)
+    expect(shot.result).toEqual({ data: imageFor(shotCase.params.clip) })
     socket.close()
     extension.close()
   }, 20_000)
