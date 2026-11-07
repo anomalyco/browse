@@ -146,8 +146,14 @@ function callWebMcpToolInPage(options: { readonly name: string; readonly inputJs
   type PageTool = { readonly name?: unknown; readonly window?: Window }
   type ModelContext = {
     readonly getTools?: () => Promise<PageTool[]>
-    readonly executeTool?: (tool: PageTool, input: string) => Promise<unknown>
+    readonly executeTool?: (tool: PageTool, input: Record<string, unknown> | string) => Promise<unknown>
     readonly invokeTool?: (name: string, input: unknown) => Promise<unknown>
+  }
+  function isInputEncodingError(error: unknown): boolean {
+    const message = typeof error === "object" && error !== null && "message" in error
+      ? String((error as { readonly message?: unknown }).message)
+      : String(error)
+    return message.includes("parameter 2 is not of type 'object'") || message.includes("Failed to parse input arguments")
   }
   const context = (document as Document & { modelContext?: ModelContext }).modelContext ??
     (navigator as Navigator & { modelContext?: ModelContext }).modelContext
@@ -156,11 +162,22 @@ function callWebMcpToolInPage(options: { readonly name: string; readonly inputJs
     const tool = tools.filter((candidate) => !("window" in candidate) || candidate.window === window)
       .find((candidate) => candidate.name === options.name)
     if (!tool) throw new Error(`WebMCP tool ${JSON.stringify(options.name)} is not registered in this frame`)
-    const result = context.executeTool
-      ? await context.executeTool(tool, options.inputJson)
-      : context.invokeTool
-      ? await context.invokeTool(options.name, JSON.parse(options.inputJson))
-      : (() => { throw new Error("WebMCP tool execution is not available on this page") })()
+    // Parse once so the object attempt keeps JSON's cleanup of undefined, functions, NaN and Dates.
+    const input = JSON.parse(options.inputJson) as Record<string, unknown>
+    let result: unknown
+    if (context.executeTool) {
+      try {
+        result = await context.executeTool(tool, input)
+      } catch (error) {
+        // Chrome 155+ wants an object; earlier versions want the JSON string.
+        if (!isInputEncodingError(error)) throw error
+        result = await context.executeTool(tool, options.inputJson)
+      }
+    } else if (context.invokeTool) {
+      result = await context.invokeTool(options.name, input)
+    } else {
+      throw new Error("WebMCP tool execution is not available on this page")
+    }
     if (typeof result !== "string") return result ?? null
     try {
       return JSON.parse(result)
