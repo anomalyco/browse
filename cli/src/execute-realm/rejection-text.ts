@@ -12,6 +12,10 @@ const nativeStackGetter = Object.getOwnPropertyDescriptor(new Error(), "stack")?
  * a fixed placeholder.
  */
 export function safeErrorMessage(value: unknown, maxLength = 300): string {
+  if (typeof value === "string") return value.length > 0 ? value.slice(0, maxLength) : placeholder
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint" || typeof value === "symbol") {
+    return String(value).slice(0, maxLength)
+  }
   if (!isSafeNativeError(value)) return placeholder
   const message = ownDataProperty(value, "message")
   return typeof message === "string" && message.length > 0 ? message.slice(0, maxLength) : placeholder

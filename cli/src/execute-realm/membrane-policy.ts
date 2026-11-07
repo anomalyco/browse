@@ -243,11 +243,11 @@ export function handleExecuteRealmRejection(promise: Promise<unknown>, reason?: 
 }
 
 /** The message an un-awaited execute rejection reports, bounded like other process diagnostics. */
-export function unhandledExecuteRejectionWarning(cause: unknown, certain: boolean): string {
+export function unhandledExecuteRejectionWarning(detail: string, certain: boolean): string {
   if (!certain) {
     return "Execute code may have started a promise that rejected and was never awaited. The rejection was contained and the relay kept running; await the promise or handle its rejection to return the error from execute."
   }
-  return `Execute code started a promise that rejected and was never awaited: ${safeErrorMessage(cause)}. The rejection was contained and the relay kept running; await the promise or handle its rejection to return the error from execute.`
+  return `Execute code started a promise that rejected and was never awaited: ${detail}. The rejection was contained and the relay kept running; await the promise or handle its rejection to return the error from execute.`
 }
 
 /** Stop a realm whose promise rejected with no handler. A running call gets the reason in its own error. */
@@ -259,13 +259,13 @@ export function handleRealmUnhandledRejection(
   pending: boolean,
 ): void {
   if (realm.isStopped) return
+  const description = certain ? rejectionDescription(realm, cause) : "a rejected promise"
   if (!pending) {
-    try { warn?.(unhandledExecuteRejectionWarning(cause, certain)) } catch {
+    try { warn?.(unhandledExecuteRejectionWarning(description, certain)) } catch {
       // Reporting must never turn a contained rejection into a relay fault.
     }
   }
-  const detail = certain ? rejectionDescription(realm, cause) : "a rejected promise"
-  realm.dispose(new Error(`Unhandled execute rejection: ${detail}; JavaScript state will reset before the next execute`))
+  realm.dispose(new Error(`Unhandled execute rejection: ${description}; JavaScript state will reset before the next execute`))
 }
 
 function rejectionDescription(realm: ExecuteRealm, cause: unknown): string {

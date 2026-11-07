@@ -4,6 +4,7 @@ import {
   unhandledExecuteRejectionWarning,
   type ExecuteRejectionOwner,
 } from "../execute-realm/membrane-policy.ts"
+import { safeErrorMessage } from "../execute-realm/rejection-text.ts"
 
 /** Even if a full-Node call never settles, release the process-wide promise hook eventually. */
 const defaultRejectionOwnershipExpiryMs = 10 * 60_000
@@ -50,7 +51,7 @@ export class ExecuteRejectionScope implements ExecuteRejectionOwner {
   }
 
   handleUnhandledRejection(cause: unknown, certain: boolean): void {
-    try { this.onRejection?.(unhandledExecuteRejectionWarning(cause, certain)) } catch {
+    try { this.onRejection?.(unhandledExecuteRejectionWarning(safeErrorMessage(cause), certain)) } catch {
       // Reporting must never turn a contained rejection into a relay fault.
     }
   }

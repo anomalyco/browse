@@ -26,7 +26,7 @@ function run(body: string, host: Record<string, unknown> = {}) {
   return new ExecuteRealm().run({ source: `(async (host) => { ${body} })`, filename: "test.js", args: [host] })
 }
 
-type NodeOutcome = { readonly value?: unknown; readonly error?: string; readonly elapsedMs?: number; readonly maxStallMs?: number; readonly stopped?: string }
+type NodeOutcome = { readonly value?: unknown; readonly error?: string; readonly elapsedMs?: number; readonly maxStallMs?: number; readonly stopped?: string; readonly warnings?: readonly string[] }
 
 // The relay runs execute code under Node, whose vm differs from Bun's: escape attempts run there too.
 function runInNode(bodies: readonly string[], setup = "", env: Record<string, string> = {}): NodeOutcome[] {
@@ -39,7 +39,8 @@ function runInNode(bodies: readonly string[], setup = "", env: Record<string, st
     ${setup}
     const results = []
     for (const body of JSON.parse(process.argv[1])) {
-      const realm = new ExecuteRealm()
+      const warnings = []
+      const realm = new ExecuteRealm({ onUnhandledRejection: warning => warnings.push(warning) })
       // How long the relay's event loop (other sessions, the HTTP API) went without a turn.
       let last = performance.now(), maxStallMs = 0
       const probe = setInterval(() => { const now = performance.now(); maxStallMs = Math.max(maxStallMs, now - last); last = now }, 5)
@@ -51,11 +52,11 @@ function runInNode(bodies: readonly string[], setup = "", env: Record<string, st
         const value = await realm.run({ source: "(async (host) => { " + body + " })", filename: "test.js", args: [host] })
         const elapsedMs = performance.now() - started
         await new Promise(resolve => setTimeout(resolve, 20)) // let the probe see the last stall, and a detached rejection land
-        results.push({ value, elapsedMs, maxStallMs, stopped: realm.stopped?.message })
+        results.push({ value, elapsedMs, maxStallMs, stopped: realm.stopped?.message, warnings })
       } catch (error) {
         const elapsedMs = performance.now() - started
         await new Promise(resolve => setTimeout(resolve, 20))
-        results.push({ error: String(error?.message ?? error), elapsedMs, maxStallMs, stopped: realm.stopped?.message })
+        results.push({ error: String(error?.message ?? error), elapsedMs, maxStallMs, stopped: realm.stopped?.message, warnings })
       } finally {
         clearInterval(probe)
         realm.dispose()
@@ -425,6 +426,8 @@ describe("Node escape corpus", () => {
     ], playwrightShapes)
     expect(outcome?.value).toEqual({ ok: true })
     expect(outcome?.stopped).toMatch(/Unhandled execute rejection: files\.write: use a private subdirectory/)
+    // The call already returned, so this arrives through the sandbox's warning queue, not as its error.
+    expect(outcome?.warnings?.join("\n")).toContain("files.write: use a private subdirectory")
   })
 
   test("a hostile rejection value is never described on the host", () => {

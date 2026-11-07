@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { safeErrorMessage } from "../src/execute-realm/rejection-text.ts"
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "browse-rejections-"))
 const home = path.join(scratch, "home")
@@ -174,4 +175,14 @@ describe("full-Node rejection scope", () => {
     `)
     expect(outcome).toEqual({ suppress: true, benign: true, threw: false, rethrown: 0 })
   }, 20_000)
+
+  test("primitive rejection reasons are shown as bounded text", () => {
+    expect(safeErrorMessage("boom")).toBe("boom")
+    expect(safeErrorMessage(42)).toBe("42")
+    expect(safeErrorMessage(false)).toBe("false")
+    expect(safeErrorMessage(10n)).toBe("10")
+    expect(safeErrorMessage(Symbol("x"))).toBe("Symbol(x)")
+    expect(safeErrorMessage("x".repeat(400))).toHaveLength(300)
+    expect(safeErrorMessage({})).toBe("reason not shown")
+  })
 })
