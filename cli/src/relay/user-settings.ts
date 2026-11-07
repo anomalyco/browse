@@ -19,7 +19,7 @@ export type SettingOverrides = Partial<Record<SettingKey, { readonly variable: s
 
 export const settingSpecs: Record<SettingKey, { readonly label: string; readonly values: readonly SettingValue[]; readonly variable?: string }> = {
   window: { label: "Where agents open their tabs (current: the user's window; separate: an unfocused window of their own)", values: ["current", "separate"], variable: "OPENCODE_BROWSER_AGENT_WINDOW" },
-  grouping: { label: "How agent tabs are grouped (one group per session, one shared group, or none)", values: ["session", "shared", "none"] },
+  grouping: { label: "How agent tabs are grouped (one shared group, one group per session, or none)", values: ["shared", "session", "none"] },
   idleMinutes: { label: "Close agent tabs untouched for this many minutes", values: [10, 30, 60, "never"] },
   cursor: { label: "Agent cursor on agent tabs outside recordings (pages can detect it)", values: ["off", "always"], variable: "OPENCODE_BROWSER_GHOST_CURSOR" },
   humanInput: { label: "Human-like input (off is faster, but easier for sites to flag)", values: ["on", "off"], variable: "OPENCODE_BROWSER_HUMAN_INPUT" },

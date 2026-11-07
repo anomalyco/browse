@@ -422,7 +422,7 @@ describe("the settings tool's relay API", () => {
     expect(await extension.pair()).toBe(true)
     const got = await settingsRequest(base, token)
     expect(got.status).toBe(200)
-    expect(got.body.settings.grouping).toMatchObject({ value: "session", effective: "session", allowed: ["session", "shared", "none"] })
+    expect(got.body.settings.grouping).toMatchObject({ value: "session", effective: "session", allowed: ["shared", "session", "none"] })
     expect(got.body.settings.cursor.overriddenBy).toBeUndefined()
     expect(got.body.note).toContain("OPENCODE_BROWSER_ALLOW_NODE")
 
@@ -441,7 +441,7 @@ describe("the settings tool's relay API", () => {
 
     // Invalid values, unknown keys and security switches are refused before anything reaches the extension.
     for (const [request, expected] of [
-      [{ grouping: "Shared" }, "grouping must be one of session, shared, none"],
+      [{ grouping: "Shared" }, "grouping must be one of shared, session, none"],
       [{ idleMinutes: 45 }, "idleMinutes must be one of 10, 30, 60, never"],
       [{ cursor: true }, "cursor must be one of off, always"],
       [{ colour: "blue" }, "Unknown setting \"colour\""],

@@ -72,6 +72,7 @@ beforeEach(async () => {
   stub.state.focusedWindowId = undefined
   socket().received.length = 0
   await stub.chrome.storage.local.remove("agentTabsWindow")
+  await stub.chrome.storage.local.set({ agentTabsGrouping: "session" })
   await stub.chrome.storage.session.remove("agentWindowId")
 })
 

@@ -170,16 +170,16 @@ connection itself isn't encrypted by browse; use a network that is (Tailscale or
 
 ## Using it
 
-- **Agents open their own tabs** in the background of the window you last used, grouped at the start of your tab strip
-  under the agent's session name and collapsed unless you're looking at one. Agents can't switch you to their tabs or
-  bring a window to the front; popups an agent opens join its group, and if one takes over your window you get your
-  tab back. Tabs nobody touches for 10 minutes close by themselves (never while a script runs on them).
+- **Agents open their own tabs** in the background of the window you last used, grouped together at the start of your
+  tab strip and collapsed unless you're looking at one. Agents can't switch you to their tabs or bring a window to the
+  front; popups an agent opens join its group, and if one takes over your window you get your tab back. Tabs nobody
+  touches for 10 minutes close by themselves (never while a script runs on them).
 - **Settings** (the extension's options page; each applies right away, to new tabs for window and grouping):
   - **Where agents open their tabs:** in your window (default), or *in a separate window* of their own that opens
     unfocused beside yours (on another display when there's no room on yours); their popups move there too.
-  - **Grouping:** one collapsed group per agent session (default), *one shared group* for every agent ("Agents · 3",
-    one per window, popups included; a handoff opens it), or *don't group* (agent tabs sit in the background of your
-    tab strip; pin one to keep it). Tabs already grouped stay where they are when you switch.
+  - **Grouping:** one shared group for every agent (default; "Agents · 3", one per window, popups included; a handoff
+    opens it), *one collapsed group per agent session*, or *don't group* (agent tabs sit in the background of your tab
+    strip; pin one to keep it). Tabs already grouped stay where they are when you switch.
   - **Close tabs agents haven't touched for:** 10 minutes (default), 30, 60, or *never*. Tabs a script runs on, a
     handoff waits on or a recording records stay open regardless. With *never*, an agent's `tabs_cleanup` without a
     time still closes only tabs idle for 10 minutes.

@@ -95,8 +95,8 @@ export function createRelayGrouping(deps: {
   }
 
   /**
-   * Puts an agent's tab in its group, by the Grouping setting: the session's group (the default), the window's shared
-   * group, or none. A tab already in an agent group of another kind (the setting changed since) stays where it is:
+   * Puts an agent's tab in its group, by the Grouping setting: the window's shared group (the default), the
+   * session's group, or none. A tab already in an agent group of another kind (the setting changed since) stays where it is:
    * new tabs follow the new setting, and tabs aren't moved around under the user.
    */
   const group = async (tabId: number, sessionId: string | undefined, current: WebSocket) => {
