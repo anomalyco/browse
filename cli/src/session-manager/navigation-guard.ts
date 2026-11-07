@@ -53,8 +53,8 @@ export class SessionNavigationGuard {
   private readonly rulesCache = new Map<string, { readonly key: string; readonly rules: readonly OriginRule[] }>()
   /** Popups that haven't shown an allowed document yet; a violation closes them instead of blanking them. */
   private readonly freshPopups = new Set<number>()
-  /** The last refused URL per tab, so the event path and a post-navigation check act once. */
-  private readonly handledViolations = new Map<number, string>()
+  /** Per tab, the number of stop-and-blank chains still in flight. */
+  private readonly blanking = new Map<number, number>()
 
   constructor(private readonly dependencies: NavigationGuardDependencies) {}
 
@@ -104,51 +104,48 @@ export class SessionNavigationGuard {
    */
   createdTabNavigated(target: NavigationGuardTarget): boolean {
     if (!this.enforced(target)) return true
-    // A violation is already being handled (the tab is on its way back to about:blank): don't publish this URL.
-    if (this.handledViolations.has(target.tabId)) return false
+    // The event path is already taking this tab back to about:blank: don't blank it twice or publish this URL.
+    if ((this.blanking.get(target.tabId) ?? 0) > 0) return false
     return this.observeCommittedUrl(target, target.targetInfo.url)
   }
 
   forgetTab(tabId: number): void {
     this.freshPopups.delete(tabId)
-    this.handledViolations.delete(tabId)
+    this.blanking.delete(tabId)
   }
 
-  /**
-   * Observe a root-session CDP event of a tab. Returns false when a main-frame URL was refused, so it is not
-   * published as the tab's URL.
-   */
-  observeEvent(target: NavigationGuardTarget, method: string, params: JsonObject | undefined): boolean {
-    if (method !== "Page.frameNavigated" && method !== "Page.frameRequestedNavigation" && method !== "Page.frameStartedNavigating" && method !== "Network.responseReceived") return true
-    if (!this.enforced(target)) return true
+  /** Observe a root-session CDP event of a tab. */
+  observeEvent(target: NavigationGuardTarget, method: string, params: JsonObject | undefined): void {
+    if (method !== "Page.frameNavigated" && method !== "Page.frameRequestedNavigation" && method !== "Page.frameStartedNavigating" && method !== "Network.responseReceived") return
+    if (!this.enforced(target)) return
     const sessionId = target.opencodeBrowserSessionId!
     const rules = this.rules(sessionId)!
     const mainFrameId = this.dependencies.mainFrameId(target.tabId) ?? target.targetInfo.targetId
     if (method === "Page.frameNavigated") {
       const frame = getObject(params?.frame)
-      if (getString(frame, "parentId") !== undefined) return true
+      if (getString(frame, "parentId") !== undefined) return
       const url = getString(frame, "url")
-      return url === undefined || this.observeCommittedUrl(target, url)
+      if (url !== undefined) this.observeCommittedUrl(target, url)
+      return
     }
     if (method === "Network.responseReceived") {
-      if (getString(params, "type") !== "Document" || getString(params, "frameId") !== mainFrameId) return true
+      if (getString(params, "type") !== "Document" || getString(params, "frameId") !== mainFrameId) return
       const response = getObject(params?.response)
       const address = getString(response, "remoteIPAddress")
       const url = getString(response, "url")
-      if (!address || !url || !isPrivateAddress(address) || explicitlyAllowsHost(rules, url)) return true
+      if (!address || !url || !isPrivateAddress(address) || explicitlyAllowsHost(rules, url)) return
       this.violation(target, url, `its document came from the private address ${address} (name it exactly in the allowlist to allow it)`, "commit")
-      return false
+      return
     }
     // A navigation is starting: stop it before the request goes out when we can.
-    if (getString(params, "frameId") !== mainFrameId) return true
+    if (getString(params, "frameId") !== mainFrameId) return
     const url = getString(params, "url")
-    if (url === undefined) return true
+    if (url === undefined) return
     const decision = checkUrl(url, rules)
-    if (decision.allowed) return true
+    if (decision.allowed) return
     this.dependencies.send(target.tabId, "Page.stopLoading", {}).catch(() => {})
     this.addWarning(sessionId, `Domain allowlist: a tab of session ${sessionId} started to navigate to ${shortUrl(url)}, but ${decision.reason}; browse stopped it. Ask the user before widening the allowlist.`)
     this.dependencies.log("allowlist.stopped", { tabId: target.tabId, session: sessionId, method, reason: decision.reason })
-    return false
   }
 
   private enforced(target: NavigationGuardTarget): boolean {
@@ -162,7 +159,6 @@ export class SessionNavigationGuard {
     if (!rules) return true
     const decision = checkUrl(url, rules)
     if (decision.allowed) {
-      this.handledViolations.delete(target.tabId)
       if (!/^about:/.test(url)) this.freshPopups.delete(target.tabId)
       return true
     }
@@ -171,8 +167,6 @@ export class SessionNavigationGuard {
   }
 
   private violation(target: NavigationGuardTarget, url: string, reason: string, _stage: "commit"): void {
-    if (this.handledViolations.get(target.tabId) === url) return
-    this.handledViolations.set(target.tabId, url)
     const sessionId = target.opencodeBrowserSessionId!
     const shownUrl = shortUrl(url)
     const popup = this.freshPopups.has(target.tabId) && target.owner === "relay"
@@ -186,10 +180,16 @@ export class SessionNavigationGuard {
       })
       return
     }
+    this.blanking.set(target.tabId, (this.blanking.get(target.tabId) ?? 0) + 1)
     this.dependencies.send(target.tabId, "Page.stopLoading", {})
       .catch(() => {})
       .then(() => this.dependencies.send(target.tabId, "Page.navigate", { url: "about:blank" }))
       .catch(() => {})
+      .finally(() => {
+        const remaining = (this.blanking.get(target.tabId) ?? 1) - 1
+        if (remaining > 0) this.blanking.set(target.tabId, remaining)
+        else this.blanking.delete(target.tabId)
+      })
   }
 
   private addWarning(sessionId: string, warning: string): void {

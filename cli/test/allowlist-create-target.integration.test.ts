@@ -44,7 +44,7 @@ async function allowlistedSession(id: string) {
 
 const targetInfo = (targetId: string, url: string) => ({ targetId, type: "page", title: url, url, attached: true, browserContextId: "CTX" })
 
-type NavigateOutcome = { readonly result?: Record<string, unknown>; readonly error?: Error; readonly url?: string }
+type NavigateOutcome = { readonly result?: Record<string, unknown>; readonly error?: Error; readonly url?: string; readonly delayMs?: number }
 
 /** A paired fake extension and a CDP client for one allowlisted session, with a mutable tab URL. */
 async function createScene(id: string, tabId: number, targetId: string) {
@@ -70,7 +70,8 @@ async function createScene(id: string, tabId: number, targetId: string) {
       if (outcome?.error) throw outcome.error
       if (outcome?.url !== undefined) state.current = outcome.url
       else state.current = url === "about:blank" ? "about:blank" : url
-      return outcome?.result ?? { frameId: targetId, loaderId: `L-${state.navigations.length}` }
+      const result = outcome?.result ?? { frameId: targetId, loaderId: `L-${state.navigations.length}` }
+      return outcome?.delayMs === undefined ? result : Bun.sleep(outcome.delayMs).then(() => result)
     })
     .on("Page.setDocumentContent", (command) => {
       state.documentContent.push(command.params?.params)
@@ -98,14 +99,6 @@ async function createScene(id: string, tabId: number, targetId: string) {
 async function getTargets(socket: WebSocket, id: number) {
   const result = await cdpCall(socket, id, "Target.getTargets")
   return (result.result?.targetInfos ?? []) as Array<{ targetId: string; url: string }>
-}
-
-async function untilTargetUrl(socket: WebSocket, targetId: string, expected: string) {
-  for (let attempt = 0; attempt < 100; attempt++) {
-    if ((await getTargets(socket, 100 + attempt)).find((target) => target.targetId === targetId)?.url === expected) return true
-    await Bun.sleep(20)
-  }
-  return false
 }
 
 /** The relay's own line for a tab's violation; `popup=false` means it blanked the tab instead of closing it. */
@@ -204,7 +197,8 @@ test("a disallowed Page.frameNavigated during the navigation is sent back to abo
       }
       const loaderId = `L-${scene.state.navigations.length}`
       scene.extension.emit("debugger.event", { tabId: 206, method: "Page.frameNavigated", params: { frame: { id: "TARGET-206", loaderId, url } } })
-      return { result: { frameId: "TARGET-206", loaderId } }
+      // Keep the blanking chain open while the post-attach check runs.
+      return { result: { frameId: "TARGET-206", loaderId }, delayMs: 100 }
     }
     const created = await cdpCall(scene.socket, 1, "Target.createTarget", { url: "https://127.0.0.1:8443/start" })
     expect(created.result?.targetId).toBe("TARGET-206")
@@ -212,8 +206,28 @@ test("a disallowed Page.frameNavigated during the navigation is sent back to abo
     expect(scene.state.navigations.filter((url) => url === "about:blank")).toHaveLength(1)
     expect(scene.state.removed).toBe(false)
     expect(violationLog(206)).toContain("popup=false")
-    // The disallowed commit was not published as the target's URL.
-    expect(await untilTargetUrl(scene.socket, "TARGET-206", "about:blank")).toBe(true)
+  } finally {
+    scene.close()
+  }
+}, 20_000)
+
+test("a repeated disallowed commit after blanking settled is blanked again", async () => {
+  const scene = await createScene("guarded-repeat", 210, "TARGET-210")
+  try {
+    expect((await cdpCall(scene.socket, 1, "Target.createTarget", { url: "https://127.0.0.1:8443/start" })).result?.targetId).toBe("TARGET-210")
+    const evil = (loaderId: string) => scene.extension.emit("debugger.event", {
+      tabId: 210,
+      method: "Page.frameNavigated",
+      params: { frame: { id: "TARGET-210", loaderId, url: "https://evil.test/" } },
+    })
+    const blanks = () => scene.state.navigations.filter((url) => url === "about:blank").length
+    // about:blank never commits here, so the first blanking chain settles by itself.
+    evil("EVIL-1")
+    expect(await until(() => blanks() === 1)).toBe(true)
+    await Bun.sleep(100)
+    evil("EVIL-2")
+    expect(await until(() => blanks() === 2)).toBe(true)
+    expect(scene.state.removed).toBe(false)
   } finally {
     scene.close()
   }
@@ -258,6 +272,7 @@ test("a tab closed during the post-attach navigation still answers Target.create
     const created = await cdpCall(scene.socket, 1, "Target.createTarget", { url: "https://127.0.0.1:8443/start" })
     expect(created.error).toBeUndefined()
     expect(created.result?.targetId).toBe("TARGET-209")
+    // The closed tab reaches the client as a later tabs.removed, not as a createTarget failure.
     expect(scene.state.removed).toBe(false)
   } finally {
     scene.close()

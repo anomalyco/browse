@@ -486,8 +486,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       const errorText = getString(navigation, "errorText")
       if (errorText) relayLog("create.navigate-failed", { tabId, errorText })
       else if (data && navigation === undefined) relayLog("create.data-skipped", { tabId })
-      // Defense in depth: check where the tab actually ended up, in case its load beat the guard's events. The guard
-      // blanks a disallowed tab like any other agent tab (it is not a popup), and only an allowed URL is published.
+      // Defense in depth: check where the tab actually ended up, in case its load beat the guard's events. A
+      // disallowed result is blanked here like any other agent tab; only a URL this check allows reaches the registry.
       const current = yield* sendDebuggerCommand({ tabId, method: "Target.getTargetInfo", params: {} }).pipe(Effect.orElseSucceed((): JsonObject => ({})))
       const targetInfo = getTargetInfo(current.targetInfo)
       if (targetInfo && !isRestrictedTarget(targetInfo) && navigationGuard.createdTabNavigated({ ...target, targetInfo })) {
