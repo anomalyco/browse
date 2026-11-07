@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { checkHostCall, createExecuteFiles, ExecuteRealm } from "../src/execute-realm.ts"
+import { checkHostCall, createExecuteFiles, ExecuteRealm, sandboxModules } from "../src/execute-realm.ts"
 import { prepareExecuteFileOutputs } from "../src/execute-realm/file-roots.ts"
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "browse-cdp-roots-"))
@@ -104,7 +104,7 @@ describe("raw CDP send parameters", () => {
 
   test("undefined array elements are still refused", async () => {
     const { result, session } = await sendInRealm('"Page.navigate"', '{ urls: ["https://example.com", undefined] }')
-    expect(result.error).toMatch(/plain JSON data/)
+    expect(result.error).toMatch(/arrays cannot contain undefined, use null/)
     expect(session.sent).toEqual([])
   })
 
@@ -193,6 +193,18 @@ describe("directory uploads", () => {
       expect(() => checkHostCall(setInputFiles, {}, [root])).toThrow(/symlink/)
     } finally {
       fs.unlinkSync(link)
+    }
+  })
+
+  test("the folder-upload entry budget is shared across paths", () => {
+    const capped = path.join(files.dir, "upload-cap")
+    fs.mkdirSync(capped)
+    for (let index = 0; index < 501; index += 1) fs.writeFileSync(path.join(capped, `${index}.txt`), "")
+    try {
+      function setInputFiles() {}
+      expect(() => checkHostCall(setInputFiles, {}, [[capped, capped]])).toThrow(/limited to 1000/)
+    } finally {
+      fs.rmSync(capped, { recursive: true, force: true })
     }
   })
 })
@@ -304,9 +316,14 @@ describe("other file-taking APIs", () => {
     expect(() => checkHostCall(setStorageState, {}, [{ cookies: [], origins: [] }])).not.toThrow()
   })
 
-  test("browser.bind is refused", () => {
-    function bind() {}
-    expect(() => checkHostCall(bind, {}, ["server"])).toThrow(/not available in execute code/)
+  test("browser.bind is refused but module bind functions are not", () => {
+    class Browser {
+      async bind() {}
+    }
+    const browser = new Browser()
+    expect(() => checkHostCall(browser.bind, browser, ["server"])).toThrow(/not available in execute code/)
+    const events = { bind() {} }
+    expect(() => checkHostCall(events.bind, events, [{}])).not.toThrow()
   })
 })
 
@@ -323,5 +340,43 @@ describe("send methods that are not CDP", () => {
     expect(received).toEqual(["hello", Buffer.from("hi")])
     expect(() => checkHostCall(route.send, route, ["hello"])).not.toThrow()
     expect(() => checkHostCall(route.send, route, [Buffer.from("hi")])).not.toThrow()
+  })
+})
+
+describe("sandbox modules", () => {
+  test("stream drop is not treated as a drag-and-drop payload", async () => {
+    const result = await run(`
+      const { Readable } = host.stream;
+      return await Readable.from([1, 2, 3]).drop(1).toArray();
+    `, { stream: sandboxModules.stream })
+    expect(result).toEqual([2, 3])
+  })
+
+  test("module bind functions remain available", async () => {
+    const result = await run(`
+      const { PassThrough } = host.stream;
+      return typeof host.stream.bind(new PassThrough());
+    `, { stream: sandboxModules.stream })
+    expect(result).toBe("function")
+  })
+})
+
+describe("function arguments with file options", () => {
+  test("a function options bag with path is refused before the host", async () => {
+    const received: unknown[] = []
+    const screenshot = (options: unknown) => { received.push(options); return "ok" }
+    const result = await run(`
+      const options = Object.assign(() => {}, { path: "/etc/realm-denied" });
+      try { await host.screenshot(options); return "allowed" } catch (error) { return error.message }
+    `, { screenshot })
+    expect(result).toMatch(/function arguments cannot be used as options/)
+    expect(received).toEqual([])
+  })
+
+  test("ordinary function callbacks still pass", () => {
+    function addInitScript() {}
+    function route() {}
+    expect(() => checkHostCall(addInitScript, {}, [() => 1])).not.toThrow()
+    expect(() => checkHostCall(route, {}, ["**/*", () => 1])).not.toThrow()
   })
 })

@@ -97,6 +97,9 @@ function copyJsonArray(value: readonly unknown[], operation: string, stack: Set<
     if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
       throw invalidCdpParameters(operation, "which cannot contain getters, setters or non-enumerable properties")
     }
+    if (descriptor.value === undefined) {
+      throw new ExecuteFileAccessError(`${operation}: CDP parameters must be plain JSON data; arrays cannot contain undefined, use null`)
+    }
     copy[Number(key)] = copyJsonValue(descriptor.value, operation, stack)
     count += 1
   }

@@ -2,14 +2,22 @@ import fs from "node:fs"
 import path from "node:path"
 import { ExecuteFileAccessError } from "./errors.ts"
 
-/** Most entries one directory upload may contain before it is refused. */
-export const maxDirectoryUploadEntries = 10_000
+/** Most entries all folder uploads in one setInputFiles/setFiles call may contain before refusal. */
+export const maxDirectoryUploadEntries = 1_000
+
+/** One entry counter for every directory path in a single setInputFiles/setFiles call. */
+export type DirectoryUploadBudget = { entries: number }
 
 /**
  * Walk a directory upload without following symlinks. Every entry goes through `check`, so the
  * existing root, ownership and browse-owned rules apply to files nested below the uploaded folder.
  */
-export function checkDirectoryUpload(root: string, operation: string, check: (target: string, operation: string) => string): void {
+export function checkDirectoryUpload(
+  root: string,
+  operation: string,
+  check: (target: string, operation: string) => string,
+  budget: DirectoryUploadBudget,
+): void {
   let rootStat: fs.Stats
   try {
     rootStat = fs.lstatSync(root)
@@ -21,14 +29,13 @@ export function checkDirectoryUpload(root: string, operation: string, check: (ta
     throw new ExecuteFileAccessError(`${operation}: ${root} is a symlink; directory uploads cannot follow symlinks`)
   }
   if (!rootStat.isDirectory()) return
-  let entries = 0
   const pending = [root]
   while (pending.length > 0) {
     const directory = pending.pop()!
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-      entries += 1
-      if (entries > maxDirectoryUploadEntries) {
-        throw new ExecuteFileAccessError(`${operation}: directory uploads are limited to ${maxDirectoryUploadEntries} entries`)
+      budget.entries += 1
+      if (budget.entries > maxDirectoryUploadEntries) {
+        throw new ExecuteFileAccessError(`${operation}: folder uploads are limited to ${maxDirectoryUploadEntries} files and subfolders`)
       }
       const child = path.join(directory, entry.name)
       if (entry.isSymbolicLink()) {
@@ -51,9 +58,10 @@ export function checkFileInputValue(
   assertPath: (target: string, operation: string) => string,
   checkEntry: (target: string, operation: string) => string,
 ): unknown {
+  const budget: DirectoryUploadBudget = { entries: 0 }
   const check = (target: string): string => {
     const resolved = assertPath(target, method)
-    checkDirectoryUpload(resolved, method, checkEntry)
+    checkDirectoryUpload(resolved, method, checkEntry, budget)
     return resolved
   }
   if (typeof value === "string") return check(value)
