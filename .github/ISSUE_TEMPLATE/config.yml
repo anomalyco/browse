@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Installation and troubleshooting
+    url: https://github.com/anomalyco/browse#install
+    about: Install browse, pair the extension, and find troubleshooting steps.
+  - name: Security
+    url: https://github.com/anomalyco/browse#security
+    about: Read how browse guards your tabs, cookies and secrets before reporting a security concern.
