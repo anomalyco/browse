@@ -6,7 +6,8 @@ import { ownedGroup } from "./agent-relay/wire"
 // tabs behind. Only tabs an agent created are tracked (the relay's
 // tabs.create); tabs the user shared are never closed. A tab is "touched" when an agent sends it a
 // command or the user switches to it. A tab the user claims (pins, or drags out of the agent's group) is
-// forgotten. `cleanup()` runs every few minutes from an alarm and on demand (relay `tabs.cleanup`).
+// forgotten; an ungroup the relay starts itself keeps it tracked. `cleanup()` runs every few minutes from an alarm
+// and on demand (relay `tabs.cleanup`).
 
 type Tracked = { touched: number }
 
@@ -17,6 +18,8 @@ const ALARM = "opencode-browser-tab-cleanup"
 const tracked = new Map<number, Tracked>()
 /** Tabs a close is ungrouping; their group-change event must not drop idle tracking. */
 const closing = new Set<number>()
+/** Tabs the relay is ungrouping itself (not closing); their group-change event must not drop idle tracking either. */
+const relayUngrouping = new Set<number>()
 let restored: Promise<void> | undefined
 let saveTimer: ReturnType<typeof setTimeout> | undefined
 let writes: Promise<unknown> = Promise.resolve()
@@ -44,6 +47,14 @@ export function touch(tabId: number) {
 
 export function forget(tabId: number) {
   if (tracked.delete(tabId)) save()
+}
+
+/**
+ * Notes an ungroup the relay starts itself (undoing a group it made, or letting go of a tab while it reloads): the
+ * group-change event must keep idle tracking, unlike a tab the user drags out of the agent group.
+ */
+export function relayUngroup(tabId: number) {
+  relayUngrouping.add(tabId)
 }
 
 /** Whether an agent opened this tab (and it hasn't been handed to the user). */
@@ -284,16 +295,23 @@ chrome.runtime.onStartup.addListener(() => {
   generation += 1
   tracked.clear()
   closing.clear()
+  relayUngrouping.clear()
   void chrome.storage.local.remove([STORAGE_KEY, CREATING_KEY])
 })
 chrome.tabs.onActivated.addListener(({ tabId }) => touch(tabId))
 chrome.tabs.onRemoved.addListener((tabId) => {
   closing.delete(tabId)
+  relayUngrouping.delete(tabId)
   forget(tabId)
 })
 chrome.tabs.onUpdated.addListener((tabId, change) => {
   if (change.pinned) forget(tabId)
-  if (change.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE && tracked.has(tabId) && !closing.has(tabId)) forget(tabId)
+  if (change.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) {
+    // The relay's own ungroups keep tracking (it may be about to close the tab or keep using it); a tab the user
+    // moves out of the agent group is theirs now.
+    const byRelay = relayUngrouping.delete(tabId)
+    if (!byRelay && tracked.has(tabId) && !closing.has(tabId)) forget(tabId)
+  }
 })
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== ALARM) return

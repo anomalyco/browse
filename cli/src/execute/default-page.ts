@@ -2,6 +2,7 @@ import { Effect } from "effect"
 import type { BrowserContext, Frame, Page } from "patchright-core"
 import { applyExplicitMediaFeatures } from "./guards.ts"
 import {
+  debuggingBarCanceledWarning,
   defaultPageClosedWarning,
   defaultPageCrashedWarning,
   defaultPageReattachedWarning,
@@ -60,6 +61,8 @@ export abstract class DefaultPageHost {
   protected pendingTargetRebind: "replaced" | "repaired" | undefined
   protected lastKnownNonBlankUrl: string | undefined
   protected recreatedFromClosedUrl: string | undefined
+  /** The user released the default page from the browser's debugging bar: say so when the next page is created. */
+  protected pageReleasedByDebuggingBar = false
   /** Media features the agent set with page.emulateMedia; the relay drops Patchright's defaults otherwise. */
   protected readonly explicitMediaFeatures = new Map<string, string>()
   protected explicitMedia: string | undefined
@@ -130,15 +133,16 @@ export abstract class DefaultPageHost {
     return true
   }
 
-  markTargetDetached(targetId: string): boolean {
+  markTargetDetached(targetId: string, options: { readonly releasedByUser?: boolean } = {}): boolean {
     if (this.defaultPageTargetId !== targetId) {
       return false
     }
     if (this.lastKnownNonBlankUrl) {
       this.recreatedFromClosedUrl = this.lastKnownNonBlankUrl
     }
+    this.pageReleasedByDebuggingBar = options.releasedByUser === true
     this.unbindDefaultPage(undefined)
-    this.addWarningOnce(defaultPageClosedWarning)
+    this.addWarningOnce(options.releasedByUser === true ? debuggingBarCanceledWarning : defaultPageClosedWarning)
     return true
   }
 
@@ -287,6 +291,12 @@ export abstract class DefaultPageHost {
         notify: true,
       })
       this.pendingWarnings.push(defaultPageClosedWarning)
+    }
+    // The warning was queued when the user released the tab; a stopped script may have drained it, so say it again
+    // here rather than let the next execute silently open a new page.
+    if (this.pageReleasedByDebuggingBar) {
+      this.pageReleasedByDebuggingBar = false
+      this.addWarningOnce(debuggingBarCanceledWarning)
     }
     const page = await context.newPage()
     const targetId = await resolvePageTargetId(page)

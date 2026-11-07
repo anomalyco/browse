@@ -119,6 +119,19 @@ describe("closing a tab in an agent group", () => {
   })
 })
 
+describe("a tab the relay ungroups itself", () => {
+  test("keeps idle tracking, unlike a tab the user drags out of the agent group", async () => {
+    const byRelay = await agentTab(0)
+    const byUser = await agentTab(0)
+    await stub.chrome.tabs.group({ tabIds: [byRelay, byUser] })
+    TabCleanup.relayUngroup(byRelay)
+    await stub.chrome.tabs.ungroup(byRelay)
+    await stub.chrome.tabs.ungroup(byUser)
+    expect(await TabCleanup.isTracked(byRelay)).toBe(true)
+    expect(await TabCleanup.isTracked(byUser)).toBe(false)
+  })
+})
+
 describe("a tab that fails to close", () => {
   test("is put back in its group, stays tracked and is retried by the next cleanup", async () => {
     const tabId = await agentTab(60)

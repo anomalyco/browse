@@ -50,8 +50,9 @@ export function createExtensionEventHandler(options: {
   readonly refreshPageStatus: (tabId: number) => void
   readonly refreshTabGrouping: (tabId: number) => void
   readonly handleToolbarClick: (tabId: number) => void
+  readonly handleDebuggingBarCancel: (tabId: number) => void
   readonly cancelTargetHandoffs: (target: ConnectedTarget, reason: HandoffCancellationReason) => void
-  readonly detachTargetState: (tabId: number, detachOptions?: { readonly preserveSessionTarget?: boolean; readonly updateExtension?: boolean }) => void
+  readonly detachTargetState: (tabId: number, detachOptions?: { readonly preserveSessionTarget?: boolean; readonly updateExtension?: boolean; readonly releasedByUser?: boolean }) => void
   readonly detachChildTargetState: (sessionId: string) => void
   readonly sendEventToTargetViewers: (rootSessionId: string, event: CdpEvent) => void
   readonly announceAttachedChildTarget: (rootSessionId: string, target: ChildTarget) => void
@@ -88,6 +89,7 @@ export function createExtensionEventHandler(options: {
     refreshPageStatus,
     refreshTabGrouping,
     handleToolbarClick,
+    handleDebuggingBarCancel,
     cancelTargetHandoffs,
     detachTargetState,
     detachChildTargetState,
@@ -331,6 +333,15 @@ export function createExtensionEventHandler(options: {
             errorMessage: "Failed to reconcile ambiguous debugger detach",
             renewed,
           })
+        }
+        return
+      }
+      // The browser's debugging bar button (Cancel in Chrome, OK in some browsers): the user took the tab back, but
+      // the tab is still open. Unlike target_closed, it is not re-attached.
+      if (reason === "canceled_by_user") {
+        if (eventTabId) {
+          handleDebuggingBarCancel(eventTabId)
+          detachTargetState(eventTabId, { releasedByUser: true })
         }
         return
       }

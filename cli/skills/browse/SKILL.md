@@ -395,6 +395,10 @@ Common diagnoses:
   unique URL substring or explicit index.
 - All targets disappeared: dismissing Chromium's debugging banner detaches every
   tab. Ask the user to click the toolbar button on it again.
+- Execute says the user stopped debugging the tab from the browser's debugging
+  bar (Cancel in Chrome, OK in some browsers): the tab is still open but browse
+  no longer controls it. Do not retry on that tab; ask the user to lend it again
+  with the toolbar button, or continue in a new tab.
 - Repeated execution-context errors: run one short follow-up so browse can
   health-check the page. A live page is reconnected and re-resolved once; a
   crashed or `chrome-error://` relay-owned page is recreated. It never replaces

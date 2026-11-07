@@ -18,6 +18,9 @@ export const defaultHandoffMessage = "Complete the requested task, then use the 
 export const timedOut = Symbol("timed-out")
 
 export const defaultPageClosedWarning = "The session default page was closed; created a new page. References to the old page in state are stale."
+/** The user clicked the browser's debugging bar button, which detaches the debugger but leaves the tab open. */
+export const debuggingBarCanceledWarning = "The user stopped debugging this tab from the browser's debugging bar (Cancel/OK). The tab is still open but browse no longer controls it. Ask the user to lend it again with the browse toolbar button, or continue in a new tab."
+export const debuggingBarCanceledStop = "The user stopped debugging this tab from the browser's debugging bar (Cancel/OK) while this script ran, so it was stopped. The tab is still open but browse no longer controls it. Ask the user to lend it again with the browse toolbar button, or continue in a new tab."
 export const defaultPageRecoveredWarning = "The session default page was unresponsive; created a new page. References to the old page in state are stale."
 export const defaultPageCrashedWarning = "The session default page target crashed; checking it before the next execute."
 export const defaultPageRepairedWarning = "The session default page stopped answering automation; browse reconnected and re-resolved the same tab. References to the old page in state are stale."

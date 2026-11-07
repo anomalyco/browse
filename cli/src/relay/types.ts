@@ -67,7 +67,7 @@ export interface ExecuteSandboxLike {
   redactNetworkCaptureText(text: string): string
   markTargetCrashed(targetId: string): boolean
   markTargetProtectedUi(targetId: string, protectedUi: boolean): boolean
-  markTargetDetached(targetId: string): boolean
+  markTargetDetached(targetId: string, options?: { readonly releasedByUser?: boolean }): boolean
   markTargetReplaced(previousTargetId: string, targetId: string): boolean
   /** Rebind a durable default target in a new sandbox; `warning` goes into the next execute result. */
   restore(target: SessionTarget | undefined, warning?: string): void

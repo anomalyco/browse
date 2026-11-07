@@ -251,6 +251,27 @@ describe("grouping: one shared group for all agents (default)", () => {
     await command("debugger.detach", { tabId: userTab })
     expect(tab(userTab).groupId).toBe(-1)
   })
+
+  test("the browser's debugging bar cancel gives the tab back: open, ungrouped, untracked, badge reset", async () => {
+    await stub.chrome.storage.local.set({ agentTabsGrouping: "shared" })
+    await userWindow()
+    const agent = await agentTab("github")
+    await command("action.setBadge", { tabId: agent.tabId, text: "RUN", title: "browse is running a script." })
+    expect(relay.badge(agent.tabId)).toMatchObject({ text: "RUN" })
+    const before = socket().received.length
+    event("debugger.onDetach").emit({ tabId: agent.tabId }, "canceled_by_user")
+    await until(() => tab(agent.tabId).groupId === -1)
+    // The user has the tab now: it stays open, out of the agent group, and idle cleanup leaves it alone.
+    expect(stub.state.tabs.has(agent.tabId)).toBe(true)
+    expect(relay.badge(agent.tabId)).toBeUndefined()
+    expect(relay.state().tabs.some((entry) => entry.tabId === agent.tabId)).toBe(false)
+    expect(await TabCleanup.isTracked(agent.tabId)).toBe(false)
+    expect(await TabCleanup.cleanup({ minutes: 0 })).toEqual([])
+    expect(stub.state.tabs.has(agent.tabId)).toBe(true)
+    // The relay hears why the debugger went away.
+    const detached = socket().received.slice(before).find((message) => message.method === "debugger.detached")
+    expect(detached?.params).toEqual({ tabId: agent.tabId, reason: "canceled_by_user" })
+  })
 })
 
 describe("grouping: none", () => {

@@ -154,6 +154,19 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     if (known) notify()
   }
 
+  /**
+   * The user has the tab back: they clicked the browser's debugging bar button (Cancel in Chrome, OK in some
+   * browsers), which detaches chrome.debugger with `canceled_by_user`. Untracks it as an agent tab so idle cleanup
+   * leaves it alone, resets the toolbar badge and lets it out of the agent group, but keeps it open (unlike the
+   * toolbar button, which closes a tab an agent opened).
+   */
+  const releaseTab = async (tabId: number) => {
+    forget(tabId)
+    TabCleanup.forget(tabId)
+    if (badges.delete(tabId)) input.badgesChanged()
+    await grouping.ungroup(tabId, { released: true })
+  }
+
   // The relay-side settings apply as soon as they change; the relay answers with what its environment fixes.
   const sendSettings = async () => {
     if (!open()) return
@@ -411,7 +424,11 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       void debuggerOps.recover(tabId, reason)
       return
     }
-    forget(tabId)
+    if (reason === "canceled_by_user") {
+      void releaseTab(tabId).catch((error: unknown) => log.add("debugger.release.error", { tabId, error: text(error) }))
+    } else {
+      forget(tabId)
+    }
     send({ method: "debugger.detached", params: { tabId, reason } })
   })
   chrome.tabs.onUpdated.addListener((tabId, change) => {

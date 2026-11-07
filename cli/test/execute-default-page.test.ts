@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { BrowserContext, Frame, Page } from "patchright-core"
 import {
+  debuggingBarCanceledWarning,
   defaultPageClosedWarning,
   defaultPageRecoveredWarning,
   defaultPageReattachedWarning,
@@ -194,6 +195,13 @@ class TestHost extends DefaultPageHost {
     return this.pendingWarnings
   }
 
+  /** Takes the queued warnings, as an execute result does when it finishes. */
+  drainWarnings(): string[] {
+    const warnings = this.pendingWarnings
+    this.pendingWarnings = []
+    return warnings
+  }
+
   mediaFeatures(): Map<string, string> {
     return this.explicitMediaFeatures
   }
@@ -353,6 +361,24 @@ describe("DefaultPageHost relay reports", () => {
     expect(host.targetId()).toBeUndefined()
     expect(host.recreatedUrl()).toBe("https://example.com/")
     expect(host.warnings()).toEqual([defaultPageClosedWarning])
+  })
+
+  test("markTargetDetached for a debugging bar cancel names the release, again when the next page opens", async () => {
+    const host = new TestHost()
+    host.bind(new FakePage().asPage(), "target-1", true)
+
+    expect(host.markTargetDetached("target-1", { releasedByUser: true })).toBe(true)
+
+    expect(host.targetId()).toBeUndefined()
+    expect(host.warnings()).toEqual([debuggingBarCanceledWarning])
+    // A stopped script's discarded result can drain the queued warning; the next execute says it again.
+    expect(host.drainWarnings()).toEqual([debuggingBarCanceledWarning])
+    const created = new FakePage("https://new.example/", "target-8")
+    const context = asContext({ pages: () => [], newPage: async () => created.asPage() })
+
+    await host.sessionPage(context)
+
+    expect(host.warnings()).toEqual([debuggingBarCanceledWarning])
   })
 
   test("markTargetReplaced keeps ownership and asks for the replaced rebind", () => {

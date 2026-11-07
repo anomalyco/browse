@@ -532,6 +532,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   function detachTargetState(tabId: number, detachOptions: {
     readonly preserveSessionTarget?: boolean
     readonly updateExtension?: boolean
+    /** The user gave the tab back from the browser's debugging bar; the next execute says so. */
+    readonly releasedByUser?: boolean
   } = {}): void {
     rootLifecycle.invalidate(tabId)
     if (detachOptions.updateExtension !== false) {
@@ -548,7 +550,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     const detached = registry.detachRootTargetState(tabId)
     if (detached) {
       presentation.cancelTargetHandoffs(detached.target, "target-detached")
-      if (!detachOptions.preserveSessionTarget) sessions.markTargetDetached(detached.target.targetInfo.targetId)
+      if (!detachOptions.preserveSessionTarget) sessions.markTargetDetached(detached.target.targetInfo.targetId, { releasedByUser: detachOptions.releasedByUser === true })
       contextDebugLog?.(`target-detached kind=root ${targetDiagnosticIdentity(registry, detached.target)}`)
     }
     cdpClients.detachTab(tabId, { destroyed: true })
@@ -627,6 +629,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     refreshPageStatus: presentation.refreshPageStatus,
     refreshTabGrouping: presentation.refreshTabGrouping,
     handleToolbarClick: presentation.handleToolbarClick,
+    handleDebuggingBarCancel: presentation.handleDebuggingBarCancel,
     cancelTargetHandoffs: presentation.cancelTargetHandoffs,
     detachTargetState,
     detachChildTargetState,
