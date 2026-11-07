@@ -370,6 +370,7 @@ download_npm() (
         print_message error "Could not write the download to $tmp_dir. Make sure it has enough free space, or set TMPDIR to another directory, then try again." >&2
     fi
     if [ "$ret" -ne 0 ]; then
+        rm -rf "$tmp_dir"
         exit "$ret"
     fi
 
