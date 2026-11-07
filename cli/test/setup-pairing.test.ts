@@ -73,7 +73,7 @@ test.skipIf(process.platform === "win32" || !node || !existsSync(built))(
       expect(install.stdout).toContain("browse is installed in a browser but isn't paired with this relay yet.")
       // The extension is installed: sending the user back to the store is the bug.
       expect(install.stdout).not.toContain("Chrome Web Store")
-      expect(install.stdout).toContain("click Pair.")
+      expect(install.stdout).toContain("click Connect.")
       const shown = /enter ([0-9A-Z]{4}-[0-9A-Z]{4}) as the pairing code/.exec(install.stdout)?.[1]
       expect(shown).toBeDefined()
       // The code it printed is the one the waiting onboarding page can redeem.
