@@ -25,7 +25,8 @@ On Windows, run `irm https://opencode.ai/browse/install.ps1 | iex` in PowerShell
 installer puts the `browse` command in `~/.local/bin` (`$XDG_BIN_HOME` when set) and runs `browse install`. It reads
 the channel's manifest from [Anomaly's release service](https://anoma.ly/release), downloads the binary for this
 computer, and verifies its size and SHA-256 before installing it. `--channel stable|beta|dev` picks the channel
-(`stable` by default); `--version <version>` installs a specific version from npm.
+(`stable` by default); `--version <version>` installs a specific version from npm, checked against npm's published
+SHA-512 integrity.
 
 `install` keeps its files in the XDG folders (`~/.config/browse`, `~/.local/share/browse`, `~/.local/state/browse`
 and `~/.cache/browse`; each honours its `XDG_*` variable), adds the `browse` MCP server to the agents you choose, and
