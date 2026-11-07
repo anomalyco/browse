@@ -89,8 +89,8 @@ describe("updating reruns the installer", () => {
   test("a binary install runs the install script, which replaces the executable in place", async () => {
     const home = fakeHome()
     const runtime = runtimeAt(home, "0.0.1")
-    // The fake install script is a local stand-in for https://opencode.ai/browse/install: it replaces the binary and
-    // ignores the version arguments it is given.
+    // OPENCODE_BROWSER_INSTALL_SCRIPT points the updater at this fake in place of the script baked into the binary: it
+    // replaces the executable and ignores the version arguments it is given.
     const installer = path.join(home, "install")
     fs.writeFileSync(installer, installerWriting("0.0.2"))
     const installed = await runInstaller({
