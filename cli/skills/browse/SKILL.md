@@ -56,9 +56,14 @@ authenticated browser state rather than reproducing a login in a fresh page.
 
 One relay can have several browsers connected at once, each with an id like
 `chrome-macbook`. New sessions use the default browser, the first connected and
-ready, unless `session_new` gets `browser: "<id>"`. `status` lists the connected
-browsers (`browse status --json` on the CLI). A session stays in its browser, so
-start a new one to use another.
+ready, unless `session_new` or the first `execute` that creates it gets
+`browser: "<id>"`. `status` lists the connected browsers (`browse status --json`
+on the CLI). A session stays in its browser, so start a new one to use another.
+
+The `browse` CLI cannot pick a browser: `session new` takes only `--read-only`
+and `--allow-origin`, so CLI sessions use the default browser. `session_adopt`
+has no `browser` either; to adopt a tab in another browser, run `session_new`
+with `browser` first, then `session_adopt` in that session.
 
 ## Inspect, act, verify
 
