@@ -1,6 +1,7 @@
 // Restarting an install after an update (auto-update.ts has the layout): `update`, and the two commands the relay's
 // updater runs in detached children so nothing waits on its event loop:
-//   self-update <version> [--channel <tag>]   reruns the installer (binary install script, or npm install -g)
+//   self-update <version> [--channel <tag>]   reruns the installer (binary: its release service channel; npm: npm
+//                                             install -g at <version>)
 //   runtime-switch <version>                  restarts the relay from the stable entry path (exit 1 when refused)
 // A switch drains the running relay first (the same safe restart as `relay restart`, refused while a capture, a
 // recording or a raw CDP client is busy). Only once it has stopped does the new entry start, so on a refusal nothing
@@ -21,6 +22,7 @@ import {
   type Channel,
   type Runtime,
 } from "./auto-update.ts"
+import { checkRelease, releaseChannel, runningServiceTarget, type ReleaseDecision } from "./release-service.ts"
 import { cliCommand, installCommand } from "../paths.ts"
 import * as RelayClient from "../relay/client.ts"
 import * as RelayLifecycle from "../relay/lifecycle.ts"
@@ -34,7 +36,7 @@ const log = (line: string) => process.stdout.write(line + "\n")
 export async function switchTo(runtime: Runtime, version: string, options: { readonly force: boolean }): Promise<string | undefined> {
   const installed = installedVersion(runtime)
   if (!installed) return `${runtime.entry} doesn't report a version`
-  if (compareVersions(installed, version) < 0) return `${version} isn't installed`
+  if (installed !== version) return `${version} isn't installed`
   const program = Effect.gen(function* () {
     const relay = yield* RelayClient.Service
     const running = yield* Effect.result(relay.version)
@@ -71,6 +73,65 @@ export async function runInstalledUpdate(args: readonly string[], runtime = inst
     return true
   }
   const channel = channelOf(runtime.version)
+  if (runtime.kind === "binary") {
+    const target = runningServiceTarget()
+    if (!target) {
+      log("✗ This executable isn't a released browse build, so it has no release channel to follow.")
+      process.exitCode = 1
+      return true
+    }
+    const serviceChannel = releaseChannel(channel)
+    const answer = await checkRelease({ version: runtime.version, channel: serviceChannel, target }).catch((error: Error) => error)
+    if (answer instanceof Error) {
+      log(`✗ Couldn't check for updates: ${answer.message}`)
+      process.exitCode = 1
+      return true
+    }
+    if (answer.status === "missing") {
+      log(`✗ There is no ${serviceChannel} release of browse yet.`)
+      process.exitCode = 1
+      return true
+    }
+    if (answer.status === "unchanged") {
+      log(`✓ Up to date: ${runtime.version} is the current ${serviceChannel} release.`)
+      return true
+    }
+    const decision: ReleaseDecision = answer.decision
+    if (decision.action === "reject") {
+      log(`✗ The ${serviceChannel} release manifest was rejected (${decision.reason}). Try again later.`)
+      process.exitCode = 1
+      return true
+    }
+    if (decision.action === "none") {
+      updateState(({ failed: _failed, latest: _latest, ...state }) => ({ ...state, checkedAt: Date.now() }))
+      log(decision.reason === "rollout_deferred" ? `✓ Up to date: ${runtime.version}; the ${serviceChannel} release ${answer.releaseVersion} is still rolling out.` : `✓ Up to date: ${runtime.version} is the current ${serviceChannel} release.`)
+      return true
+    }
+    updateState(({ failed: _failed, ...state }) => ({ ...state, checkedAt: Date.now(), latest: decision.version, ...(answer.etag ? { etag: answer.etag } : {}) }))
+    if (args.includes("--check")) {
+      log(`Update available: ${decision.version} (you have ${runtime.version}). Run \`${cliCommand("update")}\` to install it.`)
+      return true
+    }
+    log(`Installing ${decision.version} (you have ${runtime.version})…`)
+    // The installer reads the same manifest and checks the file's size and SHA-256; it follows the channel, so a
+    // release that moved on between the check and the download still installs the current build.
+    const installed = await runInstaller({ runtime, channel: serviceChannel }).catch((error: Error) => {
+      log(`✗ ${error.message}`)
+      process.exitCode = 1
+      return undefined
+    })
+    if (!installed) return true
+    updateState(({ installing: _installing, ...state }) => ({ ...state, lastUpdate: { from: runtime.version, to: installed, at: new Date().toISOString() } }))
+    const refused = await switchTo({ ...runtime, version: installed }, installed, { force: args.includes("--force") })
+    if (refused) {
+      const automatic = effectiveMode() === "on"
+      log(`! Installed ${installed}, but the relay didn't restart (${refused}).`)
+      log(automatic ? "  It keeps running the old version until no agent is using the browser, then restarts." : `  When no agent is using the browser, run \`${cliCommand("update")}\` again.`)
+      return true
+    }
+    log(`✓ Updated ${runtime.version} → ${installed}.`)
+    return true
+  }
   const published = await fetchPublished({ registry: await registryUrl(), channel }).catch((error: Error) => error)
   if (published instanceof Error) {
     log(`✗ Couldn't check for updates: ${published.message}`)
@@ -122,7 +183,13 @@ export async function runSelfUpdate(args: readonly string[]) {
     return
   }
   try {
-    const installed = await runInstaller({ runtime, version, ...(channel ? { channel } : {}) })
+    // A binary install follows its release service channel; its installer checks the manifest's size and SHA-256. An
+    // npm install is pinned to the version npm serves (version, not channel), as npm install -g does.
+    const installChannel = releaseChannel(channel ?? channelOf(version))
+    const installed = await runInstaller({
+      runtime,
+      ...(runtime.kind === "binary" ? { channel: installChannel } : { version, ...(channel ? { channel } : {}) }),
+    })
     log(`${new Date().toISOString()} installed ${installed}`)
   } catch (error) {
     updateState(({ installing, ...state }) => {

@@ -15,6 +15,7 @@ import {
   updateState,
   type Runtime,
 } from "../src/update/auto-update.ts"
+import { rolloutBucket } from "../src/update/release-service.ts"
 
 const roots: string[] = []
 afterEach(() => {
@@ -44,6 +45,19 @@ describe("channels and versions", () => {
   test("a version's channel follows its prerelease", () => {
     expect(channelOf("0.2.0")).toBe("latest")
     expect(channelOf("0.2.1-dev.57")).toBe("dev")
+    expect(channelOf("0.2.1-beta.2")).toBe("beta")
+  })
+
+  test("the rollout bucket is drawn once and kept", () => {
+    const root = fakeHome()
+    const first = rolloutBucket(root)
+    expect(first).toBeGreaterThanOrEqual(0)
+    expect(first).toBeLessThan(100)
+    expect(rolloutBucket(root)).toBe(first)
+    fs.writeFileSync(path.join(root, "rollout-bucket"), "42\n")
+    expect(rolloutBucket(root)).toBe(42)
+    fs.writeFileSync(path.join(root, "rollout-bucket"), "250\n")
+    expect(rolloutBucket(root)).toBeLessThan(100)
   })
 
   test("dev builds sort by run, above the release before them and below the one they lead to", () => {
@@ -53,7 +67,9 @@ describe("channels and versions", () => {
       expect(compareVersions(ordered[index - 1]!, ordered[index]!)).toBe(-1)
     }
     expect(compareVersions("0.2.1-dev.57", "0.2.1-dev.57")).toBe(0)
-    expect(compareVersions("0.2.1-beta.9", "0.2.0")).toBe(0)
+    expect(compareVersions("0.2.1-beta.9", "0.2.0")).toBe(1)
+    expect(compareVersions("0.2.1-dev.9", "0.2.1-beta.1")).toBe(-1)
+    expect(compareVersions("0.2.1-beta.1", "0.2.1")).toBe(-1)
   })
 })
 
@@ -106,6 +122,130 @@ describe("updating reruns the installer", () => {
 })
 
 describe("the relay's updater", () => {
+  const SHA = "a".repeat(64)
+  const manifest = (options: { version: string; rollout?: number; required?: boolean; channel?: string }) =>
+    JSON.stringify({
+      schema: 1,
+      app: "browse",
+      artifact: "cli",
+      channel: options.channel ?? "stable",
+      sequence: 2,
+      published_at: "2026-11-07T00:00:00Z",
+      release: {
+        version: options.version,
+        rollout_percent: options.rollout ?? 100,
+        ...(options.required ? { required: true } : {}),
+        targets: {
+          "linux-x64": { url: `/release/browse/files/${SHA}/opencode-browse-linux-x64-${options.version}.tgz`, size: 1, sha256: SHA },
+        },
+        distributions: [{ kind: "direct" }],
+      },
+    })
+
+  test("a binary install reads its channel's release service manifest with the protocol's User-Agent and ETag", async () => {
+    const home = fakeHome()
+    process.env.OPENCODE_BROWSER_HOME = home
+    const globals = globalThis as { __OPENCODE_BROWSER_TARGET__?: string }
+    globals.__OPENCODE_BROWSER_TARGET__ = "linux-x64"
+    try {
+      const runtime = runtimeAt(home, "0.0.1")
+      updateState(() => ({}))
+      const requests: { url: string; headers: Headers }[] = []
+      let time = 1_000_000
+      const fetcher: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        const headers = new Headers(init?.headers)
+        requests.push({ url: String(input), headers })
+        const response = requests.length === 1 ? manifest({ version: "0.0.2" }) : null
+        return response ? new Response(response, { status: 200, headers: { etag: '"one"' } }) : new Response(null, { status: 304 })
+      }) as unknown as typeof fetch
+      const spawned: string[][] = []
+      const updater = createAutoUpdater({
+        runtime,
+        isIdle: () => true,
+        log: () => {},
+        spawnChild: (args) => (spawned.push([...args]), 2 ** 22 + 12346),
+        env: { OPENCODE_BROWSER_AUTO_UPDATE: "notify" },
+        fetch: fetcher,
+        now: () => time,
+      })
+      await updater.tick()
+      expect(requests[0]!.url).toBe("https://anoma.ly/release/browse/cli/stable.json")
+      expect(requests[0]!.headers.get("user-agent")).toBe("browse/stable/0.0.1/cli")
+      expect(requests[0]!.headers.get("if-none-match")).toBeNull()
+      expect(readState()).toMatchObject({ latest: "0.0.2", etag: '"one"' })
+      expect(spawned).toEqual([])
+
+      // An hour later the check runs again with If-None-Match; 304 keeps the answer and changes nothing.
+      time += 60 * 60 * 1000
+      await updater.tick()
+      expect(requests[1]!.headers.get("if-none-match")).toBe('"one"')
+      expect(readState()).toMatchObject({ latest: "0.0.2", etag: '"one"' })
+    } finally {
+      delete process.env.OPENCODE_BROWSER_HOME
+      delete globals.__OPENCODE_BROWSER_TARGET__
+    }
+  })
+
+  test("checks at least hourly, and respects rollout and required before installing", async () => {
+    const home = fakeHome()
+    process.env.OPENCODE_BROWSER_HOME = home
+    const globals = globalThis as { __OPENCODE_BROWSER_TARGET__?: string }
+    globals.__OPENCODE_BROWSER_TARGET__ = "linux-x64"
+    try {
+      const runtime = runtimeAt(home, "0.0.1")
+      updateState(() => ({ checkedAt: 1_000_000 }))
+      let calls = 0
+      const fetcher: typeof fetch = (async () => {
+        calls++
+        return new Response(manifest({ version: "0.0.2", rollout: 0 }), { status: 200 })
+      }) as unknown as typeof fetch
+      const spawned: string[][] = []
+      const updater = createAutoUpdater({
+        runtime,
+        isIdle: () => true,
+        log: () => {},
+        spawnChild: (args) => (spawned.push([...args]), 2 ** 22 + 12347),
+        env: {},
+        fetch: fetcher,
+        now: () => 1_000_000 + 30 * 60 * 1000,
+      })
+      await updater.tick()
+      expect(calls).toBe(0)
+      expect(spawned).toEqual([])
+
+      // 61 minutes later: check, but a halted rollout installs nothing.
+      const later = createAutoUpdater({
+        runtime,
+        isIdle: () => true,
+        log: () => {},
+        spawnChild: (args) => (spawned.push([...args]), 2 ** 22 + 12348),
+        env: {},
+        fetch: fetcher,
+        now: () => 1_000_000 + 61 * 60 * 1000,
+      })
+      await later.tick()
+      expect(calls).toBe(1)
+      expect(spawned).toEqual([])
+      expect(readState().latest).toBeUndefined()
+
+      // A required release bypasses the rollout.
+      updateState(() => ({}))
+      const required = createAutoUpdater({
+        runtime,
+        isIdle: () => true,
+        log: () => {},
+        spawnChild: (args) => (spawned.push([...args]), 2 ** 22 + 12349),
+        env: {},
+        fetch: (async () => new Response(manifest({ version: "0.0.3", rollout: 0, required: true }), { status: 200 })) as unknown as typeof fetch,
+      })
+      await required.tick()
+      expect(spawned).toEqual([["self-update", "0.0.3", "--channel", "latest"]])
+    } finally {
+      delete process.env.OPENCODE_BROWSER_HOME
+      delete globals.__OPENCODE_BROWSER_TARGET__
+    }
+  })
+
   test("installs with self-update in its own process, then restarts the relay once idle", async () => {
     const home = fakeHome()
     process.env.OPENCODE_BROWSER_HOME = home

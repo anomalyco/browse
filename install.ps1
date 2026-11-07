@@ -1,6 +1,6 @@
-# Installs browse on Windows: downloads the browse binary for this computer into %USERPROFILE%\.local\bin (or
-# %XDG_BIN_HOME%), then hands over to `browse install`, which does the rest (PATH, your agents, pairing with your
-# browser). Served at https://opencode.ai/browse/install.ps1; the PowerShell twin of ./install.
+# Installs browse on Windows: downloads the browse binary for this computer from Anomaly's release service into
+# %USERPROFILE%\.local\bin (or %XDG_BIN_HOME%), then hands over to `browse install`, which does the rest (PATH, your
+# agents, pairing with your browser). Served at https://opencode.ai/browse/install.ps1; the PowerShell twin of ./install.
 #
 #   irm https://opencode.ai/browse/install.ps1 | iex
 #
@@ -13,8 +13,9 @@
 #
 # Options:
 #   -h, --help              Show this help
-#   -v, --version <version> Install a specific version (or $env:VERSION)
-#       --channel <tag>     Install the latest version on an npm tag: latest or dev (or $env:BROWSE_CHANNEL)
+#   -v, --version <version> Install a specific version from npm (or $env:VERSION)
+#       --channel <channel> Install the latest version on a release channel: stable (default), beta or dev.
+#                           `latest` means stable (or $env:BROWSE_CHANNEL)
 #   -b, --binary <path>     Install from a local browse.exe instead of downloading
 #       --no-setup          Only install the binary; don't run `browse install`
 # Anything else goes to `browse install`, e.g. --remote, --agent claude or --no-modify-path.
@@ -26,7 +27,7 @@ function Install-browse {
     $ProgressPreference = "SilentlyContinue"
 
     $requested = $env:VERSION
-    $channel = if ($env:BROWSE_CHANNEL) { $env:BROWSE_CHANNEL } else { "latest" }
+    $channel = if ($env:BROWSE_CHANNEL) { $env:BROWSE_CHANNEL } else { "stable" }
     $binary = $null
     $noSetup = $false
     $setupArgs = @()
@@ -44,8 +45,9 @@ Usage:
 
 Options:
   -h, --help              Show this help
-  -v, --version <version> Install a specific version (e.g., 0.0.7), or set `$env:VERSION
-      --channel <tag>     Install the latest version on an npm tag (latest or dev), or set `$env:BROWSE_CHANNEL
+  -v, --version <version> Install a specific version from npm (e.g., 0.0.7), or set `$env:VERSION
+      --channel <channel> Install the latest version on a release channel: stable (default), beta or dev.
+                          `latest` means stable, or set `$env:BROWSE_CHANNEL
   -b, --binary <path>     Install from a local browse.exe instead of downloading
       --no-setup          Only install the binary; don't run ``browse install``
 
@@ -75,6 +77,10 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
             default { $setupArgs += $arg }
         }
     }
+
+    # `latest` was the npm tag and is now an alias for the release service's stable channel.
+    if ($channel -eq "latest") { $channel = "stable" }
+    if ($channel -notin @("stable", "beta", "dev")) { throw "unknown channel $channel (stable, beta or dev)" }
 
     # Windows PowerShell 5.1 may still default to TLS 1.0, which the npm registry refuses.
     try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
@@ -111,10 +117,7 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
 
             $package = "@opencode/browse-windows-$target"
             $encoded = "@opencode%2fbrowse-windows-$target"
-            if (-not $requested) {
-                try { $version = (Invoke-RestMethod -UseBasicParsing "https://registry.npmjs.org/$encoded/$channel").version } catch { $version = $null }
-                if (-not $version) { throw "Failed to fetch the latest browse version for windows-$target" }
-            } else {
+            if ($requested) {
                 $version = $requested -replace "^v", ""
                 try { Invoke-RestMethod -UseBasicParsing "https://registry.npmjs.org/$encoded/$version" | Out-Null }
                 catch {
@@ -123,6 +126,28 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
                     if ($status -eq 404) { throw "browse $version is not available for windows-$target. Available versions: https://www.npmjs.com/package/${package}?activeTab=versions" }
                     throw "Failed to fetch package information: $($_.Exception.Message)"
                 }
+            } else {
+                # The channel's current release from the Anomaly release service (anomalyco/release docs/protocol.md). The
+                # manifest names the file for this target; its size and SHA-256 must match before it is used.
+                $service = if ($env:OPENCODE_BROWSER_RELEASE_SERVICE) { $env:OPENCODE_BROWSER_RELEASE_SERVICE } else { "https://anoma.ly/release" }
+                $service = $service.TrimEnd("/")
+                if (-not $service.EndsWith("/release")) { throw "OPENCODE_BROWSER_RELEASE_SERVICE must end in /release, not $service" }
+                $manifestUrl = "$service/browse/cli/$channel.json"
+                try { $manifest = Invoke-RestMethod -UseBasicParsing -UserAgent "browse/$channel/install" $manifestUrl }
+                catch { throw "no $channel release at ${manifestUrl}: $($_.Exception.Message)" }
+                if ($manifest.app -ne "browse" -or $manifest.artifact -ne "cli" -or $manifest.channel -ne $channel) {
+                    throw "$manifestUrl is not browse's $channel CLI manifest"
+                }
+                $version = [string]$manifest.release.version
+                if (-not $version) { throw "the $channel release has no version" }
+                $entry = $manifest.release.targets.PSObject.Properties["windows-$target"]
+                if (-not $entry) { throw "the $channel release has no windows-$target build" }
+                $url = [string]$entry.Value.url
+                if (-not $url.StartsWith("/")) { throw "unexpected download URL $url" }
+                $url = ($service -replace "/release$", "") + $url
+                $expectedSha = [string]$entry.Value.sha256
+                $expectedSize = [long]$entry.Value.size
+                $filename = Split-Path $url -Leaf
             }
 
         }
@@ -142,28 +167,52 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
             $source = Join-Path $tmp "package\bin\browse.exe"
             if (-not (Test-Path -LiteralPath $source)) { throw "$filename has no package\bin\browse.exe" }
         }
+        $downloadService = {
+            $archive = Join-Path $tmp $filename
+            Write-Host ""
+            Write-Host "Installing browse version: $version ($channel)"
+            Invoke-WebRequest -UseBasicParsing -UserAgent "browse/$channel/$version/cli" -Uri $url -OutFile $archive
+            $actualSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+            if (-not $expectedSha -or $actualSha -ne $expectedSha.ToLowerInvariant()) {
+                throw "checksum mismatch for $filename (expected $(if ($expectedSha) { $expectedSha } else { 'none' }), got $actualSha)"
+            }
+            $actualSize = (Get-Item -LiteralPath $archive).Length
+            if ($expectedSize -and $actualSize -ne $expectedSize) { throw "size mismatch for $filename (expected $expectedSize, got $actualSize)" }
+
+            # Windows 10 and later ship bsdtar as System32\tar.exe; another tar on PATH (Git's) can't read C:\ paths.
+            $tar = Join-Path $env:SystemRoot "System32\tar.exe"
+            if (-not (Test-Path -LiteralPath $tar)) { $tar = "tar.exe" }
+            & $tar -xzf $archive -C $tmp
+            if ($LASTEXITCODE -ne 0) { throw "Could not extract $filename" }
+            $source = Join-Path $tmp "package\bin\browse.exe"
+            if (-not (Test-Path -LiteralPath $source)) { throw "$filename has no package\bin\browse.exe" }
+        }
         if (-not $binary) {
-            foreach ($delay in 0, 15, 30, 60, 75) {
-                if ($delay) {
-                    Write-Warning "The $version tarball isn't available yet; retrying in ${delay}s."
-                    Start-Sleep -Seconds $delay
-                }
-                try { . $download; break } catch {
-                    $response = $_.Exception.Response
-                    if ([int]$response.StatusCode -ne 404) { throw }
-                    if ($delay -ne 75) { continue }
-                    if ($requested -or $channel -notin 'latest', 'dev') { throw }
-                    # Windows PowerShell uses HttpWebResponse; PowerShell Core uses HttpResponseMessage.
-                    $uri = if ($response.ResponseUri) { $response.ResponseUri } else { $response.RequestMessage.RequestUri }
-                    $versions = (Invoke-RestMethod -UseBasicParsing ([uri]::new($uri, "/$encoded"))).versions.PSObject.Properties.Name
-                    $pattern = if ($channel -eq 'dev') { '^\d+\.\d+\.\d+-dev\.\d+(\.\d+)?$' } else { '^\d+\.\d+\.\d+$' }
-                    $ordered = @($versions | Where-Object { $_ -match $pattern } | Sort-Object -Descending -Property { [version]($_ -split '-')[0] }, { [long]($_ -split '\.')[3] }, { [long]($_ -split '\.')[4] })
-                    $index = [array]::IndexOf($ordered, $version)
-                    if ($index -lt 0 -or $index + 1 -ge $ordered.Count) { throw }
-                    $previous = $ordered[$index + 1]
-                    Write-Warning "browse $version is still unavailable; falling back to $previous ($channel)."
-                    $version = $previous
-                    . $download
+            if (-not $requested) {
+                . $downloadService
+            } else {
+                foreach ($delay in 0, 15, 30, 60, 75) {
+                    if ($delay) {
+                        Write-Warning "The $version tarball isn't available yet; retrying in ${delay}s."
+                        Start-Sleep -Seconds $delay
+                    }
+                    try { . $download; break } catch {
+                        $response = $_.Exception.Response
+                        if ([int]$response.StatusCode -ne 404) { throw }
+                        if ($delay -ne 75) { continue }
+                        if ($requested -or $channel -notin 'latest', 'dev') { throw }
+                        # Windows PowerShell uses HttpWebResponse; PowerShell Core uses HttpResponseMessage.
+                        $uri = if ($response.ResponseUri) { $response.ResponseUri } else { $response.RequestMessage.RequestUri }
+                        $versions = (Invoke-RestMethod -UseBasicParsing ([uri]::new($uri, "/$encoded"))).versions.PSObject.Properties.Name
+                        $pattern = if ($channel -eq 'dev') { '^\d+\.\d+\.\d+-dev\.\d+(\.\d+)?$' } else { '^\d+\.\d+\.\d+$' }
+                        $ordered = @($versions | Where-Object { $_ -match $pattern } | Sort-Object -Descending -Property { [version]($_ -split '-')[0] }, { [long]($_ -split '\.')[3] }, { [long]($_ -split '\.')[4] })
+                        $index = [array]::IndexOf($ordered, $version)
+                        if ($index -lt 0 -or $index + 1 -ge $ordered.Count) { throw }
+                        $previous = $ordered[$index + 1]
+                        Write-Warning "browse $version is still unavailable; falling back to $previous ($channel)."
+                        $version = $previous
+                        . $download
+                    }
                 }
             }
         }

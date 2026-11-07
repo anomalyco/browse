@@ -90,7 +90,7 @@ if (import.meta.main) {
         target: `bun-${target}` as Bun.Build.CompileTarget,
         ...(executablePath ? { executablePath } : {}),
         outfile: binary,
-        execArgv: [`--user-agent=browse/${channel}/${version}`, "--use-system-ca", "--"],
+        execArgv: [`--user-agent=browse/${channel}/${version}/cli`, "--use-system-ca", "--"],
         windows: {},
       },
       define: {

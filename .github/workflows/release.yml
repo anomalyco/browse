@@ -2,12 +2,16 @@ name: Release
 run-name: "${{ github.event_name == 'workflow_dispatch' && format('Release {0} {1}', inputs.bump, inputs.version) || '' }}"
 
 # Releases browse: the extension zip, the @opencode/browse npm package and the browse binaries (an npm package
-# @opencode/browse-<target> per platform, which the install script downloads). RELEASING.md has the flow and the setup.
+# @opencode/browse-<target> per platform, and the same targets on Anomaly's release service, which the install script
+# downloads). RELEASING.md has the flow and the setup.
 #
-#   push to dev                        dev:    <next>-dev.<run> to the release service and npm dist-tag dev
-#   dispatch on dev, bump or version   stable: tag v<version>, npm latest, the Chrome Web Store, the GitHub release;
+#   push to dev                        dev:    <next>-dev.<run> to the release service (extension + every binary
+#                                              target) and npm dist-tag dev
+#   dispatch on dev, bump or version   stable: tag v<version>, the release service (extension + every binary target),
+#                                              npm latest, the Chrome Web Store, the GitHub release;
 #                                              repository admins and maintainers only, release_notes required
-#   dispatch without bump or version   check:  builds, checks and attests the stable artifacts; publishes nothing
+#   dispatch without bump or version   check:  builds, checks and attests the stable artifacts; every publish script
+#                                              runs as a dry run and publishes nothing
 #
 # Builds are separated from publishing:
 # - build and build-binaries run repository code (bun install, typecheck, tests, scripts/release-check.ts,
@@ -426,17 +430,18 @@ jobs:
           name: attestation
           path: ${{ runner.temp }}/attestation
 
-  # Dev only: the unpacked extension zip and the npm tarball to Anomaly's release service. The job's OIDC token is the
-  # only credential; the service checks it against its registry entry (workflow, refs/heads/dev, environment release).
+  # Every channel: the extension zip and the CLI binaries to Anomaly's release service. Dev publishes from every push
+  # to dev; stable from a dispatch on dev; a check run prints the same list as a dry run. The job's OIDC token is the
+  # only credential; the service checks it against registry/browse.json (workflow, refs/heads/dev, environment release).
   publish-release-service:
     name: Publish to the release service
-    needs: [plan, build, attest]
-    if: ${{ !cancelled() && needs.plan.outputs.mode == 'dev' && needs.attest.result == 'success' }}
+    needs: [plan, build, build-binaries, sign-macos, attest]
+    if: >-
+      ${{ !cancelled() && needs.attest.result == 'success'
+      && (needs.sign-macos.result == 'success' || needs.sign-macos.result == 'skipped') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    environment:
-      name: release
-      url: https://anoma.ly/release/browse/extension/dev/chromium/info
+    environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
     permissions:
       contents: read
       id-token: write
@@ -452,27 +457,31 @@ jobs:
       - name: Download
         uses: ./.github/release/download
         with:
-          pattern: build
-          digests: build=${{ needs.build.outputs.digest }}
+          pattern: "{build,binaries,binaries-signed}"
+          digests: >-
+            build=${{ needs.build.outputs.digest }} binaries=${{ needs.build-binaries.outputs.digest }}
+            binaries-signed=${{ needs.sign-macos.outputs.digest }}
       - name: Publish
-        run: bash .github/release/publish-release-service.sh "$RUNNER_TEMP/in/build"
+        run: |
+          signed=()
+          if [ "$SIGN_MACOS" = success ]; then signed=("$RUNNER_TEMP/in/binaries-signed"); fi
+          bash .github/release/publish-release-service.sh "$RUNNER_TEMP/in/build" "$RUNNER_TEMP/in/binaries" "${signed[@]}"
         env:
+          SIGN_MACOS: ${{ needs.sign-macos.result }}
           GH_TOKEN: ${{ github.token }}
           BROWSE_VERSION: ${{ needs.plan.outputs.version }}
           BROWSE_CHANNEL: ${{ needs.plan.outputs.channel }}
           BROWSE_DRY_RUN: ${{ needs.plan.outputs.dry_run }}
           NOTES_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
 
-  # Dev: after the release service has the zip the dev package fetches. Stable and check: publish-release-service is
-  # skipped. A check run publishes with --dry-run and no environment.
-  # The platform packages @opencode/browse-<target> first, then @opencode/browse.
+  # After the release service has the extension zip the dev package fetches. A check run publishes with --dry-run and
+  # no environment. The platform packages @opencode/browse-<target> first, then @opencode/browse.
   publish-npm:
     name: Publish to npm
     needs: [plan, build, build-binaries, sign-macos, attest, publish-release-service]
     if: >-
       ${{ !cancelled() && needs.attest.result == 'success'
-      && (needs.publish-release-service.result == 'success'
-      || (needs.plan.outputs.mode != 'dev' && needs.publish-release-service.result == 'skipped')) }}
+      && needs.publish-release-service.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
