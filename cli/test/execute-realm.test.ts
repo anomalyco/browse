@@ -4,7 +4,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { assertExecuteFilePath, checkHostCall, createExecuteFiles, ExecuteRealm, handleExecuteRealmRejection } from "../src/execute-realm.ts"
-import { isInside, isInstallSibling } from "../src/execute-realm/file-roots.ts"
+import { isInside, isInstallSibling, prepareExecuteFileOutputs } from "../src/execute-realm/file-roots.ts"
 import { cacheRoot, configRoot, dataRoot, installedBinaryPath, installerBinaryPath, stateRoot } from "../src/paths.ts"
 import { handleRelayProcessFault } from "../src/relay/process-guard.ts"
 import { legacyDataRoot } from "../src/setup/legacy.ts"
@@ -742,22 +742,187 @@ describe("execute file access", () => {
     fs.rmSync(path.join(files.dir, "shots"), { recursive: true, force: true })
   })
 
-  test("file-output methods get private folders, input paths are left alone", () => {
+  test("checkHostCall collects outputs without touching the filesystem", async () => {
+    const files = createExecuteFiles()
+    const dir = path.join(files.dir, "unprepared")
+    try {
+      function screenshot() {}
+      function start() {}
+      function stop() {}
+      const output = path.join(dir, "nested", "page.png")
+      expect(checkHostCall(screenshot, {}, [{ path: output }])).toHaveLength(1)
+      // Only top-level options count: a nested path is still checked, but it is not Playwright's output.
+      expect(checkHostCall(screenshot, {}, [{ widget: { path: path.join(dir, "other.png") } }])).toHaveLength(0)
+      // start/startChunk name intermediate folders; tracing.stop uses path, while network.stop uses outputPath.
+      expect(checkHostCall(start, {}, [{ path: output }])).toHaveLength(0)
+      expect(checkHostCall(stop, {}, [{ path: output }])).toHaveLength(0)
+      expect(checkHostCall(stop, {}, [{ outputPath: output }])).toHaveLength(1)
+      expect(fs.existsSync(dir)).toBe(false)
+      // Construct traps check but never prepare, even under a name Playwright writes files for.
+      class Capture {
+        readonly path: string | undefined
+        constructor(options: { path?: string }) {
+          this.path = options.path
+        }
+      }
+      Object.defineProperty(Capture, "name", { value: "screenshot" })
+      const captured = await run(`const capture = new host.screenshot({ path: host.files.path("unprepared/nested/page.png") }); return capture.path;`, { screenshot: Capture, files })
+      expect(captured).toBe(output)
+      expect(fs.existsSync(dir)).toBe(false)
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test.skipIf(process.platform === "win32")("an existing output file keeps its mode", async () => {
+    const files = createExecuteFiles()
+    const output = path.join(files.dir, "existing.png")
+    try {
+      fs.writeFileSync(output, "old", { mode: 0o640 })
+      fs.chmodSync(output, 0o640)
+      const page = {
+        async screenshot(options: { path?: string }) {
+          fs.writeFileSync(options.path!, "new")
+        },
+      }
+      await run(`await host.page.screenshot({ path: host.files.path("existing.png") }); return null;`, { page, files })
+      expect(fs.statSync(output).mode & 0o777).toBe(0o640)
+    } finally {
+      fs.rmSync(output, { force: true })
+    }
+  })
+
+  test.skipIf(process.platform === "win32")("a failed output call still secures the file it created", async () => {
+    const files = createExecuteFiles()
+    const output = path.join(files.dir, "failed.png")
+    const previous = process.umask(0o002)
+    try {
+      const page = {
+        async screenshot(options: { path?: string }) {
+          fs.writeFileSync(options.path!, "partial")
+          throw new Error("capture failed")
+        },
+      }
+      await expect(run(`await host.page.screenshot({ path: host.files.path("failed.png") }); return null;`, { page, files }))
+        .rejects.toThrow("capture failed")
+      expect(fs.statSync(output).mode & 0o777).toBe(0o600)
+    } finally {
+      process.umask(previous)
+      fs.rmSync(output, { force: true })
+    }
+  })
+
+  test.skipIf(process.platform === "win32")("a symlink at the output path is not chmodded", async () => {
+    const files = createExecuteFiles()
+    const outside = path.join(files.dir, "outside.txt")
+    const output = path.join(files.dir, "linked.png")
+    try {
+      fs.writeFileSync(outside, "secret", { mode: 0o644 })
+      fs.chmodSync(outside, 0o644)
+      const page = {
+        async screenshot(options: { path?: string }) {
+          fs.symlinkSync(outside, options.path!)
+        },
+      }
+      await run(`await host.page.screenshot({ path: host.files.path("linked.png") }); return null;`, { page, files })
+      expect(fs.lstatSync(output).isSymbolicLink()).toBe(true)
+      expect(fs.statSync(outside).mode & 0o777).toBe(0o644)
+    } finally {
+      fs.rmSync(output, { force: true })
+      fs.rmSync(outside, { force: true })
+    }
+  })
+
+  test.skipIf(process.platform === "win32")("an output through a symlinked folder is refused and creates nothing", () => {
+    const files = createExecuteFiles()
+    const outside = path.join(files.dir, "outside-folder")
+    const link = path.join(files.dir, "linked-folder")
+    try {
+      fs.mkdirSync(outside)
+      fs.symlinkSync(outside, link)
+      const output = path.join(link, "nested", "page.png")
+      expect(() => prepareExecuteFileOutputs([{ path: output }])).toThrow(/owned directories/)
+      expect(fs.existsSync(path.join(outside, "nested"))).toBe(false)
+    } finally {
+      fs.rmSync(link, { force: true })
+      fs.rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
+  test.skipIf(process.platform === "win32")("file-output methods get private folders, input paths are left alone", () => {
     const files = createExecuteFiles()
     const methods = [
-      ["screenshot", "path"], ["pdf", "path"], ["storageState", "path"], ["screenshotWithLabels", "path"],
-      ["screenshotDiff", "path"], ["stop", "outputPath"],
+      ["screenshot", "path"], ["pdf", "path"], ["storageState", "path"], ["stopChunk", "path"],
+      ["screenshotWithLabels", "path"], ["screenshotDiff", "path"], ["stop", "outputPath"],
     ] as const
-    for (const [method, key] of methods) {
-      const output = path.join(files.dir, `${method}-output`, "file")
-      const fn = ({ [method]: () => {} } as Record<string, () => void>)[method]!
-      checkHostCall(fn, {}, [{ [key]: output }])
-      expect(fs.statSync(path.dirname(output)).mode & 0o777, method).toBe(0o700)
+    try {
+      for (const [method, key] of methods) {
+        const output = path.join(files.dir, `${method}-output`, "file")
+        const fn = ({ [method]: () => {} } as Record<string, () => void>)[method]!
+        prepareExecuteFileOutputs(checkHostCall(fn, {}, [{ [key]: output }]))
+        expect(fs.statSync(path.dirname(output)).mode & 0o777, method).toBe(0o700)
+      }
+      // download.saveAs(path) and video.saveAs(path) take the file as their first argument.
+      const saved = path.join(files.dir, "saveAs-output", "file")
+      prepareExecuteFileOutputs(checkHostCall(function saveAs() {}, {}, [saved]))
+      expect(fs.statSync(path.dirname(saved)).mode & 0o777).toBe(0o700)
+      // addScriptTag reads its path; Playwright's own mkdir is not involved, so nothing is created for it.
+      const input = path.join(files.dir, "input", "file.js")
+      expect(() => checkHostCall(function addScriptTag() {}, {}, [{ path: input }])).not.toThrow()
+      expect(fs.existsSync(path.dirname(input))).toBe(false)
+    } finally {
+      for (const [method] of methods) fs.rmSync(path.join(files.dir, `${method}-output`), { recursive: true, force: true })
+      fs.rmSync(path.join(files.dir, "saveAs-output"), { recursive: true, force: true })
     }
-    // addScriptTag reads its path; Playwright's own mkdir is not involved, so nothing is created for it.
-    const input = path.join(files.dir, "input", "file.js")
-    expect(() => checkHostCall(function addScriptTag() {}, {}, [{ path: input }])).not.toThrow()
-    expect(fs.existsSync(path.dirname(input))).toBe(false)
-    for (const [method] of methods) fs.rmSync(path.join(files.dir, `${method}-output`), { recursive: true, force: true })
+  })
+
+  test.skipIf(process.platform === "win32")("browser.startTracing is secured when stopTracing writes it", async () => {
+    class TraceBrowser {
+      private trace: string | undefined
+      async startTracing(_page: unknown, options: { path?: string } = {}) {
+        this.trace = options.path
+      }
+      async stopTracing() {
+        if (!this.trace) return Buffer.alloc(0)
+        fs.mkdirSync(path.dirname(this.trace), { recursive: true })
+        fs.writeFileSync(this.trace, "trace")
+        return Buffer.alloc(0)
+      }
+    }
+    const files = createExecuteFiles()
+    const browser = new TraceBrowser()
+    const output = path.join(files.dir, "traces", "trace.json")
+    const previous = process.umask(0o002)
+    try {
+      await run(`await host.browser.startTracing(null, { path: host.files.path("traces/trace.json") }); return null;`, { browser, files })
+      // startTracing only remembers the path; stopTracing writes and secures it later.
+      expect(fs.existsSync(path.dirname(output))).toBe(false)
+      await run(`await host.browser.stopTracing(); return null;`, { browser })
+      expect(fs.statSync(path.dirname(output)).mode & 0o777).toBe(0o700)
+      expect(fs.statSync(output).mode & 0o777).toBe(0o600)
+    } finally {
+      process.umask(previous)
+      fs.rmSync(path.join(files.dir, "traces"), { recursive: true, force: true })
+    }
+  })
+
+  test.skipIf(process.platform === "win32")("download.saveAs secures the file it copies", async () => {
+    const files = createExecuteFiles()
+    const output = path.join(files.dir, "saves", "file.bin")
+    const previous = process.umask(0o002)
+    try {
+      const download = {
+        async saveAs(target: string) {
+          fs.mkdirSync(path.dirname(target), { recursive: true })
+          fs.writeFileSync(target, "data")
+        },
+      }
+      await run(`await host.download.saveAs(host.files.path("saves/file.bin")); return null;`, { download, files })
+      expect(fs.statSync(path.dirname(output)).mode & 0o777).toBe(0o700)
+      expect(fs.statSync(output).mode & 0o777).toBe(0o600)
+    } finally {
+      process.umask(previous)
+      fs.rmSync(path.join(files.dir, "saves"), { recursive: true, force: true })
+    }
   })
 })

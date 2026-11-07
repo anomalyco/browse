@@ -70,6 +70,7 @@ import {
   fileRootsEnvironmentVariable,
   pageVisibleApiWarning,
   pageVisibleApiWarningForName,
+  prepareExecuteFileOutputs,
   pruneStaleExecuteFilesDirectories,
   removeExecuteFilesDirectory,
   returnsPromise,
@@ -552,7 +553,7 @@ export class ExecuteRealm {
         const hostArgs = args.map((arg) => realm.toHost(arg))
         let outputs: readonly ExecuteFileOutput[]
         try {
-          outputs = checkHostCall(target as Function, hostThis, hostArgs)
+          outputs = prepareExecuteFileOutputs(checkHostCall(target as Function, hostThis, hostArgs))
         } catch (error) {
           // Refusals of promise-returning APIs reject, so `.catch()` in agent code sees them.
           if (returnsPromise(target as Function)) return realm.SandboxPromise.reject(realm.toSandboxThrown(error))
@@ -616,7 +617,7 @@ export class ExecuteRealm {
         // later. Merely checking Function.prototype.call is not sufficient.
         guarded = new Proxy(host, {
           apply(target, receiver, args) {
-            const outputs = checkHostCall(target, receiver, args)
+            const outputs = prepareExecuteFileOutputs(checkHostCall(target, receiver, args))
             return completeExecuteFileOutputs(Reflect.apply(target, receiver, args), outputs)
           },
           construct(target, args, newTarget) {
