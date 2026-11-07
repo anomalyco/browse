@@ -11,6 +11,8 @@ import { fixturePort } from "./lib/env.ts"
 import { startFixtures } from "./lib/fixtures.ts"
 import { exec, McpClient } from "./lib/mcp.ts"
 
+type StatusToolResult = { status?: { connected?: boolean } }
+
 const { values } = parseArgs({ options: { remote: { type: "string" }, ssh: { type: "string", default: "wssh" }, "remote-cli": { type: "string", default: "/home/exedev/browse/cli/dist/cli.mjs" } } })
 const steps: { step: string; ok: boolean; ms: number; detail?: string }[] = []
 async function step<T>(name: string, run: () => Promise<T>): Promise<T | undefined> {
@@ -40,7 +42,9 @@ await step("tools/list", async () => {
 await step("status", async () => {
   const result = await client.call("status")
   check(!result.isError, result.text)
-  check(/connected/i.test(result.text), `extension not connected: ${result.text.slice(0, 200)}`)
+  const connected = (result.data as StatusToolResult | undefined)?.status?.connected
+  check(connected !== undefined, "status result is missing the extension connection state")
+  check(connected === true, `extension not connected: ${result.text.slice(0, 200)}`)
   return result.text.split("\n").slice(0, 3).join(" | ")
 })
 
