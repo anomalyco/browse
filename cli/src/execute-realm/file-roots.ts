@@ -9,8 +9,15 @@ import stream from "node:stream"
 import url from "node:url"
 import util from "node:util"
 import zlib from "node:zlib"
+import { checkCdpSend, copyCdpParameters, isCdpMethodName, isCdpSession } from "./cdp-send.ts"
+import { checkFileInputValue } from "./directory-uploads.ts"
+import { checkDropPayload } from "./drop-payload.ts"
+import { ExecuteFileAccessError } from "./errors.ts"
+import { checkFileOptions, checkFileStrings, fileOptionMethods, isPlainRecord } from "./file-options.ts"
 import { cacheRoot, configRoot, dataRoot, defaultRoots, installedBinaryPath, installerBinaryPath, stateRoot } from "../paths.ts"
 import { legacyRoots } from "../setup/legacy.ts"
+
+export { ExecuteFileAccessError } from "./errors.ts"
 
 export const allowNodeEnvironmentVariable = "OPENCODE_BROWSER_ALLOW_NODE"
 export const allowForegroundEnvironmentVariable = "OPENCODE_BROWSER_ALLOW_FOREGROUND"
@@ -167,10 +174,6 @@ function realTarget(target: string): string {
   }
 }
 
-export class ExecuteFileAccessError extends Error {
-  override readonly name = "ExecuteFileAccessError"
-}
-
 /**
  * Browse's own folders, whose contents execute code may not read or write even when they sit inside a file root.
  * The default roots cover an everyday install while OPENCODE_BROWSER_HOME points this relay elsewhere, and the legacy
@@ -210,25 +213,37 @@ function isBinaryOrStaging(target: string, binary: string, platform: NodeJS.Plat
     isInstallSibling(target, resolved, platform) || isInstallSibling(target, stagedAt, platform)
 }
 
+/** The real locations of browse's own folders. */
+function browseOwnedDirectories(): readonly string[] {
+  return browseDirectories().map((root) => realTarget(root))
+}
+
 /** True for browse's folders, its binaries and the files installs stage beside them. */
-function isBrowseOwned(target: string, platform: NodeJS.Platform = process.platform): boolean {
-  if (browseDirectories().some((root) => isInside(target, realTarget(root), platform))) return true
+function isBrowseOwned(target: string, platform: NodeJS.Platform = process.platform, browse = browseOwnedDirectories()): boolean {
+  if (browse.some((root) => isInside(target, root, platform))) return true
   // The installer and updater write the installer binary even when OPENCODE_BROWSER_HOME points the CLI elsewhere.
   return [installedBinaryPath(), installerBinaryPath()].some((binary) => isBinaryOrStaging(target, binary, platform))
 }
 
-/** Throw unless `target` is an absolute path inside the execute file roots and outside browse's own files. */
-export function assertExecuteFilePath(target: unknown, operation: string): string {
+/**
+ * Throw unless `target` is an absolute path inside the execute file roots and outside browse's own files.
+ * `directory` exempts only the execute files directory from the private-parent rule.
+ */
+export function assertExecuteFilePath(
+  target: unknown,
+  operation: string,
+  options: { readonly directory?: boolean; readonly roots?: readonly string[]; readonly browseOwned?: readonly string[] } = {},
+): string {
   if (typeof target !== "string" || target.length === 0) {
     throw new ExecuteFileAccessError(`${operation}: file paths must be non-empty strings`)
   }
-  const roots = executeFileRoots()
+  const roots = options.roots ?? executeFileRoots()
   const describeRoots = () => `${roots.join(", ")} (add more with ${fileRootsEnvironmentVariable})`
   if (!path.isAbsolute(target)) {
     throw new ExecuteFileAccessError(`${operation}: use an absolute path inside ${describeRoots()}, for example files.path("name.png")`)
   }
   const resolved = realTarget(target)
-  if (isBrowseOwned(resolved)) {
+  if (isBrowseOwned(resolved, process.platform, options.browseOwned)) {
     throw new ExecuteFileAccessError(`${operation}: ${target} is inside browse's own files, which execute code cannot access`)
   }
   if (!roots.some((root) => isInside(resolved, root))) {
@@ -276,11 +291,93 @@ export function assertExecuteFilePath(target: unknown, operation: string): strin
     current = path.dirname(current)
   }
   const parent = path.dirname(resolved)
-  if (parent === root && process.getuid) {
+  const isFilesDirectory = options.directory === true && isSamePath(resolved, executeFilesDirectory())
+  if (parent === root && process.getuid && !isFilesDirectory) {
     const stat = fs.statSync(parent)
     if (stat.uid !== process.getuid() || (stat.mode & 0o022) !== 0) {
       throw new ExecuteFileAccessError(`${operation}: use a private subdirectory such as files.dir, not a shared temporary directory`)
     }
+  }
+  return resolved
+}
+
+/** The root `resolved` is, if it is one, under the platform's case rules. */
+function executeFileRootOf(resolved: string, roots: readonly string[] = executeFileRoots()): string | undefined {
+  return roots.find((root) => isSamePath(resolved, root))
+}
+
+/** Throw unless `target` is inside the roots and is not a root itself. Directories stay allowed. */
+function assertExecuteFilePathNotRoot(
+  target: string,
+  operation: string,
+  options: { readonly roots?: readonly string[]; readonly browseOwned?: readonly string[] } = {},
+): string {
+  const resolved = assertExecuteFilePath(target, operation, options)
+  if (executeFileRootOf(resolved, options.roots) !== undefined) {
+    throw new ExecuteFileAccessError(`${operation}: ${target} is an execute file root; use a path inside it`)
+  }
+  return resolved
+}
+
+/** Check a setInputFiles/setFiles payload, sharing root lookup and the folder-upload budget. */
+function checkUploadValue(value: unknown, method: string): unknown {
+  const options = { roots: executeFileRoots(), browseOwned: browseOwnedDirectories() }
+  const assertPath = (target: string, operation: string) => assertExecuteFilePathNotRoot(target, operation, options)
+  const checkEntry = (target: string, operation: string) => assertExecuteFilePath(target, operation, options)
+  return checkFileInputValue(value, method, assertPath, checkEntry)
+}
+
+/** Node streams have a sync `drop(limit)` method and must not be treated as Playwright drag-and-drop payloads. */
+function isStreamReceiver(receiver: unknown): boolean {
+  try {
+    return receiver instanceof stream.Stream
+  } catch {
+    return false
+  }
+}
+
+/** Iterator helpers also have a sync `drop(limit)`; skip them like streams. */
+function isIteratorReceiver(receiver: unknown): boolean {
+  try {
+    const Iterator = (globalThis as { Iterator?: Function }).Iterator
+    return typeof Iterator === "function" && receiver instanceof Iterator
+  } catch {
+    return false
+  }
+}
+
+/** `browser.bind` starts a local server; other sandbox modules (events, stream) also export a sync `bind`. */
+function isBrowserReceiver(receiver: unknown): boolean {
+  if (receiver === null || typeof receiver !== "object" || util.types.isProxy(receiver)) return false
+  try {
+    const prototype = Object.getPrototypeOf(receiver) as { constructor?: { name?: unknown } } | null
+    const name = prototype?.constructor?.name
+    return typeof name === "string" && name.replace(/\d+$/, "") === "Browser"
+  } catch {
+    return false
+  }
+}
+
+/** Throw unless `target` is a file inside the roots; file inputs cannot be roots or directories. */
+function assertExecuteFileInputPath(target: string, operation: string): string {
+  const resolved = assertExecuteFilePathNotRoot(target, operation)
+  let stat: fs.Stats | undefined
+  try {
+    stat = fs.lstatSync(resolved)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+  }
+  if (stat?.isDirectory()) {
+    throw new ExecuteFileAccessError(`${operation}: ${target} is a directory; use a file inside the execute file roots`)
+  }
+  return resolved
+}
+
+/** Throw unless `target` is a folder inside the roots that is not a root itself. */
+function assertExecuteDownloadDirectory(target: string, operation: string): string {
+  const resolved = assertExecuteFilePath(target, operation, { directory: true })
+  if (executeFileRootOf(resolved) !== undefined) {
+    throw new ExecuteFileAccessError(`${operation}: ${target} is an execute file root; use a subfolder such as files.path("downloads")`)
   }
   return resolved
 }
@@ -352,32 +449,12 @@ export function createExecuteFiles(): ExecuteFiles {
   }
 }
 
-// Playwright methods whose options name files on disk, and the option keys that do.
-const fileOptionMethods = new Set([
-  "screenshot", "pdf", "storageState", "start", "stop", "startChunk", "stopChunk", "startTracing", "stopTracing",
-  "addScriptTag", "addStyleTag", "addInitScript", "fulfill", "newContext", "newPage", "routeFromHAR",
-  "screenshotWithLabels", "screenshotDiff",
-])
-const fileOptionKeys = new Set(["path", "dir", "har", "storageState"])
-// Keys that name files wherever they appear.
-const alwaysFileOptionKeys = new Set(["outputPath", "baseline", "certPath", "keyPath", "pfxPath", "tracesDir", "downloadsPath"])
-const forbiddenOptionKeys = new Set(["executablePath", "recordHar", "recordVideo"])
-
-/**
- * Methods whose top-level `path` option names a file the call writes, unlike addScriptTag's or
- * setInputFiles' input paths. Tracing's `start`/`startChunk` options only name folders or a prefix
- * for intermediate files, so those are not here. `stop` covers both `tracing.stop({ path })` and
- * browse's `network.stop({ outputPath })`; `pageConsole.stop` takes a Page, not an options object.
- * `startTracing` is special: it only records the path `stopTracing` writes.
- */
-const fileOutputMethods = new Set(["screenshot", "pdf", "storageState", "stop", "stopChunk", "screenshotWithLabels", "screenshotDiff"])
-
-/** Outputs that name the file in the call's top-level options object. */
-const isFileOutputOption = (method: string, key: string): boolean =>
-  (key === "path" && fileOutputMethods.has(method)) || (key === "outputPath" && method === "stop")
-
-/** A file a permitted host call will write, before its folder is prepared and its prior state recorded. */
-export type ExecuteFileOutputCandidate = { readonly path: string }
+/** A file or download folder a permitted host call will write, before its folder is prepared and its prior state recorded. */
+export type ExecuteFileOutputCandidate = {
+  readonly path: string
+  /** A folder the call writes into, such as a CDP download path, rather than a single file. */
+  readonly directory?: boolean
+}
 
 /** startTracing's path, recorded when preparing because Playwright stores it before awaiting. */
 type ExecuteTraceStart = {
@@ -533,10 +610,11 @@ function secureExecuteFileOutputs(outputs: readonly ExecuteFileOutput[]): void {
 
 /**
  * Prepares what checkHostCall found: records startTracing's path as Playwright does before awaiting,
- * then creates each output's folders and records whether its file existed before the call. Every
- * candidate is checked before the folders are touched and again afterwards. stopTracing's memory
- * stays until the stop call resolves. Only the realm's apply paths call this, after the whole check
- * succeeded and before the host call runs, so checks and construct traps stay side-effect free.
+ * then creates each output file's folders (or the output folder itself for a download path) and
+ * records whether its file existed before the call. Every candidate is checked before the folders are
+ * touched and again afterwards. stopTracing's memory stays until the stop call resolves. Only the
+ * realm's apply paths call this, after the whole check succeeded and before the host call runs, so
+ * checks and construct traps stay side-effect free.
  */
 export function prepareExecuteFileOutputs(call: ExecuteHostCall): PreparedExecuteFileOutputs {
   const trace = call.trace
@@ -547,9 +625,10 @@ export function prepareExecuteFileOutputs(call: ExecuteHostCall): PreparedExecut
   }
   const outputs: ExecuteFileOutput[] = []
   for (const candidate of call.outputs) {
-    assertExecuteFilePath(candidate.path, "execute file output")
-    ensureExecuteOutputDirectory(path.dirname(candidate.path))
-    const resolved = assertExecuteFilePath(candidate.path, "execute file output")
+    assertExecuteFilePath(candidate.path, "execute file output", { directory: candidate.directory === true })
+    ensureExecuteOutputDirectory(candidate.directory === true ? candidate.path : path.dirname(candidate.path))
+    const resolved = assertExecuteFilePath(candidate.path, "execute file output", { directory: candidate.directory === true })
+    if (candidate.directory === true) continue
     outputs.push({ path: resolved, existed: fileExists(resolved) })
   }
   const stop = call.traceStop
@@ -582,39 +661,8 @@ export function completeExecuteFileOutputs(result: unknown, prepared: PreparedEx
   )
 }
 
-/**
- * Validates the file paths in a call's options and collects the ones the call will write. Only a
- * path on the top-level options object counts as an output, because only those are Playwright file
- * destinations; nothing here touches the filesystem beyond stat calls.
- */
-function checkFileOptions(value: unknown, method: string, includeMethodKeys: boolean, candidates: ExecuteFileOutputCandidate[], depth = 0): void {
-  if (depth > 4 || value === null || typeof value !== "object") return
-  if (Array.isArray(value)) {
-    for (const item of value) checkFileOptions(item, method, includeMethodKeys, candidates, depth + 1)
-    return
-  }
-  // Option bags are plain objects; Playwright objects passed as arguments (a page, a locator) are not options.
-  const prototype = Object.getPrototypeOf(value)
-  if (prototype !== Object.prototype && prototype !== null) return
-  for (const [key, item] of Object.entries(value)) {
-    if (forbiddenOptionKeys.has(key)) throw new ExecuteFileAccessError(`${method}: the ${key} option is not available in execute code`)
-    if (typeof item === "string" && (alwaysFileOptionKeys.has(key) || (includeMethodKeys && fileOptionKeys.has(key)))) {
-      const resolved = assertExecuteFilePath(item, `${method}({ ${key} })`)
-      if (depth === 0 && isFileOutputOption(method, key)) candidates.push({ path: resolved })
-      Reflect.set(value, key, resolved)
-    } else {
-      checkFileOptions(item, method, includeMethodKeys, candidates, depth + 1)
-    }
-  }
-}
-
-function checkFileStrings(value: unknown, method: string): string | undefined {
-  if (typeof value === "string") return assertExecuteFilePath(value, method)
-  if (Array.isArray(value)) for (const item of value) if (typeof item === "string") assertExecuteFilePath(item, method)
-  return undefined
-}
-
-const promiseReturningNames = new Set([...fileOptionMethods, "setInputFiles", "setFiles", "saveAs", "bringToFront", "send"])
+// Raw CDP file parameters are checked in ./cdp-send.ts before Playwright's transport sees them.
+const promiseReturningNames = new Set([...fileOptionMethods, "setInputFiles", "setFiles", "saveAs", "bringToFront"])
 
 export function returnsPromise(fn: Function): boolean {
   return util.types.isAsyncFunction(fn) || promiseReturningNames.has(typeof fn.name === "string" ? fn.name.replace(/^bound /, "") : "")
@@ -628,6 +676,9 @@ export function returnsPromise(fn: Function): boolean {
  */
 export function checkHostCall(fn: Function, receiver: unknown, args: readonly unknown[]): ExecuteHostCall {
   const name = typeof fn.name === "string" ? fn.name.replace(/^bound /, "") : ""
+  const setArgument = (index: number, value: unknown): void => { (args as unknown[])[index] = value }
+  const sendMethod = name === "send" ? args[0] : undefined
+  const cdpSessionSend = name === "send" && isCdpSession(receiver)
   if (receiver !== null && typeof receiver === "object") {
     const constructor = Reflect.getOwnPropertyDescriptor(receiver, "constructor")?.value
     if (typeof constructor === "function" && constructor.prototype === receiver) {
@@ -637,22 +688,64 @@ export function checkHostCall(fn: Function, receiver: unknown, args: readonly un
   if (name === "fetch" || name === "routeFromHAR" || (name === "fulfill" && args.some((arg) => arg !== null && typeof arg === "object" && "response" in arg))) {
     throw new Error(`${name}: Node-side requests and response/HAR replay are not available in execute code; use browser requests or route.fulfill({ body })`)
   }
-  if ((name === "bringToFront" || (name === "send" && args[0] === "Page.bringToFront")) && !executeAllowsForeground()) {
+  if (name === "bind" && isBrowserReceiver(receiver)) {
+    throw new ExecuteFileAccessError("bind: starting a browser server is not available in execute code")
+  }
+  if ((name === "bringToFront" || (name === "send" && sendMethod === "Page.bringToFront")) && !executeAllowsForeground()) {
     throw new Error(bringToFrontBlockedMessage)
   }
   const candidates: ExecuteFileOutputCandidate[] = []
-  if (name === "setInputFiles") {
+  if (name === "send") {
+    const bufferMessage = buffer.Buffer.isBuffer(sendMethod) || util.types.isUint8Array(sendMethod)
+    if (typeof sendMethod !== "string" && (cdpSessionSend || !bufferMessage)) {
+      throw new ExecuteFileAccessError(cdpSessionSend ? "CDPSession.send: the method must be a primitive string" : "send: the message must be a string or Buffer")
+    }
+    let method: string | undefined
+    if (typeof sendMethod === "string") {
+      if (cdpSessionSend) {
+        if (!isCdpMethodName(sendMethod)) throw new ExecuteFileAccessError(`CDPSession.send: ${JSON.stringify(sendMethod)} is not a CDP method name`)
+        method = sendMethod
+      } else if (isCdpMethodName(sendMethod)) {
+        method = sendMethod
+      }
+    }
+    if (method !== undefined) {
+      const sendParams = args.length > 1 ? args[1] : undefined
+      const params = sendParams === undefined ? undefined : copyCdpParameters(sendParams, method)
+      if (params !== undefined) setArgument(1, params)
+      const checked = checkCdpSend(method, params, { fileInput: assertExecuteFileInputPath, downloadDirectory: assertExecuteDownloadDirectory })
+      if (checked.downloadDirectory !== undefined) candidates.push({ path: checked.downloadDirectory, directory: true })
+    }
+  } else if (name === "setInputFiles") {
     const isFrameLike = receiver !== null && typeof receiver === "object" && typeof (receiver as { goto?: unknown }).goto === "function"
-    checkFileStrings(isFrameLike ? args[1] : args[0], "setInputFiles")
+    if (isFrameLike) setArgument(1, checkUploadValue(args[1], "setInputFiles"))
+    else setArgument(0, checkUploadValue(args[0], "setInputFiles"))
+  } else if (name === "setFiles") {
+    setArgument(0, checkUploadValue(args[0], name))
+  } else if (name === "drop") {
+    const payload = args[0]
+    if (payload !== undefined && !isStreamReceiver(receiver) && !isIteratorReceiver(receiver)) {
+      setArgument(0, checkDropPayload(payload, assertExecuteFileInputPath))
+    }
+  } else if (name === "setStorageState") {
+    const value = args[0]
+    if (typeof value === "string") setArgument(0, assertExecuteFilePathNotRoot(value, name))
+    else if (value !== undefined && value !== null && !isPlainRecord(value)) {
+      throw new ExecuteFileAccessError(`${name}: storage state must be a path string or a plain object`)
+    }
   } else if (name === "saveAs") {
     // download.saveAs(path) and video.saveAs(path) copy the artifact to a new file, parents included.
-    const target = checkFileStrings(args[0], name)
+    const target = checkFileStrings(args[0], name, assertExecuteFilePath)
     if (target !== undefined) candidates.push({ path: target })
-  } else if (name === "setFiles" || name === "routeFromHAR") {
-    checkFileStrings(args[0], name)
+  } else if (name === "routeFromHAR") {
+    checkFileStrings(args[0], name, assertExecuteFilePath)
   }
   const includeMethodKeys = fileOptionMethods.has(name)
-  for (const arg of args) checkFileOptions(arg, name || "call", includeMethodKeys, candidates)
+  for (let index = 0; index < args.length; index += 1) {
+    // addInitScript's second argument is data handed to the script, not a file options bag.
+    const methodKeys = includeMethodKeys && !(name === "addInitScript" && index === 1 && typeof args[0] === "function")
+    checkFileOptions(args[index], name || "call", methodKeys, candidates, assertExecuteFilePath)
+  }
   if (name === "startTracing" && isObject(receiver)) {
     // startTracing only records the path; stopTracing later writes it and takes no arguments.
     const path = isObject(args[1]) ? Reflect.get(args[1], "path") : undefined

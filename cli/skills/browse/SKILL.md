@@ -227,13 +227,19 @@ is no `process`, `require`, `import()`, `eval`, `fs`, `os`,
 `page.request`, `context.request` and `browser.browserType()` are unavailable.
 Files go through `files` and Playwright file options, which accept absolute paths
 inside the execute file roots (the temp directory, `/tmp`, and directories in
-`OPENCODE_BROWSER_FILE_ROOTS`):
+`OPENCODE_BROWSER_FILE_ROOTS`); raw CDP commands that name local files are
+checked the same way:
 
 ```js
 const saved = await files.write("report.csv", csvText)
 const bytes = await files.read(saved) // Buffer; files.read(p, "utf8") for text
 await page.screenshot({ path: files.path("page.png") })
 ```
+
+Setting `Browser.setDownloadBehavior` (or `Page.setDownloadBehavior`) replaces
+Playwright's own download handling, so keep its folder inside the file roots.
+After that, `page.on("download")` and `download.saveAs()` stop working for the
+context.
 
 Use `page.evaluate` for `window`, `document`, storage and same-origin `fetch`
 with page cookies. It runs in an isolated world whose `fetch` skips the page's
