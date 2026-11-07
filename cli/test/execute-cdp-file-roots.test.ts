@@ -491,8 +491,12 @@ describe("path-like values", () => {
     function saveAs() {}
     function setStorageState() {}
     function drop() {}
+    function fulfill() {}
     const files = createExecuteFiles()
     expect(() => checkHostCall(screenshot, {}, [{ path: files.path("shot.png") }])).not.toThrow()
+    expect(() => checkHostCall(screenshot, {}, [{ path: Buffer.from("/etc/hosts") }])).toThrow(/path must be a path string/)
+    expect(() => checkHostCall(screenshot, {}, [{ path: new URL("file:///etc/hosts") }])).toThrow(/path must be a path string/)
+    expect(() => checkHostCall(fulfill, {}, [{ path: 5 }])).toThrow(/path must be a path string/)
     expect(() => checkHostCall(screenshotDiff, {}, [{ baseline: Buffer.from("png") }])).not.toThrow()
     expect(() => checkHostCall(setInputFiles, {}, [Buffer.from("/etc/hosts")])).toThrow(/strings or file payload objects/)
     expect(() => checkHostCall(setInputFiles, {}, [new URL("file:///etc/hosts")])).toThrow(/strings or file payload objects/)
@@ -501,6 +505,18 @@ describe("path-like values", () => {
     expect(() => checkHostCall(setStorageState, {}, [Buffer.from("/etc/hosts")])).toThrow(/storage state/)
     expect(() => checkHostCall(drop, {}, [{ files: [Buffer.from("/etc/hosts")] }])).toThrow(/strings or file payload objects/)
     expect(() => checkHostCall(drop, {}, [{ files: { name: "a.txt", mimeType: "text/plain", buffer: Buffer.from("a") } }])).not.toThrow()
+  })
+
+  test("non-file data arguments are recursed without path restrictions", () => {
+    function fulfill() {}
+    function evaluate() {}
+    function addInitScript() {}
+    expect(() => checkHostCall(fulfill, {}, [{
+      json: { errors: [{ path: ["user", 0] }] },
+    }])).not.toThrow()
+    expect(() => checkHostCall(fulfill, {}, [{ json: { dir: "ltr" } }])).not.toThrow()
+    expect(() => checkHostCall(evaluate, {}, [() => 1, { baseline: 0.5, keyPath: ["a", "b"] }])).not.toThrow()
+    expect(() => checkHostCall(addInitScript, {}, [() => 1, { path: { a: 1 } }])).not.toThrow()
   })
 
   test("inline storage state allows cookie paths and refuses PathLike values", () => {

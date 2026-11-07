@@ -741,7 +741,11 @@ export function checkHostCall(fn: Function, receiver: unknown, args: readonly un
     checkFileStrings(args[0], name, assertExecuteFilePath)
   }
   const includeMethodKeys = fileOptionMethods.has(name)
-  for (const arg of args) checkFileOptions(arg, name || "call", includeMethodKeys, candidates, assertExecuteFilePath)
+  for (let index = 0; index < args.length; index += 1) {
+    // addInitScript's second argument is data handed to the script, not a file options bag.
+    const methodKeys = includeMethodKeys && !(name === "addInitScript" && index === 1 && typeof args[0] === "function")
+    checkFileOptions(args[index], name || "call", methodKeys, candidates, assertExecuteFilePath)
+  }
   if (name === "startTracing" && isObject(receiver)) {
     // startTracing only records the path; stopTracing later writes it and takes no arguments.
     const path = isObject(args[1]) ? Reflect.get(args[1], "path") : undefined

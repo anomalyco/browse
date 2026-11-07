@@ -147,6 +147,11 @@ export function checkFileOptions(
       if (!Reflect.set(value, key, item)) throw new ExecuteFileAccessError(`${method}: could not store clientCertificates`)
     }
     if (forbiddenOptionKeys.has(key)) throw new ExecuteFileAccessError(`${method}: the ${key} option is not available in execute code`)
+    if (method === "fulfill" && depth === 0 && key === "json") {
+      // fulfill serializes json as a response body and never reads it for files.
+      checkFileOptions(item, method, false, candidates, checkPath, depth + 1)
+      continue
+    }
     if (alwaysFileOptionKeys.has(key) || (includeMethodKeys && fileOptionKeys.has(key))) {
       if (item === undefined || item === null) continue
       if (typeof item === "string") {
@@ -155,13 +160,15 @@ export function checkFileOptions(
         Reflect.set(value, key, resolved)
         continue
       }
-      if (key === "baseline" && buffer.Buffer.isBuffer(item)) continue
-      if (key === "storageState" && isPlainRecord(item)) {
-        checkFileOptions(item, method, false, candidates, checkPath, depth + 1)
-        continue
+      if (includeMethodKeys && depth === 0) {
+        if (key === "baseline" && buffer.Buffer.isBuffer(item)) continue
+        if (key === "storageState" && isPlainRecord(item)) {
+          checkFileOptions(item, method, false, candidates, checkPath, depth + 1)
+          continue
+        }
+        const allowed = key === "storageState" ? "a path string or inline state object" : key === "baseline" ? "a path string or Buffer" : "a path string"
+        throw new ExecuteFileAccessError(`${method}: ${key} must be ${allowed}`)
       }
-      const allowed = key === "storageState" ? "a path string or inline state object" : key === "baseline" ? "a path string or Buffer" : "a path string"
-      throw new ExecuteFileAccessError(`${method}: ${key} must be ${allowed}`)
     }
     checkFileOptions(item, method, includeMethodKeys, candidates, checkPath, depth + 1)
   }
