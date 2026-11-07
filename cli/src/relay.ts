@@ -351,6 +351,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       : undefined
   }
 
+  // An attach command may run on an existing tab that is still loading, so it gets more time than the reconnect inventory.
+  const attachTimeoutMs = yield* Config.Int("OPENCODE_BROWSER_ATTACH_TIMEOUT_MS").pipe(Config.withDefault(10_000))
+
   const rootLifecycle = yield* RootTargetLifecycle.make({
     registry,
     sessions: {
@@ -371,6 +374,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       announceChild: announceAttachedChildTarget,
     },
     reportError: (message, error) => console.error(message, error),
+    attachCommandTimeoutMs: attachTimeoutMs,
   })
 
   const settingsSync = createRelaySettingsSync({
@@ -468,7 +472,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       owner: "relay",
       ...(createOptions.opencodeBrowserSessionId ? { opencodeBrowserSessionId: createOptions.opencodeBrowserSessionId } : {}),
       ...(createOptions.autoAttachParams ? { autoAttachParams: createOptions.autoAttachParams } : {}),
-    })
+    }).pipe(
+      // The tab exists for this createTarget alone: a failed attach must not leave an unattached blank tab behind.
+      Effect.tapError((error) => Effect.sync(() => {
+        relayLog("create.attach-failed", { tabId, error: error instanceof Error ? error.message : String(error) })
+        sendExtensionBestEffort({ method: "tabs.remove", params: { tabId } })
+        detachTargetState(tabId)
+      })),
+    )
     const requested = createTargetUrl({ url: createOptions.url })
     if (requested !== "about:blank") {
       const data = /^data:/i.test(requested.trim())
