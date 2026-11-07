@@ -4,6 +4,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { assertExecuteFilePath, checkHostCall, createExecuteFiles, ExecuteRealm, handleExecuteRealmRejection } from "../src/execute-realm.ts"
+import { cacheRoot, configRoot, dataRoot, installedBinaryPath, stateRoot } from "../src/paths.ts"
 import { handleRelayProcessFault } from "../src/relay/process-guard.ts"
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "browse-realm-"))
@@ -529,10 +530,58 @@ describe("execute file access", () => {
     expect(() => assertExecuteFilePath(path.join(link, "hosts"), "files.read")).toThrow(/outside the execute file roots/)
   })
 
-  test("refuses browse's own data directory even inside a temp root", async () => {
+  test("refuses browse's own folders even inside a temp root", async () => {
     const files = createExecuteFiles()
     fs.writeFileSync(path.join(home, "relay-token"), "secret")
-    await expect(files.read(path.join(home, "relay-token"))).rejects.toThrow(/data directory/)
+    await expect(files.read(path.join(home, "relay-token"))).rejects.toThrow(/browse's own files/)
+  })
+
+  test("refuses every browse root, the installed binary and its install siblings", () => {
+    const xdg = fs.mkdtempSync(path.join(os.tmpdir(), "browse-realm-xdg-"))
+    const variables = {
+      XDG_CONFIG_HOME: path.join(xdg, "config"),
+      XDG_DATA_HOME: path.join(xdg, "data"),
+      XDG_STATE_HOME: path.join(xdg, "state"),
+      XDG_CACHE_HOME: path.join(xdg, "cache"),
+      XDG_BIN_HOME: path.join(xdg, "bin"),
+    } satisfies NodeJS.ProcessEnv
+    const names = Object.keys(variables) as Array<keyof typeof variables>
+    const saved = new Map(names.map((name) => [name, process.env[name]]))
+    const savedBrowseHome = process.env.OPENCODE_BROWSER_HOME
+    // paths.ts honours XDG variables against the default home; drop OPENCODE_BROWSER_HOME so each root is separate.
+    delete process.env.OPENCODE_BROWSER_HOME
+    Object.assign(process.env, variables)
+    try {
+      for (const root of [configRoot(), dataRoot(), stateRoot(), cacheRoot()]) {
+        const file = path.join(root, "secret.json")
+        fs.mkdirSync(root, { recursive: true })
+        fs.writeFileSync(file, "secret")
+        expect(() => assertExecuteFilePath(file, "files.read")).toThrow(/inside browse's own files/)
+      }
+
+      const binary = installedBinaryPath()
+      fs.mkdirSync(path.dirname(binary), { recursive: true })
+      fs.writeFileSync(binary, "binary", { mode: 0o755 })
+      for (const denied of [binary, `${binary}.new`, `${binary}.${process.pid}.new`, `${binary}.old-0123abcd`]) {
+        expect(() => assertExecuteFilePath(denied, "files.write")).toThrow(/inside browse's own files/)
+      }
+
+      const unrelated = path.join(xdg, "unrelated.txt")
+      fs.writeFileSync(unrelated, "fine")
+      expect(assertExecuteFilePath(unrelated, "files.read")).toBe(fs.realpathSync(unrelated))
+      const sibling = path.join(path.dirname(binary), "other-tool")
+      fs.writeFileSync(sibling, "fine")
+      expect(assertExecuteFilePath(sibling, "files.read")).toBe(fs.realpathSync(sibling))
+    } finally {
+      for (const name of names) {
+        const value = saved.get(name)
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
+      if (savedBrowseHome === undefined) delete process.env.OPENCODE_BROWSER_HOME
+      else process.env.OPENCODE_BROWSER_HOME = savedBrowseHome
+      fs.rmSync(xdg, { recursive: true, force: true })
+    }
   })
 
   test("private helper directory and descriptor checks reject symlinks and hard links", async () => {

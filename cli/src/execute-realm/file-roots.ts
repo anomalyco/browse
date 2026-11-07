@@ -9,7 +9,7 @@ import stream from "node:stream"
 import url from "node:url"
 import util from "node:util"
 import zlib from "node:zlib"
-import { dataRoot } from "../paths.ts"
+import { cacheRoot, configRoot, dataRoot, installedBinaryPath, stateRoot } from "../paths.ts"
 
 export const allowNodeEnvironmentVariable = "OPENCODE_BROWSER_ALLOW_NODE"
 export const allowForegroundEnvironmentVariable = "OPENCODE_BROWSER_ALLOW_FOREGROUND"
@@ -155,7 +155,34 @@ export class ExecuteFileAccessError extends Error {
   override readonly name = "ExecuteFileAccessError"
 }
 
-/** Throw unless `target` is an absolute path inside the execute file roots and outside browse's data. */
+/** Browse's own folders, whose contents execute code may not read or write even when they sit inside a file root. */
+function browseDirectories(): readonly string[] {
+  return [configRoot(), dataRoot(), stateRoot(), cacheRoot()]
+}
+
+/**
+ * A name the installers and the updater stage beside the installed binary: `browse.new` (install, install.ps1),
+ * `browse.<pid>.new` (binary.ts) or `browse.old-<suffix>` (binary.ts and install.ps1 backups).
+ */
+function isInstallSibling(target: string, binary: string): boolean {
+  if (path.dirname(target) !== path.dirname(binary)) return false
+  const name = path.basename(binary)
+  const sibling = path.basename(target)
+  if (!sibling.startsWith(`${name}.`)) return false
+  const staged = sibling.slice(name.length + 1)
+  return staged === "new" || staged.startsWith("old-") || /^\d+\.new$/.test(staged)
+}
+
+/** True for browse's folders, its installed binary and the files installs stage beside it. */
+function isBrowseOwned(target: string): boolean {
+  if (browseDirectories().some((root) => isInside(target, realTarget(root)))) return true
+  const installed = installedBinaryPath()
+  const binary = realTarget(installed)
+  // Staging happens in the installed binary's folder even when the binary itself is a symlink elsewhere.
+  return isInside(target, binary) || isInstallSibling(target, binary) || isInstallSibling(target, path.resolve(installed))
+}
+
+/** Throw unless `target` is an absolute path inside the execute file roots and outside browse's own files. */
 export function assertExecuteFilePath(target: unknown, operation: string): string {
   if (typeof target !== "string" || target.length === 0) {
     throw new ExecuteFileAccessError(`${operation}: file paths must be non-empty strings`)
@@ -166,9 +193,8 @@ export function assertExecuteFilePath(target: unknown, operation: string): strin
     throw new ExecuteFileAccessError(`${operation}: use an absolute path inside ${describeRoots()}, for example files.path("name.png")`)
   }
   const resolved = realTarget(target)
-  const data = realTarget(dataRoot())
-  if (isInside(resolved, data)) {
-    throw new ExecuteFileAccessError(`${operation}: ${target} is inside browse's data directory, which execute code cannot access`)
+  if (isBrowseOwned(resolved)) {
+    throw new ExecuteFileAccessError(`${operation}: ${target} is inside browse's own files, which execute code cannot access`)
   }
   if (!roots.some((root) => isInside(resolved, root))) {
     throw new ExecuteFileAccessError(`${operation}: ${target} is outside the execute file roots ${describeRoots()}. Set ${allowNodeEnvironmentVariable}=1 for unrestricted file access.`)
