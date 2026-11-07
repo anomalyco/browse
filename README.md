@@ -361,6 +361,11 @@ bun run release:check            # the store zip and npm tarball a release would
 [RELEASING.md](RELEASING.md) has the release flow (dev builds from every push to `dev`; stable releases only from the
 Release workflow in GitHub Actions).
 
+## Contributing
+
+We don't take pull requests. [Open an issue](https://github.com/anomalyco/browse/issues)
+describing the bug or idea, and our agents usually turn it around fast.
+
 ## License
 
 [MIT](LICENSE)

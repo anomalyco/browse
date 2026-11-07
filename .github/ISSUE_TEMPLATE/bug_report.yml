@@ -1,0 +1,73 @@
+name: Bug report
+description: Report something that does not work as expected in browse.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve browse. Please search existing issues first.
+        Do not share passwords, cookies, pairing codes, or full session journals.
+        Review and redact any diagnostic excerpts or screenshots before attaching them.
+        Diagnoses and proposed fixes are welcome here. We don't accept outside pull
+        requests, but we credit your analysis in the pull request that fixes it.
+  - type: input
+    id: version
+    attributes:
+      label: browse version
+      description: Run `browse --version`.
+      placeholder: "0.4.2, installed with the install script"
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser
+      description: The browser and version the extension is loaded in.
+      placeholder: "Chrome 141"
+    validations:
+      required: true
+  - type: input
+    id: agent
+    attributes:
+      label: Agent
+      description: The agent or MCP client that was driving the browser, and its version.
+      placeholder: "opencode 1.4.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS
+        - Linux X11
+        - Linux Wayland
+        - Windows
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: System details
+      description: OS version and hardware; on Linux, include your distribution and desktop/compositor.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened?
+      description: Describe the actual behavior and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include the tool call or prompt that triggered it, the URL's shape, and any settings or allowlists in play. If intermittent, describe when it happens.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Additional context
+      description: Optional redacted errors, screenshots, or workarounds. Please do not upload your full settings file, session journals or relay logs.
