@@ -9,7 +9,8 @@ import stream from "node:stream"
 import url from "node:url"
 import util from "node:util"
 import zlib from "node:zlib"
-import { dataRoot } from "../paths.ts"
+import { cacheRoot, configRoot, dataRoot, defaultRoots, installedBinaryPath, installerBinaryPath, stateRoot } from "../paths.ts"
+import { legacyRoots } from "../setup/legacy.ts"
 
 export const allowNodeEnvironmentVariable = "OPENCODE_BROWSER_ALLOW_NODE"
 export const allowForegroundEnvironmentVariable = "OPENCODE_BROWSER_ALLOW_FOREGROUND"
@@ -130,9 +131,19 @@ export function executeFileRoots(): readonly string[] {
   return [...new Set(roots.map(realpathOrSelf))]
 }
 
-function isInside(child: string, parent: string): boolean {
-  const relative = path.relative(parent, child)
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))
+/** Windows paths use win32 rules; everywhere else, macOS included, POSIX rules. */
+const pathFlavor = (platform: NodeJS.Platform) => platform === "win32" ? path.win32 : path.posix
+
+/** Windows and macOS compare paths case-insensitively; Linux keeps them case-sensitive. */
+const foldCase = (value: string, platform: NodeJS.Platform): string =>
+  platform === "win32" || platform === "darwin" ? value.toLowerCase() : value
+
+/** Whether `child` is `parent` or inside it, following the platform's case rules. */
+export function isInside(child: string, parent: string, platform: NodeJS.Platform = process.platform): boolean {
+  const paths = pathFlavor(platform)
+  const relative = paths.relative(foldCase(parent, platform), foldCase(child, platform))
+  // A child literally named `..bypass` is inside; only `..` and `..<sep>` climb out.
+  return relative === "" || (!paths.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${paths.sep}`))
 }
 
 /** Resolve the real location a path refers to (following an existing symlink, or the nearest existing parent). */
@@ -155,7 +166,53 @@ export class ExecuteFileAccessError extends Error {
   override readonly name = "ExecuteFileAccessError"
 }
 
-/** Throw unless `target` is an absolute path inside the execute file roots and outside browse's data. */
+/**
+ * Browse's own folders, whose contents execute code may not read or write even when they sit inside a file root.
+ * The default roots cover an everyday install while OPENCODE_BROWSER_HOME points this relay elsewhere, and the legacy
+ * roots count too: migration copies them into the live roots on the next run.
+ */
+function browseDirectories(): readonly string[] {
+  return [...new Set([
+    configRoot(), dataRoot(), stateRoot(), cacheRoot(),
+    ...Object.values(defaultRoots()),
+    ...legacyRoots(),
+  ])]
+}
+
+/**
+ * Whether `target` is a staging name beside `binary`, or inside one: `browse.new` (install, install.ps1),
+ * `browse.<pid>.new` (binary.ts), `browse.old-<suffix>` (binary.ts and install.ps1 backups) or `browse.migrate-<pid>`
+ * (migrate.ts). Such a name must not be created as a directory, and nothing below it may be written either.
+ */
+export function isInstallSibling(target: string, binary: string, platform: NodeJS.Platform = process.platform): boolean {
+  const paths = pathFlavor(platform)
+  const folder = foldCase(paths.dirname(binary), platform)
+  const relative = paths.relative(folder, foldCase(target, platform))
+  if (relative === "" || paths.isAbsolute(relative)) return false
+  const [first] = relative.split(paths.sep)
+  const name = foldCase(paths.basename(binary), platform)
+  if (!first?.startsWith(`${name}.`)) return false
+  const staged = first.slice(name.length + 1)
+  return staged === "new" || staged.startsWith("old-") || staged.startsWith("migrate-") || /^\d+\.new$/.test(staged)
+}
+
+/** Whether `target` is a binary, or a staging file installs and migration place in its folder. */
+function isBinaryOrStaging(target: string, binary: string, platform: NodeJS.Platform): boolean {
+  const resolved = realTarget(binary)
+  // Staging happens in the binary's folder even when the binary, or a folder leading to it, is a symlink.
+  const stagedAt = path.join(realTarget(path.dirname(binary)), path.basename(binary))
+  return isInside(target, resolved, platform) || isInside(target, stagedAt, platform) ||
+    isInstallSibling(target, resolved, platform) || isInstallSibling(target, stagedAt, platform)
+}
+
+/** True for browse's folders, its binaries and the files installs stage beside them. */
+function isBrowseOwned(target: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (browseDirectories().some((root) => isInside(target, realTarget(root), platform))) return true
+  // The installer and updater write the installer binary even when OPENCODE_BROWSER_HOME points the CLI elsewhere.
+  return [installedBinaryPath(), installerBinaryPath()].some((binary) => isBinaryOrStaging(target, binary, platform))
+}
+
+/** Throw unless `target` is an absolute path inside the execute file roots and outside browse's own files. */
 export function assertExecuteFilePath(target: unknown, operation: string): string {
   if (typeof target !== "string" || target.length === 0) {
     throw new ExecuteFileAccessError(`${operation}: file paths must be non-empty strings`)
@@ -166,9 +223,8 @@ export function assertExecuteFilePath(target: unknown, operation: string): strin
     throw new ExecuteFileAccessError(`${operation}: use an absolute path inside ${describeRoots()}, for example files.path("name.png")`)
   }
   const resolved = realTarget(target)
-  const data = realTarget(dataRoot())
-  if (isInside(resolved, data)) {
-    throw new ExecuteFileAccessError(`${operation}: ${target} is inside browse's data directory, which execute code cannot access`)
+  if (isBrowseOwned(resolved)) {
+    throw new ExecuteFileAccessError(`${operation}: ${target} is inside browse's own files, which execute code cannot access`)
   }
   if (!roots.some((root) => isInside(resolved, root))) {
     throw new ExecuteFileAccessError(`${operation}: ${target} is outside the execute file roots ${describeRoots()}. Set ${allowNodeEnvironmentVariable}=1 for unrestricted file access.`)

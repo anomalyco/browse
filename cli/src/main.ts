@@ -5,8 +5,8 @@
 //   doctor, skill, mcp, status. The relay is the local server agents use; the extension connects to it.
 // `browse mcp` runs the MCP server over stdio (as does the bundle invoked as `opencode-browser-mcp`).
 import fs from "node:fs"
-import os from "node:os"
 import path from "node:path"
+import { legacyRoots } from "./setup/legacy.ts"
 
 const embeddedVersion = globalThis.__OPENCODE_BROWSER_VERSION__
 const setupCommands = new Set(["install", "uninstall", "extension", "pair", "set"])
@@ -24,11 +24,8 @@ const preCliHelp = askedForHelp && (command === "update" || (command !== undefin
 
 // Earlier layouts (~/.browse, and the old opencode-browser data root) move to the XDG folders on the first run.
 // opencode briefly shows the update, and no other command pays for the import.
-const legacyDataRoot = process.platform === "win32"
-  ? path.join(process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local"), "opencode-browser")
-  : path.join(process.env.XDG_DATA_HOME ?? path.join(os.homedir(), ".local", "share"), "opencode-browser")
 if (command !== "--version" && command !== "-v" && !askedForHelp && !process.env.OPENCODE_BROWSER_HOME &&
-  [path.join(os.homedir(), ".browse"), legacyDataRoot].some((root) => fs.existsSync(root))) {
+  legacyRoots().some((root) => fs.existsSync(root))) {
   try {
     const { migrateLegacy } = await import("./setup/migrate.ts")
     migrateLegacy()
