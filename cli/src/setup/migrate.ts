@@ -14,17 +14,10 @@ import { parse as parseToml } from "smol-toml"
 import { parseDocument } from "yaml"
 import { binRoot, binaryName, cacheRoot, configRoot, dataRoot, stateRoot } from "../paths.ts"
 import { agentLocations, browseServerCommand, editAgentConfig, type AgentName } from "./agent-config.ts"
+import { legacyDataRoot, legacyRoots } from "./legacy.ts"
 import { configureMcp } from "./mcp.ts"
 
 type Move = { readonly from: string; readonly to: string }
-
-/** The old data root, which followed XDG_DATA_HOME on unix and LOCALAPPDATA on Windows. */
-function oldDataRoot(home: string): string {
-  if (home !== os.homedir()) return path.join(home, ".local", "share", "opencode-browser")
-  if (process.platform === "win32")
-    return path.join(process.env.LOCALAPPDATA ?? path.join(home, "AppData", "Local"), "opencode-browser")
-  return path.join(process.env.XDG_DATA_HOME ?? path.join(home, ".local", "share"), "opencode-browser")
-}
 
 const normalized = (value: string) => value.replaceAll("\\", "/")
 
@@ -182,7 +175,7 @@ export type MigrationResult = { moved: number; rewritten: number; removed: strin
 export function migrateLegacy(home = os.homedir()): MigrationResult {
   const result: MigrationResult = { moved: 0, rewritten: 0, removed: [] }
   if (process.env.OPENCODE_BROWSER_HOME) return result
-  const roots = [path.join(home, ".browse"), oldDataRoot(home)]
+  const roots = legacyRoots(home)
   for (const root of roots) {
     if (!fs.existsSync(root)) continue
     let complete = true
@@ -225,7 +218,7 @@ export function migrateLegacy(home = os.homedir()): MigrationResult {
   const stillReferences = (needle: string) => locations.some((location) => referencesPath(location.file, needle))
   const keep = new Set<string>()
   const browseRoot = path.join(home, ".browse")
-  const oldData = oldDataRoot(home)
+  const oldData = legacyDataRoot(home)
   if (stillReferences(oldBinary)) keep.add(normalized(browseRoot))
   if (stillReferences(oldData)) keep.add(normalized(oldData))
   if (referencesPath(settingsFile, oldBinary)) keep.add(normalized(browseRoot))

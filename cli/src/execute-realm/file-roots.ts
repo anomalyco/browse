@@ -10,6 +10,7 @@ import url from "node:url"
 import util from "node:util"
 import zlib from "node:zlib"
 import { cacheRoot, configRoot, dataRoot, installedBinaryPath, stateRoot } from "../paths.ts"
+import { legacyRoots } from "../setup/legacy.ts"
 
 export const allowNodeEnvironmentVariable = "OPENCODE_BROWSER_ALLOW_NODE"
 export const allowForegroundEnvironmentVariable = "OPENCODE_BROWSER_ALLOW_FOREGROUND"
@@ -130,9 +131,18 @@ export function executeFileRoots(): readonly string[] {
   return [...new Set(roots.map(realpathOrSelf))]
 }
 
-function isInside(child: string, parent: string): boolean {
-  const relative = path.relative(parent, child)
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))
+/** Windows paths use win32 rules; everywhere else, macOS included, POSIX rules. */
+const pathFlavor = (platform: NodeJS.Platform) => platform === "win32" ? path.win32 : path.posix
+
+/** Windows and macOS compare paths case-insensitively; Linux keeps them case-sensitive. */
+const foldCase = (value: string, platform: NodeJS.Platform): string =>
+  platform === "win32" || platform === "darwin" ? value.toLowerCase() : value
+
+/** Whether `child` is `parent` or inside it, following the platform's case rules. */
+export function isInside(child: string, parent: string, platform: NodeJS.Platform = process.platform): boolean {
+  const paths = pathFlavor(platform)
+  const relative = paths.relative(foldCase(parent, platform), foldCase(child, platform))
+  return relative === "" || (!relative.startsWith("..") && !paths.isAbsolute(relative))
 }
 
 /** Resolve the real location a path refers to (following an existing symlink, or the nearest existing parent). */
@@ -155,31 +165,38 @@ export class ExecuteFileAccessError extends Error {
   override readonly name = "ExecuteFileAccessError"
 }
 
-/** Browse's own folders, whose contents execute code may not read or write even when they sit inside a file root. */
+/**
+ * Browse's own folders, whose contents execute code may not read or write even when they sit inside a file root.
+ * The legacy roots count too: migration copies them into the live roots on the next run.
+ */
 function browseDirectories(): readonly string[] {
-  return [configRoot(), dataRoot(), stateRoot(), cacheRoot()]
+  return [configRoot(), dataRoot(), stateRoot(), cacheRoot(), ...legacyRoots()]
 }
 
 /**
- * A name the installers and the updater stage beside the installed binary: `browse.new` (install, install.ps1),
- * `browse.<pid>.new` (binary.ts) or `browse.old-<suffix>` (binary.ts and install.ps1 backups).
+ * A name the installers, the updater and migration stage beside the installed binary: `browse.new` (install,
+ * install.ps1), `browse.<pid>.new` (binary.ts), `browse.old-<suffix>` (binary.ts and install.ps1 backups) or
+ * `browse.migrate-<pid>` (migrate.ts).
  */
-function isInstallSibling(target: string, binary: string): boolean {
-  if (path.dirname(target) !== path.dirname(binary)) return false
-  const name = path.basename(binary)
-  const sibling = path.basename(target)
+export function isInstallSibling(target: string, binary: string, platform: NodeJS.Platform = process.platform): boolean {
+  const paths = pathFlavor(platform)
+  if (foldCase(paths.dirname(target), platform) !== foldCase(paths.dirname(binary), platform)) return false
+  const name = foldCase(paths.basename(binary), platform)
+  const sibling = foldCase(paths.basename(target), platform)
   if (!sibling.startsWith(`${name}.`)) return false
   const staged = sibling.slice(name.length + 1)
-  return staged === "new" || staged.startsWith("old-") || /^\d+\.new$/.test(staged)
+  return staged === "new" || staged.startsWith("old-") || staged.startsWith("migrate-") || /^\d+\.new$/.test(staged)
 }
 
 /** True for browse's folders, its installed binary and the files installs stage beside it. */
-function isBrowseOwned(target: string): boolean {
-  if (browseDirectories().some((root) => isInside(target, realTarget(root)))) return true
+function isBrowseOwned(target: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (browseDirectories().some((root) => isInside(target, realTarget(root), platform))) return true
   const installed = installedBinaryPath()
   const binary = realTarget(installed)
-  // Staging happens in the installed binary's folder even when the binary itself is a symlink elsewhere.
-  return isInside(target, binary) || isInstallSibling(target, binary) || isInstallSibling(target, path.resolve(installed))
+  // Staging happens in the installed binary's folder even when the binary, or a folder leading to it, is a symlink.
+  const installedAt = path.join(realTarget(path.dirname(installed)), path.basename(installed))
+  return isInside(target, binary, platform) || isInside(target, installedAt, platform) ||
+    isInstallSibling(target, binary, platform) || isInstallSibling(target, installedAt, platform)
 }
 
 /** Throw unless `target` is an absolute path inside the execute file roots and outside browse's own files. */

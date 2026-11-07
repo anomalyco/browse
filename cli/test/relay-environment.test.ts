@@ -14,9 +14,12 @@ const pathOverrides = [
   "OPENCODE_BROWSER_HOME",
 ] as const
 
-/** Runs `body` with exactly `env` applied to the named variables, then restores the process environment. */
+/**
+ * Runs `body` with exactly `env` applied, after clearing every path override: a variable the relay did not forward must
+ * not keep an outer value, or each side would still resolve the same roots and the comparison would prove nothing.
+ */
 function withEnvironment<T>(env: NodeJS.ProcessEnv, body: () => T): T {
-  const names = Object.keys(env)
+  const names = [...new Set([...pathOverrides, ...Object.keys(env)])]
   const saved = new Map(names.map((name) => [name, process.env[name]]))
   const apply = (values: NodeJS.ProcessEnv) => {
     for (const name of names) {

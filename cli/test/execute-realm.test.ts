@@ -4,6 +4,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { assertExecuteFilePath, checkHostCall, createExecuteFiles, ExecuteRealm, handleExecuteRealmRejection } from "../src/execute-realm.ts"
+import { isInside, isInstallSibling } from "../src/execute-realm/file-roots.ts"
 import { cacheRoot, configRoot, dataRoot, installedBinaryPath, stateRoot } from "../src/paths.ts"
 import { handleRelayProcessFault } from "../src/relay/process-guard.ts"
 
@@ -562,14 +563,33 @@ describe("execute file access", () => {
       const binary = installedBinaryPath()
       fs.mkdirSync(path.dirname(binary), { recursive: true })
       fs.writeFileSync(binary, "binary", { mode: 0o755 })
-      for (const denied of [binary, `${binary}.new`, `${binary}.${process.pid}.new`, `${binary}.old-0123abcd`]) {
+      for (const denied of [binary, `${binary}.new`, `${binary}.${process.pid}.new`, `${binary}.old-0123abcd`, `${binary}.migrate-${process.pid}`]) {
         expect(() => assertExecuteFilePath(denied, "files.write")).toThrow(/inside browse's own files/)
       }
+
+      // Staging lands beside the resolved install folder even when the bin folder and the binary are both symlinks.
+      const realBin = path.join(xdg, "real-bin")
+      fs.mkdirSync(realBin, { recursive: true })
+      fs.rmSync(variables.XDG_BIN_HOME, { recursive: true, force: true })
+      fs.symlinkSync(realBin, variables.XDG_BIN_HOME)
+      fs.writeFileSync(path.join(realBin, "browse-target"), "binary", { mode: 0o755 })
+      fs.symlinkSync(path.join(realBin, "browse-target"), path.join(realBin, "browse"))
+      expect(() => assertExecuteFilePath(path.join(variables.XDG_BIN_HOME, "browse.new"), "files.write"))
+        .toThrow(/inside browse's own files/)
+
+      // Migration copies these roots into the live ones on the next run, so execute code must not stage files there.
+      const legacyData = path.join(variables.XDG_DATA_HOME, "opencode-browser")
+      fs.mkdirSync(legacyData, { recursive: true })
+      const legacyFile = path.join(legacyData, "relay-token")
+      fs.writeFileSync(legacyFile, "secret")
+      expect(() => assertExecuteFilePath(legacyFile, "files.read")).toThrow(/inside browse's own files/)
+      expect(() => assertExecuteFilePath(path.join(os.homedir(), ".browse", "bin", "browse"), "files.read"))
+        .toThrow(/inside browse's own files/)
 
       const unrelated = path.join(xdg, "unrelated.txt")
       fs.writeFileSync(unrelated, "fine")
       expect(assertExecuteFilePath(unrelated, "files.read")).toBe(fs.realpathSync(unrelated))
-      const sibling = path.join(path.dirname(binary), "other-tool")
+      const sibling = path.join(realBin, "other-tool")
       fs.writeFileSync(sibling, "fine")
       expect(assertExecuteFilePath(sibling, "files.read")).toBe(fs.realpathSync(sibling))
     } finally {
@@ -582,6 +602,20 @@ describe("execute file access", () => {
       else process.env.OPENCODE_BROWSER_HOME = savedBrowseHome
       fs.rmSync(xdg, { recursive: true, force: true })
     }
+  })
+
+  test("browse-owned checks ignore case where the platform's filesystem does", () => {
+    for (const platform of ["darwin", "win32"] as const) {
+      expect(isInside("/tmp/xdg/BROWSE/config.json", "/tmp/xdg/browse", platform), platform).toBe(true)
+      expect(isInside("/TMP/xdg/browse/config.json", "/tmp/xdg/browse", platform), platform).toBe(true)
+      for (const sibling of ["/bin/BROWSE.NEW", "/bin/browse.NEW", "/bin/Browse.Old-1", "/BIN/browse.new", "/bin/browse.MIGRATE-9"]) {
+        expect(isInstallSibling(sibling, "/bin/browse", platform), `${platform} ${sibling}`).toBe(true)
+      }
+    }
+    // Linux keeps paths case-sensitive, so these are different files and stay allowed.
+    expect(isInside("/tmp/xdg/BROWSE/config.json", "/tmp/xdg/browse", "linux")).toBe(false)
+    expect(isInstallSibling("/bin/BROWSE.NEW", "/bin/browse", "linux")).toBe(false)
+    expect(isInstallSibling("/bin/browse.NEW", "/bin/browse", "linux")).toBe(false)
   })
 
   test("private helper directory and descriptor checks reject symlinks and hard links", async () => {
