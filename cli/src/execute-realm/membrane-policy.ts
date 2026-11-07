@@ -125,32 +125,39 @@ export const isHiddenKey = (key: PropertyKey): boolean => typeof key === "string
 
 // Promise rejections originating in execute must not become relay process faults.
 // Creation is tracked without inspecting attacker-controlled promise prototypes.
-let activeRealm: ExecuteRealm | undefined
-const promiseRealms = new WeakMap<Promise<unknown>, ExecuteRealm>()
+
+/** Code that created a promise: a sandbox realm, or a full-Node execute call (ExecuteRejectionScope). */
+export interface ExecuteRejectionOwner {
+  /** A realm stops and resets itself; a full-Node call can only report (its code cannot be interrupted safely). */
+  handleUnhandledRejection(cause: unknown): void
+}
+
+let activeOwner: ExecuteRejectionOwner | undefined
+const promiseOwners = new WeakMap<Promise<unknown>, ExecuteRejectionOwner>()
 // The hook is installed only while execute JavaScript runs: promise hooks slow every await in the
 // process. An npm install's relay runs under Node; a binary install's under Bun, which has no promiseHooks
-// (bunRejectionRealm below).
+// (bunRejectionOwner below).
 let stopPromiseHook: (() => void) | undefined
 
-export function trackPromisesOf(realm: ExecuteRealm): () => void {
-  const previous = activeRealm
-  activeRealm = realm
+export function trackPromisesOf(owner: ExecuteRejectionOwner): () => void {
+  const previous = activeOwner
+  activeOwner = owner
   if (process.versions.bun) {
-    const entered = { realm, at: Date.now() }
-    lastRealm = entered
+    const entered = { owner, at: Date.now() }
+    lastOwner = entered
     return () => {
-      activeRealm = previous
+      activeOwner = previous
       entered.at = Date.now()
     }
   }
   if (!stopPromiseHook) {
     stopPromiseHook = v8.promiseHooks.createHook({ init(promise: Promise<unknown>) {
-      if (activeRealm) promiseRealms.set(promise, activeRealm)
+      if (activeOwner) promiseOwners.set(promise, activeOwner)
     } }) as () => void
   }
   return () => {
-    activeRealm = previous
-    if (!activeRealm && stopPromiseHook) {
+    activeOwner = previous
+    if (!activeOwner && stopPromiseHook) {
       stopPromiseHook()
       stopPromiseHook = undefined
     }
@@ -159,31 +166,71 @@ export function trackPromisesOf(realm: ExecuteRealm): () => void {
 
 // Bun (a binary install's relay) has no promiseHooks, so creation can't be tracked. There a rejected promise whose own
 // prototype is a realm's Promise.prototype came from that realm (the runtime hands a real promise, never a proxy, so
-// reading its prototype runs no sandbox code). Any other (a Promise subclass, a re-prototyped promise) goes to the realm
-// that ran within the last second: the runtime reports a rejection right after the turn that left it unhandled, and
-// every sandbox turn (code, callbacks, timers) enters its realm. Agent code then can't take the relay down; the cost is
-// that a host fault in that window resets that realm instead of stopping the relay.
+// reading its prototype runs no sandbox code). Any other (a Promise subclass, a re-prototyped promise, a full-Node
+// call's host promise) goes to the owner active within the last second: the runtime reports a rejection right after the
+// turn that left it unhandled, and every sandbox turn (code, callbacks, timers) enters its realm. A stopped realm still
+// claims late rejections in that window: `execute --rm` disposes the session's realm right after its call, and the
+// rejection most likely belongs to that call. Agent code then can't take the relay down; the cost is that a host fault
+// in that window is contained instead of stopping the relay.
 const realmsByPromisePrototype = new WeakMap<object, ExecuteRealm>()
-let lastRealm: { readonly realm: ExecuteRealm; at: number } | undefined
-const lastRealmWindowMs = 1000
+let lastOwner: { readonly owner: ExecuteRejectionOwner; at: number } | undefined
+const lastOwnerWindowMs = 1000
 
-/** Under Bun, remember which realm a sandbox Promise.prototype belongs to (bunRejectionRealm). */
+/** Under Bun, remember which realm a sandbox Promise.prototype belongs to (bunRejectionOwner). */
 export function registerRealmPromisePrototype(prototype: object, realm: ExecuteRealm): void {
   if (process.versions.bun) realmsByPromisePrototype.set(prototype, realm)
 }
 
-function bunRejectionRealm(promise: Promise<unknown>): ExecuteRealm | undefined {
+function bunRejectionOwner(promise: Promise<unknown>): ExecuteRejectionOwner | undefined {
   const byPrototype = realmsByPromisePrototype.get(Object.getPrototypeOf(promise) as object)
   if (byPrototype) return byPrototype
-  if (!lastRealm || lastRealm.realm.isStopped) return undefined
-  return activeRealm === lastRealm.realm || Date.now() - lastRealm.at <= lastRealmWindowMs ? lastRealm.realm : undefined
+  if (!lastOwner) return undefined
+  return activeOwner === lastOwner.owner || Date.now() - lastOwner.at <= lastOwnerWindowMs ? lastOwner.owner : undefined
 }
 
-export function handleExecuteRealmRejection(promise: Promise<unknown>): boolean {
-  const realm = promiseRealms.get(promise) ?? (process.versions.bun ? bunRejectionRealm(promise) : undefined)
-  if (!realm) return false
-  realm.dispose(new Error("Unhandled execute rejection; JavaScript state will reset before the next execute"))
+/** Contain a rejection created by execute code (a sandbox realm, or a full-Node execute scope). */
+export function handleExecuteRealmRejection(promise: Promise<unknown>, reason?: unknown): boolean {
+  const owner = promiseOwners.get(promise) ?? (process.versions.bun ? bunRejectionOwner(promise) : undefined)
+  if (!owner) return false
+  owner.handleUnhandledRejection(reason)
   return true
+}
+
+/** The message an un-awaited execute rejection reports, bounded like other process diagnostics. */
+export function unhandledExecuteRejectionWarning(cause: unknown): string {
+  const detail = (cause instanceof Error ? cause.message : String(cause ?? "no reason")).slice(0, 300)
+  return `Execute code started a promise that rejected and was never awaited: ${detail}. The rejection was contained and the relay kept running; await the promise or handle its rejection to return the error from execute.`
+}
+
+/**
+ * Rejection owner for full-Node execute calls (`OPENCODE_BROWSER_ALLOW_NODE=1`), where there is no realm to tag
+ * promises. Promises created while the call runs are tagged through trackPromisesOf (Node) or the recent-owner
+ * fallback (Bun); a rejection after the call returns is still reported to the sandbox for its next result.
+ */
+export class ExecuteRejectionScope implements ExecuteRejectionOwner {
+  private untrack: (() => void) | undefined
+  private readonly onRejection: ((message: string) => void) | undefined
+
+  constructor(options: { readonly onRejection?: (message: string) => void } = {}) {
+    this.onRejection = options.onRejection
+  }
+
+  /** Start tagging promises created by the call. Tagged promises stay owned after end(). */
+  begin(): void {
+    this.untrack ??= trackPromisesOf(this)
+  }
+
+  /** Stop tagging new promises (an un-tagged, late rejection falls back to the process guard). */
+  end(): void {
+    this.untrack?.()
+    this.untrack = undefined
+  }
+
+  handleUnhandledRejection(cause: unknown): void {
+    try { this.onRejection?.(unhandledExecuteRejectionWarning(cause)) } catch {
+      // Reporting must never turn a contained rejection into a relay fault.
+    }
+  }
 }
 
 // Errors execute callbacks throw into host code. A host caller that does not catch them

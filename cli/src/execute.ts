@@ -209,6 +209,7 @@ export class ExecuteSandbox extends DefaultPageHost {
       onHostCall: (fn, receiver, args) => {
         this.addWarningOnce(pageVisibleApiWarning(fn, receiver, args))
       },
+      onUnhandledRejection: (warning) => this.addWarningOnce(warning),
     })
   }
 
@@ -222,7 +223,12 @@ export class ExecuteSandbox extends DefaultPageHost {
         }
         if (!this.realm) for (const warning of pageVisibleApiSourceWarnings(code)) this.addWarningOnce(warning)
         const globals = await this.getGlobals(options)
-        const { result, logs, logSummary, aftermath } = await runUserCode({ code, globals, ...(this.realm ? { realm: this.realm } : {}) })
+        const { result, logs, logSummary, aftermath } = await runUserCode({
+          code,
+          globals,
+          ...(this.realm ? { realm: this.realm } : {}),
+          onUnhandledRejection: (warning) => this.addWarningOnce(warning),
+        })
           .then(async (completed) => ({ ...completed, aftermath: await this.withChallenge(globals.page, completed.aftermath, false) }))
           .catch(async (error: unknown) => {
             if (!(error instanceof ExecuteCodeError) || !error.aftermath) throw error

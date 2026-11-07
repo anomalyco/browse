@@ -3,7 +3,8 @@ import { spawnSync } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { assertExecuteFilePath, checkHostCall, createExecuteFiles, ExecuteRealm } from "../src/execute-realm.ts"
+import { assertExecuteFilePath, checkHostCall, createExecuteFiles, ExecuteRealm, ExecuteRejectionScope, handleExecuteRealmRejection } from "../src/execute-realm.ts"
+import { handleRelayProcessFault } from "../src/relay/process-guard.ts"
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "browse-realm-"))
 const home = path.join(scratch, "home")
@@ -25,14 +26,14 @@ function run(body: string, host: Record<string, unknown> = {}) {
   return new ExecuteRealm().run({ source: `(async (host) => { ${body} })`, filename: "test.js", args: [host] })
 }
 
-type NodeOutcome = { readonly value?: unknown; readonly error?: string; readonly elapsedMs?: number; readonly maxStallMs?: number }
+type NodeOutcome = { readonly value?: unknown; readonly error?: string; readonly elapsedMs?: number; readonly maxStallMs?: number; readonly stopped?: string }
 
 // The relay runs execute code under Node, whose vm differs from Bun's: escape attempts run there too.
 function runInNode(bodies: readonly string[], setup = "", env: Record<string, string> = {}): NodeOutcome[] {
   const script = `
     const { ExecuteRealm, sandboxModules, createExecuteFiles, handleExecuteRealmRejection, handleExecuteRealmException } = await import(${JSON.stringify(path.join(import.meta.dir, "../src/execute-realm.ts"))})
     // The relay's process guard, reduced to the execute part.
-    process.on('unhandledRejection', (reason, promise) => { if (!handleExecuteRealmRejection(promise)) throw reason })
+    process.on('unhandledRejection', (reason, promise) => { if (!handleExecuteRealmRejection(promise, reason)) throw reason })
     process.on('uncaughtException', (error) => { if (!handleExecuteRealmException(error)) { console.error(error); process.exit(70) } })
     const host = { fn: () => 1, object: { nested: true }, error: () => { throw new Error("host") } }
     ${setup}
@@ -49,12 +50,12 @@ function runInNode(bodies: readonly string[], setup = "", env: Record<string, st
         if (host.modules) realm.proxyAsObject(host.modules)
         const value = await realm.run({ source: "(async (host) => { " + body + " })", filename: "test.js", args: [host] })
         const elapsedMs = performance.now() - started
-        await new Promise(resolve => setTimeout(resolve, 20)) // let the probe see the last stall
-        results.push({ value, elapsedMs, maxStallMs })
+        await new Promise(resolve => setTimeout(resolve, 20)) // let the probe see the last stall, and a detached rejection land
+        results.push({ value, elapsedMs, maxStallMs, stopped: realm.stopped?.message })
       } catch (error) {
         const elapsedMs = performance.now() - started
         await new Promise(resolve => setTimeout(resolve, 20))
-        results.push({ error: String(error?.message ?? error), elapsedMs, maxStallMs })
+        results.push({ error: String(error?.message ?? error), elapsedMs, maxStallMs, stopped: realm.stopped?.message })
       } finally {
         clearInterval(probe)
         realm.dispose()
@@ -71,6 +72,36 @@ function runInNode(bodies: readonly string[], setup = "", env: Record<string, st
 
 /** Outcomes without timing, for exact comparisons. */
 const values = (outcomes: readonly NodeOutcome[]) => outcomes.map(({ value, error }) => (error === undefined ? { value } : { error }))
+
+/** Runs full-Node execute code in a child with the relay's process guard, as OPENCODE_BROWSER_ALLOW_NODE=1 does. */
+function runFullNodeExecute(code: string): { readonly value?: unknown; readonly warnings?: readonly string[] } {
+  const script = `
+    const { runUserCode } = await import(${JSON.stringify(path.join(import.meta.dir, "../src/execute/code-runner.ts"))})
+    const { createExecuteFiles, handleExecuteRealmRejection } = await import(${JSON.stringify(path.join(import.meta.dir, "../src/execute-realm.ts"))})
+    process.on('unhandledRejection', (reason, promise) => {
+      if (handleExecuteRealmRejection(promise, reason)) return
+      console.error(reason)
+      process.exit(70)
+    })
+    process.on('uncaughtException', (error) => { console.error(error); process.exit(71) })
+    const warnings = []
+    const page = {
+      on() { return page }, off() { return page },
+      mainFrame() { return { url: () => "about:blank" } },
+      url() { return "about:blank" }, isClosed() { return false },
+    }
+    const result = await runUserCode({
+      code: ${JSON.stringify(code)},
+      globals: { page, files: createExecuteFiles(), handoffTracker: { count: 0 }, modules: {} },
+      onUnhandledRejection: (warning) => warnings.push(warning),
+    })
+    await new Promise(resolve => setTimeout(resolve, 100))
+    console.log(JSON.stringify({ value: result.result, warnings }))
+  `
+  const child = spawnSync(process.execPath, ["-e", script], { encoding: "utf8", timeout: 15_000, env: { ...process.env, OPENCODE_BROWSER_HOME: home } })
+  if (child.status !== 0) throw new Error(`execute child failed: ${child.stderr}`)
+  return JSON.parse(child.stdout.trim().split("\n").at(-1) ?? "{}")
+}
 
 describe("ExecuteRealm", () => {
   test("runs code and returns plain data", async () => {
@@ -360,6 +391,53 @@ describe("Node escape corpus", () => {
       expect(outcome.error).toMatch(/non-extensible|Unhandled execute rejection|timer callback failed|Uncaught exception in an execute callback/)
     }
     expect(outcomes[6]?.value).toBe(42)
+  })
+
+  test("an un-awaited helper rejection stops only its realm, is reported, and the call still returns", () => {
+    const [outcome] = runInNode([
+      `host.files.write("/tmp/some-file", "x"); return { ok: true }`,
+    ], playwrightShapes)
+    expect(outcome?.value).toEqual({ ok: true })
+    expect(outcome?.stopped).toMatch(/Unhandled execute rejection: .*files\.write/)
+  })
+
+  test("full Node execute contains an un-awaited helper rejection and reports it as a warning", () => {
+    const outcome = runFullNodeExecute(`files.write("/tmp/some-file", "x"); return { ok: true }`)
+    expect(outcome.value).toEqual({ ok: true })
+    expect(outcome.warnings?.[0]).toMatch(/never awaited: .*files\.write/)
+  })
+
+  test("the full Node execute scope attributes promises created while the call runs", () => {
+    const warnings: string[] = []
+    const scope = new ExecuteRejectionScope({ onRejection: (warning) => warnings.push(warning) })
+    scope.begin()
+    const promise = Promise.reject(new Error("detached full-node"))
+    scope.end()
+    void promise.catch(() => {}) // attribution is what this test checks; don't raise a real unhandled event here
+    expect(handleExecuteRealmRejection(promise, new Error("detached full-node"))).toBe(true)
+    expect(warnings[0]).toMatch(/never awaited: detached full-node/)
+  })
+
+  test.skipIf(!process.versions.bun)("a stopped realm still claims its own late Bun rejections", async () => {
+    const warnings: string[] = []
+    const realm = new ExecuteRealm({ onUnhandledRejection: (warning) => warnings.push(warning) })
+    expect(await realm.run({ source: "(async () => 1)", filename: "test.js", args: [] })).toBe(1)
+    // `execute --rm` deletes the session right after its call and disposes the realm.
+    realm.dispose(new Error("Session deleted after execute --rm"))
+    const late = Promise.reject(new Error("late host promise"))
+    void late.catch(() => {}) // attribution is what this test checks; don't raise a real unhandled event here
+    expect(handleExecuteRealmRejection(late, new Error("late host promise"))).toBe(true)
+    // A stopped realm has nothing left to reset, so it contains the rejection without another warning.
+    expect(warnings).toEqual([])
+  })
+
+  test("a rejection with no execute owner is logged and counted, not rethrown", () => {
+    const rethrown: unknown[] = []
+    const rethrow = (cause: unknown): never => { rethrown.push(cause); throw cause }
+    expect(() => handleRelayProcessFault("unhandledRejection", new Error("detached relay-side promise"), {}, { rethrow })).not.toThrow()
+    expect(rethrown).toEqual([])
+    // A synchronous programming fault in the relay still stops it.
+    expect(() => handleRelayProcessFault("uncaughtException", new Error("relay bug"), {}, { rethrow })).toThrow("relay bug")
   })
 
   test("the files helper stays inside its roots through symlinks from sandbox code", () => {

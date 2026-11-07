@@ -80,6 +80,7 @@ import {
   containsDynamicImport,
   deniedHostClasses,
   deniedHostValues,
+  ExecuteRejectionScope,
   handleExecuteRealmException,
   handleExecuteRealmRejection,
   intrinsicSource,
@@ -89,6 +90,7 @@ import {
   shadowFor,
   tagThrownByRealm,
   trackPromisesOf,
+  unhandledExecuteRejectionWarning,
 } from "./execute-realm/membrane-policy.ts"
 
 export {
@@ -105,6 +107,7 @@ export {
   executeFilesDirectory,
   executeSliceEnvironmentVariable,
   executeSliceMs,
+  ExecuteRejectionScope,
   fileRootsEnvironmentVariable,
   handleExecuteRealmException,
   handleExecuteRealmRejection,
@@ -113,6 +116,7 @@ export {
   pruneStaleExecuteFilesDirectories,
   removeExecuteFilesDirectory,
   sandboxModules,
+  unhandledExecuteRejectionWarning,
   type ExecuteFiles,
 }
 
@@ -157,12 +161,18 @@ export class ExecuteRealm {
 
   /** Called for every host call sandbox code makes, after the call is allowed (execute warnings). */
   private readonly onHostCall: ((fn: Function, receiver: unknown, args: readonly unknown[]) => void) | undefined
+  /** Called when an un-awaited promise created in this realm rejects (the sandbox queues an execute warning). */
+  private readonly onUnhandledRejection: ((warning: string) => void) | undefined
   private readonly refuseDynamicImport = () => {
     throw new this.SandboxError("import() is not available in execute code")
   }
 
-  constructor(options: { readonly onHostCall?: (fn: Function, receiver: unknown, args: readonly unknown[]) => void } = {}) {
+  constructor(options: {
+    readonly onHostCall?: (fn: Function, receiver: unknown, args: readonly unknown[]) => void
+    readonly onUnhandledRejection?: (warning: string) => void
+  } = {}) {
     this.onHostCall = options.onHostCall
+    this.onUnhandledRejection = options.onUnhandledRejection
     const importModuleDynamically = this.refuseDynamicImport
     const dontContextify = (vm.constants as unknown as { readonly DONT_CONTEXTIFY?: unknown } | undefined)?.DONT_CONTEXTIFY
     this.context = vm.createContext((dontContextify ?? Object.create(null)) as vm.Context, {
@@ -216,6 +226,19 @@ export class ExecuteRealm {
 
   get isStopped(): boolean {
     return this.stopped !== undefined
+  }
+
+  /**
+   * A promise this realm created rejected with no handler. Stop the realm (its pending call fails with the reason) and
+   * report it: the process guard must never treat this as a relay fault.
+   */
+  handleUnhandledRejection(cause: unknown): void {
+    if (this.stopped) return
+    try { this.onUnhandledRejection?.(unhandledExecuteRejectionWarning(cause)) } catch {
+      // Reporting must never turn a contained rejection into a relay fault.
+    }
+    const detail = cause instanceof Error ? cause.message : String(cause ?? "no reason")
+    this.dispose(new Error(`Unhandled execute rejection: ${detail.slice(0, 300)}; JavaScript state will reset before the next execute`))
   }
 
   private enter<T>(entry: () => T): T {

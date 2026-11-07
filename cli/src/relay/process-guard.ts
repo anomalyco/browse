@@ -17,7 +17,11 @@ export const installRelayProcessGuard = Effect.acquireRelease(
       handleRelayProcessFault("uncaughtException", error, { origin })
     }
     const onUnhandledRejection = (reason: unknown, promise: Promise<unknown>) => {
-      if (handleExecuteRealmRejection(promise)) return
+      if (handleExecuteRealmRejection(promise, reason)) {
+        // The realm reset (or the full-Node execute scope warning) reports it; keep a line in the relay log.
+        relayLog("process.executeRejection", { message: faultText(reason).slice(0, 300) })
+        return
+      }
       handleRelayProcessFault("unhandledRejection", reason, { promise })
     }
     process.on("uncaughtException", onUncaughtException)
@@ -32,7 +36,7 @@ export const installRelayProcessGuard = Effect.acquireRelease(
   },
 )
 
-/** Playwright dispatch faults the relay swallowed to stay alive; reported by `status` and `doctor`. */
+/** Playwright dispatch faults and unhandled rejections the relay contained to stay alive; reported by `status` and `doctor`. */
 const suppressedProcessFaults: { count: number; lastAt?: string; lastMessage?: string } = { count: 0 }
 
 export function relayProcessFaultSummary(): { readonly suppressed: number; readonly lastAt?: string; readonly lastMessage?: string } {
@@ -90,13 +94,28 @@ export function handleRelayProcessFault(
   if (shouldSuppressRelayProcessFault(cause)) {
     suppressedProcessFaults.count += 1
     suppressedProcessFaults.lastAt = new Date().toISOString()
-    suppressedProcessFaults.lastMessage = (cause instanceof Error ? cause.message : String(cause)).slice(0, 300)
+    suppressedProcessFaults.lastMessage = faultText(cause).slice(0, 300)
     logProcessFault(kind, cause, detail, "keeping relay alive")
+    return
+  }
+  // A rejection nobody handled may still be execute code's: a promise created after its call returned, by a helper's
+  // fire-and-forget chain, or by full Node execute code in a callback the execute scope no longer covers. Taking the
+  // relay down loses every session and tab, so it is logged and counted; `browse status` / `doctor` report it.
+  // Synchronous programming faults (uncaughtException) still stop the relay below.
+  if (kind === "unhandledRejection") {
+    suppressedProcessFaults.count += 1
+    suppressedProcessFaults.lastAt = new Date().toISOString()
+    suppressedProcessFaults.lastMessage = faultText(cause).slice(0, 300)
+    logProcessFault(kind, cause, detail, "keeping relay alive; an unhandled rejection never stops the relay")
     return
   }
   logProcessFault(kind, cause, detail, "not a known Playwright dispatch fault; rethrowing")
   const rethrow = options.rethrow ?? rethrowProcessFault
   rethrow(cause)
+}
+
+function faultText(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause)
 }
 
 function rethrowProcessFault(cause: unknown): never {
