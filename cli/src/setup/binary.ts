@@ -1,11 +1,19 @@
 // A binary install: the install script (or PowerShell installer) puts the bun-compiled executable in ~/.local/bin
 // ($XDG_BIN_HOME when set). Install records that path, puts its folder on PATH, and uninstall takes both back.
 import { spawnSync } from "node:child_process"
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import { installedBinaryPath } from "../paths.ts"
 import { opencodeBrowserVersion } from "../version.ts"
 import { configRoot, fail, home, log, readFileOr, tilde } from "./environment.ts"
+
+export const samePath = (left: string, right: string) => {
+  try {
+    return realpathSync(left) === realpathSync(right)
+  } catch {
+    return false
+  }
+}
 
 /**
  * Makes sure this executable is the install's stable one: the installer already put it at ~/.local/bin/browse; an
@@ -14,14 +22,7 @@ import { configRoot, fail, home, log, readFileOr, tilde } from "./environment.ts
  */
 export async function installBinaryRuntime(): Promise<{ entry: string; version: string }> {
   const target = installedBinaryPath()
-  const same = (left: string, right: string) => {
-    try {
-      return realpathSync(left) === realpathSync(right)
-    } catch {
-      return false
-    }
-  }
-  if (!same(target, process.execPath)) {
+  if (!samePath(target, process.execPath)) {
     try {
       mkdirSync(path.dirname(target), { recursive: true, mode: 0o755 })
       const staged = `${target}.${process.pid}.new`
@@ -41,6 +42,21 @@ export async function installBinaryRuntime(): Promise<{ entry: string; version: 
     }
   }
   return { entry: target, version: opencodeBrowserVersion }
+}
+
+/** A regular file that is provably this install's executable: the running binary, or the same bytes as the managed copy. */
+export function isInstallerBinary(candidate: string, managed: string): boolean {
+  try {
+    if (!lstatSync(candidate).isFile()) return false
+  } catch {
+    return false
+  }
+  if (samePath(candidate, process.execPath)) return true
+  try {
+    return statSync(candidate).size === statSync(managed).size && readFileSync(candidate).equals(readFileSync(managed))
+  } catch {
+    return false
+  }
 }
 
 /**

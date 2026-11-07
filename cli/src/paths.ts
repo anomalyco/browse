@@ -19,8 +19,13 @@ const xdgRoot = (variable: string, fallback: string, home: string) => {
   return path.join(configured && path.isAbsolute(configured) ? configured : path.join(home, fallback), "browse")
 }
 
+/** The config folder without the OPENCODE_BROWSER_HOME override: where an everyday install keeps its settings. */
+function defaultConfigRoot(home = os.homedir()): string {
+  return xdgRoot("XDG_CONFIG_HOME", ".config", home)
+}
+
 export function configRoot(home = os.homedir()): string {
-  return override(home) ?? xdgRoot("XDG_CONFIG_HOME", ".config", home)
+  return override(home) ?? defaultConfigRoot(home)
 }
 
 export function dataRoot(home = os.homedir()): string {
@@ -35,15 +40,26 @@ export function cacheRoot(home = os.homedir()): string {
   return override(home) ?? xdgRoot("XDG_CACHE_HOME", ".cache", home)
 }
 
-/** The installer's folder: $XDG_BIN_HOME when set, else ~/.local/bin (the same on Windows under %USERPROFILE%). */
-export function binRoot(home = os.homedir()): string {
-  if (override(home)) return path.join(override(home)!, "bin")
+/** The installers' folder: $XDG_BIN_HOME when absolute, else ~/.local/bin (the same on Windows under %USERPROFILE%). */
+function installerBinRoot(home = os.homedir()): string {
   const configured = home === os.homedir() ? process.env.XDG_BIN_HOME : undefined
   return configured && path.isAbsolute(configured) ? configured : path.join(home, ".local", "bin")
 }
 
-/** Where the install script puts the executable. */
+/** The executable's folder: $OPENCODE_BROWSER_HOME/bin when that override is set, else the installers' folder. */
+export function binRoot(home = os.homedir()): string {
+  if (override(home)) return path.join(override(home)!, "bin")
+  return installerBinRoot(home)
+}
+
+/** The executable agents run: $OPENCODE_BROWSER_HOME/bin when set, else the installers' folder. */
 export const installedBinaryPath = (home = os.homedir()) => path.join(binRoot(home), binaryName())
+
+/** The executable the installers wrote, independent of where OPENCODE_BROWSER_HOME points the CLI. */
+export const installerBinaryPath = (home = os.homedir()) => path.join(installerBinRoot(home), binaryName())
+
+/** An everyday install's settings, independent of where OPENCODE_BROWSER_HOME points the CLI. */
+export const defaultSettingsPath = (home = os.homedir()) => path.join(defaultConfigRoot(home), "settings.json")
 
 /** This package's root: cli/ in a checkout (src/paths.ts, or the dist/cli.mjs bundle), else the installed package. */
 const packageRoot = () => path.dirname(path.dirname(fileURLToPath(import.meta.url)))
