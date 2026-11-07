@@ -342,8 +342,8 @@ Escape hatches. Set them in the environment you start opencode (or your MCP clie
 - `node cli/dist/cli.mjs status` shows the relay, the extension and every tab agents can use.
 - `node cli/dist/cli.mjs doctor` checks the install.
 - Logs: `~/.local/state/browse/logs/relay.log`.
-- Extension says another browser is connected: only one browser profile can be connected at a time. Close the other
-  one, then click **Reconnect** on the status page.
+- Extension says another browser is connected: the relay is running an older browse that drives one browser profile at
+  a time. Update browse there (or close the other browser), then click **Reconnect** on the status page.
 - Extension says it's not paired (or that the relay was refused): run `bun run setup` again, then reload the extension
   on your browser's extensions page.
 - **Load unpacked** fails, or the extension shows errors: load the `browse/dist` folder (built by `setup`), not

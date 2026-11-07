@@ -54,9 +54,11 @@ MCP: `session_adopt` with `tabId` or `targetUrl`. Prefer adoption for
 authenticated browser state rather than reproducing a login in a fresh page.
 `targetUrl` and `targetIndex` select existing pages; they never navigate.
 
-Each relay drives one browser/profile at a time. A second extension connection
-cannot replace a healthy active connection; switch browsers by disconnecting the
-incumbent extension first.
+One relay can have several browsers connected at once, each with an id like
+`chrome-macbook`. New sessions use the default browser, the first connected and
+ready, unless `session_new` gets `browser: "<id>"`. `status` lists the connected
+browsers (`browse status --json` on the CLI). A session stays in its browser, so
+start a new one to use another.
 
 ## Inspect, act, verify
 
