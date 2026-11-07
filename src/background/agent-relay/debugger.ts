@@ -40,9 +40,14 @@ export function createRelayDebugger(deps: {
     const method = string(params, "method")
     const sessionId = typeof params?.sessionId === "string" ? params.sessionId : undefined
     const cdpParams = isJsonObject(params?.params) ? params.params : undefined
+    // Navigating from about:blank to about:blank#… crashes Chrome and Vivaldi; the fragment means nothing there.
+    const sendParams =
+      method === "Page.navigate" && typeof cdpParams?.url === "string" && cdpParams.url.startsWith("about:blank#")
+        ? { ...cdpParams, url: "about:blank" }
+        : cdpParams
     const debuggee = sessionId ? { tabId, sessionId } : { tabId }
     const call = async () => {
-      const result = await chrome.debugger.sendCommand(debuggee, method, cdpParams)
+      const result = await chrome.debugger.sendCommand(debuggee, method, sendParams)
       return isJsonObject(result) ? result : {}
     }
     try {
