@@ -236,6 +236,9 @@ const bytes = await files.read(saved) // Buffer; files.read(p, "utf8") for text
 await page.screenshot({ path: files.path("page.png") })
 ```
 
+Setting `Browser.setDownloadBehavior` (or `Page.setDownloadBehavior`) replaces
+Playwright's own download handling, so keep its folder inside the file roots.
+
 Use `page.evaluate` for `window`, `document`, storage and same-origin `fetch`
 with page cookies. It runs in an isolated world whose `fetch` skips the page's
 service worker; pass `false` as its fourth argument

@@ -9,8 +9,12 @@ import stream from "node:stream"
 import url from "node:url"
 import util from "node:util"
 import zlib from "node:zlib"
+import { checkCdpSend, copyCdpParameters, isCdpMethodName, isCdpSession } from "./cdp-send.ts"
+import { ExecuteFileAccessError } from "./errors.ts"
 import { cacheRoot, configRoot, dataRoot, defaultRoots, installedBinaryPath, installerBinaryPath, stateRoot } from "../paths.ts"
 import { legacyRoots } from "../setup/legacy.ts"
+
+export { ExecuteFileAccessError } from "./errors.ts"
 
 export const allowNodeEnvironmentVariable = "OPENCODE_BROWSER_ALLOW_NODE"
 export const allowForegroundEnvironmentVariable = "OPENCODE_BROWSER_ALLOW_FOREGROUND"
@@ -167,10 +171,6 @@ function realTarget(target: string): string {
   }
 }
 
-export class ExecuteFileAccessError extends Error {
-  override readonly name = "ExecuteFileAccessError"
-}
-
 /**
  * Browse's own folders, whose contents execute code may not read or write even when they sit inside a file root.
  * The default roots cover an everyday install while OPENCODE_BROWSER_HOME points this relay elsewhere, and the legacy
@@ -217,8 +217,11 @@ function isBrowseOwned(target: string, platform: NodeJS.Platform = process.platf
   return [installedBinaryPath(), installerBinaryPath()].some((binary) => isBinaryOrStaging(target, binary, platform))
 }
 
-/** Throw unless `target` is an absolute path inside the execute file roots and outside browse's own files. */
-export function assertExecuteFilePath(target: unknown, operation: string): string {
+/**
+ * Throw unless `target` is an absolute path inside the execute file roots and outside browse's own files.
+ * `directory` also allows a folder directly under a root; its own ownership and mode are still checked.
+ */
+export function assertExecuteFilePath(target: unknown, operation: string, options: { readonly directory?: boolean } = {}): string {
   if (typeof target !== "string" || target.length === 0) {
     throw new ExecuteFileAccessError(`${operation}: file paths must be non-empty strings`)
   }
@@ -276,13 +279,60 @@ export function assertExecuteFilePath(target: unknown, operation: string): strin
     current = path.dirname(current)
   }
   const parent = path.dirname(resolved)
-  if (parent === root && process.getuid) {
+  if (parent === root && process.getuid && options.directory !== true) {
     const stat = fs.statSync(parent)
     if (stat.uid !== process.getuid() || (stat.mode & 0o022) !== 0) {
       throw new ExecuteFileAccessError(`${operation}: use a private subdirectory such as files.dir, not a shared temporary directory`)
     }
   }
   return resolved
+}
+
+/** The root `resolved` is, if it is one, under the platform's case rules. */
+function executeFileRootOf(resolved: string): string | undefined {
+  return executeFileRoots().find((root) => isSamePath(resolved, root))
+}
+
+/** Throw unless `target` is inside the roots and is not a root itself. Directories stay allowed. */
+function assertExecuteFilePathNotRoot(target: string, operation: string): string {
+  const resolved = assertExecuteFilePath(target, operation)
+  if (executeFileRootOf(resolved) !== undefined) {
+    throw new ExecuteFileAccessError(`${operation}: ${target} is an execute file root; use a path inside it`)
+  }
+  return resolved
+}
+
+/** Throw unless `target` is a file inside the roots; file inputs cannot be roots or directories. */
+function assertExecuteFileInputPath(target: string, operation: string): string {
+  const resolved = assertExecuteFilePathNotRoot(target, operation)
+  let stat: fs.Stats | undefined
+  try {
+    stat = fs.lstatSync(resolved)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+  }
+  if (stat?.isDirectory()) {
+    throw new ExecuteFileAccessError(`${operation}: ${target} is a directory; use a file inside the execute file roots`)
+  }
+  return resolved
+}
+
+/** Throw unless `target` is a folder inside the roots that is not a root itself. */
+function assertExecuteDownloadDirectory(target: string, operation: string): string {
+  const resolved = assertExecuteFilePath(target, operation, { directory: true })
+  if (executeFileRootOf(resolved) !== undefined) {
+    throw new ExecuteFileAccessError(`${operation}: ${target} is an execute file root; use a subfolder such as files.path("downloads")`)
+  }
+  return resolved
+}
+
+/** Validate and rewrite the file paths in setInputFiles, setFiles and drop payloads. Directories stay allowed. */
+function checkFileInputValue(value: unknown, method: string): unknown {
+  if (typeof value === "string") return assertExecuteFilePathNotRoot(value, method)
+  if (Array.isArray(value)) {
+    return value.map((item) => typeof item === "string" ? assertExecuteFilePathNotRoot(item, method) : item)
+  }
+  return value
 }
 
 async function openExecuteFile(target: string, write: boolean): Promise<fsPromises.FileHandle> {
@@ -552,9 +602,9 @@ export function prepareExecuteFileOutputs(call: ExecuteHostCall): PreparedExecut
   }
   const outputs: ExecuteFileOutput[] = []
   for (const candidate of call.outputs) {
-    assertExecuteFilePath(candidate.path, "execute file output")
+    assertExecuteFilePath(candidate.path, "execute file output", { directory: candidate.directory === true })
     ensureExecuteOutputDirectory(candidate.directory === true ? candidate.path : path.dirname(candidate.path))
-    const resolved = assertExecuteFilePath(candidate.path, "execute file output")
+    const resolved = assertExecuteFilePath(candidate.path, "execute file output", { directory: candidate.directory === true })
     if (candidate.directory === true) continue
     outputs.push({ path: resolved, existed: fileExists(resolved) })
   }
@@ -620,39 +670,8 @@ function checkFileStrings(value: unknown, method: string): string | undefined {
   return undefined
 }
 
-/**
- * Raw CDP commands that name files on the browser's machine, which CDPSession.send reaches without
- * Playwright's file options. Inputs are checked like setInputFiles; a download path is an output
- * folder checked like saveAs. Commands that would carry more CDP or run local code are refused.
- */
-const cdpFileInputParameters = new Map<string, (params: Record<string, unknown>) => unknown>([
-  ["DOM.setFileInputFiles", (params) => params.files],
-  ["Input.dispatchDragEvent", (params) => isObject(params.data) ? (params.data as Record<string, unknown>).files : undefined],
-  ["PWA.launchFilesInApp", (params) => params.files],
-])
-const cdpDownloadPathMethods = new Set(["Browser.setDownloadBehavior", "Page.setDownloadBehavior"])
-const cdpRefusedMethods = new Map<string, string>([
-  ["Extensions.loadUnpacked", "loading an unpacked extension runs local code in the browser"],
-  ["Target.sendMessageToTarget", "forwarding a raw CDP message would bypass these file checks"],
-  ["Target.exposeDevToolsProtocol", "exposing raw CDP to page script would bypass these file checks"],
-])
-
-function checkCdpFileParameters(method: string, value: unknown, candidates: ExecuteFileOutputCandidate[]): void {
-  const refusal = cdpRefusedMethods.get(method)
-  if (refusal !== undefined) throw new ExecuteFileAccessError(`${method}: ${refusal}, so it is not available in execute code`)
-  if (!isObject(value) || Array.isArray(value)) return
-  const params = value as Record<string, unknown>
-  const inputParameter = cdpFileInputParameters.get(method)
-  if (inputParameter !== undefined) checkFileStrings(inputParameter(params), method)
-  if (!cdpDownloadPathMethods.has(method) || typeof params.downloadPath !== "string") return
-  const downloadPath = assertExecuteFilePath(params.downloadPath, `${method}({ downloadPath })`)
-  if (executeFileRoots().some((root) => isSamePath(downloadPath, root))) {
-    throw new ExecuteFileAccessError(`${method}: use a private subdirectory inside the execute file roots for downloads, not the root itself`)
-  }
-  if (params.behavior === "allow" || params.behavior === "allowAndName") candidates.push({ path: downloadPath, directory: true })
-}
-
-const promiseReturningNames = new Set([...fileOptionMethods, "setInputFiles", "setFiles", "saveAs", "bringToFront", "send"])
+// Raw CDP file parameters are checked in ./cdp-send.ts before Playwright's transport sees them.
+const promiseReturningNames = new Set([...fileOptionMethods, "setInputFiles", "setFiles", "saveAs", "bringToFront", "send", "drop", "setStorageState", "bind"])
 
 export function returnsPromise(fn: Function): boolean {
   return util.types.isAsyncFunction(fn) || promiseReturningNames.has(typeof fn.name === "string" ? fn.name.replace(/^bound /, "") : "")
@@ -666,6 +685,9 @@ export function returnsPromise(fn: Function): boolean {
  */
 export function checkHostCall(fn: Function, receiver: unknown, args: readonly unknown[]): ExecuteHostCall {
   const name = typeof fn.name === "string" ? fn.name.replace(/^bound /, "") : ""
+  const setArgument = (index: number, value: unknown): void => { (args as unknown[])[index] = value }
+  const sendMethod = name === "send" ? args[0] : undefined
+  const cdpSessionSend = name === "send" && isCdpSession(receiver)
   if (receiver !== null && typeof receiver === "object") {
     const constructor = Reflect.getOwnPropertyDescriptor(receiver, "constructor")?.value
     if (typeof constructor === "function" && constructor.prototype === receiver) {
@@ -675,20 +697,53 @@ export function checkHostCall(fn: Function, receiver: unknown, args: readonly un
   if (name === "fetch" || name === "routeFromHAR" || (name === "fulfill" && args.some((arg) => arg !== null && typeof arg === "object" && "response" in arg))) {
     throw new Error(`${name}: Node-side requests and response/HAR replay are not available in execute code; use browser requests or route.fulfill({ body })`)
   }
-  if ((name === "bringToFront" || (name === "send" && args[0] === "Page.bringToFront")) && !executeAllowsForeground()) {
+  if (name === "bind") {
+    throw new ExecuteFileAccessError("bind: starting a browser server is not available in execute code")
+  }
+  if ((name === "bringToFront" || (name === "send" && sendMethod === "Page.bringToFront")) && !executeAllowsForeground()) {
     throw new Error(bringToFrontBlockedMessage)
   }
   const candidates: ExecuteFileOutputCandidate[] = []
   if (name === "send") {
-    if (typeof args[0] === "string") checkCdpFileParameters(args[0], args[1], candidates)
+    const bufferMessage = buffer.Buffer.isBuffer(sendMethod) || util.types.isUint8Array(sendMethod)
+    if (typeof sendMethod !== "string" && (cdpSessionSend || !bufferMessage)) {
+      throw new ExecuteFileAccessError(cdpSessionSend ? "CDPSession.send: the method must be a primitive string" : "send: the message must be a string or Buffer")
+    }
+    let method: string | undefined
+    if (typeof sendMethod === "string") {
+      if (cdpSessionSend) {
+        if (!isCdpMethodName(sendMethod)) throw new ExecuteFileAccessError(`CDPSession.send: ${JSON.stringify(sendMethod)} is not a CDP method name`)
+        method = sendMethod
+      } else if (isCdpMethodName(sendMethod)) {
+        method = sendMethod
+      }
+    }
+    if (method !== undefined) {
+      const params = args.length > 1 && args[1] !== undefined ? copyCdpParameters(args[1], method) : args[1]
+      if (params !== args[1]) setArgument(1, params)
+      const checked = checkCdpSend(method, params, { fileInput: assertExecuteFileInputPath, downloadDirectory: assertExecuteDownloadDirectory })
+      if (checked.downloadDirectory !== undefined) candidates.push({ path: checked.downloadDirectory, directory: true })
+    }
   } else if (name === "setInputFiles") {
     const isFrameLike = receiver !== null && typeof receiver === "object" && typeof (receiver as { goto?: unknown }).goto === "function"
-    checkFileStrings(isFrameLike ? args[1] : args[0], "setInputFiles")
+    if (isFrameLike) setArgument(1, checkFileInputValue(args[1], "setInputFiles"))
+    else setArgument(0, checkFileInputValue(args[0], "setInputFiles"))
+  } else if (name === "setFiles") {
+    setArgument(0, checkFileInputValue(args[0], name))
+  } else if (name === "drop") {
+    const payload = args[0]
+    if (isObject(payload) && !Array.isArray(payload) && Object.hasOwn(payload, "files")) {
+      if (!Reflect.set(payload, "files", checkFileInputValue(Reflect.get(payload, "files"), "drop"))) {
+        throw new ExecuteFileAccessError("drop: could not replace the file paths")
+      }
+    }
+  } else if (name === "setStorageState") {
+    if (typeof args[0] === "string") setArgument(0, assertExecuteFilePathNotRoot(args[0], name))
   } else if (name === "saveAs") {
     // download.saveAs(path) and video.saveAs(path) copy the artifact to a new file, parents included.
     const target = checkFileStrings(args[0], name)
     if (target !== undefined) candidates.push({ path: target })
-  } else if (name === "setFiles" || name === "routeFromHAR") {
+  } else if (name === "routeFromHAR") {
     checkFileStrings(args[0], name)
   }
   const includeMethodKeys = fileOptionMethods.has(name)
