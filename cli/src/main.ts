@@ -14,8 +14,11 @@ const command = process.argv[2]
 const args = process.argv.slice(3)
 const invokedAs = path.basename(process.argv[1] ?? "")
 // Setup commands and update run before the Effect CLI parses arguments (below), so they would act on --help instead of
-// printing it. The CLI itself detects help the same way (cli.ts).
-const askedForHelp = command === "--help" || command === "-h" || args.some((arg) => arg === "--help" || arg === "-h")
+// printing it. This mirrors the help check in cli.ts's quiet-JSON handling, but stops at `--`: everything after it belongs
+// to another program (browse secrets run prod -- mytool --help), so it is not a help request for browse.
+const separator = args.indexOf("--")
+const options = separator === -1 ? args : args.slice(0, separator)
+const askedForHelp = command === "--help" || command === "-h" || options.some((arg) => arg === "--help" || arg === "-h")
 /** Help for a command that never reaches the Effect CLI: print the top-level help instead. */
 const preCliHelp = askedForHelp && (command === "update" || (command !== undefined && setupCommands.has(command)))
 

@@ -18,8 +18,10 @@ function snapshot(dir: string, base = dir): string[] {
 }
 
 function isolatedEnv(home: string): NodeJS.ProcessEnv {
-  return {
-    ...process.env,
+  const env: NodeJS.ProcessEnv = {
+    // Built from scratch: variables like CLAUDE_CONFIG_DIR, CODEX_HOME or DISPLAY must not leak in, or a help-detection
+    // regression could touch the developer's real agent configs or open a browser.
+    PATH: process.env.PATH,
     HOME: home,
     USERPROFILE: home,
     LOCALAPPDATA: path.join(home, "local-appdata"),
@@ -36,7 +38,16 @@ function isolatedEnv(home: string): NodeJS.ProcessEnv {
     // If help detection regresses, update must not run git against the checkout this test runs from.
     GIT_DIR: path.join(home, "fake-git"),
     GIT_WORK_TREE: path.join(home, "fake-worktree"),
+    DISPLAY: "",
+    WAYLAND_DISPLAY: "",
   }
+  if (process.platform === "win32") {
+    for (const key of ["SystemRoot", "ComSpec", "TEMP", "TMP"]) {
+      const value = process.env[key]
+      if (value !== undefined) env[key] = value
+    }
+  }
+  return env
 }
 
 /** A browse root with settings and a secret profile: uninstall deletes all of it. */
