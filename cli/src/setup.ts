@@ -246,7 +246,7 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
     const label = agentLabels[agent.name]
     if (!selected.includes(agent.name)) {
       if (!plan.picker && agent.installed && !flags.requested.length)
-        log(`To add ${label} too: ${cliCommand(`install --agent ${agent.name}`)}`)
+        log(`To add ${label}${selected.length ? " too" : ""}: ${cliCommand(`install --agent ${agent.name}`)}`)
       continue
     }
     if (agent.name === "opencode") {

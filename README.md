@@ -101,9 +101,11 @@ browse install -y       # detected clients in an ordinary shell (--yes)
 ```
 
 Inside a recognized agent, `install` targets that caller automatically. Without a terminal it configures the caller
-if known, adds OpenCode if installed, and prints commands for other detected clients. No other client is added by
-default in scripts. Re-running install is additive: unchecking a client skips it, not a removal. `uninstall` removes
-the entries browse wrote, not unrelated servers or conflicting entries.
+if it recognizes it. If it can't tell which agent ran it, it configures nothing and prints the MCP entry to add by
+hand, plus a `browse install --agent <name>` command for each agent it found. Outside a recognized agent, `-y` sets
+up every detected agent instead of opening the picker, with or without a terminal. Re-running install is additive:
+unchecking a client skips it, not a removal. `uninstall` removes the entries browse wrote, not unrelated servers or
+conflicting entries.
 
 <details><summary>Supported agents and user-level config files</summary>
 
