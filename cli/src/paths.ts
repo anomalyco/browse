@@ -24,6 +24,21 @@ function defaultConfigRoot(home = os.homedir()): string {
   return xdgRoot("XDG_CONFIG_HOME", ".config", home)
 }
 
+/** Browse's XDG folders without the OPENCODE_BROWSER_HOME override: an everyday install still writes them. */
+export function defaultRoots(home = os.homedir()): {
+  readonly config: string
+  readonly data: string
+  readonly state: string
+  readonly cache: string
+} {
+  return {
+    config: defaultConfigRoot(home),
+    data: xdgRoot("XDG_DATA_HOME", ".local/share", home),
+    state: xdgRoot("XDG_STATE_HOME", ".local/state", home),
+    cache: xdgRoot("XDG_CACHE_HOME", ".cache", home),
+  }
+}
+
 export function configRoot(home = os.homedir()): string {
   return override(home) ?? defaultConfigRoot(home)
 }

@@ -5,8 +5,9 @@ import os from "node:os"
 import path from "node:path"
 import { assertExecuteFilePath, checkHostCall, createExecuteFiles, ExecuteRealm, handleExecuteRealmRejection } from "../src/execute-realm.ts"
 import { isInside, isInstallSibling } from "../src/execute-realm/file-roots.ts"
-import { cacheRoot, configRoot, dataRoot, installedBinaryPath, stateRoot } from "../src/paths.ts"
+import { cacheRoot, configRoot, dataRoot, installedBinaryPath, installerBinaryPath, stateRoot } from "../src/paths.ts"
 import { handleRelayProcessFault } from "../src/relay/process-guard.ts"
+import { legacyDataRoot } from "../src/setup/legacy.ts"
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "browse-realm-"))
 const home = path.join(scratch, "home")
@@ -563,9 +564,14 @@ describe("execute file access", () => {
       const binary = installedBinaryPath()
       fs.mkdirSync(path.dirname(binary), { recursive: true })
       fs.writeFileSync(binary, "binary", { mode: 0o755 })
-      for (const denied of [binary, `${binary}.new`, `${binary}.${process.pid}.new`, `${binary}.old-0123abcd`, `${binary}.migrate-${process.pid}`]) {
+      for (const denied of [
+        binary, `${binary}.new`, `${binary}.${process.pid}.new`, `${binary}.old-0123abcd`, `${binary}.migrate-${process.pid}`,
+        `${binary}.new/payload`, `${binary}.old-1/x`,
+      ]) {
         expect(() => assertExecuteFilePath(denied, "files.write")).toThrow(/inside browse's own files/)
       }
+      // A child literally named `..bypass` is inside the root, not a way out of it.
+      expect(() => assertExecuteFilePath(path.join(stateRoot(), "..bypass"), "files.write")).toThrow(/inside browse's own files/)
 
       // Staging lands beside the resolved install folder even when the bin folder and the binary are both symlinks.
       const realBin = path.join(xdg, "real-bin")
@@ -574,8 +580,9 @@ describe("execute file access", () => {
       fs.symlinkSync(realBin, variables.XDG_BIN_HOME)
       fs.writeFileSync(path.join(realBin, "browse-target"), "binary", { mode: 0o755 })
       fs.symlinkSync(path.join(realBin, "browse-target"), path.join(realBin, "browse"))
-      expect(() => assertExecuteFilePath(path.join(variables.XDG_BIN_HOME, "browse.new"), "files.write"))
-        .toThrow(/inside browse's own files/)
+      for (const staging of [path.join(variables.XDG_BIN_HOME, "browse.new"), path.join(realBin, "browse.new")]) {
+        expect(() => assertExecuteFilePath(staging, "files.write")).toThrow(/inside browse's own files/)
+      }
 
       // Migration copies these roots into the live ones on the next run, so execute code must not stage files there.
       const legacyData = path.join(variables.XDG_DATA_HOME, "opencode-browser")
@@ -601,6 +608,65 @@ describe("execute file access", () => {
       if (savedBrowseHome === undefined) delete process.env.OPENCODE_BROWSER_HOME
       else process.env.OPENCODE_BROWSER_HOME = savedBrowseHome
       fs.rmSync(xdg, { recursive: true, force: true })
+    }
+  })
+
+  test("refuses the everyday folders and installer binary while OPENCODE_BROWSER_HOME points elsewhere", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "browse-realm-override-"))
+    const variables = {
+      OPENCODE_BROWSER_HOME: path.join(root, "home"),
+      XDG_CONFIG_HOME: path.join(root, "config"),
+      XDG_DATA_HOME: path.join(root, "data"),
+      XDG_STATE_HOME: path.join(root, "state"),
+      XDG_CACHE_HOME: path.join(root, "cache"),
+      XDG_BIN_HOME: path.join(root, "bin"),
+    } satisfies NodeJS.ProcessEnv
+    const names = Object.keys(variables) as Array<keyof typeof variables>
+    const saved = new Map(names.map((name) => [name, process.env[name]]))
+    Object.assign(process.env, variables)
+    try {
+      // The override's own folders stay denied.
+      const overrideFile = path.join(variables.OPENCODE_BROWSER_HOME, "pairing-codes.json")
+      fs.mkdirSync(variables.OPENCODE_BROWSER_HOME, { recursive: true })
+      fs.writeFileSync(overrideFile, "{}")
+      expect(() => assertExecuteFilePath(overrideFile, "files.read")).toThrow(/inside browse's own files/)
+
+      // So do the everyday XDG folders the override hides from paths.ts.
+      const state = path.join(variables.XDG_STATE_HOME, "browse", "pairing-codes.json")
+      fs.mkdirSync(path.dirname(state), { recursive: true })
+      fs.writeFileSync(state, "{}")
+      expect(() => assertExecuteFilePath(state, "files.read")).toThrow(/inside browse's own files/)
+
+      // The installer still writes its binary at the installer path, not under the override.
+      const installer = installerBinaryPath()
+      expect(installer).toBe(path.join(variables.XDG_BIN_HOME, path.basename(installer)))
+      fs.mkdirSync(path.dirname(installer), { recursive: true })
+      fs.writeFileSync(installer, "binary", { mode: 0o755 })
+      expect(() => assertExecuteFilePath(installer, "files.write")).toThrow(/inside browse's own files/)
+      expect(() => assertExecuteFilePath(`${installer}.new/payload`, "files.write")).toThrow(/inside browse's own files/)
+    } finally {
+      for (const name of names) {
+        const value = saved.get(name)
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test.skipIf(process.platform === "win32")("legacyDataRoot ignores an empty or relative XDG_DATA_HOME", () => {
+    const saved = process.env.XDG_DATA_HOME
+    try {
+      for (const value of ["", "relative/data"]) {
+        process.env.XDG_DATA_HOME = value
+        expect(legacyDataRoot()).toBe(path.join(os.homedir(), ".local", "share", "opencode-browser"))
+      }
+      const absolute = path.join(scratch, "xdg-data")
+      process.env.XDG_DATA_HOME = absolute
+      expect(legacyDataRoot()).toBe(path.join(absolute, "opencode-browser"))
+    } finally {
+      if (saved === undefined) delete process.env.XDG_DATA_HOME
+      else process.env.XDG_DATA_HOME = saved
     }
   })
 

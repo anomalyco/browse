@@ -9,7 +9,7 @@ import stream from "node:stream"
 import url from "node:url"
 import util from "node:util"
 import zlib from "node:zlib"
-import { cacheRoot, configRoot, dataRoot, installedBinaryPath, stateRoot } from "../paths.ts"
+import { cacheRoot, configRoot, dataRoot, defaultRoots, installedBinaryPath, installerBinaryPath, stateRoot } from "../paths.ts"
 import { legacyRoots } from "../setup/legacy.ts"
 
 export const allowNodeEnvironmentVariable = "OPENCODE_BROWSER_ALLOW_NODE"
@@ -142,7 +142,8 @@ const foldCase = (value: string, platform: NodeJS.Platform): string =>
 export function isInside(child: string, parent: string, platform: NodeJS.Platform = process.platform): boolean {
   const paths = pathFlavor(platform)
   const relative = paths.relative(foldCase(parent, platform), foldCase(child, platform))
-  return relative === "" || (!relative.startsWith("..") && !paths.isAbsolute(relative))
+  // A child literally named `..bypass` is inside; only `..` and `..<sep>` climb out.
+  return relative === "" || (!paths.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${paths.sep}`))
 }
 
 /** Resolve the real location a path refers to (following an existing symlink, or the nearest existing parent). */
@@ -167,36 +168,48 @@ export class ExecuteFileAccessError extends Error {
 
 /**
  * Browse's own folders, whose contents execute code may not read or write even when they sit inside a file root.
- * The legacy roots count too: migration copies them into the live roots on the next run.
+ * The default roots cover an everyday install while OPENCODE_BROWSER_HOME points this relay elsewhere, and the legacy
+ * roots count too: migration copies them into the live roots on the next run.
  */
 function browseDirectories(): readonly string[] {
-  return [configRoot(), dataRoot(), stateRoot(), cacheRoot(), ...legacyRoots()]
+  return [...new Set([
+    configRoot(), dataRoot(), stateRoot(), cacheRoot(),
+    ...Object.values(defaultRoots()),
+    ...legacyRoots(),
+  ])]
 }
 
 /**
- * A name the installers, the updater and migration stage beside the installed binary: `browse.new` (install,
- * install.ps1), `browse.<pid>.new` (binary.ts), `browse.old-<suffix>` (binary.ts and install.ps1 backups) or
- * `browse.migrate-<pid>` (migrate.ts).
+ * Whether `target` is a staging name beside `binary`, or inside one: `browse.new` (install, install.ps1),
+ * `browse.<pid>.new` (binary.ts), `browse.old-<suffix>` (binary.ts and install.ps1 backups) or `browse.migrate-<pid>`
+ * (migrate.ts). Such a name must not be created as a directory, and nothing below it may be written either.
  */
 export function isInstallSibling(target: string, binary: string, platform: NodeJS.Platform = process.platform): boolean {
   const paths = pathFlavor(platform)
-  if (foldCase(paths.dirname(target), platform) !== foldCase(paths.dirname(binary), platform)) return false
+  const folder = foldCase(paths.dirname(binary), platform)
+  const relative = paths.relative(folder, foldCase(target, platform))
+  if (relative === "" || paths.isAbsolute(relative)) return false
+  const [first] = relative.split(paths.sep)
   const name = foldCase(paths.basename(binary), platform)
-  const sibling = foldCase(paths.basename(target), platform)
-  if (!sibling.startsWith(`${name}.`)) return false
-  const staged = sibling.slice(name.length + 1)
+  if (!first?.startsWith(`${name}.`)) return false
+  const staged = first.slice(name.length + 1)
   return staged === "new" || staged.startsWith("old-") || staged.startsWith("migrate-") || /^\d+\.new$/.test(staged)
 }
 
-/** True for browse's folders, its installed binary and the files installs stage beside it. */
+/** Whether `target` is a binary, or a staging file installs and migration place in its folder. */
+function isBinaryOrStaging(target: string, binary: string, platform: NodeJS.Platform): boolean {
+  const resolved = realTarget(binary)
+  // Staging happens in the binary's folder even when the binary, or a folder leading to it, is a symlink.
+  const stagedAt = path.join(realTarget(path.dirname(binary)), path.basename(binary))
+  return isInside(target, resolved, platform) || isInside(target, stagedAt, platform) ||
+    isInstallSibling(target, resolved, platform) || isInstallSibling(target, stagedAt, platform)
+}
+
+/** True for browse's folders, its binaries and the files installs stage beside them. */
 function isBrowseOwned(target: string, platform: NodeJS.Platform = process.platform): boolean {
   if (browseDirectories().some((root) => isInside(target, realTarget(root), platform))) return true
-  const installed = installedBinaryPath()
-  const binary = realTarget(installed)
-  // Staging happens in the installed binary's folder even when the binary, or a folder leading to it, is a symlink.
-  const installedAt = path.join(realTarget(path.dirname(installed)), path.basename(installed))
-  return isInside(target, binary, platform) || isInside(target, installedAt, platform) ||
-    isInstallSibling(target, binary, platform) || isInstallSibling(target, installedAt, platform)
+  // The installer and updater write the installer binary even when OPENCODE_BROWSER_HOME points the CLI elsewhere.
+  return [installedBinaryPath(), installerBinaryPath()].some((binary) => isBinaryOrStaging(target, binary, platform))
 }
 
 /** Throw unless `target` is an absolute path inside the execute file roots and outside browse's own files. */
