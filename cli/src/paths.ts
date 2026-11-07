@@ -105,24 +105,82 @@ export const scriptEntry = (entry: string) => /\.[cm]?[jt]s$/.test(entry)
 export const entryCommand = (entry: string, node = process.execPath): string[] => (scriptEntry(entry) ? [node, entry] : [entry])
 
 /** What Node can't start on Windows without a shell: a bare command name, or a .cmd/.bat shim. */
-const windowsShellShim = (entry: string) =>
-  /\.(cmd|bat)$/i.test(entry) || (!path.isAbsolute(entry) && !/[\\/]/.test(entry))
+const windowsShellShim = (entry: string, pathModule: typeof path.win32) =>
+  /\.(cmd|bat)$/i.test(entry) ||
+  (pathModule.extname(entry) === "" && !pathModule.isAbsolute(entry) && !/[\\/]/.test(entry))
+
+/** A path under npm's npx cache, which npx may replace or evict. */
+const npxEntry = (entry: string) => /(^|\/)_npx\//.test(entry.replaceAll("\\", "/"))
+
+export type EntrySpawnOptions = {
+  readonly platform?: NodeJS.Platform
+  /** The CLI this process runs (runningEntry by default). */
+  readonly running?: string
+  /** Whether this process is a compiled executable (compiledBinary by default). */
+  readonly compiled?: boolean
+  /** Whether this process runs from a source checkout (fromCheckout by default). */
+  readonly checkout?: boolean
+  /** Windows path rules; tests inject path.win32. */
+  readonly pathModule?: typeof path.win32
+  /** Where PATH comes from; tests inject a fake environment. */
+  readonly env?: NodeJS.ProcessEnv
+  /** The filesystem check; tests inject a fake. */
+  readonly existsSync?: (file: string) => boolean
+}
 
 /**
- * The command this process starts to run the CLI again at `entry`. npm records its global install as the bare name
- * `browse`; on Windows that is browse.cmd plus an extensionless sh shim, and child_process can't start either without a
- * shell, so use the entry this process already runs: its script under the same node, or a compiled binary's executable.
+ * The installed browse CLI a Windows shim entry runs, found with filesystem checks only. For a bare name (or a bare
+ * .cmd/.bat) walk PATH in order; for an explicit .cmd/.bat path use its folder. npm's global prefix puts its shims and
+ * node_modules side by side, so the bundle is <folder>\node_modules\@opencode\browse\dist\cli.mjs.
+ */
+export function resolveWindowsShim(
+  entry: string,
+  node = process.execPath,
+  options: Pick<EntrySpawnOptions, "pathModule" | "env" | "existsSync"> = {},
+): string[] | undefined {
+  const pathModule = options.pathModule ?? path.win32
+  const exists = options.existsSync ?? fs.existsSync
+  if (!windowsShellShim(entry, pathModule)) return undefined
+  const shimmed = /\.(cmd|bat)$/i.test(entry)
+  const withFolder = shimmed && (pathModule.isAbsolute(entry) || /[\\/]/.test(entry))
+  const directories = withFolder
+    ? [pathModule.dirname(entry)]
+    : (options.env ?? process.env).PATH?.split(";")
+        .map((directory) => directory.trim().replace(/^"(.*)"$/, "$1"))
+        .filter(Boolean) ?? []
+  for (const directory of directories) {
+    if (!shimmed) {
+      const executable = pathModule.join(directory, `${entry}.exe`)
+      if (exists(executable)) return [executable]
+    }
+    const shim = withFolder ? entry : pathModule.join(directory, shimmed ? entry : `${entry}.cmd`)
+    if (!exists(shim)) continue
+    const script = pathModule.join(directory, "node_modules", "@opencode", "browse", "dist", "cli.mjs")
+    if (exists(script)) return [node, script]
+  }
+  return undefined
+}
+
+/**
+ * The command this process starts to run the CLI again at `entry`. A Windows npm install records itself as a bare
+ * `browse` shim, which child_process can't start without a shell: resolve the installed CLI through PATH first. If
+ * nothing installed resolves, use this process's script unless it is an npx copy or a source checkout; a compiled
+ * binary never falls back to itself. Other platforms keep the old behavior.
  */
 export function entrySpawnCommand(
   entry: string,
   node = process.execPath,
-  options: { platform?: NodeJS.Platform; running?: string; compiled?: boolean } = {},
+  options: EntrySpawnOptions = {},
 ): string[] {
   if (scriptEntry(entry)) return [node, entry]
-  if ((options.platform ?? process.platform) !== "win32" || !windowsShellShim(entry)) return [entry]
+  const pathModule = options.pathModule ?? path.win32
+  if ((options.platform ?? process.platform) !== "win32" || !windowsShellShim(entry, pathModule)) return [entry]
+  const resolved = resolveWindowsShim(entry, node, options)
+  if (resolved) return resolved
   const running = options.running ?? runningEntry()
-  if (options.compiled ?? compiledBinary()) return [running]
-  return scriptEntry(running) ? [node, running] : [entry]
+  const compiled = options.compiled ?? compiledBinary()
+  const checkout = options.checkout ?? fromCheckout()
+  return !compiled && !checkout && scriptEntry(running) && !npxEntry(running) ? [node, running] : [entry]
 }
 
 /** The executable a binary install put on PATH, when it is there. */

@@ -1,9 +1,24 @@
 import { describe, expect, test } from "bun:test"
-import { entryCommand, entrySpawnCommand } from "../src/paths.ts"
+import path from "node:path"
+import { entryCommand, entrySpawnCommand, type EntrySpawnOptions } from "../src/paths.ts"
 
 const node = "/usr/bin/node"
-const win = (entry: string, running: string, compiled = false) =>
-  entrySpawnCommand(entry, node, { platform: "win32", running, compiled })
+const winPath = path.win32
+
+const files = (...paths: string[]) => {
+  const known = new Set(paths.map((file) => winPath.normalize(file)))
+  return (file: string) => known.has(winPath.normalize(file))
+}
+
+const win = (entry: string, options: EntrySpawnOptions = {}) =>
+  entrySpawnCommand(entry, node, {
+    platform: "win32",
+    checkout: false,
+    pathModule: winPath,
+    env: { PATH: "" },
+    existsSync: () => false,
+    ...options,
+  })
 
 describe("entry commands", () => {
   test("runs a script entry under the same node", () => {
@@ -18,28 +33,51 @@ describe("entry commands", () => {
     expect(entrySpawnCommand("browse", node, { platform: "linux", running: "/opt/browse/dist/cli.mjs" })).toEqual(["browse"])
   })
 
-  test("uses the running script for npm's browse shim on Windows", () => {
-    // npm installs browse as browse.cmd (plus an extensionless sh shim); child_process can't run either without a shell.
-    const script = "C:\\Users\\me\\AppData\\Roaming\\npm\\node_modules\\@opencode\\browse\\dist\\cli.mjs"
-    expect(win("browse", script)).toEqual([node, script])
-    expect(win("browse.cmd", script)).toEqual([node, script])
-    expect(win(".\\browse.cmd", script)).toEqual([node, script])
-    expect(win("C:\\npm\\browse.cmd", script)).toEqual([node, script])
+  test("leaves a windows shim alone on linux", () => {
+    expect(entrySpawnCommand("browse.cmd", node, { platform: "linux" })).toEqual(["browse.cmd"])
   })
 
-  test("uses the compiled executable for a bare shim on Windows", () => {
-    expect(win("browse", "C:\\Users\\me\\.local\\bin\\browse.exe", true)).toEqual([
-      "C:\\Users\\me\\.local\\bin\\browse.exe",
-    ])
+  test("resolves npm's global shim to the installed cli, not the running npx copy", () => {
+    // npm puts browse.cmd and node_modules side by side in its global prefix; PATH may quote entries and leave gaps.
+    const prefix = "C:\\Users\\me\\AppData\\Roaming\\npm"
+    const installed = `${prefix}\\node_modules\\@opencode\\browse\\dist\\cli.mjs`
+    const running = "C:\\Users\\me\\AppData\\Local\\npm-cache\\_npx\\abc123\\node_modules\\@opencode\\browse\\dist\\cli.mjs"
+    expect(
+      win("browse", {
+        running,
+        env: { PATH: `C:\\empty;;"${prefix}";` },
+        existsSync: files(`${prefix}\\browse.cmd`, installed),
+      }),
+    ).toEqual([node, installed])
   })
 
-  test("runs an absolute Windows script or executable directly", () => {
-    expect(win("C:\\browse\\cli.mjs", "C:\\other\\cli.mjs")).toEqual([node, "C:\\browse\\cli.mjs"])
-    expect(win("C:\\browse\\browse.exe", "C:\\other\\browse.exe")).toEqual(["C:\\browse\\browse.exe"])
+  test("resolves a bare browse.exe on PATH to the executable", () => {
+    const executable = "C:\\tools\\browse.exe"
+    expect(win("browse", { env: { PATH: "C:\\tools" }, existsSync: files(executable) })).toEqual([executable])
   })
 
-  test("leaves agent configs on the entry they record", () => {
-    // Config files keep using the stored command; only a spawn has to work around Windows' shims.
-    expect(entryCommand("browse", "node")).toEqual(["browse"])
+  test("resolves a .cmd entry through its own folder", () => {
+    const prefix = "C:\\Users\\me\\AppData\\Roaming\\npm"
+    const shim = `${prefix}\\browse.cmd`
+    const script = `${prefix}\\node_modules\\@opencode\\browse\\dist\\cli.mjs`
+    expect(win(shim, { existsSync: files(shim, script) })).toEqual([node, script])
+  })
+
+  test("leaves a bare entry when nothing resolves and the running script is under _npx", () => {
+    const running = "C:\\Users\\me\\AppData\\Local\\npm-cache\\_npx\\abc123\\node_modules\\@opencode\\browse\\dist\\cli.mjs"
+    expect(win("browse", { running })).toEqual(["browse"])
+  })
+
+  test("does not fall back to a compiled binary's own executable", () => {
+    expect(win("browse", { compiled: true, running: "C:\\Users\\me\\Downloads\\browse.exe" })).toEqual(["browse"])
+  })
+
+  test("falls back to a running script outside npx and checkouts", () => {
+    const running = "C:\\Users\\me\\AppData\\Roaming\\npm\\node_modules\\@opencode\\browse\\dist\\cli.mjs"
+    expect(win("browse", { running })).toEqual([node, running])
+  })
+
+  test("does not fall back to a checkout's running script", () => {
+    expect(win("browse", { running: "/checkout/cli/dist/cli.mjs", checkout: true })).toEqual(["browse"])
   })
 })
