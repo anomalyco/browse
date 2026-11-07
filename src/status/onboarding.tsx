@@ -425,7 +425,7 @@ function AgentStep(props: {
                   : pair().reason === "refused"
                     ? `${capitalized(here(pair().remote))} refused this browser's pairing: it was unpaired there, or that relay is a new install.`
                     : `browse found ${here(pair().remote)}, but this browser isn't paired with it yet.`}{" "}
-                {pair().remote ? "" : "Run install again: it pairs by itself."}
+                {pair().remote ? "" : "Run install again: it pairs by itself, or prints a code to enter below."}
               </Note>
               <CodeForm
                 relay={props.relay}

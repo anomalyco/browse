@@ -252,6 +252,13 @@ describe("install with the extension", () => {
     expect(output).not.toContain("Agents can use browse now")
   })
 
+  test("a browser that contacted the relay without a token is installed, so the store step is skipped", () => {
+    const { outcome, calls, output } = run({ unpaired: true, detections: [], preferred: undefined })
+    expect(outcome).toBe("ready")
+    expect(calls).toEqual({ open: [], reveal: [], copy: [] })
+    expect(output).toBe("")
+  })
+
   test("a turned-off extension is reported, not reinstalled", () => {
     const match = { browser: chrome, profile: { dir: "Default", name: "Person 1" }, id: "afeafocngkodbmaipcngoamamfmekgfo" }
     const { outcome, calls, output } = run({ detections: [{ ...none(chrome), disabled: [match] }] })
