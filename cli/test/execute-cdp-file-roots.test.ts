@@ -405,3 +405,41 @@ describe("function arguments with file options", () => {
     expect(() => checkHostCall(route, {}, ["**/*", callback])).toThrow(/path/)
   })
 })
+
+describe("client certificates", () => {
+  test("a stateful Proxy function item is refused before the host", async () => {
+    const received: unknown[] = []
+    const newContext = (options: unknown) => { received.push(options); return "ok" }
+    const result = await run(`
+      const cert = new Proxy(function () {}, {
+        has: () => false,
+        get: (target, key) => key === "certPath" ? "/etc/realm-denied" : undefined,
+      });
+      try { await host.newContext({ clientCertificates: [cert] }); return "allowed" }
+      catch (error) { return error.message }
+    `, { newContext })
+    expect(result).toMatch(/plain objects/)
+    expect(received).toEqual([])
+  })
+
+  test("cert paths are checked inside plain certificate entries", () => {
+    function newContext() {}
+    const files = createExecuteFiles()
+    expect(() => checkHostCall(newContext, {}, [{ clientCertificates: [{ origin: "https://example.com", certPath: "/etc/realm-denied" }] }])).toThrow(/outside the execute file roots/)
+    const inside = files.path("cert.pem")
+    expect(() => checkHostCall(newContext, {}, [{ clientCertificates: [{ origin: "https://example.com", certPath: inside }] }])).not.toThrow()
+  })
+
+  test("certificate entries must be plain data objects", () => {
+    function newContext() {}
+    const accessor: Record<string, unknown> = { origin: "https://example.com" }
+    Object.defineProperty(accessor, "certPath", { get: () => "/etc/realm-denied", enumerable: true })
+    expect(() => checkHostCall(newContext, {}, [{ clientCertificates: [accessor] }])).toThrow(/data properties/)
+    class Certificate {
+      readonly origin = "https://example.com"
+    }
+    expect(() => checkHostCall(newContext, {}, [{ clientCertificates: [new Certificate()] }])).toThrow(/plain objects/)
+    expect(() => checkHostCall(newContext, {}, [{ clientCertificates: [() => {}] }])).toThrow(/plain objects/)
+    expect(() => checkHostCall(newContext, {}, [{ clientCertificates: [new Proxy({ origin: "https://example.com" }, {})] }])).toThrow(/plain objects/)
+  })
+})
