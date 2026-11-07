@@ -367,9 +367,12 @@ export function startManagedRelay(
 }
 
 // The relay runs agent code and child commands; it gets only what it needs to run, never the MCP client's API keys.
+// Every XDG variable paths.ts reads must be here, or the relay resolves its files under a different root than the CLI
+// that started it (a pairing code written under a custom state root would never reach the relay).
 const relayEnvironmentNames = new Set([
   "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TEMP", "TMP", "LANG", "LANGUAGE", "TZ",
-  "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "DISPLAY", "WAYLAND_DISPLAY",
+  "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_BIN_HOME", "XDG_RUNTIME_DIR",
+  "DISPLAY", "WAYLAND_DISPLAY",
   // Networking for secrets_run children (and the relay's own requests): proxies and extra CA certificates. Names
   // are compared uppercased, so http_proxy and friends pass too.
   "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
