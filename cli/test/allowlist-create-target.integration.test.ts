@@ -108,6 +108,13 @@ async function untilTargetUrl(socket: WebSocket, targetId: string, expected: str
   return false
 }
 
+/** The relay's own line for a tab's violation; `popup=false` means it blanked the tab instead of closing it. */
+function violationLog(tabId: number) {
+  return fs.readFileSync(path.join(home, "logs/relay.log"), "utf8")
+    .split("\n")
+    .find((line) => line.includes("allowlist.violation") && line.includes(`tabId=${tabId}`))
+}
+
 test("Target.createTarget in an allowlisted session creates at about:blank, attaches, then navigates", async () => {
   const scene = await createScene("guarded-create", 201, "TARGET-201")
   try {
@@ -178,6 +185,7 @@ test("a disallowed committed URL found after attach is sent back to about:blank,
     expect(await until(() => scene.state.navigations.includes("about:blank"))).toBe(true)
     expect(scene.state.navigations).toEqual(["https://127.0.0.1:8443/start", "about:blank"])
     expect(scene.state.removed).toBe(false)
+    expect(violationLog(205)).toContain("popup=false")
     // The disallowed URL was never published through the registry.
     expect((await getTargets(scene.socket, 2)).find((target) => target.targetId === "TARGET-205")?.url).toBe("about:blank")
   } finally {
@@ -203,6 +211,7 @@ test("a disallowed Page.frameNavigated during the navigation is sent back to abo
     expect(await until(() => scene.state.navigations.includes("about:blank"))).toBe(true)
     expect(scene.state.navigations.filter((url) => url === "about:blank")).toHaveLength(1)
     expect(scene.state.removed).toBe(false)
+    expect(violationLog(206)).toContain("popup=false")
     // The disallowed commit was not published as the target's URL.
     expect(await untilTargetUrl(scene.socket, "TARGET-206", "about:blank")).toBe(true)
   } finally {
