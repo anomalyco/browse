@@ -2,6 +2,18 @@ import { isJsonObject, type JsonObject } from "../../agent-relay/protocol"
 import { DebuggerHub } from "../debugger-hub"
 import { FOREIGN_FRAME, number, sleep, string, text, type AgentRelayLog } from "./wire"
 
+// about:blank with a fragment crashes Chrome and Vivaldi when navigated through CDP; the fragment means nothing on
+// about:blank, so send plain about:blank instead. The current page isn't checked, and url spelling varies.
+function aboutBlankNavigation(url: string): string {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol === "about:" && parsed.pathname.toLowerCase() === "blank" && parsed.search === "" && url.includes("#")) return "about:blank"
+  } catch {
+    // Not a URL: leave it for Chrome to reject.
+  }
+  return url
+}
+
 export function createRelayDebugger(deps: {
   readonly log: AgentRelayLog
   readonly relayTabs: Set<number>
@@ -40,11 +52,8 @@ export function createRelayDebugger(deps: {
     const method = string(params, "method")
     const sessionId = typeof params?.sessionId === "string" ? params.sessionId : undefined
     const cdpParams = isJsonObject(params?.params) ? params.params : undefined
-    // Navigating from about:blank to about:blank#… crashes Chrome and Vivaldi; the fragment means nothing there.
-    const sendParams =
-      method === "Page.navigate" && typeof cdpParams?.url === "string" && cdpParams.url.startsWith("about:blank#")
-        ? { ...cdpParams, url: "about:blank" }
-        : cdpParams
+    const navigateUrl = method === "Page.navigate" && typeof cdpParams?.url === "string" ? aboutBlankNavigation(cdpParams.url) : undefined
+    const sendParams = navigateUrl !== undefined && navigateUrl !== cdpParams?.url ? { ...cdpParams, url: navigateUrl } : cdpParams
     const debuggee = sessionId ? { tabId, sessionId } : { tabId }
     const call = async () => {
       const result = await chrome.debugger.sendCommand(debuggee, method, sendParams)
@@ -66,9 +75,9 @@ export function createRelayDebugger(deps: {
         }
       }
       // The page keeps a frame the debugger cannot get past; navigating without it still works.
-      if (sessionId === undefined && method === "Page.navigate" && typeof cdpParams?.url === "string") {
+      if (sessionId === undefined && method === "Page.navigate" && navigateUrl !== undefined) {
         deps.log.add("cdp.navigateFallback", { tabId })
-        await chrome.tabs.update(tabId, { url: cdpParams.url })
+        await chrome.tabs.update(tabId, { url: navigateUrl })
         return { frameId: String(tabId) }
       }
       throw error

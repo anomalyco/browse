@@ -26,6 +26,7 @@ import {
   defaultPort,
   formatHostForUrl,
   getNumber,
+  getTargetInfo,
   listenHttpServer,
   logCloseError,
   sendCdpEvent,
@@ -451,16 +452,28 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     readonly autoAttachParams?: JsonObject
   }) {
     const link = yield* sessionBrowser(createOptions.opencodeBrowserSessionId)
-    const result = yield* sendToExtension({ method: "tabs.create", params: { url: createOptions.url, active: createOptions.active, ...(agentWindow ? { window: agentWindow } : {}) } }, link)
+    // Create the tab blank and navigate only after attaching: the navigation guard then sees the real load (a tab
+    // created at the URL would load it before any debugger was attached), and Vivaldi never has to answer commands
+    // on a tab that is still loading.
+    const result = yield* sendToExtension({ method: "tabs.create", params: { url: "about:blank", active: createOptions.active, ...(agentWindow ? { window: agentWindow } : {}) } }, link)
     const tabId = getNumber(result, "tabId")
     if (!tabId) return yield* Effect.fail(new Error("tabs.create did not return a tabId"))
     announceTab(tabId)
-    return yield* rootLifecycle.attach({
+    const target = yield* rootLifecycle.attach({
       tabId,
       owner: "relay",
       ...(createOptions.opencodeBrowserSessionId ? { opencodeBrowserSessionId: createOptions.opencodeBrowserSessionId } : {}),
       ...(createOptions.autoAttachParams ? { autoAttachParams: createOptions.autoAttachParams } : {}),
     })
+    // A new relay tab is checked like a freshly attached popup: a disallowed first document closes it.
+    navigationGuard.popupAttached(target)
+    if (createOptions.url === "about:blank") return target
+    yield* sendDebuggerCommand({ tabId, method: "Page.navigate", params: { url: createOptions.url } })
+    // Defense in depth: check where the tab actually ended up, in case its load beat the guard's events.
+    const current = yield* sendDebuggerCommand({ tabId, method: "Target.getTargetInfo", params: {} }).pipe(Effect.orElseSucceed((): JsonObject => ({})))
+    const targetInfo = getTargetInfo(current.targetInfo)
+    if (targetInfo) navigationGuard.popupAttached({ ...target, targetInfo })
+    return target
   })
 
   const closeTargetByTargetId = Effect.fnUntraced(function* (targetId: string) {
