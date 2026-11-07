@@ -310,7 +310,7 @@ export async function set(args: string[]) {
   log(
     "In the browser on the other computer, open browse's options (right-click its toolbar button, then Options),",
   )
-  log("and under Connection enter:")
+  log("and under advanced enter:")
   log(`  Relay         ${tailscale ?? "this computer's address"}`)
   log(
     `  Pairing code  ${formatPairingCode(mintPairingCode())}  (works once, within ${pairingCodeTtlMs / 60_000} minutes; \`${cliCommand("pair")}\` prints another)`,

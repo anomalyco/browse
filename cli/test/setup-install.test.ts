@@ -342,7 +342,8 @@ describe("pairing the store build", () => {
     const { outcome, opened, output } = pair([{ ...none(chrome), enabled: [{ browser: chrome, profile, id: storeId }] }], { allowOpen: false })
     expect(outcome).toBe("manual")
     expect(opened).toEqual([])
-    expect(output).toContain("click Pair.")
+    expect(output).toContain("expand advanced (or click Pair with a code)")
+    expect(output).toContain("click Connect.")
   })
 })
 

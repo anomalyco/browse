@@ -66,7 +66,8 @@ https://anoma.ly/release/browse/cli/dev/<target>.
 There's nothing to sign in to. Each browser pairs with the relay once and gets a key of its own (see
 [Security](#security)). If pairing didn't happen by itself, run `browse install` again to open a
 pairing link. To pair by hand, run `browse pair` (from a checkout: `node cli/dist/cli.mjs pair`).
-It starts the relay and waits. Open **Extensions → browse → Options**, enter the printed code, and click **Pair**.
+It starts the relay and waits. Open **Extensions → browse → Options**, expand **advanced** (or click **Pair with a code**),
+enter the printed code under **Pairing code**, and click **Connect**.
 The command confirms which browser paired. `pair --list` shows paired browsers; `pair --revoke <browser>` unpairs one.
 
 ### From source
@@ -167,7 +168,7 @@ and the extension connects to it across the network:
    the HTTP API and CDP answer on `127.0.0.1` only. The command prints the address and a pairing code for step 2
    (`browse pair` prints another; each works once, within 10 minutes).
 2. In the browser, open the extension's settings page (right-click the toolbar button, then **Options**). Under
-   **Connection**, replace `localhost:19988` in **Relay address** with that machine's address (a Tailscale IP or name, with
+   **advanced**, replace `localhost:19988` in **Relay address** with that machine's address (a Tailscale IP or name, with
    `:port` if it isn't 19988), enter the code under **Pairing code**, then click **Connect**. The page says right there
    whether the relay answered and accepted the code.
 
