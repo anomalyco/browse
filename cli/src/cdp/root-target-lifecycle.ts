@@ -313,9 +313,11 @@ export class RootTargetLifecycle {
     const { tabId } = transition
     if (!options.alreadyAttached) yield* this.step(transition, this.options.extension.send({ method: "debugger.attach", params: { tabId } }))
     yield* this.command(transition, "Page.enable")
-    yield* Effect.gen({ self: this }, function* () {
-      yield* this.command(transition, "Emulation.setFocusEmulationEnabled", { enabled: false })
-    }).pipe(Effect.ignore)
+    // Ignore what the tab says about focus emulation, except silence: a timeout here must fail the attach now, not
+    // swallow one timeout and pay another on the next command (two timeouts outlast a relay restart's own timeout).
+    yield* this.command(transition, "Emulation.setFocusEmulationEnabled", { enabled: false }).pipe(
+      Effect.catchIf((error) => !(error instanceof RootTargetTimeout), () => Effect.void),
+    )
     yield* this.check(transition)
     const result = yield* this.command(transition, "Target.getTargetInfo")
     const reportedTargetInfo = getTargetInfo(result.targetInfo)
