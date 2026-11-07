@@ -1,12 +1,22 @@
 import util from "node:util"
 import { ExecuteFileAccessError } from "./errors.ts"
 
-function checkDropFiles(value: unknown, checkFile: (target: string, operation: string) => string): unknown {
+/** The `{ name, mimeType, buffer }` objects drop accepts as in-memory files. */
+function isFilePayload(value: unknown): boolean {
+  if (value === null || typeof value !== "object" || Array.isArray(value) || util.types.isProxy(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+function checkDropFile(value: unknown, checkFile: (target: string, operation: string) => string): unknown {
   if (typeof value === "string") return checkFile(value, "drop")
-  if (Array.isArray(value)) {
-    return value.map((item) => typeof item === "string" ? checkFile(item, "drop") : item)
-  }
-  return value
+  if (isFilePayload(value)) return value
+  throw new ExecuteFileAccessError("drop: files must be strings or file payload objects")
+}
+
+function checkDropFiles(value: unknown, checkFile: (target: string, operation: string) => string): unknown {
+  if (Array.isArray(value)) return value.map((item) => checkDropFile(item, checkFile))
+  return checkDropFile(value, checkFile)
 }
 
 /** Validate a drop payload and return a fresh shallow plain copy with checked file paths. */

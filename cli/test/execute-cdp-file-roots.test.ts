@@ -441,5 +441,74 @@ describe("client certificates", () => {
     expect(() => checkHostCall(newContext, {}, [{ clientCertificates: [new Certificate()] }])).toThrow(/plain objects/)
     expect(() => checkHostCall(newContext, {}, [{ clientCertificates: [() => {}] }])).toThrow(/plain objects/)
     expect(() => checkHostCall(newContext, {}, [{ clientCertificates: [new Proxy({ origin: "https://example.com" }, {})] }])).toThrow(/plain objects/)
+    const indexed: unknown[] = []
+    Object.defineProperty(indexed, 0, { get: () => ({ origin: "https://example.com" }), enumerable: true })
+    expect(() => checkHostCall(newContext, {}, [{ clientCertificates: indexed }])).toThrow(/data properties/)
+  })
+
+  test("undefined client certificates and undefined cert paths are allowed", () => {
+    function newContext() {}
+    expect(() => checkHostCall(newContext, {}, [{ clientCertificates: undefined }])).not.toThrow()
+    expect(() => checkHostCall(newContext, {}, [{
+      clientCertificates: [{
+        origin: "https://example.com",
+        cert: Buffer.from("cert"),
+        key: Buffer.from("key"),
+        certPath: undefined,
+        keyPath: undefined,
+      }],
+    }])).not.toThrow()
+  })
+
+  test("clientCertificates in unrelated data is left alone", () => {
+    function evaluate() {}
+    expect(() => checkHostCall(evaluate, {}, [() => 1, { clientCertificates: null }])).not.toThrow()
+  })
+})
+
+describe("path-like values", () => {
+  test("route.fulfill refuses Buffer and file URL paths before the host", async () => {
+    const received: unknown[] = []
+    const fulfill = (options: unknown) => { received.push(options); return "ok" }
+    const result = await run(`
+      const failures = [];
+      for (const path of [Buffer.from("/etc/hosts"), new URL("file:///etc/hosts")]) {
+        try { await host.fulfill({ path }); failures.push("allowed") } catch (error) { failures.push(error.message) }
+      }
+      return failures;
+    `, { fulfill })
+    expect(result).toEqual([
+      "fulfill: path must be a path string",
+      "fulfill: path must be a path string",
+    ])
+    expect(received).toEqual([])
+  })
+
+  test("string paths still work, and other input APIs refuse PathLike values", () => {
+    function screenshot() {}
+    function screenshotDiff() {}
+    function setInputFiles() {}
+    function saveAs() {}
+    function setStorageState() {}
+    function drop() {}
+    const files = createExecuteFiles()
+    expect(() => checkHostCall(screenshot, {}, [{ path: files.path("shot.png") }])).not.toThrow()
+    expect(() => checkHostCall(screenshotDiff, {}, [{ baseline: Buffer.from("png") }])).not.toThrow()
+    expect(() => checkHostCall(setInputFiles, {}, [Buffer.from("/etc/hosts")])).toThrow(/strings or file payload objects/)
+    expect(() => checkHostCall(setInputFiles, {}, [new URL("file:///etc/hosts")])).toThrow(/strings or file payload objects/)
+    expect(() => checkHostCall(setInputFiles, {}, [{ name: "a.txt", mimeType: "text/plain", buffer: Buffer.from("a") }])).not.toThrow()
+    expect(() => checkHostCall(saveAs, {}, [Buffer.from("/etc/hosts")])).toThrow(/file paths must be strings/)
+    expect(() => checkHostCall(setStorageState, {}, [Buffer.from("/etc/hosts")])).toThrow(/storage state/)
+    expect(() => checkHostCall(drop, {}, [{ files: [Buffer.from("/etc/hosts")] }])).toThrow(/strings or file payload objects/)
+    expect(() => checkHostCall(drop, {}, [{ files: { name: "a.txt", mimeType: "text/plain", buffer: Buffer.from("a") } }])).not.toThrow()
+  })
+
+  test("inline storage state allows cookie paths and refuses PathLike values", () => {
+    function newContext() {}
+    expect(() => checkHostCall(newContext, {}, [{
+      storageState: { cookies: [{ name: "a", value: "b", domain: "example.com", path: "/" }], origins: [] },
+    }])).not.toThrow()
+    expect(() => checkHostCall(newContext, {}, [{ storageState: Buffer.from("/etc/hosts") }])).toThrow(/storageState/)
+    expect(() => checkHostCall(newContext, {}, [{ storageState: new URL("file:///etc/hosts") }])).toThrow(/storageState/)
   })
 })

@@ -1,5 +1,6 @@
 import fs from "node:fs"
 import path from "node:path"
+import util from "node:util"
 import { ExecuteFileAccessError } from "./errors.ts"
 
 /** Most entries all folder uploads in one setInputFiles/setFiles call may contain before refusal. */
@@ -51,6 +52,13 @@ export function checkDirectoryUpload(
   }
 }
 
+/** The `{ name, mimeType, buffer }` objects setInputFiles accepts as in-memory files. */
+function isFilePayload(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value) || util.types.isProxy(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
 /** Validate and rewrite the file paths in a setInputFiles/setFiles payload, walking directories. */
 export function checkFileInputValue(
   value: unknown,
@@ -64,7 +72,11 @@ export function checkFileInputValue(
     checkDirectoryUpload(resolved, method, checkEntry, budget)
     return resolved
   }
-  if (typeof value === "string") return check(value)
-  if (Array.isArray(value)) return value.map((item) => typeof item === "string" ? check(item) : item)
-  return value
+  const checkValue = (item: unknown): unknown => {
+    if (typeof item === "string") return check(item)
+    if (isFilePayload(item)) return item
+    throw new ExecuteFileAccessError(`${method}: file inputs must be strings or file payload objects`)
+  }
+  if (Array.isArray(value)) return value.map(checkValue)
+  return checkValue(value)
 }

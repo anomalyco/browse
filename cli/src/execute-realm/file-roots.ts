@@ -13,7 +13,7 @@ import { checkCdpSend, copyCdpParameters, isCdpMethodName, isCdpSession } from "
 import { checkFileInputValue } from "./directory-uploads.ts"
 import { checkDropPayload } from "./drop-payload.ts"
 import { ExecuteFileAccessError } from "./errors.ts"
-import { checkFileOptions, fileOptionMethods } from "./file-options.ts"
+import { checkFileOptions, checkFileStrings, fileOptionMethods, isPlainRecord } from "./file-options.ts"
 import { cacheRoot, configRoot, dataRoot, defaultRoots, installedBinaryPath, installerBinaryPath, stateRoot } from "../paths.ts"
 import { legacyRoots } from "../setup/legacy.ts"
 
@@ -661,12 +661,6 @@ export function completeExecuteFileOutputs(result: unknown, prepared: PreparedEx
   )
 }
 
-function checkFileStrings(value: unknown, method: string): string | undefined {
-  if (typeof value === "string") return assertExecuteFilePath(value, method)
-  if (Array.isArray(value)) for (const item of value) if (typeof item === "string") assertExecuteFilePath(item, method)
-  return undefined
-}
-
 // Raw CDP file parameters are checked in ./cdp-send.ts before Playwright's transport sees them.
 const promiseReturningNames = new Set([...fileOptionMethods, "setInputFiles", "setFiles", "saveAs", "bringToFront"])
 
@@ -734,13 +728,17 @@ export function checkHostCall(fn: Function, receiver: unknown, args: readonly un
       setArgument(0, checkDropPayload(payload, assertExecuteFileInputPath))
     }
   } else if (name === "setStorageState") {
-    if (typeof args[0] === "string") setArgument(0, assertExecuteFilePathNotRoot(args[0], name))
+    const value = args[0]
+    if (typeof value === "string") setArgument(0, assertExecuteFilePathNotRoot(value, name))
+    else if (value !== undefined && value !== null && !isPlainRecord(value)) {
+      throw new ExecuteFileAccessError(`${name}: storage state must be a path string or a plain object`)
+    }
   } else if (name === "saveAs") {
     // download.saveAs(path) and video.saveAs(path) copy the artifact to a new file, parents included.
-    const target = checkFileStrings(args[0], name)
+    const target = checkFileStrings(args[0], name, assertExecuteFilePath)
     if (target !== undefined) candidates.push({ path: target })
   } else if (name === "routeFromHAR") {
-    checkFileStrings(args[0], name)
+    checkFileStrings(args[0], name, assertExecuteFilePath)
   }
   const includeMethodKeys = fileOptionMethods.has(name)
   for (const arg of args) checkFileOptions(arg, name || "call", includeMethodKeys, candidates, assertExecuteFilePath)

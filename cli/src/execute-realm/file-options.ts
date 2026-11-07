@@ -1,3 +1,4 @@
+import buffer from "node:buffer"
 import util from "node:util"
 import { ExecuteFileAccessError } from "./errors.ts"
 
@@ -31,12 +32,37 @@ export type FileOutputCandidate = { readonly path: string }
 
 const clientCertificatePathKeys = new Set(["certPath", "keyPath", "pfxPath"])
 
-/** Client certificates are read property by property later, so only plain data entries are safe. */
-function checkClientCertificates(value: unknown, method: string): void {
+/** A non-Proxy plain object, the only container shape Playwright options are allowed to use. */
+export function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value) || util.types.isProxy(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+/**
+ * Client certificates are read property by property later, so copy the array and require every
+ * item to be a plain object with own data properties. Index getters or a later-mutated array can
+ * otherwise hand Patchright a different item than the one checked here.
+ */
+function checkClientCertificates(value: unknown, method: string): unknown[] {
   if (!Array.isArray(value) || util.types.isProxy(value)) {
     throw new ExecuteFileAccessError(`${method}: clientCertificates must be an array of plain objects`)
   }
-  for (const item of value) {
+  const copy = new Array<unknown>(value.length)
+  let count = 0
+  for (const key of Reflect.ownKeys(value)) {
+    if (key === "length" || typeof key !== "string" || !/^(0|[1-9]\d*)$/.test(key)) continue
+    const index = Number(key)
+    if (index >= value.length) continue
+    const descriptor = Reflect.getOwnPropertyDescriptor(value, key)!
+    if (!("value" in descriptor)) {
+      throw new ExecuteFileAccessError(`${method}: clientCertificates entries must be own data properties`)
+    }
+    copy[index] = descriptor.value
+    count += 1
+  }
+  if (count !== value.length) throw new ExecuteFileAccessError(`${method}: clientCertificates must be a dense array`)
+  for (const item of copy) {
     if (item === null || typeof item !== "object" || Array.isArray(item) || util.types.isProxy(item)) {
       throw new ExecuteFileAccessError(`${method}: clientCertificates entries must be plain objects`)
     }
@@ -50,11 +76,34 @@ function checkClientCertificates(value: unknown, method: string): void {
       if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
         throw new ExecuteFileAccessError(`${method}: clientCertificates entries must have own enumerable data properties`)
       }
-      if (clientCertificatePathKeys.has(key) && typeof descriptor.value !== "string") {
-        throw new ExecuteFileAccessError(`${method}: clientCertificates ${key} must be a string`)
+      if (clientCertificatePathKeys.has(key)) {
+        const path = descriptor.value
+        if (path !== undefined && path !== null && typeof path !== "string") {
+          throw new ExecuteFileAccessError(`${method}: clientCertificates ${key} must be a string`)
+        }
       }
     }
   }
+  return copy
+}
+
+/** Validate the file paths in a saveAs/routeFromHAR-style argument. */
+export function checkFileStrings(
+  value: unknown,
+  method: string,
+  checkPath: (target: string, operation: string) => string,
+): string | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value === "string") return checkPath(value, method)
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (item === undefined || item === null) continue
+      if (typeof item !== "string") throw new ExecuteFileAccessError(`${method}: file paths must be strings`)
+      checkPath(item, method)
+    }
+    return undefined
+  }
+  throw new ExecuteFileAccessError(`${method}: file paths must be strings`)
 }
 
 /**
@@ -91,15 +140,29 @@ export function checkFileOptions(
   // Option bags are plain objects; Playwright objects passed as arguments (a page, a locator) are not options.
   const prototype = Object.getPrototypeOf(value)
   if (prototype !== Object.prototype && prototype !== null) return
-  for (const [key, item] of Object.entries(value)) {
-    if (key === "clientCertificates") checkClientCertificates(item, method)
-    if (forbiddenOptionKeys.has(key)) throw new ExecuteFileAccessError(`${method}: the ${key} option is not available in execute code`)
-    if (typeof item === "string" && (alwaysFileOptionKeys.has(key) || (includeMethodKeys && fileOptionKeys.has(key)))) {
-      const resolved = checkPath(item, `${method}({ ${key} })`)
-      if (depth === 0 && isFileOutputOption(method, key)) candidates.push({ path: resolved })
-      Reflect.set(value, key, resolved)
-    } else {
-      checkFileOptions(item, method, includeMethodKeys, candidates, checkPath, depth + 1)
+  for (const [key, entry] of Object.entries(value)) {
+    let item = entry
+    if (key === "clientCertificates" && includeMethodKeys && depth === 0 && item !== undefined && item !== null) {
+      item = checkClientCertificates(item, method)
+      if (!Reflect.set(value, key, item)) throw new ExecuteFileAccessError(`${method}: could not store clientCertificates`)
     }
+    if (forbiddenOptionKeys.has(key)) throw new ExecuteFileAccessError(`${method}: the ${key} option is not available in execute code`)
+    if (alwaysFileOptionKeys.has(key) || (includeMethodKeys && fileOptionKeys.has(key))) {
+      if (item === undefined || item === null) continue
+      if (typeof item === "string") {
+        const resolved = checkPath(item, `${method}({ ${key} })`)
+        if (depth === 0 && isFileOutputOption(method, key)) candidates.push({ path: resolved })
+        Reflect.set(value, key, resolved)
+        continue
+      }
+      if (key === "baseline" && buffer.Buffer.isBuffer(item)) continue
+      if (key === "storageState" && isPlainRecord(item)) {
+        checkFileOptions(item, method, false, candidates, checkPath, depth + 1)
+        continue
+      }
+      const allowed = key === "storageState" ? "a path string or inline state object" : key === "baseline" ? "a path string or Buffer" : "a path string"
+      throw new ExecuteFileAccessError(`${method}: ${key} must be ${allowed}`)
+    }
+    checkFileOptions(item, method, includeMethodKeys, candidates, checkPath, depth + 1)
   }
 }
