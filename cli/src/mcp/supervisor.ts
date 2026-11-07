@@ -9,7 +9,7 @@ import type { Readable, Writable } from "node:stream"
 import { existsSync, statSync } from "node:fs"
 import path from "node:path"
 import { createInterface } from "node:readline"
-import { entryCommand } from "../paths.ts"
+import { entrySpawnCommand } from "../paths.ts"
 import { installedRuntime, installedVersion, type Runtime } from "../update/auto-update.ts"
 
 /** Set for the server a supervisor starts, so it serves instead of supervising again. */
@@ -87,7 +87,7 @@ export async function runBinaryMcp(args: readonly string[]) {
   }
 
   const start = (replay: boolean) => {
-    const [file, ...prefix] = entryCommand(command())
+    const [file, ...prefix] = entrySpawnCommand(command())
     const next = spawn(file!, [...prefix, "mcp", ...args], { stdio: ["pipe", "pipe", "inherit"], env: { ...process.env, [directEnvironmentVariable]: "1" } })
     // A server that exits mid-write (an old one being replaced) must not take the supervisor down with EPIPE.
     next.stdin.on("error", () => {})

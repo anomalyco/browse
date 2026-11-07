@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import path from "node:path"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
 import { runCommand, installedVersion } from "../update/auto-update.ts"
-import { cliCommand, compiledBinary, entryCommand, scriptEntry } from "../paths.ts"
+import { cliCommand, compiledBinary, entryCommand, entrySpawnCommand, scriptEntry } from "../paths.ts"
 import { opencodeBrowserVersion } from "../version.ts"
 import { installBinaryRuntime } from "./binary.ts"
 import { browsers } from "./browsers.ts"
@@ -54,7 +54,7 @@ function fingerprint(entry: string) {
  * so and how to restart it later.
  */
 export function restartOutdatedRelay(entry: string): string[] | undefined {
-  const [file, ...prefix] = entryCommand(entry)
+  const [file, ...prefix] = entrySpawnCommand(entry)
   const status = spawnSync(file!, [...prefix, "status", "--json"], { encoding: "utf8", timeout: 15_000 })
   if (!/"stale":\s*true/.test(status.stdout ?? "")) return undefined
   const restart = spawnSync(file!, [...prefix, "relay", "restart"], { encoding: "utf8", timeout: 60_000 })
@@ -251,7 +251,10 @@ export function installedRuntime(settings: Settings | undefined, server: Servers
   const source = scriptEntry(entry) && existsSync(path.join(packageDir, "src", "main.ts"))
   // The installed path reports its own version after an update, even when settings.json still has the old one.
   const onDisk = entry === "browse"
-    ? spawnSync("browse", ["--version"], { encoding: "utf8", timeout: 15_000 }).stdout?.trim() || undefined
+    ? (() => {
+        const [file, ...prefix] = entrySpawnCommand(entry)
+        return spawnSync(file!, [...prefix, "--version"], { encoding: "utf8", timeout: 15_000 }).stdout?.trim() || undefined
+      })()
     : existsSync(entry)
       ? installedVersion({ kind: scriptEntry(entry) ? "npm" : "binary", entry, version: settings?.version ?? opencodeBrowserVersion })
       : undefined

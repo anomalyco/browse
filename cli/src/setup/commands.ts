@@ -17,7 +17,7 @@ import {
   writeExtensionPairing,
 } from "../relay/browser-pairing.ts"
 import { syncDevExtension } from "./dev-extension.ts"
-import { cliCommand, compiledBinary, defaultSettingsPath, devExtensionFolder, entryCommand, installedBinaryPath, installerBinaryPath, installCommand, runningEntry } from "../paths.ts"
+import { cliCommand, compiledBinary, defaultSettingsPath, devExtensionFolder, entrySpawnCommand, installedBinaryPath, installerBinaryPath, installCommand, runningEntry } from "../paths.ts"
 import { runCommand } from "../update/auto-update.ts"
 import { unpackedExtensionId } from "../protocol.ts"
 import { parseHostname, readRelayConfig, writeRelayConfig } from "../relay/config.ts"
@@ -67,7 +67,7 @@ const relayHeaders = (): Record<string, string> => {
 }
 
 export function ensureRelay(entry: string) {
-  const [file, ...prefix] = entryCommand(entry)
+  const [file, ...prefix] = entrySpawnCommand(entry)
   const started = spawnSync(file!, [...prefix, "session", "list", "--json"], {
     encoding: "utf8",
     timeout: 30_000,
@@ -296,7 +296,7 @@ export async function set(args: string[]) {
     () => false,
   )
   if (running) {
-    const [file, ...prefix] = entryCommand(runningEntry())
+    const [file, ...prefix] = entrySpawnCommand(runningEntry())
     const restarted = spawnSync(file!, [...prefix, "relay", "restart"], { stdio: "inherit" })
     if (restarted.status !== 0)
       log(`! The relay is still running with the old hostname. Run \`${cliCommand("relay restart --force")}\` to apply it.`)

@@ -104,6 +104,27 @@ export const scriptEntry = (entry: string) => /\.[cm]?[jt]s$/.test(entry)
 /** The command that runs the CLI at `entry`: `<node> <entry>` for a script, the executable itself otherwise. */
 export const entryCommand = (entry: string, node = process.execPath): string[] => (scriptEntry(entry) ? [node, entry] : [entry])
 
+/** What Node can't start on Windows without a shell: a bare command name, or a .cmd/.bat shim. */
+const windowsShellShim = (entry: string) =>
+  /\.(cmd|bat)$/i.test(entry) || (!path.isAbsolute(entry) && !/[\\/]/.test(entry))
+
+/**
+ * The command this process starts to run the CLI again at `entry`. npm records its global install as the bare name
+ * `browse`; on Windows that is browse.cmd plus an extensionless sh shim, and child_process can't start either without a
+ * shell, so use the entry this process already runs: its script under the same node, or a compiled binary's executable.
+ */
+export function entrySpawnCommand(
+  entry: string,
+  node = process.execPath,
+  options: { platform?: NodeJS.Platform; running?: string; compiled?: boolean } = {},
+): string[] {
+  if (scriptEntry(entry)) return [node, entry]
+  if ((options.platform ?? process.platform) !== "win32" || !windowsShellShim(entry)) return [entry]
+  const running = options.running ?? runningEntry()
+  if (options.compiled ?? compiledBinary()) return [running]
+  return scriptEntry(running) ? [node, running] : [entry]
+}
+
 /** The executable a binary install put on PATH, when it is there. */
 export function installedBinary(): string | undefined {
   const binary = installedBinaryPath()

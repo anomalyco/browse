@@ -5,7 +5,7 @@ import { networkInterfaces } from "node:os"
 import * as clack from "@clack/prompts"
 import { formatPairingCode, mintPairingCode, pairingCodeTtlMs } from "../relay/browser-pairing.ts"
 import { readRelayConfig, writeRelayConfig } from "../relay/config.ts"
-import { cliCommand, entryCommand } from "../paths.ts"
+import { cliCommand, entrySpawnCommand } from "../paths.ts"
 import { parseJson } from "./browsers.ts"
 import { ensureRelay, relayBase } from "./commands.ts"
 import { findOnPath, log, rail } from "./environment.ts"
@@ -67,7 +67,7 @@ export async function installRemote(entry: string, tty: boolean) {
       (response) => response.ok,
       () => false,
     )
-    const [file, ...prefix] = entryCommand(entry)
+    const [file, ...prefix] = entrySpawnCommand(entry)
     const restarted =
       running && spawnSync(file!, [...prefix, "relay", "restart"], { encoding: "utf8", timeout: 60_000 }).status === 0
     if (running && !restarted) {
