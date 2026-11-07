@@ -108,7 +108,7 @@ describe("full-Node rejection scope", () => {
       await new Promise(resolve => setTimeout(resolve, 50))
       console.log(JSON.stringify({ result, warnings }))
     `)
-    expect(outcome.result.error).toMatch(/Unhandled execute rejection: a non-Error value/)
+    expect(outcome.result.error).toMatch(/Unhandled execute rejection: during-call/)
     expect(outcome.warnings).toEqual([])
   }, 20_000)
 
@@ -140,10 +140,10 @@ describe("full-Node rejection scope", () => {
       const nested = Object.setPrototypeOf({}, new Proxy({}, { getPrototypeOf() { for(;;){} } }))
       console.log(JSON.stringify({ message: safeErrorMessage(value), nested: safeErrorMessage(nested), stack: safeErrorStack(value) }))
     `)
-    expect(nodeOutcome).toEqual({ message: "a non-Error value", nested: "a non-Error value" })
+    expect(nodeOutcome).toEqual({ message: "reason not shown", nested: "reason not shown" })
 
     const script = `
-      const { handleRelayProcessFault } = await import(${JSON.stringify(path.join(import.meta.dir, "../src/relay/process-guard.ts"))})
+      const { handleRelayProcessFault } = await import(${JSON.stringify(path.join(import.meta.dir, "../src/relay/process-faults.ts"))})
       handleRelayProcessFault("unhandledRejection", { toString() { for (;;) {} } }, {}, { rethrow: () => {} })
       handleRelayProcessFault("unhandledRejection", Object.setPrototypeOf({}, new Proxy({}, { getPrototypeOf() { for (;;) {} } })), {}, { rethrow: () => {} })
       console.log("returned")
@@ -151,5 +151,27 @@ describe("full-Node rejection scope", () => {
     const child = spawnSync(process.execPath, ["-e", script], { encoding: "utf8", timeout: 5_000, env: { ...process.env, OPENCODE_BROWSER_HOME: home } })
     expect(child.status, child.stderr).toBe(0)
     expect(child.stdout).toContain("returned")
+  }, 20_000)
+
+  test("Node stack accessors still drive process-fault classification", () => {
+    const outcome = runNodeScope(`
+      const { shouldSuppressRelayProcessFault, isBenignClosedSessionRejection, handleRelayProcessFault } = await import(${JSON.stringify(path.join(import.meta.dir, "../src/relay/process-faults.ts"))})
+      const coreBundle = source => new Function('return new Error(' + JSON.stringify(source) + ')\\n//# sourceURL=/x/node_modules/patchright-core/lib/coreBundle.js')
+      const typeError = coreBundle("boom")()
+      const benign = coreBundle("Protocol error (Network.setCacheDisabled): session closed.")()
+      const rethrown = []
+      let threw = false
+      try {
+        handleRelayProcessFault("uncaughtException", typeError, {}, { rethrow: cause => { rethrown.push(cause); throw cause } })
+        handleRelayProcessFault("unhandledRejection", benign, {}, { rethrow: cause => { rethrown.push(cause); throw cause } })
+      } catch { threw = true }
+      console.log(JSON.stringify({
+        suppress: shouldSuppressRelayProcessFault(typeError),
+        benign: isBenignClosedSessionRejection(benign),
+        threw,
+        rethrown: rethrown.length,
+      }))
+    `)
+    expect(outcome).toEqual({ suppress: true, benign: true, threw: false, rethrown: 0 })
   }, 20_000)
 })

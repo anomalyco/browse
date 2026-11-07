@@ -256,15 +256,26 @@ export function handleRealmUnhandledRejection(
   cause: unknown,
   certain: boolean,
   warn: ((warning: string) => void) | undefined,
+  pending: boolean,
 ): void {
   if (realm.isStopped) return
-  if (!realm.hasPendingRun) {
+  if (!pending) {
     try { warn?.(unhandledExecuteRejectionWarning(cause, certain)) } catch {
       // Reporting must never turn a contained rejection into a relay fault.
     }
   }
-  const detail = certain ? safeErrorMessage(cause) : "a rejected promise"
+  const detail = certain ? rejectionDescription(realm, cause) : "a rejected promise"
   realm.dispose(new Error(`Unhandled execute rejection: ${detail}; JavaScript state will reset before the next execute`))
+}
+
+function rejectionDescription(realm: ExecuteRealm, cause: unknown): string {
+  // A helper's rejection is often a membrane Proxy around a host Error; look the host value up (no trap runs) so its
+  // real message survives. A sandbox Error's own message is a data property and is safe to read as well.
+  if (isObjectLike(cause)) {
+    const host = realm.hostValueForSandboxValue(cause)
+    if (host !== undefined) return safeErrorMessage(host)
+  }
+  return safeErrorMessage(cause)
 }
 
 // Errors execute callbacks throw into host code. A host caller that does not catch them

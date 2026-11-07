@@ -424,7 +424,7 @@ describe("Node escape corpus", () => {
       `host.files.write("/tmp/some-file", "x"); return { ok: true }`,
     ], playwrightShapes)
     expect(outcome?.value).toEqual({ ok: true })
-    expect(outcome?.stopped).toMatch(/Unhandled execute rejection: a non-Error value/)
+    expect(outcome?.stopped).toMatch(/Unhandled execute rejection: files\.write: use a private subdirectory/)
   })
 
   test("a hostile rejection value is never described on the host", () => {
@@ -434,7 +434,7 @@ describe("Node escape corpus", () => {
     ])
     for (const outcome of [throwing, looping]) {
       expect(outcome?.value).toBe(1)
-      expect(outcome?.stopped).toMatch(/Unhandled execute rejection: a non-Error value/)
+      expect(outcome?.stopped).toMatch(/Unhandled execute rejection: reason not shown/)
     }
   }, 30_000)
 
@@ -445,7 +445,7 @@ describe("Node escape corpus", () => {
     ])
     for (const outcome of outcomes) {
       expect(outcome?.value).toBe(1)
-      expect(outcome?.stopped).toMatch(/Unhandled execute rejection: a non-Error value/)
+      expect(outcome?.stopped).toMatch(/Unhandled execute rejection: reason not shown/)
     }
   }, 30_000)
 

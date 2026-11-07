@@ -159,11 +159,12 @@ export class ExecuteRealm {
   /** Called for every host call sandbox code makes, after the call is allowed (execute warnings). */
   private readonly onHostCall: ((fn: Function, receiver: unknown, args: readonly unknown[]) => void) | undefined
   private readonly onUnhandledRejection: ((warning: string) => void) | undefined
-  private readonly refuseDynamicImport = () => {
-    throw new this.SandboxError("import() is not available in execute code")
-  }
+  private readonly refuseDynamicImport = () => { throw new this.SandboxError("import() is not available in execute code") }
 
-  constructor(options: { readonly onHostCall?: (fn: Function, receiver: unknown, args: readonly unknown[]) => void; readonly onUnhandledRejection?: (warning: string) => void } = {}) {
+  constructor(options: {
+    readonly onHostCall?: (fn: Function, receiver: unknown, args: readonly unknown[]) => void
+    readonly onUnhandledRejection?: (warning: string) => void
+  } = {}) {
     this.onHostCall = options.onHostCall
     this.onUnhandledRejection = options.onUnhandledRejection
     const importModuleDynamically = this.refuseDynamicImport
@@ -217,16 +218,15 @@ export class ExecuteRealm {
     this.pendingRuns.clear()
   }
 
-  get isStopped(): boolean {
-    return this.stopped !== undefined
-  }
+  get isStopped(): boolean { return this.stopped !== undefined }
 
   /** A promise this realm created rejected with no handler; stop it so the relay survives. */
   handleUnhandledRejection(cause: unknown, certain: boolean): void {
-    handleRealmUnhandledRejection(this, cause, certain, this.onUnhandledRejection)
+    handleRealmUnhandledRejection(this, cause, certain, this.onUnhandledRejection, this.pendingRuns.size > 0)
   }
 
-  get hasPendingRun(): boolean { return this.pendingRuns.size > 0 }
+  /** The host value a sandbox proxy of this realm stands for, if any. A WeakMap lookup runs no sandbox code. */
+  hostValueForSandboxValue(value: unknown): object | undefined { return isObjectLike(value) ? this.hostBySandboxProxy.get(value) : undefined }
 
   private enter<T>(entry: () => T): T {
     if (this.stopped) throw this.stopped

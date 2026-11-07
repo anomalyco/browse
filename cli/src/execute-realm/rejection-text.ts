@@ -1,15 +1,18 @@
 import util from "node:util"
 
-const placeholder = "a non-Error value"
+const placeholder = "reason not shown"
+// V8 defines an Error's own `stack` as an accessor. Its getter is shared; only that exact native getter is safe to
+// call on a relay-realm Error. Bun may expose `stack` as a data property instead.
+const nativeStackGetter = Object.getOwnPropertyDescriptor(new Error(), "stack")?.get
 
 /**
- * A rejection can be any sandbox value, including objects whose `toString`, `stack`, `message` or prototype chain
- * runs sandbox code. Describing one on the host must not invoke any of that. Only a native Error that is not a Proxy
- * is inspected, and only through its own data property: getters, Proxy traps and prototype traversal never run.
- * Everything else gets a fixed placeholder.
+ * A rejection can be any sandbox value, including objects whose `toString`, `message` or prototype chain runs sandbox
+ * code. Describing one on the host must not invoke any of that. Only a native Error that is not a Proxy is inspected,
+ * and only through its own data property: getters, Proxy traps and prototype traversal never run. Everything else gets
+ * a fixed placeholder.
  */
 export function safeErrorMessage(value: unknown, maxLength = 300): string {
-  if (!isSafeHostError(value)) return placeholder
+  if (!isSafeNativeError(value)) return placeholder
   const message = ownDataProperty(value, "message")
   return typeof message === "string" && message.length > 0 ? message.slice(0, maxLength) : placeholder
 }
@@ -17,8 +20,16 @@ export function safeErrorMessage(value: unknown, maxLength = 300): string {
 /** The stack of a relay-realm Error, or undefined for anything that could run sandbox code. */
 export function safeErrorStack(value: unknown): string | undefined {
   if (!isSafeHostError(value)) return undefined
-  const stack = ownDataProperty(value, "stack")
-  return typeof stack === "string" ? stack : undefined
+  const descriptor = Object.getOwnPropertyDescriptor(value, "stack")
+  if (descriptor === undefined) return undefined
+  if ("value" in descriptor) return typeof descriptor.value === "string" ? descriptor.value : undefined
+  if (descriptor.get === undefined || descriptor.get !== nativeStackGetter) return undefined
+  try {
+    const stack = descriptor.get.call(value)
+    return typeof stack === "string" ? stack : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /** An Error from any realm, in a form whose own data properties can be read without running code. */
