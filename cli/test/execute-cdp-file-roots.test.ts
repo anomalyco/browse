@@ -352,6 +352,13 @@ describe("sandbox modules", () => {
     expect(result).toEqual([2, 3])
   })
 
+  const iteratorDrop = (globalThis as { Iterator?: { prototype?: { drop?: unknown } } }).Iterator?.prototype?.drop
+  test.skipIf(typeof iteratorDrop !== "function")("host iterator drop is not treated as a drag-and-drop payload", async () => {
+    const map = new Map([["a", 1], ["b", 2], ["c", 3]])
+    const result = await run(`return host.map.keys().drop(1).toArray();`, { map })
+    expect(result).toEqual(["b", "c"])
+  })
+
   test("module bind functions remain available", async () => {
     const result = await run(`
       const { PassThrough } = host.stream;
@@ -378,5 +385,23 @@ describe("function arguments with file options", () => {
     function route() {}
     expect(() => checkHostCall(addInitScript, {}, [() => 1])).not.toThrow()
     expect(() => checkHostCall(route, {}, ["**/*", () => 1])).not.toThrow()
+  })
+
+  test("nested callbacks in file option methods still pass", () => {
+    function start() {}
+    function newContext() {}
+    function screenshot() {}
+    expect(() => checkHostCall(start, {}, [{ onFrame: () => {} }])).not.toThrow()
+    expect(() => checkHostCall(newContext, {}, [{ logger: { isEnabled: () => false, log: () => {} } }])).not.toThrow()
+    expect(() => checkHostCall(screenshot, {}, [() => {}])).toThrow(/function arguments cannot be used as options/)
+  })
+
+  test("a lying has trap cannot hide a file option on a function", () => {
+    function route() {}
+    const callback = new Proxy(function () {}, {
+      has: () => false,
+      get: (target, key, receiver) => key === "path" ? "/etc/realm-denied" : Reflect.get(target, key, receiver),
+    })
+    expect(() => checkHostCall(route, {}, ["**/*", callback])).toThrow(/path/)
   })
 })

@@ -42,11 +42,13 @@ export function checkFileOptions(
   depth = 0,
 ): void {
   if (typeof value === "function") {
-    if (includeMethodKeys && method !== "addInitScript") {
+    if (depth === 0 && includeMethodKeys && method !== "addInitScript") {
       throw new ExecuteFileAccessError(`${method}: function arguments cannot be used as options`)
     }
     for (const key of allFileOptionKeys) {
-      if (key in value) throw new ExecuteFileAccessError(`${method}: function arguments cannot carry the ${key} file option`)
+      if (key in value || Reflect.get(value, key) !== undefined) {
+        throw new ExecuteFileAccessError(`${method}: function arguments cannot carry the ${key} file option`)
+      }
     }
     return
   }

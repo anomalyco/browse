@@ -336,6 +336,16 @@ function isStreamReceiver(receiver: unknown): boolean {
   }
 }
 
+/** Iterator helpers also have a sync `drop(limit)`; skip them like streams. */
+function isIteratorReceiver(receiver: unknown): boolean {
+  try {
+    const Iterator = (globalThis as { Iterator?: Function }).Iterator
+    return typeof Iterator === "function" && receiver instanceof Iterator
+  } catch {
+    return false
+  }
+}
+
 /** `browser.bind` starts a local server; other sandbox modules (events, stream) also export a sync `bind`. */
 function isBrowserReceiver(receiver: unknown): boolean {
   if (receiver === null || typeof receiver !== "object" || util.types.isProxy(receiver)) return false
@@ -720,7 +730,9 @@ export function checkHostCall(fn: Function, receiver: unknown, args: readonly un
     setArgument(0, checkUploadValue(args[0], name))
   } else if (name === "drop") {
     const payload = args[0]
-    if (payload !== undefined && !isStreamReceiver(receiver)) setArgument(0, checkDropPayload(payload, assertExecuteFileInputPath))
+    if (payload !== undefined && !isStreamReceiver(receiver) && !isIteratorReceiver(receiver)) {
+      setArgument(0, checkDropPayload(payload, assertExecuteFileInputPath))
+    }
   } else if (name === "setStorageState") {
     if (typeof args[0] === "string") setArgument(0, assertExecuteFilePathNotRoot(args[0], name))
   } else if (name === "saveAs") {
