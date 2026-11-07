@@ -238,6 +238,8 @@ await page.screenshot({ path: files.path("page.png") })
 
 Setting `Browser.setDownloadBehavior` (or `Page.setDownloadBehavior`) replaces
 Playwright's own download handling, so keep its folder inside the file roots.
+After that, `page.on("download")` and `download.saveAs()` stop working for the
+context.
 
 Use `page.evaluate` for `window`, `document`, storage and same-origin `fetch`
 with page cookies. It runs in an isolated world whose `fetch` skips the page's

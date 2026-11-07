@@ -26,7 +26,7 @@ export function isCdpMethodName(value: string): boolean {
  * it), and every session also has `send` and `detach`; nothing else execute code can reach has both.
  */
 export function isCdpSession(receiver: unknown): boolean {
-  if (receiver === null || (typeof receiver !== "object" && typeof receiver !== "function")) return false
+  if (receiver === null || typeof receiver !== "object" || util.types.isProxy(receiver)) return false
   try {
     const prototype = Object.getPrototypeOf(receiver) as { constructor?: { name?: unknown } } | null
     const name = prototype?.constructor?.name
@@ -70,6 +70,7 @@ function copyJsonValue(value: unknown, operation: string, stack: Set<object>): u
       if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
         throw invalidCdpParameters(operation, "which cannot contain getters, setters or non-enumerable properties")
       }
+      if (descriptor.value === undefined) continue
       Object.defineProperty(copy, key, {
         value: copyJsonValue(descriptor.value, operation, stack),
         writable: true,

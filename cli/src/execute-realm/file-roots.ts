@@ -10,6 +10,8 @@ import url from "node:url"
 import util from "node:util"
 import zlib from "node:zlib"
 import { checkCdpSend, copyCdpParameters, isCdpMethodName, isCdpSession } from "./cdp-send.ts"
+import { checkFileInputValue } from "./directory-uploads.ts"
+import { checkDropPayload } from "./drop-payload.ts"
 import { ExecuteFileAccessError } from "./errors.ts"
 import { cacheRoot, configRoot, dataRoot, defaultRoots, installedBinaryPath, installerBinaryPath, stateRoot } from "../paths.ts"
 import { legacyRoots } from "../setup/legacy.ts"
@@ -219,7 +221,7 @@ function isBrowseOwned(target: string, platform: NodeJS.Platform = process.platf
 
 /**
  * Throw unless `target` is an absolute path inside the execute file roots and outside browse's own files.
- * `directory` also allows a folder directly under a root; its own ownership and mode are still checked.
+ * `directory` exempts only the execute files directory from the private-parent rule.
  */
 export function assertExecuteFilePath(target: unknown, operation: string, options: { readonly directory?: boolean } = {}): string {
   if (typeof target !== "string" || target.length === 0) {
@@ -279,7 +281,8 @@ export function assertExecuteFilePath(target: unknown, operation: string, option
     current = path.dirname(current)
   }
   const parent = path.dirname(resolved)
-  if (parent === root && process.getuid && options.directory !== true) {
+  const isFilesDirectory = options.directory === true && isSamePath(resolved, executeFilesDirectory())
+  if (parent === root && process.getuid && !isFilesDirectory) {
     const stat = fs.statSync(parent)
     if (stat.uid !== process.getuid() || (stat.mode & 0o022) !== 0) {
       throw new ExecuteFileAccessError(`${operation}: use a private subdirectory such as files.dir, not a shared temporary directory`)
@@ -324,15 +327,6 @@ function assertExecuteDownloadDirectory(target: string, operation: string): stri
     throw new ExecuteFileAccessError(`${operation}: ${target} is an execute file root; use a subfolder such as files.path("downloads")`)
   }
   return resolved
-}
-
-/** Validate and rewrite the file paths in setInputFiles, setFiles and drop payloads. Directories stay allowed. */
-function checkFileInputValue(value: unknown, method: string): unknown {
-  if (typeof value === "string") return assertExecuteFilePathNotRoot(value, method)
-  if (Array.isArray(value)) {
-    return value.map((item) => typeof item === "string" ? assertExecuteFilePathNotRoot(item, method) : item)
-  }
-  return value
 }
 
 async function openExecuteFile(target: string, write: boolean): Promise<fsPromises.FileHandle> {
@@ -719,24 +713,21 @@ export function checkHostCall(fn: Function, receiver: unknown, args: readonly un
       }
     }
     if (method !== undefined) {
-      const params = args.length > 1 && args[1] !== undefined ? copyCdpParameters(args[1], method) : args[1]
-      if (params !== args[1]) setArgument(1, params)
+      const sendParams = args.length > 1 ? args[1] : undefined
+      const params = sendParams === undefined ? undefined : copyCdpParameters(sendParams, method)
+      if (params !== undefined) setArgument(1, params)
       const checked = checkCdpSend(method, params, { fileInput: assertExecuteFileInputPath, downloadDirectory: assertExecuteDownloadDirectory })
       if (checked.downloadDirectory !== undefined) candidates.push({ path: checked.downloadDirectory, directory: true })
     }
   } else if (name === "setInputFiles") {
     const isFrameLike = receiver !== null && typeof receiver === "object" && typeof (receiver as { goto?: unknown }).goto === "function"
-    if (isFrameLike) setArgument(1, checkFileInputValue(args[1], "setInputFiles"))
-    else setArgument(0, checkFileInputValue(args[0], "setInputFiles"))
+    if (isFrameLike) setArgument(1, checkFileInputValue(args[1], "setInputFiles", assertExecuteFilePathNotRoot, assertExecuteFilePath))
+    else setArgument(0, checkFileInputValue(args[0], "setInputFiles", assertExecuteFilePathNotRoot, assertExecuteFilePath))
   } else if (name === "setFiles") {
-    setArgument(0, checkFileInputValue(args[0], name))
+    setArgument(0, checkFileInputValue(args[0], name, assertExecuteFilePathNotRoot, assertExecuteFilePath))
   } else if (name === "drop") {
     const payload = args[0]
-    if (isObject(payload) && !Array.isArray(payload) && Object.hasOwn(payload, "files")) {
-      if (!Reflect.set(payload, "files", checkFileInputValue(Reflect.get(payload, "files"), "drop"))) {
-        throw new ExecuteFileAccessError("drop: could not replace the file paths")
-      }
-    }
+    if (payload !== undefined) setArgument(0, checkDropPayload(payload, assertExecuteFileInputPath))
   } else if (name === "setStorageState") {
     if (typeof args[0] === "string") setArgument(0, assertExecuteFilePathNotRoot(args[0], name))
   } else if (name === "saveAs") {

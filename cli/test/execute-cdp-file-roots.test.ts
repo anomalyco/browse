@@ -92,6 +92,22 @@ describe("raw CDP send parameters", () => {
     expect(session.sent).toEqual([{ method: "Page.navigate", params: '{"url":"https://example.com"}' }])
   })
 
+  test("undefined object properties are omitted like JSON.stringify", async () => {
+    const { result, session } = await sendInRealm('"Runtime.evaluate"', '{ expression: "1", contextId: undefined }')
+    expect(result.sent).toBe(true)
+    expect(session.sent).toEqual([{ method: "Runtime.evaluate", params: '{"expression":"1"}' }])
+    const files = createExecuteFiles()
+    const { args } = checkCdp("DOM.setFileInputFiles", { nodeId: 1, files: [files.path("upload.txt")], objectId: undefined })
+    expect("objectId" in (args[1] as object)).toBe(false)
+    expect(JSON.stringify(args[1])).toBe(JSON.stringify({ nodeId: 1, files: [files.path("upload.txt")] }))
+  })
+
+  test("undefined array elements are still refused", async () => {
+    const { result, session } = await sendInRealm('"Page.navigate"', '{ urls: ["https://example.com", undefined] }')
+    expect(result.error).toMatch(/plain JSON data/)
+    expect(session.sent).toEqual([])
+  })
+
   test("proxies, cycles and accessors are refused", () => {
     const session = new CDPSession()
     expect(() => checkCdp("Page.navigate", new Proxy({ url: "https://example.com" }, {}), session)).toThrow(/proxies/)
@@ -139,7 +155,7 @@ describe("raw CDP file inputs", () => {
     }
   })
 
-  test("setInputFiles, setFiles and drop refuse roots but keep directory support", () => {
+  test("setInputFiles and setFiles refuse roots but keep directory support; drop refuses directories", () => {
     function setInputFiles() {}
     function setFiles() {}
     function drop() {}
@@ -148,14 +164,77 @@ describe("raw CDP file inputs", () => {
     expect(() => checkHostCall(setFiles, {}, [root])).toThrow(/execute file root/)
     expect(() => checkHostCall(setFiles, {}, [directory])).not.toThrow()
     expect(() => checkHostCall(drop, {}, [{ files: [root] }])).toThrow(/execute file root/)
-    expect(() => checkHostCall(drop, {}, [{ files: [directory] }])).not.toThrow()
+    expect(() => checkHostCall(drop, {}, [{ files: [directory] }])).toThrow(/is a directory/)
     expect(() => checkHostCall(drop, {}, [{ files: { name: "a.txt", mimeType: "text/plain", buffer: Buffer.from("a") } }])).not.toThrow()
+  })
+})
+
+describe("directory uploads", () => {
+  const files = createExecuteFiles()
+  const root = path.join(files.dir, "upload-tree")
+  const nested = path.join(root, "nested")
+  fs.mkdirSync(nested, { recursive: true })
+  fs.writeFileSync(path.join(root, "a.txt"), "a")
+  fs.writeFileSync(path.join(nested, "b.txt"), "b")
+
+  test("regular files and nested folders are allowed", () => {
+    function setInputFiles() {}
+    function setFiles() {}
+    expect(() => checkHostCall(setInputFiles, {}, [root])).not.toThrow()
+    expect(() => checkHostCall(setFiles, {}, [root])).not.toThrow()
+    expect(() => checkHostCall(setInputFiles, {}, [[path.join(root, "a.txt"), nested]])).not.toThrow()
+  })
+
+  test.skipIf(process.platform === "win32")("symlinks inside an uploaded directory are refused", () => {
+    const link = path.join(root, "outside-link")
+    fs.symlinkSync("/etc/realm-denied", link)
+    try {
+      function setInputFiles() {}
+      expect(() => checkHostCall(setInputFiles, {}, [root])).toThrow(/symlink/)
+    } finally {
+      fs.unlinkSync(link)
+    }
+  })
+})
+
+describe("drop payloads", () => {
+  test("function payloads with files are refused and never reach the host", async () => {
+    const received: unknown[] = []
+    const drop = (payload: unknown) => { received.push(payload) }
+    const result = await run(`
+      const payload = Object.assign(() => {}, { files: [host.outside] });
+      try { await host.drop(payload); return "allowed" } catch (error) { return error.message }
+    `, { drop, outside: "/etc/realm-denied" })
+    expect(result).toMatch(/plain object/)
+    expect(received).toEqual([])
+  })
+
+  test("inherited and accessor files properties are refused", () => {
+    function drop() {}
+    const inherited = Object.create({ files: ["/etc/realm-denied"] })
+    expect(() => checkHostCall(drop, {}, [inherited])).toThrow(/plain object/)
+    const accessor: Record<string, unknown> = {}
+    Object.defineProperty(accessor, "files", { get: () => ["/etc/realm-denied"], enumerable: true })
+    expect(() => checkHostCall(drop, {}, [accessor])).toThrow(/data property/)
+  })
+
+  test("a valid payload is copied and paths are rewritten", () => {
+    function drop() {}
+    const files = createExecuteFiles()
+    const inside = files.path("drop.txt")
+    const payload = { files: [`${files.dir}/nested/../drop.txt`], data: { "text/plain": "hi" } }
+    const args: unknown[] = [payload]
+    checkHostCall(drop, {}, args)
+    expect(args[0]).not.toBe(payload)
+    expect((args[0] as { files: string[] }).files).toEqual([inside])
+    expect((args[0] as { data: Record<string, string> }).data).toEqual({ "text/plain": "hi" })
   })
 })
 
 describe("download behavior", () => {
   const files = createExecuteFiles()
-  const downloads = path.join(files.dir, "downloads")
+  const downloads = files.path("downloads")
+  const direct = path.join(files.roots[0]!, "downloads-direct")
 
   function download(method: string, params: Record<string, unknown>) {
     const args: unknown[] = [method, params]
@@ -169,6 +248,7 @@ describe("download behavior", () => {
       expect(() => download(method, { behavior: "allowAndName" })).toThrow(/requires a downloadPath/)
       expect(() => download(method, { behavior: "allow", downloadPath: 1 })).toThrow(/downloadPath must be a string/)
       expect(() => download(method, { behavior: "allow", downloadPath: "/etc/realm-denied" })).toThrow(/outside the execute file roots/)
+      if (process.getuid) expect(() => download(method, { behavior: "allow", downloadPath: direct })).toThrow(/private subdirectory/)
     }
   })
 
