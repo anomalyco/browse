@@ -35,6 +35,11 @@ function executable(file: string, version: string) {
   fs.chmodSync(file, 0o755)
 }
 
+/** An installer stand-in that replaces the executable with one reporting `version`. */
+function installerWriting(version: string) {
+  return `#!/bin/sh\ncat > "$HOME/.local/bin/browse" <<'EOF'\n#!/bin/sh\nif [ "$1" = "--version" ]; then echo ${version}; exit 0; fi\nexit 0\nEOF\nchmod 755 "$HOME/.local/bin/browse"\n`
+}
+
 function runtimeAt(home: string, version: string): Runtime {
   const entry = path.join(home, ".local/bin", "browse")
   executable(entry, version)
@@ -84,10 +89,10 @@ describe("updating reruns the installer", () => {
   test("a binary install runs the install script, which replaces the executable in place", async () => {
     const home = fakeHome()
     const runtime = runtimeAt(home, "0.0.1")
-    // The fake install script is a local stand-in for https://opencode.ai/browse/install: it replaces the binary and
-    // ignores the version arguments it is given.
+    // OPENCODE_BROWSER_INSTALL_SCRIPT points the updater at this fake in place of the script baked into the binary: it
+    // replaces the executable and ignores the version arguments it is given.
     const installer = path.join(home, "install")
-    fs.writeFileSync(installer, `#!/bin/sh\ncat > "$HOME/.local/bin/browse" <<'EOF'\n#!/bin/sh\nif [ "$1" = "--version" ]; then echo 0.0.2; exit 0; fi\nexit 0\nEOF\nchmod 755 "$HOME/.local/bin/browse"\n`)
+    fs.writeFileSync(installer, installerWriting("0.0.2"))
     const installed = await runInstaller({
       runtime,
       version: "0.0.2",
@@ -96,6 +101,59 @@ describe("updating reruns the installer", () => {
     expect(installed).toBe("0.0.2")
     expect(installedVersion(runtime)).toBe("0.0.2")
     expect(fs.readdirSync(path.join(home, ".local/bin"))).toEqual(["browse"])
+  })
+
+  test("a binary install runs the installer that shipped with the release, not one fetched at update time", async () => {
+    const home = fakeHome()
+    const runtime = runtimeAt(home, "0.0.1")
+    let fetches = 0
+    const dev = installerWriting("0.0.3")
+    const installed = await runInstaller({
+      runtime,
+      version: "0.0.2",
+      installer: installerWriting("0.0.2"),
+      fetch: (async () => {
+        fetches++
+        return new Response(dev)
+      }) as unknown as typeof fetch,
+      env: { ...process.env, HOME: home, OPENCODE_BROWSER_INSTALL_SCRIPT: "" },
+    })
+    expect(installed).toBe("0.0.2")
+    expect(installedVersion(runtime)).toBe("0.0.2")
+    expect(fetches).toBe(0)
+  })
+
+  test("a binary install with no installer fails before touching the executable", async () => {
+    const home = fakeHome()
+    const runtime = runtimeAt(home, "0.0.1")
+    const before = fs.readFileSync(runtime.entry, "utf8")
+    let ran = false
+    const operation = runInstaller({
+      runtime,
+      version: "0.0.2",
+      run: async () => ((ran = true), { status: 0, stdout: "", stderr: "" }),
+      env: { ...process.env, HOME: home, OPENCODE_BROWSER_INSTALL_SCRIPT: "" },
+    })
+    await expect(operation).rejects.toThrow("no installer to run")
+    expect(ran).toBe(false)
+    expect(fs.readFileSync(runtime.entry, "utf8")).toBe(before)
+    expect(installedVersion(runtime)).toBe("0.0.1")
+  })
+
+  test("a channel update runs the installer with --channel and --no-setup", async () => {
+    const home = fakeHome()
+    const runtime = runtimeAt(home, "0.0.1")
+    const calls: string[][] = []
+    await runInstaller({
+      runtime,
+      channel: "dev",
+      installer: installerWriting("0.0.2"),
+      run: async (command, args) => (calls.push([command, ...args]), { status: 0, stdout: "", stderr: "" }),
+      env: { ...process.env, HOME: home, OPENCODE_BROWSER_INSTALL_SCRIPT: "" },
+    })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]![0]).toBe("sh")
+    expect(calls[0]!.slice(1)).toEqual([expect.stringContaining("browse-install-"), "--channel", "dev", "--no-setup"])
   })
 
   test("an npm install runs npm install -g at the requested version", async () => {

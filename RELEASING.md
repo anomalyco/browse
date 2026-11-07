@@ -108,6 +108,10 @@ file's size and SHA-256 and installs it; a binary install's updater polls `cli/<
 least hourly with `If-None-Match` and User-Agent `browse/<channel>/<version>/cli`. `--version` stays on npm because the
 protocol has one current release per channel and no version lookup. npm global installs keep reading npm's dist-tag.
 
+A binary install's updater runs the install script baked into the binary it is running ([cli/script/compile.ts](cli/script/compile.ts)),
+so older releases keep reading future channel manifests with their own installer. Manifest changes must stay readable by
+older installers: relative `url`s, flat target objects, and `release.version` before any other `version` key.
+
 ## One-time setup
 
 1. **Default branch** `dev` (Settings → General).
