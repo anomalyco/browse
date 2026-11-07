@@ -260,7 +260,8 @@ describe("relay", () => {
     expect(file.error?.message).toContain("blocked Page.navigate to a file: URL")
     const internal = await cdpCall(socket, 8, "Target.createTarget", { url: "chrome://settings" })
     expect(internal.error?.message).toContain("blocked Target.createTarget")
-    expect(extension.commands.some((command) => command.params?.method === "Page.navigate" || (command.method === "tabs.create" && String(command.params?.url).startsWith("chrome:")))).toBe(false)
+    expect(extension.commands.some((command) => command.method === "tabs.create" && String(command.params?.url).startsWith("chrome:"))).toBe(false)
+    expect(extension.commands.some((command) => command.params?.method === "Page.navigate" && String((command.params?.params as { url?: string } | undefined)?.url).startsWith("chrome:"))).toBe(false)
     socket.close()
     extension.close()
   }, 20_000)
@@ -373,6 +374,7 @@ describe("relay", () => {
     expect(navigated.result).toEqual({ frameId: "TARGET-71", loaderId: "BLANK-1" })
     const sent = extension.commands.filter((command) => command.params?.tabId === 71 && (command.params?.method === "Page.navigate" || command.params?.method === "Page.setDocumentContent"))
     expect(sent.map((command) => [command.params?.method, command.params?.params])).toEqual([
+      ["Page.navigate", { url: "https://example.com/" }],
       ["Page.navigate", { url: "about:blank", frameId: "TARGET-71" }],
       ["Page.setDocumentContent", { frameId: "TARGET-71", html: "<h1>hi</h1>" }],
     ])

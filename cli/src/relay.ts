@@ -23,9 +23,13 @@ import { relayHostname } from "./relay/config.ts"
 import {
   closeHttpServer,
   closeWebSocketServer,
+  createTargetUrl,
   defaultPort,
   formatHostForUrl,
   getNumber,
+  getString,
+  getTargetInfo,
+  isRestrictedTarget,
   listenHttpServer,
   logCloseError,
   sendCdpEvent,
@@ -36,6 +40,7 @@ import { ensurePrivateDirectory, relayToken } from "./relay/secrets.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay/types.ts"
 import { createCdpDispatcher } from "./relay/cdp-dispatch.ts"
 import { createExtensionCommands } from "./relay/commands.ts"
+import { navigateTopFrameToDataUrl } from "./relay/data-navigation.ts"
 import { createExtensionEventHandler } from "./relay/extension-events.ts"
 import { ExtensionHandshake } from "./relay/extension-handshake.ts"
 import { installRelayProcessGuard, targetDiagnosticIdentity } from "./relay/process-guard.ts"
@@ -451,16 +456,46 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     readonly autoAttachParams?: JsonObject
   }) {
     const link = yield* sessionBrowser(createOptions.opencodeBrowserSessionId)
-    const result = yield* sendToExtension({ method: "tabs.create", params: { url: createOptions.url, active: createOptions.active, ...(agentWindow ? { window: agentWindow } : {}) } }, link)
+    // Create the tab blank and navigate only after attaching: the navigation guard then sees the real load (a tab
+    // created at the URL would load it before any debugger was attached), and Vivaldi never has to answer commands
+    // on a tab that is still loading.
+    const result = yield* sendToExtension({ method: "tabs.create", params: { url: "about:blank", active: createOptions.active, ...(agentWindow ? { window: agentWindow } : {}) } }, link)
     const tabId = getNumber(result, "tabId")
     if (!tabId) return yield* Effect.fail(new Error("tabs.create did not return a tabId"))
     announceTab(tabId)
-    return yield* rootLifecycle.attach({
+    const target = yield* rootLifecycle.attach({
       tabId,
       owner: "relay",
       ...(createOptions.opencodeBrowserSessionId ? { opencodeBrowserSessionId: createOptions.opencodeBrowserSessionId } : {}),
       ...(createOptions.autoAttachParams ? { autoAttachParams: createOptions.autoAttachParams } : {}),
     })
+    const requested = createTargetUrl({ url: createOptions.url })
+    if (requested !== "about:blank") {
+      const data = /^data:/i.test(requested.trim())
+      const navigation = yield* (
+        data
+          ? navigateTopFrameToDataUrl({ tabId, params: { url: requested }, mainFrameIdsByTab, blankNavigationWaiters, registry, sendDebuggerCommand })
+          : sendDebuggerCommand({ tabId, method: "Page.navigate", params: { url: requested } })
+      ).pipe(
+        // A failed navigation must not fail the create and leak an announced tab; Chrome answers createTarget anyway.
+        Effect.catch((error) => Effect.sync(() => {
+          relayLog("create.navigate-failed", { tabId, error: error instanceof Error ? error.message : String(error) })
+          return undefined
+        })),
+      )
+      const errorText = getString(navigation, "errorText")
+      if (errorText) relayLog("create.navigate-failed", { tabId, errorText })
+      else if (data && navigation === undefined) relayLog("create.data-skipped", { tabId })
+      // Defense in depth: check where the tab actually ended up, in case its load beat the guard's events. A
+      // disallowed result is blanked here like any other agent tab; only a URL this check allows reaches the registry.
+      const current = yield* sendDebuggerCommand({ tabId, method: "Target.getTargetInfo", params: {} }).pipe(Effect.orElseSucceed((): JsonObject => ({})))
+      const targetInfo = getTargetInfo(current.targetInfo)
+      if (targetInfo && !isRestrictedTarget(targetInfo) && navigationGuard.createdTabNavigated({ ...target, targetInfo })) {
+        const updated = registry.updateConnectedTargetInfo({ tabId, targetInfo })
+        if (updated?.kind === "root") return updated.target
+      }
+    }
+    return target
   })
 
   const closeTargetByTargetId = Effect.fnUntraced(function* (targetId: string) {

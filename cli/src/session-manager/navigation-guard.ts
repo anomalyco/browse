@@ -17,7 +17,7 @@
  */
 import { checkNavigationUrl, checkUrl, explicitlyAllowsHost, isPrivateAddress, parseOriginPatterns, type OriginRule } from "../auth/domain-policy.ts"
 import type { JsonObject } from "../protocol.ts"
-import { getObject, getString } from "../relay/helpers.ts"
+import { createTargetUrl, getObject, getString } from "../relay/helpers.ts"
 
 export type NavigationGuardTarget = {
   readonly tabId: number
@@ -53,6 +53,8 @@ export class SessionNavigationGuard {
   private readonly rulesCache = new Map<string, { readonly key: string; readonly rules: readonly OriginRule[] }>()
   /** Popups that haven't shown an allowed document yet; a violation closes them instead of blanking them. */
   private readonly freshPopups = new Set<number>()
+  /** Per tab, the number of stop-and-blank chains still in flight. */
+  private readonly blanking = new Map<number, number>()
 
   constructor(private readonly dependencies: NavigationGuardDependencies) {}
 
@@ -81,7 +83,7 @@ export class SessionNavigationGuard {
     if (options.method !== "Page.navigate" && options.method !== "Target.createTarget") return undefined
     const rules = this.rules(options.sessionId)
     if (!rules) return undefined
-    const url = getString(options.params, "url") ?? (options.method === "Target.createTarget" ? "about:blank" : undefined)
+    const url = options.method === "Target.createTarget" ? createTargetUrl(options.params) : getString(options.params, "url")
     if (url === undefined) return undefined
     const decision = await checkNavigationUrl(url, rules)
     if (decision.allowed) return undefined
@@ -96,8 +98,20 @@ export class SessionNavigationGuard {
     this.observeCommittedUrl(target, target.targetInfo.url)
   }
 
+  /**
+   * Check a tab the relay created after its first navigation. Unlike a popup, a violation sends it back to
+   * about:blank instead of closing it. Returns whether the tab's URL is allowed.
+   */
+  createdTabNavigated(target: NavigationGuardTarget): boolean {
+    if (!this.enforced(target)) return true
+    // The event path is already taking this tab back to about:blank: don't blank it twice or publish this URL.
+    if ((this.blanking.get(target.tabId) ?? 0) > 0) return false
+    return this.observeCommittedUrl(target, target.targetInfo.url)
+  }
+
   forgetTab(tabId: number): void {
     this.freshPopups.delete(tabId)
+    this.blanking.delete(tabId)
   }
 
   /** Observe a root-session CDP event of a tab. */
@@ -140,15 +154,16 @@ export class SessionNavigationGuard {
     return target.owner !== "user" || this.dependencies.isExecuting(sessionId)
   }
 
-  private observeCommittedUrl(target: NavigationGuardTarget, url: string): void {
+  private observeCommittedUrl(target: NavigationGuardTarget, url: string): boolean {
     const rules = this.rules(target.opencodeBrowserSessionId)
-    if (!rules) return
+    if (!rules) return true
     const decision = checkUrl(url, rules)
     if (decision.allowed) {
       if (!/^about:/.test(url)) this.freshPopups.delete(target.tabId)
-      return
+      return true
     }
     this.violation(target, url, decision.reason, "commit")
+    return false
   }
 
   private violation(target: NavigationGuardTarget, url: string, reason: string, _stage: "commit"): void {
@@ -165,10 +180,16 @@ export class SessionNavigationGuard {
       })
       return
     }
+    this.blanking.set(target.tabId, (this.blanking.get(target.tabId) ?? 0) + 1)
     this.dependencies.send(target.tabId, "Page.stopLoading", {})
       .catch(() => {})
       .then(() => this.dependencies.send(target.tabId, "Page.navigate", { url: "about:blank" }))
       .catch(() => {})
+      .finally(() => {
+        const remaining = (this.blanking.get(target.tabId) ?? 1) - 1
+        if (remaining > 0) this.blanking.set(target.tabId, remaining)
+        else this.blanking.delete(target.tabId)
+      })
   }
 
   private addWarning(sessionId: string, warning: string): void {

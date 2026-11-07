@@ -14,7 +14,8 @@ import {
 import { ghostCursorCommandMethod, type GhostCursorTabs } from "../ghost-cursor.ts"
 import { beforeInput } from "../execute/human-input.ts"
 import { isCdpRequest, parseJsonObject, type CdpRequest, type JsonObject } from "../protocol.ts"
-import { dataUrlDocument, getIdText, getNumber, getObject, getString, sendCdpResponse } from "./helpers.ts"
+import { navigateTopFrameToDataUrl } from "./data-navigation.ts"
+import { createTargetUrl, getIdText, getNumber, getObject, getString, sendCdpResponse } from "./helpers.ts"
 import { relayLog } from "./log.ts"
 import type { RelayShutdown } from "./shutdown.ts"
 import type { ChildTarget, ConnectedTarget } from "./types.ts"
@@ -115,37 +116,6 @@ export function createCdpDispatcher(options: {
     })
     return Effect.raceFirst(sendDebuggerCommand(command), nudges)
   }
-
-  const navigateTopFrameToDataUrl = Effect.fnUntraced(function* (tabId: number, params: JsonObject | undefined) {
-    const url = getString(params, "url")?.trim()
-    if (!url || !/^data:/i.test(url)) return undefined
-    const frameId = mainFrameIdsByTab.get(tabId) ?? registry.tabTargets.get(tabId)?.targetInfo.targetId
-    const requestedFrameId = getString(params, "frameId")
-    if (!frameId || (requestedFrameId !== undefined && requestedFrameId !== frameId) || blankNavigationWaiters.has(tabId)) return undefined
-    const html = yield* Effect.tryPromise(() => dataUrlDocument(url)).pipe(Effect.orElseSucceed(() => undefined))
-    if (html === undefined) return undefined
-    const committedLoaders = new Set<string>()
-    let loaderCommitted: (loaderId: string) => void = () => {}
-    blankNavigationWaiters.set(tabId, (frameUrl, loaderId) => {
-      if (frameUrl !== "about:blank" || loaderId === undefined) return
-      committedLoaders.add(loaderId)
-      loaderCommitted(loaderId)
-    })
-    return yield* Effect.gen(function* () {
-      const navigated = yield* sendDebuggerCommand({ tabId, method: "Page.navigate", params: { url: "about:blank", frameId } })
-      const loaderId = getString(navigated, "loaderId")
-      if (getString(navigated, "errorText") || loaderId === undefined) return navigated
-      if (!committedLoaders.has(loaderId)) {
-        const committed = yield* Effect.promise(() => new Promise<void>((resolve) => {
-          loaderCommitted = (id) => { if (id === loaderId) resolve() }
-        })).pipe(Effect.timeoutOption(10_000))
-        if (committed._tag === "None") return navigated
-      }
-      yield* sendDebuggerCommand({ tabId, method: "Page.setDocumentContent", params: { frameId, html } })
-      relayLog("navigate.data", { tabId, chars: html.length })
-      return { frameId: getString(navigated, "frameId") ?? frameId, loaderId } as JsonObject
-    }).pipe(Effect.ensuring(Effect.sync(() => { blankNavigationWaiters.delete(tabId) })))
-  })
 
   const routeCdpCommand = Effect.fn("Relay.routeCdpCommand")(function* (socket: WebSocket, message: CdpRequest) {
     const clientOpenCodeBrowserSessionId = cdpClients.sessionId(socket)
@@ -249,7 +219,7 @@ export function createCdpDispatcher(options: {
     }
     if (message.method === "Target.createTarget" || message.method === "Target.closeTarget") {
       if (message.method === "Target.createTarget") {
-        const url = getString(message.params, "url") ?? "about:blank"
+        const url = createTargetUrl(message.params)
         const opencodeBrowserSessionId = cdpClients.sessionId(socket)
         const autoAttachParams = cdpClients.autoAttachParams(socket)
         const target = yield* createAndAttachTab({
@@ -291,7 +261,14 @@ export function createCdpDispatcher(options: {
     }
     if (message.method === ghostCursorCommandMethod) return yield* ghostCursor.command(tabId, message.params)
     if (message.method === "Page.navigate" && route.chromeSessionId === undefined) {
-      const dataNavigation = yield* navigateTopFrameToDataUrl(tabId, message.params)
+      const dataNavigation = yield* navigateTopFrameToDataUrl({
+        tabId,
+        params: message.params,
+        mainFrameIdsByTab,
+        blankNavigationWaiters,
+        registry,
+        sendDebuggerCommand,
+      })
       if (dataNavigation) return dataNavigation
     }
     const command = {

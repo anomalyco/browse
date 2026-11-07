@@ -26,11 +26,27 @@ import {
   relayAutoUpdate,
   serialize,
   sessionName,
+  sleep,
   SLOW_CDP,
   text,
   type AgentBadge,
   type AgentRelayLog,
 } from "./wire"
+
+// Vivaldi accepts a debugger attach on a tab that is still loading but then never answers its commands. The relay
+// creates agent tabs at about:blank and attaches before navigating, so only a blank tab waits here. A real URL (sent
+// by an older relay) must answer at once: waiting would load it before the attach and bypass the session allowlist.
+const LOADING_WAIT_MS = 10_000
+async function waitUntilLoaded(tabId: number, log: AgentRelayLog) {
+  // The relay's tabs.create RPC times out after 15 s; 10 s leaves room for the answer.
+  const deadline = Date.now() + LOADING_WAIT_MS
+  while (Date.now() < deadline) {
+    const tab = await chrome.tabs.get(tabId).catch(() => undefined)
+    if (!tab || tab.status !== "loading") return
+    await sleep(100)
+  }
+  log.add("tabs.create.loadingTimeout", { tabId })
+}
 
 export function createRelayCommands(deps: {
   readonly log: AgentRelayLog
@@ -137,6 +153,7 @@ export function createRelayCommands(deps: {
         await TabCleanup.endCreate(creating)
         // A discarded tab loses the debugger and the agent's page.
         await chrome.tabs.update(tab.id, { autoDiscardable: false }).catch(() => undefined)
+        if (url === "about:blank") await waitUntilLoaded(tab.id, deps.log)
         return { tabId: tab.id }
       }
       case "tabs.remove":
