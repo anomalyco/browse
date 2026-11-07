@@ -515,14 +515,18 @@ describe("Node escape corpus", () => {
 class FakeTraceBrowser {
   trace: string | undefined
   failStart = false
+  stopCount = 0
   async startTracing(_page: unknown, options: { path?: string } = {}) {
-    if (this.failStart) throw new Error("start failed")
+    // Playwright stores the path before awaiting, even when the call then rejects.
     this.trace = options.path
+    if (this.failStart) throw new Error("start failed")
   }
   async stopTracing() {
+    this.stopCount += 1
     if (!this.trace) return Buffer.alloc(0)
     fs.mkdirSync(path.dirname(this.trace), { recursive: true })
     fs.writeFileSync(this.trace, "trace")
+    this.trace = undefined
     return Buffer.alloc(0)
   }
 }
@@ -857,7 +861,7 @@ describe("execute file access", () => {
       fs.mkdirSync(outside)
       fs.symlinkSync(outside, link)
       const output = path.join(link, "nested", "page.png")
-      expect(() => prepareExecuteFileOutputs({ outputs: [{ path: output }] })).toThrow(/owned directories/)
+      expect(() => prepareExecuteFileOutputs({ outputs: [{ path: output }] })).toThrow(/symlink|owned directories/)
       expect(fs.existsSync(path.join(outside, "nested"))).toBe(false)
     } finally {
       fs.rmSync(link, { force: true })
@@ -874,7 +878,7 @@ describe("execute file access", () => {
       fs.symlinkSync(outside, link)
       // The old walk stopped at the existing child and missed the symlink above it.
       const output = path.join(link, "existing-child", "nested", "page.png")
-      expect(() => prepareExecuteFileOutputs({ outputs: [{ path: output }] })).toThrow(/owned directories/)
+      expect(() => prepareExecuteFileOutputs({ outputs: [{ path: output }] })).toThrow(/symlink|owned directories/)
       expect(fs.existsSync(path.join(outside, "existing-child", "nested"))).toBe(false)
     } finally {
       fs.rmSync(link, { force: true })
@@ -909,51 +913,46 @@ describe("execute file access", () => {
     }
   })
 
-  test.skipIf(process.platform === "win32")("browser.startTracing is secured when stopTracing writes it", async () => {
+  test.skipIf(process.platform === "win32")("tracing memory follows startTracing and stopTracing outcomes", async () => {
     const files = createExecuteFiles()
     const browser = new FakeTraceBrowser()
     const output = path.join(files.dir, "traces", "trace.json")
+    const stale = path.join(files.dir, "stale-trace", "trace.json")
+    const rejected = path.join(files.dir, "rejected-trace", "trace.json")
+    const cleared = path.join(files.dir, "cleared-trace", "trace.json")
     const previous = process.umask(0o002)
     try {
       await run(`await host.browser.startTracing(null, { path: host.files.path("traces/trace.json") }); return null;`, { browser, files })
-      // startTracing only remembers the path; stopTracing writes and secures it later.
       expect(fs.existsSync(path.dirname(output))).toBe(false)
       await run(`await host.browser.stopTracing(); return null;`, { browser })
       expect(fs.statSync(path.dirname(output)).mode & 0o777).toBe(0o700)
       expect(fs.statSync(output).mode & 0o777).toBe(0o600)
-      // A remembered path that stops passing the guard is refused once, then forgotten.
-      prepareExecuteFileOutputs(checkHostCall(function startTracing() {}, browser, [null, { path: output }])).commitTrace?.()
-      fs.chmodSync(path.dirname(output), 0o777)
-      const stopping = checkHostCall(function stopTracing() {}, browser, [])
-      expect(stopping.tracePath).toBe(output)
-      expect(() => prepareExecuteFileOutputs(stopping)).toThrow(/owned directories/)
-      expect(() => checkHostCall(function stopTracing() {}, browser, [])).not.toThrow()
-    } finally {
-      process.umask(previous)
-      fs.rmSync(path.join(files.dir, "traces"), { recursive: true, force: true })
-    }
-  })
-
-  test.skipIf(process.platform === "win32")("startTracing remembers only a resolved call with a path", async () => {
-    const files = createExecuteFiles()
-    const browser = new FakeTraceBrowser()
-    const rejected = path.join(files.dir, "rejected-trace")
-    const cleared = path.join(files.dir, "cleared-trace")
-    try {
+      // A resolved stop forgets the path, so a later stop prepares nothing.
+      expect(checkHostCall(function stopTracing() {}, browser, []).outputs).toHaveLength(0)
+      // A remembered path that fails the guard keeps refusing and never reaches the browser.
+      prepareExecuteFileOutputs(checkHostCall(function startTracing() {}, browser, [null, { path: stale }]))
+      fs.mkdirSync(path.dirname(stale), { recursive: true })
+      fs.chmodSync(path.dirname(stale), 0o777)
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await expect(run(`await host.browser.stopTracing(); return null;`, { browser })).rejects.toThrow(/group\/world write/)
+      }
+      expect(browser.stopCount).toBe(1)
+      // Playwright stores a rejected startTracing's path too, and the memory follows it.
       browser.failStart = true
       await expect(run(`await host.browser.startTracing(null, { path: host.files.path("rejected-trace/trace.json") }); return null;`, { browser, files }))
         .rejects.toThrow("start failed")
-      // A remembered path would make stopTracing create its folder before writing.
       await run(`await host.browser.stopTracing(); return null;`, { browser })
-      expect(fs.existsSync(rejected)).toBe(false)
+      expect(fs.statSync(path.dirname(rejected)).mode & 0o777).toBe(0o700)
+      expect(fs.statSync(rejected).mode & 0o777).toBe(0o600)
+      // A pathless startTracing clears what the previous one remembered.
       browser.failStart = false
       await run(`await host.browser.startTracing(null, { path: host.files.path("cleared-trace/trace.json") }); return null;`, { browser, files })
       await run(`await host.browser.startTracing(null); return null;`, { browser })
       await run(`await host.browser.stopTracing(); return null;`, { browser })
-      expect(fs.existsSync(cleared)).toBe(false)
+      expect(fs.existsSync(path.dirname(cleared))).toBe(false)
     } finally {
-      fs.rmSync(rejected, { recursive: true, force: true })
-      fs.rmSync(cleared, { recursive: true, force: true })
+      process.umask(previous)
+      for (const dir of ["traces", "stale-trace", "rejected-trace", "cleared-trace"]) fs.rmSync(path.join(files.dir, dir), { recursive: true, force: true })
     }
   })
 

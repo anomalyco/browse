@@ -379,10 +379,10 @@ const isFileOutputOption = (method: string, key: string): boolean =>
 /** A file a permitted host call will write, before its folder is prepared and its prior state recorded. */
 export type ExecuteFileOutputCandidate = { readonly path: string }
 
-/** startTracing's path, committed for stopTracing only when the startTracing call resolves. */
+/** startTracing's path, recorded when preparing because Playwright stores it before awaiting. */
 type ExecuteTraceStart = {
   readonly receiver: object
-  /** Undefined when the call had no string path, which clears a previous one on resolve. */
+  /** Undefined when the call had no string path, which clears a previous one. */
   readonly path: string | undefined
 }
 
@@ -390,10 +390,8 @@ type ExecuteTraceStart = {
 export type ExecuteHostCall = {
   readonly outputs: readonly ExecuteFileOutputCandidate[]
   readonly trace?: ExecuteTraceStart
-  /** stopTracing: the receiver whose remembered path is an output and is forgotten when prepared. */
+  /** stopTracing: the receiver whose remembered path is an output and is forgotten when the call resolves. */
   readonly traceStop?: object
-  /** stopTracing: the remembered path, checked only after prepare drops the memory. */
-  readonly tracePath?: string
 }
 
 /** A file an allowed host call wrote, and whether it already existed before the call. */
@@ -403,11 +401,11 @@ export type ExecuteFileOutput = {
   readonly existed: boolean
 }
 
-/** The files checkHostCall found after preparation, plus trace memory to commit when the call resolves. */
+/** The files checkHostCall found after preparation, plus trace memory to drop when the call resolves. */
 export type PreparedExecuteFileOutputs = {
   readonly outputs: readonly ExecuteFileOutput[]
-  /** startTracing only: commit or clear its remembered path when the call resolves. */
-  readonly commitTrace?: () => void
+  /** stopTracing only: forget the remembered path once the stop call resolves. */
+  readonly forgetTrace?: () => void
 }
 
 /** Traces started by browser.startTracing(...), keyed by the browser whose stopTracing writes them. */
@@ -534,41 +532,40 @@ function secureExecuteFileOutputs(outputs: readonly ExecuteFileOutput[]): void {
 }
 
 /**
- * Prepares what checkHostCall found: creates each output's folders, records whether the file existed
- * before the call, and keeps startTracing's path pending until the call resolves. stopTracing's
- * memory is dropped first, before anything that can throw, so a refused stop leaves no stale path.
- * Only the realm's apply paths call this, after the whole check succeeded and before the host call
- * runs, so checks and construct traps stay side-effect free.
+ * Prepares what checkHostCall found: records startTracing's path as Playwright does before awaiting,
+ * then creates each output's folders and records whether its file existed before the call. Every
+ * candidate is checked before the folders are touched and again afterwards. stopTracing's memory
+ * stays until the stop call resolves. Only the realm's apply paths call this, after the whole check
+ * succeeded and before the host call runs, so checks and construct traps stay side-effect free.
  */
 export function prepareExecuteFileOutputs(call: ExecuteHostCall): PreparedExecuteFileOutputs {
-  if (call.traceStop !== undefined) startedTraces.delete(call.traceStop)
-  const candidates = call.tracePath === undefined ? call.outputs : [...call.outputs, { path: call.tracePath }]
+  const trace = call.trace
+  if (trace !== undefined) {
+    // Playwright sets its path at the top of startTracing, before the first await: mirror it here.
+    if (trace.path === undefined) startedTraces.delete(trace.receiver)
+    else startedTraces.set(trace.receiver, trace.path)
+  }
   const outputs: ExecuteFileOutput[] = []
-  for (const candidate of candidates) {
+  for (const candidate of call.outputs) {
+    assertExecuteFilePath(candidate.path, "execute file output")
     ensureExecuteOutputDirectory(path.dirname(candidate.path))
     const resolved = assertExecuteFilePath(candidate.path, "execute file output")
     outputs.push({ path: resolved, existed: fileExists(resolved) })
   }
-  const trace = call.trace
-  return trace === undefined ? { outputs } : {
-    outputs,
-    commitTrace: () => {
-      if (trace.path === undefined) startedTraces.delete(trace.receiver)
-      else startedTraces.set(trace.receiver, trace.path)
-    },
-  }
+  const stop = call.traceStop
+  return stop === undefined ? { outputs } : { outputs, forgetTrace: () => startedTraces.delete(stop) }
 }
 
 /**
- * Makes the files a host call created owner-only once it settles. A startTracing call commits its
- * remembered path only when it resolves, so a failed start leaves stopTracing with nothing to write.
+ * Makes the files a host call created owner-only once it settles, and forgets stopTracing's path only
+ * when the stop resolves: Playwright keeps its path after a rejection, so the memory must too.
  */
 export function completeExecuteFileOutputs(result: unknown, prepared: PreparedExecuteFileOutputs): unknown {
   const settle = (resolved: boolean) => {
-    if (resolved) prepared.commitTrace?.()
+    if (resolved) prepared.forgetTrace?.()
     secureExecuteFileOutputs(prepared.outputs)
   }
-  if (prepared.outputs.length === 0 && prepared.commitTrace === undefined) return result
+  if (prepared.outputs.length === 0 && prepared.forgetTrace === undefined) return result
   if (!util.types.isPromise(result)) {
     settle(true)
     return result
@@ -664,9 +661,10 @@ export function checkHostCall(fn: Function, receiver: unknown, args: readonly un
   }
   if (name === "stopTracing" && isObject(receiver)) {
     const remembered = startedTraces.get(receiver)
-    // Unasserted: prepare drops the memory first, so a remembered path that now fails the guard
-    // refuses this stop once instead of making every later stopTracing() fail the same way.
-    return remembered === undefined ? { outputs: candidates, traceStop: receiver } : { outputs: candidates, traceStop: receiver, tracePath: remembered }
+    if (remembered === undefined) return { outputs: candidates }
+    // Playwright keeps the path until stopTracing runs, so a path that now fails the guard must
+    // keep refusing every stop rather than let a later call write it unguarded.
+    return { outputs: [...candidates, { path: assertExecuteFilePath(remembered, "stopTracing()") }], traceStop: receiver }
   }
   return { outputs: candidates }
 }
