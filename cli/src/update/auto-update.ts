@@ -2,8 +2,9 @@
 //
 // Layout: one state file, auto-update.json in the state root (logs are beside it in logs/). There is no versions
 // directory, no current.json and no shim any more:
-//   binary install  the install script replaces ~/.local/bin/browse by atomic rename (Windows renames the running
-//                   executable aside first); running processes keep their old inode on unix.
+//   binary install  the install script this release shipped with (baked in by script/compile.ts) replaces
+//                   ~/.local/bin/browse by atomic rename (Windows renames the running executable aside first); running
+//                   processes keep their old inode on unix.
 //   npm global      `npm install -g @opencode/browse@<version>` replaces the package in place.
 //   npx             no-op: npx resolves the package itself, and install never writes npx entries.
 //
@@ -27,8 +28,6 @@ import { checkRelease, releaseChannel, runningServiceTarget, type ReleaseChannel
 export const PACKAGE_NAME = "@opencode/browse"
 const HOUR_MS = 60 * 60 * 1000
 const DEFAULT_REGISTRY = "https://registry.npmjs.org"
-const INSTALL_SCRIPT = "https://opencode.ai/browse/install"
-const INSTALL_SCRIPT_WINDOWS = "https://opencode.ai/browse/install.ps1"
 
 export const autoUpdateModes = ["on", "notify", "off"] as const
 export type AutoUpdateMode = (typeof autoUpdateModes)[number]
@@ -304,12 +303,14 @@ export type InstallerOptions = {
   readonly fetch?: typeof fetch
   readonly env?: NodeJS.ProcessEnv
   readonly platform?: NodeJS.Platform
+  /** The installer text a binary install runs: this release's baked-in one by default, or a test's fixture. */
+  readonly installer?: string
 }
 
 /**
- * Reruns whatever installed browse. Binary installs download the install script and run it non-interactively with
- * --no-setup, so it only replaces the executable (the PATH and agent entries install wrote stay). npm global installs run
- * npm install -g. npx is a no-op. Returns the version now installed.
+ * Reruns whatever installed browse. A binary install runs the install script this release shipped with, non-interactively
+ * with --no-setup, so it only replaces the executable (the PATH and agent entries install wrote stay). npm global installs
+ * run npm install -g. npx is a no-op. Returns the version now installed.
  */
 export async function runInstaller(options: InstallerOptions): Promise<string> {
   const run = options.run ?? runCommand
@@ -325,13 +326,18 @@ export async function runInstaller(options: InstallerOptions): Promise<string> {
       throw new Error(`npm install -g ${spec} left ${version}, not the requested ${options.version}`)
     return version
   }
-  const scriptUrl = env.OPENCODE_BROWSER_INSTALL_SCRIPT || (platform === "win32" ? INSTALL_SCRIPT_WINDOWS : INSTALL_SCRIPT)
-  const script = existsSync(scriptUrl)
-    ? readFileSync(scriptUrl, "utf8")
-    : await (options.fetch ?? fetch)(scriptUrl, { signal: AbortSignal.timeout(60_000) }).then(async (response) => {
-        if (!response.ok) throw new Error(`couldn't download the installer (${response.status})`)
-        return response.text()
-      })
+  // OPENCODE_BROWSER_INSTALL_SCRIPT is the explicit override tests and developers use (a local file or a URL); every
+  // other binary install runs the installer this release shipped with, never one fetched at update time.
+  const override = env.OPENCODE_BROWSER_INSTALL_SCRIPT
+  const script = override
+    ? existsSync(override)
+      ? readFileSync(override, "utf8")
+      : await (options.fetch ?? fetch)(override, { signal: AbortSignal.timeout(60_000) }).then(async (response) => {
+          if (!response.ok) throw new Error(`couldn't download the installer (${response.status})`)
+          return response.text()
+        })
+    : (options.installer ?? globalThis.__OPENCODE_BROWSER_INSTALLER__)
+  if (!script) throw new Error("this build has no installer to run; install browse again with the install script")
   const directory = mkdtempSync(path.join(os.tmpdir(), "browse-install-"))
   const file = path.join(directory, platform === "win32" ? "install.ps1" : "install")
   const args = [...(options.version ? ["--version", options.version] : options.channel ? ["--channel", options.channel] : []), "--no-setup"]

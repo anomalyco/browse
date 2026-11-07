@@ -49,6 +49,8 @@ describe("binary auto-update", () => {
     const cli = path.join(home, "cli")
     fs.cpSync(path.join(import.meta.dir, "../script"), path.join(cli, "script"), { recursive: true })
     for (const name of ["node_modules", "src", "tsconfig.json"]) fs.symlinkSync(path.join(import.meta.dir, "..", name), path.join(cli, name))
+    // compile bakes the checkout's install script into the binary.
+    for (const name of ["install", "install.ps1"]) fs.copyFileSync(path.join(import.meta.dir, "../..", name), path.join(home, name))
     const target = `${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`
     const binary = path.join(home, "bin", process.platform === "win32" ? "browse.exe" : "browse")
     const staged = `${binary}.next`
