@@ -17,13 +17,13 @@ import {
   writeExtensionPairing,
 } from "../relay/browser-pairing.ts"
 import { syncDevExtension } from "./dev-extension.ts"
-import { cliCommand, compiledBinary, devExtensionFolder, entryCommand, installedBinaryPath, installCommand, runningEntry } from "../paths.ts"
+import { cliCommand, compiledBinary, defaultSettingsPath, devExtensionFolder, entryCommand, installedBinaryPath, installerBinaryPath, installCommand, runningEntry } from "../paths.ts"
 import { runCommand } from "../update/auto-update.ts"
 import { unpackedExtensionId } from "../protocol.ts"
 import { parseHostname, readRelayConfig, writeRelayConfig } from "../relay/config.ts"
 import { relayAuthorization } from "../relay/secrets.ts"
 import { opencodeBrowserBuildId } from "../version.ts"
-import { removeBinaryInstall } from "./binary.ts"
+import { isInstallerBinary, removeBinaryInstall, samePath } from "./binary.ts"
 import { revealFolder } from "./browsers.ts"
 import {
   checkoutExtensionDirs,
@@ -390,6 +390,25 @@ export async function uninstall(args: string[]) {
     }
   }
   const binary = installedBinaryPath()
+  if (compiledBinary()) {
+    const installer = installerBinaryPath()
+    if (installer !== binary && existsSync(installer) && !samePath(installer, binary)) {
+      if (!existsSync(defaultSettingsPath()) && isInstallerBinary(installer, binary)) {
+        try {
+          rmSync(installer, { force: true })
+          log(`✓ Removed ${installer}`)
+        } catch {
+          log(`! Couldn't remove ${installer} while it's running; delete it after uninstall exits.`)
+        }
+      } else {
+        log(`! Left ${installer}; delete it if you no longer use browse there.`)
+      }
+    }
+  }
+  if (existsSync(binary)) {
+    const left = removeBinaryInstall(binary)
+    log(left ? `! Couldn't remove ${left}. After uninstall exits, close any browse agents using the file(s) and delete them.` : `✓ Removed ${binary}`)
+  }
   for (const directory of [paths.data, paths.config, paths.state, paths.cache]) {
     try {
       rmSync(directory, { recursive: true, force: true })
@@ -398,10 +417,6 @@ export async function uninstall(args: string[]) {
       if (process.platform !== "win32" || !["EBUSY", "EPERM", "EACCES"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error
       log(`! Couldn't remove all of ${directory}; close running browse agents and remove the remaining files.`)
     }
-  }
-  if (existsSync(binary)) {
-    const left = removeBinaryInstall(binary)
-    log(left ? `! Couldn't remove ${left}. After uninstall exits, close any browse agents using the file(s) and delete them.` : `✓ Removed ${binary}`)
   }
   if (!compiledBinary() && !fromSource) {
     const npm = await runCommand("npm", ["uninstall", "-g", "@opencode/browse"], { timeoutMs: 120_000 })
