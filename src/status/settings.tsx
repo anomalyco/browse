@@ -160,14 +160,14 @@ function Settings() {
             </SegmentedControl>
           </Row>
           <Override overrides={state()?.overrides} setting="agentWindow" />
-          <Row label="Group tabs" description="Per agent session, or one shared group.">
+          <Row label="Group tabs" description="One shared group, or one per agent session.">
             <SegmentedControl
               class="seg-group"
               value={grouping()}
               onChange={(value) => value && setGrouping(value as AgentGrouping)}
             >
-              <SegmentedControlItem value="session">Per session</SegmentedControlItem>
               <SegmentedControlItem value="shared">All agents</SegmentedControlItem>
+              <SegmentedControlItem value="session">Per session</SegmentedControlItem>
               <SegmentedControlItem value="none">None</SegmentedControlItem>
             </SegmentedControl>
           </Row>

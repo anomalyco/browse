@@ -103,10 +103,10 @@ export const agentWindowPlacement = (value: unknown): AgentWindowPlacement => (v
 // The status page's other settings, all in chrome.storage.local. Each applies from the moment it changes (new tabs,
 // the next cleanup, the next handoff or input); a missing or unknown value reads as the default.
 
-/** How agent tabs are grouped: one group per agent session (default), one shared group for every agent, or none. */
+/** How agent tabs are grouped: one shared group for every agent (default), one group per agent session, or none. */
 export const AGENT_GROUPING_KEY = "agentTabsGrouping"
 export type AgentGrouping = "session" | "shared" | "none"
-export const agentGrouping = (value: unknown): AgentGrouping => (value === "shared" || value === "none" ? value : "session")
+export const agentGrouping = (value: unknown): AgentGrouping => (value === "session" || value === "none" ? value : "shared")
 
 /** Minutes an agent tab may sit untouched before it closes; 0 never closes them automatically. */
 export const IDLE_MINUTES_KEY = "tabCleanupIdleMinutes"

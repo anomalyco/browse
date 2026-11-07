@@ -2,8 +2,8 @@ import { beforeEach, describe, expect, test } from "bun:test"
 import { installChrome, settle, type StubEvent } from "../chrome-stub"
 import { installFakeRelaySocket } from "../relay-stub"
 
-// The status page's Grouping setting (agent-relay.ts group, agent-groups.ts): one group per session (the default), one
-// shared "Agents · N" group for every agent, or none; with popups, handoffs, the toolbar's kill switch (the relay
+// The status page's Grouping setting (agent-relay.ts group, agent-groups.ts): one shared "Agents · N" group for every
+// agent (the default), one group per session, or none; with popups, handoffs, the toolbar's kill switch (the relay
 // detaching a tab) and both window modes. Also the relay-side settings the extension sends (cursor, human input) and
 // the environment overrides the relay reports back, and the relay's settings tool reading and writing them
 // (settings.get / settings.set). Run by ../isolated.test.ts in a process of its own.
@@ -70,7 +70,8 @@ beforeEach(async () => {
 
 await until(() => relay.state().status === "connected")
 
-describe("grouping: one group per session (default)", () => {
+describe("grouping: one group per session", () => {
+  beforeEach(() => stub.chrome.storage.local.set({ agentTabsGrouping: "session" }))
   test("each session gets its own collapsed group named after it", async () => {
     const { user, userTab } = await userWindow()
     const first = await agentTab("github")
@@ -119,6 +120,7 @@ describe("grouping: one group per session (default)", () => {
 })
 
 describe("grouping across a service worker restart", () => {
+  beforeEach(() => stub.chrome.storage.local.set({ agentTabsGrouping: "session" }))
   test("a session whose group the worker forgot keeps using the group its tab is in, and remembers it", async () => {
     const { user } = await userWindow()
     // A tab already in a session group, as after a restart: the relay re-announces it, then groups it.
@@ -145,9 +147,8 @@ describe("grouping across a service worker restart", () => {
   })
 })
 
-describe("grouping: one shared group for all agents", () => {
+describe("grouping: one shared group for all agents (default)", () => {
   test("two sessions share one collapsed group that counts its tabs", async () => {
-    await stub.chrome.storage.local.set({ agentTabsGrouping: "shared" })
     const { user, userTab } = await userWindow()
     const first = await agentTab("github")
     const second = await agentTab("linear")
@@ -204,6 +205,7 @@ describe("grouping: one shared group for all agents", () => {
   })
 
   test("switching modes leaves existing tabs in their groups; new tabs follow the new mode", async () => {
+    await stub.chrome.storage.local.set({ agentTabsGrouping: "session" })
     await userWindow()
     const before = await agentTab("github")
     await stub.chrome.storage.local.set({ agentTabsGrouping: "shared" })
@@ -261,6 +263,7 @@ describe("grouping: none", () => {
   })
 
   test("a tab still in a session group from before keeps it", async () => {
+    await stub.chrome.storage.local.set({ agentTabsGrouping: "session" })
     await userWindow()
     const before = await agentTab("github")
     await stub.chrome.storage.local.set({ agentTabsGrouping: "none" })
@@ -309,7 +312,7 @@ describe("the relay's settings tool", () => {
 
   test("settings.get reads every setting, defaults for what was never set", async () => {
     expect(await command("settings.get", {})).toEqual({
-      settings: { window: "current", grouping: "session", idleMinutes: 10, cursor: "off", humanInput: "on", handoffNotifications: "recording" },
+      settings: { window: "current", grouping: "shared", idleMinutes: 10, cursor: "off", humanInput: "on", handoffNotifications: "recording" },
     })
   })
 
@@ -337,6 +340,6 @@ describe("the relay's settings tool", () => {
       expect(socket().received.find((message) => message.id === id)!.error).toBeDefined()
     }
     expect(pageSaw).toEqual([])
-    expect((await command("settings.get", {})).settings).toMatchObject({ grouping: "session" })
+    expect((await command("settings.get", {})).settings).toMatchObject({ grouping: "shared" })
   })
 })

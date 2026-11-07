@@ -9,8 +9,8 @@ import { AGENT_GROUPING_KEY, agentGrouping, type AgentGrouping } from "../../sha
 // group collapses as soon as its window's active tab is elsewhere. `expand` opens one when an agent hands a step
 // to the user.
 //
-// Which groups agents get is the status page's "Grouping" setting (`mode`): one per agent session (the default), one
-// shared group for every agent's tabs, or none. agent-relay.ts makes and names the groups; this module only keeps
+// Which groups agents get is the status page's "Grouping" setting (`mode`): one shared group for every agent's tabs
+// (the default), one per agent session, or none. agent-relay.ts makes and names the groups; this module only keeps
 // them out of the way.
 
 const STORAGE_KEY = "agentGroups"
@@ -19,7 +19,7 @@ let restored: Promise<void> | undefined
 /** Tabs that keep their group open, for example while a handoff waits for the user. */
 const keepers: ((tabId: number) => boolean)[] = []
 
-/** The setting: "session" (one group per agent session, the default), "shared" (one for every agent) or "none". */
+/** The setting: "shared" (one group for every agent, the default), "session" (one per agent session) or "none". */
 export async function mode(): Promise<AgentGrouping> {
   return agentGrouping((await chrome.storage.local.get(AGENT_GROUPING_KEY))[AGENT_GROUPING_KEY])
 }
