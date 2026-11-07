@@ -555,7 +555,7 @@ function buildDoctorRecommendations(options: {
     return !artifact.exists
   }) ? [`Rebuild or reinstall the missing files with \`${installCommand()}\`.`] : []
   const connectionConflictRecommendations = options.extensionResult.ok && (options.extensionResult.value.rejectedConnections ?? 0) > 0
-    ? ["Keep browse enabled in one browser/profile. To switch, disable it in the current browser before connecting the other; new sessions do not change the active browser."]
+    ? ["The relay is an older browse that connects one browser at a time. Update browse on the computer running the relay, or close the other browser."]
     : []
   const staleSessionRecommendations = options.staleCurrent && options.current ? [
     `Current session ${options.current} is stale; run \`${cliCommand("session new")}\` or \`${cliCommand("session use <id>")}\` after the relay is running.`,

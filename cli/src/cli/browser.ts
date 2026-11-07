@@ -179,7 +179,7 @@ const status = Command.make(
     )
     if ((extensionStatus.rejectedConnections ?? 0) > 0) {
       yield* Console.log(
-        `Warning: ${extensionStatus.rejectedConnections} competing browser/profile connection attempt(s) rejected; the active connection was preserved. Use browse in one browser/profile at a time.`,
+        `Warning: ${extensionStatus.rejectedConnections} competing browser/profile connection attempt(s) rejected; the active connection was preserved. The relay is an older browse that connects one browser at a time; update browse on the computer running the relay, or close the other browser.`,
       )
     }
     if (extensionStatus.nextStep) yield* Console.log(extensionStatus.nextStep)
