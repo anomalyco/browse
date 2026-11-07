@@ -50,6 +50,11 @@ import { rawDataToBuffer, relayProcessFaultSummary } from "./process-guard.ts"
 export const maxPreAuthMessageBytes = 64 * 1024
 /** An extension socket that hasn't paired this long after connecting is refused. */
 export const preAuthHandshakeTimeoutMs = 10_000
+/**
+ * How long the relay remembers a browser that contacted it without a token. The extension repeats this presence every
+ * 30 seconds while it runs, and install reads it to print a pairing code instead of sending the user back to the store.
+ */
+export const unpairedPresenceTtlMs = 10 * 60_000
 
 function rawDataByteLength(data: RawData): number {
   return Array.isArray(data) ? data.reduce((total, chunk) => total + chunk.byteLength, 0) : data.byteLength
@@ -156,12 +161,14 @@ export class ExtensionHandshake {
     const { browsers, registry, storeId } = this.options
     const link = browsers.defaultLink()
     const rejected = link ? undefined : this.rejectedProtocol()
-    const recent = Date.now() - 65_000
-    const pairingState = browsers.connected ? "connected" : rejected ? "incompatible" : this.lastRefused > recent ? "refused" : this.lastUnpaired > recent ? "unpaired" : this.hasPairedBrowser ? "paired-offline" : "not-seen"
+    const now = Date.now()
+    const recentlyRefused = this.lastRefused > now - 65_000
+    const recentlyUnpaired = this.lastUnpaired > now - unpairedPresenceTtlMs
+    const pairingState = browsers.connected ? "connected" : rejected ? "incompatible" : recentlyRefused ? "refused" : recentlyUnpaired ? "unpaired" : this.hasPairedBrowser ? "paired-offline" : "not-seen"
     const nextStep = pairingState === "connected" ? undefined
       : link?.rpc.unresponsive ? browserUnresponsive
       : pairingState === "incompatible" ? this.mismatchAdvice(rejected?.version)
-      : pairingState === "refused" || pairingState === "unpaired" ? `${pairingState === "refused" ? "browse refused the pairing attempt" : "browse is installed but not paired"}. Run \`${cliCommand("install")}\` again to pair it, or run \`${cliCommand("pair")}\` and enter the new code in browse's Options.`
+      : pairingState === "refused" || pairingState === "unpaired" ? `${pairingState === "refused" ? "browse refused the pairing attempt" : "browse is installed but not paired"}. Run \`${cliCommand("install")}\` again: it pairs the browser when it can open it, or prints a code to enter in browse's Options (\`${cliCommand("pair")}\` prints one too).`
       : pairingState === "paired-offline" ? "Open the browser profile already paired with browse and enable the extension; it reconnects automatically."
       : `No browser has contacted this relay yet. If browse is installed, open that browser and run \`${cliCommand("install")}\` to pair it. Otherwise ${storeId ? `add browse from ${storeUrl(storeId)}` : `follow the extension steps in \`${installCommand()}\``}.`
     return {

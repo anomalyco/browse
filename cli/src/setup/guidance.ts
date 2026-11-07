@@ -12,6 +12,8 @@ export type LocateOptions = {
   allowOpen: boolean
   connected: boolean
   pairedOffline?: boolean
+  /** The relay just saw a browser that isn't paired: the extension is installed, so the store step is wrong. */
+  unpaired?: boolean
   detections: Detection[]
   preferred: Browser | undefined
   env: { ssh: boolean; display: boolean; tty: boolean; platform: NodeJS.Platform }
@@ -24,7 +26,8 @@ export type LocateOptions = {
  * so when none has it (and none is connected to the relay) the only step is adding it from there, with its page opened
  * when install may open things. Nothing opens when the browsers here aren't the ones the user looks at (SSH, no
  * display), with --no-open, or when a browser couldn't be checked and may already have it.
- * Returns "ready" when the extension is there, "off" when it's turned off, else "guided".
+ * Returns "ready" when the extension is there (connected, paired before, or only waiting to pair), "off" when it's turned
+ * off, else "guided".
  */
 export function locateExtension(options: LocateOptions, effects: Effects = systemEffects): "ready" | "off" | "guided" {
   const { log } = effects
@@ -40,6 +43,8 @@ export function locateExtension(options: LocateOptions, effects: Effects = syste
     )
     return "off"
   }
+  // One that contacted the relay without a token is installed too; setup prints a pairing code for it.
+  if (options.unpaired) return "ready"
   const blocked = options.detections.filter((detection) => detection.blocked).map((detection) => detection.browser.name)
   if (blocked.length) log(`! Couldn't check ${blocked.join(", ")} for browse (${blockedReason()})`)
   const target = options.preferred ?? options.detections.find((detection) => !detection.blocked)?.browser

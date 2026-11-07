@@ -2,7 +2,9 @@
 //   install    install the runtime, add the browse MCP server to opencode's config, then check which browsers have the
 //              extension. Every channel installs it from the Chrome Web Store item: when no browser has it, install
 //              says to add it there and opens that item's page; when one has it, install opens its status page with a
-//              one-time pairing code in the URL fragment so it pairs without a step. A checkout also pairs its own
+//              one-time pairing code in the URL fragment so it pairs without a step, or prints that code when it can't
+//              open the browser (SSH, no display). A browser that contacted the relay without a token is installed
+//              already, so install goes straight to the code instead of the store. A checkout also pairs its own
 //              build (dist/), and a dev npm install the dev extension it downloads from the release service into
 //              <data root>/extension (dev-extension.ts): install writes a one-time code into that folder and reloads a
 //              connected one that's out of date, without mentioning either
@@ -307,6 +309,8 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
   const initial = await settledExtensionStatus(entry)
   const connected = initial?.connected ? initial : undefined
   const pairedOffline = initial?.pairingState === "paired-offline"
+  // The relay saw this browser try to connect without a token (or refuse one): it's installed, not missing.
+  const needsPairing = initial?.pairingState === "unpaired" || initial?.pairingState === "refused"
   const folder = unpackedFolder()
   if (folder && !pairedOffline) {
     // The unpacked extension finds a one-time code in its own folder and exchanges it for its key, without a step.
@@ -356,6 +360,7 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
     allowOpen: !args.includes("--no-open"),
     connected: !!connected,
     pairedOffline,
+    unpaired: needsPairing,
     detections,
     preferred: ssh ? undefined : defaultBrowser(detections.map((detection) => detection.browser)),
     env,
@@ -373,19 +378,31 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
       env,
       code: pairingCode,
     })
-  let offer = ssh ? "none" : pairStore(detections)
+  if (needsPairing) log("browse is installed in a browser but isn't paired with this relay yet.")
+  type PairingOffer = "opened" | "manual" | "code" | "none"
+  let offer: PairingOffer = ssh ? "none" : pairStore(detections)
   const blocked = detections.filter((d) => d.blocked).map((d) => d.browser.name)
-  if (offer === "none" && blocked.length)
+  if (offer === "none" && blocked.length) {
     log(
       `Couldn't check ${blocked.join(", ")}. If browse is already installed there, pair it manually. ${manualPair(pairingCode())}`,
     )
-  const next = `If browse isn't connected after you add it, run \`${cliCommand("install")}\` again to pair it.`
+    offer = "manual"
+  }
+  // Nothing to open (SSH, no display, no detected profile): the code is still the way in, and the page that says
+  // "run install again" has a field for it.
+  if (needsPairing && offer === "none") {
+    log(manualPair(pairingCode()))
+    offer = "code"
+  }
+  const next = needsPairing
+    ? `If it isn't paired, run \`${cliCommand("pair")}\` for a new code and enter it in browse's Options.`
+    : `If browse isn't connected after you add it, run \`${cliCommand("install")}\` again to pair it.`
   const agentNext = () => {
     return `Agent: ${
       offer === "opened"
         ? "ask the user to open browse's status page in their browser"
-        : offer === "manual" || blocked.length
-          ? "ask the user to finish pairing in browse's Options"
+        : offer === "manual" || offer === "code"
+          ? "ask the user to enter the pairing code printed above in browse's Options"
           : "ask the user to add browse from the Chrome Web Store"
     }. Then re-run \`${cliCommand("install")}\` to finish, or call the browse status tool to check the connection.`
   }
