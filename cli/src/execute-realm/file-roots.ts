@@ -146,6 +146,11 @@ export function isInside(child: string, parent: string, platform: NodeJS.Platfor
   return relative === "" || (!paths.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${paths.sep}`))
 }
 
+/** Whether two paths name the same place under the platform's case rules. */
+function isSamePath(a: string, b: string): boolean {
+  return isInside(a, b) && isInside(b, a)
+}
+
 /** Resolve the real location a path refers to (following an existing symlink, or the nearest existing parent). */
 function realTarget(target: string): string {
   let current = path.resolve(target)
@@ -358,10 +363,234 @@ const fileOptionKeys = new Set(["path", "dir", "har", "storageState"])
 const alwaysFileOptionKeys = new Set(["outputPath", "baseline", "certPath", "keyPath", "pfxPath", "tracesDir", "downloadsPath"])
 const forbiddenOptionKeys = new Set(["executablePath", "recordHar", "recordVideo"])
 
-function checkFileOptions(value: unknown, method: string, includeMethodKeys: boolean, depth = 0): void {
+/**
+ * Methods whose top-level `path` option names a file the call writes, unlike addScriptTag's or
+ * setInputFiles' input paths. Tracing's `start`/`startChunk` options only name folders or a prefix
+ * for intermediate files, so those are not here. `stop` covers both `tracing.stop({ path })` and
+ * browse's `network.stop({ outputPath })`; `pageConsole.stop` takes a Page, not an options object.
+ * `startTracing` is special: it only records the path `stopTracing` writes.
+ */
+const fileOutputMethods = new Set(["screenshot", "pdf", "storageState", "stop", "stopChunk", "screenshotWithLabels", "screenshotDiff"])
+
+/** Outputs that name the file in the call's top-level options object. */
+const isFileOutputOption = (method: string, key: string): boolean =>
+  (key === "path" && fileOutputMethods.has(method)) || (key === "outputPath" && method === "stop")
+
+/** A file a permitted host call will write, before its folder is prepared and its prior state recorded. */
+export type ExecuteFileOutputCandidate = { readonly path: string }
+
+/** startTracing's path, recorded when preparing because Playwright stores it before awaiting. */
+type ExecuteTraceStart = {
+  readonly receiver: object
+  /** Undefined when the call had no string path, which clears a previous one. */
+  readonly path: string | undefined
+}
+
+/** What checkHostCall found: the files a call will write and any tracing memory it changes. */
+export type ExecuteHostCall = {
+  readonly outputs: readonly ExecuteFileOutputCandidate[]
+  readonly trace?: ExecuteTraceStart
+  /** stopTracing: the receiver whose remembered path is an output and is forgotten when the call resolves. */
+  readonly traceStop?: object
+}
+
+/** A file an allowed host call wrote, and whether it already existed before the call. */
+export type ExecuteFileOutput = {
+  readonly path: string
+  /** False when this call created the file; only those are reset to 0600, so a user's own file keeps its mode. */
+  readonly existed: boolean
+}
+
+/** The files checkHostCall found after preparation, plus trace memory to drop when the call resolves. */
+export type PreparedExecuteFileOutputs = {
+  readonly outputs: readonly ExecuteFileOutput[]
+  /** stopTracing only: forget the remembered path once the stop call resolves. */
+  readonly forgetTrace?: () => void
+}
+
+/** Traces started by browser.startTracing(...), keyed by the browser whose stopTracing writes them. */
+const startedTraces = new WeakMap<object, string>()
+
+const isObject = (value: unknown): value is object => value !== null && typeof value === "object"
+
+function fileExists(target: string): boolean {
+  try {
+    fs.lstatSync(target)
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false
+    throw error
+  }
+}
+
+function outputDirectoryError(directory: string): ExecuteFileAccessError {
+  return new ExecuteFileAccessError(`file outputs must use real, owned directories without group/world write access, not ${directory}`)
+}
+
+/** Pins a directory this call created to 0700 through its descriptor, never through its path. */
+function pinPrivateDirectory(directory: string, uid: number): void {
+  const descriptor = fs.openSync(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW)
+  try {
+    const opened = fs.fstatSync(descriptor)
+    const current = fs.lstatSync(directory)
+    if (!opened.isDirectory() || opened.uid !== uid || current.isSymbolicLink() || current.dev !== opened.dev || current.ino !== opened.ino) {
+      throw outputDirectoryError(directory)
+    }
+    if ((opened.mode & 0o777) !== 0o700) fs.fchmodSync(descriptor, 0o700)
+  } finally {
+    fs.closeSync(descriptor)
+  }
+}
+
+/**
+ * Creates the folders an output file needs as 0700, like files.write. Playwright makes them with the
+ * process umask instead, so under 0002 a screenshot would create 0775 folders and 0664 files, which
+ * assertExecuteFilePath then refuses on the very next files.path/read/write. A shared root such as
+ * /tmp can have a symlink raced in anywhere, so this first walks from the target folder up to the
+ * matching allowed root and refuses any existing component that is a symlink or, below the root,
+ * owned by someone else or group/world writable. Only then does it create the missing components
+ * top-down, one at a time. Callers re-run the guard afterwards.
+ */
+function ensureExecuteOutputDirectory(directory: string): void {
+  const resolved = path.resolve(directory)
+  const roots = executeFileRoots()
+  const root = roots.filter((candidate) => isInside(resolved, candidate)).sort((a, b) => b.length - a.length)[0]
+  if (root === undefined) throw outputDirectoryError(resolved)
+  const uid = process.getuid?.()
+  const missing: string[] = []
+  let current = resolved
+  for (;;) {
+    let stat: fs.Stats | undefined
+    try {
+      stat = fs.lstatSync(current)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    }
+    if (stat) {
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw outputDirectoryError(current)
+      if (!isSamePath(current, root) && uid !== undefined && (stat.uid !== uid || (stat.mode & 0o022) !== 0)) throw outputDirectoryError(current)
+    } else if (isSamePath(current, root)) {
+      throw outputDirectoryError(current)
+    } else {
+      missing.push(current)
+    }
+    if (isSamePath(current, root)) break
+    const parent = path.dirname(current)
+    if (parent === current) throw outputDirectoryError(current)
+    current = parent
+  }
+  for (const step of missing.reverse()) {
+    let created = false
+    try {
+      fs.mkdirSync(step, { mode: 0o700 })
+      created = true
+    } catch (error) {
+      // A racing creator is fine only after the same checks as a folder made by this call.
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
+    }
+    // Default ACLs can add group write despite mkdir's mode, so pin a folder this call made first.
+    if (created && uid !== undefined && process.platform !== "win32") pinPrivateDirectory(step, uid)
+    const stat = fs.lstatSync(step)
+    if (!stat.isDirectory() || stat.isSymbolicLink() || (uid !== undefined && (stat.uid !== uid || (stat.mode & 0o022) !== 0))) {
+      throw outputDirectoryError(step)
+    }
+  }
+}
+
+/**
+ * Resets files this host call created to 0600. Opens read-only through O_NOFOLLOW and checks the
+ * inode against the path like openExecuteFile, so a symlink or replacement swapped in meanwhile is
+ * left alone. The folder chain is re-checked through a child that does not exist before the chmod,
+ * and the file path and, on Linux, the descriptor's real target are checked after it: the guard
+ * rejects the group-writable mode the umask gave the new file, so only then can the file pass.
+ */
+function secureExecuteFileOutputs(outputs: readonly ExecuteFileOutput[]): void {
+  const uid = process.getuid?.()
+  if (uid === undefined) return
+  const operation = "execute file output"
+  for (const output of outputs) {
+    if (output.existed) continue
+    try {
+      const before = fs.lstatSync(output.path)
+      if (!before.isFile() || before.uid !== uid || before.nlink !== 1) continue
+      const descriptor = fs.openSync(output.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK)
+      try {
+        const opened = fs.fstatSync(descriptor)
+        const current = fs.lstatSync(output.path)
+        if (!opened.isFile() || opened.uid !== uid || opened.nlink !== 1 || current.isSymbolicLink() || current.dev !== opened.dev || current.ino !== opened.ino) continue
+        assertExecuteFilePath(path.join(path.dirname(output.path), `.execute-output-${crypto.randomUUID()}`), operation)
+        fs.fchmodSync(descriptor, 0o600)
+        assertExecuteFilePath(output.path, operation)
+        if (process.platform === "linux") assertExecuteFilePath(fs.realpathSync(`/proc/self/fd/${descriptor}`), operation)
+      } finally {
+        fs.closeSync(descriptor)
+      }
+    } catch {
+      // The call may have failed before writing, removed its output itself, or a check refused it.
+    }
+  }
+}
+
+/**
+ * Prepares what checkHostCall found: records startTracing's path as Playwright does before awaiting,
+ * then creates each output's folders and records whether its file existed before the call. Every
+ * candidate is checked before the folders are touched and again afterwards. stopTracing's memory
+ * stays until the stop call resolves. Only the realm's apply paths call this, after the whole check
+ * succeeded and before the host call runs, so checks and construct traps stay side-effect free.
+ */
+export function prepareExecuteFileOutputs(call: ExecuteHostCall): PreparedExecuteFileOutputs {
+  const trace = call.trace
+  if (trace !== undefined) {
+    // Playwright sets its path at the top of startTracing, before the first await: mirror it here.
+    if (trace.path === undefined) startedTraces.delete(trace.receiver)
+    else startedTraces.set(trace.receiver, trace.path)
+  }
+  const outputs: ExecuteFileOutput[] = []
+  for (const candidate of call.outputs) {
+    assertExecuteFilePath(candidate.path, "execute file output")
+    ensureExecuteOutputDirectory(path.dirname(candidate.path))
+    const resolved = assertExecuteFilePath(candidate.path, "execute file output")
+    outputs.push({ path: resolved, existed: fileExists(resolved) })
+  }
+  const stop = call.traceStop
+  return stop === undefined ? { outputs } : { outputs, forgetTrace: () => startedTraces.delete(stop) }
+}
+
+/**
+ * Makes the files a host call created owner-only once it settles, and forgets stopTracing's path only
+ * when the stop resolves: Playwright keeps its path after a rejection, so the memory must too.
+ */
+export function completeExecuteFileOutputs(result: unknown, prepared: PreparedExecuteFileOutputs): unknown {
+  const settle = (resolved: boolean) => {
+    if (resolved) prepared.forgetTrace?.()
+    secureExecuteFileOutputs(prepared.outputs)
+  }
+  if (prepared.outputs.length === 0 && prepared.forgetTrace === undefined) return result
+  if (!util.types.isPromise(result)) {
+    settle(true)
+    return result
+  }
+  return (result as Promise<unknown>).then(
+    (value) => {
+      settle(true)
+      return value
+    },
+    (error: unknown) => {
+      settle(false)
+      throw error
+    },
+  )
+}
+
+/**
+ * Validates the file paths in a call's options and collects the ones the call will write. Only a
+ * path on the top-level options object counts as an output, because only those are Playwright file
+ * destinations; nothing here touches the filesystem beyond stat calls.
+ */
+function checkFileOptions(value: unknown, method: string, includeMethodKeys: boolean, candidates: ExecuteFileOutputCandidate[], depth = 0): void {
   if (depth > 4 || value === null || typeof value !== "object") return
   if (Array.isArray(value)) {
-    for (const item of value) checkFileOptions(item, method, includeMethodKeys, depth + 1)
+    for (const item of value) checkFileOptions(item, method, includeMethodKeys, candidates, depth + 1)
     return
   }
   // Option bags are plain objects; Playwright objects passed as arguments (a page, a locator) are not options.
@@ -370,16 +599,19 @@ function checkFileOptions(value: unknown, method: string, includeMethodKeys: boo
   for (const [key, item] of Object.entries(value)) {
     if (forbiddenOptionKeys.has(key)) throw new ExecuteFileAccessError(`${method}: the ${key} option is not available in execute code`)
     if (typeof item === "string" && (alwaysFileOptionKeys.has(key) || (includeMethodKeys && fileOptionKeys.has(key)))) {
-      Reflect.set(value, key, assertExecuteFilePath(item, `${method}({ ${key} })`))
+      const resolved = assertExecuteFilePath(item, `${method}({ ${key} })`)
+      if (depth === 0 && isFileOutputOption(method, key)) candidates.push({ path: resolved })
+      Reflect.set(value, key, resolved)
     } else {
-      checkFileOptions(item, method, includeMethodKeys, depth + 1)
+      checkFileOptions(item, method, includeMethodKeys, candidates, depth + 1)
     }
   }
 }
 
-function checkFileStrings(value: unknown, method: string): void {
-  if (typeof value === "string") assertExecuteFilePath(value, method)
-  else if (Array.isArray(value)) for (const item of value) if (typeof item === "string") assertExecuteFilePath(item, method)
+function checkFileStrings(value: unknown, method: string): string | undefined {
+  if (typeof value === "string") return assertExecuteFilePath(value, method)
+  if (Array.isArray(value)) for (const item of value) if (typeof item === "string") assertExecuteFilePath(item, method)
+  return undefined
 }
 
 const promiseReturningNames = new Set([...fileOptionMethods, "setInputFiles", "setFiles", "saveAs", "bringToFront", "send"])
@@ -388,8 +620,13 @@ export function returnsPromise(fn: Function): boolean {
   return util.types.isAsyncFunction(fn) || promiseReturningNames.has(typeof fn.name === "string" ? fn.name.replace(/^bound /, "") : "")
 }
 
-/** Enforce the execute file roots and refused APIs for one host call made by sandboxed code. */
-export function checkHostCall(fn: Function, receiver: unknown, args: readonly unknown[]): void {
+/**
+ * Enforce the execute file roots and refused APIs for one host call made by sandboxed code, and
+ * return the files the call may write plus any tracing memory it changes. This is side-effect free:
+ * it only validates arguments and reads startTracing's remembered path. The realm hands the result
+ * to prepareExecuteFileOutputs after this returns and to completeExecuteFileOutputs once it settles.
+ */
+export function checkHostCall(fn: Function, receiver: unknown, args: readonly unknown[]): ExecuteHostCall {
   const name = typeof fn.name === "string" ? fn.name.replace(/^bound /, "") : ""
   if (receiver !== null && typeof receiver === "object") {
     const constructor = Reflect.getOwnPropertyDescriptor(receiver, "constructor")?.value
@@ -403,14 +640,33 @@ export function checkHostCall(fn: Function, receiver: unknown, args: readonly un
   if ((name === "bringToFront" || (name === "send" && args[0] === "Page.bringToFront")) && !executeAllowsForeground()) {
     throw new Error(bringToFrontBlockedMessage)
   }
+  const candidates: ExecuteFileOutputCandidate[] = []
   if (name === "setInputFiles") {
     const isFrameLike = receiver !== null && typeof receiver === "object" && typeof (receiver as { goto?: unknown }).goto === "function"
     checkFileStrings(isFrameLike ? args[1] : args[0], "setInputFiles")
-  } else if (name === "setFiles" || name === "saveAs" || name === "routeFromHAR") {
+  } else if (name === "saveAs") {
+    // download.saveAs(path) and video.saveAs(path) copy the artifact to a new file, parents included.
+    const target = checkFileStrings(args[0], name)
+    if (target !== undefined) candidates.push({ path: target })
+  } else if (name === "setFiles" || name === "routeFromHAR") {
     checkFileStrings(args[0], name)
   }
   const includeMethodKeys = fileOptionMethods.has(name)
-  for (const arg of args) checkFileOptions(arg, name || "call", includeMethodKeys)
+  for (const arg of args) checkFileOptions(arg, name || "call", includeMethodKeys, candidates)
+  if (name === "startTracing" && isObject(receiver)) {
+    // startTracing only records the path; stopTracing later writes it and takes no arguments.
+    const path = isObject(args[1]) ? Reflect.get(args[1], "path") : undefined
+    const trace = typeof path === "string" ? assertExecuteFilePath(path, "startTracing({ path })") : undefined
+    return { outputs: candidates, trace: { receiver, path: trace } }
+  }
+  if (name === "stopTracing" && isObject(receiver)) {
+    const remembered = startedTraces.get(receiver)
+    if (remembered === undefined) return { outputs: candidates }
+    // Playwright keeps the path until stopTracing runs, so a path that now fails the guard must
+    // keep refusing every stop rather than let a later call write it unguarded.
+    return { outputs: [...candidates, { path: assertExecuteFilePath(remembered, "stopTracing()") }], traceStop: receiver }
+  }
+  return { outputs: candidates }
 }
 
 /**

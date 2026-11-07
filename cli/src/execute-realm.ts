@@ -58,6 +58,7 @@ import {
   assertExecuteFilePath,
   bringToFrontBlockedMessage,
   checkHostCall,
+  completeExecuteFileOutputs,
   createExecuteFiles,
   executeAllowsForeground,
   executeAllowsNode,
@@ -69,11 +70,13 @@ import {
   fileRootsEnvironmentVariable,
   pageVisibleApiWarning,
   pageVisibleApiWarningForName,
+  prepareExecuteFileOutputs,
   pruneStaleExecuteFilesDirectories,
   removeExecuteFilesDirectory,
   returnsPromise,
   sandboxModules,
   type ExecuteFiles,
+  type PreparedExecuteFileOutputs,
 } from "./execute-realm/file-roots.ts"
 import { installRealmGlobals, populateHostToSandboxIntrinsics } from "./execute-realm/globals.ts"
 import {
@@ -548,8 +551,9 @@ export class ExecuteRealm {
           ? realm.hostBySandboxProxy.get(thisArgument)
           : realm.toHost(thisArgument)
         const hostArgs = args.map((arg) => realm.toHost(arg))
+        let prepared: PreparedExecuteFileOutputs
         try {
-          checkHostCall(target as Function, hostThis, hostArgs)
+          prepared = prepareExecuteFileOutputs(checkHostCall(target as Function, hostThis, hostArgs))
         } catch (error) {
           // Refusals of promise-returning APIs reject, so `.catch()` in agent code sees them.
           if (returnsPromise(target as Function)) return realm.SandboxPromise.reject(realm.toSandboxThrown(error))
@@ -567,7 +571,7 @@ export class ExecuteRealm {
           throw realm.toSandboxThrown(error)
         }
         try {
-          return realm.toSandbox(result)
+          return realm.toSandbox(completeExecuteFileOutputs(result, prepared))
         } catch (error) {
           throw realm.sanitizeThrown(error)
         }
@@ -613,8 +617,8 @@ export class ExecuteRealm {
         // later. Merely checking Function.prototype.call is not sufficient.
         guarded = new Proxy(host, {
           apply(target, receiver, args) {
-            checkHostCall(target, receiver, args)
-            return Reflect.apply(target, receiver, args)
+            const prepared = prepareExecuteFileOutputs(checkHostCall(target, receiver, args))
+            return completeExecuteFileOutputs(Reflect.apply(target, receiver, args), prepared)
           },
           construct(target, args, newTarget) {
             checkHostCall(target, undefined, args)
