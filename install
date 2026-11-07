@@ -1,7 +1,7 @@
 #!/bin/sh
-# Installs browse: downloads the browse binary for this computer into ~/.local/bin ($XDG_BIN_HOME when set), then hands
-# over to `browse install`, which does the rest (PATH, your agents, pairing with your browser). Served at
-# https://opencode.ai/browse/install. Platform detection follows opencode's installer.
+# Installs browse: downloads the browse binary for this computer from Anomaly's release service into ~/.local/bin
+# ($XDG_BIN_HOME when set), then hands over to `browse install`, which does the rest (PATH, your agents, pairing with your
+# browser). Served at https://opencode.ai/browse/install. Platform detection follows opencode's installer.
 set -eu
 APP=browse
 
@@ -17,8 +17,9 @@ Usage: install [options] [browse install options]
 
 Options:
     -h, --help              Display this help message
-    -v, --version <version> Install a specific version (e.g., 0.0.7)
-        --channel <tag>     Install the latest version on an npm tag (latest or dev)
+    -v, --version <version> Install a specific version from npm (e.g., 0.0.7)
+        --channel <channel> Install the latest version on a release channel:
+                            stable (default), beta or dev. \`latest\` means stable
     -b, --binary <path>     Install from a local binary instead of downloading
         --no-setup          Only install the binary; don't run \`browse install\`
 
@@ -27,12 +28,18 @@ Anything else goes to \`browse install\`, e.g. --remote, --agent claude or --no-
 Examples:
     curl -fsSL https://opencode.ai/browse/install | bash
     curl -fsSL https://opencode.ai/browse/install | bash -s -- --remote
+    curl -fsSL https://opencode.ai/browse/install | bash -s -- --channel dev
     curl -fsSL https://opencode.ai/browse/install | bash -s -- --version 0.0.7
 EOF
 }
 
+fail() {
+    printf '%b\n' "${RED}browse: $*${NC}" >&2
+    exit 1
+}
+
 requested_version=${VERSION:-}
-channel=latest
+channel=stable
 no_setup=false
 binary_path=""
 # Consume the installer's options, rotating setup arguments to the end without splitting or evaluating them.
@@ -84,6 +91,13 @@ while [ "$remaining" -gt 0 ]; do
             ;;
     esac
 done
+
+# `latest` was the npm tag and is now an alias for the release service's stable channel.
+case "$channel" in
+    latest) channel=stable ;;
+    stable | beta | dev) ;;
+    *) fail "unknown channel $channel (stable, beta or dev)" ;;
+esac
 
 INSTALL_DIR=${XDG_BIN_HOME:-$HOME/.local/bin}
 # XDG paths must be absolute; a relative one would put browse in the current directory.
@@ -206,14 +220,8 @@ else
 
     package="@opencode/browse-$target"
     encoded="@opencode%2fbrowse-$target"
-    if [ -z "$requested_version" ]; then
-        metadata=$(curl -fsSL "https://registry.npmjs.org/$encoded/$channel" || true)
-        specific_version=$(echo "$metadata" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -n 1)
-        if [ -z "$specific_version" ]; then
-            printf '%b\n' "${RED}Failed to fetch the latest browse version for $target${NC}"
-            exit 1
-        fi
-    else
+    # A pinned version comes from npm: the release service has one current release per channel and no version lookup.
+    if [ -n "$requested_version" ]; then
         requested_version="${requested_version#v}"
         specific_version=$requested_version
         http_status=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/$encoded/$specific_version" || true)
@@ -226,10 +234,9 @@ else
             printf '%b\n' "${RED}Failed to fetch package information${NC}"
             exit 1
         fi
+        filename="browse-$target-$specific_version.tgz"
+        url="https://registry.npmjs.org/$package/-/$filename"
     fi
-
-    filename="browse-$target-$specific_version.tgz"
-    url="https://registry.npmjs.org/$package/-/$filename"
 fi
 
 print_message() (
@@ -246,7 +253,25 @@ print_message() (
     printf '%b\n' "${color}${message}${NC}"
 )
 
-download_and_install() (
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d ' ' -f 1
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | cut -d ' ' -f 1
+    else
+        fail "sha256sum or shasum is required to verify the download"
+    fi
+}
+
+# The release service's target name: npm says darwin, the service says macos.
+service_target() {
+    case "$1" in
+        darwin-*) printf '%s' "macos-${1#darwin-}" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+download_npm() (
     print_message info "\n${MUTED}Installing ${NC}browse ${MUTED}version: ${NC}$specific_version"
     tmp_dir="${TMPDIR:-/tmp}/browse_install_$$"
     mkdir -p "$tmp_dir"
@@ -292,6 +317,71 @@ download_and_install() (
     rm -rf "$tmp_dir"
 )
 
+# The channel's current release from the Anomaly release service (https://anoma.ly/release, anomalyco/release
+# docs/protocol.md). The manifest names the file for this target; its size and SHA-256 must match before it is used.
+download_release() (
+    service="${OPENCODE_BROWSER_RELEASE_SERVICE:-https://anoma.ly/release}"
+    service="${service%/}"
+    case "$service" in
+        */release) origin="${service%/release}" ;;
+        *) fail "OPENCODE_BROWSER_RELEASE_SERVICE must end in /release, not $service" ;;
+    esac
+    service_target_name=$(service_target "$target")
+    tmp_dir="${TMPDIR:-/tmp}/browse_install_$$"
+    mkdir -p "$tmp_dir"
+
+    # The version isn't known before the manifest, so the manifest request names the tool instead.
+    curl -fsSL -A "browse/$channel/install" -o "$tmp_dir/manifest.json" "$service/browse/cli/$channel.json" ||
+        fail "no $channel release at $service/browse/cli/$channel.json"
+    # The manifest is JSON; without whitespace, every field this needs is a plain "key":value pair (URLs, hashes and
+    # versions have no spaces).
+    manifest=$(tr -d ' \t\r\n' <"$tmp_dir/manifest.json")
+    # field <key> <json>: the first value of <key> in <json>.
+    field() {
+        case "$2" in
+            *"\"$1\":"*) printf '%s' "${2#*\""$1"\":}" | sed -e 's/^"//' -e 's/[",}].*//' ;;
+        esac
+    }
+    if [ "$(field app "$manifest")" != browse ] || [ "$(field artifact "$manifest")" != cli ] ||
+        [ "$(field channel "$manifest")" != "$channel" ]; then
+        fail "$service/browse/cli/$channel.json is not browse's $channel CLI manifest"
+    fi
+    release_json="${manifest#*\"release\":}"
+    specific_version=$(field version "$release_json")
+    [ -n "$specific_version" ] || fail "the $channel release has no version"
+    targets="${release_json#*\"targets\":}"
+    target_json="${targets#*\""$service_target_name"\":\{}"
+    [ "$target_json" != "$targets" ] || fail "the $channel release has no $service_target_name build"
+    target_json="${target_json%%\}*}"
+    url=$(field url "$target_json")
+    expected_sha=$(field sha256 "$target_json")
+    expected_size=$(field size "$target_json")
+    case "$url" in
+        /*) url="$origin$url" ;;
+        *) fail "unexpected download URL $url" ;;
+    esac
+    filename="${url##*/}"
+
+    print_message info "\n${MUTED}Installing ${NC}browse ${MUTED}version: ${NC}$specific_version ${MUTED}($channel)${NC}"
+    curl -f -# -L -A "browse/$channel/$specific_version/cli" -o "$tmp_dir/$filename" "$url" || exit $?
+    actual_sha=$(sha256_file "$tmp_dir/$filename")
+    if [ -z "$expected_sha" ] || [ "$expected_sha" != "$actual_sha" ]; then
+        fail "checksum mismatch for $filename (expected ${expected_sha:-none}, got $actual_sha)"
+    fi
+    actual_size=$(wc -c <"$tmp_dir/$filename" | tr -d ' ')
+    if [ -n "$expected_size" ] && [ "$expected_size" != "$actual_size" ]; then
+        fail "size mismatch for $filename (expected $expected_size, got $actual_size)"
+    fi
+
+    tar -xzf "$tmp_dir/$filename" -C "$tmp_dir"
+    test -f "$tmp_dir/package/bin/$installed_binary" || fail "$filename has no package/bin/$installed_binary"
+    # Replace by rename, so a relay still running the old binary keeps its file.
+    mv "$tmp_dir/package/bin/$installed_binary" "$INSTALL_DIR/$installed_binary.new"
+    chmod 755 "$INSTALL_DIR/$installed_binary.new"
+    mv -f "$INSTALL_DIR/$installed_binary.new" "$INSTALL_DIR/$installed_binary"
+    rm -rf "$tmp_dir"
+)
+
 install_from_binary() {
     print_message info "\n${MUTED}Installing ${NC}browse ${MUTED}from: ${NC}$binary_path"
     cp "$binary_path" "$INSTALL_DIR/$installed_binary.new"
@@ -301,8 +391,10 @@ install_from_binary() {
 
 if [ -n "$binary_path" ]; then
     install_from_binary
+elif [ -n "$requested_version" ]; then
+    download_npm
 else
-    download_and_install
+    download_release
 fi
 
 if [ "$no_setup" = "true" ]; then

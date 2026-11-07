@@ -7,42 +7,46 @@
 //   npm global      `npm install -g @opencode/browse@<version>` replaces the package in place.
 //   npx             no-op: npx resolves the package itself, and install never writes npx entries.
 //
-// The relay checks the registry for its channel's dist-tag (latest, or dev for a dev build, which every push to dev
-// publishes) at most once a day. Mode "on" (default) runs the installer in its own process, then once no agent is using
-// the browser restarts the relay from the same entry path. "notify" only shows the update; "off" doesn't check.
+// The relay checks its channel at launch and at least once an hour. A binary install reads its channel's manifest from
+// Anomaly's release service (release-service.ts, anomalyco/release docs/protocol.md) and follows it; an npm global
+// install reads the npm dist-tag (latest, or dev for a dev build, which every push to dev publishes). Mode "on"
+// (default) runs the installer in its own process, then once no agent is using the browser restarts the relay from the
+// same entry path. "notify" only shows the update; "off" doesn't check.
 // OPENCODE_BROWSER_AUTO_UPDATE overrides the stored mode. Installed binaries and npm global installs supervise their MCP
 // server (mcp/supervisor.ts): it notices the installed version change and swaps the server between requests once the
-// relay runs it. The installer and npm do their own integrity checks; there is no separate checksum path here.
+// relay runs it. The installer and npm do their own integrity checks (the release service's size and SHA-256 for a
+// binary); there is no separate checksum path here.
 import { spawn, spawnSync } from "node:child_process"
 import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, realpathSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { cliPrefix, compiledBinary, entryCommand, fromCheckout, installedBinary, stateRoot } from "../paths.ts"
 import { opencodeBrowserVersion } from "../version.ts"
+import { checkRelease, releaseChannel, runningServiceTarget, type ReleaseChannel, type ReleaseDecision } from "./release-service.ts"
 
 export const PACKAGE_NAME = "@opencode/browse"
-const DAY_MS = 24 * 60 * 60 * 1000
+const HOUR_MS = 60 * 60 * 1000
 const DEFAULT_REGISTRY = "https://registry.npmjs.org"
 const INSTALL_SCRIPT = "https://opencode.ai/browse/install"
 const INSTALL_SCRIPT_WINDOWS = "https://opencode.ai/browse/install.ps1"
 
 export const autoUpdateModes = ["on", "notify", "off"] as const
 export type AutoUpdateMode = (typeof autoUpdateModes)[number]
-export type Channel = "latest" | "dev"
+export type Channel = "latest" | "dev" | "beta"
 export type InstallKind = "binary" | "npm" | "npx" | "checkout" | "other"
 
-/** A version auto-update installs: 1.2.3, or 1.2.4-dev.42 (1.2.4-dev.42.2 for a rerun). */
-export const UPDATE_VERSION = /^(\d+)\.(\d+)\.(\d+)(?:-dev\.(\d+)(?:\.(\d+))?)?$/
+/** A version auto-update installs: 1.2.3, 1.2.4-dev.42 (1.2.4-dev.42.2 for a rerun), or a beta. */
+export const UPDATE_VERSION = /^(\d+)\.(\d+)\.(\d+)(?:-(dev|beta)\.(\d+)(?:\.(\d+))?)?$/
 
-export const channelOf = (version: string): Channel => (version.includes("-dev.") ? "dev" : "latest")
+export const channelOf = (version: string): Channel => (version.includes("-dev.") ? "dev" : version.includes("-beta.") ? "beta" : "latest")
 
-/** Orders versions as semver does for these shapes: a dev build below its release, then by run. Anything else sorts as unknown (never newer). */
+/** Orders versions as semver does for these shapes: dev below beta below the release, then by run. Anything else never compares as newer. */
 export function compareVersions(left: string, right: string): number {
   const parse = (value: string) => {
     const match = UPDATE_VERSION.exec(value)
     if (!match) return undefined
-    const release = match[4] === undefined ? 1 : 0
-    return [Number(match[1]), Number(match[2]), Number(match[3]), release, Number(match[4] ?? 0), Number(match[5] ?? 0)]
+    const stage = match[4] === undefined ? 2 : match[4] === "beta" ? 1 : 0
+    return [Number(match[1]), Number(match[2]), Number(match[3]), stage, Number(match[5] ?? 0), Number(match[6] ?? 0)]
   }
   const a = parse(left)
   const b = parse(right)
@@ -118,6 +122,8 @@ export type AutoUpdateState = {
   readonly mode?: AutoUpdateMode
   readonly checkedAt?: number
   readonly latest?: string
+  /** The ETag of the release service manifest last read, for If-None-Match. */
+  readonly etag?: string
   readonly failed?: string
   readonly lastUpdate?: { readonly from: string; readonly to: string; readonly at: string }
   readonly lastError?: { readonly message: string; readonly at: string; readonly version?: string; readonly attempts?: number }
@@ -221,9 +227,18 @@ export function describeAutoUpdate(status: AutoUpdateStatus): string {
   if (status.install !== "binary" && status.install !== "npm") return "Updates:   not an installed runtime"
   const mode = { on: "automatic", notify: "notify only", off: "off" }[status.effective]
   const parts = [`${mode}${status.overriddenBy ? ` (set by ${status.overriddenBy})` : ""}`, `channel ${status.channel ?? "latest"}`]
-  if (status.latest && status.version && compareVersions(status.latest, status.version) > 0) parts.push(`${status.latest} available; the installer runs when no agent is using the browser`)
+  if (updateAvailable(status)) parts.push(`${status.latest} available; the installer runs when no agent is using the browser`)
   if (status.lastError) parts.push(`last attempt failed: ${status.lastError.message}`)
   return `Updates:   ${parts.join("; ")}`
+}
+
+/**
+ * Whether `status.latest` is another build: the release service's current release is compared for equality only, as
+ * the protocol says; npm's dist-tag is ordered as npm orders versions.
+ */
+export function updateAvailable(status: Pick<AutoUpdateStatus, "install" | "latest" | "version">): boolean {
+  if (!status.latest || !status.version) return false
+  return status.install === "binary" ? status.latest !== status.version : compareVersions(status.latest, status.version) > 0
 }
 
 // ---- registry and installer ----------------------------------------------------------------------------
@@ -283,7 +298,8 @@ export async function fetchPublished(options: { readonly registry: string; reado
 export type InstallerOptions = {
   readonly runtime: Runtime
   readonly version?: string
-  readonly channel?: Channel
+  /** The channel the installer follows: stable or dev for a binary, latest or dev for npm. A version pins npm. */
+  readonly channel?: Channel | ReleaseChannel
   readonly run?: Run
   readonly fetch?: typeof fetch
   readonly env?: NodeJS.ProcessEnv
@@ -380,12 +396,43 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
   const now = deps.now ?? Date.now
   const { runtime } = deps
   const running = runtime.version
-  const checkIntervalMs = Number(env.OPENCODE_BROWSER_AUTO_UPDATE_INTERVAL_MS) || DAY_MS
+  const checkIntervalMs = Math.min(Number(env.OPENCODE_BROWSER_AUTO_UPDATE_INTERVAL_MS) || HOUR_MS, HOUR_MS)
   const spawnChild = deps.spawnChild ?? ((args, onExit) => spawnRuntimeChild(runtime, args, onExit, env))
   let busy = false
   /** A runtime-switch child in flight; a stuck one is given up on after SWITCH_TIMEOUT_MS. */
   let switching: { pid: number | undefined; startedAt: number } | undefined
   let timer: NodeJS.Timeout | undefined
+
+  /** A binary install's check: its channel's release service manifest, through the protocol's client rules. */
+  async function checkBinary(state: AutoUpdateState, channel: Channel): Promise<AutoUpdateState> {
+    const target = runningServiceTarget()
+    if (!target) throw new Error("this install has no release service target")
+    const serviceChannel: ReleaseChannel = releaseChannel(channel)
+    const result = await checkRelease({
+      version: running,
+      channel: serviceChannel,
+      target,
+      ...(state.etag ? { etag: state.etag } : {}),
+      ...(deps.fetch ? { fetch: deps.fetch } : {}),
+    })
+    if (result.status === "unchanged") {
+      deps.log("autoupdate.unchanged", { channel: serviceChannel, running })
+      return updateState(({ failed: _failed, ...rest }) => ({ ...rest, checkedAt: now() }))
+    }
+    if (result.status === "missing") {
+      deps.log("autoupdate.no_release", { channel: serviceChannel, running })
+      return updateState(({ failed: _failed, latest: _latest, etag: _etag, ...rest }) => ({ ...rest, checkedAt: now() }))
+    }
+    const decision: ReleaseDecision = result.decision
+    if (decision.action === "reject") throw new Error(`the ${serviceChannel} manifest was rejected: ${decision.reason}`)
+    deps.log("autoupdate.checked", { channel: serviceChannel, current: result.releaseVersion, running, decision: decision.reason })
+    return updateState(({ failed: _failed, latest: _latest, etag: _etag, ...rest }) => ({
+      ...rest,
+      checkedAt: now(),
+      ...(result.etag ? { etag: result.etag } : {}),
+      ...(decision.action === "install" ? { latest: decision.version } : {}),
+    }))
+  }
 
   async function tick() {
     if (switching && (now() - switching.startedAt > SWITCH_TIMEOUT_MS || (switching.pid !== undefined && !processAlive(switching.pid)))) {
@@ -401,17 +448,20 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
       if (!state.checkedAt || now() - state.checkedAt >= checkIntervalMs || now() < state.checkedAt) {
         const channel = channelOf(running)
         try {
-          const published = await fetchPublished({ registry: await registryUrl(deps.run, env), channel, ...(deps.fetch ? { fetch: deps.fetch } : {}) })
-          state = updateState(({ failed: _failed, ...rest }) => ({ ...rest, checkedAt: now(), latest: published.version }))
-          deps.log("autoupdate.checked", { channel, latest: published.version, running })
+          if (runtime.kind === "binary") {
+            state = await checkBinary(state, channel)
+          } else {
+            const published = await fetchPublished({ registry: await registryUrl(deps.run, env), channel, ...(deps.fetch ? { fetch: deps.fetch } : {}) })
+            state = updateState(({ failed: _failed, ...rest }) => ({ ...rest, checkedAt: now(), latest: published.version }))
+            deps.log("autoupdate.checked", { channel, latest: published.version, running })
+          }
         } catch (error) {
-          state = updateState((rest) => ({ ...rest, checkedAt: now(), failed: (error as Error).message }))
+          state = updateState(({ latest: _latest, ...rest }) => ({ ...rest, checkedAt: now(), failed: (error as Error).message }))
           deps.log("autoupdate.check_failed", { error: (error as Error).message })
         }
         deps.onChange?.()
       }
-      const latest = state.latest
-      const wanted = latest && compareVersions(latest, running) > 0 ? latest : undefined
+      const wanted = runtime.kind === "binary" ? state.latest : state.latest && compareVersions(state.latest, running) > 0 ? state.latest : undefined
       if (!wanted || mode !== "on") return
 
       // An installer in its own process: wait for it, or record that it died without saying how it went.
@@ -422,13 +472,13 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
         const installed = installedVersion(runtime)
         state = updateState(({ installing: _installing, ...rest }) => ({
           ...rest,
-          ...(installed && compareVersions(installed, installing.version) >= 0 ? {} : { lastError: { message: "the installer stopped without finishing", at: new Date(now()).toISOString(), version: installing.version } }),
+          ...(installed && installed !== running ? {} : { lastError: { message: "the installer stopped without finishing", at: new Date(now()).toISOString(), version: installing.version } }),
         }))
         deps.log("autoupdate.installer_gone", { version: installing.version })
       }
       const installed = installedVersion(runtime)
-      if (installed && compareVersions(installed, wanted) >= 0) {
-        // Another process installed it already. Restart the relay with it once nothing is using the browser.
+      if (installed === wanted) {
+        // The build is on disk (this installer's, or another process's). Restart the relay with it once nothing is using the browser.
         if (!deps.isIdle()) return
         switching = { pid: undefined, startedAt: now() }
         deps.log("autoupdate.switching", { from: running, to: installed })

@@ -22,7 +22,10 @@ curl -fsSL https://opencode.ai/browse/install | bash
 
 On Windows, run `irm https://opencode.ai/browse/install.ps1 | iex` in PowerShell. With Node.js,
 `npx @opencode/browse install` works too: it installs the package globally so agents run `browse` from PATH. The
-installer puts the `browse` command in `~/.local/bin` (`$XDG_BIN_HOME` when set) and runs `browse install`.
+installer puts the `browse` command in `~/.local/bin` (`$XDG_BIN_HOME` when set) and runs `browse install`. It reads
+the channel's manifest from [Anomaly's release service](https://anoma.ly/release), downloads the binary for this
+computer, and verifies its size and SHA-256 before installing it. `--channel stable|beta|dev` picks the channel
+(`stable` by default); `--version <version>` installs a specific version from npm.
 
 `install` keeps its files in the XDG folders (`~/.config/browse`, `~/.local/share/browse`, `~/.local/state/browse`
 and `~/.cache/browse`; each honours its `XDG_*` variable), adds the `browse` MCP server to the agents you choose, and
@@ -41,19 +44,24 @@ That's it. Ask an agent to *"open news.ycombinator.com and tell me the top story
 Requirements: a Chromium browser, and [opencode](https://opencode.ai) or another MCP client. The npx install also needs
 Node.js 22.19+.
 
-**Updates are automatic.** The relay checks npm once a day and, in the background, reruns whatever installed browse:
-the install script for a binary install (which replaces `~/.local/bin/browse`), or `npm install -g
-@opencode/browse@<version>` for an npm one. It restarts the relay when no agent is using the browser, without changing
-opencode's config. Running MCP servers swap to the new build between tool calls. Choose *Only tell me* or *Don't check*
-under **Updates** on the extension's settings page (or `settings set autoUpdate=notify`, or
-`OPENCODE_BROWSER_AUTO_UPDATE=off`). Agents can read the current value from `status`, but the MCP `settings` tool
-can't read or change update behaviour; it stays with you. `browse update` updates now; to go back, rerun the installer
-with `--version <version>`, or `npm install -g @opencode/browse@<version>`. The Chrome Web Store updates the extension.
+**Updates are automatic.** A binary install reads its channel's manifest from Anomaly's release service at launch and
+at least once an hour; an npm install checks npm's dist-tag once an hour. When the current release is a different build,
+the relay reruns whatever installed browse in the background: the install script for a binary install (which checks the
+file's size and SHA-256 and replaces `~/.local/bin/browse`), or `npm install -g @opencode/browse@<version>` for an npm
+one. It restarts the relay when no agent is using the browser, without changing opencode's config. Running MCP servers
+swap to the new build between tool calls. Choose *Only tell me* or *Don't check* under **Updates** on the extension's
+settings page (or `settings set autoUpdate=notify`, or `OPENCODE_BROWSER_AUTO_UPDATE=off`). Agents can read the current
+value from `status`, but the MCP `settings` tool can't read or change update behaviour; it stays with you. `browse
+update` updates now; to go back, rerun the installer with `--channel <channel>` (binary installs follow the channel) or
+`--version <version>` / `npm install -g @opencode/browse@<version>` (both from npm). The Chrome Web Store updates the
+extension.
 
 **Dev builds**: every push to `dev` publishes one. `npx @opencode/browse@dev install` follows the dev channel: it
 downloads that build's extension into `<cache root>/extension`, which you load unpacked once (`browse extension` shows
-the folder), and each update refreshes the folder and reloads the extension. The zip is also at
-https://anoma.ly/release/browse/extension/dev/chromium.
+the folder), and each update refreshes the folder and reloads the extension. A binary install follows the same dev
+channel with `curl -fsSL https://opencode.ai/browse/install | bash -s -- --channel dev`. The zip is also at
+https://anoma.ly/release/browse/extension/dev/chromium and each binary at
+https://anoma.ly/release/browse/cli/dev/<target>.
 
 There's nothing to sign in to. Each browser pairs with the relay once and gets a key of its own (see
 [Security](#security)). If pairing didn't happen by itself, run `browse install` again to open a

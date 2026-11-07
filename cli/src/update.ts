@@ -12,7 +12,7 @@
 import { execFile, spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs"
 import path from "node:path"
-import { autoUpdateStatus, compareVersions, installedRuntime } from "./update/auto-update.ts"
+import { autoUpdateStatus, installedRuntime, updateAvailable } from "./update/auto-update.ts"
 import { cacheRoot, checkoutRoot, cliCommand, compiledBinary } from "./paths.ts"
 import { unpackedReloadAdvice } from "./protocol.ts"
 
@@ -206,7 +206,7 @@ export function npmUpdateNotice(): UpdateNotice | undefined | false {
   if (!runtime) return false
   const status = autoUpdateStatus({ runtime })
   const latest = status.latest
-  if (!latest || compareVersions(latest, runtime.version) <= 0 || status.effective === "off") return undefined
+  if (!latest || !updateAvailable(status) || status.effective === "off") return undefined
   if (status.effective === "on" && !status.lastError) return undefined
   const check: UpdateCheck = { repo: "npm", checkedAt: Date.now(), head: runtime.version, upstream: `npm ${status.channel ?? "latest"}`, latest, available: true }
   return { summary: `browse ${latest} is available (you have ${runtime.version})`, command: cliCommand("update"), check }
