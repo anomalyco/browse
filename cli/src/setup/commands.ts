@@ -22,6 +22,7 @@ import { runCommand } from "../update/auto-update.ts"
 import { unpackedExtensionId } from "../protocol.ts"
 import { parseHostname, readRelayConfig, writeRelayConfig } from "../relay/config.ts"
 import { relayAuthorization } from "../relay/secrets.ts"
+import { defaultSiteSecretsDir } from "../auth/site-secrets.ts"
 import { opencodeBrowserBuildId } from "../version.ts"
 import { isInstallerBinary, removeBinaryInstall, samePath } from "./binary.ts"
 import { revealFolder } from "./browsers.ts"
@@ -318,12 +319,19 @@ export async function set(args: string[]) {
   log("The connection isn't encrypted by browse: use it over Tailscale or a LAN you trust, not the open internet.")
 }
 
-/** Stored secret profiles are the one thing uninstall deletes that can't be recaptured without the user. */
+/** Stored secret profiles and site secrets are what uninstall deletes that can't be recaptured without the user. */
 async function confirmSecretRemoval(args: string[]) {
   const secrets = path.join(files.dir, "secrets")
-  const profiles = existsSync(secrets) ? readdirSync(secrets).filter((name) => name.endsWith(".json")) : []
-  if (profiles.length === 0 || args.includes("--yes") || args.includes("-y")) return
-  const notice = `Uninstalling deletes ${profiles.length} stored secret profile${profiles.length === 1 ? "" : "s"} in ${secrets}.`
+  const siteSecrets = defaultSiteSecretsDir()
+  const count = (directory: string) =>
+    existsSync(directory) ? readdirSync(directory).filter((name) => name.endsWith(".json")).length : 0
+  const profiles = count(secrets)
+  const sites = count(siteSecrets)
+  if ((profiles === 0 && sites === 0) || args.includes("--yes") || args.includes("-y")) return
+  const notice = `Uninstalling deletes ${[
+    ...(profiles > 0 ? [`${profiles} stored secret profile${profiles === 1 ? "" : "s"} in ${secrets}`] : []),
+    ...(sites > 0 ? [`${sites} site secret${sites === 1 ? "" : "s"} in ${siteSecrets}`] : []),
+  ].join(" and ")}.`
   if (!process.stdin.isTTY) fail(`${notice} Re-run with --yes to confirm.`)
   const prompt = createInterface({ input: process.stdin, output: process.stdout })
   const answer = await prompt.question(`${notice} Continue? [y/N] `).finally(() => prompt.close())

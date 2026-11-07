@@ -81,7 +81,7 @@ if (command === "--version" || command === "-v") {
                                  install, npm install -g for an npm one); --check only says whether there's an
                                  update. A git clone pulls the newer commits and runs setup again.
   uninstall [--yes]              Remove everything install set up (--yes skips confirming that stored
-                                 secret profiles are deleted)
+                                 secret profiles and site secrets are deleted)
 
 browse keeps its files in $XDG_CONFIG_HOME/browse, $XDG_DATA_HOME/browse, $XDG_STATE_HOME/browse and
 $XDG_CACHE_HOME/browse (defaults under ~/.config, ~/.local/share, ~/.local/state and ~/.cache), and the
