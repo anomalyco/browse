@@ -274,9 +274,9 @@ may try to steer it, and that other programs on your computer may try to use the
   browser's key and disconnects it. The relay accepts only the two published extension IDs (plus any listed in
   `OPENCODE_BROWSER_EXTENSION_ORIGINS`). Browsers paired by an earlier version with its shared code switch to a key of
   their own the next time they connect; `pair --revoke legacy` retires that code once they all have.
-- **Sandboxed `execute`.** Agent code runs in a separate JavaScript realm that isolates it from Node: it isn't given
-  `process`, `require`, `import()`, `fs` or network modules, only a `files` helper and Playwright file options limited
-  to the temp directory, not browse's data. The sandbox is a defense in depth, not a hard security boundary:
+- **Restricted `execute`.** Agent code runs in a restricted JavaScript realm on the relay: it withholds Node
+  APIs (`process`, `require`, `import()`, `fs`, network modules, Node fetch), limits files to the file roots, and
+  stops synchronous code after about 2 seconds. It shares the relay's process, so it is not a security boundary:
   treat code an agent runs as code running as you. The relay starts with an allowlisted environment (the basics plus
   `OPENCODE_BROWSER_*`, proxy variables and CA certificate paths), so your API keys aren't in it.
 - **CDP guardrails.** Cookie reads return only cookies for the session's own pages; cookie writes are limited to
@@ -294,7 +294,7 @@ may try to steer it, and that other programs on your computer may try to use the
   `--totp`) a TOTP seed, read from stdin or a hidden prompt, in `~/.local/share/browse/site-secrets/`
   (0700/0600). An agent types it with `secrets.type(locator, "<name>")`: the relay checks the field's frame URL from
   the browser's frame tree against the secret's origins (and the session's allowlist) right before it inserts the
-  value, so a cross-origin iframe or a redirect gets nothing. The value never enters the execute sandbox, results,
+  value, so a cross-origin iframe or a redirect gets nothing. The value never enters the execute realm, results,
   logs, journals or HARs. Once typed it is in the page, where page script could read it, so pair secrets with an
   allowlist (execute warns when you don't). A stored TOTP seed makes 2FA one factor; keep handing 2FA to yourself
   when you can. `secrets list` and `secrets remove` manage them.
