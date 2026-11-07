@@ -42,9 +42,16 @@ type Options = {
    * minutes; now it fails within seconds and the tab is let go.
    */
   readonly inventoryCommandTimeoutMs?: number
+  /**
+   * How long one command may take while a tab's root is attached (a new tab from Target.createTarget, a popup, a tab
+   * the user shared). Longer than inventory: attach also runs on existing tabs, which may still be loading. A wedged
+   * tab used to hold the attach, and the restart waiting on it, for the full debugger timeout (60 s per command).
+   */
+  readonly attachCommandTimeoutMs?: number
 }
 
 const DEFAULT_INVENTORY_COMMAND_TIMEOUT_MS = 5_000
+const DEFAULT_ATTACH_COMMAND_TIMEOUT_MS = 10_000
 
 type TabWork = { readonly semaphore: Semaphore.Semaphore; revision: number; users: number }
 type Transition = {
@@ -66,7 +73,7 @@ type Worker = {
   verificationRetries: number
 }
 
-class InventoryTimeout extends Schema.TaggedError<InventoryTimeout>()("RootTargetLifecycle.InventoryTimeout", {
+class RootTargetTimeout extends Schema.TaggedError<RootTargetTimeout>()("RootTargetLifecycle.CommandTimeout", {
   message: Schema.String,
 }) {}
 
@@ -111,7 +118,7 @@ export class RootTargetLifecycle {
   }
 
   readonly attach = Effect.fn("RootTargetLifecycle.attach")((options: AttachOptions) =>
-    this.withPermit(options.tabId, options.expectedExtensionGeneration, (transition) => this.attachUnlocked(transition, options)))
+    this.withPermit(options.tabId, options.expectedExtensionGeneration, (transition) => this.attachUnlocked(transition, options), this.options.attachCommandTimeoutMs ?? DEFAULT_ATTACH_COMMAND_TIMEOUT_MS))
 
   readonly reconcile = Effect.fn("RootTargetLifecycle.reconcile")((tabId: number, generation?: number) =>
     this.withPermit(tabId, generation, (transition) => this.reconcileUnlocked(transition)))
@@ -186,9 +193,9 @@ export class RootTargetLifecycle {
         Effect.retry({
           times: 2,
           schedule: Schedule.spaced(0).pipe(Schedule.modifyDelay(({ attempt }) => Effect.succeed(100 * attempt))),
-          // A command that didn't answer within the inventory timeout won't answer on a retry either (the tab is
+          // A command that didn't answer within the timeout won't answer on a retry either (the tab is
           // wedged); retrying only held every agent back another timeout each time.
-          while: (error) => !(error instanceof GenerationChanged) && !(error instanceof InventoryTimeout) && !lifecycle.closing && generation === lifecycle.options.extension.generation(options.tabId) && revision === work.revision,
+          while: (error) => !(error instanceof GenerationChanged) && !(error instanceof RootTargetTimeout) && !lifecycle.closing && generation === lifecycle.options.extension.generation(options.tabId) && revision === work.revision,
         }),
       )
       if (lifecycle.closing || generation !== lifecycle.options.extension.generation(options.tabId)) return null
@@ -298,7 +305,7 @@ export class RootTargetLifecycle {
     const timeoutMs = transition.timeoutMs
     return this.step(transition, timeoutMs === undefined ? send : send.pipe(Effect.timeoutOrElse({
       duration: timeoutMs,
-      orElse: () => Effect.fail(new InventoryTimeout({ message: `${method} did not answer within ${timeoutMs} ms while reconciling tab ${transition.tabId}` })),
+      orElse: () => Effect.fail(new RootTargetTimeout({ message: `${method} did not answer within ${timeoutMs} ms on tab ${transition.tabId}` })),
     })))
   }
 
@@ -306,9 +313,11 @@ export class RootTargetLifecycle {
     const { tabId } = transition
     if (!options.alreadyAttached) yield* this.step(transition, this.options.extension.send({ method: "debugger.attach", params: { tabId } }))
     yield* this.command(transition, "Page.enable")
-    yield* Effect.gen({ self: this }, function* () {
-      yield* this.command(transition, "Emulation.setFocusEmulationEnabled", { enabled: false })
-    }).pipe(Effect.ignore)
+    // Ignore what the tab says about focus emulation, except silence: a timeout here must fail the attach now, not
+    // swallow one timeout and pay another on the next command (two timeouts outlast a relay restart's own timeout).
+    yield* this.command(transition, "Emulation.setFocusEmulationEnabled", { enabled: false }).pipe(
+      Effect.catchIf((error) => !(error instanceof RootTargetTimeout), () => Effect.void),
+    )
     yield* this.check(transition)
     const result = yield* this.command(transition, "Target.getTargetInfo")
     const reportedTargetInfo = getTargetInfo(result.targetInfo)
