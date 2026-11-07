@@ -97,7 +97,7 @@ export class SecretCollector {
     const type = contentType?.toLowerCase() ?? ""
     if (type.includes("json")) {
       try {
-        return JSON.stringify(this.protectJson(JSON.parse(body), sourceName(requestScope, location)))
+        return JSON.stringify(this.protectJson(JSON.parse(body), sourceName(requestScope, location), location))
       } catch {
         return undefined
       }
@@ -230,17 +230,26 @@ export class SecretCollector {
     return value
   }
 
-  private protectJson(value: unknown, location: string, path: readonly string[] = [], inSecret = false): unknown {
+  private protectJson(value: unknown, location: string, role: "request" | "response", path: readonly string[] = [], field: JsonField = "open"): unknown {
     if (Array.isArray(value)) {
-      return value.map((item, index) => this.protectJson(item, location, [...path, String(index)], inSecret))
+      // Only direct string elements of a DocC codeListing `code` array are content; everything else is secret.
+      if (field === "codeListing") {
+        return value.map((item, index) => Predicate.isString(item)
+          ? item
+          : this.protectJson(item, location, role, [...path, String(index)], "secret"))
+      }
+      return value.map((item, index) => this.protectJson(item, location, role, [...path, String(index)], field))
     }
     if (Predicate.isObject(value)) {
+      // DocC content never reaches nested objects: everything below a `code` object is secret.
+      const inherited = field === "codeListing" || field === "codeVoice" ? "secret" : field
       return Object.fromEntries(Object.entries(value).map(([key, item]) => [
         key,
-        this.protectJson(item, location, [...path, key], inSecret || secretNamePattern.test(key)),
+        this.protectJson(item, location, role, [...path, key], jsonField(key, inherited, role, value.type, item)),
       ]))
     }
-    if (!inSecret || value === null || value === "") return value
+    if (field === "open" || value === null || value === "") return value
+    if (field === "codeVoice" && Predicate.isString(value)) return value
     return this.reference(String(value), `${location}.json.${path.join(".")}`)
   }
 
@@ -346,6 +355,21 @@ function sourceFieldName(source: string): string {
 }
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+type JsonField = "open" | "secret" | "codeListing" | "codeVoice"
+
+/**
+ * Only a DocC codeListing/codeVoice `code` value is content. Every other secret-looking key, including
+ * a bare `code` in requests and responses, stays secret exactly as before.
+ */
+function jsonField(key: string, inherited: JsonField, role: "request" | "response", type: unknown, value: unknown): JsonField {
+  if (inherited === "secret") return "secret"
+  if (!secretNamePattern.test(key)) return inherited
+  if (key !== "code" || role !== "response") return "secret"
+  if (type === "codeListing" && Array.isArray(value)) return "codeListing"
+  if (type === "codeVoice" && Predicate.isString(value)) return "codeVoice"
+  return "secret"
+}
 
 /** Path segments that look like credentials: JWTs, long hex, and long high-entropy base64/base64url. */
 export function looksLikeTokenSegment(segment: string): boolean {
