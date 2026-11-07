@@ -2,7 +2,7 @@ import { Effect } from "effect"
 import type { BrowserContext, Frame, Page } from "patchright-core"
 import { applyExplicitMediaFeatures } from "./guards.ts"
 import {
-  debuggingBarCanceledWarning,
+  debuggingBarDismissedWarning,
   defaultPageClosedWarning,
   defaultPageCrashedWarning,
   defaultPageReattachedWarning,
@@ -137,12 +137,13 @@ export abstract class DefaultPageHost {
     if (this.defaultPageTargetId !== targetId) {
       return false
     }
-    if (this.lastKnownNonBlankUrl) {
-      this.recreatedFromClosedUrl = this.lastKnownNonBlankUrl
-    }
-    this.pageReleasedByDebuggingBar = options.releasedByUser === true
+    const releasedByUser = options.releasedByUser === true
+    // A released page was not closed: don't let a later locator failure say the previous page "was closed".
+    if (releasedByUser) this.recreatedFromClosedUrl = undefined
+    else if (this.lastKnownNonBlankUrl) this.recreatedFromClosedUrl = this.lastKnownNonBlankUrl
+    this.pageReleasedByDebuggingBar = releasedByUser
     this.unbindDefaultPage(undefined)
-    this.addWarningOnce(options.releasedByUser === true ? debuggingBarCanceledWarning : defaultPageClosedWarning)
+    this.addWarningOnce(releasedByUser ? debuggingBarDismissedWarning : defaultPageClosedWarning)
     return true
   }
 
@@ -185,6 +186,8 @@ export abstract class DefaultPageHost {
     this.defaultPageTargetId = targetId
     this.ownsPage = ownsPage
     this.pendingTargetRebind = undefined
+    // A rebind (adoption, replacement, the next execute) is not the page the user released, so drop any stale notice.
+    this.pageReleasedByDebuggingBar = false
     this.recordNonBlankUrl(safePageUrl(page))
     const close = () => {
       if (this.page !== page) return
@@ -296,7 +299,7 @@ export abstract class DefaultPageHost {
     // here rather than let the next execute silently open a new page.
     if (this.pageReleasedByDebuggingBar) {
       this.pageReleasedByDebuggingBar = false
-      this.addWarningOnce(debuggingBarCanceledWarning)
+      this.addWarningOnce(debuggingBarDismissedWarning)
     }
     const page = await context.newPage()
     const targetId = await resolvePageTargetId(page)

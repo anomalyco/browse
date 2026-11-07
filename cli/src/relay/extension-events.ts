@@ -336,8 +336,8 @@ export function createExtensionEventHandler(options: {
         }
         return
       }
-      // The browser's debugging bar button (Cancel in Chrome, OK in some browsers): the user took the tab back, but
-      // the tab is still open. Unlike target_closed, it is not re-attached.
+      // The browser's debugging bar button (Cancel in Chrome, OK in some browsers) detaches every tab, not just this
+      // one. Unlike target_closed, none is re-attached: a tab the user lent is theirs again, an agent's stays open.
       if (reason === "canceled_by_user") {
         if (eventTabId) {
           handleDebuggingBarCancel(eventTabId)

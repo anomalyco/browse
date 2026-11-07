@@ -155,16 +155,49 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   }
 
   /**
-   * The user has the tab back: they clicked the browser's debugging bar button (Cancel in Chrome, OK in some
-   * browsers), which detaches chrome.debugger with `canceled_by_user`. Untracks it as an agent tab so idle cleanup
-   * leaves it alone, resets the toolbar badge and lets it out of the agent group, but keeps it open (unlike the
-   * toolbar button, which closes a tab an agent opened).
+   * Tabs an agent opened whose debugger the user canceled. An older relay still follows the detach with `tabs.ungroup`,
+   * which must not close or ungroup them: they stay open, grouped and on the idle timer. The mark is consumed by that
+   * command, or expires so it can never swallow a later, real ungroup.
    */
-  const releaseTab = async (tabId: number) => {
+  const canceledAgentTabs = new Set<number>()
+  const canceledAgentTabTtlMs = 10_000
+
+  /**
+   * The user dismissed the browser's debugging bar, which detaches the debugger from every tab at once. A tab the user
+   * lent goes back to them: untracked by idle cleanup and out of the agent group, but open. A tab an agent opened stays
+   * open, grouped and tracked, so idle cleanup closes it on the usual timer.
+   */
+  const releaseCanceledTab = async (tabId: number) => {
+    // A previous worker may have stored the tracking, so restore it before deciding who opened the tab. If that
+    // fails, treat it as agent-opened: leaving it open is safer than letting idle cleanup close a tab the user lent.
+    const agentOpened = await TabCleanup.isTracked(tabId).catch(() => true)
     forget(tabId)
-    TabCleanup.forget(tabId)
     if (badges.delete(tabId)) input.badgesChanged()
-    await grouping.ungroup(tabId, { released: true })
+    if (agentOpened) {
+      canceledAgentTabs.add(tabId)
+      setTimeout(() => canceledAgentTabs.delete(tabId), canceledAgentTabTtlMs)
+    } else {
+      TabCleanup.forget(tabId)
+      await grouping.ungroup(tabId, { released: true }).catch((error: unknown) => {
+        log.add("debugger.release.error", { tabId, error: text(error) })
+      })
+    }
+    send({ method: "debugger.detached", params: { tabId, reason: "canceled_by_user" } })
+  }
+
+  /** Whether a `tabs.ungroup` is an older relay following a debugging-bar cancel (see canceledAgentTabs). */
+  const consumeCanceledUngroup = (tabId: number) => canceledAgentTabs.delete(tabId)
+
+  /**
+   * The user is lending this tab with the toolbar button. Stop treating it as a tab an agent opened, so idle cleanup
+   * never closes it, and drop a cancel mark so the relay's follow-up `tabs.ungroup` only takes it out of the agent
+   * group. Restore the stored tracking first: forgetting before a restore would let the stored entry come back.
+   */
+  const lendTab = async (tabId: number) => {
+    // Restore the stored tracking first: forgetting before a restore would let the stored entry come back.
+    await TabCleanup.isTracked(tabId).catch(() => undefined)
+    TabCleanup.forget(tabId)
+    canceledAgentTabs.delete(tabId)
   }
 
   // The relay-side settings apply as soon as they change; the relay answers with what its environment fixes.
@@ -257,6 +290,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     sendCommand: debuggerOps.sendCommand,
     group: grouping.group,
     ungroup: grouping.ungroup,
+    consumeCanceledUngroup,
     startRecording: recording.startRecording,
     recordingCall: recording.recordingCall,
   })
@@ -425,10 +459,10 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       return
     }
     if (reason === "canceled_by_user") {
-      void releaseTab(tabId).catch((error: unknown) => log.add("debugger.release.error", { tabId, error: text(error) }))
-    } else {
-      forget(tabId)
+      void releaseCanceledTab(tabId)
+      return
     }
+    forget(tabId)
     send({ method: "debugger.detached", params: { tabId, reason } })
   })
   chrome.tabs.onUpdated.addListener((tabId, change) => {
@@ -448,6 +482,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   AgentGroups.keepOpenWhile((tabId) => pageStatuses.get(tabId)?.state === "waiting")
   chrome.tabs.onRemoved.addListener((tabId) => {
     recordingTabs.delete(tabId)
+    canceledAgentTabs.delete(tabId)
     void chrome.runtime.sendMessage({ action: "recording.cancel", tabId }).catch(() => undefined)
     if (relayTabs.has(tabId)) log.add("tab.removed", { tabId })
     forget(tabId)
@@ -488,8 +523,12 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     state: snapshot,
     badge: (tabId: number) => badges.get(tabId),
     /** The user lets agents use this tab, or stops them (the toolbar button); toggles. */
-    attachTab(tabId: number) {
+    async attachTab(tabId: number) {
       log.add("attach.requested", { tabId, connected: !!open() })
+      // A lend makes the tab the user's again; do that before the relay answers the click with `tabs.ungroup`, which
+      // must leave a lent tab open. A take-back (the tab is already an agent tab, or a queued lend) keeps tracking.
+      const lending = !relayTabs.has(tabId) && !pendingAttach.has(tabId)
+      if (lending) await lendTab(tabId)
       if (open() && status === "connected") return send({ method: "toolbar.clicked", params: { tabId } })
       // No relay yet: the click is queued until one starts; a second click takes it back.
       if (pendingAttach.delete(tabId)) return

@@ -124,11 +124,20 @@ describe("a tab the relay ungroups itself", () => {
     const byRelay = await agentTab(0)
     const byUser = await agentTab(0)
     await stub.chrome.tabs.group({ tabIds: [byRelay, byUser] })
-    TabCleanup.relayUngroup(byRelay)
-    await stub.chrome.tabs.ungroup(byRelay)
+    await TabCleanup.relayUngroup(byRelay, () => stub.chrome.tabs.ungroup(byRelay))
     await stub.chrome.tabs.ungroup(byUser)
     expect(await TabCleanup.isTracked(byRelay)).toBe(true)
     expect(await TabCleanup.isTracked(byUser)).toBe(false)
+  })
+
+  test("does not keep a mark when no group change arrives, so a later user drag-out still forgets", async () => {
+    const tabId = await agentTab(0)
+    await stub.chrome.tabs.group({ tabIds: [tabId] })
+    // The ungroup failed or the tab was already ungrouped: settle without a group-change event.
+    await TabCleanup.relayUngroup(tabId, async () => undefined)
+    await settle()
+    await stub.chrome.tabs.ungroup(tabId)
+    expect(await TabCleanup.isTracked(tabId)).toBe(false)
   })
 })
 

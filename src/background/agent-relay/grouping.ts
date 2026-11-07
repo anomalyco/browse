@@ -47,10 +47,7 @@ export function createRelayGrouping(deps: {
   const serially = serialQueue()
 
   /** Undoes a group the relay made itself. A tab it is still responsible for keeps its idle tracking. */
-  const undoGroup = (tabId: number) => {
-    TabCleanup.relayUngroup(tabId)
-    return chrome.tabs.ungroup(tabId).catch(() => undefined)
-  }
+  const undoGroup = (tabId: number) => TabCleanup.relayUngroup(tabId, () => chrome.tabs.ungroup(tabId).catch(() => undefined))
 
   /** Keeps a shared group's title counting its tabs. */
   const countShared = async (groupId: number) => {
@@ -172,7 +169,7 @@ export function createRelayGrouping(deps: {
   const ungroup = async (tabId: number, options: { finished?: boolean; released?: boolean } = {}) => {
     const tab = await chrome.tabs.get(tabId).catch(() => undefined)
     if (!tab) return
-    if (options.released) await TabCleanup.forget(tabId)
+    if (options.released) TabCleanup.forget(tabId)
     const grouped = tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE
     if (!grouped && !options.finished && !options.released) return
     const current = grouped ? await chrome.tabGroups.get(tab.groupId).catch(() => undefined) : undefined

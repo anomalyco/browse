@@ -393,12 +393,10 @@ Common diagnoses:
   page. Running setup again does not reload older workers.
 - `Target not found`: attach the intended tab, then select or adopt it by a
   unique URL substring or explicit index.
-- All targets disappeared: dismissing Chromium's debugging banner detaches every
-  tab. Ask the user to click the toolbar button on it again.
-- Execute says the user stopped debugging the tab from the browser's debugging
-  bar (Cancel in Chrome, OK in some browsers): the tab is still open but browse
-  no longer controls it. Do not retry on that tab; ask the user to lend it again
-  with the toolbar button, or continue in a new tab.
+- Dismissing Chromium's debugging bar (Cancel in Chrome, OK in some browsers)
+  detaches every tab: browse no longer controls them. Tabs an agent opened stay
+  open and close when idle; ask the user to lend the tab again with the toolbar
+  button, or continue in a new tab. `execute` says when this happened.
 - Repeated execution-context errors: run one short follow-up so browse can
   health-check the page. A live page is reconnected and re-resolved once; a
   crashed or `chrome-error://` relay-owned page is recreated. It never replaces

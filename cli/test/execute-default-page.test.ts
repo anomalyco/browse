@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { BrowserContext, Frame, Page } from "patchright-core"
 import {
-  debuggingBarCanceledWarning,
+  debuggingBarDismissedWarning,
   defaultPageClosedWarning,
   defaultPageRecoveredWarning,
   defaultPageReattachedWarning,
@@ -363,22 +363,42 @@ describe("DefaultPageHost relay reports", () => {
     expect(host.warnings()).toEqual([defaultPageClosedWarning])
   })
 
-  test("markTargetDetached for a debugging bar cancel names the release, again when the next page opens", async () => {
+  test("markTargetDetached for a debugging bar dismissal names it, and not a closed page", async () => {
     const host = new TestHost()
     host.bind(new FakePage().asPage(), "target-1", true)
 
     expect(host.markTargetDetached("target-1", { releasedByUser: true })).toBe(true)
 
     expect(host.targetId()).toBeUndefined()
-    expect(host.warnings()).toEqual([debuggingBarCanceledWarning])
+    // The page was released, not closed: later locator failures must not say it "was closed".
+    expect(host.recreatedUrl()).toBeUndefined()
+    expect(host.warnings()).toEqual([debuggingBarDismissedWarning])
     // A stopped script's discarded result can drain the queued warning; the next execute says it again.
-    expect(host.drainWarnings()).toEqual([debuggingBarCanceledWarning])
+    expect(host.drainWarnings()).toEqual([debuggingBarDismissedWarning])
     const created = new FakePage("https://new.example/", "target-8")
     const context = asContext({ pages: () => [], newPage: async () => created.asPage() })
 
     await host.sessionPage(context)
 
-    expect(host.warnings()).toEqual([debuggingBarCanceledWarning])
+    expect(host.warnings()).toEqual([debuggingBarDismissedWarning])
+  })
+
+  test("rebinding to another tab drops a stale debugging bar notice", async () => {
+    const host = new TestHost()
+    host.bind(new FakePage().asPage(), "target-1", true)
+    host.markTargetDetached("target-1", { releasedByUser: true })
+    host.drainWarnings()
+    // The session adopts another tab instead, so the released page's notice no longer applies.
+    const adopted = new FakePage("https://adopted.example/", "target-2")
+    host.bind(adopted.asPage(), "target-2", true)
+    adopted.closed = true
+    adopted.emit("close")
+    const created = new FakePage("https://new.example/", "target-3")
+    const context = asContext({ pages: () => [], newPage: async () => created.asPage() })
+
+    await host.sessionPage(context)
+
+    expect(host.warnings()).toEqual([])
   })
 
   test("markTargetReplaced keeps ownership and asks for the replaced rebind", () => {

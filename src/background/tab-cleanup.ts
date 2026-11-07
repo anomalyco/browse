@@ -50,11 +50,20 @@ export function forget(tabId: number) {
 }
 
 /**
- * Notes an ungroup the relay starts itself (undoing a group it made, or letting go of a tab while it reloads): the
- * group-change event must keep idle tracking, unlike a tab the user drags out of the agent group.
+ * Runs an ungroup the relay starts itself (undoing a group it made, or letting go of a tab while it reloads). A tab
+ * the relay still tracks keeps idle tracking when the group change lands: this is not the user dragging the tab out.
+ * The mark is dropped once the ungroup settles if no group change consumed it, so it never swallows a real one.
  */
-export function relayUngroup(tabId: number) {
+export async function relayUngroup<T>(tabId: number, ungroup: () => Promise<T>): Promise<T> {
+  await restore()
+  if (!tracked.has(tabId)) return ungroup()
   relayUngrouping.add(tabId)
+  try {
+    return await ungroup()
+  } finally {
+    // Let a group-change event queued by the ungroup consume the mark first.
+    setTimeout(() => relayUngrouping.delete(tabId), 0)
+  }
 }
 
 /** Whether an agent opened this tab (and it hasn't been handed to the user). */
