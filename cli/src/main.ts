@@ -11,14 +11,20 @@ import path from "node:path"
 const embeddedVersion = globalThis.__OPENCODE_BROWSER_VERSION__
 const setupCommands = new Set(["install", "uninstall", "extension", "pair", "set"])
 const command = process.argv[2]
+const args = process.argv.slice(3)
 const invokedAs = path.basename(process.argv[1] ?? "")
+// Setup commands and update run before the Effect CLI parses arguments (below), so they would act on --help instead of
+// printing it. The CLI itself detects help the same way (cli.ts).
+const askedForHelp = command === "--help" || command === "-h" || args.some((arg) => arg === "--help" || arg === "-h")
+/** Help for a command that never reaches the Effect CLI: print the top-level help instead. */
+const preCliHelp = askedForHelp && (command === "update" || (command !== undefined && setupCommands.has(command)))
 
 // Earlier layouts (~/.browse, and the old opencode-browser data root) move to the XDG folders on the first run.
 // opencode briefly shows the update, and no other command pays for the import.
 const legacyDataRoot = process.platform === "win32"
   ? path.join(process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local"), "opencode-browser")
   : path.join(process.env.XDG_DATA_HOME ?? path.join(os.homedir(), ".local", "share"), "opencode-browser")
-if (command !== "--version" && command !== "-v" && !process.env.OPENCODE_BROWSER_HOME &&
+if (command !== "--version" && command !== "-v" && !askedForHelp && !process.env.OPENCODE_BROWSER_HOME &&
   [path.join(os.homedir(), ".browse"), legacyDataRoot].some((root) => fs.existsSync(root))) {
   try {
     const { migrateLegacy } = await import("./setup/migrate.ts")
@@ -43,14 +49,14 @@ if (command === "--version" || command === "-v") {
   // The relay's auto-update children (auto-update.ts); not for people.
   const { runSelfUpdate, runRuntimeSwitch } = await import("./update/runtime-update.ts")
   await (command === "self-update" ? runSelfUpdate : runRuntimeSwitch)(process.argv.slice(3))
-} else if (command === "update") {
+} else if (command === "update" && !askedForHelp) {
   const { runUpdateCommand } = await import("./update.ts")
   await runUpdateCommand(process.argv.slice(3))
-} else if (command && setupCommands.has(command)) {
+} else if (command && setupCommands.has(command) && !askedForHelp) {
   const { runSetup } = await import("./setup.ts")
   await runSetup(command, process.argv.slice(3))
 } else {
-  if (!command || command === "--help" || command === "-h") {
+  if (preCliHelp || !command || command === "--help" || command === "-h") {
     process.stdout.write(`SETUP
   install [--opencode <path>]    Install browse: choose agents for the browse MCP server, check which browsers
                                  have the extension and pair it (when none does, say to add it from the Chrome
@@ -83,10 +89,10 @@ executable in ~/.local/bin (or $XDG_BIN_HOME).
 
 `)
   }
-  if (command === "status" && !process.argv.includes("--json")) {
+  if (command === "status" && !askedForHelp && !process.argv.includes("--json")) {
     const { printSetupStatus } = await import("./setup.ts")
     printSetupStatus()
   }
   const { runCli } = await import("./cli.ts")
-  runCli()
+  runCli(preCliHelp ? ["--help"] : undefined)
 }
