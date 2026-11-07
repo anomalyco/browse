@@ -1,5 +1,6 @@
 export * as TabCleanup from "./tab-cleanup"
 import { DEFAULT_IDLE_MINUTES, IDLE_MINUTES_KEY, idleMinutesSetting } from "../shared/protocol"
+import { ownedGroup } from "./agent-relay/wire"
 
 // Closes tabs agents opened once nobody has touched them for a while, so agent work doesn't leave a trail of
 // tabs behind. Only tabs an agent created are tracked (the relay's
@@ -14,6 +15,8 @@ const SESSION_KEY = "tabCleanupSession"
 const ALARM = "opencode-browser-tab-cleanup"
 
 const tracked = new Map<number, Tracked>()
+/** Tabs a close is ungrouping; their group-change event must not drop idle tracking. */
+const closing = new Set<number>()
 let restored: Promise<void> | undefined
 let saveTimer: ReturnType<typeof setTimeout> | undefined
 let writes: Promise<unknown> = Promise.resolve()
@@ -60,12 +63,37 @@ export async function idleMinutes() {
 }
 
 /**
+ * Closes an agent's tab. A tab in an agent group is ungrouped first: Chrome keeps a saved group when its last tab is
+ * the window's last tab (closing the window keeps its groups saved), while emptying a group by ungrouping always
+ * deletes it.
+ */
+export async function closeAgentTab(tabId: number): Promise<void> {
+  const tab = await chrome.tabs.get(tabId).catch(() => undefined)
+  let groupId: number | undefined
+  if (tab && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
+    const group = await chrome.tabGroups.get(tab.groupId).catch(() => undefined)
+    if (group && ownedGroup(group.title)) {
+      groupId = tab.groupId
+      closing.add(tabId)
+      await chrome.tabs.ungroup(tabId).catch(() => undefined)
+    }
+  }
+  try {
+    await chrome.tabs.remove(tabId)
+  } catch (error) {
+    if (groupId !== undefined) await chrome.tabs.group({ tabIds: [tabId], groupId }).catch(() => undefined)
+    throw error
+  }
+}
+
+/**
  * Closes tracked tabs idle for at least `minutes` (the setting by default; with the setting at never, an agent's
  * cleanup without a time still closes only tabs idle for the default 10 minutes). Skips a tab that is the active tab
  * of the focused window, is playing audio, or is guarded. `minutes: 0` closes every unguarded tracked tab.
  */
 export async function cleanup(options: { minutes?: number } = {}) {
   await restore()
+  closing.clear()
   const minutes = options.minutes ?? ((await idleMinutes()) || DEFAULT_IDLE_MINUTES)
   const now = Date.now()
   const focused = await chrome.windows.getLastFocused().catch(() => undefined)
@@ -84,13 +112,14 @@ export async function cleanup(options: { minutes?: number } = {}) {
     }
     if (tab.active && tab.windowId === focused?.id && focused?.focused) continue
     if (tab.audible || guards.some((check) => check(tabId))) continue
-    const removed = await chrome.tabs.remove(tabId).then(
+    const removed = await closeAgentTab(tabId).then(
       () => true,
       () => false,
     )
+    // Keep a tab that failed to close, so a later cleanup retries it.
+    if (!removed) continue
     tracked.delete(tabId)
-    if (removed)
-      closed.push({ tabId, title: tab.title || tab.url || "Untitled", idleMinutes: Math.round(idle / 60_000) })
+    closed.push({ tabId, title: tab.title || tab.url || "Untitled", idleMinutes: Math.round(idle / 60_000) })
   }
   save()
   return closed
@@ -211,7 +240,7 @@ export async function reconcileCreates(attached: (tabId: number) => boolean): Pr
     )
     if (tab?.id === undefined) continue
     taken.add(tab.id)
-    if (await chrome.tabs.remove(tab.id).then(() => true, () => false)) closed.push({ tabId: tab.id, title: tab.title || tab.url || "Untitled", idleMinutes: 0 })
+    if (await closeAgentTab(tab.id).then(() => true, () => false)) closed.push({ tabId: tab.id, title: tab.title || tab.url || "Untitled", idleMinutes: 0 })
   }
   await updateCreating((list) => list.filter((entry) => !pending.some((done) => done.id === entry.id)))
   return closed
@@ -230,7 +259,7 @@ export async function closeUnattached(attached: (tabId: number) => boolean): Pro
     const tab = await chrome.tabs.get(tabId).catch(() => undefined)
     tracked.delete(tabId)
     if (!tab || tab.pinned) continue
-    if (await chrome.tabs.remove(tabId).then(() => true, () => false)) closed.push({ tabId, title: tab.title || tab.url || "Untitled", idleMinutes: 0 })
+    if (await closeAgentTab(tabId).then(() => true, () => false)) closed.push({ tabId, title: tab.title || tab.url || "Untitled", idleMinutes: 0 })
   }
   save()
   return closed
@@ -252,13 +281,17 @@ function updateCreating(change: (list: Creating[]) => Creating[]) {
 chrome.runtime.onStartup.addListener(() => {
   generation += 1
   tracked.clear()
+  closing.clear()
   void chrome.storage.local.remove([STORAGE_KEY, CREATING_KEY])
 })
 chrome.tabs.onActivated.addListener(({ tabId }) => touch(tabId))
-chrome.tabs.onRemoved.addListener((tabId) => forget(tabId))
+chrome.tabs.onRemoved.addListener((tabId) => {
+  closing.delete(tabId)
+  forget(tabId)
+})
 chrome.tabs.onUpdated.addListener((tabId, change) => {
   if (change.pinned) forget(tabId)
-  if (change.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE && tracked.has(tabId)) forget(tabId)
+  if (change.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE && tracked.has(tabId) && !closing.has(tabId)) forget(tabId)
 })
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== ALARM) return

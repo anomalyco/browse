@@ -140,7 +140,7 @@ export function createRelayCommands(deps: {
         return { tabId: tab.id }
       }
       case "tabs.remove":
-        await chrome.tabs.remove(number(params, "tabId"))
+        await TabCleanup.closeAgentTab(number(params, "tabId"))
         return {}
       case "tabs.group":
         return {
