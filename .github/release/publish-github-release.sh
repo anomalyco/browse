@@ -7,7 +7,7 @@
 
 tag="v$BROWSE_VERSION"
 assets=$(mktemp -d)
-zip="opencode-browser-$BROWSE_VERSION.zip" tarball="opencode-browse-$BROWSE_VERSION.tgz"
+zip="browse-extension-$BROWSE_VERSION.zip" tarball="opencode-browse-$BROWSE_VERSION.tgz"
 for file in "$1/$zip" "$1/$tarball"; do
   test -s "$file" || die "Missing $file"
   verify_attestation "$file"

@@ -1,9 +1,10 @@
-// Builds the extension and zips it:
-//   stable  release/opencode-browser-<version>.zip, for the Chrome Web Store. The store assigns its own ID and rejects the
-//           `key` field, which only pins the ID of unpacked builds.
-//   dev     release/browse-extension-<version>.zip, the unpacked extension the release workflow publishes to the release
-//           service; dev installs download it and load it unpacked (cli/src/dev-extension.ts). It keeps `key`, so it has
-//           the unpacked ID the relay trusts, and build.json, so a relay can tell whether the loaded extension is current.
+// Builds the extension and zips it as release/browse-extension-<version>.zip, on either channel:
+//   stable  the store build, for the Chrome Web Store. The store assigns its own ID and rejects the `key` field, which
+//           only pins the ID of unpacked builds.
+//   dev     the unpacked extension the release workflow publishes to the release service; dev installs download it and
+//           load it unpacked (cli/src/dev-extension.ts). It keeps `key`, so it has the unpacked ID the relay trusts, and
+//           build.json, so a relay can tell whether the loaded extension is current.
+// The versions tell the two builds apart (a dev version has -dev.), and the contents differ.
 // The version comes from cli/package.json, the one release version for the zip and the npm package (scripts/version.ts
 // maps a dev build to the four-part manifest version Chrome accepts).
 import { $ } from "bun"
@@ -26,7 +27,7 @@ applyManifestVersion(manifest, version)
 await Bun.write(path.join(staging, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n")
 await rm(path.join(staging, "build.json"), { force: true })
 if (dev) await Bun.write(path.join(staging, "build.json"), JSON.stringify({ build }) + "\n")
-const zip = path.join(root, "release", dev ? `browse-extension-${version}.zip` : `opencode-browser-${version}.zip`)
+const zip = path.join(root, "release", `browse-extension-${version}.zip`)
 await rm(zip, { force: true })
 // install writes this checkout's pairing code into public/ (and so dist/); it is private to this machine.
 await rm(path.join(staging, "relay-pairing.json"), { force: true })

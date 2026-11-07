@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# publish-cws.sh <build dir>: uploads opencode-browser-<BROWSE_VERSION>.zip to the Chrome Web Store item and submits it
+# publish-cws.sh <build dir>: uploads browse-extension-<BROWSE_VERSION>.zip to the Chrome Web Store item and submits it
 # for review, with the Chrome Web Store API v2 and curl.
 #
 # Environment: CWS_CLIENT_ID, CWS_CLIENT_SECRET, CWS_REFRESH_TOKEN (secrets of the release environment), CWS_PUBLISHER_ID
@@ -42,7 +42,8 @@ older_version() {
 }
 # Prints the version of the newest stable release other than this one (no "v"), fails with 1 when there is none and
 # 2 when the releases can't be read. release.yml creates a GitHub release only after this job succeeded, and every
-# release carries opencode-browser-<version>.zip, so that asset is the extension the store last received. A rerun of
+# release carries browse-extension-<version>.zip (opencode-browser-<version>.zip before the zip was renamed, which
+# download_extension still reads), so that asset is the extension the store last received. A rerun of
 # this version skips its own release and compares with the one before.
 previous_release() {
   local tags tag
@@ -67,19 +68,31 @@ same_extension() {
   diff <(cd "$1" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) \
     <(cd "$2" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > /dev/null
 }
+# download_extension <version> <dir>: downloads that release's extension zip into <dir> and prints its file name. The
+# current name is browse-extension-<version>.zip; releases up to the rename carry opencode-browser-<version>.zip, and a
+# skip check against one of those still compares with the extension the store has.
+download_extension() {
+  local version=$1 dir=$2 name
+  for name in "browse-extension-$version.zip" "opencode-browser-$version.zip"; do
+    if gh release download "v$version" --repo "$GITHUB_REPOSITORY" --pattern "$name" --dir "$dir" --clobber 2> "$work/download.err"; then
+      printf '%s' "$name"
+      return 0
+    fi
+  done
+  return 1
+}
 # compare_with <version>: downloads that release's extension zip and compares it with this build. True when the
 # extension is the same; when the asset can't be read, note says why and it's false, so the upload happens as before.
 compare_with() {
-  local version=$1 dir="$work/release-$1"
+  local version=$1 dir="$work/release-$1" file
   note=""
   mkdir -p "$dir/zip" "$dir/unpacked" "$work/current"
-  if ! gh release download "v$version" --repo "$GITHUB_REPOSITORY" --pattern "opencode-browser-$version.zip" \
-    --dir "$dir/zip" --clobber 2> "$work/download.err"; then
-    note="Couldn't download opencode-browser-$version.zip from v$version ($(head -n 1 "$work/download.err")), so there's nothing to compare with."
+  if ! file=$(download_extension "$version" "$dir/zip"); then
+    note="Couldn't download browse-extension-$version.zip or opencode-browser-$version.zip from v$version ($(head -n 1 "$work/download.err")), so there's nothing to compare with."
     return 1
   fi
   if [ ! -f "$work/current/manifest.json" ]; then unzip -q "$zip" -d "$work/current"; fi
-  unzip -q "$dir/zip/opencode-browser-$version.zip" -d "$dir/unpacked"
+  unzip -q "$dir/zip/$file" -d "$dir/unpacked"
   same_extension "$work/current" "$dir/unpacked"
 }
 api=$(endpoint "${CWS_API_BASE:-}" https://chromewebstore.googleapis.com)
@@ -87,7 +100,7 @@ token_url=$(endpoint "${CWS_TOKEN_URL:-}" https://oauth2.googleapis.com/token)
 poll=${CWS_POLL_SECONDS:-5}
 
 stable_version "$BROWSE_VERSION" || die "Not a stable version: $BROWSE_VERSION"
-zip="$1/opencode-browser-$BROWSE_VERSION.zip"
+zip="$1/browse-extension-$BROWSE_VERSION.zip"
 test -s "$zip" || die "Missing $zip"
 verify_attestation "$zip"
 # Never upload a zip whose manifest isn't the version being released.
