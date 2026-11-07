@@ -1,8 +1,8 @@
 // Builds and checks the release artifacts exactly as the release workflow does, without publishing anything:
 //   bun run release:check [--tag v0.1.0] [--require-changelog] [--versions-only]
 // 1. the version is one release version everywhere: cli/package.json, package.json, public/manifest.json (and the tag)
-// 2. the extension zip (scripts/package.ts): release/opencode-browser-<version>.zip for the store (stable), or
-//    release/browse-extension-<version>.zip for the release service (dev); then release/opencode-browse-<version>.tgz
+// 2. the extension zip (scripts/package.ts): release/browse-extension-<version>.zip, the store build (stable) or the
+//    release service's unpacked build (dev); then release/opencode-browse-<version>.tgz
 //    (npm pack of a fresh cli/ build, with the store item ID from OPENCODE_BROWSER_STORE_ID baked in, and for a dev
 //    build the dev zip's sha256)
 // 3. scripts/check-artifacts.ts on both, an npm install of the tarball that starts its relay, then release/SHA256SUMS

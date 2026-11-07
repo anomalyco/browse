@@ -7,8 +7,8 @@
 #
 # Every channel publishes both artifacts:
 #
-#   extension  chromium   the unpacked extension zip: browse-extension-<version>.zip on dev, the store zip
-#                         opencode-browser-<version>.zip on stable
+#   extension  chromium   the extension zip: browse-extension-<version>.zip, the store build on stable and the unpacked
+#                         one on dev
 #   cli        one target per binary (the same eleven targets as @opencode/browse-<target>), npm's darwin is the
 #              service's macos: opencode-browse-<target>-<version>.tgz
 #
@@ -24,10 +24,11 @@ binaries_dir=$2
 signed_dir=${3:-}
 : "${NOTES_URL:?Set NOTES_URL}"
 case "$BROWSE_CHANNEL" in
-  dev) channel=dev extension="browse-extension-$BROWSE_VERSION.zip" ;;
-  latest) channel=stable extension="opencode-browser-$BROWSE_VERSION.zip" ;;
+  dev) channel=dev ;;
+  latest) channel=stable ;;
   *) die "Unknown channel $BROWSE_CHANNEL" ;;
 esac
+extension="browse-extension-$BROWSE_VERSION.zip"
 [[ "$BROWSE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || die "Not a release version: $BROWSE_VERSION"
 if [ "$channel" = stable ]; then stable_version "$BROWSE_VERSION" || die "Not a stable version: $BROWSE_VERSION"; fi
 

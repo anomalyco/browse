@@ -6,7 +6,7 @@
 //   npm tarball    @opencode/browse at the release version, only dist/, skills/ and package metadata (no extension: npm
 //                  installs get it from the store or, for a dev build, the release service), no install scripts, no
 //                  source maps, and it installs with npm and starts its relay and MCP server
-//   bun scripts/check-artifacts.ts --version 0.1.0 --zip release/opencode-browser-0.1.0.zip --tarball release/opencode-browse-0.1.0.tgz
+//   bun scripts/check-artifacts.ts --version 0.1.0 --zip release/browse-extension-0.1.0.zip --tarball release/opencode-browse-0.1.0.tgz
 import { $ } from "bun"
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import net from "node:net"
