@@ -137,13 +137,15 @@ describe("full-Node rejection scope", () => {
     const nodeOutcome = runNodeScope(`
       const { safeErrorMessage, safeErrorStack } = await import(${JSON.stringify(path.join(import.meta.dir, "../src/execute-realm/rejection-text.ts"))})
       const value = { toString() { for(;;){} } }
-      console.log(JSON.stringify({ message: safeErrorMessage(value), stack: safeErrorStack(value) }))
+      const nested = Object.setPrototypeOf({}, new Proxy({}, { getPrototypeOf() { for(;;){} } }))
+      console.log(JSON.stringify({ message: safeErrorMessage(value), nested: safeErrorMessage(nested), stack: safeErrorStack(value) }))
     `)
-    expect(nodeOutcome).toEqual({ message: "a non-Error value" })
+    expect(nodeOutcome).toEqual({ message: "a non-Error value", nested: "a non-Error value" })
 
     const script = `
       const { handleRelayProcessFault } = await import(${JSON.stringify(path.join(import.meta.dir, "../src/relay/process-guard.ts"))})
       handleRelayProcessFault("unhandledRejection", { toString() { for (;;) {} } }, {}, { rethrow: () => {} })
+      handleRelayProcessFault("unhandledRejection", Object.setPrototypeOf({}, new Proxy({}, { getPrototypeOf() { for (;;) {} } })), {}, { rethrow: () => {} })
       console.log("returned")
     `
     const child = spawnSync(process.execPath, ["-e", script], { encoding: "utf8", timeout: 5_000, env: { ...process.env, OPENCODE_BROWSER_HOME: home } })
