@@ -154,6 +154,22 @@ An opencode MCP server entry for it (add it yourself; nothing here edits your co
 
 Use the full `/usr/local/bin/node` path: exe.dev's SSH `PATH` lists `/usr/local/bin` last.
 
+## Native popup crash regression
+
+`node stress/popup-repro.ts` launches a **headless, disposable Brave profile**, loads this checkout's built extension,
+starts an isolated source relay, and drives a local OAuth-shaped popup through the Browse CLI. It checks both an
+unrestricted session and a session with a domain allowlist, asserts that the popup document and opener are readable,
+and checks that a disallowed popup closes while the browser still responds. It never connects to an existing browser
+or profile. Build the extension first (`bun run build`); install dependencies in both the root and `cli/`. Bun must be
+on PATH for the source relay.
+Set `POPUP_BROWSER` to test another browser executable.
+
+Run on a disposable worker with browser-job admission. On Brave 156.1.98.60 (Chromium 156.0.8078.48), revision
+`071f8b7` crashes the browser process on the first popup without any allowlist. Applying only the popup-window group
+guard from `bd35dd5` makes the same probe pass. The offending operation is extension `chrome.tabs.group` on a popup
+window, not a `Target.closeTarget` request. Keep the guard even when ordinary Chromium merely stalls instead of
+crashing. `test/isolated/agent-relay-grouping.ts` covers it without launching a browser.
+
 ## Stealth on a real Mac (manual, never CI)
 
 The box above measures robustness, not stealth: Linux, Xvfb and Chrome for Testing look nothing like a user's
