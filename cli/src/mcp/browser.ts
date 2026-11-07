@@ -50,13 +50,13 @@ registerMcpTools({
     {
       name: "tabs_cleanup",
       description:
-        "Close tabs agents opened that nobody has used for a while (no agent command and not visited by the user). Tabs the user shared or pinned, the active tab, tabs playing audio, recording, or waiting for a handoff stay open. Call it when you finish a task to leave the user's browser tidy; browse also does this automatically after the user's idle setting (10 minutes unless they changed it).",
+        "Close tabs agents opened that nobody has used for a while (no agent command and not visited by the user). Tabs the user shared or pinned, the active tab, tabs playing audio, recording, or waiting for a handoff stay open. This covers agent tabs from every session; to finish your own work use `session_reset` or `session_delete` instead. browse also does this automatically after the user's idle setting (10 minutes unless they changed it).",
       inputSchema: objectSchema({
         idleMinutes: {
           type: "integer",
           minimum: 0,
           description:
-            "Close tabs idle at least this long. 0 closes every eligible agent tab. Defaults to the user's setting (10 minutes; still 10 when the user set automatic cleanup to never).",
+            "Close tabs idle at least this long. 0 also closes other sessions' eligible tabs, including pages idle between their calls, so use it only when the user asks. Defaults to the user's setting (10 minutes; still 10 when the user set automatic cleanup to never).",
         },
       }),
       readOnly: false,

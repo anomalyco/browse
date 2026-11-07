@@ -350,15 +350,19 @@ viewport, state and interaction path actually tested.
 ## Tabs and settings
 
 Tabs agents open close by themselves after about 10 minutes without use (the
-user can choose 30 or 60 minutes, or never). When a task is done, tidy up right
-away:
+user can choose 30 or 60 minutes, or never). When a task is done, reset or
+delete your own session:
 
 ```bash
-browse tabs cleanup --idle-minutes 0   # MCP: tabs_cleanup { idleMinutes: 0 }
+browse session reset <name>    # MCP: session_reset
+browse session delete <name>   # MCP: session_delete
 ```
 
-Reset or delete session-owned pages when no follow-up work is expected. Keep a
-session only when you will continue with it.
+`browse tabs cleanup` closes idle agent tabs from every session sharing the
+browser, not just yours, and `--idle-minutes 0` (`tabs_cleanup` with
+`idleMinutes: 0`) would close other sessions' pages between their calls, so
+only run it when the user asks. Keep a session only when you will continue with
+it.
 
 Use the `settings` tool (CLI: `browse settings get` / `settings set key=value …`)
 only when the user asks to change how browse behaves: where tabs open (`window`),
