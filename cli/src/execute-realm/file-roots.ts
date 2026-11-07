@@ -376,8 +376,12 @@ const fileOutputMethods = new Set(["screenshot", "pdf", "storageState", "stop", 
 const isFileOutputOption = (method: string, key: string): boolean =>
   (key === "path" && fileOutputMethods.has(method)) || (key === "outputPath" && method === "stop")
 
-/** A file a permitted host call will write, before its folder is prepared and its prior state recorded. */
-export type ExecuteFileOutputCandidate = { readonly path: string }
+/** A file or download folder a permitted host call will write, before its folder is prepared and its prior state recorded. */
+export type ExecuteFileOutputCandidate = {
+  readonly path: string
+  /** A folder the call writes into, such as a CDP download path, rather than a single file. */
+  readonly directory?: boolean
+}
 
 /** startTracing's path, recorded when preparing because Playwright stores it before awaiting. */
 type ExecuteTraceStart = {
@@ -533,10 +537,11 @@ function secureExecuteFileOutputs(outputs: readonly ExecuteFileOutput[]): void {
 
 /**
  * Prepares what checkHostCall found: records startTracing's path as Playwright does before awaiting,
- * then creates each output's folders and records whether its file existed before the call. Every
- * candidate is checked before the folders are touched and again afterwards. stopTracing's memory
- * stays until the stop call resolves. Only the realm's apply paths call this, after the whole check
- * succeeded and before the host call runs, so checks and construct traps stay side-effect free.
+ * then creates each output file's folders (or the output folder itself for a download path) and
+ * records whether its file existed before the call. Every candidate is checked before the folders are
+ * touched and again afterwards. stopTracing's memory stays until the stop call resolves. Only the
+ * realm's apply paths call this, after the whole check succeeded and before the host call runs, so
+ * checks and construct traps stay side-effect free.
  */
 export function prepareExecuteFileOutputs(call: ExecuteHostCall): PreparedExecuteFileOutputs {
   const trace = call.trace
@@ -548,8 +553,9 @@ export function prepareExecuteFileOutputs(call: ExecuteHostCall): PreparedExecut
   const outputs: ExecuteFileOutput[] = []
   for (const candidate of call.outputs) {
     assertExecuteFilePath(candidate.path, "execute file output")
-    ensureExecuteOutputDirectory(path.dirname(candidate.path))
+    ensureExecuteOutputDirectory(candidate.directory === true ? candidate.path : path.dirname(candidate.path))
     const resolved = assertExecuteFilePath(candidate.path, "execute file output")
+    if (candidate.directory === true) continue
     outputs.push({ path: resolved, existed: fileExists(resolved) })
   }
   const stop = call.traceStop
@@ -614,6 +620,38 @@ function checkFileStrings(value: unknown, method: string): string | undefined {
   return undefined
 }
 
+/**
+ * Raw CDP commands that name files on the browser's machine, which CDPSession.send reaches without
+ * Playwright's file options. Inputs are checked like setInputFiles; a download path is an output
+ * folder checked like saveAs. Commands that would carry more CDP or run local code are refused.
+ */
+const cdpFileInputParameters = new Map<string, (params: Record<string, unknown>) => unknown>([
+  ["DOM.setFileInputFiles", (params) => params.files],
+  ["Input.dispatchDragEvent", (params) => isObject(params.data) ? (params.data as Record<string, unknown>).files : undefined],
+  ["PWA.launchFilesInApp", (params) => params.files],
+])
+const cdpDownloadPathMethods = new Set(["Browser.setDownloadBehavior", "Page.setDownloadBehavior"])
+const cdpRefusedMethods = new Map<string, string>([
+  ["Extensions.loadUnpacked", "loading an unpacked extension runs local code in the browser"],
+  ["Target.sendMessageToTarget", "forwarding a raw CDP message would bypass these file checks"],
+  ["Target.exposeDevToolsProtocol", "exposing raw CDP to page script would bypass these file checks"],
+])
+
+function checkCdpFileParameters(method: string, value: unknown, candidates: ExecuteFileOutputCandidate[]): void {
+  const refusal = cdpRefusedMethods.get(method)
+  if (refusal !== undefined) throw new ExecuteFileAccessError(`${method}: ${refusal}, so it is not available in execute code`)
+  if (!isObject(value) || Array.isArray(value)) return
+  const params = value as Record<string, unknown>
+  const inputParameter = cdpFileInputParameters.get(method)
+  if (inputParameter !== undefined) checkFileStrings(inputParameter(params), method)
+  if (!cdpDownloadPathMethods.has(method) || typeof params.downloadPath !== "string") return
+  const downloadPath = assertExecuteFilePath(params.downloadPath, `${method}({ downloadPath })`)
+  if (executeFileRoots().some((root) => isSamePath(downloadPath, root))) {
+    throw new ExecuteFileAccessError(`${method}: use a private subdirectory inside the execute file roots for downloads, not the root itself`)
+  }
+  if (params.behavior === "allow" || params.behavior === "allowAndName") candidates.push({ path: downloadPath, directory: true })
+}
+
 const promiseReturningNames = new Set([...fileOptionMethods, "setInputFiles", "setFiles", "saveAs", "bringToFront", "send"])
 
 export function returnsPromise(fn: Function): boolean {
@@ -641,7 +679,9 @@ export function checkHostCall(fn: Function, receiver: unknown, args: readonly un
     throw new Error(bringToFrontBlockedMessage)
   }
   const candidates: ExecuteFileOutputCandidate[] = []
-  if (name === "setInputFiles") {
+  if (name === "send") {
+    if (typeof args[0] === "string") checkCdpFileParameters(args[0], args[1], candidates)
+  } else if (name === "setInputFiles") {
     const isFrameLike = receiver !== null && typeof receiver === "object" && typeof (receiver as { goto?: unknown }).goto === "function"
     checkFileStrings(isFrameLike ? args[1] : args[0], "setInputFiles")
   } else if (name === "saveAs") {
