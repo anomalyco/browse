@@ -37,11 +37,6 @@ type Options = {
   }
   readonly reportError: (message: string, error: unknown) => void
   /**
-   * Whether an executing session has claimed the tab. A reattach while the session runs must keep focus emulation on:
-   * turning it off makes the page hidden, and its screenshots blank.
-   */
-  readonly focused: (tabId: number) => boolean
-  /**
    * How long one command may take while the extension's inventory is reconciled (a reconnect re-announcing its tabs).
    * Every attempt used to wait the full debugger timeout (60 s), so one wedged tab held the reconnect for three
    * minutes; now it fails within seconds and the tab is let go.
@@ -320,7 +315,7 @@ export class RootTargetLifecycle {
     yield* this.command(transition, "Page.enable")
     // Ignore what the tab says about focus emulation, except silence: a timeout here must fail the attach now, not
     // swallow one timeout and pay another on the next command (two timeouts outlast a relay restart's own timeout).
-    yield* this.command(transition, "Emulation.setFocusEmulationEnabled", { enabled: this.options.focused(tabId) }).pipe(
+    yield* this.command(transition, "Emulation.setFocusEmulationEnabled", { enabled: false }).pipe(
       Effect.catchIf((error) => !(error instanceof RootTargetTimeout), () => Effect.void),
     )
     yield* this.check(transition)
