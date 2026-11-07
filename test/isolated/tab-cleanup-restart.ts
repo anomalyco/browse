@@ -1,14 +1,14 @@
 import { expect, test } from "bun:test"
 import { installChrome } from "../chrome-stub"
 
-// Tab ids don't survive a browser restart, and Chrome reuses them: a stored id may name one of the user's tabs now.
-// A missing session marker therefore keeps only entries whose tab is still in a browse-owned group. Run by
-// ../isolated.test.ts in a process of its own, so the module's listener and first restore start from this test's storage.
+// An extension reload keeps tab ids but clears session storage, so a missing marker keeps only entries whose tab is
+// still in a browse-owned group. Run by ../isolated.test.ts in a process of its own, so the module's listener and first
+// restore start from this test's storage.
 
 const stub = installChrome()
 const MARKER = "\u2063"
 
-test("a missing session marker keeps stored ids only while their tab is still in a browse group", async () => {
+test("an extension reload keeps stored ids only while their tab is still in a browse group", async () => {
   const window = await stub.chrome.windows.create({ url: "https://user.example/", focused: true })
   const userTab = window.tabs[0]!.id
   const create = (url: string) => stub.chrome.tabs.create({ windowId: window.id, url, active: false })

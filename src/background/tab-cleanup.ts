@@ -148,12 +148,12 @@ export async function cleanup(options: { minutes?: number } = {}) {
 }
 
 /**
- * Whether the stored list belongs to this browser session. Session storage is cleared on a browser restart and on an
- * extension reload, while tab ids are reused after a restart: an id stored last time may name one of the user's tabs
- * now. A missing marker therefore doesn't discard the list; restore() keeps an entry only while that tab is still in
- * one of browse's groups, so a reused id that now names a user's tab is dropped.
+ * Whether the stored list is from the browser session still running. Session storage is cleared by both a browser
+ * restart and an extension reload. A browser start is handled by the onStartup listener below, which clears the list;
+ * without one, a missing marker means a reload or update, which keeps tab ids, so restore() may trust stored tabs that
+ * remain in browse's groups.
  */
-function currentBrowserSession() {
+function sameBrowserSession() {
   browserSession ??= (async () => {
     const stored = (await chrome.storage.session.get(SESSION_KEY).catch(() => ({}))) as Record<string, unknown>
     if (stored[SESSION_KEY] === true) return true
@@ -163,11 +163,11 @@ function currentBrowserSession() {
   return browserSession
 }
 
-/** Loads the stored list once; after a session reset, only ids still in a browse-owned group are trusted. */
+/** Loads the stored list once. A browser start clears it; without one, a reload trusts only ids still in a browse group. */
 function restore() {
   const mine = generation
   restored ??= (async () => {
-    const sameSession = await currentBrowserSession()
+    const sameSession = await sameBrowserSession()
     const stored = await chrome.storage.local.get(STORAGE_KEY)
     // A startup may have cleared the list while this read was in flight.
     if (mine !== generation) return
@@ -177,12 +177,16 @@ function restore() {
         if (!tracked.has(Number(tabId))) tracked.set(Number(tabId), entry)
       return
     }
+    const [tabs, groups] = await Promise.all([
+      chrome.tabs.query({}).catch(() => [] as chrome.tabs.Tab[]),
+      chrome.tabGroups.query({}).catch(() => [] as chrome.tabGroups.TabGroup[]),
+    ])
+    const open = new Map(tabs.filter((tab) => tab.id !== undefined).map((tab) => [tab.id!, tab]))
+    const ownedGroups = new Set(groups.filter((group) => ownedGroup(group.title)).map((group) => group.id))
     const kept: Record<string, Tracked> = {}
     for (const [tabId, entry] of Object.entries(saved)) {
-      const tab = await chrome.tabs.get(Number(tabId)).catch(() => undefined)
-      if (!tab || tab.pinned || tab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) continue
-      const group = await chrome.tabGroups.get(tab.groupId).catch(() => undefined)
-      if (!group || !ownedGroup(group.title)) continue
+      const tab = open.get(Number(tabId))
+      if (!tab || tab.pinned || !ownedGroups.has(tab.groupId)) continue
       kept[tabId] = entry
     }
     if (mine !== generation) return
@@ -190,7 +194,7 @@ function restore() {
     if (mine !== generation) return
     await chrome.storage.local.set({ [STORAGE_KEY]: kept }).catch(() => undefined)
     if (mine !== generation) {
-      await chrome.storage.local.remove([STORAGE_KEY, CREATING_KEY]).catch(() => undefined)
+      await chrome.storage.local.remove(STORAGE_KEY).catch(() => undefined)
       return
     }
     for (const [tabId, entry] of Object.entries(kept))
@@ -316,9 +320,8 @@ function updateCreating(change: (list: Creating[]) => Creating[]) {
 }
 
 // The user switching to a tab counts as using it; a tab the user moves out of the agent's group is theirs now.
-// Kept in local storage so a service worker restart doesn't forget which tabs agents opened. Session storage marks the
-// browser session; when it is gone (a browser restart or an extension reload), the list starts over rather than trust
-// tab ids that may have been reused.
+// Kept in local storage so a service worker restart or an extension reload doesn't forget which tabs agents opened.
+// A browser start clears it instead: tab ids can be reused across a restart, so the stored ids aren't trusted then.
 chrome.runtime.onStartup.addListener(() => {
   generation += 1
   tracked.clear()
