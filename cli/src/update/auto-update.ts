@@ -20,7 +20,7 @@ import { spawn, spawnSync } from "node:child_process"
 import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, realpathSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { cliPrefix, compiledBinary, entryCommand, fromCheckout, installedBinary, stateRoot } from "../paths.ts"
+import { cliPrefix, compiledBinary, entrySpawnCommand, fromCheckout, installedBinary, stateRoot } from "../paths.ts"
 import { opencodeBrowserVersion } from "../version.ts"
 import { checkRelease, releaseChannel, runningServiceTarget, type ReleaseChannel, type ReleaseDecision } from "./release-service.ts"
 
@@ -536,7 +536,7 @@ export function spawnRuntimeChild(runtime: Runtime, args: readonly string[], onE
   mkdirSync(directory, { recursive: true, mode: 0o700 })
   const log = openSync(path.join(directory, "auto-update.log"), "a", 0o600)
   try {
-    const [file, ...prefix] = entryCommand(runtime.entry)
+    const [file, ...prefix] = entrySpawnCommand(runtime.entry)
     const child = spawn(file!, [...prefix, ...args], { detached: true, stdio: ["ignore", log, log], env: rest })
     child.on("error", () => onExit(null))
     child.on("exit", (code) => onExit(code))

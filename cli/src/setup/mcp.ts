@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import path from "node:path"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
 import { runCommand, installedVersion } from "../update/auto-update.ts"
-import { cliCommand, compiledBinary, entryCommand, scriptEntry } from "../paths.ts"
+import { cliCommand, compiledBinary, entryCommand, entrySpawnCommand, resolveWindowsShim, scriptEntry } from "../paths.ts"
 import { opencodeBrowserVersion } from "../version.ts"
 import { installBinaryRuntime } from "./binary.ts"
 import { browsers } from "./browsers.ts"
@@ -54,7 +54,7 @@ function fingerprint(entry: string) {
  * so and how to restart it later.
  */
 export function restartOutdatedRelay(entry: string): string[] | undefined {
-  const [file, ...prefix] = entryCommand(entry)
+  const [file, ...prefix] = entrySpawnCommand(entry)
   const status = spawnSync(file!, [...prefix, "status", "--json"], { encoding: "utf8", timeout: 15_000 })
   if (!/"stale":\s*true/.test(status.stdout ?? "")) return undefined
   const restart = spawnSync(file!, [...prefix, "relay", "restart"], { encoding: "utf8", timeout: 60_000 })
@@ -204,14 +204,17 @@ async function npmGlobalRoot(): Promise<string | undefined> {
  * npm package for an npm one, or the checkout's bundle from source. There is no private runtime or shim any more:
  * updates replace that same path, and the installer owns PATH and agent entries.
  */
-export async function installRuntime(): Promise<{ entry: string; version: string }> {
-  if (compiledBinary()) return installBinaryRuntime()
+export async function installRuntime(): Promise<{ entry: string; version: string; spawnEntry: string }> {
+  if (compiledBinary()) {
+    const runtime = await installBinaryRuntime()
+    return { ...runtime, spawnEntry: runtime.entry }
+  }
   // From a checkout, run the bundle `bun run build` wrote: Node can't run the TypeScript sources (they use
   // syntax type stripping doesn't cover), and the MCP server runs under Node.
   if (fromSource) {
     const bundle = path.join(packageRoot, "dist", "cli.mjs")
     if (!existsSync(bundle)) fail("Build the CLI first: `bun run build` in cli/ (or `bun run setup` at the top).")
-    return { entry: bundle, version: opencodeBrowserVersion }
+    return { entry: bundle, version: opencodeBrowserVersion, spawnEntry: bundle }
   }
   const spec = process.env.OPENCODE_BROWSER_PACKAGE
   const globalRoot = await npmGlobalRoot()
@@ -232,8 +235,9 @@ export async function installRuntime(): Promise<{ entry: string; version: string
   if (!existsSync(entry)) fail(`npm didn't install ${PACKAGE} in ${root}; run \`npm install -g ${PACKAGE}\` and try again.`)
   const version = readJson<{ version?: string }>(path.join(root, "@opencode", "browse", "package.json"))?.version ?? opencodeBrowserVersion
   // Agents run `browse` from PATH, not an absolute node and package path: nvm/fnm change node between sessions, and the
-  // global npm bin folder is on PATH whenever npm is. The supervisor and npm keep it current.
-  return { entry: "browse", version }
+  // global npm bin folder is on PATH whenever npm is. The supervisor and npm keep it current. Setup-time self-spawns
+  // use the bundle this install just wrote, since Windows can't start the PATH shim without a shell.
+  return { entry: "browse", version, spawnEntry: entry }
 }
 
 /**
@@ -250,11 +254,23 @@ export function installedRuntime(settings: Settings | undefined, server: Servers
   const packageDir = path.dirname(path.dirname(entry))
   const source = scriptEntry(entry) && existsSync(path.join(packageDir, "src", "main.ts"))
   // The installed path reports its own version after an update, even when settings.json still has the old one.
-  const onDisk = entry === "browse"
-    ? spawnSync("browse", ["--version"], { encoding: "utf8", timeout: 15_000 }).stdout?.trim() || undefined
-    : existsSync(entry)
-      ? installedVersion({ kind: scriptEntry(entry) ? "npm" : "binary", entry, version: settings?.version ?? opencodeBrowserVersion })
-      : undefined
+  const windowsShim = process.platform === "win32" && (entry === "browse" || /\.(cmd|bat)$/i.test(entry))
+  const onDisk = windowsShim
+    ? (() => {
+        // No running-entry fallback: report the installed CLI's version, not whatever process happens to ask.
+        const resolved = resolveWindowsShim(entry)
+        if (!resolved) return undefined
+        return installedVersion({
+          kind: resolved.length === 2 ? "npm" : "binary",
+          entry: resolved[resolved.length - 1]!,
+          version: settings?.version ?? opencodeBrowserVersion,
+        })
+      })()
+    : entry === "browse"
+      ? spawnSync("browse", ["--version"], { encoding: "utf8", timeout: 15_000 }).stdout?.trim() || undefined
+      : existsSync(entry)
+        ? installedVersion({ kind: scriptEntry(entry) ? "npm" : "binary", entry, version: settings?.version ?? opencodeBrowserVersion })
+        : undefined
   const version = onDisk ?? settings?.version ?? (path.resolve(entry) === path.join(packageRoot, "dist", "cli.mjs")
     ? opencodeBrowserVersion
     : readJson<{ version?: string }>(path.join(packageDir, "package.json"))?.version)
