@@ -81,7 +81,10 @@ export async function closeAgentTab(tabId: number): Promise<void> {
   try {
     await chrome.tabs.remove(tabId)
   } catch (error) {
-    if (groupId !== undefined) await chrome.tabs.group({ tabIds: [tabId], groupId }).catch(() => undefined)
+    if (groupId !== undefined) {
+      await chrome.tabs.group({ tabIds: [tabId], groupId }).catch(() => undefined)
+      closing.delete(tabId)
+    }
     throw error
   }
 }
@@ -93,7 +96,6 @@ export async function closeAgentTab(tabId: number): Promise<void> {
  */
 export async function cleanup(options: { minutes?: number } = {}) {
   await restore()
-  closing.clear()
   const minutes = options.minutes ?? ((await idleMinutes()) || DEFAULT_IDLE_MINUTES)
   const now = Date.now()
   const focused = await chrome.windows.getLastFocused().catch(() => undefined)
