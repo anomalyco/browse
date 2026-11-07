@@ -207,8 +207,9 @@ values between calls on `state`. A single run without an `await` is stopped afte
 about 2 seconds; split heavy loops with
 `await new Promise(r => setTimeout(r, 0))` or do the work in the page.
 
-It runs in a sandbox because a page can try to prompt-inject the agent writing
-it. There is no `process`, `require`, `import()`, `eval`, `fs`, `os`,
+It runs in a restricted JavaScript realm, not a sandbox. It shares the relay's
+process, so it is not a security boundary: treat code as running as you. There
+is no `process`, `require`, `import()`, `eval`, `fs`, `os`,
 `child_process`, `http`/`https` or Node-side `fetch`, and Playwright internals,
 `page.request`, `context.request` and `browser.browserType()` are unavailable.
 Files go through `files` and Playwright file options, which accept absolute paths
