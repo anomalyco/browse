@@ -17,7 +17,7 @@
  */
 import { checkNavigationUrl, checkUrl, explicitlyAllowsHost, isPrivateAddress, parseOriginPatterns, type OriginRule } from "../auth/domain-policy.ts"
 import type { JsonObject } from "../protocol.ts"
-import { getObject, getString } from "../relay/helpers.ts"
+import { createTargetUrl, getObject, getString } from "../relay/helpers.ts"
 
 export type NavigationGuardTarget = {
   readonly tabId: number
@@ -53,6 +53,8 @@ export class SessionNavigationGuard {
   private readonly rulesCache = new Map<string, { readonly key: string; readonly rules: readonly OriginRule[] }>()
   /** Popups that haven't shown an allowed document yet; a violation closes them instead of blanking them. */
   private readonly freshPopups = new Set<number>()
+  /** The last refused URL per tab, so the event path and a post-navigation check act once. */
+  private readonly handledViolations = new Map<number, string>()
 
   constructor(private readonly dependencies: NavigationGuardDependencies) {}
 
@@ -81,7 +83,7 @@ export class SessionNavigationGuard {
     if (options.method !== "Page.navigate" && options.method !== "Target.createTarget") return undefined
     const rules = this.rules(options.sessionId)
     if (!rules) return undefined
-    const url = getString(options.params, "url") ?? (options.method === "Target.createTarget" ? "about:blank" : undefined)
+    const url = options.method === "Target.createTarget" ? createTargetUrl(options.params) : getString(options.params, "url")
     if (url === undefined) return undefined
     const decision = await checkNavigationUrl(url, rules)
     if (decision.allowed) return undefined
@@ -96,42 +98,57 @@ export class SessionNavigationGuard {
     this.observeCommittedUrl(target, target.targetInfo.url)
   }
 
-  forgetTab(tabId: number): void {
-    this.freshPopups.delete(tabId)
+  /**
+   * Check a tab the relay created after its first navigation. Unlike a popup, a violation sends it back to
+   * about:blank instead of closing it. Returns whether the tab's URL is allowed.
+   */
+  createdTabNavigated(target: NavigationGuardTarget): boolean {
+    if (!this.enforced(target)) return true
+    // A violation is already being handled (the tab is on its way back to about:blank): don't publish this URL.
+    if (this.handledViolations.has(target.tabId)) return false
+    return this.observeCommittedUrl(target, target.targetInfo.url)
   }
 
-  /** Observe a root-session CDP event of a tab. */
-  observeEvent(target: NavigationGuardTarget, method: string, params: JsonObject | undefined): void {
-    if (method !== "Page.frameNavigated" && method !== "Page.frameRequestedNavigation" && method !== "Page.frameStartedNavigating" && method !== "Network.responseReceived") return
-    if (!this.enforced(target)) return
+  forgetTab(tabId: number): void {
+    this.freshPopups.delete(tabId)
+    this.handledViolations.delete(tabId)
+  }
+
+  /**
+   * Observe a root-session CDP event of a tab. Returns false when a main-frame URL was refused, so it is not
+   * published as the tab's URL.
+   */
+  observeEvent(target: NavigationGuardTarget, method: string, params: JsonObject | undefined): boolean {
+    if (method !== "Page.frameNavigated" && method !== "Page.frameRequestedNavigation" && method !== "Page.frameStartedNavigating" && method !== "Network.responseReceived") return true
+    if (!this.enforced(target)) return true
     const sessionId = target.opencodeBrowserSessionId!
     const rules = this.rules(sessionId)!
     const mainFrameId = this.dependencies.mainFrameId(target.tabId) ?? target.targetInfo.targetId
     if (method === "Page.frameNavigated") {
       const frame = getObject(params?.frame)
-      if (getString(frame, "parentId") !== undefined) return
+      if (getString(frame, "parentId") !== undefined) return true
       const url = getString(frame, "url")
-      if (url !== undefined) this.observeCommittedUrl(target, url)
-      return
+      return url === undefined || this.observeCommittedUrl(target, url)
     }
     if (method === "Network.responseReceived") {
-      if (getString(params, "type") !== "Document" || getString(params, "frameId") !== mainFrameId) return
+      if (getString(params, "type") !== "Document" || getString(params, "frameId") !== mainFrameId) return true
       const response = getObject(params?.response)
       const address = getString(response, "remoteIPAddress")
       const url = getString(response, "url")
-      if (!address || !url || !isPrivateAddress(address) || explicitlyAllowsHost(rules, url)) return
+      if (!address || !url || !isPrivateAddress(address) || explicitlyAllowsHost(rules, url)) return true
       this.violation(target, url, `its document came from the private address ${address} (name it exactly in the allowlist to allow it)`, "commit")
-      return
+      return false
     }
     // A navigation is starting: stop it before the request goes out when we can.
-    if (getString(params, "frameId") !== mainFrameId) return
+    if (getString(params, "frameId") !== mainFrameId) return true
     const url = getString(params, "url")
-    if (url === undefined) return
+    if (url === undefined) return true
     const decision = checkUrl(url, rules)
-    if (decision.allowed) return
+    if (decision.allowed) return true
     this.dependencies.send(target.tabId, "Page.stopLoading", {}).catch(() => {})
     this.addWarning(sessionId, `Domain allowlist: a tab of session ${sessionId} started to navigate to ${shortUrl(url)}, but ${decision.reason}; browse stopped it. Ask the user before widening the allowlist.`)
     this.dependencies.log("allowlist.stopped", { tabId: target.tabId, session: sessionId, method, reason: decision.reason })
+    return false
   }
 
   private enforced(target: NavigationGuardTarget): boolean {
@@ -140,18 +157,22 @@ export class SessionNavigationGuard {
     return target.owner !== "user" || this.dependencies.isExecuting(sessionId)
   }
 
-  private observeCommittedUrl(target: NavigationGuardTarget, url: string): void {
+  private observeCommittedUrl(target: NavigationGuardTarget, url: string): boolean {
     const rules = this.rules(target.opencodeBrowserSessionId)
-    if (!rules) return
+    if (!rules) return true
     const decision = checkUrl(url, rules)
     if (decision.allowed) {
+      this.handledViolations.delete(target.tabId)
       if (!/^about:/.test(url)) this.freshPopups.delete(target.tabId)
-      return
+      return true
     }
     this.violation(target, url, decision.reason, "commit")
+    return false
   }
 
   private violation(target: NavigationGuardTarget, url: string, reason: string, _stage: "commit"): void {
+    if (this.handledViolations.get(target.tabId) === url) return
+    this.handledViolations.set(target.tabId, url)
     const sessionId = target.opencodeBrowserSessionId!
     const shownUrl = shortUrl(url)
     const popup = this.freshPopups.has(target.tabId) && target.owner === "relay"

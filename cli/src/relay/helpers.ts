@@ -130,6 +130,12 @@ export function getString(object: JsonObject | undefined, key: string): string |
   return Predicate.isString(value) ? value : undefined
 }
 
+/** Target.createTarget's url, with Chrome's about:blank default for a missing or empty one. */
+export function createTargetUrl(params: JsonObject | undefined): string {
+  const url = getString(params, "url")
+  return url === undefined || url === "" ? "about:blank" : url
+}
+
 export function getNumber(object: JsonObject | undefined, key: string): number | undefined {
   const value = object?.[key]
   return Predicate.isNumber(value) ? value : undefined

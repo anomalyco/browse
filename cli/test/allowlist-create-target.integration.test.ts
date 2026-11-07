@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test"
-import { spawn, type ChildProcess } from "node:child_process"
+import type { ChildProcess } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -7,8 +7,9 @@ import WebSocket from "ws"
 import { cdpCall, collect, connectCdp, FakeExtension, startRelay, stopRelay, until } from "./relay-harness.ts"
 
 // Target.createTarget for a session with a domain allowlist: the tab is created at about:blank, the debugger is
-// attached there, and only then is the requested URL navigated to, so the allowlist observes the real load. The URL
-// the tab actually has after that is checked too, closing it when a load beat the guard's events.
+// attached there, and only then is the requested URL navigated to, so the allowlist observes the real load. A
+// disallowed load is sent back to about:blank (the tab is not a popup); the URL actually committed is also checked
+// and only published when it passes the guard.
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-allowlist-create-"))
 let port = 0
@@ -43,63 +44,213 @@ async function allowlistedSession(id: string) {
 
 const targetInfo = (targetId: string, url: string) => ({ targetId, type: "page", title: url, url, attached: true, browserContextId: "CTX" })
 
-test("Target.createTarget in an allowlisted session creates at about:blank, attaches, then navigates", async () => {
-  const tabId = 201
-  const targetId = "TARGET-201"
-  let current = "about:blank"
+type NavigateOutcome = { readonly result?: Record<string, unknown>; readonly error?: Error; readonly url?: string }
+
+/** A paired fake extension and a CDP client for one allowlisted session, with a mutable tab URL. */
+async function createScene(id: string, tabId: number, targetId: string) {
+  const state = {
+    current: "about:blank",
+    navigations: [] as string[],
+    documentContent: [] as unknown[],
+    removed: false,
+    onNavigate: undefined as ((url: string) => NavigateOutcome | undefined) | undefined,
+    onTargetInfo: undefined as (() => { readonly url?: string; readonly error?: Error } | undefined) | undefined,
+  }
   const extension = new FakeExtension(home, port)
     .on("tabs.create", () => ({ tabId }))
-    .on("Target.getTargetInfo", () => ({ targetInfo: targetInfo(targetId, current) }))
-    .on("Page.navigate", () => {
-      current = "https://127.0.0.1:8443/start"
-      return { frameId: targetId, loaderId: "L1" }
+    .on("Target.getTargetInfo", () => {
+      const override = state.onTargetInfo?.()
+      if (override?.error) throw override.error
+      return { targetInfo: targetInfo(targetId, override?.url ?? state.current) }
+    })
+    .on("Page.navigate", (command) => {
+      const url = String((command.params?.params as { url?: string } | undefined)?.url)
+      state.navigations.push(url)
+      const outcome = state.onNavigate?.(url)
+      if (outcome?.error) throw outcome.error
+      if (outcome?.url !== undefined) state.current = outcome.url
+      else state.current = url === "about:blank" ? "about:blank" : url
+      return outcome?.result ?? { frameId: targetId, loaderId: `L-${state.navigations.length}` }
+    })
+    .on("Page.setDocumentContent", (command) => {
+      state.documentContent.push(command.params?.params)
+      return {}
+    })
+    .on("tabs.remove", () => {
+      state.removed = true
+      return {}
     })
   expect(await extension.pair()).toBe(true)
-  const sessionId = await allowlistedSession("guarded-create")
+  const sessionId = await allowlistedSession(id)
   const socket = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test?opencodeBrowserSessionId=${sessionId}`, { authorization: `Bearer ${token}` })
   if (!(socket instanceof WebSocket)) throw new Error(`CDP connection refused: ${socket}`)
-  try {
-    const events = collect(socket)
-    const created = await cdpCall(socket, 1, "Target.createTarget", { url: "https://127.0.0.1:8443/start" })
-    expect(created.error).toBeUndefined()
-    expect(created.result?.targetId).toBe(targetId)
+  return {
+    extension,
+    socket,
+    state,
+    close() {
+      socket.close()
+      extension.close()
+    },
+  }
+}
 
-    const methods = extension.commands.map((command) => command.method === "debugger.sendCommand" ? command.params?.method : command.method)
-    expect(extension.commands.find((command) => command.method === "tabs.create")?.params?.url).toBe("about:blank")
+async function getTargets(socket: WebSocket, id: number) {
+  const result = await cdpCall(socket, id, "Target.getTargets")
+  return (result.result?.targetInfos ?? []) as Array<{ targetId: string; url: string }>
+}
+
+async function untilTargetUrl(socket: WebSocket, targetId: string, expected: string) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if ((await getTargets(socket, 100 + attempt)).find((target) => target.targetId === targetId)?.url === expected) return true
+    await Bun.sleep(20)
+  }
+  return false
+}
+
+test("Target.createTarget in an allowlisted session creates at about:blank, attaches, then navigates", async () => {
+  const scene = await createScene("guarded-create", 201, "TARGET-201")
+  try {
+    const events = collect(scene.socket)
+    const created = await cdpCall(scene.socket, 1, "Target.createTarget", { url: "https://127.0.0.1:8443/start" })
+    expect(created.error).toBeUndefined()
+    expect(created.result?.targetId).toBe("TARGET-201")
+
+    const methods = scene.extension.commands.map((command) => command.method === "debugger.sendCommand" ? command.params?.method : command.method)
+    expect(scene.extension.commands.find((command) => command.method === "tabs.create")?.params?.url).toBe("about:blank")
     expect(methods.indexOf("debugger.attach")).toBeGreaterThan(methods.indexOf("tabs.create"))
     expect(methods.indexOf("Page.navigate")).toBeGreaterThan(methods.indexOf("debugger.attach"))
-    expect(extension.commands.find((command) => command.params?.method === "Page.navigate")?.params?.params).toEqual({ url: "https://127.0.0.1:8443/start" })
+    expect(scene.state.navigations).toEqual(["https://127.0.0.1:8443/start"])
 
-    // The target is announced before the navigation, as Playwright's newPage and createTarget expect.
-    expect(events.some((event) => event.method === "Target.attachedToTarget" && (event.params?.targetInfo as { targetId?: string } | undefined)?.targetId === targetId)).toBe(true)
+    // The created target is announced to the client, and its real URL is published right away.
+    expect(events.some((event) => event.method === "Target.attachedToTarget" && (event.params?.targetInfo as { targetId?: string } | undefined)?.targetId === "TARGET-201")).toBe(true)
+    expect((await getTargets(scene.socket, 2)).find((target) => target.targetId === "TARGET-201")?.url).toBe("https://127.0.0.1:8443/start")
   } finally {
-    socket.close()
-    extension.close()
+    scene.close()
   }
 }, 20_000)
 
-test("a URL outside the allowlist found after attach closes the new tab", async () => {
-  const tabId = 202
-  const targetId = "TARGET-202"
-  let current = "about:blank"
-  const extension = new FakeExtension(home, port)
-    .on("tabs.create", () => ({ tabId }))
-    .on("Target.getTargetInfo", () => ({ targetInfo: targetInfo(targetId, current) }))
-    .on("Page.navigate", () => {
-      // The requested page redirects before any frame event reaches the relay: only the post-attach check sees it.
-      current = "https://evil.test/"
-      return { frameId: targetId, loaderId: "L2" }
-    })
-  expect(await extension.pair()).toBe(true)
-  const sessionId = await allowlistedSession("guarded-redirect")
-  const socket = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test?opencodeBrowserSessionId=${sessionId}`, { authorization: `Bearer ${token}` })
-  if (!(socket instanceof WebSocket)) throw new Error(`CDP connection refused: ${socket}`)
+test("Target.createTarget with a data: URL writes it into the attached about:blank tab", async () => {
+  const scene = await createScene("guarded-data", 202, "TARGET-202")
   try {
-    const created = await cdpCall(socket, 1, "Target.createTarget", { url: "https://127.0.0.1:8443/start" })
-    expect(created.result?.targetId).toBe(targetId)
-    expect(await until(() => extension.commands.some((command) => command.method === "tabs.remove" && command.params?.tabId === tabId))).toBe(true)
+    // The data helper waits for about:blank's loader to commit before writing the document.
+    scene.state.onNavigate = (url) => {
+      const loaderId = `L-${scene.state.navigations.length}`
+      scene.extension.emit("debugger.event", { tabId: 202, method: "Page.frameNavigated", params: { frame: { id: "TARGET-202", loaderId, url } } })
+      return { result: { frameId: "TARGET-202", loaderId } }
+    }
+    const created = await cdpCall(scene.socket, 1, "Target.createTarget", { url: "data:text/html,<h1>hi</h1>" })
+    expect(created.error).toBeUndefined()
+    expect(created.result?.targetId).toBe("TARGET-202")
+    expect(scene.state.navigations).toEqual(["about:blank"])
+    expect(scene.state.navigations.some((url) => url.startsWith("data:"))).toBe(false)
+    expect(scene.state.documentContent).toHaveLength(1)
+    expect(scene.state.documentContent[0]).toMatchObject({ frameId: "TARGET-202", html: expect.stringContaining("<h1>hi</h1>") })
+    expect(scene.state.removed).toBe(false)
   } finally {
-    socket.close()
-    extension.close()
+    scene.close()
+  }
+}, 20_000)
+
+for (const [label, params] of [["empty", { url: "" }], ["missing", {}]] as const) {
+  test(`Target.createTarget with a ${label} URL creates about:blank without navigating`, async () => {
+    const tabId = label === "empty" ? 203 : 204
+    const scene = await createScene(`guarded-${label}`, tabId, `TARGET-${tabId}`)
+    try {
+      const created = await cdpCall(scene.socket, 1, "Target.createTarget", params)
+      expect(created.error).toBeUndefined()
+      expect(created.result?.targetId).toBe(`TARGET-${tabId}`)
+      expect(scene.extension.commands.find((command) => command.method === "tabs.create")?.params?.url).toBe("about:blank")
+      expect(scene.state.navigations).toEqual([])
+    } finally {
+      scene.close()
+    }
+  }, 20_000)
+}
+
+test("a disallowed committed URL found after attach is sent back to about:blank, not closed", async () => {
+  const scene = await createScene("guarded-redirect", 205, "TARGET-205")
+  try {
+    // The requested page lands somewhere else before any frame event reaches the relay: only the post-attach check sees it.
+    scene.state.onNavigate = (url) => url === "about:blank" ? undefined : { url: "https://evil.test/" }
+    const created = await cdpCall(scene.socket, 1, "Target.createTarget", { url: "https://127.0.0.1:8443/start" })
+    expect(created.result?.targetId).toBe("TARGET-205")
+    expect(await until(() => scene.state.navigations.includes("about:blank"))).toBe(true)
+    expect(scene.state.navigations).toEqual(["https://127.0.0.1:8443/start", "about:blank"])
+    expect(scene.state.removed).toBe(false)
+    // The disallowed URL was never published through the registry.
+    expect((await getTargets(scene.socket, 2)).find((target) => target.targetId === "TARGET-205")?.url).toBe("about:blank")
+  } finally {
+    scene.close()
+  }
+}, 20_000)
+
+test("a disallowed Page.frameNavigated during the navigation is sent back to about:blank, not closed", async () => {
+  const scene = await createScene("guarded-event", 206, "TARGET-206")
+  try {
+    // The main guard event path handles the commit; the post-attach check must not act on it a second time.
+    scene.state.onNavigate = (url) => {
+      if (url !== "about:blank") {
+        scene.extension.emit("debugger.event", { tabId: 206, method: "Page.frameNavigated", params: { frame: { id: "TARGET-206", loaderId: "EVIL-1", url: "https://evil.test/" } } })
+        return undefined
+      }
+      const loaderId = `L-${scene.state.navigations.length}`
+      scene.extension.emit("debugger.event", { tabId: 206, method: "Page.frameNavigated", params: { frame: { id: "TARGET-206", loaderId, url } } })
+      return { result: { frameId: "TARGET-206", loaderId } }
+    }
+    const created = await cdpCall(scene.socket, 1, "Target.createTarget", { url: "https://127.0.0.1:8443/start" })
+    expect(created.result?.targetId).toBe("TARGET-206")
+    expect(await until(() => scene.state.navigations.includes("about:blank"))).toBe(true)
+    expect(scene.state.navigations.filter((url) => url === "about:blank")).toHaveLength(1)
+    expect(scene.state.removed).toBe(false)
+    // The disallowed commit was not published as the target's URL.
+    expect(await untilTargetUrl(scene.socket, "TARGET-206", "about:blank")).toBe(true)
+  } finally {
+    scene.close()
+  }
+}, 20_000)
+
+test("a failed post-attach navigation still returns the target and leaves the tab open", async () => {
+  const scene = await createScene("guarded-failed", 207, "TARGET-207")
+  try {
+    scene.state.onNavigate = (url) => url === "about:blank" ? undefined : { error: new Error("Page.navigate failed") }
+    const created = await cdpCall(scene.socket, 1, "Target.createTarget", { url: "https://127.0.0.1:8443/start" })
+    expect(created.error).toBeUndefined()
+    expect(created.result?.targetId).toBe("TARGET-207")
+    expect(scene.state.removed).toBe(false)
+    expect((await getTargets(scene.socket, 2)).some((target) => target.targetId === "TARGET-207")).toBe(true)
+  } finally {
+    scene.close()
+  }
+}, 20_000)
+
+test("a navigation errorText still returns the target and leaves the tab open", async () => {
+  const scene = await createScene("guarded-error-text", 208, "TARGET-208")
+  try {
+    scene.state.onNavigate = (url) => url === "about:blank" ? undefined : { result: { frameId: "TARGET-208", errorText: "net::ERR_FAILED" }, url: "about:blank" }
+    const created = await cdpCall(scene.socket, 1, "Target.createTarget", { url: "https://127.0.0.1:8443/start" })
+    expect(created.error).toBeUndefined()
+    expect(created.result?.targetId).toBe("TARGET-208")
+    expect(scene.state.removed).toBe(false)
+    expect((await getTargets(scene.socket, 2)).some((target) => target.targetId === "TARGET-208")).toBe(true)
+  } finally {
+    scene.close()
+  }
+}, 20_000)
+
+test("a tab closed during the post-attach navigation still answers Target.createTarget", async () => {
+  const scene = await createScene("guarded-closed", 209, "TARGET-209")
+  try {
+    scene.state.onNavigate = (url) => {
+      if (url === "about:blank") return undefined
+      scene.state.onTargetInfo = () => ({ error: new Error("No tab with id: 209.") })
+      return { error: new Error("No tab with id: 209.") }
+    }
+    const created = await cdpCall(scene.socket, 1, "Target.createTarget", { url: "https://127.0.0.1:8443/start" })
+    expect(created.error).toBeUndefined()
+    expect(created.result?.targetId).toBe("TARGET-209")
+    expect(scene.state.removed).toBe(false)
+  } finally {
+    scene.close()
   }
 }, 20_000)

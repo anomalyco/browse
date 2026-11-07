@@ -373,7 +373,9 @@ export function createExtensionEventHandler(options: {
       return
     }
     if (flightRecorder.handleDebuggerEvent({ tabId, method, params }) || recordingRelay.handleDebuggerEvent({ tabId, method, params })) return
-    if (sourceSessionId === undefined || sourceSessionId === target.sessionId) navigationGuard.observeEvent(target, method, params)
+    const guardAllowed = sourceSessionId !== undefined && sourceSessionId !== target.sessionId
+      ? true
+      : navigationGuard.observeEvent(target, method, params)
     let shouldBroadcast = true
     let attachedChildTarget: ChildTarget | undefined
 
@@ -498,7 +500,7 @@ export function createExtensionEventHandler(options: {
         forgetProtectedFrames(tabId)
         Effect.runPromise(Effect.ignore(ghostCursor.documentCreated(tabId))).catch(() => {})
         contextDebugLog?.(`main-frame-navigated frame=${boundedToken(frameId)} loader=${boundedToken(getString(frame, "loaderId"))} ${targetDiagnosticIdentity(registry, target)} ${summarizeDiagnosticUrl(frameUrl)}`)
-        registry.updateTargetUrl(tabId, frameUrl)
+        if (guardAllowed) registry.updateTargetUrl(tabId, frameUrl)
         blankNavigationWaiters.get(tabId)?.(frameUrl, getString(frame, "loaderId"))
         Effect.runPromise(Effect.ignore(sendDebuggerCommand({ tabId, method: "Emulation.setFocusEmulationEnabled", params: { enabled: tabActivity.isFocused(tabId) } }))).catch(() => {})
       }

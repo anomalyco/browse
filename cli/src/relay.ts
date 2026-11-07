@@ -23,10 +23,13 @@ import { relayHostname } from "./relay/config.ts"
 import {
   closeHttpServer,
   closeWebSocketServer,
+  createTargetUrl,
   defaultPort,
   formatHostForUrl,
   getNumber,
+  getString,
   getTargetInfo,
+  isRestrictedTarget,
   listenHttpServer,
   logCloseError,
   sendCdpEvent,
@@ -37,6 +40,7 @@ import { ensurePrivateDirectory, relayToken } from "./relay/secrets.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay/types.ts"
 import { createCdpDispatcher } from "./relay/cdp-dispatch.ts"
 import { createExtensionCommands } from "./relay/commands.ts"
+import { navigateTopFrameToDataUrl } from "./relay/data-navigation.ts"
 import { createExtensionEventHandler } from "./relay/extension-events.ts"
 import { ExtensionHandshake } from "./relay/extension-handshake.ts"
 import { installRelayProcessGuard, targetDiagnosticIdentity } from "./relay/process-guard.ts"
@@ -465,14 +469,32 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       ...(createOptions.opencodeBrowserSessionId ? { opencodeBrowserSessionId: createOptions.opencodeBrowserSessionId } : {}),
       ...(createOptions.autoAttachParams ? { autoAttachParams: createOptions.autoAttachParams } : {}),
     })
-    // A new relay tab is checked like a freshly attached popup: a disallowed first document closes it.
-    navigationGuard.popupAttached(target)
-    if (createOptions.url === "about:blank") return target
-    yield* sendDebuggerCommand({ tabId, method: "Page.navigate", params: { url: createOptions.url } })
-    // Defense in depth: check where the tab actually ended up, in case its load beat the guard's events.
-    const current = yield* sendDebuggerCommand({ tabId, method: "Target.getTargetInfo", params: {} }).pipe(Effect.orElseSucceed((): JsonObject => ({})))
-    const targetInfo = getTargetInfo(current.targetInfo)
-    if (targetInfo) navigationGuard.popupAttached({ ...target, targetInfo })
+    const requested = createTargetUrl({ url: createOptions.url })
+    if (requested !== "about:blank") {
+      const data = /^data:/i.test(requested.trim())
+      const navigation = yield* (
+        data
+          ? navigateTopFrameToDataUrl({ tabId, params: { url: requested }, mainFrameIdsByTab, blankNavigationWaiters, registry, sendDebuggerCommand })
+          : sendDebuggerCommand({ tabId, method: "Page.navigate", params: { url: requested } })
+      ).pipe(
+        // A failed navigation must not fail the create and leak an announced tab; Chrome answers createTarget anyway.
+        Effect.catch((error) => Effect.sync(() => {
+          relayLog("create.navigate-failed", { tabId, error: error instanceof Error ? error.message : String(error) })
+          return undefined
+        })),
+      )
+      const errorText = getString(navigation, "errorText")
+      if (errorText) relayLog("create.navigate-failed", { tabId, errorText })
+      else if (data && navigation === undefined) relayLog("create.data-skipped", { tabId })
+      // Defense in depth: check where the tab actually ended up, in case its load beat the guard's events. The guard
+      // blanks a disallowed tab like any other agent tab (it is not a popup), and only an allowed URL is published.
+      const current = yield* sendDebuggerCommand({ tabId, method: "Target.getTargetInfo", params: {} }).pipe(Effect.orElseSucceed((): JsonObject => ({})))
+      const targetInfo = getTargetInfo(current.targetInfo)
+      if (targetInfo && !isRestrictedTarget(targetInfo) && navigationGuard.createdTabNavigated({ ...target, targetInfo })) {
+        const updated = registry.updateConnectedTargetInfo({ tabId, targetInfo })
+        if (updated?.kind === "root") return updated.target
+      }
+    }
     return target
   })
 
