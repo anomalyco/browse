@@ -3,6 +3,7 @@ import type stream from "node:stream"
 import { Effect } from "effect"
 import type { RawData } from "ws"
 import { handleExecuteRealmException, handleExecuteRealmRejection } from "../execute-realm.ts"
+import { isSafeHostError, safeErrorMessage, safeErrorStack } from "../execute-realm/rejection-text.ts"
 import { appendManagedRelayProcessLog, relayLog } from "./log.ts"
 import type { ChildTarget, ConnectedTarget } from "./types.ts"
 import { boundedToken } from "../update/runtime-diagnostics.ts"
@@ -18,11 +19,12 @@ export const installRelayProcessGuard = Effect.acquireRelease(
     }
     const onUnhandledRejection = (reason: unknown, promise: Promise<unknown>) => {
       if (handleExecuteRealmRejection(promise, reason)) {
-        // The realm reset (or the full-Node execute scope warning) reports it; keep a line in the relay log.
-        relayLog("process.executeRejection", { message: faultText(reason).slice(0, 300) })
+        // No message: the reason may be a sandbox value and may contain page data. The agent result carries the
+        // warning through its usual redaction; this line just records that the relay contained a rejection.
+        relayLog("process.executeRejection")
         return
       }
-      handleRelayProcessFault("unhandledRejection", reason, { promise })
+      handleRelayProcessFault("unhandledRejection", reason, {})
     }
     process.on("uncaughtException", onUncaughtException)
     process.on("unhandledRejection", onUnhandledRejection)
@@ -49,15 +51,18 @@ export function relayProcessFaultSummary(): { readonly suppressed: number; reado
 
 export function shouldSuppressRelayProcessFault(cause: unknown): boolean {
   if (isPatchrightProtocolError(cause)) return true
-  const errorText = cause instanceof Error ? `${cause.message}\n${cause.stack ?? ""}` : String(cause)
+  const errorText = `${safeErrorMessage(cause)}\n${safeErrorStack(cause) ?? ""}`
   return /playwright-core|patchright-core|coreBundle|Duplicate target/i.test(errorText)
 }
 
 // Patchright sets all three fields in its ProtocolError constructor, even when method or logs are undefined.
 // The class is private and its name can be minified. The message alone isn't proof of a Patchright fault.
 function isPatchrightProtocolError(cause: unknown): boolean {
-  return cause instanceof Error && Object.hasOwn(cause, "method") && Object.hasOwn(cause, "logs") && "type" in cause
-    && (cause.type === "error" || cause.type === "closed" || cause.type === "crashed")
+  if (!isSafeHostError(cause)) return false
+  const type = Object.getOwnPropertyDescriptor(cause, "type")?.value
+  return Object.getOwnPropertyDescriptor(cause, "method") !== undefined
+    && Object.getOwnPropertyDescriptor(cause, "logs") !== undefined
+    && (type === "error" || type === "closed" || type === "crashed")
 }
 
 /**
@@ -67,12 +72,15 @@ function isPatchrightProtocolError(cause: unknown): boolean {
  * instead (benignRejections).
  */
 export function isBenignClosedSessionRejection(cause: unknown): boolean {
-  if (!(cause instanceof Error)) return false
-  if (!isPatchrightProtocolError(cause) && !/patchright-core|playwright-core|coreBundle/.test(cause.stack ?? "")) return false
-  return /^Protocol error \([\w.]+\): .*(session closed|Target closed|Extension disconnected|extension is not connected|Unknown CDP session|Detached while handling command|Relay closed)/i.test(cause.message)
+  if (!isSafeHostError(cause)) return false
+  if (!isPatchrightProtocolError(cause) && !/patchright-core|playwright-core|coreBundle/.test(safeErrorStack(cause) ?? "")) return false
+  return /^Protocol error \([\w.]+\): .*(session closed|Target closed|Extension disconnected|extension is not connected|Unknown CDP session|Detached while handling command|Relay closed)/i.test(safeErrorMessage(cause))
 }
 
 const benignRejections = { count: 0, logged: 0, lastLogAt: 0 }
+// Unattributed rejections are logged at most once a minute; status/doctor still see every one through
+// suppressedProcessFaults. The reason may be a sandbox value, so the log never includes it.
+const unattributedRejections = { count: 0, logged: 0, lastLogAt: 0 }
 
 export function handleRelayProcessFault(
   kind: RelayProcessFaultKind,
@@ -87,14 +95,14 @@ export function handleRelayProcessFault(
       const since = benignRejections.count - benignRejections.logged
       benignRejections.lastLogAt = now
       benignRejections.logged = benignRejections.count
-      relayLog("process.benignRejections", { count: since, total: benignRejections.count, example: (cause as Error).message.slice(0, 160) })
+      relayLog("process.benignRejections", { count: since, total: benignRejections.count, example: safeErrorMessage(cause).slice(0, 160) })
     }
     return
   }
   if (shouldSuppressRelayProcessFault(cause)) {
     suppressedProcessFaults.count += 1
     suppressedProcessFaults.lastAt = new Date().toISOString()
-    suppressedProcessFaults.lastMessage = faultText(cause).slice(0, 300)
+    suppressedProcessFaults.lastMessage = safeErrorMessage(cause).slice(0, 300)
     logProcessFault(kind, cause, detail, "keeping relay alive")
     return
   }
@@ -105,8 +113,15 @@ export function handleRelayProcessFault(
   if (kind === "unhandledRejection") {
     suppressedProcessFaults.count += 1
     suppressedProcessFaults.lastAt = new Date().toISOString()
-    suppressedProcessFaults.lastMessage = faultText(cause).slice(0, 300)
-    logProcessFault(kind, cause, detail, "keeping relay alive; an unhandled rejection never stops the relay")
+    suppressedProcessFaults.lastMessage = safeErrorMessage(cause).slice(0, 300)
+    unattributedRejections.count += 1
+    const now = Date.now()
+    if (now - unattributedRejections.lastLogAt >= 60_000) {
+      const since = unattributedRejections.count - unattributedRejections.logged
+      unattributedRejections.lastLogAt = now
+      unattributedRejections.logged = unattributedRejections.count
+      logProcessFault(kind, cause, { suppressed: since }, "keeping relay alive; an unhandled rejection never stops the relay")
+    }
     return
   }
   logProcessFault(kind, cause, detail, "not a known Playwright dispatch fault; rethrowing")
@@ -114,20 +129,15 @@ export function handleRelayProcessFault(
   rethrow(cause)
 }
 
-function faultText(cause: unknown): string {
-  return cause instanceof Error ? cause.message : String(cause)
-}
-
 function rethrowProcessFault(cause: unknown): never {
-  if (cause instanceof Error) {
+  if (isSafeHostError(cause)) {
     throw cause
   }
-  throw new Error(String(cause))
+  throw new Error(safeErrorMessage(cause))
 }
 
 function logProcessFault(kind: RelayProcessFaultKind, cause: unknown, detail: Record<string, unknown>, disposition: string): void {
-  const errorText = cause instanceof Error ? cause.stack ?? cause.message : String(cause)
-  const message = `[browse relay] ${kind}; ${disposition}\n${errorText}`
+  const message = `[browse relay] ${kind}; ${disposition}\n${safeErrorStack(cause) ?? safeErrorMessage(cause)}`
   console.error(message)
   if (process.env.OPENCODE_BROWSER_MANAGED_RELAY === "1") appendManagedRelayProcessLog(message)
   if (debugEnvironmentEnabled(process.env.OPENCODE_BROWSER_DEBUG)) {

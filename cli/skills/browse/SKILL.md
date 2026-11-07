@@ -214,10 +214,11 @@ values between calls on `state`. A single run without an `await` is stopped afte
 about 2 seconds; split heavy loops with
 `await new Promise(r => setTimeout(r, 0))` or do the work in the page.
 
-Await promises: a promise that rejects with no handler is contained, so it never
-stops the relay, but the call's realm resets and the warning arrives in that
-result or the next one. `await files.write(...)` and `await page.goto(...)` put
-the error in the call that caused it.
+Await promises: a rejection with no handler never stops the relay. A running call
+gets the error; a later one resets the realm and warns on the next call (a
+one-shot `--rm` session is already gone). Full Node mode has no realm to reset.
+`await files.write(...)` and `await page.goto(...)` put the error in the call
+that caused it.
 
 It runs in a restricted JavaScript realm, not a sandbox. It shares the relay's
 process, so it is not a security boundary: treat code as running as you. There

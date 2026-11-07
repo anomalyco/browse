@@ -13,6 +13,7 @@ import inspector from "node:inspector"
 import module from "node:module"
 import net from "node:net"
 import os from "node:os"
+import { AsyncLocalStorage } from "node:async_hooks"
 import tls from "node:tls"
 import util from "node:util"
 import v8 from "node:v8"
@@ -20,6 +21,7 @@ import vm from "node:vm"
 import workerThreads from "node:worker_threads"
 import * as acorn from "acorn"
 import type { ExecuteRealm } from "../execute-realm.ts"
+import { safeErrorMessage } from "./rejection-text.ts"
 
 export const deniedHostValues = new Map<unknown, string>([
   [process, "process"],
@@ -129,49 +131,92 @@ export const isHiddenKey = (key: PropertyKey): boolean => typeof key === "string
 /** Code that created a promise: a sandbox realm, or a full-Node execute call (ExecuteRejectionScope). */
 export interface ExecuteRejectionOwner {
   /** A realm stops and resets itself; a full-Node call can only report (its code cannot be interrupted safely). */
-  handleUnhandledRejection(cause: unknown): void
+  handleUnhandledRejection(cause: unknown, certain: boolean): void
+  /** A stopped realm's late rejections are handled by the realm reset, not reported again. */
+  readonly isStopped?: boolean
 }
 
 let activeOwner: ExecuteRejectionOwner | undefined
+// Async continuations (an `await` resumption, a timer created by the call) keep the owner in their async context.
+// This is not process-wide: overlapping calls have separate stores, and a call that never settles cannot leave
+// activeOwner pointing at it.
+const rejectionContext = new AsyncLocalStorage<ExecuteRejectionOwner>()
 const promiseOwners = new WeakMap<Promise<unknown>, ExecuteRejectionOwner>()
 // The hook is installed only while execute JavaScript runs: promise hooks slow every await in the
 // process. An npm install's relay runs under Node; a binary install's under Bun, which has no promiseHooks
 // (bunRejectionOwner below).
 let stopPromiseHook: (() => void) | undefined
+let promiseHookUsers = 0
 
-export function trackPromisesOf(owner: ExecuteRejectionOwner): () => void {
+/** Set the owner for one synchronous entry (a realm runInContext, a full-Node call). */
+export function enterRejectionOwner(owner: ExecuteRejectionOwner): () => void {
   const previous = activeOwner
   activeOwner = owner
-  if (process.versions.bun) {
-    const entered = { owner, at: Date.now() }
-    lastOwner = entered
-    return () => {
-      activeOwner = previous
-      entered.at = Date.now()
-    }
-  }
-  if (!stopPromiseHook) {
-    stopPromiseHook = v8.promiseHooks.createHook({ init(promise: Promise<unknown>) {
-      if (activeOwner) promiseOwners.set(promise, activeOwner)
-    } }) as () => void
-  }
   return () => {
     activeOwner = previous
-    if (!activeOwner && stopPromiseHook) {
+  }
+}
+
+/** Run a synchronous call with the owner set for it and for every async continuation it starts. */
+export function runWithRejectionOwner<T>(owner: ExecuteRejectionOwner, run: () => T): T {
+  return rejectionContext.run(owner, () => {
+    const restore = enterRejectionOwner(owner)
+    try {
+      return run()
+    } finally {
+      restore()
+    }
+  })
+}
+
+/** Keep the promise hook installed while at least one realm or full-Node call still runs. */
+export function retainPromiseHook(): () => void {
+  promiseHookUsers += 1
+  if (promiseHookUsers === 1) {
+    stopPromiseHook = v8.promiseHooks.createHook({ init(promise: Promise<unknown>, parent: Promise<unknown>) {
+      // A promise created inside a synchronous entry belongs to that entry. One created in its continuation
+      // inherits the owner from the async context (or, for then chains, from the parent promise), so a call
+      // that awaits does not hold the owner globally.
+      const owner = activeOwner ?? rejectionContext.getStore() ?? (parent ? promiseOwners.get(parent) : undefined)
+      if (owner) promiseOwners.set(promise, owner)
+    } }) as () => void
+  }
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    promiseHookUsers -= 1
+    if (promiseHookUsers === 0 && stopPromiseHook) {
       stopPromiseHook()
       stopPromiseHook = undefined
     }
   }
 }
 
+export function trackPromisesOf(owner: ExecuteRejectionOwner): () => void {
+  const restoreOwner = enterRejectionOwner(owner)
+  if (process.versions.bun) {
+    const entered = { owner, at: Date.now() }
+    lastOwner = entered
+    return () => {
+      restoreOwner()
+      entered.at = Date.now()
+    }
+  }
+  const releaseHook = retainPromiseHook()
+  return () => {
+    restoreOwner()
+    releaseHook()
+  }
+}
+
 // Bun (a binary install's relay) has no promiseHooks, so creation can't be tracked. There a rejected promise whose own
 // prototype is a realm's Promise.prototype came from that realm (the runtime hands a real promise, never a proxy, so
 // reading its prototype runs no sandbox code). Any other (a Promise subclass, a re-prototyped promise, a full-Node
-// call's host promise) goes to the owner active within the last second: the runtime reports a rejection right after the
-// turn that left it unhandled, and every sandbox turn (code, callbacks, timers) enters its realm. A stopped realm still
-// claims late rejections in that window: `execute --rm` disposes the session's realm right after its call, and the
-// rejection most likely belongs to that call. Agent code then can't take the relay down; the cost is that a host fault
-// in that window is contained instead of stopping the relay.
+// call's host promise) goes to the realm that ran within the last second: the runtime reports a rejection right after
+// the turn that left it unhandled, and every sandbox turn (code, callbacks, timers) enters its realm. Agent code then
+// can't take the relay down. A stopped realm does not claim those fallback matches: the process guard logs and counts
+// them instead of blaming a realm that no longer exists.
 const realmsByPromisePrototype = new WeakMap<object, ExecuteRealm>()
 let lastOwner: { readonly owner: ExecuteRejectionOwner; at: number } | undefined
 const lastOwnerWindowMs = 1000
@@ -182,55 +227,44 @@ export function registerRealmPromisePrototype(prototype: object, realm: ExecuteR
 }
 
 function bunRejectionOwner(promise: Promise<unknown>): ExecuteRejectionOwner | undefined {
-  const byPrototype = realmsByPromisePrototype.get(Object.getPrototypeOf(promise) as object)
-  if (byPrototype) return byPrototype
-  if (!lastOwner) return undefined
+  if (!lastOwner || lastOwner.owner.isStopped) return undefined
   return activeOwner === lastOwner.owner || Date.now() - lastOwner.at <= lastOwnerWindowMs ? lastOwner.owner : undefined
 }
 
 /** Contain a rejection created by execute code (a sandbox realm, or a full-Node execute scope). */
 export function handleExecuteRealmRejection(promise: Promise<unknown>, reason?: unknown): boolean {
-  const owner = promiseOwners.get(promise) ?? (process.versions.bun ? bunRejectionOwner(promise) : undefined)
+  const byPrototype = process.versions.bun ? realmsByPromisePrototype.get(Object.getPrototypeOf(promise) as object) : undefined
+  const exact = promiseOwners.get(promise) ?? byPrototype
+  const owner = exact ?? (process.versions.bun ? bunRejectionOwner(promise) : undefined)
   if (!owner) return false
-  owner.handleUnhandledRejection(reason)
+  // Only a promise tag proves the owner. A recent-owner match is a guess, so it gets a warning without the message.
+  owner.handleUnhandledRejection(reason, exact !== undefined)
   return true
 }
 
 /** The message an un-awaited execute rejection reports, bounded like other process diagnostics. */
-export function unhandledExecuteRejectionWarning(cause: unknown): string {
-  const detail = (cause instanceof Error ? cause.message : String(cause ?? "no reason")).slice(0, 300)
-  return `Execute code started a promise that rejected and was never awaited: ${detail}. The rejection was contained and the relay kept running; await the promise or handle its rejection to return the error from execute.`
+export function unhandledExecuteRejectionWarning(cause: unknown, certain: boolean): string {
+  if (!certain) {
+    return "Execute code may have started a promise that rejected and was never awaited. The rejection was contained and the relay kept running; await the promise or handle its rejection to return the error from execute."
+  }
+  return `Execute code started a promise that rejected and was never awaited: ${safeErrorMessage(cause)}. The rejection was contained and the relay kept running; await the promise or handle its rejection to return the error from execute.`
 }
 
-/**
- * Rejection owner for full-Node execute calls (`OPENCODE_BROWSER_ALLOW_NODE=1`), where there is no realm to tag
- * promises. Promises created while the call runs are tagged through trackPromisesOf (Node) or the recent-owner
- * fallback (Bun); a rejection after the call returns is still reported to the sandbox for its next result.
- */
-export class ExecuteRejectionScope implements ExecuteRejectionOwner {
-  private untrack: (() => void) | undefined
-  private readonly onRejection: ((message: string) => void) | undefined
-
-  constructor(options: { readonly onRejection?: (message: string) => void } = {}) {
-    this.onRejection = options.onRejection
-  }
-
-  /** Start tagging promises created by the call. Tagged promises stay owned after end(). */
-  begin(): void {
-    this.untrack ??= trackPromisesOf(this)
-  }
-
-  /** Stop tagging new promises (an un-tagged, late rejection falls back to the process guard). */
-  end(): void {
-    this.untrack?.()
-    this.untrack = undefined
-  }
-
-  handleUnhandledRejection(cause: unknown): void {
-    try { this.onRejection?.(unhandledExecuteRejectionWarning(cause)) } catch {
+/** Stop a realm whose promise rejected with no handler. A running call gets the reason in its own error. */
+export function handleRealmUnhandledRejection(
+  realm: ExecuteRealm,
+  cause: unknown,
+  certain: boolean,
+  warn: ((warning: string) => void) | undefined,
+): void {
+  if (realm.isStopped) return
+  if (!realm.hasPendingRun) {
+    try { warn?.(unhandledExecuteRejectionWarning(cause, certain)) } catch {
       // Reporting must never turn a contained rejection into a relay fault.
     }
   }
+  const detail = certain ? safeErrorMessage(cause) : "a rejected promise"
+  realm.dispose(new Error(`Unhandled execute rejection: ${detail}; JavaScript state will reset before the next execute`))
 }
 
 // Errors execute callbacks throw into host code. A host caller that does not catch them

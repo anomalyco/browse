@@ -6,7 +6,8 @@ import * as acorn from "acorn"
 import type { Browser, BrowserContext, ConsoleMessage, Frame, Locator, Page } from "patchright-core"
 import { classifyChallenge, probePageScript, probeSelectors, type ChallengeOutcome, type ChallengeProbe } from "./challenge-detection.ts"
 import type { DemonstrationResult } from "./demonstration.ts"
-import { pageVisibleApiWarningForName, sandboxModules, ExecuteRejectionScope, type ExecuteFiles, type ExecuteRealm } from "../execute-realm.ts"
+import { pageVisibleApiWarningForName, sandboxModules, type ExecuteFiles, type ExecuteRealm } from "../execute-realm.ts"
+import { ExecuteRejectionScope } from "./rejection-scope.ts"
 import type {
   GhostCursorCalloutOptions,
   GhostCursorCaptionOptions,
@@ -294,15 +295,17 @@ export async function runUserCode({ code, globals, realm, onUnhandledRejection }
     }
     const AsyncFunction = async function () {}.constructor as new (...args: string[]) => (...args: unknown[]) => Promise<unknown>
     const fn = new AsyncFunction("console", ...sandboxGlobalKeys, `${wrapCodeWithModuleAliases(code, Object.keys(nodeModules))}\n//# sourceURL=${executeFilename}`)
-    // Full Node execute code has no realm to tag its promises, so tag the promises the call creates here.
-    // A rejection nobody handles is contained by the process guard and reported as a warning, not a relay crash.
-    const scope = new ExecuteRejectionScope({ ...(onUnhandledRejection ? { onRejection: onUnhandledRejection } : {}) })
-    scope.begin()
+    // Full Node execute code has no realm to tag its promises. Node's promise hook tags the synchronous call and
+    // continuations inherit it; Bun has no hook, so the process guard's generic fallback contains those rejections.
+    const scope = process.versions.bun || !onUnhandledRejection
+      ? undefined
+      : new ExecuteRejectionScope({ onRejection: onUnhandledRejection })
+    scope?.begin()
     try {
-      const result = await fn(...values)
+      const result = await (scope ? scope.invoke(() => fn(...values)) : fn(...values))
       return { result, ...buildResultMetadata() }
     } finally {
-      scope.end()
+      scope?.end()
     }
   } catch (cause) {
     const error = cause instanceof Error ? cause : new Error("execute sandbox code", { cause })
