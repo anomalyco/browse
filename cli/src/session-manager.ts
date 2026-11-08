@@ -9,6 +9,7 @@ import { SessionAdmission } from "./session-manager/admission.ts"
 import { adoptTargetForSession, closeSessionSettledWithTimeout, sessionRelayTargetIds, type AdoptionContext } from "./session-manager/adoption.ts"
 import { executeInSession, type ExecutionContext } from "./session-manager/execution.ts"
 import {
+  defaultShutdownTimeoutMs,
   sessionError,
   sessionSummary,
   trySession,
@@ -29,6 +30,7 @@ import {
 export {
   adoptionTipForUrl,
   defaultExecuteTimeoutMs,
+  defaultShutdownTimeoutMs,
   SessionError,
   shouldAppendAdoptionTip,
   type SessionExecuteRecord,
@@ -540,21 +542,48 @@ export class OpenCodeBrowserSessions {
     this.admission.resume()
   }
 
-  closeAll(): Effect.Effect<void> {
+  /**
+   * Relay shutdown: stop admitting, let accepted work finish and disconnect the sessions, but wait at most
+   * `timeoutMs`. A session whose work never finishes is reported through `onStalled` and dropped so the process can
+   * exit.
+   */
+  closeAll(options: {
+    readonly timeoutMs?: number
+    /** Sessions still holding work when the wait expired, called before they are dropped. */
+    readonly onStalled?: (sessionIds: readonly string[]) => void
+  } = {}): Effect.Effect<void> {
     const manager = this
-    return Effect.gen(function* () {
+    // Persisting the catalog is the shutdown's only chance to record the sessions it held; a stuck write must not
+    // keep the process alive either.
+    const stalledFlushMs = 1_000
+    // Only the wait is interruptible (so the timeout can end it); naming, persisting and dropping stragglers is not.
+    return Effect.uninterruptible(Effect.gen(function* () {
       manager.admission.markClosed()
-      yield* manager.admission.beginDrain().pipe(Effect.ignore)
-      yield* manager.adoptSemaphore.withPermit(Effect.gen(function* () {
-        yield* Effect.forEach(Array.from(manager.sessions.values()), (session) => {
-          return session.executeSemaphore.withPermit(
-            manager.disconnectOpenCodeBrowserSession(session),
-          )
-        }, { concurrency: "unbounded", discard: true })
-        yield* manager.admission.flushPersistence().pipe(Effect.ignore)
-        manager.sessions.clear()
-      }))
-    }).pipe(Effect.uninterruptible)
+      yield* Effect.interruptible(Effect.gen(function* () {
+        yield* manager.admission.beginDrain().pipe(Effect.ignore)
+        yield* manager.adoptSemaphore.withPermit(Effect.gen(function* () {
+          yield* Effect.forEach(Array.from(manager.sessions.values()), (session) => {
+            return session.executeSemaphore.withPermit(
+              manager.disconnectOpenCodeBrowserSession(session),
+            )
+          }, { concurrency: "unbounded", discard: true })
+          yield* manager.admission.flushPersistence().pipe(Effect.ignore)
+          manager.sessions.clear()
+        }))
+      })).pipe(
+        Effect.timeoutOrElse({
+          duration: options.timeoutMs ?? defaultShutdownTimeoutMs,
+          orElse: () => Effect.gen(function* () {
+            options.onStalled?.(manager.admission.pendingWorkSessionIds())
+            yield* Effect.interruptible(manager.admission.flushPersistence()).pipe(
+              Effect.timeoutOrElse({ duration: stalledFlushMs, orElse: () => Effect.void }),
+              Effect.ignore,
+            )
+            manager.sessions.clear()
+          }),
+        }),
+      )
+    }))
   }
 
   summary(id: string): SessionSummary | undefined {

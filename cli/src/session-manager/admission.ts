@@ -21,6 +21,11 @@ export class SessionAdmission {
     return this.pendingSessionWork.has(id)
   }
 
+  /** Sessions holding accepted work now, so a bounded shutdown can name what it is leaving behind. */
+  pendingWorkSessionIds(): readonly string[] {
+    return Array.from(this.pendingSessionWork.keys())
+  }
+
   assertAdmission(): void {
     if (this.admission !== "open") {
       throw sessionError("inactive", this.admission === "closed"
