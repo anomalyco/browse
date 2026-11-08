@@ -39,14 +39,23 @@ fail() {
 }
 
 # Compare hashes as hex: sha512sum, shasum and openssl print hex, while turning hex back into base64 would need xxd.
-# base64_hex <base64>: decode to lowercase hex. GNU and busybox base64 use -d; macOS uses -D.
+# base64_hex <base64>: decode to lowercase hex, or print nothing when <base64> is not base64. GNU and busybox base64 use
+# -d; macOS uses -D.
 base64_hex() {
-    if printf '%s' "$1" | base64 -d >/dev/null 2>&1; then
-        printf '%s' "$1" | base64 -d | od -A n -v -t x1 | tr -d ' \n'
-    elif printf '%s' "$1" | base64 -D >/dev/null 2>&1; then
-        printf '%s' "$1" | base64 -D | od -A n -v -t x1 | tr -d ' \n'
+    encoded=$1
+    # Check the alphabet first: malformed integrity is reported as such, not as a missing base64 tool.
+    case "$encoded" in *=) encoded=${encoded%=} ;; esac
+    case "$encoded" in *=) encoded=${encoded%=} ;; esac
+    case "$encoded" in
+        "" | *[!A-Za-z0-9+/]*) return 0 ;;
+    esac
+    # Probe the flag with a known-valid value: malformed input can't tell a bad flag from bad data.
+    if printf 'Zg==' | base64 -d >/dev/null 2>&1; then
+        printf '%s' "$1" | base64 -d 2>/dev/null | od -A n -v -t x1 | tr -d ' \t\r\n'
+    elif printf 'Zg==' | base64 -D >/dev/null 2>&1; then
+        printf '%s' "$1" | base64 -D 2>/dev/null | od -A n -v -t x1 | tr -d ' \t\r\n'
     elif command -v openssl >/dev/null 2>&1; then
-        printf '%s' "$1" | openssl base64 -d -A | od -A n -v -t x1 | tr -d ' \n'
+        printf '%s' "$1" | openssl base64 -d -A 2>/dev/null | od -A n -v -t x1 | tr -d ' \t\r\n'
     else
         fail "base64 or openssl is required to verify $package@$specific_version; nothing was installed"
     fi
@@ -60,6 +69,7 @@ field() {
 }
 
 requested_version=${VERSION:-}
+version_option=false
 channel=stable
 no_setup=false
 binary_path=""
@@ -73,8 +83,9 @@ while [ "$remaining" -gt 0 ]; do
             exit 0
             ;;
         -v|--version)
-            if [ "$remaining" -gt 0 ] && [ -n "${2:-}" ]; then
+            if [ "$remaining" -gt 0 ]; then
                 requested_version="$2"
+                version_option=true
                 remaining=$((remaining - 1))
                 shift 2
             else
@@ -119,6 +130,12 @@ case "$channel" in
     stable | beta | dev) ;;
     *) fail "unknown channel $channel (stable, beta or dev)" ;;
 esac
+
+# A bare `--version v` (or VERSION=v) would otherwise fall through to the channel install with no version.
+if [ -z "${requested_version#v}" ] && { [ -n "$requested_version" ] || [ "$version_option" = "true" ]; }; then
+    fail "--version needs a version, e.g. 0.0.14"
+fi
+requested_version="${requested_version#v}"
 
 INSTALL_DIR=${XDG_BIN_HOME:-$HOME/.local/bin}
 # XDG paths must be absolute; a relative one would put browse in the current directory.
@@ -243,10 +260,16 @@ else
     encoded="@opencode%2fbrowse-$target"
     # A pinned version comes from npm: the release service has one current release per channel and no version lookup.
     if [ -n "$requested_version" ]; then
-        requested_version="${requested_version#v}"
         specific_version=$requested_version
         tmp_dir="${TMPDIR:-/tmp}/browse_install_$$"
         mkdir -p "$tmp_dir"
+        # The pinned flow owns this directory until it execs `browse install` below, which a trap can't cross. Remove it
+        # on every other exit, including failures inside command substitutions and failed metadata reads. tmp_dir is set
+        # before the trap, so it can only ever remove this run's directory.
+        trap 'rm -rf "$tmp_dir"' EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        trap 'exit 129' HUP
         metadata_file="$tmp_dir/npm-metadata.json"
         # Keep the version metadata: its dist.integrity is the tarball's SHA-512. Without whitespace, every field this
         # needs is a plain "key":value pair (URLs, hashes and versions have no spaces).
@@ -279,7 +302,7 @@ else
             fail "$package@$specific_version has an invalid SHA-512 integrity; nothing was installed"
         fi
         case "$expected_sha512" in
-            *[!0-9a-f]*)
+            *[!0123456789abcdef]*)
                 rm -rf "$tmp_dir"
                 fail "$package@$specific_version has an invalid SHA-512 integrity; nothing was installed"
                 ;;
@@ -319,11 +342,12 @@ sha256_file() {
 
 sha512_file() {
     if command -v sha512sum >/dev/null 2>&1; then
-        sha512sum "$1" | cut -d ' ' -f 1
+        sha512sum <"$1" | cut -d ' ' -f 1
     elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 512 "$1" | cut -d ' ' -f 1
+        shasum -a 512 <"$1" | cut -d ' ' -f 1
     elif command -v openssl >/dev/null 2>&1; then
-        openssl dgst -sha512 "$1" | sed 's/^.*= //'
+        # openssl's stdin form is `(stdin)= <hex>` or `SHA2-512(stdin)= <hex>`.
+        openssl dgst -sha512 <"$1" | sed 's/^.*= *//'
     else
         fail "sha512sum, shasum or openssl is required to verify $package@$specific_version; nothing was installed"
     fi
@@ -381,6 +405,7 @@ download_npm() (
     fi
 
     tar -xzf "$tmp_dir/$filename" -C "$tmp_dir"
+    test -f "$tmp_dir/package/bin/$installed_binary" || fail "$filename has no package/bin/$installed_binary"
     # Replace by rename, so a relay still running the old binary keeps its file.
     mv "$tmp_dir/package/bin/$installed_binary" "$INSTALL_DIR/$installed_binary.new"
     chmod 755 "$INSTALL_DIR/$installed_binary.new"

@@ -22,11 +22,15 @@
 
 function Install-browse {
     param([string[]]$Arguments)
+    # Function scope: this doesn't leak to the caller's session. It covers the property probing below and the
+    # dot-sourced download blocks, which run in this same scope, under a caller's `Set-StrictMode -Version Latest`.
+    Set-StrictMode -Off
     # Everything runs in this function so a failure stops it without closing the window `irm | iex` runs in.
     $ErrorActionPreference = "Stop"
     $ProgressPreference = "SilentlyContinue"
 
     $requested = $env:VERSION
+    $pinned = [bool]$env:VERSION
     $channel = if ($env:BROWSE_CHANNEL) { $env:BROWSE_CHANNEL } else { "stable" }
     $binary = $null
     $noSetup = $false
@@ -58,6 +62,7 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
             "^(-v|--version|-Version)$" {
                 if ($i + 1 -ge $Arguments.Count) { throw "--version requires a version argument" }
                 $requested = [string]$Arguments[++$i]
+                $pinned = $true
                 continue
             }
             "^(--channel|-Channel)$" {
@@ -117,8 +122,9 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
 
             $package = "@opencode/browse-windows-$target"
             $encoded = "@opencode%2fbrowse-windows-$target"
-            if ($requested) {
+            if ($pinned) {
                 $version = $requested -replace "^v", ""
+                if (-not $version) { throw "--version needs a version, e.g. 0.0.14" }
                 # Keep the version metadata: its dist.integrity is the tarball's SHA-512.
                 try { $metadata = Invoke-RestMethod -UseBasicParsing "https://registry.npmjs.org/$encoded/$version" }
                 catch {
@@ -207,7 +213,7 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
             if (-not (Test-Path -LiteralPath $source)) { throw "$filename has no package\bin\browse.exe" }
         }
         if (-not $binary) {
-            if (-not $requested) {
+            if (-not $pinned) {
                 . $downloadService
             } else {
                 foreach ($delay in 0, 15, 30, 60, 75) {
@@ -219,7 +225,7 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
                         $response = $_.Exception.Response
                         if ([int]$response.StatusCode -ne 404) { throw }
                         if ($delay -ne 75) { continue }
-                        if ($requested -or $channel -notin 'latest', 'dev') { throw }
+                        if ($pinned -or $channel -notin 'latest', 'dev') { throw }
                         # Windows PowerShell uses HttpWebResponse; PowerShell Core uses HttpResponseMessage.
                         $uri = if ($response.ResponseUri) { $response.ResponseUri } else { $response.RequestMessage.RequestUri }
                         $versions = (Invoke-RestMethod -UseBasicParsing ([uri]::new($uri, "/$encoded"))).versions.PSObject.Properties.Name
