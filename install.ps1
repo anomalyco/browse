@@ -154,8 +154,15 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
                 $service = $service.TrimEnd("/")
                 if (-not $service.EndsWith("/release")) { throw "OPENCODE_BROWSER_RELEASE_SERVICE must end in /release, not $service" }
                 $manifestUrl = "$service/browse/cli/$channel.json"
-                try { $manifest = Invoke-RestMethod -UseBasicParsing -UserAgent "browse/$channel/install" $manifestUrl }
-                catch { throw "no $channel release at ${manifestUrl}: $($_.Exception.Message)" }
+                # PowerShell 7 validates the User-Agent as RFC 7231 product tokens, so the channel and action live in
+                # one product and a comment instead of extra `/`-separated segments.
+                try { $manifest = Invoke-RestMethod -UseBasicParsing -UserAgent "browse/$channel (install)" $manifestUrl }
+                catch {
+                    $status = $null
+                    try { $status = [int]$_.Exception.Response.StatusCode } catch {}
+                    if ($status -eq 404) { throw "no $channel release at ${manifestUrl}: $($_.Exception.Message)" }
+                    throw "could not read the $channel release manifest at ${manifestUrl}: $($_.Exception.Message)"
+                }
                 if ($manifest.app -ne "browse" -or $manifest.artifact -ne "cli" -or $manifest.channel -ne $channel) {
                     throw "$manifestUrl is not browse's $channel CLI manifest"
                 }
@@ -196,7 +203,7 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
             $archive = Join-Path $tmp $filename
             Write-Host ""
             Write-Host "Installing browse version: $version ($channel)"
-            Invoke-WebRequest -UseBasicParsing -UserAgent "browse/$channel/$version/cli" -Uri $url -OutFile $archive
+            Invoke-WebRequest -UseBasicParsing -UserAgent "browse/$version ($channel; cli)" -Uri $url -OutFile $archive
             $actualSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
             if (-not $expectedSha -or $actualSha -ne $expectedSha.ToLowerInvariant()) {
                 throw "checksum mismatch for $filename (expected $(if ($expectedSha) { $expectedSha } else { 'none' }), got $actualSha)"

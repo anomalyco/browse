@@ -6,6 +6,7 @@ import path from "node:path"
 import { spawnSync } from "node:child_process"
 
 const installer = readFileSync(path.join(import.meta.dir, "../../install"), "utf8")
+const powershellInstaller = readFileSync(path.join(import.meta.dir, "../../install.ps1"), "utf8")
 const version = "0.0.7"
 const packageName = "@opencode/browse-test"
 
@@ -260,4 +261,19 @@ test.skipIf(process.platform === "win32")("a verified tarball without the binary
     expect(result.stderr).toContain("has no package/bin/browse")
     expect(existsSync(path.join(env.home, ".local/bin/browse"))).toBe(false)
   } finally { rmSync(env.home, { recursive: true, force: true }) }
+})
+
+// .NET's HttpClient (PowerShell 7) accepts only RFC 7231 product tokens and comments in a User-Agent; Windows
+// PowerShell 5.1 sends anything, so an invalid value here goes unnoticed until a PowerShell 7 user installs.
+const token = "[!#$%&'*+.^_`|~0-9A-Za-z-]+"
+const product = `${token}(?:/${token})?`
+const comment = "\\([^()]*\\)"
+const userAgent = new RegExp(`^${product}(?:[ \\t]+(?:${product}|${comment}))*$`)
+
+test("every install.ps1 User-Agent is a valid sequence of product tokens", () => {
+  const values = [...powershellInstaller.matchAll(/-UserAgent\s+"([^"]*)"/g)].map((match) =>
+    match[1]!.replace(/\$(?:\{)?([A-Za-z_][A-Za-z0-9_]*)(?:\})?/g, (_whole, name: string) => (name === "version" ? "0.0.15" : "stable")),
+  )
+  expect(values.length).toBeGreaterThan(0)
+  for (const value of values) expect(value, value).toMatch(userAgent)
 })
