@@ -54,6 +54,33 @@ const until = async (check: () => boolean, ms = 15_000) => {
   return check()
 }
 
+/** The private files a real old folder holds, with their bytes, keyed by path under it. */
+function privateFiles(oldData: string): Record<string, string> {
+  const files: Record<string, string> = {
+    "relay-token": `${relayToken}\n`,
+    "browser-tokens.json": JSON.stringify({ "browser-key": { token: "t".repeat(43), pairedAt: 1 } }),
+    "extension-pairing": "pairing-code\n",
+    "pairing-codes.json": JSON.stringify({ codes: [{ key: "k", expiresAt: 1 }], failures: 0 }),
+    "secrets/github.json": JSON.stringify({ profile: "private", value: "\u00e9\u0000bytes" }),
+    "site-secrets/kept.json": JSON.stringify({ name: "kept", password: "p@ss" }),
+    "site-secrets/deleted.json": JSON.stringify({ name: "deleted", password: "gone" }),
+  }
+  for (const [relative, text] of Object.entries(files)) write(path.join(oldData, relative), text, 0o600)
+  for (const folder of ["secrets", "site-secrets"]) fs.chmodSync(path.join(oldData, folder), 0o700)
+  return files
+}
+
+/** Each file sits in its XDG folder (pairing codes under state, the rest under data) with its bytes and 0600. */
+function expectPrivateFilesIn(home: string, files: Record<string, string>) {
+  for (const [relative, text] of Object.entries(files)) {
+    const file = path.join(home, ".local", relative === "pairing-codes.json" ? "state" : "share", "browse", relative)
+    expect(fs.readFileSync(file, "utf8"), relative).toBe(text)
+    if (process.platform !== "win32") expect(fs.statSync(file).mode & 0o777, relative).toBe(0o600)
+  }
+  if (process.platform !== "win32")
+    for (const folder of ["secrets", "site-secrets"]) expect(fs.statSync(path.join(home, ".local", "share", "browse", folder)).mode & 0o777, folder).toBe(0o700)
+}
+
 describe("taking over the old self-managed runtime", () => {
   test("once taken over, the old shim starts the current install, and the old folder is no override", () => {
     const { home, oldData, shim, oldEntry, current, runtime } = oldRuntimeHome(homes)
@@ -170,6 +197,70 @@ describe("taking over the old self-managed runtime", () => {
       for (const pid of serversUnder(home)) process.kill(pid)
     }
   }, 60_000)
+
+  test("a home reached through a symlink still matches the old folder the shim names by its real path", () => {
+    const { home, oldData } = oldRuntimeHome(homes)
+    const linked = `${home}-link`
+    fs.symlinkSync(home, linked)
+    homes.push(linked)
+    adoptLegacyRuntime(legacyRuntime(linked), oldRuntimeHome(homes).runtime)
+    // The shim sets OPENCODE_BROWSER_HOME from its own resolved location.
+    const env: NodeJS.ProcessEnv = { OPENCODE_BROWSER_HOME: fs.realpathSync(oldData) }
+    settleLegacyHome(env, legacyRuntime(linked))
+    expect(env.OPENCODE_BROWSER_HOME).toBeUndefined()
+  })
+
+  test("site secrets, pairings and tokens arrive in the new folders byte for byte, still private", async () => {
+    const { home, oldData, runtime } = oldRuntimeHome(homes)
+    const files = privateFiles(oldData)
+    const env: NodeJS.ProcessEnv = { OPENCODE_BROWSER_HOME: oldData, OPENCODE_BROWSER_PORT: String(await freePort()) }
+    expect(await prepareLegacyTakeover(legacyRuntime(home), { install: runtime, env, home })).toBe(true)
+    expect(await withoutHomeOverride(() => commitLegacyTakeover())).toBe(true)
+    expectPrivateFilesIn(home, files)
+  })
+
+  test("a takeover that stops before its relay listens leaves the old folder in charge, and the next brings back nothing deleted meanwhile", async () => {
+    const { home, oldData, runtime } = oldRuntimeHome(homes)
+    const files = privateFiles(oldData)
+    const before = fs.readFileSync(path.join(oldData, "runtime", "current.json"), "utf8")
+    const port = String(await freePort())
+    expect(await prepareLegacyTakeover(legacyRuntime(home), { install: runtime, env: { OPENCODE_BROWSER_HOME: oldData, OPENCODE_BROWSER_PORT: port }, home })).toBe(true)
+    // The process dies here. The next one finds the old runtime still active and shares its folder again.
+    expect(fs.readFileSync(path.join(oldData, "runtime", "current.json"), "utf8")).toBe(before)
+    const next: NodeJS.ProcessEnv = {}
+    settleLegacyHome(next, legacyRuntime(home))
+    expect(next.OPENCODE_BROWSER_HOME).toBe(oldData)
+    // Meanwhile the user deletes a site secret, which the old relay still serves from the old folder.
+    fs.rmSync(path.join(oldData, "site-secrets", "deleted.json"))
+    delete files["site-secrets/deleted.json"]
+    expect(await prepareLegacyTakeover(legacyRuntime(home), { install: runtime, env: { OPENCODE_BROWSER_HOME: oldData, OPENCODE_BROWSER_PORT: port }, home })).toBe(true)
+    expect(await withoutHomeOverride(() => commitLegacyTakeover())).toBe(true)
+    expect(fs.existsSync(path.join(home, ".local", "share", "browse", "site-secrets", "deleted.json"))).toBe(false)
+    expectPrivateFilesIn(home, files)
+  })
+
+  test("a takeover that stops after publishing current.json finishes the move on the next start", async () => {
+    const { home, oldData, opencode, runtime } = oldRuntimeHome(homes)
+    const files = privateFiles(oldData)
+    const takenOver = Date.now()
+    expect(await prepareLegacyTakeover(legacyRuntime(home), { install: runtime, env: { OPENCODE_BROWSER_HOME: oldData, OPENCODE_BROWSER_PORT: String(await freePort()) }, home })).toBe(true)
+    // commitLegacyTakeover dies after pointing the old runtime here, before migrating.
+    expect(adoptLegacyRuntime(legacyRuntime(home), runtime, takenOver)).toBe(true)
+    // The next start (main.ts): the old folder the shim sets is no override, and migration runs.
+    const next: NodeJS.ProcessEnv = { OPENCODE_BROWSER_HOME: oldData }
+    settleLegacyHome(next, legacyRuntime(home))
+    expect(next.OPENCODE_BROWSER_HOME).toBeUndefined()
+    withoutHomeOverride(() => migrateLegacy(home, takenOver + 60_000))
+    expectPrivateFilesIn(home, files)
+    expect(JSON.parse(fs.readFileSync(opencode, "utf8")).mcp.servers.browse.command).toEqual(["browse", "mcp"])
+    expect(fs.existsSync(path.join(home, ".local", "state", "browse", "legacy-takeover.json"))).toBe(false)
+    // Only what agents' shims still read keeps files there for the grace period, and then it goes too.
+    const left = (fs.readdirSync(oldData, { recursive: true, withFileTypes: true }) as fs.Dirent[]).filter((entry) => entry.isFile())
+    expect([...new Set(left.map((entry) => path.relative(oldData, entry.parentPath).split(path.sep)[0]))].sort()).toEqual(["bin", "runtime"])
+    withoutHomeOverride(() => migrateLegacy(home, takenOver + 11 * 60_000))
+    expect(fs.existsSync(oldData)).toBe(false)
+    expectPrivateFilesIn(home, files)
+  })
 
   test("migration waits until agents' running shims have had time to follow, then removes the old folder", () => {
     const { home, oldData, opencode, runtime } = oldRuntimeHome(homes)

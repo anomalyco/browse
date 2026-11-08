@@ -62,21 +62,23 @@ export const legacyRuntimeActive = (runtime: LegacyRuntime | undefined) => !!run
 /** How long a taken-over runtime stays, so agents' running shims can follow current.json to the new MCP server. */
 export const LEGACY_HANDOVER_GRACE_MS = 10 * 60_000
 
+/** A path with symlinks resolved, where it exists: the old shim names its folder that way, HOME may not. */
+const real = (value: string) => {
+  try {
+    return fs.realpathSync(value)
+  } catch {
+    return path.resolve(value)
+  }
+}
+
 /** Whether `file` is inside `root`, comparing real paths (macOS's temporary folders are /var, really /private/var). */
 export function insidePath(file: string, root: string) {
-  const real = (value: string) => {
-    try {
-      return fs.realpathSync(value)
-    } catch {
-      return path.resolve(value)
-    }
-  }
   const relative = path.relative(real(root), real(file))
   return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative)
 }
 
 export const samePath = (left: string, right: string) => {
-  const normalize = (value: string) => (process.platform === "win32" ? path.resolve(value).toLowerCase() : path.resolve(value))
+  const normalize = (value: string) => (process.platform === "win32" ? real(value).toLowerCase() : real(value))
   return normalize(left) === normalize(right)
 }
 

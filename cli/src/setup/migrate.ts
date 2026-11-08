@@ -189,14 +189,38 @@ export type MigrationResult = { moved: number; rewritten: number; removed: strin
  */
 export function copyLegacyData(home = os.homedir()) {
   const root = legacyDataRoot(home)
-  for (const relative of filesUnder(root)) {
+  const record = takeoverRecord(home)
+  // A takeover that stopped before its relay listened left these copies; the old folder is still the truth, so a file
+  // deleted from it since (a site secret, a revoked pairing) must not come back from them.
+  for (const file of readCopied(record)) fs.rmSync(file, { force: true })
+  const copies = filesUnder(root).flatMap((relative) => {
     const to = destination(relative, home)
-    if (!to) continue
+    return to ? [{ relative, to }] : []
+  })
+  try {
+    fs.mkdirSync(path.dirname(record), { recursive: true, mode: 0o700 })
+    fs.writeFileSync(record, JSON.stringify({ copied: copies.map((copy) => copy.to) }) + "\n", { mode: 0o600 })
+  } catch {
+    // Without the record a stopped takeover can leave stale copies; copying is still right.
+  }
+  for (const { relative, to } of copies) {
     try {
       copyPrivate(path.join(root, relative), to, relative, true)
     } catch {
       // The takeover's migration copies it again once the relay is up.
     }
+  }
+}
+
+/** The files copyLegacyData copied for a takeover not yet published (legacy-runtime.ts). */
+const takeoverRecord = (home: string) => path.join(stateRoot(home), "legacy-takeover.json")
+
+function readCopied(record: string): string[] {
+  try {
+    const copied = (JSON.parse(fs.readFileSync(record, "utf8")) as { copied?: unknown }).copied
+    return Array.isArray(copied) ? copied.filter((file): file is string => typeof file === "string") : []
+  } catch {
+    return []
   }
 }
 
@@ -318,6 +342,14 @@ export function migrateLegacy(home = os.homedir(), now = Date.now()): MigrationR
   // Just taken over (legacy-runtime.ts): agents' running shims still read runtime/current.json to reach the new server.
   const takenOver = legacyRuntime(home)
   if (takenOver?.movedTo && !(now - Date.parse(takenOver.switchedAt ?? "") >= LEGACY_HANDOVER_GRACE_MS)) keep.add(normalized(oldData))
+  // Published: the copies are the new folders' own files now.
+  if (takenOver?.movedTo) {
+    try {
+      fs.rmSync(takeoverRecord(home), { force: true })
+    } catch {
+      // A stale record only means a later takeover's copy removes these; there won't be one.
+    }
+  }
   if (referencesPath(settingsFile, oldBinary)) keep.add(normalized(browseRoot))
   result.removed = result.removed.filter((root) => !keep.has(normalized(root)))
   const removable = result.removed.splice(0)
