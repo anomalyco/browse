@@ -66,7 +66,7 @@ registerMcpTools({
         Effect.gen(function* () {
           const action = yield* Effect.try(() => requiredAction(input, recordingActions))
           const object = requireObject(input)
-          const sessionId = ctx.resolveSessionId(object)
+          const sessionId = yield* ctx.resolveSessionId(object)
           if (action === "status") {
             return { action, session: sessionId, ...(yield* ctx.relay.recordingStatus({ sessionId })) }
           }
@@ -157,7 +157,7 @@ registerMcpTools({
         Effect.gen(function* () {
           const action = yield* Effect.try(() => requiredAction(input, flightRecorderActions))
           const object = requireObject(input)
-          const sessionId = ctx.resolveSessionId(object)
+          const sessionId = yield* ctx.resolveSessionId(object)
           if (action === "status") {
             return { action, session: sessionId, ...(yield* ctx.relay.flightRecorderStatus({ sessionId })) }
           }

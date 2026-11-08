@@ -20,7 +20,7 @@ registerMcpTools({
           session: {
             type: "string",
             description:
-              "Optional existing browse session id. Explicit ids must already exist; omit this field to use the MCP server's current session, which is created when needed.",
+              "Optional existing browse session id. Explicit ids must already exist; omit this field to use your current session (each agent has its own), which is created when needed.",
           },
           targetUrl: {
             type: "string",
@@ -51,7 +51,8 @@ registerMcpTools({
       handle: (input) =>
         Effect.gen(function* () {
           const args = yield* Effect.try(() => parseExecuteArguments(input))
-          const sessionId = args.session ?? ctx.currentSession.id
+          const caller = yield* ctx.caller
+          const sessionId = args.session ?? caller.id
           const connected = RelayLifecycle.ensureExtensionConnected({ relay: ctx.relay, sessionId, waitForReconnect: true })
           yield* connected
           const run = ctx.relay.execute({
@@ -68,8 +69,8 @@ registerMcpTools({
             (error): error is RelayClient.RelayRejected => error instanceof RelayClient.RelayRejected && error.code === "browser-unavailable",
             () => connected.pipe(Effect.andThen(run)),
           ))
-          const recreated = !args.session && ctx.currentSession.established && result.session.created === true
-          ctx.establishCurrentSession(sessionId)
+          const recreated = !args.session && caller.established && result.session.created === true
+          ctx.establishCurrentSession(caller, sessionId)
           return {
             ...result,
             ...(recreated

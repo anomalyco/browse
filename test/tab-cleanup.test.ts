@@ -81,6 +81,23 @@ describe("idle tab cleanup", () => {
     expect(open(fresh)).toBe(true)
   })
 
+  test("one agent's cleanup at 0 closes its own tabs; other agents' tabs still wait for the setting", async () => {
+    const mine = await agentTab(1)
+    const theirs = await agentTab(1)
+    const theirsStale = await agentTab(11)
+    const closed = await TabCleanup.cleanup({ own: { tabIds: [mine], minutes: 0 } })
+    expect(closed.map((tab) => tab.tabId).toSorted()).toEqual([mine, theirsStale].toSorted())
+    expect(open(theirs)).toBe(true)
+  })
+
+  test("one agent's cleanup longer than the setting waits that long for every tab", async () => {
+    const mine = await agentTab(15)
+    const theirs = await agentTab(15)
+    const closed = await TabCleanup.cleanup({ own: { tabIds: [mine], minutes: 30 } })
+    expect(closed).toEqual([])
+    expect(open(mine) && open(theirs)).toBe(true)
+  })
+
   test("a guarded tab (running, waiting or recording) stays open past the time", async () => {
     await stub.chrome.storage.local.set({ tabCleanupIdleMinutes: 10 })
     const busy = await agentTab(60)

@@ -21,8 +21,10 @@ it is needed, so do not start `browse serve` first.
 
 ## Sessions
 
-MCP keeps one implicit process session; omit `session` for the normal path, or
-call `session_new` and pass an explicit id when one MCP process needs several.
+Over MCP, each agent has its own current session, so omit `session` for the
+normal path; other agents' calls never land on your page. `session_new` and
+`session_use` change only your current session. Pass an explicit `session` id
+to work in several sessions, or to share one with another agent on purpose.
 
 CLI sessions are named, and a named session keeps its default page across short
 commands and relay restarts:
@@ -358,11 +360,11 @@ browse session reset <name>    # MCP: session_reset
 browse session delete <name>   # MCP: session_delete
 ```
 
-`browse tabs cleanup` closes idle agent tabs from every session sharing the
-browser, not just yours, and `--idle-minutes 0` (`tabs_cleanup` with
-`idleMinutes: 0`) would close other sessions' pages between their calls, so
-only run it when the user asks. Keep a session only when you will continue with
-it.
+`tabs_cleanup` with `idleMinutes: 0` closes your own sessions' idle tabs at
+once; other agents' tabs close only after the user's idle setting. The CLI's
+`browse tabs cleanup --idle-minutes 0` has no agent to scope to and closes every
+agent tab, so only run it when the user asks. Keep a session only when you will
+continue with it.
 
 Use the `settings` tool (CLI: `browse settings get` / `settings set key=value …`)
 only when the user asks to change how browse behaves: where tabs open (`window`),

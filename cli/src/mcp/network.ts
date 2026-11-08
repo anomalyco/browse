@@ -92,15 +92,15 @@ registerMcpTools({
           const action = yield* Effect.try(() => requiredAction(input, actions))
           const object = requireObject(input)
           if (action === "status") {
-            const sessionId = ctx.resolveSessionId(object)
+            const sessionId = yield* ctx.resolveSessionId(object)
             return { action, session: sessionId, ...(yield* ctx.relay.networkStatus({ sessionId })) }
           }
           if (action === "cancel") {
-            const sessionId = ctx.resolveSessionId(object)
+            const sessionId = yield* ctx.resolveSessionId(object)
             return { action, session: sessionId, ...(yield* ctx.relay.networkCancel({ sessionId })) }
           }
           if (action === "stop") {
-            const sessionId = ctx.resolveSessionId(object)
+            const sessionId = yield* ctx.resolveSessionId(object)
             const outputPath = optionalStringField(object, "outputPath")
             const secrets = optionalStringField(object, "secrets")
             if (!outputPath && !secrets) {
@@ -117,12 +117,13 @@ registerMcpTools({
             }
           }
           const explicitSession = optionalStringField(object, "session")
-          const sessionId = explicitSession ?? ctx.currentSession.id
+          const caller = yield* ctx.caller
+          const sessionId = explicitSession ?? caller.id
           if (explicitSession) {
             yield* ensureSessionExists(ctx.relay, sessionId)
           } else {
             yield* ctx.relay.sessionEnsure(sessionId)
-            ctx.currentSession.established = true
+            caller.established = true
           }
           yield* RelayLifecycle.ensureExtensionConnected({ relay: ctx.relay, sessionId, waitForReconnect: true })
           const content = optionalStringField(object, "content")

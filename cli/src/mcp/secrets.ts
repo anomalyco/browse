@@ -71,12 +71,15 @@ registerMcpTools({
         const object = requireObject(input)
         const timeoutMs = optionalPositiveIntegerField(object, "timeoutMs")
         const urlFilter = optionalStringField(object, "urlFilter")
-        return ctx.relay.authRefresh({
-          sessionId: ctx.resolveSessionId(object),
-          name: requiredStringField(object, "name"),
-          ...(urlFilter ? { urlFilter } : {}),
-          ...(timeoutMs === undefined ? {} : { timeoutMs }),
-        })
+        const name = requiredStringField(object, "name")
+        return ctx.resolveSessionId(object).pipe(Effect.flatMap((sessionId) =>
+          ctx.relay.authRefresh({
+            sessionId,
+            name,
+            ...(urlFilter ? { urlFilter } : {}),
+            ...(timeoutMs === undefined ? {} : { timeoutMs }),
+          })
+        ))
       },
     },
     {

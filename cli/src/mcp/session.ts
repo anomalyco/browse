@@ -23,7 +23,7 @@ registerMcpTools({
   build: (ctx) => [
     {
       name: "session_new",
-      description: "Create a browse session and make it current for this MCP server.",
+      description: "Create a browse session and make it your current one. Other agents keep theirs.",
       inputSchema: objectSchema({
         browser: ctx.browserProperty,
         id: { type: "string", description: "Optional lowercase session id." },
@@ -57,7 +57,7 @@ registerMcpTools({
             ...(allowedOrigins ? { allowedOrigins } : {}),
             ...(browser ? { browser } : {}),
           })
-          ctx.establishCurrentSession(session.id)
+          ctx.establishCurrentSession(yield* ctx.caller, session.id)
           return { session }
         }),
     },
@@ -84,7 +84,7 @@ registerMcpTools({
       outputSchema: SessionContainer,
       handle: (input) =>
         Effect.gen(function* () {
-          const sessionId = ctx.resolveSessionId(input)
+          const sessionId = yield* ctx.resolveSessionId(input)
           const allowedOrigins = requireObject(input).allowedOrigins
           if (!Array.isArray(allowedOrigins) || !allowedOrigins.every((item) => Predicate.isString(item))) {
             return yield* Effect.fail(new Error("allowedOrigins must be an array of strings"))
@@ -106,7 +106,7 @@ registerMcpTools({
     },
     {
       name: "session_use",
-      description: "Set this MCP server's current browse session id.",
+      description: "Make an existing browse session your current one, for calls that don't name a session. Other agents keep theirs; pass `session` explicitly to share one deliberately.",
       inputSchema: objectSchema(
         {
           id: { type: "string", description: "Existing browse session id." },
@@ -122,8 +122,9 @@ registerMcpTools({
         Effect.gen(function* () {
           const id = yield* Effect.try(() => requiredStringField(input, "id"))
           yield* ensureSessionExists(ctx.relay, id)
-          ctx.establishCurrentSession(id)
-          return { currentSession: ctx.currentSession.id }
+          const caller = yield* ctx.caller
+          ctx.establishCurrentSession(caller, id)
+          return { currentSession: caller.id }
         }),
     },
     {
@@ -140,9 +141,9 @@ registerMcpTools({
       outputSchema: SessionResetResponse,
       handle: (input) =>
         Effect.gen(function* () {
-          const id = ctx.resolveSessionId(input, "id")
+          const id = yield* ctx.resolveSessionId(input, "id")
           const reset = yield* ctx.relay.sessionReset(id)
-          ctx.establishCurrentSession(id)
+          ctx.establishCurrentSession(yield* ctx.caller, id)
           return reset
         }),
     },
@@ -160,13 +161,15 @@ registerMcpTools({
       outputSchema: SessionDeleteToolOutput,
       handle: (input) =>
         Effect.gen(function* () {
-          const id = ctx.resolveSessionId(input, "id")
+          const id = yield* ctx.resolveSessionId(input, "id")
           const result = yield* ctx.relay.sessionDelete(id)
-          if (ctx.currentSession.id === id) {
-            ctx.currentSession.id = `mcp-${crypto.randomUUID().slice(0, 8)}`
-            ctx.currentSession.established = false
+          const caller = yield* ctx.caller
+          if (caller.id === id) {
+            caller.id = `mcp-${crypto.randomUUID().slice(0, 8)}`
+            caller.established = false
+            caller.sessions.add(caller.id)
           }
-          return { ...result, currentSession: ctx.currentSession.id }
+          return { ...result, currentSession: caller.id }
         }),
     },
     {
@@ -177,7 +180,7 @@ registerMcpTools({
         session: {
           type: "string",
           description:
-            "Optional existing browse session id. Explicit ids must already exist; omit this field to use the MCP server's current session, which is created when needed.",
+            "Optional existing browse session id. Explicit ids must already exist; omit this field to use your current session, which is created when needed.",
         },
         targetUrl: {
           type: "string",
@@ -202,14 +205,15 @@ registerMcpTools({
       handle: (input) =>
         Effect.gen(function* () {
           const args = yield* Effect.try(() => parseAdoptArguments(input))
-          const sessionId = args.session ?? ctx.currentSession.id
+          const caller = yield* ctx.caller
+          const sessionId = args.session ?? caller.id
           const result = yield* ctx.relay.sessionAdopt({
             sessionId,
             createIfMissing: !args.session,
             ...(args.targetSelection ? { targetSelection: args.targetSelection } : {}),
             ...(args.tabId === undefined ? {} : { tabId: args.tabId }),
           })
-          ctx.establishCurrentSession(sessionId)
+          ctx.establishCurrentSession(caller, sessionId)
           return result
         }),
     },
