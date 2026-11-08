@@ -109,7 +109,7 @@ export function installedRuntime(entry = process.argv[1] ?? process.execPath): R
 /** The version currently on disk at the runtime's stable entry (a binary reports it with --version). */
 export function installedVersion(runtime: Runtime): string | undefined {
   if (runtime.kind === "binary") {
-    const result = spawnSync(runtime.entry, ["--version"], { encoding: "utf8", timeout: 15_000, env: { ...process.env, OPENCODE_BROWSER_AUTOSTART: "0" } })
+    const result = spawnSync(runtime.entry, ["--version"], { encoding: "utf8", timeout: 15_000, env: { ...process.env, OPENCODE_BROWSER_AUTOSTART: "0" }, windowsHide: true })
     return result.status === 0 ? result.stdout.trim() || undefined : undefined
   }
   return packageVersion(runtime.entry)
@@ -253,7 +253,7 @@ export const runCommand: Run = (command, args, options = {}) =>
     // On Windows npm is npm.cmd, which Node only runs through a shell; run npm's own entry beside node.exe instead.
     const npmCli = process.platform === "win32" && command === "npm" ? path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js") : undefined
     const [file, argv] = npmCli && existsSync(npmCli) ? [process.execPath, [npmCli, ...args]] : [command, args]
-    const child = spawn(file, argv, { env: options.env ?? process.env, stdio: ["ignore", "pipe", "pipe"] })
+    const child = spawn(file, argv, { env: options.env ?? process.env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true })
     let stdout = ""
     let stderr = ""
     child.stdout.setEncoding("utf8").on("data", (chunk: string) => void (stdout += chunk))
@@ -308,6 +308,12 @@ export type InstallerOptions = {
 }
 
 /**
+ * How long the install script may download and run: the Windows build is large, so on a slow connection the download
+ * alone can take well over ten minutes.
+ */
+const INSTALL_SCRIPT_TIMEOUT_MS = 60 * 60_000
+
+/**
  * Reruns whatever installed browse. A binary install runs the install script this release shipped with, non-interactively
  * with --no-setup, so it only replaces the executable (the PATH and agent entries install wrote stay). npm global installs
  * run npm install -g. npx is a no-op. Returns the version now installed.
@@ -345,7 +351,7 @@ export async function runInstaller(options: InstallerOptions): Promise<string> {
     writeFileSync(file, script, { mode: platform === "win32" ? 0o600 : 0o700 })
     const command = platform === "win32" ? "powershell.exe" : "sh"
     const argv = platform === "win32" ? ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", file, ...args] : [file, ...args]
-    const installed = await run(command, argv, { timeoutMs: 10 * 60_000, env })
+    const installed = await run(command, argv, { timeoutMs: INSTALL_SCRIPT_TIMEOUT_MS, env })
     if (installed.status !== 0)
       throw new Error(`the installer failed: ${(installed.stderr || installed.stdout).trim().split("\n").slice(-3).join(" ")}`)
   } finally {
@@ -386,8 +392,8 @@ export type AutoUpdaterDeps = {
   readonly now?: () => number
 }
 
-/** How long an installer may run before the relay gives up on it (the script's own timeout is 10 minutes). */
-const INSTALL_TIMEOUT_MS = 15 * 60_000
+/** How long an installer may run before the relay gives up on it: the install script's own timeout plus a margin to finish writing. */
+const INSTALL_TIMEOUT_MS = INSTALL_SCRIPT_TIMEOUT_MS + 5 * 60_000
 /** How long a runtime-switch child may run (a drain is bounded by the relay's restart timeout, a start by seconds). */
 const SWITCH_TIMEOUT_MS = 5 * 60_000
 
@@ -467,7 +473,14 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
         }
         deps.onChange?.()
       }
-      const wanted = runtime.kind === "binary" ? state.latest : state.latest && compareVersions(state.latest, running) > 0 ? state.latest : undefined
+      // A binary channel doesn't order versions: any release that differs from the running build is one to install. npm's
+      // dist-tag does, so only a newer one is.
+      const wanted = runtime.kind === "binary" ? (state.latest !== running ? state.latest : undefined) : state.latest && compareVersions(state.latest, running) > 0 ? state.latest : undefined
+      // A failure is stale once its version runs or nothing is left to install.
+      if (state.lastError && (!wanted || state.lastError.version === running)) {
+        state = updateState(({ lastError: _lastError, ...rest }) => rest)
+        deps.onChange?.()
+      }
       if (!wanted || mode !== "on") return
 
       // An installer in its own process: wait for it, or record that it died without saying how it went.
@@ -505,17 +518,25 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
         if (age >= 0 && age < Math.min(backoff, checkIntervalMs)) return
       }
       deps.log("autoupdate.installing", { version: wanted })
+      const startedAt = now()
       const pid = spawnChild(["self-update", wanted, "--channel", channelOf(running)], (code) => {
         deps.log(code === 0 ? "autoupdate.installed" : "autoupdate.install_failed", { version: wanted, code })
-        updateState(({ installing: _installing, ...rest }) => ({
-          ...rest,
-          ...(code === 0 ? {} : { lastError: { message: "the installer failed", at: new Date(now()).toISOString(), version: wanted, attempts: 1 + (rest.lastError?.version === wanted ? rest.lastError.attempts ?? 1 : 0) } }),
-        }))
+        updateState(({ installing: _installing, ...rest }) => {
+          if (code === 0) return rest
+          // The self-update child records its own detailed failure (runtime-update.ts), with this attempt's count. Keep it
+          // when it wrote one for this version during this attempt, so one failure isn't counted twice.
+          const failure = rest.lastError
+          if (failure !== undefined && failure.version === wanted && Date.parse(failure.at) >= startedAt) return rest
+          return {
+            ...rest,
+            lastError: { message: "the installer failed", at: new Date(now()).toISOString(), version: wanted, attempts: 1 + (failure?.version === wanted ? failure.attempts ?? 1 : 0) },
+          }
+        })
         deps.onChange?.()
         // Switch as soon as it's ready rather than at the next tick.
         if (code === 0) void tick()
       })
-      if (pid) updateState((rest) => ({ ...rest, installing: { version: wanted, pid, startedAt: now() } }))
+      if (pid) updateState((rest) => ({ ...rest, installing: { version: wanted, pid, startedAt } }))
     } catch (error) {
       deps.log("autoupdate.error", { error: (error as Error).message })
     } finally {
@@ -545,7 +566,7 @@ export function spawnRuntimeChild(runtime: Runtime, args: readonly string[], onE
   const log = openSync(path.join(directory, "auto-update.log"), "a", 0o600)
   try {
     const [file, ...prefix] = entrySpawnCommand(runtime.entry)
-    const child = spawn(file!, [...prefix, ...args], { detached: true, stdio: ["ignore", log, log], env: rest })
+    const child = spawn(file!, [...prefix, ...args], { detached: true, stdio: ["ignore", log, log], env: rest, windowsHide: true })
     child.on("error", () => onExit(null))
     child.on("exit", (code) => onExit(code))
     child.unref()

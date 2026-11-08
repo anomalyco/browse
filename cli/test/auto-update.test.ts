@@ -345,6 +345,94 @@ describe("the relay's updater", () => {
       delete process.env.OPENCODE_BROWSER_HOME
     }
   })
+
+  test("a 304 check with the channel's release already running doesn't restart the relay", async () => {
+    const home = fakeHome()
+    process.env.OPENCODE_BROWSER_HOME = home
+    const globals = globalThis as { __OPENCODE_BROWSER_TARGET__?: string }
+    globals.__OPENCODE_BROWSER_TARGET__ = "linux-x64"
+    try {
+      const runtime = runtimeAt(home, "0.0.15")
+      updateState(() => ({ checkedAt: 1_000_000, latest: "0.0.15", etag: '"one"', lastError: { message: "the installer failed", at: new Date(1_000_000).toISOString(), version: "0.0.15", attempts: 2 } }))
+      const spawned: string[][] = []
+      const updater = createAutoUpdater({
+        runtime,
+        isIdle: () => true,
+        log: () => {},
+        spawnChild: (args) => (spawned.push([...args]), 2 ** 22 + 12350),
+        env: {},
+        fetch: (async () => new Response(null, { status: 304 })) as unknown as typeof fetch,
+        now: () => 1_000_000 + 61 * 60 * 1000,
+      })
+      await updater.tick()
+      expect(spawned).toEqual([])
+      expect(readState()).toMatchObject({ latest: "0.0.15", etag: '"one"' })
+      // The release it once failed to install is the build this relay runs, so the failure is stale.
+      expect(readState().lastError).toBeUndefined()
+    } finally {
+      delete process.env.OPENCODE_BROWSER_HOME
+      delete globals.__OPENCODE_BROWSER_TARGET__
+    }
+  })
+
+  test("a release that differs from the running build still restarts the relay when it is installed", async () => {
+    const home = fakeHome()
+    process.env.OPENCODE_BROWSER_HOME = home
+    try {
+      const runtime = runtimeAt(home, "0.0.14")
+      executable(runtime.entry, "0.0.15")
+      updateState(() => ({ checkedAt: Date.now(), latest: "0.0.15" }))
+      const spawned: string[][] = []
+      const updater = createAutoUpdater({
+        runtime,
+        isIdle: () => true,
+        log: () => {},
+        spawnChild: (args) => (spawned.push([...args]), 2 ** 22 + 12351),
+        env: {},
+      })
+      await updater.tick()
+      expect(spawned).toEqual([["runtime-switch", "0.0.15"]])
+    } finally {
+      delete process.env.OPENCODE_BROWSER_HOME
+    }
+  })
+
+  test("one failed self-update counts as one attempt", async () => {
+    const home = fakeHome()
+    process.env.OPENCODE_BROWSER_HOME = home
+    try {
+      const runtime = runtimeAt(home, "0.0.1")
+      updateState(() => ({ checkedAt: Date.now(), latest: "0.0.2" }))
+      const spawned: string[][] = []
+      const callbacks: ((code: number | null) => void)[] = []
+      const updater = createAutoUpdater({
+        runtime,
+        isIdle: () => true,
+        log: () => {},
+        spawnChild: (args, onExit) => {
+          // runSelfUpdate in runtime-update.ts records its failure before exiting; the parent must not count it again.
+          if (args[0] === "self-update") {
+            const version = args[1]!
+            updateState((state) => ({
+              ...state,
+              lastError: { message: "the installer failed: boom", at: new Date().toISOString(), version, attempts: 1 + (state.lastError?.version === version ? state.lastError.attempts ?? 1 : 0) },
+            }))
+          }
+          spawned.push([...args])
+          callbacks.push(onExit)
+          return process.pid
+        },
+        env: {},
+      })
+      await updater.tick()
+      expect(spawned).toEqual([["self-update", "0.0.2", "--channel", "latest"]])
+      callbacks[0]!(1)
+      await Bun.sleep(0)
+      expect(readState().lastError).toMatchObject({ version: "0.0.2", attempts: 1 })
+    } finally {
+      delete process.env.OPENCODE_BROWSER_HOME
+    }
+  })
 })
 
 describe("status", () => {

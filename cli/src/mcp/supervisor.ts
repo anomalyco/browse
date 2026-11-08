@@ -98,7 +98,7 @@ export async function runBinaryMcp(args: readonly string[]) {
 
   const start = (replay: boolean) => {
     const [file, ...prefix] = entrySpawnCommand(command())
-    const next = spawn(file!, [...prefix, "mcp", ...args], { stdio: ["pipe", "pipe", "inherit"], env: { ...process.env, [directEnvironmentVariable]: "1" } })
+    const next = spawn(file!, [...prefix, "mcp", ...args], { stdio: ["pipe", "pipe", "inherit"], env: { ...process.env, [directEnvironmentVariable]: "1" }, windowsHide: true })
     // A server that exits mid-write (an old one being replaced) must not take the supervisor down with EPIPE.
     next.stdin.on("error", () => {})
     child = next
