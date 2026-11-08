@@ -94,7 +94,7 @@ export function agentLocations(home: string, config: string, onPath: (name: stri
 
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value)
 type EditResult = "added" | "unchanged" | "removed" | "conflict"
-/** Read YAML values without rounding integers beyond 2^53, and write long scalars on one line: install only adds its entry. */
+/** Parse YAML without rounding integers beyond 2^53: install only adds its entry. */
 const yamlOptions = { merge: true, intAsBigInt: true } as const
 
 /** The command array of the browse server in an agent config, if it has one (for migration). */
@@ -195,7 +195,7 @@ export function editAgentConfig(receipt: AgentReceipt, remove = false): EditResu
     if (!isMap(doc.contents) || (container !== undefined && !isMap(doc.get(key, true)))) throw invalid()
     if (remove) doc.deleteIn([key, "browse"])
     else doc.setIn([key, "browse"], expected)
-    after = doc.toString({ lineWidth: 0 })
+    after = doc.toString({ lineWidth: 0 }) // Keep long strings on one line.
     // Shared YAML anchors can make a single edit visible elsewhere. Refuse rather than change another entry.
     config[key] = { ...servers }
     if (remove) delete (config[key] as Record<string, unknown>).browse
