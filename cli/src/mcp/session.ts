@@ -164,10 +164,10 @@ registerMcpTools({
           const id = yield* ctx.resolveSessionId(input, "id")
           const result = yield* ctx.relay.sessionDelete(id)
           const caller = yield* ctx.caller
+          ctx.forgetSession(id)
           if (caller.id === id) {
             caller.id = `mcp-${crypto.randomUUID().slice(0, 8)}`
             caller.established = false
-            caller.sessions.add(caller.id)
           }
           return { ...result, currentSession: caller.id }
         }),

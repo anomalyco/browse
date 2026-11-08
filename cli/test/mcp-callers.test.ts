@@ -2,7 +2,11 @@ import { afterAll, describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { callerSessionId } from "../src/mcp/registry.ts"
+import { Effect } from "effect"
+import { McpSchema } from "effect/ai"
+import "../src/mcp.ts"
+import { buildRegisteredMcpTools, callerSessionId, createMcpToolContext } from "../src/mcp/registry.ts"
+import type * as RelayClient from "../src/relay/client.ts"
 import { FakeExtension, startRelay, stopRelay, until } from "./relay-harness.ts"
 import { mcpStdio, type McpReply } from "./support/mcp-stdio.ts"
 
@@ -50,6 +54,40 @@ async function initialized(port: number) {
 }
 
 describe("one MCP server shared by several agents", () => {
+  test("tabs_cleanup only sends established sessions that haven't been deleted", async () => {
+    const relay = {
+      sessions: Effect.succeed([{ id: "one" }, { id: "two" }]),
+      sessionDelete: (id: string) => Effect.succeed({ id, deleted: true }),
+      tabsCleanup: (_minutes: number, sessions: string[]) => Effect.succeed(sessions),
+    } as unknown as RelayClient.Interface
+    const ctx = createMcpToolContext({ relay, currentSession: { id: "implicit", established: false }, packageRoot: home })
+    const tools = buildRegisteredMcpTools(ctx)
+    const call = (name: string, args = {}, id = "agent-a") => Effect.runPromise(tools.find((tool) => tool.name === name)!.handle(args).pipe(
+      Effect.provideService(McpSchema.McpRequestContext, { clientId: 1, protocolVersion: "2025-11-25", clientCapabilities: {}, requestMetadata: agent(id) }),
+    ))
+    expect(await call("tabs_cleanup")).toEqual([])
+    await call("session_use", { id: "one" })
+    await call("session_use", { id: "one" }, "agent-b")
+    await call("session_use", { id: "two" })
+    await call("session_delete", { id: "one" })
+    expect(await call("tabs_cleanup")).toEqual(["two"])
+    expect(await call("tabs_cleanup", {}, "agent-b")).toEqual([])
+    await call("session_delete")
+    expect(await call("tabs_cleanup")).toEqual([])
+  })
+
+  test("recent callers keep their selected session while stale callers fall back to their own implicit id", async () => {
+    const ctx = createMcpToolContext({ relay: {} as RelayClient.Interface, currentSession: { id: "implicit", established: false }, packageRoot: home })
+    const caller = (id: string) => Effect.runSync(ctx.caller.pipe(Effect.provideService(McpSchema.McpRequestContext, {
+      clientId: 1, protocolVersion: "2025-11-25", clientCapabilities: {}, requestMetadata: agent(id),
+    })))
+    ctx.establishCurrentSession(caller("stale"), "old-work")
+    ctx.establishCurrentSession(caller("active"), "current-work")
+    for (let i = 0; i < 2048; i++) { caller(String(i)); caller("active") }
+    expect(caller("active").id).toBe("current-work")
+    expect(caller("stale").id).toBe(callerSessionId("stale"))
+  })
+
   test("each agent session has its own current session, derived from its id on every server", async () => {
     const relay = await startRelay(home)
     const servers: Array<ReturnType<typeof mcpStdio>> = []
