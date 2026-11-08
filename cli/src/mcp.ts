@@ -51,7 +51,7 @@ Before typing a stored secret with \`secrets.type()\`, give the session an allow
 
 When finished, \`session_reset\` (or \`session_delete\`) your own session; keep a session only when follow-up work is expected. \`tabs_cleanup\` sweeps idle agent tabs from every session, so don't pass \`idleMinutes: 0\` unless the user asks.
 
-\`status\` is an MCP tool. Setup and connection problems: run the \`browse doctor\` CLI command. The longer agent reference: \`browse skill\`. Both are shell commands, not MCP tools.`
+The \`status\` tool reports relay and extension state. \`browse doctor\` (setup and connection problems) and \`browse skill\` (the longer agent reference) are shell commands, not MCP tools.`
 
 /** The implicit session the MCP supervisor picked (mcp/supervisor.ts), when valid. */
 function shimSession(): string | undefined {
