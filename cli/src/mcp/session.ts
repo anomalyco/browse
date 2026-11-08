@@ -30,7 +30,7 @@ registerMcpTools({
         readOnly: {
           type: "boolean",
           description:
-            "Create a read-only session: the relay rejects input-dispatching CDP so scripts can inspect but not click or type.",
+            "Create a read-only session: adopt a tab the user has lent you, then snapshot, screenshot and read it; CDP input, navigation, new pages and cookie writes are refused.",
         },
         allowedOrigins: {
           type: "array",

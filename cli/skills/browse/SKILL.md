@@ -275,13 +275,28 @@ return { tools, result }
 
 ## Safety
 
-For inspect-only work, use a read-only session. Read-only rejects `Input.*`, so
-it cannot click or type through Playwright:
+For inspect-only work, use a read-only session. It cannot open a page of its
+own, so adopt a tab the user has already lent you before executing; a bare
+`execute` with no page fails when it tries to open its default page:
 
 ```bash
 browse session new inspect-prod --read-only
-browse execute --session inspect-prod 'await page.goto("https://example.com"); return page.title()'
+browse session adopt --session inspect-prod --tab-id 123   # tab= in browse status
+browse execute --session inspect-prod 'return await snapshot()'
 ```
+
+MCP: `session_new` with `readOnly: true`, then `session_adopt` with `tabId`
+(it uses the current, read-only session), `targetUrl` or `targetIndex`.
+`targetUrl` matches an attached page; adoption never navigates.
+
+Read-only is a CDP allowlist: snapshots, screenshots, page information, cookie
+reads for the session's pages, `page.evaluate` and event subscriptions are
+allowed. Everything else is refused, including `Input.*` (no click, type or
+hover through Playwright), `Page.navigate` (`page.goto`), new pages
+(`Target.createTarget`), closing tabs (`Target.closeTarget`) and cookie writes
+(`Network.setCookie`, `Storage.setCookies`). Use a writable session to open
+pages or interact. Read-only guards CDP, not page script: `page.evaluate` can
+still change the page, so use it to read, not to work around these refusals.
 
 For destructive UI work, use a two-phase **read, confirm, verify** flow: read
 candidates and return exact stable identifiers, get user approval for those
