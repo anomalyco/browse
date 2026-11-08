@@ -4,17 +4,39 @@
 // The browser is --browser, else PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH, else patchright-core's own Chromium.
 import assert from "node:assert/strict"
 import { parseArgs } from "node:util"
-import { chromium } from "patchright-core"
+import { chromium, selectors } from "patchright-core"
 import { createSnapshotHelpers } from "../src/snapshot.ts"
+import { ariaSnapshotWithoutTextControlValues } from "../src/snapshot/aria-snapshot.ts"
 import type { SnapshotRefRegistry } from "../src/snapshot/types.ts"
+import { portFromEnv } from "./support/ports.ts"
 
 const { values: options } = parseArgs({ options: { browser: { type: "string" } } })
 const executablePath = options.browser || process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || chromium.executablePath()
-const browser = await chromium.launch({ executablePath })
+const cdpPort = await portFromEnv("BROWSE_TEST_CDP_PORT")
+const browser = await chromium.launch({ executablePath, args: [`--remote-debugging-port=${cdpPort}`] })
 const registry = (): SnapshotRefRegistry => ({ selectors: new Map() })
 
 try {
   const page = await browser.newPage()
+
+  // Each CDP connection gets a default context. Even connections made after the first registration must redact,
+  // without a stream of short-lived connections retaining a new selector source per context in Patchright.
+  const engines = (selectors as unknown as { _selectorEngines: unknown[] })._selectorEngines
+  const initial = engines.length
+  for (let index = 0; index < 3; index++) {
+    const connection = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`)
+    try {
+      const field = await connection.contexts()[0]!.newPage()
+      await field.setContent('<input aria-label="Account" value="private-marker">')
+      const root = field.locator("body")
+      const snapshot = await ariaSnapshotWithoutTextControlValues(root, { timeout: 3000 })
+      assert.match(snapshot, /textbox "Account"/)
+      assert.doesNotMatch(snapshot, /private-marker/)
+      assert.match(await root.ariaSnapshot(), /private-marker/)
+      await field.close()
+    } finally { await connection.close() }
+  }
+  assert.ok(engines.length <= initial + 1, `${engines.length - initial} retained redaction engines`)
 
   // Two mains: the first visible one is captured and the output says why.
   await page.setContent(`
