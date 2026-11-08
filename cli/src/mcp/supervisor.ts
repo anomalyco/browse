@@ -3,8 +3,10 @@
 // place. This supervisor starts that path, forwards stdio (newline-delimited JSON-RPC), and once the installed version
 // changes and the relay runs it (or no relay exists), starts the new server, replays the client's `initialize` to it
 // (its answer is dropped) and carries on; while it swaps, client messages wait. An npx entry or a downloaded executable
-// has nothing supervising it, and serves directly.
+// has nothing supervising it, and serves directly. So does a server another supervisor started: an older install's
+// stable shim (bin/opencode-browser.mjs) supervises the version it starts, without telling it to serve directly.
 import { spawn, type ChildProcessByStdio } from "node:child_process"
+import { randomUUID } from "node:crypto"
 import type { Readable, Writable } from "node:stream"
 import { existsSync, statSync } from "node:fs"
 import path from "node:path"
@@ -47,7 +49,9 @@ export async function runBinaryMcp(args: readonly string[]) {
     const { runCli } = await import("../cli.ts")
     return runCli()
   }
-  const REPLAY = "opencode-browser-shim-initialize"
+  // This supervisor's own replay id: a replay from another supervisor (an older shim above this one, which uses the
+  // bare prefix) is a client request like any other, and its answer goes back up.
+  const REPLAY = `opencode-browser-shim-initialize-${randomUUID()}`
   const relayPort = Number(process.env.OPENCODE_BROWSER_PORT) || 19988
   const current = versionReader(runtime, installedVersion(runtime) ?? runtime.version)
   // A stable entry path, replaced in place by the installer.
@@ -61,6 +65,7 @@ export async function runBinaryMcp(args: readonly string[]) {
   let initialize: Message | undefined
   let initialized: string | undefined
   let swapping = false
+  let swapDeadline: ReturnType<typeof setTimeout> | undefined
   let listChanged = false
   const inflight = new Set<unknown>()
   const queue: string[] = []
@@ -99,13 +104,8 @@ export async function runBinaryMcp(args: readonly string[]) {
     createInterface({ input: next.stdout }).on("line", (line) => {
       if (next !== child) return
       const message = parse(line)
-      if (message && message.id === REPLAY) {
-        if (initialized) toChild(initialized)
-        swapping = false
-        if (listChanged) toClient(JSON.stringify({ jsonrpc: "2.0", method: "notifications/tools/list_changed" }))
-        for (const queued of queue.splice(0)) fromClient(queued)
-        return
-      }
+      // The replay's answer is ours alone, even when it arrives after the deadline released the queue.
+      if (message && message.id === REPLAY) return finishSwap()
       if (message && message.id !== undefined && message.method === undefined) {
         inflight.delete(message.id)
         if (message.result?.capabilities?.tools) listChanged = message.result.capabilities.tools.listChanged === true
@@ -116,7 +116,19 @@ export async function runBinaryMcp(args: readonly string[]) {
     if (replay && initialize) {
       swapping = true
       toChild(JSON.stringify({ ...initialize, id: REPLAY }))
+      // The new server reads the replay before anything queued behind it, so a late (or lost) answer needn't hold
+      // client messages: after a few seconds they go to the new server anyway.
+      swapDeadline = setTimeout(finishSwap, 5000)
+      swapDeadline.unref()
     }
+  }
+  const finishSwap = () => {
+    if (!swapping) return
+    clearTimeout(swapDeadline)
+    swapping = false
+    if (initialized) toChild(initialized)
+    if (listChanged) toClient(JSON.stringify({ jsonrpc: "2.0", method: "notifications/tools/list_changed" }))
+    for (const queued of queue.splice(0)) fromClient(queued)
   }
 
   // Once the installed version changes, new requests wait for the swap instead of reaching a server whose relay is
@@ -187,6 +199,9 @@ export async function runBinaryMcp(args: readonly string[]) {
 
 /** Whether this process should supervise its MCP server (an installed binary or global npm package). */
 export function supervisesMcp(): boolean {
+  // A supervisor names itself the client before starting its server. The shim older installs left in agents' configs
+  // starts each runtime version this way, and supervising again under it would stack two supervisors on one server.
+  if (process.env.OPENCODE_BROWSER_CLIENT_PID === String(process.ppid)) return false
   const runtime = installedRuntime()
   return !!runtime && runtime.kind !== "npx" && existsSync(runtime.entry)
 }
