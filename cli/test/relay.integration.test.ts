@@ -678,6 +678,10 @@ describe("process faults", () => {
     expect(isBenignClosedSessionRejection(fault("Protocol error (Network.setCacheDisabled): Internal server error, session closed."))).toBe(true)
     expect(isBenignClosedSessionRejection(fault("Protocol error (Network.setCacheDisabled): Extension disconnected"))).toBe(true)
     expect(isBenignClosedSessionRejection(fault("Protocol error (Network.setCacheDisabled): Unknown CDP session bc-tab-12 for Network.setCacheDisabled"))).toBe(true)
+    // Chrome's answer when the tab closed under an unawaited command, which patchright reports as a Protocol error.
+    const noTab = "Protocol error (Network.setCacheDisabled): No tab with given id 858742605."
+    expect(isBenignClosedSessionRejection(fault(noTab))).toBe(true)
+    expect(isBenignClosedSessionRejection(fault("Protocol error (Target.attachToTarget): No target with given id found"))).toBe(true)
     expect(isBenignClosedSessionRejection(fault("Protocol error (Runtime.evaluate): Cannot find context with specified id"))).toBe(false)
     const message = "Protocol error (Network.setCacheDisabled): session closed"
     const relayError = new Error(message)
@@ -687,6 +691,7 @@ describe("process faults", () => {
       const anonymous = Object.assign(new Error(message), { type, method: "Network.setCacheDisabled", logs: undefined })
       expect(isBenignClosedSessionRejection(anonymous)).toBe(true)
       expect(shouldSuppressRelayProcessFault(anonymous)).toBe(true)
+      expect(isBenignClosedSessionRejection(Object.assign(new Error(noTab), { type, method: "Network.setCacheDisabled", logs: undefined }))).toBe(true)
     }
     expect(shouldSuppressRelayProcessFault(Object.assign(relayError, { method: "Network.setCacheDisabled", logs: undefined, type: "other" }))).toBe(false)
   })

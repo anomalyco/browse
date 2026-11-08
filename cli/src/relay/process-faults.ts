@@ -39,7 +39,7 @@ function isPatchrightProtocolError(cause: unknown): boolean {
 export function isBenignClosedSessionRejection(cause: unknown): boolean {
   if (!isSafeHostError(cause)) return false
   if (!isPatchrightProtocolError(cause) && !/patchright-core|playwright-core|coreBundle/.test(safeErrorStack(cause) ?? "")) return false
-  return /^Protocol error \([\w.]+\): .*(session closed|Target closed|Extension disconnected|extension is not connected|Unknown CDP session|Detached while handling command|Relay closed)/i.test(safeErrorMessage(cause))
+  return /^Protocol error \([\w.]+\): .*(session closed|Target closed|No tab with given id|No target with given id|Extension disconnected|extension is not connected|Unknown CDP session|Detached while handling command|Relay closed)/i.test(safeErrorMessage(cause))
 }
 
 const benignRejections = { count: 0, logged: 0, lastLogAt: 0 }

@@ -160,6 +160,9 @@ describe("full-Node rejection scope", () => {
       const coreBundle = source => new Function('return new Error(' + JSON.stringify(source) + ')\\n//# sourceURL=/x/node_modules/patchright-core/lib/coreBundle.js')
       const typeError = coreBundle("boom")()
       const benign = coreBundle("Protocol error (Network.setCacheDisabled): session closed.")()
+      const noTab = coreBundle("Protocol error (Network.setCacheDisabled): No tab with given id 858742605.")()
+      const noTarget = coreBundle("Protocol error (Target.attachToTarget): No target with given id found")()
+      const unrelated = coreBundle("Protocol error (Runtime.evaluate): Cannot find context with specified id")()
       const rethrown = []
       let threw = false
       try {
@@ -169,11 +172,14 @@ describe("full-Node rejection scope", () => {
       console.log(JSON.stringify({
         suppress: shouldSuppressRelayProcessFault(typeError),
         benign: isBenignClosedSessionRejection(benign),
+        noTab: isBenignClosedSessionRejection(noTab),
+        noTarget: isBenignClosedSessionRejection(noTarget),
+        unrelated: isBenignClosedSessionRejection(unrelated),
         threw,
         rethrown: rethrown.length,
       }))
     `)
-    expect(outcome).toEqual({ suppress: true, benign: true, threw: false, rethrown: 0 })
+    expect(outcome).toEqual({ suppress: true, benign: true, noTab: true, noTarget: true, unrelated: false, threw: false, rethrown: 0 })
   }, 20_000)
 
   test("primitive rejection reasons are shown as bounded text", () => {
