@@ -230,7 +230,20 @@ export function createRelayCommands(deps: {
         return {}
       case "tabs.cleanup": {
         const minutes = typeof params?.idleMinutes === "number" ? Math.max(0, params.idleMinutes) : undefined
-        const closed = await TabCleanup.cleanup(minutes === undefined ? {} : { minutes })
+        // One agent's cleanup: its idle time covers only its own tabs (see TabCleanup.cleanup).
+        const own = isJsonObject(params?.own) ? params.own : undefined
+        const ownMinutes = typeof own?.idleMinutes === "number" ? Math.max(0, own.idleMinutes) : undefined
+        const closed = await TabCleanup.cleanup({
+          ...(minutes === undefined ? {} : { minutes }),
+          ...(own
+            ? {
+                own: {
+                  tabIds: Array.isArray(own.tabIds) ? own.tabIds.filter((id) => typeof id === "number") : [],
+                  ...(ownMinutes === undefined ? {} : { minutes: ownMinutes }),
+                },
+              }
+            : {}),
+        })
         return { closed: closed.map((tab) => ({ tabId: tab.tabId, title: tab.title, idleMinutes: tab.idleMinutes })) }
       }
       case "relay.settings": {

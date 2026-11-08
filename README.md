@@ -230,7 +230,7 @@ connection itself isn't encrypted by browse; use a network that is (Tailscale or
 | `flight_recorder` (`action`: `start`, `status`, `save_last`, `cancel`) | Keep the last minute of video, save it when something breaks |
 | `secrets_list` | Site secrets you stored for the session's sites; agents type them with `secrets.type()` only on their sites, without seeing them |
 | `secrets_status`, `secrets_refresh`, `secrets_run` | Reuse captured credentials while keeping their values out of transcripts and artifacts |
-| `tabs_cleanup` | Close idle agent tabs, from every session (`session_reset` closes just one session's) |
+| `tabs_cleanup` | Close idle agent tabs (`idleMinutes` applies to the calling agent's own; other agents' wait for the idle setting) |
 | `settings` | Read or change the settings below when the user asks (never the security switches or update behaviour); the options page updates live |
 | `status` | Connection status |
 

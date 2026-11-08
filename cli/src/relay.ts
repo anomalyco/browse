@@ -103,7 +103,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     catch: (cause) => new Error("Create the relay token", { cause }),
   })
   const browsers = new BrowserLinks()
-  const { sendToExtension, sendExtensionBestEffort, sendToEveryBrowser, sendToEach } = createExtensionCommands({ browsers })
+  const { sendToExtension, sendExtensionBestEffort, sendToEveryBrowser, sendToEach, cleanupTabs } = createExtensionCommands({ browsers, registry })
 
   const debugEnabled = yield* Config.Boolean("OPENCODE_BROWSER_DEBUG").pipe(Config.withDefault(false))
   const debugLog = debugEnabled ? (line: string) => console.error(`[bc ${new Date().toISOString().slice(11, 23)}] ${line}`) : undefined
@@ -675,8 +675,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     sessions,
     reloadExtension: () => sendToEach({ method: "runtime.reload" }),
     revokeBrowser: (key) => handshake.revokeBrowser(key),
-    cleanupTabs: (idleMinutes) =>
-      sendToEach({ method: "tabs.cleanup", ...(idleMinutes === undefined ? {} : { params: { idleMinutes } }) }),
+    cleanupTabs,
     settings: settingsSync.httpSettings,
     extensionStatus: () => handshake.extensionStatus(),
   })

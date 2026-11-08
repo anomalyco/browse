@@ -28,11 +28,12 @@ registerMcpTools({
       handle: () =>
         Effect.gen(function* () {
           const [version, status] = yield* Effect.all([ctx.relay.version, ctx.relay.extensionStatus])
+          const caller = yield* ctx.caller
           const buildProblem = RelayLifecycle.relayBuildProblem(version)
           const available = updateJson(ctx.update())
           return {
             endpoint: ctx.relay.endpoint,
-            currentSession: ctx.currentSession.id,
+            currentSession: caller.id,
             version,
             status,
             ...(buildProblem ? { buildProblem } : {}),
@@ -50,13 +51,13 @@ registerMcpTools({
     {
       name: "tabs_cleanup",
       description:
-        "Close tabs agents opened that nobody has used for a while (no agent command and not visited by the user). Tabs the user shared or pinned, the active tab, tabs playing audio, recording, or waiting for a handoff stay open. This covers agent tabs from every session; to finish your own work use `session_reset` or `session_delete` instead. browse also does this automatically after the user's idle setting (10 minutes unless they changed it).",
+        "Close tabs agents opened that nobody has used for a while (no agent command and not visited by the user). Tabs the user shared or pinned, the active tab, tabs playing audio, recording, or waiting for a handoff stay open. `idleMinutes` applies to your own sessions' tabs; other agents' tabs close only once idle for the user's setting too. To finish your own work, `session_reset` or `session_delete` is more direct. browse also does this automatically after the user's idle setting (10 minutes unless they changed it).",
       inputSchema: objectSchema({
         idleMinutes: {
           type: "integer",
           minimum: 0,
           description:
-            "Close tabs idle at least this long. 0 also closes other sessions' eligible tabs, including pages idle between their calls, so use it only when the user asks. Defaults to the user's setting (10 minutes; still 10 when the user set automatic cleanup to never).",
+            "Close your own sessions' tabs idle at least this long; 0 closes all of them. Defaults to the user's setting (10 minutes; still 10 when the user set automatic cleanup to never).",
         },
       }),
       readOnly: false,
@@ -64,11 +65,13 @@ registerMcpTools({
       idempotent: true,
       openWorld: false,
       outputSchema: TabsCleanupResponse,
-      handle: (input) => {
-        const value =
-          typeof input === "object" && input !== null && "idleMinutes" in input ? input.idleMinutes : undefined
-        return ctx.relay.tabsCleanup(typeof value === "number" && value >= 0 ? value : undefined)
-      },
+      handle: (input) =>
+        Effect.gen(function* () {
+          const value =
+            typeof input === "object" && input !== null && "idleMinutes" in input ? input.idleMinutes : undefined
+          const caller = yield* ctx.caller
+          return yield* ctx.relay.tabsCleanup(typeof value === "number" && value >= 0 ? value : undefined, [...caller.sessions])
+        }),
     },
     {
       name: "settings",

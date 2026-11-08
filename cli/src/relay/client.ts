@@ -153,7 +153,8 @@ export interface Interface {
   readonly recordingStop: (target: RecordingTargetRequest) => Effect.Effect<RecordingStopResponse, RelayClientError>
   readonly recordingStatus: (target: RecordingTargetRequest) => Effect.Effect<RecordingStatusResponse, RelayClientError>
   readonly recordingCancel: (target: RecordingTargetRequest) => Effect.Effect<RecordingCancelResponse, RelayClientError>
-  readonly tabsCleanup: (idleMinutes?: number) => Effect.Effect<TabsCleanupResponse, RelayClientError>
+  /** With `sessions`, `idleMinutes` applies only to those sessions' tabs; other tabs also wait for the user's setting. */
+  readonly tabsCleanup: (idleMinutes?: number, sessions?: readonly string[]) => Effect.Effect<TabsCleanupResponse, RelayClientError>
   /** The user's settings (the extension's options page), with env overrides. */
   readonly settingsGet: Effect.Effect<SettingsGetResponse, RelayClientError>
   /** Changes settings; validated strictly by the relay. */
@@ -357,7 +358,8 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
     recordingStop: (target) => postJson("/recording/stop", recordingTargetBody(target), RecordingStopResponse),
     recordingStatus: (target) => getJson(`/recording/status${recordingTargetQuery(target)}`, RecordingStatusResponse),
     recordingCancel: (target) => postJson("/recording/cancel", recordingTargetBody(target), RecordingCancelResponse),
-    tabsCleanup: (idleMinutes) => postJson("/tabs/cleanup", idleMinutes === undefined ? {} : { idleMinutes }, TabsCleanupResponse),
+    tabsCleanup: (idleMinutes, sessions) =>
+      postJson("/tabs/cleanup", { ...(idleMinutes === undefined ? {} : { idleMinutes }), ...(sessions ? { sessions } : {}) }, TabsCleanupResponse),
     settingsGet: getJson("/settings", SettingsGetResponse),
     settingsSet: (changes) => postJson("/settings", { set: changes }, SettingsSetResponse),
     flightRecorderStart: ({ sessionId, tabId, ...request }) =>

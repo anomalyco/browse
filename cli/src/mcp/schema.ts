@@ -22,6 +22,9 @@ import type { UpdateNotice } from "../update.ts"
 
 export type CurrentSession = { id: string; established: boolean }
 
+/** An agent calling the tools: its current session, every session it has made current, and whether it saw the update note. */
+export type Caller = CurrentSession & { readonly sessions: Set<string>; updateNoted: boolean }
+
 export type ExecuteArguments = {
   readonly code: string
   readonly session?: string | undefined

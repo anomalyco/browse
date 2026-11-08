@@ -113,16 +113,24 @@ export async function closeAgentTab(tabId: number): Promise<void> {
  * Closes tracked tabs idle for at least `minutes` (the setting by default; with the setting at never, an agent's
  * cleanup without a time still closes only tabs idle for the default 10 minutes). Skips a tab that is the active tab
  * of the focused window, is playing audio, or is guarded. `minutes: 0` closes every unguarded tracked tab.
+ * `own` is one agent's cleanup: its minutes apply to its own tabs, and every other tab also waits for the setting.
  */
-export async function cleanup(options: { minutes?: number } = {}) {
+export async function cleanup(options: { minutes?: number; own?: { tabIds: readonly number[]; minutes?: number } } = {}) {
   await restore()
-  const minutes = options.minutes ?? ((await idleMinutes()) || DEFAULT_IDLE_MINUTES)
+  const setting = (await idleMinutes()) || DEFAULT_IDLE_MINUTES
+  const minutes = options.minutes ?? setting
+  const own = options.own
+  const threshold = (tabId: number) => {
+    if (!own) return minutes
+    const asked = own.minutes ?? setting
+    return own.tabIds.includes(tabId) ? asked : Math.max(asked, setting)
+  }
   const now = Date.now()
   const focused = await chrome.windows.getLastFocused().catch(() => undefined)
   const closed: Closed[] = []
   for (const [tabId, entry] of Array.from(tracked)) {
     const idle = now - entry.touched
-    if (idle < minutes * 60_000) continue
+    if (idle < threshold(tabId) * 60_000) continue
     const tab = await chrome.tabs.get(tabId).catch(() => undefined)
     if (!tab) {
       tracked.delete(tabId)
