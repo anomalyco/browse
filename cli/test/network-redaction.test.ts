@@ -87,6 +87,37 @@ describe("SecretCollector", () => {
     expect(cookie?.value).toBe("sid=${BC_SECRET_1}; Path=/; HttpOnly")
   })
 
+  test("never stores hosts, CORS header values or cookie attributes as secrets", () => {
+    const collector = new SecretCollector()
+    const [authority, authorization, xAuthToken] = collector.protectHeaders(
+      [
+        { name: ":authority", value: "jsonplaceholder.typicode.com" },
+        { name: "authorization", value: "Bearer ctl-bearer-value-0001" },
+        { name: "x-auth-token", value: "ctl-xauth-value-0002" },
+      ],
+      "request",
+    )
+    expect(authority?.value).toBe("jsonplaceholder.typicode.com")
+    expect(authorization?.value).toBe("Bearer ${BC_SECRET_1}")
+    expect(xAuthToken?.value).toBe("${BC_SECRET_2}")
+    const [cors, setCookie] = collector.protectHeaders(
+      [
+        { name: "access-control-allow-credentials", value: "true" },
+        { name: "set-cookie", value: "probe=secretvalue123; Max-Age=0; Priority=High; Partitioned; Secure; HttpOnly" },
+      ],
+      "response",
+    )
+    expect(cors?.value).toBe("true")
+    expect(setCookie?.value).toBe("probe=${BC_SECRET_3}; Max-Age=0; Priority=High; Partitioned; Secure; HttpOnly")
+    expect(collector.slots().map((slot) => slot.value)).toEqual(["ctl-bearer-value-0001", "ctl-xauth-value-0002", "secretvalue123"])
+    const executeOutput = '{"host":"jsonplaceholder.typicode.com","completed":true,"note":"untrue: High tide"}'
+    expect(collector.redactText(executeOutput)).toBe(executeOutput)
+    expect(collector.redactKnownSubstrings("https://jsonplaceholder.typicode.com/posts/1", knownValueMinimum))
+      .toBe("https://jsonplaceholder.typicode.com/posts/1")
+    expect(collector.redactText("ctl-bearer-value-0001 ctl-xauth-value-0002 secretvalue123"))
+      .toBe("${BC_SECRET_1} ${BC_SECRET_2} ${BC_SECRET_3}")
+  })
+
   test("finds a known secret again under a header or URL that does not look secret", () => {
     const collector = new SecretCollector()
     collector.protectHeaders([{ name: "Authorization", value: "Bearer sk_test_SECRETVALUE1234567890" }], "request")

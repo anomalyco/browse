@@ -23,6 +23,9 @@ const secretHeaders = new Set([
   "csrf-token",
   "x-xsrf-token",
 ])
+// HTTP/2 pseudo-headers (:authority, :method, :path, :scheme, :status) and CORS response headers
+// carry routing and policy, not credentials, and must never become secret slots.
+const nonSecretHeaderPattern = /^(?::|access-control-)/
 
 export class SecretCollector {
   private readonly slotsByRef = new Map<string, MutableCredentialSlot>()
@@ -201,6 +204,7 @@ export class SecretCollector {
   private protectHeader(name: string, value: string, source: string): string {
     if (!value) return value
     const lower = name.toLowerCase()
+    if (nonSecretHeaderPattern.test(lower)) return value
     if (lower === "cookie" || lower === "set-cookie") {
       const cookieOccurrences = new Map<string, number>()
       return value.split(/;\s*/).map((part, index) => {
@@ -208,7 +212,7 @@ export class SecretCollector {
         if (separator < 1) return part
         const cookieName = part.slice(0, separator).trim()
         const cookieValue = part.slice(separator + 1)
-        if (lower === "set-cookie" && index > 0 && /^(domain|path|expires|max-age|samesite)$/i.test(cookieName)) {
+        if (lower === "set-cookie" && index > 0 && /^(domain|path|expires|max-age|samesite|priority|partitioned|secure|httponly)$/i.test(cookieName)) {
           return part
         }
         if (!cookieValue) return part
