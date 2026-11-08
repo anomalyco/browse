@@ -94,6 +94,8 @@ export function agentLocations(home: string, config: string, onPath: (name: stri
 
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value)
 type EditResult = "added" | "unchanged" | "removed" | "conflict"
+/** Read YAML values without rounding integers beyond 2^53, and write long scalars on one line: install only adds its entry. */
+const yamlOptions = { merge: true, intAsBigInt: true } as const
 
 /** The command array of the browse server in an agent config, if it has one (for migration). */
 export function browseServerCommand(name: AgentName, file: string): string[] | undefined {
@@ -104,7 +106,7 @@ export function browseServerCommand(name: AgentName, file: string): string[] | u
   try {
     let current: unknown
     if (yaml) {
-      const config = parseDocument(before, { merge: true }).toJS() as Record<string, unknown>
+      const config = parseDocument(before, yamlOptions).toJS() as Record<string, unknown>
       const key = name === "goose" ? "extensions" : "mcp_servers"
       current = object(config[key]) ? (config[key] as Record<string, unknown>).browse : undefined
     } else if (toml) {
@@ -159,7 +161,7 @@ export function editAgentConfig(receipt: AgentReceipt, remove = false): EditResu
   const before = exists ? fs.readFileSync(file, "utf8") : toml ? "" : "{}"
   const errors: ParseError[] = []
   // Edit the YAML document, not a serialized JS object: retain comments, anchors and other extensions.
-  const doc = yaml ? parseDocument(before, { merge: true }) : undefined
+  const doc = yaml ? parseDocument(before, yamlOptions) : undefined
   const config: unknown = doc ? doc.toJS() : toml ? parseToml(before) : parse(before, errors, { allowTrailingComma: true })
   const key = toml ? "mcp_servers" : serverKeys[name] ?? "mcpServers"
   const invalid = () => new Error(`Invalid ${file}; left unchanged`)
@@ -193,12 +195,12 @@ export function editAgentConfig(receipt: AgentReceipt, remove = false): EditResu
     if (!isMap(doc.contents) || (container !== undefined && !isMap(doc.get(key, true)))) throw invalid()
     if (remove) doc.deleteIn([key, "browse"])
     else doc.setIn([key, "browse"], expected)
-    after = doc.toString()
+    after = doc.toString({ lineWidth: 0 })
     // Shared YAML anchors can make a single edit visible elsewhere. Refuse rather than change another entry.
     config[key] = { ...servers }
     if (remove) delete (config[key] as Record<string, unknown>).browse
     else (config[key] as Record<string, unknown>).browse = expected
-    if (!isDeepStrictEqual(parseDocument(after, { merge: true }).toJS(), config)) return "conflict"
+    if (!isDeepStrictEqual(parseDocument(after, yamlOptions).toJS(), config)) return "conflict"
   } else {
     after = applyEdits(before, modify(before, [key, "browse"], remove ? undefined : expected, { formattingOptions: { insertSpaces: true, tabSize: 2 } }))
   }
