@@ -33,6 +33,7 @@ export function callingAgent(env: NodeJS.ProcessEnv): AgentName | undefined {
   const identified = agentName(env.AI_AGENT?.split("@")[0] ?? "") ?? agentName(env.AGENT ?? "")
   if (identified) return identified
   if (env.OPENCODE === "1" || env.OPENCODE_SESSION_ID) return "opencode"
+  if (env.PI_SESSION_ID) return "pi"
   return undefined
 }
 
@@ -89,6 +90,7 @@ export function agentLocations(home: string, config: string, onPath: (name: stri
     loc("grok", path.join(env.GROK_HOME ?? at(".grok"), "config.toml"), "grok"),
     loc("vibe", path.join(env.VIBE_HOME ?? at(".vibe"), "config.toml"), "vibe"),
     loc("qoder", at(".qoder/settings.json"), "qoder", "Qoder"),
+    loc("pi", path.join(env.PI_CODING_AGENT_DIR ?? at(".pi/agent"), "mcp.json"), "pi"),
   ]
 }
 
