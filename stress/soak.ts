@@ -318,7 +318,11 @@ process.on("SIGTERM", () => { stopping = true; cleanup(); process.exit(143) })
 
 console.log(`soak: ${WORKERS} workers, ${values.minutes} min, chaos every ~${values["chaos-every"]} s (${CHAOS.join(", ")}), results ${dir}`)
 await probeClient.initialize()
-await probeClient.call("session_new", { id: "soak-probe" })
+// An interrupted run leaves its named probe behind. Don't silently probe through that stale session.
+const removed = await probeClient.call("session_delete", { id: "soak-probe" })
+if (removed.isError && !/Session not found/i.test(removed.text)) throw new Error(`soak-probe delete: ${removed.text}`)
+const probe = await probeClient.call("session_new", { id: "soak-probe" })
+if (probe.isError) throw new Error(`soak-probe create: ${probe.text}`)
 for (let i = 0; i < WORKERS; i++) {
   const client = newClient()
   await client.initialize()
@@ -400,9 +404,12 @@ const md = [
   ``,
   `## Chaos recovery`,
   ``,
-  `| Event | Count | Recovered | Median ms | Max ms |`,
-  `| --- | ---: | ---: | ---: | ---: |`,
-  ...[...byChaos].map(([type, list]) => `| ${type} | ${list.length} | ${list.filter((e) => e.recovered).length} | ${percentile(list.map((e) => e.recoveryMs), 50)} | ${Math.max(...list.map((e) => e.recoveryMs))} |`),
+  `| Event | Count | Recovered | Median recovered ms | Max recovered ms | Not recovered |`,
+  `| --- | ---: | ---: | ---: | ---: | ---: |`,
+  ...[...byChaos].map(([type, list]) => {
+    const times = list.filter(e => e.recovered).map(e => e.recoveryMs)
+    return `| ${type} | ${list.length} | ${times.length} | ${times.length ? percentile(times, 50) : "—"} | ${times.length ? Math.max(...times) : "—"} | ${list.length - times.length} |`
+  }),
   ``,
   `## Tasks (latency over all runs)`,
   ``,
