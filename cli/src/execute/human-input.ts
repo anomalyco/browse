@@ -223,16 +223,17 @@ async function scrollToward(tabId: number, tab: TabState, params: JsonObject, se
   const viewport = metrics.cssVisualViewport
   if (!viewport) return
   const started = Date.now()
-  const offset = async () => {
+  // Picked once per scroll: the stall check below compares readings, so they must aim at the same spot.
+  const goal = viewport.clientHeight * random(0.35, 0.5)
+  const measure = async () => {
     const result = (await send("DOM.getContentQuads", node)) as { quads?: number[][] }
     const quad = result.quads?.[0]
     if (!quad) return undefined
     const ys = [quad[1]!, quad[3]!, quad[5]!, quad[7]!]
-    if (Math.min(...ys) >= 0 && Math.max(...ys) <= viewport.clientHeight) return 0
-    return (Math.min(...ys) + Math.max(...ys)) / 2 - viewport.clientHeight * random(0.35, 0.5)
+    return { offset: (Math.min(...ys) + Math.max(...ys)) / 2 - goal, visible: Math.min(...ys) >= 0 && Math.max(...ys) <= viewport.clientHeight }
   }
-  const first = await offset()
-  if (!first) return
+  const first = await measure()
+  if (!first || first.visible) return
   // The wheel scrolls whatever is under the pointer, so it rests over the page first.
   if (!tab.pointer) {
     const rest = { x: viewport.clientWidth * random(0.35, 0.65), y: viewport.clientHeight * random(0.35, 0.65) }
@@ -240,21 +241,24 @@ async function scrollToward(tabId: number, tab: TabState, params: JsonObject, se
     tab.pointer = rest
   }
   const pointer = tab.pointer
-  let remaining = first
-  let scrolled = 0
-  for (let flick = 0; flick < 12 && Math.abs(remaining) > 2; flick++) {
-    const amount = Math.sign(remaining) * Math.min(Math.abs(remaining), random(450, 900))
+  let at = first
+  let wheel = 0
+  for (let flick = 0; flick < 12 && Math.abs(at.offset) > 2; flick++) {
+    const amount = Math.sign(at.offset) * Math.min(Math.abs(at.offset), random(450, 900))
     await sendFrames(glide(0, amount), (frame) =>
       send("Input.dispatchMouseEvent", { type: "mouseWheel", x: pointer.x, y: pointer.y, deltaX: frame.x, deltaY: frame.y }),
     )
-    scrolled += amount
-    const next = await offset()
-    // Stop when the wheel didn't move the element (the page can't scroll further, or something else holds it).
-    if (next === undefined || Math.abs(next - remaining) < 1) break
-    remaining = next
-    if (Math.abs(remaining) > 2) await sleep(random(90, 240))
+    wheel += amount
+    const next = await measure()
+    // Stop when the wheel didn't move the element (the page can't scroll further, or the pointer is over
+    // another scroller).
+    if (!next || Math.abs(next.offset - at.offset) < 1) break
+    at = next
+    if (at.visible || Math.abs(at.offset) <= 2) break
+    await sleep(random(90, 240))
   }
-  relayLog("input.scroll", { tabId, distance: Math.round(first), scrolled: Math.round(scrolled), ms: Date.now() - started })
+  // `scrolled` is how far the element moved; `wheel` is the delta sent, which goes elsewhere when the element is stuck.
+  relayLog("input.scroll", { tabId, distance: Math.round(first.offset), scrolled: Math.round(first.offset - at.offset), wheel: Math.round(wheel), ms: Date.now() - started })
 }
 
 /** Per-frame wheel deltas for one scroll gesture: a quick start that eases out, at ~60 Hz. */
