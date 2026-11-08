@@ -55,6 +55,57 @@ describe("human-like input", () => {
   })
 })
 
+/**
+ * A page for scrolling an element into view: a 20px element `top` px below the viewport's top, which the wheel
+ * moves only while the page has room (`maxScroll`) and the pointer is over the element's scroller (`stuck`: not).
+ */
+function scrollPage(options: { top: number; maxScroll: number; stuck?: boolean }) {
+  const page = { scrollY: 0, wheel: 0 }
+  const send = async (method: string, params: Record<string, unknown>) => {
+    if (method === "Page.getLayoutMetrics") return { cssVisualViewport: { clientWidth: 1200, clientHeight: 800 }, cssLayoutViewport: { clientWidth: 1200, clientHeight: 800 } }
+    if (method === "DOM.getContentQuads") {
+      const top = options.top - page.scrollY
+      return { quads: [[0, top, 100, top, 100, top + 20, 0, top + 20]] }
+    }
+    if (method === "Input.dispatchMouseEvent" && params.type === "mouseWheel") {
+      const delta = Number(params.deltaY)
+      page.wheel += delta
+      if (!options.stuck) page.scrollY = Math.min(options.maxScroll, Math.max(0, page.scrollY + delta))
+    }
+    return {}
+  }
+  return { page, send }
+}
+
+describe("scrolling an element into view", () => {
+  test("lands the element in view, sending about as much wheel as the distance", async () => {
+    const { page, send } = scrollPage({ top: 3000, maxScroll: 10_000 })
+    await beforeInput(nextTab++, "DOM.scrollIntoViewIfNeeded", { objectId: "target" }, true, send)
+    const top = 3000 - page.scrollY
+    expect(top).toBeGreaterThanOrEqual(0)
+    expect(top).toBeLessThanOrEqual(780)
+    expect(page.wheel).toBeLessThanOrEqual(3000)
+  }, 15_000)
+
+  // Re-aiming at a new random spot on every reading made the stall check see movement that wasn't there, so the
+  // relay sent all 12 flicks (~8000px over ~8s) into a page that couldn't move the element.
+  test("gives up after one flick when the wheel can't move the element", async () => {
+    const { page, send } = scrollPage({ top: 3000, maxScroll: 10_000, stuck: true })
+    const started = Date.now()
+    await beforeInput(nextTab++, "DOM.scrollIntoViewIfNeeded", { objectId: "target" }, true, send)
+    expect(page.wheel).toBeLessThanOrEqual(900)
+    expect(Date.now() - started).toBeLessThan(2500)
+  }, 15_000)
+
+  test("stops soon after the page bottoms out short of the element", async () => {
+    const { page, send } = scrollPage({ top: 6000, maxScroll: 2000 })
+    await beforeInput(nextTab++, "DOM.scrollIntoViewIfNeeded", { objectId: "target" }, true, send)
+    expect(page.scrollY).toBe(2000)
+    // The flick that hits the end, then one that moves nothing and ends it.
+    expect(page.wheel).toBeLessThanOrEqual(2000 + 2 * 900)
+  }, 15_000)
+})
+
 describe("pointer positions stay on screen", () => {
   test("the first move near a corner never starts or passes off screen", async () => {
     for (let i = 0; i < 6; i++) {
