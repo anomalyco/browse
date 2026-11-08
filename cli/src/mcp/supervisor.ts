@@ -89,7 +89,10 @@ export async function runBinaryMcp(args: readonly string[]) {
     if (cancelled !== undefined) inflight.delete(cancelled)
   }
   const forward = (line: string) => {
-    trackRequest(parse(line))
+    const message = parse(line)
+    if (message?.method === "initialize") initialize = message
+    if (message?.method === "notifications/initialized") initialized = line
+    trackRequest(message)
     toChild(line)
   }
 
@@ -133,8 +136,7 @@ export async function runBinaryMcp(args: readonly string[]) {
     for (const queued of queue.splice(0)) fromClient(queued)
   }
 
-  // Once the installed version changes, new requests wait for the swap instead of reaching a server whose relay is
-  // going away (or already runs the other version); a switch that doesn't happen releases them.
+  // Once the installed version changes, check which relay is serving before routing new requests.
   let heldSince: number | undefined
   const moved = () => current() !== version
   const fromClient = (line: string) => {
@@ -147,8 +149,6 @@ export async function runBinaryMcp(args: readonly string[]) {
       queue.push(line)
       return void maybeSwap()
     }
-    if (message?.method === "initialize") initialize = message
-    if (message?.method === "notifications/initialized") initialized = line
     forward(line)
   }
 
@@ -158,8 +158,8 @@ export async function runBinaryMcp(args: readonly string[]) {
   let unreachable = 0
   const relayVersion = () =>
     fetch(`http://127.0.0.1:${relayPort}/version`, { signal: AbortSignal.timeout(2000) })
-      .then((response) => (response.ok ? (response.json() as Promise<{ version?: unknown }>) : undefined))
-      .then((body) => (body && typeof body.version === "string" ? body.version : undefined), () => undefined)
+      .then((response) => (response.ok ? (response.json() as Promise<{ version?: unknown; draining?: unknown }>) : undefined))
+      .then((body) => (body && typeof body.version === "string" ? { version: body.version, draining: body.draining === true } : undefined), () => undefined)
   const maybeSwap = async () => {
     if (swapping || checking) return
     // Held requests go to the current server at the deadline even when a request still looks in flight: a cancelled
@@ -168,7 +168,7 @@ export async function runBinaryMcp(args: readonly string[]) {
       heldSince = undefined
       for (const line of queue.splice(0)) forward(line)
     }
-    if (inflight.size > 0) return
+    if (inflight.size > 0 && !queue.length) return
     const next = current()
     if (next === version) {
       unreachable = 0
@@ -180,8 +180,15 @@ export async function runBinaryMcp(args: readonly string[]) {
     const running = await relayVersion()
     checking = false
     unreachable = running === undefined ? unreachable + 1 : 0
+    if (running?.draining) return
+    if (running?.version === version) {
+      // The entry on disk moved, but the current server still matches the relay (even with other calls in flight).
+      heldSince = undefined
+      for (const line of queue.splice(0)) forward(line)
+      return
+    }
     // Held requests don't wait forever for a relay that never reports the new version: they go to the current server.
-    if (running !== next && unreachable < 3) return
+    if (running?.version !== next && unreachable < 3) return
     if (swapping || inflight.size > 0 || current() !== next) return
     const old = child
     version = next

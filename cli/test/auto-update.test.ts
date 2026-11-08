@@ -304,7 +304,7 @@ describe("the relay's updater", () => {
     }
   })
 
-  test("installs with self-update in its own process, then restarts the relay once idle", async () => {
+  test("keeps the stable executable matching the busy relay and installs and switches only when idle", async () => {
     const home = fakeHome()
     process.env.OPENCODE_BROWSER_HOME = home
     try {
@@ -312,20 +312,33 @@ describe("the relay's updater", () => {
       updateState(() => ({ checkedAt: Date.now(), latest: "0.0.2" }))
       const spawned: string[][] = []
       const callbacks: ((code: number | null) => void)[] = []
+      let idle = false
       const updater = createAutoUpdater({
         runtime,
-        isIdle: () => true,
+        isIdle: () => idle,
         log: () => {},
-        spawnChild: (args, onExit) => (spawned.push([...args]), callbacks.push(onExit), 2 ** 22 + 12345),
+        spawnChild: (args, onExit) => {
+          if (args[0] === "self-update") executable(runtime.entry, args[1]!)
+          spawned.push([...args])
+          callbacks.push(onExit)
+          return process.pid
+        },
         env: {},
       })
       await updater.tick()
+      expect(installedVersion(runtime)).toBe(runtime.version)
+      expect(spawned).toEqual([])
+      idle = true
+      await updater.tick()
       expect(spawned).toEqual([["self-update", "0.0.2", "--channel", "latest"]])
+      expect(installedVersion(runtime)).toBe("0.0.2")
       expect(readState().installing).toMatchObject({ version: "0.0.2" })
-      // The installer child finishes and replaces the executable; the next tick restarts the relay from it.
-      executable(runtime.entry, "0.0.2")
+      // An agent came back during the install: the restart still needs its own idle check.
+      idle = false
       callbacks[0]!(0)
       await Bun.sleep(0)
+      expect(spawned).toHaveLength(1)
+      idle = true
       await updater.tick()
       expect(spawned[1]).toEqual(["runtime-switch", "0.0.2"])
     } finally {
