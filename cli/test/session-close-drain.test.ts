@@ -4,6 +4,7 @@ import type { Page } from "patchright-core"
 import { ExecuteSandbox } from "../src/execute.ts"
 import type { ExecuteSandboxLike } from "../src/relay/types.ts"
 import { OpenCodeBrowserSessions } from "../src/session-manager.ts"
+import type { PendingSessionWork } from "../src/session-manager/types.ts"
 
 // A session's close is tracked work, and a relay restart (so every auto-update) waits for tracked work to finish. A page
 // whose tab the relay lost track of never reports closed, so its close used to hang forever: the session was already
@@ -105,15 +106,17 @@ test("shutdown stops waiting for a session whose work never finishes", async () 
   writes.length = 0
   // A catalog write nothing is awaiting: the shutdown must still flush it before dropping the sessions.
   sessions.noteClient("stuck", 1234)
-  const stalled: Array<readonly string[]> = []
+  const stalled: Array<readonly PendingSessionWork[]> = []
   const started = Date.now()
   await within(
-    Effect.runPromise(sessions.closeAll({ timeoutMs: 100, onStalled: (sessionIds) => { stalled.push(sessionIds) } })),
+    Effect.runPromise(sessions.closeAll({ timeoutMs: 100, onStalled: (report) => { stalled.push(report) } })),
     2_000,
     "a shutdown waiting for a session that never finishes",
   )
 
-  expect(stalled).toEqual([["stuck"]])
+  expect(stalled).toHaveLength(1)
+  expect(stalled[0]?.map(({ sessionId }) => sessionId)).toEqual(["stuck"])
+  expect(stalled[0]?.[0]?.pending).toBeGreaterThan(0)
   expect(writes).toEqual([["stuck"]])
   expect(Date.now() - started).toBeLessThan(1_000)
   expect(sessions.sessions.size).toBe(0)

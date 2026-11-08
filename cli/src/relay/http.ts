@@ -50,6 +50,8 @@ export function closeHttpServer(server: http.Server): Effect.Effect<void, Error>
       }
       resume(Effect.void)
     })
+    // A request whose work outlived shutdown still holds its connection; nothing will answer it now.
+    server.closeAllConnections()
     return Effect.void
   })
 }

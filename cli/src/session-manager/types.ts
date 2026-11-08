@@ -43,6 +43,12 @@ export const defaultExecuteTimeoutMs = 60_000
 /** How long relay shutdown waits for accepted session work before leaving it behind. */
 export const defaultShutdownTimeoutMs = 3_000
 
+/** A session still holding tracked work when shutdown's bounded wait expired. */
+export type PendingSessionWork = {
+  readonly sessionId: string
+  readonly pending: number
+}
+
 export type SessionHooks = {
   readonly checkBrowserResponsive?: (key: string) => Effect.Effect<void, Error>
   /** Select once on creation, otherwise check the stored profile and any requested selector. */
