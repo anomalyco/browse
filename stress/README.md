@@ -87,7 +87,8 @@ and 53 for 10 to 25 s), `session-delete` (mid-task), `mcp-kill` (an agent's MCP 
 `toolbar-stop` (the user clicks the toolbar button on an agent's tab, the kill switch). After each one a probe session
 must run an execute within `--recovery-bound` seconds. Tasks overlapping a chaos window are left out of the success
 rate. Pass criteria: calm success rate, every event recovered, no stuck workers, no relay restarts that chaos didn't
-cause, bounded growth (relay RSS, fds, tabs per hour, fitted after a 5-minute warm-up), every tab a session holds
+cause, bounded growth (relay RSS on the longest single-PID span after 2 minutes of uptime, insufficient below 10 minutes
+of measurements; fds and tabs after a 5-minute run warm-up), every tab a session holds
 tracked for idle cleanup throughout, and no leaked tabs after the run (neither held by a session nor a window's active
 tab).
 
