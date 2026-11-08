@@ -307,6 +307,8 @@ describe("the relay's updater", () => {
   test("keeps the stable executable matching the busy relay and installs and switches only when idle", async () => {
     const home = fakeHome()
     process.env.OPENCODE_BROWSER_HOME = home
+    const globals = globalThis as { __OPENCODE_BROWSER_TARGET__?: string }
+    globals.__OPENCODE_BROWSER_TARGET__ = "linux-x64"
     try {
       const runtime = runtimeAt(home, "0.0.1")
       updateState(() => ({ checkedAt: Date.now(), latest: "0.0.2" }))
@@ -324,6 +326,7 @@ describe("the relay's updater", () => {
           return process.pid
         },
         env: {},
+        fetch: (async () => new Response(manifest({ version: "0.0.2" }), { status: 200 })) as unknown as typeof fetch,
       })
       await updater.tick()
       expect(installedVersion(runtime)).toBe(runtime.version)
@@ -336,13 +339,14 @@ describe("the relay's updater", () => {
       // An agent came back during the install: the restart still needs its own idle check.
       idle = false
       callbacks[0]!(0)
-      await Bun.sleep(0)
+      await Bun.sleep(10)
       expect(spawned).toHaveLength(1)
       idle = true
       await updater.tick()
       expect(spawned[1]).toEqual(["runtime-switch", "0.0.2"])
     } finally {
       delete process.env.OPENCODE_BROWSER_HOME
+      delete globals.__OPENCODE_BROWSER_TARGET__
     }
   })
 
@@ -431,6 +435,115 @@ describe("the relay's updater", () => {
       expect(readState().lastError).toMatchObject({ version: "0.0.2", attempts: 1 })
     } finally {
       delete process.env.OPENCODE_BROWSER_HOME
+    }
+  })
+
+  test("a failed check keeps the last failure and drops the etag", async () => {
+    const home = fakeHome()
+    process.env.OPENCODE_BROWSER_HOME = home
+    const globals = globalThis as { __OPENCODE_BROWSER_TARGET__?: string }
+    globals.__OPENCODE_BROWSER_TARGET__ = "linux-x64"
+    try {
+      const runtime = runtimeAt(home, "0.0.15")
+      const failure = { message: "the installer failed", at: new Date(1_000_000).toISOString(), version: "0.0.16", attempts: 1 }
+      updateState(() => ({ checkedAt: 1_000_000, latest: "0.0.16", etag: '"one"', lastError: failure }))
+      const spawned: string[][] = []
+      const updater = createAutoUpdater({
+        runtime,
+        isIdle: () => true,
+        log: () => {},
+        spawnChild: (args) => (spawned.push([...args]), 2 ** 22 + 12360),
+        env: {},
+        fetch: (async () => {
+          throw new Error("offline")
+        }) as unknown as typeof fetch,
+        now: () => 1_000_000 + 61 * 60 * 1000,
+      })
+      await updater.tick()
+      expect(spawned).toEqual([])
+      const state = readState()
+      // No etag, or the next check gets a 304 for a manifest whose latest this failed check threw away.
+      expect(state).toMatchObject({ failed: "offline" })
+      expect(state.etag).toBeUndefined()
+      expect(state.latest).toBeUndefined()
+      expect(state.lastError).toEqual(failure)
+    } finally {
+      delete process.env.OPENCODE_BROWSER_HOME
+      delete globals.__OPENCODE_BROWSER_TARGET__
+    }
+  })
+
+  test("the parent counts a failure when the child wrote no record", async () => {
+    const home = fakeHome()
+    process.env.OPENCODE_BROWSER_HOME = home
+    try {
+      const runtime = runtimeAt(home, "0.0.1")
+      const time = 1_000_000
+      updateState(() => ({ checkedAt: time - 10 * 60_000, latest: "0.0.2", lastError: { message: "old", at: new Date(time - 2 * 60 * 60_000).toISOString(), version: "0.0.2", attempts: 2 } }))
+      const spawned: string[][] = []
+      const callbacks: ((code: number | null) => void)[] = []
+      const updater = createAutoUpdater({
+        runtime,
+        isIdle: () => true,
+        log: () => {},
+        // The child exits non-zero without recording a failure of its own.
+        spawnChild: (args, onExit) => (spawned.push([...args]), callbacks.push(onExit), process.pid),
+        env: {},
+        now: () => time,
+      })
+      await updater.tick()
+      expect(spawned).toEqual([["self-update", "0.0.2", "--channel", "latest"]])
+      callbacks[0]!(1)
+      expect(readState().lastError).toMatchObject({ message: "the installer failed", version: "0.0.2", attempts: 3 })
+    } finally {
+      delete process.env.OPENCODE_BROWSER_HOME
+    }
+  })
+
+  test("a successful self-update clears the failure and rechecks before deciding", async () => {
+    const home = fakeHome()
+    process.env.OPENCODE_BROWSER_HOME = home
+    const globals = globalThis as { __OPENCODE_BROWSER_TARGET__?: string }
+    globals.__OPENCODE_BROWSER_TARGET__ = "linux-x64"
+    try {
+      const runtime = runtimeAt(home, "0.0.15")
+      const time = 1_000_000
+      updateState(() => ({ checkedAt: time - 10 * 60_000, latest: "0.0.16", etag: '"one"', lastError: { message: "old", at: new Date(time - 20 * 60_000).toISOString(), version: "0.0.16", attempts: 1 } }))
+      const spawned: string[][] = []
+      const callbacks: ((code: number | null) => void)[] = []
+      let idle = true
+      const updater = createAutoUpdater({
+        runtime,
+        isIdle: () => idle,
+        log: () => {},
+        spawnChild: (args, onExit) => {
+          // The channel moved on: this install follows it and lands 0.0.17, not the cached 0.0.16.
+          if (args[0] === "self-update") executable(runtime.entry, "0.0.17")
+          spawned.push([...args])
+          callbacks.push(onExit)
+          return process.pid
+        },
+        env: {},
+        fetch: (async () => new Response(manifest({ version: "0.0.17" }), { status: 200 })) as unknown as typeof fetch,
+        now: () => time,
+      })
+      await updater.tick()
+      expect(spawned).toEqual([["self-update", "0.0.16", "--channel", "latest"]])
+      // Not idle for the recheck, so it stops before switching; the install itself already happened.
+      idle = false
+      callbacks[0]!(0)
+      expect(readState().lastError).toBeUndefined()
+      expect(readState().checkedAt).toBeUndefined()
+      expect(readState().etag).toBeUndefined()
+      expect(readState().installing).toBeUndefined()
+      // The immediate tick re-reads the manifest, learns the real release and does not download 0.0.16 again.
+      await Bun.sleep(10)
+      expect(readState().latest).toBe("0.0.17")
+      expect(readState().checkedAt).toBeDefined()
+      expect(spawned).toHaveLength(1)
+    } finally {
+      delete process.env.OPENCODE_BROWSER_HOME
+      delete globals.__OPENCODE_BROWSER_TARGET__
     }
   })
 })

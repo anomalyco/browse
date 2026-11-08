@@ -468,7 +468,7 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
             deps.log("autoupdate.checked", { channel, latest: published.version, running })
           }
         } catch (error) {
-          state = updateState(({ latest: _latest, ...rest }) => ({ ...rest, checkedAt: now(), failed: (error as Error).message }))
+          state = updateState(({ latest: _latest, etag: _etag, ...rest }) => ({ ...rest, checkedAt: now(), failed: (error as Error).message }))
           deps.log("autoupdate.check_failed", { error: (error as Error).message })
         }
         deps.onChange?.()
@@ -476,8 +476,9 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
       // A binary channel doesn't order versions: any release that differs from the running build is one to install. npm's
       // dist-tag does, so only a newer one is.
       const wanted = runtime.kind === "binary" ? (state.latest !== running ? state.latest : undefined) : state.latest && compareVersions(state.latest, running) > 0 ? state.latest : undefined
-      // A failure is stale once its version runs or nothing is left to install.
-      if (state.lastError && (!wanted || state.lastError.version === running)) {
+      // A failure is stale once its version runs, a different release supersedes it, or nothing is left to install. A
+      // failed check says nothing new about releases, so it keeps the failure.
+      if (state.lastError && (state.lastError.version === running || (!state.failed && (!wanted || state.lastError.version !== wanted)))) {
         state = updateState(({ lastError: _lastError, ...rest }) => rest)
         deps.onChange?.()
       }
@@ -517,16 +518,22 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
         const age = now() - Date.parse(failure.at)
         if (age >= 0 && age < Math.min(backoff, checkIntervalMs)) return
       }
+      const priorFailureAt = state.lastError?.at
       deps.log("autoupdate.installing", { version: wanted })
       const startedAt = now()
       const pid = spawnChild(["self-update", wanted, "--channel", channelOf(running)], (code) => {
         deps.log(code === 0 ? "autoupdate.installed" : "autoupdate.install_failed", { version: wanted, code })
         updateState(({ installing: _installing, ...rest }) => {
-          if (code === 0) return rest
+          if (code === 0) {
+            // The installer follows the channel, so it may have installed a newer release than the cached latest. Drop
+            // the check too: the immediate tick re-reads the manifest before deciding, instead of downloading again.
+            const { checkedAt: _checkedAt, etag: _etag, lastError: _lastError, ...kept } = rest
+            return kept
+          }
           // The self-update child records its own detailed failure (runtime-update.ts), with this attempt's count. Keep it
           // when it wrote one for this version during this attempt, so one failure isn't counted twice.
           const failure = rest.lastError
-          if (failure !== undefined && failure.version === wanted && Date.parse(failure.at) >= startedAt) return rest
+          if (failure !== undefined && failure.version === wanted && failure.at !== priorFailureAt) return rest
           return {
             ...rest,
             lastError: { message: "the installer failed", at: new Date(now()).toISOString(), version: wanted, attempts: 1 + (failure?.version === wanted ? failure.attempts ?? 1 : 0) },

@@ -191,6 +191,10 @@ export async function runSelfUpdate(args: readonly string[]) {
       ...(runtime.kind === "binary" ? { channel: installChannel } : { version, ...(channel ? { channel } : {}) }),
     })
     log(`${new Date().toISOString()} installed ${installed}`)
+    updateState(({ installing, lastError: _lastError, ...state }) => {
+      const still = installing?.pid === process.pid ? undefined : installing
+      return { ...state, ...(still ? { installing: still } : {}) }
+    })
   } catch (error) {
     updateState(({ installing, ...state }) => {
       const still = installing?.pid === process.pid ? undefined : installing
