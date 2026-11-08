@@ -318,7 +318,8 @@ describe("Node escape corpus", () => {
       "return import('node:fs')",
     ], playwrightShapes)
     outcomes.forEach((outcome, index) => expect(outcome.error, `escape ${index}: ${JSON.stringify(outcome)}`).toBeDefined())
-    expect(runInNode(["return [typeof Atomics,typeof SharedArrayBuffer,typeof WeakRef,typeof FinalizationRegistry]"])[0]?.value).toEqual(Array(4).fill("undefined"))
+    // structuredClone stays out: a host one would clone the hidden `_` members behind a proxy into sandbox data.
+    expect(runInNode(["return [typeof Atomics,typeof SharedArrayBuffer,typeof WeakRef,typeof FinalizationRegistry,typeof structuredClone]"])[0]?.value).toEqual(Array(5).fill("undefined"))
   })
 
   // N18: every way execute JavaScript gets the CPU is bounded by one slice, so a runaway loop

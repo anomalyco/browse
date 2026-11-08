@@ -201,9 +201,9 @@ adds a loud warning, so set one first.
 Execute code can use `page`, `context`, `browser`, persistent `state`, the
 `files` helper, compute-only Node modules through `modules` (plus `path`, `url`,
 `util`, `crypto`, `buffer`, `zlib`, `events`, `stream`), and the browse helpers
-above. Timers, `URL`, `TextEncoder`, `Buffer`, `structuredClone` and
-`crypto.randomUUID()` are available. `execute` returns the value of `return`; a
-single expression returns automatically. Use `--file` for longer scripts:
+above. Timers, `URL`, `TextEncoder`, `Buffer` and `crypto.randomUUID()` are
+available. `execute` returns the value of `return`; a single expression returns
+automatically. Use `--file` for longer scripts:
 
 ```bash
 browse execute --session github --file ./perform-flow.js
