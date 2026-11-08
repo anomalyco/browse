@@ -42,6 +42,37 @@ const within = (ms: number, reply: Promise<McpReply>, what: string) =>
   Promise.race([reply, Bun.sleep(ms).then((): never => { throw new Error(`${what} wasn't answered within ${ms} ms`) })])
 
 describe("MCP supervisor", () => {
+  test.skipIf(process.platform === "win32")("replacing the binary with the same size and packed mtime swaps the server", async () => {
+    const root = path.join(home, "packed")
+    const binary = path.join(root, "bin", "browse")
+    fs.mkdirSync(path.dirname(binary), { recursive: true })
+    // A fixed-size executable launches the real CLI with the constants a compiled build embeds.
+    const install = (version: string) => {
+      const next = `${binary}.next`
+      fs.writeFileSync(next, `#!/usr/bin/env bun
+globalThis.__OPENCODE_BROWSER_COMPILED__ = true
+globalThis.__OPENCODE_BROWSER_VERSION__ = "${version}"
+await import(${JSON.stringify(path.join(import.meta.dir, "../src/main.ts"))})
+`, { mode: 0o755 })
+      fs.utimesSync(next, 499162500, 499162500)
+      fs.renameSync(next, binary)
+    }
+    install("1.0.0")
+    const original = fs.statSync(binary)
+    const mcp = mcpStdio({ home: root, port: await freePort(), command: [binary], env: clean })
+    const discover = () => within(10_000, mcp.request("server/discover", { _meta: {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientCapabilities": {},
+      "io.modelcontextprotocol/clientInfo": initialize.clientInfo,
+    } }), "server/discover")
+    try {
+      expect((await discover()).result?._meta).toMatchObject({ "io.modelcontextprotocol/serverInfo": { version: "1.0.0" } })
+      install("1.0.1")
+      expect(fs.statSync(binary)).toMatchObject({ size: original.size, mtimeMs: original.mtimeMs })
+      expect((await discover()).result?._meta).toMatchObject({ "io.modelcontextprotocol/serverInfo": { version: "1.0.1" } })
+    } finally { mcp.close() }
+  }, 30_000)
+
   test("an older install's shim swaps to a version that supervises, and tool calls after the swap are answered", async () => {
     // The shim earlier installs wrote to bin/opencode-browser.mjs, which agents' configs still run until browse migrates
     // them. It supervises each runtime version it starts and replays initialize with the bare replay id.

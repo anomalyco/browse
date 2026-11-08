@@ -29,8 +29,10 @@ function versionReader(runtime: Runtime, initial: string) {
   let stamp = ""
   return () => {
     try {
-      const stat = statSync(watchedFile(runtime))
-      const next = `${stat.mtimeMs}:${stat.size}`
+      const stat = statSync(watchedFile(runtime), { bigint: true })
+      // Packed releases can have identical mtimes and sizes. Rename replaces the inode;
+      // retain change and creation times for filesystems that don't report a useful inode.
+      const next = `${stat.dev}:${stat.ino}:${stat.ctimeNs}:${stat.birthtimeNs}:${stat.mtimeNs}:${stat.size}`
       if (next === stamp) return version
       stamp = next
       version = installedVersion(runtime) ?? version
