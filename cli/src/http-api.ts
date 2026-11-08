@@ -96,6 +96,7 @@ export function createHttpRequestHandler(options: {
         pid: options.relayInstance.pid,
         managed: options.relayInstance.managed,
         shutdownProtocol: 2,
+        ...(!options.shutdown.accepting ? { draining: true } : {}),
         ...compatibility,
         ...installHint,
       })

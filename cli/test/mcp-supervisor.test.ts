@@ -84,7 +84,15 @@ describe("MCP supervisor", () => {
   test("a new server that never answers the replayed initialize still gets the requests held for the swap", async () => {
     const pkg = path.join(home, "stuck", "lib", "node_modules", "@opencode", "browse")
     const entry = installPackage(pkg, "1.0.0")
-    const mcp = mcpStdio({ home, port: await freePort(), command: ["node", entry], env: clean })
+    const port = await freePort()
+    let relayState: "serving" | "draining" | "stopped" = "serving"
+    const relay = Bun.serve({ hostname: "127.0.0.1", port, fetch: () => {
+      if (relayState === "stopped") return new Response(null, { status: 503 })
+      const draining = relayState === "draining"
+      if (draining) relayState = "stopped"
+      return Response.json({ version: "1.0.0", draining })
+    } })
+    const mcp = mcpStdio({ home, port, command: ["node", entry], env: clean })
     const call = () => mcp.request("tools/call", { name: "secrets_list", arguments: {} })
     try {
       await within(10_000, mcp.request("initialize", initialize), "initialize")
@@ -98,8 +106,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [], swapped: true } }) + "\\n")
 })
 `)
-      fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: "@opencode/browse", version: "1.0.1" }))
+      fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: "@opencode/browse", version: "1.0.10" }))
+      expect((await within(3_000, call(), "a tools/call while the original relay still serves")).result?.isError).toBe(false)
+      relayState = "draining"
       expect((await within(15_000, call(), "a tools/call held for the swap")).result?.swapped).toBe(true)
-    } finally { mcp.close() }
+    } finally { mcp.close(); await relay.stop(true) }
   }, 40_000)
 })

@@ -11,8 +11,8 @@
 // The relay checks its channel at launch and at least once an hour. A binary install reads its channel's manifest from
 // Anomaly's release service (release-service.ts, anomalyco/release docs/protocol.md) and follows it; an npm global
 // install reads the npm dist-tag (latest, or dev for a dev build, which every push to dev publishes). Mode "on"
-// (default) runs the installer in its own process, then once no agent is using the browser restarts the relay from the
-// same entry path. "notify" only shows the update; "off" doesn't check.
+// (default) waits for idle before running the installer in its own process and again before restarting the relay from
+// the same entry path. "notify" only shows the update; "off" doesn't check.
 // OPENCODE_BROWSER_AUTO_UPDATE overrides the stored mode. Installed binaries and npm global installs supervise their MCP
 // server (mcp/supervisor.ts): it notices the installed version change and swaps the server between requests once the
 // relay runs it. The installer and npm do their own integrity checks (the release service's size and SHA-256 for a
@@ -482,10 +482,12 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
         }))
         deps.log("autoupdate.installer_gone", { version: installing.version })
       }
+      // The installer replaces the stable entry new clients start. Don't launch it while this relay is busy;
+      // recheck on the switch tick in case an agent came back during the download.
+      if (!deps.isIdle()) return
       const installed = installedVersion(runtime)
       if (installed === wanted) {
         // The build is on disk (this installer's, or another process's). Restart the relay with it once nothing is using the browser.
-        if (!deps.isIdle()) return
         switching = { pid: undefined, startedAt: now() }
         deps.log("autoupdate.switching", { from: running, to: installed })
         switching.pid = spawnChild(["runtime-switch", installed], (code) => {
