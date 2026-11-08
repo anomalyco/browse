@@ -1,6 +1,5 @@
 import { Deferred, Effect, Option, Semaphore } from "effect"
 import { ExecuteSandbox, type ExecuteTargetSelection } from "./execute.ts"
-import { ExecuteCpuScheduler } from "./execute-realm.ts"
 import type { NetworkCaptureOptions, NetworkCaptureResult, NetworkCaptureStatus, NetworkCaptureStopOptions } from "./network-capture.ts"
 import { generateSessionId } from "./relay/helpers.ts"
 import type { AuthenticatedJsonOutcome, AuthenticatedJsonRequest } from "./relay/schema.ts"
@@ -56,8 +55,6 @@ export function isAutoNamedSession(id: string): boolean {
 
 export class OpenCodeBrowserSessions {
   readonly sessions = new Map<string, OpenCodeBrowserSession>()
-  /** One per relay: every session's execute realm shares the event loop through it. */
-  readonly cpuScheduler = new ExecuteCpuScheduler()
   private readonly createSandbox: (id: string, onDefaultTargetChange: (target: SessionTarget | undefined) => void) => ExecuteSandboxLike
   private readonly hooks: SessionHooks
   private readonly executing = new Set<string>()
@@ -75,7 +72,7 @@ export class OpenCodeBrowserSessions {
     hooks?: SessionHooks,
     targetOwnership?: TargetOwnership,
   ) {
-    this.createSandbox = createSandbox ?? ((id, onDefaultTargetChange) => new ExecuteSandbox({ endpointUrl: this.endpointUrl, sessionId: id, onDefaultTargetChange, cpuScheduler: this.cpuScheduler }))
+    this.createSandbox = createSandbox ?? ((id, onDefaultTargetChange) => new ExecuteSandbox({ endpointUrl: this.endpointUrl, sessionId: id, onDefaultTargetChange }))
     this.hooks = hooks ?? {}
     this.targetOwnership = targetOwnership ?? new MemoryTargetOwnership()
     this.admission = new SessionAdmission(this.sessions, this.hooks)

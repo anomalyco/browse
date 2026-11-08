@@ -1,5 +1,6 @@
 import vm from "node:vm"
 import type { ExecuteRealm } from "../execute-realm.ts"
+import { releaseExecuteTurn, waitForExecuteTurn } from "./cpu-budget.ts"
 import { hostIntrinsics, isObjectLike } from "./membrane-policy.ts"
 
 /**
@@ -43,41 +44,47 @@ export function populateHostToSandboxIntrinsics(hostToSandbox: Map<unknown, unkn
  * Install the realm's timers and harmless host utilities on its global object.
  *
  * A string callback would be code generation, so a non-function callback throws TypeError. Ids come
- * from the realm's one counter; a stopped realm hands an id out without scheduling. A throwing
- * callback disposes the realm so the next execute starts from clean state. `queueMicrotask` is
- * built inside the context so it never holds a host function.
- *
- * A due timer waits in the realm's scheduler queue while other sessions' work runs. It keeps its id
- * until the callback starts, so clearing it while queued cancels it, and an interval that comes due
- * again while still queued is not queued twice.
+ * from the realm's one counter; a stopped realm hands an id out without scheduling. A timer fire
+ * waits for a relay-wide execute turn before it runs sandbox code, and an interval skips a fire
+ * while an earlier one still waits, so callbacks cannot pile up. A throwing callback disposes the
+ * realm so the next execute starts from clean state. `queueMicrotask` is built inside the context
+ * so it never holds a host function.
  */
 export function installRealmGlobals(realm: ExecuteRealm, target: Record<string, unknown>): void {
+  const awaitingTurn = new Set<number>()
+  const cancelled = new Set<number>()
   const schedule = (repeat: boolean, callback: (...args: unknown[]) => unknown, delay = 0, ...args: unknown[]) => {
     // A string callback would be code generation; refuse it rather than failing later.
     if (typeof callback !== "function") throw new TypeError("The timer callback must be a function")
     const id = ++realm.nextTimer
     if (realm.stopped) return id
-    let queued = false
-    const fire = () => {
-      queued = false
-      if (realm.stopped || !realm.timers.has(id)) return
-      if (!repeat) realm.timers.delete(id)
+    const invoke = () => {
+      if (realm.stopped || cancelled.delete(id)) return false
       try { callback(...args) } catch {
         realm.dispose(new Error("Execute timer callback failed; JavaScript state will reset before the next execute"))
       }
+      return true
     }
-    const due = () => {
-      if (queued) return
-      queued = true
-      realm.scheduler.schedule(realm, fire)
+    const fire = () => {
+      if (!repeat) realm.timers.delete(id)
+      if (realm.stopped || awaitingTurn.has(id)) return
+      const turn = waitForExecuteTurn(realm)
+      if (turn === undefined) { invoke(); return }
+      awaitingTurn.add(id)
+      void turn.then(() => {
+        awaitingTurn.delete(id)
+        // A cleared timer or a stopped realm runs no sandbox code, so its turn charged nothing.
+        if (!invoke()) releaseExecuteTurn()
+      })
     }
-    realm.timers.set(id, (repeat ? setInterval : setTimeout)(due, delay))
+    realm.timers.set(id, (repeat ? setInterval : setTimeout)(fire, delay))
     return id
   }
   const clear = (id: number) => {
     const timer = realm.timers.get(id)
     if (timer) clearTimeout(timer)
     realm.timers.delete(id)
+    if (awaitingTurn.has(id)) cancelled.add(id)
   }
   const hostGlobals: Record<string, unknown> = {
     setTimeout: (callback: (...args: unknown[]) => unknown, delay?: number, ...args: unknown[]) => schedule(false, callback, delay, ...args),

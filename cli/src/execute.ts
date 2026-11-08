@@ -4,7 +4,7 @@ import { registerAriaSnapshotSelector } from "./snapshot/aria-snapshot.ts"
 import * as AuthProfile from "./auth/profile.ts"
 import * as AuthenticatedOrigin from "./auth/authenticated-origin.ts"
 import { challengeWarning } from "./execute/challenge-detection.ts"
-import { executeAllowsNode, ExecuteRealm, pageVisibleApiWarning, type ExecuteCpuScheduler } from "./execute-realm.ts"
+import { executeAllowsNode, ExecuteRealm, pageVisibleApiWarning } from "./execute-realm.ts"
 import {
   challengeWaitMs,
   detectChallenge,
@@ -161,8 +161,6 @@ type ExecuteSandboxOptions = {
   readonly allowedOrigins?: () => readonly string[] | undefined
   /** Allowlist violations the relay saw in this session's tabs since the last execute. */
   readonly drainGuardWarnings?: () => readonly string[]
-  /** Shares the relay's event loop fairly with other sessions' execute code. */
-  readonly cpuScheduler?: ExecuteCpuScheduler
 }
 
 export type ExecuteResult = {
@@ -216,7 +214,6 @@ export class ExecuteSandbox extends DefaultPageHost {
         this.addWarningOnce(pageVisibleApiWarning(fn, receiver, args))
       },
       onUnhandledRejection: (warning) => this.addWarningOnce(warning),
-      ...(this.options.cpuScheduler ? { scheduler: this.options.cpuScheduler } : {}),
     })
   }
 

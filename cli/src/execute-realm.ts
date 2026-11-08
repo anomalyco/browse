@@ -29,12 +29,13 @@
  *
  * Execute JavaScript shares the relay's event loop with every session, so each
  * synchronous slice (initial code, callback, timer, promise continuation and the
- * microtasks it queues) is cut off after OPENCODE_BROWSER_EXECUTE_SLICE_MS, and
- * callbacks that use the relay thread's CPU more than half the time (over a
- * window of three slices) are stopped too. Async entries are queued fairly
- * between sessions and paced so the relay keeps answering (cpu-scheduler.ts).
- * Native work inside one host call (a large zlib *Sync call, allocating a huge
- * Buffer) and memory use are not bounded this way.
+ * microtasks it queues) is cut off after OPENCODE_BROWSER_EXECUTE_SLICE_MS. All
+ * sessions also share one CPU ledger: entries start only while the relay thread
+ * spent at most half of the last three slices in execute code, and callbacks that
+ * do not fit wait in a relay-wide FIFO queue so sessions take turns. A single
+ * callback that keeps the relay busy more than half the time (over that window)
+ * is stopped too. Native work inside one host call (a large zlib *Sync call,
+ * allocating a huge Buffer) and memory use are not bounded this way.
  *
  * The slice timeout is V8's TerminateExecution: it can land anywhere on the
  * stack, including inside a host function the sandbox called synchronously
@@ -54,7 +55,6 @@ import buffer from "node:buffer"
 import crypto from "node:crypto"
 import util from "node:util"
 import vm from "node:vm"
-import { ExecuteCpuScheduler } from "./execute-realm/cpu-scheduler.ts"
 import {
   allowForegroundEnvironmentVariable,
   allowNodeEnvironmentVariable,
@@ -82,6 +82,7 @@ import {
   type PreparedExecuteFileOutputs,
 } from "./execute-realm/file-roots.ts"
 import { installRealmGlobals, populateHostToSandboxIntrinsics } from "./execute-realm/globals.ts"
+import { cancelExecuteWaiters, chargeExecuteCpu, releaseExecuteTurn, waitForExecuteTurn } from "./execute-realm/cpu-budget.ts"
 import {
   containsDynamicImport,
   deniedHostClasses,
@@ -112,7 +113,6 @@ export {
   executeFilesDirectory,
   executeSliceEnvironmentVariable,
   executeSliceMs,
-  ExecuteCpuScheduler,
   fileRootsEnvironmentVariable,
   handleExecuteRealmException,
   handleExecuteRealmRejection,
@@ -147,11 +147,14 @@ export class ExecuteRealm {
   // Host function -> the checkHostCall-guarded proxy host helpers receive instead.
   private readonly guardedHostFunctions = new WeakMap<Function, Function>()
   private readonly forceProxy = new WeakSet<object>()
-  // Timer state, the scheduler and `stopped` are not private: ./execute-realm/globals.ts schedules timers on them.
+  // Timer state and `stopped` are not private: ./execute-realm/globals.ts schedules timers on them.
   readonly timers = new Map<number, ReturnType<typeof setTimeout>>()
   nextTimer = 0
-  readonly scheduler: ExecuteCpuScheduler
   private entryDepth = 0
+  private readonly sliceMs = executeSliceMs()
+  // CPU accounting, the relay-wide window and admission live in ./execute-realm/cpu-budget.ts.
+  private readonly disposed: Promise<void>
+  private signalDisposed!: () => void
   stopped: Error | undefined
   private readonly pendingRuns = new Set<(error: Error) => void>()
   private readonly entryKey = `__execute_${crypto.randomUUID().replaceAll("-", "")}`
@@ -166,12 +169,10 @@ export class ExecuteRealm {
   constructor(options: {
     readonly onHostCall?: (fn: Function, receiver: unknown, args: readonly unknown[]) => void
     readonly onUnhandledRejection?: (warning: string) => void
-    /** The relay's shared scheduler; a standalone realm gets its own. */
-    readonly scheduler?: ExecuteCpuScheduler
   } = {}) {
-    this.scheduler = options.scheduler ?? new ExecuteCpuScheduler()
     this.onHostCall = options.onHostCall
     this.onUnhandledRejection = options.onUnhandledRejection
+    this.disposed = new Promise((resolve) => { this.signalDisposed = resolve })
     const importModuleDynamically = this.refuseDynamicImport
     const dontContextify = (vm.constants as unknown as { readonly DONT_CONTEXTIFY?: unknown } | undefined)?.DONT_CONTEXTIFY
     this.context = vm.createContext((dontContextify ?? Object.create(null)) as vm.Context, {
@@ -215,11 +216,12 @@ export class ExecuteRealm {
   dispose(error = new Error("Execute stopped")): void {
     if (this.stopped) return
     this.stopped = error
+    this.signalDisposed()
+    cancelExecuteWaiters(this)
     for (const timer of this.timers.values()) clearTimeout(timer)
     this.timers.clear()
     for (const reject of this.pendingRuns) reject(error)
     this.pendingRuns.clear()
-    this.scheduler.forget(this)
   }
 
   get isStopped(): boolean { return this.stopped !== undefined }
@@ -241,14 +243,13 @@ export class ExecuteRealm {
     }
     const untrack = trackPromisesOf(this)
     this.entryDepth += 1
-    this.scheduler.begin()
     const startedAt = process.threadCpuUsage()
     try {
-      return this.entryScript.runInContext(this.context, { timeout: this.scheduler.sliceMs }) as T
+      return this.entryScript.runInContext(this.context, { timeout: this.sliceMs }) as T
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code === "ERR_SCRIPT_EXECUTION_TIMEOUT") {
         this.dispose(new Error(
-          `Execute exceeded its synchronous CPU budget: JavaScript ran for over ${this.scheduler.sliceMs}ms without yielding, which stalls every session on the relay. ` +
+          `Execute exceeded its synchronous CPU budget: JavaScript ran for over ${this.sliceMs}ms without yielding, which stalls every session on the relay. ` +
           "Likely causes: a loop that never ends, a slow regular expression, or converting a very large value. " +
           "Split heavy work into chunks separated by `await new Promise(r => setTimeout(r, 0))`, do it in the page with page.evaluate(), or return less data " +
           `(the relay's limit is ${executeSliceEnvironmentVariable}). JavaScript state will reset before the next execute.`,
@@ -260,20 +261,48 @@ export class ExecuteRealm {
       this.entryDepth -= 1
       untrack()
       Reflect.deleteProperty(this.global, this.entryKey)
-      if (this.scheduler.end(this, process.threadCpuUsage(startedAt)) && !this.stopped) {
-        this.dispose(new Error(
-          "Execute exceeded its sustained CPU budget: its callbacks and timers kept the relay's JavaScript busy more than half the time, which stalls every session on the relay. " +
-          "Do heavy work in the page with page.evaluate(), or wait longer between timer or event callbacks. JavaScript state will reset before the next execute.",
-        ))
-      }
+      this.chargeBusyTime(process.threadCpuUsage(startedAt))
     }
+  }
+
+  private chargeBusyTime(cpu: NodeJS.CpuUsage): void {
+    // The shared ledger keeps the relay-wide window; its return value is this realm's own share,
+    // so the per-realm sustained budget stays exactly as it was.
+    const busyMs = chargeExecuteCpu(this, (cpu.user + cpu.system) / 1000)
+    if (busyMs > this.sliceMs * 1.5 && !this.stopped) {
+      this.dispose(new Error(
+        "Execute exceeded its sustained CPU budget: its callbacks and timers kept the relay's JavaScript busy more than half the time, which stalls every session on the relay. " +
+        "Do heavy work in the page with page.evaluate(), or wait longer between timer or event callbacks. JavaScript state will reset before the next execute.",
+      ))
+    }
+  }
+
+  /**
+   * Run a continuation that an async host callback is handing back to the sandbox. Outside an
+   * entry it waits for a relay-wide turn first; synchronous host-to-sandbox calls do not come here.
+   */
+  private afterHostTurn(run: () => void, onStopped: () => void = () => {}): void {
+    if (this.stopped) { onStopped(); return }
+    if (this.entryDepth > 0) { run(); return }
+    const turn = waitForExecuteTurn(this)
+    if (turn === undefined) { run(); return }
+    let granted = false
+    void Promise.race([turn.then(() => { granted = true }), this.disposed]).then(() => {
+      if (!this.stopped) { run(); return }
+      // The turn was granted but the realm stopped before it ran any sandbox code, so nothing was
+      // charged; pass the turn to the next waiter instead of leaving it for the fallback timer.
+      if (granted) releaseExecuteTurn()
+      onStopped()
+    })
   }
 
   private drainMicrotasks(): void {
     if (this.stopped || this.entryDepth > 0) return
-    try { this.enter(() => {}) } catch (error) {
-      this.dispose(error instanceof Error ? error : new Error("Execute microtask failed"))
-    }
+    this.afterHostTurn(() => {
+      try { this.enter(() => {}) } catch (error) {
+        this.dispose(error instanceof Error ? error : new Error("Execute microtask failed"))
+      }
+    })
   }
 
   /** Make a host object cross as a proxy even when it is plain data (module objects, helper namespaces). */
@@ -306,16 +335,22 @@ export class ExecuteRealm {
     void stopped.catch(() => {})
     this.pendingRuns.add(rejectRun)
     try {
-      if (this.stopped) throw this.stopped
-      const result = new Promise((resolve, reject) => this.scheduler.schedule(this, () => {
-        try {
-          resolve(this.enter(() => {
-            const fn = new vm.Script(options.source, { filename: options.filename, importModuleDynamically } as vm.ScriptOptions).runInContext(this.context)
-            const args = options.args.map((value, index) => options.sandboxArgs?.has(index) ? options.sandboxArgs.get(index) : this.toSandbox(value))
-            return this.toHost(Reflect.apply(fn as Function, undefined, args))
-          }))
-        } catch (error) { reject(error) }
-      }))
+      // Starting a run is already asynchronous, so it can wait for a relay-wide turn. The
+      // stopped promise rejects the wait when the realm is disposed while queued.
+      const turn = this.stopped ? undefined : waitForExecuteTurn(this)
+      if (turn !== undefined) {
+        await Promise.race([turn, stopped])
+        // Disposed after this run's turn was granted: it never entered the sandbox, so wake the next.
+        if (this.stopped) {
+          releaseExecuteTurn()
+          throw this.stopped
+        }
+      }
+      const result = this.enter(() => {
+        const fn = new vm.Script(options.source, { filename: options.filename, importModuleDynamically } as vm.ScriptOptions).runInContext(this.context)
+        const args = options.args.map((value, index) => options.sandboxArgs?.has(index) ? options.sandboxArgs.get(index) : this.toSandbox(value))
+        return this.toHost(Reflect.apply(fn as Function, undefined, args))
+      })
       return await Promise.race([result, stopped])
     } catch (error) {
       throw this.toHostThrown(error)
@@ -420,22 +455,26 @@ export class ExecuteRealm {
   private toSandboxPromise(promise: Promise<unknown>): Promise<unknown> {
     return new this.SandboxPromise((resolve, reject) => {
       promise.then(
-        (value) => this.scheduler.schedule(this, () => {
+        (value) => {
           if (this.stopped) return
-          try {
-            this.enter(() => resolve(this.toSandbox(value)))
-          } catch (error) {
-            if (!this.stopped) this.enter(() => reject(this.toSandboxThrown(error)))
-          }
-          this.drainMicrotasks()
-        }),
-        (error: unknown) => this.scheduler.schedule(this, () => {
+          this.afterHostTurn(() => {
+            try {
+              this.enter(() => resolve(this.toSandbox(value)))
+            } catch (error) {
+              if (!this.stopped) this.enter(() => reject(this.toSandboxThrown(error)))
+            }
+            this.drainMicrotasks()
+          })
+        },
+        (error: unknown) => {
           if (this.stopped) return
-          try { this.enter(() => reject(this.toSandboxThrown(error))) } catch (failure) {
-            this.dispose(failure instanceof Error ? failure : new Error("Execute promise callback failed"))
-          }
-          this.drainMicrotasks()
-        }),
+          this.afterHostTurn(() => {
+            try { this.enter(() => reject(this.toSandboxThrown(error))) } catch (failure) {
+              this.dispose(failure instanceof Error ? failure : new Error("Execute promise callback failed"))
+            }
+            this.drainMicrotasks()
+          })
+        },
       )
     })
   }
@@ -701,16 +740,21 @@ export class ExecuteRealm {
 
   private toHostPromise(promise: Promise<unknown>): Promise<unknown> {
     return new Promise((resolve, reject) => {
+      const stopped = () => reject(this.stopped ?? new Error("Execute stopped"))
       Reflect.apply(this.sandboxAwait, undefined, [promise,
         (value: unknown) => {
-          try {
-            resolve(this.enter(() => this.toHost(value)))
-          } catch (error) {
-            reject(this.stopped ?? this.enter(() => this.toHostThrown(error)))
-          }
+          this.afterHostTurn(() => {
+            try {
+              resolve(this.enter(() => this.toHost(value)))
+            } catch (error) {
+              reject(this.stopped ?? this.enter(() => this.toHostThrown(error)))
+            }
+          }, stopped)
         },
         (error: unknown) => {
-          try { reject(this.enter(() => this.toHostThrown(error))) } catch (failure) { reject(failure) }
+          this.afterHostTurn(() => {
+            try { reject(this.enter(() => this.toHostThrown(error))) } catch (failure) { reject(failure) }
+          }, stopped)
         },
       ])
     })
