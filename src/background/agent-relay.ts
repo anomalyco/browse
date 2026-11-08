@@ -480,7 +480,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     return recordingTabs.has(tabId) || state === "waiting" || state === "running"
   })
   AgentGroups.keepOpenWhile((tabId) => pageStatuses.get(tabId)?.state === "waiting")
-  chrome.tabs.onRemoved.addListener((tabId) => {
+  const tabRemoved = (tabId: number) => {
     recordingTabs.delete(tabId)
     canceledAgentTabs.delete(tabId)
     void chrome.runtime.sendMessage({ action: "recording.cancel", tabId }).catch(() => undefined)
@@ -490,7 +490,11 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     if (badges.delete(tabId)) input.badgesChanged()
     send({ method: "tabs.removed", params: { tabId } })
     grouping.recountShared()
-  })
+  }
+  chrome.tabs.onRemoved.addListener((tabId) => tabRemoved(tabId))
+  // A tab Chrome swaps for another (a discard, a prerender) gets a new id and no onRemoved for the old one, which
+  // the relay would otherwise keep as a target that answers "No tab with given id".
+  chrome.tabs.onReplaced.addListener((_addedTabId, removedTabId) => tabRemoved(removedTabId))
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === ALARM && !retry) void connect("alarm")
   })
