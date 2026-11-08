@@ -15,6 +15,7 @@ export const minExtensionProtocolVersion = 3
 
 export const unpackedExtensionId = "afeafocngkodbmaipcngoamamfmekgfo"
 export const browserUnresponsive = "The browser isn't responding (asleep or frozen?). Wake it and try again."
+export const browserReloading = "browse stopped answering in this browser for over a minute, so the relay asked it to reload. Try again in a few seconds."
 export const unpackedReloadAdvice = "Reload browse on your browser's extensions page (↻)."
 // A close reason, not an RPC. Older workers just see extension-older; newer workers verify the build locally.
 export const checkoutReloadPrefix = "Extension protocol incompatible: extension-older; reload "
