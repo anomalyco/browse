@@ -368,6 +368,23 @@ describe("Node escape corpus", () => {
     expect(outcome!.elapsedMs!).toBeLessThan(sliceMs * 6)
   }, 30_000)
 
+  test("the sustained budget charges CPU time, not slices stretched by a loaded machine or other sessions", () => {
+    const sliceMs = 100
+    // host.stall keeps the relay thread off the CPU mid-slice, as a descheduled thread or a page fault does.
+    const setup = `
+      const stallCell = new Int32Array(new SharedArrayBuffer(4))
+      host.stall = (ms) => { Atomics.wait(stallCell, 0, 0, ms) }
+      host.later = () => new Promise((resolve) => setTimeout(resolve, 1))
+      host.busyOtherSession = () => { const other = setInterval(() => { const end = performance.now() + 40; while (performance.now() < end) {} }, 10); setTimeout(() => clearInterval(other), 1500) }
+    `
+    const outcomes = runInNode([
+      `for (let i = 0; i < 40; i++) { host.stall(${sliceMs * 0.05}); await host.later() } return "short stalls"`,
+      `for (let i = 0; i < 6; i++) { host.stall(${sliceMs * 0.6}); await host.later() } return "long stalls"`,
+      `host.busyOtherSession(); for (let i = 0; i < 40; i++) await host.later(); return "busy relay"`,
+    ], setup, { OPENCODE_BROWSER_EXECUTE_SLICE_MS: String(sliceMs) })
+    expect(values(outcomes)).toEqual([{ value: "short stalls" }, { value: "long stalls" }, { value: "busy relay" }])
+  }, 30_000)
+
   test("a few heavy operations back to back stay under the sustained budget", () => {
     const sliceMs = 200
     const busy = (fraction: number) => `{ const end = performance.now() + ${sliceMs * fraction}; while (performance.now() < end) {} }`

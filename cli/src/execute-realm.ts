@@ -30,9 +30,10 @@
  * Execute JavaScript shares the relay's event loop with every session, so each
  * synchronous slice (initial code, callback, timer, promise continuation and the
  * microtasks it queues) is cut off after OPENCODE_BROWSER_EXECUTE_SLICE_MS, and
- * callbacks that keep the loop busy more than half the time (over a window of
- * three slices) are stopped too. Native work inside one host call (a large zlib
- * *Sync call, allocating a huge Buffer) and memory use are not bounded this way.
+ * callbacks that use the relay thread's CPU more than half the time (over a
+ * window of three slices) are stopped too. Native work inside one host call (a
+ * large zlib *Sync call, allocating a huge Buffer) and memory use are not
+ * bounded this way.
  *
  * The slice timeout is V8's TerminateExecution: it can land anywhere on the
  * stack, including inside a host function the sandbox called synchronously
@@ -151,6 +152,8 @@ export class ExecuteRealm {
   // Sliding window of VM time: the realm's slices may use at most half of the last three slice
   // lengths of wall time (3 s of 6 s by default), so a busy setInterval stops within a few
   // seconds while one full slice, or a few heavy operations back to back, still pass.
+  // Slices are charged the relay thread's CPU time, not their wall time: on a loaded machine the
+  // thread can sit descheduled mid-slice, and that wait is not work this realm made the relay do.
   private readonly busyWindowMs = this.sliceMs * 3
   private readonly busySlices: Array<{ readonly start: number; readonly end: number }> = []
   stopped: Error | undefined
@@ -240,7 +243,7 @@ export class ExecuteRealm {
     }
     const untrack = trackPromisesOf(this)
     this.entryDepth += 1
-    const startedAt = performance.now()
+    const startedAt = process.threadCpuUsage()
     try {
       return this.entryScript.runInContext(this.context, { timeout: this.sliceMs }) as T
     } catch (error) {
@@ -258,14 +261,14 @@ export class ExecuteRealm {
       this.entryDepth -= 1
       untrack()
       Reflect.deleteProperty(this.global, this.entryKey)
-      this.chargeBusyTime(performance.now() - startedAt)
+      this.chargeBusyTime(process.threadCpuUsage(startedAt))
     }
   }
 
-  private chargeBusyTime(elapsedMs: number): void {
+  private chargeBusyTime(cpu: NodeJS.CpuUsage): void {
     const now = performance.now()
     const windowStart = now - this.busyWindowMs
-    this.busySlices.push({ start: now - elapsedMs, end: now })
+    this.busySlices.push({ start: now - (cpu.user + cpu.system) / 1000, end: now })
     while (this.busySlices.length > 0 && this.busySlices[0]!.end <= windowStart) this.busySlices.shift()
     let busyMs = 0
     for (const slice of this.busySlices) busyMs += slice.end - Math.max(slice.start, windowStart)
