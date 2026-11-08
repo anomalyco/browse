@@ -22,11 +22,15 @@
 
 function Install-browse {
     param([string[]]$Arguments)
+    # Function scope: this doesn't leak to the caller's session. It covers the property probing below and the
+    # dot-sourced download blocks, which run in this same scope, under a caller's `Set-StrictMode -Version Latest`.
+    Set-StrictMode -Off
     # Everything runs in this function so a failure stops it without closing the window `irm | iex` runs in.
     $ErrorActionPreference = "Stop"
     $ProgressPreference = "SilentlyContinue"
 
     $requested = $env:VERSION
+    $pinned = [bool]$env:VERSION
     $channel = if ($env:BROWSE_CHANNEL) { $env:BROWSE_CHANNEL } else { "stable" }
     $binary = $null
     $noSetup = $false
@@ -58,6 +62,7 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
             "^(-v|--version|-Version)$" {
                 if ($i + 1 -ge $Arguments.Count) { throw "--version requires a version argument" }
                 $requested = [string]$Arguments[++$i]
+                $pinned = $true
                 continue
             }
             "^(--channel|-Channel)$" {
@@ -117,15 +122,31 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
 
             $package = "@opencode/browse-windows-$target"
             $encoded = "@opencode%2fbrowse-windows-$target"
-            if ($requested) {
+            if ($pinned) {
                 $version = $requested -replace "^v", ""
-                try { Invoke-RestMethod -UseBasicParsing "https://registry.npmjs.org/$encoded/$version" | Out-Null }
+                if (-not $version) { throw "--version needs a version, e.g. 0.0.14" }
+                # Keep the version metadata: its dist.integrity is the tarball's SHA-512.
+                try { $metadata = Invoke-RestMethod -UseBasicParsing "https://registry.npmjs.org/$encoded/$version" }
                 catch {
                     $status = $null
                     try { $status = [int]$_.Exception.Response.StatusCode } catch {}
                     if ($status -eq 404) { throw "browse $version is not available for windows-$target. Available versions: https://www.npmjs.com/package/${package}?activeTab=versions" }
                     throw "Failed to fetch package information: $($_.Exception.Message)"
                 }
+                $integrity = [string]$metadata.dist.integrity
+                if (-not $integrity) {
+                    throw "$package@$version has no published SHA-512 integrity; nothing was installed"
+                }
+                $sri = [regex]::Match($integrity, '(?:^|\s)sha512-([A-Za-z0-9+/]+={0,2})(?:\s|$)')
+                if (-not $sri.Success) {
+                    throw "$package@$version has no usable SHA-512 integrity; nothing was installed"
+                }
+                try { $expectedBytes = [Convert]::FromBase64String($sri.Groups[1].Value) }
+                catch { throw "$package@$version has an invalid SHA-512 integrity; nothing was installed" }
+                if ($expectedBytes.Length -ne 64) {
+                    throw "$package@$version has an invalid SHA-512 integrity; nothing was installed"
+                }
+                $expectedSha512 = ([BitConverter]::ToString($expectedBytes) -replace "-", "").ToLowerInvariant()
             } else {
                 # The channel's current release from the Anomaly release service (anomalyco/release docs/protocol.md). The
                 # manifest names the file for this target; its size and SHA-256 must match before it is used.
@@ -158,6 +179,10 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
             Write-Host ""
             Write-Host "Installing browse version: $version"
             Invoke-WebRequest -UseBasicParsing -Uri "https://registry.npmjs.org/$package/-/$filename" -OutFile $archive
+            $actualSha = (Get-FileHash -Algorithm SHA512 -LiteralPath $archive).Hash.ToLowerInvariant()
+            if ($actualSha -ne $expectedSha512) {
+                throw "checksum mismatch for $package@$version ($filename): expected $expectedSha512, got $actualSha; nothing was installed"
+            }
 
             # Windows 10 and later ship bsdtar as System32\tar.exe; another tar on PATH (Git's) can't read C:\ paths.
             $tar = Join-Path $env:SystemRoot "System32\tar.exe"
@@ -188,7 +213,7 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
             if (-not (Test-Path -LiteralPath $source)) { throw "$filename has no package\bin\browse.exe" }
         }
         if (-not $binary) {
-            if (-not $requested) {
+            if (-not $pinned) {
                 . $downloadService
             } else {
                 foreach ($delay in 0, 15, 30, 60, 75) {
@@ -200,7 +225,7 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
                         $response = $_.Exception.Response
                         if ([int]$response.StatusCode -ne 404) { throw }
                         if ($delay -ne 75) { continue }
-                        if ($requested -or $channel -notin 'latest', 'dev') { throw }
+                        if ($pinned -or $channel -notin 'latest', 'dev') { throw }
                         # Windows PowerShell uses HttpWebResponse; PowerShell Core uses HttpResponseMessage.
                         $uri = if ($response.ResponseUri) { $response.ResponseUri } else { $response.RequestMessage.RequestUri }
                         $versions = (Invoke-RestMethod -UseBasicParsing ([uri]::new($uri, "/$encoded"))).versions.PSObject.Properties.Name
