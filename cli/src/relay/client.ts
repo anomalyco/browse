@@ -70,6 +70,10 @@ export const extensionOriginsConfig = Config.String("OPENCODE_BROWSER_EXTENSION_
 
 export const endpointForPort = (port: number): string => `http://127.0.0.1:${port}`
 
+/** How long a read waits before this client has had any answer from the port, and after. See `make`. */
+export const unknownRelayReadSeconds = 5
+export const busyRelayReadSeconds = 30
+
 export class RelayUnreachable extends Schema.TaggedError<RelayUnreachable>()(
   "RelayClient.RelayUnreachable",
   {
@@ -245,14 +249,24 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
     return options?.clientPid === undefined ? authorized : HttpClientRequest.setHeader(authorized, "opencode-browser-client-pid", String(options.clientPid))
   }
 
+  // Every session's execute code shares the relay's event loop, so under load even /version can wait several seconds
+  // for its turn. Until this client has had any answer on the port, a stalled read means a frozen relay or another
+  // program, and fails fast. Once the relay has answered, a stalled read is most likely a busy relay, so it waits longer.
+  let relayAnswered = false
+  const execute = (request: HttpClientRequest.HttpClientRequest) =>
+    httpClient.execute(authorize(request)).pipe(Effect.tap(() => Effect.sync(() => { relayAnswered = true })))
+
   const getJson = <A>(path: string, schema: Schema.ConstraintDecoder<A>): Effect.Effect<A, RelayClientError> =>
-    Effect.suspend(() => httpClient.execute(authorize(HttpClientRequest.get(new URL(path, endpoint))))).pipe(
-      Effect.mapError(transportError(path)),
-      Effect.flatMap((response) => handleResponse(response, path, schema)),
-      Effect.timeoutOrElse({ duration: 5000, orElse: () => Effect.fail(new RelayTimedOut({
-        message: `The relay on port ${new URL(endpoint).port} isn't answering (${path} timed out).`, path,
-      })) }),
-    )
+    Effect.suspend(() => {
+      const seconds = relayAnswered ? busyRelayReadSeconds : unknownRelayReadSeconds
+      return execute(HttpClientRequest.get(new URL(path, endpoint))).pipe(
+        Effect.mapError(transportError(path)),
+        Effect.flatMap((response) => handleResponse(response, path, schema)),
+        Effect.timeoutOrElse({ duration: `${seconds} seconds`, orElse: () => Effect.fail(new RelayTimedOut({
+          message: `The relay on port ${new URL(endpoint).port} isn't answering (${path} timed out after ${seconds}s).`, path,
+        })) }),
+      )
+    })
 
   // Writes can legitimately wait for a human handoff or a command with no deadline. Probe the relay while waiting,
   // rather than shortening those operations or retrying a write whose outcome we don't know.
@@ -269,7 +283,7 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
       path,
       cause,
     })),
-    Effect.flatMap((request) => httpClient.execute(authorize(request)).pipe(
+    Effect.flatMap((request) => execute(request).pipe(
       Effect.mapError(transportError(path)),
       Effect.flatMap((response) => handleResponse(response, path, schema)),
       Effect.raceFirst(checkWhileWaiting),
