@@ -40,6 +40,8 @@ export type AdoptionResult = {
 }
 
 export const defaultExecuteTimeoutMs = 60_000
+/** How long relay shutdown waits for accepted session work before leaving it behind. */
+export const defaultShutdownTimeoutMs = 3_000
 
 export type SessionHooks = {
   readonly checkBrowserResponsive?: (key: string) => Effect.Effect<void, Error>

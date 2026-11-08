@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { Effect } from "effect"
 import type { Page } from "patchright-core"
 import { ExecuteSandbox } from "../src/execute.ts"
+import type { ExecuteSandboxLike } from "../src/relay/types.ts"
 import { OpenCodeBrowserSessions } from "../src/session-manager.ts"
 
 // A session's close is tracked work, and a relay restart (so every auto-update) waits for tracked work to finish. A page
@@ -56,4 +57,50 @@ test("deleting a session whose page never closes doesn't hold the relay's drain"
 
   await within(Effect.runPromise(sessions.beginDrain()), 5_000, "the drain")
   expect(sessions.isDrained()).toBe(true)
+}, 10_000)
+
+/** A sandbox whose script never settles, so an execute keeps holding the session's accepted work. */
+class NeverFinishingSandbox implements ExecuteSandboxLike {
+  execute() { return Effect.never }
+  authenticatedJson(): never { throw new Error("unused") }
+  adoptPage() { return Effect.void }
+  abortExecution() { return Effect.void }
+  disconnectSettled() { return Effect.void }
+  closeSettled() { return Effect.void }
+  networkStart(): never { throw new Error("unused") }
+  networkStatus() { return { active: false } as never }
+  networkStop(): never { throw new Error("unused") }
+  networkCancel() { return Effect.succeed({ cancelled: false }) }
+  networkEnd() { return Effect.succeed({ cancelled: false }) }
+  authRefresh(): never { throw new Error("unused") }
+  redactNetworkCaptureText(text: string) { return text }
+  markTargetCrashed() { return false }
+  markTargetProtectedUi() { return false }
+  markTargetDetached() { return false }
+  markTargetReplaced() { return false }
+  restore() {}
+  getStatus() { return { connected: true, pageUrl: null, stateKeys: [] } }
+}
+
+test("shutdown stops waiting for a session whose work never finishes", async () => {
+  const sessions = new OpenCodeBrowserSessions("http://127.0.0.1:0", () => new NeverFinishingSandbox(), {
+    executeTimeoutMs: 0,
+    lifecycleTimeoutMs: 200,
+  })
+  // Left pending on purpose: this is the session work that never finishes.
+  void Effect.runPromise(sessions.execute({ sessionId: "stuck", code: "...", createIfMissing: true })).catch(() => {})
+  for (let attempt = 0; attempt < 50 && !sessions.isExecuting("stuck"); attempt++) await Bun.sleep(5)
+  expect(sessions.isExecuting("stuck")).toBe(true)
+
+  const stalled: Array<readonly string[]> = []
+  const started = Date.now()
+  await within(
+    Effect.runPromise(sessions.closeAll({ timeoutMs: 100, onStalled: (sessionIds) => { stalled.push(sessionIds) } })),
+    2_000,
+    "a shutdown waiting for a session that never finishes",
+  )
+
+  expect(stalled).toEqual([["stuck"]])
+  expect(Date.now() - started).toBeLessThan(1_000)
+  expect(sessions.sessions.size).toBe(0)
 }, 10_000)

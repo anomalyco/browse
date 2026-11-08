@@ -51,7 +51,7 @@ import { createRelayTransportServers } from "./relay/transport-server.ts"
 import { RootTargetLifecycle } from "./cdp/root-target-lifecycle.ts"
 import { defaultSessionCatalogPath, SessionCatalog } from "./session-manager/catalog.ts"
 import { appendJournalEntry, defaultJournalBaseDir, makeJournalEntry } from "./session-manager/journal.ts"
-import { defaultExecuteTimeoutMs, OpenCodeBrowserSessions } from "./session-manager.ts"
+import { defaultExecuteTimeoutMs, defaultShutdownTimeoutMs, OpenCodeBrowserSessions } from "./session-manager.ts"
 import { SessionNavigationGuard } from "./session-manager/navigation-guard.ts"
 import { TabActivity } from "./cdp/tab-activity.ts"
 import { TargetRegistry, type RootTargetChange, type TargetOwnershipChange } from "./cdp/target-registry.ts"
@@ -708,7 +708,12 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     stopTimers()
     autoUpdater?.stop()
     yield* shutdownControl.close().pipe(Effect.ignore)
-    yield* sessions.closeAll()
+    yield* sessions.closeAll({
+      onStalled: (sessionIds) => relayLog("relay.shutdown.stalled", {
+        sessions: sessionIds.length > 0 ? sessionIds.join(",") : "none",
+        waitedMs: defaultShutdownTimeoutMs,
+      }),
+    })
     yield* rootLifecycle.close()
     if (managed) {
       yield* audit(RelayLifecycleEvent.cases.Closed.make({ instanceId: browserId })).pipe(
