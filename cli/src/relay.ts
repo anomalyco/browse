@@ -259,6 +259,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         onDefaultTargetChange,
         allowedOrigins: () => sessions.allowedOrigins(id),
         drainGuardWarnings: () => navigationGuard.drainWarnings(id),
+        cpuScheduler: sessions.cpuScheduler,
         isRecordingTarget: (targetId) => {
           const target = registry.targetsByTargetId.get(targetId)
           return target !== undefined && isTabRecorded(target.tabId)
