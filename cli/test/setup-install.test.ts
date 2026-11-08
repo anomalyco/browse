@@ -24,6 +24,8 @@ test("identifies the calling agent, not the editor hosting a regular terminal", 
   expect(callingAgent({ TERM_PROGRAM: "vscode", CODEX_HOME: "/home/me/.codex" })).toBeUndefined()
   expect(callingAgent({ GEMINI_CLI: "1" })).toBe("gemini")
   expect(callingAgent({ OPENCODE_SESSION_ID: "session" })).toBe("opencode")
+  expect(callingAgent({ PI_SESSION_ID: "session" })).toBe("pi")
+  expect(callingAgent({ AI_AGENT: "pi" })).toBe("pi")
   expect(callingAgent({ AMP_CURRENT_THREAD_ID: "thread" })).toBe("amp")
   expect(callingAgent({ AI_AGENT: "goose@1.2.3" })).toBe("goose")
 })
@@ -166,10 +168,12 @@ test("every picker choice has one user-scoped destination; config dirs and binar
   try {
     const config = path.join(home, ".config")
     fs.mkdirSync(path.join(home, ".qwen"))
+    fs.mkdirSync(path.join(home, ".pi/agent"), { recursive: true })
     const locations = agentLocations(home, config, bin => bin === "droid", path.join(config, "opencode/opencode.json"))
     expect(locations.map(a => a.name).sort()).toEqual([...agentNames].sort())
     expect(locations.find(a => a.name === "qwen-code")).toMatchObject({ installed: true, file: path.join(home, ".qwen/settings.json") })
     expect(locations.find(a => a.name === "droid")).toMatchObject({ installed: true, file: path.join(home, ".factory/mcp.json") })
+    expect(locations.find(a => a.name === "pi")).toMatchObject({ installed: true, file: path.join(home, ".pi/agent/mcp.json") })
     expect(locations.find(a => a.name === "junie")?.installed).toBe(false)
   } finally { fs.rmSync(home, { recursive: true, force: true }) }
 })
