@@ -46,6 +46,10 @@ export function populateHostToSandboxIntrinsics(hostToSandbox: Map<unknown, unkn
  * from the realm's one counter; a stopped realm hands an id out without scheduling. A throwing
  * callback disposes the realm so the next execute starts from clean state. `queueMicrotask` is
  * built inside the context so it never holds a host function.
+ *
+ * A due timer waits in the realm's scheduler queue while other sessions' work runs. It keeps its id
+ * until the callback starts, so clearing it while queued cancels it, and an interval that comes due
+ * again while still queued is not queued twice.
  */
 export function installRealmGlobals(realm: ExecuteRealm, target: Record<string, unknown>): void {
   const schedule = (repeat: boolean, callback: (...args: unknown[]) => unknown, delay = 0, ...args: unknown[]) => {
@@ -53,14 +57,21 @@ export function installRealmGlobals(realm: ExecuteRealm, target: Record<string, 
     if (typeof callback !== "function") throw new TypeError("The timer callback must be a function")
     const id = ++realm.nextTimer
     if (realm.stopped) return id
+    let queued = false
     const fire = () => {
+      queued = false
+      if (realm.stopped || !realm.timers.has(id)) return
       if (!repeat) realm.timers.delete(id)
-      if (realm.stopped) return
       try { callback(...args) } catch {
         realm.dispose(new Error("Execute timer callback failed; JavaScript state will reset before the next execute"))
       }
     }
-    realm.timers.set(id, (repeat ? setInterval : setTimeout)(fire, delay))
+    const due = () => {
+      if (queued) return
+      queued = true
+      realm.scheduler.schedule(realm, fire)
+    }
+    realm.timers.set(id, (repeat ? setInterval : setTimeout)(due, delay))
     return id
   }
   const clear = (id: number) => {

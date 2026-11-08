@@ -31,9 +31,10 @@
  * synchronous slice (initial code, callback, timer, promise continuation and the
  * microtasks it queues) is cut off after OPENCODE_BROWSER_EXECUTE_SLICE_MS, and
  * callbacks that use the relay thread's CPU more than half the time (over a
- * window of three slices) are stopped too. Native work inside one host call (a
- * large zlib *Sync call, allocating a huge Buffer) and memory use are not
- * bounded this way.
+ * window of three slices) are stopped too. Async entries are queued fairly
+ * between sessions and paced so the relay keeps answering (cpu-scheduler.ts).
+ * Native work inside one host call (a large zlib *Sync call, allocating a huge
+ * Buffer) and memory use are not bounded this way.
  *
  * The slice timeout is V8's TerminateExecution: it can land anywhere on the
  * stack, including inside a host function the sandbox called synchronously
@@ -53,6 +54,7 @@ import buffer from "node:buffer"
 import crypto from "node:crypto"
 import util from "node:util"
 import vm from "node:vm"
+import { ExecuteCpuScheduler } from "./execute-realm/cpu-scheduler.ts"
 import {
   allowForegroundEnvironmentVariable,
   allowNodeEnvironmentVariable,
@@ -110,6 +112,7 @@ export {
   executeFilesDirectory,
   executeSliceEnvironmentVariable,
   executeSliceMs,
+  ExecuteCpuScheduler,
   fileRootsEnvironmentVariable,
   handleExecuteRealmException,
   handleExecuteRealmRejection,
@@ -144,18 +147,11 @@ export class ExecuteRealm {
   // Host function -> the checkHostCall-guarded proxy host helpers receive instead.
   private readonly guardedHostFunctions = new WeakMap<Function, Function>()
   private readonly forceProxy = new WeakSet<object>()
-  // Timer state and `stopped` are not private: ./execute-realm/globals.ts schedules timers on them.
+  // Timer state, the scheduler and `stopped` are not private: ./execute-realm/globals.ts schedules timers on them.
   readonly timers = new Map<number, ReturnType<typeof setTimeout>>()
   nextTimer = 0
+  readonly scheduler: ExecuteCpuScheduler
   private entryDepth = 0
-  private readonly sliceMs = executeSliceMs()
-  // Sliding window of VM time: the realm's slices may use at most half of the last three slice
-  // lengths of wall time (3 s of 6 s by default), so a busy setInterval stops within a few
-  // seconds while one full slice, or a few heavy operations back to back, still pass.
-  // Slices are charged the relay thread's CPU time, not their wall time: on a loaded machine the
-  // thread can sit descheduled mid-slice, and that wait is not work this realm made the relay do.
-  private readonly busyWindowMs = this.sliceMs * 3
-  private readonly busySlices: Array<{ readonly start: number; readonly end: number }> = []
   stopped: Error | undefined
   private readonly pendingRuns = new Set<(error: Error) => void>()
   private readonly entryKey = `__execute_${crypto.randomUUID().replaceAll("-", "")}`
@@ -170,7 +166,10 @@ export class ExecuteRealm {
   constructor(options: {
     readonly onHostCall?: (fn: Function, receiver: unknown, args: readonly unknown[]) => void
     readonly onUnhandledRejection?: (warning: string) => void
+    /** The relay's shared scheduler; a standalone realm gets its own. */
+    readonly scheduler?: ExecuteCpuScheduler
   } = {}) {
+    this.scheduler = options.scheduler ?? new ExecuteCpuScheduler()
     this.onHostCall = options.onHostCall
     this.onUnhandledRejection = options.onUnhandledRejection
     const importModuleDynamically = this.refuseDynamicImport
@@ -210,9 +209,7 @@ export class ExecuteRealm {
   }
 
   /** Pending realm timers, for tests and diagnostics. */
-  get pendingTimers(): number {
-    return this.timers.size
-  }
+  get pendingTimers(): number { return this.timers.size }
 
   /** Revoke callbacks and timers when execution is stopped or its CPU budget is exhausted. */
   dispose(error = new Error("Execute stopped")): void {
@@ -222,6 +219,7 @@ export class ExecuteRealm {
     this.timers.clear()
     for (const reject of this.pendingRuns) reject(error)
     this.pendingRuns.clear()
+    this.scheduler.forget(this)
   }
 
   get isStopped(): boolean { return this.stopped !== undefined }
@@ -243,13 +241,14 @@ export class ExecuteRealm {
     }
     const untrack = trackPromisesOf(this)
     this.entryDepth += 1
+    this.scheduler.begin()
     const startedAt = process.threadCpuUsage()
     try {
-      return this.entryScript.runInContext(this.context, { timeout: this.sliceMs }) as T
+      return this.entryScript.runInContext(this.context, { timeout: this.scheduler.sliceMs }) as T
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code === "ERR_SCRIPT_EXECUTION_TIMEOUT") {
         this.dispose(new Error(
-          `Execute exceeded its synchronous CPU budget: JavaScript ran for over ${this.sliceMs}ms without yielding, which stalls every session on the relay. ` +
+          `Execute exceeded its synchronous CPU budget: JavaScript ran for over ${this.scheduler.sliceMs}ms without yielding, which stalls every session on the relay. ` +
           "Likely causes: a loop that never ends, a slow regular expression, or converting a very large value. " +
           "Split heavy work into chunks separated by `await new Promise(r => setTimeout(r, 0))`, do it in the page with page.evaluate(), or return less data " +
           `(the relay's limit is ${executeSliceEnvironmentVariable}). JavaScript state will reset before the next execute.`,
@@ -261,22 +260,12 @@ export class ExecuteRealm {
       this.entryDepth -= 1
       untrack()
       Reflect.deleteProperty(this.global, this.entryKey)
-      this.chargeBusyTime(process.threadCpuUsage(startedAt))
-    }
-  }
-
-  private chargeBusyTime(cpu: NodeJS.CpuUsage): void {
-    const now = performance.now()
-    const windowStart = now - this.busyWindowMs
-    this.busySlices.push({ start: now - (cpu.user + cpu.system) / 1000, end: now })
-    while (this.busySlices.length > 0 && this.busySlices[0]!.end <= windowStart) this.busySlices.shift()
-    let busyMs = 0
-    for (const slice of this.busySlices) busyMs += slice.end - Math.max(slice.start, windowStart)
-    if (busyMs > this.busyWindowMs / 2 && !this.stopped) {
-      this.dispose(new Error(
-        "Execute exceeded its sustained CPU budget: its callbacks and timers kept the relay's JavaScript busy more than half the time, which stalls every session on the relay. " +
-        "Do heavy work in the page with page.evaluate(), or wait longer between timer or event callbacks. JavaScript state will reset before the next execute.",
-      ))
+      if (this.scheduler.end(this, process.threadCpuUsage(startedAt)) && !this.stopped) {
+        this.dispose(new Error(
+          "Execute exceeded its sustained CPU budget: its callbacks and timers kept the relay's JavaScript busy more than half the time, which stalls every session on the relay. " +
+          "Do heavy work in the page with page.evaluate(), or wait longer between timer or event callbacks. JavaScript state will reset before the next execute.",
+        ))
+      }
     }
   }
 
@@ -317,11 +306,16 @@ export class ExecuteRealm {
     void stopped.catch(() => {})
     this.pendingRuns.add(rejectRun)
     try {
-      const result = this.enter(() => {
-        const fn = new vm.Script(options.source, { filename: options.filename, importModuleDynamically } as vm.ScriptOptions).runInContext(this.context)
-        const args = options.args.map((value, index) => options.sandboxArgs?.has(index) ? options.sandboxArgs.get(index) : this.toSandbox(value))
-        return this.toHost(Reflect.apply(fn as Function, undefined, args))
-      })
+      if (this.stopped) throw this.stopped
+      const result = new Promise((resolve, reject) => this.scheduler.schedule(this, () => {
+        try {
+          resolve(this.enter(() => {
+            const fn = new vm.Script(options.source, { filename: options.filename, importModuleDynamically } as vm.ScriptOptions).runInContext(this.context)
+            const args = options.args.map((value, index) => options.sandboxArgs?.has(index) ? options.sandboxArgs.get(index) : this.toSandbox(value))
+            return this.toHost(Reflect.apply(fn as Function, undefined, args))
+          }))
+        } catch (error) { reject(error) }
+      }))
       return await Promise.race([result, stopped])
     } catch (error) {
       throw this.toHostThrown(error)
@@ -346,9 +340,7 @@ export class ExecuteRealm {
     return false
   }
 
-  private sandboxError(message: string): Error {
-    return new this.SandboxError(message)
-  }
+  private sandboxError(message: string): Error { return new this.SandboxError(message) }
 
   toSandbox(value: unknown, seen: Map<object, unknown> = new Map()): unknown {
     if (!isObjectLike(value)) return value
@@ -428,7 +420,7 @@ export class ExecuteRealm {
   private toSandboxPromise(promise: Promise<unknown>): Promise<unknown> {
     return new this.SandboxPromise((resolve, reject) => {
       promise.then(
-        (value) => {
+        (value) => this.scheduler.schedule(this, () => {
           if (this.stopped) return
           try {
             this.enter(() => resolve(this.toSandbox(value)))
@@ -436,14 +428,14 @@ export class ExecuteRealm {
             if (!this.stopped) this.enter(() => reject(this.toSandboxThrown(error)))
           }
           this.drainMicrotasks()
-        },
-        (error: unknown) => {
+        }),
+        (error: unknown) => this.scheduler.schedule(this, () => {
           if (this.stopped) return
           try { this.enter(() => reject(this.toSandboxThrown(error))) } catch (failure) {
             this.dispose(failure instanceof Error ? failure : new Error("Execute promise callback failed"))
           }
           this.drainMicrotasks()
-        },
+        }),
       )
     })
   }
