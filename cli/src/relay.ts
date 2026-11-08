@@ -39,7 +39,7 @@ import { relayLog } from "./relay/log.ts"
 import { ensurePrivateDirectory, relayToken } from "./relay/secrets.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay/types.ts"
 import { createCdpDispatcher } from "./relay/cdp-dispatch.ts"
-import { createExtensionCommands } from "./relay/commands.ts"
+import { createExtensionCommands, isMissingTabError } from "./relay/commands.ts"
 import { navigateTopFrameToDataUrl } from "./relay/data-navigation.ts"
 import { createExtensionEventHandler } from "./relay/extension-events.ts"
 import { ExtensionHandshake } from "./relay/extension-handshake.ts"
@@ -103,7 +103,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     catch: (cause) => new Error("Create the relay token", { cause }),
   })
   const browsers = new BrowserLinks()
-  const { sendToExtension, sendExtensionBestEffort, sendToEveryBrowser, sendToEach, cleanupTabs } = createExtensionCommands({ browsers, registry })
+  const { sendToExtension, sendExtensionBestEffort, sendToEveryBrowser, sendToEach, cleanupTabs } = createExtensionCommands({ browsers, registry, onTabGone: forgetMissingTab })
 
   const debugEnabled = yield* Config.Boolean("OPENCODE_BROWSER_DEBUG").pipe(Config.withDefault(false))
   const debugLog = debugEnabled ? (line: string) => console.error(`[bc ${new Date().toISOString().slice(11, 23)}] ${line}`) : undefined
@@ -513,7 +513,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     const target = registry.targetsByTargetId.get(targetId)
     if (!target) return
     if (target.owner === "user") return yield* detachTab(target.tabId)
-    yield* sendToExtension({ method: "tabs.remove", params: { tabId: target.tabId } })
+    // A tab that is already gone is closed: answering an error would leave Playwright's page.close() waiting forever.
+    yield* sendToExtension({ method: "tabs.remove", params: { tabId: target.tabId } }).pipe(Effect.catchIf(isMissingTabError, () => Effect.void))
     detachTargetState(target.tabId)
   })
 
@@ -555,6 +556,18 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
     cdpClients.detachTab(tabId, { destroyed: true })
     clearTabRuntimeState(tabId)
+  }
+
+  /**
+   * Chrome answered a command for this tab that it has no such tab, though the extension never reported it closed
+   * (#153). Drop it as a reported close does, so clients see the page close, and fail what is still waiting on it.
+   */
+  function forgetMissingTab(tabId: number, method: string): void {
+    if (!registry.routingRootTarget(tabId)) return
+    relayLog("target.gone", { tabId, method })
+    detachTargetState(tabId)
+    const owner = browsers.browserTab(tabId)
+    owner?.link.rpc.rejectDebuggerCommandsForTab(owner.tabId, new Error(`Target closed: tab ${tabId} no longer exists`))
   }
 
   function recordRootReplacement(change: Extract<RootTargetChange, { readonly kind: "replaced" }>): void {

@@ -2,14 +2,27 @@ import { Effect, Result } from "effect"
 import type { JsonObject } from "../protocol.ts"
 import type { TargetRegistry } from "../cdp/target-registry.ts"
 import type { BrowserLink, BrowserLinks } from "./browser-links.ts"
-import { getNumber } from "./helpers.ts"
+import { getNumber, getString } from "./helpers.ts"
 import type { ExtensionCommandInput } from "./rpc.ts"
 
 /**
- * Extension command routing: one browser by link, the browser that owns a tab, every connected browser, or the first
- * that answers. Tab ids are translated at the link's edge, so callers only ever see relay ids.
+ * Chrome's answer for a tab id it no longer has: "No tab with given id 7." from chrome.debugger, "No tab with id: 7."
+ * from chrome.tabs. ("No target with given id" is different: CDP says it about a targetId parameter, not the tab.)
  */
-export function createExtensionCommands(options: { readonly browsers: BrowserLinks; readonly registry: Pick<TargetRegistry, "listRootTargets"> }) {
+export function isMissingTabError(error: Error): boolean {
+  return /\bNo tab with (?:given )?id\b/.test(error.message)
+}
+
+/**
+ * Extension command routing: one browser by link, the browser that owns a tab, every connected browser, or the first
+ * that answers. Tab ids are translated at the link's edge, so callers only ever see relay ids. A command that finds
+ * its tab gone calls `onTabGone`.
+ */
+export function createExtensionCommands(options: {
+  readonly browsers: BrowserLinks
+  readonly registry: Pick<TargetRegistry, "listRootTargets">
+  readonly onTabGone?: (tabId: number, method: string) => void
+}) {
   const { browsers } = options
   const sendToBrowser = (link: BrowserLink, command: ExtensionCommandInput) =>
     link.rpc.send(command).pipe(Effect.map((result) => {
@@ -21,7 +34,11 @@ export function createExtensionCommands(options: { readonly browsers: BrowserLin
     if (tabId !== undefined) {
       const owner = browsers.browserTab(tabId)
       if (!owner) return Effect.fail(new Error("browse extension is not connected"))
-      return sendToBrowser(owner.link, { ...command, params: { ...command.params, tabId: owner.tabId } })
+      return sendToBrowser(owner.link, { ...command, params: { ...command.params, tabId: owner.tabId } }).pipe(
+        Effect.tapError((error) => Effect.sync(() => {
+          if (isMissingTabError(error)) options.onTabGone?.(tabId, getString(command.params, "method") ?? command.method)
+        })),
+      )
     }
     const target = link ?? browsers.defaultLink()
     return target ? sendToBrowser(target, command) : Effect.fail(new Error("browse extension is not connected"))
