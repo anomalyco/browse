@@ -73,6 +73,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       rootSelector: withinSelector ?? refRoot?.selector,
       rootRole: refRoot?.role,
       rootName: refRoot?.name,
+      ...(withinSelector === undefined ? {} : { reportRootFallback: true }),
     }
     const signature = JSON.stringify({
       compact: settings.compact,
@@ -238,14 +239,14 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
     const useDiff = options.diff === true || (options.delta === true && compatiblePrevious !== undefined)
     registry.previousSnapshot = { page, signature, entries }
     if (!useDiff) {
-      const lines = entries.map((entry) => formatSnapshotLine(entry, entry.refId))
+      const lines = [...(result.notes ?? []), ...entries.map((entry) => formatSnapshotLine(entry, entry.refId))]
       return options.find === undefined
         ? lines.join("\n")
         : findSnapshotLines(lines, options.find, options.context)
     }
 
     const operations = diffSnapshotEntries(compatiblePrevious?.entries ?? [], entries)
-    const lines: string[] = []
+    const lines: string[] = [...(result.notes ?? [])]
     let additions = 0
     let removals = 0
     let unchanged = 0
