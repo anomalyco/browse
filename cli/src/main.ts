@@ -6,7 +6,7 @@
 // `browse mcp` runs the MCP server over stdio (as does the bundle invoked as `opencode-browser-mcp`).
 import fs from "node:fs"
 import path from "node:path"
-import { legacyRoots } from "./setup/legacy.ts"
+import { legacyRoots, legacyRuntime, legacyRuntimeActive, settleLegacyHome } from "./setup/legacy.ts"
 
 const embeddedVersion = globalThis.__OPENCODE_BROWSER_VERSION__
 const setupCommands = new Set(["install", "uninstall", "extension", "pair", "set"])
@@ -21,6 +21,19 @@ const options = separator === -1 ? args : args.slice(0, separator)
 const askedForHelp = command === "--help" || command === "-h" || options.some((arg) => arg === "--help" || arg === "-h")
 /** Help for a command that never reaches the Effect CLI: print the top-level help instead. */
 const preCliHelp = askedForHelp && (command === "update" || (command !== undefined && setupCommands.has(command)))
+
+// The old self-managed runtime (setup/legacy.ts): a relay started from this install takes it over, then every process
+// either shares its folder (still active) or stops treating it as OPENCODE_BROWSER_HOME (taken over).
+const oldRuntime = legacyRuntime()
+if (command === "serve" && legacyRuntimeActive(oldRuntime)) {
+  try {
+    const { adoptLegacyRuntime } = await import("./setup/legacy-runtime.ts")
+    adoptLegacyRuntime(oldRuntime)
+  } catch {
+    // The relay still starts; the old runtime keeps its folder until a later start takes it over.
+  }
+}
+settleLegacyHome(process.env, command === "serve" ? legacyRuntime() : oldRuntime)
 
 // Earlier layouts (~/.browse, and the old opencode-browser data root) move to the XDG folders on the first run.
 // opencode briefly shows the update, and no other command pays for the import.

@@ -347,6 +347,70 @@ describe("the relay's updater", () => {
   })
 })
 
+describe("a runtime the old opencode-browser shim starts from runtime/versions", () => {
+  const ok = { status: 0, stdout: "", stderr: "" }
+  const writePackage = (dir: string, version: string) => {
+    fs.mkdirSync(path.join(dir, "dist"), { recursive: true })
+    fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: "@opencode/browse", version }))
+    fs.writeFileSync(path.join(dir, "dist", "cli.mjs"), "")
+    return path.join(dir, "dist", "cli.mjs")
+  }
+  /** The layout releases before 0.0.11 left: 0.0.15-dev.108 under runtime/versions, and npm's global folder beside it. */
+  function oldRuntime() {
+    const home = fakeHome()
+    const previous = { XDG_DATA_HOME: process.env.XDG_DATA_HOME, LOCALAPPDATA: process.env.LOCALAPPDATA, OPENCODE_BROWSER_HOME: process.env.OPENCODE_BROWSER_HOME }
+    process.env.XDG_DATA_HOME = process.env.LOCALAPPDATA = path.join(home, "data")
+    process.env.OPENCODE_BROWSER_HOME = home
+    const versions = path.join(home, "data", "opencode-browser", "runtime", "versions")
+    const runtime: Runtime = { kind: "npm", entry: writePackage(path.join(versions, "0.0.15-dev.108", "node_modules", "@opencode", "browse"), "0.0.15-dev.108"), version: "0.0.15-dev.108" }
+    const globalRoot = path.join(home, "global", "lib", "node_modules")
+    const npm = (install?: () => void) => async (_command: string, args: readonly string[]) => {
+      if (args[0] === "root") return { ...ok, stdout: `${globalRoot}\n` }
+      install?.()
+      return ok
+    }
+    const restore = () => {
+      for (const [name, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
+    }
+    return { runtime, global: path.join(globalRoot, "@opencode", "browse"), npm, restore }
+  }
+
+  test("npm install -g puts the update in npm's global folder, which is the version it reports", async () => {
+    const { runtime, global, npm, restore } = oldRuntime()
+    try {
+      // 0.0.15's updater read the version back from runtime/versions, which npm never touches, and failed every time.
+      const installed = await runInstaller({ runtime, version: "0.0.16-dev.130", run: npm(() => writePackage(global, "0.0.16-dev.130")), env: {} })
+      expect(installed).toBe("0.0.16-dev.130")
+    } finally {
+      restore()
+    }
+  })
+
+  test("the relay restarts from npm's global folder once the update is there", async () => {
+    const { runtime, global, npm, restore } = oldRuntime()
+    try {
+      const entry = writePackage(global, "0.0.16-dev.130")
+      updateState(() => ({ checkedAt: Date.now(), latest: "0.0.16-dev.130" }))
+      const spawned: { args: string[]; from: string }[] = []
+      const updater = createAutoUpdater({
+        runtime,
+        isIdle: () => true,
+        log: () => {},
+        spawnChild: (args, _onExit, from) => (spawned.push({ args: [...args], from: from.entry }), 2 ** 22 + 12350),
+        run: npm(),
+        env: {},
+      })
+      await updater.tick()
+      expect(spawned).toEqual([{ args: ["runtime-switch", "0.0.16-dev.130"], from: entry }])
+    } finally {
+      restore()
+    }
+  })
+})
+
 describe("status", () => {
   test("says how each install updates", () => {
     const home = fakeHome()

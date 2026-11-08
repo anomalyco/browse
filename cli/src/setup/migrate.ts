@@ -4,7 +4,8 @@
 // Every file is copied beside its destination and renamed into place, so an interrupted run simply continues. Existing
 // new files always win (the old copy is removed, not merged), which makes a second run a no-op. Agent MCP entries that
 // point at ~/.browse/bin/browse are rewritten to ~/.local/bin/browse; entries that record an absolute node path are
-// rewritten to the stable `browse` command, since nvm/fnm change node between sessions. Then the old roots are removed.
+// rewritten to the stable `browse` command, since nvm/fnm change node between sessions. Then the old roots are removed;
+// the old data root waits LEGACY_HANDOVER_GRACE_MS after its runtime was taken over (legacy-runtime.ts).
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -14,7 +15,7 @@ import { parse as parseToml } from "smol-toml"
 import { parseDocument } from "yaml"
 import { binRoot, binaryName, cacheRoot, configRoot, dataRoot, stateRoot } from "../paths.ts"
 import { agentLocations, browseServerCommand, editAgentConfig, type AgentName } from "./agent-config.ts"
-import { legacyDataRoot, legacyRoots } from "./legacy.ts"
+import { LEGACY_HANDOVER_GRACE_MS, legacyDataRoot, legacyRoots, legacyRuntime } from "./legacy.ts"
 import { configureMcp } from "./mcp.ts"
 
 type Move = { readonly from: string; readonly to: string }
@@ -172,7 +173,7 @@ function rewriteAgent(name: AgentName, file: string, oldBinary: string, newBinar
 export type MigrationResult = { moved: number; rewritten: number; removed: string[] }
 
 /** Idempotent, never throws: migration must not stop browse from starting. */
-export function migrateLegacy(home = os.homedir()): MigrationResult {
+export function migrateLegacy(home = os.homedir(), now = Date.now()): MigrationResult {
   const result: MigrationResult = { moved: 0, rewritten: 0, removed: [] }
   if (process.env.OPENCODE_BROWSER_HOME) return result
   const roots = legacyRoots(home)
@@ -221,6 +222,9 @@ export function migrateLegacy(home = os.homedir()): MigrationResult {
   const oldData = legacyDataRoot(home)
   if (stillReferences(oldBinary)) keep.add(normalized(browseRoot))
   if (stillReferences(oldData)) keep.add(normalized(oldData))
+  // Just taken over (legacy-runtime.ts): agents' running shims still read runtime/current.json to reach the new server.
+  const takenOver = legacyRuntime(home)
+  if (takenOver?.movedTo && !(now - Date.parse(takenOver.switchedAt ?? "") >= LEGACY_HANDOVER_GRACE_MS)) keep.add(normalized(oldData))
   if (referencesPath(settingsFile, oldBinary)) keep.add(normalized(browseRoot))
   result.removed = result.removed.filter((root) => !keep.has(normalized(root)))
   const removable = result.removed.splice(0)
