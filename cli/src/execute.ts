@@ -420,8 +420,9 @@ export class ExecuteSandbox extends DefaultPageHost {
       })
       yield* sandbox.networkCapture.cancel()
       if (browser) {
-        yield* runSettledPlaywrightOperation({
+        yield* runPlaywrightOperation({
           label: "Disconnect sandbox browser after handoff cancellation",
+          timeoutMs: playwrightCloseTimeoutMs,
           run: () => browser.close(),
         }).pipe(Effect.ignore)
       }
@@ -441,15 +442,19 @@ export class ExecuteSandbox extends DefaultPageHost {
       if (options.clearState) for (const key of Object.keys(sandbox.state)) delete sandbox.state[key]
       yield* sandbox.networkCapture.cancel()
 
+      // Bounded: a page whose tab the relay lost track of never reports closed, and a session's close is tracked work,
+      // so an unbounded close held every later relay restart (and so every auto-update) until the relay died.
       if (ownsOpenPage) {
-        yield* runSettledPlaywrightOperation({
+        yield* runPlaywrightOperation({
           label: "Close sandbox page after adoption",
+          timeoutMs: playwrightCloseTimeoutMs,
           run: () => page.close(),
         }).pipe(Effect.ignore)
       }
       if (browser) {
-        yield* runSettledPlaywrightOperation({
+        yield* runPlaywrightOperation({
           label: "Close sandbox browser connection after adoption",
+          timeoutMs: playwrightCloseTimeoutMs,
           run: () => browser.close(),
         }).pipe(Effect.ignore)
       }
