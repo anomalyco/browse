@@ -321,6 +321,12 @@ describe("Node escape corpus", () => {
     expect(runInNode(["return [typeof Atomics,typeof SharedArrayBuffer,typeof WeakRef,typeof FinalizationRegistry]"])[0]?.value).toEqual(Array(4).fill("undefined"))
   })
 
+  // A host structuredClone would receive the raw host object behind a proxy and clone its hidden `_` members into
+  // sandbox data, so the realm leaves it out; the escape corpus above checks that cloning a page still fails.
+  test("structuredClone stays out of the realm", () => {
+    expect(runInNode(["return typeof structuredClone"])[0]?.value).toBe("undefined")
+  })
+
   // N18: every way execute JavaScript gets the CPU is bounded by one slice, so a runaway loop
   // stalls the relay (and every other session) for at most OPENCODE_BROWSER_EXECUTE_SLICE_MS.
   test("CPU slices bound loops in code, awaits, callbacks, timers, events, getters and thenables", () => {

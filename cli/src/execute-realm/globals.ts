@@ -73,6 +73,8 @@ export function installRealmGlobals(realm: ExecuteRealm, target: Record<string, 
     setInterval: (callback: (...args: unknown[]) => unknown, delay?: number, ...args: unknown[]) => schedule(true, callback, delay, ...args),
     setImmediate: (callback: (...args: unknown[]) => unknown, ...args: unknown[]) => schedule(false, callback, 0, ...args),
     clearTimeout: clear, clearInterval: clear, clearImmediate: clear,
+    // structuredClone is deliberately absent: as a host function it receives the raw host object behind a
+    // proxy and copies its hidden `_` members and connection internals into sandbox-visible data.
     atob, btoa, URL, URLSearchParams, TextEncoder, TextDecoder, Buffer, AbortController,
     AbortSignal, Blob, Event, EventTarget, performance, crypto: globalThis.crypto,
   }
