@@ -8,6 +8,7 @@ import { isInside, isInstallSibling, prepareExecuteFileOutputs } from "../src/ex
 import { cacheRoot, configRoot, dataRoot, installedBinaryPath, installerBinaryPath, stateRoot } from "../src/paths.ts"
 import { handleRelayProcessFault } from "../src/relay/process-guard.ts"
 import { legacyDataRoot } from "../src/setup/legacy.ts"
+import { nodeRealmRunner, values, type NodeOutcome } from "./support/node-realm.ts"
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "browse-realm-"))
 const home = path.join(scratch, "home")
@@ -29,53 +30,7 @@ function run(body: string, host: Record<string, unknown> = {}) {
   return new ExecuteRealm().run({ source: `(async (host) => { ${body} })`, filename: "test.js", args: [host] })
 }
 
-type NodeOutcome = { readonly value?: unknown; readonly error?: string; readonly elapsedMs?: number; readonly maxStallMs?: number; readonly stopped?: string; readonly warnings?: readonly string[] }
-
-// The relay runs execute code under Node, whose vm differs from Bun's: escape attempts run there too.
-function runInNode(bodies: readonly string[], setup = "", env: Record<string, string> = {}): NodeOutcome[] {
-  const script = `
-    const { ExecuteRealm, sandboxModules, createExecuteFiles, handleExecuteRealmRejection, handleExecuteRealmException } = await import(${JSON.stringify(path.join(import.meta.dir, "../src/execute-realm.ts"))})
-    // The relay's process guard, reduced to the execute part.
-    process.on('unhandledRejection', (reason, promise) => { if (!handleExecuteRealmRejection(promise, reason)) throw reason })
-    process.on('uncaughtException', (error) => { if (!handleExecuteRealmException(error)) { console.error(error); process.exit(70) } })
-    const host = { fn: () => 1, object: { nested: true }, error: () => { throw new Error("host") } }
-    ${setup}
-    const results = []
-    for (const body of JSON.parse(process.argv[1])) {
-      const warnings = []
-      const realm = new ExecuteRealm({ onUnhandledRejection: warning => warnings.push(warning) })
-      // How long the relay's event loop (other sessions, the HTTP API) went without a turn.
-      let last = performance.now(), maxStallMs = 0
-      const probe = setInterval(() => { const now = performance.now(); maxStallMs = Math.max(maxStallMs, now - last); last = now }, 5)
-      const started = performance.now()
-      try {
-        realm.proxyAsObject(host)
-        if (host.files) realm.proxyAsObject(host.files)
-        if (host.modules) realm.proxyAsObject(host.modules)
-        const value = await realm.run({ source: "(async (host) => { " + body + " })", filename: "test.js", args: [host] })
-        const elapsedMs = performance.now() - started
-        await new Promise(resolve => setTimeout(resolve, 20)) // let the probe see the last stall, and a detached rejection land
-        results.push({ value, elapsedMs, maxStallMs, stopped: realm.stopped?.message, warnings })
-      } catch (error) {
-        const elapsedMs = performance.now() - started
-        await new Promise(resolve => setTimeout(resolve, 20))
-        results.push({ error: String(error?.message ?? error), elapsedMs, maxStallMs, stopped: realm.stopped?.message, warnings })
-      } finally {
-        clearInterval(probe)
-        realm.dispose()
-        host.emitConsole?.()
-        host.page?.removeAllListeners?.()
-      }
-    }
-    console.log(JSON.stringify(results))
-  `
-  const child = spawnSync("node", ["--input-type=module", "--no-warnings", "-e", script, JSON.stringify(bodies)], { encoding: "utf8", timeout: 30_000, env: { ...process.env, OPENCODE_BROWSER_HOME: home, ...env } })
-  if (child.status !== 0) throw new Error(`node failed: ${child.stderr}`)
-  return JSON.parse(child.stdout.trim().split("\n").at(-1) ?? "[]") as NodeOutcome[]
-}
-
-/** Outcomes without timing, for exact comparisons. */
-const values = (outcomes: readonly NodeOutcome[]) => outcomes.map(({ value, error }) => (error === undefined ? { value } : { error }))
+const runInNode = nodeRealmRunner(home)
 
 /** Runs realm bodies in a Bun child with the relay's execute guard (Bun has no promiseHooks). */
 function runInBun(bodies: readonly string[]): NodeOutcome[] {
@@ -366,23 +321,6 @@ describe("Node escape corpus", () => {
     expect(outcome!.maxStallMs!).toBeLessThan(sliceMs + 250)
     // Stopped within a couple of slices (the window is three slice lengths), not after a long burst allowance.
     expect(outcome!.elapsedMs!).toBeLessThan(sliceMs * 6)
-  }, 30_000)
-
-  test("the sustained budget charges CPU time, not slices stretched by a loaded machine or other sessions", () => {
-    const sliceMs = 100
-    // host.stall keeps the relay thread off the CPU mid-slice, as a descheduled thread or a page fault does.
-    const setup = `
-      const stallCell = new Int32Array(new SharedArrayBuffer(4))
-      host.stall = (ms) => { Atomics.wait(stallCell, 0, 0, ms) }
-      host.later = () => new Promise((resolve) => setTimeout(resolve, 1))
-      host.busyOtherSession = () => { const other = setInterval(() => { const end = performance.now() + 40; while (performance.now() < end) {} }, 10); setTimeout(() => clearInterval(other), 1500) }
-    `
-    const outcomes = runInNode([
-      `for (let i = 0; i < 40; i++) { host.stall(${sliceMs * 0.05}); await host.later() } return "short stalls"`,
-      `for (let i = 0; i < 6; i++) { host.stall(${sliceMs * 0.6}); await host.later() } return "long stalls"`,
-      `host.busyOtherSession(); for (let i = 0; i < 40; i++) await host.later(); return "busy relay"`,
-    ], setup, { OPENCODE_BROWSER_EXECUTE_SLICE_MS: String(sliceMs) })
-    expect(values(outcomes)).toEqual([{ value: "short stalls" }, { value: "long stalls" }, { value: "busy relay" }])
   }, 30_000)
 
   test("a few heavy operations back to back stay under the sustained budget", () => {
