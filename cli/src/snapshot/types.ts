@@ -11,6 +11,11 @@ export type AriaSnapshotOptions = {
 export type AriaSnapshotHelper = (target?: AriaSnapshotTarget, options?: AriaSnapshotOptions) => Promise<string>
 
 export type SnapshotOptions = {
+  /**
+   * Scope the snapshot to a selector string or a locator. A string with more than one match snapshots the first
+   * visible one, and a string with no match snapshots the whole page; either case adds a note to the output. A
+   * locator keeps Playwright's strict requirement that it resolves to one element.
+   */
   readonly within?: AriaSnapshotTarget
   readonly interactive?: boolean
   readonly compact?: boolean
@@ -75,6 +80,16 @@ export type SnapshotCaptureSettings = {
   readonly rootSelector: string | undefined
   readonly rootRole: string | undefined
   readonly rootName: string | undefined
+  /** Set for a `within` selector, never for a ref: report an ambiguous or empty root in the snapshot output. */
+  readonly reportRootFallback?: boolean
+}
+
+export type SnapshotCaptureResult = {
+  readonly entries: readonly SnapshotEntry[]
+  readonly truncated: boolean
+  readonly needsSettle?: boolean
+  /** Plain sentences describing how a `within` scope resolved, shown above the snapshot lines. */
+  readonly notes?: readonly string[]
 }
 
 export type InputTarget = AriaSnapshotTarget

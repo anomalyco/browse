@@ -120,3 +120,7 @@ jobs:
       - name: Execute sandbox browser harness
         run: node --no-warnings test/execute-realm-browser.ts
         working-directory: cli
+
+      - name: Snapshot within selector harness
+        run: bun test/snapshot-within-browser.ts
+        working-directory: cli

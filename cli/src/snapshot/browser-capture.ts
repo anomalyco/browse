@@ -1,11 +1,11 @@
-import type { SnapshotCaptureSettings, SnapshotEntry } from "./types.ts"
+import type { SnapshotCaptureResult, SnapshotCaptureSettings, SnapshotEntry } from "./types.ts"
 
 // Self-contained browser evaluation script: serialized via Function.prototype.toString() into page.evaluate().
 // Do not reference module-level runtime imports inside captureSnapshotInBrowser.
 export const captureSnapshotInBrowser = (
   rootOrSettings: Element | SnapshotCaptureSettings,
   locatorSettings?: SnapshotCaptureSettings,
-) => {
+): SnapshotCaptureResult => {
   type BrowserEntry = SnapshotEntry
   const settings = locatorSettings ?? rootOrSettings as SnapshotCaptureSettings
 
@@ -311,15 +311,24 @@ export const captureSnapshotInBrowser = (
     return ""
   }
   let autoScopedMain = false
+  let rootNote: string | undefined
   const root = rootOrSettings instanceof Element
     ? rootOrSettings
     : (() => {
         if (settings.rootSelector) {
-          const matches = document.querySelectorAll(settings.rootSelector)
-          if (matches.length !== 1) {
+          const matches = Array.from(document.querySelectorAll(settings.rootSelector))
+          if (matches.length === 1) return matches[0]!
+          // Only a `within` selector is forgiven; a ref root must still identify exactly one element.
+          if (!settings.reportRootFallback) {
             throw new Error(`snapshot within expects exactly one match for selector: ${settings.rootSelector}; got ${matches.length}`)
           }
-          return matches[0] as Element
+          const firstMatch = matches.find(isVisible) ?? matches[0]
+          if (firstMatch) {
+            rootNote = `within "${settings.rootSelector}" matched ${matches.length} elements; showing the first`
+            return firstMatch
+          }
+          rootNote = `within "${settings.rootSelector}" matched nothing; showing the whole page`
+          return (document.body ?? document.documentElement) as Element | null
         }
         const fallbackRoot = (document.body ?? document.documentElement) as Element | null
         if (!fallbackRoot) return null
@@ -344,7 +353,7 @@ export const captureSnapshotInBrowser = (
         return fallbackRoot
       })()
   if (!root) {
-    return { entries: [], truncated: false }
+    return { entries: [], truncated: false, ...(rootNote ? { notes: [rootNote] } : {}) }
   }
   if ((settings.rootRole && roleFor(root) !== settings.rootRole) || (settings.rootName && accessibleName(root) !== settings.rootName)) {
     throw new Error("Snapshot ref no longer identifies the captured element; call snapshot() again")
@@ -957,6 +966,7 @@ export const captureSnapshotInBrowser = (
     entries: selected,
     truncated: truncated || selected.length < entries.length,
     ...(needsSettle ? { needsSettle: true } : {}),
+    ...(rootNote ? { notes: [rootNote] } : {}),
   }
 }
 
