@@ -64,11 +64,26 @@ export function createRelayTransportServers(deps: TransportServerDeps): {
     debugLog,
   } = deps
 
-  const isSilentProbePath = (pathname: string | undefined): boolean =>
-    pathname === "/version" ||
-    pathname === "/json/version" ||
-    pathname === "/json/version/" ||
-    pathname === "/extension/status"
+  /** The pathname as the request handler routes it, without its trailing slash. */
+  const routePath = (pathname: string | undefined): string => pathname?.replace(/\/$/, "") || "/"
+
+  /** Polled continuously by the supervisor, clients and the extension's status page; too noisy to log. */
+  const isSilentProbePath = (pathname: string | undefined): boolean => {
+    const path = routePath(pathname)
+    return path === "/version" || path === "/json/version" || path === "/extension/status"
+  }
+
+  /**
+   * Requests that don't mean an agent is using the browser: the updater's and CLI's lifecycle calls (POST /shutdown, and
+   * the version probe every client and the supervisor make first) and the read-only status and doctor reads. They leave
+   * the auto-updater's idle clock alone; an agent's real request (execute, a session, capture, recording or setting
+   * change) restarts it.
+   */
+  const isLifecycleOrStatusPath = (pathname: string | undefined, method: string | undefined): boolean => {
+    const path = routePath(pathname)
+    if (isSilentProbePath(path) || path === "/shutdown") return true
+    return method === "GET" && (path === "/cli/sessions" || path === "/json/list" || path === "/settings")
+  }
 
   const httpServer = http.createServer((request, response) => {
     if (!isLocalPeer(request.socket)) {
@@ -81,8 +96,7 @@ export function createRelayTransportServers(deps: TransportServerDeps): {
       return
     }
     const started = performance.now()
-    const requestPath = (request.url ?? "").split("?")[0]
-    if (!isSilentProbePath(requestPath)) {
+    if (!isLifecycleOrStatusPath(request.url?.split("?")[0], request.method)) {
       onAgentHttpActivity()
     }
     response.once("finish", () => {
