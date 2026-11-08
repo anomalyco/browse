@@ -83,15 +83,28 @@ class NeverFinishingSandbox implements ExecuteSandboxLike {
 }
 
 test("shutdown stops waiting for a session whose work never finishes", async () => {
+  const writes: string[][] = []
   const sessions = new OpenCodeBrowserSessions("http://127.0.0.1:0", () => new NeverFinishingSandbox(), {
     executeTimeoutMs: 0,
     lifecycleTimeoutMs: 200,
+    onSessionsChanged: async (entries) => {
+      // Slower than the stalled wait, so only the shutdown's own flush sees this write finish.
+      await Bun.sleep(300)
+      writes.push(entries.map((entry) => entry.id))
+    },
   })
   // Left pending on purpose: this is the session work that never finishes.
   void Effect.runPromise(sessions.execute({ sessionId: "stuck", code: "...", createIfMissing: true })).catch(() => {})
   for (let attempt = 0; attempt < 50 && !sessions.isExecuting("stuck"); attempt++) await Bun.sleep(5)
   expect(sessions.isExecuting("stuck")).toBe(true)
 
+  // Wait out the write the execute's own session creation queued, so only the next one is pending at shutdown.
+  for (let attempt = 0; attempt < 100 && writes.length === 0; attempt++) await Bun.sleep(5)
+  expect(writes).toEqual([["stuck"]])
+
+  writes.length = 0
+  // A catalog write nothing is awaiting: the shutdown must still flush it before dropping the sessions.
+  sessions.noteClient("stuck", 1234)
   const stalled: Array<readonly string[]> = []
   const started = Date.now()
   await within(
@@ -101,6 +114,7 @@ test("shutdown stops waiting for a session whose work never finishes", async () 
   )
 
   expect(stalled).toEqual([["stuck"]])
+  expect(writes).toEqual([["stuck"]])
   expect(Date.now() - started).toBeLessThan(1_000)
   expect(sessions.sessions.size).toBe(0)
 }, 10_000)

@@ -543,10 +543,9 @@ export class OpenCodeBrowserSessions {
   }
 
   /**
-   * Relay shutdown: stop admitting, then let accepted work finish and disconnect the sessions. A session whose work
-   * never finishes used to hold this forever, leaving a half-stopped relay that no longer accepted work and never
-   * exited, so a plain `kill` needed SIGKILL. At shutdown there is nothing to save by waiting longer than the bound:
-   * name the sessions still holding work and leave them behind.
+   * Relay shutdown: stop admitting, let accepted work finish and disconnect the sessions, but wait at most
+   * `timeoutMs`. A session whose work never finishes is reported through `onStalled` and dropped so the process can
+   * exit.
    */
   closeAll(options: {
     readonly timeoutMs?: number
@@ -554,7 +553,10 @@ export class OpenCodeBrowserSessions {
     readonly onStalled?: (sessionIds: readonly string[]) => void
   } = {}): Effect.Effect<void> {
     const manager = this
-    // Only the wait is interruptible (so the timeout can end it); naming and dropping the stragglers is not.
+    // Persisting the catalog is the shutdown's only chance to record the sessions it held; a stuck write must not
+    // keep the process alive either.
+    const stalledFlushMs = 1_000
+    // Only the wait is interruptible (so the timeout can end it); naming, persisting and dropping stragglers is not.
     return Effect.uninterruptible(Effect.gen(function* () {
       manager.admission.markClosed()
       yield* Effect.interruptible(Effect.gen(function* () {
@@ -571,8 +573,12 @@ export class OpenCodeBrowserSessions {
       })).pipe(
         Effect.timeoutOrElse({
           duration: options.timeoutMs ?? defaultShutdownTimeoutMs,
-          orElse: () => Effect.sync(() => {
+          orElse: () => Effect.gen(function* () {
             options.onStalled?.(manager.admission.pendingWorkSessionIds())
+            yield* Effect.interruptible(manager.admission.flushPersistence()).pipe(
+              Effect.timeoutOrElse({ duration: stalledFlushMs, orElse: () => Effect.void }),
+              Effect.ignore,
+            )
             manager.sessions.clear()
           }),
         }),
