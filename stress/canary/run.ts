@@ -14,7 +14,7 @@ import { command, readJson, record, root, saveJson, type Evidence, type Metrics,
 const { values } = parseArgs({ options: { once: { type: "boolean" }, "soak-minutes": { type: "string" } } })
 const once = !!values.once, short = Number(values["soak-minutes"] ?? 2), minute = 60_000
 const binary = binaryPath, stress = path.resolve(import.meta.dirname, "..")
-assert(process.env.BROWSE_STRESS_BINARY === binary && dataDir === path.join(os.homedir(), ".local/share/browse"), "requires isolated canary install and data HOME")
+assert(!process.env.OPENCODE_BROWSER_HOME && process.env.BROWSE_STRESS_BINARY === binary && dataDir === path.join(os.homedir(), ".local/share/browse"), "requires the canary install's XDG paths without OPENCODE_BROWSER_HOME")
 assert([relayPort, chromeDebugPort, fixturePort].every(p => Number.isInteger(p) && p >= 19700 && p <= 19799) && new Set([relayPort, chromeDebugPort, fixturePort]).size === 3, "dedicated canary ports required")
 assert(once ? fs.realpathSync(os.homedir()).startsWith(path.join(fs.realpathSync(os.tmpdir()), "opencode/browse-canary.")) : os.userInfo().username === "canary", "--once requires a temp opencode/browse-canary.* HOME; service requires user canary")
 assert(!once || (Number.isFinite(short) && short > 0 && short <= 30))
@@ -24,7 +24,7 @@ const webhook = process.env.CANARY_SLACK_WEBHOOK
 delete process.env.CANARY_SLACK_WEBHOOK // never pass it to browsers, fuzz, npm or the product
 const node = (name: string, ...args: string[]) => [process.execPath, path.join(stress, name + ".ts"), ...args]
 const stateFile = path.join(root, "state.json")
-type State = { build?: string; commit?: string; tested?: string; day?: string; site?: number; trafficAt?: number; seen?: { version: string; commit: string; since: number; switchedAt?: number; assisted?: boolean; forcedAt?: number }; outage?: { since: number; incident?: boolean; hard?: boolean }; previous: Record<string, Status>; current: Record<string, Status>; alerted: string[] }
+type State = { build?: string; commit?: string; tested?: string; day?: string; site?: number; trafficAt?: number; seen?: { version: string; commit: string; since: number; lagSince?: number; switchedAt?: number; assisted?: boolean; forcedAt?: number }; outage?: { since: number; incident?: boolean; hard?: boolean }; previous: Record<string, Status>; current: Record<string, Status>; alerted: string[] }
 fs.mkdirSync(root, { recursive: true, mode: 0o700 })
 const state: State = fs.existsSync(stateFile) ? readJson(stateFile) : { previous: {}, current: {}, alerted: [] }
 const save = () => saveJson(stateFile, state)
@@ -33,6 +33,7 @@ async function alert(message: string, id: string) {
   const folder = path.join(root, id), url = process.env.CANARY_RESULTS_URL?.replace(/\/$/, "")
   const text = `Browse canary: ${message} — <${url ? `${url}/${id}/` : `ssh://${os.hostname()}`}|${os.hostname()}:${folder}>`
   console.error(`Browse canary: ${message} — ${folder}`)
+  fs.appendFileSync(path.join(root, "ALERTS.md"), `- ${new Date().toISOString()} — ${message} ([run](${id}/summary.md))\n`, { mode: 0o600 })
   if (webhook && !once) try {
     const res = await fetch(webhook, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }), signal: AbortSignal.timeout(10_000) })
     if (!res.ok) console.error(`Slack delivery failed: HTTP ${res.status}`)
@@ -52,13 +53,13 @@ async function snapshot() {
   // No CLI here: a status command could start the relay and make a failed automatic switch look successful.
   const v = await relayJson<{ version: string }>("/version", undefined, 3000).catch(() => undefined)
   const ext = await relayJson("/extension/status", undefined, 3000).catch(() => undefined)
+  const installed = spawnSync(binary, ["--version"], { encoding: "utf8", timeout: 15_000 }).stdout?.trim()
   let matched = false
   try {
     const zip = readJson<{ version: string; build: string }>(path.join(cacheDir, "extension.json"))
-    const installed = spawnSync(binary, ["--version"], { encoding: "utf8", timeout: 15_000 }).stdout?.trim()
     matched = !!zip.build && zip.version === v?.version && installed === zip.version && installed.includes("-dev.") && ext?.connected && zip.build === ext.build
   } catch { /* files may not exist during a failed update */ }
-  return { version: v?.version, connected: ext?.connected === true, matched }
+  return { version: v?.version, installed, connected: ext?.connected === true, matched }
 }
 async function metrics(idle = false): Promise<Metrics> {
   const cdp = await BrowserCdp.connect(2500).catch(() => undefined)
@@ -71,7 +72,7 @@ async function metrics(idle = false): Promise<Metrics> {
   } finally { cdp?.close() }
 }
 let nextPoll = 0
-async function poll() {
+async function poll(s: Awaited<ReturnType<typeof snapshot>>) {
   if (Date.now() < nextPoll) return
   nextPoll = Date.now() + 5 * minute
   await check("dev-tag", async () => {
@@ -79,7 +80,8 @@ async function poll() {
     assert(res.ok, `registry HTTP ${res.status}`)
     const pkg = await res.json() as { version: string; gitHead?: string }
     assert(/^\d+\.\d+\.\d+-dev\.\d+(\.\d+)?$/.test(pkg.version), "invalid dev dist-tag")
-    if (pkg.version !== state.tested && state.seen?.version !== pkg.version) {
+    if (pkg.version === state.tested && pkg.version === s.installed && s.matched && state.seen) { delete state.seen; save() }
+    if ((pkg.version !== state.tested || pkg.version !== s.installed) && state.seen?.version !== pkg.version) {
       const since = Date.now()
       // npm's dev metadata often omits gitHead. Its published provenance identifies the product commit, not
       // the checkout from which this particular harness was deployed. Leave it unknown if neither is available.
@@ -90,10 +92,14 @@ async function poll() {
         const dep = JSON.parse(Buffer.from(payload, "base64").toString()).predicate.buildDefinition.resolvedDependencies.find((d: { uri: string }) => d.uri === "git+https://github.com/anomalyco/browse@refs/heads/dev")
         if (/^[0-9a-f]{40}$/.test(dep?.digest.gitCommit)) head = dep.digest.gitCommit
       } catch { /* version is still verifiable directly from the running artifact */ }
-      state.seen = { version: pkg.version, since, commit: head.slice(0, 7) }; save()
+      // A moving tag must not buy a stalled install another hour (or reset its retry throttle).
+      const prior = state.seen && !state.seen.switchedAt && !(s.matched && s.version === state.seen.version) ? state.seen : undefined
+      state.seen = { version: pkg.version, since, commit: head.slice(0, 7), lagSince: prior?.lagSince ?? prior?.since ?? since, forcedAt: prior?.forcedAt, assisted: prior?.assisted }; save()
     }
-    return { note: pkg.version }
-  }, { tier: "upgrade", report: true })
+    const pending = state.seen, age = pending ? Date.now() - (pending.lagSince ?? pending.since) : 0
+    const behind = s.installed !== pkg.version
+    return { status: behind ? age >= 60 * minute ? "fail" : "skipped" : "pass", note: `npm dev ${pkg.version}; installed ${s.installed || "missing"}${behind ? `; behind for ${Math.floor(age / minute)} min` : ""}` }
+  }, { tier: "upgrade", regress: false })
 }
 async function health(ok: boolean, since: number) {
   if (ok) {
@@ -136,7 +142,7 @@ async function suite(kind: "release" | "nightly" | "short") {
       if (s.connected) missing = 0
       else if (!missing) missing = Date.now()
       else if (Date.now() - missing >= 6 * minute) abort.abort()
-      await poll()
+      await poll(s)
       if (state.seen && s.matched && s.version === state.seen.version && !state.seen.switchedAt) { state.seen.switchedAt = Date.now(); save() }
     }, 30_000)
     let e: Evidence
@@ -190,7 +196,7 @@ async function suite(kind: "release" | "nightly" | "short") {
 async function cycle() {
   const s = await snapshot(), start = Date.now()
   version = s.version ?? state.build ?? "unknown"
-  await poll()
+  await poll(s)
   const pending = state.seen
   commit = version === pending?.version ? pending.commit : version === state.build ? state.commit ?? "" : ""
   if (pending && !state.outage && s.matched && version === pending.version) {
@@ -202,10 +208,10 @@ async function cycle() {
     await check("released-extension", async () => ({ note: `running relay ${version} and connected extension match the installed dev release`, metrics: await metrics(true) }))
     await suite(once ? "short" : "release")
     if (!state.outage) { state.tested = version; if (state.seen?.version === version) delete state.seen; save() }
-  } else if (pending && !once && start - pending.since >= 60 * minute && (!pending.forcedAt || start - pending.forcedAt >= 60 * minute)) {
-    const first = !pending.forcedAt
+  } else if (pending && !once && start - (pending.lagSince ?? pending.since) >= 60 * minute && (!pending.forcedAt || start - pending.forcedAt >= 60 * minute)) {
     pending.assisted = true; pending.forcedAt = start; save()
-    await check("update-stuck", async () => ({ status: "fail", note: `expected ${pending.version}, running ${s.version ?? "none"}; matched zip: ${!!s.matched}` }), { tier: "upgrade", regress: false, ...(first ? { incident: `auto-update stuck on ${pending.version} for 1 h` } : {}) })
+    const note = `update stuck: expected ${pending.version}, installed ${s.installed || "none"}, running ${s.version ?? "none"}; matched zip: ${!!s.matched}`
+    await check("update-stuck", async () => ({ status: "fail", note }), { tier: "upgrade", incident: note })
     await check("forced-update", dir => command(dir, [binary, "update", "--no-open"], 8), { tier: "upgrade", regress: false })
   } else if (once) {
     if (!s.matched) await check("released-extension", async () => ({ status: "fail", note: "expected connected release matching installed dev version" }))

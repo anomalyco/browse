@@ -11,6 +11,13 @@ if (fs.existsSync(file)) for await (const line of readline.createInterface({ inp
   const row: History = JSON.parse(line)
   if (Date.parse(row.started) >= now - 7 * 24 * hour) rows.push(row)
 }
+const release = rows.findLastIndex(r => r.check === "released-extension")
+if (release >= 0) {
+  const build = rows[release]!, cycle = rows.slice(release).filter(r => r.version === build.version)
+  console.log(`## Latest release cycle · ${build.version} · ${build.started}\n`)
+  for (const check of ["released-extension", "scenarios-core", "soak-release"]) console.log(`- ${check}: ${cycle.find(r => r.check === check)?.status ?? "not recorded"}`)
+  console.log(`\nLocal incidents: ${path.join(root, "ALERTS.md")}\n`)
+}
 for (const hours of [24, 168]) {
   const recent = rows.filter(r => Date.parse(r.started) >= now - hours * hour)
   console.log(`## Canary · last ${hours === 24 ? "24 h" : "7 d"}\n\n| Check | Pass / runs | Pass rate | Flaky | Skipped |\n|---|---:|---:|---:|---:|`)
