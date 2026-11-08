@@ -427,7 +427,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     recordingRelay,
     flightRecorder,
     rootLifecycle,
-    sendToExtension,
+    closeTargetByTargetId: (targetId) => closeTargetByTargetId(targetId),
     sendToEveryBrowser,
     isTabRecorded,
     detachTab,

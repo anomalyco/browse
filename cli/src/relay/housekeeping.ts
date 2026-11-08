@@ -4,7 +4,7 @@ import type { CdpClientPool } from "../cdp/client-pool.ts"
 import type { RootTargetLifecycle } from "../cdp/root-target-lifecycle.ts"
 import type { TabActivity } from "../cdp/tab-activity.ts"
 import type { TargetRegistry } from "../cdp/target-registry.ts"
-import { browserUnresponsive, type JsonObject } from "../protocol.ts"
+import { browserUnresponsive } from "../protocol.ts"
 import type { FlightRecorderRelay } from "../recording-relay/flight-recorder.ts"
 import type { RecordingRelay } from "../recording-relay.ts"
 import type { OpenCodeBrowserSessions } from "../session-manager.ts"
@@ -57,7 +57,7 @@ export function createRelayHousekeeping(options: {
   readonly recordingRelay: RecordingRelay
   readonly flightRecorder: FlightRecorderRelay
   readonly rootLifecycle: RootTargetLifecycle
-  readonly sendToExtension: (command: ExtensionCommandInput) => Effect.Effect<JsonObject, Error>
+  readonly closeTargetByTargetId: (targetId: string) => Effect.Effect<void, Error>
   readonly sendToEveryBrowser: (command: ExtensionCommandInput) => void
   readonly isTabRecorded: (tabId: number) => boolean
   readonly detachTab: (tabId: number) => Effect.Effect<void, Error>
@@ -82,7 +82,7 @@ export function createRelayHousekeeping(options: {
     recordingRelay,
     flightRecorder,
     rootLifecycle,
-    sendToExtension,
+    closeTargetByTargetId,
     sendToEveryBrowser,
     isTabRecorded,
     detachTab,
@@ -115,7 +115,7 @@ export function createRelayHousekeeping(options: {
       if (!target || target.owner !== "relay") return
       const link = browsers.browserTab(target.tabId)?.link
       if (link && (link.rpc.connected || link.rpc.protocolLegacy === true)) {
-        yield* sendToExtension({ method: "tabs.remove", params: { tabId: target.tabId } })
+        yield* closeTargetByTargetId(targetId)
         return
       }
       const remaining = deadline - (yield* Clock.currentTimeMillis)

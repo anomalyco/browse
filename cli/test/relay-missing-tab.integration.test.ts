@@ -28,7 +28,7 @@ afterAll(async () => {
 })
 
 /** A paired extension whose agent tab `tabId` can vanish, and a session's CDP client attached to it. */
-async function scene(session: string, tabId: number) {
+async function scene(session: string, tabId: number, beforeConnect?: () => Promise<void>) {
   const targetId = `TARGET-${tabId}`
   const state = { gone: false }
   const missing = () => {
@@ -41,6 +41,7 @@ async function scene(session: string, tabId: number) {
       if (state.gone) throw new Error(`No tab with id: ${tabId}.`)
     })
   expect(await extension.pair()).toBe(true)
+  await beforeConnect?.()
   const socket = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test?opencodeBrowserSessionId=${session}`, { authorization: `Bearer ${token}` })
   if (!(socket instanceof WebSocket)) throw new Error("CDP connection refused")
   const events = collect(socket)
@@ -84,6 +85,30 @@ test("an error that isn't about the tab keeps the target", async () => {
     expect(detached()).toBe(false)
     expect(await listed()).toBe(true)
   } finally {
+    socket.close()
+    extension.close()
+  }
+}, 20_000)
+
+test("deleting a session never announces its closing tab to a connecting session", async () => {
+  const id = "releasing"
+  const post = (method: string) => fetch(`http://127.0.0.1:${port}/cli/session/${method}`, {
+    method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ id }),
+  })
+  const { extension, socket, targetId } = await scene(id, 94, async () => { expect((await post("new")).ok).toBe(true) })
+  const next = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test?opencodeBrowserSessionId=arriving`, { authorization: `Bearer ${token}` })
+  if (!(next instanceof WebSocket)) throw new Error("CDP connection refused")
+  try {
+    const events = collect(next)
+    await cdpCall(next, 1, "Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true })
+    // The extension answers tabs.remove, but hasn't delivered the tab-closed event yet.
+    expect((await post("delete")).ok).toBe(true)
+    expect(extension.commands.some((command) => command.method === "tabs.remove" && command.params?.tabId === 94)).toBe(true)
+    const listed = (await cdpCall(next, 2, "Target.getTargets")).result?.targetInfos
+    expect(listed).not.toContainEqual(expect.objectContaining({ targetId }))
+    expect(events.filter((event) => event.method === "Target.attachedToTarget").map((event) => event.params?.targetInfo)).not.toContainEqual(expect.objectContaining({ targetId }))
+  } finally {
+    next.close()
     socket.close()
     extension.close()
   }
