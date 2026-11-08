@@ -130,6 +130,24 @@ test.each(agentNames.filter(n => n !== "opencode"))("%s user config: preserve un
   } finally { fs.rmSync(home, { recursive: true, force: true }) }
 })
 
+test.each(["hermes", "goose"] as const)("%s keeps large integers and long scalars byte-for-byte when install adds its entry", name => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-yaml-"))
+  try {
+    const key = name === "goose" ? "extensions" : "mcp_servers"
+    const file = path.join(home, "config.yaml")
+    const long = "a single quoted value that is deliberately longer than the eighty column line width yaml would fold at"
+    // The browse entry is appended to the last map, so every byte before it must come back unchanged.
+    const before = `# my config\naccount: 1234567890123456789\nnote: '${long}'\n${key}:\n  other: { url: https://other }\n`
+    fs.writeFileSync(file, before)
+    expect(editAgentConfig({ name, file, node: "/a path/node", entry: "/a path/browse.mjs" })).toBe("added")
+    const after = fs.readFileSync(file, "utf8")
+    expect(after.startsWith(before)).toBe(true)
+    expect(after).toContain("account: 1234567890123456789")
+    expect(after).toContain(`note: '${long}'`)
+    expect((Bun.YAML.parse(after) as Record<string, { browse?: unknown }>)[key]?.browse).toMatchObject(name === "goose" ? { cmd: "/a path/node", args: ["/a path/browse.mjs", "mcp"] } : { command: "/a path/node", args: ["/a path/browse.mjs", "mcp"] })
+  } finally { fs.rmSync(home, { recursive: true, force: true }) }
+})
+
 test("an agent config write is atomic and keeps the file's mode", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-atomic-"))
   try {
