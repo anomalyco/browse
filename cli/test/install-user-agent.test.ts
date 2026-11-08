@@ -9,7 +9,7 @@ const lines = script.split(/\r?\n/).filter((line) => !line.trimStart().startsWit
 
 test("install.ps1 splats header validation past the protocol User-Agents", () => {
   const calls = lines.filter((line) => line.includes("-UserAgent"))
-  expect(calls.map((line) => line.match(/"([^"]+)"/)?.[1])).toEqual(["browse/$channel/install", "browse/$channel/$version/cli"])
+  expect(calls.map((line) => line.match(/-UserAgent\s+"([^"]+)"/)?.[1])).toEqual(["browse/$channel/install", "browse/$channel/$version/cli"])
   for (const line of calls) expect(line).toContain("@lenient")
 })
 

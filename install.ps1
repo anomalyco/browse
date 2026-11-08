@@ -158,16 +158,18 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
                 $manifestUrl = "$service/browse/cli/$channel.json"
                 try { $manifest = Invoke-RestMethod -UseBasicParsing -UserAgent "browse/$channel/install" -Uri $manifestUrl @lenient }
                 catch {
-                    # A response (404 included) means the release is missing; without one the request never reached the
-                    # service, so report the real error instead of blaming the channel.
-                    if (-not $_.Exception.Response) { throw "could not fetch the $channel release manifest from ${manifestUrl}: $($_.Exception.Message)" }
-                    throw "no $channel release at ${manifestUrl}: $($_.Exception.Message)"
+                    $status = $null
+                    try { $status = [int]$_.Exception.Response.StatusCode } catch {}
+                    if ($status -eq 404) { throw "no $channel release at ${manifestUrl}: $($_.Exception.Message)" }
+                    throw "could not fetch the $channel release manifest from ${manifestUrl}: $($_.Exception.Message)"
                 }
                 if ($manifest.app -ne "browse" -or $manifest.artifact -ne "cli" -or $manifest.channel -ne $channel) {
                     throw "$manifestUrl is not browse's $channel CLI manifest"
                 }
                 $version = [string]$manifest.release.version
                 if (-not $version) { throw "the $channel release has no version" }
+                # The version goes into a request header with validation skipped, so reject header syntax (CR/LF) here.
+                if ($version -cnotmatch '\A(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\z') { throw "the $channel release has an invalid version" }
                 $entry = $manifest.release.targets.PSObject.Properties["windows-$target"]
                 if (-not $entry) { throw "the $channel release has no windows-$target build" }
                 $url = [string]$entry.Value.url
