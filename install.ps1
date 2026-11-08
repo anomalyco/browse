@@ -28,6 +28,8 @@ function Install-browse {
     # Everything runs in this function so a failure stops it without closing the window `irm | iex` runs in.
     $ErrorActionPreference = "Stop"
     $ProgressPreference = "SilentlyContinue"
+    # PowerShell 6+ validates -UserAgent as HTTP product tokens; 5.1 has no -SkipHeaderValidation and doesn't validate.
+    $lenient = if ($PSVersionTable.PSVersion.Major -ge 6) { @{ SkipHeaderValidation = $true } } else { @{} }
 
     $requested = $env:VERSION
     $pinned = [bool]$env:VERSION
@@ -154,14 +156,12 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
                 $service = $service.TrimEnd("/")
                 if (-not $service.EndsWith("/release")) { throw "OPENCODE_BROWSER_RELEASE_SERVICE must end in /release, not $service" }
                 $manifestUrl = "$service/browse/cli/$channel.json"
-                # PowerShell 7 validates the User-Agent as RFC 7231 product tokens, so the channel and action live in
-                # one product and a comment instead of extra `/`-separated segments.
-                try { $manifest = Invoke-RestMethod -UseBasicParsing -UserAgent "browse/$channel (install)" $manifestUrl }
+                try { $manifest = Invoke-RestMethod -UseBasicParsing -UserAgent "browse/$channel/install" -Uri $manifestUrl @lenient }
                 catch {
-                    $status = $null
-                    try { $status = [int]$_.Exception.Response.StatusCode } catch {}
-                    if ($status -eq 404) { throw "no $channel release at ${manifestUrl}: $($_.Exception.Message)" }
-                    throw "could not read the $channel release manifest at ${manifestUrl}: $($_.Exception.Message)"
+                    # A response (404 included) means the release is missing; without one the request never reached the
+                    # service, so report the real error instead of blaming the channel.
+                    if (-not $_.Exception.Response) { throw "could not fetch the $channel release manifest from ${manifestUrl}: $($_.Exception.Message)" }
+                    throw "no $channel release at ${manifestUrl}: $($_.Exception.Message)"
                 }
                 if ($manifest.app -ne "browse" -or $manifest.artifact -ne "cli" -or $manifest.channel -ne $channel) {
                     throw "$manifestUrl is not browse's $channel CLI manifest"
@@ -203,7 +203,7 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
             $archive = Join-Path $tmp $filename
             Write-Host ""
             Write-Host "Installing browse version: $version ($channel)"
-            Invoke-WebRequest -UseBasicParsing -UserAgent "browse/$version ($channel; cli)" -Uri $url -OutFile $archive
+            Invoke-WebRequest -UseBasicParsing -UserAgent "browse/$channel/$version/cli" -Uri $url -OutFile $archive @lenient
             $actualSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
             if (-not $expectedSha -or $actualSha -ne $expectedSha.ToLowerInvariant()) {
                 throw "checksum mismatch for $filename (expected $(if ($expectedSha) { $expectedSha } else { 'none' }), got $actualSha)"
