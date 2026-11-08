@@ -157,7 +157,8 @@ export async function runInstalledUpdate(args: readonly string[], runtime = inst
   if (!installed) return true
   updateState(({ installing: _installing, ...state }) => ({ ...state, lastUpdate: { from: runtime.version, to: installed, at: new Date().toISOString() } }))
   // An old runtime/versions runtime's update is in npm's global folder; its relay restarts from there.
-  const refused = await switchTo({ ...(await updateTarget(runtime)), version: installed }, installed, { force: args.includes("--force") })
+  const target = await updateTarget(runtime)
+  const refused = target ? await switchTo({ ...target, version: installed }, installed, { force: args.includes("--force") }) : "npm's global folder is unknown (`npm root -g` failed)"
   if (refused) {
     const automatic = effectiveMode() === "on"
     log(`! Installed ${installed}, but the relay didn't restart (${refused}).`)

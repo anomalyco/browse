@@ -115,10 +115,17 @@ export function installedRuntime(entry = process.argv[1] ?? process.execPath): R
  * runtime/versions under the old data root (setup/legacy.ts), whose updates land in npm's global folder. The relay
  * restarted from there takes the old runtime over (setup/legacy-runtime.ts).
  */
-export async function updateTarget(runtime: Runtime, run: Run = runCommand, env: NodeJS.ProcessEnv = process.env): Promise<Runtime> {
+export async function updateTarget(runtime: Runtime, run: Run = runCommand, env: NodeJS.ProcessEnv = process.env): Promise<Runtime | undefined> {
   if (runtime.kind !== "npm" || !insidePath(runtime.entry, path.join(legacyDataRoot(), "runtime", "versions"))) return runtime
-  const root = (await run("npm", ["root", "-g"], { timeoutMs: 15_000, env })).stdout.trim()
-  return root ? { ...runtime, entry: path.join(root, ...PACKAGE_NAME.split("/"), "dist", "cli.mjs") } : runtime
+  const root = await npmGlobalRoot(run, env)
+  return root ? { ...runtime, entry: path.join(root, ...PACKAGE_NAME.split("/"), "dist", "cli.mjs") } : undefined
+}
+
+/** npm's global package root (`npm root -g`), where `npm install -g` puts packages; undefined when npm can't say. */
+export async function npmGlobalRoot(run: Run = runCommand, env: NodeJS.ProcessEnv = process.env): Promise<string | undefined> {
+  const result = await run("npm", ["root", "-g"], { timeoutMs: 20_000, env })
+  const root = result.status === 0 ? result.stdout.trim() : ""
+  return root && path.isAbsolute(root) ? root : undefined
 }
 
 /** The version currently on disk at the runtime's stable entry (a binary reports it with --version). */
@@ -336,7 +343,12 @@ export async function runInstaller(options: InstallerOptions): Promise<string> {
     const spec = `${PACKAGE_NAME}@${options.version ?? options.channel ?? "latest"}`
     const npm = await run("npm", ["install", "-g", spec], { timeoutMs: 10 * 60_000, env })
     if (npm.status !== 0) throw new Error(`npm install -g ${spec} failed: ${(npm.stderr || npm.stdout).trim().split("\n").slice(-3).join(" ")}`)
-    const version = installedVersion(await updateTarget(options.runtime, run, env)) ?? options.version ?? options.channel ?? "latest"
+    const target = await updateTarget(options.runtime, run, env)
+    if (!target) throw new Error(`npm install -g ${spec} ran, but \`npm root -g\` didn't say where it installed`)
+    const found = existsSync(target.entry) ? installedVersion(target) : undefined
+    // A runtime outside npm's folder can only see the update there, so it is there or the install failed.
+    if (!found && target !== options.runtime) throw new Error(`npm install -g ${spec} ran, but ${target.entry} isn't there`)
+    const version = found ?? options.version ?? options.channel ?? "latest"
     if (options.version && compareVersions(version, options.version) < 0)
       throw new Error(`npm install -g ${spec} left ${version}, not the requested ${options.version}`)
     return version
@@ -490,7 +502,9 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
       const wanted = runtime.kind === "binary" ? state.latest : state.latest && compareVersions(state.latest, running) > 0 ? state.latest : undefined
       if (!wanted || mode !== "on") return
 
+      // A failed `npm root -g` isn't kept: the next tick asks again.
       updates ??= await updateTarget(runtime, deps.run ?? runCommand, env)
+      if (!updates) return void deps.log("autoupdate.no_target", { reason: "npm root -g failed" })
       // An installer in its own process: wait for it, or record that it died without saying how it went.
       const installing = state.installing
       if (installing) {

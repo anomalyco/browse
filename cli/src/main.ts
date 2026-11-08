@@ -4,9 +4,8 @@
 //   Driving the browser (cli.ts): serve, relay, execute, session, network, secrets, recording, journal,
 //   doctor, skill, mcp, status. The relay is the local server agents use; the extension connects to it.
 // `browse mcp` runs the MCP server over stdio (as does the bundle invoked as `opencode-browser-mcp`).
-import fs from "node:fs"
 import path from "node:path"
-import { legacyRoots, legacyRuntime, legacyRuntimeActive, settleLegacyHome } from "./setup/legacy.ts"
+import { legacyRootsLeft, legacyRuntime, legacyRuntimeActive, settleLegacyHome } from "./setup/legacy.ts"
 
 const embeddedVersion = globalThis.__OPENCODE_BROWSER_VERSION__
 const setupCommands = new Set(["install", "uninstall", "extension", "pair", "set"])
@@ -22,23 +21,18 @@ const askedForHelp = command === "--help" || command === "-h" || options.some((a
 /** Help for a command that never reaches the Effect CLI: print the top-level help instead. */
 const preCliHelp = askedForHelp && (command === "update" || (command !== undefined && setupCommands.has(command)))
 
-// The old self-managed runtime (setup/legacy.ts): a relay started from this install takes it over, then every process
-// either shares its folder (still active) or stops treating it as OPENCODE_BROWSER_HOME (taken over).
+// The old self-managed runtime (setup/legacy.ts): a relay started from this install takes it over once it owns the port
+// (setup/legacy-runtime.ts). Every other process shares its folder while it's active, and stops treating that folder as
+// OPENCODE_BROWSER_HOME once it's taken over.
 const oldRuntime = legacyRuntime()
-if (command === "serve" && legacyRuntimeActive(oldRuntime)) {
-  try {
-    const { adoptLegacyRuntime } = await import("./setup/legacy-runtime.ts")
-    adoptLegacyRuntime(oldRuntime)
-  } catch {
-    // The relay still starts; the old runtime keeps its folder until a later start takes it over.
-  }
-}
-settleLegacyHome(process.env, command === "serve" ? legacyRuntime() : oldRuntime)
+const takingOver = command === "serve" && !askedForHelp && legacyRuntimeActive(oldRuntime) &&
+  (await import("./setup/legacy-runtime.ts").then((module) => module.prepareLegacyTakeover(oldRuntime)).catch(() => false))
+if (!takingOver) settleLegacyHome(process.env, oldRuntime)
 
 // Earlier layouts (~/.browse, and the old opencode-browser data root) move to the XDG folders on the first run.
 // opencode briefly shows the update, and no other command pays for the import.
-if (command !== "--version" && command !== "-v" && !askedForHelp && !process.env.OPENCODE_BROWSER_HOME &&
-  legacyRoots().some((root) => fs.existsSync(root))) {
+// A takeover migrates once its relay owns the port.
+if (command !== "--version" && command !== "-v" && !askedForHelp && !takingOver && !process.env.OPENCODE_BROWSER_HOME && legacyRootsLeft()) {
   try {
     const { migrateLegacy } = await import("./setup/migrate.ts")
     migrateLegacy()

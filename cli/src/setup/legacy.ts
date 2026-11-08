@@ -20,6 +20,17 @@ export function legacyRoots(home = os.homedir()): readonly string[] {
   return [path.join(home, ".browse"), legacyDataRoot(home)]
 }
 
+/** Whether migration has work left: an old root holds more than the extension link it keeps for a dev extension. */
+export function legacyRootsLeft(home = os.homedir()) {
+  return legacyRoots(home).some((root) => {
+    try {
+      return fs.readdirSync(root).some((name) => name !== "extension" || !fs.lstatSync(path.join(root, name)).isSymbolicLink())
+    } catch {
+      return false
+    }
+  })
+}
+
 /**
  * The self-managed runtime of releases before 0.0.11: runtime/current.json names the version under runtime/versions
  * that the old shim (bin/opencode-browser.mjs, which agents' MCP entries run) starts, with OPENCODE_BROWSER_HOME set to
@@ -64,7 +75,7 @@ export function insidePath(file: string, root: string) {
   return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative)
 }
 
-const samePath = (left: string, right: string) => {
+export const samePath = (left: string, right: string) => {
   const normalize = (value: string) => (process.platform === "win32" ? path.resolve(value).toLowerCase() : path.resolve(value))
   return normalize(left) === normalize(right)
 }

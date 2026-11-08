@@ -3,7 +3,7 @@ import { createHash } from "node:crypto"
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
-import { runCommand, installedVersion } from "../update/auto-update.ts"
+import { npmGlobalRoot, runCommand, installedVersion } from "../update/auto-update.ts"
 import { cliCommand, compiledBinary, entryCommand, entrySpawnCommand, resolveWindowsShim, scriptEntry } from "../paths.ts"
 import { opencodeBrowserVersion } from "../version.ts"
 import { installBinaryRuntime } from "./binary.ts"
@@ -34,9 +34,12 @@ export type Servers = Record<
   { type?: unknown; command?: unknown; environment?: unknown; [key: string]: unknown }
 >
 
+/** OpenCode's user config files under its config folder, in the order OpenCode reads them. */
+export const OPENCODE_CONFIG_NAMES = ["opencode.json", "opencode.jsonc", ".opencode/opencode.json", ".opencode/opencode.jsonc"]
+
 export function configFile() {
   const directory = path.join(configRoot, "opencode")
-  const candidates = ["opencode.json", "opencode.jsonc", ".opencode/opencode.json", ".opencode/opencode.jsonc"].map(
+  const candidates = OPENCODE_CONFIG_NAMES.map(
     (name) => path.join(directory, name),
   )
   return candidates.find((file) => existsSync(file) && statSync(file).isFile()) ?? candidates[0]!
@@ -190,13 +193,6 @@ export function removeLegacyHost() {
     : []
   keys.forEach((key) => spawnSync("reg", ["delete", key, "/f"]))
   return leftovers.length + keys.length > 0
-}
-
-/** npm's global package root (`npm root -g`), where a global install keeps the package agents run. */
-async function npmGlobalRoot(): Promise<string | undefined> {
-  const result = await runCommand("npm", ["root", "-g"], { timeoutMs: 20_000 })
-  const root = result.status === 0 ? result.stdout.trim() : ""
-  return root && path.isAbsolute(root) ? root : undefined
 }
 
 /**

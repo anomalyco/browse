@@ -17,6 +17,9 @@ const serve = Command.make(
     yield* Effect.scoped(
       Effect.gen(function* () {
         const relay = yield* startRelay({ port, additionalExtensionOrigins })
+        // Taking over the old self-managed runtime (setup/legacy-runtime.ts) is published only now that this relay
+        // owns the port.
+        yield* Effect.promise(() => import("../setup/legacy-runtime.ts").then((module) => module.commitLegacyTakeover()))
         yield* Console.log(`browse relay listening at ${relay.url}`)
         yield* Console.log(
           `browse connects automatically while the browser runs. Run \`${cliCommand("status")}\` to check.`,

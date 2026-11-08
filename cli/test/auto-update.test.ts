@@ -364,8 +364,8 @@ describe("a runtime the old opencode-browser shim starts from runtime/versions",
     const versions = path.join(home, "data", "opencode-browser", "runtime", "versions")
     const runtime: Runtime = { kind: "npm", entry: writePackage(path.join(versions, "0.0.15-dev.108", "node_modules", "@opencode", "browse"), "0.0.15-dev.108"), version: "0.0.15-dev.108" }
     const globalRoot = path.join(home, "global", "lib", "node_modules")
-    const npm = (install?: () => void) => async (_command: string, args: readonly string[]) => {
-      if (args[0] === "root") return { ...ok, stdout: `${globalRoot}\n` }
+    const npm = (install?: () => void, root = () => true) => async (_command: string, args: readonly string[]) => {
+      if (args[0] === "root") return root() ? { ...ok, stdout: `${globalRoot}\n` } : { status: 1, stdout: "", stderr: "npm: not found" }
       install?.()
       return ok
     }
@@ -384,6 +384,41 @@ describe("a runtime the old opencode-browser shim starts from runtime/versions",
       // 0.0.15's updater read the version back from runtime/versions, which npm never touches, and failed every time.
       const installed = await runInstaller({ runtime, version: "0.0.16-dev.130", run: npm(() => writePackage(global, "0.0.16-dev.130")), env: {} })
       expect(installed).toBe("0.0.16-dev.130")
+    } finally {
+      restore()
+    }
+  })
+
+  test("an install it can't find in npm's global folder fails, rather than reporting the version it asked for", async () => {
+    const { runtime, npm, restore } = oldRuntime()
+    try {
+      await expect(runInstaller({ runtime, version: "0.0.16-dev.130", run: npm(undefined, () => false), env: {} })).rejects.toThrow("npm root -g")
+      await expect(runInstaller({ runtime, version: "0.0.16-dev.130", run: npm(), env: {} })).rejects.toThrow("isn't there")
+    } finally {
+      restore()
+    }
+  })
+
+  test("a failed `npm root -g` is asked again on the next tick, not kept", async () => {
+    const { runtime, global, npm, restore } = oldRuntime()
+    try {
+      const entry = writePackage(global, "0.0.16-dev.130")
+      updateState(() => ({ checkedAt: Date.now(), latest: "0.0.16-dev.130" }))
+      let rootWorks = false
+      const spawned: { args: string[]; from: string }[] = []
+      const updater = createAutoUpdater({
+        runtime,
+        isIdle: () => true,
+        log: () => {},
+        spawnChild: (args, _onExit, from) => (spawned.push({ args: [...args], from: from.entry }), 2 ** 22 + 12351),
+        run: npm(undefined, () => rootWorks),
+        env: {},
+      })
+      await updater.tick()
+      expect(spawned).toEqual([])
+      rootWorks = true
+      await updater.tick()
+      expect(spawned).toEqual([{ args: ["runtime-switch", "0.0.16-dev.130"], from: entry }])
     } finally {
       restore()
     }
