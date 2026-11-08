@@ -79,6 +79,9 @@ async function createFfmpegVideoEncoder(options: {
     options.artifactType,
     temporaryOutputPath,
   ], { detached: process.platform !== "win32", stdio: "pipe" })
+  // A failed write's callback can run before its stream error event. Keep observing stdin between writes and at EOF.
+  let inputError: Error | undefined
+  child.stdin.on("error", (error) => { inputError ??= error })
   let stderr = ""
   child.stderr.setEncoding("utf8")
   child.stderr.on("data", (chunk: string) => {
@@ -109,6 +112,7 @@ async function createFfmpegVideoEncoder(options: {
   return {
     write: async (frame, timestampMs, durationMs) => {
       if (completed || finishingPromise || cancelPromise) throw new Error("ffmpeg input closed before recording finished")
+      if (inputError) throw inputError
       const envelope = mjpegMatroskaFrame(timestampMs, durationMs, frame.length)
       try {
         await writeStreamChunk(child.stdin, envelope.header)
@@ -131,6 +135,7 @@ async function createFfmpegVideoEncoder(options: {
         }
         const error = await exit
         if (error) throw error
+        if (inputError) throw inputError
         await fs.rename(temporaryOutputPath, options.outputPath)
         completed = true
       })().catch(async (error: unknown) => {
