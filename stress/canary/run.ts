@@ -5,7 +5,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { parseArgs } from "node:util"
-import { binaryPath, cacheDir, chromeDebugPort, dataDir, fixturePort, relayJson, relayPort, sleep } from "../lib/env.ts"
+import { binaryPath, cacheDir, chromeDebugPort, dataDir, fixturePort, relayJson, relayPort, sleep, stateDir } from "../lib/env.ts"
 import { BrowserCdp } from "../lib/cdp.ts"
 import { Sampler } from "../lib/metrics.ts"
 import { npxSmoke } from "./npx.ts"
@@ -18,16 +18,23 @@ assert(!process.env.OPENCODE_BROWSER_HOME && process.env.BROWSE_STRESS_BINARY ==
 assert([relayPort, chromeDebugPort, fixturePort].every(p => Number.isInteger(p) && p >= 19700 && p <= 19799) && new Set([relayPort, chromeDebugPort, fixturePort]).size === 3, "dedicated canary ports required")
 assert(once ? fs.realpathSync(os.homedir()).startsWith(path.join(fs.realpathSync(os.tmpdir()), "opencode/browse-canary.")) : os.userInfo().username === "canary", "--once requires a temp opencode/browse-canary.* HOME; service requires user canary")
 assert(!once || (Number.isFinite(short) && short > 0 && short <= 30))
-assert(process.env.OPENCODE_BROWSER_AUTO_UPDATE === "on" && process.env.OPENCODE_BROWSER_UPDATE_CHECK === "1", "auto-update must be enabled")
+assert(process.env.OPENCODE_BROWSER_AUTO_UPDATE === undefined && process.env.OPENCODE_BROWSER_UPDATE_CHECK === "1", "the stored mode must control auto-update, including after MCP respawns the relay")
 process.umask(0o077)
 const webhook = process.env.CANARY_SLACK_WEBHOOK
 delete process.env.CANARY_SLACK_WEBHOOK // never pass it to browsers, fuzz, npm or the product
 const node = (name: string, ...args: string[]) => [process.execPath, path.join(stress, name + ".ts"), ...args]
 const stateFile = path.join(root, "state.json")
-type State = { build?: string; commit?: string; tested?: string; day?: string; site?: number; trafficAt?: number; seen?: { version: string; commit: string; since: number; lagSince?: number; switchedAt?: number; assisted?: boolean; forcedAt?: number }; outage?: { since: number; incident?: boolean; hard?: boolean }; previous: Record<string, Status>; current: Record<string, Status>; alerted: string[] }
+type State = { updatesPaused?: boolean; build?: string; commit?: string; tested?: string; day?: string; site?: number; trafficAt?: number; seen?: { version: string; commit: string; since: number; lagSince?: number; switchedAt?: number; assisted?: boolean; forcedAt?: number }; outage?: { since: number; incident?: boolean; hard?: boolean }; previous: Record<string, Status>; current: Record<string, Status>; alerted: string[] }
 fs.mkdirSync(root, { recursive: true, mode: 0o700 })
 const state: State = fs.existsSync(stateFile) ? readJson(stateFile) : { previous: {}, current: {}, alerted: [] }
 const save = () => saveJson(stateFile, state)
+const updateFile = path.join(stateDir, "auto-update.json")
+const updateState = () => fs.existsSync(updateFile) ? readJson<{ mode?: string; installing?: { pid: number } }>(updateFile) : {}
+const setUpdateMode = (mode: "on" | "off") => saveJson(updateFile, { ...updateState(), mode })
+function resumeUpdates() { setUpdateMode("on"); delete state.updatesPaused; save() }
+// A service stop or reboot can preempt finally. Undo only a pause this canary owned.
+if (state.updatesPaused) resumeUpdates()
+assert((updateState().mode ?? "on") === "on", "stored auto-update mode must be on between release suites")
 let failed = false, version = state.build ?? "unknown", commit = state.commit ?? ""
 async function alert(message: string, id: string) {
   const folder = path.join(root, id), url = process.env.CANARY_RESULTS_URL?.replace(/\/$/, "")
@@ -54,12 +61,14 @@ async function snapshot() {
   const v = await relayJson<{ version: string }>("/version", undefined, 3000).catch(() => undefined)
   const ext = await relayJson("/extension/status", undefined, 3000).catch(() => undefined)
   const installed = spawnSync(binary, ["--version"], { encoding: "utf8", timeout: 15_000 }).stdout?.trim()
-  let matched = false
+  let zipVersion: string | undefined, zipBuild: string | undefined
   try {
     const zip = readJson<{ version: string; build: string }>(path.join(cacheDir, "extension.json"))
-    matched = !!zip.build && zip.version === v?.version && installed === zip.version && installed.includes("-dev.") && ext?.connected && zip.build === ext.build
+    zipVersion = zip.version; zipBuild = zip.build
   } catch { /* files may not exist during a failed update */ }
-  return { version: v?.version, installed, connected: ext?.connected === true, matched }
+  const extension: string | undefined = ext?.connected ? ext.build : undefined
+  const matched = !!zipBuild && zipVersion === v?.version && installed === zipVersion && !!installed?.includes("-dev.") && zipBuild === extension
+  return { version: v?.version, installed, connected: ext?.connected === true, extension, zipVersion, matched }
 }
 async function metrics(idle = false): Promise<Metrics> {
   const cdp = await BrowserCdp.connect(2500).catch(() => undefined)
@@ -132,13 +141,44 @@ async function health(ok: boolean, since: number) {
   }
 }
 
-async function suite(kind: "release" | "nightly" | "short") {
+type Snapshot = Awaited<ReturnType<typeof snapshot>>
+const builds = (s: Snapshot) => `relay ${s.version ?? "missing"}, binary ${s.installed || "missing"}, zip ${s.zipVersion ?? "missing"}, connected extension ${s.extension ?? "missing"}`
+
+async function releaseSuite() {
+  const skip = async (note: string) => { await check("soak-release", async () => ({ status: "skipped", note })); return false }
+  state.updatesPaused = true; save()
+  try {
+    setUpdateMode("off")
+    // A tick that read "on" before our write may still be fetching its manifest (30 s timeout).
+    // Drain that tick, then any live installer it started. A dead pid can linger until updates resume.
+    await sleep(31_000)
+    const deadline = Date.now() + 15 * minute
+    for (;;) {
+      const pid = updateState().installing?.pid
+      if (!pid) break
+      assert(Number.isSafeInteger(pid) && pid > 1, "invalid installer pid")
+      try { process.kill(pid, 0) } catch (err) { if ((err as NodeJS.ErrnoException).code === "ESRCH") break; throw err }
+      if (Date.now() >= deadline) return await skip(`not started: installer ${pid} still running`)
+      await sleep(1000)
+    }
+    const before = await snapshot()
+    if (!before.matched || before.version !== version || !before.extension || updateState().mode !== "off") return await skip(`not started: could not pin ${version}; ${builds(before)}`)
+    return await suite("release", before.extension)
+  } finally { resumeUpdates() }
+}
+
+async function suite(kind: "release" | "nightly" | "short", pinnedExtension?: string) {
   // Observe, don't inject traffic or start another run while the harness owns the browser. Interrupt a long
   // soak/fuzz if the extension stays missing for the incident bound, before attempting any recovery.
   const observed = async (dir: string, argv: string[], minutes: number) => {
     const abort = new AbortController(); let missing = 0
+    let drift: string | undefined
+    const observeBuild = (s: Snapshot) => {
+      if (pinnedExtension && ((s.version && s.version !== version) || (s.installed && s.installed !== version) || (s.zipVersion && s.zipVersion !== version) || (s.extension && s.extension !== pinnedExtension))) drift ??= `invalid: build changed during ${version} check; ${builds(s)}`
+    }
     const timer = setInterval(async () => {
       const s = await snapshot()
+      observeBuild(s)
       if (s.connected) missing = 0
       else if (!missing) missing = Date.now()
       else if (Date.now() - missing >= 6 * minute) abort.abort()
@@ -147,30 +187,44 @@ async function suite(kind: "release" | "nightly" | "short") {
     }, 30_000)
     let e: Evidence
     try { e = await command(dir, argv, minutes, abort.signal) } finally { clearInterval(timer) }
+    const after = await snapshot()
+    observeBuild(after)
+    if (drift) return { ...e, status: "skipped" as const, note: drift }
     if (abort.signal.aborted) {
       await health(false, missing)
       return { ...e, status: "fail" as const, note: "interrupted: browser unreachable for 6 min" }
     }
-    const after = await snapshot()
     if (after.version && version !== after.version) return { ...e, status: "skipped" as const, note: `version changed mid-check to ${after.version}` }
+    if (pinnedExtension) {
+      if (!after.matched) return { ...e, status: "fail" as const, note: `could not verify build after check: ${builds(after)}` }
+      e.note += `; before and after: ${builds(after)}`
+    }
     return e
   }
-  if (kind !== "nightly") await check("scenarios-core", async dir => {
+  const core = kind !== "nightly" && await check("scenarios-core", async dir => {
     const argv = node("run-scenarios", "--tag", "core"), first = await observed(dir, argv, 25)
     if (first.status !== "fail" || state.outage) return first
     const retry = await observed(dir, argv, 25)
     return retry.status === "pass" ? { ...retry, status: "flaky", note: "passed on retry in fresh MCP sessions; both attempts retained" } : retry
   })
-  if (state.outage) return
+  if (kind === "release" && core && core.status === "skipped") {
+    await check("soak-release", async () => ({ status: "skipped", note: `not started: build changed during ${core.id}` }))
+    return false
+  }
+  if (state.outage) return false
   const duration = kind === "nightly" ? 60 : kind === "release" ? 30 : short
   const args = ["--minutes", String(duration), "--min-success", "0.995"]
   if (kind === "short") args.push("--no-sites", "--workers", "1", "--only", "fill-click", "--chaos", "session-delete", "--chaos-every", "10", "--sample-every", "10")
   if (kind === "release") args.push("--chaos-every", "75")
   let bound = false
   const soak = await check(`soak-${kind}`, async dir => {
+    if (pinnedExtension) {
+      const s = await snapshot()
+      if (!s.matched || s.version !== version || s.extension !== pinnedExtension) return { status: "skipped", note: `not started: expected ${version}; ${builds(s)}` }
+    }
     const e = await observed(dir, node("soak", ...args), duration + 12)
     const sub = fs.readdirSync(dir).find(n => n.endsWith("-soak")), file = sub && path.join(dir, sub, "chaos.jsonl")
-    if (file && fs.existsSync(file)) {
+    if (e.status !== "skipped" && file && fs.existsSync(file)) {
       const events = fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map(l => JSON.parse(l))
       bound = events.some(r => !r.recovered || r.recoveryMs > 120_000)
       if (events.length) e.metrics = { recoveryMs: Math.max(...events.map(r => r.recoveryMs)) }
@@ -178,8 +232,8 @@ async function suite(kind: "release" | "nightly" | "short") {
     }
     return e
   })
-  if (bound) await alert("chaos recovery exceeded 120 s", soak.id)
-  if (kind !== "nightly" || state.outage) return
+  if (bound && soak.status === "fail") await alert("chaos recovery exceeded 120 s", soak.id)
+  if (kind !== "nightly" || state.outage) return soak.status !== "skipped"
   await check("fuzz", dir => observed(dir, node("fuzz", "--minutes", "15"), 22))
   if (state.outage) return
   await check("npx-smoke", npxSmoke)
@@ -206,8 +260,8 @@ async function cycle() {
       if (previous) await check("auto-update", async () => ({ status: pending.assisted ? "fail" : "pass", note: `${previous} → ${version}; relay, installed version and loaded zip agree`, metrics: { updateMs: Math.max(0, (pending.switchedAt ?? start) - pending.since), forced: !!pending.assisted } }), { tier: "upgrade", regress: false })
     }
     await check("released-extension", async () => ({ note: `running relay ${version} and connected extension match the installed dev release`, metrics: await metrics(true) }))
-    await suite(once ? "short" : "release")
-    if (!state.outage) { state.tested = version; if (state.seen?.version === version) delete state.seen; save() }
+    const tested = once ? await suite("short") : await releaseSuite()
+    if (tested && !state.outage) { state.tested = version; if (state.seen?.version === version) delete state.seen; save() }
   } else if (pending && !once && start - (pending.lagSince ?? pending.since) >= 60 * minute && (!pending.forcedAt || start - pending.forcedAt >= 60 * minute)) {
     pending.assisted = true; pending.forcedAt = start; save()
     const note = `update stuck: expected ${pending.version}, installed ${s.installed || "none"}, running ${s.version ?? "none"}; matched zip: ${!!s.matched}`
