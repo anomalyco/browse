@@ -10,12 +10,15 @@ const runInNode = nodeRealmRunner(path.join(scratch, "home"))
 afterAll(() => fs.rmSync(scratch, { recursive: true, force: true }))
 
 // Runs `script` as a Node module with ExecuteRealm and ExecuteCpuScheduler in scope; it prints its result as JSON last.
-function runScenario<T>(script: string, env: Record<string, string> = {}): T {
+// `host()` makes a host object with a read-only cpuMs(); `busy(ms)` is sandbox code that burns that much of the
+// relay thread's CPU (what the scheduler charges), so a preempted runner can't turn it into less work.
+function runScenario<T>(script: string): T {
   const source = `const { ExecuteRealm, ExecuteCpuScheduler } = await import(${JSON.stringify(path.join(import.meta.dir, "../src/execute-realm.ts"))})
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
-    const busy = (ms) => \`{ const end = performance.now() + \${ms}; while (performance.now() < end) {} }\`
+    const host = (extra = {}) => ({ cpuMs: () => { const cpu = process.threadCpuUsage(); return (cpu.user + cpu.system) / 1000 }, ...extra })
+    const busy = (ms) => \`{ const end = host.cpuMs() + \${ms}; while (host.cpuMs() < end) { for (let k = 0; k < 4000; k++) {} } }\`
     ${script}`
-  const child = spawnSync("node", ["--input-type=module", "--no-warnings", "-e", source], { encoding: "utf8", timeout: 60_000, env: { ...process.env, OPENCODE_BROWSER_HOME: path.join(scratch, "home"), ...env } })
+  const child = spawnSync("node", ["--input-type=module", "--no-warnings", "-e", source], { encoding: "utf8", timeout: 60_000, env: { ...process.env, OPENCODE_BROWSER_HOME: path.join(scratch, "home") } })
   if (child.status !== 0) throw new Error(`node failed: ${child.stderr}`)
   return JSON.parse(child.stdout.trim().split("\n").at(-1) ?? "null") as T
 }
@@ -37,7 +40,7 @@ test("the sustained budget charges CPU time, not slices stretched by a loaded ma
   expect(values(outcomes)).toEqual([{ value: "short stalls" }, { value: "long stalls" }, { value: "busy relay" }])
 }, 30_000)
 
-type Starvation = { readonly maxVersionMs: number; readonly interactiveMs: number; readonly paceMs: number; readonly errors: readonly string[] }
+type Starvation = { readonly p95VersionMs: number; readonly maxVersionMs: number; readonly interactiveMs: number; readonly paceMs: number; readonly errors: readonly string[] }
 
 // Eight sessions chunking heavy work, a light interactive session, an HTTP /version endpoint and a host timer loop
 // like human-input's pace(), all on one event loop. `shared` gives every realm the relay's one scheduler; otherwise
@@ -45,12 +48,12 @@ type Starvation = { readonly maxVersionMs: number; readonly interactiveMs: numbe
 const starvation = (shared: boolean) => runScenario<Starvation>(`
   const http = await import("node:http")
   const scheduler = ${shared} ? new ExecuteCpuScheduler() : undefined
-  const host = { later: () => new Promise((resolve) => setTimeout(resolve, 1)) }
+  const sessionHost = host({ later: () => new Promise((resolve) => setTimeout(resolve, 1)) })
   const run = (body) => {
     const realm = new ExecuteRealm(scheduler ? { scheduler } : {})
-    realm.proxyAsObject(host)
+    realm.proxyAsObject(sessionHost)
     const started = performance.now()
-    return realm.run({ source: "(async (host) => { " + body + " })", filename: "test.js", args: [host] })
+    return realm.run({ source: "(async (host) => { " + body + " })", filename: "test.js", args: [sessionHost] })
       .then(() => ({ ms: performance.now() - started }), (error) => ({ ms: performance.now() - started, error: String(error.message) }))
   }
   const server = http.createServer((_request, response) => response.end("{}"))
@@ -76,17 +79,25 @@ const starvation = (shared: boolean) => runScenario<Starvation>(`
   done = true
   await probing
   server.close()
-  console.log(JSON.stringify({ maxVersionMs: Math.max(...versions), interactiveMs: outcomes.at(-1).ms, paceMs, errors: outcomes.flatMap((outcome) => outcome.error ? [outcome.error] : []) }))
-`, { OPENCODE_BROWSER_EXECUTE_SLICE_MS: "200" })
+  const sorted = versions.toSorted((a, b) => a - b)
+  console.log(JSON.stringify({
+    p95VersionMs: sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))],
+    maxVersionMs: sorted.at(-1),
+    interactiveMs: outcomes.at(-1).ms,
+    paceMs,
+    errors: outcomes.flatMap((outcome) => outcome.error ? [outcome.error] : []),
+  }))
+`)
 
 test("sessions sharing the relay's scheduler keep /version, light sessions and host timers responsive", () => {
   const unshared = starvation(false)
   const shared = starvation(true)
+  console.log(JSON.stringify({ unshared, shared }))
   expect(shared.errors).toEqual([])
   // Unshared, a turn of the loop runs every session's due slice back to back (about 8 x 40 ms) before any I/O.
   // Shared, I/O waits for at most one slice and its pacing gap.
-  expect(shared.maxVersionMs).toBeLessThan(250)
-  expect(shared.maxVersionMs).toBeLessThan(unshared.maxVersionMs / 2)
+  expect(shared.p95VersionMs).toBeLessThan(150)
+  expect(shared.p95VersionMs).toBeLessThan(unshared.p95VersionMs / 2)
   expect(shared.interactiveMs).toBeLessThan(unshared.interactiveMs / 2)
   expect(shared.paceMs).toBeLessThan(unshared.paceMs / 2)
 }, 60_000)
@@ -94,8 +105,10 @@ test("sessions sharing the relay's scheduler keep /version, light sessions and h
 test("a realm's queued callbacks run in the order they came due", () => {
   // The busy run leaves open time owed, so all twenty timers queue before any runs.
   const order = runScenario<unknown>(`
+    const realmHost = host()
     const realm = new ExecuteRealm()
-    console.log(JSON.stringify(await realm.run({ filename: "test.js", args: [], source: "(async () => { const order = []; for (let i = 0; i < 20; i++) setTimeout(() => order.push(i), 0); " + busy(40) + " await new Promise((r) => setTimeout(r, 100)); return order })" })))
+    realm.proxyAsObject(realmHost)
+    console.log(JSON.stringify(await realm.run({ filename: "test.js", args: [realmHost], source: "(async (host) => { const order = []; for (let i = 0; i < 20; i++) setTimeout(() => order.push(i), 0); " + busy(40) + " await new Promise((r) => setTimeout(r, 100)); return order })" })))
   `)
   expect(order).toEqual(Array.from({ length: 20 }, (_, index) => index))
 }, 30_000)
@@ -104,9 +117,9 @@ test("clearing a timer that is already queued cancels it", () => {
   // host.soon calls back after the timers came due and queued, but before the paced queue runs them.
   const fired = runScenario<unknown>(`
     const realm = new ExecuteRealm()
-    const host = { soon: (callback) => setTimeout(callback, 5) }
-    realm.proxyAsObject(host)
-    console.log(JSON.stringify(await realm.run({ filename: "test.js", args: [host], source: "(async (host) => { const fired = []; const cancelled = setTimeout(() => fired.push('cancelled'), 0); setTimeout(() => fired.push('kept'), 0); host.soon(() => clearTimeout(cancelled)); " + busy(40) + " await new Promise((r) => setTimeout(r, 100)); return fired })" })))
+    const realmHost = host({ soon: (callback) => setTimeout(callback, 5) })
+    realm.proxyAsObject(realmHost)
+    console.log(JSON.stringify(await realm.run({ filename: "test.js", args: [realmHost], source: "(async (host) => { const fired = []; const cancelled = setTimeout(() => fired.push('cancelled'), 0); setTimeout(() => fired.push('kept'), 0); host.soon(() => clearTimeout(cancelled)); " + busy(40) + " await new Promise((r) => setTimeout(r, 100)); return fired })" })))
   `)
   expect(fired).toEqual(["kept"])
 }, 30_000)
@@ -114,10 +127,14 @@ test("clearing a timer that is already queued cancels it", () => {
 test("an interval that comes due again while queued runs once, not once per missed period", () => {
   const counts = runScenario<{ readonly ticks: number }>(`
     const scheduler = new ExecuteCpuScheduler()
+    const realmHost = host({ ticking: true })
     const heavy = new ExecuteRealm({ scheduler })
     const ticking = new ExecuteRealm({ scheduler })
-    const working = heavy.run({ filename: "heavy.js", args: [], source: "(async () => { for (let i = 0; i < 12; i++) { " + busy(60) + " await new Promise((r) => setTimeout(r, 0)) } })" })
+    for (const realm of [heavy, ticking]) realm.proxyAsObject(realmHost)
+    // The heavy realm keeps working until the ticking realm has cleared its interval.
+    const working = heavy.run({ filename: "heavy.js", args: [realmHost], source: "(async (host) => { while (host.ticking) { " + busy(60) + " await new Promise((r) => setTimeout(r, 0)) } })" })
     const ticks = await ticking.run({ filename: "ticking.js", args: [], source: "(async () => { let ticks = 0; const id = setInterval(() => { ticks += 1 }, 1); await new Promise((r) => setTimeout(r, 800)); clearInterval(id); return ticks })" })
+    realmHost.ticking = false
     await working
     console.log(JSON.stringify({ ticks }))
   `)
@@ -128,21 +145,22 @@ test("an interval that comes due again while queued runs once, not once per miss
 }, 30_000)
 
 test("disposing a realm drops its queued callbacks and runs", () => {
+  // busy(100) owes 50 ms of open time, so the pump waits that long; sleep(0) lets the due timer queue first.
   const outcome = runScenario<unknown>(`
     const scheduler = new ExecuteCpuScheduler()
     const marks = []
-    const host = { mark: (name) => { marks.push(name) } }
+    const realmHost = host({ mark: (name) => { marks.push(name) } })
     const timers = new ExecuteRealm({ scheduler })
     const runs = new ExecuteRealm({ scheduler })
-    for (const realm of [timers, runs]) realm.proxyAsObject(host)
-    await timers.run({ filename: "timers.js", args: [host], source: "((host) => { setTimeout(() => host.mark('timer'), 0); " + busy(40) + " })" })
-    const queuedRun = runs.run({ filename: "runs.js", args: [host], source: "((host) => host.mark('run'))" }).then(() => "ran", (error) => error.message)
-    await sleep(5)
+    for (const realm of [timers, runs]) realm.proxyAsObject(realmHost)
+    await timers.run({ filename: "timers.js", args: [realmHost], source: "((host) => { setTimeout(() => host.mark('timer'), 0); " + busy(100) + " })" })
+    const queuedRun = runs.run({ filename: "runs.js", args: [realmHost], source: "((host) => host.mark('run'))" }).then(() => "ran", (error) => error.message)
+    await sleep(0)
     const queued = scheduler.pending
     timers.dispose()
     runs.dispose()
     const afterDispose = scheduler.pending
-    await sleep(60)
+    await sleep(80)
     console.log(JSON.stringify({ queued, afterDispose, run: await queuedRun, marks }))
   `)
   expect(outcome).toEqual({ queued: 2, afterDispose: 0, run: "Execute stopped", marks: [] })
