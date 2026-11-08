@@ -8,6 +8,7 @@ Wants=browse-canary-browser@chrome.service browse-canary-install.service
 User=canary
 EnvironmentFile=/etc/browse-canary.env
 EnvironmentFile=-/etc/browse-canary-alerts.env
+UnsetEnvironment=OPENCODE_BROWSER_HOME
 WorkingDirectory=/home/canary
 UMask=0077
 ExecStart=/usr/local/bin/node /opt/browse-canary/stress/canary/run.ts

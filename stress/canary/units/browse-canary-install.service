@@ -10,6 +10,7 @@ Type=oneshot
 RemainAfterExit=yes
 User=canary
 EnvironmentFile=/etc/browse-canary.env
+UnsetEnvironment=OPENCODE_BROWSER_HOME
 UMask=0077
 WorkingDirectory=/home/canary
 ExecStart=/bin/bash /opt/browse-canary/stress/canary/bootstrap.sh
