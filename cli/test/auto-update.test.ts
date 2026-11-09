@@ -12,6 +12,7 @@ import {
   installKind,
   readState,
   runInstaller,
+  setStoredMode,
   updateState,
   type Runtime,
 } from "../src/update/auto-update.ts"
@@ -693,7 +694,12 @@ describe("status", () => {
       const status = autoUpdateStatus({ runtime, env: {} })
       expect(status.install).toBe("binary")
       expect(status.effective).toBe("on")
-      expect(describeAutoUpdate(status)).toContain("0.0.2 available")
+      expect(describeAutoUpdate(status)).toContain("0.0.2 available; the installer runs when no agent is using the browser")
+      setStoredMode("notify")
+      const notify = autoUpdateStatus({ runtime, env: {} })
+      expect(notify.effective).toBe("notify")
+      expect(describeAutoUpdate(notify)).toContain(`0.0.2 available; run \`${notify.cli} update\` to install it`)
+      expect(describeAutoUpdate(notify)).not.toContain("installer runs")
       expect(describeAutoUpdate(autoUpdateStatus({ runtime: { ...runtime, kind: "npx" }, env: {} }))).toContain("npx resolves")
     } finally {
       delete process.env.OPENCODE_BROWSER_HOME
