@@ -78,11 +78,17 @@ export function createMcpToolContext(options: {
     description:
       "Optional browser id for a new session's tabs; omit for the default browser. A session stays in its browser. Call status to list the connected browsers.",
   } as const
-  const newCaller = (session: CurrentSession): Caller => ({ ...session, sessions: new Set(session.established ? [session.id] : []), updateNoted: false })
-  // One MCP server can serve many agents: OpenCode runs one per server config and process, shared by every agent
-  // session and subagent, and names the caller in each call's _meta. Each caller keeps its own current session, so one
-  // agent's bare execute or session_use never moves another's page. Calls without a caller id share the server's.
-  const shared = newCaller(options.currentSession)
+  const newCaller = (session: CurrentSession, shared: boolean): Caller => ({
+    ...session,
+    sessions: new Set(session.established ? [session.id] : []),
+    shared,
+    updateNoted: false,
+  })
+  // One MCP server keeps a separate current session per calling agent when the client names it: OpenCode names the
+  // agent in each call's _meta and serves every agent session and subagent from one process. Calls without a caller id
+  // share one current session, so agents of such a client (e.g. subagents) share it too, and one agent's bare execute
+  // or session_use moves the others' page.
+  const shared = newCaller(options.currentSession, true)
   const callers = new Map<string, Caller>()
   const caller = Effect.serviceOption(McpSchema.McpRequestContext).pipe(Effect.map((context) => {
     const meta = Option.getOrUndefined(context)?.requestMetadata
@@ -96,7 +102,7 @@ export function createMcpToolContext(options: {
     }
     if (callers.size >= maxRememberedCallers) callers.delete(callers.keys().next().value!)
     // A session the user pinned for this server (OPENCODE_BROWSER_SESSION) stays every caller's starting session.
-    const created = newCaller(options.currentSession.established ? options.currentSession : { id: callerSessionId(id), established: false })
+    const created = newCaller(options.currentSession.established ? options.currentSession : { id: callerSessionId(id), established: false }, false)
     callers.set(id, created)
     return created
   }))

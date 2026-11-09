@@ -11,8 +11,8 @@ import { FakeExtension, startRelay, stopRelay, until } from "./relay-harness.ts"
 import { mcpStdio, type McpReply } from "./support/mcp-stdio.ts"
 
 // OpenCode runs one MCP server per server config and process, shared by every agent session and subagent, and names
-// the calling agent in each tools/call's _meta. Each agent gets its own current session; calls that name no agent
-// (other MCP clients, which run one server per conversation) share the server's, as before.
+// the calling agent in each tools/call's _meta. Each named agent gets its own current session; calls that name no
+// agent share one, as when a client runs a parent agent and its subagents through one server without naming them.
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-mcp-callers-"))
 afterAll(() => fs.rmSync(home, { recursive: true, force: true }))
 
@@ -121,6 +121,10 @@ describe("one MCP server shared by several agents", () => {
     const call = async (name: string, args: Record<string, unknown>, sessionID?: string) =>
       structured(await mcp.request("tools/call", { name, arguments: args, ...(sessionID ? { _meta: agent(sessionID) } : {}) }))
     try {
+      // status says whether this caller shares its current session with every other unnamed caller.
+      expect(await call("status", {}, "ses_a")).toMatchObject({ sharedSession: false })
+      expect(await call("status", {})).toMatchObject({ sharedSession: true })
+
       // Two agents' bare executes land in two sessions, each on its own tab.
       expect(await call("execute", { code: "return 1" }, "ses_a")).toMatchObject({ session: callerSessionId("ses_a") })
       expect(await call("execute", { code: "return 2" }, "ses_b")).toMatchObject({ session: callerSessionId("ses_b") })
