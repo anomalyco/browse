@@ -472,12 +472,30 @@ describe("toolbar clicks that can't attach", () => {
     expect(notice()?.message).toBe("browse can't use this page. Chrome doesn't let extensions control browser pages or the Chrome Web Store.")
   })
 
-  test("a chrome:// tab already in relayTabs is still sent as a take-back", async () => {
+  test("a chrome:// tab Chrome dropped from the debugger still sends a connected take-back", async () => {
     const { userTab } = await userWindow()
     await command("debugger.attach", { tabId: userTab })
-    await stub.chrome.tabs.update(userTab, { url: "chrome://extensions" })
-    await relay.attachTab(userTab)
-    await toolbarClicked(userTab)
+    expect(relay.state().tabs.some((entry) => entry.tabId === userTab)).toBe(true)
+
+    const original = stub.chrome.debugger.attach
+    stub.chrome.debugger.attach = async () => {
+      throw new Error("Cannot access a chrome:// URL")
+    }
+    try {
+      await stub.chrome.tabs.update(userTab, { url: "chrome://extensions" })
+      // Chrome drops the debugger on the navigation; recover can't reattach, so the extension forgets the tab while
+      // the relay still has it as a target.
+      event("debugger.onDetach").emit({ tabId: userTab }, "target_closed")
+      // recover waits 45 ms before trying to attach again.
+      await new Promise((resolve) => setTimeout(resolve, 60))
+      await until(() => !relay.state().tabs.some((entry) => entry.tabId === userTab))
+
+      await relay.attachTab(userTab)
+      await toolbarClicked(userTab)
+      expect(stub.state.notifications.size).toBe(0)
+    } finally {
+      stub.chrome.debugger.attach = original
+    }
   })
 
   test("an attach with no click before it stays quiet", async () => {
@@ -501,11 +519,14 @@ describe("toolbar clicks that can't attach", () => {
   test("a file page clicked while the relay is away is refused before it is queued", async () => {
     const { userTab } = await userWindow()
     await stub.chrome.tabs.update(userTab, { url: "file:///tmp/report.html" })
+    TabCleanup.track(userTab)
     socket().drop()
     expect(relay.state().status).not.toBe("connected")
     await relay.attachTab(userTab)
     expect(stub.state.notifications.size).toBe(1)
     expect(notice()?.message).toContain("Allow access to file URLs")
+    // The click still takes an agent-opened tab off idle cleanup even though its page can't be queued.
+    expect(await TabCleanup.isTracked(userTab)).toBe(false)
     relay.reconnect()
     await until(() => relay.state().status === "connected")
     expect(socket().received.some((entry) => entry.method === "toolbar.clicked" && entry.params?.tabId === userTab)).toBe(false)

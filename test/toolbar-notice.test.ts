@@ -56,6 +56,19 @@ describe("ToolbarNotice", () => {
     expect(await ToolbarNotice.unavailable(tabId)).toBe("file")
   })
 
+  test("a browser without file-access detection is left to the relay", async () => {
+    const extension = stub.chrome.extension as { isAllowedFileSchemeAccess?: () => Promise<boolean> }
+    const original = extension.isAllowedFileSchemeAccess
+    extension.isAllowedFileSchemeAccess = undefined
+    try {
+      const tabId = await tab("file:///tmp/report.html")
+      expect(await ToolbarNotice.unavailable(tabId)).toBeUndefined()
+      expect(stub.state.notifications.size).toBe(0)
+    } finally {
+      extension.isAllowedFileSchemeAccess = original
+    }
+  })
+
   test("only the attach after a click belongs to the user", () => {
     const tabId = 1
     expect(ToolbarNotice.take(tabId)).toBe(false)

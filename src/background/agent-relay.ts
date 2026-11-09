@@ -550,13 +550,14 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       // No relay yet: a second click takes the queued one back before anything else.
       if (pendingAttach.delete(tabId)) return
       if (lending) {
+        // The user clicked to keep an agent-opened tab, so take it off idle cleanup even if the page can't be queued.
+        await lendTab(tabId)
         // A page that can't be attached can't be queued either; say why now instead of after a reconnect.
         const blocked = await ToolbarNotice.unavailable(tabId)
         if (blocked) {
           log.add("attach.unavailable", { tabId, reason: blocked })
           return
         }
-        await lendTab(tabId)
       }
       pendingAttach.set(tabId, lending)
       attempts = 0

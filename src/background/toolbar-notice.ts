@@ -37,7 +37,10 @@ async function classify(url: string | undefined): Promise<Blocked | undefined> {
   if (!url || url.startsWith(OWN)) return undefined
   if (url.startsWith("file://")) {
     // A browser without the API is left to the relay's attach, which reports Chrome's own reason if it fails.
-    return (await chrome.extension.isAllowedFileSchemeAccess().catch(() => true)) ? undefined : "file"
+    const allowed = await Promise.resolve()
+      .then(() => chrome.extension?.isAllowedFileSchemeAccess?.())
+      .catch(() => true)
+    return allowed === false ? "file" : undefined
   }
   return INTERNAL.test(url) || STORE.test(url) ? "page" : undefined
 }
