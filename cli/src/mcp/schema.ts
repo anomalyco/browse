@@ -59,7 +59,7 @@ export function objectSchema(properties: JsonObject, required: readonly string[]
 export const emptyInputSchema = objectSchema({})
 export const sessionSchemaProperty = {
   type: "string",
-  description: "Optional session id. Defaults to this MCP server's current session.",
+  description: "Optional session id. Defaults to your current session.",
 } as const
 export const sessionAliasSchemaProperty = { type: "string", description: "Same as id." } as const
 export const sessionOnlyInputSchema = objectSchema({

@@ -23,11 +23,12 @@ it is needed, so do not start `browse serve` first.
 
 Over MCP, each agent has its own current session when the client names the
 agent (OpenCode does), so omit `session` for the normal path; another named
-agent's calls never land on your page. `status` reports `sharedSession: true`
-when the client doesn't name agents, and then every agent on that server
-shares one current session: if several agents (such as subagents) use it, each
-should `session_new` its own and pass `session` on every call. `session_new`
-and `session_use` change your current session. Pass an explicit `session` id
+agent's bare calls don't land on your page. `status` reports
+`sharedSession: true` when the client doesn't name agents, and then every
+agent on that server shares one current session: if several agents (such as
+subagents) use it, each should `session_new` its own and pass `session` on
+every call. `session_new`, `session_use`, `session_reset` and any call that
+names a `session` make it your current session. Pass an explicit `session` id
 to work in several sessions, or to share one with another agent on purpose.
 
 CLI sessions are named, and a named session keeps its default page across short

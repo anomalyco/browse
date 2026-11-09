@@ -52,7 +52,7 @@ registerMcpTools({
     {
       name: "tabs_cleanup",
       description:
-        "Close tabs agents opened that nobody has used for a while (no agent command and not visited by the user). Tabs the user shared or pinned, the active tab, tabs playing audio, recording, or waiting for a handoff stay open. `idleMinutes` applies to the sessions the calling agent made current; when the client doesn't name agents, that is every session made current over this server, so agents sharing one should not use `idleMinutes: 0` unless the user asks. Tabs of other agents the client names close only once idle for the user's setting too. To finish your own work, `session_reset` or `session_delete` is more direct. browse also does this automatically after the user's idle setting (10 minutes unless they changed it).",
+        "Close tabs agents opened that nobody has used for a while (no agent command and not visited by the user). Tabs the user shared or pinned, the active tab, tabs playing audio, recording, or waiting for a handoff stay open. `idleMinutes` applies to the sessions the calling agent made current; when the client doesn't name agents, that is every session made current over this server, so agents sharing one should not use `idleMinutes: 0` unless the user asks. Every other agent tab closes only once idle for the user's setting too. To finish your own work, `session_reset` or `session_delete` is more direct. browse also does this automatically after the user's idle setting (10 minutes unless they changed it).",
       inputSchema: objectSchema({
         idleMinutes: {
           type: "integer",

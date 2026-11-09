@@ -231,13 +231,13 @@ connection itself isn't encrypted by browse; use a network that is (Tailscale or
 | `flight_recorder` (`action`: `start`, `status`, `save_last`, `cancel`) | Keep the last minute of video, save it when something breaks |
 | `secrets_list` | Site secrets you stored for the session's sites; agents type them with `secrets.type()` only on their sites, without seeing them |
 | `secrets_status`, `secrets_refresh`, `secrets_run` | Reuse captured credentials while keeping their values out of transcripts and artifacts |
-| `tabs_cleanup` | Close idle agent tabs (`idleMinutes` applies to the calling agent's own sessions; when the client doesn't name agents, every session made current on that server; other agents' wait for the idle setting) |
+| `tabs_cleanup` | Close idle agent tabs (`idleMinutes` applies to the calling agent's own sessions; other agents' wait for the idle setting) |
 | `settings` | Read or change the settings below when the user asks (never the security switches or update behaviour); the options page updates live |
 | `status` | Connection status |
 
 Each agent has its own current session only when the client names the agent (OpenCode does; `status` reports
-`sharedSession`). With other clients, agents on one server share a current session unless each passes its own
-`session`.
+`sharedSession`). With other clients, agents on one server share one current session; when several use it, each
+should `session_new` its own and pass `session` on every call.
 
 The agent reference is [`cli/skills/browse/SKILL.md`](cli/skills/browse/SKILL.md)
 (`browse skill` prints it). The MCP server also sends a short usage guide in its
