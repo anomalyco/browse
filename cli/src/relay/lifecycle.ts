@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url"
 import { browserUnresponsive, extensionProtocolAdvice, extensionReconnectAlarmPeriodMs } from "../protocol.ts"
 import * as RelayClient from "./client.ts"
 import { RelayShutdownRequest, type ExtensionStatus, type RelayVersion } from "./schema.ts"
+import { launchWindowsRelay, quoteWindowsArgument } from "./windows-launch.ts"
 import { compareVersions, installedRuntime, installedVersion } from "../update/auto-update.ts"
 import { cliCommand, compiledBinary, installCommand, scriptEntry } from "../paths.ts"
 import { opencodeBrowserBuildId } from "../version.ts"
@@ -347,9 +348,12 @@ export function startManagedRelay(
       const { OPENCODE_BROWSER_RESTART_REQUEST_ID: _inheritedRestartRequestId, ...env } = relayEnvironment(process.env)
       const childEnv = { ...env, OPENCODE_BROWSER_MANAGED_RELAY: "1", ...(options.restartRequestId ? { OPENCODE_BROWSER_RESTART_REQUEST_ID: options.restartRequestId } : {}) }
       if (process.platform === "win32") {
-        // A detached spawn can still inherit extra pipe handles from cmd / PowerShell 5.1. ShellExecute starts a
-        // separate hidden console without those handles. Start-Process takes one Windows command line, not argv.
-        const args = launch.args.map(s => `"${s.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`).join(" ")
+        // Under Bun, kernel32 CreateProcessW starts the relay in its own invisible console without inheriting this
+        // process's handles (windows-launch.ts). Otherwise, and when that fails: a detached spawn can still inherit
+        // extra pipe handles from cmd / PowerShell 5.1, so ShellExecute starts a separate hidden console without them.
+        // Start-Process takes one Windows command line, not argv.
+        if (launchWindowsRelay(launch, childEnv)) return
+        const args = launch.args.map(quoteWindowsArgument).join(" ")
         execFileSync(path.join(process.env.SystemRoot!, "System32/WindowsPowerShell/v1.0/powershell.exe"),
           ["-NoProfile", "-NonInteractive", "-Command", "Start-Process -ErrorAction Stop -WindowStyle Hidden -FilePath $env:BROWSE_EXE -ArgumentList $env:BROWSE_ARGS"],
           { env: { ...childEnv, BROWSE_EXE: launch.executable, BROWSE_ARGS: args }, windowsHide: true, stdio: "ignore" })
