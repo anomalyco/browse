@@ -57,7 +57,8 @@ export class SecretCollector {
   private readonly retiredRefsByValue = new Map<string, string>()
   // Redaction-only references (BC_REDACTED_N) for one-time values and token-like URL path segments.
   private readonly redactedRefsByValue = new Map<string, string>()
-  // Values from stored profiles and addRedactionOnly (typed site secrets) are always replaced, whatever their length.
+  // Values from stored profiles, addRedactionOnly (typed site secrets) and one-time request fields
+  // (passwords, codes) are always replaced, whatever their length.
   private readonly alwaysRedacted = new Set<string>()
   private nextRedactedRef = 1
   private nextRef = 1
@@ -319,7 +320,10 @@ export class SecretCollector {
   }
 
   private reference(value: string, source: string): string {
-    if (oneTimeFieldPattern.test(sourceFieldName(source))) return this.redactionReference(value)
+    if (oneTimeFieldPattern.test(sourceFieldName(source))) {
+      this.alwaysRedacted.add(value)
+      return this.redactionReference(value)
+    }
     const sourceRef = this.refsBySource.get(source)
     if (sourceRef) {
       const slot = this.slotsByRef.get(sourceRef)
@@ -490,12 +494,13 @@ export function redactKnownValues(text: string, slots: readonly RedactionSlot[])
 }
 
 /**
- * Redact execute output. Explicitly registered values (typed site secrets) and
- * known values of at least `minimumKnownSubstringLength` are replaced anywhere.
- * A whole string equal to any known value is replaced even when the value is
- * shorter: output that is exactly a credential is intentional credential output.
+ * Redact execute output. Explicitly registered values (typed site secrets,
+ * one-time request fields) and known values of at least
+ * `minimumKnownSubstringLength` are replaced anywhere. A whole string equal to
+ * any known value is replaced even when the value is shorter: output that is
+ * exactly a credential is intentional credential output.
  */
-export function redactOutputText(
+function redactOutputText(
   text: string,
   slots: readonly RedactionSlot[],
   alwaysRedacted: ReadonlySet<string>,
@@ -503,16 +508,12 @@ export function redactOutputText(
   return outputStringRedactor(slots, alwaysRedacted)(text)
 }
 
-export function redactOutputValue(
+function redactOutputValue(
   value: unknown,
   slots: readonly RedactionSlot[],
   alwaysRedacted: ReadonlySet<string>,
 ): unknown {
   return redactValueWith(value, slots, outputStringRedactor(slots, alwaysRedacted))
-}
-
-export function redactKnownValue(value: unknown, slots: readonly RedactionSlot[]): unknown {
-  return redactValueWith(value, slots, (text) => redactKnownValues(text, slots))
 }
 
 function outputStringRedactor(

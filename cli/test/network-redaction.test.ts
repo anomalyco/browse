@@ -136,6 +136,20 @@ describe("SecretCollector", () => {
     expect(collector.redactValue("42")).toBe("${BC_SECRET_1}")
   })
 
+  test("keeps replacing short one-time request values inside unrelated execute output", () => {
+    const collector = new SecretCollector()
+    const form = collector.protectBody("username=bob&password=hunter1", "application/x-www-form-urlencoded", "request")
+    expect(form).toBe("username=bob&password=${BC_REDACTED_1}")
+    const json = collector.protectBody(JSON.stringify({ otp: "123456" }), "application/json", "request")
+    expect(JSON.parse(json ?? "{}")).toEqual({ otp: "${BC_REDACTED_2}" })
+
+    // Passwords and one-time codes are replaced at any length, unlike short reusable captures.
+    expect(collector.redactText("username=bob&password=hunter1")).toBe("username=bob&password=${BC_REDACTED_1}")
+    expect(collector.redactText("code 123456 ok")).toBe("code ${BC_REDACTED_2} ok")
+    expect(collector.redactText("username=bob&password=hunter1")).not.toContain("hunter1")
+    expect(collector.redactText("code 123456 ok")).not.toContain("123456")
+  })
+
   test("keeps replacing long captured values inside unrelated execute output", () => {
     const collector = new SecretCollector()
     collector.protectUrl("https://api.example.com/v1/orders?session=42&access_token=tok_live_ABCDEF1234567890")
