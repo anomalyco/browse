@@ -7,7 +7,7 @@
 // recording or a raw CDP client is busy). Only once it has stopped does the new entry start, so on a refusal nothing
 // changes. --force ends what's blocking it. There is nothing to roll back to: the installer replaces the binary or the
 // npm package in place, and running `install` again is the way to go back.
-import { Effect } from "effect"
+import { ConfigProvider, Effect } from "effect"
 import {
   channelOf,
   compareVersions,
@@ -65,7 +65,13 @@ export async function switchTo(runtime: Runtime, version: string, options: { rea
     // Another relay can start in the gap (an old MCP server's next call); it must be the new version.
     const now = yield* relay.version
     return (now.version === installed ? { from } : { from, refused: `a relay of version ${now.version} started first` }) satisfies SwitchResult
-  }).pipe(Effect.provide(RelayClient.layerFetch))
+  }).pipe(
+    Effect.provide(RelayClient.layerFetch),
+    // Effect's default ConfigProvider is a snapshot of process.env taken on the process's first config read, so a
+    // process that set the relay's variables later (a test, a wrapper) would still switch the port from startup. The
+    // switch reads the environment it actually runs with.
+    Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv())),
+  )
   const refusal = (error: unknown): SwitchResult => ({
     ...(from === undefined ? {} : { from }),
     refused: (error as Error).message ?? String(error),
