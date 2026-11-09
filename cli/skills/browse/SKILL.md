@@ -70,8 +70,9 @@ on the CLI). A session stays in its browser, so start a new one to use another.
 
 The `browse` CLI picks a browser with `session new <name> --browser "<id or
 name>"`; without it, CLI sessions use the default browser. `session_adopt` has no
-`browser` either; to adopt a tab in another browser, create the session with
-`--browser` first, then `session_adopt` in that session.
+`browser`; to adopt a tab in another browser, create the session with `browse
+session new <name> --browser …` (or `session_new` with `browser`) first, then
+`session_adopt` in that session.
 
 ## Inspect, act, verify
 

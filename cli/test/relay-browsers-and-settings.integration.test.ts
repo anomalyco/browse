@@ -242,9 +242,11 @@ describe("several browsers", () => {
     const listed = await (await api("/cli/sessions")).json() as { sessions: { id: string; browser?: string }[] }
     expect(listed.sessions.find((session) => session.id === "cli-on-home")?.browser).toBe("home-brave")
     const unknownCli = cli(["session", "new", "cli-on-nothing", "--browser", "nope"])
-    expect(unknownCli.status).not.toBe(0)
+    expect(unknownCli.status).toBe(1)
     expect(unknownCli.stderr).toContain('No connected browser is called "nope"')
     expect(unknownCli.stderr).toContain("home-brave")
+    const refused = await (await api("/cli/sessions")).json() as { sessions: { id: string; browser?: string }[] }
+    expect(refused.sessions.find((session) => session.id === "cli-on-nothing")).toBeUndefined()
 
     // Each session's tab opens in its browser, and commands for it go there, with that browser's own tab id.
     expect(await openTab("on-home")).toEqual({ targetId: "TARGET-HOME", value: "TARGET-HOME" })
