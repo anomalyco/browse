@@ -261,7 +261,7 @@ export async function runBinaryMcp(args: readonly string[]) {
   createInterface({ input: process.stdin }).on("line", fromClient).on("close", () => {
     child.stdin.end()
     // The child normally exits on its own and `finish` flushes first. This terminates one that never does, without
-    // cutting off a flush already in progress.
+    // cutting off a flush already in progress; a tool call still running after 5 seconds is cut here.
     setTimeout(() => stop(0, true), 5000).unref()
   })
   // A signal ends the supervisor, but never the server it started: terminate it, then leave with the signal's code.

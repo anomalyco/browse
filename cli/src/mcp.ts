@@ -152,19 +152,20 @@ const registerTools = Effect.gen(function* () {
               ),
             )
           : spec.handle(payload)
-        return Effect.suspend(() => {
-          toolCallStarted()
-          return operation.pipe(
-            Effect.match({
-              onFailure: (error) => toolResult({ text: mcpErrorMessage(spec.name, error.message), isError: true }),
-              onSuccess: (value) =>
-                spec.result ? spec.result(value) : toolResultForValue(value, spec.outputSchema ? { outputSchema: spec.outputSchema } : {}),
-            }),
-            Effect.flatMap((result) => ctx.caller.pipe(Effect.map((caller) => withUpdateNote(caller, spec.name, result)))),
-            // Failures and interrupts decrement too, so a call that never answers can't wedge the count.
-            Effect.ensuring(Effect.sync(toolCallFinished)),
-          )
-        })
+        return Effect.acquireUseRelease(
+          Effect.sync(toolCallStarted),
+          () =>
+            operation.pipe(
+              Effect.match({
+                onFailure: (error) => toolResult({ text: mcpErrorMessage(spec.name, error.message), isError: true }),
+                onSuccess: (value) =>
+                  spec.result ? spec.result(value) : toolResultForValue(value, spec.outputSchema ? { outputSchema: spec.outputSchema } : {}),
+              }),
+              Effect.flatMap((result) => ctx.caller.pipe(Effect.map((caller) => withUpdateNote(caller, spec.name, result)))),
+            ),
+          // Success, failure and interrupt all release the count, so a call that never answers can't wedge it.
+          () => Effect.sync(toolCallFinished),
+        )
       },
     })
   yield* Effect.forEach(buildRegisteredMcpTools(ctx), register, { discard: true })
@@ -184,25 +185,29 @@ const toolCallWaitMs = 30_000
 /**
  * After a handler returns, the RpcServer encodes its answer, offers it to a bounded response queue (rpc/RpcServer.ts,
  * `makeProtocolStdio`) and a stream writes that queue to stdout. The handler's finalizer runs before any of that, so
- * give the queue this long to drain before interrupting. Answers are small and local, so 150 ms is ample.
+ * stdin EOF waits this long after the last call finishes before interrupting, letting its answer drain.
  */
 const answerFlushMs = 150
 
 /**
- * After stdin EOF, waits for the tool calls already running (bounded by toolCallWaitMs), then pauses so their answers
- * reach stdout. A request read just before EOF can start its handler a moment later, so a call that starts during the
- * pause is waited for and flushed too. Only a request that never answers, such as `subscriptions/listen`, is left for
- * the interrupt.
+ * After stdin EOF, waits for the tool calls already running (bounded by toolCallWaitMs), then pauses so the last one's
+ * answer reaches stdout. A request read just before EOF can start its handler a moment later, so a call that starts
+ * during the pause is waited for and drained too. Only a request that never answers, such as `subscriptions/listen`, is
+ * left for the interrupt.
  */
 const finishToolCalls = Effect.gen(function* () {
   const deadline = Date.now() + toolCallWaitMs
-  while (toolCalls.running > 0 && Date.now() < deadline) {
-    yield* Effect.raceFirst(toolCallsIdle, Effect.sleep(Math.max(0, deadline - Date.now())))
-  }
-  yield* Effect.sleep(answerFlushMs)
-  while (toolCalls.running > 0 && Date.now() < deadline) {
-    yield* Effect.raceFirst(toolCallsIdle, Effect.sleep(Math.max(0, deadline - Date.now())))
+  while (true) {
+    const remaining = Math.max(0, deadline - Date.now())
+    if (toolCalls.running > 0) {
+      // A stuck call has had its 30 seconds: stop waiting for it and interrupt.
+      if (remaining === 0) return
+      yield* Effect.raceFirst(toolCallsIdle, Effect.sleep(remaining))
+      continue
+    }
+    // The idle waiter woke us when the last call finished; give its answer the flush before interrupting.
     yield* Effect.sleep(answerFlushMs)
+    if (toolCalls.running === 0) return
   }
 })
 

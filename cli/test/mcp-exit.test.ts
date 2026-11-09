@@ -55,9 +55,6 @@ const env = (extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
 
 const initialize = { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } }
 
-/** The isolated port `env` gives every server here. */
-const relayPort = 29988
-
 /** What a 2026-07-28 client (Claude Code, say) sends with each request instead of initializing. */
 const modernMeta = {
   "io.modelcontextprotocol/protocolVersion": "2026-07-28",
@@ -232,9 +229,12 @@ async function blackholeRelay() {
   })
   await new Promise<void>((resolve, reject) => {
     listener.once("error", reject)
-    listener.listen(relayPort, "127.0.0.1", resolve)
+    listener.listen(0, "127.0.0.1", resolve)
   })
+  const address = listener.address()
+  if (address === null || typeof address === "string") throw new Error("blackhole relay has no port")
   return {
+    port: address.port,
     close: () => {
       for (const socket of sockets) socket.destroy()
       listener.close()
@@ -275,7 +275,10 @@ describe("browse mcp shuts down cleanly when its client closes stdin", () => {
     // timeout, so a tool call is genuinely in flight when stdin closes: it must still be answered. Only a request that
     // never answers, such as `subscriptions/listen`, may be cut.
     const relay = await blackholeRelay()
-    const mcp = server([process.execPath, source, "mcp"], { OPENCODE_BROWSER_MCP_DIRECT: "1" })
+    const mcp = server([process.execPath, source, "mcp"], {
+      OPENCODE_BROWSER_MCP_DIRECT: "1",
+      OPENCODE_BROWSER_PORT: String(relay.port),
+    })
     try {
       await mcp.handshake()
       const reply = mcp.request(3, "tools/call", { name: "tabs_cleanup", arguments: {} })
