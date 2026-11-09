@@ -69,6 +69,8 @@ describe("binary auto-update", () => {
       fs.renameSync(staged, binary)
       const update = await Bun.$`${binary} runtime-switch ${versions[1]}`.env(env).quiet().nothrow()
       expect(update.exitCode, update.text()).toBe(0)
+      // The child runs 1.0.1 (the path now holds it); the line names the relay it replaced.
+      expect(update.text()).toContain(`switch ${versions[0]} → ${versions[1]}: done`)
       const running = await relayVersion()
       replacement = running.pid
       expect(running.version).toBe(versions[1])

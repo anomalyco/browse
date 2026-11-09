@@ -384,7 +384,10 @@ export type AutoUpdaterDeps = {
   readonly log: (event: string, fields?: Record<string, unknown>) => void
   /** The notice changed (status page, MCP note). */
   readonly onChange?: () => void
-  /** Starts a detached child process of this version's CLI (`self-update`, `runtime-switch`); onExit gets its exit code. */
+  /**
+   * Starts a detached child from the install's stable entry (`self-update`, `runtime-switch`), which an installer may
+   * already have replaced with the new build; onExit gets its exit code.
+   */
   readonly spawnChild?: (args: readonly string[], onExit: (code: number | null) => void) => number | undefined
   readonly env?: NodeJS.ProcessEnv
   readonly fetch?: typeof fetch
