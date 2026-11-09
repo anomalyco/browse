@@ -231,6 +231,21 @@ describe("several browsers", () => {
     expect((await api("/cli/session/new", { id: "on-home", browser: "home-brave" })).ok).toBe(true)
     expect((await api("/cli/session/new", { id: "on-default" })).ok).toBe(true)
 
+    // The CLI picks a browser by name, and a name that isn't connected is refused with what is.
+    const cli = (args: string[]) => spawnSync(process.execPath, [path.join(import.meta.dir, "../src/main.ts"), ...args], {
+      env: { PATH: process.env.PATH, HOME: multiHome, OPENCODE_BROWSER_HOME: multiHome, OPENCODE_BROWSER_PORT: String(multi!.port), OPENCODE_BROWSER_UPDATE_CHECK: "0" },
+      encoding: "utf8", timeout: 10_000,
+    })
+    const created = cli(["session", "new", "cli-on-home", "--browser", "Home Brave"])
+    expect(created.status).toBe(0)
+    expect(created.stdout.trim()).toBe("cli-on-home")
+    const listed = await (await api("/cli/sessions")).json() as { sessions: { id: string; browser?: string }[] }
+    expect(listed.sessions.find((session) => session.id === "cli-on-home")?.browser).toBe("home-brave")
+    const unknownCli = cli(["session", "new", "cli-on-nothing", "--browser", "nope"])
+    expect(unknownCli.status).not.toBe(0)
+    expect(unknownCli.stderr).toContain('No connected browser is called "nope"')
+    expect(unknownCli.stderr).toContain("home-brave")
+
     // Each session's tab opens in its browser, and commands for it go there, with that browser's own tab id.
     expect(await openTab("on-home")).toEqual({ targetId: "TARGET-HOME", value: "TARGET-HOME" })
     expect(await openTab("on-default")).toEqual({ targetId: "TARGET-WORK", value: "TARGET-WORK" })

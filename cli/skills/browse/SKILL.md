@@ -68,10 +68,10 @@ ready, unless `session_new` or the first `execute` that creates it gets
 `browser: "<id>"`. `status` lists the connected browsers (`browse status --json`
 on the CLI). A session stays in its browser, so start a new one to use another.
 
-The `browse` CLI cannot pick a browser: `session new` takes only `--read-only`
-and `--allow-origin`, so CLI sessions use the default browser. `session_adopt`
-has no `browser` either; to adopt a tab in another browser, run `session_new`
-with `browser` first, then `session_adopt` in that session.
+The `browse` CLI picks a browser with `session new <name> --browser "<id or
+name>"`; without it, CLI sessions use the default browser. `session_adopt` has no
+`browser` either; to adopt a tab in another browser, create the session with
+`--browser` first, then `session_adopt` in that session.
 
 ## Inspect, act, verify
 

@@ -188,6 +188,10 @@ connection itself isn't encrypted by browse; use a network that is (Tailscale or
   tab strip and collapsed unless you're looking at one. Agents can't switch you to their tabs or bring a window to the
   front; popups an agent opens join its group, and if one takes over your window you get your tab back. Tabs nobody
   touches for 10 minutes close by themselves (never while a script runs on them).
+- **Several browsers at once.** Each connected browser has an id (like `chrome-macbook`) and a name; `browse status
+  --json` lists them. New sessions open their tabs in the default browser, the first connected and ready, unless one is
+  named: `browse session new work --browser "Home Brave"` (or `browser` on the `session_new` tool, or on the first
+  `execute` that creates the session). A session stays in its browser, so start a new one to use another.
 - **Settings** (the extension's options page; each applies right away, to new tabs for window and grouping):
   - **Where agents open their tabs:** in your window (default), or *in a separate window* of their own that opens
     unfocused beside yours (on another display when there's no room on yours); their popups move there too.
