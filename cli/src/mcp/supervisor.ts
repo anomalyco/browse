@@ -73,6 +73,14 @@ export async function runBinaryMcp(args: readonly string[]) {
   const queue: string[] = []
   const toClient = (line: string) => process.stdout.write(line + "\n")
   const toChild = (line: string) => child.stdin.write(line + "\n")
+  // The child is gone and its stdout is fully read: give the client the answers still buffered in our own stdout, then
+  // exit with the child's status. `process.exit` alone would drop them when the client wasn't reading.
+  let finishing = false
+  const finish = (code: number) => {
+    if (finishing) return
+    finishing = true
+    process.stdout.write("", () => process.exit(code))
+  }
   const parse = (line: string): Message | undefined => {
     try {
       return JSON.parse(line) as Message
@@ -102,11 +110,24 @@ export async function runBinaryMcp(args: readonly string[]) {
     // A server that exits mid-write (an old one being replaced) must not take the supervisor down with EPIPE.
     next.stdin.on("error", () => {})
     child = next
-    next.on("exit", (code, signal) => {
-      if (next !== child) return
-      process.exit(code ?? (signal ? 1 : 0))
+    // A server replaced by a swap keeps exiting in the background; only the current child's status ends the supervisor.
+    // Wait for both its close (stdio is done) and readline's close (every line reached the client) before exiting.
+    let linesDone = false
+    let exited: { code: number | null; signal: NodeJS.Signals | null } | undefined
+    const finishChild = () => {
+      if (next !== child || !linesDone || !exited) return
+      finish(exited.code ?? (exited.signal ? 1 : 0))
+    }
+    next.on("close", (code, signal) => {
+      exited = { code, signal }
+      finishChild()
     })
-    createInterface({ input: next.stdout }).on("line", (line) => {
+    const reader = createInterface({ input: next.stdout })
+    reader.on("close", () => {
+      linesDone = true
+      finishChild()
+    })
+    reader.on("line", (line) => {
       if (next !== child) return
       const message = parse(line)
       // The replay's answer is ours alone, even when it arrives after the deadline released the queue.
@@ -201,7 +222,9 @@ export async function runBinaryMcp(args: readonly string[]) {
   start(false)
   createInterface({ input: process.stdin }).on("line", fromClient).on("close", () => {
     child.stdin.end()
-    setTimeout(() => process.exit(0), 5000).unref()
+    // The child normally exits on its own and `finish` flushes first. This unblocks a child that never does, without
+    // cutting off a flush already in progress.
+    setTimeout(() => finish(0), 5000).unref()
   })
   setInterval(() => void maybeSwap(), 1000).unref()
 }
