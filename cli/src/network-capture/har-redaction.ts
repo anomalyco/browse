@@ -3,7 +3,7 @@ import { Effect, Predicate } from "effect"
 import type { Response } from "patchright-core"
 import * as AuthProfile from "../auth/profile.ts"
 import { writeJsonFileAtomically } from "../fs-durability.ts"
-import { looksLikeTokenSegment, SecretCollector } from "./redaction.ts"
+import { looksLikeTokenSegment, minimumKnownSubstringLength, SecretCollector } from "./redaction.ts"
 import {
   NetworkCaptureError,
   type ActiveCapture,
@@ -203,8 +203,6 @@ function protectCapturedBody(
     : { ...body, text }
 }
 
-// Known values shorter than this are not replaced inside URLs and headers, where short strings collide with ordinary text.
-const minimumKnownSubstringLength = 8
 // Inside JSON string values (a "next" link carrying an access token, an echoed path token) only longer known values
 // are replaced: ordinary text rarely contains 16 characters of a credential.
 const minimumKnownBodySubstringLength = 16
