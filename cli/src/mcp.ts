@@ -36,6 +36,40 @@ export {
 
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 
+/**
+ * Tool calls running right now, and the shutdown waiters to wake when the last one finishes. A 2026-07-28 client's
+ * `subscriptions/listen` stays open for the whole connection, so effect's RpcServer never ends the client on stdin EOF;
+ * shutdown uses this count to let ordinary calls answer before interrupting (see runMcpServer).
+ */
+const toolCalls = {
+  running: 0,
+  idle: [] as Array<() => void>,
+}
+
+/** Resolves when no tool call is running. */
+const toolCallsIdle = Effect.callback<void>((resume) => {
+  if (toolCalls.running === 0) {
+    resume(Effect.void)
+    return Effect.void
+  }
+  const wake = () => resume(Effect.void)
+  toolCalls.idle.push(wake)
+  return Effect.sync(() => {
+    const index = toolCalls.idle.indexOf(wake)
+    if (index !== -1) toolCalls.idle.splice(index, 1)
+  })
+})
+
+const toolCallStarted = () => {
+  toolCalls.running++
+}
+
+const toolCallFinished = () => {
+  toolCalls.running--
+  if (toolCalls.running > 0) return
+  for (const wake of toolCalls.idle.splice(0)) wake()
+}
+
 /** Initialize instructions: what the tool list can't say on its own. Keep this short; details belong on the tools. */
 export const mcpInstructions = `browse drives the user's real Chrome-family browser through the browse extension, so logins, extensions and open tabs are already there and the user can watch or take over. \`execute\` runs Playwright JavaScript on a session's page; the session tools manage named tabs.
 
@@ -118,14 +152,19 @@ const registerTools = Effect.gen(function* () {
               ),
             )
           : spec.handle(payload)
-        return operation.pipe(
-          Effect.match({
-            onFailure: (error) => toolResult({ text: mcpErrorMessage(spec.name, error.message), isError: true }),
-            onSuccess: (value) =>
-              spec.result ? spec.result(value) : toolResultForValue(value, spec.outputSchema ? { outputSchema: spec.outputSchema } : {}),
-          }),
-          Effect.flatMap((result) => ctx.caller.pipe(Effect.map((caller) => withUpdateNote(caller, spec.name, result)))),
-        )
+        return Effect.suspend(() => {
+          toolCallStarted()
+          return operation.pipe(
+            Effect.match({
+              onFailure: (error) => toolResult({ text: mcpErrorMessage(spec.name, error.message), isError: true }),
+              onSuccess: (value) =>
+                spec.result ? spec.result(value) : toolResultForValue(value, spec.outputSchema ? { outputSchema: spec.outputSchema } : {}),
+            }),
+            Effect.flatMap((result) => ctx.caller.pipe(Effect.map((caller) => withUpdateNote(caller, spec.name, result)))),
+            // Failures and interrupts decrement too, so a call that never answers can't wedge the count.
+            Effect.ensuring(Effect.sync(toolCallFinished)),
+          )
+        })
       },
     })
   yield* Effect.forEach(buildRegisteredMcpTools(ctx), register, { discard: true })
@@ -140,6 +179,33 @@ export const mcpServerLayer = McpServer.layerStdio({
 
 export const mcpToolsLayer = Layer.effectDiscard(registerTools)
 
+/** How long stdin EOF waits for running tool calls; a stuck one can't keep the process here forever. */
+const toolCallWaitMs = 30_000
+/**
+ * After a handler returns, the RpcServer encodes its answer, offers it to a bounded response queue (rpc/RpcServer.ts,
+ * `makeProtocolStdio`) and a stream writes that queue to stdout. The handler's finalizer runs before any of that, so
+ * give the queue this long to drain before interrupting. Answers are small and local, so 150 ms is ample.
+ */
+const answerFlushMs = 150
+
+/**
+ * After stdin EOF, waits for the tool calls already running (bounded by toolCallWaitMs), then pauses so their answers
+ * reach stdout. A request read just before EOF can start its handler a moment later, so a call that starts during the
+ * pause is waited for and flushed too. Only a request that never answers, such as `subscriptions/listen`, is left for
+ * the interrupt.
+ */
+const finishToolCalls = Effect.gen(function* () {
+  const deadline = Date.now() + toolCallWaitMs
+  while (toolCalls.running > 0 && Date.now() < deadline) {
+    yield* Effect.raceFirst(toolCallsIdle, Effect.sleep(Math.max(0, deadline - Date.now())))
+  }
+  yield* Effect.sleep(answerFlushMs)
+  while (toolCalls.running > 0 && Date.now() < deadline) {
+    yield* Effect.raceFirst(toolCallsIdle, Effect.sleep(Math.max(0, deadline - Date.now())))
+    yield* Effect.sleep(answerFlushMs)
+  }
+})
+
 /** Resolves when the client closes stdin, the way an MCP client shuts a stdio server down. */
 const stdinClosed = Effect.callback<void>((resume) => {
   if (process.stdin.readableEnded || process.stdin.destroyed) {
@@ -148,7 +214,13 @@ const stdinClosed = Effect.callback<void>((resume) => {
   }
   const closed = () => resume(Effect.void)
   process.stdin.once("end", closed)
-  return Effect.sync(() => process.stdin.off("end", closed))
+  process.stdin.once("close", closed)
+  process.stdin.once("error", closed)
+  return Effect.sync(() => {
+    process.stdin.off("end", closed)
+    process.stdin.off("close", closed)
+    process.stdin.off("error", closed)
+  })
 })
 
 export const runMcpServer: Effect.Effect<never, Error> = Layer.launch(
@@ -160,8 +232,9 @@ export const runMcpServer: Effect.Effect<never, Error> = Layer.launch(
   ),
 ).pipe(
   // A 2026-07-28 client's `subscriptions/listen` stays open for the whole connection, and effect's RpcServer only ends
-  // a client on stdin EOF when no request fibers are in flight (rpc/RpcServer.js: Eof checks client.fibers). Without
-  // this the server outlives the client. The delay lets ordinary requests still in flight finish first; the interrupt
-  // is the same clean-EOF shutdown the RpcServer itself performs (main.ts turns it into exit 0).
-  Effect.raceFirst(stdinClosed.pipe(Effect.andThen(Effect.sleep(1000)), Effect.andThen(Effect.interrupt))),
+  // a client on stdin EOF when no request fibers are in flight (rpc/RpcServer.ts, `Eof` checks `client.fibers`). Without
+  // this the server outlives the client. Interrupting ends the whole server, so first wait for ordinary tool calls to
+  // finish and their answers to reach stdout (finishToolCalls): only a request that never answers is cut short.
+  // main.ts turns the interrupt from a stdin EOF into exit 0.
+  Effect.raceFirst(stdinClosed.pipe(Effect.andThen(finishToolCalls), Effect.andThen(Effect.interrupt))),
 )

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
 import { spawn, spawnSync } from "node:child_process"
 import fs from "node:fs"
+import { createServer, type Socket } from "node:net"
 import os from "node:os"
 import path from "node:path"
 import { bundleCli } from "../bundle.ts"
@@ -53,6 +54,9 @@ const env = (extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
 })
 
 const initialize = { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } }
+
+/** The isolated port `env` gives every server here. */
+const relayPort = 29988
 
 /** What a 2026-07-28 client (Claude Code, say) sends with each request instead of initializing. */
 const modernMeta = {
@@ -112,7 +116,9 @@ if (process.env.OPENCODE_BROWSER_MCP_DIRECT === "1") {
 }
 `)
   fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "@opencode/browse", version: "0.0.1" }))
-  fs.symlinkSync(path.join(import.meta.dir, "../node_modules"), path.join(root, "node_modules"), "junction")
+  // Tests call this more than once, and the symlink is shared.
+  const modules = path.join(root, "node_modules")
+  if (!fs.existsSync(modules)) fs.symlinkSync(path.join(import.meta.dir, "../node_modules"), modules, "junction")
   return path.join(dist, "cli.mjs")
 }
 
@@ -217,6 +223,25 @@ async function subscribedServer(command: readonly string[], extra: NodeJS.Proces
 const within = <A>(ms: number, promise: Promise<A>, what: string): Promise<A> =>
   Promise.race([promise, Bun.sleep(ms).then((): never => { throw new Error(`${what} didn't finish within ${ms} ms`) })])
 
+/** A relay port that accepts connections but never answers, so relay reads wait for their timeout instead of failing fast. */
+async function blackholeRelay() {
+  const sockets = new Set<Socket>()
+  const listener = createServer((socket) => {
+    sockets.add(socket)
+    socket.on("close", () => sockets.delete(socket))
+  })
+  await new Promise<void>((resolve, reject) => {
+    listener.once("error", reject)
+    listener.listen(relayPort, "127.0.0.1", resolve)
+  })
+  return {
+    close: () => {
+      for (const socket of sockets) socket.destroy()
+      listener.close()
+    },
+  }
+}
+
 describe("browse mcp shuts down cleanly when its client closes stdin", () => {
   test("the direct server exits 0", async () => {
     const mcp = server([process.execPath, source, "mcp"], { OPENCODE_BROWSER_MCP_DIRECT: "1" })
@@ -244,6 +269,31 @@ describe("browse mcp shuts down cleanly when its client closes stdin", () => {
       cleanup(mcp)
     }
   }, 20_000)
+
+  test("a slow tool call still answers after stdin EOF", async () => {
+    // `tabs_cleanup` needs the relay. A port that accepts but never answers makes its relay probe wait for the 5 s read
+    // timeout, so a tool call is genuinely in flight when stdin closes: it must still be answered. Only a request that
+    // never answers, such as `subscriptions/listen`, may be cut.
+    const relay = await blackholeRelay()
+    const mcp = server([process.execPath, source, "mcp"], { OPENCODE_BROWSER_MCP_DIRECT: "1" })
+    try {
+      await mcp.handshake()
+      const reply = mcp.request(3, "tools/call", { name: "tabs_cleanup", arguments: {} })
+      // Let the call reach the tool before the client goes away.
+      await Bun.sleep(300)
+      const started = Date.now()
+      mcp.child.stdin.end()
+      const answer = await within(10_000, reply, "the slow tool call's answer")
+      // A real tool result, not the error an interrupted request is answered with.
+      expect(answer.error).toBeUndefined()
+      expect(answer.result).toBeDefined()
+      const exit = await within(10_000, mcp.exit, "the direct server's exit after a slow tool call")
+      expect({ ...exit, stderr: mcp.stderr(), ms: Date.now() - started }).toMatchObject({ code: 0, signal: null })
+    } finally {
+      cleanup(mcp)
+      relay.close()
+    }
+  }, 30_000)
 
   test.skipIf(process.platform === "win32")("an installed binary's supervised server exits 0 promptly", async () => {
     // A private executable path makes `browse mcp` supervise, as an installed binary does.
@@ -333,7 +383,34 @@ describe("the MCP supervisor never leaves its server behind", () => {
     }
   }, 20_000)
 
-  test("a server that ignores stdin EOF is terminated at the fallback", async () => {
+  test.skipIf(process.platform === "win32")("SIGINT terminates a server that ignores stdin EOF", async () => {
+    // The stubborn child ignores EOF, so only the supervisor's own signal handling can take it down.
+    const mcp = server([process.execPath, installedStubbornServer(), "mcp"])
+    try {
+      await mcp.handshake()
+      mcp.child.kill("SIGINT")
+      const exit = await within(4_000, mcp.exit, "the supervisor's SIGINT exit with a stubborn server")
+      expect(exit.signal === "SIGINT" || exit.code === 130).toBe(true)
+      await noServersLeft("SIGINT with a stubborn server")
+    } finally {
+      cleanup(mcp)
+    }
+  }, 20_000)
+
+  test.skipIf(process.platform === "win32")("SIGTERM terminates a server that ignores stdin EOF", async () => {
+    const mcp = server([process.execPath, installedStubbornServer(), "mcp"])
+    try {
+      await mcp.handshake()
+      mcp.child.kill("SIGTERM")
+      const exit = await within(4_000, mcp.exit, "the supervisor's SIGTERM exit with a stubborn server")
+      expect(exit.signal === "SIGTERM" || exit.code === 143).toBe(true)
+      await noServersLeft("SIGTERM with a stubborn server")
+    } finally {
+      cleanup(mcp)
+    }
+  }, 20_000)
+
+  test.skipIf(process.platform === "win32")("a server that ignores stdin EOF is terminated at the fallback", async () => {
     const mcp = server([process.execPath, installedStubbornServer(), "mcp"])
     try {
       await mcp.handshake()

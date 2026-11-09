@@ -90,23 +90,30 @@ export async function runBinaryMcp(args: readonly string[]) {
     exit(code, true)
   }
   // A child that ignores stdin EOF can't keep us here: terminate every server and exit once they are gone (SIGKILL one
-  // that ignores SIGTERM too), so none is left behind. `force` lets a signal end us even mid-flush.
-  let stopping = false
+  // that ignores SIGTERM too), so none is left behind. `force` lets a signal end us even mid-flush; repeated signals are
+  // ignored, so a second one can't kill the supervisor before its servers are gone.
+  let stopping: { readonly code: number; readonly flush: boolean } | undefined
+  let stopDeadline: ReturnType<typeof setTimeout> | undefined
+  let leaving = false
+  const stopped = () => {
+    if (!stopping || leaving) return
+    leaving = true
+    clearTimeout(stopDeadline)
+    exit(stopping.code, stopping.flush)
+  }
   const stop = (code: number, flush: boolean, force = false) => {
     if (stopping || (finishing && !force)) return
-    stopping = true
+    stopping = { code, flush }
     finishing = true
     for (const running of servers) running.kill()
-    const deadline = Date.now() + 2000
-    const wait = () => {
-      if (servers.size === 0) return exit(code, flush)
-      if (Date.now() > deadline) {
-        for (const running of servers) running.kill("SIGKILL")
-        return exit(code, flush)
-      }
-      setTimeout(wait, 25)
-    }
-    wait()
+    if (servers.size === 0) return stopped()
+    // A server's `close` (see start) resolves this as soon as the last one is gone; one that ignores SIGTERM is killed
+    // outright at the deadline.
+    stopDeadline = setTimeout(() => {
+      for (const running of servers) running.kill("SIGKILL")
+      stopped()
+    }, 2000)
+    stopDeadline.unref()
   }
   const parse = (line: string): Message | undefined => {
     try {
@@ -150,6 +157,8 @@ export async function runBinaryMcp(args: readonly string[]) {
       servers.delete(next)
       exited = { code, signal }
       finishChild()
+      // The last server stop() terminated is gone: leave now instead of waiting for its deadline.
+      if (stopping && servers.size === 0) stopped()
     })
     const reader = createInterface({ input: next.stdout })
     reader.on("close", () => {
@@ -256,8 +265,8 @@ export async function runBinaryMcp(args: readonly string[]) {
     setTimeout(() => stop(0, true), 5000).unref()
   })
   // A signal ends the supervisor, but never the server it started: terminate it, then leave with the signal's code.
-  process.once("SIGINT", () => stop(130, false, true))
-  process.once("SIGTERM", () => stop(143, false, true))
+  process.on("SIGINT", () => stop(130, false, true))
+  process.on("SIGTERM", () => stop(143, false, true))
   setInterval(() => void maybeSwap(), 1000).unref()
 }
 
