@@ -343,6 +343,7 @@ describe("tool output schemas", () => {
     const value = {
       endpoint: "http://127.0.0.1:19988",
       currentSession: "mcp-1234abcd",
+      sharedSession: false,
       version: { version: "0.0.10", pid: 42 },
       status: { connected: true, version: "0.0.10", activeTargets: 1 },
       autoUpdate: { install: "npm", cli: "browse", mode: "auto", effective: "auto" },

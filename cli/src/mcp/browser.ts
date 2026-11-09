@@ -34,6 +34,7 @@ registerMcpTools({
           return {
             endpoint: ctx.relay.endpoint,
             currentSession: caller.id,
+            sharedSession: caller.shared,
             version,
             status,
             ...(buildProblem ? { buildProblem } : {}),
@@ -51,13 +52,13 @@ registerMcpTools({
     {
       name: "tabs_cleanup",
       description:
-        "Close tabs agents opened that nobody has used for a while (no agent command and not visited by the user). Tabs the user shared or pinned, the active tab, tabs playing audio, recording, or waiting for a handoff stay open. `idleMinutes` applies to your own sessions' tabs; other agents' tabs close only once idle for the user's setting too. To finish your own work, `session_reset` or `session_delete` is more direct. browse also does this automatically after the user's idle setting (10 minutes unless they changed it).",
+        "Close tabs agents opened that nobody has used for a while (no agent command and not visited by the user). Tabs the user shared or pinned, the active tab, tabs playing audio, recording, or waiting for a handoff stay open. `idleMinutes` applies to the sessions the calling agent made current; when the client doesn't name agents, that is every session made current over this server, so agents sharing one should not use `idleMinutes: 0` unless the user asks. Every other agent tab closes only once idle for the user's setting too. To finish your own work, `session_reset` or `session_delete` is more direct. browse also does this automatically after the user's idle setting (10 minutes unless they changed it).",
       inputSchema: objectSchema({
         idleMinutes: {
           type: "integer",
           minimum: 0,
           description:
-            "Close your own sessions' tabs idle at least this long; 0 closes all of them. Defaults to the user's setting (10 minutes; still 10 when the user set automatic cleanup to never).",
+            "Close the calling agent's own sessions' tabs idle at least this long; 0 closes all of them. When the client doesn't name agents, every session made current over this server counts, so only use 0 when the user asks. Defaults to the user's setting (10 minutes; still 10 when the user set automatic cleanup to never).",
         },
       }),
       readOnly: false,

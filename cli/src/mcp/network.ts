@@ -34,7 +34,7 @@ registerMcpTools({
           session: {
             type: "string",
             description:
-              "Optional session id. Defaults to this MCP server's current session; start creates it when missing.",
+              "Optional session id. Defaults to your current session; start creates it when missing.",
           },
           urlFilter: { type: "string", description: "For start: capture only request URLs containing this text." },
           resourceTypes: {

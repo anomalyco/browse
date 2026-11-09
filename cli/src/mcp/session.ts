@@ -23,7 +23,7 @@ registerMcpTools({
   build: (ctx) => [
     {
       name: "session_new",
-      description: "Create a browse session and make it your current one. Other agents keep theirs.",
+      description: "Create a browse session and make it your current one. Agents the client names keep theirs; otherwise the current session is shared by every agent on this server.",
       inputSchema: objectSchema({
         browser: ctx.browserProperty,
         id: { type: "string", description: "Optional lowercase session id." },
@@ -106,7 +106,7 @@ registerMcpTools({
     },
     {
       name: "session_use",
-      description: "Make an existing browse session your current one, for calls that don't name a session. Other agents keep theirs; pass `session` explicitly to share one deliberately.",
+      description: "Make an existing browse session your current one, for calls that don't name a session. Agents the client names keep theirs; otherwise the current session is shared by every agent on this server. Pass `session` explicitly to share one deliberately.",
       inputSchema: objectSchema(
         {
           id: { type: "string", description: "Existing browse session id." },

@@ -21,10 +21,16 @@ it is needed, so do not start `browse serve` first.
 
 ## Sessions
 
-Over MCP, each agent has its own current session, so omit `session` for the
-normal path; other agents' calls never land on your page. `session_new` and
-`session_use` change only your current session. Pass an explicit `session` id
-to work in several sessions, or to share one with another agent on purpose.
+Over MCP, each agent has its own current session when the client names the
+agent (OpenCode does), so omit `session` for the normal path; another named
+agent's bare calls don't land on your page. `status` reports
+`sharedSession: true` when the client doesn't name agents, and then every
+agent on that server shares one current session: if several agents (such as
+subagents) use it, each should `session_new` its own and pass `session` on
+every call. `session_new`, `session_use`, `session_reset`, and `execute` or
+`session_adopt` with a `session`, make it your current session. Pass an
+explicit `session` id to work in several sessions, or to share one with
+another agent on purpose.
 
 CLI sessions are named, and a named session keeps its default page across short
 commands and relay restarts:
@@ -376,10 +382,12 @@ browse session delete <name>   # MCP: session_delete
 ```
 
 `tabs_cleanup` with `idleMinutes: 0` closes your own sessions' idle tabs at
-once; other agents' tabs close only after the user's idle setting. The CLI's
-`browse tabs cleanup --idle-minutes 0` has no agent to scope to and closes every
-agent tab, so only run it when the user asks. Keep a session only when you will
-continue with it.
+once; other agents' tabs close only after the user's idle setting. When the
+client doesn't name agents, "your own" is every session any agent on that
+server made current, so don't use `idleMinutes: 0` unless the user asks. The
+CLI's `browse tabs cleanup --idle-minutes 0` has no agent to scope to and
+closes every agent tab, so only run it when the user asks. Keep a session only
+when you will continue with it.
 
 Use the `settings` tool (CLI: `browse settings get` / `settings set key=value …`)
 only when the user asks to change how browse behaves: where tabs open (`window`),
