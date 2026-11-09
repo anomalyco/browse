@@ -118,6 +118,89 @@ describe("SecretCollector", () => {
       .toBe("${BC_SECRET_1} ${BC_SECRET_2} ${BC_SECRET_3}")
   })
 
+  test("keeps custom access-control headers and cookie values secret", () => {
+    const collector = new SecretCollector()
+    const [custom] = collector.protectHeaders([{ name: "access-control-token", value: "ctl-acctoken-value-0003" }], "response")
+    expect(custom?.value).toBe("${BC_SECRET_1}")
+    const [requestCookie] = collector.protectHeaders([{ name: "Cookie", value: "priority=ctlcookie01; secure=ctlcookie02" }], "request")
+    expect(requestCookie?.value).toBe("priority=${BC_SECRET_2}; secure=${BC_SECRET_3}")
+    const [setCookie] = collector.protectHeaders([{ name: "Set-Cookie", value: "secure=ctlcookie03; Path=/" }], "response")
+    expect(setCookie?.value).toBe("secure=${BC_SECRET_4}; Path=/")
+    const [attributes] = collector.protectHeaders(
+      [{ name: "Set-Cookie", value: "sid=ctlcookie04; Secure=true; HttpOnly=true; Partitioned=true" }],
+      "response",
+    )
+    expect(attributes?.value).toBe("sid=${BC_SECRET_5}; Secure=true; HttpOnly=true; Partitioned=true")
+    expect(collector.slots().map((slot) => slot.value)).toEqual([
+      "ctl-acctoken-value-0003",
+      "ctlcookie01",
+      "ctlcookie02",
+      "ctlcookie03",
+      "ctlcookie04",
+    ])
+  })
+
+  test("keeps booleans in redacted values", () => {
+    const collector = new SecretCollector()
+    collector.protectHeaders([{ name: "authorization", value: "Bearer ctl-bearer-value-0001" }], "request")
+    collector.protectHeaders([{ name: "access-control-allow-credentials", value: "true" }], "response")
+    expect(collector.redactValue({ flag: true, token: "ctl-bearer-value-0001" })).toEqual({ flag: true, token: "[REDACTED]" })
+  })
+
+  test("protects every newline-joined set-cookie line", () => {
+    const collector = new SecretCollector()
+    const [cookies] = collector.protectHeaders(
+      [{ name: "Set-Cookie", value: "a=ctlcookie05; Priority=High\nb=ctlcookie06; Path=/" }],
+      "response",
+    )
+    expect(cookies?.value).toBe("a=${BC_SECRET_1}; Priority=High\nb=${BC_SECRET_2}; Path=/")
+    expect(collector.slots().map((slot) => slot.value)).toEqual(["ctlcookie05", "ctlcookie06"])
+  })
+
+  test("protects :path query values under the request URL's references", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "browse-har-path-"))
+    const outputPath = join(directory, "capture.har")
+    try {
+      const short = capturedEntry("short", {})
+      const encoded = capturedEntry("encoded", {})
+      await Effect.runPromise(finishCapture(
+        activeCapture([
+          {
+            ...short,
+            request: {
+              ...short.request,
+              url: "https://docs.example.com/callback?code=492817&x=1",
+              headers: [{ name: ":path", value: "/callback?code=492817&x=1" }, { name: ":authority", value: "docs.example.com" }],
+            },
+          },
+          {
+            ...encoded,
+            request: {
+              ...encoded.request,
+              url: "https://docs.example.com/callback?code=4%2f0ax4xfwi6abcdef789",
+              headers: [{ name: ":path", value: "/callback?code=4%2f0ax4xfwi6abcdef789" }, { name: ":authority", value: "docs.example.com" }],
+            },
+          },
+        ]),
+        { outputPath },
+        undefined,
+        {},
+      ))
+      const har = JSON.parse(await readFile(outputPath, "utf8")) as {
+        log: { entries: Array<{ request: { url: string; headers: Array<{ name: string; value: string }> } }> }
+      }
+      const [shortEntry, encodedEntry] = har.log.entries
+      expect(shortEntry?.request.url).toBe("https://docs.example.com/callback?code=${BC_REDACTED_1}&x=1")
+      expect(shortEntry?.request.headers).toContainEqual({ name: ":path", value: "/callback?code=${BC_REDACTED_1}&x=1" })
+      expect(shortEntry?.request.headers).toContainEqual({ name: ":authority", value: "docs.example.com" })
+      expect(encodedEntry?.request.url).toBe("https://docs.example.com/callback?code=${BC_REDACTED_2}")
+      expect(encodedEntry?.request.headers).toContainEqual({ name: ":path", value: "/callback?code=${BC_REDACTED_2}" })
+      expect(encodedEntry?.request.headers).toContainEqual({ name: ":authority", value: "docs.example.com" })
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
   test("finds a known secret again under a header or URL that does not look secret", () => {
     const collector = new SecretCollector()
     collector.protectHeaders([{ name: "Authorization", value: "Bearer sk_test_SECRETVALUE1234567890" }], "request")
