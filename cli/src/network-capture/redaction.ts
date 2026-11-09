@@ -14,6 +14,12 @@ const secretNamePattern = /auth(?:orization)?|cookie|credential|csrf|xsrf|token|
 // Values typed into these fields (passwords, one-time codes) are redacted but never stored as reusable slots.
 const oneTimeFieldPattern = /pass(?:word|wd|code|phrase)|(?:^|[-_.])pwd(?:$|[-_.])|otp|totp|(?:^|[-_.])(?:mfa_?|2fa_?|verification_?|auth_?)?code(?:$|[-_.])|(?:^|[-_.])pin(?:$|[-_.])/i
 const referencePattern = String.raw`BC_(?:SECRET|REDACTED)_\d+`
+/**
+ * Known values shorter than this are not replaced inside unrelated output or
+ * captured text: short strings collide with ordinary text. A whole value that
+ * equals the known value is still replaced.
+ */
+export const minimumKnownSubstringLength = 8
 const secretHeaders = new Set([
   "authorization",
   "proxy-authorization",
@@ -51,6 +57,8 @@ export class SecretCollector {
   private readonly retiredRefsByValue = new Map<string, string>()
   // Redaction-only references (BC_REDACTED_N) for one-time values and token-like URL path segments.
   private readonly redactedRefsByValue = new Map<string, string>()
+  // Values from stored profiles and addRedactionOnly (typed site secrets) are always replaced, whatever their length.
+  private readonly alwaysRedacted = new Set<string>()
   private nextRedactedRef = 1
   private nextRef = 1
   private updated = new Set<string>()
@@ -66,6 +74,7 @@ export class SecretCollector {
       }
       this.slotsByRef.set(copy.ref, copy)
       this.refsByValue.set(copy.value, copy.ref)
+      this.alwaysRedacted.add(copy.value)
       for (const source of copy.sources) {
         this.refsBySource.set(source, copy.ref)
       }
@@ -147,11 +156,11 @@ export class SecretCollector {
   }
 
   redactText(text: string): string {
-    return redactKnownValues(text, this.redactionSlots())
+    return redactOutputText(text, this.redactionSlots(), this.alwaysRedacted)
   }
 
   redactValue(value: unknown): unknown {
-    return redactKnownValue(value, this.redactionSlots())
+    return redactOutputValue(value, this.redactionSlots(), this.alwaysRedacted)
   }
 
   redactExactValue(value: unknown, minimumLength: number): unknown {
@@ -186,7 +195,10 @@ export class SecretCollector {
 
   /** Redact `value` everywhere from now on under a redaction-only reference (never persisted to a profile). */
   addRedactionOnly(value: string): void {
-    if (value) this.redactionReference(value)
+    if (value) {
+      this.alwaysRedacted.add(value)
+      this.redactionReference(value)
+    }
   }
 
   /** Replace these values (raw, percent- and form-encoded) under their redaction-only references, at any length. */
@@ -477,17 +489,64 @@ export function redactKnownValues(text: string, slots: readonly RedactionSlot[])
     .reduce((output, slot) => replaceOutsideReferences(output, slot.value, `\${${slot.ref}}`), text)
 }
 
+/**
+ * Redact execute output. Explicitly registered values (typed site secrets) and
+ * known values of at least `minimumKnownSubstringLength` are replaced anywhere.
+ * A whole string equal to any known value is replaced even when the value is
+ * shorter: output that is exactly a credential is intentional credential output.
+ */
+export function redactOutputText(
+  text: string,
+  slots: readonly RedactionSlot[],
+  alwaysRedacted: ReadonlySet<string>,
+): string {
+  return outputStringRedactor(slots, alwaysRedacted)(text)
+}
+
+export function redactOutputValue(
+  value: unknown,
+  slots: readonly RedactionSlot[],
+  alwaysRedacted: ReadonlySet<string>,
+): unknown {
+  return redactValueWith(value, slots, outputStringRedactor(slots, alwaysRedacted))
+}
+
 export function redactKnownValue(value: unknown, slots: readonly RedactionSlot[]): unknown {
-  if (Predicate.isString(value)) return redactKnownValues(value, slots)
+  return redactValueWith(value, slots, (text) => redactKnownValues(text, slots))
+}
+
+function outputStringRedactor(
+  slots: readonly RedactionSlot[],
+  alwaysRedacted: ReadonlySet<string>,
+): (text: string) => string {
+  const exact = new Map<string, RedactionSlot>()
+  for (const slot of slots) {
+    if (slot.value && !exact.has(slot.value)) exact.set(slot.value, slot)
+  }
+  const referenceText = new RegExp(String.raw`^\$\{${referencePattern}\}$`)
+  const substringSlots = slots.filter((slot) =>
+    slot.value.length >= minimumKnownSubstringLength || alwaysRedacted.has(slot.value))
+  return (text) => {
+    const match = text && !referenceText.test(text) ? exact.get(text) : undefined
+    return match ? `\${${match.ref}}` : redactKnownValues(text, substringSlots)
+  }
+}
+
+function redactValueWith(
+  value: unknown,
+  slots: readonly RedactionSlot[],
+  redactString: (text: string) => string,
+): unknown {
+  if (Predicate.isString(value)) return redactString(value)
   if (Predicate.isNumber(value) || Predicate.isBoolean(value)) {
     const slot = slots.find((candidate) => candidate.value === String(value))
     return slot ? `\${${slot.ref}}` : value
   }
-  if (Array.isArray(value)) return value.map((item) => redactKnownValue(item, slots))
+  if (Array.isArray(value)) return value.map((item) => redactValueWith(item, slots, redactString))
   if (!Predicate.isObject(value)) return value
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [
     key,
-    secretNamePattern.test(key) ? redactSecretValue(item) : redactKnownValue(item, slots),
+    secretNamePattern.test(key) ? redactSecretValue(item) : redactValueWith(item, slots, redactString),
   ]))
 }
 

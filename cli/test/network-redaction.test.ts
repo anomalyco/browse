@@ -118,6 +118,38 @@ describe("SecretCollector", () => {
       .toBe("${BC_SECRET_1} ${BC_SECRET_2} ${BC_SECRET_3}")
   })
 
+  test("does not replace short captured values inside unrelated execute output", () => {
+    const collector = new SecretCollector()
+    const url = collector.protectUrl("https://api.example.com/v1/orders?session=42&page=2")
+    expect(url).toBe("https://api.example.com/v1/orders?session=${BC_SECRET_1}&page=2")
+
+    // "42" is a captured credential, but it is too short to replace inside ordinary text.
+    expect(collector.redactText("order 1423 at 4:42")).toBe("order 1423 at 4:42")
+    expect(collector.redactValue("order 1423 at 4:42")).toBe("order 1423 at 4:42")
+    expect(collector.redactValue({ echoed: "42", text: "order 1423 at 4:42" })).toEqual({
+      echoed: "${BC_SECRET_1}",
+      text: "order 1423 at 4:42",
+    })
+
+    // A whole value that is exactly the captured credential is still redacted.
+    expect(collector.redactText("42")).toBe("${BC_SECRET_1}")
+    expect(collector.redactValue("42")).toBe("${BC_SECRET_1}")
+  })
+
+  test("keeps replacing long captured values inside unrelated execute output", () => {
+    const collector = new SecretCollector()
+    collector.protectUrl("https://api.example.com/v1/orders?session=42&access_token=tok_live_ABCDEF1234567890")
+    expect(collector.redactText("order 1423 at 4:42 token tok_live_ABCDEF1234567890 end"))
+      .toBe("order 1423 at 4:42 token ${BC_SECRET_2} end")
+  })
+
+  test("keeps replacing explicitly typed secrets of any length in execute output", () => {
+    const collector = new SecretCollector()
+    collector.addRedactionOnly("p@ss")
+    expect(collector.redactText("say p@ss now")).toBe("say ${BC_REDACTED_1} now")
+    expect(collector.redactValue({ echoed: "p@ss" })).toEqual({ echoed: "${BC_REDACTED_1}" })
+  })
+
   test("keeps custom access-control headers and cookie values secret", () => {
     const collector = new SecretCollector()
     const [custom] = collector.protectHeaders([{ name: "access-control-token", value: "ctl-acctoken-value-0003" }], "response")
