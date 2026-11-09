@@ -117,8 +117,8 @@ jobs:
         env:
           BROWSE_TEST_BINARY: ${{ github.workspace }}/cli/dist-bin/browse-windows-x64/bin/browse.exe
 
-      - name: Test the source relay launch
-        run: bun test test/windows-launch.test.ts
+      - name: Test the source relay launch and CreateProcessW path
+        run: bun test test/windows-launch.test.ts test/windows-launch-arguments.test.ts
         working-directory: cli
 
   browser:

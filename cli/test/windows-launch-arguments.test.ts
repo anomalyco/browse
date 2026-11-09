@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { quoteWindowsArgument, windowsCommandLine, windowsEnvironmentBlock } from "../src/relay/windows-launch.ts"
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import { launchWindowsRelay, quoteWindowsArgument, windowsCommandLine, windowsEnvironmentBlock } from "../src/relay/windows-launch.ts"
 
 describe("windows relay command line", () => {
   test("quotes arguments the way CommandLineToArgvW parses them back", () => {
@@ -35,3 +38,24 @@ describe("windows relay environment block", () => {
     expect(windowsEnvironmentBlock({})).toBe("\0")
   })
 })
+
+// The launch integration test only proves some launcher worked; this one calls the CreateProcessW path directly.
+test.skipIf(process.platform !== "win32")("launches a process with CreateProcessW, its environment and its arguments", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "browse-create-process-"))
+  try {
+    const marker = path.join(dir, "marker.json")
+    const value = `value with spaces and "quotes" ${Date.now()}`
+    const argv = ["argument with a space", 'quote " and a trailing backslash \\']
+    const script = `require("node:fs").writeFileSync(${JSON.stringify(marker)}, JSON.stringify({ value: process.env.BROWSE_TEST_LAUNCH_VALUE, argv: process.argv.slice(1) }))`
+    expect(launchWindowsRelay(
+      { executable: process.execPath, args: ["-e", script, ...argv] },
+      { ...process.env, BROWSE_TEST_LAUNCH_VALUE: value },
+    )).toBe(true)
+    for (let i = 0; i < 100 && !existsSync(marker); i++) await Bun.sleep(100)
+    const written = JSON.parse(readFileSync(marker, "utf8")) as { value: string; argv: string[] }
+    expect(written.value).toBe(value)
+    expect(written.argv).toEqual(argv)
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+}, 15_000)
