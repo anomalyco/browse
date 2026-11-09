@@ -23,6 +23,25 @@ const secretHeaders = new Set([
   "csrf-token",
   "x-xsrf-token",
 ])
+// HTTP/2 pseudo-headers (except :path, which is protected like a request URL) and standard CORS
+// response headers carry routing and policy, not credentials, and must never become secret slots.
+const nonSecretHeaders = new Set([
+  ":authority",
+  ":method",
+  ":scheme",
+  ":status",
+  ":protocol",
+  "access-control-allow-credentials",
+  "access-control-allow-origin",
+  "access-control-allow-methods",
+  "access-control-allow-headers",
+  "access-control-expose-headers",
+  "access-control-max-age",
+  "access-control-request-method",
+  "access-control-request-headers",
+  "access-control-allow-private-network",
+  "access-control-request-private-network",
+])
 
 export class SecretCollector {
   private readonly slotsByRef = new Map<string, MutableCredentialSlot>()
@@ -63,7 +82,7 @@ export class SecretCollector {
       occurrences.set(lowerName, occurrence + 1)
       return {
       name,
-        value: this.protectHeader(name, value, sourceName(requestScope, `${location}.header.${lowerName}`, occurrence)),
+        value: this.protectHeader(name, value, sourceName(requestScope, `${location}.header.${lowerName}`, occurrence), requestScope),
       }
     })
   }
@@ -198,17 +217,20 @@ export class SecretCollector {
     return `\${${ref}}`
   }
 
-  private protectHeader(name: string, value: string, source: string): string {
+  private protectHeader(name: string, value: string, source: string, requestScope = ""): string {
     if (!value) return value
     const lower = name.toLowerCase()
+    // :path carries the request path and query, so protect it exactly like the request URL.
+    if (lower === ":path") return this.protectUrl(value, requestScope)
+    if (nonSecretHeaders.has(lower)) return value
     if (lower === "cookie" || lower === "set-cookie") {
       const cookieOccurrences = new Map<string, number>()
-      return value.split(/;\s*/).map((part, index) => {
+      const protectLine = (line: string) => line.split(/;\s*/).map((part, index) => {
         const separator = part.indexOf("=")
         if (separator < 1) return part
         const cookieName = part.slice(0, separator).trim()
         const cookieValue = part.slice(separator + 1)
-        if (lower === "set-cookie" && index > 0 && /^(domain|path|expires|max-age|samesite)$/i.test(cookieName)) {
+        if (lower === "set-cookie" && index > 0 && /^(domain|path|expires|max-age|samesite|priority|partitioned|secure|httponly)$/i.test(cookieName)) {
           return part
         }
         if (!cookieValue) return part
@@ -216,6 +238,8 @@ export class SecretCollector {
         cookieOccurrences.set(cookieName, occurrence + 1)
         return `${cookieName}=${this.reference(cookieValue, sourceName("", `${source}.${cookieName}`, occurrence))}`
       }).join("; ")
+      // Raw headers can arrive as one value with each cookie on its own line.
+      return lower === "set-cookie" ? value.split("\n").map(protectLine).join("\n") : protectLine(value)
     }
     if (lower === "location" || lower === "referer" || lower === "referrer") {
       return this.protectUrl(value, `${source}.url`)
