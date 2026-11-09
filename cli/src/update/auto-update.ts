@@ -524,7 +524,7 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
       const priorFailureAt = state.lastError?.at
       deps.log("autoupdate.installing", { version: wanted })
       const startedAt = now()
-      const pid = spawnChild(["self-update", wanted, "--channel", channelOf(running)], (code) => {
+      const pid = spawnChild(["self-update", wanted, "--channel", channelOf(running), "--from", running], (code) => {
         deps.log(code === 0 ? "autoupdate.installed" : "autoupdate.install_failed", { version: wanted, code })
         updateState(({ installing: _installing, ...rest }) => {
           if (code === 0) {

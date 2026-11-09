@@ -183,9 +183,8 @@ export async function runInstalledUpdate(args: readonly string[], runtime = inst
   return true
 }
 
-/** `self-update <version> [--channel <tag>]`: the relay's installer child. Exit 0 when the installer succeeded. */
-export async function runSelfUpdate(args: readonly string[]) {
-  const runtime = installedRuntime()
+/** `self-update <version> [--channel <tag>] [--from <version>]`: the relay's installer child. Exit 0 when the installer succeeded. */
+export async function runSelfUpdate(args: readonly string[], runtime = installedRuntime()) {
   const version = args[0]
   const channelAt = args.indexOf("--channel")
   const channel = (channelAt === -1 ? channelOf(version ?? "") : args[channelAt + 1]) as Channel | undefined
@@ -199,6 +198,10 @@ export async function runSelfUpdate(args: readonly string[]) {
     process.exitCode = 2
     return
   }
+  // The relay passes its own version: a refused switch can leave the build on disk newer than the relay still running.
+  const fromAt = args.indexOf("--from")
+  const passedFrom = fromAt === -1 ? undefined : args[fromAt + 1]
+  const fromVersion = passedFrom !== undefined && UPDATE_VERSION.test(passedFrom) ? passedFrom : runtime.version
   try {
     // A binary install follows its release service channel; its installer checks the manifest's size and SHA-256. An
     // npm install is pinned to the version npm serves (version, not channel), as npm install -g does.
@@ -210,7 +213,11 @@ export async function runSelfUpdate(args: readonly string[]) {
     log(`${new Date().toISOString()} installed ${installed}`)
     updateState(({ installing, lastError: _lastError, ...state }) => {
       const still = installing?.pid === process.pid ? undefined : installing
-      return { ...state, ...(still ? { installing: still } : {}) }
+      return {
+        ...state,
+        ...(still ? { installing: still } : {}),
+        ...(installed !== fromVersion ? { lastUpdate: { from: fromVersion, to: installed, at: new Date().toISOString() } } : {}),
+      }
     })
   } catch (error) {
     updateState(({ installing, ...state }) => {
