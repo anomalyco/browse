@@ -22,6 +22,9 @@ run-name: "${{ github.event_name == 'workflow_dispatch' && format('Release {0} {
 # - attest and every publish job check out only .github/release/, verify each artifact against the digest of the job
 #   that made it (and the attestation), and run those scripts on the artifacts as data. They never execute repository
 #   code. Jobs that hold a secret or publish run in environment release, which admits only dev.
+# - the jobs that need a secret (tag, sign-macos, publish-cws, push-release-to-dev) assume
+#   arn:aws:iam::604439173067:role/github/browse-release over GitHub OIDC in environment release and read only the
+#   secrets they use from AWS Secrets Manager; the Chrome Web Store ids are repository variables.
 # .github/ (CODEOWNERS) is the security boundary for releases.
 
 on:
@@ -100,14 +103,27 @@ jobs:
     environment: release
     permissions:
       contents: read
+      id-token: write
     outputs:
       sha: ${{ steps.tag.outputs.sha }}
     steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::604439173067:role/github/browse-release
+          role-session-name: browse-${{ github.run_id }}
+          aws-region: us-east-1
+      - name: Read the release tag key
+        uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
+        with:
+          secret-ids: RELEASE_TAG_KEY,browse/release/RELEASE_TAG_KEY
+          parse-json-secrets: false
+      # Without the key the checkout falls back to the workflow token.
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-          ssh-key: ${{ secrets.RELEASE_TAG_KEY }}
+          ssh-key: ${{ env.RELEASE_TAG_KEY }}
       - id: tag
         name: Tag
         run: bash .github/release/tag-release.sh
@@ -309,9 +325,10 @@ jobs:
           path: ${{ runner.temp }}/binaries
 
   # OPTIONAL, off by default: signs the macOS binaries with a Developer ID (hardened runtime, .github/release/entitlements/
-  # cli.plist) once the repository variable MACOS_SIGNING is true and environment release has APPLE_SIGNING_CERTIFICATE
-  # (a base64 .p12 without a password). Until then this job is skipped and the macOS packages ship with the ad-hoc
-  # signature bun build --compile gives them, which runs: neither the install script's curl nor npm sets quarantine.
+  # cli.plist) once the repository variable MACOS_SIGNING is true. The certificate comes from AWS Secrets Manager
+  # (shared/APPLE_SIGNING_CERTIFICATE: a base64 .p12 without a password). Until then this job is skipped and the macOS
+  # packages ship with the ad-hoc signature bun build --compile gives them, which runs: neither the install script's curl
+  # nor npm sets quarantine.
   sign-macos:
     name: Sign the macOS binaries (optional)
     needs: [plan, build-binaries]
@@ -321,6 +338,7 @@ jobs:
     environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
     permissions:
       contents: read
+      id-token: write
     outputs:
       digest: ${{ steps.upload.outputs.digest }}
     steps:
@@ -336,11 +354,24 @@ jobs:
         with:
           pattern: binaries
           digests: binaries=${{ needs.build-binaries.outputs.digest }}
+      - name: Configure AWS credentials
+        if: needs.plan.outputs.dry_run != 'true'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::604439173067:role/github/browse-release
+          role-session-name: browse-${{ github.run_id }}
+          aws-region: us-east-1
+      - name: Read the signing certificate
+        if: needs.plan.outputs.dry_run != 'true'
+        uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
+        with:
+          secret-ids: APPLE_SIGNING_CERTIFICATE,shared/APPLE_SIGNING_CERTIFICATE
+          parse-json-secrets: false
       # The sign script looks the identity up in build.keychain; codesign finds the key through the user search list.
       - name: Import certificate
         if: needs.plan.outputs.dry_run != 'true'
         run: |
-          [ -n "$APPLE_SIGNING_CERTIFICATE" ] || { echo "::error::MACOS_SIGNING is true but environment release has no APPLE_SIGNING_CERTIFICATE."; exit 1; }
+          [ -n "$APPLE_SIGNING_CERTIFICATE" ] || { echo "::error::MACOS_SIGNING is true but AWS shared/APPLE_SIGNING_CERTIFICATE is empty."; exit 1; }
           cert="$RUNNER_TEMP/cert.p12"
           keychain_password=$(openssl rand -base64 32)
           printf '%s' "$APPLE_SIGNING_CERTIFICATE" | base64 --decode > "$cert"
@@ -352,8 +383,6 @@ jobs:
           # shellcheck disable=SC2046 # one keychain path per word
           security list-keychains -d user -s build.keychain $(security list-keychains -d user | tr -d '"')
           rm -f "$cert"
-        env:
-          APPLE_SIGNING_CERTIFICATE: ${{ secrets.APPLE_SIGNING_CERTIFICATE }}
       - name: Sign
         run: bash .github/release/sign-macos.sh "$RUNNER_TEMP/in/binaries" "$RUNNER_TEMP/signed"
         env:
@@ -531,6 +560,7 @@ jobs:
     environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
     permissions:
       contents: read
+      id-token: write
       attestations: read
     steps:
       - name: Check out release scripts
@@ -545,15 +575,29 @@ jobs:
         with:
           pattern: build
           digests: build=${{ needs.build.outputs.digest }}
+      - name: Configure AWS credentials
+        if: needs.plan.outputs.dry_run != 'true'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::604439173067:role/github/browse-release
+          role-session-name: browse-${{ github.run_id }}
+          aws-region: us-east-1
+      # A dry run fetches none: publish-cws.sh checks the zip and uploads nothing without a refresh token.
+      - name: Read the store credentials
+        if: needs.plan.outputs.dry_run != 'true'
+        uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
+        with:
+          secret-ids: |
+            CWS_CLIENT_SECRET,browse/release/CWS_CLIENT_SECRET
+            CWS_REFRESH_TOKEN,browse/release/CWS_REFRESH_TOKEN
+          parse-json-secrets: false
       - name: Upload and submit for review
         run: bash .github/release/publish-cws.sh "$RUNNER_TEMP/in/build"
         env:
           GH_TOKEN: ${{ github.token }}
           BROWSE_VERSION: ${{ needs.plan.outputs.version }}
           BROWSE_DRY_RUN: ${{ needs.plan.outputs.dry_run }}
-          CWS_CLIENT_ID: ${{ secrets.CWS_CLIENT_ID }}
-          CWS_CLIENT_SECRET: ${{ secrets.CWS_CLIENT_SECRET }}
-          CWS_REFRESH_TOKEN: ${{ secrets.CWS_REFRESH_TOKEN }}
+          CWS_CLIENT_ID: ${{ vars.CWS_CLIENT_ID }}
           CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
           CWS_ITEM_ID: ${{ vars.CWS_ITEM_ID }}
 
@@ -601,12 +645,25 @@ jobs:
     environment: release
     permissions:
       contents: read
+      id-token: write
     steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::604439173067:role/github/browse-release
+          role-session-name: browse-${{ github.run_id }}
+          aws-region: us-east-1
+      - name: Read the release tag key
+        uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
+        with:
+          secret-ids: RELEASE_TAG_KEY,browse/release/RELEASE_TAG_KEY
+          parse-json-secrets: false
+      # Without the key the checkout falls back to the workflow token.
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-          ssh-key: ${{ secrets.RELEASE_TAG_KEY }}
+          ssh-key: ${{ env.RELEASE_TAG_KEY }}
       - name: Push
         run: bash .github/release/push-release-to-dev.sh "$SHA"
         env:
