@@ -18,6 +18,7 @@ import { DebuggerHub } from "../debugger-hub"
 import { HandoffNotice } from "../handoff-notice"
 import { PageScripts } from "../page-scripts"
 import { TabCleanup } from "../tab-cleanup"
+import { ToolbarNotice } from "../toolbar-notice"
 import { UserSettings } from "../user-settings"
 import {
   ATTACHED_TITLE,
@@ -120,7 +121,15 @@ export function createRelayCommands(deps: {
       case "debugger.attach": {
         const tabId = number(params, "tabId")
         TabCleanup.touch(tabId)
-        await DebuggerHub.attach(tabId)
+        // A click's attach comes back here; a failure is told to the user instead of only returned to the relay.
+        const clicked = ToolbarNotice.take(tabId)
+        try {
+          await DebuggerHub.attach(tabId)
+        } catch (error) {
+          if (clicked) void ToolbarNotice.failed(tabId, error)
+          throw error
+        }
+        if (clicked) void ToolbarNotice.clear(tabId)
         deps.relayTabs.add(tabId)
         deps.notify()
         return {}

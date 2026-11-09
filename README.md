@@ -213,7 +213,9 @@ connection itself isn't encrypted by browse; use a network that is (Tailscale or
   it back. While an agent works the badge reads **RUN**, and **WAIT** when it needs you. The button always works: a
   click while a script runs takes the tab back and stops the script. Agents can't close a tab you lent them. The
   browser's debugging bar button (**Cancel** in Chrome, **OK** in some browsers like Dia) disconnects browse from
-  every tab: tabs you lent go back to you, and tabs agents opened stay open until idle cleanup closes them.
+  every tab: tabs you lent go back to you, and tabs agents opened stay open until idle cleanup closes them. File pages
+  need **Allow access to file URLs** for browse on its details page in `chrome://extensions`, and Chrome's own pages,
+  the Web Store included, can't be lent.
 - **Handoffs:** the page shows a small card with the site's origin. Do the human part, then click **Continue** on the
   card or the toolbar button.
 - **Recordings show only the page.** Nothing from browse is drawn while a tab is recorded: no cursor, no

@@ -51,6 +51,7 @@ import { createRelayRecording } from "./agent-relay/recording"
 import { DebuggerHub } from "./debugger-hub"
 import { HandoffNotice } from "./handoff-notice"
 import { TabCleanup } from "./tab-cleanup"
+import { ToolbarNotice } from "./toolbar-notice"
 
 export type { AgentBadge }
 
@@ -75,8 +76,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   const recordingTabs = new Set<number>()
   const pageStatuses = new Map<number, PageStatus>()
   const badges = new Map<number, AgentBadge>()
-  /** Tabs the user let agents use while the relay was not connected; announced once it is. */
-  const pendingAttach = new Set<number>()
+  /** Tabs clicked while the relay was not connected; the value says the click was a lend. Announced once it is. */
+  const pendingAttach = new Map<number, boolean>()
   let update: AgentRelayUpdate | undefined
   /** Settings the connected relay's environment fixes, as it reported them (`relay.settings`). */
   let overrides: RelayOverrides | undefined
@@ -151,6 +152,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     const known = relayTabs.delete(tabId)
     pageStatuses.delete(tabId)
     void HandoffNotice.clear(tabId)
+    void ToolbarNotice.clear(tabId)
     if (known) notify()
   }
 
@@ -261,7 +263,10 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       setStatus(skew ? "incompatible" : "connected")
       // Only the newest connection gets this far (verify checks socket === current).
       handshake.settle(generation)
-      pendingAttach.forEach((tabId) => send({ method: "toolbar.clicked", params: { tabId } }))
+      pendingAttach.forEach((lending, tabId) => {
+        if (lending) ToolbarNotice.expect(tabId)
+        send({ method: "toolbar.clicked", params: { tabId } })
+      })
       pendingAttach.clear()
       void grouping.ungroupStale().catch((error: unknown) => log.add("ungroupStale.error", { error: text(error) }))
     },
@@ -532,11 +537,28 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       // A lend makes the tab the user's again; do that before the relay answers the click with `tabs.ungroup`, which
       // must leave a lent tab open. A take-back (the tab is already an agent tab, or a queued lend) keeps tracking.
       const lending = !relayTabs.has(tabId) && !pendingAttach.has(tabId)
-      if (lending) await lendTab(tabId)
-      if (open() && status === "connected") return send({ method: "toolbar.clicked", params: { tabId } })
-      // No relay yet: the click is queued until one starts; a second click takes it back.
+      // A click that reaches the relay always goes through: the relay may still hold the tab as an agent's after Chrome
+      // dropped its debugger (a navigation to chrome://, say), and the button must stay able to stop that agent. The
+      // attach reply then says why the tab couldn't be lent.
+      if (open() && status === "connected") {
+        if (lending) {
+          await lendTab(tabId)
+          ToolbarNotice.expect(tabId)
+        }
+        return send({ method: "toolbar.clicked", params: { tabId } })
+      }
+      // No relay yet: a second click takes the queued one back before anything else.
       if (pendingAttach.delete(tabId)) return
-      pendingAttach.add(tabId)
+      if (lending) {
+        // A page that can't be attached can't be queued either; say why now instead of after a reconnect.
+        const blocked = await ToolbarNotice.unavailable(tabId)
+        if (blocked) {
+          log.add("attach.unavailable", { tabId, reason: blocked })
+          return
+        }
+        await lendTab(tabId)
+      }
+      pendingAttach.set(tabId, lending)
       attempts = 0
       void connect("attach")
     },

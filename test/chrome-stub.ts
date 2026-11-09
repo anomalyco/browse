@@ -23,7 +23,7 @@ export class StubEvent {
 
 type Bounds = { left: number; top: number; width: number; height: number }
 type Window = Bounds & { id: number; type: string; state: string; focused: boolean }
-type Tab = { id: number; windowId: number; url: string; active: boolean; index: number; groupId: number; pinned: boolean }
+type Tab = { id: number; windowId: number; url: string; pendingUrl?: string; active: boolean; index: number; groupId: number; pinned: boolean }
 type Group = { id: number; windowId: number; title: string; color: string; collapsed: boolean }
 type CreateWindow = Partial<Bounds> & { url?: string; focused?: boolean; state?: string; type?: string }
 
@@ -102,6 +102,8 @@ export function createChrome() {
     focusedWindowId: undefined as number | undefined,
     created: [] as CreateWindow[],
     permissionLevel: "granted" as "granted" | "denied",
+    /** The extension's "Allow access to file URLs" setting. */
+    fileAccess: false,
     notificationsFail: false,
     notifications: new Map<string, unknown>(),
   }
@@ -157,6 +159,17 @@ export function createChrome() {
     return tab
   }
   const chrome = lenient({
+    extension: lenient({
+      isAllowedFileSchemeAccess: async () => state.fileAccess,
+    }),
+    debugger: lenient({
+      onDetach: new StubEvent(),
+      async attach() {},
+      async detach() {},
+      async sendCommand() {
+        return {}
+      },
+    }),
     runtime: lenient({
       id: "stubextensionid",
       lastError: undefined,
