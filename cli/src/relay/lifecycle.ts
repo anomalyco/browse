@@ -6,6 +6,7 @@ import process from "node:process"
 import { fileURLToPath } from "node:url"
 import { browserUnresponsive, extensionProtocolAdvice, extensionReconnectAlarmPeriodMs } from "../protocol.ts"
 import * as RelayClient from "./client.ts"
+import { relayLog } from "./log.ts"
 import { RelayShutdownRequest, type ExtensionStatus, type RelayVersion } from "./schema.ts"
 import { launchWindowsRelay, quoteWindowsArgument } from "./windows-launch.ts"
 import { compareVersions, installedRuntime, installedVersion } from "../update/auto-update.ts"
@@ -345,14 +346,18 @@ export function startManagedRelay(
         throw new Error("Cannot locate the browse CLI entrypoint")
       }
       const launch = managedRelayLaunch(entrypoint, executable, execArgv)
-      const { OPENCODE_BROWSER_RESTART_REQUEST_ID: _inheritedRestartRequestId, ...env } = relayEnvironment(process.env)
+      // relayEnvironment keeps every OPENCODE_BROWSER_ name, whatever its casing, so strip the inherited restart id
+      // case-insensitively here (the option below is then the only one).
+      const env = Object.fromEntries(
+        Object.entries(relayEnvironment(process.env)).filter(([name]) => name.toUpperCase() !== "OPENCODE_BROWSER_RESTART_REQUEST_ID"),
+      )
       const childEnv = { ...env, OPENCODE_BROWSER_MANAGED_RELAY: "1", ...(options.restartRequestId ? { OPENCODE_BROWSER_RESTART_REQUEST_ID: options.restartRequestId } : {}) }
       if (process.platform === "win32") {
         // Under Bun, kernel32 CreateProcessW starts the relay in its own invisible console without inheriting this
         // process's handles (windows-launch.ts). Otherwise, and when that fails: a detached spawn can still inherit
         // extra pipe handles from cmd / PowerShell 5.1, so ShellExecute starts a separate hidden console without them.
         // Start-Process takes one Windows command line, not argv.
-        if (launchWindowsRelay(launch, childEnv)) return
+        if (launchWindowsRelay(launch, childEnv, (reason) => relayLog("relay.launch.fallback", { executable: launch.executable, reason }))) return
         const args = launch.args.map(quoteWindowsArgument).join(" ")
         execFileSync(path.join(process.env.SystemRoot!, "System32/WindowsPowerShell/v1.0/powershell.exe"),
           ["-NoProfile", "-NonInteractive", "-Command", "Start-Process -ErrorAction Stop -WindowStyle Hidden -FilePath $env:BROWSE_EXE -ArgumentList $env:BROWSE_ARGS"],
