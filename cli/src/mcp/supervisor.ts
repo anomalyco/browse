@@ -64,6 +64,8 @@ export async function runBinaryMcp(args: readonly string[]) {
   process.env.OPENCODE_BROWSER_CLIENT_PID = String(process.pid)
   let version = current()
   let child: ChildProcessByStdio<Writable, Readable, null>
+  // Every server this supervisor started: the current one, and a swapped-out one still exiting. None may outlive us.
+  const servers = new Set<ChildProcessByStdio<Writable, Readable, null>>()
   let initialize: Message | undefined
   let initialized: string | undefined
   let swapping = false
@@ -76,10 +78,42 @@ export async function runBinaryMcp(args: readonly string[]) {
   // The child is gone and its stdout is fully read: give the client the answers still buffered in our own stdout, then
   // exit with the child's status. `process.exit` alone would drop them when the client wasn't reading.
   let finishing = false
+  const exit = (code: number, flush: boolean) => {
+    finishing = true
+    if (!flush) return process.exit(code)
+    process.stdout.write("", () => process.exit(code))
+  }
   const finish = (code: number) => {
     if (finishing) return
+    // A swapped-out server must not outlive the supervisor that started it.
+    for (const running of servers) running.kill()
+    exit(code, true)
+  }
+  // A child that ignores stdin EOF can't keep us here: terminate every server and exit once they are gone (SIGKILL one
+  // that ignores SIGTERM too), so none is left behind. `force` lets a signal end us even mid-flush; repeated signals are
+  // ignored, so a second one can't kill the supervisor before its servers are gone.
+  let stopping: { readonly code: number; readonly flush: boolean } | undefined
+  let stopDeadline: ReturnType<typeof setTimeout> | undefined
+  let leaving = false
+  const stopped = () => {
+    if (!stopping || leaving) return
+    leaving = true
+    clearTimeout(stopDeadline)
+    exit(stopping.code, stopping.flush)
+  }
+  const stop = (code: number, flush: boolean, force = false) => {
+    if (stopping || (finishing && !force)) return
+    stopping = { code, flush }
     finishing = true
-    process.stdout.write("", () => process.exit(code))
+    for (const running of servers) running.kill()
+    if (servers.size === 0) return stopped()
+    // A server's `close` (see start) resolves this as soon as the last one is gone; one that ignores SIGTERM is killed
+    // outright at the deadline.
+    stopDeadline = setTimeout(() => {
+      for (const running of servers) running.kill("SIGKILL")
+      stopped()
+    }, 2000)
+    stopDeadline.unref()
   }
   const parse = (line: string): Message | undefined => {
     try {
@@ -109,6 +143,7 @@ export async function runBinaryMcp(args: readonly string[]) {
     const next = spawn(file!, [...prefix, "mcp", ...args], { stdio: ["pipe", "pipe", "inherit"], env: { ...process.env, [directEnvironmentVariable]: "1" }, windowsHide: true })
     // A server that exits mid-write (an old one being replaced) must not take the supervisor down with EPIPE.
     next.stdin.on("error", () => {})
+    servers.add(next)
     child = next
     // A server replaced by a swap keeps exiting in the background; only the current child's status ends the supervisor.
     // Wait for both its close (stdio is done) and readline's close (every line reached the client) before exiting.
@@ -119,8 +154,11 @@ export async function runBinaryMcp(args: readonly string[]) {
       finish(exited.code ?? (exited.signal ? 1 : 0))
     }
     next.on("close", (code, signal) => {
+      servers.delete(next)
       exited = { code, signal }
       finishChild()
+      // The last server stop() terminated is gone: leave now instead of waiting for its deadline.
+      if (stopping && servers.size === 0) stopped()
     })
     const reader = createInterface({ input: next.stdout })
     reader.on("close", () => {
@@ -222,10 +260,13 @@ export async function runBinaryMcp(args: readonly string[]) {
   start(false)
   createInterface({ input: process.stdin }).on("line", fromClient).on("close", () => {
     child.stdin.end()
-    // The child normally exits on its own and `finish` flushes first. This unblocks a child that never does, without
-    // cutting off a flush already in progress.
-    setTimeout(() => finish(0), 5000).unref()
+    // The child normally exits on its own and `finish` flushes first. This terminates one that never does, without
+    // cutting off a flush already in progress; a tool call still running after 5 seconds is cut here.
+    setTimeout(() => stop(0, true), 5000).unref()
   })
+  // A signal ends the supervisor, but never the server it started: terminate it, then leave with the signal's code.
+  process.on("SIGINT", () => stop(130, false, true))
+  process.on("SIGTERM", () => stop(143, false, true))
   setInterval(() => void maybeSwap(), 1000).unref()
 }
 
