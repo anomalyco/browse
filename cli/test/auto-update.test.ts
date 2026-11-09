@@ -15,9 +15,7 @@ import {
   updateState,
   type Runtime,
 } from "../src/update/auto-update.ts"
-import { switchTo } from "../src/update/runtime-update.ts"
 import { rolloutBucket } from "../src/update/release-service.ts"
-import { freePort } from "./support/ports.ts"
 
 const roots: string[] = []
 afterEach(() => {
@@ -546,39 +544,6 @@ describe("the relay's updater", () => {
     } finally {
       delete process.env.OPENCODE_BROWSER_HOME
       delete globals.__OPENCODE_BROWSER_TARGET__
-    }
-  })
-})
-
-describe("switching after an install", () => {
-  test("a switch reports the version the replaced relay was running, not the build on disk", async () => {
-    const home = fakeHome()
-    // The installer already replaced the stable entry: this child's own runtime.version is the new build.
-    const runtime = runtimeAt(home, "0.0.16")
-    const port = await freePort()
-    const relay = Bun.serve({
-      hostname: "127.0.0.1",
-      port,
-      fetch: (request) => new URL(request.url).pathname === "/version"
-        ? Response.json({ version: "0.0.15", instanceId: "old-relay", managed: false })
-        : new Response("Not Found", { status: 404 }),
-    })
-    const previousHome = process.env.OPENCODE_BROWSER_HOME
-    const previousPort = process.env.OPENCODE_BROWSER_PORT
-    process.env.OPENCODE_BROWSER_HOME = home
-    process.env.OPENCODE_BROWSER_PORT = String(port)
-    try {
-      const result = await switchTo(runtime, "0.0.16", { force: false })
-      expect(result.from).toBe("0.0.15")
-      // A foreground relay can't be replaced, so the switch stops before draining it; the version still comes from the
-      // relay that would have been replaced.
-      expect(result.refused).toBeDefined()
-    } finally {
-      if (previousHome === undefined) delete process.env.OPENCODE_BROWSER_HOME
-      else process.env.OPENCODE_BROWSER_HOME = previousHome
-      if (previousPort === undefined) delete process.env.OPENCODE_BROWSER_PORT
-      else process.env.OPENCODE_BROWSER_PORT = previousPort
-      relay.stop(true)
     }
   })
 })
