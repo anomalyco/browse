@@ -12,9 +12,11 @@ import {
   installKind,
   readState,
   runInstaller,
+  setStoredMode,
   updateState,
   type Runtime,
 } from "../src/update/auto-update.ts"
+import { cliCommand } from "../src/paths.ts"
 import { rolloutBucket } from "../src/update/release-service.ts"
 import { runSelfUpdate } from "../src/update/runtime-update.ts"
 
@@ -693,7 +695,27 @@ describe("status", () => {
       const status = autoUpdateStatus({ runtime, env: {} })
       expect(status.install).toBe("binary")
       expect(status.effective).toBe("on")
-      expect(describeAutoUpdate(status)).toContain("0.0.2 available")
+      expect(describeAutoUpdate(status)).toContain("0.0.2 available; the installer runs when no agent is using the browser")
+      const installLine = `0.0.2 available; run \`${cliCommand("update")}\` to install it`
+      setStoredMode("notify")
+      const notify = autoUpdateStatus({ runtime, env: {} })
+      expect(notify.effective).toBe("notify")
+      expect(describeAutoUpdate(notify)).toContain(installLine)
+      expect(describeAutoUpdate(notify)).not.toContain("installer runs")
+      setStoredMode("off")
+      const off = autoUpdateStatus({ runtime, env: {} })
+      expect(off.effective).toBe("off")
+      expect(describeAutoUpdate(off)).toContain(installLine)
+      expect(describeAutoUpdate(off)).not.toContain("installer runs")
+      setStoredMode("on")
+      const notifyOverride = autoUpdateStatus({ runtime, env: { OPENCODE_BROWSER_AUTO_UPDATE: "notify" } })
+      expect(notifyOverride.effective).toBe("notify")
+      expect(describeAutoUpdate(notifyOverride)).toContain(installLine)
+      expect(describeAutoUpdate(notifyOverride)).not.toContain("installer runs")
+      setStoredMode("notify")
+      const onOverride = autoUpdateStatus({ runtime, env: { OPENCODE_BROWSER_AUTO_UPDATE: "on" } })
+      expect(onOverride.effective).toBe("on")
+      expect(describeAutoUpdate(onOverride)).toContain("0.0.2 available; the installer runs when no agent is using the browser")
       expect(describeAutoUpdate(autoUpdateStatus({ runtime: { ...runtime, kind: "npx" }, env: {} }))).toContain("npx resolves")
     } finally {
       delete process.env.OPENCODE_BROWSER_HOME

@@ -226,7 +226,12 @@ export function describeAutoUpdate(status: AutoUpdateStatus): string {
   if (status.install !== "binary" && status.install !== "npm") return "Updates:   not an installed runtime"
   const mode = { on: "automatic", notify: "notify only", off: "off" }[status.effective]
   const parts = [`${mode}${status.overriddenBy ? ` (set by ${status.overriddenBy})` : ""}`, `channel ${status.channel ?? "latest"}`]
-  if (updateAvailable(status)) parts.push(`${status.latest} available; the installer runs when no agent is using the browser`)
+  if (updateAvailable(status))
+    parts.push(
+      status.effective === "on"
+        ? `${status.latest} available; the installer runs when no agent is using the browser`
+        : `${status.latest} available; run \`${status.cli} update\` to install it`,
+    )
   if (status.lastError) parts.push(`last attempt failed: ${status.lastError.message}`)
   return `Updates:   ${parts.join("; ")}`
 }
