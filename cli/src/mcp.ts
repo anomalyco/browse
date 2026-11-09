@@ -140,6 +140,17 @@ export const mcpServerLayer = McpServer.layerStdio({
 
 export const mcpToolsLayer = Layer.effectDiscard(registerTools)
 
+/** Resolves when the client closes stdin, the way an MCP client shuts a stdio server down. */
+const stdinClosed = Effect.callback<void>((resume) => {
+  if (process.stdin.readableEnded || process.stdin.destroyed) {
+    resume(Effect.void)
+    return Effect.void
+  }
+  const closed = () => resume(Effect.void)
+  process.stdin.once("end", closed)
+  return Effect.sync(() => process.stdin.off("end", closed))
+})
+
 export const runMcpServer: Effect.Effect<never, Error> = Layer.launch(
   mcpServerLayer.pipe(
     // Populate the shared McpServer before stdio can answer initialize or server/discover.
@@ -147,4 +158,10 @@ export const runMcpServer: Effect.Effect<never, Error> = Layer.launch(
     Layer.provide(NodeStdio.layer),
     Layer.provide(RelayClient.layerFetchMcp),
   ),
+).pipe(
+  // A 2026-07-28 client's `subscriptions/listen` stays open for the whole connection, and effect's RpcServer only ends
+  // a client on stdin EOF when no request fibers are in flight (rpc/RpcServer.js: Eof checks client.fibers). Without
+  // this the server outlives the client. The delay lets ordinary requests still in flight finish first; the interrupt
+  // is the same clean-EOF shutdown the RpcServer itself performs (main.ts turns it into exit 0).
+  Effect.raceFirst(stdinClosed.pipe(Effect.andThen(Effect.sleep(1000)), Effect.andThen(Effect.interrupt))),
 )
