@@ -7,6 +7,9 @@
 //                   processes keep their old inode on unix.
 //   npm global      `npm install -g @opencode/browse@<version>` replaces the package in place.
 //   npx             no-op: npx resolves the package itself, and install never writes npx entries.
+// The self-managed runtime of releases before 0.0.11 (runtime/versions under the old data root, setup/legacy.ts) runs as
+// an npm install whose updates land in npm's global folder (updateTarget); the relay restarted from there takes the old
+// runtime over (setup/legacy-runtime.ts).
 //
 // The relay checks its channel at launch and at least once an hour. A binary install reads its channel's manifest from
 // Anomaly's release service (release-service.ts, anomalyco/release docs/protocol.md) and follows it; an npm global
@@ -22,6 +25,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, rea
 import os from "node:os"
 import path from "node:path"
 import { cliPrefix, compiledBinary, entrySpawnCommand, fromCheckout, installedBinary, stateRoot } from "../paths.ts"
+import { insidePath, legacyDataRoot } from "../setup/legacy.ts"
 import { opencodeBrowserVersion } from "../version.ts"
 import { checkRelease, releaseChannel, runningServiceTarget, type ReleaseChannel, type ReleaseDecision } from "./release-service.ts"
 
@@ -104,6 +108,24 @@ export function installedRuntime(entry = process.argv[1] ?? process.execPath): R
   if (kind !== "npm" && kind !== "npx") return undefined
   const resolved = realEntry(entry)
   return { kind, entry: resolved, version: packageVersion(resolved) ?? opencodeBrowserVersion }
+}
+
+/**
+ * Where `npm install -g` puts updates for this runtime: the runtime itself, except for one the old shim starts from
+ * runtime/versions under the old data root (setup/legacy.ts), whose updates land in npm's global folder. The relay
+ * restarted from there takes the old runtime over (setup/legacy-runtime.ts).
+ */
+export async function updateTarget(runtime: Runtime, run: Run = runCommand, env: NodeJS.ProcessEnv = process.env): Promise<Runtime | undefined> {
+  if (runtime.kind !== "npm" || !insidePath(runtime.entry, path.join(legacyDataRoot(), "runtime", "versions"))) return runtime
+  const root = await npmGlobalRoot(run, env)
+  return root ? { ...runtime, entry: path.join(root, ...PACKAGE_NAME.split("/"), "dist", "cli.mjs") } : undefined
+}
+
+/** npm's global package root (`npm root -g`), where `npm install -g` puts packages; undefined when npm can't say. */
+export async function npmGlobalRoot(run: Run = runCommand, env: NodeJS.ProcessEnv = process.env): Promise<string | undefined> {
+  const result = await run("npm", ["root", "-g"], { timeoutMs: 20_000, env })
+  const root = result.status === 0 ? result.stdout.trim() : ""
+  return root && path.isAbsolute(root) ? root : undefined
 }
 
 /** The version currently on disk at the runtime's stable entry (a binary reports it with --version). */
@@ -332,7 +354,12 @@ export async function runInstaller(options: InstallerOptions): Promise<string> {
     const spec = `${PACKAGE_NAME}@${options.version ?? options.channel ?? "latest"}`
     const npm = await run("npm", ["install", "-g", spec], { timeoutMs: 10 * 60_000, env })
     if (npm.status !== 0) throw new Error(`npm install -g ${spec} failed: ${(npm.stderr || npm.stdout).trim().split("\n").slice(-3).join(" ")}`)
-    const version = installedVersion(options.runtime) ?? options.version ?? options.channel ?? "latest"
+    const target = await updateTarget(options.runtime, run, env)
+    if (!target) throw new Error(`npm install -g ${spec} ran, but \`npm root -g\` didn't say where it installed`)
+    const found = existsSync(target.entry) ? installedVersion(target) : undefined
+    // A runtime outside npm's folder can only see the update there, so it is there or the install failed.
+    if (!found && target !== options.runtime) throw new Error(`npm install -g ${spec} ran, but ${target.entry} isn't there`)
+    const version = found ?? options.version ?? options.channel ?? "latest"
     if (options.version && compareVersions(version, options.version) < 0)
       throw new Error(`npm install -g ${spec} left ${version}, not the requested ${options.version}`)
     return version
@@ -391,9 +418,9 @@ export type AutoUpdaterDeps = {
   readonly onChange?: () => void
   /**
    * Starts a detached child from the install's stable entry (`self-update`, `runtime-switch`), which an installer may
-   * already have replaced with the new build; onExit gets its exit code.
+   * already have replaced with the new build; onExit gets its exit code. `from` is the install to start it from (a pre-0.0.11 runtime has its own).
    */
-  readonly spawnChild?: (args: readonly string[], onExit: (code: number | null) => void) => number | undefined
+  readonly spawnChild?: (args: readonly string[], onExit: (code: number | null) => void, from: Runtime) => number | undefined
   readonly env?: NodeJS.ProcessEnv
   readonly fetch?: typeof fetch
   readonly run?: Run
@@ -417,7 +444,9 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
   const { runtime } = deps
   const running = runtime.version
   const checkIntervalMs = Math.min(Number(env.OPENCODE_BROWSER_AUTO_UPDATE_INTERVAL_MS) || HOUR_MS, HOUR_MS)
-  const spawnChild = deps.spawnChild ?? ((args, onExit) => spawnRuntimeChild(runtime, args, onExit, env))
+  const spawnChild = deps.spawnChild ?? ((args, onExit, from) => spawnRuntimeChild(from, args, onExit, env))
+  /** Where updates land (updateTarget), found on the first tick that needs it. */
+  let updates: Runtime | undefined
   let busy = false
   /** A runtime-switch child in flight; a stuck one is given up on after SWITCH_TIMEOUT_MS. */
   let switching: { pid: number | undefined; startedAt: number } | undefined
@@ -492,12 +521,15 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
       }
       if (!wanted || mode !== "on") return
 
+      // A failed `npm root -g` isn't kept: the next tick asks again.
+      updates ??= await updateTarget(runtime, deps.run ?? runCommand, env)
+      if (!updates) return void deps.log("autoupdate.no_target", { reason: "npm root -g failed" })
       // An installer in its own process: wait for it, or record that it died without saying how it went.
       const installing = state.installing
       if (installing) {
         const alive = processAlive(installing.pid) && now() - installing.startedAt < INSTALL_TIMEOUT_MS
         if (alive) return
-        const installed = installedVersion(runtime)
+        const installed = installedVersion(updates)
         state = updateState(({ installing: _installing, ...rest }) => ({
           ...rest,
           ...(installed && installed !== running ? {} : { lastError: { message: "the installer stopped without finishing", at: new Date(now()).toISOString(), version: installing.version } }),
@@ -507,7 +539,7 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
       // The installer replaces the stable entry new clients start. Don't launch it while this relay is busy;
       // recheck on the switch tick in case an agent came back during the download.
       if (!deps.isIdle()) return
-      const installed = installedVersion(runtime)
+      const installed = installedVersion(updates)
       if (installed === wanted) {
         // The build is on disk (this installer's, or another process's). Restart the relay with it once nothing is using the browser.
         switching = { pid: undefined, startedAt: now() }
@@ -516,7 +548,7 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
           if (switching) switching = undefined
           if (code !== 0) deps.log("autoupdate.restart_refused", { version: installed, code })
           deps.onChange?.()
-        })
+        }, updates)
         return
       }
       if (state.lastError?.version === wanted) {
@@ -550,7 +582,7 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
         deps.onChange?.()
         // Switch as soon as it's ready rather than at the next tick.
         if (code === 0) void tick()
-      })
+      }, runtime)
       if (pid) updateState((rest) => ({ ...rest, installing: { version: wanted, pid, startedAt } }))
     } catch (error) {
       deps.log("autoupdate.error", { error: (error as Error).message })

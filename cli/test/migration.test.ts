@@ -2,7 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { parse } from "jsonc-parser"
+import { legacyRootsLeft, legacyRuntime } from "../src/setup/legacy.ts"
+import { adoptLegacyRuntime } from "../src/setup/legacy-runtime.ts"
 import { migrateLegacy } from "../src/setup/migrate.ts"
+import { node, oldRuntimeHome, withoutHomeOverride } from "./support/legacy-runtime.ts"
 
 const homes: string[] = []
 afterEach(() => {
@@ -116,5 +120,61 @@ describe("migration from the old layouts", () => {
       if (previousHome === undefined) delete process.env.OPENCODE_BROWSER_HOME
       else process.env.OPENCODE_BROWSER_HOME = previousHome
     }
+  })
+})
+
+describe("migration after the old self-managed runtime was taken over", () => {
+  const takenOver = Date.parse("2026-11-08T16:00:00Z")
+  /** The old runtime once a relay from a current install took it over (legacy-runtime.ts). */
+  function takenOverHome() {
+    const fixture = oldRuntimeHome(homes)
+    adoptLegacyRuntime(legacyRuntime(fixture.home), fixture.runtime, takenOver)
+    return fixture
+  }
+
+  test("a dev extension the browser loads from the old folder keeps loading, from the folder updates replace", () => {
+    const { home, oldData } = takenOverHome()
+    write(path.join(oldData, "extension", "manifest.json"), JSON.stringify({ version: "1" }))
+    const loaded = path.join(oldData, "extension", "manifest.json")
+    const folder = path.join(home, ".cache", "browse", "extension")
+    withoutHomeOverride(() => migrateLegacy(home, takenOver + 60_000))
+    expect(fs.lstatSync(path.join(oldData, "extension")).isSymbolicLink()).toBe(true)
+    // A dev relay updates the extension by swapping the cache folder; the path the browser loaded sees it.
+    fs.renameSync(folder, `${folder}-old`)
+    write(path.join(folder, "manifest.json"), JSON.stringify({ version: "2" }))
+    expect(JSON.parse(fs.readFileSync(loaded, "utf8")).version).toBe("2")
+    // Past the grace period everything else in the old folder goes, the link stays, and migration has nothing left.
+    withoutHomeOverride(() => migrateLegacy(home, takenOver + 11 * 60_000))
+    expect(fs.readdirSync(oldData)).toEqual(["extension"])
+    expect(JSON.parse(fs.readFileSync(loaded, "utf8")).version).toBe("2")
+    expect(legacyRootsLeft(home)).toBe(false)
+  })
+
+  test("browse entries in opencode.jsonc and in configs settings.json recorded move to `browse mcp` before the shim goes", () => {
+    const { home, oldData, shim, opencode } = takenOverHome()
+    fs.rmSync(opencode)
+    const jsonc = path.join(home, ".config", "opencode", "opencode.jsonc")
+    const entry = { type: "local", command: [node, shim, "mcp"] }
+    write(jsonc, `{\n  // mine\n  "mcp": { "servers": { "browse": ${JSON.stringify(entry)} } }\n}\n`)
+    const project = path.join(home, "project", ".opencode", "opencode.jsonc")
+    write(project, JSON.stringify({ mcp: { servers: { browse: entry } } }))
+    write(path.join(oldData, "settings.json"), JSON.stringify({ opencodeConfigs: [project] }))
+    withoutHomeOverride(() => migrateLegacy(home, takenOver + 11 * 60_000))
+    for (const file of [jsonc, project]) expect(parse(fs.readFileSync(file, "utf8")).mcp.servers.browse.command).toEqual(["browse", "mcp"])
+    expect(fs.readFileSync(jsonc, "utf8")).toContain("// mine")
+    expect(fs.existsSync(oldData)).toBe(false)
+  })
+
+  test("a file deleted from the new folders during the grace period stays deleted", () => {
+    const { home, oldData } = takenOverHome()
+    write(path.join(oldData, "secrets", "github.json"), "{}\n", 0o600)
+    const secret = path.join(home, ".local", "share", "browse", "secrets", "github.json")
+    withoutHomeOverride(() => migrateLegacy(home, takenOver + 60_000))
+    expect(fs.existsSync(secret)).toBe(true)
+    fs.rmSync(secret)
+    withoutHomeOverride(() => migrateLegacy(home, takenOver + 2 * 60_000))
+    expect(fs.existsSync(secret)).toBe(false)
+    // The shim still finds current.json meanwhile.
+    expect(fs.existsSync(path.join(oldData, "runtime", "current.json"))).toBe(true)
   })
 })

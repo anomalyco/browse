@@ -4,7 +4,8 @@
 // Every file is copied beside its destination and renamed into place, so an interrupted run simply continues. Existing
 // new files always win (the old copy is removed, not merged), which makes a second run a no-op. Agent MCP entries that
 // point at ~/.browse/bin/browse are rewritten to ~/.local/bin/browse; entries that record an absolute node path are
-// rewritten to the stable `browse` command, since nvm/fnm change node between sessions. Then the old roots are removed.
+// rewritten to the stable `browse` command, since nvm/fnm change node between sessions. Then the old roots are removed;
+// the old data root waits LEGACY_HANDOVER_GRACE_MS after its runtime was taken over (legacy-runtime.ts).
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -12,10 +13,11 @@ import { randomUUID } from "node:crypto"
 import { parse as parseJsonc, type ParseError } from "jsonc-parser"
 import { parse as parseToml } from "smol-toml"
 import { parseDocument } from "yaml"
-import { binRoot, binaryName, cacheRoot, configRoot, dataRoot, stateRoot } from "../paths.ts"
+import { binRoot, binaryName, cacheRoot, configRoot, dataRoot, devExtensionFolder, stateRoot } from "../paths.ts"
 import { agentLocations, browseServerCommand, editAgentConfig, type AgentName } from "./agent-config.ts"
-import { legacyDataRoot, legacyRoots } from "./legacy.ts"
-import { configureMcp } from "./mcp.ts"
+import { LEGACY_HANDOVER_GRACE_MS, legacyDataRoot, legacyRoots, legacyRuntime } from "./legacy.ts"
+import type { Settings } from "./environment.ts"
+import { configureMcp, OPENCODE_CONFIG_NAMES } from "./mcp.ts"
 
 type Move = { readonly from: string; readonly to: string }
 
@@ -37,6 +39,15 @@ function destination(relative: string, home: string): string | undefined {
   if (top === "relays") return path.join(path.basename(file) === "lifecycle.jsonl" ? stateRoot(home) : dataRoot(home), file)
   // Pairings, tokens, secrets, session catalogs and anything unknown are durable data.
   return path.join(dataRoot(home), file)
+}
+
+const lexists = (file: string) => {
+  try {
+    fs.lstatSync(file)
+    return true
+  } catch {
+    return false
+  }
 }
 
 /** The private files and folders that must keep 0600/0700. */
@@ -61,8 +72,8 @@ function filesUnder(root: string, relative = ""): string[] {
   })
 }
 
-function copyPrivate(from: string, to: string, relative: string) {
-  if (fs.existsSync(to)) return
+function copyPrivate(from: string, to: string, relative: string, overwrite = false) {
+  if (!overwrite && fs.existsSync(to)) return
   fs.mkdirSync(path.dirname(to), { recursive: true, mode: privatePath(relative) ? 0o700 : 0o755 })
   const temporary = `${to}.migrate-${process.pid}`
   fs.rmSync(temporary, { force: true })
@@ -171,13 +182,111 @@ function rewriteAgent(name: AgentName, file: string, oldBinary: string, newBinar
 
 export type MigrationResult = { moved: number; rewritten: number; removed: string[] }
 
+/**
+ * Copies the old data root into the XDG folders with the old files winning, for taking over a runtime that still uses
+ * them (legacy-runtime.ts) before its relay is replaced. Only copies: nothing is removed or rewritten until the new relay
+ * owns the port. Never throws.
+ */
+export function copyLegacyData(home = os.homedir()) {
+  const root = legacyDataRoot(home)
+  const record = takeoverRecord(home)
+  // A takeover that stopped before its relay listened left these copies; the old folder is still the truth, so a file
+  // deleted from it since (a site secret, a revoked pairing) must not come back from them.
+  for (const file of readCopied(record)) fs.rmSync(file, { force: true })
+  const copies = filesUnder(root).flatMap((relative) => {
+    const to = destination(relative, home)
+    return to ? [{ relative, to }] : []
+  })
+  try {
+    fs.mkdirSync(path.dirname(record), { recursive: true, mode: 0o700 })
+    fs.writeFileSync(record, JSON.stringify({ copied: copies.map((copy) => copy.to) }) + "\n", { mode: 0o600 })
+  } catch {
+    // Without the record a stopped takeover can leave stale copies; copying is still right.
+  }
+  for (const { relative, to } of copies) {
+    try {
+      copyPrivate(path.join(root, relative), to, relative, true)
+    } catch {
+      // The takeover's migration copies it again once the relay is up.
+    }
+  }
+}
+
+/** The files copyLegacyData copied for a takeover not yet published (legacy-runtime.ts). */
+const takeoverRecord = (home: string) => path.join(stateRoot(home), "legacy-takeover.json")
+
+function readCopied(record: string): string[] {
+  try {
+    const copied = (JSON.parse(fs.readFileSync(record, "utf8")) as { copied?: unknown }).copied
+    return Array.isArray(copied) ? copied.filter((file): file is string => typeof file === "string") : []
+  } catch {
+    return []
+  }
+}
+
+/** What earlier installs recorded in settings.json: the OpenCode configs and agent entries they wrote. */
+function recordedConfigs(home: string): AgentLocationRecord[] {
+  return [path.join(configRoot(home), "settings.json"), path.join(home, ".browse", "settings.json"), path.join(legacyDataRoot(home), "settings.json")].flatMap((file) => {
+    try {
+      const settings = JSON.parse(fs.readFileSync(file, "utf8")) as Settings
+      return [
+        ...(settings.opencodeConfigs ?? []).filter((config) => typeof config === "string").map((config) => ({ name: "opencode" as const, file: config })),
+        ...(settings.agents ?? []).filter((agent) => typeof agent?.file === "string").map((agent) => ({ name: agent.name, file: agent.file })),
+      ]
+    } catch {
+      return []
+    }
+  })
+}
+
+type AgentLocationRecord = { readonly name: AgentName; readonly file: string }
+
+/**
+ * A dev install's unpacked extension: the browser loaded the old root's extension folder by its path, and reloads that
+ * path when the new relay updates the extension. The folder moves to the cache root and the old path becomes a link to
+ * it, which stays for as long as the old root does.
+ */
+function linkLegacyExtension(root: string, home: string) {
+  const old = path.join(root, "extension")
+  try {
+    // Absent, or already the link.
+    if (!fs.lstatSync(old).isDirectory()) return
+  } catch {
+    return
+  }
+  const folder = devExtensionFolder(cacheRoot(home))
+  const link = `${old}.link-${process.pid}`
+  try {
+    fs.mkdirSync(path.dirname(folder), { recursive: true })
+    // Link first, so a failure leaves the folder the browser loads untouched.
+    fs.rmSync(link, { force: true })
+    fs.symlinkSync(folder, link, "junction")
+    if (fs.existsSync(folder)) fs.rmSync(old, { recursive: true, force: true })
+    else {
+      try {
+        fs.renameSync(old, folder)
+      } catch {
+        fs.cpSync(old, folder, { recursive: true })
+        fs.rmSync(old, { recursive: true, force: true })
+      }
+    }
+    fs.renameSync(link, old)
+  } catch {
+    fs.rmSync(link, { force: true })
+  }
+}
+
 /** Idempotent, never throws: migration must not stop browse from starting. */
-export function migrateLegacy(home = os.homedir()): MigrationResult {
+export function migrateLegacy(home = os.homedir(), now = Date.now()): MigrationResult {
   const result: MigrationResult = { moved: 0, rewritten: 0, removed: [] }
   if (process.env.OPENCODE_BROWSER_HOME) return result
   const roots = legacyRoots(home)
+  const oldData = legacyDataRoot(home)
+  // Read before the files move: settings.json names configs the default locations don't cover.
+  const recorded = recordedConfigs(home)
   for (const root of roots) {
     if (!fs.existsSync(root)) continue
+    if (root === oldData) linkLegacyExtension(root, home)
     let complete = true
     for (const relative of filesUnder(root)) {
       const to = destination(relative, home)
@@ -185,6 +294,10 @@ export function migrateLegacy(home = os.homedir()): MigrationResult {
       try {
         copyPrivate(path.join(root, relative), to, relative)
         result.moved++
+        // Moved, not copied, so a later run can't bring back a file deleted in the new folders. The executable stays
+        // until no agent runs it, and the extension until no browser loads it.
+        const top = normalized(relative).split("/")[0]
+        if (top !== "bin" && top !== "extension") fs.rmSync(path.join(root, relative), { force: true })
       } catch {
         // Leave the old file for the next run; never overwrite a new one.
         complete = false
@@ -204,7 +317,13 @@ export function migrateLegacy(home = os.homedir()): MigrationResult {
   const config = home === os.homedir() && process.env.XDG_CONFIG_HOME && path.isAbsolute(process.env.XDG_CONFIG_HOME)
     ? process.env.XDG_CONFIG_HOME
     : path.join(home, ".config")
-  const locations = agentLocations(home, config, () => undefined, path.join(config, "opencode", "opencode.json"))
+  // Every config the installer may have written browse into: OpenCode's default candidates, then what settings recorded.
+  const opencodeConfigs = OPENCODE_CONFIG_NAMES.map((name) => path.join(config, "opencode", name))
+  const locations = [
+    ...agentLocations(home, config, () => undefined, opencodeConfigs[0]!).filter((location) => location.name !== "opencode"),
+    ...opencodeConfigs.map((file) => ({ name: "opencode" as const, file })),
+    ...recorded,
+  ].filter((location, index, all) => all.findIndex((other) => other.name === location.name && normalized(other.file) === normalized(location.file)) === index)
   for (const location of locations) {
     try {
       if (rewriteAgent(location.name, location.file, oldBinary, newBinary)) result.rewritten++
@@ -218,15 +337,28 @@ export function migrateLegacy(home = os.homedir()): MigrationResult {
   const stillReferences = (needle: string) => locations.some((location) => referencesPath(location.file, needle))
   const keep = new Set<string>()
   const browseRoot = path.join(home, ".browse")
-  const oldData = legacyDataRoot(home)
   if (stillReferences(oldBinary)) keep.add(normalized(browseRoot))
   if (stillReferences(oldData)) keep.add(normalized(oldData))
+  // Just taken over (legacy-runtime.ts): agents' running shims still read runtime/current.json to reach the new server.
+  const takenOver = legacyRuntime(home)
+  if (takenOver?.movedTo && !(now - Date.parse(takenOver.switchedAt ?? "") >= LEGACY_HANDOVER_GRACE_MS)) keep.add(normalized(oldData))
+  // Published: the copies are the new folders' own files now.
+  if (takenOver?.movedTo) {
+    try {
+      fs.rmSync(takeoverRecord(home), { force: true })
+    } catch {
+      // A stale record only means a later takeover's copy removes these; there won't be one.
+    }
+  }
   if (referencesPath(settingsFile, oldBinary)) keep.add(normalized(browseRoot))
   result.removed = result.removed.filter((root) => !keep.has(normalized(root)))
   const removable = result.removed.splice(0)
   for (const root of removable) {
     try {
-      fs.rmSync(root, { recursive: true, force: true })
+      // The extension link outlives everything else in the old data root (linkLegacyExtension).
+      const keepExtension = root === oldData && lexists(path.join(root, "extension"))
+      if (!keepExtension) fs.rmSync(root, { recursive: true, force: true })
+      else for (const name of fs.readdirSync(root)) if (name !== "extension") fs.rmSync(path.join(root, name), { recursive: true, force: true })
       result.removed.push(root)
     } catch {
       // A locked file stays for the next run.

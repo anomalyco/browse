@@ -359,6 +359,10 @@ Escape hatches. Set them in the environment you start opencode (or your MCP clie
 - `node cli/dist/cli.mjs status` shows the relay, the extension and every tab agents can use.
 - `node cli/dist/cli.mjs doctor` checks the install.
 - Logs: `~/.local/state/browse/logs/relay.log`.
+- Stuck on 0.0.15 or earlier with `~/.local/share/opencode-browser` (`%LOCALAPPDATA%\opencode-browser` on Windows) still
+  there: installs from before 0.0.11 download each update but keep running the old version. Run
+  `npm install -g @opencode/browse@latest` (`@dev` on the dev channel), then `browse relay restart` once no agent is
+  using the browser. Running agents move to the new version, and the old folder's files move to the folders above.
 - Extension says another browser is connected: the relay is running an older browse that drives one browser profile at
   a time. Update browse on the computer running the relay (or close the other browser), then click **Reconnect** on the
   status page.
