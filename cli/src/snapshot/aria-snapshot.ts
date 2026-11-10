@@ -164,7 +164,7 @@ const pageCleanup = new WeakMap<Page, {
  */
 export async function ariaSnapshotWithoutTextControlValues(
   locator: Locator,
-  options: { readonly timeout: number },
+  options: { readonly timeout: number; readonly deadline?: number },
 ): Promise<string> {
   const page = locator.page()
   const redactionSelectorName = await selectorForContext(page.context())
@@ -177,9 +177,11 @@ export async function ariaSnapshotWithoutTextControlValues(
   let captureFailed = false
   let captureError: unknown
   try {
+    // The element wait used part of the slice; the read gets what is left of it.
+    const readTimeout = options.deadline === undefined ? options.timeout : Math.max(1, options.deadline - Date.now())
     snapshot = await locator
       .locator(`${redactionSelectorName}=on_${token}`)
-      .ariaSnapshot(options)
+      .ariaSnapshot({ timeout: readTimeout })
   } catch (error) {
     captureFailed = true
     captureError = error
@@ -212,7 +214,7 @@ export async function ariaSnapshotWithFrames(
   const page = locator.page()
   const tree = await ariaSnapshotWithoutTextControlValues(locator, { timeout: options.timeout })
   const budget: FrameBudget = { frames: maxSnapshotFrames, skipped: { limit: 0, deadline: 0 } }
-  const blocks = await frameBlocks(locator, { page, depth: 1, budget, deadline })
+  const blocks = await frameBlocks(locator, { page, depth: 1, budget, deadline, listingFloorMs: minFrameListingTimeoutMs })
   const lines = tree.split("\n")
   if (blocks.length > 0) lines.push("", ...blocks)
   if (budget.skipped.limit > 0) lines.push(frameSkipNote(budget.skipped.limit, `${maxSnapshotFrames} iframes at most per snapshot`))
@@ -234,9 +236,11 @@ async function frameBlocks(scope: Locator, options: {
   readonly depth: number
   readonly budget: FrameBudget
   readonly deadline: number
+  /** Extra time for the cheap iframe listing; only the main document gets it. */
+  readonly listingFloorMs: number
 }): Promise<string[]> {
   const blocks: string[] = []
-  const listing = await iframeCandidates(scope, options.deadline)
+  const listing = await iframeCandidates(scope, options.deadline, options.listingFloorMs)
   options.budget.skipped.limit += listing.skipped
   for (const [index, candidate] of listing.candidates.entries()) {
     const content = await frameContent(candidate, {
@@ -256,8 +260,8 @@ async function frameBlocks(scope: Locator, options: {
  * label can never shift onto a different element. Listing is cheap, so it gets a short floor past the deadline: a
  * page with no iframes must never produce a deadline note because its tree read ran long.
  */
-async function iframeCandidates(scope: Locator, deadline: number): Promise<{ candidates: IframeCandidate[]; skipped: number }> {
-  const listingDeadline = Math.max(deadline, Date.now() + minFrameListingTimeoutMs)
+async function iframeCandidates(scope: Locator, deadline: number, listingFloorMs: number): Promise<{ candidates: IframeCandidate[]; skipped: number }> {
+  const listingDeadline = Math.max(deadline, Date.now() + listingFloorMs)
   const handles = await withinDeadline(
     scope.locator("iframe, frame").elementHandles(),
     listingDeadline,
@@ -266,10 +270,8 @@ async function iframeCandidates(scope: Locator, deadline: number): Promise<{ can
   if (!handles) return { candidates: [], skipped: 0 }
   try {
     const candidates: IframeCandidate[] = []
-    let examined = 0
+    let skipped = 0
     for (const handle of handles) {
-      if (candidates.length >= maxSnapshotFrames) break
-      examined += 1
       const info = await withinDeadline(handle.evaluate((node) => {
         const element = node as Element
         const text = (value: string | null) => (value ?? "").trim()
@@ -291,13 +293,18 @@ async function iframeCandidates(scope: Locator, deadline: number): Promise<{ can
         }
       }), listingDeadline).catch(() => undefined)
       if (!info || info.tiny) continue
+      // Tiny frames never count against the cap, so they must not inflate the skip note either.
+      if (candidates.length >= maxSnapshotFrames) {
+        skipped += 1
+        continue
+      }
       candidates.push({
         frame: await withinDeadline(handle.contentFrame(), listingDeadline).catch(() => null),
         name: info.name || info.src || "frame",
         src: info.src,
       })
     }
-    return { candidates, skipped: Math.max(0, handles.length - examined) }
+    return { candidates, skipped }
   } finally {
     await Promise.all(handles.map((handle) => handle.dispose().catch(() => {})))
   }
@@ -357,6 +364,9 @@ async function frameContent(candidate: IframeCandidate, options: {
     return []
   }
   const timeout = frameCaptureTimeoutMs(remaining, options.framesLeft)
+  // The frame's slice covers its whole subtree, so a hung nested frame cannot spend the time reserved for the
+  // frame's later siblings.
+  const frameDeadline = Math.min(options.deadline, Date.now() + timeout)
   options.budget.frames -= 1
   // A document that navigates between activation and the read is not patched any more: drop its result.
   let navigated = false
@@ -366,10 +376,10 @@ async function frameContent(candidate: IframeCandidate, options: {
   options.page.on("framenavigated", onFrameNavigated)
   try {
     const target = frame.locator(documentRootSelector).first()
-    const tree = await ariaSnapshotWithoutTextControlValues(target, { timeout })
+    const tree = await ariaSnapshotWithoutTextControlValues(target, { timeout, deadline: frameDeadline })
     if (navigated) throw new Error("the frame navigated while it was captured")
     const lines = tree.split("\n")
-    const nested = await frameBlocks(target, { ...options, depth: options.depth + 1 })
+    const nested = await frameBlocks(target, { ...options, depth: options.depth + 1, deadline: frameDeadline, listingFloorMs: 0 })
     if (nested.length > 0) lines.push("", ...nested)
     return lines
   } catch (error) {

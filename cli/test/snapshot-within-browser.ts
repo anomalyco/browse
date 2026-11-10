@@ -29,12 +29,20 @@ const frameForm = (title: string, nested = ""): string => `<!doctype html><html>
 
 let sameOriginFrameUrl = ""
 const nestedHtml = frameForm("Nested").replace("Pagar", "Nested")
+// A third origin for a frame that never answers; bound to 127.0.0.2 so it cannot share a renderer with the page.
+const hungServer = http.createServer((_request, response) => {
+  response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
+  response.end(`<!doctype html><html><head><script>while (true) {}</script></head><body></body></html>`)
+})
+await new Promise<void>((resolve) => hungServer.listen(0, "127.0.0.2", resolve))
+const hungPort = (hungServer.address() as { port: number }).port
 const crossOriginServer = http.createServer((request, response) => {
   response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
   if (request.url === "/nested") return response.end(nestedHtml)
   if (request.url === "/moved") return response.end(frameForm("Moved"))
   if (request.url === "/leak") return response.end(`<!doctype html><html><body><h1>Leaky</h1><input aria-label="Key" value="LEAK-VALUE-CROSS"><button>Go</button></body></html>`)
   if (request.url === "/hung") return response.end(`<!doctype html><html><head><script>while (true) {}</script></head><body></body></html>`)
+  if (request.url === "/nested-host") return response.end(`<!doctype html><html><body><h1>A</h1><iframe src="http://127.0.0.2:${hungPort}/hung" title="a1"></iframe></body></html>`)
   if (request.url === "/slow") return response.end(`<!doctype html><html><head><script>const end = Date.now() + 1500; while (Date.now() < end) {}</script></head><body><h1>Slow</h1></body></html>`)
   response.end(frameForm("Pay form", request.url === "/payment" ? `<iframe src="${sameOriginFrameUrl}/nested" title="nested" width="200" height="150"></iframe>` : ""))
 })
@@ -57,6 +65,13 @@ const hostServer = http.createServer((request, response) => {
   if (request.url === "/late-target") return response.end(`<!doctype html><html><body><main><h1>Host</h1><div id="late-slot"></div></main>
     <script>setTimeout(() => { const el = document.createElement("section"); el.id = "late"; el.innerHTML = "<h2>Late</h2>" + Array.from({ length: 12000 }, (_, index) => "<p>row " + index + "</p>").join(""); document.getElementById("late-slot").appendChild(el) }, 1750)</script></body></html>`)
   if (request.url === "/slow-parent") return response.end(`<!doctype html><html><body><main><h1>Host</h1><iframe src="http://localhost:${crossOriginPort}/slow" title="slow"></iframe></main></body></html>`)
+  if (request.url === "/aria-many") return response.end(`<!doctype html><html><body><main><h1>Host</h1>
+    ${Array.from({ length: 10 }, (_, index) => `<iframe src="/working" title="many-${index}"></iframe>`).join("")}
+    ${Array.from({ length: 2 }, (_, index) => `<iframe src="/working" title="tiny-${index}" style="border:0;width:0;height:0"></iframe>`).join("")}
+    </main></body></html>`)
+  if (request.url === "/nested-hung") return response.end(`<!doctype html><html><body><main><h1>Host</h1>
+    <iframe src="http://localhost:${crossOriginPort}/nested-host" title="a"></iframe>
+    <iframe src="/working" title="b"></iframe></main></body></html>`)
   if (request.url === "/hung-parent") return response.end(`<!doctype html><html><body><main><h1>Host</h1>
     <iframe src="http://localhost:${crossOriginPort}/hung" title="hung"></iframe>
     <iframe src="/working" title="healthy"></iframe></main></body></html>`)
@@ -471,6 +486,24 @@ try {
   const slowAria = await createAriaSnapshotHelper(page)()
   assert.match(slowAria, /- iframe "slow" \[src=localhost:\d+\]:\n  - heading "Slow"/, slowAria)
 
+  // Tiny iframes are filtered before the 8-frame cap, so they are not counted in the skip note either.
+  await page.goto(`http://127.0.0.1:${hostPort}/aria-many`)
+  await page.frameLocator('iframe[title="many-0"]').locator("h1").waitFor()
+  const ariaMany = await createAriaSnapshotHelper(page)()
+  assert.match(ariaMany, /- \.\.\. 2 iframe contents not captured \(8 iframes at most per snapshot\)/, ariaMany)
+  assert.doesNotMatch(ariaMany, /iframe "tiny-/)
+
+  // A hung frame nested inside the first iframe is bounded by that frame's slice, so the next sibling is still
+  // captured instead of inheriting the whole snapshot deadline.
+  await page.goto(`http://127.0.0.1:${hostPort}/nested-hung`, { waitUntil: "domcontentloaded" })
+  await page.frameLocator('iframe[title="b"]').locator("h1").waitFor()
+  const nestedSnapshot = await createSnapshotHelpers(page, registry()).snapshot({ timeout: 5_000 })
+  assert.match(nestedSnapshot, /content not captured \(the frame did not answer in time\)/, nestedSnapshot)
+  assert.match(nestedSnapshot, /- iframe "b"[\s\S]*heading "Working"/, nestedSnapshot)
+  const nestedAria = await createAriaSnapshotHelper(page)(undefined, { timeout: 5_000 })
+  assert.match(nestedAria, /- iframe "b" \[src=127\.0\.0\.1:\d+\]:\n  - heading "Working"/, nestedAria)
+  await page.goto("about:blank")
+
   // A page without iframes keeps dev's output even when its tree read runs past the caller's timeout: the cheap
   // listing still runs, finds nothing, and must not add an iframe deadline note.
   await page.goto(`http://127.0.0.1:${hostPort}/late-target`)
@@ -514,9 +547,12 @@ try {
     hungFrame: "PASS",
     lateTreeNoIframeNote: "PASS",
     singleSlowFrame: "PASS",
+    nestedHungSibling: "PASS",
+    ariaTinyNotCounted: "PASS",
   }))
 } finally {
   await browser.close().catch(() => {})
   await new Promise<void>((resolve) => hostServer.close(() => resolve()))
   await new Promise<void>((resolve) => crossOriginServer.close(() => resolve()))
+  await new Promise<void>((resolve) => hungServer.close(() => resolve()))
 }

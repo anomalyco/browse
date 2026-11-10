@@ -89,6 +89,9 @@ export async function captureSnapshotFrames(options: {
     // single slow frame gets what the caller allowed instead of one eighth of it.
     const framesAhead = options.entries.slice(index).filter((candidate) => candidate.iframe && candidate.selector).length
     const timeout = frameCaptureTimeoutMs(remaining, Math.min(options.budget.frames, framesAhead))
+    // This frame's slice covers its whole subtree: a hung nested frame cannot spend the time reserved for the
+    // frame's later siblings.
+    const frameDeadline = Math.min(options.deadline, Date.now() + timeout)
     options.budget.frames -= 1
     const frame = await contentFrameOf(options.frame, entry.selector, timeout)
     if (!frame) {
@@ -107,7 +110,7 @@ export async function captureSnapshotFrames(options: {
     try {
       const capture = await Effect.runPromise(runPlaywrightOperation({
         label: "Frame snapshot",
-        timeoutMs: Math.max(1, Math.min(options.deadline - Date.now(), timeout)),
+        timeoutMs: Math.max(1, frameDeadline - Date.now()),
         run: () => frame.evaluate(browserCapture, settings),
       }))
       options.budget.items = Math.max(0, options.budget.items - capture.entries.length)
@@ -115,7 +118,7 @@ export async function captureSnapshotFrames(options: {
         frame,
         entries: capture.entries,
         settings,
-        deadline: options.deadline,
+        deadline: frameDeadline,
         budget: options.budget,
         depth: options.depth + 1,
         frameGenerations: options.frameGenerations,
