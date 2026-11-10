@@ -732,7 +732,7 @@ describe("execute file access", () => {
       const error = await run(`await host.page.screenshot({ path: host.files.dir + "/shared-shots/page.png" }); return null;`, { page, files })
         .then(() => undefined, (failure: Error) => failure)
       expect(error?.message).toMatch(/file paths must use owned directories and files without group\/world write access/)
-      expect(error?.message).toContain(shared)
+      expect(error?.message).toContain(fs.realpathSync(shared))
       expect(error?.message).toContain("files.path")
       expect(fs.existsSync(path.join(shared, "page.png"))).toBe(false)
     } finally {
