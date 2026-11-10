@@ -312,8 +312,9 @@ may try to steer it, and that other programs on your computer may try to use the
   environment (the basics plus `OPENCODE_BROWSER_*`, proxy variables and CA certificate paths), so your API keys
   aren't in it.
 - **CDP guardrails.** Cookie reads return only cookies for the session's own pages; cookie writes are limited to
-  those hosts. Clearing cookies, cache or site data, and closing the browser, are always refused. `page.bringToFront()`
-  is refused so agents can't raise windows over your work.
+  those hosts. Clearing cookies, cache or site data, and closing the browser, are always refused. Granting or
+  changing site permissions (`context.grantPermissions()`, `context.clearPermissions()`, `Browser.setPermission`) is
+  refused too. `page.bringToFront()` is refused so agents can't raise windows over your work.
 - **Domain allowlists (opt-in).** `session new <name> --allow-origin example.com` (or `session allow`, or
   `allowedOrigins` on `session_new` / `session_allowlist`) limits where a session's tabs go. The relay refuses agent
   navigations and new tabs to other hosts, stops or blanks links, redirects and script navigations that leave the
