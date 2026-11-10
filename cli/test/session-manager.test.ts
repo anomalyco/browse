@@ -60,6 +60,7 @@ class FakeSandbox implements ExecuteSandboxLike {
 function manager(script: (sandbox: FakeSandbox) => Promise<ExecuteResult>, options: {
   readonly handoffs?: HandoffRegistry
   readonly executeTimeoutMs?: number
+  readonly onSessionDeleted?: (sessionId: string) => void
 } = {}) {
   const sandboxes: FakeSandbox[] = []
   const sessions = new OpenCodeBrowserSessions("http://127.0.0.1:0", () => {
@@ -70,6 +71,7 @@ function manager(script: (sandbox: FakeSandbox) => Promise<ExecuteResult>, optio
     stopGraceMs: 300,
     lifecycleTimeoutMs: 5_000,
     ...(options.executeTimeoutMs === undefined ? {} : { executeTimeoutMs: options.executeTimeoutMs }),
+    ...(options.onSessionDeleted ? { onSessionDeleted: options.onSessionDeleted } : {}),
     ...(options.handoffs ? { onCancelSessionHandoff: (id: string) => options.handoffs?.cancelForSession(id) !== undefined } : {}),
   })
   return { sessions, sandboxes }
@@ -131,6 +133,15 @@ describe("stopping an execute", () => {
 })
 
 describe("delete and reset while busy", () => {
+  test("delete reports the session to the deleted hook", async () => {
+    const deleted: string[] = []
+    const { sessions } = manager(async () => ok("x"), { onSessionDeleted: (sessionId) => { deleted.push(sessionId) } })
+
+    await run(sessions.execute({ sessionId: "d0", code: "...", createIfMissing: true }))
+    expect(await run(sessions.delete("d0"))).toEqual({ deleted: true })
+    expect(deleted).toEqual(["d0"])
+  })
+
   test("delete stops a running execute and returns promptly", async () => {
     const { sessions } = manager(async (sandbox) => {
       await sandbox.playwrightCall()

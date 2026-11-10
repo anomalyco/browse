@@ -389,6 +389,13 @@ export class OpenCodeBrowserSessions {
         }))
         yield* manager.releaseSessionTargetOwnership(session)
         yield* manager.closeOpenCodeBrowserSession(session)
+        yield* Effect.sync(() => {
+          try {
+            manager.hooks.onSessionDeleted?.(id)
+          } catch (error) {
+            console.error("Session deleted hook failed", error)
+          }
+        })
         return true
       })))
       return { deleted, ...(stopped ? { stopped } : {}) }

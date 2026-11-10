@@ -290,7 +290,6 @@ export function createCdpDispatcher(options: {
         return {}
       }
       const generation = deviceMetricsOverrides.generation(tabId)
-      if (!deviceMetricsOverrides.isCurrent(tabId, generation)) return {}
       yield* clearDeviceMetricsOverride(
         (method, params) => sendDebuggerCommand({ tabId, method, params }),
         { retry: () => deviceMetricsOverrides.isCurrent(tabId, generation) },
@@ -301,8 +300,8 @@ export function createCdpDispatcher(options: {
     }
     if (message.method === "Emulation.setDeviceMetricsOverride" && route.chromeSessionId === undefined) {
       // Emulation only applies at the top target. Remember the tab, and which session's client set
-      // it, so the execute end can clear it if the script doesn't; a raw client marks without an
-      // owner, so no session's execute end will clear its viewport.
+      // it, so the execute end can clear it if the script doesn't; a raw client without a browse
+      // session id marks without an owner, so no session's execute end will clear its viewport.
       deviceMetricsOverrides.mark(tabId, cdpClients.sessionId(socket))
     }
     if (message.method === "Page.navigate" && route.chromeSessionId === undefined) {

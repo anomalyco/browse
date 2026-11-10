@@ -58,6 +58,8 @@ export type SessionHooks = {
   readonly onExecuteStateChange?: (sessionId: string, executing: boolean) => void | Effect.Effect<void>
   /** Called after each execute completes, for journaling. Failure is logged and ignored. */
   readonly onExecuteRecord?: (record: SessionExecuteRecord) => unknown | Promise<unknown>
+  /** Called after a session is deleted, to drop state keyed by it. Failure is logged and ignored. */
+  readonly onSessionDeleted?: (sessionId: string) => void
   /** How long lifecycle commands wait for a permit or sandbox operation. */
   readonly lifecycleTimeoutMs?: number
   /** Overall budget for a single execute call (paused while handoff waits on the user); 0 disables. */

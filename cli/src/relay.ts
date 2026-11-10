@@ -321,9 +321,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
           yield* clearDeviceMetricsOverride(
             (method, params) => sendDebuggerCommand({ tabId, method, params }),
             { retry: () => deviceMetricsOverrides.isCurrent(tabId, generation) },
-          ).pipe(Effect.ignore)
+          ).pipe(Effect.timeoutOption("2 seconds"), Effect.ignore)
         }
       }),
+      // A deleted session's tabs are gone; drop its ownership so another session's clear isn't
+      // skipped by an owner that will never run again.
+      onSessionDeleted: (sessionId) => {
+        deviceMetricsOverrides.take(sessionId)
+      },
       onExecuteRecord: (record) => {
         const entry = makeJournalEntry({
           sessionId: record.sessionId,
