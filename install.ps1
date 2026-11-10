@@ -20,6 +20,26 @@
 #       --no-setup          Only install the binary; don't run `browse install`
 # Anything else goes to `browse install`, e.g. --remote, --agent claude or --no-modify-path.
 
+# Windows PowerShell 5.1 can fail to autoload Get-FileHash when a PowerShell 7 module directory earlier in PSModulePath
+# shadows Microsoft.PowerShell.Utility, so hash a file with .NET directly: the same lowercase hex on 5.1 and 7+.
+function Get-FileDigest {
+    param([string]$Path, [string]$Algorithm)
+    $hash = switch ($Algorithm) {
+        "SHA256" { [System.Security.Cryptography.SHA256]::Create() }
+        "SHA512" { [System.Security.Cryptography.SHA512]::Create() }
+        default { throw "unsupported hash algorithm $Algorithm" }
+    }
+    $stream = $null
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        $bytes = $hash.ComputeHash($stream)
+        return ([BitConverter]::ToString($bytes) -replace "-", "").ToLowerInvariant()
+    } finally {
+        if ($stream) { $stream.Dispose() }
+        $hash.Dispose()
+    }
+}
+
 function Install-browse {
     param([string[]]$Arguments)
     # Function scope: this doesn't leak to the caller's session. It covers the property probing below and the
@@ -186,7 +206,7 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
             Write-Host ""
             Write-Host "Installing browse version: $version"
             Invoke-WebRequest -UseBasicParsing -Uri "https://registry.npmjs.org/$package/-/$filename" -OutFile $archive
-            $actualSha = (Get-FileHash -Algorithm SHA512 -LiteralPath $archive).Hash.ToLowerInvariant()
+            $actualSha = Get-FileDigest -Path $archive -Algorithm SHA512
             if ($actualSha -ne $expectedSha512) {
                 throw "checksum mismatch for $package@$version ($filename): expected $expectedSha512, got $actualSha; nothing was installed"
             }
@@ -204,7 +224,7 @@ Anything else goes to ``browse install``, e.g. --remote, --agent claude or --no-
             Write-Host ""
             Write-Host "Installing browse version: $version ($channel)"
             Invoke-WebRequest -UseBasicParsing -UserAgent "browse/$version ($channel; cli)" -Uri $url -OutFile $archive
-            $actualSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+            $actualSha = Get-FileDigest -Path $archive -Algorithm SHA256
             if (-not $expectedSha -or $actualSha -ne $expectedSha.ToLowerInvariant()) {
                 throw "checksum mismatch for $filename (expected $(if ($expectedSha) { $expectedSha } else { 'none' }), got $actualSha)"
             }

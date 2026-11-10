@@ -270,6 +270,16 @@ const product = `${token}(?:/${token})?`
 const comment = "\\([^()]*\\)"
 const userAgent = new RegExp(`^${product}(?:[ \\t]+(?:${product}|${comment}))*$`)
 
+// Windows PowerShell 5.1 can fail to autoload Get-FileHash when a PowerShell 7 module earlier in PSModulePath shadows
+// Microsoft.PowerShell.Utility: the install then aborts after the download. Hashing with .NET works on 5.1 and 7+.
+test("install.ps1 hashes downloads with .NET, never Get-FileHash", () => {
+  const code = powershellInstaller.split("\n").filter((line) => !line.trimStart().startsWith("#")).join("\n")
+  expect(code).not.toContain("Get-FileHash")
+  expect(code).toContain("[System.Security.Cryptography.SHA256]::Create()")
+  expect(code).toContain("[System.Security.Cryptography.SHA512]::Create()")
+  for (const algorithm of ["SHA256", "SHA512"]) expect(code).toContain(`-Algorithm ${algorithm}`)
+})
+
 test("every install.ps1 User-Agent is a valid sequence of product tokens", () => {
   const values = [...powershellInstaller.matchAll(/-UserAgent\s+"([^"]*)"/g)].map((match) =>
     match[1]!.replace(/\$(?:\{)?([A-Za-z_][A-Za-z0-9_]*)(?:\})?/g, (_whole, name: string) => (name === "version" ? "0.0.15" : "stable")),
