@@ -14,6 +14,7 @@ import {
 import {
   captureSnapshotFrames,
   frameOfScope,
+  frameSkipNote,
   isFrameLocator,
   maxSnapshotFrames,
   type SnapshotFrame,
@@ -50,9 +51,6 @@ export {
 
 const delay = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds))
-
-const frameSkipNote = (count: number, reason: string): string =>
-  `- ... ${count} iframe ${count === 1 ? "content" : "contents"} not captured (${reason})`
 
 type RenderedCapture = {
   readonly entries: SnapshotRenderedEntry[]
@@ -293,6 +291,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
     }
     let remainingItems = Math.max(0, maxItems - main.entries.length)
     let omittedFrames = 0
+    const frameCount = (node: SnapshotFrame): number => 1 + [...node.children.values()].reduce((sum, child) => sum + frameCount(child), 0)
     const emitFrame = (node: SnapshotFrame, indent: number): void => {
       const indentation = "  ".repeat(indent)
       if (node.note) {
@@ -302,7 +301,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       const frame = node.frame
       if (!frame) return
       if (remainingItems <= 0) {
-        omittedFrames += 1
+        omittedFrames += frameCount(node)
         return
       }
       const frameKey = frameKeyFor(frame)
@@ -311,6 +310,8 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       for (const [index, entry] of child.entries.entries()) {
         if (remainingItems <= 0) {
           entries.push({ prefix: `${indentation}- ... frame content truncated (maxItems reached)` })
+          // Nested frames under the entries that never rendered are skipped too; count them in the note.
+          for (const [nestedIndex, nested] of node.children) if (nestedIndex >= index) omittedFrames += frameCount(nested)
           break
         }
         const rendered = { ...entry, prefix: `${indentation}${entry.prefix}`, frameKey }

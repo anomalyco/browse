@@ -552,30 +552,27 @@ export const captureSnapshotInBrowser = (
     return localCssPath(element, document)
   }
   const frameTags = new Set(["iframe", "frame"])
+  // Host or protocol only: a path, query or data/blob body can carry a session token into the transcript.
+  const frameHost = (element: Element): string => {
+    const src = element.getAttribute("src")
+    if (!src) return ""
+    try {
+      const url = new URL(src, document.baseURI)
+      return url.host || url.protocol.replace(/:$/, "")
+    } catch {
+      return ""
+    }
+  }
   const frameName = (element: Element): string => {
     const labelled = labelledName(element)
     if (labelled) return labelled
     const name = normalize(element.getAttribute("name") ?? "")
     if (name) return name
-    const src = element.getAttribute("src") ?? ""
-    try {
-      const url = new URL(src, document.baseURI)
-      if (url.host) return url.host
-      return normalize(src) || "Frame"
-    } catch {
-      return truncate(normalize(src), 120) || "Frame"
-    }
+    return frameHost(element) || "Frame"
   }
   const frameSource = (element: Element): string | undefined => {
-    const src = element.getAttribute("src") ?? ""
-    if (!src) return undefined
-    try {
-      // Host only: a path or query can carry a session token into the transcript.
-      const url = new URL(src, document.baseURI)
-      return truncate(`src=${url.host || url.protocol}`, 80)
-    } catch {
-      return "src=unparseable"
-    }
+    const host = frameHost(element)
+    return host ? `src=${truncate(host, 80)}` : undefined
   }
   // A readable frame selector survives small DOM changes better than `iframe:nth-of-type(3)`.
   const frameSelector = (element: Element): string => {

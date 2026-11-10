@@ -34,6 +34,7 @@ const crossOriginServer = http.createServer((request, response) => {
   if (request.url === "/nested") return response.end(nestedHtml)
   if (request.url === "/moved") return response.end(frameForm("Moved"))
   if (request.url === "/leak") return response.end(`<!doctype html><html><body><h1>Leaky</h1><input aria-label="Key" value="LEAK-VALUE-CROSS"><button>Go</button></body></html>`)
+  if (request.url === "/hung") return response.end(`<!doctype html><html><head><script>while (true) {}</script></head><body></body></html>`)
   response.end(frameForm("Pay form", request.url === "/payment" ? `<iframe src="${sameOriginFrameUrl}/nested" title="nested" width="200" height="150"></iframe>` : ""))
 })
 await new Promise<void>((resolve) => crossOriginServer.listen(0, "127.0.0.1", resolve))
@@ -47,9 +48,14 @@ const hostServer = http.createServer((request, response) => {
   if (request.url === "/moved-frame") return response.end(frameForm("Moved"))
   if (request.url === "/frame-leak") return response.end(`<!doctype html><html><body><h1>Late</h1><input aria-label="Key" value="LEAK-VALUE-ATTR"><button>Go</button></body></html>`)
   if (request.url === "/working") return response.end(`<!doctype html><html><body><h1>Working</h1><input aria-label="Working field" value="working-value"></body></html>`)
-  if (request.url === "/ambiguous") return response.end(`<!doctype html><html><body><main><h1>Host</h1>
-    <iframe src="/working" title="normal"></iframe>
-    <iframe src="/working" title="zero" style="border:0;width:0;height:0"></iframe></main></body></html>`)
+  if (request.url === "/mislabel") return response.end(`<!doctype html><html><body><main><h1>Host</h1>
+    <div aria-hidden="true"><template shadowrootmode="open"><iframe src="/shadow-frame" title="hidden-host"></iframe></template></div>
+    <iframe src="/zero-frame" title="zero" style="border:0;width:0;height:0"></iframe></main></body></html>`)
+  if (request.url === "/shadow-frame") return response.end(`<!doctype html><html><body><h1>B frame</h1></body></html>`)
+  if (request.url === "/zero-frame") return response.end(`<!doctype html><html><body><h1>A frame</h1></body></html>`)
+  if (request.url === "/hung-parent") return response.end(`<!doctype html><html><body><main><h1>Host</h1>
+    <iframe src="http://localhost:${crossOriginPort}/hung" title="hung"></iframe>
+    <iframe src="/working" title="healthy"></iframe></main></body></html>`)
   if (request.url === "/modal") return response.end(`<!doctype html><html><body><main><h1>Checkout</h1>
     <dialog open aria-modal="true" aria-label="Modal">
       <h2>Details</h2>
@@ -300,6 +306,9 @@ try {
   await page.frameLocator('iframe[title="same"]').locator("input[name=card]").fill("same-secret")
   await page.frameLocator('iframe[title="payment"]').frameLocator('iframe[title="nested"]').locator("input[name=card]").fill("nested-secret")
   const aria = await ariaHelpers()
+  assert.match(aria, /^- iframe "payment" \[src=localhost:\d+\]:$/m, aria)
+  assert.match(aria, /^- iframe "same" \[src=127\.0\.0\.1:\d+\]:$/m, aria)
+  assert.match(aria, /^  - iframe "nested" \[src=127\.0\.0\.1:\d+\]:$/m, aria)
   assert.match(aria, /heading "Pay form"/, aria)
   assert.match(aria, /heading "Same form"/, aria)
   assert.match(aria, /heading "Nested"/, aria)
@@ -310,7 +319,7 @@ try {
   // A target inside the frame redacts that frame and the frames nested under it too.
   const ariaInFrame = await ariaHelpers(page.frameLocator('iframe[title="payment"]').locator("body"))
   assert.match(ariaInFrame, /heading "Pay form"/)
-  assert.match(ariaInFrame, /heading "Nested"/)
+  assert.match(ariaInFrame, /^- iframe "nested" \[src=127\.0\.0\.1:\d+\]:\n  - heading "Nested"/m, ariaInFrame)
   assert.doesNotMatch(ariaInFrame, /cross-secret/)
   assert.doesNotMatch(ariaInFrame, /nested-secret/)
   // Values are in the DOM; only the snapshot redacts them.
@@ -392,12 +401,15 @@ try {
     /stale after an iframe navigation or detach/,
   )
 
-  // A tree line that cannot be bound to exactly one iframe is not guessed: each frame gets a labelled block.
-  await page.goto(`http://127.0.0.1:${hostPort}/ambiguous`)
-  const ambiguous = await createAriaSnapshotHelper(page)()
-  assert.match(ambiguous, /  - iframe\n  - iframe\n/, ambiguous)
-  assert.match(ambiguous, /- iframe "normal":\n  - heading "Working"/, ambiguous)
-  assert.doesNotMatch(ambiguous, /- iframe "zero"/, "a frame outside the mapping is not labelled")
+  // An aria-hidden host in a shadow root and a 0x0 iframe make line-to-element mapping impossible; the tree is
+  // left alone and each captured frame gets a label that names the frame it actually is.
+  await page.goto(`http://127.0.0.1:${hostPort}/mislabel`)
+  await page.frameLocator('iframe[title="hidden-host"]').locator("h1").waitFor()
+  const mislabel = await createAriaSnapshotHelper(page)()
+  assert.match(mislabel, /^\s+- iframe$/m, mislabel)
+  assert.match(mislabel, /- iframe "hidden-host" \[src=127\.0\.0\.1:\d+\]:\n  - heading "B frame"/, mislabel)
+  assert.doesNotMatch(mislabel, /- iframe "zero"/, "a 0x0 iframe is not captured")
+  assert.doesNotMatch(mislabel, /heading "A frame"/)
 
   // --- ariaSnapshot: frames are read one document at a time, each with its own redaction ---
   await page.goto(`http://127.0.0.1:${hostPort}/`)
@@ -448,6 +460,18 @@ try {
     await brokenPage.close()
   } finally { await brokenConnection.close() }
 
+  // One hung frame gets a capped timeout, so a healthy frame after it is still captured (snapshot and aria).
+  await page.goto(`http://127.0.0.1:${hostPort}/hung-parent`, { waitUntil: "domcontentloaded" })
+  await page.frameLocator('iframe[title="healthy"]').locator("h1").waitFor()
+  const hungSnapshot = await createSnapshotHelpers(page, registry()).snapshot({ timeout: 5_000 })
+  assert.match(hungSnapshot, /- iframe "hung"/, hungSnapshot)
+  assert.match(hungSnapshot, /content not captured \(the frame did not answer before the snapshot deadline\)/, hungSnapshot)
+  assert.match(hungSnapshot, /- iframe "healthy"[\s\S]*heading "Working"/, hungSnapshot)
+  const hungAria = await createAriaSnapshotHelper(page)()
+  assert.match(hungAria, /- iframe "hung" \[src=localhost:\d+\]:\n  - \.\.\. content not captured/, hungAria)
+  assert.match(hungAria, /- iframe "healthy" \[src=127\.0\.0\.1:\d+\]:\n  - heading "Working"/, hungAria)
+  await page.goto("about:blank")
+
   console.log(JSON.stringify({
     multiple: "PASS",
     hidden: "PASS",
@@ -465,10 +489,11 @@ try {
     framePriority: "PASS",
     frameIdentity: "PASS",
     frameScope: "PASS",
-    ariaAmbiguous: "PASS",
+    ariaLabelledBlocks: "PASS",
     withinRefRecheck: "PASS",
     ariaNoLeak: "PASS",
     ariaRedactionFailure: "PASS",
+    hungFrame: "PASS",
   }))
 } finally {
   await browser.close().catch(() => {})

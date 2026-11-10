@@ -121,22 +121,23 @@ Useful inspection helpers:
   code is readable. A field the page locks after you type into it counts as
   readonly. Visible iframes appear as `iframe` lines with their own documents
   nested under them, same-origin and cross-origin alike, up to 8 frames three
-  levels deep, so a dialog whose form lives in a payment iframe is readable
-  without `page.frames()`; pass `snapshot({ frames: false })` to leave iframe
-  content out. `snapshot({ find:
-  /checkout/i, context: 2 })` searches it, and `snapshot({ diff: true })` or
-  `{ delta: true }` reports changes.
+  levels deep; iframe elements under 20px in both directions are skipped. So a
+  dialog whose form lives in a payment iframe is readable without
+  `page.frames()`; pass `snapshot({ frames: false })` to leave iframe content
+  out. `snapshot({ find: /checkout/i, context: 2 })` searches it, and
+  `snapshot({ diff: true })` or `{ delta: true }` reports changes.
 - `ref("e12")` resolves a control from the latest snapshot, including controls
   inside an iframe: those refs resolve in that frame and fail closed when the
   frame navigates. Refs fail closed after navigation or incompatible DOM drift;
   compatible refs keep their ids. `snapshot({ within: frameLocator(...) })`
   captures a frame and its refs resolve there.
 - `ariaSnapshot(target?, { timeout })` returns Playwright's detailed YAML tree
-  when the compact snapshot omits needed structure. Each iframe's document is
-  nested under its `- iframe` line; when those lines cannot be matched to the
-  elements one to one, the frames follow the tree as labelled
-  `- iframe "name":` blocks. It applies the same value hiding in every frame,
-  and a frame it cannot read becomes a note instead of content.
+  when the compact snapshot omits needed structure. The tree keeps Playwright's
+  anonymous `- iframe` lines, and each iframe's document follows it as a
+  labelled block in document order (`- iframe "name" [src=host]:`, with nested
+  frames as further labelled blocks). It applies the same value hiding in
+  every frame; a frame it cannot read becomes a note, and if it cannot confirm
+  that redaction was removed the call fails rather than return values.
 - `screenshotWithLabels({ page?, path? })` adds visual labels when layout
   matters and registers its labels for `ref()`.
 - `screenshotDiff({ baseline, path?, threshold?, fullPage? })` compares a saved

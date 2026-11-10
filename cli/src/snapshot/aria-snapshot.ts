@@ -1,8 +1,15 @@
 import type { BrowserContext, Frame, Locator, Page } from "patchright-core"
 import { runtimeFailureKind } from "../update/runtime-diagnostics.ts"
-import { maxSnapshotFrameDepth, maxSnapshotFrames } from "./frames.ts"
+import { frameFailureNote, frameSkipNote, maxSnapshotFrameDepth, maxSnapshotFrames, maxSnapshotFrameTimeoutMs } from "./frames.ts"
 
 const redactionCleanupErrorMessage = "browse could not confirm ARIA snapshot value-redaction cleanup"
+
+/** A document that may still carry redaction patches; `captureFailed` says its content was never captured. */
+export class AriaSnapshotRedactionError extends AggregateError {
+  constructor(errors: readonly unknown[], readonly captureFailed: boolean) {
+    super([...errors], redactionCleanupErrorMessage)
+  }
+}
 /** Reads the body (or frameset) of a document as its snapshot target. */
 const documentRootSelector = "body, frameset"
 // Keep the engine as source text so bundlers cannot inject Node-only helpers into the browser function.
@@ -179,11 +186,8 @@ export async function ariaSnapshotWithoutTextControlValues(
   try {
     await cleanupRedaction(page, frame, redactionSelectorName, token)
   } catch (cleanupError) {
-    if (captureFailed) {
-      const cleanupReasons = cleanupError instanceof AggregateError ? cleanupError.errors : [cleanupError]
-      throw new AggregateError([captureError, ...cleanupReasons], redactionCleanupErrorMessage)
-    }
-    throw cleanupError
+    const cleanupReasons = cleanupError instanceof AggregateError ? cleanupError.errors : [cleanupError]
+    throw new AriaSnapshotRedactionError(captureFailed ? [captureError, ...cleanupReasons] : cleanupReasons, captureFailed)
   }
 
   if (captureFailed) throw captureError
@@ -191,10 +195,12 @@ export async function ariaSnapshotWithoutTextControlValues(
 }
 
 /**
- * The target's ARIA snapshot with each iframe's document folded in, indented under its `- iframe` line. Every
- * document is read through {@link ariaSnapshotWithoutTextControlValues} with its own token, so redaction is
- * activated and cleaned up in the same frame that is read. A frame that cannot be read or redacted becomes a
- * short note; it never fails the target's snapshot or returns its content unredacted.
+ * The target's ARIA snapshot plus one labelled block per iframe document, in document order: the tree is left
+ * as Playwright produced it (its anonymous `- iframe` lines are never matched to elements) and each frame is
+ * appended as `- iframe "<name>" [src=<host>]:` with its own tree indented under it. Every document is read
+ * through {@link ariaSnapshotWithoutTextControlValues} with its own token, so redaction is activated and cleaned
+ * up in the same frame that is read. A frame that cannot be read becomes a note; a frame whose redaction cannot
+ * be confirmed fails the call, exactly as it would for the target document.
  */
 export async function ariaSnapshotWithFrames(
   locator: Locator,
@@ -203,99 +209,95 @@ export async function ariaSnapshotWithFrames(
   const deadline = Date.now() + Math.max(1, options.timeout)
   const page = locator.page()
   const tree = await ariaSnapshotWithoutTextControlValues(locator, { timeout: options.timeout })
-  const budget = { frames: maxSnapshotFrames, skipped: { limit: 0, deadline: 0 } }
-  const lines = await foldIframes({ scope: locator, page, tree, depth: 1, budget, deadline })
-  const skipped = budget.skipped.limit + budget.skipped.deadline
-  if (skipped > 0) lines.push(`- ... ${skipped} iframe ${skipped === 1 ? "content" : "contents"} not captured (${maxSnapshotFrames} at most per snapshot or the snapshot deadline)`)
+  const budget: FrameBudget = { frames: maxSnapshotFrames, skipped: { limit: 0, deadline: 0 } }
+  const blocks = await frameBlocks(locator, { page, depth: 1, budget, deadline })
+  const lines = tree.split("\n")
+  if (blocks.length > 0) lines.push("", ...blocks)
+  if (budget.skipped.limit > 0) lines.push(frameSkipNote(budget.skipped.limit, `${maxSnapshotFrames} iframes at most per snapshot`))
+  if (budget.skipped.deadline > 0) lines.push(frameSkipNote(budget.skipped.deadline, "snapshot deadline reached"))
   return lines.join("\n")
 }
+
+type FrameBudget = { frames: number; skipped: { limit: number; deadline: number } }
 
 type IframeCandidate = {
   readonly frame: Frame | null
   readonly name: string
-  readonly host: string
-  readonly visible: boolean
-  readonly ariaHidden: boolean
+  readonly src: string
 }
 
-/** Fold the iframes of one document's snapshot in, recursively. Returns the document's output lines. */
-async function foldIframes(options: {
-  readonly scope: Locator
+/** One labelled block per iframe under `scope`, in document order, each followed by its indented content. */
+async function frameBlocks(scope: Locator, options: {
   readonly page: Page
-  readonly tree: string
   readonly depth: number
-  readonly budget: { frames: number; skipped: { limit: number; deadline: number } }
+  readonly budget: FrameBudget
   readonly deadline: number
 }): Promise<string[]> {
-  const lines = options.tree.split("\n")
-  const iframeLineIndexes = lines.flatMap((line, index) => /^\s*- iframe(?:\s*\[[^\]]*\])?$/.test(line) ? [index] : [])
-  // Only iframes the aria tree renders can own a line: an invisible one has no box and no line.
-  const candidates = (await iframeCandidates(options.scope)).filter((candidate) => candidate.visible && !candidate.ariaHidden)
-  // The aria tree names no iframe, so binding lines to elements is only safe when every element the tree should
-  // contain is there, in document order. Otherwise both stay separate and each frame block is labelled.
-  const nesting = candidates.length === iframeLineIndexes.length ? iframeLineIndexes : undefined
-
-  if (!nesting) {
-    const appended = candidates.length === 0 ? [] : [""]
-    for (const candidate of candidates) {
-      const content = await iframeContent(candidate, options)
-      const name = candidate.name || candidate.host
-      const label = name ? ` "${name.replace(/"/g, '\\"')}"` : ""
-      appended.push(content.length === 0 ? `- iframe${label}` : `- iframe${label}:`)
-      for (const line of content) appended.push(`  ${line}`)
-    }
-    return [...lines, ...appended]
+  const blocks: string[] = []
+  const listing = await iframeCandidates(scope)
+  options.budget.skipped.limit += listing.skipped
+  for (const candidate of listing.candidates) {
+    const content = await frameContent(candidate, options)
+    const label = `- iframe ${JSON.stringify(candidate.name)}${candidate.src ? ` [src=${candidate.src}]` : ""}`
+    blocks.push(content.length === 0 ? label : `${label}:`)
+    for (const line of content) blocks.push(`  ${line}`)
   }
-
-  const output: string[] = []
-  let next = 0
-  for (let index = 0; index < lines.length; index++) {
-    if (nesting[next] !== index) {
-      output.push(lines[index]!)
-      continue
-    }
-    const candidate = candidates[next]!
-    next += 1
-    const indent = /^\s*/.exec(lines[index]!)![0]
-    const content = await iframeContent(candidate, options)
-    if (content.length === 0) {
-      output.push(lines[index]!)
-      continue
-    }
-    output.push(`${lines[index]!.trimEnd().replace(/:$/, "")}:`)
-    for (const line of content) output.push(`${indent}  ${line}`)
-  }
-  return output
+  return blocks
 }
 
-/** Every iframe element in the scope, in document order, with what the tree needs to know about it. */
-async function iframeCandidates(scope: Locator): Promise<IframeCandidate[]> {
-  const handles = await scope.locator("iframe, frame").elementHandles().catch(() => [])
-  const candidates: IframeCandidate[] = []
+/**
+ * Every iframe under `scope` in document order, up to the frame cap. Metadata comes from one evaluateAll; only
+ * the content frames need a call each.
+ */
+async function iframeCandidates(scope: Locator): Promise<{ candidates: IframeCandidate[]; skipped: number }> {
+  const limit = maxSnapshotFrames
+  const metadata = await scope.locator("iframe, frame").evaluateAll((elements, maximum) => ({
+    total: elements.length,
+    items: elements.slice(0, maximum as number).map((element) => {
+      const text = (value: string | null) => (value ?? "").trim()
+      const width = element.getBoundingClientRect().width
+      const height = element.getBoundingClientRect().height
+      let src = ""
+      const raw = element.getAttribute("src")
+      if (raw) {
+        try {
+          const url = new URL(raw, document.baseURI)
+          src = url.host || url.protocol.replace(/:$/, "")
+        } catch {
+          src = ""
+        }
+      }
+      return {
+        name: text(element.getAttribute("title")) || text(element.getAttribute("aria-label")) || text(element.getAttribute("name")),
+        src,
+        tiny: width < 20 && height < 20,
+      }
+    }),
+  }), limit).catch(() => ({ total: 0, items: [] }))
+  if (metadata.items.length === 0) return { candidates: [], skipped: metadata.total }
+  const handles = (await scope.locator("iframe, frame").elementHandles().catch(() => [])).slice(0, metadata.items.length)
   try {
-    for (const handle of handles) {
+    const candidates: IframeCandidate[] = []
+    for (const [index, handle] of handles.entries()) {
+      const info = metadata.items[index]!
+      if (info.tiny) continue
       candidates.push({
         frame: await handle.contentFrame().catch(() => null),
-        name: (await handle.getAttribute("title").catch(() => null))
-          ?? (await handle.getAttribute("aria-label").catch(() => null))
-          ?? (await handle.getAttribute("name").catch(() => null))
-          ?? "",
-        host: hostOf(await handle.getAttribute("src").catch(() => null), scope.page().url()),
-        visible: await handle.isVisible().catch(() => false),
-        ariaHidden: await handle.evaluate((element) => (element as Element).closest('[aria-hidden="true"]') !== null).catch(() => false),
+        name: info.name || info.src || "frame",
+        src: info.src,
       })
     }
+    return { candidates, skipped: metadata.total - handles.length }
   } finally {
     await Promise.all(handles.map((handle) => handle.dispose().catch(() => {})))
   }
-  return candidates
 }
 
-/** One iframe's folded content, or a note when its document cannot be read or redacted. */
-async function iframeContent(candidate: IframeCandidate, options: {
+/** One iframe's content, or a note when its document cannot be read. Cleanup failures propagate. */
+async function frameContent(candidate: IframeCandidate, options: {
   readonly page: Page
   readonly depth: number
-  readonly budget: { frames: number; skipped: { limit: number; deadline: number } }
+  readonly budget: FrameBudget
   readonly deadline: number
 }): Promise<string[]> {
   if (options.depth > maxSnapshotFrameDepth) return [noteLine(`content not captured (frames nested deeper than ${maxSnapshotFrameDepth})`)]
@@ -311,6 +313,7 @@ async function iframeContent(candidate: IframeCandidate, options: {
     return []
   }
   options.budget.frames -= 1
+  const timeout = Math.min(remaining, maxSnapshotFrameTimeoutMs)
   // A document that navigates between activation and the read is not patched any more: drop its result.
   let navigated = false
   const onFrameNavigated = (navigatedFrame: Frame) => {
@@ -319,41 +322,33 @@ async function iframeContent(candidate: IframeCandidate, options: {
   options.page.on("framenavigated", onFrameNavigated)
   try {
     const target = frame.locator(documentRootSelector).first()
-    const tree = await ariaSnapshotWithoutTextControlValues(target, { timeout: remaining })
+    const tree = await ariaSnapshotWithoutTextControlValues(target, { timeout })
     if (navigated) throw new Error("the frame navigated while it was captured")
-    return await foldIframes({ ...options, scope: target, tree, depth: options.depth + 1 })
+    const lines = tree.split("\n")
+    const nested = await frameBlocks(target, { ...options, depth: options.depth + 1 })
+    if (nested.length > 0) lines.push("", ...nested)
+    return lines
   } catch (error) {
+    if (isRedactionCleanupFailure(error)) throw error
     return [noteLine(`content not captured (${frameFailureNote(error)})`)]
   } finally {
     options.page.off("framenavigated", onFrameNavigated)
   }
 }
 
+/**
+ * A captured frame whose redaction could not be confirmed. It must fail the whole call (its content may be
+ * patched); a frame whose capture also failed is only a note, since nothing trustworthy was read from it.
+ */
+export function isRedactionCleanupFailure(error: unknown): boolean {
+  return error instanceof AriaSnapshotRedactionError && !error.captureFailed
+}
+
 function noteLine(reason: string): string {
   return `- ... ${reason}`
 }
 
-function hostOf(src: string | null, base: string): string {
-  if (!src) return ""
-  try {
-    return new URL(src, base).host
-  } catch {
-    return ""
-  }
-}
 
-function frameFailureNote(cause: unknown): string {
-  switch (runtimeFailureKind(cause)) {
-    case "context-destroyed":
-    case "context-missing":
-    case "target-closed":
-      return "the frame changed while capturing"
-    case "timeout":
-      return "the frame did not answer before the snapshot deadline"
-    default:
-      return "the frame could not be read or redacted"
-  }
-}
 
 export async function registerAriaSnapshotSelector(context: BrowserContext): Promise<void> {
   await selectorForContext(context)
@@ -389,21 +384,23 @@ async function cleanupRedaction(page: Page, frame: Frame, redactionSelectorName:
 
   const cleanup = state.queue.then(async () => {
     const pending = [...state.pendingTokens]
-    let currentFailures: unknown[] = []
-    // Other frames' unconfirmed tokens are retried too, but only their own frame's caller hears about them: one
-    // frame that cannot be cleaned up must not fail every later frame's snapshot.
-    for (const [pendingToken, target] of pending) {
-      let failures: unknown[]
-      try {
-        await target.frame.locator(`${target.selectorName}=off_${pendingToken}`).waitFor({ state: "attached", timeout: 1_000 })
-        failures = []
-      } catch (error) {
-        failures = redactionContextIsGone(error) ? [] : [error]
+    // Every pending token is retried in parallel, as before. Only the caller's own token can fail this call:
+    // another frame's unconfirmed cleanup sits in the queue for its own caller rather than breaking every later
+    // frame's snapshot.
+    const results = await Promise.allSettled(pending.map(async ([pendingToken, target]) => {
+      await target.frame.locator(`${target.selectorName}=off_${pendingToken}`).waitFor({ state: "attached", timeout: 1_000 })
+    }))
+    const failures: unknown[] = []
+    for (let index = 0; index < results.length; index++) {
+      const result = results[index]!
+      const pendingToken = pending[index]![0]
+      if (result.status === "fulfilled" || redactionContextIsGone(result.reason)) {
+        state.pendingTokens.delete(pendingToken)
+      } else if (pendingToken === token) {
+        failures.push(result.reason)
       }
-      if (failures.length === 0) state.pendingTokens.delete(pendingToken)
-      else if (pendingToken === token) currentFailures = failures
     }
-    if (currentFailures.length > 0) throw new AggregateError(currentFailures, redactionCleanupErrorMessage)
+    if (failures.length > 0) throw new AggregateError(failures, redactionCleanupErrorMessage)
   })
   state.queue = cleanup.catch(() => {})
   await cleanup

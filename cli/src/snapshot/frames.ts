@@ -12,8 +12,8 @@ import type { SnapshotCaptureResult, SnapshotCaptureSettings, SnapshotEntry } fr
 export const maxSnapshotFrames = 8
 /** Frames nested in frames. A payment page inside a checkout inside a shop is three. */
 export const maxSnapshotFrameDepth = 3
-/** Resolving one iframe element is a local DOM query; it must not eat the snapshot's deadline. */
-const frameAttachTimeoutMs = 2_000
+/** One frame gets at most this long, so a hung ad iframe cannot spend the whole snapshot deadline. */
+export const maxSnapshotFrameTimeoutMs = 1_000
 
 export type SnapshotFrame = {
   /** The child frame, or undefined when the iframe element has no frame attached. */
@@ -77,7 +77,7 @@ export async function captureSnapshotFrames(options: {
       continue
     }
     options.budget.frames -= 1
-    const frame = await contentFrameOf(options.frame, entry.selector, remaining)
+    const frame = await contentFrameOf(options.frame, entry.selector, Math.min(remaining, maxSnapshotFrameTimeoutMs))
     if (!frame) {
       frames.set(index, {
         capture: { entries: [], truncated: false },
@@ -94,7 +94,7 @@ export async function captureSnapshotFrames(options: {
     try {
       const capture = await Effect.runPromise(runPlaywrightOperation({
         label: "Frame snapshot",
-        timeoutMs: Math.max(1, options.deadline - Date.now()),
+        timeoutMs: Math.max(1, Math.min(options.deadline - Date.now(), maxSnapshotFrameTimeoutMs)),
         run: () => frame.evaluate(browserCapture, settings),
       }))
       options.budget.items = Math.max(0, options.budget.items - capture.entries.length)
@@ -143,8 +143,8 @@ export function isFrameLocator(value: Locator | FrameLocator): value is FrameLoc
   return typeof (value as Locator).elementHandle !== "function"
 }
 
-async function contentFrameOf(parent: Frame, selector: string, remainingMs: number): Promise<Frame | undefined> {
-  const timeout = Math.max(1, Math.min(frameAttachTimeoutMs, remainingMs))
+async function contentFrameOf(parent: Frame, selector: string, timeoutMs: number): Promise<Frame | undefined> {
+  const timeout = Math.max(1, timeoutMs)
   const handle = await parent.locator(selector).elementHandle({ timeout }).catch(() => null)
   if (!handle) return undefined
   try {
@@ -169,7 +169,10 @@ function childSettings(settings: SnapshotCaptureSettings, iframeDepth: number): 
   }
 }
 
-function frameFailureNote(cause: unknown): string {
+export const frameSkipNote = (count: number, reason: string): string =>
+  `- ... ${count} iframe ${count === 1 ? "content" : "contents"} not captured (${reason})`
+
+export function frameFailureNote(cause: unknown): string {
   switch (runtimeFailureKind(cause)) {
     case "context-destroyed":
     case "context-missing":
