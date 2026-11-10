@@ -240,6 +240,12 @@ values between calls on `state`. A single run without an `await` is stopped afte
 about 2 seconds; split heavy loops with
 `await new Promise(r => setTimeout(r, 0))` or do the work in the page.
 
+`execute`'s `timeoutMs` (MCP) / `--timeout-ms` (CLI) is the whole-script
+deadline, 60 seconds by default and paused during `handoff()`; `0` disables it.
+When you set it (or the relay sets `OPENCODE_BROWSER_EXECUTE_TIMEOUT_MS`),
+Playwright actions and navigations get the same budget, at least 30 seconds;
+without either they keep Playwright's 30-second default.
+
 Await promises: a rejection with no handler never stops the relay. A running call
 gets the error; a later one resets the realm and warns on the next call (a
 one-shot `--rm` session is already gone). Full Node mode has no realm to reset.
@@ -285,7 +291,14 @@ A cross-origin iframe also needs `allow="clipboard-write"` (or `clipboard-read`)
 from its parent; without it Chrome refuses the call and nothing in the frame can
 fix that, so write from the top page or read the value from the DOM instead.
 Clipboard reads usually ask the user for permission, so use `handoff()` or avoid
-them. `context.grantPermissions()` is refused, so don't try it.
+them. Permission grants are refused (`context.grantPermissions()`,
+`context.clearPermissions()`, `Browser.grantPermissions`, `Browser.setPermission`,
+`Browser.resetPermissions`), so don't try them.
+
+`page.setViewportSize({ width, height })` emulates a viewport inside the user's
+window: the tab is letterboxed while it is set, and browse clears the override
+when the script ends (within a couple of seconds), so the tab returns to the
+window's size. Don't rely on the size carrying over to the next `execute`.
 
 The page's console messages and uncaught errors are off by default because
 capturing them lets the page detect a debugger. Turn them on for one page when

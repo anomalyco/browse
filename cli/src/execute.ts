@@ -17,7 +17,7 @@ import {
   type SandboxGlobals,
 } from "./execute/code-runner.ts"
 import { DefaultPageHost } from "./execute/default-page.ts"
-import { downloadCapabilityErrorMessage, installDownloadCapabilityGuard, installDownloadCapabilityGuards, installViewportZoomGuard } from "./execute/guards.ts"
+import { downloadCapabilityErrorMessage, installDownloadCapabilityGuard, installDownloadCapabilityGuards, installViewportZoomGuard, withRestoredViewports } from "./execute/guards.ts"
 import {
   createExecuteLogCapture,
   emptyExecuteLogSummary,
@@ -191,6 +191,7 @@ export class ExecuteSandbox extends DefaultPageHost {
   private readonly allowNode = executeAllowsNode()
   private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
   private readonly networkCapture = new NetworkCapture.Recorder()
+  private readonly viewportGuardContexts = new WeakSet<BrowserContext>()
   private readonly secrets: ExecuteSecretsBridge
   /** The context whose pages this call gave its action budget, for the restore. */
   private actionTimeoutContext: BrowserContext | undefined
@@ -237,37 +238,43 @@ export class ExecuteSandbox extends DefaultPageHost {
           }
           if (!this.realm) for (const warning of pageVisibleApiSourceWarnings(code)) this.addWarningOnce(warning)
           const globals = await this.getGlobals(options)
-          const { result, logs, logSummary, aftermath } = await runUserCode({
-            code,
-            globals,
-            ...(this.realm ? { realm: this.realm } : {}),
-            onUnhandledRejection: (warning) => this.addWarningOnce(warning),
+          return await withRestoredViewports({
+            context: globals.context,
+            page: globals.page,
+            run: async () => {
+              const { result, logs, logSummary, aftermath } = await runUserCode({
+                code,
+                globals,
+                ...(this.realm ? { realm: this.realm } : {}),
+                onUnhandledRejection: (warning) => this.addWarningOnce(warning),
+              })
+                .then(async (completed) => ({ ...completed, aftermath: await this.withChallenge(globals.page, completed.aftermath, false) }))
+                .catch(async (error: unknown) => {
+                  if (!(error instanceof ExecuteCodeError) || !error.aftermath) throw error
+                  throw new ExecuteCodeError(error.originalError, error.logs, error.logSummary, await this.withChallenge(globals.page, error.aftermath, true))
+                })
+              await this.networkCapture.settleForOutput()
+              const extracted = extractExecuteMedia(result)
+              const redactedValue = this.secrets.redactOutputValue(extracted.value)
+              const jsonSafeResult = toJsonSafeValue(redactedValue)
+              const bounded = boundExecuteResult(stringifyResult(redactedValue), jsonSafeResult.serializable ? jsonSafeResult.value : undefined, jsonSafeResult.serializable)
+              const warnings = this.finalizeWarnings(
+                logSummary,
+                jsonValueWarning(redactedValue, jsonSafeResult),
+                bounded.warning,
+              )
+              return {
+                text: bounded.text,
+                ...(bounded.hasValue ? { value: bounded.value } : {}),
+                ...(extracted.media.length > 0 ? { media: extracted.media } : {}),
+                isError: false,
+                logs: this.secrets.redactCaptureLogs(logs),
+                logSummary,
+                warnings,
+                aftermath: this.secrets.redactCaptureAftermath(aftermath),
+              }
+            },
           })
-            .then(async (completed) => ({ ...completed, aftermath: await this.withChallenge(globals.page, completed.aftermath, false) }))
-            .catch(async (error: unknown) => {
-              if (!(error instanceof ExecuteCodeError) || !error.aftermath) throw error
-              throw new ExecuteCodeError(error.originalError, error.logs, error.logSummary, await this.withChallenge(globals.page, error.aftermath, true))
-            })
-          await this.networkCapture.settleForOutput()
-          const extracted = extractExecuteMedia(result)
-          const redactedValue = this.secrets.redactOutputValue(extracted.value)
-          const jsonSafeResult = toJsonSafeValue(redactedValue)
-          const bounded = boundExecuteResult(stringifyResult(redactedValue), jsonSafeResult.serializable ? jsonSafeResult.value : undefined, jsonSafeResult.serializable)
-          const warnings = this.finalizeWarnings(
-            logSummary,
-            jsonValueWarning(redactedValue, jsonSafeResult),
-            bounded.warning,
-          )
-          return {
-            text: bounded.text,
-            ...(bounded.hasValue ? { value: bounded.value } : {}),
-            ...(extracted.media.length > 0 ? { media: extracted.media } : {}),
-            isError: false,
-            logs: this.secrets.redactCaptureLogs(logs),
-            logSummary,
-            warnings,
-            aftermath: this.secrets.redactCaptureAftermath(aftermath),
-          }
         } finally {
           this.restoreActionTimeout()
           this.actionTimeoutContext?.setDefaultTimeout?.(defaultActionTimeoutMs)
@@ -595,17 +602,31 @@ export class ExecuteSandbox extends DefaultPageHost {
     this.actionTimeoutContext = context
     context.setDefaultTimeout?.(this.actionTimeoutMs)
     this.applyActionTimeout(page)
-    installViewportZoomGuard({
-      page,
-      explicitMediaFeatures: this.explicitMediaFeatures,
-      getExplicitMedia: () => this.explicitMedia,
-      setExplicitMedia: (media) => {
-        this.explicitMedia = media
-      },
-      addWarningOnce: (warning) => this.addWarningOnce(warning),
-    })
+    this.installViewportGuards(context)
     this.networkCapture.bindPage(this.page)
     return { browser, context, page }
+  }
+
+  /**
+   * Tracks viewport changes on every page the script can reach, not only the default page:
+   * `context.newPage()` and pages opened during the script must be restored too.
+   */
+  private installViewportGuards(context: BrowserContext): void {
+    const install = (page: Page) =>
+      installViewportZoomGuard({
+        page,
+        explicitMediaFeatures: this.explicitMediaFeatures,
+        getExplicitMedia: () => this.explicitMedia,
+        setExplicitMedia: (media) => {
+          this.explicitMedia = media
+        },
+        addWarningOnce: (warning) => this.addWarningOnce(warning),
+      })
+    for (const page of context.pages()) install(page)
+    if (!this.viewportGuardContexts.has(context)) {
+      context.on("page", install)
+      this.viewportGuardContexts.add(context)
+    }
   }
 
   private ensureSessionPage(label: string): Effect.Effect<Page, Error> {
