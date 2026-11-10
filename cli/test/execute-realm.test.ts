@@ -718,6 +718,28 @@ describe("execute file access", () => {
     fs.rmSync(path.join(files.dir, "shots"), { recursive: true, force: true })
   })
 
+  test.skipIf(process.platform === "win32")("a group/world writable output folder is named in the error next to the remedy", async () => {
+    const files = createExecuteFiles()
+    const shared = path.join(files.dir, "shared-shots")
+    try {
+      fs.mkdirSync(shared)
+      fs.chmodSync(shared, 0o775)
+      const page = {
+        async screenshot(options: { path?: string }) {
+          fs.writeFileSync(options.path!, "png")
+        },
+      }
+      const error = await run(`await host.page.screenshot({ path: host.files.dir + "/shared-shots/page.png" }); return null;`, { page, files })
+        .then(() => undefined, (failure: Error) => failure)
+      expect(error?.message).toMatch(/file paths must use owned directories and files without group\/world write access/)
+      expect(error?.message).toContain(fs.realpathSync(shared))
+      expect(error?.message).toContain("files.path")
+      expect(fs.existsSync(path.join(shared, "page.png"))).toBe(false)
+    } finally {
+      fs.rmSync(shared, { recursive: true, force: true })
+    }
+  })
+
   test("checkHostCall collects outputs without touching the filesystem", async () => {
     const files = createExecuteFiles()
     const dir = path.join(files.dir, "unprepared")

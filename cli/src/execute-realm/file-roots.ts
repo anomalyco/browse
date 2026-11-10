@@ -282,7 +282,7 @@ export function assertExecuteFilePath(
     }
     if (stat?.isSymbolicLink()) throw new ExecuteFileAccessError(`${operation}: symlink paths are not available in execute code`)
     if (stat && current !== root && process.getuid && (stat.uid !== process.getuid() || (stat.mode & 0o022) !== 0)) {
-      throw new ExecuteFileAccessError(`${operation}: file paths must use owned directories and files without group/world write access`)
+      throw new ExecuteFileAccessError(`${operation}: file paths must use owned directories and files without group/world write access (${current} is not); use files.path(name) for a file in the private files.dir`)
     }
     if (stat && !stat.isDirectory() && (!stat.isFile() || stat.nlink !== 1)) {
       throw new ExecuteFileAccessError(`${operation}: expected a regular file with no hard links`)
