@@ -120,9 +120,10 @@ Useful inspection helpers:
   `cc-exp*`); other readonly fields show their value, so a generated address or
   code is readable. A field the page locks after you type into it counts as
   readonly. Visible iframes appear as `iframe` lines with their own documents
-  nested under them, same-origin and cross-origin alike, so a dialog whose form
-  lives in a payment iframe is readable without `page.frames()`; pass
-  `snapshot({ frames: false })` to leave iframe content out. `snapshot({ find:
+  nested under them, same-origin and cross-origin alike, up to 8 frames three
+  levels deep, so a dialog whose form lives in a payment iframe is readable
+  without `page.frames()`; pass `snapshot({ frames: false })` to leave iframe
+  content out. `snapshot({ find:
   /checkout/i, context: 2 })` searches it, and `snapshot({ diff: true })` or
   `{ delta: true }` reports changes.
 - `ref("e12")` resolves a control from the latest snapshot, including controls
@@ -131,8 +132,11 @@ Useful inspection helpers:
   compatible refs keep their ids. `snapshot({ within: frameLocator(...) })`
   captures a frame and its refs resolve there.
 - `ariaSnapshot(target?, { timeout })` returns Playwright's detailed YAML tree
-  when the compact snapshot omits needed structure. It includes iframe content
-  and applies the same value hiding in every frame.
+  when the compact snapshot omits needed structure. Each iframe's document is
+  nested under its `- iframe` line; when those lines cannot be matched to the
+  elements one to one, the frames follow the tree as labelled
+  `- iframe "name":` blocks. It applies the same value hiding in every frame,
+  and a frame it cannot read becomes a note instead of content.
 - `screenshotWithLabels({ page?, path? })` adds visual labels when layout
   matters and registers its labels for `ref()`.
 - `screenshotDiff({ baseline, path?, threshold?, fullPage? })` compares a saved

@@ -33,6 +33,7 @@ const crossOriginServer = http.createServer((request, response) => {
   response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
   if (request.url === "/nested") return response.end(nestedHtml)
   if (request.url === "/moved") return response.end(frameForm("Moved"))
+  if (request.url === "/leak") return response.end(`<!doctype html><html><body><h1>Leaky</h1><input aria-label="Key" value="LEAK-VALUE-CROSS"><button>Go</button></body></html>`)
   response.end(frameForm("Pay form", request.url === "/payment" ? `<iframe src="${sameOriginFrameUrl}/nested" title="nested" width="200" height="150"></iframe>` : ""))
 })
 await new Promise<void>((resolve) => crossOriginServer.listen(0, "127.0.0.1", resolve))
@@ -44,6 +45,23 @@ const hostServer = http.createServer((request, response) => {
   if (request.url === "/many") return response.end(`<!doctype html><html><body><h1>Many</h1>${Array.from({ length: 10 }, (_, index) => `<iframe src="/same" title="same-${index}"></iframe>`).join("")}</body></html>`)
   if (request.url === "/nested") return response.end(nestedHtml)
   if (request.url === "/moved-frame") return response.end(frameForm("Moved"))
+  if (request.url === "/frame-leak") return response.end(`<!doctype html><html><body><h1>Late</h1><input aria-label="Key" value="LEAK-VALUE-ATTR"><button>Go</button></body></html>`)
+  if (request.url === "/working") return response.end(`<!doctype html><html><body><h1>Working</h1><input aria-label="Working field" value="working-value"></body></html>`)
+  if (request.url === "/ambiguous") return response.end(`<!doctype html><html><body><main><h1>Host</h1>
+    <iframe src="/working" title="normal"></iframe>
+    <iframe src="/working" title="zero" style="border:0;width:0;height:0"></iframe></main></body></html>`)
+  if (request.url === "/modal") return response.end(`<!doctype html><html><body><main><h1>Checkout</h1>
+    <dialog open aria-modal="true" aria-label="Modal">
+      <h2>Details</h2>
+      <input aria-label="Email">
+      <button type="button">Apply</button>
+      <iframe src="/working" title="tiny" width="10" height="10"></iframe>
+    </dialog></main></body></html>`)
+  if (request.url === "/ads") return response.end(`<!doctype html><html><body><main><h1>Ads</h1>
+    ${Array.from({ length: 6 }, (_, index) => `<iframe src="/working" title="ad-${index}" width="300" height="100"></iframe>`).join("")}
+    <button type="button">Real action</button></main></body></html>`)
+  if (request.url === "/redact-fail") return response.end(`<!doctype html><html><body><main><h1>Host</h1>
+    <iframe src="/frame-leak" title="broken"></iframe><iframe src="/working" title="working"></iframe></main></body></html>`)
   response.end(`<!doctype html><html><body><main><h1>Checkout</h1>
     <dialog open aria-modal="true" aria-label="Pagar">
       <iframe src="http://localhost:${crossOriginPort}/payment" title="payment" width="400" height="300"></iframe>
@@ -203,8 +221,8 @@ try {
   // The dialog is the capture root and its own entry; both iframes sit one level under it.
   assert.equal(indentOf(printed[paymentIndex]!), indentOf(printed[dialogIndex]!) + 2, frameSnapshot)
   assert.equal(indentOf(printed[sameIndex]!), indentOf(printed[dialogIndex]!) + 2, frameSnapshot)
-  assert.match(frameSnapshot, /- iframe "payment" \[ref=e\d+ src=localhost:\d+\/payment\]/, frameSnapshot)
-  assert.match(frameSnapshot, /- iframe "same" \[ref=e\d+ src=127\.0\.0\.1:\d+\/same\]/, frameSnapshot)
+  assert.match(frameSnapshot, /- iframe "payment" \[ref=e\d+ src=localhost:\d+\]/, frameSnapshot)
+  assert.match(frameSnapshot, /- iframe "same" \[ref=e\d+ src=127\.0\.0\.1:\d+\]/, frameSnapshot)
   // Both documents are captured, nested under their iframe line, and cross-origin content is included.
   const inFrame = (index: number, pattern: RegExp) => {
     const base = indentOf(printed[index]!)
@@ -288,7 +306,7 @@ try {
   assert.doesNotMatch(aria, /cross-secret/)
   assert.doesNotMatch(aria, /same-secret/)
   assert.doesNotMatch(aria, /nested-secret/)
-  assert.doesNotMatch(aria, /\[ref=/, "Playwright's inert refs are stripped")
+  assert.doesNotMatch(aria, /\[ref=|\[active\]|\bgeneric\b/, "the default format is kept")
   // A target inside the frame redacts that frame and the frames nested under it too.
   const ariaInFrame = await ariaHelpers(page.frameLocator('iframe[title="payment"]').locator("body"))
   assert.match(ariaInFrame, /heading "Pay form"/)
@@ -313,8 +331,122 @@ try {
   await page.goto(`http://127.0.0.1:${hostPort}/many`)
   await page.frameLocator('iframe[title="same-0"]').locator("h1").waitFor()
   const many = await createSnapshotHelpers(page, registry()).snapshot({ maxItems: 200 })
-  assert.match(many, /- \.\.\. 2 iframe contents not captured \(8 at most per snapshot\)/, many)
+  assert.match(many, /- \.\.\. 2 iframe contents not captured \(8 iframes at most per snapshot\)/, many)
   assert.match(many, /- iframe "same-9"/, many)
+
+  // D: a modal without iframes keeps dev's shape: dialog at 0, heading at 1, its controls at 2.
+  await page.goto(`http://127.0.0.1:${hostPort}/modal`)
+  const modalSnapshot = await createSnapshotHelpers(page, registry()).snapshot()
+  const modalLines = modalSnapshot.split("\n")
+  const modalLine = (needle: string) => modalLines.findIndex((line) => line.includes(needle))
+  assert.ok(modalLine('- dialog "Modal"') >= 0, modalSnapshot)
+  assert.equal(indentOf(modalLines[modalLine('- dialog "Modal"')]!), 0, modalSnapshot)
+  assert.equal(indentOf(modalLines[modalLine('heading "Details"')]!), 2, modalSnapshot)
+  assert.equal(indentOf(modalLines[modalLine('textbox "Email"')]!), 4, modalSnapshot)
+  assert.equal(indentOf(modalLines[modalLine('button "Apply"')]!), 4, modalSnapshot)
+  assert.doesNotMatch(modalSnapshot, /iframe "tiny"/, "a 10x10 iframe is not worth a line")
+
+  // E: ad iframes have ordinary priority; with a small maxItems the real control still makes it in.
+  await page.goto(`http://127.0.0.1:${hostPort}/ads`)
+  await page.frameLocator('iframe[title="ad-0"]').locator("h1").waitFor()
+  const crowded = await createSnapshotHelpers(page, registry()).snapshot({ maxItems: 4, frames: false })
+  assert.match(crowded, /button "Real action"/, crowded)
+  assert.ok((crowded.match(/- iframe/g) ?? []).length < 6, crowded)
+
+  // B: removing the first iframe never retargets its refs to the frame that shifts up.
+  await page.goto(`http://127.0.0.1:${hostPort}/`)
+  for (const title of ["payment", "same"]) {
+    await page.frameLocator(`iframe[title="${title}"]`).locator("h1").waitFor()
+  }
+  const identityHelpers = createSnapshotHelpers(page, registry())
+  const identityBefore = await identityHelpers.snapshot()
+  const paymentButton = refFor(identityBefore, "button", "Pagar", '- iframe "payment"')
+  const sameButton = refFor(identityBefore, "button", "Pagar", '- iframe "same"')
+  assert.ok(paymentButton && sameButton, identityBefore)
+  await page.evaluate(() => document.querySelector('iframe[title="payment"]')!.remove())
+  const identityAfter = await identityHelpers.snapshot()
+  assert.throws(() => identityHelpers.ref(paymentButton!), /Unknown snapshot ref/, identityAfter)
+  assert.equal(refFor(identityAfter, "button", "Pagar", '- iframe "same"'), sameButton, identityAfter)
+
+  // F: a bare FrameLocator scopes the snapshot to that frame's document.
+  const frameScopeHelpers = createSnapshotHelpers(page, registry())
+  const bareScope = await frameScopeHelpers.snapshot({ within: page.frameLocator('iframe[title="same"]') })
+  assert.match(bareScope, /heading "Same form"/, bareScope)
+  const bareRef = refFor(bareScope, "textbox", "Card number")
+  assert.ok(bareRef, bareScope)
+  assert.equal(await frameScopeHelpers.ref(bareRef).count(), 1)
+
+  // I: a `within` ref root rechecks its frame; a ref resolved before the navigation cannot be used after it.
+  await page.goto(`http://127.0.0.1:${hostPort}/`)
+  await page.frameLocator('iframe[title="payment"]').locator("h1").waitFor()
+  const staleHelpers = createSnapshotHelpers(page, registry())
+  const staleSnapshot = await staleHelpers.snapshot()
+  const staleControl = refFor(staleSnapshot, "textbox", "Card number", '- iframe "payment"')
+  assert.ok(staleControl, staleSnapshot)
+  const staleRoot = staleHelpers.ref(staleControl)
+  const staleFrame = page.frames().find((frame) => frame.url().includes("localhost"))
+  assert.ok(staleFrame, "cross-origin frame is a real Playwright frame")
+  await staleFrame.goto(`http://localhost:${crossOriginPort}/moved`)
+  await assert.rejects(
+    () => staleHelpers.snapshot({ within: staleRoot }),
+    /stale after an iframe navigation or detach/,
+  )
+
+  // A tree line that cannot be bound to exactly one iframe is not guessed: each frame gets a labelled block.
+  await page.goto(`http://127.0.0.1:${hostPort}/ambiguous`)
+  const ambiguous = await createAriaSnapshotHelper(page)()
+  assert.match(ambiguous, /  - iframe\n  - iframe\n/, ambiguous)
+  assert.match(ambiguous, /- iframe "normal":\n  - heading "Working"/, ambiguous)
+  assert.doesNotMatch(ambiguous, /- iframe "zero"/, "a frame outside the mapping is not labelled")
+
+  // --- ariaSnapshot: frames are read one document at a time, each with its own redaction ---
+  await page.goto(`http://127.0.0.1:${hostPort}/`)
+  await page.frameLocator('iframe[title="payment"]').locator("h1").waitFor()
+  const leakHelpers = createAriaSnapshotHelper(page)
+  // An iframe inserted just before the snapshot is read through its own token, redacted in its own frame.
+  await page.evaluate((url) => {
+    const iframe = document.createElement("iframe")
+    iframe.src = url
+    iframe.title = "late"
+    document.body.appendChild(iframe)
+  }, `http://127.0.0.1:${hostPort}/frame-leak`)
+  await page.frameLocator('iframe[title="late"]').locator("h1").waitFor()
+  const inserted = await leakHelpers()
+  assert.match(inserted, /heading "Late"/, inserted)
+  assert.doesNotMatch(inserted, /LEAK-VALUE-ATTR/)
+
+  // A cross-origin frame navigated just before, or while, the snapshot runs never returns the new values.
+  const crossOrigin = page.frames().find((frame) => frame.url().includes("localhost"))
+  assert.ok(crossOrigin, "cross-origin frame is a real Playwright frame")
+  await crossOrigin.goto(`http://localhost:${crossOriginPort}/leak`)
+  const navigated = await leakHelpers()
+  assert.doesNotMatch(navigated, /LEAK-VALUE-CROSS/)
+  const pendingAria = leakHelpers()
+  await pause(5)
+  await crossOrigin.goto(`http://localhost:${crossOriginPort}/leak?again`).catch(() => {})
+  assert.doesNotMatch(await pendingAria, /LEAK-VALUE-CROSS/)
+
+  // A frame whose redaction cannot be activated becomes a note, is not left patched, and does not fail the rest.
+  const brokenConnection = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`)
+  try {
+    const brokenPage = await brokenConnection.contexts()[0]!.newPage()
+    await brokenPage.goto(`http://127.0.0.1:${hostPort}/redact-fail`)
+    const brokenFrame = brokenPage.frames().find((frame) => frame.url().includes("/frame-leak"))
+    assert.ok(brokenFrame, "the broken frame loaded")
+    // Warm only that frame's utility world, before the redaction engine is registered for this context.
+    await brokenFrame.locator("body").innerText()
+    const brokenAria = await createAriaSnapshotHelper(brokenPage)()
+    assert.match(brokenAria, /heading "Host"/, brokenAria)
+    assert.match(brokenAria, /content not captured/, brokenAria)
+    assert.match(brokenAria, /heading "Working"/, "a healthy frame still gets its content")
+    assert.doesNotMatch(brokenAria, /LEAK-VALUE-ATTR/)
+    assert.equal(
+      await brokenPage.frameLocator('iframe[title="broken"]').locator("input").inputValue(),
+      "LEAK-VALUE-ATTR",
+      "a frame whose activation failed is not left patched",
+    )
+    await brokenPage.close()
+  } finally { await brokenConnection.close() }
 
   console.log(JSON.stringify({
     multiple: "PASS",
@@ -329,6 +461,14 @@ try {
     frameRefClosed: "PASS",
     ariaFrames: "PASS",
     frameBudget: "PASS",
+    modalDepth: "PASS",
+    framePriority: "PASS",
+    frameIdentity: "PASS",
+    frameScope: "PASS",
+    ariaAmbiguous: "PASS",
+    withinRefRecheck: "PASS",
+    ariaNoLeak: "PASS",
+    ariaRedactionFailure: "PASS",
   }))
 } finally {
   await browser.close().catch(() => {})

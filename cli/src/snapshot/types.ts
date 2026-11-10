@@ -1,8 +1,10 @@
 import { Predicate } from "effect"
-import type { Frame, Locator, Page } from "patchright-core"
-import { ariaSnapshotWithoutTextControlValues } from "./aria-snapshot.ts"
+import type { Frame, FrameLocator, Locator, Page } from "patchright-core"
+import { ariaSnapshotWithFrames } from "./aria-snapshot.ts"
 
 export type AriaSnapshotTarget = Locator | string
+/** A `within` scope: a selector, a locator in some frame, or a FrameLocator for that frame's whole document. */
+export type SnapshotScope = Locator | FrameLocator | string
 
 export type AriaSnapshotOptions = {
   readonly timeout?: number
@@ -16,7 +18,7 @@ export type SnapshotOptions = {
    * visible one, and a string with no match snapshots the whole page; either case adds a note to the output. A
    * locator keeps Playwright's strict requirement that it resolves to one element.
    */
-  readonly within?: AriaSnapshotTarget
+  readonly within?: SnapshotScope
   readonly interactive?: boolean
   readonly compact?: boolean
   readonly diff?: boolean
@@ -50,6 +52,8 @@ export type SnapshotEntry = {
   readonly selectorRole?: string
   /** The element is an `<iframe>`/`<frame>`; its document is captured separately and nested under this entry. */
   readonly iframe?: boolean
+  /** The capture root, rendered as an entry of its own; its descendants sit at least one level below it. */
+  readonly root?: boolean
   readonly priority: number
 }
 
@@ -70,8 +74,11 @@ export type SnapshotRefRegistry = {
   selectors: Map<string, SnapshotRefTarget>
   previousSnapshot?: SnapshotBaseline
   nextRef?: number
-  locatorScopes?: WeakMap<Locator, number>
+  locatorScopes?: WeakMap<object, number>
   nextLocatorScope?: number
+  /** Stable ids for frames, so a ref is never reused for an element in a different frame. */
+  frameIds?: WeakMap<Frame, string>
+  nextFrameId?: number
   removeNavigationListener?: () => void
   /** Per-frame document generations, bumped on `framenavigated`, so frame refs fail closed after a navigation. */
   frameGenerations?: WeakMap<Frame, number>
@@ -165,7 +172,7 @@ export type ScreenshotLabelRect = {
 export function createAriaSnapshotHelper(page: Pick<Page, "locator">): AriaSnapshotHelper {
   return async (target, options) => {
     const locator = target === undefined ? page.locator("body") : Predicate.isString(target) ? page.locator(target) : target
-    return await ariaSnapshotWithoutTextControlValues(locator, {
+    return await ariaSnapshotWithFrames(locator, {
       timeout: options?.timeout ?? defaultAriaSnapshotTimeoutMs,
     })
   }

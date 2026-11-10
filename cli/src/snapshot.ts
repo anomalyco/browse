@@ -13,7 +13,8 @@ import {
 } from "./snapshot/diff-and-format.ts"
 import {
   captureSnapshotFrames,
-  frameOfLocator,
+  frameOfScope,
+  isFrameLocator,
   maxSnapshotFrames,
   type SnapshotFrame,
   type SnapshotFrameBudget,
@@ -27,6 +28,7 @@ import {
   type SnapshotHelper,
   type SnapshotRefHelper,
   type SnapshotRefRegistry,
+  type SnapshotRefTarget,
   type SnapshotRenderedEntry,
 } from "./snapshot/types.ts"
 
@@ -49,6 +51,9 @@ export {
 const delay = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds))
 
+const frameSkipNote = (count: number, reason: string): string =>
+  `- ... ${count} iframe ${count === 1 ? "content" : "contents"} not captured (${reason})`
+
 type RenderedCapture = {
   readonly entries: SnapshotRenderedEntry[]
   /** Indentation level of each entry within its own document, after normalizing the capture's minimum to 0. */
@@ -67,19 +72,27 @@ function renderSnapshotCapture(capture: SnapshotCaptureResult): RenderedCapture 
     resolvedDepths.set(entry, depth)
     return depth
   }
-  const minimumDepth = capture.entries.reduce((minimum, entry) => Math.min(minimum, resolvedDepth(entry)), Number.POSITIVE_INFINITY)
+  // The root is rendered as an entry of its own (a modal dialog, a within row); its descendants then sit at
+  // least one level below it, while keeping the heading depth dev already gave them.
+  const rootEntry = capture.entries.find((entry) => entry.root)
+  const rootDepth = rootEntry ? resolvedDepth(rootEntry) : undefined
+  const depthOf = (entry: SnapshotEntry): number => {
+    const depth = resolvedDepth(entry)
+    return rootEntry && rootDepth !== undefined && entry !== rootEntry ? Math.max(depth, rootDepth + 1) : depth
+  }
+  const minimumDepth = capture.entries.reduce((minimum, entry) => Math.min(minimum, depthOf(entry)), Number.POSITIVE_INFINITY)
   const depthOffset = Number.isFinite(minimumDepth) ? minimumDepth : 0
   return {
     entries: capture.entries.map((entry) => {
       const name = entry.name.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
       return {
-        prefix: `${"  ".repeat(Math.max(0, resolvedDepth(entry) - depthOffset))}- ${entry.role} "${name}"`,
+        prefix: `${"  ".repeat(Math.max(0, depthOf(entry) - depthOffset))}- ${entry.role} "${name}"`,
         ...(entry.details ? { details: entry.details } : {}),
         ...(entry.selector ? { selector: entry.selector, role: entry.selectorRole ?? entry.role } : {}),
         ...(entry.identityName ? { identityName: entry.identityName } : {}),
       }
     }),
-    depths: capture.entries.map((entry) => Math.max(0, resolvedDepth(entry) - depthOffset)),
+    depths: capture.entries.map((entry) => Math.max(0, depthOf(entry) - depthOffset)),
   }
 }
 
@@ -87,21 +100,30 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
   readonly snapshot: SnapshotHelper
   readonly ref: SnapshotRefHelper
 } {
-  const refRoots = new WeakMap<Locator, { readonly selector: string; readonly role: string; readonly name?: string; readonly frame?: Frame }>()
+  const refRoots = new WeakMap<Locator, SnapshotRefTarget>()
   const snapshot: SnapshotHelper = async (options = {}) => {
     const within = options.within
     const withinSelector = Predicate.isString(within) ? within : undefined
-    const withinLocator = within !== undefined && !Predicate.isString(within) ? within : undefined
+    const withinScope = within !== undefined && !Predicate.isString(within) ? within : undefined
+    const withinLocator = withinScope && !isFrameLocator(withinScope) ? withinScope : undefined
+    const withinFrameLocator = withinScope && isFrameLocator(withinScope) ? withinScope : undefined
     const refRoot = withinLocator ? refRoots.get(withinLocator) : undefined
     const locator = withinLocator && !refRoot ? withinLocator : undefined
+    if (refRoot?.frame) {
+      const generation = registry.frameGenerations?.get(refRoot.frame) ?? 0
+      if (refRoot.frame.isDetached() || (refRoot.frameGeneration !== undefined && generation !== refRoot.frameGeneration)) {
+        throw new Error("Snapshot refs are stale after an iframe navigation or detach; call snapshot() again")
+      }
+    }
     let locatorScope: number | undefined
-    if (locator) {
+    const scoped = withinLocator ?? withinFrameLocator
+    if (scoped) {
       const scopes = registry.locatorScopes ??= new WeakMap()
-      locatorScope = scopes.get(locator)
+      locatorScope = scopes.get(scoped)
       if (locatorScope === undefined) {
         locatorScope = registry.nextLocatorScope ?? 1
         registry.nextLocatorScope = locatorScope + 1
-        scopes.set(locator, locatorScope)
+        scopes.set(scoped, locatorScope)
       }
     }
     const depth = Math.max(1, Math.min(16, Math.floor(options.depth ?? 10)))
@@ -130,6 +152,8 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         ? { kind: "selector", selector: withinSelector }
         : refRoot
         ? { kind: "ref", selector: refRoot.selector, role: refRoot.role, name: refRoot.name }
+        : withinFrameLocator
+        ? { kind: "frame", scope: locatorScope }
         : locator
         ? { kind: "locator", scope: locatorScope }
         : { kind: "page" },
@@ -148,7 +172,8 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
     // A `within` locator scoped to an iframe captures, and registers refs, in that frame. A ref root remembers
     // the frame it was captured in, so `within: ref("e12")` reads the same document.
     let captureFrame: Frame = refRoot?.frame ?? page.mainFrame()
-    if (locator) captureFrame = await frameOfLocator(locator, timeoutMs)
+    if (locator) captureFrame = await frameOfScope(locator, timeoutMs)
+    else if (withinFrameLocator) captureFrame = await frameOfScope(withinFrameLocator, timeoutMs)
 
     registry.removeNavigationListener?.()
     registry.selectors.clear()
@@ -168,6 +193,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
     const removeNavigationListener = () => page.off("framenavigated", onFrameNavigated)
     page.on("framenavigated", onFrameNavigated)
     registry.removeNavigationListener = removeNavigationListener
+    const captureGeneration = frameGenerations.get(captureFrame) ?? 0
 
     let result: Awaited<ReturnType<typeof captureSnapshotInBrowser>>
     if (locator) {
@@ -235,7 +261,11 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
     registry.selectors.clear()
 
     const main = renderSnapshotCapture(result)
-    const frameBudget: SnapshotFrameBudget = { frames: maxSnapshotFrames, skipped: 0 }
+    const frameBudget: SnapshotFrameBudget = {
+      frames: maxSnapshotFrames,
+      items: Math.max(0, maxItems - main.entries.length),
+      skipped: { budget: 0, deadline: 0, items: 0 },
+    }
     const frameNodes: ReadonlyMap<number, SnapshotFrame> = includeFrames && result.entries.some((entry) => entry.iframe)
       ? await captureSnapshotFrames({
           frame: captureFrame,
@@ -244,16 +274,25 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           deadline,
           budget: frameBudget,
           depth: 1,
+          frameGenerations,
         })
       : new Map()
 
     // Merge frame documents under their iframe lines. The main capture already spent part of maxItems; frame
     // content and its nested frames share what is left, so the whole snapshot stays within one budget.
     const entries: SnapshotRenderedEntry[] = []
-    const frameObjects = new Map<string, Frame>()
+    const frameObjects = new Map<string, { readonly frame: Frame; readonly generation: number }>()
+    const frameIds = registry.frameIds ??= new WeakMap()
+    const frameKeyFor = (frame: Frame): string => {
+      const existing = frameIds.get(frame)
+      if (existing) return existing
+      const key = `f${registry.nextFrameId ?? 1}`
+      registry.nextFrameId = (registry.nextFrameId ?? 1) + 1
+      frameIds.set(frame, key)
+      return key
+    }
     let remainingItems = Math.max(0, maxItems - main.entries.length)
-    let nextFrameKey = 1
-    let omittedFrames = false
+    let omittedFrames = 0
     const emitFrame = (node: SnapshotFrame, indent: number): void => {
       const indentation = "  ".repeat(indent)
       if (node.note) {
@@ -263,21 +302,15 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       const frame = node.frame
       if (!frame) return
       if (remainingItems <= 0) {
-        if (!omittedFrames) {
-          entries.push({ prefix: `${indentation}- ... frame content omitted (maxItems reached)` })
-          omittedFrames = true
-        }
+        omittedFrames += 1
         return
       }
-      const frameKey = `f${nextFrameKey++}`
-      frameObjects.set(frameKey, frame)
+      const frameKey = frameKeyFor(frame)
+      frameObjects.set(frameKey, { frame, generation: node.generation })
       const child = renderSnapshotCapture(node.capture)
       for (const [index, entry] of child.entries.entries()) {
         if (remainingItems <= 0) {
-          if (!omittedFrames) {
-            entries.push({ prefix: `${indentation}- ... frame content truncated (maxItems reached)` })
-            omittedFrames = true
-          }
+          entries.push({ prefix: `${indentation}- ... frame content truncated (maxItems reached)` })
           break
         }
         const rendered = { ...entry, prefix: `${indentation}${entry.prefix}`, frameKey }
@@ -296,9 +329,10 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       if (node) emitFrame(node, main.depths[index]! + 1)
     }
     if (result.truncated) entries.push({ prefix: `- ... truncated after ${maxItems} items` })
-    if (frameBudget.skipped > 0) {
-      entries.push({ prefix: `- ... ${frameBudget.skipped} iframe ${frameBudget.skipped === 1 ? "content" : "contents"} not captured (${maxSnapshotFrames} at most per snapshot)` })
-    }
+    if (frameBudget.skipped.items > 0) entries.push({ prefix: frameSkipNote(frameBudget.skipped.items, "maxItems reached") })
+    if (frameBudget.skipped.budget > 0) entries.push({ prefix: frameSkipNote(frameBudget.skipped.budget, `${maxSnapshotFrames} iframes at most per snapshot`) })
+    if (frameBudget.skipped.deadline > 0) entries.push({ prefix: frameSkipNote(frameBudget.skipped.deadline, "snapshot deadline reached") })
+    if (omittedFrames > 0) entries.push({ prefix: frameSkipNote(omittedFrames, "maxItems reached") })
 
     const compatiblePrevious = previousSnapshot?.page === page && previousSnapshot.signature === signature
       ? previousSnapshot
@@ -324,12 +358,17 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
     const registerRef = (entry: SnapshotRenderedEntry, id: string): void => {
       if (!entry.selector || !entry.role) return
       // Entries of a capture rooted inside a frame belong to that frame; nested frames carry their own key.
-      const frame = entry.frameKey ? frameObjects.get(entry.frameKey) : captureFrame === page.mainFrame() ? undefined : captureFrame
+      // The generation was recorded when the frame was captured, so a navigation since then keeps the ref stale.
+      const owner = entry.frameKey
+        ? frameObjects.get(entry.frameKey)
+        : captureFrame === page.mainFrame()
+        ? undefined
+        : { frame: captureFrame, generation: captureGeneration }
       registry.selectors.set(id, {
         selector: entry.selector,
         role: entry.role,
         ...(entry.identityName ? { name: entry.identityName } : {}),
-        ...(frame ? { frame, frameGeneration: frameGenerations.get(frame) ?? 0 } : {}),
+        ...(owner ? { frame: owner.frame, frameGeneration: owner.generation } : {}),
       })
     }
 

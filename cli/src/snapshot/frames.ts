@@ -1,5 +1,5 @@
 import { Effect } from "effect"
-import type { Frame, Locator } from "patchright-core"
+import type { Frame, FrameLocator, Locator } from "patchright-core"
 import { runPlaywrightOperation } from "../execute/page-recovery.ts"
 import { runtimeFailureKind } from "../update/runtime-diagnostics.ts"
 import { browserCapture } from "./browser-capture.ts"
@@ -23,19 +23,23 @@ export type SnapshotFrame = {
   readonly children: ReadonlyMap<number, SnapshotFrame>
   /** One short sentence, rendered under the iframe line when its document could not be captured. */
   readonly note?: string
+  /** The frame's navigation generation when the capture started; refs registered with it fail closed afterwards. */
+  readonly generation: number
 }
 
 export type SnapshotFrameBudget = {
   /** Frames left to capture across the whole snapshot. Mutated as frames are claimed. */
   frames: number
-  /** Iframes left uncaptured because the budget ran out. */
-  skipped: number
+  /** Snapshot items left to spend on frame content (the main capture already spent part of maxItems). */
+  items: number
+  /** Frames left uncaptured, by reason, for the notes after the entries. */
+  readonly skipped: { budget: number; deadline: number; items: number }
 }
 
 /**
- * Capture the documents of the iframes among `entries`, depth first, bounded by the frame budget and the
- * snapshot deadline. A frame that detaches, navigates or refuses to answer becomes a note on its iframe entry;
- * it never fails the snapshot.
+ * Capture the documents of the iframes among `entries`, depth first, bounded by the frame and item budgets and
+ * the snapshot deadline. A frame that detaches, navigates, refuses to answer or cannot be redacted becomes a note
+ * on its iframe entry; it never fails the snapshot.
  */
 export async function captureSnapshotFrames(options: {
   /** The frame that owns `entries` (the snapshot's capture root or a parent iframe). */
@@ -45,6 +49,7 @@ export async function captureSnapshotFrames(options: {
   readonly deadline: number
   readonly budget: SnapshotFrameBudget
   readonly depth: number
+  readonly frameGenerations: WeakMap<Frame, number>
 }): Promise<ReadonlyMap<number, SnapshotFrame>> {
   const frames = new Map<number, SnapshotFrame>()
   for (const [index, entry] of options.entries.entries()) {
@@ -53,31 +58,46 @@ export async function captureSnapshotFrames(options: {
       frames.set(index, {
         capture: { entries: [], truncated: false },
         children: new Map(),
+        generation: 0,
         note: `content not captured (frames nested deeper than ${maxSnapshotFrameDepth})`,
       })
       continue
     }
     if (options.budget.frames <= 0) {
-      options.budget.skipped += 1
+      options.budget.skipped.budget += 1
+      continue
+    }
+    if (options.budget.items <= 0) {
+      options.budget.skipped.items += 1
+      continue
+    }
+    const remaining = options.deadline - Date.now()
+    if (remaining <= 0) {
+      options.budget.skipped.deadline += 1
       continue
     }
     options.budget.frames -= 1
-    const frame = await contentFrameOf(options.frame, entry.selector, options.deadline)
+    const frame = await contentFrameOf(options.frame, entry.selector, remaining)
     if (!frame) {
       frames.set(index, {
         capture: { entries: [], truncated: false },
         children: new Map(),
+        generation: 0,
         note: "content not captured (the iframe is gone or has no frame attached)",
       })
       continue
     }
+    // Recorded before the read: a frame that navigates while it is captured keeps a stale generation, so the
+    // refs registered from that document fail closed instead of resolving into the new one.
+    const generation = options.frameGenerations.get(frame) ?? 0
     const settings = childSettings(options.settings, entry.depth)
     try {
       const capture = await Effect.runPromise(runPlaywrightOperation({
         label: "Frame snapshot",
-        timeoutMs: remainingMs(options.deadline),
+        timeoutMs: Math.max(1, options.deadline - Date.now()),
         run: () => frame.evaluate(browserCapture, settings),
       }))
+      options.budget.items = Math.max(0, options.budget.items - capture.entries.length)
       const children = await captureSnapshotFrames({
         frame,
         entries: capture.entries,
@@ -85,13 +105,15 @@ export async function captureSnapshotFrames(options: {
         deadline: options.deadline,
         budget: options.budget,
         depth: options.depth + 1,
+        frameGenerations: options.frameGenerations,
       })
-      frames.set(index, { frame, capture, children })
+      frames.set(index, { frame, capture, children, generation })
     } catch (error) {
       frames.set(index, {
         frame,
         capture: { entries: [], truncated: false },
         children: new Map(),
+        generation,
         note: `content not captured (${frameFailureNote(error)})`,
       })
     }
@@ -99,9 +121,13 @@ export async function captureSnapshotFrames(options: {
   return frames
 }
 
-/** The frame of a `within` locator, so a snapshot scoped inside an iframe reads and registers refs there. */
-export async function frameOfLocator(locator: Locator, timeoutMs: number): Promise<Frame> {
-  const handle = await locator.elementHandle({ timeout: Math.max(1, timeoutMs) })
+/**
+ * The frame of a `within` scope, so a snapshot scoped inside an iframe reads and registers refs there. A
+ * FrameLocator scopes to the frame it points at; a Locator scopes to the frame that owns the element.
+ */
+export async function frameOfScope(scope: Locator | FrameLocator, timeoutMs: number): Promise<Frame> {
+  const probe = isFrameLocator(scope) ? scope.locator("html") : scope
+  const handle = await probe.elementHandle({ timeout: Math.max(1, timeoutMs) })
   if (!handle) throw new Error("snapshot within target did not resolve to an element")
   try {
     const frame = await handle.ownerFrame()
@@ -112,22 +138,13 @@ export async function frameOfLocator(locator: Locator, timeoutMs: number): Promi
   }
 }
 
-/** Every frame nested under `frame`, depth first, without duplicates. */
-export function frameDescendants(frame: Frame): Frame[] {
-  const descendants: Frame[] = []
-  const visit = (parent: Frame): void => {
-    for (const child of parent.childFrames()) {
-      if (child === frame || descendants.includes(child)) continue
-      descendants.push(child)
-      visit(child)
-    }
-  }
-  visit(frame)
-  return descendants
+/** A FrameLocator has no elementHandle; every Locator does. */
+export function isFrameLocator(value: Locator | FrameLocator): value is FrameLocator {
+  return typeof (value as Locator).elementHandle !== "function"
 }
 
-async function contentFrameOf(parent: Frame, selector: string, deadline: number): Promise<Frame | undefined> {
-  const timeout = Math.max(1, Math.min(frameAttachTimeoutMs, deadline - Date.now()))
+async function contentFrameOf(parent: Frame, selector: string, remainingMs: number): Promise<Frame | undefined> {
+  const timeout = Math.max(1, Math.min(frameAttachTimeoutMs, remainingMs))
   const handle = await parent.locator(selector).elementHandle({ timeout }).catch(() => null)
   if (!handle) return undefined
   try {
@@ -163,8 +180,4 @@ function frameFailureNote(cause: unknown): string {
     default:
       return "the frame could not be read"
   }
-}
-
-function remainingMs(deadline: number): number {
-  return Math.max(100, deadline - Date.now())
 }

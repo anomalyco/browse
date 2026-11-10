@@ -570,11 +570,11 @@ export const captureSnapshotInBrowser = (
     const src = element.getAttribute("src") ?? ""
     if (!src) return undefined
     try {
+      // Host only: a path or query can carry a session token into the transcript.
       const url = new URL(src, document.baseURI)
-      const path = url.pathname === "/" ? "" : url.pathname
-      return truncate(`src=${url.host}${path}`, 120)
+      return truncate(`src=${url.host || url.protocol}`, 80)
     } catch {
-      return truncate(`src=${normalize(src)}`, 120)
+      return "src=unparseable"
     }
   }
   // A readable frame selector survives small DOM changes better than `iframe:nth-of-type(3)`.
@@ -672,14 +672,7 @@ export const captureSnapshotInBrowser = (
   }
   const parentChainCache = new WeakMap<Element, readonly string[]>()
   const structuralChainFrom = (node: Element | null): readonly string[] => {
-    if (!node) return []
-    // The capture root is an entry of its own when it is structural (a modal dialog, a within row or table), and
-    // its children then nest one level under it like any other structural parent. A non-structural root (body,
-    // main) has no entry, so it adds no level.
-    if (node === root) {
-      const rootKey = structuralKeys.get(root)
-      return rootKey ? [rootKey] : []
-    }
+    if (!node || node === root) return []
     const cached = parentChainCache.get(node)
     if (cached !== undefined) return cached
     const tail = structuralChainFrom(parentElementOrHost(node))
@@ -821,7 +814,7 @@ export const captureSnapshotInBrowser = (
     return result
   }
   const priorityFor = (options: { readonly role: string; readonly interactive: boolean; readonly primaryLink: boolean; readonly structuralEssential: boolean; readonly inActiveOverlay: boolean }): number => {
-    if (options.role === "alert" || options.role === "status" || options.role === "navigation" || options.role === "iframe" || options.structuralEssential || options.inActiveOverlay) return -1
+    if (options.role === "alert" || options.role === "status" || options.role === "navigation" || options.structuralEssential || options.inActiveOverlay) return -1
     if (options.role === "heading") return 0
     if (options.role === "link" && options.primaryLink) return 0
     if (options.interactive && (options.role !== "link" || options.primaryLink)) return 1
@@ -896,6 +889,11 @@ export const captureSnapshotInBrowser = (
     const role = roleFor(element)
     const isHeading = role === "heading"
     const isFrame = frameTags.has(element.localName)
+    // A 1-2px tracking iframe is not worth a line or a document capture; real embeds are larger.
+    if (isFrame) {
+      const rect = element.getBoundingClientRect()
+      if (rect.width < 20 && rect.height < 20) continue
+    }
     if (isHeading && isRedundantHeadingForLink(element)) continue
     if (
       role === "combobox" &&
@@ -988,6 +986,7 @@ export const captureSnapshotInBrowser = (
       ...(parentKeys.length > 0 ? { parentKeys } : {}),
       role,
       name,
+      ...(element === root ? { root: true } : {}),
       ...(isInteractive && identityName && !labelProxy ? { identityName } : {}),
       ...(labelProxy ? { selectorRole: "label" } : {}),
       ...(isInteractive ? { interactiveElement: labelProxy ?? element } : isFrame ? { frameElement: element } : {}),
@@ -998,6 +997,7 @@ export const captureSnapshotInBrowser = (
         primaryLink,
         inActiveOverlay,
         structuralEssential: isStructural &&
+          role !== "iframe" &&
           role !== "row" &&
           role !== "listitem" &&
           role !== "code" &&
