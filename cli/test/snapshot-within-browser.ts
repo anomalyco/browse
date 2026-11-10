@@ -35,6 +35,7 @@ const crossOriginServer = http.createServer((request, response) => {
   if (request.url === "/moved") return response.end(frameForm("Moved"))
   if (request.url === "/leak") return response.end(`<!doctype html><html><body><h1>Leaky</h1><input aria-label="Key" value="LEAK-VALUE-CROSS"><button>Go</button></body></html>`)
   if (request.url === "/hung") return response.end(`<!doctype html><html><head><script>while (true) {}</script></head><body></body></html>`)
+  if (request.url === "/slow") return response.end(`<!doctype html><html><head><script>const end = Date.now() + 1500; while (Date.now() < end) {}</script></head><body><h1>Slow</h1></body></html>`)
   response.end(frameForm("Pay form", request.url === "/payment" ? `<iframe src="${sameOriginFrameUrl}/nested" title="nested" width="200" height="150"></iframe>` : ""))
 })
 await new Promise<void>((resolve) => crossOriginServer.listen(0, "127.0.0.1", resolve))
@@ -53,6 +54,9 @@ const hostServer = http.createServer((request, response) => {
     <iframe src="/zero-frame" title="zero" style="border:0;width:0;height:0"></iframe></main></body></html>`)
   if (request.url === "/shadow-frame") return response.end(`<!doctype html><html><body><h1>B frame</h1></body></html>`)
   if (request.url === "/zero-frame") return response.end(`<!doctype html><html><body><h1>A frame</h1></body></html>`)
+  if (request.url === "/late-target") return response.end(`<!doctype html><html><body><main><h1>Host</h1><div id="late-slot"></div></main>
+    <script>setTimeout(() => { const el = document.createElement("section"); el.id = "late"; el.innerHTML = "<h2>Late</h2>" + Array.from({ length: 12000 }, (_, index) => "<p>row " + index + "</p>").join(""); document.getElementById("late-slot").appendChild(el) }, 1750)</script></body></html>`)
+  if (request.url === "/slow-parent") return response.end(`<!doctype html><html><body><main><h1>Host</h1><iframe src="http://localhost:${crossOriginPort}/slow" title="slow"></iframe></main></body></html>`)
   if (request.url === "/hung-parent") return response.end(`<!doctype html><html><body><main><h1>Host</h1>
     <iframe src="http://localhost:${crossOriginPort}/hung" title="hung"></iframe>
     <iframe src="/working" title="healthy"></iframe></main></body></html>`)
@@ -460,6 +464,20 @@ try {
     await brokenPage.close()
   } finally { await brokenConnection.close() }
 
+  // One slow frame (1.5s) gets the caller's time when it is the only frame, rather than an eighth of it.
+  await page.goto(`http://127.0.0.1:${hostPort}/slow-parent`, { waitUntil: "domcontentloaded" })
+  const slowSnapshot = await createSnapshotHelpers(page, registry()).snapshot({ timeout: 5_000 })
+  assert.match(slowSnapshot, /- iframe "slow"[\s\S]*heading "Slow"/, slowSnapshot)
+  const slowAria = await createAriaSnapshotHelper(page)()
+  assert.match(slowAria, /- iframe "slow" \[src=localhost:\d+\]:\n  - heading "Slow"/, slowAria)
+
+  // A page without iframes keeps dev's output even when its tree read runs past the caller's timeout: the cheap
+  // listing still runs, finds nothing, and must not add an iframe deadline note.
+  await page.goto(`http://127.0.0.1:${hostPort}/late-target`)
+  const lateTarget = await createAriaSnapshotHelper(page)("#late", { timeout: 2_000 })
+  assert.match(lateTarget, /heading "Late"/, lateTarget)
+  assert.doesNotMatch(lateTarget, /iframe contents not captured/, lateTarget)
+
   // One hung frame gets a capped timeout, so a healthy frame after it is still captured (snapshot and aria).
   await page.goto(`http://127.0.0.1:${hostPort}/hung-parent`, { waitUntil: "domcontentloaded" })
   await page.frameLocator('iframe[title="healthy"]').locator("h1").waitFor()
@@ -494,6 +512,8 @@ try {
     ariaNoLeak: "PASS",
     ariaRedactionFailure: "PASS",
     hungFrame: "PASS",
+    lateTreeNoIframeNote: "PASS",
+    singleSlowFrame: "PASS",
   }))
 } finally {
   await browser.close().catch(() => {})

@@ -12,6 +12,8 @@ export class AriaSnapshotRedactionError extends AggregateError {
 }
 /** Reads the body (or frameset) of a document as its snapshot target. */
 const documentRootSelector = "body, frameset"
+/** Listing iframes is cheap; give it a floor even when the tree read used up the caller's timeout. */
+const minFrameListingTimeoutMs = 300
 // Keep the engine as source text so bundlers cannot inject Node-only helpers into the browser function.
 const redactionSelectorSource = `({
   query(root, body) {
@@ -235,13 +237,12 @@ async function frameBlocks(scope: Locator, options: {
 }): Promise<string[]> {
   const blocks: string[] = []
   const listing = await iframeCandidates(scope, options.deadline)
-  if (listing.timedOut) {
-    blocks.push("- ... iframe contents not captured (snapshot deadline reached)")
-    return blocks
-  }
   options.budget.skipped.limit += listing.skipped
-  for (const candidate of listing.candidates) {
-    const content = await frameContent(candidate, options)
+  for (const [index, candidate] of listing.candidates.entries()) {
+    const content = await frameContent(candidate, {
+      ...options,
+      framesLeft: Math.min(options.budget.frames, listing.candidates.length - index),
+    })
     const label = `- iframe ${JSON.stringify(candidate.name)}${candidate.src ? ` [src=${candidate.src}]` : ""}`
     blocks.push(content.length === 0 ? label : `${label}:`)
     for (const line of content) blocks.push(`  ${line}`)
@@ -250,16 +251,25 @@ async function frameBlocks(scope: Locator, options: {
 }
 
 /**
- * Every iframe under `scope` in document order, up to the frame cap. Metadata is read from each handle itself, in
- * the same pass that takes its content frame, so a label can never shift onto a different element. Collection is
- * bounded by the snapshot deadline.
+ * Every iframe under `scope` in document order, up to the frame cap. Tiniest frames are skipped before the cap, as
+ * `snapshot()` does. Metadata is read from each handle itself, in the same pass that takes its content frame, so a
+ * label can never shift onto a different element. Listing is cheap, so it gets a short floor past the deadline: a
+ * page with no iframes must never produce a deadline note because its tree read ran long.
  */
-async function iframeCandidates(scope: Locator, deadline: number): Promise<{ candidates: IframeCandidate[]; skipped: number; timedOut: boolean }> {
-  const handles = await withinDeadline(scope.locator("iframe, frame").elementHandles(), deadline).catch(() => undefined)
-  if (!handles) return { candidates: [], skipped: 0, timedOut: true }
+async function iframeCandidates(scope: Locator, deadline: number): Promise<{ candidates: IframeCandidate[]; skipped: number }> {
+  const listingDeadline = Math.max(deadline, Date.now() + minFrameListingTimeoutMs)
+  const handles = await withinDeadline(
+    scope.locator("iframe, frame").elementHandles(),
+    listingDeadline,
+    (late) => { for (const handle of late) void handle.dispose().catch(() => {}) },
+  ).catch(() => undefined)
+  if (!handles) return { candidates: [], skipped: 0 }
   try {
     const candidates: IframeCandidate[] = []
-    for (const handle of handles.slice(0, maxSnapshotFrames)) {
+    let examined = 0
+    for (const handle of handles) {
+      if (candidates.length >= maxSnapshotFrames) break
+      examined += 1
       const info = await withinDeadline(handle.evaluate((node) => {
         const element = node as Element
         const text = (value: string | null) => (value ?? "").trim()
@@ -279,29 +289,48 @@ async function iframeCandidates(scope: Locator, deadline: number): Promise<{ can
           src,
           tiny: rect.width < 20 && rect.height < 20,
         }
-      }), deadline).catch(() => undefined)
+      }), listingDeadline).catch(() => undefined)
       if (!info || info.tiny) continue
       candidates.push({
-        frame: await handle.contentFrame().catch(() => null),
+        frame: await withinDeadline(handle.contentFrame(), listingDeadline).catch(() => null),
         name: info.name || info.src || "frame",
         src: info.src,
       })
     }
-    return { candidates, skipped: Math.max(0, handles.length - maxSnapshotFrames), timedOut: false }
+    return { candidates, skipped: Math.max(0, handles.length - examined) }
   } finally {
     await Promise.all(handles.map((handle) => handle.dispose().catch(() => {})))
   }
 }
 
-/** A Playwright call with no timeout option of its own, bounded by the snapshot deadline. */
-function withinDeadline<T>(promise: Promise<T>, deadline: number): Promise<T> {
-  const remaining = deadline - Date.now()
-  if (remaining <= 0) return Promise.reject(new Error("snapshot deadline reached"))
+/**
+ * A Playwright call with no timeout option of its own, bounded by a deadline. Handlers are always attached: a late
+ * resolution is passed to `onLate` (so handles are disposed) and a late rejection is swallowed.
+ */
+function withinDeadline<T>(promise: Promise<T>, deadline: number, onLate?: (value: T) => void): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("snapshot deadline reached")), remaining)
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      reject(new Error("snapshot deadline reached"))
+    }, Math.max(0, deadline - Date.now()))
     promise.then(
-      (value) => { clearTimeout(timer); resolve(value) },
-      (error) => { clearTimeout(timer); reject(error) },
+      (value) => {
+        clearTimeout(timer)
+        if (settled) {
+          onLate?.(value)
+          return
+        }
+        settled = true
+        resolve(value)
+      },
+      (error) => {
+        clearTimeout(timer)
+        if (settled) return
+        settled = true
+        reject(error)
+      },
     )
   })
 }
@@ -312,6 +341,8 @@ async function frameContent(candidate: IframeCandidate, options: {
   readonly depth: number
   readonly budget: FrameBudget
   readonly deadline: number
+  /** Iframes still to capture from this document, including this one. */
+  readonly framesLeft: number
 }): Promise<string[]> {
   if (options.depth > maxSnapshotFrameDepth) return [noteLine(`content not captured (frames nested deeper than ${maxSnapshotFrameDepth})`)]
   if (options.budget.frames <= 0) {
@@ -325,7 +356,7 @@ async function frameContent(candidate: IframeCandidate, options: {
     options.budget.skipped.deadline += 1
     return []
   }
-  const timeout = frameCaptureTimeoutMs(remaining, options.budget.frames)
+  const timeout = frameCaptureTimeoutMs(remaining, options.framesLeft)
   options.budget.frames -= 1
   // A document that navigates between activation and the read is not patched any more: drop its result.
   let navigated = false

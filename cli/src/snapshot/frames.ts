@@ -16,9 +16,9 @@ export const maxSnapshotFrameDepth = 3
 export const maxSnapshotFrameTimeoutMs = 1_000
 
 /**
- * One frame's slice of the deadline: an even share of what is left across the frames still to capture, at least
- * a second, and never more than the deadline itself. A hung first frame cannot starve later ones, while a single
- * slow frame still gets the time the caller allowed.
+ * One frame's slice of the deadline: an even share of what is left across the frames actually still to capture
+ * (never the fixed cap), at least a second, and never more than the deadline itself. A hung first frame cannot
+ * starve later ones, while a single slow frame gets the time the caller allowed.
  */
 export function frameCaptureTimeoutMs(remainingMs: number, framesLeft: number): number {
   return Math.min(remainingMs, Math.max(maxSnapshotFrameTimeoutMs, Math.floor(remainingMs / Math.max(1, framesLeft))))
@@ -85,7 +85,10 @@ export async function captureSnapshotFrames(options: {
       options.budget.skipped.deadline += 1
       continue
     }
-    const timeout = frameCaptureTimeoutMs(remaining, options.budget.frames)
+    // Share the deadline across the iframes this document still has, capped by the global frame budget, so a
+    // single slow frame gets what the caller allowed instead of one eighth of it.
+    const framesAhead = options.entries.slice(index).filter((candidate) => candidate.iframe && candidate.selector).length
+    const timeout = frameCaptureTimeoutMs(remaining, Math.min(options.budget.frames, framesAhead))
     options.budget.frames -= 1
     const frame = await contentFrameOf(options.frame, entry.selector, timeout)
     if (!frame) {
