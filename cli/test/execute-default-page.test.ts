@@ -6,6 +6,7 @@ import {
   defaultPageRecoveredWarning,
   defaultPageReattachedWarning,
   defaultPageReplacedWarning,
+  installClosedPageReplacementGuard,
   SessionPageRecoveryError,
 } from "../src/execute/page-recovery.ts"
 import { DefaultPageHost, type DefaultPageHostOptions, type DefaultPageTarget } from "../src/execute/default-page.ts"
@@ -76,6 +77,10 @@ class FakePage {
     this.evaluateCalls += 1
     if (this.evaluateError) throw this.evaluateError
     return false
+  }
+
+  async goto(): Promise<null> {
+    return null
   }
 
   async close(): Promise<void> {
@@ -205,6 +210,18 @@ class TestHost extends DefaultPageHost {
   mediaFeatures(): Map<string, string> {
     return this.explicitMediaFeatures
   }
+
+  raiseActionTimeout(milliseconds: number): void {
+    this.actionTimeoutMs = milliseconds
+  }
+
+  armActionTimeout(page: Page): void {
+    this.applyActionTimeout(page)
+  }
+
+  restoreActionTimeoutNow(): void {
+    this.restoreActionTimeout()
+  }
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
@@ -308,6 +325,80 @@ describe("DefaultPageHost binding", () => {
     expect(host.lastNonBlankUrl()).toBe("https://example.com/next")
     expect(page.defaultTimeoutMs).toBe(30_000)
     expect(page.emulatedMedia.at(-1)?.features).toContainEqual({ name: "prefers-color-scheme", value: "dark" })
+  })
+
+  test("a raised action timeout is applied on bind, survives navigation, and is restored", async () => {
+    const host = new TestHost()
+    const page = new FakePage()
+    host.raiseActionTimeout(240_000)
+
+    host.bind(page.asPage(), "target-1", true)
+    expect(page.defaultTimeoutMs).toBe(240_000)
+
+    page.currentUrl = "https://example.com/next"
+    page.emit("framenavigated", page.frame)
+    await settle()
+    expect(page.defaultTimeoutMs).toBe(240_000)
+
+    host.restoreActionTimeoutNow()
+    expect(page.defaultTimeoutMs).toBe(30_000)
+  })
+
+  test("the closed-page replacement guard restores the current action timeout after a navigation", async () => {
+    const page = new FakePage()
+    let cleared = false
+    let actionTimeoutMs = 240_000
+    installClosedPageReplacementGuard(page.asPage(), () => {
+      cleared = true
+    }, () => actionTimeoutMs)
+    expect(page.defaultTimeoutMs).toBe(2_500)
+
+    await page.goto()
+    expect(cleared).toBe(true)
+    expect(page.defaultTimeoutMs).toBe(240_000)
+
+    // A later call's budget, not the one the guard was installed with.
+    actionTimeoutMs = 90_000
+    await page.goto()
+    expect(page.defaultTimeoutMs).toBe(90_000)
+  })
+
+  test("a recreated page keeps its 2.5s guard through the call's apply and restore", async () => {
+    const host = new TestHost()
+    const page = new FakePage("https://example.com/", "target-1")
+    host.bind(page.asPage(), "target-1", true)
+    page.emit("close")
+    const created = new FakePage("about:blank", "target-2")
+    const context = asContext({ pages: () => [], newPage: async () => created.asPage() })
+    host.raiseActionTimeout(240_000)
+
+    const recreated = await host.sessionPage(context)
+    expect(recreated).toBe(created.asPage())
+    expect(created.defaultTimeoutMs).toBe(2_500)
+
+    host.armActionTimeout(recreated)
+    expect(created.defaultTimeoutMs).toBe(2_500)
+    host.restoreActionTimeoutNow()
+    expect(created.defaultTimeoutMs).toBe(2_500)
+  })
+
+  test("a recreated page takes the current action timeout once it navigates", async () => {
+    const host = new TestHost()
+    const page = new FakePage("https://example.com/", "target-1")
+    host.bind(page.asPage(), "target-1", true)
+    page.emit("close")
+    const created = new FakePage("about:blank", "target-2")
+    const context = asContext({ pages: () => [], newPage: async () => created.asPage() })
+    host.raiseActionTimeout(240_000)
+
+    expect(await host.sessionPage(context)).toBe(created.asPage())
+    expect(created.defaultTimeoutMs).toBe(2_500)
+
+    await created.goto()
+    expect(created.defaultTimeoutMs).toBe(240_000)
+
+    host.restoreActionTimeoutNow()
+    expect(created.defaultTimeoutMs).toBe(30_000)
   })
 
   test("a stale page's close event is ignored after a rebind", () => {

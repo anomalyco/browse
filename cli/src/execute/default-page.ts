@@ -3,6 +3,7 @@ import type { BrowserContext, Frame, Page } from "patchright-core"
 import { applyExplicitMediaFeatures } from "./guards.ts"
 import {
   debuggingBarDismissedWarning,
+  defaultActionTimeoutMs,
   defaultPageClosedWarning,
   defaultPageCrashedWarning,
   defaultPageReattachedWarning,
@@ -67,6 +68,11 @@ export abstract class DefaultPageHost {
   protected readonly explicitMediaFeatures = new Map<string, string>()
   protected explicitMedia: string | undefined
   protected pendingWarnings: string[] = []
+  /** Playwright's default per-action timeout: raised for a call that asked for a longer execute. */
+  protected actionTimeoutMs = defaultActionTimeoutMs
+  private readonly actionTimeoutPages = new Set<Page>()
+  /** A page that replaced a closed one: its 2.5s guard owns the timeout until it navigates. */
+  private actionTimeoutGuardedPage: Page | undefined
   protected boundPageListeners: {
     readonly page: Page
     readonly close: () => void
@@ -89,6 +95,27 @@ export abstract class DefaultPageHost {
 
   protected addWarningOnce(warning: string | undefined): void {
     if (warning && !this.pendingWarnings.includes(warning)) this.pendingWarnings.push(warning)
+  }
+
+  /** Give a page this call's action budget, remembering it so the restore covers every page the call touched. */
+  protected applyActionTimeout(page: Page): void {
+    this.actionTimeoutPages.add(page)
+    if (page === this.actionTimeoutGuardedPage) return
+    page.setDefaultTimeout?.(this.actionTimeoutMs)
+  }
+
+  /** Back to the steady-state action timeout on every page this session raised, but not over a live 2.5s guard. */
+  protected restoreActionTimeout(): void {
+    this.actionTimeoutMs = defaultActionTimeoutMs
+    for (const page of this.actionTimeoutPages) {
+      if (page !== this.actionTimeoutGuardedPage) page.setDefaultTimeout?.(this.actionTimeoutMs)
+    }
+    this.actionTimeoutPages.clear()
+  }
+
+  /** The page's guard is gone: a navigation or `goto` decides its timeout from now on. */
+  private releaseActionTimeoutGuard(page: Page): void {
+    if (this.actionTimeoutGuardedPage === page) this.actionTimeoutGuardedPage = undefined
   }
 
   /** Forget the bound page; a target id is re-resolved exactly on the next execute. */
@@ -179,6 +206,7 @@ export abstract class DefaultPageHost {
   protected bindDefaultPage(page: Page, targetId: string | undefined, ownsPage: boolean, notify: boolean): void {
     this.clearPageListeners()
     this.page = page
+    this.applyActionTimeout(page)
     if (targetId === undefined || targetId !== this.defaultPageTargetId) {
       this.pageCrashed = false
       this.pageProtectedUi = false
@@ -205,7 +233,8 @@ export abstract class DefaultPageHost {
       if (this.page === page && frame === page.mainFrame()) {
         this.pageCrashed = false
         this.recordNonBlankUrl(frame.url())
-        page.setDefaultTimeout?.(30_000)
+        this.releaseActionTimeoutGuard(page)
+        page.setDefaultTimeout?.(this.actionTimeoutMs)
         if (this.explicitMediaFeatures.size > 0) {
           void applyExplicitMediaFeatures(page, this.explicitMedia, this.explicitMediaFeatures)
         }
@@ -305,9 +334,11 @@ export abstract class DefaultPageHost {
     const targetId = await resolvePageTargetId(page)
     this.bindDefaultPage(page, targetId, true, true)
     if (this.recreatedFromClosedUrl) {
+      this.actionTimeoutGuardedPage = page
       installClosedPageReplacementGuard(page, () => {
         this.recreatedFromClosedUrl = undefined
-      })
+        this.releaseActionTimeoutGuard(page)
+      }, () => this.actionTimeoutMs)
     }
     return page
   }

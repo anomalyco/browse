@@ -65,7 +65,12 @@ export function executeInSession(
       yield* ctx.setExecuting(session.id, true)
       const stopSignal = Deferred.makeUnsafe<{ readonly message: string; readonly diagnostic: string }>()
       const released = Deferred.makeUnsafe<{ readonly forced: boolean }>()
-      const effectiveTimeoutMs = options.timeoutMs ?? ctx.hooks.executeTimeoutMs ?? defaultExecuteTimeoutMs
+      const chosenTimeoutMs = options.timeoutMs ?? ctx.hooks.executeTimeoutMs
+      const effectiveTimeoutMs = chosenTimeoutMs ?? defaultExecuteTimeoutMs
+      // Only an explicit per-call or relay timeout raises Playwright's 30s action timeout; the built-in default leaves it alone.
+      const actionTimeoutMs = chosenTimeoutMs === undefined
+        ? undefined
+        : chosenTimeoutMs === 0 ? 0 : Math.max(30_000, chosenTimeoutMs)
       let deadline: ExecutionDeadline | undefined
       const stopRunning = (message: string, diagnostic: string) => {
         deadline?.cancel()
@@ -95,7 +100,10 @@ export function executeInSession(
       // script that never settles (it awaits a timer the stop cleared) is abandoned, not awaited.
       const result = yield* Effect.gen(function* () {
         const script = yield* session.sandbox
-          .execute(options.code, { ...(options.targetSelection ? { targetSelection: options.targetSelection } : {}) })
+          .execute(options.code, {
+            ...(options.targetSelection ? { targetSelection: options.targetSelection } : {}),
+            ...(actionTimeoutMs === undefined ? {} : { actionTimeoutMs }),
+          })
           .pipe(Effect.forkDetach({ startImmediately: true }))
         const first = yield* Effect.raceFirst(
           Fiber.join(script).pipe(Effect.map((value) => ({ settled: true as const, value }))),

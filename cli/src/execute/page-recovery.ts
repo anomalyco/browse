@@ -6,6 +6,8 @@ import { runtimeFailureKind } from "../update/runtime-diagnostics.ts"
 import { resolvePageTargetId } from "./target-selection.ts"
 
 export const playwrightCloseTimeoutMs = 2_000
+/** The default timeout Playwright actions and navigations get on a session's pages. */
+export const defaultActionTimeoutMs = 30_000
 export const playwrightConnectTimeoutMs = 15_000
 // CdpRuntime can spend two 3s observation windows replaying shared contexts.
 // Leave room for that healthy reconnect path while bounding adopted setup.
@@ -370,11 +372,15 @@ export async function waitForExactTarget<T>(options: {
   }
 }
 
-export function installClosedPageReplacementGuard(page: Page, clearRecreatedFromClosedUrl: () => void): void {
+export function installClosedPageReplacementGuard(
+  page: Page,
+  clearRecreatedFromClosedUrl: () => void,
+  actionTimeoutMs: () => number = () => defaultActionTimeoutMs,
+): void {
   page.setDefaultTimeout?.(2_500)
   const restoreTimeout = () => {
     clearRecreatedFromClosedUrl()
-    page.setDefaultTimeout?.(30_000)
+    page.setDefaultTimeout?.(actionTimeoutMs())
   }
   if (typeof page.goto === "function") {
     const originalGoto = page.goto.bind(page)
