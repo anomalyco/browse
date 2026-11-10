@@ -28,16 +28,23 @@ export function clearDeviceMetricsOverride<Error>(
   })
 }
 
+type OverrideEntry = {
+  /** The browse session whose client set it, or undefined for a raw client. */
+  sessionId: string | undefined
+  generation: number
+}
+
 /**
- * Tabs with a device-metrics override, and the browse session whose script set it. Generations are
- * monotonic across the relay so an in-flight clear retry can never match a set that replaced it.
+ * Tabs with a device-metrics override, the session that most recently set it, and a relay-wide
+ * generation. The generation stays on the tab when ownership is taken or cleared, so an in-flight
+ * clear can check that the override it started on is still the current one.
  */
 export class DeviceMetricsOverrides {
   private nextGeneration = 1
-  private readonly entries = new Map<number, { readonly sessionId: string; readonly generation: number }>()
+  private readonly entries = new Map<number, OverrideEntry>()
 
   /** Records a forwarded set and returns its generation. */
-  mark(tabId: number, sessionId: string): number {
+  mark(tabId: number, sessionId: string | undefined): number {
     const generation = this.nextGeneration++
     this.entries.set(tabId, { sessionId, generation })
     return generation
@@ -47,20 +54,33 @@ export class DeviceMetricsOverrides {
     return this.entries.get(tabId)?.generation ?? 0
   }
 
-  /** Removes and returns the tabs whose latest set came from this session. */
-  take(sessionId: string): number[] {
-    const taken: number[] = []
+  /** The session whose client set the tab's current override, if one is tracked. */
+  sessionId(tabId: number): string | undefined {
+    return this.entries.get(tabId)?.sessionId
+  }
+
+  /** True when the tab still has the override with this generation. */
+  isCurrent(tabId: number, generation: number): boolean {
+    return this.generation(tabId) === generation
+  }
+
+  /** Drops this session's ownership of its tabs, keeping their generations. */
+  take(sessionId: string): Array<{ readonly tabId: number; readonly generation: number }> {
+    const taken: Array<{ readonly tabId: number; readonly generation: number }> = []
     for (const [tabId, entry] of this.entries) {
       if (entry.sessionId !== sessionId) continue
-      this.entries.delete(tabId)
-      taken.push(tabId)
+      entry.sessionId = undefined
+      taken.push({ tabId, generation: entry.generation })
     }
     return taken
   }
 
-  /** Drops a tab after its own clear, unless a newer set replaced it. */
-  clear(tabId: number, generation: number): void {
-    if (this.entries.get(tabId)?.generation === generation) this.entries.delete(tabId)
+  /** Drops ownership after a clear, unless a newer set replaced it or another session owns it. */
+  clear(tabId: number, generation: number, sessionId: string | undefined): void {
+    const entry = this.entries.get(tabId)
+    if (!entry || entry.generation !== generation) return
+    if (sessionId !== undefined && entry.sessionId !== undefined && entry.sessionId !== sessionId) return
+    entry.sessionId = undefined
   }
 
   /** Drops a tab when its runtime state goes away, so the map does not grow forever. */
@@ -69,11 +89,13 @@ export class DeviceMetricsOverrides {
   }
 }
 
-/** Tabs an execute end should clear: those this session set, and never for a read-only session. */
+/** Tabs an execute end should clear: this session's, visible, and never for a read-only session. */
 export function tabsToClearOnExecuteEnd(options: {
   readonly overrides: DeviceMetricsOverrides
   readonly readOnly: boolean
   readonly sessionId: string
-}): number[] {
-  return options.readOnly ? [] : options.overrides.take(options.sessionId)
+  readonly canSee: (tabId: number) => boolean
+}): Array<{ readonly tabId: number; readonly generation: number }> {
+  if (options.readOnly) return []
+  return options.overrides.take(options.sessionId).filter(({ tabId }) => options.canSee(tabId))
 }

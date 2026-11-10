@@ -161,7 +161,7 @@ function guardedPage(options: {
     setViewportSize: async () => {
       if (options.setViewportFails) throw new Error("target closed")
     },
-    evaluate: async () => ({ innerWidth: 0, innerHeight: 0, width: 0, height: 0, outerWidth: 1000, dpr: 1 }),
+    evaluate: async () => ({ innerWidth: 990, innerHeight: 0, width: 990, height: 0, outerWidth: 1000, dpr: 1 }),
     isClosed: () => false,
     context: () => ({
       newCDPSession: async () => ({
@@ -308,6 +308,32 @@ describe("restoreEmulatedViewport", () => {
     expect(sent).toEqual(["Emulation.clearDeviceMetricsOverride"])
   })
 
+  test("stops clearing when the overall restore times out", async () => {
+    const sent: string[] = []
+    type FakeSession = { send: (method: string) => Promise<void>; detach: () => Promise<void> }
+    let resolveSession: ((session: FakeSession) => void) | undefined
+    const page = asPage({
+      setViewportSize: async () => {},
+      evaluate: async () => ({ innerWidth: 990, innerHeight: 0, width: 990, height: 0, outerWidth: 1000, dpr: 1 }),
+      isClosed: () => false,
+      context: () => ({
+        newCDPSession: () => new Promise<FakeSession>((resolve) => {
+          resolveSession = resolve
+        }),
+      }),
+    })
+    installViewportZoomGuard(viewportGuardOptions(page))
+    await page.setViewportSize({ width: 1200, height: 800 })
+
+    // The session never opens before the ~2s bound; when it does, the cancelled restore must not
+    // send a clear over the next script's viewport.
+    await restoreEmulatedViewport(page)
+    resolveSession?.({ send: async (method: string) => { sent.push(method) }, detach: async () => {} })
+    await Bun.sleep(100)
+
+    expect(sent).toEqual([])
+  }, 10_000)
+
   test("retries a clear that Chrome dropped", async () => {
     const sent: string[] = []
     let width = 780
@@ -315,7 +341,7 @@ describe("restoreEmulatedViewport", () => {
       setViewportSize: async (size: { width: number; height: number }) => {
         width = size.width
       },
-      evaluate: async () => ({ innerWidth: width, innerHeight: 800, width, height: 800, outerWidth: 1000, dpr: 1 }),
+      evaluate: async () => ({ innerWidth: width, innerHeight: 800, width, height: 800, outerWidth: 800, dpr: 1 }),
       isClosed: () => false,
       context: () => ({
         newCDPSession: async () => ({

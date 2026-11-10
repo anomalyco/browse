@@ -283,20 +283,27 @@ export function createCdpDispatcher(options: {
     // at the top target, so a clear addressed to a child frame goes to the tab instead (a separate
     // fix: that request would otherwise clear nothing).
     if (message.method === "Emulation.clearDeviceMetricsOverride") {
+      const clientSessionId = cdpClients.sessionId(socket)
+      const owner = deviceMetricsOverrides.sessionId(tabId)
+      if (clientSessionId !== undefined && owner !== undefined && owner !== clientSessionId) {
+        // Another session's script set this tab's current override; this clear would wipe it.
+        return {}
+      }
       const generation = deviceMetricsOverrides.generation(tabId)
+      if (!deviceMetricsOverrides.isCurrent(tabId, generation)) return {}
       yield* clearDeviceMetricsOverride(
         (method, params) => sendDebuggerCommand({ tabId, method, params }),
-        { retry: () => deviceMetricsOverrides.generation(tabId) === generation },
+        { retry: () => deviceMetricsOverrides.isCurrent(tabId, generation) },
       )
       // The override is gone, so the execute end does not need to clear it again.
-      deviceMetricsOverrides.clear(tabId, generation)
+      deviceMetricsOverrides.clear(tabId, generation, clientSessionId)
       return {}
     }
-    if (message.method === "Emulation.setDeviceMetricsOverride") {
-      // Remember the tab (and which session's script set it) so the execute end clears it if the
-      // script doesn't. Raw CDP clients have no browse session, so their overrides aren't tracked.
-      const sessionId = cdpClients.sessionId(socket)
-      if (sessionId) deviceMetricsOverrides.mark(tabId, sessionId)
+    if (message.method === "Emulation.setDeviceMetricsOverride" && route.chromeSessionId === undefined) {
+      // Emulation only applies at the top target. Remember the tab, and which session's client set
+      // it, so the execute end can clear it if the script doesn't; a raw client marks without an
+      // owner, so no session's execute end will clear its viewport.
+      deviceMetricsOverrides.mark(tabId, cdpClients.sessionId(socket))
     }
     if (message.method === "Page.navigate" && route.chromeSessionId === undefined) {
       const dataNavigation = yield* navigateTopFrameToDataUrl({

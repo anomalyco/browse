@@ -307,16 +307,20 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         // until the debugger detaches. Clear the tabs this session's script set an override on,
         // owned or just driven through target selection, which also covers raw CDP overrides. This
         // runs inline under the session's execute semaphore, so nothing is left for the next call.
-        const tabIds = tabsToClearOnExecuteEnd({
+        const tabs = tabsToClearOnExecuteEnd({
           overrides: deviceMetricsOverrides,
           readOnly: sessions.isReadOnly(sessionId),
           sessionId,
+          canSee: (tabId) => {
+            const target = registry.tabTargets.get(tabId)
+            return target !== undefined && cdpRouter.canSessionSeeTarget(sessionId, target)
+          },
         })
-        for (const tabId of tabIds) {
-          const generation = deviceMetricsOverrides.generation(tabId)
+        for (const { tabId, generation } of tabs) {
+          if (!deviceMetricsOverrides.isCurrent(tabId, generation)) continue
           yield* clearDeviceMetricsOverride(
             (method, params) => sendDebuggerCommand({ tabId, method, params }),
-            { retry: () => deviceMetricsOverrides.generation(tabId) === generation },
+            { retry: () => deviceMetricsOverrides.isCurrent(tabId, generation) },
           ).pipe(Effect.ignore)
         }
       }),

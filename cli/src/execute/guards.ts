@@ -118,8 +118,9 @@ export function installViewportZoomGuard(options: {
             page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight, outerWidth: window.outerWidth })),
             1_000,
           ).catch(() => timedOut)
-          // An emulated viewport can be wider than the window; only accept a real-looking one.
-          if (typeof before !== "symbol" && before.width <= before.outerWidth) {
+          // A real content width sits just inside the window (a few pixels of frame, a scrollbar);
+          // an emulated one is often much wider. Keep the size only as a hint when it looks real.
+          if (typeof before !== "symbol" && before.width <= before.outerWidth && before.outerWidth - before.width <= 40) {
             guard.original = { width: before.width, height: before.height }
           }
         }
@@ -161,12 +162,11 @@ type ServerPage = {
 }
 
 /**
- * Playwright has no API to forget an emulated viewport. It keeps the emulated size on the server
- * Page (`_emulatedSize`, replayed to a new frame session) and the last metrics it sent on the main
- * frame session (`_metricsOverride`, compared to skip identical calls). Clearing the override
- * through CDP alone would therefore come back on a cross-process navigation and a later
- * setViewportSize of the same size would be skipped. These are the two fields setViewportSize
- * caches; the client copy only backs page.viewportSize().
+ * Playwright has no API to forget an emulated viewport. Its main frame session caches the metrics
+ * it last sent (`_metricsOverride`) and skips identical calls, so after a CDP clear a later
+ * setViewportSize of the same size would send nothing. The server Page also keeps `_emulatedSize`
+ * (used if it initializes a frame session or resets for reuse), and the client copy backs
+ * page.viewportSize(). Reset all three.
  */
 function forgetPlaywrightViewport(page: Page): void {
   try {
@@ -185,8 +185,9 @@ function forgetPlaywrightViewport(page: Page): void {
  * a viewport inside an attached tab (it does not resize the user's window), so leaving the override
  * letterboxes the page. Chrome can drop a clear that races the set, so this clears, waits, and uses
  * the captured window size only as a hint for whether one more clear is needed; the overall wait is
- * bounded so a slow browser cannot turn a finished script into a timeout. Cleaning the cached
- * Playwright state keeps later calls correct.
+ * bounded so a slow browser cannot turn a finished script into a timeout, and a restore that loses
+ * that race stops before its next command. Cleaning the cached Playwright state keeps later calls
+ * correct.
  */
 export async function restoreEmulatedViewport(page: Page): Promise<void> {
   const guard = viewportGuards.get(page)
@@ -194,17 +195,23 @@ export async function restoreEmulatedViewport(page: Page): Promise<void> {
   const original = guard.original
   guard.dirty = false
   guard.original = undefined
+  // Set when the overall timeout wins: the restore keeps running, and without this it could clear
+  // a viewport that the next script set after its own setViewportSize.
+  let cancelled = false
   const restore = async () => {
     if (page.isClosed()) return
     const cdp = await page.context().newCDPSession(page)
     try {
+      if (cancelled) return
       const attempts = original ? 3 : 2
       for (let attempt = 0; attempt < attempts; attempt++) {
+        if (cancelled) return
         await cdp.send("Emulation.clearDeviceMetricsOverride")
         // The clear is applied by the renderer's next layout; measuring immediately can still read
         // the emulated width, which used to look like a dropped clear. A clear repeated only after
         // this pause also lands after the set's visible-size update, which is what Chrome races.
         await delay(120)
+        if (cancelled) return
         if (!original) continue
         const measured = await withTimeout(
           page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight })),
@@ -217,7 +224,8 @@ export async function restoreEmulatedViewport(page: Page): Promise<void> {
       await cdp.detach().catch(() => {})
     }
   }
-  await withTimeout(restore(), viewportRestoreTimeoutMs).catch(() => timedOut)
+  const outcome = await withTimeout(restore(), viewportRestoreTimeoutMs).catch(() => timedOut)
+  if (typeof outcome === "symbol") cancelled = true
   forgetPlaywrightViewport(page)
 }
 
