@@ -6,8 +6,9 @@ import { installFakeRelaySocket } from "../relay-stub"
 // The relay attaches a debugger as soon as tabs.create answers; Vivaldi then never answers commands on a tab that was
 // still loading, so an about:blank tab's answer waits for it to leave "loading". A tab created at a real URL (an older
 // relay) must answer at once, before the page loads and bypasses the relay's allowlist. And Page.navigate to
-// about:blank with a fragment crashes Chrome and Vivaldi, so the extension sends plain about:blank instead. Run by
-// ../isolated.test.ts in a process of its own.
+// about:blank with a fragment crashes Chrome and Vivaldi, so the extension sends plain about:blank instead. A Chrome
+// call that never settles (Dia) must not hold the answer past the relay's 15 s RPC timeout. Run by ../isolated.test.ts
+// in a process of its own.
 
 const stub = installChrome()
 ;(globalThis as { __OPENCODE_BROWSER_BUILD__?: string }).__OPENCODE_BROWSER_BUILD__ = "test"
@@ -45,10 +46,12 @@ const realCreate = stub.chrome.tabs.create
 const realGet = stub.chrome.tabs.get
 let status: "loading" | "complete" | undefined
 let getsFail = false
+let getsHang = false
 let gets = 0
 stub.chrome.tabs.create = async (options) => Object.assign(await realCreate(options), { status })
 stub.chrome.tabs.get = async (id) => {
   gets++
+  if (getsHang) return new Promise<never>(() => {})
   if (getsFail) throw new Error(`No tab with id: ${id}.`)
   return Object.assign(await realGet(id), { status })
 }
@@ -103,6 +106,50 @@ test("tabs.create stops waiting when the tab is gone", async () => {
   expect(gets).toBeGreaterThan(0)
   expect(typeof result.tabId).toBe("number")
   getsFail = false
+})
+
+test("tabs.create answers within its budget when tabs.get never settles", async () => {
+  status = "loading"
+  getsHang = true
+  gets = 0
+  const now = Date.now()
+  const started = performance.now()
+  setSystemTime(now)
+  try {
+    const id = command("tabs.create", { url: "about:blank", active: false })
+    await until(() => gets > 0)
+    // The first get gets a short slice, then the loop's deadline check gives up.
+    setSystemTime(now + 10_001)
+    const result = await answerFor(id)
+    expect(typeof result.tabId).toBe("number")
+    expect(performance.now() - started).toBeLessThan(1_000)
+    const diagnostics = await relay.diagnostics()
+    expect(diagnostics).toContain("tabs.create.start")
+    expect(diagnostics).toContain("tabs.create.loadingTimeout")
+  } finally {
+    getsHang = false
+    setSystemTime()
+  }
+})
+
+test("tabs.create answers without waiting for tabs.update", async () => {
+  status = "complete"
+  gets = 0
+  const realUpdate = stub.chrome.tabs.update
+  let updates = 0
+  stub.chrome.tabs.update = () => {
+    updates++
+    return new Promise<never>(() => {})
+  }
+  const started = Date.now()
+  try {
+    const result = await answerFor(command("tabs.create", { url: "about:blank", active: false }))
+    expect(Date.now() - started).toBeLessThan(1_000)
+    expect(updates).toBe(1)
+    expect(typeof result.tabId).toBe("number")
+  } finally {
+    stub.chrome.tabs.update = realUpdate
+  }
 })
 
 test("Page.navigate to about:blank with a fragment is sent as about:blank; other urls are untouched", async () => {

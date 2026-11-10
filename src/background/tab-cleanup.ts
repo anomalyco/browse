@@ -1,6 +1,6 @@
 export * as TabCleanup from "./tab-cleanup"
 import { DEFAULT_IDLE_MINUTES, IDLE_MINUTES_KEY, idleMinutesSetting } from "../shared/protocol"
-import { ownedGroup } from "./agent-relay/wire"
+import { ownedGroup, TIMED_OUT, withTimeout } from "./agent-relay/wire"
 
 // Closes tabs agents opened once nobody has touched them for a while, so agent work doesn't leave a trail of
 // tabs behind. Only tabs an agent created are tracked (the relay's
@@ -28,6 +28,8 @@ let generation = 0
 let browserSession: Promise<boolean> | undefined
 /** Touches are written at most this often; which tabs are tracked is written at once. */
 const TOUCH_SAVE_MS = 2_000
+/** How long restore() waits for the tab and group lists; Dia's tab-group API can never settle. */
+const RESTORE_QUERY_MS = 2_000
 /** Tabs that must stay open whatever their age, for example while a handoff waits for the user or a recording runs. */
 const guards: ((tabId: number) => boolean)[] = []
 
@@ -185,10 +187,14 @@ function restore() {
         if (!tracked.has(Number(tabId))) tracked.set(Number(tabId), entry)
       return
     }
-    const [tabs, groups] = await Promise.all([
-      chrome.tabs.query({}).catch(() => [] as chrome.tabs.Tab[]),
-      chrome.tabGroups.query({}).catch(() => [] as chrome.tabGroups.TabGroup[]),
+    const [queriedTabs, queriedGroups] = await Promise.all([
+      withTimeout(chrome.tabs.query({}).catch(() => [] as chrome.tabs.Tab[]), RESTORE_QUERY_MS),
+      withTimeout(chrome.tabGroups.query({}).catch(() => [] as chrome.tabGroups.TabGroup[]), RESTORE_QUERY_MS),
     ])
+    // A query that timed out counts as none, like a failed one: without its groups the stored list isn't trusted, and
+    // without its tabs none of them are known to be open.
+    const tabs = queriedTabs === TIMED_OUT ? [] : queriedTabs
+    const groups = queriedGroups === TIMED_OUT ? [] : queriedGroups
     const open = new Map(tabs.filter((tab) => tab.id !== undefined).map((tab) => [tab.id!, tab]))
     const ownedGroups = new Set(groups.filter((group) => ownedGroup(group.title)).map((group) => group.id))
     const kept: Record<string, Tracked> = {}
