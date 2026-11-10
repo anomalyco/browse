@@ -95,30 +95,41 @@ try {
     /snapshot within expects exactly one match for selector: #dup; got 0/,
   )
 
-  // Readonly text fields show the value the page generated; editable, password and one-time-code values stay hidden.
+  // Readonly text fields show the value the page generated; editable, password, one-time-code and card values stay hidden.
   const readonlyContent = `
     <main>
       <input type="text" readonly value="someone@example.com">
       <input type="password" readonly value="hunter2">
       <input type="text" readonly autocomplete="one-time-code" value="424242">
+      <input type="text" readonly autocomplete="cc-number" value="4111111111111111">
       <input type="text" value="private-marker">
       <input type="text" disabled>
+      <textarea readonly>readonly-notes</textarea>
+      <textarea>editable-notes</textarea>
+      <input type="checkbox" readonly value="cbval">
+      <input type="submit" readonly value="SubmitVal">
+      <input type="checkbox" disabled>
     </main>
   `
   await page.setContent(readonlyContent)
   const readonlySnapshot = await createSnapshotHelpers(page, registry()).snapshot()
   assert.match(readonlySnapshot, /readonly value="someone@example\.com"/, readonlySnapshot)
-  assert.equal((readonlySnapshot.match(/^- textbox "textbox"/gm) ?? []).length, 5, readonlySnapshot)
+  assert.match(readonlySnapshot, /readonly value="readonly-notes"/, readonlySnapshot)
+  assert.equal((readonlySnapshot.match(/^- textbox "textbox"/gm) ?? []).length, 8, readonlySnapshot)
   assert.match(readonlySnapshot, /textbox "textbox" \[ref=e\d+ disabled\]/, readonlySnapshot)
-  assert.doesNotMatch(readonlySnapshot, /hunter2|424242|private-marker/)
+  assert.doesNotMatch(readonlySnapshot, /hunter2|424242|4111111111111111|private-marker|editable-notes/)
+  assert.doesNotMatch(readonlySnapshot, /readonly value="(?:cbval|SubmitVal)"/, readonlySnapshot)
+  assert.doesNotMatch(readonlySnapshot, /^- checkbox "checkbox" .*disabled/m, readonlySnapshot)
 
+  // A fresh CDP context: the redaction selector has to be registered before the page's first evaluate.
   const readonlyConnection = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`)
   try {
     const readonlyPage = await readonlyConnection.contexts()[0]!.newPage()
     await readonlyPage.setContent(readonlyContent)
     const readonlyAria = await createAriaSnapshotHelper(readonlyPage)("main")
     assert.match(readonlyAria, /someone@example\.com/, readonlyAria)
-    assert.doesNotMatch(readonlyAria, /hunter2|424242|private-marker/)
+    assert.match(readonlyAria, /readonly-notes/, readonlyAria)
+    assert.doesNotMatch(readonlyAria, /hunter2|424242|4111111111111111|private-marker|editable-notes/)
     await readonlyPage.close()
   } finally { await readonlyConnection.close() }
 

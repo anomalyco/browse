@@ -55,7 +55,7 @@ const redactionSelectorSource = `({
         const isEditableDescendant = (element) => explicitEditableState(element) !== true && isInEditableSubtree(element)
         const isNativeTextControl = (element) => element instanceof HTMLTextAreaElement
           || (element instanceof HTMLInputElement && !state.nonTextInputTypes.has(element.type))
-        const readOnlyAutocompleteTokens = new Set(["current-password", "new-password", "one-time-code"])
+        const readOnlyAutocompleteTokens = new Set(["current-password", "new-password", "one-time-code", "cc-number", "cc-csc", "cc-exp", "cc-exp-month", "cc-exp-year"])
         const isReadOnlyTextControl = (element) => {
           if (!isNativeTextControl(element) || !element.readOnly) return false
           if (element instanceof HTMLInputElement && element.type === "password") return false

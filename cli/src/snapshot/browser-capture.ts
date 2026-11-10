@@ -358,7 +358,13 @@ export const captureSnapshotInBrowser = (
   if ((settings.rootRole && roleFor(root) !== settings.rootRole) || (settings.rootName && accessibleName(root) !== settings.rootName)) {
     throw new Error("Snapshot ref no longer identifies the captured element; call snapshot() again")
   }
-  const hiddenReadonlyAutocompleteTokens = new Set(["current-password", "new-password", "one-time-code"])
+  const nonTextInputTypes = new Set(["button", "checkbox", "file", "hidden", "image", "radio", "reset", "submit"])
+  const isNativeTextControl = (element: Element): element is HTMLInputElement | HTMLTextAreaElement =>
+    element instanceof HTMLTextAreaElement || (element instanceof HTMLInputElement && !nonTextInputTypes.has(element.type))
+  const hiddenReadonlyAutocompleteTokens = new Set([
+    "current-password", "new-password", "one-time-code",
+    "cc-number", "cc-csc", "cc-exp", "cc-exp-month", "cc-exp-year",
+  ])
   const detailsFor = (element: Element): string | undefined => {
     const details: string[] = []
     if (element instanceof HTMLInputElement) {
@@ -368,9 +374,10 @@ export const captureSnapshotInBrowser = (
     if ((ariaChecked === "true" || ariaChecked === "false" || ariaChecked === "mixed") && !(element instanceof HTMLInputElement)) {
       details.push(ariaChecked === "true" ? "checked" : ariaChecked === "false" ? "unchecked" : "checked=mixed")
     }
-    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+    if (isNativeTextControl(element)) {
       const autocomplete = (element.getAttribute("autocomplete") ?? "").toLowerCase().split(/\s+/)
-      if (element.readOnly && element.type !== "password" && !autocomplete.some((token) => hiddenReadonlyAutocompleteTokens.has(token))) {
+      const isPassword = element instanceof HTMLInputElement && element.type === "password"
+      if (element.readOnly && !isPassword && !autocomplete.some((token) => hiddenReadonlyAutocompleteTokens.has(token))) {
         details.push("readonly")
         const value = normalize(element.value)
         if (value) details.push(`value="${quote(truncate(value, 80))}"`)
@@ -895,8 +902,7 @@ export const captureSnapshotInBrowser = (
       ? (nameFromAuthorOnly ? authorAccessibleName(element) : displayName)
       : displayName
     const isDisabled = ((element as HTMLButtonElement).disabled === true) || element.getAttribute("aria-disabled") === "true"
-    const isDisabledTextControl = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
-    if (isInteractive && isDisabled && !displayName && !element.getAttribute("name") && !isDisabledTextControl) continue
+    if (isInteractive && isDisabled && !displayName && !element.getAttribute("name") && !isNativeTextControl(element)) continue
     const fallbackName = role === "group" ? "Group"
       : role === "dialog" || role === "alertdialog" ? "Dialog"
       : role === "listbox" ? "Listbox"
