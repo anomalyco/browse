@@ -375,12 +375,12 @@ export async function waitForExactTarget<T>(options: {
 export function installClosedPageReplacementGuard(
   page: Page,
   clearRecreatedFromClosedUrl: () => void,
-  restoreTimeoutMs = defaultActionTimeoutMs,
+  actionTimeoutMs: () => number = () => defaultActionTimeoutMs,
 ): void {
   page.setDefaultTimeout?.(2_500)
   const restoreTimeout = () => {
     clearRecreatedFromClosedUrl()
-    page.setDefaultTimeout?.(restoreTimeoutMs)
+    page.setDefaultTimeout?.(actionTimeoutMs())
   }
   if (typeof page.goto === "function") {
     const originalGoto = page.goto.bind(page)

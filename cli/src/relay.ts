@@ -51,7 +51,7 @@ import { createRelayTransportServers } from "./relay/transport-server.ts"
 import { RootTargetLifecycle } from "./cdp/root-target-lifecycle.ts"
 import { defaultSessionCatalogPath, SessionCatalog } from "./session-manager/catalog.ts"
 import { appendJournalEntry, defaultJournalBaseDir, makeJournalEntry } from "./session-manager/journal.ts"
-import { defaultExecuteTimeoutMs, defaultShutdownTimeoutMs, OpenCodeBrowserSessions } from "./session-manager.ts"
+import { defaultShutdownTimeoutMs, OpenCodeBrowserSessions } from "./session-manager.ts"
 import { SessionNavigationGuard } from "./session-manager/navigation-guard.ts"
 import { TabActivity } from "./cdp/tab-activity.ts"
 import { TargetRegistry, type RootTargetChange, type TargetOwnershipChange } from "./cdp/target-registry.ts"
@@ -63,6 +63,15 @@ export {
   relayProcessFaultSummary,
   shouldSuppressRelayProcessFault,
 } from "./relay/process-guard.ts"
+
+/**
+ * OPENCODE_BROWSER_EXECUTE_TIMEOUT_MS when the relay was given one: the default budget for an execute that didn't
+ * choose its own, and the action budget that comes with it. Unset keeps the 60s fallback in session-manager.
+ */
+export const configuredExecuteTimeoutMs = Config.Int("OPENCODE_BROWSER_EXECUTE_TIMEOUT_MS").pipe(
+  Config.option,
+  Config.map(Option.getOrUndefined),
+)
 
 export const startRelay = Effect.fn("Relay.start")(function* (options: {
   readonly port?: number
@@ -243,7 +252,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     cdpClientCount: () => cdpClients.size,
   })
 
-  const executeTimeoutMs = yield* Config.Int("OPENCODE_BROWSER_EXECUTE_TIMEOUT_MS").pipe(Config.withDefault(defaultExecuteTimeoutMs))
+  const executeTimeoutMs = yield* configuredExecuteTimeoutMs
   const keepaliveIntervalMs = yield* Config.Int("OPENCODE_BROWSER_KEEPALIVE_MS").pipe(Config.withDefault(20_000))
   const idleTabTtlMs = yield* Config.Int("OPENCODE_BROWSER_IDLE_TAB_TTL_MS").pipe(Config.withDefault(15 * 60_000))
   const journalBaseDir = defaultJournalBaseDir()
@@ -287,7 +296,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       getUserAttachedPageUrls: (session) => registry.listRootTargets()
         .filter((target) => target.owner === "user" && browsers.ownerKey(target.tabId) === session.browser?.key)
         .map((target) => target.targetInfo.url || "about:blank"),
-      executeTimeoutMs,
+      ...(executeTimeoutMs === undefined ? {} : { executeTimeoutMs }),
       onExecuteStateChange: (sessionId, executing) => presentation.onSessionExecuteStateChange(sessionId, executing),
       onExecuteRecord: (record) => {
         const entry = makeJournalEntry({

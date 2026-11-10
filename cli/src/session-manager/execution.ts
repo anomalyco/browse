@@ -67,7 +67,7 @@ export function executeInSession(
       const released = Deferred.makeUnsafe<{ readonly forced: boolean }>()
       const chosenTimeoutMs = options.timeoutMs ?? ctx.hooks.executeTimeoutMs
       const effectiveTimeoutMs = chosenTimeoutMs ?? defaultExecuteTimeoutMs
-      // Only a timeout the caller or the relay chose raises Playwright's 30s action timeout; the default leaves it alone.
+      // Only an explicit per-call or relay timeout raises Playwright's 30s action timeout; the built-in default leaves it alone.
       const actionTimeoutMs = chosenTimeoutMs === undefined
         ? undefined
         : chosenTimeoutMs === 0 ? 0 : Math.max(30_000, chosenTimeoutMs)

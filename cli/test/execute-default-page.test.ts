@@ -215,6 +215,10 @@ class TestHost extends DefaultPageHost {
     this.actionTimeoutMs = milliseconds
   }
 
+  armActionTimeout(page: Page): void {
+    this.applyActionTimeout(page)
+  }
+
   restoreActionTimeoutNow(): void {
     this.restoreActionTimeout()
   }
@@ -340,18 +344,61 @@ describe("DefaultPageHost binding", () => {
     expect(page.defaultTimeoutMs).toBe(30_000)
   })
 
-  test("the closed-page replacement guard restores the call's action timeout after a navigation", async () => {
+  test("the closed-page replacement guard restores the current action timeout after a navigation", async () => {
     const page = new FakePage()
     let cleared = false
+    let actionTimeoutMs = 240_000
     installClosedPageReplacementGuard(page.asPage(), () => {
       cleared = true
-    }, 240_000)
+    }, () => actionTimeoutMs)
     expect(page.defaultTimeoutMs).toBe(2_500)
 
     await page.goto()
-
     expect(cleared).toBe(true)
     expect(page.defaultTimeoutMs).toBe(240_000)
+
+    // A later call's budget, not the one the guard was installed with.
+    actionTimeoutMs = 90_000
+    await page.goto()
+    expect(page.defaultTimeoutMs).toBe(90_000)
+  })
+
+  test("a recreated page keeps its 2.5s guard through the call's apply and restore", async () => {
+    const host = new TestHost()
+    const page = new FakePage("https://example.com/", "target-1")
+    host.bind(page.asPage(), "target-1", true)
+    page.emit("close")
+    const created = new FakePage("about:blank", "target-2")
+    const context = asContext({ pages: () => [], newPage: async () => created.asPage() })
+    host.raiseActionTimeout(240_000)
+
+    const recreated = await host.sessionPage(context)
+    expect(recreated).toBe(created.asPage())
+    expect(created.defaultTimeoutMs).toBe(2_500)
+
+    host.armActionTimeout(recreated)
+    expect(created.defaultTimeoutMs).toBe(2_500)
+    host.restoreActionTimeoutNow()
+    expect(created.defaultTimeoutMs).toBe(2_500)
+  })
+
+  test("a recreated page takes the current action timeout once it navigates", async () => {
+    const host = new TestHost()
+    const page = new FakePage("https://example.com/", "target-1")
+    host.bind(page.asPage(), "target-1", true)
+    page.emit("close")
+    const created = new FakePage("about:blank", "target-2")
+    const context = asContext({ pages: () => [], newPage: async () => created.asPage() })
+    host.raiseActionTimeout(240_000)
+
+    expect(await host.sessionPage(context)).toBe(created.asPage())
+    expect(created.defaultTimeoutMs).toBe(2_500)
+
+    await created.goto()
+    expect(created.defaultTimeoutMs).toBe(240_000)
+
+    host.restoreActionTimeoutNow()
+    expect(created.defaultTimeoutMs).toBe(30_000)
   })
 
   test("a stale page's close event is ignored after a rebind", () => {

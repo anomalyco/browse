@@ -241,11 +241,11 @@ connection itself isn't encrypted by browse; use a network that is (Tailscale or
 | `settings` | Read or change the settings below when the user asks (never the security switches or update behaviour); the options page updates live |
 | `status` | Connection status |
 
-`execute` takes an optional `timeoutMs` (`--timeout-ms` on the CLI) as the budget for the whole script: 60000
-milliseconds by default, 0 disables it, and time spent in `handoff()` doesn't count. When you set it (or set
-`OPENCODE_BROWSER_EXECUTE_TIMEOUT_MS` for the relay), Playwright actions and navigations in that call get the same
-budget, at least 30 seconds (0 removes their timeout too), so a long `pressSequentially()` isn't cut off at
-Playwright's 30-second default. Without either, actions keep that 30-second default.
+`execute` takes an optional `timeoutMs` (`--timeout-ms` on the CLI), the budget for the whole script: 60000
+milliseconds by default, 0 disables it, and time spent in `handoff()` doesn't count. An explicit `timeoutMs` (or
+`OPENCODE_BROWSER_EXECUTE_TIMEOUT_MS`) is also how long Playwright actions and navigations may take in that call, at
+least 30 seconds; without one they keep Playwright's 30-second default. At 0 their timeout is off too, so a stuck
+wait only ends when the call is stopped.
 
 `snapshot()` and `ariaSnapshot()` hide the values of editable fields and of password, one-time-code and card
 fields (`autocomplete` `cc-number`, `cc-csc`, `cc-exp*`). Other readonly fields show their value, so a generated
@@ -360,7 +360,7 @@ Escape hatches. Set them in the environment you start opencode (or your MCP clie
 | `OPENCODE_BROWSER_ALLOW_ALL_COOKIES=1` | Let sessions read and write every cookie in the profile |
 | `OPENCODE_BROWSER_ALLOW_FOREGROUND=1` | Allow `page.bringToFront()` |
 | `OPENCODE_BROWSER_AGENT_WINDOW=separate` | Open agent tabs in a separate window (`current`: in the user's window), overriding the options page's *Where agents open their tabs* |
-| `OPENCODE_BROWSER_EXECUTE_TIMEOUT_MS=60000` | Default budget for one `execute` call, `timeoutMs` when a caller passes one; Playwright actions and navigations get it too, at least 30 seconds (0 disables both) |
+| `OPENCODE_BROWSER_EXECUTE_TIMEOUT_MS=120000` | When set, the default budget for an `execute` that passes no `timeoutMs`, plus Playwright's action and navigation timeout for it (at least 30 seconds; 0 removes both) |
 | `OPENCODE_BROWSER_EXECUTE_SLICE_MS=2000` | Longest `execute` JavaScript may run without yielding before it is stopped (50 to 60000; every session waits meanwhile) |
 | `OPENCODE_BROWSER_GHOST_CURSOR=1` | Show the agent cursor on every agent tab outside recordings (pages can see it); `0` keeps it off. Overrides the options page's *Agent cursor* |
 | `OPENCODE_BROWSER_AUTO_UPDATE=notify` | Installs: only show new versions (`off`: don't check; `on`: install them when idle, the default). Overrides the status page's *Updates* |
