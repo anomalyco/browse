@@ -5,6 +5,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import * as clack from "@clack/prompts"
 import type { AgentName, AgentReceipt } from "./agent-config.ts"
+import { writeStdout } from "../cli/output.ts"
 import { formatPairingCode } from "../relay/browser-pairing.ts"
 import {
   cacheRoot,
@@ -140,7 +141,7 @@ export const tilde = (file: string) => (file === home || file.startsWith(home + 
 export const rail: { active: boolean; waiting?: ReturnType<typeof clack.spinner> | undefined } = { active: false }
 
 export function log(line: string) {
-  if (!rail.active) return void process.stdout.write(line + "\n")
+  if (!rail.active) return writeStdout(line + "\n")
   if (!line.trim()) return
   const ok = line.startsWith("✓ ")
   const warn = line.startsWith("! ")

@@ -50,8 +50,33 @@ if (command === "--version" || command === "-v") {
   await runBinaryMcp(process.argv.slice(3))
 } else if (invokedAs === "opencode-browser-mcp" || (command === "mcp" && process.argv.length === 3)) {
   const { NodeRuntime } = await import("@effect/platform-node")
+  const { defaultTeardown } = await import("effect/Runtime")
   const { runMcpServer } = await import("./mcp.ts")
-  runMcpServer.pipe(NodeRuntime.runMain)
+  // An MCP client shuts a stdio server down by closing its stdin. A 2026-07-28 client's open `subscriptions/listen`
+  // keeps the RPC server from ending on its own, so mcp.ts interrupts it once stdin closes and the tool calls still
+  // running have answered. The default teardown reads an interrupt-only exit as 130, SIGINT's code; that EOF is a clean
+  // shutdown here, so exit 0 instead. A real SIGINT or SIGTERM still exits 130. `process.exit` doesn't wait for a
+  // background update check's git calls that would otherwise hold the event loop open.
+  let stdinGone = false
+  const onStdinGone = () => {
+    stdinGone = true
+  }
+  process.stdin.once("end", onStdinGone)
+  process.stdin.once("close", onStdinGone)
+  process.stdin.once("error", onStdinGone)
+  let signalled = false
+  const onSignal = () => {
+    signalled = true
+  }
+  process.once("SIGINT", onSignal)
+  process.once("SIGTERM", onSignal)
+  runMcpServer.pipe(NodeRuntime.runMain({
+    teardown: (exit, onExit) =>
+      defaultTeardown(exit, (code) => {
+        if (stdinGone && !signalled && code === 130) return process.exit(0)
+        onExit(code)
+      }),
+  }))
 } else if (command === "self-update" || command === "runtime-switch") {
   // The relay's auto-update children (auto-update.ts); not for people.
   const { runSelfUpdate, runRuntimeSwitch } = await import("./update/runtime-update.ts")

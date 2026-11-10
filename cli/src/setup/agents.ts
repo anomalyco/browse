@@ -6,7 +6,7 @@ export const agentLabels = {
   kilo: "Kilo Code", goose: "Goose", amp: "Amp", kiro: "Kiro", droid: "Factory Droid", copilot: "GitHub Copilot CLI",
   warp: "Warp", "lm-studio": "LM Studio", "qwen-code": "Qwen Code", kimi: "Kimi Code CLI", augment: "Augment (Auggie CLI)",
   antigravity: "Antigravity", junie: "Junie", codebuddy: "CodeBuddy Code", cortex: "Cortex Code", hermes: "Hermes Agent",
-  grok: "Grok Build", vibe: "Mistral Vibe", qoder: "Qoder CLI",
+  grok: "Grok Build", vibe: "Mistral Vibe", qoder: "Qoder CLI", pi: "Pi",
 }
 export type AgentName = keyof typeof agentLabels
 export const agentNames = Object.keys(agentLabels) as AgentName[]

@@ -427,7 +427,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     recordingRelay,
     flightRecorder,
     rootLifecycle,
-    sendToExtension,
+    closeTargetByTargetId: (targetId) => closeTargetByTargetId(targetId),
     sendToEveryBrowser,
     isTabRecorded,
     detachTab,
@@ -722,8 +722,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     autoUpdater?.stop()
     yield* shutdownControl.close().pipe(Effect.ignore)
     yield* sessions.closeAll({
-      onStalled: (sessionIds) => relayLog("relay.shutdown.stalled", {
-        sessions: sessionIds.length > 0 ? sessionIds.join(",") : "none",
+      onStalled: (sessions) => relayLog("relay.shutdown.stalled", {
+        sessions: sessions.length > 0 ? sessions.map(({ sessionId, pending }) => `${sessionId} (${pending})`).join(", ") : "none",
         waitedMs: defaultShutdownTimeoutMs,
       }),
     })

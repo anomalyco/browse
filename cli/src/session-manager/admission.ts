@@ -1,7 +1,7 @@
 import { Deferred, Effect, Exit, Fiber, Latch } from "effect"
 import type { OpenCodeBrowserSession } from "../relay/types.ts"
 import type { PersistedSession } from "./catalog.ts"
-import { persistedSession, sessionError, type SessionHooks } from "./types.ts"
+import { persistedSession, sessionError, type PendingSessionWork, type SessionHooks } from "./types.ts"
 
 export class SessionAdmission {
   private persistenceTail = Promise.resolve()
@@ -21,9 +21,9 @@ export class SessionAdmission {
     return this.pendingSessionWork.has(id)
   }
 
-  /** Sessions holding accepted work now, so a bounded shutdown can name what it is leaving behind. */
-  pendingWorkSessionIds(): readonly string[] {
-    return Array.from(this.pendingSessionWork.keys())
+  /** Sessions holding accepted work now, and how much, so a bounded shutdown can name what it is leaving behind. */
+  pendingWorkBySession(): readonly PendingSessionWork[] {
+    return Array.from(this.pendingSessionWork, ([sessionId, pending]) => ({ sessionId, pending }))
   }
 
   assertAdmission(): void {

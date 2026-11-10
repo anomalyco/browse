@@ -282,9 +282,8 @@ export function cleanupCdpRecording(context: CdpCaptureContext, recording: CdpRe
   recording.cleanupPromise = (async () => {
     await Promise.all([
       context.sendDebuggerCommand({ tabId: recording.tabId, method: "Page.stopScreencast", params: {} }).catch(() => {}),
-      recording.encoder.cancel().catch(() => {}),
+      recording.writePromise.catch(() => {}).then(() => recording.encoder.cancel()).catch(() => {}),
     ])
-    await recording.writePromise.catch(() => {})
     if (context.activeRecordings.get(recording.tabId) === recording) {
       context.activeRecordings.delete(recording.tabId)
       context.recordingChanged(recording.tabId)

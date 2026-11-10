@@ -15,6 +15,7 @@ import { startFixtures } from "./lib/fixtures.ts"
 import { exec, McpClient } from "./lib/mcp.ts"
 import { relayPid, Sampler, type Sample } from "./lib/metrics.ts"
 import { Jsonl, mdEscape, oneLine, percentile, slope } from "./lib/results.ts"
+import { longestRssSegment, sweepSoakSessions, unexplainedRestarts } from "./lib/soak.ts"
 import { scenarios, type Ctx } from "./scenarios.ts"
 
 const canary = !!process.env.BROWSE_STRESS_BINARY
@@ -56,9 +57,10 @@ async function cdp(): Promise<BrowserCdp> {
   return cdpConnection
 }
 
-// A new profile's onboarding page may hide its original blank tab. Exempt only that pre-run identity, not
+// A new profile's onboarding page may hide its original blank tab. Exempt only that launch identity, not
 // about:blank tabs created by the workers (those are genuine leaks).
-const launchTab = canary ? (await (await cdp()).extensionView()).tabs.find(t => t.url === "about:blank" && t.groupId === -1)?.id : undefined
+const findLaunchTab = async () => canary ? (await (await cdp()).extensionView()).tabs.find(t => t.url === "about:blank" && t.groupId === -1)?.id : undefined
+let launchTab = await findLaunchTab()
 
 type Window = { from: number; to: number }
 const chaosWindows: Window[] = []
@@ -81,6 +83,10 @@ function newClient() {
   return new McpClient()
 }
 
+function deleteSession(client: McpClient, id: string) {
+  return client.call("session_delete", { id }, 30_000).then(r => !r.isError || /Session not found/i.test(r.text), () => false)
+}
+
 async function workerLoop(worker: Worker) {
   while (!stopping && Date.now() < deadline) {
     if (worker.client.exited !== undefined) {
@@ -89,7 +95,8 @@ async function workerLoop(worker: Worker) {
     }
     // A session whose delete failed (its MCP server was killed mid-task) is the harness's to clean up, as a person
     // would close the tabs of an agent that crashed; named sessions outlive their clients by design.
-    for (const left of worker.leftover.splice(0)) await worker.client.call("session_delete", { id: left }, 30_000).catch(() => worker.leftover.push(left))
+    for (const left of worker.leftover.splice(0)) if (!await deleteSession(worker.client, left)) worker.leftover.push(left)
+    if (stopping) break
     const useSite = !values["no-sites"] && Math.random() < 0.3
     const site = SITES[Math.floor(Math.random() * SITES.length)]!
     const scenario = soakScenarios[Math.floor(Math.random() * soakScenarios.length)]!
@@ -111,8 +118,7 @@ async function workerLoop(worker: Worker) {
     } catch (e) {
       error = oneLine(e)
     } finally {
-      const deleted = await worker.client.call("session_delete", { id: session }, 30_000).then((r) => !r.isError, () => false)
-      if (!deleted) worker.leftover.push(session)
+      if (!await deleteSession(worker.client, session)) worker.leftover.push(session)
     }
     const to = Date.now()
     worker.busySince = undefined
@@ -181,8 +187,11 @@ const chaosActions: Record<string, () => Promise<Record<string, unknown>>> = {
     return { closed }
   },
   "chrome-restart": async () => {
+    launchTab = undefined
     sudo(["systemctl", "restart", canary ? "browse-canary-browser@chrome.service" : "browse-chrome"])
     cdpConnection?.close()
+    cdpConnection = undefined
+    launchTab = await findLaunchTab()
     return {}
   },
   "network-drop": async () => {
@@ -281,16 +290,18 @@ async function chaosLoop() {
 
 // --- metrics ------------------------------------------------------------------------------------------------------
 const samples: (Sample & { at: number })[] = []
-const pidChanges: { at: number; from: unknown; to: unknown }[] = []
+const pidChanges: { at: number; from: number; to: number }[] = []
 async function metricsLoop() {
-  const sampler = new Sampler(launchTab)
-  let lastPid: unknown
+  const sampler = new Sampler()
+  let lastPid: number | undefined
   while (!stopping) {
     const at = Date.now()
     let sample: Sample = {}
-    try { sample = await sampler.sample(await cdp().catch(() => undefined)) } catch (e) { sample = { error: oneLine(e) } }
-    if (sample.relayPid && lastPid && sample.relayPid !== lastPid) pidChanges.push({ at, from: lastPid, to: sample.relayPid })
-    if (sample.relayPid) lastPid = sample.relayPid
+    try { sample = await sampler.sample(await cdp().catch(() => undefined), launchTab) } catch (e) { sample = { error: oneLine(e) } }
+    if (typeof sample.relayPid === "number") {
+      if (lastPid && sample.relayPid !== lastPid) pidChanges.push({ at: typeof sample.relayStartedAt === "number" ? sample.relayStartedAt : at, from: lastPid, to: sample.relayPid })
+      lastPid = sample.relayPid
+    }
     const recent = readTasks().filter((t) => t.to > at - Number(values["sample-every"]) * 1000)
     sample.tasksWindow = recent.length
     sample.failuresWindow = recent.filter((t) => !t.ok).length
@@ -313,14 +324,24 @@ const cleanup = () => {
   signalAll(frozen, "SIGCONT")
 }
 process.on("exit", cleanup)
-process.on("SIGINT", () => { stopping = true; cleanup(); process.exit(130) })
-process.on("SIGTERM", () => { stopping = true; cleanup(); process.exit(143) })
+async function interrupt(code: number) {
+  stopping = true
+  cleanup()
+  // The canary sends SIGKILL after three seconds. Never hang on a dead relay during shutdown.
+  const timer = setTimeout(() => process.exit(code), 2500)
+  try { await sweepSoakSessions() } catch (e) { console.error(`interrupted session cleanup: ${oneLine(e)}`) }
+  clearTimeout(timer)
+  process.exit(code)
+}
+process.once("SIGINT", () => void interrupt(130))
+process.once("SIGTERM", () => void interrupt(143))
 
 console.log(`soak: ${WORKERS} workers, ${values.minutes} min, chaos every ~${values["chaos-every"]} s (${CHAOS.join(", ")}), results ${dir}`)
 await probeClient.initialize()
-// An interrupted run leaves its named probe behind. Don't silently probe through that stale session.
+// This first MCP tool also starts a cold relay before we ask it to enumerate abandoned worker sessions.
 const removed = await probeClient.call("session_delete", { id: "soak-probe" })
 if (removed.isError && !/Session not found/i.test(removed.text)) throw new Error(`soak-probe delete: ${removed.text}`)
+await sweepSoakSessions()
 const probe = await probeClient.call("session_new", { id: "soak-probe" })
 if (probe.isError) throw new Error(`soak-probe create: ${probe.text}`)
 for (let i = 0; i < WORKERS; i++) {
@@ -339,10 +360,10 @@ stopping = true
 const stuck = workers.filter((w) => w.busySince).map((w) => ({ worker: w.id, task: w.task, busyMs: Date.now() - w.busySince! }))
 await sleep(1000)
 await metrics.catch(() => undefined)
-for (const w of workers) for (const left of w.leftover.splice(0)) await w.client.call("session_delete", { id: left }, 30_000).catch(() => undefined)
+for (const w of workers) for (const left of w.leftover) if (!await deleteSession(probeClient, left)) console.error(`could not delete leftover ${left}`)
 // Session deletes close their tabs asynchronously.
 await sleep(5000)
-const finalSample = await new Sampler(launchTab).sample(await cdp().catch(() => undefined)).catch(() => ({} as Sample))
+const finalSample = await new Sampler().sample(await cdp().catch(() => undefined), launchTab).catch(() => ({} as Sample))
 for (const w of workers) await w.client.close()
 await probeClient.call("session_delete", { id: "soak-probe" }).catch(() => undefined)
 await probeClient.close()
@@ -356,13 +377,15 @@ const calm = tasks.filter((t) => !inChaos(t.from, t.to))
 const successCalm = calm.length ? calm.filter((t) => t.ok).length / calm.length : NaN
 const successAll = tasks.length ? tasks.filter((t) => t.ok).length / tasks.length : NaN
 const warm = samples.filter((s) => s.at > started + 5 * 60_000)
+const rss = longestRssSegment(samples), enoughRss = rss.durationMs >= 10 * 60_000
+const rssRange = rss.samples.length ? `PID ${rss.samples[0]!.relayPid}, ${new Date(rss.samples[0]!.at).toISOString()} to ${new Date(rss.samples.at(-1)!.at).toISOString()} (${(rss.durationMs / 60_000).toFixed(1)} min, ${rss.samples.length} samples)` : "no post-warm-up RSS samples"
 const fit = (key: string) => {
-  const points = warm.filter((s) => typeof s[key] === "number").map((s) => [(s.at - started) / 3_600_000, s[key] as number] as [number, number])
+  const points = (key === "relayRssMb" ? rss.samples : warm).filter((s) => typeof s[key] === "number").map((s) => [(s.at - started) / 3_600_000, s[key] as number] as [number, number])
   const vals = points.map((p) => p[1])
   return { key, perHour: Math.round(slope(points) * 100) / 100, min: Math.min(...vals), max: Math.max(...vals), last: vals.at(-1) ?? NaN, n: points.length }
 }
 const growth = ["relayRssMb", "relayFds", "relayThreads", "chromeRssMb", "chromeProcesses", "tabs", "groupedTabs", "groups", "debuggerAttached", "relayTargets", "relaySessions", "trackedTabs", "sessionTabs", "orphanTabs", "journalBytes", "relayLogBytes"].map(fit)
-const unexplainedRestarts = pidChanges.filter((c) => !chaosEvents.some((e) => (e.type === "relay-kill9") && Math.abs(e.at - c.at) < 60_000 + Number(values["sample-every"]) * 1000))
+const crashes = unexplainedRestarts(pidChanges, chaosEvents, Number(values["sample-every"]) * 1000)
 const byChaos = new Map<string, any[]>()
 for (const e of chaosEvents) byChaos.set(e.type, [...(byChaos.get(e.type) ?? []), e])
 const byTask = new Map<string, any[]>()
@@ -372,14 +395,14 @@ for (const t of calm.filter((t) => !t.ok)) { const key = String(t.error).slice(0
 
 const maxUntracked = Math.max(0, ...samples.map((sample) => Number(sample.untrackedSessionTabs ?? 0)))
 const perHour = (key: string) => growth.find((g) => g.key === key)?.perHour ?? 0
-const memoryOk = perHour("relayRssMb") < 50 && perHour("relayFds") < 50 && perHour("tabs") < 10
 const criteria = [
   { name: `calm success rate >= ${MIN_SUCCESS}`, ok: successCalm >= MIN_SUCCESS, value: successCalm.toFixed(3) },
   { name: `every chaos event recovered within ${RECOVERY_BOUND_MS / 1000} s`, ok: chaosEvents.every((e) => e.recovered), value: `${chaosEvents.filter((e) => e.recovered).length}/${chaosEvents.length}` },
   ...(canary ? [{ name: "requested chaos actually injected", ok: CHAOS.every(type => chaosEvents.some(e => e.type === type && !e.error && !e.skipped)) && !chaosEvents.some(e => e.error), value: chaosEvents.filter(e => e.error).map(e => `${e.type}: ${e.error}`).join(", ") }] : []),
   { name: "no stuck workers after the run", ok: stuck.length === 0 && settle === "settled", value: JSON.stringify(stuck) },
-  { name: "no unexplained relay restarts (crash loops)", ok: unexplainedRestarts.length === 0, value: String(unexplainedRestarts.length) },
-  { name: "bounded growth (relay RSS < 50 MB/h, fds < 50/h, tabs < 10/h)", ok: memoryOk, value: "" },
+  { name: "no unexplained relay restarts (crash loops)", ok: crashes.length === 0, value: crashes.length ? crashes.map(c => `${new Date(c.at).toISOString()} PID ${c.from} → ${c.to}`).join("; ") : "0" },
+  { name: "relay RSS growth < 50 MB/h", ok: enoughRss ? perHour("relayRssMb") < 50 : null, value: rssRange },
+  { name: "bounded growth (fds < 50/h, tabs < 10/h)", ok: perHour("relayFds") < 50 && perHour("tabs") < 10, value: "" },
   { name: "every session tab tracked for idle cleanup (max untracked over the run)", ok: maxUntracked === 0, value: String(maxUntracked) },
   { name: "no leaked tabs after the run (not held by a session, not a window's active tab)", ok: finalSample.orphanTabs === 0, value: String(finalSample.orphanTabs) },
 ]
@@ -392,15 +415,17 @@ const md = [
   ``,
   `| Criterion | Result | Value |`,
   `| --- | --- | --- |`,
-  ...criteria.map((c) => `| ${c.name} | ${c.ok ? "pass" : "**FAIL**"} | ${mdEscape(c.value)} |`),
+  ...criteria.map((c) => `| ${c.name} | ${c.ok === null ? "insufficient" : c.ok ? "pass" : "**FAIL**"} | ${mdEscape(c.value)} |`),
   ``,
   `Success rate: ${(successCalm * 100).toFixed(1)}% outside chaos windows (${calm.length} tasks), ${(successAll * 100).toFixed(1)}% overall.`,
   ``,
-  `## Growth (after 5 min warm-up; slope per hour)`,
+  `## Growth (slope per hour)`,
+  ``,
+  `Relay RSS: longest single-PID span after 2 min of uptime; at least 10 min of measurements required. Other metrics exclude the first 5 min of the run.`,
   ``,
   `| Metric | Slope/h | Min | Max | Last |`,
   `| --- | ---: | ---: | ---: | ---: |`,
-  ...growth.map((g) => `| ${g.key} | ${g.perHour} | ${g.min} | ${g.max} | ${g.last} |`),
+  ...growth.map((g) => `| ${g.key} | ${g.key === "relayRssMb" && !enoughRss ? "insufficient" : g.perHour} | ${g.n ? g.min : "—"} | ${g.n ? g.max : "—"} | ${g.n ? g.last : "—"} |`),
   ``,
   `## Chaos recovery`,
   ``,
@@ -433,4 +458,4 @@ const md = [
 ].join("\n")
 fs.writeFileSync(path.join(dir, "summary.md"), `${md}\n`)
 console.log(md)
-process.exit(criteria.every((c) => c.ok) ? 0 : 1)
+process.exit(criteria.some((c) => c.ok === false) ? 1 : 0)

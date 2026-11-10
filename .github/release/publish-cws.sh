@@ -2,8 +2,9 @@
 # publish-cws.sh <build dir>: uploads browse-extension-<BROWSE_VERSION>.zip to the Chrome Web Store item and submits it
 # for review, with the Chrome Web Store API v2 and curl.
 #
-# Environment: CWS_CLIENT_ID, CWS_CLIENT_SECRET, CWS_REFRESH_TOKEN (secrets of the release environment), CWS_PUBLISHER_ID
-# and CWS_ITEM_ID (repository variables), GH_TOKEN and GITHUB_REPOSITORY (to read the previous release's zip).
+# Environment: CWS_CLIENT_ID, CWS_PUBLISHER_ID and CWS_ITEM_ID (repository variables), CWS_CLIENT_SECRET and
+# CWS_REFRESH_TOKEN (read from AWS Secrets Manager by the release workflow), GH_TOKEN and GITHUB_REPOSITORY (to read the
+# previous release's zip).
 # Idempotent: when the item already has this version (published or in review), nothing is uploaded again; it reports
 # the state. It also uploads nothing when the zip is the extension the store already has, unchanged apart from the
 # manifest version (and version_name): the store keeps that version and the release goes on without another review.

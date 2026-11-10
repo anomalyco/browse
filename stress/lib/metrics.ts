@@ -8,14 +8,15 @@ import { dataDir, relayBase, relayJson, stateDir } from "./env.ts"
 
 const CLK_TCK = 100
 
-export async function relayPid(): Promise<number | undefined> {
+async function relayVersion() {
   try {
-    const version = await fetch(`${relayBase}/version`, { signal: AbortSignal.timeout(3000) }).then((r) => r.json()) as { pid?: number }
-    return version.pid
+    return await fetch(`${relayBase}/version`, { signal: AbortSignal.timeout(3000) }).then((r) => r.json()) as { pid?: number; startedAt?: string }
   } catch {
     return undefined
   }
 }
+
+export async function relayPid() { return (await relayVersion())?.pid }
 
 function procStat(pid: number): { cpuTicks: number; rssKb: number; fds: number; threads: number } | undefined {
   try {
@@ -68,13 +69,11 @@ export type Sample = Record<string, number | string | boolean | null | object>
 
 export class Sampler {
   private last?: { pid: number; ticks: number; at: number }
-  private launchTab?: number
-  constructor(launchTab?: number) { this.launchTab = launchTab }
-
-  async sample(cdp: BrowserCdp | undefined): Promise<Sample> {
+  async sample(cdp: BrowserCdp | undefined, launchTab?: number): Promise<Sample> {
     const at = Date.now()
-    const pid = await relayPid()
+    const version = await relayVersion(), pid = version?.pid
     const sample: Sample = { relayPid: pid ?? null }
+    if (version?.startedAt) sample.relayStartedAt = Date.parse(version.startedAt)
     const stat = pid ? procStat(pid) : undefined
     if (pid && stat) {
       sample.relayRssMb = Math.round(stat.rssKb / 1024)
@@ -124,7 +123,7 @@ export class Sampler {
         sample.sessionTabs = [...held].filter((id) => existing.has(id)).length
         sample.untrackedSessionTabs = [...held].filter((id) => existing.has(id) && !tracked.has(id)).length
         // The extension's own pages (its welcome page after a reinstall) aren't agent tabs.
-        sample.orphanTabs = view.tabs.filter((t) => !t.active && !held.has(t.id) && !t.url.startsWith("chrome-extension://") && !(t.id === this.launchTab && t.url === "about:blank")).length
+        sample.orphanTabs = view.tabs.filter((t) => !t.active && !held.has(t.id) && !t.url.startsWith("chrome-extension://") && !(t.id === launchTab && t.url === "about:blank")).length
       } catch (error) {
         sample.cdpError = String(error).slice(0, 120)
       }

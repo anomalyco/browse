@@ -1,12 +1,11 @@
 // Gets the Chrome Web Store API refresh token the release workflow uses, once, on your own computer:
-//   bun scripts/cws-auth.ts                 prints the refresh token once
-//   bun scripts/cws-auth.ts --set-secret    stores it straight into GitHub (gh secret set CWS_REFRESH_TOKEN
-//                                           --env release), so it never shows on screen
+//   bun scripts/cws-auth.ts    prints the refresh token once, for `bun set browse release CWS_REFRESH_TOKEN` in
+//                              anomalyco/secrets, which stores it in AWS Secrets Manager (RELEASING.md)
 // It asks for the OAuth client's ID and secret (or reads CWS_CLIENT_ID / CWS_CLIENT_SECRET), opens Google's consent page
 // in your browser with PKCE, receives the code on a one-time 127.0.0.1 redirect, and exchanges it. Nothing is written to
 // disk. Sign in as the Google account that owns (or is a member of) the Chrome Web Store publisher.
 // The OAuth client must be a "Desktop app" client, which allows loopback redirects (RELEASING.md).
-import { spawn, spawnSync } from "node:child_process"
+import { spawn } from "node:child_process"
 import { createHash, randomBytes } from "node:crypto"
 import http from "node:http"
 import type { AddressInfo } from "node:net"
@@ -14,7 +13,6 @@ import { createInterface } from "node:readline"
 import { parseArgs } from "node:util"
 
 const SCOPE = "https://www.googleapis.com/auth/chromewebstore"
-const REPO = "anomalyco/browse"
 
 function loopbackOverride(name: string, fallback: string) {
   const value = process.env[name]
@@ -55,7 +53,7 @@ function openBrowser(url: string) {
 }
 
 async function main() {
-  const { values } = parseArgs({ options: { "set-secret": { type: "boolean" }, "no-open": { type: "boolean" }, repo: { type: "string" } } })
+  const { values } = parseArgs({ options: { "no-open": { type: "boolean" } } })
   const clientId = process.env.CWS_CLIENT_ID?.trim() || (await ask("OAuth client ID: "))
   const clientSecret = process.env.CWS_CLIENT_SECRET?.trim() || (await ask("OAuth client secret (hidden): ", true))
   if (!clientId || !clientSecret) throw new Error("Both the client ID and secret are needed.")
@@ -126,18 +124,8 @@ async function main() {
     throw new Error(`Token exchange failed: ${response.status} ${body.error ?? ""} ${body.error_description ?? ""}${response.ok ? " (no refresh token; revoke the app's access at https://myaccount.google.com/permissions and run this again)" : ""}`)
   if (body.scope && !body.scope.split(" ").includes(SCOPE)) throw new Error(`The token doesn't carry the ${SCOPE} scope.`)
 
-  if (values["set-secret"]) {
-    const repo = values.repo ?? REPO
-    const result = spawnSync("gh", ["secret", "set", "CWS_REFRESH_TOKEN", "--env", "release", "--repo", repo], {
-      input: body.refresh_token,
-      stdio: ["pipe", "inherit", "inherit"],
-    })
-    if (result.status !== 0) throw new Error("gh secret set failed (is gh installed and signed in with admin access to the repo?). Run without --set-secret to print the token instead.")
-    console.error(`✓ Stored CWS_REFRESH_TOKEN in the release environment of ${repo}.`)
-  } else {
-    console.error("Refresh token (shown once; store it as the CWS_REFRESH_TOKEN secret of the release environment, then clear your terminal):")
-    process.stdout.write(`${body.refresh_token}\n`)
-  }
+  console.error("Refresh token (shown once; store it as browse/release/CWS_REFRESH_TOKEN with `bun set browse release CWS_REFRESH_TOKEN` in anomalyco/secrets, then clear your terminal):")
+  process.stdout.write(`${body.refresh_token}\n`)
 }
 
 main().catch((error) => {

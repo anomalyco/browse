@@ -1,7 +1,6 @@
 import type { BrowserContext, Frame, Locator, Page } from "patchright-core"
 import { runtimeFailureKind } from "../update/runtime-diagnostics.ts"
 
-const { selectors } = await import("../execute/coreBundle.ts")
 const redactionCleanupErrorMessage = "browse could not confirm ARIA snapshot value-redaction cleanup"
 // Keep the engine as source text so bundlers cannot inject Node-only helpers into the browser function.
 const redactionSelectorSource = `({
@@ -124,7 +123,7 @@ const redactionSelectorSource = `({
 })`
 
 const redactionModuleId = globalThis.crypto.randomUUID().replaceAll("-", "")
-let nextRedactionSelector = 0
+const selectorName = `bcariaredact${redactionModuleId}`
 let nextRedactionToken = 0
 const contextSelectors = new WeakMap<BrowserContext, Promise<string>>()
 const pageCleanup = new WeakMap<Page, {
@@ -177,12 +176,15 @@ async function selectorForContext(context: BrowserContext): Promise<string> {
   const existing = contextSelectors.get(context)
   if (existing) return existing
 
-  const name = `bcariaredact${redactionModuleId}${++nextRedactionSelector}`
-  const registration = selectors.register(
-    name,
-    { content: redactionSelectorSource },
-    { contentScript: true },
-  ).then(() => name, (error) => {
+  // Patchright's public selectors.register retains each engine forever and sends it to *all* live contexts.
+  // Later connectOverCDP default contexts, unlike newContext(), don't inherit that registration. Use the same
+  // context RPC register uses, once per context, without ever adding the engine to the process-wide list.
+  const { _channel } = context as BrowserContext & { _channel: {
+    registerSelectorEngine(params: { selectorEngine: { name: string; source: string; contentScript: boolean } }, options: { timeout: number }): Promise<void>
+  } }
+  const registration = _channel.registerSelectorEngine({
+    selectorEngine: { name: selectorName, source: redactionSelectorSource, contentScript: true },
+  }, { timeout: 0 }).then(() => selectorName, (error) => {
     contextSelectors.delete(context)
     throw error
   })

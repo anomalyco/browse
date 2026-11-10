@@ -30,19 +30,32 @@ import * as RelayLifecycle from "../relay/lifecycle.ts"
 
 const log = (line: string) => process.stdout.write(line + "\n")
 
+/** What a switch did: which relay it replaced, and why it was refused. */
+export type SwitchResult = {
+  /**
+   * The version the replaced relay reported about itself. The child runs the build now on disk, so its own
+   * `Runtime.version` is the new one; only the running relay knows which version is actually being replaced.
+   */
+  readonly from?: string
+  /** Why the restart was refused; undefined when it restarted (or no relay was running). */
+  readonly refused?: string
+}
+
 /**
- * Restarts the relay from the install's stable entry once `version` is on disk. Undefined when it restarted (or no
- * relay was running), else why not. Nothing on disk moves, so a refused restart leaves the old relay running.
+ * Restarts the relay from the install's stable entry once `version` is on disk. `refused` is undefined when it
+ * restarted (or no relay was running). Nothing on disk moves, so a refused restart leaves the old relay running.
  */
-export async function switchTo(runtime: Runtime, version: string, options: { readonly force: boolean }): Promise<string | undefined> {
+export async function switchTo(runtime: Runtime, version: string, options: { readonly force: boolean }): Promise<SwitchResult> {
   const installed = installedVersion(runtime)
-  if (!installed) return `${runtime.entry} doesn't report a version`
-  if (installed !== version) return `${version} isn't installed`
+  if (!installed) return { refused: `${runtime.entry} doesn't report a version` }
+  if (installed !== version) return { refused: `${version} isn't installed` }
+  let from: string | undefined
   const program = Effect.gen(function* () {
     const relay = yield* RelayClient.Service
     const running = yield* Effect.result(relay.version)
     // No relay: nothing to drain or mix with.
-    if (running._tag === "Failure") return undefined
+    if (running._tag === "Failure") return {} satisfies SwitchResult
+    from = running.success.version
     yield* RelayLifecycle.restartRelay({
       relay,
       clientKind: "cli",
@@ -52,9 +65,13 @@ export async function switchTo(runtime: Runtime, version: string, options: { rea
     })
     // Another relay can start in the gap (an old MCP server's next call); it must be the new version.
     const now = yield* relay.version
-    return now.version === installed ? undefined : `a relay of version ${now.version} started first`
+    return (now.version === installed ? { from } : { from, refused: `a relay of version ${now.version} started first` }) satisfies SwitchResult
   }).pipe(Effect.provide(RelayClient.layerFetch))
-  return Effect.runPromise(program.pipe(Effect.catch((error) => Effect.succeed((error as Error).message ?? String(error)))))
+  const refusal = (error: unknown): SwitchResult => ({
+    ...(from === undefined ? {} : { from }),
+    refused: (error as Error).message ?? String(error),
+  })
+  return Effect.runPromise(program.pipe(Effect.catch((error) => Effect.succeed(refusal(error)))))
 }
 
 function installedOnly(command: string) {
@@ -123,7 +140,7 @@ export async function runInstalledUpdate(args: readonly string[], runtime = inst
     })
     if (!installed) return true
     updateState(({ installing: _installing, ...state }) => ({ ...state, lastUpdate: { from: runtime.version, to: installed, at: new Date().toISOString() } }))
-    const refused = await switchTo({ ...runtime, version: installed }, installed, { force: args.includes("--force") })
+    const { refused } = await switchTo({ ...runtime, version: installed }, installed, { force: args.includes("--force") })
     if (refused) {
       const automatic = effectiveMode() === "on"
       log(`! Installed ${installed}, but the relay didn't restart (${refused}).`)
@@ -158,7 +175,9 @@ export async function runInstalledUpdate(args: readonly string[], runtime = inst
   updateState(({ installing: _installing, ...state }) => ({ ...state, lastUpdate: { from: runtime.version, to: installed, at: new Date().toISOString() } }))
   // An old runtime/versions runtime's update is in npm's global folder; its relay restarts from there.
   const target = await updateTarget(runtime)
-  const refused = target ? await switchTo({ ...target, version: installed }, installed, { force: args.includes("--force") }) : "npm's global folder is unknown (`npm root -g` failed)"
+  const { refused } = target
+    ? await switchTo({ ...target, version: installed }, installed, { force: args.includes("--force") })
+    : { refused: "npm's global folder is unknown (`npm root -g` failed)" }
   if (refused) {
     const automatic = effectiveMode() === "on"
     log(`! Installed ${installed}, but the relay didn't restart (${refused}).`)
@@ -169,9 +188,8 @@ export async function runInstalledUpdate(args: readonly string[], runtime = inst
   return true
 }
 
-/** `self-update <version> [--channel <tag>]`: the relay's installer child. Exit 0 when the installer succeeded. */
-export async function runSelfUpdate(args: readonly string[]) {
-  const runtime = installedRuntime()
+/** `self-update <version> [--channel <tag>] [--from <version>]`: the relay's installer child. Exit 0 when the installer succeeded. */
+export async function runSelfUpdate(args: readonly string[], runtime = installedRuntime()) {
   const version = args[0]
   const channelAt = args.indexOf("--channel")
   const channel = (channelAt === -1 ? channelOf(version ?? "") : args[channelAt + 1]) as Channel | undefined
@@ -185,6 +203,10 @@ export async function runSelfUpdate(args: readonly string[]) {
     process.exitCode = 2
     return
   }
+  // The relay passes its own version: a refused switch can leave the build on disk newer than the relay still running.
+  const fromAt = args.indexOf("--from")
+  const passedFrom = fromAt === -1 ? undefined : args[fromAt + 1]
+  const fromVersion = passedFrom !== undefined && UPDATE_VERSION.test(passedFrom) ? passedFrom : runtime.version
   try {
     // A binary install follows its release service channel; its installer checks the manifest's size and SHA-256. An
     // npm install is pinned to the version npm serves (version, not channel), as npm install -g does.
@@ -194,6 +216,14 @@ export async function runSelfUpdate(args: readonly string[]) {
       ...(runtime.kind === "binary" ? { channel: installChannel } : { version, ...(channel ? { channel } : {}) }),
     })
     log(`${new Date().toISOString()} installed ${installed}`)
+    updateState(({ installing, lastError: _lastError, ...state }) => {
+      const still = installing?.pid === process.pid ? undefined : installing
+      return {
+        ...state,
+        ...(still ? { installing: still } : {}),
+        ...(installed !== fromVersion ? { lastUpdate: { from: fromVersion, to: installed, at: new Date().toISOString() } } : {}),
+      }
+    })
   } catch (error) {
     updateState(({ installing, ...state }) => {
       const still = installing?.pid === process.pid ? undefined : installing
@@ -221,8 +251,10 @@ export async function runRuntimeSwitch(args: readonly string[]) {
     process.exitCode = 2
     return
   }
-  const before = runtime.version
-  const refused = await switchTo({ ...runtime, version }, version, { force: false })
+  const { from, refused } = await switchTo({ ...runtime, version }, version, { force: false })
+  // This child starts from the stable entry, which an installer may already have replaced with `version`, so its own
+  // runtime.version is the new build: the relay it drained reported the version actually being replaced.
+  const before = from ?? runtime.version
   log(`${new Date().toISOString()} switch ${before} → ${version}: ${refused ? `refused (${refused})` : "done"}`)
   if (refused) process.exitCode = 1
 }

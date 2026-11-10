@@ -44,14 +44,22 @@ const sessionNew = Command.make(
         "Only let this session's tabs load these hosts or origins (repeatable or comma-separated): example.com, *.example.com, https://app.example.com, http://localhost:3000",
       ),
     ),
+    browser: Flag.String("browser").pipe(
+      Flag.optional,
+      Flag.withDescription(
+        "Open this session's tabs in the connected browser with this id or name (browse status --json lists them); omit for the default browser",
+      ),
+    ),
   },
-  Effect.fn("Cli.sessionNew")(function* ({ name, readOnly, allowOrigin }) {
+  Effect.fn("Cli.sessionNew")(function* ({ name, readOnly, allowOrigin, browser }) {
     const relay = yield* RelayClient.Service
     yield* ensureCliRelay()
     const store = yield* SessionStore.Service
+    const browserValue = Option.getOrUndefined(browser)
     const result = yield* relay.sessionNew(Option.getOrUndefined(name), {
       ...(readOnly ? { readOnly: true } : {}),
       ...(allowOrigin.length > 0 ? { allowedOrigins: allowOrigin } : {}),
+      ...(browserValue ? { browser: browserValue } : {}),
     })
     yield* store.write(result.id)
     yield* Console.log(result.id)

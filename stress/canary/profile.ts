@@ -33,6 +33,9 @@ while (Date.now() < deadline) {
     // Keep primary Chrome alive even when the relay itself is broken. The daemon measures and recovers that
     // outage. Brave is started just for the nightly check, which must wait until the second lane is available.
     if (configured && (browser === "chrome" || (await relayJson("/extension/status", undefined, 2000).catch(() => ({}))).browsers?.some((b: { id: string; connected: boolean }) => b.id === id && b.connected))) process.exit(0)
+  } catch (error) {
+    // The worker target can appear before Chrome has installed its extension APIs in that context.
+    if (!(error instanceof Error && error.message.includes("ReferenceError: chrome is not defined"))) throw error
   } finally { cdp?.close() }
   await sleep(1000)
 }

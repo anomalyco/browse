@@ -2,13 +2,17 @@ import { afterAll, describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { callerSessionId } from "../src/mcp/registry.ts"
+import { Effect } from "effect"
+import { McpSchema } from "effect/ai"
+import "../src/mcp.ts"
+import { buildRegisteredMcpTools, callerSessionId, createMcpToolContext } from "../src/mcp/registry.ts"
+import type * as RelayClient from "../src/relay/client.ts"
 import { FakeExtension, startRelay, stopRelay, until } from "./relay-harness.ts"
 import { mcpStdio, type McpReply } from "./support/mcp-stdio.ts"
 
 // OpenCode runs one MCP server per server config and process, shared by every agent session and subagent, and names
-// the calling agent in each tools/call's _meta. Each agent gets its own current session; calls that name no agent
-// (other MCP clients, which run one server per conversation) share the server's, as before.
+// the calling agent in each tools/call's _meta. Each named agent gets its own current session; calls that name no
+// agent share one, as when a client runs a parent agent and its subagents through one server without naming them.
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-mcp-callers-"))
 afterAll(() => fs.rmSync(home, { recursive: true, force: true }))
 
@@ -50,6 +54,40 @@ async function initialized(port: number) {
 }
 
 describe("one MCP server shared by several agents", () => {
+  test("tabs_cleanup only sends established sessions that haven't been deleted", async () => {
+    const relay = {
+      sessions: Effect.succeed([{ id: "one" }, { id: "two" }]),
+      sessionDelete: (id: string) => Effect.succeed({ id, deleted: true }),
+      tabsCleanup: (_minutes: number, sessions: string[]) => Effect.succeed(sessions),
+    } as unknown as RelayClient.Interface
+    const ctx = createMcpToolContext({ relay, currentSession: { id: "implicit", established: false }, packageRoot: home })
+    const tools = buildRegisteredMcpTools(ctx)
+    const call = (name: string, args = {}, id = "agent-a") => Effect.runPromise(tools.find((tool) => tool.name === name)!.handle(args).pipe(
+      Effect.provideService(McpSchema.McpRequestContext, { clientId: 1, protocolVersion: "2025-11-25", clientCapabilities: {}, requestMetadata: agent(id) }),
+    ))
+    expect(await call("tabs_cleanup")).toEqual([])
+    await call("session_use", { id: "one" })
+    await call("session_use", { id: "one" }, "agent-b")
+    await call("session_use", { id: "two" })
+    await call("session_delete", { id: "one" })
+    expect(await call("tabs_cleanup")).toEqual(["two"])
+    expect(await call("tabs_cleanup", {}, "agent-b")).toEqual([])
+    await call("session_delete")
+    expect(await call("tabs_cleanup")).toEqual([])
+  })
+
+  test("recent callers keep their selected session while stale callers fall back to their own implicit id", async () => {
+    const ctx = createMcpToolContext({ relay: {} as RelayClient.Interface, currentSession: { id: "implicit", established: false }, packageRoot: home })
+    const caller = (id: string) => Effect.runSync(ctx.caller.pipe(Effect.provideService(McpSchema.McpRequestContext, {
+      clientId: 1, protocolVersion: "2025-11-25", clientCapabilities: {}, requestMetadata: agent(id),
+    })))
+    ctx.establishCurrentSession(caller("stale"), "old-work")
+    ctx.establishCurrentSession(caller("active"), "current-work")
+    for (let i = 0; i < 2048; i++) { caller(String(i)); caller("active") }
+    expect(caller("active").id).toBe("current-work")
+    expect(caller("stale").id).toBe(callerSessionId("stale"))
+  })
+
   test("each agent session has its own current session, derived from its id on every server", async () => {
     const relay = await startRelay(home)
     const servers: Array<ReturnType<typeof mcpStdio>> = []
@@ -83,6 +121,10 @@ describe("one MCP server shared by several agents", () => {
     const call = async (name: string, args: Record<string, unknown>, sessionID?: string) =>
       structured(await mcp.request("tools/call", { name, arguments: args, ...(sessionID ? { _meta: agent(sessionID) } : {}) }))
     try {
+      // status says whether this caller shares its current session with every other unnamed caller.
+      expect(await call("status", {}, "ses_a")).toMatchObject({ sharedSession: false })
+      expect(await call("status", {})).toMatchObject({ sharedSession: true })
+
       // Two agents' bare executes land in two sessions, each on its own tab.
       expect(await call("execute", { code: "return 1" }, "ses_a")).toMatchObject({ session: callerSessionId("ses_a") })
       expect(await call("execute", { code: "return 2" }, "ses_b")).toMatchObject({ session: callerSessionId("ses_b") })

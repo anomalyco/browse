@@ -18,6 +18,7 @@ import { DebuggerHub } from "../debugger-hub"
 import { HandoffNotice } from "../handoff-notice"
 import { PageScripts } from "../page-scripts"
 import { TabCleanup } from "../tab-cleanup"
+import { ToolbarNotice } from "../toolbar-notice"
 import { UserSettings } from "../user-settings"
 import {
   ATTACHED_TITLE,
@@ -29,19 +30,30 @@ import {
   sleep,
   SLOW_CDP,
   text,
+  TIMED_OUT,
+  withTimeout,
   type AgentBadge,
   type AgentRelayLog,
 } from "./wire"
 
+// The relay's tabs.create RPC times out after 15 s (cli/src/relay/rpc.ts); the handler answers within 12 s so the
+// reply still has time to arrive. A Chrome call that never settles (tab groups in Dia) must not use that up.
+// The budget includes beginCreate and opening the tab, so a slow open shortens the about:blank load wait.
+const CREATE_BUDGET_MS = 12_000
 // Vivaldi accepts a debugger attach on a tab that is still loading but then never answers its commands. The relay
 // creates agent tabs at about:blank and attaches before navigating, so only a blank tab waits here. A real URL (sent
 // by an older relay) must answer at once: waiting would load it before the attach and bypass the session allowlist.
 const LOADING_WAIT_MS = 10_000
-async function waitUntilLoaded(tabId: number, log: AgentRelayLog) {
-  // The relay's tabs.create RPC times out after 15 s; 10 s leaves room for the answer.
-  const deadline = Date.now() + LOADING_WAIT_MS
-  while (Date.now() < deadline) {
-    const tab = await chrome.tabs.get(tabId).catch(() => undefined)
+/** A get that never settles gets one short slice; the loop checks the deadline between them. */
+const TAB_GET_SLICE_MS = 250
+async function waitUntilLoaded(tabId: number, log: AgentRelayLog, deadline: number) {
+  const untilDeadline = Math.min(Date.now() + LOADING_WAIT_MS, deadline)
+  while (Date.now() < untilDeadline) {
+    const tab = await withTimeout(
+      chrome.tabs.get(tabId).catch(() => undefined),
+      Math.min(TAB_GET_SLICE_MS, untilDeadline - Date.now()),
+    )
+    if (tab === TIMED_OUT) continue
     if (!tab || tab.status !== "loading") return
     await sleep(100)
   }
@@ -120,7 +132,15 @@ export function createRelayCommands(deps: {
       case "debugger.attach": {
         const tabId = number(params, "tabId")
         TabCleanup.touch(tabId)
-        await DebuggerHub.attach(tabId)
+        // A click's attach comes back here; a failure is told to the user instead of only returned to the relay.
+        const clicked = ToolbarNotice.take(tabId)
+        try {
+          await DebuggerHub.attach(tabId)
+        } catch (error) {
+          if (clicked) void ToolbarNotice.failed(tabId, error)
+          throw error
+        }
+        if (clicked) void ToolbarNotice.clear(tabId)
         deps.relayTabs.add(tabId)
         deps.notify()
         return {}
@@ -139,12 +159,15 @@ export function createRelayCommands(deps: {
         // In the background of the user's window (or the agents' own unfocused window, by setting), never in front
         // of the user's tabs.
         const url = typeof params?.url === "string" ? params.url : "about:blank"
+        const active = params?.active === true
+        deps.log.add("tabs.create.start", { blank: url === "about:blank", active })
+        const deadline = Date.now() + CREATE_BUDGET_MS
         const creating = await TabCleanup.beginCreate(url)
         const tab = await AgentWindow.open(url, {
-          active: params?.active === true,
+          active,
           ...(AgentWindow.isPlacement(params?.window) ? { override: params.window } : {}),
         }).catch(async (error: unknown) => {
-          await TabCleanup.endCreate(creating)
+          await withTimeout(TabCleanup.endCreate(creating), deadline - Date.now())
           throw error
         })
         if (tab.id === undefined) {
@@ -152,10 +175,12 @@ export function createRelayCommands(deps: {
           throw new Error("Created tab has no id")
         }
         TabCleanup.track(tab.id)
-        await TabCleanup.endCreate(creating)
-        // A discarded tab loses the debugger and the agent's page.
-        await chrome.tabs.update(tab.id, { autoDiscardable: false }).catch(() => undefined)
-        if (url === "about:blank") await waitUntilLoaded(tab.id, deps.log)
+        // A discarded tab loses the debugger and the agent's page. Issued now but not awaited: the answer must not
+        // wait on it.
+        void chrome.tabs.update(tab.id, { autoDiscardable: false }).catch(() => undefined)
+        // The tab is tracked in memory; clearing the creation marker must not hold the answer past the budget.
+        await withTimeout(TabCleanup.endCreate(creating), deadline - Date.now())
+        if (url === "about:blank") await waitUntilLoaded(tab.id, deps.log, deadline)
         return { tabId: tab.id }
       }
       case "tabs.remove":

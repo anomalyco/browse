@@ -22,8 +22,11 @@ import type { UpdateNotice } from "../update.ts"
 
 export type CurrentSession = { id: string; established: boolean }
 
-/** An agent calling the tools: its current session, every session it has made current, and whether it saw the update note. */
-export type Caller = CurrentSession & { readonly sessions: Set<string>; updateNoted: boolean }
+/**
+ * An agent calling the tools: its current session, every session it has made current, whether it shares them with
+ * every other unnamed caller, and whether it saw the update note.
+ */
+export type Caller = CurrentSession & { readonly sessions: Set<string>; readonly shared: boolean; updateNoted: boolean }
 
 export type ExecuteArguments = {
   readonly code: string
@@ -56,7 +59,7 @@ export function objectSchema(properties: JsonObject, required: readonly string[]
 export const emptyInputSchema = objectSchema({})
 export const sessionSchemaProperty = {
   type: "string",
-  description: "Optional session id. Defaults to this MCP server's current session.",
+  description: "Optional session id. Defaults to your current session.",
 } as const
 export const sessionAliasSchemaProperty = { type: "string", description: "Same as id." } as const
 export const sessionOnlyInputSchema = objectSchema({
@@ -81,6 +84,7 @@ export const ExecuteToolOutput = Schema.Struct({
 export const StatusToolOutput = Schema.Struct({
   endpoint: Schema.String,
   currentSession: Schema.String,
+  sharedSession: Schema.Boolean,
   version: RelayVersion,
   status: ExtensionStatus,
   buildProblem: Schema.optionalKey(Schema.String),

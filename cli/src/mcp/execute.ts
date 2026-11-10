@@ -20,7 +20,7 @@ registerMcpTools({
           session: {
             type: "string",
             description:
-              "Optional existing browse session id. Explicit ids must already exist; omit this field to use your current session (each agent has its own), which is created when needed.",
+              "Optional existing browse session id. Explicit ids must already exist; omit this field to use your current session (per agent when the client names it; see `status`), which is created when needed.",
           },
           targetUrl: {
             type: "string",

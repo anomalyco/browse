@@ -142,6 +142,7 @@ Windows, or `CONFIG` on Linux. The paths below are defaults; a client's existing
 | [Kiro](https://kiro.dev/docs/mcp/configuration/) (`kiro`) | `~/.kiro/settings/mcp.json` | JSON · `mcpServers` |
 | [LM Studio](https://lmstudio.ai/blog/lmstudio-v0.3.17) (`lm-studio`) | `~/.lmstudio/mcp.json` | JSON · `mcpServers` |
 | [Mistral Vibe](https://docs.mistral.ai/vibe/code/cli/mcp-servers) (`vibe`) | `~/.vibe/config.toml` | TOML · `[[mcp_servers]]` |
+| [Pi](https://pi.dev/docs/latest/mcp) (`pi`) | `~/.pi/agent/mcp.json` | JSON · `mcpServers` |
 | [Qoder CLI](https://docs.qoder.com/cli/mcp-reference) (`qoder`) | `~/.qoder/settings.json` | JSON · `mcpServers` |
 | [Qwen Code](https://qwenlm.github.io/qwen-code-docs/en/users/features/mcp/) (`qwen-code`) | `~/.qwen/settings.json` | JSON · `mcpServers` |
 | [Roo Code (VS Code)](https://docs.roocode.com/features/mcp/using-mcp-in-roo) (`roo`) | `APP/Code/User/globalStorage/rooveterinaryinc.roo-cline/settings/mcp_settings.json` | JSON · `mcpServers` |
@@ -187,6 +188,10 @@ connection itself isn't encrypted by browse; use a network that is (Tailscale or
   tab strip and collapsed unless you're looking at one. Agents can't switch you to their tabs or bring a window to the
   front; popups an agent opens join its group, and if one takes over your window you get your tab back. Tabs nobody
   touches for 10 minutes close by themselves (never while a script runs on them).
+- **Several browsers at once.** Each connected browser has an id (like `chrome-macbook`) and a name; `browse status
+  --json` lists them. New sessions open their tabs in the default browser, the first connected and ready, unless one is
+  named: `browse session new work --browser "Home Brave"` (or `browser` on the `session_new` tool, or on the first
+  `execute` that creates the session). A session stays in its browser, so start a new one to use another.
 - **Settings** (the extension's options page; each applies right away, to new tabs for window and grouping):
   - **Where agents open their tabs:** in your window (default), or *in a separate window* of their own that opens
     unfocused beside yours (on another display when there's no room on yours); their popups move there too.
@@ -208,7 +213,9 @@ connection itself isn't encrypted by browse; use a network that is (Tailscale or
   it back. While an agent works the badge reads **RUN**, and **WAIT** when it needs you. The button always works: a
   click while a script runs takes the tab back and stops the script. Agents can't close a tab you lent them. The
   browser's debugging bar button (**Cancel** in Chrome, **OK** in some browsers like Dia) disconnects browse from
-  every tab: tabs you lent go back to you, and tabs agents opened stay open until idle cleanup closes them.
+  every tab: tabs you lent go back to you, and tabs agents opened stay open until idle cleanup closes them. File pages
+  need **Allow access to file URLs** for browse on its details page in `chrome://extensions`, and Chrome's own pages,
+  the Web Store included, can't be lent.
 - **Handoffs:** the page shows a small card with the site's origin. Do the human part, then click **Continue** on the
   card or the toolbar button.
 - **Recordings show only the page.** Nothing from browse is drawn while a tab is recorded: no cursor, no
@@ -230,9 +237,13 @@ connection itself isn't encrypted by browse; use a network that is (Tailscale or
 | `flight_recorder` (`action`: `start`, `status`, `save_last`, `cancel`) | Keep the last minute of video, save it when something breaks |
 | `secrets_list` | Site secrets you stored for the session's sites; agents type them with `secrets.type()` only on their sites, without seeing them |
 | `secrets_status`, `secrets_refresh`, `secrets_run` | Reuse captured credentials while keeping their values out of transcripts and artifacts |
-| `tabs_cleanup` | Close idle agent tabs (`idleMinutes` applies to the calling agent's own; other agents' wait for the idle setting) |
+| `tabs_cleanup` | Close idle agent tabs (`idleMinutes` applies to the calling agent's own sessions; other agents' wait for the idle setting) |
 | `settings` | Read or change the settings below when the user asks (never the security switches or update behaviour); the options page updates live |
 | `status` | Connection status |
+
+Each agent has its own current session only when the client names the agent (OpenCode does; `status` reports
+`sharedSession`). With other clients, agents on one server share one current session; when several use it, each
+should `session_new` its own and pass `session` on every call.
 
 The agent reference is [`cli/skills/browse/SKILL.md`](cli/skills/browse/SKILL.md)
 (`browse skill` prints it). The MCP server also sends a short usage guide in its

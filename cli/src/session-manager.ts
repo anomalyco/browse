@@ -16,6 +16,7 @@ import {
   trySession,
   type AdoptionResult,
   type ExecutionResponse,
+  type PendingSessionWork,
   type RunningExecution,
   type SessionCreateOptions,
   type SessionExecuteRecord,
@@ -553,7 +554,7 @@ export class OpenCodeBrowserSessions {
   closeAll(options: {
     readonly timeoutMs?: number
     /** Sessions still holding work when the wait expired, called before they are dropped. */
-    readonly onStalled?: (sessionIds: readonly string[]) => void
+    readonly onStalled?: (sessions: readonly PendingSessionWork[]) => void
   } = {}): Effect.Effect<void> {
     const manager = this
     // Persisting the catalog is the shutdown's only chance to record the sessions it held; a stuck write must not
@@ -577,7 +578,7 @@ export class OpenCodeBrowserSessions {
         Effect.timeoutOrElse({
           duration: options.timeoutMs ?? defaultShutdownTimeoutMs,
           orElse: () => Effect.gen(function* () {
-            options.onStalled?.(manager.admission.pendingWorkSessionIds())
+            options.onStalled?.(manager.admission.pendingWorkBySession())
             yield* Effect.interruptible(manager.admission.flushPersistence()).pipe(
               Effect.timeoutOrElse({ duration: stalledFlushMs, orElse: () => Effect.void }),
               Effect.ignore,
