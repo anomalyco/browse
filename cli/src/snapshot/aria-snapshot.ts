@@ -1,6 +1,6 @@
 import type { BrowserContext, Frame, Locator, Page } from "patchright-core"
 import { runtimeFailureKind } from "../update/runtime-diagnostics.ts"
-import { frameFailureNote, frameSkipNote, maxSnapshotFrameDepth, maxSnapshotFrames, maxSnapshotFrameTimeoutMs } from "./frames.ts"
+import { frameCaptureTimeoutMs, frameFailureNote, frameSkipNote, maxSnapshotFrameDepth, maxSnapshotFrames } from "./frames.ts"
 
 const redactionCleanupErrorMessage = "browse could not confirm ARIA snapshot value-redaction cleanup"
 
@@ -234,7 +234,11 @@ async function frameBlocks(scope: Locator, options: {
   readonly deadline: number
 }): Promise<string[]> {
   const blocks: string[] = []
-  const listing = await iframeCandidates(scope)
+  const listing = await iframeCandidates(scope, options.deadline)
+  if (listing.timedOut) {
+    blocks.push("- ... iframe contents not captured (snapshot deadline reached)")
+    return blocks
+  }
   options.budget.skipped.limit += listing.skipped
   for (const candidate of listing.candidates) {
     const content = await frameContent(candidate, options)
@@ -246,51 +250,60 @@ async function frameBlocks(scope: Locator, options: {
 }
 
 /**
- * Every iframe under `scope` in document order, up to the frame cap. Metadata comes from one evaluateAll; only
- * the content frames need a call each.
+ * Every iframe under `scope` in document order, up to the frame cap. Metadata is read from each handle itself, in
+ * the same pass that takes its content frame, so a label can never shift onto a different element. Collection is
+ * bounded by the snapshot deadline.
  */
-async function iframeCandidates(scope: Locator): Promise<{ candidates: IframeCandidate[]; skipped: number }> {
-  const limit = maxSnapshotFrames
-  const metadata = await scope.locator("iframe, frame").evaluateAll((elements, maximum) => ({
-    total: elements.length,
-    items: elements.slice(0, maximum as number).map((element) => {
-      const text = (value: string | null) => (value ?? "").trim()
-      const width = element.getBoundingClientRect().width
-      const height = element.getBoundingClientRect().height
-      let src = ""
-      const raw = element.getAttribute("src")
-      if (raw) {
-        try {
-          const url = new URL(raw, document.baseURI)
-          src = url.host || url.protocol.replace(/:$/, "")
-        } catch {
-          src = ""
-        }
-      }
-      return {
-        name: text(element.getAttribute("title")) || text(element.getAttribute("aria-label")) || text(element.getAttribute("name")),
-        src,
-        tiny: width < 20 && height < 20,
-      }
-    }),
-  }), limit).catch(() => ({ total: 0, items: [] }))
-  if (metadata.items.length === 0) return { candidates: [], skipped: metadata.total }
-  const handles = (await scope.locator("iframe, frame").elementHandles().catch(() => [])).slice(0, metadata.items.length)
+async function iframeCandidates(scope: Locator, deadline: number): Promise<{ candidates: IframeCandidate[]; skipped: number; timedOut: boolean }> {
+  const handles = await withinDeadline(scope.locator("iframe, frame").elementHandles(), deadline).catch(() => undefined)
+  if (!handles) return { candidates: [], skipped: 0, timedOut: true }
   try {
     const candidates: IframeCandidate[] = []
-    for (const [index, handle] of handles.entries()) {
-      const info = metadata.items[index]!
-      if (info.tiny) continue
+    for (const handle of handles.slice(0, maxSnapshotFrames)) {
+      const info = await withinDeadline(handle.evaluate((node) => {
+        const element = node as Element
+        const text = (value: string | null) => (value ?? "").trim()
+        const rect = element.getBoundingClientRect()
+        let src = ""
+        const raw = element.getAttribute("src")
+        if (raw) {
+          try {
+            const url = new URL(raw, document.baseURI)
+            src = url.host || url.protocol.replace(/:$/, "")
+          } catch {
+            src = ""
+          }
+        }
+        return {
+          name: text(element.getAttribute("title")) || text(element.getAttribute("aria-label")) || text(element.getAttribute("name")),
+          src,
+          tiny: rect.width < 20 && rect.height < 20,
+        }
+      }), deadline).catch(() => undefined)
+      if (!info || info.tiny) continue
       candidates.push({
         frame: await handle.contentFrame().catch(() => null),
         name: info.name || info.src || "frame",
         src: info.src,
       })
     }
-    return { candidates, skipped: metadata.total - handles.length }
+    return { candidates, skipped: Math.max(0, handles.length - maxSnapshotFrames), timedOut: false }
   } finally {
     await Promise.all(handles.map((handle) => handle.dispose().catch(() => {})))
   }
+}
+
+/** A Playwright call with no timeout option of its own, bounded by the snapshot deadline. */
+function withinDeadline<T>(promise: Promise<T>, deadline: number): Promise<T> {
+  const remaining = deadline - Date.now()
+  if (remaining <= 0) return Promise.reject(new Error("snapshot deadline reached"))
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("snapshot deadline reached")), remaining)
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value) },
+      (error) => { clearTimeout(timer); reject(error) },
+    )
+  })
 }
 
 /** One iframe's content, or a note when its document cannot be read. Cleanup failures propagate. */
@@ -312,8 +325,8 @@ async function frameContent(candidate: IframeCandidate, options: {
     options.budget.skipped.deadline += 1
     return []
   }
+  const timeout = frameCaptureTimeoutMs(remaining, options.budget.frames)
   options.budget.frames -= 1
-  const timeout = Math.min(remaining, maxSnapshotFrameTimeoutMs)
   // A document that navigates between activation and the read is not patched any more: drop its result.
   let navigated = false
   const onFrameNavigated = (navigatedFrame: Frame) => {
@@ -330,7 +343,9 @@ async function frameContent(candidate: IframeCandidate, options: {
     return lines
   } catch (error) {
     if (isRedactionCleanupFailure(error)) throw error
-    return [noteLine(`content not captured (${frameFailureNote(error)})`)]
+    // Classify the capture error itself; the wrapper only adds the cleanup message.
+    const cause = error instanceof AriaSnapshotRedactionError && error.captureFailed ? error.errors[0] : error
+    return [noteLine(`content not captured (${frameFailureNote(cause)})`)]
   } finally {
     options.page.off("framenavigated", onFrameNavigated)
   }

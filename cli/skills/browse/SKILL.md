@@ -129,7 +129,7 @@ Useful inspection helpers:
 - `ref("e12")` resolves a control from the latest snapshot, including controls
   inside an iframe: those refs resolve in that frame and fail closed when the
   frame navigates. Refs fail closed after navigation or incompatible DOM drift;
-  compatible refs keep their ids. `snapshot({ within: frameLocator(...) })`
+  compatible refs keep their ids. `snapshot({ within: page.frameLocator(...) })`
   captures a frame and its refs resolve there.
 - `ariaSnapshot(target?, { timeout })` returns Playwright's detailed YAML tree
   when the compact snapshot omits needed structure. The tree keeps Playwright's

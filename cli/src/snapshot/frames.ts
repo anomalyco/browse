@@ -12,8 +12,17 @@ import type { SnapshotCaptureResult, SnapshotCaptureSettings, SnapshotEntry } fr
 export const maxSnapshotFrames = 8
 /** Frames nested in frames. A payment page inside a checkout inside a shop is three. */
 export const maxSnapshotFrameDepth = 3
-/** One frame gets at most this long, so a hung ad iframe cannot spend the whole snapshot deadline. */
+/** One frame gets at least this long, even when many frames share a short deadline. */
 export const maxSnapshotFrameTimeoutMs = 1_000
+
+/**
+ * One frame's slice of the deadline: an even share of what is left across the frames still to capture, at least
+ * a second, and never more than the deadline itself. A hung first frame cannot starve later ones, while a single
+ * slow frame still gets the time the caller allowed.
+ */
+export function frameCaptureTimeoutMs(remainingMs: number, framesLeft: number): number {
+  return Math.min(remainingMs, Math.max(maxSnapshotFrameTimeoutMs, Math.floor(remainingMs / Math.max(1, framesLeft))))
+}
 
 export type SnapshotFrame = {
   /** The child frame, or undefined when the iframe element has no frame attached. */
@@ -76,8 +85,9 @@ export async function captureSnapshotFrames(options: {
       options.budget.skipped.deadline += 1
       continue
     }
+    const timeout = frameCaptureTimeoutMs(remaining, options.budget.frames)
     options.budget.frames -= 1
-    const frame = await contentFrameOf(options.frame, entry.selector, Math.min(remaining, maxSnapshotFrameTimeoutMs))
+    const frame = await contentFrameOf(options.frame, entry.selector, timeout)
     if (!frame) {
       frames.set(index, {
         capture: { entries: [], truncated: false },
@@ -94,7 +104,7 @@ export async function captureSnapshotFrames(options: {
     try {
       const capture = await Effect.runPromise(runPlaywrightOperation({
         label: "Frame snapshot",
-        timeoutMs: Math.max(1, Math.min(options.deadline - Date.now(), maxSnapshotFrameTimeoutMs)),
+        timeoutMs: Math.max(1, Math.min(options.deadline - Date.now(), timeout)),
         run: () => frame.evaluate(browserCapture, settings),
       }))
       options.budget.items = Math.max(0, options.budget.items - capture.entries.length)
@@ -179,7 +189,7 @@ export function frameFailureNote(cause: unknown): string {
     case "target-closed":
       return "the frame changed while capturing"
     case "timeout":
-      return "the frame did not answer before the snapshot deadline"
+      return "the frame did not answer in time"
     default:
       return "the frame could not be read"
   }

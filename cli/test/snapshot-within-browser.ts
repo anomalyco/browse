@@ -465,7 +465,7 @@ try {
   await page.frameLocator('iframe[title="healthy"]').locator("h1").waitFor()
   const hungSnapshot = await createSnapshotHelpers(page, registry()).snapshot({ timeout: 5_000 })
   assert.match(hungSnapshot, /- iframe "hung"/, hungSnapshot)
-  assert.match(hungSnapshot, /content not captured \(the frame did not answer before the snapshot deadline\)/, hungSnapshot)
+  assert.match(hungSnapshot, /content not captured \(the frame did not answer in time\)/, hungSnapshot)
   assert.match(hungSnapshot, /- iframe "healthy"[\s\S]*heading "Working"/, hungSnapshot)
   const hungAria = await createAriaSnapshotHelper(page)()
   assert.match(hungAria, /- iframe "hung" \[src=localhost:\d+\]:\n  - \.\.\. content not captured/, hungAria)

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { AriaSnapshotRedactionError, isRedactionCleanupFailure } from "../src/snapshot/aria-snapshot.ts"
-import { frameFailureNote, frameSkipNote } from "../src/snapshot/frames.ts"
+import { frameCaptureTimeoutMs, frameFailureNote, frameSkipNote } from "../src/snapshot/frames.ts"
 
 describe("aria snapshot redaction failures", () => {
   test("a cleanup failure for a captured frame fails the call", () => {
@@ -28,8 +28,16 @@ describe("frame failure notes", () => {
   })
 
   test("classifies a timeout and anything else", () => {
-    expect(frameFailureNote(new Error("Frame snapshot timed out after 1000ms"))).toBe("the frame did not answer before the snapshot deadline")
+    expect(frameFailureNote(new Error("Frame snapshot timed out after 1000ms"))).toBe("the frame did not answer in time")
     expect(frameFailureNote(new Error("Cannot evaluate in this document"))).toBe("the frame could not be read")
+  })
+
+  test("each frame gets at least a second or an even share of what is left", () => {
+    expect(frameCaptureTimeoutMs(30_000, 8)).toBe(3_750)
+    expect(frameCaptureTimeoutMs(2_000, 8)).toBe(1_000)
+    expect(frameCaptureTimeoutMs(10_000, 1)).toBe(10_000)
+    expect(frameCaptureTimeoutMs(5_000, 0)).toBe(5_000)
+    expect(frameCaptureTimeoutMs(700, 8)).toBe(700)
   })
 
   test("skip notes count frames, not lines", () => {
