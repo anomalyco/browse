@@ -2,6 +2,7 @@ import { Effect, Schema } from "effect"
 import type { BrowserContext, Page } from "patchright-core"
 import type { HandoffOutcome } from "../session-manager/handoff.ts"
 import { cliCommand } from "../paths.ts"
+import type { ExecuteAftermath } from "../relay/schema.ts"
 import { runtimeFailureKind } from "../update/runtime-diagnostics.ts"
 import { resolvePageTargetId } from "./target-selection.ts"
 
@@ -288,7 +289,9 @@ export function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<
  * retries locators until they time out. When the relay reports that the tab is
  * blocked by protected extension UI, those masked failures are the block.
  */
-export function isMaskedProtectedUiFailure(cause: unknown): boolean {
+export function isMaskedProtectedUiFailure(cause: unknown, aftermath?: ExecuteAftermath): boolean {
+  // A lost context after the main frame navigated is the navigation (a login redirect), not the password manager.
+  if (aftermath && (aftermath.navigations.length > 0 || aftermath.startUrl !== aftermath.endUrl)) return false
   const kind = runtimeFailureKind(cause)
   return kind === "context-destroyed" || kind === "context-missing" || kind === "timeout"
 }

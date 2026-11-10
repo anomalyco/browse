@@ -153,6 +153,18 @@ describe("adoptOpened, agent tabs in the user's window", () => {
     nothingActivated()
   })
 
+  test("another extension's page opened from an agent tab (a password manager's unlock) is left to the user", async () => {
+    const { user, agentTab } = await sharedScene()
+    const url = "chrome-extension://aeblfdkhhhdcdjpifhhbdiojplfjncoa/popup/unlock.html"
+    const unlock = await stub.chrome.tabs.create({ windowId: user.id, url, active: true })
+    event("webNavigation.onCreatedNavigationTarget").emit({ sourceTabId: agentTab, tabId: unlock.id, url })
+    for (let i = 0; i < 20; i++) await settle()
+    expect(stub.state.tabs.get(unlock.id)).toMatchObject({ windowId: user.id, active: true })
+    expect(stub.state.tabs.get(unlock.id)!.groupId).not.toBe(8)
+    expect(await TabCleanup.isTracked(unlock.id)).toBe(false)
+    expect(opened()).toEqual([])
+  })
+
   test("a popup window gives up focus and stays where it is", async () => {
     const { agentTab } = await sharedScene()
     const window = await stub.chrome.windows.create({ type: "popup", url: "https://popup.example/", focused: true })

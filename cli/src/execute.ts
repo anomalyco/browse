@@ -277,7 +277,7 @@ export class ExecuteSandbox extends DefaultPageHost {
           const aftermath = error instanceof ExecuteCodeError ? error.aftermath : undefined
           const diagnostic = error instanceof SessionPageRecoveryError
             ? `session-page/${error.reason}`
-            : this.pageProtectedUi && isMaskedProtectedUiFailure(error)
+            : this.pageProtectedUi && isMaskedProtectedUiFailure(error, aftermath)
             ? protectedExtensionUiDiagnostic
             : executionContextFailureDiagnostic(error, aftermath)
           if (diagnostic?.startsWith("execution-context/")) {
