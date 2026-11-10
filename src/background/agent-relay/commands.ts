@@ -38,6 +38,7 @@ import {
 
 // The relay's tabs.create RPC times out after 15 s (cli/src/relay/rpc.ts); the handler answers within 12 s so the
 // reply still has time to arrive. A Chrome call that never settles (tab groups in Dia) must not use that up.
+// The budget includes beginCreate and opening the tab, so a slow open shortens the about:blank load wait.
 const CREATE_BUDGET_MS = 12_000
 // Vivaldi accepts a debugger attach on a tab that is still loading but then never answers its commands. The relay
 // creates agent tabs at about:blank and attaches before navigating, so only a blank tab waits here. A real URL (sent
@@ -159,7 +160,7 @@ export function createRelayCommands(deps: {
         // of the user's tabs.
         const url = typeof params?.url === "string" ? params.url : "about:blank"
         const active = params?.active === true
-        deps.log.add("tabs.create.start", { url, active })
+        deps.log.add("tabs.create.start", { blank: url === "about:blank", active })
         const deadline = Date.now() + CREATE_BUDGET_MS
         const creating = await TabCleanup.beginCreate(url)
         const tab = await AgentWindow.open(url, {

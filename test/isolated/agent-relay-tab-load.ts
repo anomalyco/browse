@@ -152,6 +152,34 @@ test("tabs.create answers without waiting for tabs.update", async () => {
   }
 })
 
+test("tabs.create answers within its budget when endCreate never settles", async () => {
+  // beginCreate's write has finished once the tab opens; a save that never lands from here on is one endCreate
+  // waits on. Moving the clock past the deadline leaves it no time, so this doesn't wait 12 real seconds.
+  const now = Date.now()
+  const createWithStatus = stub.chrome.tabs.create
+  const realSet = stub.chrome.storage.local.set
+  let savesHang = false
+  stub.chrome.tabs.create = async (options) => {
+    savesHang = true
+    setSystemTime(now + 12_001)
+    return createWithStatus(options)
+  }
+  stub.chrome.storage.local.set = (items) => (savesHang ? new Promise<never>(() => {}) : realSet(items))
+  const started = performance.now()
+  try {
+    const result = await answerFor(command("tabs.create", { url: "https://example.com/", active: false }))
+    expect(performance.now() - started).toBeLessThan(1_000)
+    expect(typeof result.tabId).toBe("number")
+    const diagnostics = await relay.diagnostics()
+    expect(diagnostics).toContain("tabs.create.start blank=false active=false")
+    expect(diagnostics).not.toContain("https://example.com/")
+  } finally {
+    stub.chrome.tabs.create = createWithStatus
+    stub.chrome.storage.local.set = realSet
+    setSystemTime()
+  }
+})
+
 test("Page.navigate to about:blank with a fragment is sent as about:blank; other urls are untouched", async () => {
   const sent: { method: string; params: unknown }[] = []
   const debuggerApi = (stub.chrome as unknown as {
