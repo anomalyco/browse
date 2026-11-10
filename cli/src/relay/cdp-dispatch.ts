@@ -288,11 +288,15 @@ export function createCdpDispatcher(options: {
         (method, params) => sendDebuggerCommand({ tabId, method, params }),
         { retry: () => deviceMetricsOverrides.generation(tabId) === generation },
       )
+      // The override is gone, so the execute end does not need to clear it again.
+      deviceMetricsOverrides.clear(tabId, generation)
       return {}
     }
     if (message.method === "Emulation.setDeviceMetricsOverride") {
-      // Remember the tab so the execute end can clear an override a script never cleared itself.
-      deviceMetricsOverrides.mark(tabId)
+      // Remember the tab (and which session's script set it) so the execute end clears it if the
+      // script doesn't. Raw CDP clients have no browse session, so their overrides aren't tracked.
+      const sessionId = cdpClients.sessionId(socket)
+      if (sessionId) deviceMetricsOverrides.mark(tabId, sessionId)
     }
     if (message.method === "Page.navigate" && route.chromeSessionId === undefined) {
       const dataNavigation = yield* navigateTopFrameToDataUrl({

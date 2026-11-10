@@ -25,8 +25,8 @@ describe("clearDeviceMetricsOverride", () => {
   test("skips the repeat when a newer set arrives during the pause", async () => {
     const sent: string[] = []
     const overrides = new DeviceMetricsOverrides()
-    const generation = overrides.generation(1)
-    overrides.mark(1) // the set that the repeat would have wiped
+    const generation = overrides.mark(1, "session-a")
+    overrides.mark(1, "session-a") // the set that the repeat would have wiped
 
     await Effect.runPromise(clearDeviceMetricsOverride(recorder(sent), {
       retry: () => overrides.generation(1) === generation,
@@ -37,52 +37,81 @@ describe("clearDeviceMetricsOverride", () => {
 })
 
 describe("DeviceMetricsOverrides", () => {
-  test("marks tabs and takes only the ones asked for", () => {
+  test("takes only the tabs this session set", () => {
     const overrides = new DeviceMetricsOverrides()
-    overrides.mark(1)
-    overrides.mark(3)
+    overrides.mark(1, "session-a")
+    overrides.mark(2, "session-b")
 
-    expect(overrides.take([2, 3])).toEqual([3])
-    expect(overrides.take([1, 2, 3])).toEqual([1])
-    expect(overrides.take([1, 2, 3])).toEqual([])
+    expect(overrides.take("session-a")).toEqual([1])
+    expect(overrides.take("session-a")).toEqual([])
+    expect(overrides.take("session-b")).toEqual([2])
+    expect(overrides.take("session-b")).toEqual([])
   })
 
-  test("a new mark changes the generation and taking does not reset it", () => {
+  test("never takes a tab whose latest set came from another session", () => {
     const overrides = new DeviceMetricsOverrides()
-    expect(overrides.generation(4)).toBe(0)
-    expect(overrides.mark(4)).toBe(1)
-    expect(overrides.mark(4)).toBe(2)
-    expect(overrides.take([4])).toEqual([4])
-    expect(overrides.generation(4)).toBe(2)
-    expect(overrides.mark(4)).toBe(3)
-    expect(overrides.take([4])).toEqual([4])
+    overrides.mark(3, "session-a")
+    overrides.mark(3, "session-b")
+
+    expect(overrides.take("session-a")).toEqual([])
+    expect(overrides.take("session-b")).toEqual([3])
   })
 
-  test("an old clear retry cannot match a set that followed an execute-end take", () => {
+  test("a tab the session drove without owning it is still taken", () => {
     const overrides = new DeviceMetricsOverrides()
-    overrides.mark(9)
-    const captured = overrides.generation(9)
-    overrides.take([9])
-    overrides.mark(9)
+    // Ownership is not part of the tracker: targetUrl/targetIndex tabs are marked the same way.
+    overrides.mark(8, "session-a")
 
-    expect(overrides.generation(9)).not.toBe(captured)
+    expect(tabsToClearOnExecuteEnd({ overrides, readOnly: false, sessionId: "session-a" })).toEqual([8])
+  })
+
+  test("a clear drops the tab unless a newer set replaced it", () => {
+    const overrides = new DeviceMetricsOverrides()
+    const generation = overrides.mark(4, "session-a")
+    overrides.clear(4, generation)
+    expect(overrides.take("session-a")).toEqual([])
+
+    const next = overrides.mark(5, "session-a")
+    overrides.clear(5, next - 1) // stale generation: a newer set owns the tab
+    expect(overrides.take("session-a")).toEqual([5])
+  })
+
+  test("forget drops a tab when its runtime state goes away", () => {
+    const overrides = new DeviceMetricsOverrides()
+    overrides.mark(6, "session-a")
+    overrides.forget(6)
+
+    expect(overrides.generation(6)).toBe(0)
+    expect(overrides.take("session-a")).toEqual([])
+  })
+
+  test("generations are not reused, so an old retry cannot match a forgotten tab's new set", () => {
+    const overrides = new DeviceMetricsOverrides()
+    const before = overrides.mark(7, "session-a")
+    overrides.forget(7)
+    const after = overrides.mark(7, "session-b")
+
+    expect(after).not.toBe(before)
+    expect(after).toBeGreaterThan(before)
   })
 })
 
 describe("tabsToClearOnExecuteEnd", () => {
-  test("clears only tabs that had a device-metrics override, once", () => {
+  test("clears only this session's tabs that still have an override, once", () => {
     const overrides = new DeviceMetricsOverrides()
-    overrides.mark(7)
+    overrides.mark(1, "session-a")
+    overrides.mark(2, "session-b")
 
-    expect(tabsToClearOnExecuteEnd({ overrides, readOnly: false, tabIds: [6, 7, 8] })).toEqual([7])
-    expect(tabsToClearOnExecuteEnd({ overrides, readOnly: false, tabIds: [6, 7, 8] })).toEqual([])
+    expect(tabsToClearOnExecuteEnd({ overrides, readOnly: false, sessionId: "session-a" })).toEqual([1])
+    expect(tabsToClearOnExecuteEnd({ overrides, readOnly: false, sessionId: "session-a" })).toEqual([])
+    expect(tabsToClearOnExecuteEnd({ overrides, readOnly: false, sessionId: "session-b" })).toEqual([2])
   })
 
   test("does not clear, or consume marks, for a read-only session", () => {
     const overrides = new DeviceMetricsOverrides()
-    overrides.mark(7)
+    overrides.mark(7, "session-a")
 
-    expect(tabsToClearOnExecuteEnd({ overrides, readOnly: true, tabIds: [7] })).toEqual([])
-    expect(tabsToClearOnExecuteEnd({ overrides, readOnly: false, tabIds: [7] })).toEqual([7])
+    expect(tabsToClearOnExecuteEnd({ overrides, readOnly: true, sessionId: "session-a" })).toEqual([])
+    expect(tabsToClearOnExecuteEnd({ overrides, readOnly: false, sessionId: "session-a" })).toEqual([7])
   })
 })

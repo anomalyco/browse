@@ -304,21 +304,20 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         yield* presentation.onSessionExecuteStateChange(sessionId, executing)
         if (executing) return
         // A viewport emulated on a tab outlives the script that set it: the tab stays letterboxed
-        // until the debugger detaches. Clear the tabs that actually received an override in this
-        // session, which also covers raw CDP overrides the execute sandbox does not track.
+        // until the debugger detaches. Clear the tabs this session's script set an override on,
+        // owned or just driven through target selection, which also covers raw CDP overrides. This
+        // runs inline under the session's execute semaphore, so nothing is left for the next call.
         const tabIds = tabsToClearOnExecuteEnd({
           overrides: deviceMetricsOverrides,
           readOnly: sessions.isReadOnly(sessionId),
-          tabIds: registry.listRootTargets()
-            .filter((target) => target.opencodeBrowserSessionId === sessionId)
-            .map((target) => target.tabId),
+          sessionId,
         })
         for (const tabId of tabIds) {
           const generation = deviceMetricsOverrides.generation(tabId)
-          yield* Effect.forkDetach(clearDeviceMetricsOverride(
+          yield* clearDeviceMetricsOverride(
             (method, params) => sendDebuggerCommand({ tabId, method, params }),
             { retry: () => deviceMetricsOverrides.generation(tabId) === generation },
-          ).pipe(Effect.ignore))
+          ).pipe(Effect.ignore)
         }
       }),
       onExecuteRecord: (record) => {
@@ -557,6 +556,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     protectedFrames.forgetTab(tabId)
     navigationGuard.forgetTab(tabId)
     ghostCursor.forget(tabId)
+    deviceMetricsOverrides.forget(tabId)
     forgetTab(tabId)
     for (const [sessionId, childTabId] of suppressedChildSessions) {
       if (childTabId === tabId) suppressedChildSessions.delete(sessionId)
