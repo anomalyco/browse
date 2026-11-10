@@ -84,7 +84,21 @@ publish() { # <artifact> <target=file>...
   shift
   set -- "$@" --app browse --artifact "$artifact" --release "$work/release.json" \
     --out "$work/manifest-$artifact.json" --verify-downloads
-  client publish "$@"
+  # Publishing is idempotent (a rerun skips files the service already has), so retry a transient network error
+  # instead of failing the job, for example a connection reset while the client re-downloads files to verify them.
+  local attempt delay status
+  delay=10
+  for attempt in 1 2 3; do
+    if client publish "$@"; then
+      return 0
+    else
+      status=$?
+    fi
+    if [ "$attempt" -eq 3 ]; then return "$status"; fi
+    echo "publish $artifact: attempt $attempt failed (exit $status); retrying in ${delay}s" >&2
+    sleep "$delay"
+    delay=30
+  done
 }
 publish extension --target "chromium=$build_dir/$extension"
 set --
