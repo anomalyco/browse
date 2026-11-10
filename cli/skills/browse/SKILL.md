@@ -266,6 +266,11 @@ Cookie access is limited to the hosts of the session's pages, and
 `page.bringToFront()` is refused because it raises the user's window; use
 `handoff()` when the user needs to act.
 
+Clipboard calls in a frame need that frame focused: call `window.focus()` inside
+it in the same `evaluate` (or click in the frame) before `navigator.clipboard`,
+and the parent must give the frame `allow="clipboard-write"` (or
+`clipboard-read`). `context.grantPermissions()` is refused, so don't try it.
+
 The page's console messages and uncaught errors are off by default because
 capturing them lets the page detect a debugger. Turn them on for one page when
 debugging, then turn them off:
@@ -320,8 +325,8 @@ Never globally auto-accept native dialogs.
 
 browse refuses navigations to `file:`, `chrome:`, `chrome-extension:`,
 `devtools:` and `view-source:` URLs, and blocks CDP commands that would destroy
-shared browser state, including browser close and cookie/cache clearing. Never
-work around those guardrails.
+shared browser state, including browser close, cookie/cache clearing, and
+granting or changing site permissions. Never work around those guardrails.
 
 Every execute is journaled under `<state root>/sessions/<id>/journal.jsonl`
 (`~/.local/state/browse` on macOS and Linux). Never place credentials
