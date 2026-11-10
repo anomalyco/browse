@@ -6,6 +6,7 @@ import {
   defaultPageRecoveredWarning,
   defaultPageReattachedWarning,
   defaultPageReplacedWarning,
+  installClosedPageReplacementGuard,
   SessionPageRecoveryError,
 } from "../src/execute/page-recovery.ts"
 import { DefaultPageHost, type DefaultPageHostOptions, type DefaultPageTarget } from "../src/execute/default-page.ts"
@@ -76,6 +77,10 @@ class FakePage {
     this.evaluateCalls += 1
     if (this.evaluateError) throw this.evaluateError
     return false
+  }
+
+  async goto(): Promise<null> {
+    return null
   }
 
   async close(): Promise<void> {
@@ -205,6 +210,14 @@ class TestHost extends DefaultPageHost {
   mediaFeatures(): Map<string, string> {
     return this.explicitMediaFeatures
   }
+
+  raiseActionTimeout(milliseconds: number): void {
+    this.actionTimeoutMs = milliseconds
+  }
+
+  restoreActionTimeoutNow(): void {
+    this.restoreActionTimeout()
+  }
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
@@ -308,6 +321,37 @@ describe("DefaultPageHost binding", () => {
     expect(host.lastNonBlankUrl()).toBe("https://example.com/next")
     expect(page.defaultTimeoutMs).toBe(30_000)
     expect(page.emulatedMedia.at(-1)?.features).toContainEqual({ name: "prefers-color-scheme", value: "dark" })
+  })
+
+  test("a raised action timeout is applied on bind, survives navigation, and is restored", async () => {
+    const host = new TestHost()
+    const page = new FakePage()
+    host.raiseActionTimeout(240_000)
+
+    host.bind(page.asPage(), "target-1", true)
+    expect(page.defaultTimeoutMs).toBe(240_000)
+
+    page.currentUrl = "https://example.com/next"
+    page.emit("framenavigated", page.frame)
+    await settle()
+    expect(page.defaultTimeoutMs).toBe(240_000)
+
+    host.restoreActionTimeoutNow()
+    expect(page.defaultTimeoutMs).toBe(30_000)
+  })
+
+  test("the closed-page replacement guard restores the call's action timeout after a navigation", async () => {
+    const page = new FakePage()
+    let cleared = false
+    installClosedPageReplacementGuard(page.asPage(), () => {
+      cleared = true
+    }, 240_000)
+    expect(page.defaultTimeoutMs).toBe(2_500)
+
+    await page.goto()
+
+    expect(cleared).toBe(true)
+    expect(page.defaultTimeoutMs).toBe(240_000)
   })
 
   test("a stale page's close event is ignored after a rebind", () => {

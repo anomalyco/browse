@@ -28,6 +28,7 @@ import {
 } from "./execute/log-capture.ts"
 import {
   adoptedPageConnectTimeoutMs,
+  defaultActionTimeoutMs,
   defaultHandoffTimeoutMs,
   defaultPageClosedWarning,
   defaultPageReattachedWarning,
@@ -180,6 +181,8 @@ export type ExecuteResult = {
 
 export type ExecuteOptions = {
   readonly targetSelection?: ExecuteTargetSelection
+  /** Playwright's action budget for this call, when the caller or the relay chose an overall timeout. */
+  readonly actionTimeoutMs?: number
 }
 
 export class ExecuteSandbox extends DefaultPageHost {
@@ -189,6 +192,8 @@ export class ExecuteSandbox extends DefaultPageHost {
   private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
   private readonly networkCapture = new NetworkCapture.Recorder()
   private readonly secrets: ExecuteSecretsBridge
+  /** The context whose pages this call gave its action budget, for the restore. */
+  private actionTimeoutContext: BrowserContext | undefined
   private realm: ExecuteRealm | undefined
   private state: Record<string, unknown>
 
@@ -223,43 +228,50 @@ export class ExecuteSandbox extends DefaultPageHost {
   execute(code: string, options: ExecuteOptions = {}): Effect.Effect<ExecuteResult> {
     return Effect.tryPromise({
       try: async () => {
-        if (this.realm?.isStopped) {
-          this.realm = this.createRealm()
-          this.state = this.realm.state
-          this.pendingWarnings.push("The previous execute realm stopped; JavaScript state and pending callbacks were reset.")
-        }
-        if (!this.realm) for (const warning of pageVisibleApiSourceWarnings(code)) this.addWarningOnce(warning)
-        const globals = await this.getGlobals(options)
-        const { result, logs, logSummary, aftermath } = await runUserCode({
-          code,
-          globals,
-          ...(this.realm ? { realm: this.realm } : {}),
-          onUnhandledRejection: (warning) => this.addWarningOnce(warning),
-        })
-          .then(async (completed) => ({ ...completed, aftermath: await this.withChallenge(globals.page, completed.aftermath, false) }))
-          .catch(async (error: unknown) => {
-            if (!(error instanceof ExecuteCodeError) || !error.aftermath) throw error
-            throw new ExecuteCodeError(error.originalError, error.logs, error.logSummary, await this.withChallenge(globals.page, error.aftermath, true))
+        this.actionTimeoutMs = options.actionTimeoutMs ?? defaultActionTimeoutMs
+        try {
+          if (this.realm?.isStopped) {
+            this.realm = this.createRealm()
+            this.state = this.realm.state
+            this.pendingWarnings.push("The previous execute realm stopped; JavaScript state and pending callbacks were reset.")
+          }
+          if (!this.realm) for (const warning of pageVisibleApiSourceWarnings(code)) this.addWarningOnce(warning)
+          const globals = await this.getGlobals(options)
+          const { result, logs, logSummary, aftermath } = await runUserCode({
+            code,
+            globals,
+            ...(this.realm ? { realm: this.realm } : {}),
+            onUnhandledRejection: (warning) => this.addWarningOnce(warning),
           })
-        await this.networkCapture.settleForOutput()
-        const extracted = extractExecuteMedia(result)
-        const redactedValue = this.secrets.redactOutputValue(extracted.value)
-        const jsonSafeResult = toJsonSafeValue(redactedValue)
-        const bounded = boundExecuteResult(stringifyResult(redactedValue), jsonSafeResult.serializable ? jsonSafeResult.value : undefined, jsonSafeResult.serializable)
-        const warnings = this.finalizeWarnings(
-          logSummary,
-          jsonValueWarning(redactedValue, jsonSafeResult),
-          bounded.warning,
-        )
-        return {
-          text: bounded.text,
-          ...(bounded.hasValue ? { value: bounded.value } : {}),
-          ...(extracted.media.length > 0 ? { media: extracted.media } : {}),
-          isError: false,
-          logs: this.secrets.redactCaptureLogs(logs),
-          logSummary,
-          warnings,
-          aftermath: this.secrets.redactCaptureAftermath(aftermath),
+            .then(async (completed) => ({ ...completed, aftermath: await this.withChallenge(globals.page, completed.aftermath, false) }))
+            .catch(async (error: unknown) => {
+              if (!(error instanceof ExecuteCodeError) || !error.aftermath) throw error
+              throw new ExecuteCodeError(error.originalError, error.logs, error.logSummary, await this.withChallenge(globals.page, error.aftermath, true))
+            })
+          await this.networkCapture.settleForOutput()
+          const extracted = extractExecuteMedia(result)
+          const redactedValue = this.secrets.redactOutputValue(extracted.value)
+          const jsonSafeResult = toJsonSafeValue(redactedValue)
+          const bounded = boundExecuteResult(stringifyResult(redactedValue), jsonSafeResult.serializable ? jsonSafeResult.value : undefined, jsonSafeResult.serializable)
+          const warnings = this.finalizeWarnings(
+            logSummary,
+            jsonValueWarning(redactedValue, jsonSafeResult),
+            bounded.warning,
+          )
+          return {
+            text: bounded.text,
+            ...(bounded.hasValue ? { value: bounded.value } : {}),
+            ...(extracted.media.length > 0 ? { media: extracted.media } : {}),
+            isError: false,
+            logs: this.secrets.redactCaptureLogs(logs),
+            logSummary,
+            warnings,
+            aftermath: this.secrets.redactCaptureAftermath(aftermath),
+          }
+        } finally {
+          this.restoreActionTimeout()
+          this.actionTimeoutContext?.setDefaultTimeout?.(defaultActionTimeoutMs)
+          this.actionTimeoutContext = undefined
         }
       },
       catch: (cause) => {
@@ -579,6 +591,10 @@ export class ExecuteSandbox extends DefaultPageHost {
       page = await this.getSessionPage({ context, ...(targetSelection ? { targetSelection } : {}) })
     }
     installPageReadTimeout(page)
+    // The page this call drives, and its context for pages the code opens itself.
+    this.actionTimeoutContext = context
+    context.setDefaultTimeout?.(this.actionTimeoutMs)
+    this.applyActionTimeout(page)
     installViewportZoomGuard({
       page,
       explicitMediaFeatures: this.explicitMediaFeatures,

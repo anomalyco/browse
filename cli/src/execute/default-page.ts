@@ -3,6 +3,7 @@ import type { BrowserContext, Frame, Page } from "patchright-core"
 import { applyExplicitMediaFeatures } from "./guards.ts"
 import {
   debuggingBarDismissedWarning,
+  defaultActionTimeoutMs,
   defaultPageClosedWarning,
   defaultPageCrashedWarning,
   defaultPageReattachedWarning,
@@ -67,6 +68,9 @@ export abstract class DefaultPageHost {
   protected readonly explicitMediaFeatures = new Map<string, string>()
   protected explicitMedia: string | undefined
   protected pendingWarnings: string[] = []
+  /** Playwright's default per-action timeout: raised for a call that asked for a longer execute. */
+  protected actionTimeoutMs = defaultActionTimeoutMs
+  private readonly actionTimeoutPages = new Set<Page>()
   protected boundPageListeners: {
     readonly page: Page
     readonly close: () => void
@@ -89,6 +93,19 @@ export abstract class DefaultPageHost {
 
   protected addWarningOnce(warning: string | undefined): void {
     if (warning && !this.pendingWarnings.includes(warning)) this.pendingWarnings.push(warning)
+  }
+
+  /** Give a page this call's action budget, remembering it so the restore covers every page the call touched. */
+  protected applyActionTimeout(page: Page): void {
+    page.setDefaultTimeout?.(this.actionTimeoutMs)
+    this.actionTimeoutPages.add(page)
+  }
+
+  /** Back to the steady-state action timeout on every page this session raised. */
+  protected restoreActionTimeout(): void {
+    this.actionTimeoutMs = defaultActionTimeoutMs
+    for (const page of this.actionTimeoutPages) page.setDefaultTimeout?.(this.actionTimeoutMs)
+    this.actionTimeoutPages.clear()
   }
 
   /** Forget the bound page; a target id is re-resolved exactly on the next execute. */
@@ -179,6 +196,7 @@ export abstract class DefaultPageHost {
   protected bindDefaultPage(page: Page, targetId: string | undefined, ownsPage: boolean, notify: boolean): void {
     this.clearPageListeners()
     this.page = page
+    this.applyActionTimeout(page)
     if (targetId === undefined || targetId !== this.defaultPageTargetId) {
       this.pageCrashed = false
       this.pageProtectedUi = false
@@ -205,7 +223,7 @@ export abstract class DefaultPageHost {
       if (this.page === page && frame === page.mainFrame()) {
         this.pageCrashed = false
         this.recordNonBlankUrl(frame.url())
-        page.setDefaultTimeout?.(30_000)
+        page.setDefaultTimeout?.(this.actionTimeoutMs)
         if (this.explicitMediaFeatures.size > 0) {
           void applyExplicitMediaFeatures(page, this.explicitMedia, this.explicitMediaFeatures)
         }
@@ -307,7 +325,7 @@ export abstract class DefaultPageHost {
     if (this.recreatedFromClosedUrl) {
       installClosedPageReplacementGuard(page, () => {
         this.recreatedFromClosedUrl = undefined
-      })
+      }, this.actionTimeoutMs)
     }
     return page
   }
