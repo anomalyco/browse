@@ -1,12 +1,13 @@
-// Headless check of snapshot root selection in a plain page with no extension or relay:
+// Headless check of snapshot root selection and iframe capture in a plain page with no extension or relay:
 //   PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=<chrome> bun test/snapshot-within-browser.ts [--browser <chrome>]
 // Runs under Bun because it loads cli/src TypeScript directly; existing harnesses run Node against built output.
 // The browser is --browser, else PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH, else patchright-core's own Chromium.
 import assert from "node:assert/strict"
+import http from "node:http"
 import { parseArgs } from "node:util"
 import { chromium, selectors } from "patchright-core"
 import { createAriaSnapshotHelper, createSnapshotHelpers } from "../src/snapshot.ts"
-import { ariaSnapshotWithoutTextControlValues } from "../src/snapshot/aria-snapshot.ts"
+import { ariaSnapshotWithoutTextControlValues, registerAriaSnapshotSelector } from "../src/snapshot/aria-snapshot.ts"
 import type { SnapshotRefRegistry } from "../src/snapshot/types.ts"
 import { portFromEnv } from "./support/ports.ts"
 
@@ -16,8 +17,59 @@ const cdpPort = await portFromEnv("BROWSE_TEST_CDP_PORT")
 const browser = await chromium.launch({ executablePath, args: [`--remote-debugging-port=${cdpPort}`] })
 const registry = (): SnapshotRefRegistry => ({ selectors: new Map() })
 
+// The iframe fixture: a modal checkout dialog with a cross-origin payment frame (localhost, so Chromium puts it in
+// its own process) and a same-origin one, each with a heading, two textboxes, a button and a nested frame.
+const frameForm = (title: string, nested = ""): string => `<!doctype html><html><body>
+  <h1>${title}</h1>
+  <label>Card number<input name="card" aria-label="Card number"></label>
+  <label>Expiry<input name="expiry" aria-label="Expiry"></label>
+  <button type="button" onclick="this.textContent='Paid'">Pagar</button>
+  ${nested}
+</body></html>`
+
+let sameOriginFrameUrl = ""
+const nestedHtml = frameForm("Nested").replace("Pagar", "Nested")
+const crossOriginServer = http.createServer((request, response) => {
+  response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
+  if (request.url === "/nested") return response.end(nestedHtml)
+  if (request.url === "/moved") return response.end(frameForm("Moved"))
+  response.end(frameForm("Pay form", request.url === "/payment" ? `<iframe src="${sameOriginFrameUrl}/nested" title="nested" width="200" height="150"></iframe>` : ""))
+})
+await new Promise<void>((resolve) => crossOriginServer.listen(0, "127.0.0.1", resolve))
+const crossOriginPort = (crossOriginServer.address() as { port: number }).port
+
+const hostServer = http.createServer((request, response) => {
+  response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
+  if (request.url === "/same") return response.end(frameForm("Same form"))
+  if (request.url === "/many") return response.end(`<!doctype html><html><body><h1>Many</h1>${Array.from({ length: 10 }, (_, index) => `<iframe src="/same" title="same-${index}"></iframe>`).join("")}</body></html>`)
+  if (request.url === "/nested") return response.end(nestedHtml)
+  if (request.url === "/moved-frame") return response.end(frameForm("Moved"))
+  response.end(`<!doctype html><html><body><main><h1>Checkout</h1>
+    <dialog open aria-modal="true" aria-label="Pagar">
+      <iframe src="http://localhost:${crossOriginPort}/payment" title="payment" width="400" height="300"></iframe>
+      <iframe src="/same" title="same" width="400" height="300"></iframe>
+    </dialog>
+  </main></body></html>`)
+})
+await new Promise<void>((resolve) => hostServer.listen(0, "127.0.0.1", resolve))
+const hostPort = (hostServer.address() as { port: number }).port
+sameOriginFrameUrl = `http://127.0.0.1:${hostPort}`
+
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+const refFor = (output: string, role: string, name: string, after?: string): string | undefined => {
+  const lines = output.split("\n")
+  const start = after === undefined ? 0 : Math.max(0, lines.findIndex((line) => line.includes(after)))
+  for (let index = start; index < lines.length; index++) {
+    const match = new RegExp(`${role} "${name}" \\[ref=(e\\d+)`).exec(lines[index]!)
+    if (match) return match[1]
+  }
+  return undefined
+}
+
 try {
   const page = await browser.newPage()
+  // The execute sandbox registers the redaction engine when it connects, before any frame's utility world exists.
+  await registerAriaSnapshotSelector(page.context())
 
   // Each CDP connection gets a default context. Even connections made after the first registration must redact,
   // without a stream of short-lived connections retaining a new selector source per context in Patchright.
@@ -133,7 +185,149 @@ try {
     await readonlyPage.close()
   } finally { await readonlyConnection.close() }
 
-  console.log(JSON.stringify({ multiple: "PASS", hidden: "PASS", missing: "PASS", single: "PASS", refStrict: "PASS", readonlyValues: "PASS" }))
+  // --- iframes ---
+  await page.goto(`http://127.0.0.1:${hostPort}/`)
+  for (const title of ["payment", "same"]) {
+    await page.frameLocator(`iframe[title="${title}"]`).locator("h1").waitFor()
+  }
+  await page.frameLocator('iframe[title="payment"]').frameLocator('iframe[title="nested"]').locator("h1").waitFor()
+  const frameHelpers = createSnapshotHelpers(page, registry())
+  const frameSnapshot = await frameHelpers.snapshot()
+  const paymentIndex = frameSnapshot.split("\n").findIndex((line) => line.includes('- iframe "payment"'))
+  const sameIndex = frameSnapshot.split("\n").findIndex((line) => line.includes('- iframe "same"'))
+  assert.ok(paymentIndex >= 0, frameSnapshot)
+  assert.ok(sameIndex > paymentIndex, frameSnapshot)
+  assert.match(frameSnapshot, /- iframe "payment" \[ref=e\d+ src=localhost:\d+\/payment\]/, frameSnapshot)
+  assert.match(frameSnapshot, /- iframe "same" \[ref=e\d+ src=127\.0\.0\.1:\d+\/same\]/, frameSnapshot)
+  // Both documents are captured, nested under their iframe line, and cross-origin content is included.
+  const printed = frameSnapshot.split("\n")
+  const indentOf = (line: string) => line.length - line.trimStart().length
+  const inFrame = (index: number, pattern: RegExp) => {
+    const base = indentOf(printed[index]!)
+    for (let cursor = index + 1; cursor < printed.length; cursor++) {
+      const line = printed[cursor]!
+      if (line.startsWith("- ") || indentOf(line) <= base) return false
+      if (pattern.test(line)) return true
+    }
+    return false
+  }
+  assert.ok(inFrame(paymentIndex, /heading "Pay form"/), frameSnapshot)
+  assert.ok(inFrame(sameIndex, /heading "Same form"/), frameSnapshot)
+  assert.equal((frameSnapshot.match(/textbox "Card number"/g) ?? []).length, 3, "cross-origin, same-origin and nested frames each print a card field")
+
+  // Frames are cheaper to leave out when they are irrelevant: the iframe line stays, its content does not.
+  const withoutFrames = await createSnapshotHelpers(page, registry()).snapshot({ frames: false })
+  assert.match(withoutFrames, /- iframe "payment"/)
+  assert.doesNotMatch(withoutFrames, /Pay form/)
+
+  // A ref from the cross-origin document clicks inside that document.
+  const crossOriginButton = refFor(frameSnapshot, "button", "Pagar", '- iframe "payment"')
+  const sameOriginField = refFor(frameSnapshot, "textbox", "Card number", '- iframe "same"')
+  assert.ok(crossOriginButton, frameSnapshot)
+  assert.ok(sameOriginField, frameSnapshot)
+  await frameHelpers.ref(crossOriginButton).click()
+  assert.equal(await page.frameLocator('iframe[title="payment"]').locator("button").textContent(), "Paid")
+  await frameHelpers.ref(sameOriginField).fill("4242 4242 4242 4242")
+  assert.equal(await page.frameLocator('iframe[title="same"]').locator("input[name=card]").inputValue(), "4242 4242 4242 4242")
+
+  // find still sees frame content.
+  const found = await frameHelpers.snapshot({ find: "Expiry" })
+  assert.match(found, /matching snapshot lines/)
+  assert.match(found, /textbox "Expiry"/)
+
+  // A `within` locator in a frame captures there and its refs resolve there.
+  const withinFrame = createSnapshotHelpers(page, registry())
+  const frameBody = page.frameLocator('iframe[title="payment"]').locator("body")
+  const withinOutput = await withinFrame.snapshot({ within: frameBody })
+  assert.match(withinOutput, /heading "Pay form"/)
+  assert.doesNotMatch(withinOutput, /Checkout/)
+  const withinRef = refFor(withinOutput, "textbox", "Expiry")
+  assert.ok(withinRef, withinOutput)
+  assert.equal(await withinFrame.ref(withinRef).count(), 1)
+  await withinFrame.ref(withinRef).fill("12/34")
+  assert.equal(await page.frameLocator('iframe[title="payment"]').locator("input[name=expiry]").inputValue(), "12/34")
+
+  // `within: ref("eN")` captures in the frame the ref came from.
+  const beforeFrameRoot = await frameHelpers.snapshot()
+  const frameControl = refFor(beforeFrameRoot, "textbox", "Expiry", '- iframe "payment"')
+  assert.ok(frameControl, beforeFrameRoot)
+  const withinFrameRef = await frameHelpers.snapshot({ within: frameHelpers.ref(frameControl) })
+  assert.match(withinFrameRef, /textbox "Expiry"/)
+  assert.doesNotMatch(withinFrameRef, /Checkout/)
+
+  // A frame ref fails closed once that frame navigates.
+  const beforeNavigation = await frameHelpers.snapshot()
+  const paymentControl = refFor(beforeNavigation, "textbox", "Expiry", '- iframe "payment"')
+  assert.ok(paymentControl, beforeNavigation)
+  const crossOriginFrame = page.frames().find((frame) => frame.url().includes("localhost"))
+  assert.ok(crossOriginFrame, "cross-origin frame is a real Playwright frame")
+  await crossOriginFrame.goto(`http://localhost:${crossOriginPort}/moved`)
+  await page.frameLocator('iframe[title="payment"]').locator("h1").filter({ hasText: "Moved" }).waitFor()
+  assert.throws(
+    () => frameHelpers.ref(paymentControl),
+    /was captured in an iframe that has navigated or detached; call snapshot\(\) again/,
+  )
+
+  // ariaSnapshot includes iframe content but never values typed into one, cross-origin or same-origin.
+  await page.goto(`http://127.0.0.1:${hostPort}/`)
+  for (const title of ["payment", "same"]) {
+    await page.frameLocator(`iframe[title="${title}"]`).locator("h1").waitFor()
+  }
+  const ariaHelpers = createAriaSnapshotHelper(page)
+  await page.frameLocator('iframe[title="payment"]').locator("input[name=card]").fill("cross-secret")
+  await page.frameLocator('iframe[title="same"]').locator("input[name=card]").fill("same-secret")
+  await page.frameLocator('iframe[title="payment"]').frameLocator('iframe[title="nested"]').locator("input[name=card]").fill("nested-secret")
+  const aria = await ariaHelpers()
+  assert.match(aria, /heading "Pay form"/, aria)
+  assert.match(aria, /heading "Same form"/, aria)
+  assert.match(aria, /heading "Nested"/, aria)
+  assert.doesNotMatch(aria, /cross-secret/)
+  assert.doesNotMatch(aria, /same-secret/)
+  assert.doesNotMatch(aria, /nested-secret/)
+  assert.doesNotMatch(aria, /\[ref=/, "Playwright's inert refs are stripped")
+  // A target inside the frame redacts that frame and the frames nested under it too.
+  const ariaInFrame = await ariaHelpers(page.frameLocator('iframe[title="payment"]').locator("body"))
+  assert.match(ariaInFrame, /heading "Pay form"/)
+  assert.match(ariaInFrame, /heading "Nested"/)
+  assert.doesNotMatch(ariaInFrame, /cross-secret/)
+  assert.doesNotMatch(ariaInFrame, /nested-secret/)
+  // Values are in the DOM; only the snapshot redacts them.
+  assert.equal(await page.frameLocator('iframe[title="payment"]').locator("input[name=card]").inputValue(), "cross-secret")
+
+  // diff reports a change made inside a frame, against a baseline taken with the same options.
+  await page.goto(`http://127.0.0.1:${hostPort}/`)
+  await page.frameLocator('iframe[title="payment"]').locator("h1").waitFor()
+  const diffHelpers = createSnapshotHelpers(page, registry())
+  const baseline = await diffHelpers.snapshot()
+  const diffButton = refFor(baseline, "button", "Pagar", '- iframe "payment"')
+  assert.ok(diffButton, baseline)
+  await diffHelpers.ref(diffButton).click()
+  const diff = await diffHelpers.snapshot({ diff: true })
+  assert.match(diff, /\+\s+button "Paid"/, diff)
+
+  // The frame budget is honest about the iframes it leaves out.
+  await page.goto(`http://127.0.0.1:${hostPort}/many`)
+  await page.frameLocator('iframe[title="same-0"]').locator("h1").waitFor()
+  const many = await createSnapshotHelpers(page, registry()).snapshot({ maxItems: 200 })
+  assert.match(many, /- \.\.\. 2 iframe contents not captured \(8 at most per snapshot\)/, many)
+  assert.match(many, /- iframe "same-9"/, many)
+
+  console.log(JSON.stringify({
+    multiple: "PASS",
+    hidden: "PASS",
+    missing: "PASS",
+    single: "PASS",
+    refStrict: "PASS",
+    readonlyValues: "PASS",
+    frames: "PASS",
+    crossOriginRef: "PASS",
+    withinFrame: "PASS",
+    frameRefClosed: "PASS",
+    ariaFrames: "PASS",
+    frameBudget: "PASS",
+  }))
 } finally {
-  await browser.close()
+  await browser.close().catch(() => {})
+  await new Promise<void>((resolve) => hostServer.close(() => resolve()))
+  await new Promise<void>((resolve) => crossOriginServer.close(() => resolve()))
 }

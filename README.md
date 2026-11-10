@@ -228,7 +228,7 @@ connection itself isn't encrypted by browse; use a network that is (Tailscale or
 
 | Tool | What it does |
 | --- | --- |
-| `execute` | Run Playwright code against the session's page (`page`, `context`, `snapshot()`, `handoff()`, …) |
+| `execute` | Run Playwright code against the session's page (`page`, `context`, `snapshot()`, `handoff()`, …). `snapshot()` outlines the page and the content of its iframes, with refs that work inside frames |
 | `session_new`, `session_list`, `session_use`, `session_reset`, `session_delete` | Named sessions, each with its own tabs; they survive restarts |
 | `session_adopt` | Take over a tab you handed over with the toolbar button |
 | `session_allowlist` | Limit a session's tabs to the sites you name (also `allowedOrigins` on `session_new`) |

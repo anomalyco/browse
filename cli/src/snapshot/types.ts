@@ -1,5 +1,5 @@
 import { Predicate } from "effect"
-import type { Locator, Page } from "patchright-core"
+import type { Frame, Locator, Page } from "patchright-core"
 import { ariaSnapshotWithoutTextControlValues } from "./aria-snapshot.ts"
 
 export type AriaSnapshotTarget = Locator | string
@@ -26,6 +26,12 @@ export type SnapshotOptions = {
   readonly depth?: number
   readonly maxItems?: number
   readonly timeout?: number
+  /**
+   * Capture the content of visible iframes and frames too, nested under their `iframe` line, and let refs from
+   * that content resolve in the frame. Defaults to true; turn it off for a page whose embeds are irrelevant or
+   * expensive.
+   */
+  readonly frames?: boolean
 }
 
 export type SnapshotHelper = (options?: SnapshotOptions) => Promise<string>
@@ -42,18 +48,33 @@ export type SnapshotEntry = {
   readonly details?: string
   readonly selector?: string
   readonly selectorRole?: string
+  /** The element is an `<iframe>`/`<frame>`; its document is captured separately and nested under this entry. */
+  readonly iframe?: boolean
   readonly priority: number
+}
+
+/** Where a snapshot ref lives: the session page or the frame it was captured in. */
+export type SnapshotRefTarget = {
+  readonly selector: string
+  readonly role: string
+  readonly name?: string
+  /** Set when the element is inside a frame; refs then resolve with `frame.locator`, not `page.locator`. */
+  readonly frame?: Frame
+  /** The frame's generation when the ref was captured; a navigation bumps it and makes the ref stale. */
+  readonly frameGeneration?: number
 }
 
 export type SnapshotRefRegistry = {
   page?: Page
   url?: string
-  selectors: Map<string, { readonly selector: string; readonly role: string; readonly name?: string }>
+  selectors: Map<string, SnapshotRefTarget>
   previousSnapshot?: SnapshotBaseline
   nextRef?: number
   locatorScopes?: WeakMap<Locator, number>
   nextLocatorScope?: number
   removeNavigationListener?: () => void
+  /** Per-frame document generations, bumped on `framenavigated`, so frame refs fail closed after a navigation. */
+  frameGenerations?: WeakMap<Frame, number>
 }
 
 export type SnapshotRenderedEntry = {
@@ -63,6 +84,8 @@ export type SnapshotRenderedEntry = {
   readonly role?: string
   readonly identityName?: string
   readonly refId?: string
+  /** Identifies the captured frame the entry came from, so identical selectors in two frames never share a ref. */
+  readonly frameKey?: string
 }
 
 export type SnapshotBaseline = {

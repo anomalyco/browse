@@ -1,7 +1,10 @@
 import type { BrowserContext, Frame, Locator, Page } from "patchright-core"
 import { runtimeFailureKind } from "../update/runtime-diagnostics.ts"
+import { frameDescendants } from "./frames.ts"
 
 const redactionCleanupErrorMessage = "browse could not confirm ARIA snapshot value-redaction cleanup"
+/** Playwright's AI-mode refs are internal to that snapshot; browse refs are separate and would not resolve them. */
+const snapshotRefMarker = / \[ref=(?:f\d+)?e\d+\]/g
 // Keep the engine as source text so bundlers cannot inject Node-only helpers into the browser function.
 const redactionSelectorSource = `({
   query(root, body) {
@@ -141,7 +144,7 @@ const selectorName = `bcariaredact${redactionModuleId}`
 let nextRedactionToken = 0
 const contextSelectors = new WeakMap<BrowserContext, Promise<string>>()
 const pageCleanup = new WeakMap<Page, {
-  readonly pendingTokens: Map<string, { readonly frame: Frame; readonly selectorName: string }>
+  readonly pendingTokens: Map<string, { readonly frames: readonly Frame[]; readonly selectorName: string }>
   queue: Promise<void>
 }>()
 
@@ -156,20 +159,34 @@ export async function ariaSnapshotWithoutTextControlValues(
   if (!handle) throw new Error("ARIA snapshot target did not resolve to an element")
   const frame = await handle.ownerFrame().finally(() => handle.dispose())
   if (!frame) throw new Error("ARIA snapshot target is not attached to a frame")
+  // `mode: "ai"` is what makes Playwright fold iframe documents into the snapshot, including cross-origin ones.
+  // The redaction patches are per frame, so cover the target's frame and every frame nested under it before
+  // reading: otherwise values typed into an iframe would come back verbatim. Fail closed when one cannot be
+  // redacted rather than return a snapshot that may contain them.
+  const frames = [frame, ...frameDescendants(frame)].filter((candidate) => !candidate.isDetached())
+  let activated: Frame[] = []
   let snapshot: string | undefined
   let captureFailed = false
   let captureError: unknown
   try {
-    snapshot = await locator
+    const activation = await Promise.allSettled(frames.map(async (candidate) => {
+      await candidate.locator(`${redactionSelectorName}=on_${token}`).waitFor({ state: "attached", timeout: options.timeout })
+      return candidate
+    }))
+    activated = activation.flatMap((settled) => settled.status === "fulfilled" ? [settled.value] : [])
+    for (const settled of activation) {
+      if (settled.status === "rejected") throw settled.reason
+    }
+    snapshot = (await locator
       .locator(`${redactionSelectorName}=on_${token}`)
-      .ariaSnapshot(options)
+      .ariaSnapshot({ ...options, mode: "ai" })).replace(snapshotRefMarker, "")
   } catch (error) {
     captureFailed = true
     captureError = error
   }
 
   try {
-    await cleanupRedaction(page, frame, redactionSelectorName, token)
+    await cleanupRedaction(page, activated, redactionSelectorName, token)
   } catch (cleanupError) {
     if (captureFailed) {
       const cleanupReasons = cleanupError instanceof AggregateError ? cleanupError.errors : [cleanupError]
@@ -206,28 +223,27 @@ async function selectorForContext(context: BrowserContext): Promise<string> {
   return registration
 }
 
-async function cleanupRedaction(page: Page, frame: Frame, redactionSelectorName: string, token: string): Promise<void> {
+async function cleanupRedaction(page: Page, frames: readonly Frame[], redactionSelectorName: string, token: string): Promise<void> {
   let state = pageCleanup.get(page)
   if (!state) {
     state = { pendingTokens: new Map(), queue: Promise.resolve() }
     pageCleanup.set(page, state)
   }
-  state.pendingTokens.set(token, { frame, selectorName: redactionSelectorName })
+  state.pendingTokens.set(token, { frames, selectorName: redactionSelectorName })
 
   const cleanup = state.queue.then(async () => {
     const pending = [...state.pendingTokens]
-    const results = await Promise.allSettled(pending.map(async ([pendingToken, target]) => {
-      await target.frame.locator(`${target.selectorName}=off_${pendingToken}`).waitFor({ state: "attached", timeout: 1_000 })
+    const outcomes = await Promise.all(pending.map(async ([pendingToken, target]) => {
+      const results = await Promise.allSettled(target.frames.map((frame) =>
+        frame.locator(`${target.selectorName}=off_${pendingToken}`).waitFor({ state: "attached", timeout: 1_000 })))
+      const failures = results.flatMap((result) =>
+        result.status === "rejected" && !redactionContextIsGone(result.reason) ? [result.reason] : [])
+      return { pendingToken, failures }
     }))
     const failures: unknown[] = []
-    for (let index = 0; index < results.length; index++) {
-      const result = results[index]!
-      const pendingToken = pending[index]![0]
-      if (result.status === "fulfilled" || redactionContextIsGone(result.reason)) {
-        state.pendingTokens.delete(pendingToken)
-      } else {
-        failures.push(result.reason)
-      }
+    for (const outcome of outcomes) {
+      if (outcome.failures.length > 0) failures.push(...outcome.failures)
+      else state.pendingTokens.delete(outcome.pendingToken)
     }
     if (failures.length > 0) throw new AggregateError(failures, redactionCleanupErrorMessage)
   })

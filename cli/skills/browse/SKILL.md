@@ -119,12 +119,20 @@ Useful inspection helpers:
   one-time-code and card fields (`autocomplete` `cc-number`, `cc-csc`,
   `cc-exp*`); other readonly fields show their value, so a generated address or
   code is readable. A field the page locks after you type into it counts as
-  readonly. `snapshot({ find: /checkout/i, context: 2 })` searches it, and
-  `snapshot({ diff: true })` or `{ delta: true }` reports changes.
-- `ref("e12")` resolves a control from the latest snapshot. Refs fail closed
-  after navigation or incompatible DOM drift; compatible refs keep their ids.
+  readonly. Visible iframes appear as `iframe` lines with their own documents
+  nested under them, same-origin and cross-origin alike, so a dialog whose form
+  lives in a payment iframe is readable without `page.frames()`; pass
+  `snapshot({ frames: false })` to leave iframe content out. `snapshot({ find:
+  /checkout/i, context: 2 })` searches it, and `snapshot({ diff: true })` or
+  `{ delta: true }` reports changes.
+- `ref("e12")` resolves a control from the latest snapshot, including controls
+  inside an iframe: those refs resolve in that frame and fail closed when the
+  frame navigates. Refs fail closed after navigation or incompatible DOM drift;
+  compatible refs keep their ids. `snapshot({ within: frameLocator(...) })`
+  captures a frame and its refs resolve there.
 - `ariaSnapshot(target?, { timeout })` returns Playwright's detailed YAML tree
-  when the compact snapshot omits needed structure.
+  when the compact snapshot omits needed structure. It includes iframe content
+  and applies the same value hiding in every frame.
 - `screenshotWithLabels({ page?, path? })` adds visual labels when layout
   matters and registers its labels for `ref()`.
 - `screenshotDiff({ baseline, path?, threshold?, fullPage? })` compares a saved
