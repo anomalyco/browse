@@ -305,9 +305,9 @@ may try to steer it, and that other programs on your computer may try to use the
   `OPENCODE_BROWSER_EXTENSION_ORIGINS`). Browsers paired by an earlier version with its shared code switch to a key of
   their own the next time they connect; `pair --revoke legacy` retires that code once they all have.
 - **Restricted `execute`.** Agent code runs in a restricted JavaScript realm on the relay: it withholds Node
-  APIs (`process`, `require`, `import()`, `fs`, network modules, Node fetch), limits files to the file roots, checks
-  the file paths in the raw CDP commands that take them, and stops synchronous code after about 2 seconds. It shares
-  the relay's process, so it is not a security boundary:
+  APIs (`process`, `require`, `import()`, `fs`, network modules, Node fetch), limits files to the file roots, requires
+  folders you own with no group/world write access, checks the file paths in the raw CDP commands that take them, and
+  stops synchronous code after about 2 seconds. It shares the relay's process, so it is not a security boundary:
   treat code an agent runs as code running as you. The relay starts with an allowlisted environment (the basics plus
   `OPENCODE_BROWSER_*`, proxy variables and CA certificate paths), so your API keys aren't in it.
 - **CDP guardrails.** Cookie reads return only cookies for the session's own pages; cookie writes are limited to
