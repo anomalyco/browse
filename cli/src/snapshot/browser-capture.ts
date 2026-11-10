@@ -672,7 +672,14 @@ export const captureSnapshotInBrowser = (
   }
   const parentChainCache = new WeakMap<Element, readonly string[]>()
   const structuralChainFrom = (node: Element | null): readonly string[] => {
-    if (!node || node === root) return []
+    if (!node) return []
+    // The capture root is an entry of its own when it is structural (a modal dialog, a within row or table), and
+    // its children then nest one level under it like any other structural parent. A non-structural root (body,
+    // main) has no entry, so it adds no level.
+    if (node === root) {
+      const rootKey = structuralKeys.get(root)
+      return rootKey ? [rootKey] : []
+    }
     const cached = parentChainCache.get(node)
     if (cached !== undefined) return cached
     const tail = structuralChainFrom(parentElementOrHost(node))

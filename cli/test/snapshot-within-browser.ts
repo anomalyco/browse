@@ -193,15 +193,19 @@ try {
   await page.frameLocator('iframe[title="payment"]').frameLocator('iframe[title="nested"]').locator("h1").waitFor()
   const frameHelpers = createSnapshotHelpers(page, registry())
   const frameSnapshot = await frameHelpers.snapshot()
-  const paymentIndex = frameSnapshot.split("\n").findIndex((line) => line.includes('- iframe "payment"'))
-  const sameIndex = frameSnapshot.split("\n").findIndex((line) => line.includes('- iframe "same"'))
-  assert.ok(paymentIndex >= 0, frameSnapshot)
+  const printed = frameSnapshot.split("\n")
+  const indentOf = (line: string) => line.length - line.trimStart().length
+  const dialogIndex = printed.findIndex((line) => line.includes('- dialog "Pagar"'))
+  const paymentIndex = printed.findIndex((line) => line.includes('- iframe "payment"'))
+  const sameIndex = printed.findIndex((line) => line.includes('- iframe "same"'))
+  assert.ok(dialogIndex >= 0 && paymentIndex >= 0, frameSnapshot)
   assert.ok(sameIndex > paymentIndex, frameSnapshot)
+  // The dialog is the capture root and its own entry; both iframes sit one level under it.
+  assert.equal(indentOf(printed[paymentIndex]!), indentOf(printed[dialogIndex]!) + 2, frameSnapshot)
+  assert.equal(indentOf(printed[sameIndex]!), indentOf(printed[dialogIndex]!) + 2, frameSnapshot)
   assert.match(frameSnapshot, /- iframe "payment" \[ref=e\d+ src=localhost:\d+\/payment\]/, frameSnapshot)
   assert.match(frameSnapshot, /- iframe "same" \[ref=e\d+ src=127\.0\.0\.1:\d+\/same\]/, frameSnapshot)
   // Both documents are captured, nested under their iframe line, and cross-origin content is included.
-  const printed = frameSnapshot.split("\n")
-  const indentOf = (line: string) => line.length - line.trimStart().length
   const inFrame = (index: number, pattern: RegExp) => {
     const base = indentOf(printed[index]!)
     for (let cursor = index + 1; cursor < printed.length; cursor++) {
