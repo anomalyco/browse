@@ -115,8 +115,9 @@ Useful inspection helpers:
 
 - `snapshot()` is the compact read-before-act default. It prioritizes semantic
   groups, alerts, lists, tables, headings, links, and controls. It and
-  `ariaSnapshot()` hide editable fields and password, one-time-code and card
-  fields; other readonly fields show their value, so a generated address or
+  `ariaSnapshot()` hide the values of editable fields and of password,
+  one-time-code and card fields (`autocomplete` `cc-number`, `cc-csc`,
+  `cc-exp*`); other readonly fields show their value, so a generated address or
   code is readable. A field the page locks after you type into it counts as
   readonly. `snapshot({ find: /checkout/i, context: 2 })` searches it, and
   `snapshot({ diff: true })` or `{ delta: true }` reports changes.
