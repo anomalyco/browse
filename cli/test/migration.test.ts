@@ -150,6 +150,18 @@ describe("migration after the old self-managed runtime was taken over", () => {
     expect(legacyRootsLeft(home)).toBe(false)
   })
 
+  test("a run stopped before its extension link was in place is finished by the next one", () => {
+    const { home, oldData } = takenOverHome()
+    // The folder already moved to the cache and the old path is gone, but the link never got renamed into place.
+    const folder = path.join(home, ".cache", "browse", "extension")
+    write(path.join(folder, "manifest.json"), JSON.stringify({ version: "1" }))
+    fs.symlinkSync(folder, path.join(oldData, "extension.link-2147483646"), "junction")
+    withoutHomeOverride(() => migrateLegacy(home, takenOver + 11 * 60_000))
+    expect(fs.readdirSync(oldData)).toEqual(["extension"])
+    expect(fs.lstatSync(path.join(oldData, "extension")).isSymbolicLink()).toBe(true)
+    expect(JSON.parse(fs.readFileSync(path.join(oldData, "extension", "manifest.json"), "utf8")).version).toBe("1")
+  })
+
   test("browse entries in opencode.jsonc and in configs settings.json recorded move to `browse mcp` before the shim goes", () => {
     const { home, oldData, shim, opencode } = takenOverHome()
     fs.rmSync(opencode)

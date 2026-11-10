@@ -248,13 +248,20 @@ type AgentLocationRecord = { readonly name: AgentName; readonly file: string }
  */
 function linkLegacyExtension(root: string, home: string) {
   const old = path.join(root, "extension")
+  const folder = devExtensionFolder(cacheRoot(home))
   try {
     // Absent, or already the link.
     if (!fs.lstatSync(old).isDirectory()) return
   } catch {
-    return
+    // Absent because a run stopped between removing the folder and renaming its link into place: finish the job. The
+    // link it left goes when the rest of the old root does.
+    if (!fs.existsSync(folder)) return
+    try {
+      if (!fs.readdirSync(root).some((name) => name.startsWith("extension.link-"))) return
+    } catch {
+      return
+    }
   }
-  const folder = devExtensionFolder(cacheRoot(home))
   const link = `${old}.link-${process.pid}`
   try {
     fs.mkdirSync(path.dirname(folder), { recursive: true })
