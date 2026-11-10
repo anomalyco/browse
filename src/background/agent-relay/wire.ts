@@ -145,6 +145,20 @@ export function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+export const TIMED_OUT = Symbol("timed out")
+/** `work`'s value, or TIMED_OUT after `ms`: a browser call that never settles must not hold an answer. */
+export async function withTimeout<T>(work: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<typeof TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => resolve(TIMED_OUT), Math.max(0, ms))
+  })
+  try {
+    return await Promise.race([work, timeout])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export function text(error: unknown) {
   return error instanceof Error ? error.message : String(error)
 }
