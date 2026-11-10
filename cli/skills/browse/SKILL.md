@@ -266,10 +266,13 @@ Cookie access is limited to the hosts of the session's pages, and
 `page.bringToFront()` is refused because it raises the user's window; use
 `handoff()` when the user needs to act.
 
-Clipboard calls in a frame need that frame focused: call `window.focus()` inside
-it in the same `evaluate` (or click in the frame) before `navigator.clipboard`,
-and the parent must give the frame `allow="clipboard-write"` (or
-`clipboard-read`). `context.grantPermissions()` is refused, so don't try it.
+Clipboard calls in a frame need that frame focused: in the same `frame.evaluate`,
+call `window.focus()` before `navigator.clipboard` (or click in the frame first).
+A cross-origin iframe also needs `allow="clipboard-write"` (or `clipboard-read`)
+from its parent; without it Chrome refuses the call and nothing in the frame can
+fix that, so write from the top page or read the value from the DOM instead.
+Clipboard reads usually ask the user for permission, so use `handoff()` or avoid
+them. `context.grantPermissions()` is refused, so don't try it.
 
 The page's console messages and uncaught errors are off by default because
 capturing them lets the page detect a debugger. Turn them on for one page when
