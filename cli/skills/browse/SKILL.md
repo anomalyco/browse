@@ -114,8 +114,9 @@ result carries a warning saying so.
 Useful inspection helpers:
 
 - `snapshot()` is the compact read-before-act default. It prioritizes semantic
-  groups, alerts, lists, tables, headings, links, and controls; text input values
-  are omitted. `snapshot({ find: /checkout/i, context: 2 })` searches it, and
+  groups, alerts, lists, tables, headings, links, and controls; editable and
+  password field values are omitted, while readonly fields show their value.
+  `snapshot({ find: /checkout/i, context: 2 })` searches it, and
   `snapshot({ diff: true })` or `{ delta: true }` reports changes.
 - `ref("e12")` resolves a control from the latest snapshot. Refs fail closed
   after navigation or incompatible DOM drift; compatible refs keep their ids.

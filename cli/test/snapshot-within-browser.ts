@@ -5,7 +5,7 @@
 import assert from "node:assert/strict"
 import { parseArgs } from "node:util"
 import { chromium, selectors } from "patchright-core"
-import { createSnapshotHelpers } from "../src/snapshot.ts"
+import { createAriaSnapshotHelper, createSnapshotHelpers } from "../src/snapshot.ts"
 import { ariaSnapshotWithoutTextControlValues } from "../src/snapshot/aria-snapshot.ts"
 import type { SnapshotRefRegistry } from "../src/snapshot/types.ts"
 import { portFromEnv } from "./support/ports.ts"
@@ -95,7 +95,34 @@ try {
     /snapshot within expects exactly one match for selector: #dup; got 0/,
   )
 
-  console.log(JSON.stringify({ multiple: "PASS", hidden: "PASS", missing: "PASS", single: "PASS", refStrict: "PASS" }))
+  // Readonly text fields show the value the page generated; editable, password and one-time-code values stay hidden.
+  const readonlyContent = `
+    <main>
+      <input type="text" readonly value="someone@example.com">
+      <input type="password" readonly value="hunter2">
+      <input type="text" readonly autocomplete="one-time-code" value="424242">
+      <input type="text" value="private-marker">
+      <input type="text" disabled>
+    </main>
+  `
+  await page.setContent(readonlyContent)
+  const readonlySnapshot = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.match(readonlySnapshot, /readonly value="someone@example\.com"/, readonlySnapshot)
+  assert.equal((readonlySnapshot.match(/^- textbox "textbox"/gm) ?? []).length, 5, readonlySnapshot)
+  assert.match(readonlySnapshot, /textbox "textbox" \[ref=e\d+ disabled\]/, readonlySnapshot)
+  assert.doesNotMatch(readonlySnapshot, /hunter2|424242|private-marker/)
+
+  const readonlyConnection = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`)
+  try {
+    const readonlyPage = await readonlyConnection.contexts()[0]!.newPage()
+    await readonlyPage.setContent(readonlyContent)
+    const readonlyAria = await createAriaSnapshotHelper(readonlyPage)("main")
+    assert.match(readonlyAria, /someone@example\.com/, readonlyAria)
+    assert.doesNotMatch(readonlyAria, /hunter2|424242|private-marker/)
+    await readonlyPage.close()
+  } finally { await readonlyConnection.close() }
+
+  console.log(JSON.stringify({ multiple: "PASS", hidden: "PASS", missing: "PASS", single: "PASS", refStrict: "PASS", readonlyValues: "PASS" }))
 } finally {
   await browser.close()
 }

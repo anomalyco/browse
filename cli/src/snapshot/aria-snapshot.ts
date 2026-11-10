@@ -55,6 +55,14 @@ const redactionSelectorSource = `({
         const isEditableDescendant = (element) => explicitEditableState(element) !== true && isInEditableSubtree(element)
         const isNativeTextControl = (element) => element instanceof HTMLTextAreaElement
           || (element instanceof HTMLInputElement && !state.nonTextInputTypes.has(element.type))
+        const readOnlyAutocompleteTokens = new Set(["current-password", "new-password", "one-time-code"])
+        const isReadOnlyTextControl = (element) => {
+          if (!isNativeTextControl(element) || !element.readOnly) return false
+          if (element instanceof HTMLInputElement && element.type === "password") return false
+          const autocomplete = getAttribute(element, "autocomplete")
+          return autocomplete === null
+            || !autocomplete.trim().toLowerCase().split(/\\s+/).some((token) => readOnlyAutocompleteTokens.has(token))
+        }
         const isValueRole = (element) => {
           const role = getAttribute(element, "role")
           return role !== null && role.trim().toLowerCase().split(/\\s+/).some((candidate) => state.valueRoles.has(candidate))
@@ -64,10 +72,15 @@ const redactionSelectorSource = `({
         Object.defineProperty(HTMLInputElement.prototype, "value", {
           ...state.inputValue,
           get() {
-            return isNativeTextControl(this) ? "" : state.inputValue.get.call(this)
+            return isNativeTextControl(this) && !isReadOnlyTextControl(this) ? "" : state.inputValue.get.call(this)
           },
         })
-        Object.defineProperty(HTMLTextAreaElement.prototype, "value", { ...state.textareaValue, get() { return "" } })
+        Object.defineProperty(HTMLTextAreaElement.prototype, "value", {
+          ...state.textareaValue,
+          get() {
+            return isReadOnlyTextControl(this) ? state.textareaValue.get.call(this) : ""
+          },
+        })
         Object.defineProperty(Node.prototype, "nodeValue", {
           ...state.nodeValue,
           get() {
@@ -95,7 +108,8 @@ const redactionSelectorSource = `({
           value(name) {
             const attribute = String(name).toLowerCase()
             if (state.valueAttributes.has(attribute)
-              && (isNativeTextControl(this) || isValueRole(this) || isInEditableSubtree(this))) return null
+              && (isValueRole(this) || isInEditableSubtree(this)
+                || (isNativeTextControl(this) && (attribute !== "value" || !isReadOnlyTextControl(this))))) return null
             if (state.editableNameAttributes.has(attribute) && isEditableDescendant(this)) return null
             return state.getAttribute.value.call(this, name)
           },

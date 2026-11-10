@@ -358,6 +358,7 @@ export const captureSnapshotInBrowser = (
   if ((settings.rootRole && roleFor(root) !== settings.rootRole) || (settings.rootName && accessibleName(root) !== settings.rootName)) {
     throw new Error("Snapshot ref no longer identifies the captured element; call snapshot() again")
   }
+  const hiddenReadonlyAutocompleteTokens = new Set(["current-password", "new-password", "one-time-code"])
   const detailsFor = (element: Element): string | undefined => {
     const details: string[] = []
     if (element instanceof HTMLInputElement) {
@@ -366,6 +367,14 @@ export const captureSnapshotInBrowser = (
     const ariaChecked = element.getAttribute("aria-checked")
     if ((ariaChecked === "true" || ariaChecked === "false" || ariaChecked === "mixed") && !(element instanceof HTMLInputElement)) {
       details.push(ariaChecked === "true" ? "checked" : ariaChecked === "false" ? "unchecked" : "checked=mixed")
+    }
+    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+      const autocomplete = (element.getAttribute("autocomplete") ?? "").toLowerCase().split(/\s+/)
+      if (element.readOnly && element.type !== "password" && !autocomplete.some((token) => hiddenReadonlyAutocompleteTokens.has(token))) {
+        details.push("readonly")
+        const value = normalize(element.value)
+        if (value) details.push(`value="${quote(truncate(value, 80))}"`)
+      }
     }
     if (element instanceof HTMLSelectElement) {
       const selected = element.selectedOptions[0]?.textContent
@@ -886,7 +895,8 @@ export const captureSnapshotInBrowser = (
       ? (nameFromAuthorOnly ? authorAccessibleName(element) : displayName)
       : displayName
     const isDisabled = ((element as HTMLButtonElement).disabled === true) || element.getAttribute("aria-disabled") === "true"
-    if (isInteractive && isDisabled && !displayName && !element.getAttribute("name")) continue
+    const isDisabledTextControl = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+    if (isInteractive && isDisabled && !displayName && !element.getAttribute("name") && !isDisabledTextControl) continue
     const fallbackName = role === "group" ? "Group"
       : role === "dialog" || role === "alertdialog" ? "Dialog"
       : role === "listbox" ? "Listbox"

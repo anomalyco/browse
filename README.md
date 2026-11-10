@@ -241,6 +241,9 @@ connection itself isn't encrypted by browse; use a network that is (Tailscale or
 | `settings` | Read or change the settings below when the user asks (never the security switches or update behaviour); the options page updates live |
 | `status` | Connection status |
 
+`snapshot()` leaves editable and password field values out; readonly fields show their value, so a generated
+address or code on the page is readable.
+
 Each agent has its own current session only when the client names the agent (OpenCode does; `status` reports
 `sharedSession`). With other clients, agents on one server share one current session; when several use it, each
 should `session_new` its own and pass `session` on every call.
