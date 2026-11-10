@@ -3,6 +3,7 @@ import path from "node:path"
 import type { JsonObject } from "../protocol.ts"
 import { getString } from "../relay/helpers.ts"
 import { startFfmpegVideoEncoder } from "./ffmpeg-encoder.ts"
+import { discardNativeRecording, finishNativeRecording, tryStartNativeRecording } from "./native-recording.ts"
 import { acknowledgeScreencastFrame, parseScreencastFrame, prepareCdpScreencastViewport, startCdpScreencast } from "./screencast.ts"
 import {
   cdpArtifactType,
@@ -13,6 +14,7 @@ import {
   type ActiveRecording,
   type CdpRecording,
   type CdpVideoFrame,
+  type NativeRecording,
   type RecordingStartOptions,
   type RecordingStartResult,
   type RecordingStopResult,
@@ -23,6 +25,8 @@ import {
 } from "./types.ts"
 
 export type CdpCaptureContext = {
+  readonly connectionForTab: (tabId: number) => object | undefined
+  readonly nativeSupport: WeakMap<object, Promise<boolean>>
   readonly activeRecordings: Map<number, ActiveRecording>
   readonly sendDebuggerCommand: SendDebuggerCommand
   readonly startVideoEncoder?: StartVideoEncoder
@@ -115,6 +119,20 @@ export async function startCdpRecording(
     return { success: false, error: `Could not prepare the page for recording: ${error instanceof Error ? error.message : String(error)}` }
   }
   if (starting.cancelled) return cancelledResult()
+  if (options.owner === "relay" && artifactType === "mp4") {
+    const recording = await tryStartNativeRecording(context, options, size, frameRate, starting)
+    if (recording) {
+      if (starting.cancelled) {
+        await discardNativeRecording(recording)
+        return cancelledResult()
+      }
+      context.activeRecordings.set(options.tabId, recording)
+      context.armMaxDuration(recording, options.maxDurationMs)
+      return { success: true, tabId: options.tabId, startedAt: recording.startedAt, path: options.outputPath,
+        mimeType: "video/mp4", mode: "cdp", artifactType, frameRate }
+    }
+    if (starting.cancelled) return cancelledResult()
+  }
   let encoder: VideoEncoder
   try {
     encoder = await (context.startVideoEncoder ?? startFfmpegVideoEncoder)({
@@ -194,28 +212,40 @@ export async function startCdpRecording(
   }
 }
 
-export async function stopCdpRecording(context: CdpCaptureContext, recording: CdpRecording): Promise<RecordingStopResult> {
+export async function stopCdpRecording(context: CdpCaptureContext, recording: CdpRecording | NativeRecording): Promise<RecordingStopResult> {
   if (recording.stopPromise) return recording.stopPromise
-  recording.stopping = true
-  recording.stopFallback?.()
+  if (!("stream" in recording)) {
+    recording.stopping = true
+    recording.stopFallback?.()
+  }
   if (recording.maxDurationTimer) clearTimeout(recording.maxDurationTimer)
-  const stopPromise = finishCdpRecording(context, recording).finally(() => {
+  const finish = "stream" in recording ? finishNativeRecording(context, recording) : finishCdpRecording(context, recording)
+  const stopPromise = finish.finally(() => {
     if (context.activeRecordings.get(recording.tabId) === recording) {
       context.activeRecordings.delete(recording.tabId)
       context.recordingChanged(recording.tabId)
     }
-    recording.stopped = true
+    if (!("stream" in recording)) recording.stopped = true
   })
   recording.stopPromise = stopPromise
   return stopPromise
 }
 
-export async function cancelCdpRecording(context: CdpCaptureContext, recording: CdpRecording): Promise<void> {
+export async function cancelCdpRecording(context: CdpCaptureContext, recording: CdpRecording | NativeRecording): Promise<void> {
   if (recording.stopPromise) {
     await recording.stopPromise.catch(() => {})
     return
   }
-  await cleanupCdpRecording(context, recording)
+  if ("stream" in recording) {
+    if (recording.maxDurationTimer) clearTimeout(recording.maxDurationTimer)
+    recording.cleanupPromise ??= discardNativeRecording(recording).finally(() => {
+      if (context.activeRecordings.get(recording.tabId) === recording) {
+        context.activeRecordings.delete(recording.tabId)
+        context.recordingChanged(recording.tabId)
+      }
+    })
+    await recording.cleanupPromise
+  } else await cleanupCdpRecording(context, recording)
 }
 
 async function finishCdpRecording(context: CdpCaptureContext, recording: CdpRecording): Promise<RecordingStopResult> {
