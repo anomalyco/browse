@@ -2,7 +2,7 @@ import { Effect, Predicate } from "effect"
 import type { Frame, Locator, Page } from "patchright-core"
 import { runPlaywrightOperation } from "./execute.ts"
 import { runtimeFailureKind } from "./update/runtime-diagnostics.ts"
-import { browserCapture, type captureSnapshotInBrowser } from "./snapshot/browser-capture.ts"
+import { browserCapture } from "./snapshot/browser-capture.ts"
 import {
   diffSnapshotEntries,
   findSnapshotLines,
@@ -11,6 +11,7 @@ import {
   snapshotRefAriaRole,
   snapshotRefIdentity,
 } from "./snapshot/diff-and-format.ts"
+import { refLocator } from "./snapshot/ref-selector.ts"
 import {
   captureSnapshotFrames,
   frameOfScope,
@@ -193,7 +194,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
     registry.removeNavigationListener = removeNavigationListener
     const captureGeneration = frameGenerations.get(captureFrame) ?? 0
 
-    let result: Awaited<ReturnType<typeof captureSnapshotInBrowser>>
+    let result: ReturnType<typeof browserCapture>
     if (locator) {
       result = await locator.evaluate(browserCapture, settings, { timeout: timeoutMs })
     } else {
@@ -335,12 +336,12 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
     if (frameBudget.skipped.deadline > 0) entries.push({ prefix: frameSkipNote(frameBudget.skipped.deadline, "snapshot deadline reached") })
     if (omittedFrames > 0) entries.push({ prefix: frameSkipNote(omittedFrames, "maxItems reached") })
 
-    const compatiblePrevious = previousSnapshot?.page === page && previousSnapshot.signature === signature
-      ? previousSnapshot
-      : undefined
+    const samePagePrevious = previousSnapshot?.page === page ? previousSnapshot : undefined
+    const compatiblePrevious = samePagePrevious?.signature === signature ? samePagePrevious : undefined
     let nextRef = registry.nextRef ?? 1
+    // Ids carry over from the previous snapshot of this page even if its options differed, e.g. snapshot({ maxItems }).
     const reusableRefs = new Map<string, string[]>()
-    for (const entry of compatiblePrevious?.entries ?? []) {
+    for (const entry of samePagePrevious?.entries ?? []) {
       if (!entry.refId) continue
       const key = snapshotRefIdentity(entry)
       if (!key) continue
@@ -427,13 +428,13 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         throw new Error(`Snapshot ref ${id} was captured in an iframe that has navigated or detached; call snapshot() again`)
       }
     }
-    const locator = frame ? frame.locator(snapshotRef.selector) : page.locator(snapshotRef.selector)
+    const scope = frame ?? page
     const role = snapshotRefAriaRole(snapshotRef.role)
-    const resolved = role
-      ? frame
-        ? locator.and(frame.getByRole(role, snapshotRef.name ? { name: snapshotRef.name, exact: true } : undefined))
-        : locator.and(page.getByRole(role, snapshotRef.name ? { name: snapshotRef.name, exact: true } : undefined))
-      : locator
+    const resolved = (role && snapshotRef.name && !snapshotRef.selector.includes(" >> ")
+      ? refLocator(page, scope, normalized, { selector: snapshotRef.selector, role: snapshotRef.role, name: snapshotRef.name })
+      : undefined) ?? (role
+      ? scope.locator(snapshotRef.selector).and(scope.getByRole(role, snapshotRef.name ? { name: snapshotRef.name, exact: true } : undefined))
+      : scope.locator(snapshotRef.selector))
     refRoots.set(resolved, snapshotRef)
     return resolved
   }

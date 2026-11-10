@@ -1,6 +1,7 @@
 import { Effect } from "effect"
 import type { Browser, BrowserContext, Page } from "patchright-core"
 import { registerAriaSnapshotSelector } from "./snapshot/aria-snapshot.ts"
+import { registerRefSelector } from "./snapshot/ref-selector.ts"
 import * as AuthProfile from "./auth/profile.ts"
 import * as AuthenticatedOrigin from "./auth/authenticated-origin.ts"
 import { challengeWarning } from "./execute/challenge-detection.ts"
@@ -554,6 +555,7 @@ export class ExecuteSandbox extends DefaultPageHost {
     const browser = this.browser
     const context = browser.contexts()[0] ?? (await browser.newContext())
     await registerAriaSnapshotSelector(context)
+    await registerRefSelector(context)
     installDownloadCapabilityGuards(context)
     return { browser, context }
   }

@@ -46,9 +46,22 @@ const bigDataTableHtml = htmlPage(
   `<main><nav aria-label="Primary">${Array.from({ length: 10 }, (_, i) => `<a href="/n${i}">Nav ${i}</a>`).join("")}</nav><h1>Orders</h1><table class="orders"><thead><tr><th scope="col">Row</th><th scope="col">Link</th><th scope="col">Action</th></tr></thead><tbody>${Array.from({ length: 5_000 }, (_, i) => `<tr class="order-row"><td class="cell">Row ${i}</td><td class="cell"><a class="order-link" data-testid="${i === 3 ? "unique-row-3" : "shared-row"}" href="#r${i}">link ${i}</a></td><td class="cell"><button class="order-btn" aria-label="Act ${i}" onclick="this.setAttribute('aria-label','Acted ${i}');this.textContent='Acted ${i}'">Act ${i}</button></td></tr>`).join("")}</tbody></table></main>`,
 )
 
+const staleRefsHtml = htmlPage(
+  "Stale refs",
+  `<a data-test="shopping-cart-link" role="button" href="#cart" aria-label="Cart, empty">cart</a>
+  <button onclick="document.title = 'saved'">Save</button>
+  <form id="searchform"><input type="search" aria-label="Search site"><button type="button">Search</button></form>
+  <script>
+    window.mutate = () => {
+      document.querySelector("a").setAttribute("aria-label", "Cart, 2 items")
+      document.getElementById("searchform").innerHTML = '<div><input role="combobox" aria-label="Search site"><span><button type="button">Search</button></span></div>'
+    }
+  </script>`,
+)
+
 const fixture = http.createServer((request, response) => {
   response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" })
-  response.end(request.url === "/big-table" ? bigDataTableHtml : bigRowsHtml)
+  response.end(request.url === "/big-table" ? bigDataTableHtml : request.url === "/stale-refs" ? staleRefsHtml : bigRowsHtml)
 })
 
 async function api(route: string, body?: unknown) {
@@ -60,8 +73,8 @@ async function api(route: string, body?: unknown) {
   return await response.json() as Record<string, any>
 }
 
-async function execute(sessionId: string, code: string) {
-  return await api("/cli/execute", { sessionId, code, createIfMissing: false })
+async function execute(sessionId: string, code: string, extra: Record<string, unknown> = {}) {
+  return await api("/cli/execute", { sessionId, code, createIfMissing: false, ...extra })
 }
 
 try {
@@ -91,6 +104,46 @@ try {
   assert.match(dataTableCheck.value.rowOut, /- row "Row: Row 2 \| Link: link 2 \| Action: Act 2"/)
   assert.equal(dataTableCheck.value.hash, "#r3")
   assert.match(dataTableCheck.value.diff, /\+\s+button "Acted 2"/)
+
+  // Through the sandbox: a ref still on its element works, reads of a stale ref return false, and actions on stale
+  // refs fail within a few seconds with what changed.
+  const staleRefs = await execute("snap-single", `
+    await page.goto(${JSON.stringify(`${fixtureUrl}/stale-refs`)});
+    const s = await snapshot();
+    const id = (pattern) => s.match(new RegExp(pattern + ' \\\\[ref=(e\\\\d+)'))?.[1];
+    await page.addScriptTag({ content: "mutate()" });
+    await ref(id('button "Save"')).click();
+    const visible = await ref(id('button "Cart, empty"')).isVisible();
+    const t0 = performance.now();
+    const cart = await ref(id('button "Cart, empty"')).click().then(() => "clicked", (cause) => cause.message);
+    const ms = performance.now() - t0;
+    const search = await ref(id('button "Search"')).click().then(() => "clicked", (cause) => cause.message);
+    return { title: await page.title(), visible, cart, search, ms, hash: await page.evaluate(() => location.hash) };
+  `)
+  assert.equal(staleRefs.isError, false, staleRefs.text)
+  assert.equal(staleRefs.value.title, "saved")
+  assert.equal(staleRefs.value.visible, false)
+  assert.match(staleRefs.value.cart, /^locator\.click: Error: ref e\d+ is stale: button "Cart, empty" now reads "Cart, 2 items"; call snapshot\(\) again/)
+  assert.match(staleRefs.value.search, /ref e\d+ is stale: button "Search" is gone/)
+  assert.ok(staleRefs.value.ms < 6_000, `stale ref took ${staleRefs.value.ms}ms`)
+  assert.equal(staleRefs.value.hash, "")
+  // A longer action timeout from execute's timeoutMs doesn't stretch the stale-ref grace.
+  const staleRefsLongTimeout = await execute("snap-single", `
+    await page.goto(${JSON.stringify(`${fixtureUrl}/stale-refs`)});
+    const s = await snapshot();
+    const id = (pattern) => s.match(new RegExp(pattern + ' \\\\[ref=(e\\\\d+)'))?.[1];
+    await page.addScriptTag({ content: "mutate()" });
+    await ref(id('button "Save"')).click();
+    const visible = await ref(id('button "Cart, empty"')).isVisible();
+    const t0 = performance.now();
+    const cart = await ref(id('button "Cart, empty"')).click().then(() => "clicked", (cause) => cause.message);
+    const ms = performance.now() - t0;
+    const search = await ref(id('button "Search"')).click().then(() => "clicked", (cause) => cause.message);
+    return { title: await page.title(), visible, cart, search, ms, hash: await page.evaluate(() => location.hash) };
+  `, { timeoutMs: 120_000 })
+  assert.equal(staleRefsLongTimeout.isError, false, staleRefsLongTimeout.text)
+  assert.match(staleRefsLongTimeout.value.cart, /is stale: button "Cart, empty" now reads "Cart, 2 items"/)
+  assert.ok(staleRefsLongTimeout.value.ms < 6_000, `stale ref took ${staleRefsLongTimeout.value.ms}ms`)
 
   await execute("snap-single", `await page.goto(${JSON.stringify(`${fixtureUrl}/big`)})`)
   const singleSamples: number[] = []
@@ -160,6 +213,7 @@ try {
 
   console.log(JSON.stringify({
     semantics: "PASS",
+    staleRefMs: Math.round(staleRefs.value.ms),
     singleSnapshotMs: summarize(singleSamples),
     concurrent8x3ScenarioMs: summarize(scenarioMs),
     concurrent8x3PerSnapshotMs: summarize(perSnapshotMs),
