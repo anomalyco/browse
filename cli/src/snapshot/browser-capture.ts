@@ -551,6 +551,40 @@ export const captureSnapshotInBrowser = (
     }
     return localCssPath(element, document)
   }
+  const frameTags = new Set(["iframe", "frame"])
+  // Host or protocol only: a path, query or data/blob body can carry a session token into the transcript.
+  const frameHost = (element: Element): string => {
+    const src = element.getAttribute("src")
+    if (!src) return ""
+    try {
+      const url = new URL(src, document.baseURI)
+      return url.host || url.protocol.replace(/:$/, "")
+    } catch {
+      return ""
+    }
+  }
+  const frameName = (element: Element): string => {
+    const labelled = labelledName(element)
+    if (labelled) return labelled
+    const name = normalize(element.getAttribute("name") ?? "")
+    if (name) return name
+    return frameHost(element) || "Frame"
+  }
+  const frameSource = (element: Element): string | undefined => {
+    const host = frameHost(element)
+    return host ? `src=${truncate(host, 80)}` : undefined
+  }
+  // A readable frame selector survives small DOM changes better than `iframe:nth-of-type(3)`.
+  const frameSelector = (element: Element): string => {
+    const tag = element.localName
+    for (const attribute of ["title", "name", "src"]) {
+      const value = element.getAttribute(attribute)
+      if (!value) continue
+      const candidate = `${tag}[${attribute}="${quote(value)}"]`
+      if (isUniqueSelector(document, candidate)) return candidate
+    }
+    return cssPath(element)
+  }
   const rootHeadings = Array.from(root.querySelectorAll("h1, h2, h3, h4, h5, h6, [role='heading']")).map((heading) => {
     const candidate = /^H([1-6])$/.exec(heading.tagName)?.[1]
     return {
@@ -617,6 +651,7 @@ export const captureSnapshotInBrowser = (
   }
   const isCandidateElement = (element: Element): boolean => {
     const local = element.localName
+    if (frameTags.has(local)) return true
     if (extraCandidateTags.has(local) || structuralTags.has(local) || interactiveTags.has(local)) return true
     if (local === "a" && element.hasAttribute("href")) return true
     if (element.hasAttribute("contenteditable")) return true
@@ -784,7 +819,7 @@ export const captureSnapshotInBrowser = (
     return 2
   }
 
-  type PendingEntry = BrowserEntry & { readonly interactiveElement?: Element }
+  type PendingEntry = BrowserEntry & { readonly interactiveElement?: Element; readonly frameElement?: Element }
   const entries: PendingEntry[] = []
   let truncated = false
   const add = (entry: PendingEntry): void => {
@@ -850,6 +885,12 @@ export const captureSnapshotInBrowser = (
     if (!isVisible(element)) continue
     const role = roleFor(element)
     const isHeading = role === "heading"
+    const isFrame = frameTags.has(element.localName)
+    // A 1-2px tracking iframe is not worth a line or a document capture; real embeds are larger.
+    if (isFrame) {
+      const rect = element.getBoundingClientRect()
+      if (rect.width < 20 && rect.height < 20) continue
+    }
     if (isHeading && isRedundantHeadingForLink(element)) continue
     if (
       role === "combobox" &&
@@ -864,7 +905,7 @@ export const captureSnapshotInBrowser = (
     const isInteractive = isInteractiveElement(element)
     const isSafetyText = role === "alert" || role === "status"
     const isParagraph = element.localName === "p"
-    const isStructural = !isInteractive && isStructuralElement(element)
+    const isStructural = isFrame || (!isInteractive && isStructuralElement(element))
     if (isStructural) {
       if (role === "listbox" && (element.getAttribute("aria-label") === "slider" || element.getAttribute("aria-roledescription") === "carousel")) {
         continue
@@ -895,7 +936,7 @@ export const captureSnapshotInBrowser = (
     ) {
       continue
     }
-    const displayName = isStructural ? structuralName(element, role) : accessibleName(element)
+    const displayName = isFrame ? frameName(element) : isStructural ? structuralName(element, role) : accessibleName(element)
     if (isInteractive && isDuplicateCardLink(element, displayName)) continue
     const nameFromAuthorOnly = role === "combobox" || role === "listbox" || role === "textbox" || role === "searchbox" || role === "spinbutton" || role === "slider"
     const identityName = isInteractive
@@ -914,7 +955,7 @@ export const captureSnapshotInBrowser = (
       : ""
     const name = truncate(displayName || fallbackName, isParagraph || isSafetyText || isStructural ? 180 : 120)
     if (!name) continue
-    const details = isHeading ? `level=${headingDepth(element) + 1}` : detailsFor(element)
+    const details = isHeading ? `level=${headingDepth(element) + 1}` : isFrame ? frameSource(element) : detailsFor(element)
     const primaryLink = (role === "link" && isPrimaryLink(element)) || headerCandidateSet.has(element)
     const baseDepth = headingDepth(element)
     const parentKeys = structuralParentKeys(element)
@@ -942,9 +983,10 @@ export const captureSnapshotInBrowser = (
       ...(parentKeys.length > 0 ? { parentKeys } : {}),
       role,
       name,
+      ...(element === root ? { root: true } : {}),
       ...(isInteractive && identityName && !labelProxy ? { identityName } : {}),
       ...(labelProxy ? { selectorRole: "label" } : {}),
-      ...(isInteractive ? { interactiveElement: labelProxy ?? element } : {}),
+      ...(isInteractive ? { interactiveElement: labelProxy ?? element } : isFrame ? { frameElement: element } : {}),
       ...(details ? { details } : {}),
       priority: priorityFor({
         role: headerCandidateSet.has(element) ? "heading" : role,
@@ -952,6 +994,7 @@ export const captureSnapshotInBrowser = (
         primaryLink,
         inActiveOverlay,
         structuralEssential: isStructural &&
+          role !== "iframe" &&
           role !== "row" &&
           role !== "listitem" &&
           role !== "code" &&
@@ -965,9 +1008,13 @@ export const captureSnapshotInBrowser = (
     .sort((left, right) => left.entry.priority - right.entry.priority || left.index - right.index)
     .slice(0, settings.maxItems)
     .sort((left, right) => left.index - right.index)
-    .map(({ entry: { interactiveElement, ...rest } }) => ({
+    .map(({ entry: { interactiveElement, frameElement, ...rest } }) => ({
       ...rest,
-      ...(interactiveElement ? { selector: cssPath(interactiveElement) } : {}),
+      ...(interactiveElement
+        ? { selector: cssPath(interactiveElement) }
+        : frameElement
+        ? { selector: frameSelector(frameElement), iframe: true }
+        : {}),
     }))
   const needsSettle = Boolean(
     !settings.rootSelector &&

@@ -4,7 +4,7 @@ import type { SnapshotRenderedEntry } from "./types.ts"
 
 export function snapshotRefIdentity(entry: SnapshotRenderedEntry): string | undefined {
   if (!entry.selector || !entry.role) return undefined
-  return JSON.stringify([entry.selector, entry.role, entry.identityName ?? null])
+  return JSON.stringify([entry.selector, entry.role, entry.identityName ?? null, entry.frameKey ?? null])
 }
 
 export function findSnapshotLines(lines: readonly string[], query: string | RegExp, requestedContext: number | undefined): string {
