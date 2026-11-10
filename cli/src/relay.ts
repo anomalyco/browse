@@ -5,6 +5,7 @@ import type { WebSocket } from "ws"
 import { createAutoUpdater, installedRuntime } from "./update/auto-update.ts"
 import { BrowserLinks, type BrowserLink } from "./relay/browser-links.ts"
 import { CdpClientPool } from "./cdp/client-pool.ts"
+import { clearDeviceMetricsOverride, DeviceMetricsOverrides, tabsToClearOnExecuteEnd } from "./cdp/emulation.ts"
 import { CdpRouter } from "./cdp/router.ts"
 import { CdpRuntime } from "./cdp/runtime.ts"
 import { installedDevExtension, syncDevExtension } from "./setup/dev-extension.ts"
@@ -256,6 +257,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const keepaliveIntervalMs = yield* Config.Int("OPENCODE_BROWSER_KEEPALIVE_MS").pipe(Config.withDefault(20_000))
   const idleTabTtlMs = yield* Config.Int("OPENCODE_BROWSER_IDLE_TAB_TTL_MS").pipe(Config.withDefault(15 * 60_000))
   const journalBaseDir = defaultJournalBaseDir()
+  // Tabs that received a device-metrics override; the execute end clears only these.
+  const deviceMetricsOverrides = new DeviceMetricsOverrides()
 
   // The sandbox wiring stays here: it closes over `sessions` itself and over `navigationGuard`, declared below.
   const sessions: OpenCodeBrowserSessions = new OpenCodeBrowserSessions(
@@ -297,7 +300,35 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         .filter((target) => target.owner === "user" && browsers.ownerKey(target.tabId) === session.browser?.key)
         .map((target) => target.targetInfo.url || "about:blank"),
       ...(executeTimeoutMs === undefined ? {} : { executeTimeoutMs }),
-      onExecuteStateChange: (sessionId, executing) => presentation.onSessionExecuteStateChange(sessionId, executing),
+      onExecuteStateChange: (sessionId, executing) => Effect.gen(function* () {
+        yield* presentation.onSessionExecuteStateChange(sessionId, executing)
+        if (executing) return
+        // A viewport emulated on a tab outlives the script that set it: the tab stays letterboxed
+        // until the debugger detaches. Clear the tabs this session's script set an override on,
+        // owned or just driven through target selection, which also covers raw CDP overrides. This
+        // runs inline under the session's execute semaphore, so nothing is left for the next call.
+        const tabs = tabsToClearOnExecuteEnd({
+          overrides: deviceMetricsOverrides,
+          readOnly: sessions.isReadOnly(sessionId),
+          sessionId,
+          canSee: (tabId) => {
+            const target = registry.tabTargets.get(tabId)
+            return target !== undefined && cdpRouter.canSessionSeeTarget(sessionId, target)
+          },
+        })
+        for (const { tabId, generation } of tabs) {
+          if (!deviceMetricsOverrides.isCurrent(tabId, generation)) continue
+          yield* clearDeviceMetricsOverride(
+            (method, params) => sendDebuggerCommand({ tabId, method, params }),
+            { retry: () => deviceMetricsOverrides.isCurrent(tabId, generation) },
+          ).pipe(Effect.timeoutOption("2 seconds"), Effect.ignore)
+        }
+      }),
+      // A deleted session's tabs are gone; drop its ownership so another session's clear isn't
+      // skipped by an owner that will never run again.
+      onSessionDeleted: (sessionId) => {
+        deviceMetricsOverrides.take(sessionId)
+      },
       onExecuteRecord: (record) => {
         const entry = makeJournalEntry({
           sessionId: record.sessionId,
@@ -534,6 +565,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     protectedFrames.forgetTab(tabId)
     navigationGuard.forgetTab(tabId)
     ghostCursor.forget(tabId)
+    deviceMetricsOverrides.forget(tabId)
     forgetTab(tabId)
     for (const [sessionId, childTabId] of suppressedChildSessions) {
       if (childTabId === tabId) suppressedChildSessions.delete(sessionId)
@@ -674,6 +706,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     navigationGuard,
     ghostCursor,
     tabActivity,
+    deviceMetricsOverrides,
     mainFrameIdsByTab,
     blankNavigationWaiters,
     sendDebuggerCommand,

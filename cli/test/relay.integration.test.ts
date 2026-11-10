@@ -266,6 +266,38 @@ describe("relay", () => {
     extension.close()
   }, 20_000)
 
+  test("clearing device metrics runs twice on the tab, never on a child frame session", async () => {
+    const tabId = 42
+    const targetInfo = { targetId: "TARGET-42", type: "page", title: "Example", url: "https://example.com/", attached: true, browserContextId: "CTX" }
+    const frameInfo = { targetId: "FRAME-42", type: "iframe", title: "", url: "https://example.com/frame", attached: true, browserContextId: "CTX" }
+    const extension = new FakeExtension(home, port)
+      .on("tabs.create", () => ({ tabId }))
+      .on("Target.getTargetInfo", () => ({ targetInfo }))
+    expect(await extension.pair()).toBe(true)
+    const socket = await connectCdp(`ws://127.0.0.1:${port}/devtools/browser/test`, { authorization: `Bearer ${token}` })
+    if (!(socket instanceof WebSocket)) throw new Error(`CDP connection refused: ${socket}`)
+    const events = collect(socket)
+    expect((await cdpCall(socket, 1, "Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true })).error).toBeUndefined()
+    expect((await cdpCall(socket, 2, "Target.createTarget", { url: "https://example.com/" })).result?.targetId).toBe("TARGET-42")
+    // A child frame Chrome attached inside the tab: a clear addressed to it must still reach the tab.
+    extension.emit("debugger.event", {
+      tabId,
+      method: "Target.attachedToTarget",
+      params: { sessionId: "frame-42", targetInfo: frameInfo, waitingForDebugger: false },
+    })
+    expect(await until(() => events.some((event) => event.method === "Target.attachedToTarget" && event.params?.sessionId === "frame-42"))).toBe(true)
+    const clears = () => extension.commands.filter((command) => command.method === "debugger.sendCommand" && command.params?.method === "Emulation.clearDeviceMetricsOverride")
+    const cleared = await cdpCall(socket, 3, "Emulation.clearDeviceMetricsOverride", {}, "frame-42")
+    expect(cleared.error).toBeUndefined()
+    expect(await until(() => clears().length === 2)).toBe(true)
+    expect(clears().map((command) => ({ tabId: command.params?.tabId, sessionId: command.params?.sessionId }))).toEqual([
+      { tabId, sessionId: undefined },
+      { tabId, sessionId: undefined },
+    ])
+    socket.close()
+    extension.close()
+  }, 20_000)
+
   test("a popup an agent's page opens becomes the opener session's page, with openerId", async () => {
     const targetInfo = (tabId: number) => ({ targetId: `TARGET-${tabId}`, type: "page", title: "Example", url: `https://example.com/${tabId}`, attached: true, browserContextId: "CTX" })
     const extension = new FakeExtension(home, port)

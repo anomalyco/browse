@@ -251,6 +251,10 @@ wait only ends when the call is stopped.
 fields (`autocomplete` `cc-number`, `cc-csc`, `cc-exp*`). Other readonly fields show their value, so a generated
 address or code is readable; a field the page locks after you type into it counts as readonly.
 
+`page.setViewportSize()` emulates a viewport inside the real window, so the tab is letterboxed while it is set; when
+the script ends browse clears the override, retrying one Chrome drops, and the tab goes back to the window's size
+within a couple of seconds.
+
 Each agent has its own current session only when the client names the agent (OpenCode does; `status` reports
 `sharedSession`). With other clients, agents on one server share one current session; when several use it, each
 should `session_new` its own and pass `session` on every call.
@@ -312,15 +316,16 @@ may try to steer it, and that other programs on your computer may try to use the
   their own the next time they connect; `pair --revoke legacy` retires that code once they all have.
 - **Restricted `execute`.** Agent code runs in a restricted JavaScript realm on the relay: it withholds Node
   APIs (`process`, `require`, `import()`, `fs`, network modules, Node fetch), limits files to the file roots, requires
-  the folders and files below a root to be yours and not group/world writable, checks the file paths in the raw CDP
-  commands that take them, and stops synchronous code after about 2 seconds. It shares the relay's process, so it is
-  not a security boundary: treat code an agent runs as code running as you. The relay starts with an allowlisted
-  environment (the basics plus `OPENCODE_BROWSER_*`, proxy variables and CA certificate paths), so your API keys
-  aren't in it.
+  the folders and files below a root to be yours and not group/world writable (use `files.path()` or `files.dir`),
+  checks the file paths in the raw CDP commands that take them, and stops synchronous code after about 2 seconds. It
+  shares the relay's process, so it is not a security boundary: treat code an agent runs as code running as you. The
+  relay starts with an allowlisted environment (the basics plus `OPENCODE_BROWSER_*`, proxy variables and CA
+  certificate paths), so your API keys aren't in it.
 - **CDP guardrails.** Cookie reads return only cookies for the session's own pages; cookie writes are limited to
   those hosts. Clearing cookies, cache or site data, and closing the browser, are always refused. Granting or
-  changing site permissions (`context.grantPermissions()`, `context.clearPermissions()`, `Browser.setPermission`) is
-  refused too. `page.bringToFront()` is refused so agents can't raise windows over your work.
+  changing site permissions (`context.grantPermissions()`, `context.clearPermissions()`, `Browser.setPermission`,
+  `Browser.grantPermissions`, `Browser.resetPermissions`) is refused too. `page.bringToFront()` is refused so agents
+  can't raise windows over your work.
 - **Domain allowlists (opt-in).** `session new <name> --allow-origin example.com` (or `session allow`, or
   `allowedOrigins` on `session_new` / `session_allowlist`) limits where a session's tabs go. The relay refuses agent
   navigations and new tabs to other hosts, stops or blanks links, redirects and script navigations that leave the

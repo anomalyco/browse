@@ -12,6 +12,7 @@ import {
   replayTargetCreated,
 } from "../cdp/shims.ts"
 import { ghostCursorCommandMethod, type GhostCursorTabs } from "../ghost-cursor.ts"
+import { clearDeviceMetricsOverride, type DeviceMetricsOverrides } from "../cdp/emulation.ts"
 import { beforeInput } from "../execute/human-input.ts"
 import { isCdpRequest, parseJsonObject, type CdpRequest, type JsonObject } from "../protocol.ts"
 import { navigateTopFrameToDataUrl } from "./data-navigation.ts"
@@ -37,6 +38,7 @@ export function createCdpDispatcher(options: {
   readonly navigationGuard: SessionNavigationGuard
   readonly ghostCursor: GhostCursorTabs
   readonly tabActivity: TabActivity
+  readonly deviceMetricsOverrides: DeviceMetricsOverrides
   readonly mainFrameIdsByTab: Map<number, string>
   readonly blankNavigationWaiters: Map<number, (url: string, loaderId: string | undefined) => void>
   readonly sendDebuggerCommand: (command: { readonly tabId: number; readonly sessionId?: string; readonly method: string; readonly params: JsonObject }) => Effect.Effect<JsonObject, Error>
@@ -63,6 +65,7 @@ export function createCdpDispatcher(options: {
     navigationGuard,
     ghostCursor,
     tabActivity,
+    deviceMetricsOverrides,
     mainFrameIdsByTab,
     blankNavigationWaiters,
     sendDebuggerCommand,
@@ -274,6 +277,33 @@ export function createCdpDispatcher(options: {
       yield* tabActivity.focus(tabId, executingSession)
     }
     if (message.method === ghostCursorCommandMethod) return yield* ghostCursor.command(tabId, message.params)
+    // A page's CDP sessions are aliases onto the tab's chrome.debugger session, so a clear from
+    // context.newCDPSession(page) already reaches the session that set the override; repeating it
+    // covers Chrome dropping one that races the set's visible-size update. Emulation only applies
+    // at the top target, so a clear addressed to a child frame goes to the tab instead (a separate
+    // fix: that request would otherwise clear nothing).
+    if (message.method === "Emulation.clearDeviceMetricsOverride") {
+      const clientSessionId = cdpClients.sessionId(socket)
+      const owner = deviceMetricsOverrides.sessionId(tabId)
+      if (clientSessionId !== undefined && owner !== undefined && owner !== clientSessionId) {
+        // Another session's script set this tab's current override; this clear would wipe it.
+        return {}
+      }
+      const generation = deviceMetricsOverrides.generation(tabId)
+      yield* clearDeviceMetricsOverride(
+        (method, params) => sendDebuggerCommand({ tabId, method, params }),
+        { retry: () => deviceMetricsOverrides.isCurrent(tabId, generation) },
+      )
+      // The override is gone, so the execute end does not need to clear it again.
+      deviceMetricsOverrides.clear(tabId, generation, clientSessionId)
+      return {}
+    }
+    if (message.method === "Emulation.setDeviceMetricsOverride" && route.chromeSessionId === undefined) {
+      // Emulation only applies at the top target. Remember the tab, and which session's client set
+      // it, so the execute end can clear it if the script doesn't; a raw client without a browse
+      // session id marks without an owner, so no session's execute end will clear its viewport.
+      deviceMetricsOverrides.mark(tabId, cdpClients.sessionId(socket))
+    }
     if (message.method === "Page.navigate" && route.chromeSessionId === undefined) {
       const dataNavigation = yield* navigateTopFrameToDataUrl({
         tabId,
