@@ -163,17 +163,26 @@ export function createRelayCommands(deps: {
         deps.log.add("tabs.create.start", { blank: url === "about:blank", active })
         const deadline = Date.now() + CREATE_BUDGET_MS
         const creating = await TabCleanup.beginCreate(url)
-        const tab = await AgentWindow.open(url, {
+        const opened = await AgentWindow.open(url, {
           active,
           ...(AgentWindow.isPlacement(params?.window) ? { override: params.window } : {}),
         }).catch(async (error: unknown) => {
           await withTimeout(TabCleanup.endCreate(creating), deadline - Date.now())
           throw error
         })
+        const tab = opened.tab
         if (tab.id === undefined) {
           void TabCleanup.endCreate(creating)
           throw new Error("Created tab has no id")
         }
+        deps.log.add("tabs.create.window", {
+          tabId: tab.id,
+          windowId: tab.windowId,
+          created: opened.created,
+          rule: opened.rule,
+          lastFocused: opened.lastFocused,
+          normalWindows: opened.normalWindows,
+        })
         TabCleanup.track(tab.id)
         // A discarded tab loses the debugger and the agent's page. Issued now but not awaited: the answer must not
         // wait on it.

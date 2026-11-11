@@ -23,7 +23,7 @@ export class StubEvent {
 
 type Bounds = { left: number; top: number; width: number; height: number }
 type Window = Bounds & { id: number; type: string; state: string; focused: boolean }
-type Tab = { id: number; windowId: number; url: string; pendingUrl?: string; active: boolean; index: number; groupId: number; pinned: boolean }
+type Tab = { id: number; windowId: number; url: string; pendingUrl?: string; active: boolean; index: number; groupId: number; pinned: boolean; lastAccessed: number }
 type Group = { id: number; windowId: number; title: string; color: string; collapsed: boolean }
 type CreateWindow = Partial<Bounds> & { url?: string; focused?: boolean; state?: string; type?: string }
 
@@ -100,6 +100,10 @@ export function createChrome() {
     /** The displays chrome.windows.create bounds are checked against. */
     displays: [{ left: 0, top: 0, width: 1512, height: 982 }] as Bounds[],
     focusedWindowId: undefined as number | undefined,
+    /** The window getLastFocused answers with: focusedWindowId unless a test makes it answer with another one. */
+    lastFocusedWindowId: undefined as number | undefined,
+    /** Makes chrome.windows.getAll never settle, like a Chromium call Dia stalls. */
+    getAllHangs: false,
     created: [] as CreateWindow[],
     permissionLevel: "granted" as "granted" | "denied",
     /** The extension's "Allow access to file URLs" setting. */
@@ -107,6 +111,7 @@ export function createChrome() {
     notificationsFail: false,
     notifications: new Map<string, unknown>(),
   }
+  const tabsOf = (windowId: number) => [...tabs.values()].filter((tab) => tab.windowId === windowId).map((tab) => ({ ...tab }))
   const windowsApi = lenient({
     WINDOW_ID_NONE: -1,
     onRemoved: new StubEvent(),
@@ -122,15 +127,22 @@ export function createChrome() {
       const tab = addTab(window.id, options.url ?? "about:blank", true)
       return { ...window, tabs: [{ ...tab }] }
     },
-    async get(id: number) {
+    async get(id: number, options: { populate?: boolean } = {}) {
       const window = windows.get(id)
       if (!window) throw new Error(`No window with id: ${id}.`)
+      return { ...window, ...(options.populate ? { tabs: tabsOf(window.id) } : {}) }
+    },
+    async getLastFocused(options: { windowTypes?: string[] } = {}) {
+      const id = state.lastFocusedWindowId ?? state.focusedWindowId
+      const window = id === undefined ? undefined : windows.get(id)
+      if (!window || (options.windowTypes && !options.windowTypes.includes(window.type))) throw new Error("No last-focused window")
       return { ...window }
     },
-    async getLastFocused() {
-      const window = state.focusedWindowId === undefined ? undefined : windows.get(state.focusedWindowId)
-      if (!window) throw new Error("No last-focused window")
-      return { ...window }
+    async getAll(options: { windowTypes?: string[]; populate?: boolean } = {}) {
+      if (state.getAllHangs) return new Promise<never>(() => {})
+      return [...windows.values()]
+        .filter((window) => !options.windowTypes || options.windowTypes.includes(window.type))
+        .map((window) => ({ ...window, ...(options.populate ? { tabs: tabsOf(window.id) } : {}) }))
     },
     async update(id: number, change: { focused?: boolean }) {
       const window = windows.get(id)
@@ -152,9 +164,9 @@ export function createChrome() {
       dropEmptyGroups()
     },
   })
-  const addTab = (windowId: number, url: string, active: boolean) => {
+  const addTab = (windowId: number, url: string, active: boolean, lastAccessed = Date.now()) => {
     if (active) for (const other of tabs.values()) if (other.windowId === windowId) other.active = false
-    const tab: Tab = { id: nextId++, windowId, url, active, index: [...tabs.values()].filter((tab) => tab.windowId === windowId).length, groupId: -1, pinned: false }
+    const tab: Tab = { id: nextId++, windowId, url, active, index: [...tabs.values()].filter((tab) => tab.windowId === windowId).length, groupId: -1, pinned: false, lastAccessed }
     tabs.set(tab.id, tab)
     return tab
   }
