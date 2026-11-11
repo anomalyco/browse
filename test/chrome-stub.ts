@@ -102,6 +102,8 @@ export function createChrome() {
     focusedWindowId: undefined as number | undefined,
     /** The window getLastFocused answers with: focusedWindowId unless a test makes it answer with another one. */
     lastFocusedWindowId: undefined as number | undefined,
+    /** Makes chrome.windows.getAll never settle, like a Chromium call Dia stalls. */
+    getAllHangs: false,
     created: [] as CreateWindow[],
     permissionLevel: "granted" as "granted" | "denied",
     /** The extension's "Allow access to file URLs" setting. */
@@ -109,6 +111,7 @@ export function createChrome() {
     notificationsFail: false,
     notifications: new Map<string, unknown>(),
   }
+  const tabsOf = (windowId: number) => [...tabs.values()].filter((tab) => tab.windowId === windowId).map((tab) => ({ ...tab }))
   const windowsApi = lenient({
     WINDOW_ID_NONE: -1,
     onRemoved: new StubEvent(),
@@ -124,10 +127,10 @@ export function createChrome() {
       const tab = addTab(window.id, options.url ?? "about:blank", true)
       return { ...window, tabs: [{ ...tab }] }
     },
-    async get(id: number) {
+    async get(id: number, options: { populate?: boolean } = {}) {
       const window = windows.get(id)
       if (!window) throw new Error(`No window with id: ${id}.`)
-      return { ...window }
+      return { ...window, ...(options.populate ? { tabs: tabsOf(window.id) } : {}) }
     },
     async getLastFocused(options: { windowTypes?: string[] } = {}) {
       const id = state.lastFocusedWindowId ?? state.focusedWindowId
@@ -136,12 +139,10 @@ export function createChrome() {
       return { ...window }
     },
     async getAll(options: { windowTypes?: string[]; populate?: boolean } = {}) {
+      if (state.getAllHangs) return new Promise<never>(() => {})
       return [...windows.values()]
         .filter((window) => !options.windowTypes || options.windowTypes.includes(window.type))
-        .map((window) => ({
-          ...window,
-          ...(options.populate ? { tabs: [...tabs.values()].filter((tab) => tab.windowId === window.id).map((tab) => ({ ...tab })) } : {}),
-        }))
+        .map((window) => ({ ...window, ...(options.populate ? { tabs: tabsOf(window.id) } : {}) }))
     },
     async update(id: number, change: { focused?: boolean }) {
       const window = windows.get(id)
