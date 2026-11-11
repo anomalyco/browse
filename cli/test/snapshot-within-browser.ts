@@ -29,20 +29,32 @@ const frameForm = (title: string, nested = ""): string => `<!doctype html><html>
 
 let sameOriginFrameUrl = ""
 const nestedHtml = frameForm("Nested").replace("Pagar", "Nested")
-// A third origin for a frame that never answers; bound to 127.0.0.2 so it cannot share a renderer with the page.
+// A third origin for a frame that never answers, on its own address so it cannot share a renderer with the page.
+// macOS has no 127.0.0.2 unless aliased, so fall back to the IPv6 loopback there.
 const hungServer = http.createServer((_request, response) => {
   response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
   response.end(`<!doctype html><html><head><script>while (true) {}</script></head><body></body></html>`)
 })
-await new Promise<void>((resolve) => hungServer.listen(0, "127.0.0.2", resolve))
-const hungPort = (hungServer.address() as { port: number }).port
+await new Promise<void>((resolve, reject) => {
+  hungServer.once("listening", () => resolve())
+  hungServer.once("error", (error: NodeJS.ErrnoException) => {
+    // Bun reports an address the host doesn't have as EADDRINUSE; port 0 can't really be in use.
+    if (error.code !== "EADDRNOTAVAIL" && error.code !== "EADDRINUSE") return reject(error)
+    hungServer.once("error", reject)
+    hungServer.listen(0, "::1")
+  })
+  hungServer.listen(0, "127.0.0.2")
+})
+const hungAddress = hungServer.address() as { address: string; family: string; port: number }
+const hungHost = hungAddress.family === "IPv6" ? `[${hungAddress.address}]` : hungAddress.address
+const hungPort = hungAddress.port
 const crossOriginServer = http.createServer((request, response) => {
   response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
   if (request.url === "/nested") return response.end(nestedHtml)
   if (request.url === "/moved") return response.end(frameForm("Moved"))
   if (request.url === "/leak") return response.end(`<!doctype html><html><body><h1>Leaky</h1><input aria-label="Key" value="LEAK-VALUE-CROSS"><button>Go</button></body></html>`)
   if (request.url === "/hung") return response.end(`<!doctype html><html><head><script>while (true) {}</script></head><body></body></html>`)
-  if (request.url === "/nested-host") return response.end(`<!doctype html><html><body><h1>A</h1><iframe src="http://127.0.0.2:${hungPort}/hung" title="a1"></iframe></body></html>`)
+  if (request.url === "/nested-host") return response.end(`<!doctype html><html><body><h1>A</h1><iframe src="http://${hungHost}:${hungPort}/hung" title="a1"></iframe></body></html>`)
   if (request.url === "/slow") return response.end(`<!doctype html><html><head><script>const end = Date.now() + 1500; while (Date.now() < end) {}</script></head><body><h1>Slow</h1></body></html>`)
   response.end(frameForm("Pay form", request.url === "/payment" ? `<iframe src="${sameOriginFrameUrl}/nested" title="nested" width="200" height="150"></iframe>` : ""))
 })
