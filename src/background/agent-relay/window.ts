@@ -1,7 +1,9 @@
 export * as AgentWindow from "./window"
 import { AGENT_WINDOW_KEY as PLACEMENT_KEY } from "../../shared/protocol"
+import { TabCleanup } from "../tab-cleanup"
+import { TIMED_OUT, withTimeout } from "./wire"
 
-// Where agents' new tabs open. By default ("current") in the window the user last focused, in the background
+// Where agents' new tabs open. By default ("current") in the window the user is looking at, in the background
 // (`active: false`), where the session's tab group keeps them collapsed at the start of the tab strip
 // (agent-groups.ts). The status page offers "separate" instead: one window of the agents' own, created unfocused and
 // placed beside the user's window. The relay can override the setting per tab (OPENCODE_BROWSER_AGENT_WINDOW).
@@ -20,7 +22,10 @@ import { AGENT_WINDOW_KEY as PLACEMENT_KEY } from "../../shared/protocol"
 const KEY = "agentWindowId"
 export type Placement = "current" | "separate"
 const SIZE = { width: 1280, height: 900 }
+/** Dia can stall a Chrome call; choosing a window must not eat the relay's tabs.create budget. */
+const WINDOW_QUERY_MS = 2_000
 let queue: Promise<unknown> = Promise.resolve()
+let last: { windowId?: number; created: boolean } | undefined
 
 type Bounds = { left: number; top: number; width: number; height: number }
 
@@ -48,16 +53,25 @@ export async function open(url: string, options: { active?: boolean; override?: 
   return where === "separate" ? openTab(url, options) : openInUserWindow(url, options)
 }
 
+/** The window the last tab opened in (undefined if that failed), and whether it was made for it: for the relay's log. */
+export function lastChoice() {
+  return last
+}
+
 /**
- * Opens `url` in a new tab of the window the user last focused. Without a normal window (only popups or app windows,
- * or none at all) one is made unfocused rather than appearing over what the user is doing.
+ * Opens `url` in a new tab of the window the user is looking at. Without a normal window (only popups or app
+ * windows, or none at all) one is made unfocused rather than appearing over what the user is doing.
  */
 export function openInUserWindow(url: string, options: { active?: boolean } = {}): Promise<chrome.tabs.Tab> {
   return serially(async () => {
-    const user = await chrome.windows.getLastFocused({ windowTypes: ["normal"] }).catch(() => undefined)
-    if (user?.id !== undefined && user.type === "normal")
+    const user = await userWindow()
+    if (user?.id !== undefined) {
+      last = { windowId: user.id, created: false }
       return chrome.tabs.create({ windowId: user.id, url, active: options.active === true })
-    return firstTab(await create(url))
+    }
+    const window = await create(url)
+    last = { windowId: window?.id, created: true }
+    return firstTab(window)
   })
 }
 
@@ -65,9 +79,13 @@ export function openInUserWindow(url: string, options: { active?: boolean } = {}
 export function openTab(url: string, options: { active?: boolean } = {}): Promise<chrome.tabs.Tab> {
   return serially(async () => {
     const windowId = await id()
-    if (windowId !== undefined) return chrome.tabs.create({ windowId, url, active: options.active === true })
+    if (windowId !== undefined) {
+      last = { windowId, created: false }
+      return chrome.tabs.create({ windowId, url, active: options.active === true })
+    }
     const window = await create(url)
     if (window?.id === undefined) throw new Error("Could not open the agent window")
+    last = { windowId: window.id, created: true }
     await chrome.storage.session.set({ [KEY]: window.id })
     return firstTab(window)
   })
@@ -87,6 +105,43 @@ async function firstTab(window: chrome.windows.Window | undefined) {
   return tab
 }
 
+/**
+ * The normal window the user is looking at: the focused one, else the one with the most recently used tab the user
+ * owns. Some Chromium browsers (Dia) keep windows the user never sees, and getLastFocused can return one, so its
+ * answer is only trusted while it is focused.
+ */
+async function userWindow(): Promise<chrome.windows.Window | undefined> {
+  const lastFocused = await chrome.windows.getLastFocused({ windowTypes: ["normal"] }).catch(() => undefined)
+  if (lastFocused?.focused) return lastFocused
+  const queried = await withTimeout(
+    chrome.windows.getAll({ windowTypes: ["normal"], populate: true }),
+    WINDOW_QUERY_MS,
+  ).catch(() => [] as chrome.windows.Window[])
+  const windows = (queried === TIMED_OUT ? [] : queried).filter((window) => window.id !== undefined && window.type === "normal")
+  const candidates: chrome.windows.Window[] = []
+  for (const window of windows) if (window.state !== "minimized" && (await hasUserTab(window))) candidates.push(window)
+  const latest = Math.max(0, ...candidates.map(lastAccessed))
+  return candidates.find((window) => window.id === lastFocused?.id && lastAccessed(window) === latest)
+    ?? candidates.find((window) => lastAccessed(window) === latest)
+    ?? (lastFocused?.id !== undefined && lastFocused.type === "normal" ? lastFocused : undefined)
+    ?? windows.find((window) => window.state !== "minimized")
+    ?? windows[0]
+}
+
+/** Whether the window holds a tab an agent didn't open: one holding only agent tabs is the agents' own. */
+async function hasUserTab(window: chrome.windows.Window) {
+  const tabs = window.tabs ?? (window.id === undefined ? [] : await chrome.tabs.query({ windowId: window.id }).catch(() => []))
+  for (const tab of tabs) {
+    const id = tab.id
+    if (id !== undefined && !(await TabCleanup.isTracked(id))) return true
+  }
+  return false
+}
+
+function lastAccessed(window: chrome.windows.Window) {
+  return (window.tabs ?? []).reduce((at, tab) => Math.max(at, tab.lastAccessed ?? 0), 0)
+}
+
 /** Places for the agent window next to `user`'s window, best first: right, left, below, above. */
 export function placements(user: Partial<Bounds> | undefined, size = SIZE): Bounds[] {
   const { left, top, width, height } = user ?? {}
@@ -101,7 +156,7 @@ export function placements(user: Partial<Bounds> | undefined, size = SIZE): Boun
 
 async function create(url: string) {
   const base = { url, focused: false, state: "normal", type: "normal" } as const
-  const user = await chrome.windows.getLastFocused({ windowTypes: ["normal"] }).catch(() => undefined)
+  const user = await userWindow()
   // A minimized or fullscreen window's bounds say nothing useful about where the user is looking.
   const anchor = user?.state === "normal" || user?.state === "maximized" ? user : undefined
   for (const bounds of placements(anchor)) {

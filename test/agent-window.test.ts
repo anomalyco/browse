@@ -1,8 +1,12 @@
-import { beforeEach, describe, expect, test } from "bun:test"
+import { afterAll, beforeEach, describe, expect, test } from "bun:test"
 import { installChrome, settle } from "./chrome-stub"
 
 const stub = installChrome()
 const { AgentWindow } = await import("../src/background/agent-relay/window")
+const { TabCleanup } = await import("../src/background/tab-cleanup")
+
+/** Agent tabs opened in a test, forgotten before the next one. */
+const tracked: number[] = []
 
 /** The user's window, focused, at the given bounds. */
 async function userWindow(bounds: { left: number; top: number; width: number; height: number }) {
@@ -12,14 +16,21 @@ async function userWindow(bounds: { left: number; top: number; width: number; he
 }
 
 beforeEach(async () => {
+  for (const tabId of tracked.splice(0)) TabCleanup.forget(tabId)
   stub.state.windows.clear()
   stub.state.tabs.clear()
   stub.state.created.length = 0
   stub.state.activations.length = 0
   stub.state.focusedWindowId = undefined
+  stub.state.lastFocusedWindowId = undefined
   stub.state.displays = [{ left: 0, top: 0, width: 1512, height: 982 }]
   await stub.chrome.storage.session.remove("agentWindowId")
   await stub.chrome.storage.local.remove("agentTabsWindow")
+})
+
+afterAll(() => {
+  for (const tabId of tracked.splice(0)) TabCleanup.forget(tabId)
+  stub.state.lastFocusedWindowId = undefined
 })
 
 describe("AgentWindow.open", () => {
@@ -77,6 +88,90 @@ describe("AgentWindow.open", () => {
   test("an unknown stored value means the default", async () => {
     await stub.chrome.storage.local.set({ agentTabsWindow: "elsewhere" })
     expect(await AgentWindow.placement()).toBe("current")
+  })
+})
+
+// Some Chromium browsers (Dia) keep windows the user never sees: a profile's window can stay open while another
+// profile is on screen. getLastFocused may answer with one of them, so these cases check the window the user uses.
+describe("AgentWindow.open with windows the browser doesn't show", () => {
+  /** A normal window that isn't focused, holding the user's tab last accessed at `at`. */
+  async function userTabWindow(at: number, options: { state?: string } = {}) {
+    const window = await stub.chrome.windows.create({ url: "https://user.example/", focused: false, ...options })
+    const tab = [...stub.state.tabs.values()].find((tab) => tab.windowId === window.id)!
+    await stub.chrome.tabs.update(tab.id, { lastAccessed: at })
+    stub.state.created.length = 0
+    return { window, tab }
+  }
+
+  /** A normal window holding only a tab an agent opened, last accessed at `at`. */
+  async function agentTabWindow(at: number) {
+    const window = await stub.chrome.windows.create({ url: "https://agent.example/", focused: false })
+    const tab = [...stub.state.tabs.values()].find((tab) => tab.windowId === window.id)!
+    await stub.chrome.tabs.update(tab.id, { lastAccessed: at })
+    TabCleanup.track(tab.id)
+    tracked.push(tab.id)
+    stub.state.created.length = 0
+    return { window, tab }
+  }
+
+  test("the focused window wins over one with a more recently used tab", async () => {
+    const focused = await userTabWindow(100)
+    await stub.chrome.windows.update(focused.window.id, { focused: true })
+    stub.state.lastFocusedWindowId = focused.window.id
+    await userTabWindow(200)
+
+    const tab = await AgentWindow.open("https://example.com/")
+    expect(tab.windowId).toBe(focused.window.id)
+    expect(stub.state.created).toHaveLength(0)
+  })
+
+  test("skips a window holding only agent tabs for one with a user's tab", async () => {
+    const agents = await agentTabWindow(200)
+    stub.state.lastFocusedWindowId = agents.window.id
+    const user = await userTabWindow(100)
+
+    const tab = await AgentWindow.open("https://example.com/")
+    expect(tab.windowId).toBe(user.window.id)
+    expect(stub.state.created).toHaveLength(0)
+  })
+
+  test("on a tie the last-focused window wins", async () => {
+    await userTabWindow(100)
+    const lastFocused = await userTabWindow(100)
+    stub.state.lastFocusedWindowId = lastFocused.window.id
+
+    const tab = await AgentWindow.open("https://example.com/")
+    expect(tab.windowId).toBe(lastFocused.window.id)
+    expect(stub.state.created).toHaveLength(0)
+  })
+
+  test("opens in a normal window when getLastFocused fails", async () => {
+    const user = await userTabWindow(100)
+    stub.state.lastFocusedWindowId = 9_999
+
+    const tab = await AgentWindow.open("https://example.com/")
+    expect(tab.windowId).toBe(user.window.id)
+    expect(stub.state.created).toHaveLength(0)
+  })
+
+  test("skips a minimized window for one the user can see", async () => {
+    const minimized = await userTabWindow(200, { state: "minimized" })
+    stub.state.lastFocusedWindowId = minimized.window.id
+    const visible = await userTabWindow(100)
+
+    const tab = await AgentWindow.open("https://example.com/")
+    expect(tab.windowId).toBe(visible.window.id)
+    expect(stub.state.created).toHaveLength(0)
+  })
+
+  test("with no normal window, still makes one unfocused", async () => {
+    const popup = await stub.chrome.windows.create({ type: "popup", url: "https://popup.example/", focused: false })
+    stub.state.lastFocusedWindowId = popup.id
+    stub.state.created.length = 0
+
+    const tab = await AgentWindow.open("https://example.com/")
+    expect(stub.state.created).toEqual([expect.objectContaining({ focused: false, type: "normal" })])
+    expect(tab.windowId).not.toBe(popup.id)
   })
 })
 

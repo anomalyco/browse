@@ -174,6 +174,12 @@ export function createRelayCommands(deps: {
           void TabCleanup.endCreate(creating)
           throw new Error("Created tab has no id")
         }
+        const choice = AgentWindow.lastChoice()
+        deps.log.add("tabs.create.window", {
+          tabId: tab.id,
+          windowId: choice?.windowId ?? tab.windowId,
+          created: choice?.created === true,
+        })
         TabCleanup.track(tab.id)
         // A discarded tab loses the debugger and the agent's page. Issued now but not awaited: the answer must not
         // wait on it.
