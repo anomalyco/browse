@@ -17,7 +17,7 @@ import {
   type ExecuteResponse,
   type TargetSelection,
 } from "../relay/schema.ts"
-import { settingKeys, type SettingKey } from "../relay/user-settings.ts"
+import { settingKeys, type SettingKey, type SettingValue } from "../relay/user-settings.ts"
 import type { UpdateNotice } from "../update.ts"
 
 export type CurrentSession = { id: string; established: boolean }
@@ -54,6 +54,21 @@ export function objectSchema(properties: JsonObject, required: readonly string[]
     required: [...required],
     additionalProperties: false,
   }
+}
+
+/**
+ * A property accepting exactly `values`, as one single-typed `enum` per JSON type. Settings are the one place a tool
+ * schema mixes numbers and strings (`idleMinutes` is 10, 30, 60 or "never"), and some MCP clients reject an `enum`
+ * whose values have different types, which fails their whole tool list.
+ */
+export function valuesSchema(values: readonly SettingValue[], description: string): JsonObject {
+  const groups = new Map<string, SettingValue[]>()
+  for (const value of values) {
+    const type = typeof value === "number" ? (Number.isInteger(value) ? "integer" : "number") : "string"
+    groups.set(type, [...(groups.get(type) ?? []), value])
+  }
+  const variants = [...groups].map(([type, items]) => ({ type, enum: items }))
+  return variants.length === 1 ? { ...variants[0]!, description } : { anyOf: variants, description }
 }
 
 export const emptyInputSchema = objectSchema({})

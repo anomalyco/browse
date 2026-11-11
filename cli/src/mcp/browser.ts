@@ -6,7 +6,7 @@ import { updateJson } from "../update.ts"
 import { securityVariables, settingSpecs, type SettingReport } from "../relay/user-settings.ts"
 import { TabsCleanupResponse } from "../relay/schema.ts"
 import { registerMcpTools } from "./registry.ts"
-import { agentSettingKeys, emptyInputSchema, objectSchema, SettingsToolOutput, StatusToolOutput } from "./schema.ts"
+import { agentSettingKeys, emptyInputSchema, objectSchema, SettingsToolOutput, StatusToolOutput, valuesSchema } from "./schema.ts"
 
 /** The settings report without update behaviour: agents may see its value in status but never read or change it here. */
 const agentSettings = (settings: Record<string, SettingReport>) =>
@@ -82,7 +82,7 @@ registerMcpTools({
           type: "object",
           description: "Settings to change; omit to only read them.",
           properties: Object.fromEntries(
-            agentSettingKeys.map((key) => [key, { enum: [...settingSpecs[key].values], description: settingSpecs[key].label }]),
+            agentSettingKeys.map((key) => [key, valuesSchema(settingSpecs[key].values, settingSpecs[key].label)]),
           ),
           additionalProperties: false,
         },
