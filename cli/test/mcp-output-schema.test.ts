@@ -15,6 +15,7 @@ import {
 } from "../src/mcp/schema.ts"
 import type * as RelayClient from "../src/relay/client.ts"
 import type { ExecuteResponse } from "../src/relay/schema.ts"
+import { parseSettingChanges, settingSpecs, SettingsInputError } from "../src/relay/user-settings.ts"
 
 function executeResponse(overrides: Partial<ExecuteResponse> = {}): ExecuteResponse {
   return {
@@ -47,6 +48,48 @@ function resultJson(result: McpSchema.CallToolResult): string {
 
 function textBlocks(result: McpSchema.CallToolResult): string[] {
   return result.content.flatMap((item) => item.type === "text" ? [item.text] : [])
+}
+
+/** The JSON type of a value. Integer and number are one type: JSON Schema matches either against both. */
+function jsonType(value: unknown): string {
+  return typeof value === "number" ? "number" : value === null ? "null" : typeof value
+}
+
+/** Every `enum` and `const` in a JSON Schema, with its path and the `type` declared beside it, if any. */
+function literals(schema: unknown): Array<{ path: string; type: string | undefined; values: readonly unknown[] }> {
+  const found: Array<{ path: string; type: string | undefined; values: readonly unknown[] }> = []
+  const visit = (node: unknown, path: string) => {
+    if (Array.isArray(node)) return node.forEach((item, index) => visit(item, `${path}[${index}]`))
+    if (node === null || typeof node !== "object") return
+    const record = node as Record<string, unknown>
+    const type = typeof record.type === "string" ? record.type : undefined
+    if (Array.isArray(record.enum)) found.push({ path: `${path}.enum`, type, values: record.enum })
+    if ("const" in record) found.push({ path: `${path}.const`, type, values: [record.const] })
+    for (const [key, value] of Object.entries(record)) visit(value, `${path}.${key}`)
+  }
+  visit(schema, "")
+  return found
+}
+
+function matchesJsonType(type: string, value: unknown): boolean {
+  switch (type) {
+    case "integer": return typeof value === "number" && Number.isInteger(value)
+    case "number": return typeof value === "number"
+    case "string": return typeof value === "string"
+    case "boolean": return typeof value === "boolean"
+    case "null": return value === null
+    case "array": return Array.isArray(value)
+    case "object": return typeof value === "object" && value !== null && !Array.isArray(value)
+    default: return true
+  }
+}
+
+/** Every JSON Schema the MCP server advertises: each tool's input, and its structured result's output. */
+function advertisedSchemas(): Array<{ name: string; json: unknown }> {
+  return specs().flatMap((spec) => [
+    { name: `${spec.name} input`, json: spec.inputSchema },
+    ...(spec.outputSchema ? [{ name: `${spec.name} output`, json: toolOutputJson(spec.outputSchema) }] : []),
+  ])
 }
 
 describe("tool output schemas", () => {
@@ -410,5 +453,45 @@ describe("tool output schemas", () => {
     expect(value).toEqual(adopted)
     expect(value).not.toHaveProperty("confirmation")
     expect(Schema.is(spec.outputSchema!)(value)).toBe(true)
+  })
+})
+
+describe("advertised tool schemas", () => {
+  // Some MCP clients (Kimi, for one) reject a tool whose enum or const mixes JSON types, and fail the whole tool list
+  // over it. Each variant must keep its own type, through anyOf or otherwise.
+  test("every enum and const keeps one JSON type", () => {
+    const problems: string[] = []
+    for (const { name, json } of advertisedSchemas()) {
+      for (const { path, type, values } of literals(json)) {
+        const types = new Set(values.map((value) => jsonType(value)))
+        if (types.size > 1) problems.push(`${name}${path} mixes ${[...types].join(", ")}: ${JSON.stringify(values)}`)
+        if (type) {
+          const mismatched = values.filter((value) => !matchesJsonType(type, value))
+          if (mismatched.length > 0) problems.push(`${name}${path} declares type ${type} but holds ${JSON.stringify(mismatched)}`)
+        }
+      }
+    }
+    expect(problems).toEqual([])
+  })
+
+  test("settings idleMinutes splits its minutes and 'never' into single-typed enums", () => {
+    const input = specs().find((spec) => spec.name === "settings")!.inputSchema
+    const set = (input.properties as Record<string, { properties: Record<string, unknown> }>).set!
+    expect(set.properties.idleMinutes).toEqual({
+      anyOf: [
+        { type: "integer", enum: [10, 30, 60] },
+        { type: "string", enum: ["never"] },
+      ],
+      description: settingSpecs.idleMinutes.label,
+    })
+  })
+
+  test("settings idleMinutes still decodes every value it advertises", () => {
+    expect(parseSettingChanges({ idleMinutes: 10 })).toEqual({ idleMinutes: 10 })
+    expect(parseSettingChanges({ idleMinutes: "never" })).toEqual({ idleMinutes: "never" })
+    // 0 and numeric strings are the CLI's other spellings of the same values.
+    expect(parseSettingChanges({ idleMinutes: 0 })).toEqual({ idleMinutes: "never" })
+    expect(parseSettingChanges({ idleMinutes: "30" })).toEqual({ idleMinutes: 30 })
+    expect(() => parseSettingChanges({ idleMinutes: 15 })).toThrow(SettingsInputError)
   })
 })
