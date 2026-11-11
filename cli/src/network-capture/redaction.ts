@@ -20,6 +20,42 @@ const referencePattern = String.raw`BC_(?:SECRET|REDACTED)_\d+`
  * equals the known value is still replaced.
  */
 export const minimumKnownSubstringLength = 8
+// HTTP/2 pseudo-header sources are `METHOD url.request.header.:name` or
+// `METHOD url.response.header.:name`, optionally followed by a duplicate-header occurrence index.
+// Older profiles can have whitespace before the colon or after the name. A source grows as
+// `<scope>.` followed by query.… or fragment.…, or by (request|response).(header|json|form|multipart).…
+// So only query, fragment, request and response can directly follow the scope; json, form, multipart
+// and header only appear after request/response. Ambiguous URL paths ending in .query or .fragment
+// are kept: wrongly dropping a real secret is worse than keeping a hostname. :path carries the
+// request URL and its query slots, so it is usable.
+const pseudoHeaderSourcePattern = /^(?:[A-Z]+ (\S+)\.)?(?:request|response)\.header\.[ \t]*:[ \t]*([^.\s]+)[ \t]*(?:\.\d+)?$/
+const nonHeaderSourceSegmentPattern = /\.(?:query|fragment)(?:\.|$)|\.(?:request|response)\.(?:json|form|multipart|header)(?:\.|$)/
+function isPseudoHeaderSource(source: string): boolean {
+  const match = pseudoHeaderSourcePattern.exec(source)
+  if (!match) return false
+  const scope = match[1]
+  return (scope === undefined || !nonHeaderSourceSegmentPattern.test(scope)) && match[2] !== "path"
+}
+function isPseudoHeaderOnly(sources: readonly string[]): boolean {
+  return sources.length > 0 && sources.every(isPseudoHeaderSource)
+}
+/**
+ * Drop slots that cannot be used safely: values too short to replace without
+ * corrupting unrelated text, and slots that only ever came from an HTTP/2
+ * pseudo-header (an old :authority hostname, for example). Profiles written by
+ * older builds are cleaned through this before they are read or written back.
+ */
+export function cleanCredentialSlots(slots: readonly CredentialSlot[]): readonly CredentialSlot[] {
+  return slots.filter((slot) =>
+    slot.value.length >= minimumKnownSubstringLength && !isPseudoHeaderOnly(slot.sources))
+}
+/** The highest BC_SECRET_N number present, or 0. */
+export function highestSecretRef(slots: readonly CredentialSlot[]): number {
+  return slots.reduce((highest, slot) => {
+    const number = /^BC_SECRET_(\d+)$/.exec(slot.ref)?.[1]
+    return number === undefined ? highest : Math.max(highest, Number(number))
+  }, 0)
+}
 const secretHeaders = new Set([
   "authorization",
   "proxy-authorization",
@@ -29,14 +65,9 @@ const secretHeaders = new Set([
   "csrf-token",
   "x-xsrf-token",
 ])
-// HTTP/2 pseudo-headers (except :path, which is protected like a request URL) and standard CORS
-// response headers carry routing and policy, not credentials, and must never become secret slots.
+// Standard CORS response headers carry routing and policy, not credentials, and must never become
+// secret slots. HTTP/2 pseudo-headers are skipped structurally in protectHeader.
 const nonSecretHeaders = new Set([
-  ":authority",
-  ":method",
-  ":scheme",
-  ":status",
-  ":protocol",
   "access-control-allow-credentials",
   "access-control-allow-origin",
   "access-control-allow-methods",
@@ -65,8 +96,10 @@ export class SecretCollector {
   private updated = new Set<string>()
   private observed = new Set<string>()
 
-  constructor(existing: readonly CredentialSlot[] = []) {
-    for (const slot of existing) {
+  constructor(existing: readonly CredentialSlot[] = [], nextRef = 1) {
+    // Include refs whose slots are dropped: old HARs and scripts can still refer to them.
+    this.nextRef = Math.max(this.nextRef, nextRef, highestSecretRef(existing) + 1)
+    for (const slot of cleanCredentialSlots(existing)) {
       const copy: MutableCredentialSlot = {
         ref: slot.ref,
         value: slot.value,
@@ -87,11 +120,11 @@ export class SecretCollector {
   protectHeaders(headers: readonly { readonly name: string; readonly value: string }[], location: "request" | "response", requestScope = ""): Array<{ name: string; value: string }> {
     const occurrences = new Map<string, number>()
     return headers.map(({ name, value }) => {
-      const lowerName = name.toLowerCase()
+      const lowerName = name.trim().toLowerCase()
       const occurrence = occurrences.get(lowerName) ?? 0
       occurrences.set(lowerName, occurrence + 1)
       return {
-      name,
+        name,
         value: this.protectHeader(name, value, sourceName(requestScope, `${location}.header.${lowerName}`, occurrence), requestScope),
       }
     })
@@ -146,6 +179,11 @@ export class SecretCollector {
     return Array.from(this.slotsByRef.values())
       .sort((left, right) => left.ref.localeCompare(right.ref, undefined, { numeric: true }))
       .map((slot) => ({ ...slot, sources: [...slot.sources] }))
+  }
+
+  /** The next reusable ref, including refs this collector dropped but the profile has used before. */
+  nextSecretRef(): number {
+    return this.nextRef
   }
 
   updatedRefs(): readonly string[] {
@@ -232,9 +270,12 @@ export class SecretCollector {
 
   private protectHeader(name: string, value: string, source: string, requestScope = ""): string {
     if (!value) return value
-    const lower = name.toLowerCase()
+    const lower = name.trim().toLowerCase()
     // :path carries the request path and query, so protect it exactly like the request URL.
     if (lower === ":path") return this.protectUrl(value, requestScope)
+    // Every other HTTP/2 pseudo-header is routing or status, never a credential. Checking the prefix
+    // matters because secretNamePattern would classify ":authority" as an auth header.
+    if (lower.startsWith(":")) return value
     if (nonSecretHeaders.has(lower)) return value
     if (lower === "cookie" || lower === "set-cookie") {
       const cookieOccurrences = new Map<string, number>()
@@ -324,6 +365,9 @@ export class SecretCollector {
       this.alwaysRedacted.add(value)
       return this.redactionReference(value)
     }
+    // Short values are redacted where they were captured but never stored as reusable slots:
+    // globally replacing "B" or "1" would corrupt unrelated output, including BC_SECRET_n refs.
+    if (value.length < minimumKnownSubstringLength) return this.redactionReference(value)
     const sourceRef = this.refsBySource.get(source)
     if (sourceRef) {
       const slot = this.slotsByRef.get(sourceRef)
@@ -494,13 +538,13 @@ export function redactKnownValues(text: string, slots: readonly RedactionSlot[])
 }
 
 /**
- * Redact execute output. Explicitly registered values (typed site secrets,
+ * Redact output text. Explicitly registered values (typed site secrets,
  * one-time request fields) and known values of at least
  * `minimumKnownSubstringLength` are replaced anywhere. A whole string equal to
  * any known value is replaced even when the value is shorter: output that is
  * exactly a credential is intentional credential output.
  */
-function redactOutputText(
+export function redactOutputText(
   text: string,
   slots: readonly RedactionSlot[],
   alwaysRedacted: ReadonlySet<string>,

@@ -30,7 +30,7 @@ export function finishCapture(
     const existingProfile = secrets
       ? yield* AuthProfile.readOptional(secrets, profileOptions)
       : undefined
-    const collector = new SecretCollector(existingProfile?.slots ?? [])
+    const collector = new SecretCollector(existingProfile?.slots ?? [], existingProfile?.nextRef ?? 1)
     for (const value of active.extraRedactions) collector.addRedactionOnly(value)
     const structurallyProtected = active.entries.map((entry) => protectEntry(entry, collector))
     const protectedEntries = structurallyProtected
@@ -44,7 +44,7 @@ export function finishCapture(
       })
     }
     const authProfile = secrets
-      ? yield* AuthProfile.write({ name: secrets, slots: collector.slots(), ...profileOptions })
+      ? yield* AuthProfile.write({ name: secrets, slots: collector.slots(), nextRef: collector.nextSecretRef(), ...profileOptions })
       : undefined
     if (options.outputPath) {
       yield* writeArtifact(options.outputPath, {

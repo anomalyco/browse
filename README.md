@@ -351,10 +351,12 @@ may try to steer it, and that other programs on your computer may try to use the
 - **Less on disk.** Session journals are private (0700/0600), redact typed passwords, codes and tokens, and are pruned
   after 14 days (200 at most). HARs replace credentials with references; typed passwords and one-time codes are never
   stored. Secret profiles keep values out of transcripts and artifacts, but anything that runs with them (like
-  `secrets_run`) can use them. `secrets_run` commands get the relay's allowlisted environment plus the profile's
-  `BC_SECRET_N` values, not the environment you started opencode with: `PATH`, `HOME`, locale, `HTTP_PROXY`,
-  `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR` and `NODE_EXTRA_CA_CERTS` pass through; other
-  variables (API keys included) don't.
+  `secrets_run`) can use them. Short captured values are redacted in place, while HTTP/2 pseudo-header values are
+  left as they are in HARs. Old profile slots holding either kind are dropped when loaded, because replacing them
+  everywhere corrupts unrelated text. `secrets_run` commands get the relay's allowlisted environment plus the
+  profile's `BC_SECRET_N` values, not the environment you started opencode with: `PATH`, `HOME`, locale, `HTTP_PROXY`,
+  `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR` and `NODE_EXTRA_CA_CERTS` pass through;
+  other variables (API keys included) don't.
 
 Escape hatches. Set them in the environment you start opencode (or your MCP client) from; the relay inherits
 `OPENCODE_BROWSER_*` variables. Run `node cli/dist/cli.mjs relay restart` after changing them:
