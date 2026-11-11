@@ -2,7 +2,7 @@ import { Effect } from "effect"
 import * as RelayClient from "../relay/client.ts"
 import * as RelayLifecycle from "../relay/lifecycle.ts"
 import { registerMcpTools } from "./registry.ts"
-import { ExecuteToolOutput, executeToolResult, objectSchema, parseExecuteArguments } from "./schema.ts"
+import { executeToolResult, objectSchema, parseExecuteArguments } from "./schema.ts"
 
 registerMcpTools({
   order: 100,
@@ -46,7 +46,7 @@ registerMcpTools({
       destructive: true,
       idempotent: false,
       openWorld: true,
-      outputSchema: ExecuteToolOutput,
+      // No outputSchema: clients that validate one reject image results, which carry no structured content.
       result: executeToolResult,
       handle: (input) =>
         Effect.gen(function* () {
