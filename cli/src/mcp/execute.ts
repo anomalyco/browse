@@ -37,7 +37,7 @@ registerMcpTools({
             type: "integer",
             minimum: 0,
             description:
-              "Optional overall script timeout in milliseconds (paused while handoff() waits on the user); defaults to 60000, 0 disables. When set, it is also the timeout for Playwright actions and navigations in the code, at least 30 seconds; 0 removes those too.",
+              "Optional overall script timeout in milliseconds (paused while handoff() waits on the user); defaults to 60000, 0 disables. It includes time spent waiting behind another execute on the same session, and that call's handoff does not pause it. When set, it is also the timeout for Playwright actions and navigations in the code, at least 30 seconds; 0 removes those too.",
           },
         },
         ["code"],

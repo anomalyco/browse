@@ -39,9 +39,15 @@ function cliExecute(code: string, sessionId = "realm-e2e"): Promise<Record<strin
   return new Promise((resolve, reject) => {
     const child = spawn("node", [cli, "execute", "--session", sessionId, "--json", code], { env, stdio: ["ignore", "pipe", "pipe"] })
     let output = ""
+    // A wedged relay must fail this harness instead of leaving the child waiting forever.
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL")
+      reject(new Error(`CLI execute did not finish within 10000ms: ${code.slice(0, 80)}`))
+    }, 10_000)
     child.stdout.on("data", data => { output += data })
-    child.on("error", reject)
+    child.on("error", (error) => { clearTimeout(timeout); reject(error) })
     child.on("exit", () => {
+      clearTimeout(timeout)
       try { resolve(JSON.parse(output)) } catch { reject(new Error("CLI returned no JSON")) }
     })
   })

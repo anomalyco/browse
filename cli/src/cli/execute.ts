@@ -122,7 +122,7 @@ const execute = Command.make(
     ),
     timeoutMs: Flag.Int("timeout-ms").pipe(
       Flag.optional,
-      Flag.withDescription("Overall script timeout in milliseconds (paused during handoff); defaults to 60000, 0 disables. When set, it is also the timeout for Playwright actions and navigations, at least 30 seconds; 0 removes those too"),
+      Flag.withDescription("Overall script timeout in milliseconds (paused during handoff); defaults to 60000, 0 disables. It includes time spent waiting behind another execute on the same session, and that call's handoff does not pause it. When set, it is also the timeout for Playwright actions and navigations, at least 30 seconds; 0 removes those too"),
     ),
     targetUrl: Flag.String("target-url").pipe(
       Flag.optional,

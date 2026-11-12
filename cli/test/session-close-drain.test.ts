@@ -65,7 +65,7 @@ class NeverFinishingSandbox implements ExecuteSandboxLike {
   execute() { return Effect.never }
   authenticatedJson(): never { throw new Error("unused") }
   adoptPage() { return Effect.void }
-  abortExecution() { return Effect.void }
+  stopRealm() {}
   disconnectSettled() { return Effect.void }
   closeSettled() { return Effect.void }
   networkStart(): never { throw new Error("unused") }

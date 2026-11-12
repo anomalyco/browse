@@ -48,8 +48,15 @@ export function executeInSession(
     const response = yield* Deferred.make<ExecutionResponse, Error>()
     const stopSignal = Deferred.makeUnsafe<{ readonly message: string; readonly diagnostic: string }>()
     let started = false
+    // True while this call waits for the session's execute lock; its deadline uses it to tell a queued call from one
+    // that is already setting up its browser.
+    let queued = true
     let cancelled = false
     let stopped: { readonly message: string; readonly diagnostic: string } | undefined
+    const stoppedExecution = (stop: { readonly message: string; readonly diagnostic: string }): ExecutionResponse => ({
+      result: stoppedExecuteResult(stop.message, stop.diagnostic),
+      session: createdSummary(session, resolved.created),
+    })
     const chosenTimeoutMs = options.timeoutMs ?? ctx.hooks.executeTimeoutMs
     const effectiveTimeoutMs = chosenTimeoutMs ?? defaultExecuteTimeoutMs
     // Only an explicit per-call or relay timeout raises Playwright's 30s action timeout; the built-in default leaves it alone.
@@ -63,15 +70,19 @@ export function executeInSession(
       stopped = { message, diagnostic }
       deadline?.cancel()
       Effect.runSync(Deferred.succeed(stopSignal, { message, diagnostic }))
-      Effect.runSync(Deferred.succeed(response, {
-        result: stoppedExecuteResult(message, diagnostic),
-        session: createdSummary(session, resolved.created),
-      }))
+      Effect.runSync(Deferred.succeed(response, stoppedExecution({ message, diagnostic })))
     }
-    // Armed before the session's execute lock: a call queued behind a stopped execute that is still settling gets
-    // its own timeout instead of waiting for that lock, which may be held by a wedged tab's browser connection.
+    // Armed before the session's execute lock: the timeout covers time spent waiting behind another execute on the
+    // session, so a queued call gets its own answer instead of waiting for a lock a wedged tab may still hold.
     if (effectiveTimeoutMs > 0) {
       deadline = new ExecutionDeadline(effectiveTimeoutMs, () => {
+        if (queued) {
+          stopRunning(
+            `Execute timed out after ${effectiveTimeoutMs}ms while this session was still busy with another execute; this code did not run.`,
+            "execute-queued-timeout",
+          )
+          return
+        }
         stopRunning(
           `Execute timed out after ${effectiveTimeoutMs}ms. Pass --timeout-ms <ms> (or timeoutMs in MCP) for longer runs, or 0 to disable.`,
           "execute-timeout",
@@ -79,12 +90,13 @@ export function executeInSession(
       })
     }
     const operation = Effect.gen(function* () {
+      queued = false
       if (cancelled) {
         return yield* sessionError("inactive", `Session execute was cancelled before starting: ${session.id}`, session.id)
       }
       // The deadline expired while this call waited for the execute lock; its caller already has the answer.
       if (stopped !== undefined) {
-        return { result: stoppedExecuteResult(stopped.message, stopped.diagnostic), session: createdSummary(session, resolved.created) }
+        return stoppedExecution(stopped)
       }
       if (ctx.sessions.get(session.id) !== session) {
         return yield* sessionError("inactive", `Session is no longer active: ${session.id}`, session.id)
@@ -94,6 +106,10 @@ export function executeInSession(
       if (session.browser?.key && ctx.hooks.checkBrowserResponsive) yield* ctx.hooks.checkBrowserResponsive(session.browser.key).pipe(
         Effect.mapError(error => sessionError("browser-unavailable", error.message, session.id)),
       )
+      // The deadline can expire while that check waits; its caller already has the answer, so the code never runs.
+      if (stopped !== undefined) {
+        return stoppedExecution(stopped)
+      }
       started = true
       session.updatedAt = new Date().toISOString()
       const released = Deferred.makeUnsafe<{ readonly forced: boolean }>()
@@ -161,12 +177,14 @@ export function executeInSession(
       return { result: resultWithHint, session: createdSummary(session, resolved.created) }
     })
     const worker = session.executeSemaphore.withPermit(operation.pipe(Effect.matchEffect({
-      onFailure: (error) => (resolved.created
-        ? ctx.cleanupCreatedSession(session)
-        : Effect.void).pipe(Effect.andThen(Effect.sync(() => deadline?.cancel())), Effect.andThen(Deferred.fail(response, error))),
-      onSuccess: (value) => (options.removeAfterExecute
-        ? ctx.cleanupCreatedSession(session)
-        : Effect.void).pipe(Effect.andThen(Effect.sync(() => deadline?.cancel())), Effect.andThen(Deferred.succeed(response, value))),
+      onFailure: (error) => Effect.sync(() => deadline?.cancel()).pipe(
+        Effect.andThen(resolved.created ? ctx.cleanupCreatedSession(session) : Effect.void),
+        Effect.andThen(Deferred.fail(response, error)),
+      ),
+      onSuccess: (value) => Effect.sync(() => deadline?.cancel()).pipe(
+        Effect.andThen(options.removeAfterExecute ? ctx.cleanupCreatedSession(session) : Effect.void),
+        Effect.andThen(Deferred.succeed(response, value)),
+      ),
     })))
     const workerFiber = yield* ctx.admission.forkTracked(worker, session.id)
     return yield* restore(Deferred.await(response)).pipe(

@@ -243,10 +243,11 @@ connection itself isn't encrypted by browse; use a network that is (Tailscale or
 | `status` | Connection status |
 
 `execute` takes an optional `timeoutMs` (`--timeout-ms` on the CLI), the budget for the whole script: 60000
-milliseconds by default, 0 disables it, and time spent in `handoff()` doesn't count. An explicit `timeoutMs` (or
-`OPENCODE_BROWSER_EXECUTE_TIMEOUT_MS`) is also how long Playwright actions and navigations may take in that call, at
-least 30 seconds; without one they keep Playwright's 30-second default. At 0 their timeout is off too, so a stuck
-wait only ends when the call is stopped.
+milliseconds by default, 0 disables it, and time spent in `handoff()` doesn't count. It starts when the call does,
+so time spent waiting behind another execute on the same session counts, and that other call's handoff doesn't
+pause it. An explicit `timeoutMs` (or `OPENCODE_BROWSER_EXECUTE_TIMEOUT_MS`) is also how long Playwright actions
+and navigations may take in that call, at least 30 seconds; without one they keep Playwright's 30-second default.
+At 0 their timeout is off too, so a stuck wait only ends when the call is stopped.
 
 `snapshot()` and `ariaSnapshot()` hide the values of editable fields and of password, one-time-code and card
 fields (`autocomplete` `cc-number`, `cc-csc`, `cc-exp*`). Other readonly fields show their value, so a generated

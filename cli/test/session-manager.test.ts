@@ -15,11 +15,15 @@ const ok = (text: string): ExecuteResult => ({
 })
 
 /**
- * A sandbox whose scripts are promises the test controls. `abortExecution` behaves like the real one closing the
- * browser connection: a script waiting on Playwright fails, one waiting on something else (a stuck loop) doesn't.
+ * A sandbox whose scripts are promises the test controls. `stopRealm` behaves like the real one stopping user code,
+ * and `disconnectSettled` like closing the browser connection: a script waiting on Playwright fails, one waiting on
+ * something else (a stuck loop) doesn't.
  */
 class FakeSandbox implements ExecuteSandboxLike {
+  /** Browser connections closed. */
   aborted = 0
+  /** Realms stopped; user code stops here. */
+  realmStops = 0
   executions = 0
   readonly calls: Array<ExecuteOptions | undefined> = []
   private abortWaiters: Array<() => void> = []
@@ -33,12 +37,14 @@ class FakeSandbox implements ExecuteSandboxLike {
   playwrightCall(): Promise<never> {
     return new Promise((_, reject) => this.abortWaiters.push(() => reject(new Error("Target page, context or browser has been closed"))))
   }
-  abortExecution() {
+  stopRealm() {
+    this.realmStops += 1
+  }
+  disconnectSettled() {
     this.aborted += 1
     for (const waiter of this.abortWaiters.splice(0)) waiter()
     return Effect.void
   }
-  disconnectSettled() { return Effect.void }
   closeSettled() { return Effect.void }
   authenticatedJson(): never { throw new Error("unused") }
   adoptPage() { return Effect.void }
@@ -62,8 +68,12 @@ function manager(script: (sandbox: FakeSandbox) => Promise<ExecuteResult>, optio
   readonly executeTimeoutMs?: number
   readonly onSessionDeleted?: (sessionId: string) => void
   readonly onStoppingExecute?: () => Effect.Effect<void>
+  readonly browser?: { readonly id: string; readonly key: string }
+  readonly checkBrowserResponsive?: () => Effect.Effect<void, Error>
 } = {}) {
   const sandboxes: FakeSandbox[] = []
+  const browser = options.browser
+  const checkBrowserResponsive = options.checkBrowserResponsive
   const sessions = new OpenCodeBrowserSessions("http://127.0.0.1:0", () => {
     const sandbox = new FakeSandbox(script)
     sandboxes.push(sandbox)
@@ -74,6 +84,8 @@ function manager(script: (sandbox: FakeSandbox) => Promise<ExecuteResult>, optio
     ...(options.executeTimeoutMs === undefined ? {} : { executeTimeoutMs: options.executeTimeoutMs }),
     ...(options.onSessionDeleted ? { onSessionDeleted: options.onSessionDeleted } : {}),
     ...(options.onStoppingExecute ? { onStoppingExecute: options.onStoppingExecute } : {}),
+    ...(browser ? { resolveBrowser: () => browser } : {}),
+    ...(checkBrowserResponsive ? { checkBrowserResponsive } : {}),
     ...(options.handoffs ? { onCancelSessionHandoff: (id: string) => options.handoffs?.cancelForSession(id) !== undefined } : {}),
   })
   return { sessions, sandboxes }
@@ -133,30 +145,35 @@ describe("stopping an execute", () => {
     expect(sessions.stopExecution("missing", "stop")).toBe(false)
   })
 
-  test("a stop cancels the session's pending navigation before aborting its browser connection", async () => {
+  test("a stop stops the realm, then cancels the pending navigation, then closes the connection", async () => {
     const calls: string[] = []
     const { sessions, sandboxes } = manager(async (sandbox) => {
       if (sandbox.executions === 1) await sandbox.playwrightCall()
       return ok("next")
     }, {
-      onStoppingExecute: () => Effect.sync(() => { calls.push(`navigation aborted=${sandboxes[0]?.aborted}`) }),
+      onStoppingExecute: () => Effect.sync(() => {
+        calls.push(`cancel realmStops=${sandboxes[0]?.realmStops} connections=${sandboxes[0]?.aborted}`)
+      }),
     })
     const { response } = await startExecute(sessions, "nav")
     expect(sessions.stopExecution("nav", "stop")).toBe(true)
     expect((await response).result.isError).toBe(true)
-    // Cancelling the navigation is first: the Playwright connection that the script awaits closes after it.
-    expect(calls).toEqual(["navigation aborted=0"])
+    for (let i = 0; i < 100 && sandboxes[0]?.aborted !== 1; i++) await Bun.sleep(5)
+    // User code stopped before the cancel, and the browser connection closing that the script awaits comes last.
+    expect(calls).toEqual(["cancel realmStops=1 connections=0"])
+    expect(sandboxes[0]?.realmStops).toBe(1)
     expect(sandboxes[0]?.aborted).toBe(1)
   })
 
   test("a timeout cancels the session's pending navigation too", async () => {
     let calls = 0
-    const { sessions } = manager(async (sandbox) => {
+    const { sessions, sandboxes } = manager(async (sandbox) => {
       if (sandbox.executions === 1) await sandbox.playwrightCall()
       return ok("next")
     }, { onStoppingExecute: () => Effect.sync(() => { calls += 1 }) })
     const timedOut = await run(sessions.execute({ sessionId: "nav-timeout", code: "...", createIfMissing: true, timeoutMs: 20 }))
     expect(timedOut.result.diagnostic).toBe("execute-timeout")
+    for (let i = 0; i < 100 && sandboxes[0]?.aborted !== 1; i++) await Bun.sleep(5)
     expect(calls).toBe(1)
   })
 })
@@ -347,13 +364,31 @@ describe("execute timeouts, disconnects, one-shot cleanup, and idle reaping", ()
     ])
     expect(second).not.toBe("still waiting")
     if (second === "still waiting") throw new Error("queued execute ignored its timeout")
-    expect(second.result.diagnostic).toBe("execute-timeout")
+    expect(second.result.diagnostic).toBe("execute-queued-timeout")
+    expect(second.result.text).toContain("while this session was still busy with another execute; this code did not run")
     expect(Date.now() - started).toBeLessThan(2_000)
     // User code never ran under the expired call.
     expect(sandboxes[0]?.executions).toBe(1)
 
     sessions.stopExecution("t-queued", "stop")
     expect((await first).result.isError).toBe(true)
+  })
+
+  test("a timeout during the browser responsiveness check never dispatches the code", async () => {
+    const { sessions, sandboxes } = manager(async () => ok("ran"), {
+      browser: { id: "b1", key: "b1" },
+      checkBrowserResponsive: () => Effect.sleep("500 millis"),
+    })
+    const started = Date.now()
+    const timedOut = await run(sessions.execute({ sessionId: "t-check", code: "...", createIfMissing: true, timeoutMs: 20 }))
+    expect(timedOut.result.isError).toBe(true)
+    expect(timedOut.result.diagnostic).toBe("execute-timeout")
+    expect(timedOut.result.text).toContain("Execute timed out after 20ms")
+    expect(Date.now() - started).toBeLessThan(400)
+    // The check finishes long after the caller was answered; the stopped call must not start its script.
+    await Bun.sleep(550)
+    expect(sandboxes[0]?.executions).toBe(0)
+    expect(sessions.isExecuting("t-check")).toBe(false)
   })
 
   test("pauseExecutionTimeout suspends the execute deadline while waiting on a handoff", async () => {

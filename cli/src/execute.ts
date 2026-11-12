@@ -418,13 +418,12 @@ export class ExecuteSandbox extends DefaultPageHost {
   }
 
   /**
-   * Stops a running script from outside (the toolbar's stop, session delete/reset): closes its browser connection so
-   * every Playwright call it makes rejects, and disposes its realm (pending runs reject, timers are revoked; `state` resets).
-   * The session manager relies on this hook; keep it when the realm changes.
+   * Stops a running script's code at once (the toolbar's stop, session delete/reset): pending runs reject and timers
+   * are revoked. Synchronous on purpose, so a stop takes effect before anything the caller does next. The session
+   * manager relies on this hook; keep it synchronous when the realm changes.
    */
-  abortExecution(): Effect.Effect<void, Error> {
+  stopRealm(): void {
     this.realm?.dispose(new Error("Execute stopped: the session was stopped, deleted or reset"))
-    return this.disconnectSettled()
   }
 
   disconnectSettled(): Effect.Effect<void, Error> {
