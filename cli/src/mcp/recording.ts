@@ -23,7 +23,7 @@ registerMcpTools({
     {
       name: "recording",
       description:
-        "Record the current session tab. Actions: start begins recording (CDP mode records video to WebM or MP4; tab-capture mode supports WebM and optional audio; outputPath is required); stop finalizes the artifact; status returns bounded status and quality counters; cancel discards the unfinished artifact.",
+        "Record the current session tab. Actions: start begins recording (CDP mode records WebM or MP4; native agent-tab MP4 fits the visible tab surface within the viewport bounds without padding; tab-capture supports WebM and optional audio; outputPath is required); stop finalizes the artifact; status returns bounded status and quality counters when available; cancel discards the unfinished artifact.",
       inputSchema: objectSchema(
         {
           action: {

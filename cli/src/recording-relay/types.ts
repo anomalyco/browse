@@ -157,7 +157,20 @@ export type StartVideoEncoder = (options: {
   readonly height: number
 }) => Promise<VideoEncoder>
 
-export type ActiveRecording = TabCaptureRecording | CdpRecording
+export type NativeRecording = ActiveRecordingBase & {
+  mode: "cdp"
+  artifactType: "mp4"
+  stream: string
+  frameRate: number
+  maxWidth: number
+  maxHeight: number
+  startedMonotonicAt: number
+  // Stream handles belong to one browser connection, including during teardown.
+  send: (method: string, params?: JsonObject) => Promise<JsonObject>
+  stopPromise?: Promise<RecordingStopResult>
+}
+
+export type ActiveRecording = TabCaptureRecording | CdpRecording | NativeRecording
 
 export type StartingRecording = {
   readonly tabId: number

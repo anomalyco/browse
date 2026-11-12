@@ -71,6 +71,7 @@ export class RecordingRelay {
   constructor(readonly options: {
     readonly sendToExtension: (command: Omit<ExtensionCommand, "id">) => Promise<JsonObject>
     readonly sendDebuggerCommand: SendDebuggerCommand
+    readonly connectionForTab: (tabId: number) => object | undefined
     readonly isExtensionConnected: () => boolean
     readonly isTabUnavailable?: (tabId: number) => boolean
     /**
@@ -84,6 +85,8 @@ export class RecordingRelay {
   }) {
     this.cdpContext = {
       activeRecordings: this.activeRecordings,
+      connectionForTab: options.connectionForTab,
+      nativeSupport: new WeakMap(),
       sendDebuggerCommand: options.sendDebuggerCommand,
       ...(options.startVideoEncoder ? { startVideoEncoder: options.startVideoEncoder } : {}),
       now: () => this.now(),
@@ -227,10 +230,12 @@ export class RecordingRelay {
         path: recording.outputPath,
         mode: "cdp",
         artifactType: recording.artifactType,
-        quality: recordingQuality(recording, this.monotonicNow() - recording.startedMonotonicAt),
-        frameCount: recording.stopping
-          ? recording.frameCount
-          : Math.max(0, Math.round(((this.monotonicNow() - recording.startedMonotonicAt) / 1_000) * recording.frameRate)),
+        ...("stream" in recording ? {} : {
+          quality: recordingQuality(recording, this.monotonicNow() - recording.startedMonotonicAt),
+          frameCount: recording.stopping
+            ? recording.frameCount
+            : Math.max(0, Math.round(((this.monotonicNow() - recording.startedMonotonicAt) / 1_000) * recording.frameRate)),
+        }),
       }
     }
     let result: ExtensionStatusResult | undefined
@@ -350,7 +355,7 @@ export class RecordingRelay {
       return false
     }
     const recording = this.activeRecordings.get(options.tabId)
-    if (!recording || recording.mode !== "cdp") {
+    if (!recording || recording.mode !== "cdp" || "stream" in recording) {
       return false
     }
     return handleCdpScreencastFrame(this.cdpContext, recording, options)

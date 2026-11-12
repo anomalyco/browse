@@ -27,12 +27,107 @@ function flightRecorder(events: string[]) {
 }
 
 describe("clean recordings", () => {
+  test("agent MP4 drains Chrome's stream to disk, without starting ffmpeg or inventing quality counters", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "native-recording-"))
+    const outputPath = path.join(dir, "demo.mp4")
+    const methods: string[] = []
+    const connection = {}
+    let reads = 0
+    const relay = new RecordingRelay({
+      connectionForTab: () => connection, isExtensionConnected: () => true,
+      sendToExtension: async () => { throw new Error("unexpected tab capture") },
+      startVideoEncoder: async () => { throw new Error("unexpected ffmpeg") },
+      sendDebuggerCommand: async ({ method, params }) => {
+        methods.push(method)
+        if (method === "Page.getLayoutMetrics") return { cssVisualViewport: { clientWidth: 1280, clientHeight: 721 } }
+        if (method === "Page.startScreenRecording") expect(params).toEqual({ maxWidth: 1280, maxHeight: 720, frameRate: 30 })
+        if (method === "IO.read") {
+          expect(params.handle).toBe("s")
+          return { data: ++reads === 1 ? "AP8=" : "gA==", base64Encoded: true, eof: reads === 2 }
+        }
+        return { stream: "s" }
+      },
+    })
+    try {
+      expect(await relay.startRecording({ tabId: 1, owner: "relay", outputPath, frameRate: 30 })).toMatchObject({ success: true, mode: "cdp", mimeType: "video/mp4" })
+      expect(await relay.statusRecording({ tabId: 1 })).not.toHaveProperty("quality")
+      const [a, b] = await Promise.all([relay.stopRecording({ tabId: 1 }), relay.stopRecording({ tabId: 1 })])
+      expect(a).toEqual(b)
+      expect(a).toMatchObject({ success: true, size: 3, path: outputPath })
+      expect(await fs.readFile(outputPath)).toEqual(Buffer.from([0, 255, 128]))
+      expect(JSON.parse(await fs.readFile(`${outputPath}.json`, "utf8"))).toMatchObject({ artifactType: "mp4", maxWidth: 1280, maxHeight: 720 })
+      expect(methods).toEqual(["Page.getLayoutMetrics", "Page.startScreenRecording", "Page.stopScreenRecording", "IO.read", "IO.read", "IO.close"])
+      expect(relay.hasActiveRecordings()).toBe(false)
+    } finally { await fs.rm(dir, { recursive: true, force: true }) }
+  })
+
+  test("WebM skips native; a missing method is cached per link, but a transient start failure is retried", async () => {
+    let connection = {}
+    let probes = 0, encoders = 0
+    const methods: string[] = []
+    const relay = new RecordingRelay({
+      connectionForTab: () => connection, isExtensionConnected: () => true, sendToExtension: async () => ({}),
+      sendDebuggerCommand: async ({ method }) => {
+        methods.push(method)
+        if (method === "Page.startScreenRecording") {
+          if (++probes === 1) throw new Error("'Page.startScreenRecording' wasn't found")
+          if (probes === 2) throw new Error("inactive frame")
+          return { stream: "s" }
+        }
+        return {}
+      },
+      startVideoEncoder: async () => {
+        encoders++
+        return { write: async () => {}, finish: async () => {}, cancel: async () => {} }
+      },
+    })
+    const capture = async (tabId: number, ext: string) => {
+      expect((await relay.startRecording({ tabId, owner: "relay", outputPath: path.join(os.tmpdir(), `unused.${ext}`) })).success).toBe(true)
+      await relay.cancelRecording({ tabId })
+    }
+    await capture(1, "webm")
+    expect(probes).toBe(0)
+    await capture(1, "mp4")
+    await capture(2, "mp4")
+    expect(probes).toBe(1)
+    connection = {}
+    await capture(1, "mp4")
+    await capture(2, "mp4")
+    expect([probes, encoders]).toEqual([3, 4])
+    expect(methods.slice(-2)).toEqual(["Page.stopScreenRecording", "IO.close"])
+    expect(methods).not.toContain("IO.read")
+  })
+
+  test("a failed native read preserves the destination and closes the stream", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "native-read-failure-"))
+    const outputPath = path.join(dir, "existing.mp4")
+    const connection = {}, methods: string[] = []
+    const relay = new RecordingRelay({
+      connectionForTab: () => connection, isExtensionConnected: () => true, sendToExtension: async () => ({}),
+      sendDebuggerCommand: async ({ method }) => {
+        methods.push(method)
+        if (method === "IO.read") throw new Error("read failed")
+        return { stream: "s" }
+      },
+    })
+    try {
+      await fs.writeFile(outputPath, "previous recording")
+      await relay.startRecording({ tabId: 1, owner: "relay", outputPath })
+      expect(await relay.stopRecording({ tabId: 1 })).toMatchObject({ success: false, error: expect.stringContaining("read failed") })
+      expect(await fs.readdir(dir)).toEqual(["existing.mp4"])
+      expect(await fs.readFile(outputPath, "utf8")).toBe("previous recording")
+      expect(methods.at(-1)).toBe("IO.close")
+      expect(relay.hasActiveRecordings()).toBe(false)
+    } finally { await fs.rm(dir, { recursive: true, force: true }) }
+  })
+
   test("an extension disconnect drains a pending frame before cancelling ffmpeg", async () => {
     const writing = Promise.withResolvers<void>()
     const release = Promise.withResolvers<void>()
     const events: string[] = []
     let time = 0
     const relay = new RecordingRelay({
+      connectionForTab: () => undefined,
       sendToExtension: async () => ({}), sendDebuggerCommand: async () => ({}), isExtensionConnected: () => true,
       monotonicNow: () => time,
       startVideoEncoder: async () => ({

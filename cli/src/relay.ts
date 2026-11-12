@@ -160,6 +160,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const sweptBrowsers = new Set<string>()
 
   const recordingRelay = new RecordingRelay({
+    connectionForTab: (tabId) => browsers.browserTab(tabId)?.link,
     sendToExtension: (command) => Effect.runPromise(sendToExtension(command)),
     sendDebuggerCommand: (command) => Effect.runPromise(sendDebuggerCommand(command)),
     isExtensionConnected: () => browsers.connected,
