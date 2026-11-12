@@ -704,19 +704,20 @@ export class OpenCodeBrowserSessions {
     this.cancelSessionHandoff(session.id)
     // User code stops first, synchronously, as before: nothing the script does runs after its caller was told it stopped.
     session.sandbox.stopRealm()
-    // Then end a navigation it left pending, and only then close its browser connection. The cancel has its own cap so
-    // the disconnect always gets the full stop grace.
+    // Then end a navigation it left pending, and only then close its browser connection. One stop grace covers both:
+    // the cancel may take at most half of it (never more than 2s), so the disconnect always starts within the grace.
+    const graceMs = this.stopGraceMs()
     const cancelNavigation = this.hooks.onStoppingExecute?.(session)
     const cancel = cancelNavigation === undefined
       ? Effect.void
       : cancelNavigation.pipe(
-          Effect.timeoutOption(Math.min(2_000, this.stopGraceMs())),
+          Effect.timeoutOption(Math.min(2_000, Math.floor(graceMs / 2))),
           Effect.catchCause((cause) => Effect.sync(() => console.error("Cancel stopped execute navigation", cause))),
           Effect.asVoid,
         )
     return cancel.pipe(
       Effect.andThen(Effect.suspend(() => session.sandbox.disconnectSettled())),
-      Effect.timeoutOption(this.stopGraceMs()),
+      Effect.timeoutOption(graceMs),
       Effect.catchCause((cause) => Effect.sync(() => console.error("Disconnect stopped execute", cause))),
       Effect.asVoid,
     )

@@ -1,4 +1,4 @@
-import { Effect } from "effect"
+import { Effect, Fiber } from "effect"
 import type { Browser, BrowserContext, Page } from "patchright-core"
 import { registerAriaSnapshotSelector } from "./snapshot/aria-snapshot.ts"
 import { registerRefSelector } from "./snapshot/ref-selector.ts"
@@ -434,6 +434,16 @@ export class ExecuteSandbox extends DefaultPageHost {
       sandbox.state = sandbox.realm?.state ?? {}
       // Routes, listeners, init scripts and CDP sessions belong to the browser connection closed below.
       const browser = sandbox.browser
+      // Start the close before the first yield, while the reference is still held: an interrupted disconnect must not
+      // leave a connection open with nothing pointing at it. Cancel does no CDP work of its own (it discards pending
+      // capture work and waits only for finalizers already running, whose failures are caught), so the two can overlap.
+      const closing = yield* (browser
+        ? runPlaywrightOperation({
+            label: "Disconnect sandbox browser after handoff cancellation",
+            timeoutMs: playwrightCloseTimeoutMs,
+            run: () => browser.close(),
+          }).pipe(Effect.ignore)
+        : Effect.void).pipe(Effect.forkDetach({ startImmediately: true }))
       sandbox.browser = undefined
       sandbox.unbindDefaultPage(sandbox.defaultPageTargetId, {
         ownsPage: sandbox.ownsPage,
@@ -441,13 +451,7 @@ export class ExecuteSandbox extends DefaultPageHost {
         pageProtectedUi: sandbox.pageProtectedUi,
       })
       yield* sandbox.networkCapture.cancel()
-      if (browser) {
-        yield* runPlaywrightOperation({
-          label: "Disconnect sandbox browser after handoff cancellation",
-          timeoutMs: playwrightCloseTimeoutMs,
-          run: () => browser.close(),
-        }).pipe(Effect.ignore)
-      }
+      yield* Fiber.join(closing)
     })
   }
 

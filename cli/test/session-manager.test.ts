@@ -365,7 +365,7 @@ describe("execute timeouts, disconnects, one-shot cleanup, and idle reaping", ()
     expect(second).not.toBe("still waiting")
     if (second === "still waiting") throw new Error("queued execute ignored its timeout")
     expect(second.result.diagnostic).toBe("execute-queued-timeout")
-    expect(second.result.text).toContain("while this session was still busy with another execute; this code did not run")
+    expect(second.result.text).toContain("while this session was still busy with another operation; this code did not run")
     expect(Date.now() - started).toBeLessThan(2_000)
     // User code never ran under the expired call.
     expect(sandboxes[0]?.executions).toBe(1)

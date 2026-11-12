@@ -78,7 +78,7 @@ export function executeInSession(
       deadline = new ExecutionDeadline(effectiveTimeoutMs, () => {
         if (queued) {
           stopRunning(
-            `Execute timed out after ${effectiveTimeoutMs}ms while this session was still busy with another execute; this code did not run.`,
+            `Execute timed out after ${effectiveTimeoutMs}ms while this session was still busy with another operation; this code did not run.`,
             "execute-queued-timeout",
           )
           return
