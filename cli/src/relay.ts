@@ -37,6 +37,7 @@ import {
 } from "./relay/helpers.ts"
 import { appendRelayLifecycleEvent, RelayLifecycleEvent } from "./relay/lifecycle-log.ts"
 import { relayLog } from "./relay/log.ts"
+import { configuredTimeoutMs, extensionCommandTimeout, extensionPingTimeout } from "./relay/rpc.ts"
 import { ensurePrivateDirectory, relayToken } from "./relay/secrets.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay/types.ts"
 import { createCdpDispatcher } from "./relay/cdp-dispatch.ts"
@@ -112,7 +113,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     },
     catch: (cause) => new Error("Create the relay token", { cause }),
   })
-  const browsers = new BrowserLinks()
+  const extensionTimeoutEnv = Option.getOrUndefined(yield* Config.option(Config.String("OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS")))
+  const pingTimeoutEnv = Option.getOrUndefined(yield* Config.option(Config.String("OPENCODE_BROWSER_PING_TIMEOUT_MS")))
+  const browsers = new BrowserLinks({
+    timeouts: {
+      commandTimeoutMs: configuredTimeoutMs(extensionTimeoutEnv, extensionCommandTimeout),
+      pingTimeoutMs: configuredTimeoutMs(pingTimeoutEnv, extensionPingTimeout),
+    },
+  })
   const { sendToExtension, sendExtensionBestEffort, sendToEveryBrowser, sendToEach, cleanupTabs } = createExtensionCommands({ browsers, registry, onTabGone: forgetMissingTab })
 
   const debugEnabled = yield* Config.Boolean("OPENCODE_BROWSER_DEBUG").pipe(Config.withDefault(false))

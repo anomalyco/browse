@@ -7,8 +7,8 @@ import { installFakeRelaySocket } from "../relay-stub"
 // still loading, so an about:blank tab's answer waits for it to leave "loading". A tab created at a real URL (an older
 // relay) must answer at once, before the page loads and bypasses the relay's allowlist. And Page.navigate to
 // about:blank with a fragment crashes Chrome and Vivaldi, so the extension sends plain about:blank instead. A Chrome
-// call that never settles (Dia) must not hold the answer past the relay's 15 s RPC timeout. Run by ../isolated.test.ts
-// in a process of its own.
+// call that never settles (Dia) must not hold the answer past the relay's command timeout (30 s by default). Run by
+// ../isolated.test.ts in a process of its own.
 
 const stub = installChrome()
 ;(globalThis as { __OPENCODE_BROWSER_BUILD__?: string }).__OPENCODE_BROWSER_BUILD__ = "test"

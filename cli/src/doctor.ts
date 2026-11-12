@@ -354,12 +354,7 @@ function buildDoctorChecks(options: {
       message: options.relayResult.ok ? `reachable (${options.relayResult.value.version})` : options.relayResult.error,
     },
     relayBuildCheck({ relayResult: options.relayResult, cliBuildId: opencodeBrowserBuildId }),
-    {
-      id: "extension-connected",
-      label: "extension connection",
-      status: options.extensionResult.ok && options.extensionResult.value.connected ? "ok" : "fail",
-      message: options.extensionResult.ok ? options.extensionResult.value.connected ? `connected${options.extensionResult.value.version ? ` (${options.extensionResult.value.version})` : ""}` : "disconnected" : options.extensionResult.error,
-    },
+    extensionConnectedCheck(options.extensionResult),
     extensionVersionCheck({
       extensionResult: options.extensionResult,
       expectedExtensionVersion: options.expectedExtensionVersion,
@@ -482,6 +477,21 @@ function relayBuildCheck(options: {
       ? `matches CLI build (${options.cliBuildId})`
       : `runtime ${relayBuildId} does not match CLI ${options.cliBuildId}`,
   )
+}
+
+function extensionConnectedCheck(extensionResult: ProbeResult<ExtensionStatus>): DoctorCheck {
+  const check = makeDoctorCheck("extension-connected", "extension connection")
+  if (!extensionResult.ok) {
+    return check("fail", extensionResult.error)
+  }
+  const status = extensionResult.value
+  if (status.browsers?.some((browser) => browser.unresponsive)) {
+    return check("warn", "connected but not answering (busy or asleep)")
+  }
+  if (status.connected) {
+    return check("ok", `connected${status.version ? ` (${status.version})` : ""}`)
+  }
+  return check("fail", "disconnected")
 }
 
 function extensionVersionCheck(options: {

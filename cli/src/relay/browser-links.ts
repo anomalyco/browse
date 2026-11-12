@@ -11,7 +11,7 @@ import type http from "node:http"
 import os from "node:os"
 import path from "node:path"
 import type { WebSocket } from "ws"
-import { ExtensionRpc } from "./rpc.ts"
+import { ExtensionRpc, type ExtensionRpcTimeouts } from "./rpc.ts"
 import { writePrivateJsonFileSync } from "../fs-durability.ts"
 import { dataRoot } from "../paths.ts"
 import { isLocalPeer } from "./config.ts"
@@ -75,7 +75,11 @@ export class BrowserLinks {
   private readonly fromRelay = new Map<number, { readonly key: string; readonly tabId: number }>()
   private known: Known | undefined
 
-  constructor(private readonly options: { readonly root?: string } = {}) {}
+  constructor(private readonly options: {
+    readonly root?: string
+    /** Extension RPC timeouts, for a browser that answers slowly on a loaded computer. */
+    readonly timeouts?: ExtensionRpcTimeouts
+  } = {}) {}
 
   private get file() {
     return path.join(this.options.root ?? dataRoot(), "browsers.json")
@@ -121,7 +125,7 @@ export class BrowserLinks {
       key: options.key,
       id: this.identify(options.key, options.name),
       name: options.name,
-      rpc: new ExtensionRpc(),
+      rpc: new ExtensionRpc(this.options.timeouts),
       socket: options.socket,
       generation: ++this.generation,
       connectedAt: Date.now(),

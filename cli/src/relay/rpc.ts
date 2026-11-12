@@ -32,6 +32,25 @@ export type ExtensionRpcTimeouts = {
   readonly awaitPromiseTimeoutMs?: number
 }
 
+export type ExtensionTimeoutSetting = {
+  readonly fallback: number
+  readonly min: number
+  readonly max: number
+}
+
+/** OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS: how long a command that isn't a debugger command or a ping may take. */
+export const extensionCommandTimeout: ExtensionTimeoutSetting = { fallback: 30_000, min: 5_000, max: 300_000 }
+/** OPENCODE_BROWSER_PING_TIMEOUT_MS: how long a ping may go unanswered before the browser counts as asleep. */
+export const extensionPingTimeout: ExtensionTimeoutSetting = { fallback: 10_000, min: 1_000, max: 30_000 }
+
+/** A timeout from its setting's environment value: a whole number clamped to the setting's range, else its fallback. */
+export function configuredTimeoutMs(value: string | undefined, setting: ExtensionTimeoutSetting): number {
+  const trimmed = value?.trim()
+  if (!trimmed) return setting.fallback
+  const parsed = Number(trimmed)
+  return Number.isInteger(parsed) ? Math.min(Math.max(parsed, setting.min), setting.max) : setting.fallback
+}
+
 /**
  * Request/response correlator for the single extension websocket.
  *
@@ -172,10 +191,10 @@ export class ExtensionRpc {
       // usually govern it, but a hung promise must not hold the relay open forever.
       const timeoutMs = awaitsPagePromise(command)
         ? this.timeouts.awaitPromiseTimeoutMs ?? 5 * 60_000
-        : command.method === "ping" ? this.timeouts.pingTimeoutMs ?? 4_000
+        : command.method === "ping" ? this.timeouts.pingTimeoutMs ?? extensionPingTimeout.fallback
         : command.method === "debugger.sendCommand"
         ? this.timeouts.debuggerCommandTimeoutMs ?? 60_000
-        : this.timeouts.commandTimeoutMs ?? 15_000
+        : this.timeouts.commandTimeoutMs ?? extensionCommandTimeout.fallback
       const finish = (effect: Effect.Effect<JsonObject, Error>) => {
         if (completed) {
           return
