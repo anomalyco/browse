@@ -1,10 +1,10 @@
 // The status page's first-run card: the one thing to do next, from the extension's connection state and a probe of
 // this computer's relay port. Without a token or a code the extension doesn't connect at all, so it can't tell "no relay
 // yet" from "a relay that hasn't paired with this browser"; the probe (the relay's open /version) tells them apart.
+import type { RelayProbe } from "../agent-relay/probe"
 import type { AgentRelayState } from "../shared/protocol"
 
-/** Whether a browse relay answers on this computer's relay port; "unknown" until the first probe ends. */
-export type RelayProbe = "unknown" | "absent" | "found" | "install-waiting"
+export type { RelayProbe } from "../agent-relay/probe"
 
 export type FirstRunStep =
   /** No state from the worker yet, or the probe hasn't answered. */
@@ -56,16 +56,3 @@ export function firstRunStep(state: AgentRelayState | undefined, probe: RelayPro
 
 /** Probing is only useful while there's nothing to connect with, for this computer's relay. */
 export const shouldProbe = (state: AgentRelayState | undefined) => state?.status === "unpaired" && !state.relay.remote
-
-/**
- * What a GET of the relay's /version answered: found for browse's own reply (`{ version, instanceId }`), or for the
- * relay's refusal of a cross-site browser request; absent for anything else, or no answer.
- */
-export function relayProbeResult(status: number | undefined, body: unknown): Exclude<RelayProbe, "unknown"> {
-  if (status === undefined || typeof body !== "object" || body === null) return "absent"
-  const reply = body as Record<string, unknown>
-  if ((status === 200 && typeof reply.version === "string" && typeof reply.instanceId === "string") ||
-      (status === 403 && typeof reply.error === "string" && /Cross-origin browser requests/.test(reply.error)))
-    return reply.installWaiting === true ? "install-waiting" : "found"
-  return "absent"
-}

@@ -6,8 +6,21 @@ type JsonPrimitive = string | number | boolean | null
 type JsonValue = JsonPrimitive | JsonValue[] | { readonly [key: string]: JsonValue }
 export type JsonObject = { readonly [key: string]: JsonValue }
 
-/** The relay's default port (cli/src/relay-helpers.ts defaultPort). */
+/** The relay's default port (cli/src/relay/helpers.ts defaultPort). */
 export const defaultRelayPort = 19988
+
+/**
+ * The ports an unpinned relay falls back to when another program holds 19988, in the order it tries them. Must match
+ * cli/src/relay/port.ts fallbackPorts (19989 is Browser Control's, so it is skipped there and here).
+ */
+export const relayFallbackPorts = [19990, 19991, 19992, 19993, 19994, 19995, 19996, 19997] as const
+
+/** Every port a browse relay can listen on, in the order the extension dials and scans them. */
+export const relayPorts: readonly number[] = [defaultRelayPort, ...relayFallbackPorts]
+
+/** A port that can be a browse relay's: the default or a fallback. Anything else is ignored as a pairing hint. */
+export const relayPortHint = (value: unknown): number | undefined =>
+  typeof value === "number" && relayPorts.includes(value) ? value : undefined
 
 /**
  * Chrome's minimum alarm period. A disconnected extension's MV3 worker sleeps until this alarm fires, so the

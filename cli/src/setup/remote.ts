@@ -5,9 +5,10 @@ import { networkInterfaces } from "node:os"
 import * as clack from "@clack/prompts"
 import { formatPairingCode, mintPairingCode, pairingCodeTtlMs } from "../relay/browser-pairing.ts"
 import { readRelayConfig, writeRelayConfig } from "../relay/config.ts"
+import { probeRelayPort, resolveRelayPort } from "../relay/port.ts"
 import { cliCommand, entrySpawnCommand } from "../paths.ts"
 import { parseJson } from "./browsers.ts"
-import { ensureRelay, relayBase } from "./commands.ts"
+import { ensureRelay } from "./commands.ts"
 import { findOnPath, log, rail } from "./environment.ts"
 
 const tailnetIPv4 = /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./
@@ -63,10 +64,7 @@ export async function installRemote(entry: string, tty: boolean) {
   const config = readRelayConfig()
   if (config.hostname !== "0.0.0.0") {
     writeRelayConfig({ ...config, hostname: "0.0.0.0" })
-    const running = await fetch(`${relayBase()}/version`, { signal: AbortSignal.timeout(2_000) }).then(
-      (response) => response.ok,
-      () => false,
-    )
+    const running = (await probeRelayPort(resolveRelayPort(), 2_000)) === "browse"
     const [file, ...prefix] = entrySpawnCommand(entry)
     const restarted =
       running && spawnSync(file!, [...prefix, "relay", "restart"], { encoding: "utf8", timeout: 60_000 }).status === 0
@@ -76,7 +74,7 @@ export async function installRemote(entry: string, tty: boolean) {
     } else log("✓ Opened the relay to other computers")
   } else log("✓ The relay is open to other computers")
   ensureRelay(entry)
-  const port = Number(process.env.OPENCODE_BROWSER_PORT) || 19988
+  const port = resolveRelayPort()
   const interfaces = networkInterfaces()
   const onTailnet = Object.values(interfaces)
     .flat()

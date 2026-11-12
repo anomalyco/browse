@@ -29,6 +29,7 @@ import {
 import { agentFlags, agentPlan, pickAgents } from "./setup/agent-picker.ts"
 import { autoUpdateStatus, describeAutoUpdate } from "./update/auto-update.ts"
 import { mintPairingCode, pairingCodeKey, pendingPairingCodeKeys } from "./relay/browser-pairing.ts"
+import { resolveRelayPort } from "./relay/port.ts"
 import { cliCommand, compiledBinary, entryCommand, installCommand, oldStoreMarker, scriptEntry } from "./paths.ts"
 import {
   extensionProtocolAdvice,
@@ -49,6 +50,7 @@ import {
 } from "./setup/browsers.ts"
 import {
   ensureRelay,
+  ensureRelayQuietly,
   extension,
   extensionStatus,
   pair,
@@ -314,7 +316,9 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
   const folder = unpackedFolder()
   if (folder && !pairedOffline) {
     // The unpacked extension finds a one-time code in its own folder and exchanges it for its key, without a step.
-    pairUnpacked()
+    // This runs before any early return (extension off, mismatch, old store build): no relay is started here, so the
+    // code names the live port only when a relay already runs.
+    await pairUnpacked()
     // A browser already running an older unpacked build keeps its old code until it reloads; ask it to, silently:
     // install never talks about unpacked builds.
     const reload = connected ? await reloadOutdatedExtension(connected, folder) : "current"
@@ -366,7 +370,13 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
     env,
   })
   if (connected || found === "off" || pairedOffline) return
-  ensureRelay(spawnEntry)
+  // Up only now, before a pairing file or link names the relay's listen port when it isn't 19988 (a fallback). A
+  // port-less file code only works on 19988, so if the relay can't start the extension starts there and scans.
+  if (folder) {
+    const failure = ensureRelayQuietly(spawnEntry)
+    if (failure) fail(failure)
+    await pairUnpacked()
+  } else ensureRelay(spawnEntry)
   let code: string | undefined
   const pairingCode = () =>
     code && pendingPairingCodeKeys().includes(pairingCodeKey(code)) ? code : (code = mintPairingCode())
@@ -377,6 +387,7 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
       allowOpen: !args.includes("--no-open"),
       env,
       code: pairingCode,
+      port: resolveRelayPort(),
     })
   if (needsPairing) log("browse is installed in a browser but isn't paired with this relay yet.")
   type PairingOffer = "opened" | "manual" | "code" | "none"
@@ -384,14 +395,14 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
   const blocked = detections.filter((d) => d.blocked).map((d) => d.browser.name)
   if (offer === "none" && blocked.length) {
     log(
-      `Couldn't check ${blocked.join(", ")}. If browse is already installed there, pair it manually. ${manualPair(pairingCode())}`,
+      `Couldn't check ${blocked.join(", ")}. If browse is already installed there, pair it manually. ${manualPair(pairingCode(), resolveRelayPort())}`,
     )
     offer = "manual"
   }
   // Nothing to open (SSH, no display, no detected profile): the code is still the way in, and the page that says
   // "run install again" has a field for it.
   if (needsPairing && offer === "none") {
-    log(manualPair(pairingCode()))
+    log(manualPair(pairingCode(), resolveRelayPort()))
     offer = "code"
   }
   const next = needsPairing
@@ -441,7 +452,7 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
       await new Promise((resolve) => setTimeout(resolve, Math.max(0, Math.min(1000, deadline - Date.now()))))
     } while (!stopped && Date.now() < deadline)
     if (!env.tty) return log(`! Not connected yet. ${agentNext()}`)
-    log(`! Not connected yet. ${code ? manualPair(pairingCode()) : next}`)
+    log(`! Not connected yet. ${code ? manualPair(pairingCode(), resolveRelayPort()) : next}`)
     process.exitCode = 1
   } finally {
     process.off("SIGINT", stop)

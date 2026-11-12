@@ -11,19 +11,25 @@ import { IconButton } from "@opencode/ui/icon-button"
 import { Menu } from "@opencode/ui/menu"
 import { TextInput } from "@opencode/ui/text-input"
 import { unpackedExtensionId, unpackedReloadAdvice } from "../../cli/src/protocol"
-import { firstRunStep, relayProbeResult, shouldProbe, type FirstRunStep, type RelayProbe } from "./first-run"
+import { relayPorts } from "../agent-relay/protocol"
+import { probeRelayPort, type RelayProbe } from "../agent-relay/probe"
+import { firstRunStep, shouldProbe, type FirstRunStep } from "./first-run"
+import { pairingLink } from "./pairing-link"
 import { TRY_PROMPT, checklist } from "./checklist"
 import { installCommand, installMethod, installMethods, remoteInstallMethod, remoteInstallMethods, type InstallMethod } from "./install"
 import { RelayForm } from "./relay-form"
 import { applyColorScheme, Brand, createFlash, createRelay, Note, Rich, type Relay } from "./ui"
 import "./onboarding.css"
 
-// `browse install` opens the setup page with a one-time code in the fragment (welcome.html#code=…, which
-// forwards here) for a store build (cli/src/setup.ts pairStoreExtension). Take it, then drop it from the URL (address
-// bar and history) before anything else.
-let fragmentCode = /^#code=([0-9A-Za-z-]{8,9})$/.exec(location.hash)?.[1]
+// `browse install` opens the setup page with a one-time code in the fragment (welcome.html#code=…, which forwards
+// here), plus the relay's port when it isn't 19988, for a store build (cli/src/setup.ts pairStoreExtension). Take
+// them, then drop the whole fragment from the URL (address bar and history) before anything else.
+const link = pairingLink(location.hash)
+let fragmentCode = link?.code
+const fragmentPort = link?.port
 const installTab = !!fragmentCode
-if (/^#(code|ticket|pair)=/.test(location.hash)) history.replaceState(null, "", location.pathname + location.search)
+if (link !== undefined || /^#(code|ticket|pair)=/.test(location.hash))
+  history.replaceState(null, "", location.pathname + location.search)
 
 const settingsUrl = () => chrome.runtime.getURL("settings.html")
 const AGENT_PROMPT = `Set up browse so you can use my Chrome: run ${installCommand}`
@@ -65,7 +71,12 @@ function Onboarding() {
     // one the relay refused). A working pairing is never replaced; the page says it ignored the link instead. While
     // it's still connecting (or the relay is starting), wait for a status that tells.
     if (fragmentCode && state.status !== "offline" && state.status !== "connecting") {
-      if (state.status === "unpaired" || state.status === "untrusted") relay.send({ type: "pairing.link", code: fragmentCode })
+      if (state.status === "unpaired" || state.status === "untrusted")
+        relay.send({
+          type: "pairing.link",
+          code: fragmentCode,
+          ...(fragmentPort !== undefined ? { port: fragmentPort } : {}),
+        })
       else setLinkNote("Already paired with the relay; the pairing link from install was ignored.")
       fragmentCode = undefined
     }
@@ -78,30 +89,31 @@ function Onboarding() {
   })
 
   /**
-   * Asks this computer's relay port whether a browse relay answers (its /version is open), while the extension has
-   * no token or code to connect with. One probe at a time, and again while the page stays in that state.
+   * Asks the port the worker is using whether a browse relay answers (its /version is open), while the extension has
+   * no token or code to connect with. One probe at a time, and again while the page stays in that state. When the
+   * worker finds the relay on another port (a fallback relay), the probe follows it right away.
    */
   let probing = false
+  let probedPort: number | undefined
   let probeTimer: ReturnType<typeof setTimeout> | undefined
   async function probeRelay() {
-    if (probing || probeTimer !== undefined) return
+    if (probing) return
+    const port = Number(/:(\d+)$/.exec(relay.state()?.relay.address ?? "")?.[1]) || undefined
+    if (port !== probedPort) {
+      clearTimeout(probeTimer)
+      probeTimer = undefined
+    } else if (probeTimer !== undefined) return
     probing = true
-    const port = /:(\d+)$/.exec(relay.state()?.relay.address ?? "")?.[1]
-    let result: Exclude<RelayProbe, "unknown"> = "absent"
-    if (port) {
-      try {
-        const response = await fetch(`http://127.0.0.1:${port}/version`, {
-          headers: { "x-browse-install": "probe" },
-          cache: "no-store",
-          signal: AbortSignal.timeout(2_000),
-        })
-        result = relayProbeResult(response.status, await response.json().catch(() => undefined))
-      } catch {
-        result = "absent"
-      }
-    }
+    probedPort = port
+    const result = port === undefined ? "absent" : await probeRelayPort(port)
+    // A relay on a fallback port isn't pre-filled in the form (it may not be this browser's), but it still tells the
+    // step apart: "pair with it" rather than "install browse".
+    const elsewhere = result === "absent"
+      ? (await Promise.all(relayPorts.filter((candidate) => candidate !== port).map((candidate) => probeRelayPort(candidate))))
+        .find((answer) => answer !== "absent")
+      : undefined
     probing = false
-    setProbe(result)
+    setProbe(result === "absent" ? elsewhere ?? "absent" : result)
     probeTimer = setTimeout(() => {
       probeTimer = undefined
       if (shouldProbe(relay.state())) void probeRelay()
@@ -525,6 +537,7 @@ function CodeForm(props: { relay: Relay; label: string; onPaired: () => void }) 
         if (!code().trim()) return
         setPending(true)
         setNote(undefined)
+        // connectTo treats the shown port submitted unchanged as automatic, not as a typed hint.
         props.relay.send({ type: "relay.connect", address: props.relay.state()?.relay.address ?? "", code: code() })
       }}
     >

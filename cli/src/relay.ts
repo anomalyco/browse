@@ -25,7 +25,6 @@ import {
   closeHttpServer,
   closeWebSocketServer,
   createTargetUrl,
-  defaultPort,
   formatHostForUrl,
   getNumber,
   getString,
@@ -38,6 +37,14 @@ import {
 import { appendRelayLifecycleEvent, RelayLifecycleEvent } from "./relay/lifecycle-log.ts"
 import { relayLog } from "./relay/log.ts"
 import { configuredTimeoutMs, extensionCommandTimeout, extensionPingTimeout } from "./relay/rpc.ts"
+import {
+  chooseRelayPort,
+  configuredRelayPort,
+  relayPortPinned,
+  removeRelayState,
+  writeLastRelayPort,
+  writeRelayState,
+} from "./relay/port.ts"
 import { ensurePrivateDirectory, relayToken } from "./relay/secrets.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay/types.ts"
 import { createCdpDispatcher } from "./relay/cdp-dispatch.ts"
@@ -77,6 +84,8 @@ export const configuredExecuteTimeoutMs = Config.Int("OPENCODE_BROWSER_EXECUTE_T
 
 export const startRelay = Effect.fn("Relay.start")(function* (options: {
   readonly port?: number
+  /** Test-only: replaces the fallback candidate list so tests never touch the real 19988–19997 range. */
+  readonly portCandidates?: readonly number[]
   readonly releaseTargetGraceMs?: number
   readonly sessionCatalogPath?: string | null
   readonly additionalExtensionOrigins?: readonly string[]
@@ -87,15 +96,27 @@ export const startRelay = Effect.fn("Relay.start")(function* (options: {
 
 const makeRelay = Effect.fnUntraced(function* (options: {
   readonly port?: number
+  readonly portCandidates?: readonly number[]
   readonly releaseTargetGraceMs?: number
   readonly sessionCatalogPath?: string | null
   readonly additionalExtensionOrigins?: readonly string[]
 } = {}) {
   const listenHost = relayHostname()
   const host = "127.0.0.1"
-  const port = options.port ?? defaultPort
+  // The configured port names this install's state; the listen port may be a fallback (relay/port.ts).
+  const configuredPort = options.port ?? configuredRelayPort()
+  const port = yield* Effect.tryPromise({
+    try: () => chooseRelayPort({
+      configuredPort,
+      pinned: options.port !== undefined || relayPortPinned(),
+      host: listenHost,
+      ...(options.portCandidates ? { candidates: options.portCandidates } : {}),
+    }),
+    catch: (cause) => cause instanceof Error ? cause : new Error("Choose the relay port", { cause }),
+  })
   const releaseTargetGraceMs = Math.max(0, options.releaseTargetGraceMs ?? 10_000)
   const browserId = crypto.randomUUID()
+  const startedAt = new Date().toISOString()
   const endpointUrl = `http://${formatHostForUrl(host)}:${port}`
   const additionalChromeExtensionOrigins = new Set(options.additionalExtensionOrigins ?? [])
   // The store build installs from, for a checkout too: install points every channel at it (paths.ts PUBLIC_STORE_ID).
@@ -103,7 +124,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   additionalChromeExtensionOrigins.add(`chrome-extension://${storeId}`)
   const sessionCatalog = options.sessionCatalogPath === null
     ? undefined
-    : new SessionCatalog(options.sessionCatalogPath ?? defaultSessionCatalogPath(port))
+    : new SessionCatalog(options.sessionCatalogPath ?? defaultSessionCatalogPath(configuredPort))
   let catalogWritesEnabled = false
   const registry = new TargetRegistry()
   const authToken = yield* Effect.try({
@@ -456,7 +477,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const restartTimeoutMs = yield* Config.Int("OPENCODE_BROWSER_RESTART_TIMEOUT_MS").pipe(Config.withDefault(10_000))
   const clientGoneGraceMs = yield* Config.Int("OPENCODE_BROWSER_CLIENT_GONE_GRACE_MS").pipe(Config.withDefault(60_000))
   const restartRequestId = yield* Config.option(Config.String("OPENCODE_BROWSER_RESTART_REQUEST_ID"))
-  const lifecycleLogPath = path.join(stateRoot(), "relays", String(port), "lifecycle.jsonl")
+  const lifecycleLogPath = path.join(stateRoot(), "relays", String(configuredPort), "lifecycle.jsonl")
   const audit = (event: RelayLifecycleEvent) => Effect.try(() => appendRelayLifecycleEvent(lifecycleLogPath, event))
 
   function setProtectedUi(tabId: number, protectedUi: boolean): void {
@@ -747,7 +768,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     port,
     browserId,
     authToken,
-    relayInstance: { id: browserId, startedAt: new Date().toISOString(), pid: process.pid, managed },
+    relayInstance: { id: browserId, startedAt, pid: process.pid, managed },
     shutdown: shutdownControl,
     registry,
     recordingRelay,
@@ -806,18 +827,45 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     for (const socket of cdpClients) socket.close()
     for (const link of browsers.list()) link.rpc.close()
     yield* closeWebSocketServer(websocketServer).pipe(logCloseError("Failed to close websocket server"))
-    yield* closeHttpServer(httpServer).pipe(logCloseError("Failed to close http server"))
+    // Removed only once this relay stops answering: until closeHttpServer completes, relay.json must keep clients on this
+    // instance instead of sending them to whatever holds the configured port (relay/port.ts). ensuring covers a close
+    // that fails, where the listener may still be gone.
+    yield* closeHttpServer(httpServer).pipe(
+      logCloseError("Failed to close http server"),
+      Effect.ensuring(Effect.sync(() => removeRelayState(browserId, stateRoot(), configuredPort))),
+    )
   })
 
   const close = cleanup()
 
-  yield* Effect.catch(listenHttpServer({ server: httpServer, host: listenHost, port }), (error) => {
-    return Effect.gen(function* () {
+  yield* Effect.catch(
+    Effect.gen(function* () {
+      yield* listenHttpServer({ server: httpServer, host: listenHost, port })
+      // Published only once the port is bound: clients resolve through it to find a fallback port. Never holds a token.
+      // A fallback port that can't be recorded leaves clients on 19988 (another program): fail the start instead.
+      // Inside this block, so a failed write runs cleanup instead of leaving the bound server behind.
+      yield* Effect.try({
+        try: () => writeRelayState({ port, configuredPort, pid: process.pid, instanceId: browserId, startedAt }),
+        catch: (cause) => new Error("Write the relay port file", { cause }),
+      }).pipe(Effect.catch((error) => {
+        relayLog("relay.state.write_failed", { port, configuredPort, error: error.message })
+        return port === configuredPort ? Effect.void : Effect.fail(error)
+      }))
+      // Remote browsers enter the printed address by hand; remember the last port across shutdowns (relay.json goes).
+      yield* Effect.try({
+        try: () => writeLastRelayPort(port, stateRoot(), configuredPort),
+        catch: (cause) => new Error("Write the last relay port", { cause }),
+      }).pipe(Effect.catch((error) => {
+        relayLog("relay.last_port.write_failed", { port, configuredPort, error: error.message })
+        return Effect.void
+      }))
+      yield* Effect.sync(() => pruneStaleExecuteFilesDirectories())
+    }),
+    (error) => Effect.gen(function* () {
       yield* cleanup()
       return yield* Effect.fail(error)
-    })
-  })
-  yield* Effect.sync(() => pruneStaleExecuteFilesDirectories())
+    }),
+  )
 
   yield* Effect.catch(
     Effect.gen(function* () {
@@ -861,7 +909,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       }
       const dev = devExtension()
       if (dev && installedDevExtension()) {
-        syncDevExtension(dev).then(
+        syncDevExtension(dev, { port }).then(
           (result) => {
             if (result === "updated") relayLog("extension.dev_updated", { file: dev.file })
             for (const link of browsers.list()) if (link.local) handshake.reloadOutdatedDevExtension(link)

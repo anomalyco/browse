@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test"
 import { spawn, spawnSync } from "node:child_process"
 import fs from "node:fs"
+import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import { bundleCli } from "../bundle.ts"
@@ -79,6 +80,14 @@ function expectPrivateFilesIn(home: string, files: Record<string, string>) {
   }
   if (process.platform !== "win32")
     for (const folder of ["secrets", "site-secrets"]) expect(fs.statSync(path.join(home, ".local", "share", "browse", folder)).mode & 0o777, folder).toBe(0o700)
+}
+
+/** A free port outside browse's real relay range, so no test here can touch 19988–19997. */
+async function freePortOutsideBrowseRange(): Promise<number> {
+  for (;;) {
+    const port = await freePort()
+    if (port < 19988 || port > 19997) return port
+  }
 }
 
 describe("taking over the old self-managed runtime", () => {
@@ -194,7 +203,14 @@ describe("taking over the old self-managed runtime", () => {
       expect((await within(5_000, call(), "a tools/call after the next update")).result?.isError).toBe(false)
     } finally {
       mcp.close()
-      for (const pid of serversUnder(home)) process.kill(pid)
+      for (const pid of serversUnder(home)) {
+        try {
+          process.kill(pid)
+        } catch (error) {
+          // The server may exit between the ps listing and the kill.
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
+        }
+      }
     }
   }, 60_000)
 
@@ -274,5 +290,54 @@ describe("taking over the old self-managed runtime", () => {
       expect(migrateLegacy(home, takenOver + 11 * 60_000).removed).toEqual([oldData])
       expect(fs.existsSync(oldData)).toBe(false)
     })
+  })
+
+  test("an unpinned relay on a free port takes the old runtime over", async () => {
+    const { home, oldData, runtime } = oldRuntimeHome(homes)
+    const env: NodeJS.ProcessEnv = { OPENCODE_BROWSER_HOME: oldData }
+    // Nothing answers and nothing is bound: the relay can start here, so the takeover must go ahead.
+    expect(await prepareLegacyTakeover(legacyRuntime(home), {
+      install: runtime,
+      env,
+      home,
+      relayPort: await freePortOutsideBrowseRange(),
+      pinned: false,
+    })).toBe(true)
+    expect(env.OPENCODE_BROWSER_HOME).toBeUndefined()
+  })
+
+  test("an unpinned relay only lets a definite non-browse listener through, never a slow or silent one", async () => {
+    const { home, oldData, runtime } = oldRuntimeHome(homes)
+    // Playwriter and friends answer HTTP, just not browse's /version: the relay can fall back (relay/port.ts), so a
+    // takeover must go ahead rather than being blocked by whatever holds the port.
+    using other = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("Not Found", { status: 404 }) })
+    const env: NodeJS.ProcessEnv = { OPENCODE_BROWSER_HOME: oldData }
+    expect(await prepareLegacyTakeover(legacyRuntime(home), {
+      install: runtime,
+      env,
+      home,
+      relayPort: other.port!,
+      pinned: false,
+    })).toBe(true)
+    expect(env.OPENCODE_BROWSER_HOME).toBeUndefined()
+
+    // A port that accepts but never answers HTTP is a doubt: takeover waits, exactly as for a busy one.
+    const { home: silentHome, oldData: silentData, runtime: silentRuntime } = oldRuntimeHome(homes)
+    const silent = net.createServer((socket) => socket.on("data", () => undefined))
+    await new Promise<void>((resolve) => silent.listen(0, "127.0.0.1", resolve))
+    const silentPort = (silent.address() as net.AddressInfo).port
+    try {
+      const silentEnv: NodeJS.ProcessEnv = { OPENCODE_BROWSER_HOME: silentData }
+      expect(await prepareLegacyTakeover(legacyRuntime(silentHome), {
+        install: silentRuntime,
+        env: silentEnv,
+        home: silentHome,
+        relayPort: silentPort,
+        pinned: false,
+      })).toBe(false)
+      expect(silentEnv.OPENCODE_BROWSER_HOME).toBe(silentData)
+    } finally {
+      silent.close()
+    }
   })
 })

@@ -3,8 +3,9 @@
 // shim swaps its MCP server once current.json names another version and the relay reports that version. A relay
 // started from a current install (the npm global package or the binary) while that runtime is active takes it over, in
 // two steps around binding the relay port:
-//   prepare  (main.ts, before `serve` starts) only for the default home and a free port: copies the old folder's data
-//            into the XDG folders, the old files winning, and stops treating the old folder as OPENCODE_BROWSER_HOME.
+//   prepare  (main.ts, before `serve` starts) only for the default home and a port without a browse relay on it: copies
+//            the old folder's data into the XDG folders, the old files winning, and stops treating the old folder as
+//            OPENCODE_BROWSER_HOME.
 //   commit   (cli/relay.ts, once the relay listens) writes a forwarder for this version that runs the current install,
 //            points current.json at it so running agents follow, then migrates (setup/migrate.ts): agents' entries
 //            become `browse mcp`, and the old folder goes after a grace period.
@@ -13,6 +14,7 @@ import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import { compiledBinary, installerBinaryPath } from "../paths.ts"
+import { probeRelayPort, relayPortPinned, resolveRelayPort } from "../relay/port.ts"
 import { channelOf, installedRuntime, type Runtime } from "../update/auto-update.ts"
 import { opencodeBrowserVersion } from "../version.ts"
 import { insidePath, legacyRuntimeActive, samePath, type LegacyRuntime } from "./legacy.ts"
@@ -41,14 +43,26 @@ export async function prepareLegacyTakeover(legacy: LegacyRuntime | undefined, o
   readonly install?: Runtime | undefined
   readonly env?: NodeJS.ProcessEnv
   readonly home?: string
+  /** Tests inject the port and pin state so they never touch the real 19988–19997 range. */
+  readonly relayPort?: number
+  readonly pinned?: boolean
 } = {}): Promise<boolean> {
   const env = options.env ?? process.env
   const install = "install" in options ? options.install : currentInstall()
   if (!legacy || !legacyRuntimeActive(legacy) || !install || install.kind === "npx" || insidePath(install.entry, legacy.root)) return false
   // An isolated relay (its own OPENCODE_BROWSER_HOME) leaves the old runtime alone.
   if (env.OPENCODE_BROWSER_HOME && !samePath(env.OPENCODE_BROWSER_HOME, legacy.root)) return false
-  // Another relay holds the port: this one won't start, so it mustn't take anything over.
-  if (await portInUse(Number(env.OPENCODE_BROWSER_PORT) || 19988)) return false
+  // Another relay holds the port: this one won't start, so it mustn't take anything over. Pinned keeps the old rule:
+  // anything listening blocks. Unpinned lets a definite non-browse HTTP reply through, since the relay would then fall
+  // back (relay/port.ts), and takes a free port. A browse relay blocks, and so does a port that is bound but silent or
+  // times out: a probe that fails to answer is a doubt, not a free port.
+  const port = options.relayPort ?? (Number(env.OPENCODE_BROWSER_PORT) || resolveRelayPort())
+  if (options.pinned ?? relayPortPinned(env)) {
+    if (await portInUse(port)) return false
+  } else {
+    const owner = await probeRelayPort(port)
+    if (owner === "browse" || (owner === "nobody" && (await portInUse(port)))) return false
+  }
   const home = options.home ?? os.homedir()
   const { copyLegacyData } = await import("./migrate.ts")
   // First, or the XDG paths the copy writes to would still resolve to the old folder.
@@ -113,6 +127,14 @@ function writeForwarder(entry: string, runtime: Runtime) {
   writeAtomic(entry, ["#!/usr/bin/env node", `${FORWARDER} (${runtime.kind}). Don't edit.`, ...run, ""].join("\n"))
 }
 
+function realpath(file: string) {
+  try {
+    return fs.realpathSync(file)
+  } catch {
+    return path.resolve(file)
+  }
+}
+
 /** Whether something accepts connections on the relay port; anything but a refusal counts, so a doubt never takes over. */
 function portInUse(port: number) {
   return new Promise<boolean>((resolve) => {
@@ -121,14 +143,6 @@ function portInUse(port: number) {
     socket.once("connect", () => (socket.destroy(), resolve(true)))
     socket.once("error", (error: NodeJS.ErrnoException) => resolve(error.code !== "ECONNREFUSED"))
   })
-}
-
-function realpath(file: string) {
-  try {
-    return fs.realpathSync(file)
-  } catch {
-    return path.resolve(file)
-  }
 }
 
 function writeAtomic(file: string, text: string, mode = 0o644) {

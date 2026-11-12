@@ -137,6 +137,8 @@ test("an entered code is exchanged for a token, which never crosses the connecti
   const code = mintPairingCode(root)
   expect((await relay.connectTo("localhost", code.slice(0, 4) + "-" + code.slice(4).toLowerCase())).status).toBe("connected")
   expect(last().paired).toBe(true)
+  // The PORT_KEY dev pin is explicit, not an automatic loopback connection: it must not become the proven port.
+  expect(await stored("agentRelayProvenPort")).toBeUndefined()
   const token = (await stored("agentRelayTokens"))[ADDRESS]
   const profile = (await stored("agentRelayProfile")).id
   expect(token).toBe(browserToken(profile, root))

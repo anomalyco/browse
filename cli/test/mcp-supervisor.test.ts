@@ -121,7 +121,7 @@ await import(${JSON.stringify(path.join(import.meta.dir, "../src/main.ts"))})
       if (relayState === "stopped") return new Response(null, { status: 503 })
       const draining = relayState === "draining"
       if (draining) relayState = "stopped"
-      return Response.json({ version: "1.0.0", draining })
+      return Response.json({ version: "1.0.0", instanceId: "supervisor-test", draining })
     } })
     const mcp = mcpStdio({ home, port, command: ["node", entry], env: clean })
     const call = () => mcp.request("tools/call", { name: "secrets_list", arguments: {} })

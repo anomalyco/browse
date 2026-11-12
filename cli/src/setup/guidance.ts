@@ -7,6 +7,7 @@ import {
   type Effects,
 } from "./browsers.ts"
 import { connectedMessage, manualPair, pairedOfflineMessage, STORE_IDS, STORE_URL } from "./environment.ts"
+import { defaultPort } from "../relay/helpers.ts"
 
 export type LocateOptions = {
   allowOpen: boolean
@@ -69,6 +70,8 @@ export function pairStoreExtension(
   options: Pick<LocateOptions, "detections" | "preferred" | "allowOpen" | "env"> & {
     code: () => string
     storeIds?: readonly string[]
+    /** The relay's listen port; appended to the link and the manual text when it isn't 19988 (relay/port.ts). */
+    port?: number
   },
   effects: Effects = systemEffects,
 ): "opened" | "manual" | "none" {
@@ -79,14 +82,15 @@ export function pairStoreExtension(
   const match = matches.find((candidate) => candidate.browser.name === options.preferred?.name) ?? matches[0]
   if (!match) return "none"
   const interactive = options.allowOpen && options.env.display && !options.env.ssh
+  const port = options.port === undefined || options.port === defaultPort ? "" : `&port=${options.port}`
   if (
     interactive &&
-    effects.open(match.browser, `chrome-extension://${match.id}/welcome.html#code=${options.code()}`, match.profile.dir)
+    effects.open(match.browser, `chrome-extension://${match.id}/welcome.html#code=${options.code()}${port}`, match.profile.dir)
   ) {
     effects.log(`✓ Opened browse in ${match.browser.name} to connect it`)
     return "opened"
   }
-  effects.log(`To connect browse in ${match.browser.name}: ${manualPair(options.code())}`)
+  effects.log(`To connect browse in ${match.browser.name}: ${manualPair(options.code(), options.port)}`)
   return "manual"
 }
 

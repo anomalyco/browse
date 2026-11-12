@@ -18,7 +18,6 @@ import {
   HUMAN_INPUT_KEY,
   humanInput,
   RELAY_ADDRESS_KEY,
-  relayAddress,
   type AgentRelayState,
   type AgentRelayStatus,
   type AgentRelayUpdate,
@@ -31,6 +30,8 @@ import { createAgentRelayLog, formatAgentRelayLog } from "./agent-relay/log"
 import { AgentGroups } from "./agent-relay/groups"
 import { createRelayCommands } from "./agent-relay/commands"
 import { createRelayDebugger } from "./agent-relay/debugger"
+import { createRelayDiscovery, relayTarget } from "./agent-relay/discovery"
+import { defaultDiscovered, discoveredKeys, discoveredRelay, isDeliberateClose, provenDiscovered, shownRelayPort } from "./agent-relay/discovered"
 import { createRelayGrouping } from "./agent-relay/grouping"
 import { createRelayHandshake } from "./agent-relay/handshake"
 import {
@@ -74,6 +75,10 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   let status: AgentRelayStatus = "offline"
   let host = "127.0.0.1"
   let port = defaultRelayPort
+  /** No address set and no dev pin: the relay may move to a fallback port, and a failed connection may scan for it. */
+  let automatic = true
+  /** How the current automatic port was learned, and whether a connection on it ever authenticated. */
+  let discovered = defaultDiscovered
   let attempts = 0
   let retry: ReturnType<typeof setTimeout> | undefined
   let keepalive: ReturnType<typeof setInterval> | undefined
@@ -188,6 +193,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
 
   const snapshot = (): AgentRelayState => {
     const { pairing, skew, codeRejected, unpacked } = handshake.pairingState()
+    const shownPort = shownRelayPort(automatic, discovered, port)
     return {
       status,
       pairing,
@@ -202,7 +208,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       ...(codeRejected ? { codeRejected: true } : {}),
       ...(unpacked ? { unpacked: true } : {}),
       ...(browser && status === "connected" ? { browser } : {}),
-      relay: { address: `${host === "127.0.0.1" ? "localhost" : host}:${port}`, remote: host !== "127.0.0.1" },
+      relay: { address: `${host === "127.0.0.1" ? "localhost" : host}:${shownPort}`, remote: host !== "127.0.0.1" },
     }
   }
 
@@ -335,11 +341,19 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     void connect(reason)
   }
 
+  /** Finds a relay that moved to a fallback port (cli/src/relay/port.ts), instead of backing off on the wrong one. */
+  const discovery = createRelayDiscovery({
+    log,
+    current: () => ({ port, automatic }),
+    reconnect: (reason) => resetAndConnect(reason),
+  })
+
   const handshake = createRelayHandshake({
     log,
     relayTabs,
     currentSocket: () => socket,
     hostPort: () => ({ host, port }),
+    automatic: () => automatic,
     status: () => status,
     snapshot,
     generation: () => generation,
@@ -353,6 +367,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         if (socket === current) send({ method: "pong" })
       }, KEEPALIVE)
       connectedAt = Date.now()
+      discovered = provenDiscovered(discovered, port)
+      discovery.noteAuthenticated()
       setStatus(skew ? "incompatible" : "connected")
       // Only the newest connection gets this far (verify checks socket === current).
       handshake.settle(generation)
@@ -414,12 +430,16 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     if (socket && socket.readyState <= WebSocket.OPEN) return
     clearTimeout(retry)
     retry = undefined
-    const stored = await chrome.storage.local.get([PORT_KEY, RELAY_ADDRESS_KEY])
-    // A relay on another computer (the status page's relay address), else this one; an unusable value reads as unset.
-    const address = relayAddress(stored[RELAY_ADDRESS_KEY]) ?? { host: "127.0.0.1" }
+    // An unpacked build's pairing file names the relay's port when it isn't 19988 (cli/src/relay/port.ts).
+    await handshake.pairingHint()
+    const stored = await chrome.storage.local.get([PORT_KEY, RELAY_ADDRESS_KEY, ...discoveredKeys])
+    // An address the user set (or the PORT_KEY dev pin), else this one: 19988, or the port a hint or scan found.
+    const target = relayTarget(stored)
     const previous = `${host}:${port}`
-    host = address.host
-    port = address.port ?? (Number(stored[PORT_KEY]) || defaultRelayPort)
+    host = target.host
+    port = target.port
+    automatic = target.automatic
+    discovered = discoveredRelay(stored)
     if (`${host}:${port}` !== previous) notify()
     if (socket && socket.readyState <= WebSocket.OPEN) return
     // Without a credential announce only the protocol and that pairing is needed. No identity, tabs or
@@ -523,6 +543,10 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       // A missing relay is normal until an agent's browse tools (or the browse CLI) start one.
       else setStatus(openedAt === undefined ? "offline" : "connecting")
       handshake.settle(mine)
+      // One rate-limited scan may find a relay that moved to a fallback port (cli/src/relay/port.ts).
+      const missed = presenceOnly ? () => undefined : () => schedule(quiet && openedAt === undefined)
+      if (discovery.afterClose({ trusted: handshake.trusted.has(current), deliberate: isDeliberateClose(event.code, event.reason), code: event.code }, missed))
+        return
       if (!presenceOnly) schedule(quiet && openedAt === undefined)
     }
   }

@@ -125,7 +125,7 @@ test("Connect dials the relay address, a typed code wins over the bundled one th
   expect((await stub.chrome.storage.local.get("agentRelayAddress")).agentRelayAddress).toBe("100.64.0.2")
 })
 
-test("localhost (as the page shows it) goes back to this computer's relay and its bundled code", async () => {
+test("localhost without a port goes back to this computer's relay, an explicit loopback port stays explicit", async () => {
   await stub.chrome.storage.local.remove("agentRelayPairingCode")
   for (const address of ["localhost:19925", "", "127.0.0.1"]) {
     await stub.chrome.storage.local.set({ agentRelayAddress: "100.64.0.2" })
@@ -135,7 +135,10 @@ test("localhost (as the page shows it) goes back to this computer's relay and it
     await until(() => FakeWebSocket.made.length > before && FakeWebSocket.made.at(-1)!.url === "ws://127.0.0.1:19925/extension")
     expect(relay.state().relay).toEqual({ address: "localhost:19925", remote: false })
     await until(() => relay.state().unpacked === true)
-    expect((await stub.chrome.storage.local.get("agentRelayAddress")).agentRelayAddress).toBe("")
+    // The PORT_KEY pin is explicit, so a port typed with localhost is kept: only a bare localhost is automatic.
+    expect((await stub.chrome.storage.local.get("agentRelayAddress")).agentRelayAddress).toBe(
+      address.includes(":") ? "127.0.0.1:19925" : "",
+    )
     FakeWebSocket.made.at(-1)!.close()
     expect((await outcome).status).toBe("offline")
   }

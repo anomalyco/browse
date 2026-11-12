@@ -126,8 +126,11 @@ export function recordPairingFailure(root = stateRoot(), now = Date.now()): bool
 }
 
 /** Writes a fresh code into an unpacked extension, which exchanges it once for its token. Never in a package or zip. */
-export function writeExtensionPairing(extensionDirectory: string, code: string): void {
-  writePrivateJsonFileSync(path.join(extensionDirectory, extensionPairingFileName), { code })
+export function writeExtensionPairing(extensionDirectory: string, code: string, port?: number): void {
+  writePrivateJsonFileSync(path.join(extensionDirectory, extensionPairingFileName), {
+    code,
+    ...(port === undefined ? {} : { port }),
+  })
 }
 
 // ---- tokens ----------------------------------------------------------------------------------------------------

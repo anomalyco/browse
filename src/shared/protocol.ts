@@ -147,6 +147,6 @@ export type FromStatusPage =
   | { type: "relay.connect"; address: string; code: string }
   | { type: "agents.reconnect" }
   | { type: "tabs.cleanup" }
-  /** A one-time code from install's link (welcome.html#code=…). */
-  | { type: "pairing.link"; code: string }
+  /** A one-time code from install's link (welcome.html#code=…), and the relay port when it isn't 19988. */
+  | { type: "pairing.link"; code: string; port?: number }
   | { type: "autoUpdate.set"; mode: AutoUpdateMode }
