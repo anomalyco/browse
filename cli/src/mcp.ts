@@ -78,7 +78,7 @@ Use one loop: inspect, act, verify.
 - Act with the narrowest stable control, and keep dependent steps in one \`execute\` while transient UI is open.
 - Verify with a fresh page read (\`page.url()\`, a heading, or a new snapshot). A click that returned, or a handoff the user acknowledged, is not proof the task succeeded.
 
-\`execute\` returns the value of your \`return\`; a single expression returns automatically. The execute tool's description lists the helpers it provides (snapshot, ref, handoff, files, secrets, screenshots, network capture, and more).
+\`execute\` returns the value of your \`return\`; a single expression returns automatically. The execute tool's description lists the helpers it provides (snapshot, ref, handoff, files, secrets, screenshots, network capture, and more). \`page\`, \`browser\`, \`context\`, \`state\` and the other helpers exist only inside the \`code\` string \`execute\` receives, never as globals of the client's own runtime: in a client that runs tools in its own code mode, pass the Playwright code as a string in \`code\`.
 
 When only a person can proceed — login, 2FA, passkey, captcha or payment confirmation — call \`handoff("what the user should do")\` and wait. Pass \`start\` for an action that itself blocks. Never solve a captcha yourself and never retry-loop a blocked site; if a challenge is interactive or the site refuses the visit, hand off or stop and tell the user.
 

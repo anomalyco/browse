@@ -229,9 +229,12 @@ adds a loud warning, so set one first.
 Execute code can use `page`, `context`, `browser`, persistent `state`, the
 `files` helper, compute-only Node modules through `modules` (plus `path`, `url`,
 `util`, `crypto`, `buffer`, `zlib`, `events`, `stream`), and the browse helpers
-above. Timers, `URL`, `TextEncoder`, `Buffer` and `crypto.randomUUID()` are
-available. `execute` returns the value of `return`; a single expression returns
-automatically. Use `--file` for longer scripts:
+above. Those names exist only inside the code string browse runs, never as
+globals of a client's own runtime: in a client that runs tools in its own code
+mode, pass the Playwright code as a string in `code`. Timers, `URL`,
+`TextEncoder`, `Buffer` and `crypto.randomUUID()` are available. `execute`
+returns the value of `return`; a single expression returns automatically. Use
+`--file` for longer scripts:
 
 ```bash
 browse execute --session github --file ./perform-flow.js
