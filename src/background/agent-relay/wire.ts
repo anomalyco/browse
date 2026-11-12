@@ -23,10 +23,12 @@ export type Handshake = {
 
 /** Overrides the relay port, for development and isolated tests. An automatic connection never scans with it set. */
 export const PORT_KEY = "agentRelayPort"
-/** chrome.storage.local: the port an automatic connection found the relay on (a pairing hint, or a scan). */
+/** chrome.storage.local: the port an automatic connection currently dials (a pairing hint, a scan, or the default). */
 export const DISCOVERED_PORT_KEY = "agentRelayDiscoveredPort"
-/** chrome.storage.local: how that port was found, "hint" (link, file, typed address) or "scan". Missing reads as hint. */
+/** chrome.storage.local: how that port was found, "hint" (link, file, typed address) or "scan". Missing reads as scan. */
 export const DISCOVERED_KIND_KEY = "agentRelayDiscoveredKind"
+/** chrome.storage.local: the port whose relay completed its HMAC proof here; only that makes a scanned port trusted. */
+export const PROVEN_PORT_KEY = "agentRelayProvenPort"
 /** chrome.storage.local: the port a pending pairing code was given for; it is never sent to another one. */
 export const CODE_PORT_KEY = "agentRelayCodePort"
 export const PROFILE_KEY = "agentRelayProfile"

@@ -34,6 +34,7 @@ import {
   PAIRING_KEY,
   PORT_KEY,
   PROFILE_KEY,
+  PROVEN_PORT_KEY,
   SPENT_KEY,
   TOKENS_KEY,
   type AgentRelayLog,
@@ -47,7 +48,7 @@ type PairingFile = { readonly code?: PairingCode; readonly port?: number }
 
 /**
  * The token a loopback relay on another port may still accept: the most recently stored loopback token for a port
- * browse can listen on. Storing a token moves its key to the end (rememberToken), so insertion order is recency.
+ * browse can listen on (each is a token a relay proved). Storing one moves its key to the end (rememberToken).
  */
 function loopbackToken(tokens: Record<string, unknown>): string | undefined {
   let found: string | undefined
@@ -92,6 +93,8 @@ export function createRelayHandshake(deps: {
   let skew: ProtocolSkew | undefined
   /** The pairing file read in flight, or its result once found. */
   let pairingFileRead: Promise<PairingFile | undefined> | undefined
+  /** The file code whose port was applied, so the same code never overrides a later scan. */
+  let pairingHintFileCode: string | undefined
 
   /**
    * Waiters for how the next connection attempt ends (`connectTo` on the status page), each with the generation it
@@ -128,30 +131,39 @@ export function createRelayHandshake(deps: {
   }
 
   /**
-   * An automatic connection takes the relay port install wrote next to the pairing file as its discovered port, so
-   * an unspent code in that file is tried where it is valid instead of at 19988. This also replaces a port only a scan
-   * found: a listener that mimics browse's /version must not capture the file's code. A port a link or the user named
-   * stays, since that is already a deliberate hint.
+   * An unspent code in the unpacked build's pairing file names the relay port install wrote it for, so its first
+   * attempt goes there. It applies only while that code could be used (not already paired on the target port, no
+   * pending typed/link code) and only once per code: a later scan of an already-paired browser is never overridden.
+   * A file without a port says nothing, so it never replaces a discovered or proven port.
    */
   const pairingHint = async () => {
-    const stored = await chrome.storage.local.get([RELAY_ADDRESS_KEY, PORT_KEY, DISCOVERED_PORT_KEY, DISCOVERED_KIND_KEY, SPENT_KEY])
-    if (!relayTarget(stored).automatic) return
-    const discovered = relayPortHint(stored[DISCOVERED_PORT_KEY])
-    if (discovered !== undefined && stored[DISCOVERED_KIND_KEY] === "hint") return
+    const stored = await chrome.storage.local.get([
+      RELAY_ADDRESS_KEY, PORT_KEY, DISCOVERED_PORT_KEY, DISCOVERED_KIND_KEY, PROVEN_PORT_KEY,
+      SPENT_KEY, PAIRING_KEY, TOKENS_KEY,
+    ])
+    const target = relayTarget(stored)
+    if (!target.automatic) return
     const file = await pairingFile()
     if (file?.code === undefined) return
+    const code = file.code.code
+    if (pairingHintFileCode === code) return
     const spent = new Set(Array.isArray(stored[SPENT_KEY]) ? (stored[SPENT_KEY] as unknown[]) : [])
-    if (spent.has(file.code.code)) return
-    const port = file.port ?? defaultRelayPort
-    // Nothing to change when the file means the default and no other port was found: dialing already starts there.
-    if (discovered === undefined && port === defaultRelayPort) return
+    if (spent.has(code)) return
+    if (normalizePairingCode(stored[PAIRING_KEY]) !== undefined) return
+    const tokens = isJsonObject(stored[TOKENS_KEY]) ? stored[TOKENS_KEY] : {}
+    if (typeof tokens[`127.0.0.1:${target.port}`] === "string") return
+    const port = file.port
+    if (port === undefined) return
     deps.log.add("pairing.port", { port })
-    // The file's own code is tied to its port (credential reads it from there); a code the user entered keeps the
-    // port it was given for, or 19988.
+    if (relayPortHint(stored[DISCOVERED_PORT_KEY]) === port && stored[DISCOVERED_KIND_KEY] === "hint") {
+      pairingHintFileCode = code
+      return
+    }
     await chrome.storage.local.set({
       [DISCOVERED_PORT_KEY]: port,
       [DISCOVERED_KIND_KEY]: "hint",
     })
+    pairingHintFileCode = code
   }
 
   /**
@@ -171,7 +183,7 @@ export function createRelayHandshake(deps: {
     const tokens = isJsonObject(stored[TOKENS_KEY]) ? stored[TOKENS_KEY] : {}
     const own = typeof tokens[address] === "string" ? tokens[address] : undefined
     // A fallback only moves an automatic connection to a browse port; an explicit port's token is its own key only.
-    const token = own ?? (local && automatic ? loopbackToken(tokens) : undefined)
+    const token = local && automatic ? (loopbackToken(tokens) ?? own) : own
     const entered = normalizePairingCode(stored[PAIRING_KEY])
     const file = local ? await pairingFile() : undefined
     const usable = (code: PairingCode | undefined, here: boolean) =>
@@ -370,6 +382,8 @@ export function createRelayHandshake(deps: {
         : typeof range?.min === "number" && extensionProtocolVersion < range.min
           ? "update-extension"
           : undefined
+    // The relay completed its proof on this port. Only this makes a scanned port trusted enough to show or prefer.
+    await chrome.storage.local.set({ [PROVEN_PORT_KEY]: pending.port })
     trusted.add(current)
     tokenRefused = undefined
     codeRejected = false
@@ -505,12 +519,16 @@ export function createRelayHandshake(deps: {
     if (code === undefined || code.legacy || deps.status() === "connected") return false
     const port = relayPortHint(hint)
     deps.log.add("pairing.link")
+    const stored = await chrome.storage.local.get([RELAY_ADDRESS_KEY])
+    const address = relayAddress(stored[RELAY_ADDRESS_KEY])
     // A link without a port is for 19988. Drop a port only a scan found first, so the reconnect this write triggers
     // dials 19988 with the code instead of carrying it to whatever answered a scan.
     if (port === undefined) await chrome.storage.local.remove([DISCOVERED_PORT_KEY, DISCOVERED_KIND_KEY])
     // Reconnects through storage.onChanged, or here after the write: a link press tries now even when these values
     // were already stored.
     await chrome.storage.local.set({
+      // A loopback address left on the form must not pin the browser away from the link's port (or 19988).
+      ...(address?.host === "127.0.0.1" ? { [RELAY_ADDRESS_KEY]: "" } : {}),
       [PAIRING_KEY]: code.code,
       // The port this code is for: never a later scan's, nor whatever port is in use when the code is tried.
       [CODE_PORT_KEY]: port ?? defaultRelayPort,

@@ -167,11 +167,12 @@ When opencode runs on one machine and your browser on another (over Tailscale, s
 and the extension connects to it across the network:
 
 1. On the opencode machine, install browse, then run `browse set hostname 0.0.0.0`.
-   The relay then listens on every network, restarting if it runs. Other computers reach only the extension link;
-   the HTTP API and CDP answer on `127.0.0.1` only. The command prints the address (with its port when it isn't
-   19988) and a pairing code for step 2 (`browse pair` prints another; each works once, within 10 minutes).
-   If another program holds 19988, enter the port printed after the address; it can change if the relay later has to
-   bind somewhere else.
+   The relay then listens on every network, restarting it if it runs (or starting it when it doesn't). Other
+   computers reach only the extension link; the HTTP API and CDP answer on `127.0.0.1` only. The command prints the
+   address (with its port when it isn't 19988) and a pairing code for step 2 (`browse pair` prints another; each works
+   once, within 10 minutes).
+   If another program holds 19988, enter the port printed after the address; the relay keeps its last port while it
+   stays free, but it can change if that port is taken.
 2. In the browser, open the extension's settings page (right-click the toolbar button, then **Options**). Under
    **advanced**, replace `localhost:19988` in **Relay address** with that machine's address and port (a Tailscale IP
    or name, `:port` added when it isn't 19988), enter the code under **Pairing code**, then click **Connect**. The

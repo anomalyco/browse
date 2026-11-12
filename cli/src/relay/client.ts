@@ -295,13 +295,14 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
       cause,
     })
 
-  /** relay.json's instance when it names this endpoint and its process is alive; anything else isn't trusted. */
-  const recordedInstance = (endpoint: string): string | undefined => {
+  /**
+   * relay.json for the configured port when its process is alive. One read per verification: a live file naming
+   * another port, or another instance, means the endpoint under test is not this install's relay.
+   */
+  const liveRelayState = () => {
     try {
-      const port = Number(new URL(endpoint).port)
       const state = readRelayState()
-      if (!state || state.port !== port || state.configuredPort !== configuredRelayPort() || !processAlive(state.pid)) return undefined
-      return state.instanceId
+      return state && state.configuredPort === configuredRelayPort() && processAlive(state.pid) ? state : undefined
     } catch {
       return undefined
     }
@@ -309,7 +310,10 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
 
   // Bearer tokens only go to a port whose open /version proved it is this install's browse relay. Verified once per
   // resolved endpoint (and instance), never for an endpoint that changed underneath this client.
-  const verifyEndpoint = (endpoint: string): Effect.Effect<VerifiedEndpoint, RelayClientError> =>
+  const verifyEndpoint = (
+    endpoint: string,
+    state: ReturnType<typeof liveRelayState> = liveRelayState(),
+  ): Effect.Effect<VerifiedEndpoint, RelayClientError> =>
     Effect.suspend(() => {
       const seconds = relayAnswered ? busyRelayReadSeconds : unknownRelayReadSeconds
       return executeUnauthorized("/version", HttpClientRequest.get(new URL("/version", endpoint))).pipe(
@@ -331,9 +335,10 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
             typeof reply?.version !== "string" ||
             typeof reply.instanceId !== "string"
           ) return Effect.fail(notBrowse(endpoint, body))
-          const recorded = recordedInstance(endpoint)
-          if (recorded !== undefined && recorded !== reply.instanceId) return Effect.fail(notBrowse(endpoint, body))
-          return Effect.succeed({ endpoint, instanceId: reply.instanceId, recorded })
+          // A live relay.json for this install is authoritative: the verified port and instance must be exactly its.
+          if (state !== undefined && (state.port !== Number(new URL(endpoint).port) || state.instanceId !== reply.instanceId))
+            return Effect.fail(notBrowse(endpoint, body))
+          return Effect.succeed({ endpoint, instanceId: reply.instanceId, recorded: state?.instanceId })
         }),
         Effect.timeoutOrElse({
           duration: `${seconds} seconds`,
@@ -345,14 +350,16 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
     })
 
   const ensureVerified = (endpoint: string): Effect.Effect<void, RelayClientError> => {
-    // Keep a proof only while relay.json names the same instance (a restart forces a probe), or while it was absent
-    // when the proof was made and still is. A proof made while relay.json existed must not survive the file going away.
-    const recorded = recordedInstance(endpoint)
+    const state = liveRelayState()
+    const port = Number(new URL(endpoint).port)
+    // A proof is reused only for the same live relay.json state: a live file for this port and instance, or no live
+    // file at proof time and still none. Anything else re-probes (and then fails if the file names another relay).
     if (
       verified?.endpoint === endpoint &&
-      (recorded === verified.instanceId || (recorded === undefined && verified.recorded === undefined))
+      ((state !== undefined && state.port === port && state.instanceId === verified.instanceId) ||
+        (state === undefined && verified.recorded === undefined))
     ) return Effect.void
-    return verifyEndpoint(endpoint).pipe(Effect.tap((value) => Effect.sync(() => { verified = value })), Effect.asVoid)
+    return verifyEndpoint(endpoint, state).pipe(Effect.tap((value) => Effect.sync(() => { verified = value })), Effect.asVoid)
   }
 
   /**
@@ -448,27 +455,29 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
     get endpoint() {
       return currentEndpoint()
     },
-    version: requestJson("/version", RelayVersion).pipe(
-      // Another product on the port (Playwriter answers `{ version }` alone): without browse's instanceId this is not
-      // a browse relay, and must never be mistaken for one. Same path as any other foreign listener.
-      Effect.flatMap(({ value: version, endpoint }): Effect.Effect<RelayVersion, RelayClientError> => {
-        const instanceId = version.instanceId
-        if (typeof instanceId !== "string") return Effect.fail(notBrowse(endpoint, version))
-        const recorded = recordedInstance(endpoint)
-        if (recorded !== undefined && recorded !== instanceId) return Effect.fail(notBrowse(endpoint, version))
-        // The open /version just proved this endpoint, so an authorized request may use it without probing again.
-        // relay.json's instance is stored with the proof, so its later disappearance forces a new probe (see
-        // ensureVerified).
-        return Effect.sync(() => {
-          verified = { endpoint, instanceId, recorded }
-          return version
-        })
-      }),
-      Effect.mapError((error) =>
-        error instanceof RelayDecodeFailed || (error instanceof RelayRejected && !error.code && error.status === 404)
-          ? new RelayDecodeFailed({ message: `Relay port ${new URL(currentEndpoint()).port} is in use by another program (not a browse /version response).`, path: "/version", cause: error })
-          : error),
-    ),
+    version: Effect.suspend(() => {
+      const state = liveRelayState()
+      return requestJson("/version", RelayVersion).pipe(
+        // Another product on the port (Playwriter answers `{ version }` alone): without browse's instanceId this is not
+        // a browse relay, and must never be mistaken for one. Same path as any other foreign listener.
+        Effect.flatMap(({ value: version, endpoint }): Effect.Effect<RelayVersion, RelayClientError> => {
+          const instanceId = version.instanceId
+          if (typeof instanceId !== "string") return Effect.fail(notBrowse(endpoint, version))
+          if (state !== undefined && (state.port !== Number(new URL(endpoint).port) || state.instanceId !== instanceId))
+            return Effect.fail(notBrowse(endpoint, version))
+          // The open /version just proved this endpoint, so an authorized request may use it without probing again.
+          // relay.json's instance is stored with the proof, so its later disappearance forces a new probe.
+          return Effect.sync(() => {
+            verified = { endpoint, instanceId, recorded: state?.instanceId }
+            return version
+          })
+        }),
+        Effect.mapError((error) =>
+          error instanceof RelayDecodeFailed || (error instanceof RelayRejected && !error.code && error.status === 404)
+            ? new RelayDecodeFailed({ message: `Relay port ${new URL(currentEndpoint()).port} is in use by another program (not a browse /version response).`, path: "/version", cause: error })
+            : error),
+      )
+    }),
     shutdown: (request) => postJson("/shutdown", { ...request }, RelayShutdownResponse),
     extensionStatus: getJson("/extension/status", ExtensionStatus),
     targets: getJson("/json/list", TargetSummaries),

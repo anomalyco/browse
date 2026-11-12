@@ -33,7 +33,7 @@ export function installedDevExtension(root = cacheRoot()): Installed | undefined
  * extension with its key ignores it) and swaps it in. Returns "current" when the folder already had it, "updated" when
  * its files changed.
  */
-export async function syncDevExtension(extension: DevExtension, options: { readonly root?: string; readonly fetch?: typeof fetch; readonly env?: NodeJS.ProcessEnv } = {}): Promise<"current" | "updated"> {
+export async function syncDevExtension(extension: DevExtension, options: { readonly root?: string; readonly fetch?: typeof fetch; readonly env?: NodeJS.ProcessEnv; readonly port?: number } = {}): Promise<"current" | "updated"> {
   const root = options.root ?? cacheRoot()
   const folder = devExtensionFolder(root)
   // Already current: `install` puts a fresh code in the folder when one is needed (pairUnpacked), so a relay starting
@@ -58,9 +58,8 @@ export async function syncDevExtension(extension: DevExtension, options: { reado
     }
     const manifest = JSON.parse(readFileSync(path.join(staging, "manifest.json"), "utf8")) as { version_name?: string; version?: string; key?: string }
     if (!manifest.key) throw new Error("the dev extension has no manifest key, so it wouldn't have browse's unpacked ID")
-    // No port here: this folder is written before install knows the relay's listen port. install replaces the code
-    // with a fresh one (pairUnpacked) that names a live relay's port; an omitted port means 19988.
-    writeExtensionPairing(staging, mintPairingCode(undefined, { ttlMs: bundledPairingCodeTtlMs }))
+    // The relay's listen port when the caller knows it (relay startup); install writes a fresh code with the live port.
+    writeExtensionPairing(staging, mintPairingCode(undefined, { ttlMs: bundledPairingCodeTtlMs }), options.port)
     const build = (() => {
       try {
         return (JSON.parse(readFileSync(path.join(staging, "build.json"), "utf8")) as { build?: string }).build

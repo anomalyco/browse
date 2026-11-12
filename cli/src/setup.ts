@@ -50,6 +50,7 @@ import {
 } from "./setup/browsers.ts"
 import {
   ensureRelay,
+  ensureRelayQuietly,
   extension,
   extensionStatus,
   pair,
@@ -312,19 +313,11 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
   const pairedOffline = initial?.pairingState === "paired-offline"
   // The relay saw this browser try to connect without a token (or refuse one): it's installed, not missing.
   const needsPairing = initial?.pairingState === "unpaired" || initial?.pairingState === "refused"
-  let folderPaired = false
   const folder = unpackedFolder()
-  if (folder && !pairedOffline) {
-    // A browser that isn't paired yet gets a one-time code in its folder, which needs the relay's listen port when it
-    // isn't 19988. A connected browser is paired already and needs no new code (or a relay start) for the reload.
-    if (!connected) {
-      ensureRelay(spawnEntry)
-      await pairUnpacked()
-      folderPaired = true
-    }
+  if (folder && connected && !pairedOffline) {
     // A browser already running an older unpacked build keeps its old code until it reloads; ask it to, silently:
     // install never talks about unpacked builds.
-    const reload = connected ? await reloadOutdatedExtension(connected, folder) : "current"
+    const reload = await reloadOutdatedExtension(connected, folder)
     if (reload === "reloaded") log("✓ Reloaded browse in your browser")
   }
   // Including --no-wait (checkout update): an incompatible browser is installed, not waiting to be added or paired.
@@ -373,12 +366,12 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
     env,
   })
   if (connected || found === "off" || pairedOffline) return
-  // Up only now, before a pairing file or link names the relay's listen port when it isn't 19988 (a fallback).
-  if (!folderPaired) {
-    ensureRelay(spawnEntry)
-    // The unpacked extension finds a one-time code in its own folder and exchanges it for its key, without a step.
-    if (folder) await pairUnpacked()
-  }
+  // Up only now, before a pairing file or link names the relay's listen port when it isn't 19988 (a fallback). A folder
+  // code still works without a port if the relay can't start (the extension then starts at 19988 and scans).
+  if (folder) {
+    ensureRelayQuietly(spawnEntry)
+    await pairUnpacked()
+  } else ensureRelay(spawnEntry)
   let code: string | undefined
   const pairingCode = () =>
     code && pendingPairingCodeKeys().includes(pairingCodeKey(code)) ? code : (code = mintPairingCode())

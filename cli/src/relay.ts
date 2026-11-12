@@ -42,6 +42,7 @@ import {
   configuredRelayPort,
   relayPortPinned,
   removeRelayState,
+  writeLastRelayPort,
   writeRelayState,
 } from "./relay/port.ts"
 import { ensurePrivateDirectory, relayToken } from "./relay/secrets.ts"
@@ -837,22 +838,34 @@ const makeRelay = Effect.fnUntraced(function* (options: {
 
   const close = cleanup()
 
-  yield* Effect.catch(listenHttpServer({ server: httpServer, host: listenHost, port }), (error) => {
-    return Effect.gen(function* () {
+  yield* Effect.catch(
+    Effect.gen(function* () {
+      yield* listenHttpServer({ server: httpServer, host: listenHost, port })
+      // Published only once the port is bound: clients resolve through it to find a fallback port. Never holds a token.
+      // A fallback port that can't be recorded leaves clients on 19988 (another program): fail the start instead.
+      // Inside this block, so a failed write runs cleanup instead of leaving the bound server behind.
+      yield* Effect.try({
+        try: () => writeRelayState({ port, configuredPort, pid: process.pid, instanceId: browserId, startedAt }),
+        catch: (cause) => new Error("Write the relay port file", { cause }),
+      }).pipe(Effect.catch((error) => {
+        relayLog("relay.state.write_failed", { port, configuredPort, error: error.message })
+        return port === configuredPort ? Effect.void : Effect.fail(error)
+      }))
+      // Remote browsers enter the printed address by hand; remember the last port across shutdowns (relay.json goes).
+      yield* Effect.try({
+        try: () => writeLastRelayPort(port, stateRoot(), configuredPort),
+        catch: (cause) => new Error("Write the last relay port", { cause }),
+      }).pipe(Effect.catch((error) => {
+        relayLog("relay.last_port.write_failed", { port, configuredPort, error: error.message })
+        return Effect.void
+      }))
+      yield* Effect.sync(() => pruneStaleExecuteFilesDirectories())
+    }),
+    (error) => Effect.gen(function* () {
       yield* cleanup()
       return yield* Effect.fail(error)
-    })
-  })
-  // Published only once the port is bound: clients resolve through it to find a fallback port. Never holds a token.
-  // A fallback port that can't be recorded leaves clients on 19988 (another program): fail the start instead.
-  yield* Effect.try({
-    try: () => writeRelayState({ port, configuredPort, pid: process.pid, instanceId: browserId, startedAt }),
-    catch: (cause) => new Error("Write the relay port file", { cause }),
-  }).pipe(Effect.catch((error) => {
-    relayLog("relay.state.write_failed", { port, configuredPort, error: error.message })
-    return port === configuredPort ? Effect.void : Effect.fail(error)
-  }))
-  yield* Effect.sync(() => pruneStaleExecuteFilesDirectories())
+    }),
+  )
 
   yield* Effect.catch(
     Effect.gen(function* () {
@@ -896,7 +909,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       }
       const dev = devExtension()
       if (dev && installedDevExtension()) {
-        syncDevExtension(dev).then(
+        syncDevExtension(dev, { port }).then(
           (result) => {
             if (result === "updated") relayLog("extension.dev_updated", { file: dev.file })
             for (const link of browsers.list()) if (link.local) handshake.reloadOutdatedDevExtension(link)

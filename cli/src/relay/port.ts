@@ -52,13 +52,31 @@ export type RelayState = {
 export const relayStatePath = (root = stateRoot(), configuredPort = configuredRelayPort()): string =>
   path.join(root, "relays", String(configuredPort), "relay.json")
 
+/** The last port this configured install listened on, kept across shutdowns (unlike relay.json). Never a token. */
+export const lastRelayPortPath = (root = stateRoot(), configuredPort = configuredRelayPort()): string =>
+  path.join(root, "relays", String(configuredPort), "last-port.json")
+
+export function readLastRelayPort(root = stateRoot(), configuredPort = configuredRelayPort()): number | undefined {
+  try {
+    const value = JSON.parse(fs.readFileSync(lastRelayPortPath(root, configuredPort), "utf8")) as { port?: unknown } | null
+    return typeof value === "object" && value !== null && !Array.isArray(value) && isPort(value.port) ? value.port : undefined
+  } catch {
+    return undefined
+  }
+}
+
+export function writeLastRelayPort(port: number, root = stateRoot(), configuredPort = configuredRelayPort()): void {
+  writePrivateJsonFileSync(lastRelayPortPath(root, configuredPort), { port }, { ensureParent: true })
+}
+
 export function readRelayState(
   root = stateRoot(),
   configuredPort = configuredRelayPort(),
 ): RelayState | undefined {
   try {
     const value = JSON.parse(fs.readFileSync(relayStatePath(root, configuredPort), "utf8")) as Partial<RelayState> | null
-    if (!value || !isPort(value.port) || !isPort(value.configuredPort) || !isPositiveInt(value.pid)) return undefined
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined
+    if (!isPort(value.port) || value.configuredPort !== configuredPort || !isPositiveInt(value.pid)) return undefined
     if (typeof value.instanceId !== "string" || value.instanceId === "" || typeof value.startedAt !== "string") return undefined
     return {
       port: value.port,
@@ -163,23 +181,31 @@ async function browseVersionAt(port: number, timeoutMs: number): Promise<BrowseV
 }
 
 /**
- * The running browse relay's endpoint, proven before any caller attaches the relay token: its open `/version` must
- * have browse's shape, and when relay.json is trusted for that port, the same instanceId. Undefined otherwise, which
- * every caller treats as "no relay" — another program on the port must never receive the token.
+ * The running browse relay, proven before any caller attaches the relay token: its open `/version` must have browse's
+ * shape and, when a live relay.json exists for this configured port, the same port and instanceId. A live relay.json
+ * naming another port means the endpoint under test is not trusted, not that there is no relay.
  */
+export async function verifiedRelay(
+  options: { readonly root?: string; readonly timeoutMs?: number } = {},
+): Promise<{ readonly endpoint: string; readonly instanceId: string } | undefined> {
+  const root = options.root ?? stateRoot()
+  const state = readRelayState(root)
+  const live = state !== undefined && state.configuredPort === configuredRelayPort() && processAlive(state.pid)
+    ? state
+    : undefined
+  // This one read decides the port: a pinned port stays pinned, otherwise a live relay.json names it, else 19988.
+  const port = envPort() ?? live?.port ?? defaultPort
+  const version = await browseVersionAt(port, options.timeoutMs ?? 3_000)
+  if (!version) return undefined
+  if (live && (live.port !== port || version.instanceId !== live.instanceId)) return undefined
+  return { endpoint: endpointForPort(port), instanceId: version.instanceId }
+}
+
+/** The endpoint of `verifiedRelay`, for callers that only need where to send. */
 export async function verifiedRelayEndpoint(
   options: { readonly root?: string; readonly timeoutMs?: number } = {},
 ): Promise<string | undefined> {
-  const root = options.root ?? stateRoot()
-  const port = resolveRelayPort(root)
-  const state = readRelayState(root)
-  const trusted = state !== undefined && state.port === port && state.configuredPort === configuredRelayPort() && processAlive(state.pid)
-    ? state
-    : undefined
-  const version = await browseVersionAt(port, options.timeoutMs ?? 3_000)
-  if (!version) return undefined
-  if (trusted && version.instanceId !== trusted.instanceId) return undefined
-  return endpointForPort(port)
+  return (await verifiedRelay(options))?.endpoint
 }
 
 /** A live relay recorded in relay.json for `configuredPort`, still answering as the same browse instance. */
@@ -220,13 +246,19 @@ function portListText(ports: readonly number[]): string {
 }
 
 /** Whether `port` can be bound on `host` right now. Errors other than EADDRINUSE go to the real listen. */
-function canListen(host: string, port: number): Promise<boolean> {
+function canBind(host: string, port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const server = net.createServer()
     server.unref()
     server.once("error", (error) => resolve((error as NodeJS.ErrnoException).code !== "EADDRINUSE"))
     server.listen({ host, port, exclusive: true }, () => server.close(() => resolve(true)))
   })
+}
+
+/** A non-loopback listen must also be free on 127.0.0.1, the address clients and CDP use. */
+async function canListen(host: string, port: number): Promise<boolean> {
+  if (!(await canBind(host, port))) return false
+  return loopbackHost(host) || canBind("127.0.0.1", port)
 }
 
 export type ChooseRelayPortOptions = {
@@ -263,11 +295,10 @@ export async function chooseRelayPort(options: ChooseRelayPortOptions = {}): Pro
   const probeTimeoutMs = options.probeTimeoutMs ?? 500
   const recorded = await liveRecordedRelay(configuredPort, root, probeTimeoutMs)
   if (recorded) throw alreadyInUse(host, recorded.port)
-  // Remote browsers enter the printed address by hand and don't scan for a move. Keep the port a previous start
-  // recorded for this configured port while it is free, so a relay restart doesn't silently move after another
-  // program's server briefly held 19988.
-  const sticky = !loopbackHost(host) ? readRelayState(root, configuredPort) : undefined
-  if (sticky && sticky.configuredPort === configuredPort && await canListen(host, sticky.port)) return sticky.port
+  // Remote browsers enter the printed address by hand and don't scan for a move. Keep the last port this install
+  // listened on while it is free, even across shutdowns (relay.json is deleted then; last-port.json is not).
+  const last = !loopbackHost(host) ? readLastRelayPort(root, configuredPort) : undefined
+  if (last !== undefined && await canListen(host, last)) return last
   for (const port of candidates) {
     if (await canListen(host, port)) return port
     const owner = await probeRelayPort(port, probeTimeoutMs)

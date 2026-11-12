@@ -22,7 +22,7 @@ import { runCommand } from "../update/auto-update.ts"
 import { unpackedExtensionId } from "../protocol.ts"
 import { parseHostname, readRelayConfig, writeRelayConfig } from "../relay/config.ts"
 import { defaultPort } from "../relay/helpers.ts"
-import { configuredRelayPort, endpointForPort, liveRelayPort, probeRelayPort, resolveRelayPort, verifiedRelayEndpoint } from "../relay/port.ts"
+import { configuredRelayPort, endpointForPort, liveRelayPort, probeRelayPort, resolveRelayPort, verifiedRelay, verifiedRelayEndpoint } from "../relay/port.ts"
 import { relayAuthorization } from "../relay/secrets.ts"
 import { defaultSiteSecretsDir } from "../auth/site-secrets.ts"
 import { opencodeBrowserBuildId } from "../version.ts"
@@ -392,7 +392,7 @@ async function stopInstalledRelay() {
   if (!existsSync(audit)) return
   const probe = async () => {
     try {
-      const response = await fetch(`${base}/version`, { redirect: "error", signal: AbortSignal.timeout(2000) })
+      const response = await fetch(`${base}/version`, { redirect: "manual", signal: AbortSignal.timeout(2000) })
       return response.ok ? await response.json() as { managed?: boolean; instanceId?: string; shutdownProtocol?: number } : undefined
     } catch (error) {
       const e = error as { code?: string; cause?: { code?: string } }
@@ -409,10 +409,11 @@ async function stopInstalledRelay() {
   })
   if (!ours) return
   if (relay.shutdownProtocol !== 2) throw new Error("Stop the legacy relay manually, then run uninstall again.")
-  // The token only goes to a port whose open /version proved it is this install's relay (relay/port.ts).
-  const endpoint = await verifiedRelayEndpoint()
-  if (endpoint === undefined) throw new Error("Could not verify the running relay; stop it manually, then run uninstall again.")
-  const response = await fetch(`${endpoint}/shutdown`, {
+  // The token only goes to the endpoint and instance the probe above confirmed, and only while relay.json still agrees.
+  const verified = await verifiedRelay()
+  if (verified === undefined || verified.endpoint !== base || verified.instanceId !== relay.instanceId)
+    throw new Error("Could not verify the running relay; stop it manually, then run uninstall again.")
+  const response = await fetch(`${verified.endpoint}/shutdown`, {
     method: "POST", redirect: "error", headers: { ...relayHeaders(), "content-type": "application/json" }, signal: AbortSignal.timeout(15_000),
     body: JSON.stringify({ instanceId: relay.instanceId, requestId: randomUUID(), reason: "explicit-restart", force: true,
       client: { kind: "cli", instanceId: randomUUID(), buildId: opencodeBrowserBuildId } }),

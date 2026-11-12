@@ -154,6 +154,7 @@ export const restartRelay = Effect.fn("RelayLifecycle.restartRelay")(function* (
   readonly onShutdownAccepted?: Effect.Effect<void>
 }) {
   const buildId = options.buildId ?? opencodeBrowserBuildId
+  const absent = (error: unknown) => isRelayUnreachable(error) || isForeignListener(error, options.pinned)
   const initial = yield* Effect.result(options.relay.version)
   let original: RelayVersion | undefined
   let replacement: RelayVersion | undefined
@@ -162,7 +163,7 @@ export const restartRelay = Effect.fn("RelayLifecycle.restartRelay")(function* (
     original = initial.success
   } else if (isRelayStarting(initial.failure)) {
     original = yield* waitForRelayReady(options)
-  } else if (!isRelayUnreachable(initial.failure)) {
+  } else if (!absent(initial.failure)) {
     return yield* initial.failure
   }
 
@@ -182,7 +183,7 @@ export const restartRelay = Effect.fn("RelayLifecycle.restartRelay")(function* (
 
     const confirmed = yield* Effect.result(options.relay.version)
     if (Result.isFailure(confirmed)) {
-      if (!isRelayUnreachable(confirmed.failure)) return yield* confirmed.failure
+      if (!absent(confirmed.failure)) return yield* confirmed.failure
     } else if (!isSameRelayInstance(original, confirmed.success)) {
       replacement = confirmed.success
     } else {

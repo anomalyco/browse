@@ -98,11 +98,12 @@ describe("relay scan", () => {
     expect(await scanRelayPorts()).toEqual([])
   })
 
-  test("prefers a port this browser already holds a token for, then 19988", () => {
-    expect(chooseRelayPort([19990, 19991], (port) => port === 19991)).toBe(19991)
-    expect(chooseRelayPort([19990, 19991], () => false)).toBe(19990)
-    expect(chooseRelayPort([19990, 19988], () => false)).toBe(19988)
-    expect(chooseRelayPort([19990, 19991, 19988], (port) => port === 19991)).toBe(19991)
-    expect(chooseRelayPort([], () => true)).toBeUndefined()
+  test("prefers the proven port, then a token, then 19988", () => {
+    expect(chooseRelayPort([19990, 19991], { tokenFor: (port) => port === 19991 })).toBe(19991)
+    expect(chooseRelayPort([19990, 19991], { tokenFor: () => false })).toBe(19990)
+    expect(chooseRelayPort([19990, 19988], { tokenFor: () => false })).toBe(19988)
+    expect(chooseRelayPort([19990, 19991, 19988], { proven: 19990, tokenFor: (port) => port === 19991 })).toBe(19990)
+    expect(chooseRelayPort([19990, 19991, 19988], { tokenFor: (port) => port === 19991 })).toBe(19991)
+    expect(chooseRelayPort([], { tokenFor: () => true })).toBeUndefined()
   })
 })

@@ -11,6 +11,7 @@ const stub = installChrome()
 
 const TOKEN = "test-token-0123456789abcdefghijklmnopqrstuv"
 const STALE_TOKEN = "stale-token-0123456789abcdefghijklmnopqrstu"
+const STALE_OWN_TOKEN = "stale-own-token-0123456789abcdefghijklmnopqrs"
 const STALE_PORT = 19988
 const OTHER_PORT = 19991
 const BROWSER_PORT = 19990
@@ -19,8 +20,10 @@ installFakeRelaySocket({ port: BROWSER_PORT, token: TOKEN })
 await stub.chrome.storage.local.set({
   agentRelayDiscoveredPort: BROWSER_PORT,
   agentRelayTokens: {
-    // The most recently stored browse-range loopback token wins, not the default port's older one.
+    // The most recently stored browse-range loopback token wins, not the default port's older one nor this port's
+    // stale one: the token is a guess until the relay's proof accepts it.
     [`127.0.0.1:${STALE_PORT}`]: STALE_TOKEN,
+    [`127.0.0.1:${BROWSER_PORT}`]: STALE_OWN_TOKEN,
     [`127.0.0.1:${OTHER_PORT}`]: TOKEN,
     // Not a port browse listens on: a fallback must never send this one to a relay.
     "127.0.0.1:20000": "not-a-browse-port-token",

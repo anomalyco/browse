@@ -27,7 +27,6 @@ import fs from "node:fs"
 import path from "node:path"
 import { writePrivateJsonFileSync } from "../fs-durability.ts"
 import { dataRoot, stateRoot } from "../paths.ts"
-import { defaultPort } from "./helpers.ts"
 
 const legacyContext = "opencode-browser-pairing-v2"
 const context = "opencode-browser-pairing-v3"
@@ -130,7 +129,7 @@ export function recordPairingFailure(root = stateRoot(), now = Date.now()): bool
 export function writeExtensionPairing(extensionDirectory: string, code: string, port?: number): void {
   writePrivateJsonFileSync(path.join(extensionDirectory, extensionPairingFileName), {
     code,
-    ...(port === undefined || port === defaultPort ? {} : { port }),
+    ...(port === undefined ? {} : { port }),
   })
 }
 

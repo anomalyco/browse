@@ -4,7 +4,7 @@
 import { defaultRelayPort, isJsonObject, relayPortHint, relayPorts } from "../../agent-relay/protocol"
 import { probeRelayPort } from "../../agent-relay/probe"
 import { RELAY_ADDRESS_KEY, relayAddress } from "../../shared/protocol"
-import { DISCOVERED_KIND_KEY, DISCOVERED_PORT_KEY, PORT_KEY, TOKENS_KEY, type AgentRelayLog } from "./wire"
+import { DISCOVERED_KIND_KEY, DISCOVERED_PORT_KEY, PORT_KEY, PROVEN_PORT_KEY, TOKENS_KEY, type AgentRelayLog } from "./wire"
 
 /** Where the next connection dials. */
 export type RelayTarget = {
@@ -43,9 +43,16 @@ export async function scanRelayPorts(timeoutMs = PROBE_TIMEOUT_MS): Promise<numb
   return answers.filter((port): port is number => port !== undefined)
 }
 
-/** The port to move to: a port this browser holds a token for, else 19988, else the first browse answer. */
-export function chooseRelayPort(found: readonly number[], tokenFor: (port: number) => boolean): number | undefined {
-  return found.find((port) => tokenFor(port)) ?? (found.includes(defaultRelayPort) ? defaultRelayPort : found[0])
+/** The port to move to: the proven port, then a port with a token, then 19988, then the rest in dial order. */
+export function chooseRelayPort(
+  found: readonly number[],
+  options: { readonly proven?: number; readonly tokenFor: (port: number) => boolean },
+): number | undefined {
+  if (found.length === 0) return undefined
+  if (options.proven !== undefined && found.includes(options.proven)) return options.proven
+  const token = found.find(options.tokenFor)
+  if (token !== undefined) return token
+  return found.includes(defaultRelayPort) ? defaultRelayPort : found[0]
 }
 
 /**
@@ -60,21 +67,36 @@ export function createRelayDiscovery(deps: {
   readonly reconnect: (reason: string) => void
 }) {
   let lastScan = 0
+  /** Ports that answered /version but closed without the relay's proof since the last successful authentication. */
+  const unproven = new Set<number>()
 
   const scan = async (missed: () => void) => {
     const failed = deps.current().port
-    const stored = await chrome.storage.local.get([TOKENS_KEY, DISCOVERED_PORT_KEY, DISCOVERED_KIND_KEY])
+    const stored = await chrome.storage.local.get([TOKENS_KEY, DISCOVERED_PORT_KEY, DISCOVERED_KIND_KEY, PROVEN_PORT_KEY])
+    const proven = relayPortHint(stored[PROVEN_PORT_KEY])
     // A port only a scan found and no connection ever proved is a hint at best: forget it before looking again, so a
-    // listener that mimics browse's /version can't keep the next attempt on itself. Dialing falls back to 19988 until
-    // a scan finds something.
-    if (stored[DISCOVERED_KIND_KEY] !== "hint" && relayPortHint(stored[DISCOVERED_PORT_KEY]) === failed)
-      await chrome.storage.local.remove([DISCOVERED_PORT_KEY, DISCOVERED_KIND_KEY])
+    // listener that mimics browse's /version can't keep the next attempt on itself. A proven port is just restarting.
+    if (
+      failed !== proven &&
+      stored[DISCOVERED_KIND_KEY] !== "hint" &&
+      relayPortHint(stored[DISCOVERED_PORT_KEY]) === failed
+    ) await chrome.storage.local.remove([DISCOVERED_PORT_KEY, DISCOVERED_KIND_KEY])
     const found = await scanRelayPorts()
     // Every candidate refused, or none is browse (the usual "no relay is running"): keep the normal backoff.
     if (found.length === 0) return missed()
+    // Skip ports that failed their proof while others answered; the proven port is never skipped. If that excludes
+    // everything, one success since reset proves nothing about the rest, so start over with all of them.
+    let usable = found.filter((port) => port === proven || !unproven.has(port))
+    if (usable.length === 0) {
+      unproven.clear()
+      usable = [...found]
+    }
     const tokens = isJsonObject(stored[TOKENS_KEY]) ? stored[TOKENS_KEY] : {}
-    const next = chooseRelayPort(found, (port) => typeof tokens[`127.0.0.1:${port}`] === "string")
-    // The port that just failed answered as browse: it is already the right one, so back off and try it again later.
+    const next = chooseRelayPort(usable, {
+      proven,
+      tokenFor: (port) => typeof tokens[`127.0.0.1:${port}`] === "string",
+    })
+    // The port that just failed is already the right one: back off and try it again later.
     if (next === undefined || next === failed) return missed()
     deps.log.add("relay.discovery", { found: found.join(","), port: next })
     await chrome.storage.local.set({ [DISCOVERED_PORT_KEY]: next, [DISCOVERED_KIND_KEY]: "scan" })
@@ -82,17 +104,20 @@ export function createRelayDiscovery(deps: {
   }
 
   return {
+    /** A connection completed the relay's proof: no candidate is suspect anymore, and a close may scan at once. */
+    noteAuthenticated() {
+      unproven.clear()
+      lastScan = 0
+    },
     /**
      * A connection closed. Returns true when a scan was started: it reconnects on a find, or calls `missed` (the
-     * normal backoff) when nothing answered. Only a relay this browser actually authenticated keeps its port: an
-     * unauthenticated close, even after a challenge or a browse close code, may be someone else and stays eligible
-     * for a rate-limited scan. The pairing gate in handshake.ts stays the only thing that decides what is obeyed.
+     * normal backoff) when nothing answered. A port that closed without the proof stays suspect until a connection
+     * authenticates somewhere; the pairing gate in handshake.ts stays the only thing that decides what is obeyed.
      */
     afterClose(closed: { readonly trusted: boolean; readonly deliberate: boolean; readonly code: number }, missed: () => void): boolean {
       if (!deps.current().automatic) return false
-      // A connection that authenticated keeps its port; one this worker closed itself is simply reconnecting with
-      // new settings. Either way nothing failed to scan away from.
-      if (closed.trusted || closed.deliberate) return false
+      if (closed.deliberate) return false
+      if (!closed.trusted) unproven.add(deps.current().port)
       const now = Date.now()
       if (now - lastScan < SCAN_INTERVAL_MS) return false
       lastScan = now

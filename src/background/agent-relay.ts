@@ -31,7 +31,7 @@ import { AgentGroups } from "./agent-relay/groups"
 import { createRelayCommands } from "./agent-relay/commands"
 import { createRelayDebugger } from "./agent-relay/debugger"
 import { createRelayDiscovery, relayTarget } from "./agent-relay/discovery"
-import { defaultDiscovered, discoveredKeys, discoveredRelay, isDeliberateClose, shownRelayPort, trustDiscovered } from "./agent-relay/discovered"
+import { defaultDiscovered, discoveredKeys, discoveredRelay, isDeliberateClose, provenDiscovered, shownRelayPort } from "./agent-relay/discovered"
 import { createRelayGrouping } from "./agent-relay/grouping"
 import { createRelayHandshake } from "./agent-relay/handshake"
 import {
@@ -367,8 +367,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         if (socket === current) send({ method: "pong" })
       }, KEEPALIVE)
       connectedAt = Date.now()
-      // Only the discovered port this connection actually reached becomes shown as trusted.
-      discovered = trustDiscovered(discovered, Number(new URL(current.url).port))
+      discovered = provenDiscovered(discovered, port)
+      discovery.noteAuthenticated()
       setStatus(skew ? "incompatible" : "connected")
       // Only the newest connection gets this far (verify checks socket === current).
       handshake.settle(generation)
@@ -439,7 +439,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     host = target.host
     port = target.port
     automatic = target.automatic
-    discovered = discoveredRelay(stored, target.port)
+    discovered = discoveredRelay(stored)
     if (`${host}:${port}` !== previous) notify()
     if (socket && socket.readyState <= WebSocket.OPEN) return
     // Without a credential announce only the protocol and that pairing is needed. No identity, tabs or
