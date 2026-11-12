@@ -210,8 +210,9 @@ connection itself isn't encrypted by browse; use a network that is (Tailscale or
   tool when you ask them to (`node cli/dist/cli.mjs settings get`, `settings set grouping=shared` on the CLI); the
   options page follows at once. The security switches below are environment-only, never settings.
 - **Hand an agent one of your tabs** by clicking the toolbar button on it. The badge shows **ON**; click again to take
-  it back. While an agent works the badge reads **RUN**, and **WAIT** when it needs you. The button always works: a
-  click while a script runs takes the tab back and stops the script. Agents can't close a tab you lent them. The
+  it back. While an agent works the badge reads **RUN**, and **WAIT** when it needs you. If the relay isn't running yet
+  the badge shows **…** and the tab is handed over once an agent starts browse; click again to cancel. The button always
+  works: a click while a script runs takes the tab back and stops the script. Agents can't close a tab you lent them. The
   browser's debugging bar button (**Cancel** in Chrome, **OK** in some browsers like Dia) disconnects browse from
   every tab: tabs you lent go back to you, and tabs agents opened stay open until idle cleanup closes them. File pages
   need **Allow access to file URLs** for browse on its details page in `chrome://extensions`, and Chrome's own pages,
