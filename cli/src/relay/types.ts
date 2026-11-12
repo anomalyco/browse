@@ -51,8 +51,8 @@ export interface ExecuteSandboxLike {
   execute(code: string, options?: ExecuteOptions): Effect.Effect<ExecuteResult>
   authenticatedJson(request: Omit<AuthenticatedJsonRequest, "sessionId">): Effect.Effect<AuthenticatedJsonOutcome, Error>
   adoptPage(targetId: string): Effect.Effect<void, Error>
-  /** Stop a running script: its Playwright calls reject and its timers stop; the default tab is kept. */
-  abortExecution(): Effect.Effect<void, Error>
+  /** Stop a running script at once: its pending runs reject and its timers stop; the default tab is kept. */
+  stopRealm(): void
   /** Shutdown and handoff cancellation await disconnection without closing or forgetting the default tab. */
   disconnectSettled(): Effect.Effect<void, Error>
   /** Adoption rollback cleanup does not settle before started Playwright close promises settle. */

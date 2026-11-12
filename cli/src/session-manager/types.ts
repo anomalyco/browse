@@ -80,6 +80,12 @@ export type SessionHooks = {
   readonly onSessionsChanged?: (sessions: readonly PersistedSession[]) => unknown | Promise<unknown>
   /** Cancel the session's pending handoff so its waiter fails; true when one was pending. */
   readonly onCancelSessionHandoff?: (sessionId: string) => boolean
+  /**
+   * End any navigation still pending on the session's tabs before the stopped script's browser connection closes.
+   * Chromium handles `Page.stopLoading` in the browser process, so it answers (and releases queued commands) even
+   * while a `Page.navigate` to a server that never responds is still in flight.
+   */
+  readonly onStoppingExecute?: (session: OpenCodeBrowserSession) => Effect.Effect<void>
   /** How long a stopped script may take to settle before its sandbox is abandoned and the execute lock released. */
   readonly stopGraceMs?: number
 }

@@ -244,6 +244,8 @@ about 2 seconds; split heavy loops with
 
 `execute`'s `timeoutMs` (MCP) / `--timeout-ms` (CLI) is the whole-script
 deadline, 60 seconds by default and paused during `handoff()`; `0` disables it.
+It starts with the call, so time queued behind another execute on the session
+counts, and that other call's handoff doesn't pause it.
 When you set it (or the relay sets `OPENCODE_BROWSER_EXECUTE_TIMEOUT_MS`),
 Playwright actions and navigations get the same budget, at least 30 seconds;
 without either they keep Playwright's 30-second default.

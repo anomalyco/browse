@@ -299,6 +299,20 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       getUserAttachedPageUrls: (session) => registry.listRootTargets()
         .filter((target) => target.owner === "user" && browsers.ownerKey(target.tabId) === session.browser?.key)
         .map((target) => target.targetInfo.url || "about:blank"),
+      // A stopped script may be awaiting a navigation whose server never answers. The caller and the execute lock
+      // are released at once, but Chromium still has Page.navigate in flight on the tab and queues every
+      // renderer-bound command behind it (including the next execute's connectOverCDP), so end it browser-side.
+      // Only tabs the session owns: a tab it merely drove through target selection may be another session's or the user's.
+      onStoppingExecute: (session) => {
+        if (session.readOnly) return Effect.void
+        const tabs = registry.listRootTargets().filter((target) => target.opencodeBrowserSessionId === session.id)
+        if (tabs.length === 0) return Effect.void
+        return Effect.forEach(tabs, (target) =>
+          sendDebuggerCommand({ tabId: target.tabId, method: "Page.stopLoading", params: {} }).pipe(
+            Effect.timeoutOption("2 seconds"),
+            Effect.ignore,
+          ), { concurrency: "unbounded", discard: true })
+      },
       ...(executeTimeoutMs === undefined ? {} : { executeTimeoutMs }),
       onExecuteStateChange: (sessionId, executing) => Effect.gen(function* () {
         yield* presentation.onSessionExecuteStateChange(sessionId, executing)
