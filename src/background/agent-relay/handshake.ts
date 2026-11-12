@@ -1,5 +1,5 @@
 import { extensionProtocolVersion } from "../../../cli/src/protocol"
-import { defaultRelayPort, isJsonObject, relayPortHint } from "../../agent-relay/protocol"
+import { defaultRelayPort, isJsonObject, relayPortHint, relayPorts } from "../../agent-relay/protocol"
 import {
   BROWSER_NAME_KEY,
   RELAY_ADDRESS_KEY,
@@ -44,11 +44,19 @@ declare const __OPENCODE_BROWSER_BUILD__: string
 
 type PairingFile = { readonly code?: PairingCode; readonly port?: number }
 
-/** The token a loopback relay on another port may still accept: the most recently stored loopback one. */
+/**
+ * The token a loopback relay on another port may still accept: the default port's token when this browser has one,
+ * else the most recently stored loopback token for a port browse can listen on. Storing a token moves its key to the
+ * end (rememberToken), so insertion order is recency.
+ */
 function loopbackToken(tokens: Record<string, unknown>): string | undefined {
+  const direct = tokens[`127.0.0.1:${defaultRelayPort}`]
+  if (typeof direct === "string") return direct
   let found: string | undefined
   for (const [key, value] of Object.entries(tokens)) {
-    if (key.startsWith("127.0.0.1:") && typeof value === "string") found = value
+    if (!key.startsWith("127.0.0.1:") || typeof value !== "string") continue
+    if (!relayPorts.includes(Number(key.slice("127.0.0.1:".length)))) continue
+    found = value
   }
   return found
 }
@@ -150,14 +158,15 @@ export function createRelayHandshake(deps: {
     const { host, port } = deps.hostPort()
     const address = `${host}:${port}`
     const local = host === "127.0.0.1"
+    const automatic = deps.automatic()
     const stored = await chrome.storage.local.get([PAIRING_KEY, TOKENS_KEY, SPENT_KEY, CODE_PORT_KEY])
     const spent = new Set(Array.isArray(stored[SPENT_KEY]) ? (stored[SPENT_KEY] as unknown[]) : [])
     const tokens = isJsonObject(stored[TOKENS_KEY]) ? stored[TOKENS_KEY] : {}
     const own = typeof tokens[address] === "string" ? tokens[address] : undefined
-    const token = own ?? (local ? loopbackToken(tokens) : undefined)
+    // A fallback only moves an automatic connection to a browse port; an explicit port's token is its own key only.
+    const token = own ?? (local && automatic ? loopbackToken(tokens) : undefined)
     const entered = normalizePairingCode(stored[PAIRING_KEY])
     const file = local ? await pairingFile() : undefined
-    const automatic = deps.automatic()
     const usable = (code: PairingCode | undefined, here: boolean) =>
       here && code !== undefined && !spent.has(code.code) && !(code.legacy && token !== undefined)
     const next: Credential | undefined =
@@ -250,16 +259,21 @@ export function createRelayHandshake(deps: {
   }
 
   /**
-   * Stores this browser's token under the address it just connected to. A relay found on a new port keeps the token
-   * it already proved; the proof is bound to the port, so a wrong relay simply rejects it.
+   * Stores this browser's token under the address it just connected to. The key moves to the end so the next
+   * fallback prefers the token stored most recently. A relay found on a new port keeps the token it already proved;
+   * the proof is bound to the port, so a wrong relay simply rejects it.
    */
   const rememberToken = async (token: string) => {
     const { host, port } = deps.hostPort()
     const address = `${host}:${port}`
     const stored = await chrome.storage.local.get(TOKENS_KEY)
     const tokens = isJsonObject(stored[TOKENS_KEY]) ? stored[TOKENS_KEY] : {}
-    if (tokens[address] === token) return
-    await chrome.storage.local.set({ [TOKENS_KEY]: { ...tokens, [address]: token } })
+    const keys = Object.keys(tokens)
+    if (tokens[address] === token && keys[keys.length - 1] === address) return
+    // Delete-then-set in one write: a plain overwrite keeps the old key position, which would misreport recency.
+    const reordered = Object.fromEntries(Object.entries(tokens).filter(([key]) => key !== address))
+    reordered[address] = token
+    await chrome.storage.local.set({ [TOKENS_KEY]: reordered })
   }
 
   /**
@@ -405,10 +419,12 @@ export function createRelayHandshake(deps: {
     if (address === undefined) return { status: "invalid-address" }
     const code = codeInput.trim() === "" ? undefined : normalizePairingCode(codeInput)
     if (codeInput.trim() !== "" && code === undefined) return { status: "invalid-code" }
-    // Localhost with the port the worker is already on is this computer: saving the automatic address the form
-    // shows must not pin it, since a fallback relay may move again.
+    // Localhost with no port, or the automatic address the form shows for this computer while the connection is still
+    // automatic, is this computer: saving it must not pin it. An explicit port stays explicit, even when it happens to
+    // be the port now in use.
     const current = deps.hostPort()
-    const local = address.host === "127.0.0.1" && (address.port === undefined || address.port === current.port)
+    const local = address.host === "127.0.0.1" &&
+      (address.port === undefined || (deps.automatic() && address.port === current.port))
     const value = local ? "" : address.port ? `${address.host}:${address.port}` : address.host
     const before = await chrome.storage.local.get([RELAY_ADDRESS_KEY, PAIRING_KEY, PORT_KEY, DISCOVERED_PORT_KEY])
     const changed =
@@ -463,10 +479,11 @@ export function createRelayHandshake(deps: {
     // Reconnects through storage.onChanged, or here after the write (a hint can change while the code doesn't).
     await chrome.storage.local.set({
       [PAIRING_KEY]: code.code,
-      ...(port !== undefined ? { [DISCOVERED_PORT_KEY]: port, [CODE_PORT_KEY]: port } : {}),
+      // The port this code is for: never a later scan's, nor whatever port is in use when the code is tried.
+      [CODE_PORT_KEY]: port ?? defaultRelayPort,
+      ...(port !== undefined ? { [DISCOVERED_PORT_KEY]: port } : {}),
     })
-    if (port === undefined) await chrome.storage.local.remove(CODE_PORT_KEY)
-    else deps.resetAndConnect("pairing", "Pairing changed")
+    if (port !== undefined) deps.resetAndConnect("pairing", "Pairing changed")
     return true
   }
 

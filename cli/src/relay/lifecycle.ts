@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url"
 import { browserUnresponsive, extensionProtocolAdvice, extensionReconnectAlarmPeriodMs } from "../protocol.ts"
 import * as RelayClient from "./client.ts"
 import { relayLog } from "./log.ts"
-import { configuredRelayPort, processAlive, readRelayState, relayPortPinned } from "./port.ts"
+import { relayPortPinned } from "./port.ts"
 import { RelayShutdownRequest, type ExtensionStatus, type RelayVersion } from "./schema.ts"
 import { launchWindowsRelay, quoteWindowsArgument } from "./windows-launch.ts"
 import { compareVersions, installedRuntime, installedVersion } from "../update/auto-update.ts"
@@ -437,18 +437,12 @@ function isRelayStartingOrUnreachable(error: unknown): error is RelayClient.Rela
   return isRelayStarting(error) || isRelayUnreachable(error)
 }
 
-/** A live relay this install recorded, so its port is known to be browse's and a slow answer is not a foreign one. */
-function hasLiveRelayState(): boolean {
-  const state = readRelayState()
-  return state !== undefined && state.configuredPort === configuredRelayPort() && processAlive(state.pid)
-}
-
 /**
- * The port answered like another program (or never answered on a port this install didn't record). Without a pinned
- * port the relay may start, or move, to a fallback port; a pinned one keeps its hard error.
+ * The port answered like another program. Without a pinned port the relay may start, or move, to a fallback port; a
+ * pinned one keeps its hard error. A timeout is not foreign: a slow relay is still this install's relay, and starting
+ * a second one elsewhere would split state (relay/port.ts).
  */
 function isForeignListener(error: unknown, pinned?: boolean): boolean {
   if (pinned ?? relayPortPinned()) return false
-  if (error instanceof RelayClient.RelayDecodeFailed) return true
-  return error instanceof RelayClient.RelayTimedOut && !hasLiveRelayState()
+  return error instanceof RelayClient.RelayDecodeFailed
 }

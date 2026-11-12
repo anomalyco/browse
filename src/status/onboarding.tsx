@@ -22,12 +22,13 @@ import "./onboarding.css"
 
 // `browse install` opens the setup page with a one-time code in the fragment (welcome.html#code=…, which forwards
 // here), plus the relay's port when it isn't 19988, for a store build (cli/src/setup.ts pairStoreExtension). Take
-// them, then drop them from the URL (address bar and history) before anything else.
+// them, then drop the whole fragment from the URL (address bar and history) before anything else.
 const link = pairingLink(location.hash)
 let fragmentCode = link?.code
 const fragmentPort = link?.port
 const installTab = !!fragmentCode
-if (/^#(code|ticket|pair)=/.test(location.hash)) history.replaceState(null, "", location.pathname + location.search)
+if (link !== undefined || /^#(code|ticket|pair)=/.test(location.hash))
+  history.replaceState(null, "", location.pathname + location.search)
 
 const settingsUrl = () => chrome.runtime.getURL("settings.html")
 const AGENT_PROMPT = `Set up browse so you can use my Chrome: run ${installCommand}`

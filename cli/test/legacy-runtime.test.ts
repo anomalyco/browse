@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test"
 import { spawn, spawnSync } from "node:child_process"
 import fs from "node:fs"
+import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import { bundleCli } from "../bundle.ts"
@@ -119,7 +120,7 @@ describe("taking over the old self-managed runtime", () => {
     const token = path.join(home, ".local", "share", "browse", "relay-token")
     write(token, "stale\n", 0o600)
     const before = fs.readFileSync(path.join(oldData, "runtime", "current.json"), "utf8")
-    using busy = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ version: "0.0.15", instanceId: "another-relay" }) })
+    using busy = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") })
     const busyEnv: NodeJS.ProcessEnv = { OPENCODE_BROWSER_HOME: oldData, OPENCODE_BROWSER_PORT: String(busy.port) }
     expect(await prepareLegacyTakeover(legacyRuntime(home), { install: runtime, env: busyEnv, home })).toBe(false)
     const isolated: NodeJS.ProcessEnv = { OPENCODE_BROWSER_HOME: path.join(home, "isolated"), OPENCODE_BROWSER_PORT: String(await freePort()) }
@@ -144,7 +145,7 @@ describe("taking over the old self-managed runtime", () => {
     installBuild(packageDir, "0.0.16-dev.130")
     const record = path.join(oldData, "runtime", "current.json")
     const before = fs.readFileSync(record, "utf8")
-    using busy = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ version: "0.0.15", instanceId: "another-relay" }) })
+    using busy = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") })
     const serve = (port: number, options: { home?: string; args?: string[]; timeout?: number } = {}) =>
       spawnSync(node, [current, "serve", ...(options.args ?? [])], {
         encoding: "utf8",
@@ -276,13 +277,38 @@ describe("taking over the old self-managed runtime", () => {
     })
   })
 
-  test("a non-browse listener on the port doesn't block a takeover", async () => {
+  test("an unpinned relay only lets a definite non-browse listener through, never a slow or silent one", async () => {
     const { home, oldData, runtime } = oldRuntimeHome(homes)
-    // Playwriter and friends don't answer /version like browse: the relay can fall back (relay/port.ts), so a takeover
-    // must go ahead rather than being blocked by whatever holds the port.
+    // Playwriter and friends answer HTTP, just not browse's /version: the relay can fall back (relay/port.ts), so a
+    // takeover must go ahead rather than being blocked by whatever holds the port.
     using other = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("Not Found", { status: 404 }) })
-    const env: NodeJS.ProcessEnv = { OPENCODE_BROWSER_HOME: oldData, OPENCODE_BROWSER_PORT: String(other.port) }
-    expect(await prepareLegacyTakeover(legacyRuntime(home), { install: runtime, env, home })).toBe(true)
+    const env: NodeJS.ProcessEnv = { OPENCODE_BROWSER_HOME: oldData }
+    expect(await prepareLegacyTakeover(legacyRuntime(home), {
+      install: runtime,
+      env,
+      home,
+      relayPort: other.port!,
+      pinned: false,
+    })).toBe(true)
     expect(env.OPENCODE_BROWSER_HOME).toBeUndefined()
+
+    // A port that accepts but never answers HTTP is a doubt: takeover waits, exactly as for a busy one.
+    const { home: silentHome, oldData: silentData, runtime: silentRuntime } = oldRuntimeHome(homes)
+    const silent = net.createServer((socket) => socket.on("data", () => undefined))
+    await new Promise<void>((resolve) => silent.listen(0, "127.0.0.1", resolve))
+    const silentPort = (silent.address() as net.AddressInfo).port
+    try {
+      const silentEnv: NodeJS.ProcessEnv = { OPENCODE_BROWSER_HOME: silentData }
+      expect(await prepareLegacyTakeover(legacyRuntime(silentHome), {
+        install: silentRuntime,
+        env: silentEnv,
+        home: silentHome,
+        relayPort: silentPort,
+        pinned: false,
+      })).toBe(false)
+      expect(silentEnv.OPENCODE_BROWSER_HOME).toBe(silentData)
+    } finally {
+      silent.close()
+    }
   })
 })

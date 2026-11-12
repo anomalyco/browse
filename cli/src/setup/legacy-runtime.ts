@@ -10,10 +10,11 @@
 //            points current.json at it so running agents follow, then migrates (setup/migrate.ts): agents' entries
 //            become `browse mcp`, and the old folder goes after a grace period.
 import fs from "node:fs"
+import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import { compiledBinary, installerBinaryPath } from "../paths.ts"
-import { probeRelayPort, resolveRelayPort } from "../relay/port.ts"
+import { probeRelayPort, relayPortPinned, resolveRelayPort } from "../relay/port.ts"
 import { channelOf, installedRuntime, type Runtime } from "../update/auto-update.ts"
 import { opencodeBrowserVersion } from "../version.ts"
 import { insidePath, legacyRuntimeActive, samePath, type LegacyRuntime } from "./legacy.ts"
@@ -42,15 +43,22 @@ export async function prepareLegacyTakeover(legacy: LegacyRuntime | undefined, o
   readonly install?: Runtime | undefined
   readonly env?: NodeJS.ProcessEnv
   readonly home?: string
+  /** Tests inject the port and pin state so they never touch the real 19988–19997 range. */
+  readonly relayPort?: number
+  readonly pinned?: boolean
 } = {}): Promise<boolean> {
   const env = options.env ?? process.env
   const install = "install" in options ? options.install : currentInstall()
   if (!legacy || !legacyRuntimeActive(legacy) || !install || install.kind === "npx" || insidePath(install.entry, legacy.root)) return false
   // An isolated relay (its own OPENCODE_BROWSER_HOME) leaves the old runtime alone.
   if (env.OPENCODE_BROWSER_HOME && !samePath(env.OPENCODE_BROWSER_HOME, legacy.root)) return false
-  // Another browse relay holds the port: this one won't be the one that listens, so it mustn't take anything over.
-  // A foreign program there is not browse; an unpinned relay falls back to another port (relay/port.ts).
-  if (await probeRelayPort(Number(env.OPENCODE_BROWSER_PORT) || resolveRelayPort()) === "browse") return false
+  // Another relay holds the port: this one won't start, so it mustn't take anything over. Pinned keeps the old rule:
+  // anything listening blocks. Unpinned only lets a definite non-browse HTTP reply through, since the relay would then
+  // fall back (relay/port.ts); a probe that fails or times out is a port in use, not a free one.
+  const port = options.relayPort ?? (Number(env.OPENCODE_BROWSER_PORT) || resolveRelayPort())
+  if (options.pinned ?? relayPortPinned(env)) {
+    if (await portInUse(port)) return false
+  } else if (await probeRelayPort(port) !== "other") return false
   const home = options.home ?? os.homedir()
   const { copyLegacyData } = await import("./migrate.ts")
   // First, or the XDG paths the copy writes to would still resolve to the old folder.
@@ -121,6 +129,16 @@ function realpath(file: string) {
   } catch {
     return path.resolve(file)
   }
+}
+
+/** Whether something accepts connections on the relay port; anything but a refusal counts, so a doubt never takes over. */
+function portInUse(port: number) {
+  return new Promise<boolean>((resolve) => {
+    const socket = net.connect({ host: "127.0.0.1", port })
+    socket.setTimeout(1000, () => (socket.destroy(), resolve(true)))
+    socket.once("connect", () => (socket.destroy(), resolve(true)))
+    socket.once("error", (error: NodeJS.ErrnoException) => resolve(error.code !== "ECONNREFUSED"))
+  })
 }
 
 function writeAtomic(file: string, text: string, mode = 0o644) {

@@ -17,7 +17,7 @@ afterAll(() => {
   fs.rmSync(home, { recursive: true, force: true })
 })
 
-const version = { version: "0.0.15", buildId: "2026-11-06T00:00:00Z" }
+const version = { version: "0.0.15", buildId: "2026-11-06T00:00:00Z", instanceId: "relay-instance" }
 
 /** A relay whose nth /version answer arrives after `versionDelays[n]` test-clock seconds, and POSTs after `postSeconds`. */
 function fakeRelay(options: { readonly versionDelays: readonly (number | "never")[]; readonly postSeconds?: number }) {
@@ -76,11 +76,12 @@ describe("RelayClient read timeouts", () => {
   })
 
   test("a long write survives liveness checks that answer slowly", async () => {
-    // Every check during the 70 s write takes 12 s: the relay is busy, not frozen.
+    // The client verifies the endpoint once (the second /version), then every check during the 70 s write takes 12 s:
+    // the relay is busy, not frozen.
     const exit = await withRelay(
       fakeRelay({ versionDelays: [0, 12, 12, 12], postSeconds: 70 }),
       (client) => client.version.pipe(Effect.andThen(client.tabsCleanup())),
-      71,
+      83,
     )
     expect(exit).toMatchObject({ _tag: "Success", value: { closed: [] } })
   })

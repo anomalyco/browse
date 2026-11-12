@@ -1,6 +1,12 @@
 import { cliCommand } from "../paths.ts"
 import { defaultPort } from "./helpers.ts"
-import { endpointForPort, resolveRelayPort } from "./port.ts"
+import {
+  configuredRelayPort,
+  endpointForPort,
+  processAlive,
+  readRelayState,
+  resolveRelayPort,
+} from "./port.ts"
 import { relayAuthorization } from "./secrets.ts"
 import { NodeHttpClient } from "@effect/platform-node"
 import { Config, Context, Effect, Layer, Option, Schema } from "effect"
@@ -242,6 +248,13 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
     })
   }
 
+  const isRelayClientError = (error: unknown): error is RelayClientError =>
+    error instanceof RelayUnreachable ||
+    error instanceof RelayRejected ||
+    error instanceof RelayDecodeFailed ||
+    error instanceof RelayEncodeFailed ||
+    error instanceof RelayTimedOut
+
   // The relay rejects requests without this install's token (relay-secrets.ts). Read once it exists; a relay
   // started by this client creates it, so a failed read is retried on the next request.
   let authorization: string | undefined
@@ -259,20 +272,91 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
   // for its turn. Until this client has had any answer on the port, a stalled read means a frozen relay or another
   // program, and fails fast. Once the relay has answered, a stalled read is most likely a busy relay, so it waits longer.
   let relayAnswered = false
-  const execute = (request: HttpClientRequest.HttpClientRequest) =>
-    httpClient.execute(authorize(request)).pipe(Effect.tap(() => Effect.sync(() => { relayAnswered = true })))
   // The open version probe never carries the relay token (or this client's pid): another program holding the port
   // must not receive either. See `version` and the fallback probe in relay/port.ts.
-  const executeUnauthorized = (request: HttpClientRequest.HttpClientRequest) =>
-    httpClient.execute(request).pipe(Effect.tap(() => Effect.sync(() => { relayAnswered = true })))
+  const executeUnauthorized = (path: string, request: HttpClientRequest.HttpClientRequest) =>
+    httpClient.execute(request).pipe(
+      Effect.mapError(transportError(path)),
+      Effect.tap(() => Effect.sync(() => { relayAnswered = true })),
+    )
+
+  type VerifiedEndpoint = { readonly endpoint: string; readonly instanceId: string }
+  let verified: VerifiedEndpoint | undefined
+
+  const notBrowse = (endpoint: string, cause: unknown) =>
+    new RelayDecodeFailed({
+      message: `Relay port ${new URL(endpoint).port} is in use by another program (not a browse /version response).`,
+      path: "/version",
+      cause,
+    })
+
+  /** relay.json's instance when it names this endpoint and its process is alive; anything else isn't trusted. */
+  const recordedInstance = (endpoint: string): string | undefined => {
+    try {
+      const port = Number(new URL(endpoint).port)
+      const state = readRelayState()
+      if (!state || state.port !== port || state.configuredPort !== configuredRelayPort() || !processAlive(state.pid)) return undefined
+      return state.instanceId
+    } catch {
+      return undefined
+    }
+  }
+
+  // Bearer tokens only go to a port whose open /version proved it is this install's browse relay. Verified once per
+  // resolved endpoint (and instance), never for an endpoint that changed underneath this client.
+  const verifyEndpoint = (endpoint: string): Effect.Effect<VerifiedEndpoint, RelayClientError> =>
+    Effect.suspend(() => {
+      const seconds = relayAnswered ? busyRelayReadSeconds : unknownRelayReadSeconds
+      return executeUnauthorized("/version", HttpClientRequest.get(new URL("/version", endpoint))).pipe(
+        Effect.flatMap((response) => readBody(response, "/version").pipe(Effect.map((body) => ({ response, body })))),
+        Effect.flatMap(({ response, body }): Effect.Effect<VerifiedEndpoint, RelayClientError> => {
+          const reply = typeof body === "object" && body !== null ? body as Record<string, unknown> : undefined
+          if (
+            response.status !== 200 ||
+            typeof reply?.version !== "string" ||
+            typeof reply.instanceId !== "string"
+          ) return Effect.fail(notBrowse(endpoint, body))
+          const recorded = recordedInstance(endpoint)
+          if (recorded !== undefined && recorded !== reply.instanceId) return Effect.fail(notBrowse(endpoint, body))
+          return Effect.succeed({ endpoint, instanceId: reply.instanceId })
+        }),
+        Effect.timeoutOrElse({
+          duration: `${seconds} seconds`,
+          orElse: () => Effect.fail(new RelayTimedOut({
+            message: `The relay on port ${new URL(endpoint).port} isn't answering (/version timed out after ${seconds}s).`, path: "/version",
+          })),
+        }),
+      )
+    })
+
+  const ensureVerified = (endpoint: string): Effect.Effect<void, RelayClientError> => {
+    // Cached per endpoint and instance: a restart on the same port changes relay.json's instance and forces a probe.
+    const recorded = recordedInstance(endpoint)
+    if (verified?.endpoint === endpoint && (recorded === undefined || recorded === verified.instanceId)) return Effect.void
+    return verifyEndpoint(endpoint).pipe(Effect.tap((value) => Effect.sync(() => { verified = value })), Effect.asVoid)
+  }
+
+  /** A request that carries the relay token, after this endpoint proved itself. A transport failure drops the proof. */
+  const executeAuthorized = (path: string, request: HttpClientRequest.HttpClientRequest) =>
+    Effect.suspend(() => {
+      const endpoint = currentEndpoint()
+      return ensureVerified(endpoint).pipe(
+        Effect.flatMap(() => httpClient.execute(authorize(request))),
+        Effect.mapError((error) => isRelayClientError(error) ? error : transportError(path)(error)),
+        Effect.tap(() => Effect.sync(() => { relayAnswered = true })),
+        Effect.tapError((error) => Effect.sync(() => {
+          if (error instanceof RelayUnreachable && verified?.endpoint === endpoint) verified = undefined
+        })),
+      )
+    })
 
   const getJson = <A>(path: string, schema: Schema.ConstraintDecoder<A>): Effect.Effect<A, RelayClientError> =>
     Effect.suspend(() => {
       const endpoint = currentEndpoint()
       const seconds = relayAnswered ? busyRelayReadSeconds : unknownRelayReadSeconds
-      const send = path === "/version" ? executeUnauthorized : execute
-      return send(HttpClientRequest.get(new URL(path, endpoint))).pipe(
-        Effect.mapError(transportError(path)),
+      const request = HttpClientRequest.get(new URL(path, endpoint))
+      const send = path === "/version" ? executeUnauthorized(path, request) : executeAuthorized(path, request)
+      return send.pipe(
         Effect.flatMap((response) => handleResponse(response, path, schema)),
         Effect.timeoutOrElse({ duration: `${seconds} seconds`, orElse: () => Effect.fail(new RelayTimedOut({
           message: `The relay on port ${new URL(endpoint).port} isn't answering (${path} timed out after ${seconds}s).`, path,
@@ -295,8 +379,7 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
       path,
       cause,
     })),
-    Effect.flatMap((request) => execute(request).pipe(
-      Effect.mapError(transportError(path)),
+    Effect.flatMap((request) => executeAuthorized(path, request).pipe(
       Effect.flatMap((response) => handleResponse(response, path, schema)),
       Effect.raceFirst(checkWhileWaiting),
     )),
@@ -323,10 +406,22 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
     get endpoint() {
       return currentEndpoint()
     },
-    version: getJson("/version", RelayVersion).pipe(Effect.mapError((error) =>
-      error instanceof RelayDecodeFailed || (error instanceof RelayRejected && !error.code && error.status === 404)
-        ? new RelayDecodeFailed({ message: `Relay port ${new URL(currentEndpoint()).port} is in use by another program (not a browse /version response).`, path: "/version", cause: error })
-        : error)),
+    version: getJson("/version", RelayVersion).pipe(
+      // Another product on the port (Playwriter answers `{ version }` alone): without browse's instanceId this is not
+      // a browse relay, and must never be mistaken for one. Same path as any other foreign listener.
+      Effect.flatMap((version): Effect.Effect<RelayVersion, RelayClientError> =>
+        typeof version.instanceId === "string"
+          ? Effect.succeed(version)
+          : Effect.fail(new RelayDecodeFailed({
+            message: `Relay port ${new URL(currentEndpoint()).port} is in use by another program (not a browse /version response).`,
+            path: "/version",
+            cause: version,
+          }))),
+      Effect.mapError((error) =>
+        error instanceof RelayDecodeFailed || (error instanceof RelayRejected && !error.code && error.status === 404)
+          ? new RelayDecodeFailed({ message: `Relay port ${new URL(currentEndpoint()).port} is in use by another program (not a browse /version response).`, path: "/version", cause: error })
+          : error),
+    ),
     shutdown: (request) => postJson("/shutdown", { ...request }, RelayShutdownResponse),
     extensionStatus: getJson("/extension/status", ExtensionStatus),
     targets: getJson("/json/list", TargetSummaries),

@@ -804,7 +804,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   })
 
   const cleanup = Effect.fnUntraced(function* () {
-    yield* Effect.sync(() => removeRelayState(browserId))
+    yield* Effect.sync(() => removeRelayState(browserId, stateRoot(), configuredPort))
     stopTimers()
     autoUpdater?.stop()
     yield* shutdownControl.close().pipe(Effect.ignore)

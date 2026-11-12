@@ -81,6 +81,8 @@ test("a code is never sent to a port only a scan found", async () => {
 test("a link that names the port lets the code go there", async () => {
   const before = socketsAt(BROWSER_PORT).length
   expect(await relay.pairLink(CODE, BROWSER_PORT)).toBe(true)
+  // One write records the code and the port it is for; there is no moment where the code exists without its port.
+  expect((await stub.chrome.storage.local.get("agentRelayCodePort")).agentRelayCodePort).toBe(BROWSER_PORT)
   await until(() => socketsAt(BROWSER_PORT).length > before)
   const hinted = socketsAt(BROWSER_PORT).at(-1)!
   await until(() => hinted.sent.some((data) => JSON.parse(data).method === "hello"))

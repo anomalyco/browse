@@ -22,7 +22,7 @@ import { runCommand } from "../update/auto-update.ts"
 import { unpackedExtensionId } from "../protocol.ts"
 import { parseHostname, readRelayConfig, writeRelayConfig } from "../relay/config.ts"
 import { defaultPort } from "../relay/helpers.ts"
-import { configuredRelayPort, endpointForPort, resolveRelayPort } from "../relay/port.ts"
+import { configuredRelayPort, endpointForPort, resolveRelayPort, verifiedRelayEndpoint } from "../relay/port.ts"
 import { relayAuthorization } from "../relay/secrets.ts"
 import { defaultSiteSecretsDir } from "../auth/site-secrets.ts"
 import { opencodeBrowserBuildId } from "../version.ts"
@@ -70,6 +70,30 @@ const relayHeaders = (): Record<string, string> => {
   }
 }
 
+/**
+ * A setup request that may carry the relay token, sent only to an endpoint whose open /version proved it is a browse
+ * relay (and, when relay.json is trusted, the same instance). Undefined otherwise: another program holding the port
+ * never receives the token, and callers treat it as "no relay".
+ */
+async function relayRequest(
+  path: string,
+  options: {
+    readonly method?: string
+    readonly body?: string
+    readonly headers?: Record<string, string>
+    readonly timeoutMs?: number
+  } = {},
+): Promise<Response | undefined> {
+  const endpoint = await verifiedRelayEndpoint()
+  if (endpoint === undefined) return undefined
+  return fetch(`${endpoint}${path}`, {
+    ...(options.method === undefined ? {} : { method: options.method }),
+    ...(options.body === undefined ? {} : { body: options.body }),
+    headers: { ...relayHeaders(), ...options.headers },
+    signal: AbortSignal.timeout(options.timeoutMs ?? 3_000),
+  }).catch(() => undefined)
+}
+
 export function ensureRelay(entry: string) {
   const [file, ...prefix] = entrySpawnCommand(entry)
   const started = spawnSync(file!, [...prefix, "session", "list", "--json"], {
@@ -80,13 +104,18 @@ export function ensureRelay(entry: string) {
     fail(started.stderr?.trim() || `Couldn't reach the browse relay: ${started.error?.message || `run ${cliCommand("doctor")}`}`)
 }
 
-export const extensionStatus = (installWaiting = false) =>
-  fetch(`${relayBase()}/extension/status`, {
-    headers: { ...relayHeaders(), ...(installWaiting ? { "x-browse-install": "waiting" } : {}) },
-    signal: AbortSignal.timeout(3_000),
+export const extensionStatus = async (installWaiting = false) => {
+  const response = await relayRequest("/extension/status", {
+    headers: installWaiting ? { "x-browse-install": "waiting" } : {},
+    timeoutMs: 3_000,
   })
-    .then((response) => (response.ok ? (response.json() as Promise<ExtensionStatus>) : undefined))
-    .catch(() => undefined)
+  if (!response?.ok) return undefined
+  try {
+    return (await response.json()) as ExtensionStatus
+  } catch {
+    return undefined
+  }
+}
 
 /** The extension connected to the relay, if any; a relay restarted moments ago waits a second or two for it. */
 export async function settledExtensionStatus(entry: string) {
@@ -113,15 +142,12 @@ export async function reloadOutdatedExtension(
   if (before.origin !== `chrome-extension://${unpackedExtensionId}`) return "current"
   const bundled = readJson<{ build?: string }>(path.join(folder, "build.json"))?.build
   if (bundled && before.build === bundled) return "current"
-  const sent = await fetch(`${relayBase()}/extension/reload`, {
+  const sent = (await relayRequest("/extension/reload", {
     method: "POST",
     body: "{}",
-    headers: { "content-type": "application/json", ...relayHeaders() },
-    signal: AbortSignal.timeout(5_000),
-  }).then(
-    (response) => response.ok,
-    () => false,
-  )
+    headers: { "content-type": "application/json" },
+    timeoutMs: 5_000,
+  }))?.ok === true
   if (!sent) return "stale"
   for (let attempt = 0; attempt < 20; attempt++) {
     await new Promise((resolve) => setTimeout(resolve, 500))
@@ -268,15 +294,20 @@ async function revokePairing(target: string | undefined) {
     return
   }
   // A running relay drops its connection now; any later connection fails pairing anyway.
-  const dropped = await fetch(`${relayBase()}/extension/revoke`, {
+  const response = await relayRequest("/extension/revoke", {
     method: "POST",
     body: JSON.stringify({ key: browser.key }),
-    headers: { "content-type": "application/json", ...relayHeaders() },
-    signal: AbortSignal.timeout(3_000),
-  }).then(
-    async (response) => (response.ok ? ((await response.json()) as { dropped?: boolean }).dropped === true : false),
-    () => false,
-  )
+    headers: { "content-type": "application/json" },
+    timeoutMs: 3_000,
+  })
+  let dropped = false
+  if (response?.ok) {
+    try {
+      dropped = ((await response.json()) as { dropped?: boolean }).dropped === true
+    } catch {
+      dropped = false
+    }
+  }
   log(
     `✓ Unpaired ${browser.id ?? browser.key}${dropped ? " and disconnected it" : ""}. To use it again, pair it with a new code.`,
   )
@@ -306,6 +337,9 @@ export async function set(args: string[]) {
       log(`! The relay is still running with the old hostname. Run \`${cliCommand("relay restart --force")}\` to apply it.`)
   }
   if (hostname === "127.0.0.1") return
+  // Like install --remote: start the relay when it wasn't running, then read the port it actually bound (a fallback).
+  ensureRelay(readJson<Settings>(files.settings)?.entry ?? runningEntry())
+  const port = resolveRelayPort()
   const tailscale = Object.values(networkInterfaces())
     .flat()
     .find((address) => address?.family === "IPv4" && /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(address.address))
@@ -315,7 +349,6 @@ export async function set(args: string[]) {
     "In the browser on the other computer, open browse's options (right-click its toolbar button, then Options),",
   )
   log("and under advanced enter:")
-  const port = resolveRelayPort()
   log(`  Relay         ${(tailscale ?? "this computer's address") + (port === defaultPort ? "" : `:${port}`)}`)
   log(
     `  Pairing code  ${formatPairingCode(mintPairingCode())}  (works once, within ${pairingCodeTtlMs / 60_000} minutes; \`${cliCommand("pair")}\` prints another)`,
@@ -366,7 +399,10 @@ async function stopInstalledRelay() {
   })
   if (!ours) return
   if (relay.shutdownProtocol !== 2) throw new Error("Stop the legacy relay manually, then run uninstall again.")
-  const response = await fetch(`${base}/shutdown`, {
+  // The token only goes to a port whose open /version proved it is this install's relay (relay/port.ts).
+  const endpoint = await verifiedRelayEndpoint()
+  if (endpoint === undefined) throw new Error("Could not verify the running relay; stop it manually, then run uninstall again.")
+  const response = await fetch(`${endpoint}/shutdown`, {
     method: "POST", redirect: "error", headers: { ...relayHeaders(), "content-type": "application/json" }, signal: AbortSignal.timeout(15_000),
     body: JSON.stringify({ instanceId: relay.instanceId, requestId: randomUUID(), reason: "explicit-restart", force: true,
       client: { kind: "cli", instanceId: randomUUID(), buildId: opencodeBrowserBuildId } }),

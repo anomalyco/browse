@@ -47,7 +47,7 @@ describe("CLI process exit codes and session defaults", () => {
   test("pair reports a running relay build mismatch, not a startup failure", async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-pair-mismatch-"))
     const relay = Bun.serve({ hostname: "127.0.0.1", port: await unusedPort(), fetch: () =>
-      Response.json({ version: "0.0.1", buildId: "2026-01-01T00:00:00Z" }) })
+      Response.json({ version: "0.0.1", buildId: "2026-01-01T00:00:00Z", instanceId: "older-build" }) })
     try {
       const result = await execFileAsync(process.execPath, [cliEntry, "pair"], {
         env: { ...process.env, HOME: home, OPENCODE_BROWSER_HOME: home, OPENCODE_BROWSER_PORT: String(relay.port) }, timeout: 5000,
@@ -130,7 +130,7 @@ describe("CLI process exit codes and session defaults", () => {
       req.on("end", () => {
         res.setHeader("content-type", "application/json")
         if (req.url === "/version") {
-          res.end(JSON.stringify({ version: opencodeBrowserVersion, buildId: opencodeBrowserBuildId }))
+          res.end(JSON.stringify({ version: opencodeBrowserVersion, buildId: opencodeBrowserBuildId, instanceId: "contract-relay" }))
           return
         }
         if (req.url === "/extension/status") {

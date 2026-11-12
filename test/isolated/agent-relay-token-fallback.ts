@@ -16,7 +16,11 @@ installFakeRelaySocket({ port: BROWSER_PORT, token: TOKEN })
 
 await stub.chrome.storage.local.set({
   agentRelayDiscoveredPort: BROWSER_PORT,
-  agentRelayTokens: { [`127.0.0.1:${OLD_PORT}`]: TOKEN },
+  agentRelayTokens: {
+    [`127.0.0.1:${OLD_PORT}`]: TOKEN,
+    // Not a port browse listens on: a fallback must never send this one to a relay.
+    "127.0.0.1:20000": "not-a-browse-port-token",
+  },
 })
 const { createAgentRelay } = await import("../../src/background/agent-relay")
 const relay = createAgentRelay({ changed: () => {}, badgesChanged: () => {} })
@@ -29,9 +33,10 @@ async function until(check: () => boolean) {
 test("a relay on a new loopback port keeps the token this browser had", async () => {
   await until(() => relay.state().status === "connected")
   expect(relay.state().pairing).toBe("token")
-  // Stored under the new key too, with the original entry untouched.
+  // Stored under the new key too, with the original entries untouched and the non-browse token unused.
   expect(await stored("agentRelayTokens")).toEqual({
     [`127.0.0.1:${OLD_PORT}`]: TOKEN,
+    "127.0.0.1:20000": "not-a-browse-port-token",
     [`127.0.0.1:${BROWSER_PORT}`]: TOKEN,
   })
 })

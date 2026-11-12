@@ -5,8 +5,8 @@
 // listen port changes: another product (Playwriter) also uses 19988, and an unpinned relay steps to the next free
 // browse port instead of failing onboarding. The extension learns the listen port when it pairs.
 //
-// <state root>/relay.json records the port the running relay actually bound. Clients resolve through it so a CLI or
-// MCP server started after a fallback finds the relay. It never holds the relay token.
+// <state root>/relays/<configured port>/relay.json records the port the running relay actually bound. Clients resolve
+// through it so a CLI or MCP server started after a fallback finds the relay. It never holds the relay token.
 import fs from "node:fs"
 import net from "node:net"
 import path from "node:path"
@@ -19,18 +19,18 @@ export const fallbackPorts = [19990, 19991, 19992, 19993, 19994, 19995, 19996, 1
 
 export const endpointForPort = (port: number): string => `http://127.0.0.1:${port}`
 
-function envPort(): number | undefined {
-  const raw = process.env.OPENCODE_BROWSER_PORT
+function envPort(env: NodeJS.ProcessEnv = process.env): number | undefined {
+  const raw = env.OPENCODE_BROWSER_PORT
   if (raw === undefined || raw.trim() === "") return undefined
   const port = Number(raw)
   return Number.isSafeInteger(port) && port > 0 && port < 65_536 ? port : undefined
 }
 
 /** The port this install is configured for: OPENCODE_BROWSER_PORT, else 19988. State paths and keys use this one. */
-export const configuredRelayPort = (): number => envPort() ?? defaultPort
+export const configuredRelayPort = (env: NodeJS.ProcessEnv = process.env): number => envPort(env) ?? defaultPort
 
 /** Whether OPENCODE_BROWSER_PORT pins the relay to one port, with no fallback. */
-export const relayPortPinned = (): boolean => envPort() !== undefined
+export const relayPortPinned = (env: NodeJS.ProcessEnv = process.env): boolean => envPort(env) !== undefined
 
 const isPort = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value < 65_536
@@ -38,7 +38,7 @@ const isPort = (value: unknown): value is number =>
 const isPositiveInt = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value > 0
 
-/** What the running relay recorded in <state root>/relay.json. */
+/** What the running relay recorded in <state root>/relays/<configured port>/relay.json. */
 export type RelayState = {
   /** The port the relay actually bound. */
   readonly port: number
@@ -49,11 +49,15 @@ export type RelayState = {
   readonly startedAt: string
 }
 
-export const relayStatePath = (root = stateRoot()): string => path.join(root, "relay.json")
+export const relayStatePath = (root = stateRoot(), configuredPort = configuredRelayPort()): string =>
+  path.join(root, "relays", String(configuredPort), "relay.json")
 
-export function readRelayState(root = stateRoot()): RelayState | undefined {
+export function readRelayState(
+  root = stateRoot(),
+  configuredPort = configuredRelayPort(),
+): RelayState | undefined {
   try {
-    const value = JSON.parse(fs.readFileSync(relayStatePath(root), "utf8")) as Partial<RelayState> | null
+    const value = JSON.parse(fs.readFileSync(relayStatePath(root, configuredPort), "utf8")) as Partial<RelayState> | null
     if (!value || !isPort(value.port) || !isPort(value.configuredPort) || !isPositiveInt(value.pid)) return undefined
     if (typeof value.instanceId !== "string" || typeof value.startedAt !== "string") return undefined
     return {
@@ -69,15 +73,19 @@ export function readRelayState(root = stateRoot()): RelayState | undefined {
 }
 
 export function writeRelayState(state: RelayState, root = stateRoot()): void {
-  writePrivateJsonFileSync(relayStatePath(root), state, { ensureParent: true })
+  writePrivateJsonFileSync(relayStatePath(root, state.configuredPort), state, { ensureParent: true })
 }
 
 /** Removes the file only when it still describes the instance that is shutting down. */
-export function removeRelayState(instanceId: string, root = stateRoot()): void {
-  const state = readRelayState(root)
+export function removeRelayState(
+  instanceId: string,
+  root = stateRoot(),
+  configuredPort = configuredRelayPort(),
+): void {
+  const state = readRelayState(root, configuredPort)
   if (!state || state.instanceId !== instanceId) return
   try {
-    fs.rmSync(relayStatePath(root), { force: true })
+    fs.rmSync(relayStatePath(root, state.configuredPort), { force: true })
   } catch {}
 }
 
@@ -102,18 +110,16 @@ export function resolveRelayPort(root = stateRoot()): number {
   return defaultPort
 }
 
-const isFallbackPort = (port: number): boolean => port === defaultPort || (fallbackPorts as readonly number[]).includes(port)
-
-/** The ports an unpinned relay tries, in order: the last fallback (sticky), then 19988, then 19990–19997. */
-export function relayPortCandidates(configuredPort = configuredRelayPort(), root = stateRoot()): number[] {
-  const state = readRelayState(root)
-  const sticky = state && state.configuredPort === configuredPort && isFallbackPort(state.port) ? [state.port] : []
-  return [...new Set([...sticky, configuredPort, ...fallbackPorts])]
+/** The ports an unpinned relay tries, in order: the configured port, then 19990–19997. */
+export function relayPortCandidates(configuredPort = configuredRelayPort()): number[] {
+  return [...new Set([configuredPort, ...fallbackPorts])]
 }
 
 export type RelayPortOwner = "browse" | "other" | "nobody"
 
-const browseVersion = (body: unknown): boolean =>
+type BrowseVersion = { readonly version: string; readonly instanceId: string }
+
+const browseVersion = (body: unknown): body is BrowseVersion =>
   typeof body === "object" && body !== null &&
   typeof (body as { version?: unknown }).version === "string" &&
   typeof (body as { instanceId?: unknown }).instanceId === "string"
@@ -138,6 +144,53 @@ export async function probeRelayPort(port: number, timeoutMs = 500): Promise<Rel
   } catch {
     return "nobody"
   }
+}
+
+/** A browse relay's own `/version` answer on `port`, or undefined for anything else. Never carries credentials. */
+async function browseVersionAt(port: number, timeoutMs: number): Promise<BrowseVersion | undefined> {
+  try {
+    const response = await fetch(`${endpointForPort(port)}/version`, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    if (response.status !== 200) return undefined
+    const body: unknown = await response.json().catch(() => undefined)
+    return browseVersion(body) ? body : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The running browse relay's endpoint, proven before any caller attaches the relay token: its open `/version` must
+ * have browse's shape, and when relay.json is trusted for that port, the same instanceId. Undefined otherwise, which
+ * every caller treats as "no relay" — another program on the port must never receive the token.
+ */
+export async function verifiedRelayEndpoint(
+  options: { readonly root?: string; readonly timeoutMs?: number } = {},
+): Promise<string | undefined> {
+  const root = options.root ?? stateRoot()
+  const port = resolveRelayPort(root)
+  const state = readRelayState(root)
+  const trusted = state !== undefined && state.port === port && state.configuredPort === configuredRelayPort() && processAlive(state.pid)
+    ? state
+    : undefined
+  const version = await browseVersionAt(port, options.timeoutMs ?? 3_000)
+  if (!version) return undefined
+  if (trusted && version.instanceId !== trusted.instanceId) return undefined
+  return endpointForPort(port)
+}
+
+/** A live relay recorded in relay.json for `configuredPort`, still answering as the same browse instance. */
+async function liveRecordedRelay(
+  configuredPort: number,
+  root: string,
+  timeoutMs: number,
+): Promise<RelayState | undefined> {
+  const state = readRelayState(root, configuredPort)
+  if (!state || state.configuredPort !== configuredPort || !processAlive(state.pid)) return undefined
+  const version = await browseVersionAt(state.port, timeoutMs)
+  return version?.instanceId === state.instanceId ? state : undefined
 }
 
 /** "19988, 19990-19997" */
@@ -171,24 +224,36 @@ export type ChooseRelayPortOptions = {
   /** Replaces the built-in list. Tests pass free ports so they never touch the real 19988–19997 range. */
   readonly candidates?: readonly number[]
   readonly probeTimeoutMs?: number
+  readonly root?: string
 }
+
+const alreadyInUse = (host: string, port: number) =>
+  new Error(`listen EADDRINUSE: address already in use ${host}:${port}`)
 
 /**
  * The listen port for this relay. Pinned returns the configured port untouched (the listen then fails as before when
- * it is taken). Unpinned tries each candidate: a free one wins; one held by a browse relay stops the start, so an
- * install never runs a second relay elsewhere; one held by another program moves on.
+ * it is taken). Unpinned first refuses to run beside the relay.json instance that is still live here, then tries each
+ * candidate: a free one wins; one held by a browse relay stops the start, so an install never runs a second relay
+ * elsewhere; one held by another HTTP server moves on. A port that can't be bound but doesn't answer HTTP is in use by
+ * something else: the start stops there too, rather than racing a slow relay with a second one.
  */
 export async function chooseRelayPort(options: ChooseRelayPortOptions = {}): Promise<number> {
   const configuredPort = options.configuredPort ?? configuredRelayPort()
   const pinned = options.pinned ?? relayPortPinned()
   if (pinned) return configuredPort
   const host = options.host ?? "127.0.0.1"
+  const root = options.root ?? stateRoot()
   const candidates = options.candidates ?? relayPortCandidates(configuredPort)
+  const probeTimeoutMs = options.probeTimeoutMs ?? 500
+  const recorded = await liveRecordedRelay(configuredPort, root, probeTimeoutMs)
+  if (recorded) throw alreadyInUse(host, recorded.port)
   for (const port of candidates) {
     if (await canListen(host, port)) return port
-    if (await probeRelayPort(port, options.probeTimeoutMs) === "browse") {
-      throw new Error(`listen EADDRINUSE: address already in use ${host}:${port}`)
-    }
+    const owner = await probeRelayPort(port, probeTimeoutMs)
+    if (owner === "browse") throw alreadyInUse(host, port)
+    // A definite non-browse HTTP server leaves the port to it. No answer at all is a port something holds that isn't
+    // HTTP: starting a relay elsewhere would leave two relays with two sets of state.
+    if (owner === "nobody") throw alreadyInUse(host, port)
   }
   throw new Error(
     `browse relay ports ${portListText(candidates)} are all in use. Set OPENCODE_BROWSER_PORT to a free port, or stop the program holding them.`,

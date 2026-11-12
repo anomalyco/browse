@@ -1,12 +1,23 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import fs from "node:fs"
+import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import { NodeHttpClient } from "@effect/platform-node"
 import { Effect } from "effect"
 import * as RelayClient from "../src/relay/client.ts"
-import { chooseRelayPort, probeRelayPort, readRelayState, relayStatePath } from "../src/relay/port.ts"
+import { ensureRelay, restartRelay } from "../src/relay/lifecycle.ts"
+import {
+  chooseRelayPort,
+  endpointForPort,
+  probeRelayPort,
+  readRelayState,
+  relayPortCandidates,
+  relayStatePath,
+  writeRelayState,
+} from "../src/relay/port.ts"
 import { startRelay } from "../src/relay.ts"
+import { extensionStatus } from "../src/setup/commands.ts"
 import { relayToken } from "../src/relay/secrets.ts"
 import { freePort } from "./support/ports.ts"
 
@@ -61,6 +72,8 @@ describe("relay port fallback", () => {
         configuredPort: 19988,
         pid: process.pid,
       })
+      // State is per configured port, next to that port's lifecycle log, and never the token.
+      expect(relayStatePath()).toBe(path.join(home, "relays", "19988", "relay.json"))
       expect(fs.statSync(relayStatePath()).mode & 0o777).toBe(0o600)
 
       // A client with no pinned port resolves the fallback through relay.json.
@@ -108,6 +121,220 @@ describe("relay port fallback", () => {
     expect(sessions?.authorization).toStartWith("Bearer ")
     expect(sessions?.pid).toBe(String(process.pid))
   }, 30_000)
+
+  test("a version-only listener is another program: version() rejects it and ensureRelay starts past it", async () => {
+    const held = await freePortOutsideBrowseRange()
+    const fallback = await freePortOutsideBrowseRange()
+    let mine = false
+    const instanceId = "browse-after-start"
+    // Playwriter's relay answers GET /version with just `{ version }`.
+    using other = Bun.serve({
+      hostname: "127.0.0.1",
+      port: held,
+      fetch: (request) => new URL(request.url).pathname === "/version"
+        ? Response.json(mine ? { version: "9.9.9", instanceId } : { version: "0.10.0" })
+        : Response.json({ error: "unauthorized" }, { status: 401 }),
+    })
+    // A definite non-browse reply is what lets the relay move to a fallback port.
+    expect(await chooseRelayPort({ configuredPort: held, pinned: false, candidates: [held, fallback] })).toBe(fallback)
+    await Effect.runPromise(Effect.gen(function* () {
+      const client = yield* RelayClient.make({ endpoint: endpointForPort(held) })
+      const failure = yield* Effect.result(client.version)
+      expect(failure._tag).toBe("Failure")
+      if (failure._tag === "Failure") expect(failure.failure).toBeInstanceOf(RelayClient.RelayDecodeFailed)
+      let started = 0
+      const readiness = yield* ensureRelay({
+        relay: client,
+        start: Effect.sync(() => {
+          started++
+          mine = true
+        }),
+        retryTimes: 20,
+        retryDelayMs: 10,
+      })
+      expect(started).toBe(1)
+      expect(readiness.started).toBe(true)
+      expect(readiness.version.instanceId).toBe(instanceId)
+      expect(readiness.buildProblem).toBeString()
+    }).pipe(Effect.provide(NodeHttpClient.layerNodeHttp)))
+  }, 30_000)
+
+  test("an unpinned relay refuses to start beside a live relay.json instance", async () => {
+    const configuredPort = await freePortOutsideBrowseRange()
+    const actualPort = await freePortOutsideBrowseRange()
+    const free = await freePortOutsideBrowseRange()
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "browse-relay-state-"))
+    using live = Bun.serve({
+      hostname: "127.0.0.1",
+      port: actualPort,
+      fetch: () => Response.json({ version: "9.9.9", instanceId: "recorded-instance" }),
+    })
+    try {
+      writeRelayState({
+        port: actualPort,
+        configuredPort,
+        pid: process.pid,
+        instanceId: "recorded-instance",
+        startedAt: new Date().toISOString(),
+      }, root)
+      expect(relayStatePath(root, configuredPort)).toBe(path.join(root, "relays", String(configuredPort), "relay.json"))
+      await expect(chooseRelayPort({ configuredPort, pinned: false, candidates: [free], root })).rejects.toThrow(
+        `listen EADDRINUSE: address already in use 127.0.0.1:${actualPort}`,
+      )
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  test("a port held by something that doesn't answer HTTP stops the start instead of starting a second relay", async () => {
+    const held = await freePortOutsideBrowseRange()
+    const fallback = await freePortOutsideBrowseRange()
+    const silent = net.createServer((socket) => socket.on("data", () => undefined))
+    await new Promise<void>((resolve) => silent.listen(held, "127.0.0.1", resolve))
+    try {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "browse-relay-state-"))
+      try {
+        await expect(chooseRelayPort({
+          configuredPort: held,
+          pinned: false,
+          candidates: [held, fallback],
+          probeTimeoutMs: 200,
+          root,
+        })).rejects.toThrow(`listen EADDRINUSE: address already in use 127.0.0.1:${held}`)
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true })
+      }
+    } finally {
+      silent.close()
+    }
+  }, 30_000)
+
+  test("a slow relay is not taken for a foreign one and replaced by a second relay", async () => {
+    let started = 0
+    const relay = {
+      endpoint: "http://127.0.0.1:19988",
+      version: Effect.fail(new RelayClient.RelayTimedOut({
+        message: "The relay on port 19988 isn't answering (/version timed out after 5s).",
+        path: "/version",
+      })),
+    } as unknown as RelayClient.Interface
+    const exit = await Effect.runPromise(Effect.exit(ensureRelay({
+      relay,
+      start: Effect.sync(() => {
+        started++
+      }),
+      retryTimes: 1,
+      retryDelayMs: 1,
+    })))
+    expect(exit._tag).toBe("Failure")
+    expect(started).toBe(0)
+  })
+
+  test("a restart whose old relay leaves a version-only listener at the endpoint starts a new relay", async () => {
+    const managed = {
+      version: "0.0.15",
+      buildId: "2026-11-06T00:00:00Z",
+      instanceId: "old-relay",
+      managed: true,
+      shutdownProtocol: 2 as const,
+    }
+    let calls = 0
+    let started = 0
+    const relay = {
+      endpoint: "http://127.0.0.1:19988",
+      version: Effect.suspend(() => {
+        calls++
+        // After the old relay's shutdown it removes relay.json; the endpoint falls back to a port Playwriter holds.
+        if (calls === 3) return Effect.fail(new RelayClient.RelayDecodeFailed({
+          message: "in use by another program (not a browse /version response)",
+          path: "/version",
+          cause: { version: "0.10.0" },
+        }))
+        return Effect.succeed(calls >= 4 ? { ...managed, instanceId: "new-relay" } : managed)
+      }),
+      shutdown: () => Effect.succeed({ stopping: true as const }),
+    } as unknown as RelayClient.Interface
+    const readiness = await Effect.runPromise(restartRelay({
+      relay,
+      buildId: managed.buildId,
+      start: Effect.sync(() => {
+        started++
+      }),
+      retryTimes: 2,
+      retryDelayMs: 1,
+    }))
+    expect(started).toBe(1)
+    expect(readiness.started).toBe(true)
+    expect(readiness.version.instanceId).toBe("new-relay")
+  })
+
+  test("setup and RelayClient never send the token to a non-browse or mismatched listener", async () => {
+    const port = await freePortOutsideBrowseRange()
+    const sent: Array<string | undefined> = []
+    let versionReply: Record<string, unknown> = { version: "0.10.0" }
+    using fake = Bun.serve({
+      hostname: "127.0.0.1",
+      port,
+      fetch: (request) => {
+        const pathname = new URL(request.url).pathname
+        sent.push(header(request, "authorization"))
+        return pathname === "/version"
+          ? Response.json(versionReply)
+          : Response.json({ connected: true, activeTargets: 0 })
+      },
+    })
+    relayToken(home)
+    const previousPort = process.env.OPENCODE_BROWSER_PORT
+    process.env.OPENCODE_BROWSER_PORT = String(port)
+    try {
+      // Playwriter's reply, with no relay.json: setup finds no relay, and the client refuses before the token.
+      const noRelay = async () => {
+        expect(await extensionStatus()).toBeUndefined()
+        await Effect.runPromise(Effect.gen(function* () {
+          const client = yield* RelayClient.make({ endpoint: endpointForPort(port) })
+          const failure = yield* Effect.result(client.extensionStatus)
+          expect(failure._tag).toBe("Failure")
+          if (failure._tag === "Failure") expect(failure.failure).toBeInstanceOf(RelayClient.RelayDecodeFailed)
+        }).pipe(Effect.provide(NodeHttpClient.layerNodeHttp)))
+      }
+      await noRelay()
+      expect(sent.length).toBeGreaterThan(0)
+      expect(sent.every((value) => value === undefined)).toBe(true)
+
+      // relay.json names the port but a different instance: still not this install's relay, so no token.
+      versionReply = { version: "9.9.9", instanceId: "answered-instance" }
+      sent.length = 0
+      writeRelayState({
+        port,
+        configuredPort: port,
+        pid: process.pid,
+        instanceId: "some-other-instance",
+        startedAt: new Date().toISOString(),
+      })
+      await noRelay()
+      expect(sent.every((value) => value === undefined)).toBe(true)
+
+      // The recorded instance answers: now the same call may carry the token.
+      sent.length = 0
+      writeRelayState({
+        port,
+        configuredPort: port,
+        pid: process.pid,
+        instanceId: "answered-instance",
+        startedAt: new Date().toISOString(),
+      })
+      expect(await extensionStatus()).toMatchObject({ connected: true })
+      expect(sent.some((value) => value?.startsWith("Bearer "))).toBe(true)
+    } finally {
+      fs.rmSync(path.join(home, "relays", String(port)), { recursive: true, force: true })
+      if (previousPort === undefined) delete process.env.OPENCODE_BROWSER_PORT
+      else process.env.OPENCODE_BROWSER_PORT = previousPort
+    }
+  }, 30_000)
+
+  test("candidates are the configured port first, then the fallback range", () => {
+    expect(relayPortCandidates(19988)).toEqual([19988, 19990, 19991, 19992, 19993, 19994, 19995, 19996, 19997])
+  })
 
   test("a pinned port is used as is, with no probing or fallback", async () => {
     const held = await freePortOutsideBrowseRange()
