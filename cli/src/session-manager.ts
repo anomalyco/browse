@@ -702,7 +702,17 @@ export class OpenCodeBrowserSessions {
 
   private endStoppedScript(session: OpenCodeBrowserSession): Effect.Effect<void> {
     this.cancelSessionHandoff(session.id)
-    return session.sandbox.abortExecution().pipe(
+    const cancelNavigation = this.hooks.onStoppingExecute?.(session)
+    const beforeAbort = cancelNavigation === undefined
+      ? Effect.void
+      : cancelNavigation.pipe(
+          Effect.timeoutOption(this.stopGraceMs()),
+          Effect.catchCause((cause) => Effect.sync(() => console.error("Cancel stopped execute navigation", cause))),
+          Effect.asVoid,
+        )
+    return beforeAbort.pipe(
+      // suspend: abortExecution disposes the realm as soon as it is called, and that must happen after the cancel.
+      Effect.andThen(Effect.suspend(() => session.sandbox.abortExecution())),
       Effect.timeoutOption(this.stopGraceMs()),
       Effect.catchCause((cause) => Effect.sync(() => console.error("Abort stopped execute", cause))),
       Effect.asVoid,

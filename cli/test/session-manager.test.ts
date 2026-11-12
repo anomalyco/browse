@@ -61,6 +61,7 @@ function manager(script: (sandbox: FakeSandbox) => Promise<ExecuteResult>, optio
   readonly handoffs?: HandoffRegistry
   readonly executeTimeoutMs?: number
   readonly onSessionDeleted?: (sessionId: string) => void
+  readonly onStoppingExecute?: () => Effect.Effect<void>
 } = {}) {
   const sandboxes: FakeSandbox[] = []
   const sessions = new OpenCodeBrowserSessions("http://127.0.0.1:0", () => {
@@ -72,6 +73,7 @@ function manager(script: (sandbox: FakeSandbox) => Promise<ExecuteResult>, optio
     lifecycleTimeoutMs: 5_000,
     ...(options.executeTimeoutMs === undefined ? {} : { executeTimeoutMs: options.executeTimeoutMs }),
     ...(options.onSessionDeleted ? { onSessionDeleted: options.onSessionDeleted } : {}),
+    ...(options.onStoppingExecute ? { onStoppingExecute: options.onStoppingExecute } : {}),
     ...(options.handoffs ? { onCancelSessionHandoff: (id: string) => options.handoffs?.cancelForSession(id) !== undefined } : {}),
   })
   return { sessions, sandboxes }
@@ -129,6 +131,33 @@ describe("stopping an execute", () => {
   test("stopExecution is false when nothing runs", () => {
     const { sessions } = manager(async () => ok("x"))
     expect(sessions.stopExecution("missing", "stop")).toBe(false)
+  })
+
+  test("a stop cancels the session's pending navigation before aborting its browser connection", async () => {
+    const calls: string[] = []
+    const { sessions, sandboxes } = manager(async (sandbox) => {
+      if (sandbox.executions === 1) await sandbox.playwrightCall()
+      return ok("next")
+    }, {
+      onStoppingExecute: () => Effect.sync(() => { calls.push(`navigation aborted=${sandboxes[0]?.aborted}`) }),
+    })
+    const { response } = await startExecute(sessions, "nav")
+    expect(sessions.stopExecution("nav", "stop")).toBe(true)
+    expect((await response).result.isError).toBe(true)
+    // Cancelling the navigation is first: the Playwright connection that the script awaits closes after it.
+    expect(calls).toEqual(["navigation aborted=0"])
+    expect(sandboxes[0]?.aborted).toBe(1)
+  })
+
+  test("a timeout cancels the session's pending navigation too", async () => {
+    let calls = 0
+    const { sessions } = manager(async (sandbox) => {
+      if (sandbox.executions === 1) await sandbox.playwrightCall()
+      return ok("next")
+    }, { onStoppingExecute: () => Effect.sync(() => { calls += 1 }) })
+    const timedOut = await run(sessions.execute({ sessionId: "nav-timeout", code: "...", createIfMissing: true, timeoutMs: 20 }))
+    expect(timedOut.result.diagnostic).toBe("execute-timeout")
+    expect(calls).toBe(1)
   })
 })
 
@@ -300,6 +329,31 @@ describe("execute timeouts, disconnects, one-shot cleanup, and idle reaping", ()
 
     const next = await run(sessions.execute({ sessionId: "t1", code: "...", createIfMissing: false, timeoutMs: 1_000 }))
     expect(next.result.text).toBe("recovered")
+  })
+
+  test("a queued execute's own timeout runs while it waits for the session's execute lock", async () => {
+    const { sessions, sandboxes } = manager(async (sandbox) => {
+      if (sandbox.executions === 1) await sandbox.playwrightCall()
+      return ok("second")
+    })
+    const first = run(sessions.execute({ sessionId: "t-queued", code: "first", createIfMissing: true, timeoutMs: 0 }))
+    for (let i = 0; i < 50 && !sessions.isExecuting("t-queued"); i++) await Bun.sleep(5)
+    expect(sessions.isExecuting("t-queued")).toBe(true)
+
+    const started = Date.now()
+    const second = await Promise.race([
+      run(sessions.execute({ sessionId: "t-queued", code: "second", createIfMissing: false, timeoutMs: 40 })),
+      Bun.sleep(2_000).then(() => "still waiting" as const),
+    ])
+    expect(second).not.toBe("still waiting")
+    if (second === "still waiting") throw new Error("queued execute ignored its timeout")
+    expect(second.result.diagnostic).toBe("execute-timeout")
+    expect(Date.now() - started).toBeLessThan(2_000)
+    // User code never ran under the expired call.
+    expect(sandboxes[0]?.executions).toBe(1)
+
+    sessions.stopExecution("t-queued", "stop")
+    expect((await first).result.isError).toBe(true)
   })
 
   test("pauseExecutionTimeout suspends the execute deadline while waiting on a handoff", async () => {

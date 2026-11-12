@@ -16,9 +16,13 @@ const scene = await startBrowserScene({ ...(options.browser === undefined ? {} :
 const { cli, env, base, fixturePort, fixtureUrl } = scene
 const authorization = `Bearer ${relayToken(scene.home)}`
 const fixture = http.createServer((request, response) => {
+  // Never answer: a pending navigation that must be stopped rather than awaited.
+  if (request.url === "/hang") return
   response.setHeader("Content-Type", request.url === "/data" ? "application/json" : "text/html")
   response.end(request.url === "/data" ? '{"ok":true}' : '<title>Realm fixture</title><label>Name<input id="name"></label><button onclick="document.querySelector(\'output\').textContent=document.querySelector(\'input\').value">Save</button><output></output>')
 })
+fixture.headersTimeout = 0
+fixture.requestTimeout = 0
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 async function api(route: string, body?: unknown) {
   const response = await fetch(`${base}${route}`, {
@@ -31,9 +35,9 @@ async function api(route: string, body?: unknown) {
 async function execute(code: string, sessionId = "realm-e2e") {
   return await api("/cli/execute", { sessionId, code, createIfMissing: false })
 }
-function cliExecute(code: string): Promise<Record<string, any>> {
+function cliExecute(code: string, sessionId = "realm-e2e"): Promise<Record<string, any>> {
   return new Promise((resolve, reject) => {
-    const child = spawn("node", [cli, "execute", "--session", "realm-e2e", "--json", code], { env, stdio: ["ignore", "pipe", "pipe"] })
+    const child = spawn("node", [cli, "execute", "--session", sessionId, "--json", code], { env, stdio: ["ignore", "pipe", "pipe"] })
     let output = ""
     child.stdout.on("data", data => { output += data })
     child.on("error", reject)
@@ -82,6 +86,24 @@ try {
   const handoff = await cliExecute("await handoff('Headless timeout check', {timeoutMs:50})")
   assert.equal(handoff.isError, true)
   assert.match(handoff.text, /Handoff timed out/)
+  // A stopped execute must not leave a Page.navigate the server never answers pending on its tab: Chromium queues
+  // every renderer-bound command behind it, so the next execute (a fresh connectOverCDP) would hang.
+  await api("/cli/session/new", { id: "realm-hang" })
+  const hangStarted = Date.now()
+  const hung = await api("/cli/execute", {
+    sessionId: "realm-hang",
+    code: `await page.goto(${JSON.stringify(fixtureUrl + "/hang")}); return page.url()`,
+    createIfMissing: false,
+    timeoutMs: 500,
+  })
+  assert.equal(hung.isError, true, hung.text)
+  assert.equal(hung.diagnostic, "execute-timeout")
+  assert.ok(Date.now() - hangStarted < 5_000)
+  const afterHang = Date.now()
+  const afterHangResult = await cliExecute("return 1", "realm-hang")
+  assert.equal(afterHangResult.ok, true, afterHangResult.text)
+  assert.equal(afterHangResult.text, "1")
+  assert.ok(Date.now() - afterHang < 5_000, `execute after a stopped navigation took ${Date.now() - afterHang}ms`)
   const escapes = [
     "'use strict'; Object.getPrototypeOf(page).goto = ()=>{}",
     "'use strict'; modules.events.prototype.emit = ()=>{}",
@@ -136,6 +158,9 @@ try {
   assert.equal((await execute("return 7", "realm-loop")).value, 7)
   console.log(JSON.stringify({ normal: "PASS", persistence: "PASS", handoffTimeout: "PASS", escapes: escapes.length, concurrentCpuTimeoutMs, handlerCpuTimeoutMs, rejectionIsolation: "PASS", recovery: "PASS", root: scene.root }))
 } finally {
-  await new Promise<void>(resolve => fixture.close(() => resolve()))
+  await new Promise<void>(resolve => {
+    fixture.closeAllConnections()
+    fixture.close(() => resolve())
+  })
   await scene.stop()
 }
