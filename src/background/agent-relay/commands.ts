@@ -36,8 +36,9 @@ import {
   type AgentRelayLog,
 } from "./wire"
 
-// The relay's tabs.create RPC times out after 15 s (cli/src/relay/rpc.ts); the handler answers within 12 s so the
-// reply still has time to arrive. A Chrome call that never settles (tab groups in Dia) must not use that up.
+// The relay's tabs.create RPC waits 30 s by default (cli/src/relay/rpc.ts, OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS); the
+// handler answers within 12 s so the reply still has time to arrive. A Chrome call that never settles (tab groups in
+// Dia) must not use that up.
 // The budget includes beginCreate and opening the tab, so a slow open shortens the about:blank load wait.
 const CREATE_BUDGET_MS = 12_000
 // Vivaldi accepts a debugger attach on a tab that is still loading but then never answers its commands. The relay

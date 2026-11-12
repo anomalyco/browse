@@ -85,6 +85,8 @@ export type DoctorReport = {
   }
   readonly extension: {
     readonly connected: boolean | null
+    /** A browser has an open socket but isn't answering commands. */
+    readonly unresponsive: boolean | null
     readonly version: string | null
     readonly expectedVersion: string | null
     readonly versionMatches: boolean | null
@@ -265,6 +267,7 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
     },
     extension: {
       connected: extensionResult.ok ? extensionResult.value.connected : null,
+      unresponsive: extensionResult.ok ? (extensionResult.value.browsers?.some((browser) => browser.unresponsive) ?? false) : null,
       version: extensionVersion,
       expectedVersion,
       versionMatches: extensionVersionMatches,
@@ -354,12 +357,7 @@ function buildDoctorChecks(options: {
       message: options.relayResult.ok ? `reachable (${options.relayResult.value.version})` : options.relayResult.error,
     },
     relayBuildCheck({ relayResult: options.relayResult, cliBuildId: opencodeBrowserBuildId }),
-    {
-      id: "extension-connected",
-      label: "extension connection",
-      status: options.extensionResult.ok && options.extensionResult.value.connected ? "ok" : "fail",
-      message: options.extensionResult.ok ? options.extensionResult.value.connected ? `connected${options.extensionResult.value.version ? ` (${options.extensionResult.value.version})` : ""}` : "disconnected" : options.extensionResult.error,
-    },
+    extensionConnectedCheck(options.extensionResult),
     extensionVersionCheck({
       extensionResult: options.extensionResult,
       expectedExtensionVersion: options.expectedExtensionVersion,
@@ -482,6 +480,24 @@ function relayBuildCheck(options: {
       ? `matches CLI build (${options.cliBuildId})`
       : `runtime ${relayBuildId} does not match CLI ${options.cliBuildId}`,
   )
+}
+
+export function extensionConnectedCheck(extensionResult: ProbeResult<ExtensionStatus>): DoctorCheck {
+  const check = makeDoctorCheck("extension-connected", "extension connection")
+  if (!extensionResult.ok) {
+    return check("fail", extensionResult.error)
+  }
+  const status = extensionResult.value
+  const unresponsive = (status.browsers ?? []).filter((browser) => browser.unresponsive)
+  if (status.connected) {
+    const connected = `connected${status.version ? ` (${status.version})` : ""}`
+    const others = unresponsive.map((browser) => `${browser.id} isn't answering (busy or asleep)`).join(", ")
+    return others ? check("warn", `${connected}; ${others}`) : check("ok", connected)
+  }
+  if (unresponsive.length > 0) {
+    return check("warn", "connected but not answering (busy or asleep)")
+  }
+  return check("fail", "disconnected")
 }
 
 function extensionVersionCheck(options: {
@@ -638,7 +654,8 @@ function formatExtensionSummary(report: DoctorReport): string {
     ? ""
     : `, protocol ${report.extension.protocolVersion} ${report.extension.protocolCompatible === false ? "incompatible" : "compatible"}`
   const match = report.extension.versionMatches === null ? "" : report.extension.versionMatches ? ", matches the CLI's version" : ", differs from the CLI's version"
-  return `${report.extension.connected ? "connected" : "disconnected"}${version}${protocol}${match}`
+  const state = report.extension.connected ? "connected" : report.extension.unresponsive ? "not answering (busy or asleep)" : "disconnected"
+  return `${state}${version}${protocol}${match}`
 }
 
 function formatNullableNumber(value: number | null): string {

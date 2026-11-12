@@ -226,6 +226,8 @@ export function createRelayHousekeeping(options: {
       keepaliveTimer = setInterval(() => {
         for (const link of browsers.list()) {
           if (!link.rpc.connected && !link.rpc.unresponsive) continue
+          // A slow worker still owes an answer to the last ping; another would only queue behind it.
+          if (link.rpc.pingPending) continue
           void Effect.runPromise(link.rpc.send({ method: "ping" })).catch(() => {
             if (!link.rpc.unresponsive || browsers.byKey(link.key) !== link) return
             for (const session of sessions.sessions.values()) {

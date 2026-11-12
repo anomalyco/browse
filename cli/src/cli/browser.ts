@@ -174,8 +174,9 @@ const status = Command.make(
     if (buildProblem) {
       yield* Console.log(`Warning: ${buildProblem}`)
     }
+    const notAnswering = extensionStatus.browsers?.some((browser) => browser.unresponsive) ?? false
     yield* Console.log(
-      `Extension: ${extensionStatus.connected ? "connected" : "disconnected"}${extensionStatus.version ? ` (${extensionStatus.version})` : ""}`,
+      `Extension: ${extensionStatus.connected ? "connected" : notAnswering ? "not answering (busy or asleep)" : "disconnected"}${extensionStatus.version ? ` (${extensionStatus.version})` : ""}`,
     )
     if ((extensionStatus.rejectedConnections ?? 0) > 0) {
       yield* Console.log(

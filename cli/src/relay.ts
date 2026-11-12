@@ -37,6 +37,7 @@ import {
 } from "./relay/helpers.ts"
 import { appendRelayLifecycleEvent, RelayLifecycleEvent } from "./relay/lifecycle-log.ts"
 import { relayLog } from "./relay/log.ts"
+import { configuredTimeoutMs, extensionCommandTimeout, extensionPingTimeout } from "./relay/rpc.ts"
 import { ensurePrivateDirectory, relayToken } from "./relay/secrets.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay/types.ts"
 import { createCdpDispatcher } from "./relay/cdp-dispatch.ts"
@@ -112,7 +113,16 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     },
     catch: (cause) => new Error("Create the relay token", { cause }),
   })
-  const browsers = new BrowserLinks()
+  const extensionTimeoutEnv = Option.getOrUndefined(yield* Config.option(Config.String("OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS")))
+  const pingTimeoutEnv = Option.getOrUndefined(yield* Config.option(Config.String("OPENCODE_BROWSER_PING_TIMEOUT_MS")))
+  const extensionCommandTimeoutMs = configuredTimeoutMs(extensionTimeoutEnv, extensionCommandTimeout)
+  const extensionPingTimeoutMs = configuredTimeoutMs(pingTimeoutEnv, extensionPingTimeout)
+  const browsers = new BrowserLinks({
+    timeouts: {
+      commandTimeoutMs: extensionCommandTimeoutMs,
+      pingTimeoutMs: extensionPingTimeoutMs,
+    },
+  })
   const { sendToExtension, sendExtensionBestEffort, sendToEveryBrowser, sendToEach, cleanupTabs } = createExtensionCommands({ browsers, registry, onTabGone: forgetMissingTab })
 
   const debugEnabled = yield* Config.Boolean("OPENCODE_BROWSER_DEBUG").pipe(Config.withDefault(false))
@@ -859,7 +869,15 @@ const makeRelay = Effect.fnUntraced(function* (options: {
           (error: unknown) => relayLog("extension.dev_update_failed", { error: (error as Error).message }),
         )
       }
-      relayLog("relay.ready", { url: endpointUrl, version: opencodeBrowserVersion, build: opencodeBrowserBuildId, pid: process.pid, managed })
+      relayLog("relay.ready", {
+        url: endpointUrl,
+        version: opencodeBrowserVersion,
+        build: opencodeBrowserBuildId,
+        pid: process.pid,
+        managed,
+        extensionTimeoutMs: extensionCommandTimeoutMs,
+        pingTimeoutMs: extensionPingTimeoutMs,
+      })
     }),
     (error) => Effect.gen(function* () {
       yield* cleanup()

@@ -7,7 +7,7 @@ import { startBrowserScene } from "./support/browser-scene.ts"
 const scene = await startBrowserScene({ name: "frozen-browser-" })
 const api = async (route: string, body?: unknown) => (await fetch(scene.base + route, {
   headers: { authorization: `Bearer ${relayToken(scene.home)}`, "content-type": "application/json" },
-  ...(body ? { method: "POST", body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(12_000),
+  ...(body ? { method: "POST", body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(20_000),
 })).json()
 const execute = () => api("/cli/execute", { sessionId: "freeze", code: "return await page.title()", createIfMissing: false })
 let frozen: number[] = []
@@ -22,7 +22,7 @@ try {
   }
   const start = Date.now()
   const result = await execute()
-  assert.match(result.text ?? result.error, /browser isn't responding.*asleep or frozen/i)
+  assert.match(result.text ?? result.error, /browser isn't answering.*asleep, frozen or very busy/i)
   assert.equal((await api("/extension/status")).connected, false)
   console.log(`Frozen execute: ${Date.now() - start} ms; ${result.text ?? result.error}`)
   for (const pid of frozen) process.kill(pid, "SIGCONT")
@@ -35,7 +35,8 @@ try {
     frozen.push(id)
   }
   const idle = Date.now()
-  while (Date.now() - idle < 26_000 && (await api("/extension/status")).connected) await new Promise(r => setTimeout(r, 200))
+  // One keepalive interval (20 s) plus the ping timeout (10 s), with margin.
+  while (Date.now() - idle < 35_000 && (await api("/extension/status")).connected) await new Promise(r => setTimeout(r, 200))
   assert.equal((await api("/extension/status")).connected, false, "idle heartbeat detects a frozen worker")
   console.log(`Idle freeze detected in ${Date.now() - idle} ms`)
 } finally {

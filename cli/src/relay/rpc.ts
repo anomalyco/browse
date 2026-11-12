@@ -32,6 +32,26 @@ export type ExtensionRpcTimeouts = {
   readonly awaitPromiseTimeoutMs?: number
 }
 
+export type ExtensionTimeoutSetting = {
+  readonly fallback: number
+  readonly min: number
+  readonly max: number
+}
+
+/** OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS: how long a command that isn't a debugger command or a ping may take. Its
+ * minimum leaves room for the extension's own 12 s tabs.create budget. */
+export const extensionCommandTimeout: ExtensionTimeoutSetting = { fallback: 30_000, min: 15_000, max: 300_000 }
+/** OPENCODE_BROWSER_PING_TIMEOUT_MS: how long a ping may go unanswered before the browser counts as asleep. */
+export const extensionPingTimeout: ExtensionTimeoutSetting = { fallback: 10_000, min: 1_000, max: 30_000 }
+
+/** A timeout from its setting's environment value: a whole number clamped to the setting's range, else its fallback. */
+export function configuredTimeoutMs(value: string | undefined, setting: ExtensionTimeoutSetting): number {
+  const trimmed = value?.trim()
+  if (!trimmed) return setting.fallback
+  const parsed = Number(trimmed)
+  return Number.isInteger(parsed) ? Math.min(Math.max(parsed, setting.min), setting.max) : setting.fallback
+}
+
 /**
  * Request/response correlator for the single extension websocket.
  *
@@ -49,6 +69,8 @@ export class ExtensionRpc {
   private unansweredSince: number | undefined
   private nextRequestId = 1
   private readonly pendingRequests = new Map<number, PendingExtensionRequest>()
+  /** Pings still waiting for an answer, so a keepalive doesn't stack another on a slow worker. */
+  private readonly pendingPings = new Set<number>()
   private livenessProbe: { readonly timeout: NodeJS.Timeout; readonly socket: WebSocket; readonly onPong: () => void } | undefined
   version: string | undefined
   protocolVersion: number | null | undefined
@@ -59,6 +81,10 @@ export class ExtensionRpc {
 
   get connected(): boolean {
     return this.socket?.readyState === WebSocket.OPEN && this.ready && !this.unresponsive && this.protocolCompatible !== false
+  }
+
+  get pingPending(): boolean {
+    return this.pendingPings.size > 0
   }
 
   get acceptsEvents(): boolean {
@@ -172,10 +198,10 @@ export class ExtensionRpc {
       // usually govern it, but a hung promise must not hold the relay open forever.
       const timeoutMs = awaitsPagePromise(command)
         ? this.timeouts.awaitPromiseTimeoutMs ?? 5 * 60_000
-        : command.method === "ping" ? this.timeouts.pingTimeoutMs ?? 4_000
+        : command.method === "ping" ? this.timeouts.pingTimeoutMs ?? extensionPingTimeout.fallback
         : command.method === "debugger.sendCommand"
         ? this.timeouts.debuggerCommandTimeoutMs ?? 60_000
-        : this.timeouts.commandTimeoutMs ?? 15_000
+        : this.timeouts.commandTimeoutMs ?? extensionCommandTimeout.fallback
       const finish = (effect: Effect.Effect<JsonObject, Error>) => {
         if (completed) {
           return
@@ -183,6 +209,7 @@ export class ExtensionRpc {
         completed = true
         clearTimeout(timeout)
         this.pendingRequests.delete(id)
+        this.pendingPings.delete(id)
         resume(effect)
       }
       const timeout = setTimeout(() => {
@@ -214,6 +241,7 @@ export class ExtensionRpc {
         },
         ...(debuggerTabId === undefined ? {} : { debuggerTabId }),
       })
+      if (command.method === "ping") this.pendingPings.add(id)
       try {
         socket.send(JSON.stringify(message), (error) => {
           if (error) {
@@ -227,6 +255,7 @@ export class ExtensionRpc {
         completed = true
         clearTimeout(timeout)
         this.pendingRequests.delete(id)
+        this.pendingPings.delete(id)
       })
     })
   }
