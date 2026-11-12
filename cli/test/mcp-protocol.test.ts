@@ -176,6 +176,7 @@ describe("MCP protocol versions", () => {
     const init = await mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } })
     expect(init.result?.protocolVersion).toBe("2025-11-25")
     expect(init.result?.instructions).toContain("snapshot()")
+    expect(init.result?.instructions).toContain("exist only inside the `code` string")
     mcp.notify("notifications/initialized")
     expect(((await mcp.request("tools/list")).result?.tools as unknown[]).length).toBeGreaterThan(0)
     expect((await mcp.request("tools/call", { name: "secrets_list", arguments: {} })).result?.isError).toBe(false)
