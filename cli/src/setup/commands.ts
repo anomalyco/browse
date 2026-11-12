@@ -21,6 +21,8 @@ import { cliCommand, compiledBinary, defaultSettingsPath, devExtensionFolder, en
 import { runCommand } from "../update/auto-update.ts"
 import { unpackedExtensionId } from "../protocol.ts"
 import { parseHostname, readRelayConfig, writeRelayConfig } from "../relay/config.ts"
+import { defaultPort } from "../relay/helpers.ts"
+import { configuredRelayPort, endpointForPort, resolveRelayPort } from "../relay/port.ts"
 import { relayAuthorization } from "../relay/secrets.ts"
 import { defaultSiteSecretsDir } from "../auth/site-secrets.ts"
 import { opencodeBrowserBuildId } from "../version.ts"
@@ -56,9 +58,10 @@ export type ExtensionStatus = {
   protocolVersion?: number | null
 }
 
-export const relayBase = () => `http://127.0.0.1:${Number(process.env.OPENCODE_BROWSER_PORT) || 19988}`
+/** The running relay's endpoint, wherever it bound: the configured port or a fallback (relay/port.ts). */
+export const relayBase = () => endpointForPort(resolveRelayPort())
 
-/** The relay token header; the relay rejects every API request without it. */
+/** The relay token header; the relay rejects every API request without it. Never sent to the open /version probe. */
 const relayHeaders = (): Record<string, string> => {
   try {
     return { authorization: relayAuthorization() }
@@ -152,7 +155,7 @@ export function pairUnpacked() {
   )
   if (directories.length === 0) return
   const code = mintPairingCode(undefined, { ttlMs: bundledPairingCodeTtlMs })
-  for (const directory of directories) writeExtensionPairing(directory, code)
+  for (const directory of directories) writeExtensionPairing(directory, code, resolveRelayPort())
 }
 
 export async function extension() {
@@ -189,7 +192,7 @@ export async function pair(args: string[]) {
   const receipt = randomUUID()
   const code = mintPairingCode(undefined, { receipt })
   log(`Pairing code: ${formatPairingCode(code)}`)
-  log(`${manualPair(code)} It works once, within ${pairingCodeTtlMs / 60_000} minutes.`)
+  log(`${manualPair(code, resolveRelayPort())} It works once, within ${pairingCodeTtlMs / 60_000} minutes.`)
   log(
     `Waiting up to ${timeoutMs / 1000}s for that browser. Later, \`${cliCommand("pair --list")}\` shows paired browsers.`,
   )
@@ -312,7 +315,8 @@ export async function set(args: string[]) {
     "In the browser on the other computer, open browse's options (right-click its toolbar button, then Options),",
   )
   log("and under advanced enter:")
-  log(`  Relay         ${tailscale ?? "this computer's address"}`)
+  const port = resolveRelayPort()
+  log(`  Relay         ${(tailscale ?? "this computer's address") + (port === defaultPort ? "" : `:${port}`)}`)
   log(
     `  Pairing code  ${formatPairingCode(mintPairingCode())}  (works once, within ${pairingCodeTtlMs / 60_000} minutes; \`${cliCommand("pair")}\` prints another)`,
   )
@@ -341,7 +345,7 @@ async function confirmSecretRemoval(args: string[]) {
 /** Stop only a managed instance that recorded its identity in this install. Never start a relay during uninstall. */
 async function stopInstalledRelay() {
   const base = relayBase()
-  const audit = path.join(paths.state, "relays", new URL(base).port, "lifecycle.jsonl")
+  const audit = path.join(paths.state, "relays", String(configuredRelayPort()), "lifecycle.jsonl")
   if (!existsSync(audit)) return
   const probe = async () => {
     try {

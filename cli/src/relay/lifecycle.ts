@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url"
 import { browserUnresponsive, extensionProtocolAdvice, extensionReconnectAlarmPeriodMs } from "../protocol.ts"
 import * as RelayClient from "./client.ts"
 import { relayLog } from "./log.ts"
+import { configuredRelayPort, processAlive, readRelayState, relayPortPinned } from "./port.ts"
 import { RelayShutdownRequest, type ExtensionStatus, type RelayVersion } from "./schema.ts"
 import { launchWindowsRelay, quoteWindowsArgument } from "./windows-launch.ts"
 import { compareVersions, installedRuntime, installedVersion } from "../update/auto-update.ts"
@@ -31,6 +32,8 @@ export type EnsureRelayOptions = {
   readonly buildId?: string
   readonly retryTimes?: number
   readonly retryDelayMs?: number
+  /** The endpoint is fixed (an explicit endpoint, or a pinned port): a port held by another program stays a hard error. */
+  readonly pinned?: boolean
 }
 
 export function shouldWaitForExtensionReconnect(readiness: RelayReadiness): boolean {
@@ -98,7 +101,7 @@ export const ensureRelay = Effect.fn("RelayLifecycle.ensureRelay")(function* (op
       ...(buildProblem ? { buildProblem } : {}),
     } satisfies RelayReadiness
   }
-  const relayWasAbsent = isRelayUnreachable(initial.failure)
+  const relayWasAbsent = isRelayUnreachable(initial.failure) || isForeignListener(initial.failure, options.pinned)
   if (!relayWasAbsent && !isRelayStarting(initial.failure)) {
     return yield* initial.failure
   }
@@ -121,13 +124,14 @@ export const ensureRelay = Effect.fn("RelayLifecycle.ensureRelay")(function* (op
 })
 
 function waitForRelayReady(options: EnsureRelayOptions): Effect.Effect<RelayVersion, Error | RelayClient.RelayClientError> {
+  const retry = (error: unknown) => isRelayStartingOrUnreachable(error) || isForeignListener(error, options.pinned)
   return options.relay.version.pipe(
     Effect.retry({
       times: options.retryTimes ?? 200,
       schedule: Schedule.spaced(options.retryDelayMs ?? 50),
-      while: isRelayStartingOrUnreachable,
+      while: retry,
     }),
-    Effect.mapError((error) => isRelayStartingOrUnreachable(error)
+    Effect.mapError((error) => retry(error)
       ? new RelayStartFailed({
         message: `browse relay did not start at ${options.relay.endpoint}`,
         endpoint: options.relay.endpoint,
@@ -222,12 +226,13 @@ function waitForRelayExitOrReplacement(options: {
   readonly version: RelayVersion
   readonly retryTimes?: number
   readonly retryDelayMs?: number
+  readonly pinned?: boolean
 }): Effect.Effect<RelayVersion | undefined, Error | RelayClient.RelayClientError> {
   return options.relay.version.pipe(
     Effect.flatMap((version) => isSameRelayInstance(options.version, version)
       ? Effect.fail(new RelayStillRunning("browse relay is still draining; no replacement was started"))
       : Effect.succeed(version)),
-    Effect.catch((error) => isRelayUnreachable(error) ? Effect.succeed(undefined) : Effect.fail(error)),
+    Effect.catch((error) => isRelayUnreachable(error) || isForeignListener(error, options.pinned) ? Effect.succeed(undefined) : Effect.fail(error)),
     Effect.retry({
       times: options.retryTimes ?? 200,
       schedule: Schedule.spaced(options.retryDelayMs ?? 50),
@@ -430,4 +435,20 @@ function isRelayStarting(error: unknown): error is RelayClient.RelayRejected {
 
 function isRelayStartingOrUnreachable(error: unknown): error is RelayClient.RelayRejected | RelayClient.RelayUnreachable {
   return isRelayStarting(error) || isRelayUnreachable(error)
+}
+
+/** A live relay this install recorded, so its port is known to be browse's and a slow answer is not a foreign one. */
+function hasLiveRelayState(): boolean {
+  const state = readRelayState()
+  return state !== undefined && state.configuredPort === configuredRelayPort() && processAlive(state.pid)
+}
+
+/**
+ * The port answered like another program (or never answered on a port this install didn't record). Without a pinned
+ * port the relay may start, or move, to a fallback port; a pinned one keeps its hard error.
+ */
+function isForeignListener(error: unknown, pinned?: boolean): boolean {
+  if (pinned ?? relayPortPinned()) return false
+  if (error instanceof RelayClient.RelayDecodeFailed) return true
+  return error instanceof RelayClient.RelayTimedOut && !hasLiveRelayState()
 }

@@ -1,4 +1,4 @@
-import { defaultRelayPort, isJsonObject, type JsonObject } from "../../agent-relay/protocol"
+import { isJsonObject, type JsonObject } from "../../agent-relay/protocol"
 import { autoUpdateMode, BROWSER_NAME_KEY, type RelayAutoUpdate } from "../../shared/protocol"
 import type { createAgentRelayLog } from "./log"
 import type { ecdhKeyPair, PairingCode } from "../pairing"
@@ -21,8 +21,12 @@ export type Handshake = {
   session?: { key: Uint8Array; relayNonce: string }
 }
 
-/** Overrides the relay port, for development and isolated tests. */
+/** Overrides the relay port, for development and isolated tests. An automatic connection never scans with it set. */
 export const PORT_KEY = "agentRelayPort"
+/** chrome.storage.local: the port an automatic connection found the relay on (a pairing hint, or a scan). */
+export const DISCOVERED_PORT_KEY = "agentRelayDiscoveredPort"
+/** chrome.storage.local: the port a pending pairing code was given for; it is never sent to another one. */
+export const CODE_PORT_KEY = "agentRelayCodePort"
 export const PROFILE_KEY = "agentRelayProfile"
 /** chrome.storage.local: each agent session's tab group, so a worker restart keeps a session's tabs in one group. */
 export const SESSION_GROUPS_KEY = "agentSessionGroups"
@@ -60,7 +64,6 @@ export const SLOW_CDP = 2_000
 // drop the debugger; evicting the frame and re-attaching recovers.
 export const FOREIGN_FRAME = /Cannot access a chrome-extension:\/\/ URL|Debugger is not attached to the tab/i
 export const ATTACHED_TITLE = "browse · Agents can use this tab. Click to stop."
-export const DEFAULT_PORT = defaultRelayPort
 
 export const CLOSE_CODES: Record<number, string> = {
   1000: "normal",

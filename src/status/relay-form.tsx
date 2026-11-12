@@ -14,7 +14,8 @@ export function RelayForm(props: { relay: Relay; help?: boolean; remote?: boolea
   const [pending, setPending] = createSignal(false)
   const [result, setResult] = createSignal<RelayResult>()
 
-  // The field shows where the extension connects (localhost:19988 for this computer), unless the user is editing it.
+  // The field shows where the extension connects (the port the worker found a relay on, else localhost:19988),
+  // unless the user is editing it.
   createEffect(() => {
     const relay = props.relay.state()?.relay
     if (relay === undefined || edited()) return

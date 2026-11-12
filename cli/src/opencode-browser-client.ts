@@ -186,6 +186,7 @@ export const make = Effect.fn("OpenCodeBrowserClient.make")(function* (options: 
   )
   const readiness = yield* RelayLifecycle.ensureRelay({
     relay,
+    ...(options.endpoint ? { pinned: true } : {}),
     // The consumer may run under Bun; the relay is a Node application.
     start: RelayLifecycle.startManagedRelay(undefined, "node", []),
   }).pipe(Effect.mapError((error) => clientError("connect", error)))

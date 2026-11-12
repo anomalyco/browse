@@ -12,6 +12,7 @@ import { existsSync, statSync } from "node:fs"
 import path from "node:path"
 import { createInterface } from "node:readline"
 import { entrySpawnCommand } from "../paths.ts"
+import { endpointForPort, resolveRelayPort } from "../relay/port.ts"
 import { installedRuntime, installedVersion, type Runtime } from "../update/auto-update.ts"
 
 /** Set for the server a supervisor starts, so it serves instead of supervising again. */
@@ -54,7 +55,6 @@ export async function runBinaryMcp(args: readonly string[]) {
   // This supervisor's own replay id: a replay from another supervisor (an older shim above this one, which uses the
   // bare prefix) is a client request like any other, and its answer goes back up.
   const REPLAY = `opencode-browser-shim-initialize-${randomUUID()}`
-  const relayPort = Number(process.env.OPENCODE_BROWSER_PORT) || 19988
   const current = versionReader(runtime, installedVersion(runtime) ?? runtime.version)
   // A stable entry path, replaced in place by the installer.
   const command = () => runtime.entry
@@ -216,7 +216,7 @@ export async function runBinaryMcp(args: readonly string[]) {
   let checking = false
   let unreachable = 0
   const relayVersion = () =>
-    fetch(`http://127.0.0.1:${relayPort}/version`, { signal: AbortSignal.timeout(2000) })
+    fetch(`${endpointForPort(resolveRelayPort())}/version`, { signal: AbortSignal.timeout(2000) })
       .then((response) => (response.ok ? (response.json() as Promise<{ version?: unknown; draining?: unknown }>) : undefined))
       .then((body) => (body && typeof body.version === "string" ? { version: body.version, draining: body.draining === true } : undefined), () => undefined)
   const maybeSwap = async () => {

@@ -5,6 +5,7 @@ import { networkInterfaces } from "node:os"
 import * as clack from "@clack/prompts"
 import { formatPairingCode, mintPairingCode, pairingCodeTtlMs } from "../relay/browser-pairing.ts"
 import { readRelayConfig, writeRelayConfig } from "../relay/config.ts"
+import { resolveRelayPort } from "../relay/port.ts"
 import { cliCommand, entrySpawnCommand } from "../paths.ts"
 import { parseJson } from "./browsers.ts"
 import { ensureRelay, relayBase } from "./commands.ts"
@@ -76,7 +77,7 @@ export async function installRemote(entry: string, tty: boolean) {
     } else log("✓ Opened the relay to other computers")
   } else log("✓ The relay is open to other computers")
   ensureRelay(entry)
-  const port = Number(process.env.OPENCODE_BROWSER_PORT) || 19988
+  const port = resolveRelayPort()
   const interfaces = networkInterfaces()
   const onTailnet = Object.values(interfaces)
     .flat()

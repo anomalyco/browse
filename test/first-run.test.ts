@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { AgentRelayState } from "../src/shared/protocol"
-import { firstRunStep, relayProbeResult, shouldProbe } from "../src/status/first-run"
+import { firstRunStep, shouldProbe } from "../src/status/first-run"
+import { relayProbeResult } from "../src/agent-relay/probe"
 
 const state = (overrides: Partial<AgentRelayState> = {}): AgentRelayState => ({
   status: "unpaired",

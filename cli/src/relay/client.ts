@@ -1,5 +1,6 @@
 import { cliCommand } from "../paths.ts"
 import { defaultPort } from "./helpers.ts"
+import { endpointForPort, resolveRelayPort } from "./port.ts"
 import { relayAuthorization } from "./secrets.ts"
 import { NodeHttpClient } from "@effect/platform-node"
 import { Config, Context, Effect, Layer, Option, Schema } from "effect"
@@ -68,7 +69,7 @@ export const portConfig = Config.Int("OPENCODE_BROWSER_PORT").pipe(Config.withDe
  */
 export const extensionOriginsConfig = Config.String("OPENCODE_BROWSER_EXTENSION_ORIGINS").pipe(Config.withDefault(""))
 
-export const endpointForPort = (port: number): string => `http://127.0.0.1:${port}`
+export { endpointForPort } from "./port.ts"
 
 /** How long a read waits before this client has had any answer from the port, and after. See `make`. */
 export const unknownRelayReadSeconds = 5
@@ -175,13 +176,15 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
   /** Sent as OpenCode-Browser-Client-Pid so the relay can end a capture or an implicit session once this process is gone. */
   readonly clientPid?: number
 }) {
-  const port = yield* portConfig.pipe(
+  // Validate OPENCODE_BROWSER_PORT as before; the endpoint itself is resolved on every request so a relay that moved
+  // to a fallback port is found without recreating this client (relay/port.ts).
+  yield* portConfig.pipe(
     Effect.mapError((cause) => new RelayConfigInvalid({
       message: `Invalid OPENCODE_BROWSER_PORT configuration: ${cause.message}`,
       cause,
     })),
   )
-  const endpoint = options?.endpoint ?? endpointForPort(port)
+  const currentEndpoint = (): string => options?.endpoint ?? endpointForPort(resolveRelayPort())
   const httpClient = yield* HttpClient.HttpClient
 
   const readBody = (
@@ -229,13 +232,15 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
       }),
     )
 
-  const transportError = (path: string) => (cause: unknown) =>
-    new RelayUnreachable({
+  const transportError = (path: string) => (cause: unknown) => {
+    const endpoint = currentEndpoint()
+    return new RelayUnreachable({
       message: `browse relay is not reachable at ${endpoint}. Relay-backed CLI commands start it automatically; use \`${cliCommand("serve")}\` only for foreground debugging.`,
       endpoint,
       path,
       cause,
     })
+  }
 
   // The relay rejects requests without this install's token (relay-secrets.ts). Read once it exists; a relay
   // started by this client creates it, so a failed read is retried on the next request.
@@ -256,11 +261,17 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
   let relayAnswered = false
   const execute = (request: HttpClientRequest.HttpClientRequest) =>
     httpClient.execute(authorize(request)).pipe(Effect.tap(() => Effect.sync(() => { relayAnswered = true })))
+  // The open version probe never carries the relay token (or this client's pid): another program holding the port
+  // must not receive either. See `version` and the fallback probe in relay/port.ts.
+  const executeUnauthorized = (request: HttpClientRequest.HttpClientRequest) =>
+    httpClient.execute(request).pipe(Effect.tap(() => Effect.sync(() => { relayAnswered = true })))
 
   const getJson = <A>(path: string, schema: Schema.ConstraintDecoder<A>): Effect.Effect<A, RelayClientError> =>
     Effect.suspend(() => {
+      const endpoint = currentEndpoint()
       const seconds = relayAnswered ? busyRelayReadSeconds : unknownRelayReadSeconds
-      return execute(HttpClientRequest.get(new URL(path, endpoint))).pipe(
+      const send = path === "/version" ? executeUnauthorized : execute
+      return send(HttpClientRequest.get(new URL(path, endpoint))).pipe(
         Effect.mapError(transportError(path)),
         Effect.flatMap((response) => handleResponse(response, path, schema)),
         Effect.timeoutOrElse({ duration: `${seconds} seconds`, orElse: () => Effect.fail(new RelayTimedOut({
@@ -277,7 +288,7 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
     path: string,
     body: Record<string, unknown>,
     schema: Schema.ConstraintDecoder<A>,
-  ): Effect.Effect<A, RelayClientError> => HttpClientRequest.post(new URL(path, endpoint)).pipe(
+  ): Effect.Effect<A, RelayClientError> => HttpClientRequest.post(new URL(path, currentEndpoint())).pipe(
     HttpClientRequest.bodyJson(body),
     Effect.mapError((cause) => new RelayEncodeFailed({
       message: `Could not encode relay request for ${path}`,
@@ -309,10 +320,12 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
   }
 
   return Service.of({
-    endpoint,
+    get endpoint() {
+      return currentEndpoint()
+    },
     version: getJson("/version", RelayVersion).pipe(Effect.mapError((error) =>
       error instanceof RelayDecodeFailed || (error instanceof RelayRejected && !error.code && error.status === 404)
-        ? new RelayDecodeFailed({ message: `Relay port ${new URL(endpoint).port} is in use by another program (not a browse /version response).`, path: "/version", cause: error })
+        ? new RelayDecodeFailed({ message: `Relay port ${new URL(currentEndpoint()).port} is in use by another program (not a browse /version response).`, path: "/version", cause: error })
         : error)),
     shutdown: (request) => postJson("/shutdown", { ...request }, RelayShutdownResponse),
     extensionStatus: getJson("/extension/status", ExtensionStatus),

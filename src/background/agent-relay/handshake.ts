@@ -1,5 +1,5 @@
 import { extensionProtocolVersion } from "../../../cli/src/protocol"
-import { isJsonObject } from "../../agent-relay/protocol"
+import { defaultRelayPort, isJsonObject, relayPortHint } from "../../agent-relay/protocol"
 import {
   BROWSER_NAME_KEY,
   RELAY_ADDRESS_KEY,
@@ -22,11 +22,13 @@ import {
   type PairingCode,
 } from "../pairing"
 import { TabCleanup } from "../tab-cleanup"
+import { codePort, relayTarget } from "./discovery"
 import {
   browserBrand,
   browserName,
+  CODE_PORT_KEY,
   CONNECT_TIMEOUT,
-  DEFAULT_PORT,
+  DISCOVERED_PORT_KEY,
   PAIRING_FILE,
   PAIRING_KEY,
   PORT_KEY,
@@ -40,11 +42,24 @@ import {
 
 declare const __OPENCODE_BROWSER_BUILD__: string
 
+type PairingFile = { readonly code?: PairingCode; readonly port?: number }
+
+/** The token a loopback relay on another port may still accept: the most recently stored loopback one. */
+function loopbackToken(tokens: Record<string, unknown>): string | undefined {
+  let found: string | undefined
+  for (const [key, value] of Object.entries(tokens)) {
+    if (key.startsWith("127.0.0.1:") && typeof value === "string") found = value
+  }
+  return found
+}
+
 export function createRelayHandshake(deps: {
   readonly log: AgentRelayLog
   readonly relayTabs: Set<number>
   readonly currentSocket: () => WebSocket | undefined
   readonly hostPort: () => { readonly host: string; readonly port: number }
+  /** The address is automatic: a pairing code may only go to the port it was given for (never a scanned one). */
+  readonly automatic: () => boolean
   readonly status: () => AgentRelayStatus
   readonly snapshot: () => AgentRelayState
   readonly generation: () => number
@@ -54,6 +69,8 @@ export function createRelayHandshake(deps: {
 }) {
   /** Sockets whose relay proved it holds this browser's token; nothing else is obeyed. */
   const trusted = new WeakSet<WebSocket>()
+  /** Sockets whose relay sent a pairing challenge: it speaks the browse protocol. */
+  const challenged = new WeakSet<WebSocket>()
   /** What each socket pairs with, for its close to say what was refused. */
   const credentials = new WeakMap<WebSocket, Credential>()
   /** The handshake in flight on a socket: this extension's nonce, and the code exchange's state once it started. */
@@ -69,7 +86,8 @@ export function createRelayHandshake(deps: {
   let unpacked = false
   /** Which side to update when the relay's protocol doesn't match this extension's. */
   let skew: ProtocolSkew | undefined
-  let bundledPairing: Promise<PairingCode | undefined> | undefined
+  /** The pairing file read in flight, or its result once found. */
+  let pairingFileRead: Promise<PairingFile | undefined> | undefined
 
   /**
    * Waiters for how the next connection attempt ends (`connectTo` on the status page), each with the generation it
@@ -85,43 +103,75 @@ export function createRelayHandshake(deps: {
       }
   }
 
-  /** The one-time code install wrote into this unpacked build, if any. Looked for again until found (install may write it while the worker runs), and again on Reconnect or a pairing change. */
-  const bundledCode = async () => {
-    const reading = (bundledPairing ??= fetch(chrome.runtime.getURL(PAIRING_FILE))
+  /**
+   * The one-time code and relay port install wrote into this unpacked build, if any (cli/src/browser-pairing.ts
+   * writeExtensionPairing). Looked for again until found (install may write it while the worker runs), and again on
+   * Reconnect or a pairing change.
+   */
+  const pairingFile = async () => {
+    const reading = (pairingFileRead ??= fetch(chrome.runtime.getURL(PAIRING_FILE))
       .then((response) => (response.ok ? (response.json() as Promise<unknown>) : undefined))
-      .then((value) => normalizePairingCode(isJsonObject(value) ? value.code : undefined))
+      .then((value): PairingFile | undefined => {
+        if (!isJsonObject(value)) return undefined
+        const code = normalizePairingCode(value.code)
+        const port = relayPortHint(value.port)
+        return code === undefined && port === undefined ? undefined : { ...(code ? { code } : {}), ...(port ? { port } : {}) }
+      })
       .catch(() => undefined))
-    const bundled = await reading
-    if (bundled === undefined && bundledPairing === reading) bundledPairing = undefined
-    return bundled
+    const file = await reading
+    if (file === undefined && pairingFileRead === reading) pairingFileRead = undefined
+    return file
+  }
+
+  /**
+   * An automatic connection takes the relay port install wrote next to the pairing file (set only when it isn't
+   * 19988) as its discovered port, so the first attempt goes to the relay instead of scanning for it. Only while no
+   * port is known: a scan or an earlier hint is fresher than a file that may predate a move.
+   */
+  const pairingHint = async () => {
+    const stored = await chrome.storage.local.get([RELAY_ADDRESS_KEY, PORT_KEY, DISCOVERED_PORT_KEY])
+    if (!relayTarget(stored).automatic || relayPortHint(stored[DISCOVERED_PORT_KEY]) !== undefined) return
+    const file = await pairingFile()
+    if (file?.port === undefined) return
+    deps.log.add("pairing.port", { port: file.port })
+    // The file's own code is tied to its port (credential reads it from there); a code the user entered keeps the
+    // port it was given for, or 19988.
+    await chrome.storage.local.set({ [DISCOVERED_PORT_KEY]: file.port })
   }
 
   /**
    * What the next connection pairs with: a code the user entered (or install's link brought), else this browser's
    * token for the relay, else the code install wrote into this unpacked build (only for this computer's relay, and
    * only once), else the token again even though the relay refused it (it may have been a relay that isn't ours).
+   * A code only goes to the port it was given for: one found by scanning is a different relay, and its refusal would
+   * burn the code. The token's proof is bound to the port, so trying one that moved ports is safe.
    */
   const credential = async (): Promise<Credential | undefined> => {
     const { host, port } = deps.hostPort()
     const address = `${host}:${port}`
-    const stored = await chrome.storage.local.get([PAIRING_KEY, TOKENS_KEY, SPENT_KEY])
+    const local = host === "127.0.0.1"
+    const stored = await chrome.storage.local.get([PAIRING_KEY, TOKENS_KEY, SPENT_KEY, CODE_PORT_KEY])
     const spent = new Set(Array.isArray(stored[SPENT_KEY]) ? (stored[SPENT_KEY] as unknown[]) : [])
     const tokens = isJsonObject(stored[TOKENS_KEY]) ? stored[TOKENS_KEY] : {}
-    const token = typeof tokens[address] === "string" ? tokens[address] : undefined
+    const own = typeof tokens[address] === "string" ? tokens[address] : undefined
+    const token = own ?? (local ? loopbackToken(tokens) : undefined)
     const entered = normalizePairingCode(stored[PAIRING_KEY])
-    const bundled = host === "127.0.0.1" ? await bundledCode() : undefined
-    const usable = (code: PairingCode | undefined) =>
-      code !== undefined && !spent.has(code.code) && !(code.legacy && token !== undefined)
+    const file = local ? await pairingFile() : undefined
+    const automatic = deps.automatic()
+    const usable = (code: PairingCode | undefined, here: boolean) =>
+      here && code !== undefined && !spent.has(code.code) && !(code.legacy && token !== undefined)
     const next: Credential | undefined =
-      usable(entered) ? { kind: "code", code: entered!, source: "entered" }
+      usable(entered, !automatic || port === codePort(stored[CODE_PORT_KEY])) ?
+        { kind: "code", code: entered!, source: "entered" }
       : token !== undefined && tokenRefused !== address ? { kind: "token", token }
-      : usable(bundled) ? { kind: "code", code: bundled!, source: "bundled" }
+      : usable(file?.code, !automatic || port === (file?.port ?? defaultRelayPort)) ?
+        { kind: "code", code: file!.code!, source: "bundled" }
       : token !== undefined ? { kind: "token", token }
       : undefined
     const source: PairingSource = next?.kind ?? "none"
-    if (source !== pairing || unpacked !== (bundled !== undefined)) {
+    if (source !== pairing || unpacked !== (file?.code !== undefined)) {
       pairing = source
-      unpacked = bundled !== undefined
+      unpacked = file?.code !== undefined
       deps.notify()
     }
     return next
@@ -136,7 +186,7 @@ export function createRelayHandshake(deps: {
     await chrome.storage.local.set({ [SPENT_KEY]: [...spent.filter((value) => value !== code), code].slice(-20) })
     if (normalizePairingCode(stored[PAIRING_KEY])?.code === code) {
       clearingCode = true
-      await chrome.storage.local.remove(PAIRING_KEY)
+      await chrome.storage.local.remove([PAIRING_KEY, CODE_PORT_KEY])
     }
   }
 
@@ -192,14 +242,24 @@ export function createRelayHandshake(deps: {
 
   /** Keeps the token a code was exchanged for, and spends the code. */
   const adoptToken = async (token: string, code: PairingCode) => {
-    const { host, port } = deps.hostPort()
-    const stored = await chrome.storage.local.get(TOKENS_KEY)
-    const tokens = isJsonObject(stored[TOKENS_KEY]) ? stored[TOKENS_KEY] : {}
-    await chrome.storage.local.set({ [TOKENS_KEY]: { ...tokens, [`${host}:${port}`]: token } })
+    await rememberToken(token)
     await spendCode(code.code)
     tokenRefused = undefined
     codeRejected = false
     deps.log.add("pairing.token", { legacy: code.legacy })
+  }
+
+  /**
+   * Stores this browser's token under the address it just connected to. A relay found on a new port keeps the token
+   * it already proved; the proof is bound to the port, so a wrong relay simply rejects it.
+   */
+  const rememberToken = async (token: string) => {
+    const { host, port } = deps.hostPort()
+    const address = `${host}:${port}`
+    const stored = await chrome.storage.local.get(TOKENS_KEY)
+    const tokens = isJsonObject(stored[TOKENS_KEY]) ? stored[TOKENS_KEY] : {}
+    if (tokens[address] === token) return
+    await chrome.storage.local.set({ [TOKENS_KEY]: { ...tokens, [address]: token } })
   }
 
   /**
@@ -240,6 +300,7 @@ export function createRelayHandshake(deps: {
         typeof params?.nonce === "string" && /^[A-Za-z0-9_-]{22,128}$/.test(params.nonce) ? params.nonce : undefined
       if (message?.method !== "auth.challenge" || nonce === undefined)
         return refuse(`unexpected ${String(message?.method ?? message?.id ?? "message")}`)
+      challenged.add(current)
       relayNonce = nonce
       if (isJsonObject(params?.protocol)) pending.protocol = params.protocol
       if (using.kind === "token") {
@@ -272,6 +333,7 @@ export function createRelayHandshake(deps: {
     if (deps.currentSocket() !== current || current.readyState !== WebSocket.OPEN) return
     if (token === undefined) return refuse("no token")
     if (using.kind === "code") await adoptToken(token, using.code)
+    else await rememberToken(token)
     if (deps.currentSocket() !== current || current.readyState !== WebSocket.OPEN) return
     current.send(
       JSON.stringify({
@@ -331,7 +393,7 @@ export function createRelayHandshake(deps: {
     }
     if (PAIRING_KEY in changes && changes[PAIRING_KEY]?.newValue !== undefined) codeRejected = false
     deps.log.add("pairing.changed")
-    bundledPairing = undefined
+    pairingFileRead = undefined
     deps.resetAndConnect("pairing", "Pairing changed")
   }
 
@@ -343,10 +405,12 @@ export function createRelayHandshake(deps: {
     if (address === undefined) return { status: "invalid-address" }
     const code = codeInput.trim() === "" ? undefined : normalizePairingCode(codeInput)
     if (codeInput.trim() !== "" && code === undefined) return { status: "invalid-code" }
-    const storedPort = Number((await chrome.storage.local.get(PORT_KEY))[PORT_KEY]) || DEFAULT_PORT
-    const local = address.host === "127.0.0.1" && (address.port === undefined || address.port === storedPort)
+    // Localhost with the port the worker is already on is this computer: saving the automatic address the form
+    // shows must not pin it, since a fallback relay may move again.
+    const current = deps.hostPort()
+    const local = address.host === "127.0.0.1" && (address.port === undefined || address.port === current.port)
     const value = local ? "" : address.port ? `${address.host}:${address.port}` : address.host
-    const before = await chrome.storage.local.get([RELAY_ADDRESS_KEY, PAIRING_KEY])
+    const before = await chrome.storage.local.get([RELAY_ADDRESS_KEY, PAIRING_KEY, PORT_KEY, DISCOVERED_PORT_KEY])
     const changed =
       (before[RELAY_ADDRESS_KEY] ?? "") !== value || (code !== undefined && before[PAIRING_KEY] !== code.code)
     const outcome = new Promise<AgentRelayStatus>((resolve) => {
@@ -367,40 +431,62 @@ export function createRelayHandshake(deps: {
     if (changed)
       await chrome.storage.local.set({
         [RELAY_ADDRESS_KEY]: value,
-        ...(code !== undefined ? { [PAIRING_KEY]: code.code } : {}),
+        ...(code !== undefined
+          ? {
+              [PAIRING_KEY]: code.code,
+              // The port this save dials: a later scan must never carry the code to a different relay.
+              [CODE_PORT_KEY]: relayTarget({
+                [RELAY_ADDRESS_KEY]: value,
+                [PORT_KEY]: before[PORT_KEY],
+                [DISCOVERED_PORT_KEY]: before[DISCOVERED_PORT_KEY],
+              }).port,
+            }
+          : {}),
       })
     else {
-      bundledPairing = undefined
+      pairingFileRead = undefined
       tokenRefused = undefined
       deps.resetAndConnect("user", "Checking the connection")
     }
     return { status: await outcome, address: deps.snapshot().relay.address }
   }
 
-  const pairLink = async (input: string) => {
+  /**
+   * A one-time code from install's link (welcome.html#code=…, or `&port=` when the relay isn't on 19988). The port is
+   * taken as the discovered port, and as the only port the code may ever be sent to.
+   */
+  const pairLink = async (input: string, hint?: number) => {
     const code = normalizePairingCode(input)
     if (code === undefined || code.legacy || deps.status() === "connected") return false
+    const port = relayPortHint(hint)
     deps.log.add("pairing.link")
-    // Reconnects through storage.onChanged.
-    await chrome.storage.local.set({ [PAIRING_KEY]: code.code })
+    // Reconnects through storage.onChanged, or here after the write (a hint can change while the code doesn't).
+    await chrome.storage.local.set({
+      [PAIRING_KEY]: code.code,
+      ...(port !== undefined ? { [DISCOVERED_PORT_KEY]: port, [CODE_PORT_KEY]: port } : {}),
+    })
+    if (port === undefined) await chrome.storage.local.remove(CODE_PORT_KEY)
+    else deps.resetAndConnect("pairing", "Pairing changed")
     return true
   }
 
   const reconnect = () => {
     deps.log.add("reconnect.requested")
-    bundledPairing = undefined
+    pairingFileRead = undefined
     tokenRefused = undefined
     deps.resetAndConnect("user")
   }
 
   return {
     trusted,
+    challenged,
     pairingState: () => ({ pairing, skew, codeRejected, unpacked }),
     setSkew: (next: ProtocolSkew | undefined) => {
       skew = next
     },
     settle,
     credential,
+    pairingHint,
     hello,
     verify,
     onCloseRefusal,

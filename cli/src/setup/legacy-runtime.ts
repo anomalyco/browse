@@ -3,16 +3,17 @@
 // shim swaps its MCP server once current.json names another version and the relay reports that version. A relay
 // started from a current install (the npm global package or the binary) while that runtime is active takes it over, in
 // two steps around binding the relay port:
-//   prepare  (main.ts, before `serve` starts) only for the default home and a free port: copies the old folder's data
-//            into the XDG folders, the old files winning, and stops treating the old folder as OPENCODE_BROWSER_HOME.
+//   prepare  (main.ts, before `serve` starts) only for the default home and a port without a browse relay on it: copies
+//            the old folder's data into the XDG folders, the old files winning, and stops treating the old folder as
+//            OPENCODE_BROWSER_HOME.
 //   commit   (cli/relay.ts, once the relay listens) writes a forwarder for this version that runs the current install,
 //            points current.json at it so running agents follow, then migrates (setup/migrate.ts): agents' entries
 //            become `browse mcp`, and the old folder goes after a grace period.
 import fs from "node:fs"
-import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import { compiledBinary, installerBinaryPath } from "../paths.ts"
+import { probeRelayPort, resolveRelayPort } from "../relay/port.ts"
 import { channelOf, installedRuntime, type Runtime } from "../update/auto-update.ts"
 import { opencodeBrowserVersion } from "../version.ts"
 import { insidePath, legacyRuntimeActive, samePath, type LegacyRuntime } from "./legacy.ts"
@@ -47,8 +48,9 @@ export async function prepareLegacyTakeover(legacy: LegacyRuntime | undefined, o
   if (!legacy || !legacyRuntimeActive(legacy) || !install || install.kind === "npx" || insidePath(install.entry, legacy.root)) return false
   // An isolated relay (its own OPENCODE_BROWSER_HOME) leaves the old runtime alone.
   if (env.OPENCODE_BROWSER_HOME && !samePath(env.OPENCODE_BROWSER_HOME, legacy.root)) return false
-  // Another relay holds the port: this one won't start, so it mustn't take anything over.
-  if (await portInUse(Number(env.OPENCODE_BROWSER_PORT) || 19988)) return false
+  // Another browse relay holds the port: this one won't be the one that listens, so it mustn't take anything over.
+  // A foreign program there is not browse; an unpinned relay falls back to another port (relay/port.ts).
+  if (await probeRelayPort(Number(env.OPENCODE_BROWSER_PORT) || resolveRelayPort()) === "browse") return false
   const home = options.home ?? os.homedir()
   const { copyLegacyData } = await import("./migrate.ts")
   // First, or the XDG paths the copy writes to would still resolve to the old folder.
@@ -111,16 +113,6 @@ function writeForwarder(entry: string, runtime: Runtime) {
         `await import(pathToFileURL(${target}).href)`,
       ]
   writeAtomic(entry, ["#!/usr/bin/env node", `${FORWARDER} (${runtime.kind}). Don't edit.`, ...run, ""].join("\n"))
-}
-
-/** Whether something accepts connections on the relay port; anything but a refusal counts, so a doubt never takes over. */
-function portInUse(port: number) {
-  return new Promise<boolean>((resolve) => {
-    const socket = net.connect({ host: "127.0.0.1", port })
-    socket.setTimeout(1000, () => (socket.destroy(), resolve(true)))
-    socket.once("connect", () => (socket.destroy(), resolve(true)))
-    socket.once("error", (error: NodeJS.ErrnoException) => resolve(error.code !== "ECONNREFUSED"))
-  })
 }
 
 function realpath(file: string) {

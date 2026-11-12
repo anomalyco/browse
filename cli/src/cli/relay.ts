@@ -12,11 +12,12 @@ const serve = Command.make(
     const [{ startRelay }, { parseAdditionalExtensionOrigins }] = yield* Effect.promise(() =>
       Promise.all([import("../relay.ts"), import("../relay/helpers.ts")]),
     )
-    const port = yield* RelayClient.portConfig
+    // Unset, the relay falls back from 19988 to a free browse port (relay/port.ts); an explicit port pins it.
+    const port = process.env.OPENCODE_BROWSER_PORT === undefined ? undefined : yield* RelayClient.portConfig
     const additionalExtensionOrigins = parseAdditionalExtensionOrigins(yield* RelayClient.extensionOriginsConfig)
     yield* Effect.scoped(
       Effect.gen(function* () {
-        const relay = yield* startRelay({ port, additionalExtensionOrigins })
+        const relay = yield* startRelay({ ...(port === undefined ? {} : { port }), additionalExtensionOrigins })
         // Taking over the old self-managed runtime (setup/legacy-runtime.ts) is published only now that this relay
         // owns the port.
         yield* Effect.promise(() => import("../setup/legacy-runtime.ts").then((module) => module.commitLegacyTakeover()))

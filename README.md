@@ -168,12 +168,12 @@ and the extension connects to it across the network:
 
 1. On the opencode machine, install browse, then run `browse set hostname 0.0.0.0`.
    The relay then listens on every network, restarting if it runs. Other computers reach only the extension link;
-   the HTTP API and CDP answer on `127.0.0.1` only. The command prints the address and a pairing code for step 2
-   (`browse pair` prints another; each works once, within 10 minutes).
+   the HTTP API and CDP answer on `127.0.0.1` only. The command prints the address (with its port when it isn't
+   19988) and a pairing code for step 2 (`browse pair` prints another; each works once, within 10 minutes).
 2. In the browser, open the extension's settings page (right-click the toolbar button, then **Options**). Under
-   **advanced**, replace `localhost:19988` in **Relay address** with that machine's address (a Tailscale IP or name, with
-   `:port` if it isn't 19988), enter the code under **Pairing code**, then click **Connect**. The page says right there
-   whether the relay answered and accepted the code.
+   **advanced**, replace `localhost:19988` in **Relay address** with that machine's address and port (a Tailscale IP
+   or name, `:port` added when it isn't 19988), enter the code under **Pairing code**, then click **Connect**. The
+   page says right there whether the relay answered and accepted the code.
 
 `browse set hostname 127.0.0.1` goes back to this computer only.
 
@@ -274,8 +274,8 @@ initialize instructions. Everything is also a CLI:
 </picture>
 
 The agent talks to the `browse` MCP server over stdio. The server hands each command to the relay on
-`127.0.0.1:19988`, and the extension, connected to the relay over a WebSocket, runs it in your browser through
-`chrome.debugger`.
+`127.0.0.1:19988` (or the next free port from 19990–19997 when another program holds it), and the extension,
+connected to the relay over a WebSocket, runs it in your browser through `chrome.debugger`.
 
 - **The relay** (`cli/`) is a local Chrome DevTools endpoint backed by the extension. It keeps named sessions,
   handoffs, recordings, network capture and a journal, and starts on demand.
@@ -375,6 +375,7 @@ Escape hatches. Set them in the environment you start opencode (or your MCP clie
 | `OPENCODE_BROWSER_CHALLENGE_WAIT_MS=15000` | How long `execute` waits for a bot check the browser clears by itself (0 to 60000; 0 reports it without waiting) |
 | `OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS=30000` | How long the relay waits for the extension to answer a command (15000 to 300000); raise it on a heavily loaded computer |
 | `OPENCODE_BROWSER_PING_TIMEOUT_MS=10000` | How long a ping may go unanswered before the browser counts as asleep (1000 to 30000) |
+| `OPENCODE_BROWSER_PORT=20000` | Pin the relay's port, with no fallback; clients dial it too (unset, browse uses 19988 and steps to the next free port of 19990–19997 when another program holds it) |
 
 ## Troubleshooting
 
@@ -383,6 +384,9 @@ Escape hatches. Set them in the environment you start opencode (or your MCP clie
 - Agents fail with "The browser isn't answering" while the computer is very busy: the browser may just be slow. Raise
   `OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS` and `OPENCODE_BROWSER_PING_TIMEOUT_MS`, then run `browse relay restart`.
 - Logs: `~/.local/state/browse/logs/relay.log`.
+- Another program already on port 19988 (Playwriter's relay, say): browse uses 19988, and if it's held browse picks
+  the next free port from 19990–19997 by itself; the extension finds it, so both can run side by side.
+  `OPENCODE_BROWSER_PORT` pins one port with no fallback.
 - Stuck on 0.0.15 or earlier with `~/.local/share/opencode-browser` (`%LOCALAPPDATA%\opencode-browser` on Windows) still
   there: installs from before 0.0.11 download each update but keep running the old version. Run
   `npm install -g @opencode/browse@latest` (`@dev` on the dev channel), then `browse relay restart` once no agent is

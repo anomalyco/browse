@@ -119,7 +119,7 @@ describe("taking over the old self-managed runtime", () => {
     const token = path.join(home, ".local", "share", "browse", "relay-token")
     write(token, "stale\n", 0o600)
     const before = fs.readFileSync(path.join(oldData, "runtime", "current.json"), "utf8")
-    using busy = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") })
+    using busy = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ version: "0.0.15", instanceId: "another-relay" }) })
     const busyEnv: NodeJS.ProcessEnv = { OPENCODE_BROWSER_HOME: oldData, OPENCODE_BROWSER_PORT: String(busy.port) }
     expect(await prepareLegacyTakeover(legacyRuntime(home), { install: runtime, env: busyEnv, home })).toBe(false)
     const isolated: NodeJS.ProcessEnv = { OPENCODE_BROWSER_HOME: path.join(home, "isolated"), OPENCODE_BROWSER_PORT: String(await freePort()) }
@@ -144,7 +144,7 @@ describe("taking over the old self-managed runtime", () => {
     installBuild(packageDir, "0.0.16-dev.130")
     const record = path.join(oldData, "runtime", "current.json")
     const before = fs.readFileSync(record, "utf8")
-    using busy = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") })
+    using busy = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ version: "0.0.15", instanceId: "another-relay" }) })
     const serve = (port: number, options: { home?: string; args?: string[]; timeout?: number } = {}) =>
       spawnSync(node, [current, "serve", ...(options.args ?? [])], {
         encoding: "utf8",
@@ -274,5 +274,15 @@ describe("taking over the old self-managed runtime", () => {
       expect(migrateLegacy(home, takenOver + 11 * 60_000).removed).toEqual([oldData])
       expect(fs.existsSync(oldData)).toBe(false)
     })
+  })
+
+  test("a non-browse listener on the port doesn't block a takeover", async () => {
+    const { home, oldData, runtime } = oldRuntimeHome(homes)
+    // Playwriter and friends don't answer /version like browse: the relay can fall back (relay/port.ts), so a takeover
+    // must go ahead rather than being blocked by whatever holds the port.
+    using other = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("Not Found", { status: 404 }) })
+    const env: NodeJS.ProcessEnv = { OPENCODE_BROWSER_HOME: oldData, OPENCODE_BROWSER_PORT: String(other.port) }
+    expect(await prepareLegacyTakeover(legacyRuntime(home), { install: runtime, env, home })).toBe(true)
+    expect(env.OPENCODE_BROWSER_HOME).toBeUndefined()
   })
 })
