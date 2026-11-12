@@ -50,8 +50,10 @@ test("a proven scanned port survives its own close and a scan keeps dialling it"
   expect(await stored("agentRelayProvenPort")).toBe(PORT)
 })
 
-test("a code without a port still goes to 19988, even when the scanned port is proven", async () => {
-  void relay.connectTo("localhost", CODE)
+test("a code-only submit while the proven port fails still goes to 19988", async () => {
+  // The proven relay just failed; the code-only form sends no address, so the shown port must not become a hint.
+  current().drop(1006)
+  void relay.connectTo("", CODE)
   await until(async () => (await stored("agentRelayCodePort")) === 19988)
   expect(await stored("agentRelayCodePort")).toBe(19988)
   expect(await stored("agentRelayDiscoveredPort")).toBeUndefined()

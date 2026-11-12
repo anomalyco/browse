@@ -388,8 +388,8 @@ Escape hatches. Set them in the environment you start opencode (or your MCP clie
   `OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS` and `OPENCODE_BROWSER_PING_TIMEOUT_MS`, then run `browse relay restart`.
 - Logs: `~/.local/state/browse/logs/relay.log`.
 - Another program's HTTP server already on port 19988 (Playwriter's relay, say): browse picks the next free port from
-  19990–19997 by itself; install's pairing link or file tells the extension that port, and once paired it finds the
-  relay again by itself, so both can run side by side. A port held by something that doesn't
+  19990–19997 by itself; while the relay is running, install's pairing link or file tells the extension that port, and
+  once paired it finds the relay again by itself, so both can run side by side. A port held by something that doesn't
   answer HTTP is treated as in use, so browse won't start a second relay elsewhere: stop that program or set
   `OPENCODE_BROWSER_PORT`.
 - Stuck on 0.0.15 or earlier with `~/.local/share/opencode-browser` (`%LOCALAPPDATA%\opencode-browser` on Windows) still

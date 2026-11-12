@@ -189,15 +189,26 @@ export async function verifiedRelay(
   options: { readonly root?: string; readonly timeoutMs?: number } = {},
 ): Promise<{ readonly endpoint: string; readonly instanceId: string } | undefined> {
   const root = options.root ?? stateRoot()
-  const state = readRelayState(root)
-  const live = state !== undefined && state.configuredPort === configuredRelayPort() && processAlive(state.pid)
+  const configuredPort = configuredRelayPort()
+  const state = readRelayState(root, configuredPort)
+  const live = state !== undefined && state.configuredPort === configuredPort && processAlive(state.pid)
     ? state
     : undefined
   // This one read decides the port: a pinned port stays pinned, otherwise a live relay.json names it, else 19988.
   const port = envPort() ?? live?.port ?? defaultPort
   const version = await browseVersionAt(port, options.timeoutMs ?? 3_000)
   if (!version) return undefined
-  if (live && (live.port !== port || version.instanceId !== live.instanceId)) return undefined
+  // The record must not have changed while /version was in flight. A live record when the probe started must still be
+  // the same; one that appears during the probe is allowed only when it describes exactly this reply.
+  const reread = readRelayState(root, configuredPort)
+  const after = reread !== undefined && reread.configuredPort === configuredPort && processAlive(reread.pid)
+    ? reread
+    : undefined
+  const same = live === undefined
+    ? true
+    : after !== undefined && after.port === live.port && after.instanceId === live.instanceId
+  if (!same) return undefined
+  if (after && (after.port !== port || version.instanceId !== after.instanceId)) return undefined
   return { endpoint: endpointForPort(port), instanceId: version.instanceId }
 }
 

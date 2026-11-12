@@ -203,7 +203,14 @@ describe("taking over the old self-managed runtime", () => {
       expect((await within(5_000, call(), "a tools/call after the next update")).result?.isError).toBe(false)
     } finally {
       mcp.close()
-      for (const pid of serversUnder(home)) process.kill(pid)
+      for (const pid of serversUnder(home)) {
+        try {
+          process.kill(pid)
+        } catch (error) {
+          // The server may exit between the ps listing and the kill.
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
+        }
+      }
     }
   }, 60_000)
 

@@ -73,7 +73,7 @@ export function createRelayDiscovery(deps: {
   const scan = async (missed: () => void) => {
     const failed = deps.current().port
     const stored = await chrome.storage.local.get([TOKENS_KEY, DISCOVERED_PORT_KEY, DISCOVERED_KIND_KEY, PROVEN_PORT_KEY])
-    const proven = relayPortHint(stored[PROVEN_PORT_KEY])
+    let proven = relayPortHint(stored[PROVEN_PORT_KEY])
     // A port only a scan found and no connection ever proved is a hint at best: forget it before looking again, so a
     // listener that mimics browse's /version can't keep the next attempt on itself. A proven port is just restarting.
     if (
@@ -84,9 +84,14 @@ export function createRelayDiscovery(deps: {
     const found = await scanRelayPorts()
     // Every candidate refused, or none is browse (the usual "no relay is running"): keep the normal backoff.
     if (found.length === 0) return missed()
-    // Skip ports that failed their proof while others answered; the proven port is never skipped. If that excludes
-    // everything, one success since reset proves nothing about the rest, so start over with all of them.
-    let usable = found.filter((port) => port === proven || !unproven.has(port))
+    // The proven port just failed without its proof and something else answered: it is no longer the relay here. (When
+    // it is the only candidate it is most likely restarting, so keep it.)
+    if (failed === proven && found.some((port) => port !== failed)) {
+      proven = undefined
+      await chrome.storage.local.remove(PROVEN_PORT_KEY)
+    }
+    // Skip ports that failed their proof while others answered. If that excludes everything, start over with all.
+    let usable = found.filter((port) => !unproven.has(port))
     if (usable.length === 0) {
       unproven.clear()
       usable = [...found]

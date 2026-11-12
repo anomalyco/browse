@@ -97,8 +97,8 @@ export type Settings = {
 export const connectedMessage = "✓ Connected to your browser. Ask your agent to open a page."
 export const pairedOfflineMessage =
   "! Not connected yet. Open the browser profile already paired with browse and make sure the extension is enabled. It reconnects automatically."
-export const manualPair = (code: string, port = defaultPort) =>
-  `Open the Extensions menu → browse → Options, expand advanced (or click Pair with a code), enter ${formatPairingCode(code)} as the pairing code${port === defaultPort ? "" : ` and localhost:${port} as the relay address`}, then click Connect.`
+export const manualPair = (code: string, port = defaultPort, address?: string) =>
+  `Open the Extensions menu → browse → Options, expand advanced (or click Pair with a code), enter ${formatPairingCode(code)} as the pairing code${address ? ` and ${address} as the relay address` : port === defaultPort ? "" : ` and localhost:${port} as the relay address`}, then click Connect.`
 
 export function flag(args: string[], name: string) {
   const index = args.indexOf(name)

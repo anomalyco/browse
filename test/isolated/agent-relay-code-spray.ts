@@ -101,8 +101,8 @@ test("a link without a port clears the port it was on and points the code at 199
   expect(socketsAt(DEFAULT_PORT).at(-1)!.url).toBe(`ws://127.0.0.1:${DEFAULT_PORT}/extension`)
 })
 
-test("a link clears a loopback address so it can dial the link's port", async () => {
-  await stub.chrome.storage.local.set({ agentRelayAddress: `127.0.0.1:${BROWSER_PORT}` })
+test("a link clears a stored address so it can dial the link's port", async () => {
+  await stub.chrome.storage.local.set({ agentRelayAddress: "100.64.0.2" })
   await settle()
   expect(await relay.pairLink(CODE, 19991)).toBe(true)
   expect((await stub.chrome.storage.local.get("agentRelayAddress")).agentRelayAddress).toBe("")

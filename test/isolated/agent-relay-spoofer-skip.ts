@@ -65,6 +65,7 @@ globalThis.fetch = (async (input: string | URL) => {
 await stub.chrome.storage.local.set({
   agentRelayDiscoveredPort: SPOOF_PORT,
   agentRelayDiscoveredKind: "scan",
+  agentRelayProvenPort: SPOOF_PORT,
   agentRelayTokens: {
     [`127.0.0.1:${SPOOF_PORT}`]: SPOOF_TOKEN,
     [`127.0.0.1:${REAL_PORT}`]: REAL_TOKEN,

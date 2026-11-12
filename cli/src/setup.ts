@@ -314,10 +314,14 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
   // The relay saw this browser try to connect without a token (or refuse one): it's installed, not missing.
   const needsPairing = initial?.pairingState === "unpaired" || initial?.pairingState === "refused"
   const folder = unpackedFolder()
-  if (folder && connected && !pairedOffline) {
+  if (folder && !pairedOffline) {
+    // The unpacked extension finds a one-time code in its own folder and exchanges it for its key, without a step.
+    // This runs before any early return (extension off, mismatch, old store build): no relay is started here, so the
+    // code names the live port only when a relay already runs.
+    await pairUnpacked()
     // A browser already running an older unpacked build keeps its old code until it reloads; ask it to, silently:
     // install never talks about unpacked builds.
-    const reload = await reloadOutdatedExtension(connected, folder)
+    const reload = connected ? await reloadOutdatedExtension(connected, folder) : "current"
     if (reload === "reloaded") log("✓ Reloaded browse in your browser")
   }
   // Including --no-wait (checkout update): an incompatible browser is installed, not waiting to be added or paired.
@@ -366,10 +370,11 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
     env,
   })
   if (connected || found === "off" || pairedOffline) return
-  // Up only now, before a pairing file or link names the relay's listen port when it isn't 19988 (a fallback). A folder
-  // code still works without a port if the relay can't start (the extension then starts at 19988 and scans).
+  // Up only now, before a pairing file or link names the relay's listen port when it isn't 19988 (a fallback). A
+  // port-less file code only works on 19988, so if the relay can't start the extension starts there and scans.
   if (folder) {
-    ensureRelayQuietly(spawnEntry)
+    const failure = ensureRelayQuietly(spawnEntry)
+    if (failure) log(`! Couldn't start the relay: ${failure}`)
     await pairUnpacked()
   } else ensureRelay(spawnEntry)
   let code: string | undefined

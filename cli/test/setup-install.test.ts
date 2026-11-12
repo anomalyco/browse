@@ -5,7 +5,7 @@ import path from "node:path"
 import { parse } from "jsonc-parser"
 import { agentLocations, agentNames, callingAgent, editAgentConfig } from "../src/setup/agent-config.ts"
 import { agentFlags, agentPlan } from "../src/setup/agent-picker.ts"
-import { STORE_URL } from "../src/setup/environment.ts"
+import { manualPair, STORE_URL } from "../src/setup/environment.ts"
 import { configureMcp, installedExtensionVersion, installedRuntime, installWaitTimeout, locateExtension, manualMcpEntry, pairStoreExtension, relayNotRestarted, remoteRelayAddresses, remoteRelayLines, removeMcp, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
 
 const browser = (name: string): Browser => ({ name, userData: `/data/${name}`, manifests: [], defaultIDs: [], executables: [] })
@@ -13,6 +13,11 @@ const chrome = browser("Google Chrome")
 const edge = browser("Microsoft Edge")
 const none = (target: Browser): Detection => ({ browser: target, blocked: false, enabled: [], disabled: [] })
 const folder = "/src/browse/dist"
+
+test("a remote relay's pairing text names its address instead of localhost", () => {
+  expect(manualPair("ABCD1234", 19990, "devbox.tail1234.ts.net:19990")).toContain("devbox.tail1234.ts.net:19990")
+  expect(manualPair("ABCD1234", 19990)).toContain("localhost:19990")
+})
 
 test("identifies the calling agent, not the editor hosting a regular terminal", () => {
   expect(callingAgent({ CLAUDECODE: "1", TERM_PROGRAM: "vscode" })).toBe("claude")

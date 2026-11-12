@@ -27,6 +27,8 @@ export async function probeRelayPort(port: number, timeoutMs = 2_000): Promise<E
     const response = await fetch(`http://127.0.0.1:${port}/version`, {
       headers: { "x-browse-install": "probe" },
       cache: "no-store",
+      credentials: "omit",
+      redirect: "error",
       signal: AbortSignal.timeout(timeoutMs),
     })
     return relayProbeResult(response.status, await response.json().catch(() => undefined))

@@ -46,6 +46,7 @@ import {
   type Settings,
 } from "./environment.ts"
 import { waitForExtension } from "./guidance.ts"
+import { remoteRelayAddresses } from "./remote.ts"
 import { configFile, removeLegacyHost, removeMcp } from "./mcp.ts"
 
 export type ExtensionStatus = {
@@ -109,9 +110,11 @@ export function ensureRelay(entry: string) {
     fail(started.stderr?.trim() || `Couldn't reach the browse relay: ${started.error?.message || `run ${cliCommand("doctor")}`}`)
 }
 
-/** Starts the relay when it isn't running, without failing the command (a saved hostname is still worth printing). */
-export function ensureRelayQuietly(entry: string): boolean {
-  return startRelay(entry).status === 0
+/** Starts the relay when it isn't running. Returns why it couldn't, or undefined on success (callers may continue). */
+export function ensureRelayQuietly(entry: string): string | undefined {
+  const started = startRelay(entry)
+  if (started.status === 0) return undefined
+  return started.stderr?.trim() || started.error?.message || `run ${cliCommand("doctor")}`
 }
 
 export const extensionStatus = async (installWaiting = false) => {
@@ -210,6 +213,9 @@ export async function extension() {
   await syncDev()
   if (!existsSync(path.join(folder, "manifest.json")))
     fail(`${folder} has no built extension. Run \`${installCommand()}\` first.`)
+  // The folder code names the live relay's port when one is running; otherwise it stays usable on 19988.
+  const failure = ensureRelayQuietly(readJson<Settings>(files.settings)?.entry ?? runningEntry())
+  if (failure) log(`! Couldn't start the relay: ${failure}`)
   await pairUnpacked()
   revealFolder(folder)
   log(`Load unpacked from: ${folder}`)
@@ -229,8 +235,13 @@ export async function pair(args: string[]) {
   ensureRelay(readJson<Settings>(files.settings)?.entry ?? runningEntry())
   const receipt = randomUUID()
   const code = mintPairingCode(undefined, { receipt })
+  const port = resolveRelayPort()
+  // A browser on another computer needs this machine's address, not localhost:<port>.
+  const remote = readRelayConfig().hostname === "0.0.0.0"
+    ? remoteRelayAddresses(networkInterfaces(), { port })[0]
+    : undefined
   log(`Pairing code: ${formatPairingCode(code)}`)
-  log(`${manualPair(code, resolveRelayPort())} It works once, within ${pairingCodeTtlMs / 60_000} minutes.`)
+  log(`${manualPair(code, port, remote)} It works once, within ${pairingCodeTtlMs / 60_000} minutes.`)
   log(
     `Waiting up to ${timeoutMs / 1000}s for that browser. Later, \`${cliCommand("pair --list")}\` shows paired browsers.`,
   )

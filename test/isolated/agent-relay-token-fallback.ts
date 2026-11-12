@@ -16,6 +16,8 @@ const STALE_PORT = 19988
 const OTHER_PORT = 19991
 const BROWSER_PORT = 19990
 installFakeRelaySocket({ port: BROWSER_PORT, token: TOKEN })
+// No real relay: any other local probe is a 404, never a connection to this computer's browse.
+globalThis.fetch = (async () => new Response("not found", { status: 404 })) as unknown as typeof fetch
 
 await stub.chrome.storage.local.set({
   agentRelayDiscoveredPort: BROWSER_PORT,

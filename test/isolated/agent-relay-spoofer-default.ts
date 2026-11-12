@@ -63,6 +63,7 @@ globalThis.fetch = (async (input: string | URL) => {
 ;(globalThis as { WebSocket: unknown }).WebSocket = FakeWebSocket
 
 await stub.chrome.storage.local.set({
+  agentRelayProvenPort: SPOOF_PORT,
   agentRelayTokens: {
     [`127.0.0.1:${SPOOF_PORT}`]: SPOOF_TOKEN,
     [`127.0.0.1:${REAL_PORT}`]: REAL_TOKEN,

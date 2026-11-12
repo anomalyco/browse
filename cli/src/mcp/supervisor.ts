@@ -216,7 +216,7 @@ export async function runBinaryMcp(args: readonly string[]) {
   let checking = false
   let unreachable = 0
   const relayVersion = () =>
-    fetch(`${endpointForPort(resolveRelayPort())}/version`, { signal: AbortSignal.timeout(2000) })
+    fetch(`${endpointForPort(resolveRelayPort())}/version`, { redirect: "manual", signal: AbortSignal.timeout(2000) })
       .then((response) => (response.ok ? (response.json() as Promise<{ version?: unknown; instanceId?: unknown; draining?: unknown }>) : undefined))
       .then((body) => (body && typeof body.version === "string" && typeof body.instanceId === "string"
         ? { version: body.version, draining: body.draining === true }

@@ -71,7 +71,7 @@ test("a code entered while the discovered port is scan-only goes to 19988, not t
   // A scan-only port no connection has authenticated is not offered in the form.
   expect(relay.state().relay).toEqual({ address: `localhost:${DEFAULT_PORT}`, remote: false })
   const scannedBefore = at(SCANNED_PORT).length
-  void relay.connectTo("localhost", CODE)
+  void relay.connectTo(`localhost:${DEFAULT_PORT}`, CODE)
   await until(() => at(DEFAULT_PORT).some((socket) => socket.received.some((message) => message.method === "hello")))
   const hello = at(DEFAULT_PORT).at(-1)!.received.find((message) => message.method === "hello")
   expect(hello?.params?.pairing).toMatchObject({ mode: "code" })

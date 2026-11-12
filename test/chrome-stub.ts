@@ -330,7 +330,19 @@ export type Stub = ReturnType<typeof createChrome>
  * instead of replacing the stub.
  */
 export function installChrome(): Stub {
-  const global = globalThis as { chrome?: unknown; __chromeStub?: Stub }
+  const global = globalThis as { chrome?: unknown; __chromeStub?: Stub; __browseFetchStubbed?: boolean }
+  // Isolated tests must never reach a real local relay: anything aimed at this computer gets a 404 unless the test
+  // installs its own fetch stub first. Other hosts pass through.
+  if (!global.__browseFetchStubbed) {
+    global.__browseFetchStubbed = true
+    const realFetch = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const host = new URL(typeof input === "string" || input instanceof URL ? String(input) : input.url).hostname
+      if (host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]")
+        return new Response("not found", { status: 404 })
+      return realFetch(input, init)
+    }) as typeof fetch
+  }
   global.__chromeStub ??= createChrome()
   global.chrome = global.__chromeStub.chrome
   return global.__chromeStub

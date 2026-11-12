@@ -23,6 +23,7 @@ import {
 } from "../pairing"
 import { TabCleanup } from "../tab-cleanup"
 import { codePort, relayTarget } from "./discovery"
+import { discoveredRelay, shownRelayPort } from "./discovered"
 import {
   browserBrand,
   browserName,
@@ -382,8 +383,10 @@ export function createRelayHandshake(deps: {
         : typeof range?.min === "number" && extensionProtocolVersion < range.min
           ? "update-extension"
           : undefined
-    // The relay completed its proof on this port. Only this makes a scanned port trusted enough to show or prefer.
-    await chrome.storage.local.set({ [PROVEN_PORT_KEY]: pending.port })
+    // Only this computer's automatic connection makes a port proven: a remote relay and the PORT_KEY dev pin are
+    // dialled exactly as given, so they must not overwrite the port the form and scans treat as proven.
+    if (deps.automatic() && deps.hostPort().host === "127.0.0.1")
+      await chrome.storage.local.set({ [PROVEN_PORT_KEY]: pending.port })
     trusted.add(current)
     tokenRefused = undefined
     codeRejected = false
@@ -440,19 +443,21 @@ export function createRelayHandshake(deps: {
     const code = codeInput.trim() === "" ? undefined : normalizePairingCode(codeInput)
     if (codeInput.trim() !== "" && code === undefined) return { status: "invalid-code" }
     const before = await chrome.storage.local.get([
-      RELAY_ADDRESS_KEY, PAIRING_KEY, PORT_KEY, DISCOVERED_PORT_KEY, DISCOVERED_KIND_KEY,
+      RELAY_ADDRESS_KEY, PAIRING_KEY, PORT_KEY, DISCOVERED_PORT_KEY, DISCOVERED_KIND_KEY, PROVEN_PORT_KEY,
     ])
     const current = deps.hostPort()
     const automatic = deps.automatic()
-    // Localhost with no port, or the automatic address the form shows for this computer while the connection is still
-    // automatic, is this computer: saving it must not pin it. A loopback address with a browse port while automatic is
-    // a hint for where the relay is, not a pin: a relay that later returns to 19988 is still found. An explicit stored
-    // address re-saved stays explicit, even when its port happens to be the one now in use.
-    const hinted = automatic && address.host === "127.0.0.1" && address.port !== undefined && relayPorts.includes(address.port)
+    // The port the form shows is not a typed hint when it is submitted unchanged: a code-only form sends the shown
+    // address, and treating it as a hint would pin whatever fallback the page happened to display.
+    const shownPort = shownRelayPort(automatic, discoveredRelay(before), current.port)
+    const typedPort = automatic && address.host === "127.0.0.1" && address.port !== undefined && relayPorts.includes(address.port)
       ? address.port
       : undefined
+    const hinted = typedPort !== undefined && (typedPort !== shownPort || before[DISCOVERED_KIND_KEY] === "hint")
+      ? typedPort
+      : undefined
     const local = address.host === "127.0.0.1" &&
-      (address.port === undefined || hinted !== undefined || (automatic && address.port === current.port))
+      (address.port === undefined || hinted !== undefined || (automatic && (address.port === current.port || address.port === shownPort)))
     const value = local ? "" : address.port ? `${address.host}:${address.port}` : address.host
     // A code typed without a port must not ride on a port only a scan found: 19988 is where an unpaired extension
     // starts. A relay found by a scan is never given a pairing code (agent-relay/discovery.ts).
@@ -519,22 +524,21 @@ export function createRelayHandshake(deps: {
     if (code === undefined || code.legacy || deps.status() === "connected") return false
     const port = relayPortHint(hint)
     deps.log.add("pairing.link")
-    const stored = await chrome.storage.local.get([RELAY_ADDRESS_KEY])
-    const address = relayAddress(stored[RELAY_ADDRESS_KEY])
+    const stored = await chrome.storage.local.get([RELAY_ADDRESS_KEY, PAIRING_KEY])
     // A link without a port is for 19988. Drop a port only a scan found first, so the reconnect this write triggers
     // dials 19988 with the code instead of carrying it to whatever answered a scan.
     if (port === undefined) await chrome.storage.local.remove([DISCOVERED_PORT_KEY, DISCOVERED_KIND_KEY])
-    // Reconnects through storage.onChanged, or here after the write: a link press tries now even when these values
-    // were already stored.
     await chrome.storage.local.set({
-      // A loopback address left on the form must not pin the browser away from the link's port (or 19988).
-      ...(address?.host === "127.0.0.1" ? { [RELAY_ADDRESS_KEY]: "" } : {}),
+      // A welcome link is for this computer's relay: clear any address so it dials the link's port (or 19988).
+      [RELAY_ADDRESS_KEY]: "",
       [PAIRING_KEY]: code.code,
       // The port this code is for: never a later scan's, nor whatever port is in use when the code is tried.
       [CODE_PORT_KEY]: port ?? defaultRelayPort,
       ...(port !== undefined ? { [DISCOVERED_PORT_KEY]: port, [DISCOVERED_KIND_KEY]: "hint" } : {}),
     })
-    deps.resetAndConnect("pairing", "Pairing changed")
+    // The write reconnects through storage.onChanged; only an unchanged address and code need the explicit nudge.
+    if ((stored[RELAY_ADDRESS_KEY] ?? "") === "" && stored[PAIRING_KEY] === code.code)
+      deps.resetAndConnect("pairing", "Pairing changed")
     return true
   }
 
