@@ -38,8 +38,9 @@ export type ExtensionTimeoutSetting = {
   readonly max: number
 }
 
-/** OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS: how long a command that isn't a debugger command or a ping may take. */
-export const extensionCommandTimeout: ExtensionTimeoutSetting = { fallback: 30_000, min: 5_000, max: 300_000 }
+/** OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS: how long a command that isn't a debugger command or a ping may take. Its
+ * minimum leaves room for the extension's own 12 s tabs.create budget. */
+export const extensionCommandTimeout: ExtensionTimeoutSetting = { fallback: 30_000, min: 15_000, max: 300_000 }
 /** OPENCODE_BROWSER_PING_TIMEOUT_MS: how long a ping may go unanswered before the browser counts as asleep. */
 export const extensionPingTimeout: ExtensionTimeoutSetting = { fallback: 10_000, min: 1_000, max: 30_000 }
 
@@ -68,6 +69,8 @@ export class ExtensionRpc {
   private unansweredSince: number | undefined
   private nextRequestId = 1
   private readonly pendingRequests = new Map<number, PendingExtensionRequest>()
+  /** Pings still waiting for an answer, so a keepalive doesn't stack another on a slow worker. */
+  private readonly pendingPings = new Set<number>()
   private livenessProbe: { readonly timeout: NodeJS.Timeout; readonly socket: WebSocket; readonly onPong: () => void } | undefined
   version: string | undefined
   protocolVersion: number | null | undefined
@@ -78,6 +81,10 @@ export class ExtensionRpc {
 
   get connected(): boolean {
     return this.socket?.readyState === WebSocket.OPEN && this.ready && !this.unresponsive && this.protocolCompatible !== false
+  }
+
+  get pingPending(): boolean {
+    return this.pendingPings.size > 0
   }
 
   get acceptsEvents(): boolean {
@@ -202,6 +209,7 @@ export class ExtensionRpc {
         completed = true
         clearTimeout(timeout)
         this.pendingRequests.delete(id)
+        this.pendingPings.delete(id)
         resume(effect)
       }
       const timeout = setTimeout(() => {
@@ -233,6 +241,7 @@ export class ExtensionRpc {
         },
         ...(debuggerTabId === undefined ? {} : { debuggerTabId }),
       })
+      if (command.method === "ping") this.pendingPings.add(id)
       try {
         socket.send(JSON.stringify(message), (error) => {
           if (error) {
@@ -246,6 +255,7 @@ export class ExtensionRpc {
         completed = true
         clearTimeout(timeout)
         this.pendingRequests.delete(id)
+        this.pendingPings.delete(id)
       })
     })
   }

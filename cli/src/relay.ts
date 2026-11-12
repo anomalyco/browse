@@ -115,10 +115,12 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   })
   const extensionTimeoutEnv = Option.getOrUndefined(yield* Config.option(Config.String("OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS")))
   const pingTimeoutEnv = Option.getOrUndefined(yield* Config.option(Config.String("OPENCODE_BROWSER_PING_TIMEOUT_MS")))
+  const extensionCommandTimeoutMs = configuredTimeoutMs(extensionTimeoutEnv, extensionCommandTimeout)
+  const extensionPingTimeoutMs = configuredTimeoutMs(pingTimeoutEnv, extensionPingTimeout)
   const browsers = new BrowserLinks({
     timeouts: {
-      commandTimeoutMs: configuredTimeoutMs(extensionTimeoutEnv, extensionCommandTimeout),
-      pingTimeoutMs: configuredTimeoutMs(pingTimeoutEnv, extensionPingTimeout),
+      commandTimeoutMs: extensionCommandTimeoutMs,
+      pingTimeoutMs: extensionPingTimeoutMs,
     },
   })
   const { sendToExtension, sendExtensionBestEffort, sendToEveryBrowser, sendToEach, cleanupTabs } = createExtensionCommands({ browsers, registry, onTabGone: forgetMissingTab })
@@ -867,7 +869,15 @@ const makeRelay = Effect.fnUntraced(function* (options: {
           (error: unknown) => relayLog("extension.dev_update_failed", { error: (error as Error).message }),
         )
       }
-      relayLog("relay.ready", { url: endpointUrl, version: opencodeBrowserVersion, build: opencodeBrowserBuildId, pid: process.pid, managed })
+      relayLog("relay.ready", {
+        url: endpointUrl,
+        version: opencodeBrowserVersion,
+        build: opencodeBrowserBuildId,
+        pid: process.pid,
+        managed,
+        extensionTimeoutMs: extensionCommandTimeoutMs,
+        pingTimeoutMs: extensionPingTimeoutMs,
+      })
     }),
     (error) => Effect.gen(function* () {
       yield* cleanup()

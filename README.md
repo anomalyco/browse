@@ -373,14 +373,14 @@ Escape hatches. Set them in the environment you start opencode (or your MCP clie
 | `OPENCODE_BROWSER_AUTO_UPDATE=notify` | Installs: only show new versions (`off`: don't check; `on`: install them when idle, the default). Overrides the status page's *Updates* |
 | `OPENCODE_BROWSER_HUMAN_INPUT=0` | Send input at full speed instead of human-like paths and pacing; `1` keeps them on. Overrides the options page's *Human-like input* |
 | `OPENCODE_BROWSER_CHALLENGE_WAIT_MS=15000` | How long `execute` waits for a bot check the browser clears by itself (0 to 60000; 0 reports it without waiting) |
-| `OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS=30000` | How long the relay waits for the extension to answer a command (5000 to 300000); raise it on a heavily loaded computer |
+| `OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS=30000` | How long the relay waits for the extension to answer a command (15000 to 300000); raise it on a heavily loaded computer |
 | `OPENCODE_BROWSER_PING_TIMEOUT_MS=10000` | How long a ping may go unanswered before the browser counts as asleep (1000 to 30000) |
 
 ## Troubleshooting
 
 - `node cli/dist/cli.mjs status` shows the relay, the extension and every tab agents can use.
 - `node cli/dist/cli.mjs doctor` checks the install.
-- Agents fail with "isn't answering" while the computer is very busy: the browser may just be slow. Raise
+- Agents fail with "The browser isn't answering" while the computer is very busy: the browser may just be slow. Raise
   `OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS` and `OPENCODE_BROWSER_PING_TIMEOUT_MS`, then run `browse relay restart`.
 - Logs: `~/.local/state/browse/logs/relay.log`.
 - Stuck on 0.0.15 or earlier with `~/.local/share/opencode-browser` (`%LOCALAPPDATA%\opencode-browser` on Windows) still

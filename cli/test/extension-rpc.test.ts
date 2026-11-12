@@ -89,7 +89,23 @@ test("a configured ping timeout is used instead of the default", async () => {
   const started = Date.now()
   const failure = await Effect.runPromise(Effect.flip(rpc.send({ method: "ping" })))
   expect(failure.message).toBe(browserUnresponsive)
-  expect(Date.now() - started).toBeGreaterThanOrEqual(30)
+  const elapsed = Date.now() - started
+  expect(elapsed).toBeGreaterThanOrEqual(30)
+  expect(elapsed).toBeLessThan(1_000)
+})
+
+test("a pending ping is reported until it is answered or times out", async () => {
+  const answered = connectedRpc({ pingTimeoutMs: 1_000 })
+  const reply = Effect.runPromise(Effect.result(answered.rpc.send({ method: "ping" })))
+  expect(answered.rpc.pingPending).toBe(true)
+  const request = JSON.parse(answered.sent.at(-1)!) as { id: number }
+  answered.rpc.handleResponse({ id: request.id, result: {} })
+  expect((await reply)._tag).toBe("Success")
+  expect(answered.rpc.pingPending).toBe(false)
+
+  const timedOut = connectedRpc({ pingTimeoutMs: 10 })
+  expect((await Effect.runPromise(Effect.result(timedOut.rpc.send({ method: "ping" }))))._tag).toBe("Failure")
+  expect(timedOut.rpc.pingPending).toBe(false)
 })
 
 test("a configured command timeout bounds a slow command and names it", async () => {
@@ -106,7 +122,7 @@ test("the timeout environment parser clamps and falls back", () => {
   expect(configuredTimeoutMs("", extensionCommandTimeout)).toBe(30_000)
   expect(configuredTimeoutMs("not-a-number", extensionCommandTimeout)).toBe(30_000)
   expect(configuredTimeoutMs("1500.5", extensionPingTimeout)).toBe(10_000)
-  expect(configuredTimeoutMs("100", extensionCommandTimeout)).toBe(5_000)
+  expect(configuredTimeoutMs("100", extensionCommandTimeout)).toBe(15_000)
   expect(configuredTimeoutMs("1000000", extensionCommandTimeout)).toBe(300_000)
   expect(configuredTimeoutMs("250", extensionPingTimeout)).toBe(1_000)
   expect(configuredTimeoutMs("60000", extensionPingTimeout)).toBe(30_000)
