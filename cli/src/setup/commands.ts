@@ -104,17 +104,19 @@ function startRelay(entry: string) {
   })
 }
 
-export function ensureRelay(entry: string) {
-  const started = startRelay(entry)
-  if (started.status !== 0)
-    fail(started.stderr?.trim() || `Couldn't reach the browse relay: ${started.error?.message || `run ${cliCommand("doctor")}`}`)
+function relayFailure(started: ReturnType<typeof startRelay>): string {
+  return started.stderr?.trim() || `Couldn't reach the browse relay: ${started.error?.message || `run ${cliCommand("doctor")}`}`
 }
 
-/** Starts the relay when it isn't running. Returns why it couldn't, or undefined on success (callers may continue). */
+export function ensureRelay(entry: string) {
+  const started = startRelay(entry)
+  if (started.status !== 0) fail(relayFailure(started))
+}
+
+/** Starts the relay when it isn't running. Returns the failure reason, or undefined on success (callers may continue). */
 export function ensureRelayQuietly(entry: string): string | undefined {
   const started = startRelay(entry)
-  if (started.status === 0) return undefined
-  return started.stderr?.trim() || started.error?.message || `run ${cliCommand("doctor")}`
+  return started.status === 0 ? undefined : relayFailure(started)
 }
 
 export const extensionStatus = async (installWaiting = false) => {

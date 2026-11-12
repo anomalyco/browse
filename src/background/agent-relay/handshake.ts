@@ -525,19 +525,25 @@ export function createRelayHandshake(deps: {
     const port = relayPortHint(hint)
     deps.log.add("pairing.link")
     const stored = await chrome.storage.local.get([RELAY_ADDRESS_KEY, PAIRING_KEY])
+    const saved = relayAddress(stored[RELAY_ADDRESS_KEY])
+    // A link with no browse-range port is still for this computer. Keep a saved loopback address only when it pins a
+    // port outside the relay range (OPENCODE_BROWSER_PORT=9222, say): that browser is deliberately pinned there. Every
+    // other address (remote, or an in-range loopback) is cleared so the link dials its port or 19988.
+    const keepPinned = port === undefined && saved?.host === "127.0.0.1" &&
+      saved.port !== undefined && !relayPorts.includes(saved.port)
+    const address = keepPinned ? stored[RELAY_ADDRESS_KEY] as string : ""
     // A link without a port is for 19988. Drop a port only a scan found first, so the reconnect this write triggers
     // dials 19988 with the code instead of carrying it to whatever answered a scan.
     if (port === undefined) await chrome.storage.local.remove([DISCOVERED_PORT_KEY, DISCOVERED_KIND_KEY])
     await chrome.storage.local.set({
-      // A welcome link is for this computer's relay: clear any address so it dials the link's port (or 19988).
-      [RELAY_ADDRESS_KEY]: "",
+      [RELAY_ADDRESS_KEY]: address,
       [PAIRING_KEY]: code.code,
       // The port this code is for: never a later scan's, nor whatever port is in use when the code is tried.
       [CODE_PORT_KEY]: port ?? defaultRelayPort,
       ...(port !== undefined ? { [DISCOVERED_PORT_KEY]: port, [DISCOVERED_KIND_KEY]: "hint" } : {}),
     })
     // The write reconnects through storage.onChanged; only an unchanged address and code need the explicit nudge.
-    if ((stored[RELAY_ADDRESS_KEY] ?? "") === "" && stored[PAIRING_KEY] === code.code)
+    if ((stored[RELAY_ADDRESS_KEY] ?? "") === address && stored[PAIRING_KEY] === code.code)
       deps.resetAndConnect("pairing", "Pairing changed")
     return true
   }

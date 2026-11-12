@@ -374,7 +374,7 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
   // port-less file code only works on 19988, so if the relay can't start the extension starts there and scans.
   if (folder) {
     const failure = ensureRelayQuietly(spawnEntry)
-    if (failure) log(`! Couldn't start the relay: ${failure}`)
+    if (failure) fail(failure)
     await pairUnpacked()
   } else ensureRelay(spawnEntry)
   let code: string | undefined

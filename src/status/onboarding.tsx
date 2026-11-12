@@ -537,14 +537,8 @@ function CodeForm(props: { relay: Relay; label: string; onPaired: () => void }) 
         if (!code().trim()) return
         setPending(true)
         setNote(undefined)
-        const state = props.relay.state()
-        // This form has no address field: only a remote relay's address is meaningful to send. Sending the shown local
-        // port would turn a fallback the page happened to display into a typed hint.
-        props.relay.send({
-          type: "relay.connect",
-          address: state?.relay.remote ? state.relay.address : "",
-          code: code(),
-        })
+        // connectTo treats the shown port submitted unchanged as automatic, not as a typed hint.
+        props.relay.send({ type: "relay.connect", address: props.relay.state()?.relay.address ?? "", code: code() })
       }}
     >
       <p class="hint">
