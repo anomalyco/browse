@@ -11,6 +11,7 @@ import { IconButton } from "@opencode/ui/icon-button"
 import { Menu } from "@opencode/ui/menu"
 import { TextInput } from "@opencode/ui/text-input"
 import { unpackedExtensionId, unpackedReloadAdvice } from "../../cli/src/protocol"
+import { relayPorts } from "../agent-relay/protocol"
 import { probeRelayPort, type RelayProbe } from "../agent-relay/probe"
 import { firstRunStep, shouldProbe, type FirstRunStep } from "./first-run"
 import { pairingLink } from "./pairing-link"
@@ -105,8 +106,14 @@ function Onboarding() {
     probing = true
     probedPort = port
     const result = port === undefined ? "absent" : await probeRelayPort(port)
+    // A relay on a fallback port isn't pre-filled in the form (it may not be this browser's), but it still tells the
+    // step apart: "pair with it" rather than "install browse".
+    const elsewhere = result === "absent"
+      ? (await Promise.all(relayPorts.filter((candidate) => candidate !== port).map((candidate) => probeRelayPort(candidate))))
+        .find((answer) => answer !== "absent")
+      : undefined
     probing = false
-    setProbe(result)
+    setProbe(result === "absent" ? elsewhere ?? "absent" : result)
     probeTimer = setTimeout(() => {
       probeTimer = undefined
       if (shouldProbe(relay.state())) void probeRelay()

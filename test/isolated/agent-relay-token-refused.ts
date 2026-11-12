@@ -66,5 +66,6 @@ test("a refused fallback token leaves the entry it came from alone", async () =>
   await until(() => relay.state().status === "untrusted")
   expect(relay.state().pairing).toBe("token")
   expect(await stored("agentRelayTokens")).toEqual({ [`127.0.0.1:${OLD_PORT}`]: STORED_TOKEN })
-  expect(await stored("agentRelayDiscoveredPort")).toBe(BROWSER_PORT)
+  // Nothing authenticated on the discovered port, so the scan forgets it and dialing returns to 19988.
+  expect(await stored("agentRelayDiscoveredPort")).toBeUndefined()
 })

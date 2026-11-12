@@ -9,6 +9,7 @@ const stub = installChrome()
 ;(globalThis as { __OPENCODE_BROWSER_BUILD__?: string }).__OPENCODE_BROWSER_BUILD__ = "test"
 
 const CODE = "0123ABCD"
+const DEFAULT_PORT = 19988
 const BROWSER_PORT = 19990
 
 class FakeWebSocket {
@@ -66,7 +67,7 @@ async function until(check: () => boolean) {
 }
 
 test("a code is never sent to a port only a scan found", async () => {
-  await until(() => relay.state().relay.address === "localhost:19990" && socketsAt(BROWSER_PORT).length > 0)
+  await until(() => relay.state().relay.address === "localhost:19988" && socketsAt(BROWSER_PORT).length > 0)
   expect((await stub.chrome.storage.local.get("agentRelayDiscoveredPort")).agentRelayDiscoveredPort).toBe(BROWSER_PORT)
   const scanned = socketsAt(BROWSER_PORT)[0]!
   await until(() => scanned.sent.length > 0)
@@ -89,4 +90,13 @@ test("a link that names the port lets the code go there", async () => {
   const hello = hinted.sent.map((data) => JSON.parse(data)).find((message) => message.method === "hello")
   expect(hello.params.pairing.mode).toBe("code")
   expect(relay.state().pairing).toBe("code")
+})
+
+test("a link without a port clears the port it was on and points the code at 19988", async () => {
+  const before = socketsAt(DEFAULT_PORT).length
+  expect(await relay.pairLink(CODE)).toBe(true)
+  await until(() => socketsAt(DEFAULT_PORT).length > before)
+  expect((await stub.chrome.storage.local.get("agentRelayCodePort")).agentRelayCodePort).toBe(DEFAULT_PORT)
+  expect((await stub.chrome.storage.local.get("agentRelayDiscoveredPort")).agentRelayDiscoveredPort).toBeUndefined()
+  expect(socketsAt(DEFAULT_PORT).at(-1)!.url).toBe(`ws://127.0.0.1:${DEFAULT_PORT}/extension`)
 })

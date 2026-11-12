@@ -28,6 +28,7 @@ import {
   browserName,
   CODE_PORT_KEY,
   CONNECT_TIMEOUT,
+  DISCOVERED_KIND_KEY,
   DISCOVERED_PORT_KEY,
   PAIRING_FILE,
   PAIRING_KEY,
@@ -45,13 +46,10 @@ declare const __OPENCODE_BROWSER_BUILD__: string
 type PairingFile = { readonly code?: PairingCode; readonly port?: number }
 
 /**
- * The token a loopback relay on another port may still accept: the default port's token when this browser has one,
- * else the most recently stored loopback token for a port browse can listen on. Storing a token moves its key to the
- * end (rememberToken), so insertion order is recency.
+ * The token a loopback relay on another port may still accept: the most recently stored loopback token for a port
+ * browse can listen on. Storing a token moves its key to the end (rememberToken), so insertion order is recency.
  */
 function loopbackToken(tokens: Record<string, unknown>): string | undefined {
-  const direct = tokens[`127.0.0.1:${defaultRelayPort}`]
-  if (typeof direct === "string") return direct
   let found: string | undefined
   for (const [key, value] of Object.entries(tokens)) {
     if (!key.startsWith("127.0.0.1:") || typeof value !== "string") continue
@@ -77,8 +75,6 @@ export function createRelayHandshake(deps: {
 }) {
   /** Sockets whose relay proved it holds this browser's token; nothing else is obeyed. */
   const trusted = new WeakSet<WebSocket>()
-  /** Sockets whose relay sent a pairing challenge: it speaks the browse protocol. */
-  const challenged = new WeakSet<WebSocket>()
   /** What each socket pairs with, for its close to say what was refused. */
   const credentials = new WeakMap<WebSocket, Credential>()
   /** The handshake in flight on a socket: this extension's nonce, and the code exchange's state once it started. */
@@ -132,19 +128,30 @@ export function createRelayHandshake(deps: {
   }
 
   /**
-   * An automatic connection takes the relay port install wrote next to the pairing file (set only when it isn't
-   * 19988) as its discovered port, so the first attempt goes to the relay instead of scanning for it. Only while no
-   * port is known: a scan or an earlier hint is fresher than a file that may predate a move.
+   * An automatic connection takes the relay port install wrote next to the pairing file as its discovered port, so
+   * an unspent code in that file is tried where it is valid instead of at 19988. This also replaces a port only a scan
+   * found: a listener that mimics browse's /version must not capture the file's code. A port a link or the user named
+   * stays, since that is already a deliberate hint.
    */
   const pairingHint = async () => {
-    const stored = await chrome.storage.local.get([RELAY_ADDRESS_KEY, PORT_KEY, DISCOVERED_PORT_KEY])
-    if (!relayTarget(stored).automatic || relayPortHint(stored[DISCOVERED_PORT_KEY]) !== undefined) return
+    const stored = await chrome.storage.local.get([RELAY_ADDRESS_KEY, PORT_KEY, DISCOVERED_PORT_KEY, DISCOVERED_KIND_KEY, SPENT_KEY])
+    if (!relayTarget(stored).automatic) return
+    const discovered = relayPortHint(stored[DISCOVERED_PORT_KEY])
+    if (discovered !== undefined && stored[DISCOVERED_KIND_KEY] === "hint") return
     const file = await pairingFile()
-    if (file?.port === undefined) return
-    deps.log.add("pairing.port", { port: file.port })
+    if (file?.code === undefined) return
+    const spent = new Set(Array.isArray(stored[SPENT_KEY]) ? (stored[SPENT_KEY] as unknown[]) : [])
+    if (spent.has(file.code.code)) return
+    const port = file.port ?? defaultRelayPort
+    // Nothing to change when the file means the default and no other port was found: dialing already starts there.
+    if (discovered === undefined && port === defaultRelayPort) return
+    deps.log.add("pairing.port", { port })
     // The file's own code is tied to its port (credential reads it from there); a code the user entered keeps the
     // port it was given for, or 19988.
-    await chrome.storage.local.set({ [DISCOVERED_PORT_KEY]: file.port })
+    await chrome.storage.local.set({
+      [DISCOVERED_PORT_KEY]: port,
+      [DISCOVERED_KIND_KEY]: "hint",
+    })
   }
 
   /**
@@ -314,7 +321,6 @@ export function createRelayHandshake(deps: {
         typeof params?.nonce === "string" && /^[A-Za-z0-9_-]{22,128}$/.test(params.nonce) ? params.nonce : undefined
       if (message?.method !== "auth.challenge" || nonce === undefined)
         return refuse(`unexpected ${String(message?.method ?? message?.id ?? "message")}`)
-      challenged.add(current)
       relayNonce = nonce
       if (isJsonObject(params?.protocol)) pending.protocol = params.protocol
       if (using.kind === "token") {
@@ -419,16 +425,38 @@ export function createRelayHandshake(deps: {
     if (address === undefined) return { status: "invalid-address" }
     const code = codeInput.trim() === "" ? undefined : normalizePairingCode(codeInput)
     if (codeInput.trim() !== "" && code === undefined) return { status: "invalid-code" }
-    // Localhost with no port, or the automatic address the form shows for this computer while the connection is still
-    // automatic, is this computer: saving it must not pin it. An explicit port stays explicit, even when it happens to
-    // be the port now in use.
+    const before = await chrome.storage.local.get([
+      RELAY_ADDRESS_KEY, PAIRING_KEY, PORT_KEY, DISCOVERED_PORT_KEY, DISCOVERED_KIND_KEY,
+    ])
     const current = deps.hostPort()
+    const automatic = deps.automatic()
+    // Localhost with no port, or the automatic address the form shows for this computer while the connection is still
+    // automatic, is this computer: saving it must not pin it. A loopback address with a browse port while automatic is
+    // a hint for where the relay is, not a pin: a relay that later returns to 19988 is still found. An explicit stored
+    // address re-saved stays explicit, even when its port happens to be the one now in use.
+    const hinted = automatic && address.host === "127.0.0.1" && address.port !== undefined && relayPorts.includes(address.port)
+      ? address.port
+      : undefined
     const local = address.host === "127.0.0.1" &&
-      (address.port === undefined || (deps.automatic() && address.port === current.port))
+      (address.port === undefined || hinted !== undefined || (automatic && address.port === current.port))
     const value = local ? "" : address.port ? `${address.host}:${address.port}` : address.host
-    const before = await chrome.storage.local.get([RELAY_ADDRESS_KEY, PAIRING_KEY, PORT_KEY, DISCOVERED_PORT_KEY])
+    // A code typed without a port must not ride on a port only a scan found: 19988 is where an unpaired extension
+    // starts. A relay found by a scan is never given a pairing code (agent-relay/discovery.ts).
+    const scannedOnly = automatic && hinted === undefined && code !== undefined && before[DISCOVERED_KIND_KEY] !== "hint"
+    const codePort = hinted ?? (scannedOnly
+      ? defaultRelayPort
+      : relayTarget({
+          [RELAY_ADDRESS_KEY]: value,
+          [PORT_KEY]: before[PORT_KEY],
+          [DISCOVERED_PORT_KEY]: before[DISCOVERED_PORT_KEY],
+        }).port)
+    const clearDiscovered = scannedOnly && relayPortHint(before[DISCOVERED_PORT_KEY]) !== undefined
+    const beforeKind = before[DISCOVERED_KIND_KEY] === "hint" ? "hint" : "scan"
     const changed =
-      (before[RELAY_ADDRESS_KEY] ?? "") !== value || (code !== undefined && before[PAIRING_KEY] !== code.code)
+      (before[RELAY_ADDRESS_KEY] ?? "") !== value ||
+      (code !== undefined && before[PAIRING_KEY] !== code.code) ||
+      (hinted !== undefined && (relayPortHint(before[DISCOVERED_PORT_KEY]) !== hinted || beforeKind !== "hint")) ||
+      clearDiscovered
     const outcome = new Promise<AgentRelayStatus>((resolve) => {
       const waiter = { after: deps.generation(), resolve }
       outcomes.add(waiter)
@@ -443,19 +471,20 @@ export function createRelayHandshake(deps: {
       if (Array.isArray(spent))
         await chrome.storage.local.set({ [SPENT_KEY]: spent.filter((entry) => entry !== code.code) })
     }
+    // Removed before the write, so the reconnect the write triggers already dials 19988 instead of the scanned port.
+    if (clearDiscovered) await chrome.storage.local.remove([DISCOVERED_PORT_KEY, DISCOVERED_KIND_KEY])
     // One write, so storage.onChanged reconnects once.
     if (changed)
       await chrome.storage.local.set({
         [RELAY_ADDRESS_KEY]: value,
+        ...(hinted !== undefined
+          ? { [DISCOVERED_PORT_KEY]: hinted, [DISCOVERED_KIND_KEY]: "hint" }
+          : {}),
         ...(code !== undefined
           ? {
               [PAIRING_KEY]: code.code,
               // The port this save dials: a later scan must never carry the code to a different relay.
-              [CODE_PORT_KEY]: relayTarget({
-                [RELAY_ADDRESS_KEY]: value,
-                [PORT_KEY]: before[PORT_KEY],
-                [DISCOVERED_PORT_KEY]: before[DISCOVERED_PORT_KEY],
-              }).port,
+              [CODE_PORT_KEY]: codePort,
             }
           : {}),
       })
@@ -476,14 +505,18 @@ export function createRelayHandshake(deps: {
     if (code === undefined || code.legacy || deps.status() === "connected") return false
     const port = relayPortHint(hint)
     deps.log.add("pairing.link")
-    // Reconnects through storage.onChanged, or here after the write (a hint can change while the code doesn't).
+    // A link without a port is for 19988. Drop a port only a scan found first, so the reconnect this write triggers
+    // dials 19988 with the code instead of carrying it to whatever answered a scan.
+    if (port === undefined) await chrome.storage.local.remove([DISCOVERED_PORT_KEY, DISCOVERED_KIND_KEY])
+    // Reconnects through storage.onChanged, or here after the write: a link press tries now even when these values
+    // were already stored.
     await chrome.storage.local.set({
       [PAIRING_KEY]: code.code,
       // The port this code is for: never a later scan's, nor whatever port is in use when the code is tried.
       [CODE_PORT_KEY]: port ?? defaultRelayPort,
-      ...(port !== undefined ? { [DISCOVERED_PORT_KEY]: port } : {}),
+      ...(port !== undefined ? { [DISCOVERED_PORT_KEY]: port, [DISCOVERED_KIND_KEY]: "hint" } : {}),
     })
-    if (port !== undefined) deps.resetAndConnect("pairing", "Pairing changed")
+    deps.resetAndConnect("pairing", "Pairing changed")
     return true
   }
 
@@ -496,7 +529,6 @@ export function createRelayHandshake(deps: {
 
   return {
     trusted,
-    challenged,
     pairingState: () => ({ pairing, skew, codeRejected, unpacked }),
     setSkew: (next: ProtocolSkew | undefined) => {
       skew = next

@@ -10,6 +10,7 @@ import { ensureRelay, restartRelay } from "../src/relay/lifecycle.ts"
 import {
   chooseRelayPort,
   endpointForPort,
+  liveRelayPort,
   probeRelayPort,
   readRelayState,
   relayPortCandidates,
@@ -312,6 +313,13 @@ describe("relay port fallback", () => {
         startedAt: new Date().toISOString(),
       })
       await noRelay()
+      // version() itself refuses a reply that doesn't match the trusted relay.json instance.
+      const mismatched = await Effect.runPromise(Effect.gen(function* () {
+        const client = yield* RelayClient.make({ endpoint: endpointForPort(port) })
+        return yield* Effect.result(client.version)
+      }).pipe(Effect.provide(NodeHttpClient.layerNodeHttp)))
+      expect(mismatched._tag).toBe("Failure")
+      if (mismatched._tag === "Failure") expect(mismatched.failure).toBeInstanceOf(RelayClient.RelayDecodeFailed)
       expect(sent.every((value) => value === undefined)).toBe(true)
 
       // The recorded instance answers: now the same call may carry the token.
@@ -331,6 +339,118 @@ describe("relay port fallback", () => {
       else process.env.OPENCODE_BROWSER_PORT = previousPort
     }
   }, 30_000)
+
+  test("a draining relay on a fallback port is not replaced while relay.json still names it", async () => {
+    const configured = await freePortOutsideBrowseRange()
+    const fallback = await freePortOutsideBrowseRange()
+    const previousPort = process.env.OPENCODE_BROWSER_PORT
+    process.env.OPENCODE_BROWSER_PORT = String(configured)
+    const startedAt = new Date().toISOString()
+    const old = {
+      version: "0.0.15",
+      buildId: "2026-11-06T00:00:00Z",
+      instanceId: "old-relay",
+      managed: true,
+      shutdownProtocol: 2 as const,
+    }
+    try {
+      writeRelayState({ port: fallback, configuredPort: configured, pid: process.pid, instanceId: old.instanceId, startedAt })
+      let calls = 0
+      let started = 0
+      const draining = {
+        endpoint: endpointForPort(fallback),
+        version: Effect.suspend(() => {
+          calls++
+          // The old instance answers while it drains. Once it stops, 19988 answers as another program, but relay.json
+          // still names the old instance and its process is alive: that is not an exit yet.
+          return calls <= 2
+            ? Effect.succeed(old)
+            : Effect.fail(new RelayClient.RelayDecodeFailed({
+              message: "in use by another program (not a browse /version response)",
+              path: "/version",
+              cause: { version: "0.10.0" },
+            }))
+        }),
+        shutdown: () => Effect.succeed({ stopping: true as const }),
+      } as unknown as RelayClient.Interface
+      const exit = await Effect.runPromise(Effect.exit(restartRelay({
+        relay: draining,
+        buildId: old.buildId,
+        start: Effect.sync(() => {
+          started++
+        }),
+        retryTimes: 1,
+        retryDelayMs: 1,
+      })))
+      expect(exit._tag).toBe("Failure")
+      expect(started).toBe(0)
+    } finally {
+      fs.rmSync(relayStatePath(), { force: true })
+      if (previousPort === undefined) delete process.env.OPENCODE_BROWSER_PORT
+      else process.env.OPENCODE_BROWSER_PORT = previousPort
+    }
+  })
+
+  test("a pairing file names a port only from a live relay.json", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "browse-relay-live-"))
+    const port = await freePortOutsideBrowseRange()
+    using live = Bun.serve({
+      hostname: "127.0.0.1",
+      port,
+      fetch: () => Response.json({ version: "9.9.9", instanceId: "live-relay" }),
+    })
+    try {
+      expect(await liveRelayPort({ root })).toBeUndefined()
+      writeRelayState({
+        port,
+        configuredPort: 19988,
+        pid: process.pid,
+        instanceId: "live-relay",
+        startedAt: new Date().toISOString(),
+      }, root)
+      expect(await liveRelayPort({ root })).toBe(port)
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("a remote relay keeps the fallback port its relay.json recorded; a local one doesn't", async () => {
+    const configured = await freePortOutsideBrowseRange()
+    const recordedPort = await freePortOutsideBrowseRange()
+    const candidate = await freePortOutsideBrowseRange()
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "browse-relay-sticky-"))
+    try {
+      writeRelayState({
+        port: recordedPort,
+        configuredPort: configured,
+        pid: process.pid,
+        instanceId: "sticky-relay",
+        startedAt: new Date().toISOString(),
+      }, root)
+      expect(await chooseRelayPort({ configuredPort: configured, pinned: false, host: "0.0.0.0", candidates: [candidate], root })).toBe(recordedPort)
+      expect(await chooseRelayPort({ configuredPort: configured, pinned: false, host: "127.0.0.1", candidates: [candidate], root })).toBe(candidate)
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test("relay.json with an empty instance is not a relay", async () => {
+    const configured = await freePortOutsideBrowseRange()
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "browse-relay-state-empty-"))
+    try {
+      fs.mkdirSync(path.dirname(relayStatePath(root, configured)), { recursive: true })
+      fs.writeFileSync(relayStatePath(root, configured), JSON.stringify({
+        port: await freePortOutsideBrowseRange(),
+        configuredPort: configured,
+        pid: process.pid,
+        instanceId: "",
+        startedAt: new Date().toISOString(),
+      }))
+      expect(readRelayState(root, configured)).toBeUndefined()
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
 
   test("candidates are the configured port first, then the fallback range", () => {
     expect(relayPortCandidates(19988)).toEqual([19988, 19990, 19991, 19992, 19993, 19994, 19995, 19996, 19997])

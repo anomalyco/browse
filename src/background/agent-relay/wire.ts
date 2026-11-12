@@ -25,6 +25,8 @@ export type Handshake = {
 export const PORT_KEY = "agentRelayPort"
 /** chrome.storage.local: the port an automatic connection found the relay on (a pairing hint, or a scan). */
 export const DISCOVERED_PORT_KEY = "agentRelayDiscoveredPort"
+/** chrome.storage.local: how that port was found, "hint" (link, file, typed address) or "scan". Missing reads as hint. */
+export const DISCOVERED_KIND_KEY = "agentRelayDiscoveredKind"
 /** chrome.storage.local: the port a pending pairing code was given for; it is never sent to another one. */
 export const CODE_PORT_KEY = "agentRelayCodePort"
 export const PROFILE_KEY = "agentRelayProfile"

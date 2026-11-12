@@ -170,6 +170,8 @@ and the extension connects to it across the network:
    The relay then listens on every network, restarting if it runs. Other computers reach only the extension link;
    the HTTP API and CDP answer on `127.0.0.1` only. The command prints the address (with its port when it isn't
    19988) and a pairing code for step 2 (`browse pair` prints another; each works once, within 10 minutes).
+   If another program holds 19988, enter the port printed after the address; it can change if the relay later has to
+   bind somewhere else.
 2. In the browser, open the extension's settings page (right-click the toolbar button, then **Options**). Under
    **advanced**, replace `localhost:19988` in **Relay address** with that machine's address and port (a Tailscale IP
    or name, `:port` added when it isn't 19988), enter the code under **Pairing code**, then click **Connect**. The
@@ -385,7 +387,8 @@ Escape hatches. Set them in the environment you start opencode (or your MCP clie
   `OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS` and `OPENCODE_BROWSER_PING_TIMEOUT_MS`, then run `browse relay restart`.
 - Logs: `~/.local/state/browse/logs/relay.log`.
 - Another program's HTTP server already on port 19988 (Playwriter's relay, say): browse picks the next free port from
-  19990–19997 by itself; the extension finds it, so both can run side by side. A port held by something that doesn't
+  19990–19997 by itself; install's pairing link or file tells the extension that port, and once paired it finds the
+  relay again by itself, so both can run side by side. A port held by something that doesn't
   answer HTTP is treated as in use, so browse won't start a second relay elsewhere: stop that program or set
   `OPENCODE_BROWSER_PORT`.
 - Stuck on 0.0.15 or earlier with `~/.local/share/opencode-browser` (`%LOCALAPPDATA%\opencode-browser` on Windows) still

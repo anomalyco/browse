@@ -53,12 +53,16 @@ export async function prepareLegacyTakeover(legacy: LegacyRuntime | undefined, o
   // An isolated relay (its own OPENCODE_BROWSER_HOME) leaves the old runtime alone.
   if (env.OPENCODE_BROWSER_HOME && !samePath(env.OPENCODE_BROWSER_HOME, legacy.root)) return false
   // Another relay holds the port: this one won't start, so it mustn't take anything over. Pinned keeps the old rule:
-  // anything listening blocks. Unpinned only lets a definite non-browse HTTP reply through, since the relay would then
-  // fall back (relay/port.ts); a probe that fails or times out is a port in use, not a free one.
+  // anything listening blocks. Unpinned lets a definite non-browse HTTP reply through, since the relay would then fall
+  // back (relay/port.ts), and takes a free port. A browse relay blocks, and so does a port that is bound but silent or
+  // times out: a probe that fails to answer is a doubt, not a free port.
   const port = options.relayPort ?? (Number(env.OPENCODE_BROWSER_PORT) || resolveRelayPort())
   if (options.pinned ?? relayPortPinned(env)) {
     if (await portInUse(port)) return false
-  } else if (await probeRelayPort(port) !== "other") return false
+  } else {
+    const owner = await probeRelayPort(port)
+    if (owner === "browse" || (owner === "nobody" && (await portInUse(port)))) return false
+  }
   const home = options.home ?? os.homedir()
   const { copyLegacyData } = await import("./migrate.ts")
   // First, or the XDG paths the copy writes to would still resolve to the old folder.

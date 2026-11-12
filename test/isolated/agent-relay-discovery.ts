@@ -68,13 +68,14 @@ async function until(check: () => boolean) {
 }
 
 test("an automatic connection scans a failed port and moves to the browse relay it finds", async () => {
-  await until(() => relay.state().relay.address === "localhost:19990")
+  await until(() => relay.state().relay.address === "localhost:19988" && made().some((url) => url.includes(":19990/")))
   expect(made()).toEqual(["ws://127.0.0.1:19988/extension", "ws://127.0.0.1:19990/extension"])
   expect(await stored("agentRelayDiscoveredPort")).toBe(BROWSER_PORT)
   // The scan asked every candidate, not just the failed port.
   expect(probes.some((url) => url.endsWith(":19988/version"))).toBe(true)
   expect(probes.some((url) => url.endsWith(":19990/version"))).toBe(true)
-  expect(relay.state().relay).toEqual({ address: "localhost:19990", remote: false })
+  // A port only a scan found, with no authenticated connection, isn't offered in the form: it shows the default.
+  expect(relay.state().relay).toEqual({ address: "localhost:19988", remote: false })
   // Nothing to pair with yet: the connection is presence-only, and now watches the right port.
   await until(() => FakeWebSocket.made.at(-1)!.sent.length > 0)
   expect(relay.state().status).toBe("unpaired")
@@ -91,7 +92,7 @@ test("saving the automatic address the page shows does not pin it", async () => 
   // Presence-only again, and still on the automatic port: no address was stored.
   FakeWebSocket.made.at(-1)!.close(1000)
   expect(await outcome).toMatchObject({ status: "unpaired" })
-  expect((await stub.chrome.storage.local.get("agentRelayAddress")).agentRelayAddress).toBeUndefined()
+  expect((await stub.chrome.storage.local.get("agentRelayAddress")).agentRelayAddress).toBe("")
   expect(relay.state().relay).toEqual({ address: "localhost:19990", remote: false })
 })
 

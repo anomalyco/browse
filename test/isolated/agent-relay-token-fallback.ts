@@ -10,14 +10,18 @@ const stub = installChrome()
 ;(globalThis as { __OPENCODE_BROWSER_BUILD__?: string }).__OPENCODE_BROWSER_BUILD__ = "test"
 
 const TOKEN = "test-token-0123456789abcdefghijklmnopqrstuv"
-const OLD_PORT = 19988
+const STALE_TOKEN = "stale-token-0123456789abcdefghijklmnopqrstu"
+const STALE_PORT = 19988
+const OTHER_PORT = 19991
 const BROWSER_PORT = 19990
 installFakeRelaySocket({ port: BROWSER_PORT, token: TOKEN })
 
 await stub.chrome.storage.local.set({
   agentRelayDiscoveredPort: BROWSER_PORT,
   agentRelayTokens: {
-    [`127.0.0.1:${OLD_PORT}`]: TOKEN,
+    // The most recently stored browse-range loopback token wins, not the default port's older one.
+    [`127.0.0.1:${STALE_PORT}`]: STALE_TOKEN,
+    [`127.0.0.1:${OTHER_PORT}`]: TOKEN,
     // Not a port browse listens on: a fallback must never send this one to a relay.
     "127.0.0.1:20000": "not-a-browse-port-token",
   },
@@ -35,7 +39,8 @@ test("a relay on a new loopback port keeps the token this browser had", async ()
   expect(relay.state().pairing).toBe("token")
   // Stored under the new key too, with the original entries untouched and the non-browse token unused.
   expect(await stored("agentRelayTokens")).toEqual({
-    [`127.0.0.1:${OLD_PORT}`]: TOKEN,
+    [`127.0.0.1:${STALE_PORT}`]: STALE_TOKEN,
+    [`127.0.0.1:${OTHER_PORT}`]: TOKEN,
     "127.0.0.1:20000": "not-a-browse-port-token",
     [`127.0.0.1:${BROWSER_PORT}`]: TOKEN,
   })

@@ -58,6 +58,8 @@ export async function syncDevExtension(extension: DevExtension, options: { reado
     }
     const manifest = JSON.parse(readFileSync(path.join(staging, "manifest.json"), "utf8")) as { version_name?: string; version?: string; key?: string }
     if (!manifest.key) throw new Error("the dev extension has no manifest key, so it wouldn't have browse's unpacked ID")
+    // No port here: this folder is written before install knows the relay's listen port. install replaces the code
+    // with a fresh one (pairUnpacked) that names a live relay's port; an omitted port means 19988.
     writeExtensionPairing(staging, mintPairingCode(undefined, { ttlMs: bundledPairingCodeTtlMs }))
     const build = (() => {
       try {

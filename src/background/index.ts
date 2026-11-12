@@ -30,10 +30,18 @@ if (__OPENCODE_BROWSER_TEST_HOOKS__)
   Object.assign(globalThis, { __opencodeBrowserTest: { toolbarClick: (tabId: number) => agents.attachTab(tabId) } })
 
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== STATUS_PORT || port.sender?.id !== chrome.runtime.id) return
+  // Only this extension's own pages may drive the relay: a content script in a page shares our extension id, but its
+  // sender URL is the page's, not chrome-extension://<id>/.
+  const sender = port.sender
+  const origin = `chrome-extension://${chrome.runtime.id}`
+  const page = sender?.id === chrome.runtime.id &&
+    sender.url?.startsWith(`${origin}/`) === true &&
+    (sender.origin === undefined || sender.origin === origin || sender.origin === `${origin}/`)
+  if (port.name !== STATUS_PORT || !page) return
   pages.add(port)
   port.onDisconnect.addListener(() => pages.delete(port))
   port.onMessage.addListener((message: FromStatusPage) => {
+    if (typeof message !== "object" || message === null) return
     if (message.type === "agents.reconnect") agents.reconnect()
     if (message.type === "tabs.cleanup") void TabCleanup.cleanup({ minutes: 0 })
     if (message.type === "autoUpdate.set") agents.setAutoUpdate(message.mode)

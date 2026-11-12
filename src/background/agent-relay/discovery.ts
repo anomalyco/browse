@@ -4,7 +4,7 @@
 import { defaultRelayPort, isJsonObject, relayPortHint, relayPorts } from "../../agent-relay/protocol"
 import { probeRelayPort } from "../../agent-relay/probe"
 import { RELAY_ADDRESS_KEY, relayAddress } from "../../shared/protocol"
-import { DISCOVERED_PORT_KEY, PORT_KEY, TOKENS_KEY, type AgentRelayLog } from "./wire"
+import { DISCOVERED_KIND_KEY, DISCOVERED_PORT_KEY, PORT_KEY, TOKENS_KEY, type AgentRelayLog } from "./wire"
 
 /** Where the next connection dials. */
 export type RelayTarget = {
@@ -43,14 +43,10 @@ export async function scanRelayPorts(timeoutMs = PROBE_TIMEOUT_MS): Promise<numb
   return answers.filter((port): port is number => port !== undefined)
 }
 
-/** The port to move to: the first browse port this browser holds a token for, else the first that answered. */
+/** The port to move to: a port this browser holds a token for, else 19988, else the first browse answer. */
 export function chooseRelayPort(found: readonly number[], tokenFor: (port: number) => boolean): number | undefined {
-  return found.find((port) => tokenFor(port)) ?? found[0]
+  return found.find((port) => tokenFor(port)) ?? (found.includes(defaultRelayPort) ? defaultRelayPort : found[0])
 }
-
-// A browse relay sends these itself (wire.ts CLOSE_CODES); any other close that wasn't a pairing refusal came from
-// something that may not be the relay at all.
-const BROWSE_CLOSE_CODES = new Set([4001, 4002, 4003, 4004, 4005])
 
 /**
  * The worker's scan after a failed connection. Automatic connections only, and at most one scan per
@@ -67,28 +63,36 @@ export function createRelayDiscovery(deps: {
 
   const scan = async (missed: () => void) => {
     const failed = deps.current().port
+    const stored = await chrome.storage.local.get([TOKENS_KEY, DISCOVERED_PORT_KEY, DISCOVERED_KIND_KEY])
+    // A port only a scan found and no connection ever proved is a hint at best: forget it before looking again, so a
+    // listener that mimics browse's /version can't keep the next attempt on itself. Dialing falls back to 19988 until
+    // a scan finds something.
+    if (stored[DISCOVERED_KIND_KEY] !== "hint" && relayPortHint(stored[DISCOVERED_PORT_KEY]) === failed)
+      await chrome.storage.local.remove([DISCOVERED_PORT_KEY, DISCOVERED_KIND_KEY])
     const found = await scanRelayPorts()
     // Every candidate refused, or none is browse (the usual "no relay is running"): keep the normal backoff.
     if (found.length === 0) return missed()
-    const stored = await chrome.storage.local.get([TOKENS_KEY])
     const tokens = isJsonObject(stored[TOKENS_KEY]) ? stored[TOKENS_KEY] : {}
     const next = chooseRelayPort(found, (port) => typeof tokens[`127.0.0.1:${port}`] === "string")
     // The port that just failed answered as browse: it is already the right one, so back off and try it again later.
     if (next === undefined || next === failed) return missed()
     deps.log.add("relay.discovery", { found: found.join(","), port: next })
-    await chrome.storage.local.set({ [DISCOVERED_PORT_KEY]: next })
+    await chrome.storage.local.set({ [DISCOVERED_PORT_KEY]: next, [DISCOVERED_KIND_KEY]: "scan" })
     deps.reconnect("discovery")
   }
 
   return {
     /**
      * A connection closed. Returns true when a scan was started: it reconnects on a find, or calls `missed` (the
-     * normal backoff) when nothing answered. A relay that challenged us, or sent one of browse's close codes, is
-     * already the right port. The pairing gate in handshake.ts stays the only thing that decides what is obeyed.
+     * normal backoff) when nothing answered. Only a relay this browser actually authenticated keeps its port: an
+     * unauthenticated close, even after a challenge or a browse close code, may be someone else and stays eligible
+     * for a rate-limited scan. The pairing gate in handshake.ts stays the only thing that decides what is obeyed.
      */
-    afterClose(closed: { readonly challenged: boolean; readonly code: number }, missed: () => void): boolean {
+    afterClose(closed: { readonly trusted: boolean; readonly deliberate: boolean; readonly code: number }, missed: () => void): boolean {
       if (!deps.current().automatic) return false
-      if (closed.challenged || BROWSE_CLOSE_CODES.has(closed.code)) return false
+      // A connection that authenticated keeps its port; one this worker closed itself is simply reconnecting with
+      // new settings. Either way nothing failed to scan away from.
+      if (closed.trusted || closed.deliberate) return false
       const now = Date.now()
       if (now - lastScan < SCAN_INTERVAL_MS) return false
       lastScan = now

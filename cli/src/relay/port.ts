@@ -59,7 +59,7 @@ export function readRelayState(
   try {
     const value = JSON.parse(fs.readFileSync(relayStatePath(root, configuredPort), "utf8")) as Partial<RelayState> | null
     if (!value || !isPort(value.port) || !isPort(value.configuredPort) || !isPositiveInt(value.pid)) return undefined
-    if (typeof value.instanceId !== "string" || typeof value.startedAt !== "string") return undefined
+    if (typeof value.instanceId !== "string" || value.instanceId === "" || typeof value.startedAt !== "string") return undefined
     return {
       port: value.port,
       configuredPort: value.configuredPort,
@@ -93,8 +93,9 @@ export function processAlive(pid: number): boolean {
   try {
     process.kill(pid, 0)
     return true
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM"
+  } catch {
+    // Our relay is always this user's process: EPERM means another user's, which this install never wrote.
+    return false
   }
 }
 
@@ -193,6 +194,18 @@ async function liveRecordedRelay(
   return version?.instanceId === state.instanceId ? state : undefined
 }
 
+/**
+ * The port a live relay recorded in relay.json, proven by its open /version. Undefined when no relay has recorded
+ * itself, or when the recorded instance no longer answers: a pairing file must not name a port nothing is listening on.
+ */
+export async function liveRelayPort(
+  options: { readonly root?: string; readonly timeoutMs?: number } = {},
+): Promise<number | undefined> {
+  const root = options.root ?? stateRoot()
+  const state = await liveRecordedRelay(configuredRelayPort(), root, options.timeoutMs ?? 800)
+  return state?.port
+}
+
 /** "19988, 19990-19997" */
 function portListText(ports: readonly number[]): string {
   const groups: string[] = []
@@ -230,6 +243,9 @@ export type ChooseRelayPortOptions = {
 const alreadyInUse = (host: string, port: number) =>
   new Error(`listen EADDRINUSE: address already in use ${host}:${port}`)
 
+const loopbackHost = (host: string) =>
+  host === "localhost" || host === "::1" || host === "[::1]" || /^127\./.test(host)
+
 /**
  * The listen port for this relay. Pinned returns the configured port untouched (the listen then fails as before when
  * it is taken). Unpinned first refuses to run beside the relay.json instance that is still live here, then tries each
@@ -247,6 +263,11 @@ export async function chooseRelayPort(options: ChooseRelayPortOptions = {}): Pro
   const probeTimeoutMs = options.probeTimeoutMs ?? 500
   const recorded = await liveRecordedRelay(configuredPort, root, probeTimeoutMs)
   if (recorded) throw alreadyInUse(host, recorded.port)
+  // Remote browsers enter the printed address by hand and don't scan for a move. Keep the port a previous start
+  // recorded for this configured port while it is free, so a relay restart doesn't silently move after another
+  // program's server briefly held 19988.
+  const sticky = !loopbackHost(host) ? readRelayState(root, configuredPort) : undefined
+  if (sticky && sticky.configuredPort === configuredPort && await canListen(host, sticky.port)) return sticky.port
   for (const port of candidates) {
     if (await canListen(host, port)) return port
     const owner = await probeRelayPort(port, probeTimeoutMs)

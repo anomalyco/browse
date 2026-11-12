@@ -804,7 +804,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   })
 
   const cleanup = Effect.fnUntraced(function* () {
-    yield* Effect.sync(() => removeRelayState(browserId, stateRoot(), configuredPort))
     stopTimers()
     autoUpdater?.stop()
     yield* shutdownControl.close().pipe(Effect.ignore)
@@ -827,7 +826,13 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     for (const socket of cdpClients) socket.close()
     for (const link of browsers.list()) link.rpc.close()
     yield* closeWebSocketServer(websocketServer).pipe(logCloseError("Failed to close websocket server"))
-    yield* closeHttpServer(httpServer).pipe(logCloseError("Failed to close http server"))
+    // Removed only once this relay stops answering: until closeHttpServer completes, relay.json must keep clients on this
+    // instance instead of sending them to whatever holds the configured port (relay/port.ts). ensuring covers a close
+    // that fails, where the listener may still be gone.
+    yield* closeHttpServer(httpServer).pipe(
+      logCloseError("Failed to close http server"),
+      Effect.ensuring(Effect.sync(() => removeRelayState(browserId, stateRoot(), configuredPort))),
+    )
   })
 
   const close = cleanup()
@@ -839,10 +844,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     })
   })
   // Published only once the port is bound: clients resolve through it to find a fallback port. Never holds a token.
+  // A fallback port that can't be recorded leaves clients on 19988 (another program): fail the start instead.
   yield* Effect.try({
     try: () => writeRelayState({ port, configuredPort, pid: process.pid, instanceId: browserId, startedAt }),
     catch: (cause) => new Error("Write the relay port file", { cause }),
-  }).pipe(Effect.ignore)
+  }).pipe(Effect.catch((error) => {
+    relayLog("relay.state.write_failed", { port, configuredPort, error: error.message })
+    return port === configuredPort ? Effect.void : Effect.fail(error)
+  }))
   yield* Effect.sync(() => pruneStaleExecuteFilesDirectories())
 
   yield* Effect.catch(

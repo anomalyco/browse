@@ -22,7 +22,7 @@ import { runCommand } from "../update/auto-update.ts"
 import { unpackedExtensionId } from "../protocol.ts"
 import { parseHostname, readRelayConfig, writeRelayConfig } from "../relay/config.ts"
 import { defaultPort } from "../relay/helpers.ts"
-import { configuredRelayPort, endpointForPort, resolveRelayPort, verifiedRelayEndpoint } from "../relay/port.ts"
+import { configuredRelayPort, endpointForPort, liveRelayPort, probeRelayPort, resolveRelayPort, verifiedRelayEndpoint } from "../relay/port.ts"
 import { relayAuthorization } from "../relay/secrets.ts"
 import { defaultSiteSecretsDir } from "../auth/site-secrets.ts"
 import { opencodeBrowserBuildId } from "../version.ts"
@@ -90,18 +90,28 @@ async function relayRequest(
     ...(options.method === undefined ? {} : { method: options.method }),
     ...(options.body === undefined ? {} : { body: options.body }),
     headers: { ...relayHeaders(), ...options.headers },
+    redirect: "error",
     signal: AbortSignal.timeout(options.timeoutMs ?? 3_000),
   }).catch(() => undefined)
 }
 
-export function ensureRelay(entry: string) {
+function startRelay(entry: string) {
   const [file, ...prefix] = entrySpawnCommand(entry)
-  const started = spawnSync(file!, [...prefix, "session", "list", "--json"], {
+  return spawnSync(file!, [...prefix, "session", "list", "--json"], {
     encoding: "utf8",
     timeout: 30_000,
   })
+}
+
+export function ensureRelay(entry: string) {
+  const started = startRelay(entry)
   if (started.status !== 0)
     fail(started.stderr?.trim() || `Couldn't reach the browse relay: ${started.error?.message || `run ${cliCommand("doctor")}`}`)
+}
+
+/** Starts the relay when it isn't running, without failing the command (a saved hostname is still worth printing). */
+export function ensureRelayQuietly(entry: string): boolean {
+  return startRelay(entry).status === 0
 }
 
 export const extensionStatus = async (installWaiting = false) => {
@@ -173,15 +183,17 @@ export async function syncDev() {
 /**
  * Writes a fresh one-time code into every unpacked extension folder this install manages (a checkout's, or a dev
  * install's). It's good for an hour and only until an extension used it, so the folder holds nothing reusable; an
- * extension that already has its key ignores it.
+ * extension that already has its key ignores it. The port is included only when a live relay recorded it: naming a
+ * port nothing listens on would send an unpaired extension to the wrong place.
  */
-export function pairUnpacked() {
+export async function pairUnpacked() {
   const directories = [...checkoutExtensionDirs, ...(dev ? [devExtensionFolder(paths.cache)] : [])].filter((directory) =>
     existsSync(path.join(directory, "manifest.json")),
   )
   if (directories.length === 0) return
+  const port = await liveRelayPort()
   const code = mintPairingCode(undefined, { ttlMs: bundledPairingCodeTtlMs })
-  for (const directory of directories) writeExtensionPairing(directory, code, resolveRelayPort())
+  for (const directory of directories) writeExtensionPairing(directory, code, port)
 }
 
 export async function extension() {
@@ -198,7 +210,7 @@ export async function extension() {
   await syncDev()
   if (!existsSync(path.join(folder, "manifest.json")))
     fail(`${folder} has no built extension. Run \`${installCommand()}\` first.`)
-  pairUnpacked()
+  await pairUnpacked()
   revealFolder(folder)
   log(`Load unpacked from: ${folder}`)
 }
@@ -326,10 +338,7 @@ export async function set(args: string[]) {
   }
   writeRelayConfig({ ...readRelayConfig(), hostname })
   log(`✓ hostname is ${hostname}`)
-  const running = await fetch(`${relayBase()}/version`, { signal: AbortSignal.timeout(2000) }).then(
-    (response) => response.ok,
-    () => false,
-  )
+  const running = (await probeRelayPort(resolveRelayPort(), 2_000)) === "browse"
   if (running) {
     const [file, ...prefix] = entrySpawnCommand(runningEntry())
     const restarted = spawnSync(file!, [...prefix, "relay", "restart"], { stdio: "inherit" })
@@ -338,7 +347,8 @@ export async function set(args: string[]) {
   }
   if (hostname === "127.0.0.1") return
   // Like install --remote: start the relay when it wasn't running, then read the port it actually bound (a fallback).
-  ensureRelay(readJson<Settings>(files.settings)?.entry ?? runningEntry())
+  // A relay that can't start here doesn't undo the saved hostname, and the address is still useful without a port note.
+  ensureRelayQuietly(readJson<Settings>(files.settings)?.entry ?? runningEntry())
   const port = resolveRelayPort()
   const tailscale = Object.values(networkInterfaces())
     .flat()

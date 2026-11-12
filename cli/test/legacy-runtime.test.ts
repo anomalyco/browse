@@ -82,6 +82,14 @@ function expectPrivateFilesIn(home: string, files: Record<string, string>) {
     for (const folder of ["secrets", "site-secrets"]) expect(fs.statSync(path.join(home, ".local", "share", "browse", folder)).mode & 0o777, folder).toBe(0o700)
 }
 
+/** A free port outside browse's real relay range, so no test here can touch 19988–19997. */
+async function freePortOutsideBrowseRange(): Promise<number> {
+  for (;;) {
+    const port = await freePort()
+    if (port < 19988 || port > 19997) return port
+  }
+}
+
 describe("taking over the old self-managed runtime", () => {
   test("once taken over, the old shim starts the current install, and the old folder is no override", () => {
     const { home, oldData, shim, oldEntry, current, runtime } = oldRuntimeHome(homes)
@@ -275,6 +283,20 @@ describe("taking over the old self-managed runtime", () => {
       expect(migrateLegacy(home, takenOver + 11 * 60_000).removed).toEqual([oldData])
       expect(fs.existsSync(oldData)).toBe(false)
     })
+  })
+
+  test("an unpinned relay on a free port takes the old runtime over", async () => {
+    const { home, oldData, runtime } = oldRuntimeHome(homes)
+    const env: NodeJS.ProcessEnv = { OPENCODE_BROWSER_HOME: oldData }
+    // Nothing answers and nothing is bound: the relay can start here, so the takeover must go ahead.
+    expect(await prepareLegacyTakeover(legacyRuntime(home), {
+      install: runtime,
+      env,
+      home,
+      relayPort: await freePortOutsideBrowseRange(),
+      pinned: false,
+    })).toBe(true)
+    expect(env.OPENCODE_BROWSER_HOME).toBeUndefined()
   })
 
   test("an unpinned relay only lets a definite non-browse listener through, never a slow or silent one", async () => {

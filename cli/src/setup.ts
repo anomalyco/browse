@@ -312,12 +312,16 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
   const pairedOffline = initial?.pairingState === "paired-offline"
   // The relay saw this browser try to connect without a token (or refuse one): it's installed, not missing.
   const needsPairing = initial?.pairingState === "unpaired" || initial?.pairingState === "refused"
-  // Up before pairing files are written: the unpacked pairing file names the relay's listen port when it isn't 19988.
-  ensureRelay(spawnEntry)
+  let folderPaired = false
   const folder = unpackedFolder()
   if (folder && !pairedOffline) {
-    // The unpacked extension finds a one-time code in its own folder and exchanges it for its key, without a step.
-    pairUnpacked()
+    // A browser that isn't paired yet gets a one-time code in its folder, which needs the relay's listen port when it
+    // isn't 19988. A connected browser is paired already and needs no new code (or a relay start) for the reload.
+    if (!connected) {
+      ensureRelay(spawnEntry)
+      await pairUnpacked()
+      folderPaired = true
+    }
     // A browser already running an older unpacked build keeps its old code until it reloads; ask it to, silently:
     // install never talks about unpacked builds.
     const reload = connected ? await reloadOutdatedExtension(connected, folder) : "current"
@@ -369,6 +373,12 @@ async function installSteps(args: string[], tty: boolean, caller: AgentName | un
     env,
   })
   if (connected || found === "off" || pairedOffline) return
+  // Up only now, before a pairing file or link names the relay's listen port when it isn't 19988 (a fallback).
+  if (!folderPaired) {
+    ensureRelay(spawnEntry)
+    // The unpacked extension finds a one-time code in its own folder and exchanges it for its key, without a step.
+    if (folder) await pairUnpacked()
+  }
   let code: string | undefined
   const pairingCode = () =>
     code && pendingPairingCodeKeys().includes(pairingCodeKey(code)) ? code : (code = mintPairingCode())

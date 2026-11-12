@@ -217,8 +217,10 @@ export async function runBinaryMcp(args: readonly string[]) {
   let unreachable = 0
   const relayVersion = () =>
     fetch(`${endpointForPort(resolveRelayPort())}/version`, { signal: AbortSignal.timeout(2000) })
-      .then((response) => (response.ok ? (response.json() as Promise<{ version?: unknown; draining?: unknown }>) : undefined))
-      .then((body) => (body && typeof body.version === "string" ? { version: body.version, draining: body.draining === true } : undefined), () => undefined)
+      .then((response) => (response.ok ? (response.json() as Promise<{ version?: unknown; instanceId?: unknown; draining?: unknown }>) : undefined))
+      .then((body) => (body && typeof body.version === "string" && typeof body.instanceId === "string"
+        ? { version: body.version, draining: body.draining === true }
+        : undefined), () => undefined)
   const maybeSwap = async () => {
     if (swapping || checking) return
     // Held requests go to the current server at the deadline even when a request still looks in flight: a cancelled
