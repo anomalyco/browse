@@ -96,7 +96,6 @@ describe("tool output schemas", () => {
   test("the main tools advertise an object-root output schema", () => {
     const byName = new Map(specs().map((spec) => [spec.name, spec]))
     const expected = [
-      "execute",
       "status",
       "session_new",
       "session_allowlist",
@@ -123,6 +122,21 @@ describe("tool output schemas", () => {
       expect(json.type, name).toBe("object")
       expect(json.properties, name).toBeDefined()
     }
+  })
+
+  test("execute advertises no output schema, so a client that validates one accepts its image results", () => {
+    const execute = specs().find((spec) => spec.name === "execute")!
+    expect(execute.outputSchema).toBeUndefined()
+    const result = executeToolResult(executeResponse({
+      text: "Returned 1 image",
+      media: [{ type: "image", mimeType: "image/png", data: Buffer.from("png").toString("base64"), size: 3 }],
+    }))
+    expect(result.structuredContent).toBeUndefined()
+    expect(result.content.map((item) => item.type)).toEqual(["text", "image"])
+    // The MCP SDK client rejects a non-error result without structured content from a tool that declares an output
+    // schema. Every screenshot hit that while execute declared one.
+    const rejected = execute.outputSchema !== undefined && result.structuredContent === undefined && !result.isError
+    expect(rejected).toBe(false)
   })
 
   test("tool annotations describe what each tool can do", () => {
@@ -358,28 +372,52 @@ describe("tool output schemas", () => {
     expect(textBlocks(result)).toEqual(["42"])
   })
 
-  test("execute errors are MCP errors and keep diagnostics, not an isError field", () => {
+  test("execute errors put their warnings, diagnostic, page movement and logs in the text, with no structured content", () => {
     const result = executeToolResult(executeResponse({
       text: "Error: boom\n    at script:1:1",
       isError: true,
+      logs: [{ source: "script", type: "log", text: "step 1" }, { source: "page", type: "error", text: "bad", repeatCount: 3 }],
       warnings: ["the page navigated"],
+      diagnostic: "execution-context/context-destroyed; pageClosed=false; urlChanged=true; mainFrameNavigations=1",
       aftermath: {
         startUrl: "https://example.com/one",
-        endUrl: "https://example.com/one",
-        navigations: [],
+        endUrl: "https://example.com/two",
+        navigations: ["https://example.com/two"],
         consoleErrorCount: 1,
         pageErrorCount: 0,
         handoffs: 0,
       },
     }))
     expect(result.isError).toBe(true)
+    expect(result.structuredContent).toBeUndefined()
+    expect(textBlocks(result)).toEqual([[
+      "Error: boom\n    at script:1:1",
+      "Warnings:\n- the page navigated",
+      "Diagnostic: execution-context/context-destroyed; pageClosed=false; urlChanged=true; mainFrameNavigations=1",
+      "Page: moved from https://example.com/one to https://example.com/two; 1 navigation; 1 console error",
+      "Logs (2):\n[log] step 1\n[page error] bad (×3)",
+    ].join("\n\n")])
+  })
+
+  test("a bare execute error stays just the message", () => {
+    const result = executeToolResult(executeResponse({ text: "Error: boom\n    at script:1:1", isError: true }))
     expect(textBlocks(result)).toEqual(["Error: boom\n    at script:1:1"])
-    const structured = result.structuredContent as typeof ExecuteToolOutput.Type
-    expect(Schema.is(ExecuteToolOutput)(structured)).toBe(true)
-    expect(structured).not.toHaveProperty("isError")
-    expect(structured).not.toHaveProperty("value")
-    expect(structured.warnings).toEqual(["the page navigated"])
-    expect(structured.aftermath?.consoleErrorCount).toBe(1)
+  })
+
+  test("execute error text stays under 10,000 characters and keeps its warnings", () => {
+    const result = executeToolResult(executeResponse({
+      text: `locator.click: Timeout 30000ms exceeded.\nCall log:\n${"  - retrying click action\n".repeat(2000)}    at execute.js:5:1`,
+      isError: true,
+      logs: Array.from({ length: 500 }, (_, index) => ({ source: "script" as const, type: "log", text: `line ${index} ${"x".repeat(400)}` })),
+      warnings: ["Pointer action was blocked"],
+    }))
+    const text = textBlocks(result).join("")
+    expect(text.length).toBeLessThan(10_000)
+    expect(text).toStartWith("locator.click: Timeout 30000ms exceeded.")
+    expect(text).toContain("at execute.js:5:1")
+    expect(text).toContain("Warnings:\n- Pointer action was blocked")
+    expect(text).toContain("line 499")
+    expect(text).not.toContain("line 479 ")
   })
 
   test("status structured content validates and its fallback text is compact", () => {

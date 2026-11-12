@@ -269,13 +269,67 @@ export function executeToolOutput(result: ExecuteResponse & { readonly notice?: 
   }
 }
 
+// Many clients show only the text of an error result, and one cuts error text past 10,000 characters from the middle,
+// so an error's text carries its warnings and context and stays under that.
+const errorMessageLimit = 3000
+const errorLogLimit = 20
+const errorLogLineLimit = 300
+const errorLogsLimit = 2500
+
+function clip(text: string, limit: number): string {
+  if (text.length <= limit) return text
+  const head = Math.ceil(limit * 2 / 3)
+  const tail = limit - head
+  return `${text.slice(0, head)}\n… ${text.length - limit} characters cut …\n${text.slice(-tail)}`
+}
+
+function aftermathLine(aftermath: ExecuteAftermath | undefined): string | undefined {
+  if (!aftermath) return undefined
+  const parts: string[] = []
+  if (aftermath.endUrl === null) parts.push("the page closed")
+  else if (aftermath.startUrl !== aftermath.endUrl) parts.push(`moved from ${clip(aftermath.startUrl ?? "nowhere", 200)} to ${clip(aftermath.endUrl, 200)}`)
+  if (aftermath.navigations.length > 0) parts.push(`${aftermath.navigations.length} navigation${aftermath.navigations.length === 1 ? "" : "s"}`)
+  if (aftermath.consoleErrorCount > 0) parts.push(`${aftermath.consoleErrorCount} console error${aftermath.consoleErrorCount === 1 ? "" : "s"}`)
+  if (aftermath.pageErrorCount > 0) parts.push(`${aftermath.pageErrorCount} page error${aftermath.pageErrorCount === 1 ? "" : "s"}`)
+  if (aftermath.handoffs > 0) parts.push(`${aftermath.handoffs} handoff${aftermath.handoffs === 1 ? "" : "s"}`)
+  return parts.length > 0 ? `Page: ${parts.join("; ")}` : undefined
+}
+
+function errorLogsBlock(logs: readonly ExecuteLogEntry[]): string | undefined {
+  if (logs.length === 0) return undefined
+  const lines: string[] = []
+  let size = 0
+  for (const entry of logs.slice(-errorLogLimit).reverse()) {
+    const prefix = entry.source === "page" ? `[page ${entry.type}]` : `[${entry.type}]`
+    const repeat = entry.repeatCount && entry.repeatCount > 1 ? ` (×${entry.repeatCount})` : ""
+    const line = clip(`${prefix} ${entry.text}${repeat}`, errorLogLineLimit).replaceAll("\n", " ")
+    if (size + line.length > errorLogsLimit) break
+    lines.unshift(line)
+    size += line.length + 1
+  }
+  const shown = lines.length < logs.length ? `last ${lines.length} of ${logs.length}` : `${logs.length}`
+  return `Logs (${shown}):\n${lines.join("\n")}`
+}
+
+/** The text of a failed execute: the error first, then the warnings, diagnostic, page movement and recent logs. */
+export function executeErrorText(result: ExecuteResponse): string {
+  const warnings = result.warnings ?? []
+  return [
+    clip(result.text, errorMessageLimit),
+    warnings.length > 0 ? `Warnings:\n${warnings.map((warning) => `- ${warning}`).join("\n")}` : undefined,
+    result.diagnostic ? `Diagnostic: ${result.diagnostic}` : undefined,
+    aftermathLine(result.aftermath),
+    errorLogsBlock(result.logs),
+  ].filter((part): part is string => part !== undefined).join("\n\n")
+}
+
 /**
  * The text fallback for an execute. A string return is the agent's own readable text, not JSON; a structured return is
  * its compact JSON value. That keeps one copy of the value outside the structured result.
  */
 export function executeToolText(result: ExecuteResponse & { readonly notice?: string }): string {
   const text = result.isError
-    ? result.text
+    ? executeErrorText(result)
     : Predicate.isString(result.value)
       ? result.value
       : result.value === undefined
@@ -284,13 +338,16 @@ export function executeToolText(result: ExecuteResponse & { readonly notice?: st
   return result.notice ? `${text}\n\n${result.notice}` : text
 }
 
-/** The MCP result for one execute: images keep their content blocks and text, everything else gets structured output. */
+/**
+ * The MCP result for one execute: images keep their content blocks and text, errors are text only, and everything else
+ * also gets structured output.
+ */
 export function executeToolResult(value: unknown): McpSchema.CallToolResult {
   const result = value as ExecuteResponse & { readonly notice?: string }
   if (result.media && result.media.length > 0) {
     return new McpSchema.CallToolResult({
       content: [
-        McpSchema.TextContent.make({ text: result.text }),
+        McpSchema.TextContent.make({ text: result.isError ? executeErrorText(result) : result.text }),
         ...result.media.map((image) => McpSchema.ImageContent.make({
           data: new Uint8Array(Buffer.from(image.data, "base64")),
           mimeType: image.mimeType,
@@ -299,6 +356,9 @@ export function executeToolResult(value: unknown): McpSchema.CallToolResult {
       isError: result.isError,
     })
   }
+  // A failed execute is text only: a client that prefers structuredContent would otherwise show the context without
+  // the error.
+  if (result.isError) return toolResult({ text: executeToolText(result), isError: true })
   return toolResultForValue(executeToolOutput(result), {
     outputSchema: ExecuteToolOutput,
     text: executeToolText(result),
