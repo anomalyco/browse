@@ -57,6 +57,15 @@ export type { AgentBadge }
 
 declare const __OPENCODE_BROWSER_BUILD__: string
 
+/**
+ * chrome.storage.session: the toolbar clicks waiting for a relay, as `{ tabId, lending }` (see createAgentRelay). A
+ * worker stop would otherwise lose them; a browser restart or an extension reload clears session storage.
+ */
+const PENDING_KEY = "agentRelayPendingClicks"
+type PendingClick = { tabId: number; lending: boolean }
+const pendingClick = (value: unknown): value is PendingClick =>
+  isJsonObject(value) && typeof value.tabId === "number" && typeof value.lending === "boolean"
+
 export function createAgentRelay(input: { changed: (state: AgentRelayState) => void; badgesChanged: () => void }) {
   const log = createAgentRelayLog()
   let socket: WebSocket | undefined
@@ -78,6 +87,72 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   const badges = new Map<number, AgentBadge>()
   /** Tabs clicked while the relay was not connected; the value says the click was a lend. Announced once it is. */
   const pendingAttach = new Map<number, boolean>()
+  /** Tabs closed while the stored queue loaded; a `tabs.get` answer that came first must not queue them. */
+  let closedWhileRestoring: Set<number> | undefined
+  /** Writes run in order and each carries the queue as it is when it runs, so an older list can't land last. */
+  let pendingWrites: Promise<unknown> = Promise.resolve()
+  const savePending = () => {
+    pendingWrites = pendingWrites
+      .then(() => {
+        if (!pendingAttach.size) return chrome.storage.session.remove(PENDING_KEY)
+        const list = Array.from(pendingAttach, ([tabId, lending]) => ({ tabId, lending }))
+        return chrome.storage.session.set({ [PENDING_KEY]: list })
+      })
+      .catch(() => undefined)
+  }
+  /** Takes a queued click back: the tab goes back to what it was, badge and storage included. */
+  const cancelPending = (tabId: number) => {
+    if (!pendingAttach.delete(tabId)) return false
+    savePending()
+    input.badgesChanged()
+    return true
+  }
+  /** Relays in these states send every toolbar click to the setup page, so a queued one could never be taken back. */
+  const unusable = (state: AgentRelayStatus) =>
+    state === "unpaired" || state === "untrusted" || state === "incompatible"
+  /** Empties the queue: its badges go, and the next click opens the setup page rather than queueing again. */
+  const dropNow = (reason: AgentRelayStatus) => {
+    const tabs = pendingAttach.size
+    if (!tabs) return
+    pendingAttach.clear()
+    savePending()
+    input.badgesChanged()
+    log.add("attach.dropped", { reason, tabs })
+  }
+  /** The badge for a queued click: the ellipsis says browse has the tab and hasn't handed it to the relay yet. */
+  const queuedBadge = (lending: boolean): AgentBadge => ({
+    text: "…",
+    title: lending
+      ? "browse is waiting for the relay, which starts when an agent next uses browse. Click again to cancel."
+      : "browse will take this tab back when the relay connects, which happens when an agent next uses browse. Click again to cancel.",
+  })
+  /** The queue a previous worker left. attachTab and the flush wait for it, so neither acts on half a queue. */
+  const restored = (async () => {
+    const closing = (closedWhileRestoring = new Set<number>())
+    const stored = (await chrome.storage.session.get(PENDING_KEY).catch(() => ({}))) as Record<string, unknown>
+    const list = Array.isArray(stored[PENDING_KEY]) ? stored[PENDING_KEY].filter(pendingClick) : []
+    let dropped = 0
+    for (const { tabId, lending } of list) {
+      const tab = await chrome.tabs.get(tabId).catch(() => undefined)
+      // A tab closed while no worker ran isn't handed over; nor is one whose close landed while Chrome answered.
+      if (!tab || closing.has(tabId)) {
+        dropped++
+        continue
+      }
+      pendingAttach.set(tabId, lending)
+    }
+    closedWhileRestoring = undefined
+    if (dropped) savePending()
+    if (list.length) log.add("attach.restored", { queued: pendingAttach.size, ...(dropped ? { dropped } : {}) })
+    // A relay that refused this browser, or speaks another version, was found while the queue loaded: drop it.
+    if (unusable(status)) dropNow(status)
+    else if (pendingAttach.size) input.badgesChanged()
+  })()
+  /** Waits for the queue a previous worker left, then drops it if the relay still can't take it. */
+  const dropPending = async () => {
+    await restored
+    if (unusable(status)) dropNow(status)
+  }
   let update: AgentRelayUpdate | undefined
   /** Settings the connected relay's environment fixes, as it reported them (`relay.settings`). */
   let overrides: RelayOverrides | undefined
@@ -136,6 +211,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     if (status === next) return
     log.add("status", { from: status, to: next })
     status = next
+    // Nothing can take a queued click then, and the badge would promise a handover that won't happen.
+    if (unusable(next)) void dropPending()
     notify()
   }
 
@@ -154,6 +231,22 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     void HandoffNotice.clear(tabId)
     void ToolbarNotice.clear(tabId)
     if (known) notify()
+  }
+
+  /** Sends the clicks that waited for the relay; one made meanwhile waits for the next connection. */
+  const flushPending = async () => {
+    await restored
+    // Only a relay that is connected right now gets them.
+    if (!open() || status !== "connected" || !pendingAttach.size) return
+    const queued = Array.from(pendingAttach)
+    pendingAttach.clear()
+    savePending()
+    input.badgesChanged()
+    log.add("attach.flush", { tabs: queued.length })
+    for (const [tabId, lending] of queued) {
+      if (lending) ToolbarNotice.expect(tabId)
+      send({ method: "toolbar.clicked", params: { tabId } })
+    }
   }
 
   /**
@@ -263,11 +356,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       setStatus(skew ? "incompatible" : "connected")
       // Only the newest connection gets this far (verify checks socket === current).
       handshake.settle(generation)
-      pendingAttach.forEach((lending, tabId) => {
-        if (lending) ToolbarNotice.expect(tabId)
-        send({ method: "toolbar.clicked", params: { tabId } })
-      })
-      pendingAttach.clear()
+      // Clicks that waited for the relay go now that it can take them.
+      void flushPending()
       void grouping.ungroupStale().catch((error: unknown) => log.add("ungroupStale.error", { error: text(error) }))
     },
   })
@@ -488,10 +578,11 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   const tabRemoved = (tabId: number) => {
     recordingTabs.delete(tabId)
     canceledAgentTabs.delete(tabId)
+    closedWhileRestoring?.add(tabId)
     void chrome.runtime.sendMessage({ action: "recording.cancel", tabId }).catch(() => undefined)
     if (relayTabs.has(tabId)) log.add("tab.removed", { tabId })
     forget(tabId)
-    pendingAttach.delete(tabId)
+    cancelPending(tabId)
     if (badges.delete(tabId)) input.badgesChanged()
     send({ method: "tabs.removed", params: { tabId } })
     grouping.recountShared()
@@ -530,10 +621,16 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
 
   return {
     state: snapshot,
-    badge: (tabId: number) => badges.get(tabId),
+    /** The toolbar badge for a tab: a click waiting for the relay says so until it goes, or is taken back. */
+    badge: (tabId: number) => {
+      const queued = pendingAttach.get(tabId)
+      return queued === undefined ? badges.get(tabId) : queuedBadge(queued)
+    },
     /** The user lets agents use this tab, or stops them (the toolbar button); toggles. */
     async attachTab(tabId: number) {
       log.add("attach.requested", { tabId, connected: !!open() })
+      // Wait for the queue a previous worker left: a click on a tab it holds is the user's second one.
+      await restored
       // A lend makes the tab the user's again; do that before the relay answers the click with `tabs.ungroup`, which
       // must leave a lent tab open. A take-back (the tab is already an agent tab, or a queued lend) keeps tracking.
       const lending = !relayTabs.has(tabId) && !pendingAttach.has(tabId)
@@ -541,6 +638,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       // dropped its debugger (a navigation to chrome://, say), and the button must stay able to stop that agent. The
       // attach reply then says why the tab couldn't be lent.
       if (open() && status === "connected") {
+        // Queued and not sent yet: this click takes it back rather than queueing it a second time.
+        if (cancelPending(tabId)) return
         if (lending) {
           await lendTab(tabId)
           ToolbarNotice.expect(tabId)
@@ -548,7 +647,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
         return send({ method: "toolbar.clicked", params: { tabId } })
       }
       // No relay yet: a second click takes the queued one back before anything else.
-      if (pendingAttach.delete(tabId)) return
+      if (cancelPending(tabId)) return
       if (lending) {
         // The user clicked to keep an agent-opened tab, so take it off idle cleanup even if the page can't be queued.
         await lendTab(tabId)
@@ -559,7 +658,16 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
           return
         }
       }
+      // This click woke a worker that was still starting, and the connection check may have found the browser unpaired
+      // or the relay too old while the page was judged. Such a relay never takes a queued click back; the next click
+      // opens the setup page.
+      if (unusable(status)) {
+        log.add("attach.dropped", { reason: status, tabs: 1 })
+        return
+      }
       pendingAttach.set(tabId, lending)
+      savePending()
+      input.badgesChanged()
       attempts = 0
       void connect("attach")
     },
