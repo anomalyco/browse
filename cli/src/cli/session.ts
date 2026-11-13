@@ -50,8 +50,14 @@ const sessionNew = Command.make(
         "Open this session's tabs in the connected browser with this id or name (browse status --json lists them); omit for the default browser",
       ),
     ),
+    keepVisible: Flag.Boolean("keep-visible").pipe(
+      Flag.withDefault(false),
+      Flag.withDescription(
+        "Keep this session's own tabs visible and focused to the page between execute calls, for apps that pause or disconnect while hidden (pages can notice; tabs you lent it are never kept)",
+      ),
+    ),
   },
-  Effect.fn("Cli.sessionNew")(function* ({ name, readOnly, allowOrigin, browser }) {
+  Effect.fn("Cli.sessionNew")(function* ({ name, readOnly, allowOrigin, browser, keepVisible }) {
     const relay = yield* RelayClient.Service
     yield* ensureCliRelay()
     const store = yield* SessionStore.Service
@@ -59,6 +65,7 @@ const sessionNew = Command.make(
     const result = yield* relay.sessionNew(Option.getOrUndefined(name), {
       ...(readOnly ? { readOnly: true } : {}),
       ...(allowOrigin.length > 0 ? { allowedOrigins: allowOrigin } : {}),
+      ...(keepVisible ? { keepVisible: true } : {}),
       ...(browserValue ? { browser: browserValue } : {}),
     })
     yield* store.write(result.id)

@@ -135,6 +135,7 @@ export function handleCliRequest(options: {
       const session = yield* options.sessions.create(optionalSessionId(request.id), {
         readOnly: request.readOnly === true,
         ...(allowedOrigins ? { allowedOrigins } : {}),
+        ...(request.keepVisible === true ? { keepVisible: true } : {}),
         ...(request.browser ? { browser: request.browser } : {}),
       })
       noteClient(options.request, options.sessions, session.id)

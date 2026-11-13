@@ -369,10 +369,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
           ).pipe(Effect.timeoutOption("2 seconds"), Effect.ignore)
         }
       }),
-      // A deleted session's tabs are gone; drop its ownership so another session's clear isn't
-      // skipped by an owner that will never run again.
+      // A deleted or reset session's tabs are gone; drop its ownership so another session's clear isn't
+      // skipped by an owner that will never run again, and release any tab the session kept visible.
       onSessionDeleted: (sessionId) => {
         deviceMetricsOverrides.take(sessionId)
+        void Effect.runPromise(Effect.ignore(tabActivity.release(sessionId))).catch(() => {})
       },
       onExecuteRecord: (record) => {
         const entry = makeJournalEntry({

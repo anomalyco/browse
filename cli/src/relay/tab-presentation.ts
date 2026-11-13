@@ -25,6 +25,14 @@ export const attachedBadge = { text: "ON", color: "#7c3aed", title: "Detach from
 export const executingBadge = { text: "RUN", color: "#f59e0b", title: "browse is running a script. Click to stop it and take this tab back." }
 export const waitingBadge = (message: string) => ({ text: "WAIT", color: "#2563eb", title: `browse is waiting for you: ${message} Click here when you're done.` })
 
+/**
+ * Whether a session keeps focus emulation on for this tab between calls: only a keepVisible session, and only a tab it
+ * opened itself (relay-owned), never a tab the user lent it.
+ */
+export function keepsTabVisible(sessionId: string, keepVisible: boolean, target: ConnectedTarget | undefined): boolean {
+  return keepVisible && target?.owner === "relay" && target.opencodeBrowserSessionId === sessionId
+}
+
 export function createTabPresentation(options: {
   readonly registry: TargetRegistry
   readonly browsers: BrowserLinks
@@ -273,7 +281,15 @@ export function createTabPresentation(options: {
       }
       activeHandoffTabs.delete(sessionId)
     }
-    return executing ? Effect.void : tabActivity.finish(sessionId)
+    return executing ? Effect.void : tabActivity.finish(sessionId, { keep: (tabId) => keepsVisible(sessionId, tabId) })
+  }
+
+  /**
+   * A keepVisible session keeps focus emulation on for the tabs it opened itself, never for a tab the user lent it,
+   * so pages that disconnect while hidden stay connected between calls without changing what the user lent.
+   */
+  function keepsVisible(sessionId: string, tabId: number): boolean {
+    return keepsTabVisible(sessionId, getSessions().keepsTabsVisible(sessionId), registry.tabTargets.get(tabId))
   }
 
   function handleToolbarClick(tabId: number): void {

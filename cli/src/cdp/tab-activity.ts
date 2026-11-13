@@ -32,11 +32,29 @@ export class TabActivity {
     }))
   }
 
-  finish(sessionId: string): Effect.Effect<void> {
+  /**
+   * Drop a session's claims after an execute finishes. `keep` names the tabs whose emulation stays on for it, so a
+   * page that pauses or disconnects while hidden keeps its connection between calls.
+   */
+  finish(sessionId: string, options: { readonly keep?: (tabId: number) => boolean } = {}): Effect.Effect<void> {
+    return this.focusLock.withPermit(Effect.gen({ self: this }, function* () {
+      for (const [tabId, owners] of this.focusedBy) {
+        if (!owners.has(sessionId)) continue
+        this.touch(tabId)
+        if (options.keep?.(tabId) === true) continue
+        owners.delete(sessionId)
+        if (owners.size > 0) continue
+        this.focusedBy.delete(tabId)
+        yield* this.setFocus(tabId, false).pipe(Effect.ignore)
+      }
+    }))
+  }
+
+  /** Release every tab a session claimed, kept ones included; a session's delete and reset use it. */
+  release(sessionId: string): Effect.Effect<void> {
     return this.focusLock.withPermit(Effect.gen({ self: this }, function* () {
       for (const [tabId, owners] of this.focusedBy) {
         if (!owners.delete(sessionId)) continue
-        this.touch(tabId)
         if (owners.size > 0) continue
         this.focusedBy.delete(tabId)
         yield* this.setFocus(tabId, false).pipe(Effect.ignore)

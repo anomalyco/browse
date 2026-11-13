@@ -191,6 +191,12 @@ connection itself isn't encrypted by browse; use a network that is (Tailscale or
   tab strip and collapsed unless you're looking at one. Agents can't switch you to their tabs or bring a window to the
   front; popups an agent opens join its group, and if one takes over your window you get your tab back. Tabs nobody
   touches for 10 minutes close by themselves (never while a script runs on them).
+- **What a page sees.** Between calls a page sees an agent's tab hidden and unfocused; only while an `execute` runs on
+  it does browse emulate focus, so background work isn't throttled. Some apps pause or disconnect when hidden, so a
+  session can be created with `browse session new live --keep-visible` (or `keepVisible: true` on `session_new`): the
+  tabs that session opened itself stay visible and focused to the page between calls. Pages can notice either way, it
+  never raises or focuses the window, tabs you lent the session behave as usual (released when the call ends), and it is
+  released when the session is deleted or reset or the tab closes.
 - **Several browsers at once.** Each connected browser has an id (like `chrome-macbook`) and a name; `browse status
   --json` lists them. New sessions open their tabs in the default browser, the first connected and ready, unless one is
   named: `browse session new work --browser "Home Brave"` (or `browser` on the `session_new` tool, or on the first
@@ -291,8 +297,8 @@ extension, connected to the relay over a WebSocket, runs it in your browser thro
   anonymous element, drawn from an isolated world. Input moves like a person: curved mouse paths, paced typing,
   gliding scroll (turn *Human-like input* off on the options page, or `OPENCODE_BROWSER_HUMAN_INPUT=0`, for full speed). This makes an agent hard to spot, not impossible: the
   browser shows its "started debugging" bar while the debugger is attached, focus emulation keeps background agent tabs
-  "visible", the card and cursor elements exist while shown, and `fillInput`'s fallback dispatches synthetic events
-  (it warns when it does).
+  "visible" while a script runs on them (and between calls for a `keepVisible` session), the card and cursor elements
+  exist while shown, and `fillInput`'s fallback dispatches synthetic events (it warns when it does).
 
 Permissions: `debugger`, `tabs`, `tabGroups`, `storage`, `alarms`, `offscreen` and `tabCapture` (recordings),
 `scripting` (to add the handoff script only to tabs agents use, never to every page), `webNavigation` (to keep popups

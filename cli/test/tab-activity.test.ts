@@ -56,4 +56,76 @@ describe("TabActivity", () => {
 
     expect(idle.map((item) => item.tabId)).toEqual([1])
   })
+
+  test("a kept tab stays enabled after finish while the session's other tabs are disabled", async () => {
+    const calls: Array<{ readonly tabId: number; readonly enabled: boolean }> = []
+    const activity = new TabActivity((tabId, enabled) => Effect.sync(() => {
+      calls.push({ tabId, enabled })
+    }))
+
+    await Effect.runPromise(activity.focus(10, "s1"))
+    await Effect.runPromise(activity.focus(11, "s1"))
+    await Effect.runPromise(activity.finish("s1", { keep: (tabId) => tabId === 10 }))
+
+    expect(activity.isFocused(10)).toBe(true)
+    expect(activity.isFocused(11)).toBe(false)
+    expect(calls).toEqual([{ tabId: 10, enabled: true }, { tabId: 11, enabled: true }, { tabId: 11, enabled: false }])
+
+    // A later execute that keeps nothing turns the kept tab off too.
+    await Effect.runPromise(activity.finish("s1"))
+    expect(activity.isFocused(10)).toBe(false)
+    expect(calls.at(-1)).toEqual({ tabId: 10, enabled: false })
+  })
+
+  test("releasing a session turns off every tab it kept", async () => {
+    const calls: Array<{ readonly tabId: number; readonly enabled: boolean }> = []
+    const activity = new TabActivity((tabId, enabled) => Effect.sync(() => {
+      calls.push({ tabId, enabled })
+    }))
+
+    await Effect.runPromise(activity.focus(10, "s1"))
+    await Effect.runPromise(activity.finish("s1", { keep: () => true }))
+    expect(calls).toEqual([{ tabId: 10, enabled: true }])
+
+    await Effect.runPromise(activity.release("s1"))
+    expect(activity.isFocused(10)).toBe(false)
+    expect(calls).toEqual([{ tabId: 10, enabled: true }, { tabId: 10, enabled: false }])
+  })
+
+  test("another session finishing does not disable a kept tab", async () => {
+    const calls: Array<{ readonly tabId: number; readonly enabled: boolean }> = []
+    const activity = new TabActivity((tabId, enabled) => Effect.sync(() => {
+      calls.push({ tabId, enabled })
+    }))
+
+    await Effect.runPromise(activity.focus(10, "s1"))
+    await Effect.runPromise(activity.finish("s1", { keep: () => true }))
+    await Effect.runPromise(activity.focus(10, "s2"))
+    await Effect.runPromise(activity.finish("s2"))
+
+    expect(activity.isFocused(10)).toBe(true)
+    expect(calls).toEqual([{ tabId: 10, enabled: true }])
+
+    await Effect.runPromise(activity.release("s1"))
+    expect(activity.isFocused(10)).toBe(false)
+    expect(calls).toEqual([{ tabId: 10, enabled: true }, { tabId: 10, enabled: false }])
+  })
+
+  test("releasing one of two owners leaves the tab enabled until the last one goes", async () => {
+    const calls: Array<{ readonly tabId: number; readonly enabled: boolean }> = []
+    const activity = new TabActivity((tabId, enabled) => Effect.sync(() => {
+      calls.push({ tabId, enabled })
+    }))
+
+    await Effect.runPromise(activity.focus(10, "s1"))
+    await Effect.runPromise(activity.focus(10, "s2"))
+    await Effect.runPromise(activity.release("s1"))
+
+    expect(activity.isFocused(10)).toBe(true)
+    expect(calls).toEqual([{ tabId: 10, enabled: true }])
+
+    await Effect.runPromise(activity.release("s2"))
+    expect(activity.isFocused(10)).toBe(false)
+    expect(calls).toEqual([{ tabId: 10, enabled: true }, { tabId: 10, enabled: false }])
+  })
 })

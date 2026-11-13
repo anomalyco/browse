@@ -134,6 +134,7 @@ export class OpenCodeBrowserSessions {
         updatedAt: entry.updatedAt,
       })
       if (entry.allowedOrigins && entry.allowedOrigins.length > 0) session.allowedOrigins = entry.allowedOrigins
+      if (entry.keepVisible === true) session.keepVisible = true
       if (entry.browser) session.browser = { id: entry.browser, ...(entry.browserKey ? { key: entry.browserKey } : {}) }
       if (entry.target) session.target = entry.target
       if (entry.clientPid !== undefined) session.clientPid = entry.clientPid
@@ -173,6 +174,7 @@ export class OpenCodeBrowserSessions {
     const browser = this.resolveBrowser(options?.browser)
     const session = this.createOpenCodeBrowserSession(sessionId, options?.readOnly === true)
     if (options?.allowedOrigins && options.allowedOrigins.length > 0) session.allowedOrigins = options.allowedOrigins
+    if (options?.keepVisible === true) session.keepVisible = true
     if (browser) session.browser = browser
     this.sessions.set(sessionId, session)
     this.admission.schedulePersistence()
@@ -247,6 +249,11 @@ export class OpenCodeBrowserSessions {
       manager.admission.schedulePersistence()
       return sessionSummary(session)
     })
+  }
+
+  /** Whether the session keeps its own tabs visible to the page between execute calls. */
+  keepsTabsVisible(id: string): boolean {
+    return this.sessions.get(id)?.keepVisible === true
   }
 
   isExecuting(id: string): boolean {
@@ -417,6 +424,7 @@ export class OpenCodeBrowserSessions {
         yield* manager.closeSessionRelayTargets(existing)
         const session = manager.createOpenCodeBrowserSession(id, existing.readOnly)
         if (existing.allowedOrigins) session.allowedOrigins = existing.allowedOrigins
+        if (existing.keepVisible) session.keepVisible = true
         if (existing.browser) session.browser = existing.browser
         if (existing.clientPid !== undefined) session.clientPid = existing.clientPid
         manager.sessions.set(id, session)
@@ -425,6 +433,15 @@ export class OpenCodeBrowserSessions {
         }))
         yield* manager.releaseSessionTargetOwnership(existing)
         yield* manager.closeOpenCodeBrowserSession(existing)
+        // The id outlives the session object, so drop state keyed by it as a delete does (focus it kept, viewport
+        // overrides its script left).
+        yield* Effect.sync(() => {
+          try {
+            manager.hooks.onSessionDeleted?.(id)
+          } catch (error) {
+            console.error("Session reset hook failed", error)
+          }
+        })
         return sessionSummary(session)
       })))
       return { session, ...(stopped ? { stopped } : {}) }

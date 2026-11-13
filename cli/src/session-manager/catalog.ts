@@ -13,6 +13,8 @@ export const PersistedSession = Schema.Struct({
   updatedAt: Schema.String,
   readOnly: Schema.Boolean,
   allowedOrigins: Schema.optionalKey(Schema.Array(Schema.String)),
+  /** Keep the session's own tabs visible to the page between execute calls. */
+  keepVisible: Schema.optionalKey(Schema.Boolean),
   browser: Schema.optionalKey(Schema.String),
   browserKey: Schema.optionalKey(Schema.String),
   target: Schema.optionalKey(Schema.Struct({
