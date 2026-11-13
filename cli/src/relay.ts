@@ -404,6 +404,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
           .map(([targetId]) => targetId),
       ],
       onCancelSessionHandoff: (sessionId) => handoffs.cancelForSession(sessionId) !== undefined,
+      pendingHandoff: (sessionId) => {
+        const pending = handoffs.pendingForSession(sessionId)
+        return pending ? { message: pending.message, tabId: pending.tabId, startedAt: pending.startedAt } : undefined
+      },
       onSessionsChanged: async (entries) => {
         if (catalogWritesEnabled) await sessionCatalog?.save(entries)
       },

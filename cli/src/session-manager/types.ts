@@ -80,6 +80,12 @@ export type SessionHooks = {
   readonly onSessionsChanged?: (sessions: readonly PersistedSession[]) => unknown | Promise<unknown>
   /** Cancel the session's pending handoff so its waiter fails; true when one was pending. */
   readonly onCancelSessionHandoff?: (sessionId: string) => boolean
+  /** The session's pending handoff, included in its summary while it waits on the user. */
+  readonly pendingHandoff?: (sessionId: string) => {
+    readonly message: string
+    readonly tabId: number
+    readonly startedAt: string
+  } | undefined
   /**
    * End any navigation still pending on the session's tabs before the stopped script's browser connection closes.
    * Chromium handles `Page.stopLoading` in the browser process, so it answers (and releases queued commands) even
@@ -210,8 +216,9 @@ export function stoppedExecuteResult(message: string, diagnostic: string): Execu
   }
 }
 
-export function sessionSummary(session: OpenCodeBrowserSession): SessionSummary {
+export function sessionSummary(session: OpenCodeBrowserSession, hooks?: SessionHooks): SessionSummary {
   const status = session.sandbox.getStatus()
+  const handoff = hooks?.pendingHandoff?.(session.id)
   return {
     id: session.id,
     createdAt: session.createdAt,
@@ -223,12 +230,13 @@ export function sessionSummary(session: OpenCodeBrowserSession): SessionSummary 
     ...(session.allowedOrigins ? { allowedOrigins: [...session.allowedOrigins] } : {}),
     ...(session.keepVisible ? { keepVisible: true } : {}),
     ...(session.browser ? { browser: session.browser.id } : {}),
+    ...(handoff ? { handoff } : {}),
   }
 }
 
-export function createdSummary(session: OpenCodeBrowserSession, created: boolean): CreatedSessionSummary {
+export function createdSummary(session: OpenCodeBrowserSession, created: boolean, hooks?: SessionHooks): CreatedSessionSummary {
   return {
-    ...sessionSummary(session),
+    ...sessionSummary(session, hooks),
     ...(created ? { created: true } : {}),
   }
 }

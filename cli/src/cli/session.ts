@@ -98,7 +98,8 @@ const sessionList = Command.make(
       const keys = item.stateKeys.length ? ` state=${item.stateKeys.join(",")}` : ""
       const readOnly = item.readOnly ? " read-only" : ""
       const allowed = item.allowedOrigins ? ` allow=${item.allowedOrigins.join(",")}` : ""
-      return Console.log(`${marker} ${item.id} ${page}${keys}${readOnly}${allowed}`)
+      const handoff = item.handoff ? ` waiting on you: "${item.handoff.message}"` : ""
+      return Console.log(`${marker} ${item.id} ${page}${keys}${readOnly}${allowed}${handoff}`)
     })
   }),
 ).pipe(Command.withDescription("List browse sessions"))

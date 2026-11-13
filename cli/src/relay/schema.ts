@@ -9,6 +9,12 @@ import { Schema } from "effect"
  * producers derive their types from here so the contract cannot drift.
  */
 
+export const SessionHandoff = Schema.Struct({
+  message: Schema.String,
+  tabId: Schema.Number,
+  startedAt: Schema.String,
+})
+
 export const SessionSummary = Schema.Struct({
   id: Schema.String,
   createdAt: Schema.String,
@@ -20,6 +26,7 @@ export const SessionSummary = Schema.Struct({
   allowedOrigins: Schema.optionalKey(Schema.Array(Schema.String)),
   keepVisible: Schema.optionalKey(Schema.Boolean),
   browser: Schema.optionalKey(Schema.String),
+  handoff: Schema.optionalKey(SessionHandoff),
 })
 
 export interface SessionSummary extends Schema.Schema.Type<typeof SessionSummary> {}

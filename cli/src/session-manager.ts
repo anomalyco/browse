@@ -112,7 +112,7 @@ export class OpenCodeBrowserSessions {
   }
 
   listSummaries(): SessionSummary[] {
-    return Array.from(this.sessions.values()).map((session) => sessionSummary(session))
+    return Array.from(this.sessions.values()).map((session) => sessionSummary(session, this.hooks))
   }
 
   restore(entries: readonly PersistedSession[]): void {
@@ -198,10 +198,10 @@ export class OpenCodeBrowserSessions {
             id,
           )
         }
-        return sessionSummary(existing)
+        return sessionSummary(existing, manager.hooks)
       }
       const session = yield* manager.createPersistedSession(id, options)
-      return sessionSummary(session)
+      return sessionSummary(session, manager.hooks)
     }).pipe(Effect.uninterruptible))
   }
 
@@ -247,7 +247,7 @@ export class OpenCodeBrowserSessions {
       else delete session.allowedOrigins
       session.updatedAt = new Date().toISOString()
       manager.admission.schedulePersistence()
-      return sessionSummary(session)
+      return sessionSummary(session, manager.hooks)
     })
   }
 
@@ -442,7 +442,7 @@ export class OpenCodeBrowserSessions {
             console.error("Session reset hook failed", error)
           }
         })
-        return sessionSummary(session)
+        return sessionSummary(session, manager.hooks)
       })))
       return { session, ...(stopped ? { stopped } : {}) }
     }))
@@ -616,7 +616,7 @@ export class OpenCodeBrowserSessions {
 
   summary(id: string): SessionSummary | undefined {
     const session = this.sessions.get(id)
-    return session ? sessionSummary(session) : undefined
+    return session ? sessionSummary(session, this.hooks) : undefined
   }
 
   /** Reaps idle auto-named and oc-* sessions; explicit (named) sessions keep their state and are never reset here. */

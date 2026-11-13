@@ -86,7 +86,13 @@ function manager(script: (sandbox: FakeSandbox) => Promise<ExecuteResult>, optio
     ...(options.onStoppingExecute ? { onStoppingExecute: options.onStoppingExecute } : {}),
     ...(browser ? { resolveBrowser: () => browser } : {}),
     ...(checkBrowserResponsive ? { checkBrowserResponsive } : {}),
-    ...(options.handoffs ? { onCancelSessionHandoff: (id: string) => options.handoffs?.cancelForSession(id) !== undefined } : {}),
+    ...(options.handoffs ? {
+      onCancelSessionHandoff: (id: string) => options.handoffs?.cancelForSession(id) !== undefined,
+      pendingHandoff: (id: string) => {
+        const pending = options.handoffs?.pendingForSession(id)
+        return pending ? { message: pending.message, tabId: pending.tabId, startedAt: pending.startedAt } : undefined
+      },
+    } : {}),
   })
   return { sessions, sandboxes }
 }
@@ -249,6 +255,30 @@ describe("delete and reset while busy", () => {
     const { sessions } = manager(async () => ok("x"))
     await run(sessions.execute({ sessionId: "idle", code: "...", createIfMissing: true }))
     expect(await run(sessions.delete("idle"))).toEqual({ deleted: true })
+  })
+})
+
+describe("session summaries", () => {
+  test("include a pending handoff and omit it once the handoff ends", async () => {
+    let next = 0
+    const handoffs = new HandoffRegistry(() => `h${++next}`)
+    let cancelHandoff: (() => void) | undefined
+    const { sessions } = manager(async () => {
+      const wait = handoffs.wait({ sessionId: "s3", tabId: 1, targetId: "T1", targetSessionId: "S1", message: "Sign in", timeoutMs: 600_000 })
+      cancelHandoff = wait.cancel
+      await wait.outcome
+      return ok("done")
+    }, { handoffs })
+    const { response } = await startExecute(sessions, "s3")
+    await Bun.sleep(20)
+    const summary = sessions.summary("s3")
+    expect(summary?.handoff).toMatchObject({ message: "Sign in", tabId: 1 })
+    const startedAt = summary?.handoff?.startedAt ?? ""
+    expect(new Date(startedAt).toISOString()).toBe(startedAt)
+    expect(sessions.listSummaries()[0]?.handoff).toEqual(summary?.handoff)
+    cancelHandoff?.()
+    expect((await response).result.text).toBe("done")
+    expect(sessions.summary("s3")).not.toHaveProperty("handoff")
   })
 })
 

@@ -12,7 +12,10 @@ describe("HandoffRegistry", () => {
   test("binds a handoff to its session, tab and target", () => {
     const handoffs = registry()
     const wait = handoffs.wait({ sessionId: "github", ...target, message: "Sign in", timeoutMs: 10_000 })
-    expect(handoffs.pendingForTab(7)).toEqual({ id: wait.id, sessionId: "github", ...target, message: "Sign in" })
+    const view = handoffs.pendingForTab(7)
+    expect(view).toMatchObject({ id: wait.id, sessionId: "github", ...target, message: "Sign in" })
+    const startedAt = view?.startedAt ?? ""
+    expect(new Date(startedAt).toISOString()).toBe(startedAt)
     expect(handoffs.pendingForSession("github")?.id).toBe(wait.id)
     expect(handoffs.pendingForTab(8)).toBeUndefined()
     wait.cancel()
