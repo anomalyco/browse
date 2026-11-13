@@ -227,7 +227,8 @@ connection itself isn't encrypted by browse; use a network that is (Tailscale or
   need **Allow access to file URLs** for browse on its details page in `chrome://extensions`, and Chrome's own pages,
   the Web Store included, can't be lent.
 - **Handoffs:** the page shows a small card with the site's origin. Do the human part, then click **Continue** on the
-  card or the toolbar button.
+  card or the toolbar button. While one waits, `browse session list --json` and `session_list` include it (message,
+  tab and start time) so other tools can see what is waiting on you.
 - **Recordings show only the page.** Nothing from browse is drawn while a tab is recorded: no cursor, no
   labels, no handoff card (you get a system notification instead; click it to go to the tab). If notifications are
   turned off for the extension, the card is shown after all, and the recording includes it. For a demo video, ask for

@@ -21,6 +21,7 @@ type PendingHandoff = {
   targetId: string
   targetSessionId: string
   readonly message: string
+  readonly startedAt: string
   readonly resolve: (outcome: HandoffOutcome) => void
 }
 
@@ -85,6 +86,7 @@ export type PendingHandoffView = {
   readonly targetId: string
   readonly targetSessionId: string
   readonly message: string
+  readonly startedAt: string
 }
 
 /**
@@ -124,6 +126,7 @@ export class HandoffRegistry {
       existing.resolve("timeout")
     }
     const id = this.createId()
+    const startedAt = new Date().toISOString()
     let held = false
     let humanCompleted = false
     let finish: (outcome: HandoffOutcome) => void
@@ -144,6 +147,7 @@ export class HandoffRegistry {
         targetId: options.targetId,
         targetSessionId: options.targetSessionId,
         message: options.message,
+        startedAt,
         resolve: (outcome) => {
           if (outcome === "resolved" && held) {
             humanCompleted = true
@@ -271,6 +275,7 @@ export class HandoffRegistry {
       targetId: pending.targetId,
       targetSessionId: pending.targetSessionId,
       message: pending.message,
+      startedAt: pending.startedAt,
     }
   }
 }

@@ -55,7 +55,7 @@ export function executeInSession(
     let stopped: { readonly message: string; readonly diagnostic: string } | undefined
     const stoppedExecution = (stop: { readonly message: string; readonly diagnostic: string }): ExecutionResponse => ({
       result: stoppedExecuteResult(stop.message, stop.diagnostic),
-      session: createdSummary(session, resolved.created),
+      session: createdSummary(session, resolved.created, ctx.hooks),
     })
     const chosenTimeoutMs = options.timeoutMs ?? ctx.hooks.executeTimeoutMs
     const effectiveTimeoutMs = chosenTimeoutMs ?? defaultExecuteTimeoutMs
@@ -174,7 +174,7 @@ export function executeInSession(
         result: resultWithHint,
       })
       yield* ctx.admission.commitPersistence()
-      return { result: resultWithHint, session: createdSummary(session, resolved.created) }
+      return { result: resultWithHint, session: createdSummary(session, resolved.created, ctx.hooks) }
     })
     const worker = session.executeSemaphore.withPermit(operation.pipe(Effect.matchEffect({
       onFailure: (error) => Effect.sync(() => deadline?.cancel()).pipe(

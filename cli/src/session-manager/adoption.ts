@@ -98,7 +98,7 @@ export function adoptTargetForSession(
         catch: (cause) => cause instanceof Error ? cause : new Error("Commit target ownership", { cause }),
       })
       const releasedTargetIds = previousTargetId && previousTargetId !== options.targetId ? [previousTargetId] : []
-      const value = { adoptedUrl: options.targetUrl, releasedTargetIds, session: createdSummary(session, resolved.created) }
+      const value = { adoptedUrl: options.targetUrl, releasedTargetIds, session: createdSummary(session, resolved.created, context.hooks) }
       yield* Deferred.succeed(result, value)
       return value
     })
