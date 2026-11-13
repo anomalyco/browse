@@ -100,7 +100,7 @@ test.skipIf(legacyHost)("uninstall leaves data in place when the first relay pro
 test.skipIf(legacyHost)("uninstall keeps polling while the stopping relay resets the probe", async () => {
   const home = mkdtempSync(path.join(tmpdir(), "browse-uninstall-stopping-")), root = path.join(home, "data")
   const instanceId = "stopping-fixture"
-  let stopping = false, resets = 0
+  let stopping = false, resets = 0, closed = false
   const relay = http.createServer((request, response) => {
     if (request.url === "/shutdown") {
       stopping = true
@@ -113,6 +113,7 @@ test.skipIf(legacyHost)("uninstall keeps polling while the stopping relay resets
         request.socket.destroy()
         return
       }
+      closed = true
       relay.close()
       relay.closeAllConnections()
       request.socket.destroy()
@@ -130,6 +131,7 @@ test.skipIf(legacyHost)("uninstall keeps polling while the stopping relay resets
     expect(result.code, result.stderr || result.stdout).toBe(0)
     expect(existsSync(root)).toBe(false)
     expect(resets).toBeGreaterThan(0)
+    expect(closed).toBe(true)
   } finally {
     if (relay.listening) await new Promise<void>((resolve) => relay.close(() => resolve()))
     rmSync(home, { recursive: true, force: true })
