@@ -49,6 +49,18 @@ keeps working. Popups (`window.open`, `target=_blank`) are ordinary pages of
 your session: use `page.waitForEvent("popup")` or `context.waitForEvent("page")`.
 `page.close()` only releases a tab the user lent you.
 
+Pages see your tabs hidden and unfocused between calls; only while an `execute`
+runs on a tab does browse emulate focus on it. If a site pauses, disconnects or
+logs out when hidden, create the session with `--keep-visible` (`keepVisible:
+true` on `session_new`): the tabs that session opened itself stay visible and
+focused to the page between calls. Pages can notice. It never raises or focuses
+the window, tabs the user lent the session are not kept, and it is released when
+the session is deleted or reset or the tab closes.
+
+```bash
+browse session new live --keep-visible
+```
+
 To work in a tab the user already has open, ask them to click the browse toolbar
 button on it (the badge shows ON). Select it for one execute, or adopt it for
 sticky reuse:

@@ -49,3 +49,16 @@ test("a catalog with an invalid session id is moved aside too", async () => {
   }
   expect(fs.readdirSync(root).filter((name) => name.startsWith("sessions.json.corrupt-"))).toHaveLength(1)
 })
+
+test("session options survive a catalog round trip", async () => {
+  const { catalog } = temporaryCatalog()
+  const now = new Date().toISOString()
+  const sessions = [
+    { id: "keep-visible", createdAt: now, updatedAt: now, readOnly: false, keepVisible: true, allowedOrigins: ["https://shop.test"] },
+    { id: "plain", createdAt: now, updatedAt: now, readOnly: true },
+  ]
+
+  await catalog.save(sessions)
+
+  expect(await catalog.load()).toEqual(sessions)
+})

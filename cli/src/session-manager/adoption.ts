@@ -155,6 +155,7 @@ function cleanupSettledAdoption(
         createdAt: session.createdAt,
       })
       if (session.allowedOrigins) replacement.allowedOrigins = session.allowedOrigins
+      if (session.keepVisible) replacement.keepVisible = true
       if (session.browser) replacement.browser = session.browser
       context.sessions.set(session.id, replacement)
     }

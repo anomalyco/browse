@@ -38,6 +38,11 @@ registerMcpTools({
           description:
             "Optional domain allowlist: hosts or origins this session's tabs may load (example.com, *.example.com, https://app.example.com, http://localhost:3000). Navigations elsewhere are refused or sent back to about:blank; private and loopback addresses need an exact entry.",
         },
+        keepVisible: {
+          type: "boolean",
+          description:
+            "Keep this session's own tabs visible and focused to the page between execute calls, for apps that pause or disconnect while hidden. Pages can notice. It never raises or focuses the window, never applies to a tab the user lent you, and is released when the session is deleted or reset or the tab closes.",
+        },
       }),
       readOnly: false,
       destructive: false,
@@ -49,12 +54,14 @@ registerMcpTools({
           const requestedId = optionalStringField(input, "id")
           const readOnly = optionalBooleanField(input, "readOnly")
           const allowedOrigins = optionalStringArrayField(input, "allowedOrigins")
+          const keepVisible = optionalBooleanField(input, "keepVisible")
           const browser = optionalStringField(input, "browser")
           // A browser that's reconnecting (worker or relay restart) is back within seconds: wait, as execute does.
           yield* RelayLifecycle.ensureExtensionConnected({ relay: ctx.relay, waitForReconnect: true })
           const session = yield* ctx.relay.sessionNew(requestedId, {
             ...(readOnly ? { readOnly: true } : {}),
             ...(allowedOrigins ? { allowedOrigins } : {}),
+            ...(keepVisible ? { keepVisible: true } : {}),
             ...(browser ? { browser } : {}),
           })
           ctx.establishCurrentSession(yield* ctx.caller, session.id)

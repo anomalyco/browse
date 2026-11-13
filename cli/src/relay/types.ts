@@ -85,6 +85,11 @@ export type OpenCodeBrowserSession = {
   readonly readOnly: boolean
   /** Normalized allowed-origin patterns (domain-policy.ts); undefined: the session may go anywhere. */
   allowedOrigins?: readonly string[]
+  /**
+   * Keep this session's own tabs visible and focused to the page between execute calls, for apps that pause or
+   * disconnect while hidden. Tabs the user lent are never kept. Pages can notice.
+   */
+  keepVisible?: boolean
   /** The immutable profile key, plus its agent-facing id. Older catalogs recorded at most the id. */
   browser?: { readonly id: string; readonly key?: string }
   /** Replaced when a stopped script does not settle in time (session-manager.ts). */

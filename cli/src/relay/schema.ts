@@ -18,6 +18,7 @@ export const SessionSummary = Schema.Struct({
   stateKeys: Schema.Array(Schema.String),
   readOnly: Schema.optionalKey(Schema.Boolean),
   allowedOrigins: Schema.optionalKey(Schema.Array(Schema.String)),
+  keepVisible: Schema.optionalKey(Schema.Boolean),
   browser: Schema.optionalKey(Schema.String),
 })
 
@@ -101,6 +102,8 @@ export const SessionNewRequest = Schema.Struct({
   id: Schema.optionalKey(Schema.String),
   readOnly: Schema.optionalKey(Schema.Boolean),
   allowedOrigins: Schema.optionalKey(Schema.Array(Schema.String)),
+  /** Keep the session's own tabs visible and focused to the page between execute calls. */
+  keepVisible: Schema.optionalKey(Schema.Boolean),
   /** The connected browser (its id) the session's tabs open in; omitted: the default browser. */
   browser: Schema.optionalKey(Schema.String),
 })

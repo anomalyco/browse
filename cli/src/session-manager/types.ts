@@ -17,7 +17,7 @@ export type SessionExecuteRecord = {
 }
 
 export type CreatedSessionSummary = SessionSummary & { readonly created?: boolean }
-export type SessionCreateOptions = { readonly readOnly?: boolean; readonly allowedOrigins?: readonly string[]; readonly browser?: string }
+export type SessionCreateOptions = { readonly readOnly?: boolean; readonly allowedOrigins?: readonly string[]; readonly keepVisible?: boolean; readonly browser?: string }
 
 export interface SessionContext {
   readonly sessions: Map<string, OpenCodeBrowserSession>
@@ -58,7 +58,7 @@ export type SessionHooks = {
   readonly onExecuteStateChange?: (sessionId: string, executing: boolean) => void | Effect.Effect<void>
   /** Called after each execute completes, for journaling. Failure is logged and ignored. */
   readonly onExecuteRecord?: (record: SessionExecuteRecord) => unknown | Promise<unknown>
-  /** Called after a session is deleted, to drop state keyed by it. Failure is logged and ignored. */
+  /** Called after a session is deleted or reset, to drop state keyed by it. Failure is logged and ignored. */
   readonly onSessionDeleted?: (sessionId: string) => void
   /** How long lifecycle commands wait for a permit or sandbox operation. */
   readonly lifecycleTimeoutMs?: number
@@ -221,6 +221,7 @@ export function sessionSummary(session: OpenCodeBrowserSession): SessionSummary 
     stateKeys: status.stateKeys,
     ...(session.readOnly ? { readOnly: true } : {}),
     ...(session.allowedOrigins ? { allowedOrigins: [...session.allowedOrigins] } : {}),
+    ...(session.keepVisible ? { keepVisible: true } : {}),
     ...(session.browser ? { browser: session.browser.id } : {}),
   }
 }
@@ -240,6 +241,7 @@ export function persistedSession(session: OpenCodeBrowserSession): PersistedSess
     updatedAt: session.updatedAt,
     readOnly: session.readOnly,
     ...(session.allowedOrigins ? { allowedOrigins: [...session.allowedOrigins] } : {}),
+    ...(session.keepVisible ? { keepVisible: true } : {}),
     ...(session.browser ? { browser: session.browser.id, ...(session.browser.key ? { browserKey: session.browser.key } : {}) } : {}),
     ...(target ? { target } : {}),
     ...(session.clientPid === undefined ? {} : { clientPid: session.clientPid }),
