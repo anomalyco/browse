@@ -98,7 +98,7 @@ const sessionList = Command.make(
       const keys = item.stateKeys.length ? ` state=${item.stateKeys.join(",")}` : ""
       const readOnly = item.readOnly ? " read-only" : ""
       const allowed = item.allowedOrigins ? ` allow=${item.allowedOrigins.join(",")}` : ""
-      const handoff = item.handoff ? ` waiting on you: "${item.handoff.message}"` : ""
+      const handoff = item.handoff ? ` waiting on you: ${JSON.stringify(item.handoff.message)}` : ""
       return Console.log(`${marker} ${item.id} ${page}${keys}${readOnly}${allowed}${handoff}`)
     })
   }),
