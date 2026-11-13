@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test"
 import { spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import http from "node:http"
+import { createServer, type AddressInfo } from "node:net"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { freePort } from "./support/ports.ts"
@@ -71,6 +73,65 @@ test.skipIf(legacyHost)("uninstall stops its managed relay before removing its d
     expect(existsSync(root)).toBe(false)
   } finally {
     relay.kill(); await relay.exited
+    rmSync(home, { recursive: true, force: true })
+  }
+}, 25_000)
+
+// A reset before the relay is known to be stopping could be another program holding the port: fail closed and keep the data.
+test.skipIf(legacyHost)("uninstall leaves data in place when the first relay probe connection is reset", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "browse-uninstall-reset-")), root = path.join(home, "data")
+  const resetting = createServer((socket) => socket.destroy())
+  await new Promise<void>((resolve) => resetting.listen(0, "127.0.0.1", resolve))
+  const port = (resetting.address() as AddressInfo).port
+  const audit = path.join(root, "relays", String(port), "lifecycle.jsonl")
+  mkdirSync(path.dirname(audit), { recursive: true })
+  writeFileSync(audit, `${JSON.stringify({ _tag: "Ready", instanceId: "reset-fixture" })}\n`)
+  try {
+    const result = await runUninstall(home, port, ["--yes"])
+    expect(result.code, result.stderr || result.stdout).not.toBe(0)
+    expect(existsSync(root)).toBe(true)
+  } finally {
+    await new Promise<void>((resolve) => resetting.close(() => resolve()))
+    rmSync(home, { recursive: true, force: true })
+  }
+}, 25_000)
+
+// After /shutdown a managed relay closes its sockets, so a reset /version is still stopping, not gone.
+test.skipIf(legacyHost)("uninstall keeps polling while the stopping relay resets the probe", async () => {
+  const home = mkdtempSync(path.join(tmpdir(), "browse-uninstall-stopping-")), root = path.join(home, "data")
+  const instanceId = "stopping-fixture"
+  let stopping = false, resets = 0
+  const relay = http.createServer((request, response) => {
+    if (request.url === "/shutdown") {
+      stopping = true
+      response.end(JSON.stringify({ stopping: true }))
+      return
+    }
+    if (stopping) {
+      if (resets < 2) {
+        resets++
+        request.socket.destroy()
+        return
+      }
+      relay.close()
+      relay.closeAllConnections()
+      request.socket.destroy()
+      return
+    }
+    response.end(JSON.stringify({ version: "0.0.0", instanceId, managed: true, shutdownProtocol: 2 }))
+  })
+  await new Promise<void>((resolve) => relay.listen(0, "127.0.0.1", resolve))
+  const port = (relay.address() as AddressInfo).port
+  const audit = path.join(root, "relays", String(port), "lifecycle.jsonl")
+  mkdirSync(path.dirname(audit), { recursive: true })
+  writeFileSync(audit, `${JSON.stringify({ _tag: "Ready", instanceId })}\n`)
+  try {
+    const result = await runUninstall(home, port, ["--yes"])
+    expect(result.code, result.stderr || result.stdout).toBe(0)
+    expect(existsSync(root)).toBe(false)
+    expect(resets).toBeGreaterThan(0)
+  } finally {
+    if (relay.listening) await new Promise<void>((resolve) => relay.close(() => resolve()))
     rmSync(home, { recursive: true, force: true })
   }
 }, 25_000)
