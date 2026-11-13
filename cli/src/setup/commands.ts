@@ -433,9 +433,16 @@ async function stopInstalledRelay() {
   })
   if (!response.ok || !(await response.json() as { stopping?: boolean }).stopping) throw new Error("The running relay refused shutdown. Stop it manually, then run uninstall again.")
   for (let n = 0; n < 100; n++) {
-    const current = await probe()
-    if (!current) return
-    if (current.instanceId !== relay.instanceId) throw new Error("Another relay started during uninstall; no files were removed.")
+    const current = await probe().catch((error) => {
+      const e = error as { code?: string; cause?: { code?: string } }
+      // A stopping relay closes its sockets, so a reset here means wait and poll again; only a refusal means gone.
+      if (["ECONNRESET", "ConnectionClosed"].includes(e.cause?.code ?? e.code ?? "")) return "stopping" as const
+      throw error
+    })
+    if (current !== "stopping") {
+      if (!current) return
+      if (current.instanceId !== relay.instanceId) throw new Error("Another relay started during uninstall; no files were removed.")
+    }
     await new Promise(resolve => setTimeout(resolve, 50))
   }
   throw new Error("The relay is still stopping. Run uninstall again once it exits.")
