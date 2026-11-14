@@ -391,7 +391,8 @@ export function createRelayHandshake(deps: {
     tokenRefused = undefined
     codeRejected = false
     deps.log.add("pairing.ok", { source: using.kind })
-    // Tabs an agent opened say so: one the relay no longer knows after a reconnect is closed, not handed to the user.
+    // Tabs an agent opened say so: a relay that can't match one to a session after a restart releases it
+    // (relay-side `extension.inventory.released`) instead of leaving it on idle cleanup.
     for (const tabId of Array.from(deps.relayTabs)) {
       const agent = await TabCleanup.isTracked(tabId)
       if (deps.currentSocket() !== current) return

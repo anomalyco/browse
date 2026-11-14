@@ -1,6 +1,7 @@
 import { Data, Effect, Exit, Latch, Match, Schema } from "effect"
 import type { RelayShutdownRequest } from "./schema.ts"
 import { RelayLifecycleEvent } from "./lifecycle-log.ts"
+import { relayLog } from "./log.ts"
 import { cliCommand } from "../paths.ts"
 
 /** What keeps the relay from restarting, in words for the user ("a network capture in session x since 12:01"). */
@@ -39,8 +40,19 @@ export class RelayShutdown {
     readonly quiescent: () => boolean
     readonly audit: (event: RelayLifecycleEvent) => Effect.Effect<void, Error>
     readonly stop: () => void
+    /** One operational log line per shutdown request and close; injectable so tests never write the real log. */
+    readonly log?: (event: string, fields?: Record<string, unknown>) => void
     readonly timeoutMs?: number
   }) {}
+
+  private log(event: string, fields: Record<string, unknown> = {}): void {
+    try {
+      const log = this.options.log ?? relayLog
+      log(event, fields)
+    } catch {
+      // Logging a shutdown must never be what stops it.
+    }
+  }
 
   get accepting(): boolean {
     return State.$is("Running")(this.state)
@@ -65,6 +77,7 @@ export class RelayShutdown {
   close(): Effect.Effect<void, Error> {
     const control = this
     return Effect.gen(function* () {
+      control.log("relay.shutdown.close", { requests: control.requests })
       control.state = State.Closing()
       yield* control.drainAndSettle()
     })
@@ -103,6 +116,11 @@ export class RelayShutdown {
   request(request: RelayShutdownRequest): Effect.Effect<void, Error> {
     const control = this
     return Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
+      control.log("relay.shutdown.requested", {
+        requestId: request.requestId,
+        client: request.client.kind,
+        force: request.force === true,
+      })
       if (request.instanceId !== control.options.instanceId) {
         return yield* new RelayShutdownError({ reason: "instance-changed", message: "Relay shutdown does not match the active managed instance" })
       }
@@ -143,6 +161,7 @@ export class RelayShutdown {
         const busy = control.options.busy()
         if (busy) return yield* control.busyError(busy)
         control.state = State.Stopping()
+        control.log("relay.shutdown.stopping", { requestId: request.requestId })
         control.options.stop()
       }).pipe(Effect.onExit((exit) => {
         if (Exit.isSuccess(exit) || !State.$is("Draining")(control.state)) return Effect.void

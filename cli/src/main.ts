@@ -35,6 +35,15 @@ if (command !== "--version" && command !== "-v" && !askedForHelp && !takingOver)
   removeStoredSecrets()
 }
 
+// A serve relay says in its log when it is asked to exit. A silent exit is the one thing an operator cannot
+// diagnose, and the signal handlers Effect installs later exit the process.
+if (command === "serve" && !askedForHelp) {
+  const { relayLog } = await import("./relay/log.ts")
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.prependOnceListener(signal, () => relayLog("relay.signal", { signal, pid: process.pid }))
+  }
+}
+
 // Earlier layouts (~/.browse, and the old opencode-browser data root) move to the XDG folders on the first run.
 // opencode briefly shows the update, and no other command pays for the import.
 // A takeover migrates once its relay owns the port.

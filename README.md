@@ -191,6 +191,10 @@ connection itself isn't encrypted by browse; use a network that is (Tailscale or
   tab strip and collapsed unless you're looking at one. Agents can't switch you to their tabs or bring a window to the
   front; popups an agent opens join its group, and if one takes over your window you get your tab back. Tabs nobody
   touches for 10 minutes close by themselves (never while a script runs on them).
+- **Relay restarts keep agent tabs.** A session records every tab it holds, so a relay that starts again reclaims its
+  default page and every page or popup the session opened. An agent tab the new relay can't match to a session is let
+  go instead of closed: browse detaches from it and leaves it open for you. Only tabs of a session deleted while the
+  relay was still running are closed.
 - **What a page sees.** Between calls a page sees an agent's tab hidden and unfocused; only while an `execute` runs on
   it does browse emulate focus, so background work isn't throttled. Some apps pause or disconnect when hidden, so a
   session can be created with `browse session new live --keep-visible` (or `keepVisible: true` on `session_new`): the

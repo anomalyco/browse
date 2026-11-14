@@ -150,7 +150,9 @@ export function createRelayCommands(deps: {
         const tabId = number(params, "tabId")
         deps.forget(tabId)
         await DebuggerHub.detach(tabId)
-        await deps.ungroup(tabId, { finished: true })
+        // A relay that can't identify a tab's session releases it: leave an agent tab open and off idle cleanup.
+        if (params?.release === true) await deps.ungroup(tabId, { released: true })
+        else await deps.ungroup(tabId, { finished: true })
         return {}
       }
       case "debugger.sendCommand":

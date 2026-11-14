@@ -3,6 +3,7 @@ import { Effect, Fiber } from "effect"
 import { boundExecuteResult, jsonValueWarning, maxExecuteResultChars, toJsonSafeValue, type ExecuteOptions, type ExecuteResult } from "../src/execute.ts"
 import { ExecuteRealm } from "../src/execute-realm.ts"
 import { HandoffRegistry } from "../src/session-manager/handoff.ts"
+import type { PersistedSession } from "../src/session-manager/catalog.ts"
 import type { ConnectedTarget, ExecuteSandboxLike } from "../src/relay/types.ts"
 import { OpenCodeBrowserSessions } from "../src/session-manager.ts"
 
@@ -298,6 +299,46 @@ describe("closing a session's pages", () => {
     await run(sessions.execute({ sessionId: "again", code: "...", createIfMissing: true }))
     await run(sessions.reset("again"))
     expect(closed).toEqual(["T-other"])
+  })
+})
+
+describe("persisting a session's pages", () => {
+  test("every relay-owned target is written with the catalog and reclaimed by a restart", async () => {
+    const writes: PersistedSession[][] = []
+    const create = (onSessionsChanged?: (sessions: readonly PersistedSession[]) => void) => new OpenCodeBrowserSessions(
+      "http://127.0.0.1:0",
+      () => new FakeSandbox(async () => ok("x")),
+      {
+        lifecycleTimeoutMs: 5_000,
+        relayTargetIdsForSession: (id) => id === "pages" ? ["T-default"] : [],
+        ...(onSessionsChanged ? { onSessionsChanged } : {}),
+      },
+    )
+    const sessions = create((entries) => { writes.push([...entries]) })
+    await run(sessions.execute({ sessionId: "pages", code: "...", createIfMissing: true }))
+    // A page opened after the default one (a popup, say) is recorded as it attaches, not only on the next execute.
+    sessions.noteTargetHeld("T-popup", "pages")
+    await run(sessions.persist())
+    const saved = writes.at(-1)?.find((entry) => entry.id === "pages")
+    expect(saved?.targets?.map((target) => target.id).sort()).toEqual(["T-default", "T-popup"])
+
+    const restarted = create()
+    restarted.restore(writes.at(-1) ?? [])
+    expect(restarted.persistedTargetOwner("T-default")).toEqual({ sessionId: "pages", owner: "relay" })
+    expect(restarted.persistedTargetOwner("T-popup")).toEqual({ sessionId: "pages", owner: "relay" })
+  })
+
+  test("clearing a session's default target says which target went and why", () => {
+    const cleared: Array<[string, string, string]> = []
+    const sessions = new OpenCodeBrowserSessions("http://127.0.0.1:0", () => new FakeSandbox(async () => ok("x")), {
+      lifecycleTimeoutMs: 5_000,
+      onTargetCleared: (sessionId, targetId, reason) => { cleared.push([sessionId, targetId, reason]) },
+    })
+    const session = sessions.createNew("logs")
+    session.target = { id: "T-old", owner: "relay" }
+    expect(sessions.markTargetDetached("T-old", { reason: "tab-closed" })).toEqual([])
+    expect(session.target).toBeUndefined()
+    expect(cleared).toEqual([["logs", "T-old", "tab-closed"]])
   })
 })
 
