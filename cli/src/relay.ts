@@ -190,7 +190,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const suppressedChildSessions = new Map<string, number>()
   const protectedFrames = new ProtectedFrameTracker()
   const handoffs = new HandoffRegistry()
-  const ownersAcrossReconnect = new Map<string, { readonly sessionId?: string; readonly owner: "relay" | "user"; readonly browser: string }>()
+  const ownersAcrossReconnect = new Map<string, { readonly sessionId?: string; readonly owner: "relay" | "user"; readonly browser: string; readonly deleted?: boolean }>()
   const sweptBrowsers = new Set<string>()
 
   const recordingRelay = new RecordingRelay({
@@ -381,7 +381,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       onRestoreWarning: (detail) => relayLog("session.restore.dropped", { detail }),
       onTombstoneRelayTargets: (sessionId, targetIds, browserKey) => {
         for (const targetId of targetIds) {
-          ownersAcrossReconnect.set(targetId, { browser: browserKey ?? "", owner: "relay", sessionId })
+          ownersAcrossReconnect.set(targetId, { browser: browserKey ?? "", owner: "relay", sessionId, deleted: true })
         }
       },
       onReleaseRelayTarget: (targetId) => releaseRelayTarget(targetId),
@@ -391,7 +391,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
           .filter((target) => target.owner === "relay" && target.opencodeBrowserSessionId === sessionId)
           .map((target) => target.targetInfo.targetId),
         ...Array.from(ownersAcrossReconnect)
-          .filter(([targetId, known]) => known.owner === "relay" && known.sessionId === sessionId && !registry.targetsByTargetId.has(targetId))
+          .filter(([targetId, known]) => known.deleted !== true && known.owner === "relay" && known.sessionId === sessionId && !registry.targetsByTargetId.has(targetId))
           .map(([targetId]) => targetId),
       ],
       onCancelSessionHandoff: (sessionId) => handoffs.cancelForSession(sessionId) !== undefined,
@@ -426,9 +426,12 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     log: (event, details) => relayLog(event, details),
   })
 
-  const ownerAcrossReconnect = (targetId: string) => {
+  const ownerAcrossReconnect = (targetId: string, includeRelayOwnership: boolean, browserKey: string | undefined) => {
     const known = ownersAcrossReconnect.get(targetId)
-    return known?.sessionId !== undefined && sessions.sessions.has(known.sessionId)
+    if (!known || known.deleted === true) return undefined
+    if (browserKey !== undefined && known.browser !== "" && known.browser !== browserKey) return undefined
+    if (!includeRelayOwnership && known.owner !== "user") return undefined
+    return known.sessionId !== undefined && sessions.sessions.has(known.sessionId)
       ? { sessionId: known.sessionId, owner: known.owner }
       : undefined
   }
@@ -440,11 +443,13 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     registry,
     sessions: {
       persistedTargetOwner: (targetId, restoreOptions) =>
-        sessions.persistedTargetOwner(targetId, restoreOptions) ?? ownerAcrossReconnect(targetId),
+        sessions.persistedTargetOwner(targetId, restoreOptions) ??
+        ownerAcrossReconnect(targetId, restoreOptions?.includeHeldTargets !== false, restoreOptions?.browserKey),
       markTargetReplaced: (previousTargetId, targetId) => sessions.markTargetReplaced(previousTargetId, targetId),
       noteTargetHeld: (targetId, sessionId) => sessions.noteTargetHeld(targetId, sessionId),
       forgetTargetHeld: (targetId) => sessions.forgetTargetHeld(targetId),
     },
+    browserKeyForTab: (tabId) => browsers.ownerKey(tabId),
     authorizeRestoredTarget: ({ tabId, targetId, url, owner, sessionId }) => {
       // Like a popup or a created tab: the session's allowlist decides before the page is published for it.
       const allowed = navigationGuard.createdTabNavigated({

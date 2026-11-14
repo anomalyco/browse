@@ -53,6 +53,17 @@ function catalogTargets(home: string, port: number, sessionId: string): Array<{ 
   }
 }
 
+function writeCatalogTarget(home: string, port: number, sessionId: string, target: { readonly id: string; readonly owner: "relay" }) {
+  const catalogPath = path.join(home, "relays", String(port), "sessions.json")
+  const catalog = JSON.parse(fs.readFileSync(catalogPath, "utf8")) as {
+    sessions: Array<{ id: string; target?: { id: string; owner: string }; targets?: Array<{ id: string; owner: string }> }>
+  }
+  const saved = catalog.sessions.find((entry) => entry.id === sessionId)
+  if (!saved) throw new Error(`No catalog session ${sessionId}`)
+  saved.target = target
+  fs.writeFileSync(catalogPath, JSON.stringify(catalog))
+}
+
 /** Fills a session's catalog with tabs, then stops its relay as an unexpected exit would. */
 async function seed(home: string, options: {
   readonly sessionId: string
@@ -104,7 +115,17 @@ async function seed(home: string, options: {
 
 async function owners(port: number, token: string) {
   const response = await fetch(`http://127.0.0.1:${port}/json/list`, { headers: { authorization: `Bearer ${token}` } })
-  return (await response.json()) as Array<{ tabId: number; opencodeBrowserSessionId?: string }>
+  return (await response.json()) as Array<{ tabId: number; url?: string; opencodeBrowserSessionId?: string }>
+}
+
+async function waitForRestoredSession(port: number, token: string, sessionId: string) {
+  const restored = async () => {
+    const response = await fetch(`http://127.0.0.1:${port}/cli/sessions`, { headers: { authorization: `Bearer ${token}` } })
+    if (!response.ok) return false
+    const body = await response.json() as { sessions?: Array<{ id: string }> }
+    return body.sessions?.some((session) => session.id === sessionId) === true
+  }
+  expect(await waitFor(restored)).toBe(true)
 }
 
 test("a fresh relay reclaims agent pages, releases an unclaimed one, and prunes stale hints", async () => {
@@ -154,6 +175,7 @@ test("deleting a session before the browser reconnects still closes its restored
     const first = await seed(home, { sessionId: "restart-delete", tabs: [310, 311], urls })
     const started = await startRelay(home, {}, first.port)
     secondChild = started.child
+    await waitForRestoredSession(started.port, first.token, "restart-delete")
     // No extension is connected yet: the delete only has the catalog's targets to work with.
     const deleted = await fetch(`http://127.0.0.1:${started.port}/cli/session/delete`, {
       method: "POST",
@@ -182,6 +204,8 @@ test("a non-agent announcement and a toolbar lend never reclaim a persisted agen
   let replacement: FakeExtension | undefined
   try {
     const first = await seed(home, { sessionId: "restart-lend", tabs: [320, 321], urls })
+    // The tab is the session's relay-owned default page, not only a held hint.
+    writeCatalogTarget(home, first.port, "restart-lend", { id: "TARGET-320", owner: "relay" })
     const started = await startRelay(home, {}, first.port)
     secondChild = started.child
     replacement = new FakeExtension(home, started.port)
@@ -197,6 +221,10 @@ test("a non-agent announcement and a toolbar lend never reclaim a persisted agen
     }
     replacement.sendReady()
     expect(await waitFor(() => catalogTargets(home, first.port, "restart-lend").length === 0)).toBe(true)
+    const saved = JSON.parse(fs.readFileSync(path.join(home, "relays", String(first.port), "sessions.json"), "utf8")) as {
+      sessions: Array<{ id: string; target?: { id: string } }>
+    }
+    expect(saved.sessions.find((entry) => entry.id === "restart-lend")?.target).toBeUndefined()
   } finally {
     replacement?.close()
     await stopAndWait(secondChild)
@@ -228,6 +256,138 @@ test("a reclaimed page must still pass the session's allowlist before it is publ
   } finally {
     replacement?.close()
     await stopAndWait(secondChild)
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+}, 40_000)
+
+test("an unannounced relay default page is pruned from the catalog", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-relay-prune-default-"))
+  const urls = new Map<number, string>()
+  let secondChild: ChildProcess | undefined
+  let replacement: FakeExtension | undefined
+  try {
+    const first = await seed(home, { sessionId: "restart-prune-default", tabs: [324, 325], urls })
+    writeCatalogTarget(home, first.port, "restart-prune-default", { id: "TARGET-324", owner: "relay" })
+    const started = await startRelay(home, {}, first.port)
+    secondChild = started.child
+    replacement = new FakeExtension(home, started.port)
+      .on("Target.getTargetInfo", (command) => ({ targetInfo: targetInfo(Number(command.params?.tabId), urls) }))
+    // 324 (the default page) is gone; only 325 comes back.
+    expect(await replacement.pair({ attachedTabs: [325], agentTabs: [325], capabilities: ["tab-release"] })).toBe(true)
+    const saved = () => JSON.parse(fs.readFileSync(path.join(home, "relays", String(first.port), "sessions.json"), "utf8")) as {
+      sessions: Array<{ id: string; target?: { id: string }; targets?: Array<{ id: string }> }>
+    }
+    expect(await waitFor(() => {
+      const session = saved().sessions.find((entry) => entry.id === "restart-prune-default")
+      return session?.target === undefined && session?.targets?.every((target) => target.id !== "TARGET-324") === true
+    })).toBe(true)
+  } finally {
+    replacement?.close()
+    await stopAndWait(secondChild)
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+}, 40_000)
+
+test("a deleted session's tombstone is not inherited by a new session reusing its id", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-relay-tombstone-"))
+  const urls = new Map<number, string>()
+  let secondChild: ChildProcess | undefined
+  let replacement: FakeExtension | undefined
+  try {
+    const first = await seed(home, { sessionId: "work", tabs: [330], urls })
+    const started = await startRelay(home, {}, first.port)
+    secondChild = started.child
+    await waitForRestoredSession(started.port, first.token, "work")
+    const post = (route: string, body: unknown) => fetch(`http://127.0.0.1:${started.port}${route}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${first.token}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    })
+    const deleted = await post("/cli/session/delete", { id: "work" })
+    expect(deleted.ok).toBe(true)
+    expect(await deleted.clone().json()).toMatchObject({ deleted: true })
+    // A new session needs a connected browser; pair one without running its ready inventory, so the tombstone is
+    // still there when the real browser reconnects with the old tab.
+    const gate = new FakeExtension(home, started.port)
+    expect(await gate.pair({ deferReady: true })).toBe(true)
+    // The id is reused before the browser is back: the old tab must still close, not become the new session's page.
+    const created = await post("/cli/session/new", { id: "work" })
+    expect(created.ok, await created.clone().text()).toBe(true)
+    gate.close()
+    await Bun.sleep(100)
+    replacement = new FakeExtension(home, started.port)
+      .on("Target.getTargetInfo", (command) => ({ targetInfo: targetInfo(Number(command.params?.tabId), urls) }))
+    expect(await replacement.pair({ attachedTabs: [330], agentTabs: [330], capabilities: ["tab-release"] })).toBe(true)
+    expect(await waitFor(() => replacement?.commands.some((command) =>
+      command.method === "tabs.remove" && command.params?.tabId === 330) ?? false)).toBe(true)
+    expect(replacement.commands.some((command) => command.method === "debugger.detach" && command.params?.release === true)).toBe(false)
+    const saved = JSON.parse(fs.readFileSync(path.join(home, "relays", String(first.port), "sessions.json"), "utf8")) as {
+      sessions: Array<{ id: string; target?: { id: string }; targets?: Array<{ id: string }> }>
+    }
+    const reused = saved.sessions.find((entry) => entry.id === "work")
+    expect(reused?.target).toBeUndefined()
+    expect(reused?.targets ?? []).toEqual([])
+  } finally {
+    replacement?.close()
+    await stopAndWait(secondChild)
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+}, 40_000)
+
+test("a refused restored page is published blank and released on the same relay reconnect", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-relay-refused-"))
+  const urls = new Map([[340, "https://blocked.test/"]])
+  let socket: WebSocket | undefined
+  let first: FakeExtension | undefined
+  let replacement: FakeExtension | undefined
+  let relay: Awaited<ReturnType<typeof startRelay>> | undefined
+  try {
+    relay = await startRelay(home)
+    let next = 340
+    first = new FakeExtension(home, relay.port)
+      .on("tabs.create", () => ({ tabId: next++ }))
+      .on("Target.getTargetInfo", (command) => ({ targetInfo: targetInfo(Number(command.params?.tabId), urls) }))
+    expect(await first.pair()).toBe(true)
+    const base = `http://127.0.0.1:${relay.port}`
+    const post = (route: string, body: unknown) => fetch(`${base}${route}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${relay!.token}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    })
+    expect((await post("/cli/session/new", { id: "guarded-same-relay" })).ok).toBe(true)
+    const connected = await connectCdp(
+      `ws://127.0.0.1:${relay.port}/devtools/browser/test?opencodeBrowserSessionId=guarded-same-relay`,
+      { authorization: `Bearer ${relay.token}` },
+    )
+    if (!(connected instanceof WebSocket)) throw new Error(`CDP connection refused: ${connected}`)
+    socket = connected
+    expect((await cdpCall(socket, 1, "Target.createTarget", { url: "https://blocked.test/" })).result?.targetId).toBe("TARGET-340")
+    expect(await waitFor(() => catalogTargets(home, relay!.port, "guarded-same-relay").length === 1)).toBe(true)
+    expect((await post("/cli/session/allowlist", { id: "guarded-same-relay", allowedOrigins: ["https://allowed.test"] })).ok).toBe(true)
+
+    first.close()
+    first = undefined
+    socket.close()
+    socket = undefined
+    for (let attempt = 0; attempt < 50 && (await owners(relay.port, relay.token)).length > 0; attempt++) await Bun.sleep(50)
+
+    replacement = new FakeExtension(home, relay.port)
+      .on("Target.getTargetInfo", (command) => ({ targetInfo: targetInfo(Number(command.params?.tabId), urls) }))
+    expect(await replacement.pair({ attachedTabs: [340], agentTabs: [340], capabilities: ["tab-release"], deferReady: true })).toBe(true)
+    const refused = () => owners(relay!.port, relay!.token).then((targets) => targets.find((target) => target.tabId === 340))
+    expect(await waitFor(async () => (await refused())?.url === "about:blank")).toBe(true)
+    expect((await refused())?.opencodeBrowserSessionId).toBeUndefined()
+    replacement.sendReady()
+    expect(await waitFor(() => replacement?.commands.some((command) =>
+      command.method === "debugger.detach" && command.params?.tabId === 340 && command.params?.release === true) ?? false)).toBe(true)
+    expect(replacement.commands.some((command) =>
+      command.method === "debugger.sendCommand" && command.params?.method === "Page.navigate" &&
+      (command.params?.params as { url?: string } | undefined)?.url === "about:blank")).toBe(true)
+  } finally {
+    replacement?.close()
+    first?.close()
+    socket?.close()
+    await stopAndWait(relay?.child)
     fs.rmSync(home, { recursive: true, force: true })
   }
 }, 40_000)

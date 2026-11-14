@@ -46,6 +46,8 @@ type Options = {
     readonly owner: "relay" | "user"
     readonly sessionId: string
   }) => boolean
+  /** The browser a tab belongs to, so a catalog target bound to another browser is never reclaimed. */
+  readonly browserKeyForTab?: (tabId: number) => string | undefined
   readonly presentation: {
     readonly replaced: (change: Extract<RootTargetChange, { readonly kind: "replaced" }>) => void
     readonly committed: (target: ConnectedTarget) => void
@@ -350,10 +352,13 @@ export class RootTargetLifecycle {
     const targetInfo = options.openerTargetId && !reportedTargetInfo.openerId
       ? { ...reportedTargetInfo, openerId: options.openerTargetId }
       : reportedTargetInfo
+    let publishedTargetInfo = targetInfo
+    const browserKey = this.options.browserKeyForTab?.(tabId)
     const restored = options.opencodeBrowserSessionId || options.restoreOwnership === false
       ? undefined
       : this.options.sessions.persistedTargetOwner(targetInfo.targetId, {
           includeHeldTargets: options.reclaimHeldTargets === true,
+          ...(browserKey ? { browserKey } : {}),
         })
     let owner = restored?.owner ?? options.owner
     let opencodeBrowserSessionId = options.opencodeBrowserSessionId ?? restored?.sessionId
@@ -371,11 +376,14 @@ export class RootTargetLifecycle {
     ) {
       owner = "user"
       opencodeBrowserSessionId = undefined
+      // The page keeps its forbidden URL only until the blank navigation lands; publish it as blank already so a
+      // guardrail reading visible pages never sees a URL the session's allowlist refused.
+      publishedTargetInfo = { ...targetInfo, url: "about:blank" }
     }
     const target = this.options.registry.stageRootTarget({
       tabId,
       sessionId: `bc-tab-${this.nextSessionId++}`,
-      targetInfo,
+      targetInfo: publishedTargetInfo,
       owner,
       ...(opencodeBrowserSessionId ? { opencodeBrowserSessionId } : {}),
     })

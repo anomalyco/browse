@@ -192,11 +192,14 @@ export class OpenCodeBrowserSessions {
 
   persistedTargetOwner(
     targetId: string,
-    options: { readonly includeHeldTargets?: boolean } = {},
+    options: { readonly includeHeldTargets?: boolean; readonly browserKey?: string } = {},
   ): { readonly sessionId: string; readonly owner: "relay" | "user" } | undefined {
     for (const session of this.sessions.values()) {
+      if (options.browserKey !== undefined && session.browser?.key !== undefined && session.browser.key !== options.browserKey) continue
       const target = session.target
-      if (target?.id === targetId) return { sessionId: session.id, owner: target.owner }
+      if (target?.id === targetId && (options.includeHeldTargets !== false || target.owner === "user")) {
+        return { sessionId: session.id, owner: target.owner }
+      }
       if (options.includeHeldTargets === false) continue
       const held = session.targets?.find((candidate) => candidate.id === targetId)
       if (held) return { sessionId: session.id, owner: held.owner }
@@ -215,34 +218,56 @@ export class OpenCodeBrowserSessions {
   }
 
   /** Drop a target a session no longer holds (a user lend, an adoption): it must not be reclaimed again. */
-  forgetTargetHeld(targetId: string): boolean {
+  forgetTargetHeld(targetId: string, reason = "released"): boolean {
     let changed = false
     for (const session of this.sessions.values()) {
-      if (!session.targets?.some((target) => target.id === targetId)) continue
-      const kept = session.targets.filter((target) => target.id !== targetId)
-      if (kept.length > 0) session.targets = kept
-      else delete session.targets
-      changed = true
+      let sessionChanged = false
+      if (session.target?.owner === "relay" && session.target.id === targetId) {
+        this.notifyTargetCleared(session.id, targetId, reason)
+        delete session.target
+        sessionChanged = true
+      }
+      if (session.targets?.some((target) => target.id === targetId)) {
+        const kept = session.targets.filter((target) => target.id !== targetId)
+        if (kept.length > 0) session.targets = kept
+        else delete session.targets
+        sessionChanged = true
+      }
+      changed ||= sessionChanged
     }
     if (changed) this.admission.schedulePersistence()
     return changed
   }
 
   /**
-   * Keep only targets a settled inventory actually announced, for sessions in that browser (or sessions whose
-   * browser is unknown), and dedupe them. Returns the target ids removed.
+   * Keep only targets a settled inventory actually announced, for sessions in that browser, and dedupe them. Sessions
+   * with no browser key are only included when exactly one browser is connected/known. Returns the target ids removed.
    */
-  pruneHeldTargets(options: { readonly browserKey: string; readonly liveTargetIds: ReadonlySet<string> }): string[] {
-    const removed: string[] = []
+  pruneHeldTargets(options: {
+    readonly browserKey: string
+    readonly liveTargetIds: ReadonlySet<string>
+    readonly includeUnknownBrowser: boolean
+  }): string[] {
+    const removed = new Set<string>()
     let changed = false
     for (const session of this.sessions.values()) {
+      if (session.browser?.key === undefined) {
+        if (!options.includeUnknownBrowser) continue
+      } else if (session.browser.key !== options.browserKey) {
+        continue
+      }
+      if (session.target?.owner === "relay" && !options.liveTargetIds.has(session.target.id)) {
+        removed.add(session.target.id)
+        this.notifyTargetCleared(session.id, session.target.id, "pruned")
+        delete session.target
+        changed = true
+      }
       if (session.targets === undefined) continue
-      if (session.browser?.key !== undefined && session.browser.key !== options.browserKey) continue
       const kept: SessionTarget[] = []
       const seen = new Set<string>()
       for (const target of session.targets) {
         if (!options.liveTargetIds.has(target.id) || seen.has(target.id)) {
-          removed.push(target.id)
+          removed.add(target.id)
           changed = true
           continue
         }
@@ -253,7 +278,7 @@ export class OpenCodeBrowserSessions {
       else delete session.targets
     }
     if (changed) this.admission.schedulePersistence()
-    return removed
+    return [...removed]
   }
 
   /** A deleted session's restored tabs are no longer live: a browser reconnect must close them. */

@@ -81,7 +81,11 @@ export function adoptTargetForSession(
         yield* context.closeRelayTarget(previousTarget.id)
         previousRelayClosed = true
       }
+      if (session.target?.owner === "relay" && (session.target.id === options.targetId || session.target.id === previousTargetId)) {
+        delete session.target
+      }
       session.target = { id: options.targetId, owner: "user" }
+      // A target adopted as a user's tab is not a held relay target any more, including when it was its default page.
       if (session.targets) {
         const held = session.targets.filter((target) => target.id !== options.targetId && target.id !== previousTargetId)
         if (held.length > 0) session.targets = held

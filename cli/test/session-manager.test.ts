@@ -402,12 +402,54 @@ describe("persisting a session's pages", () => {
 
     expect(sessions.persistedTargetOwner("T-live", { includeHeldTargets: false })).toBeUndefined()
     expect(sessions.persistedTargetOwner("T-live")).toEqual({ sessionId: "pages", owner: "relay" })
-    expect(sessions.pruneHeldTargets({ browserKey: "browser-1", liveTargetIds: new Set(["T-live"]) })).toEqual(["T-live", "T-stale"])
+    expect(sessions.pruneHeldTargets({ browserKey: "browser-1", liveTargetIds: new Set(["T-live"]), includeUnknownBrowser: true })).toEqual(["T-live", "T-stale"])
     expect(session.targets).toEqual([{ id: "T-live", owner: "relay" }])
     expect(other.targets).toEqual([{ id: "T-elsewhere", owner: "relay" }])
 
     expect(sessions.forgetTargetHeld("T-live")).toBe(true)
     expect(session.targets).toBeUndefined()
+  })
+
+  test("a relay-owned default page is not reclaimed for a non-agent tab, is forgotten, and is pruned", () => {
+    const sessions = new OpenCodeBrowserSessions("http://127.0.0.1:0", () => new FakeSandbox(async () => ok("x")))
+    const session = sessions.createNew("default-page")
+    session.browser = { id: "chrome", key: "browser-1" }
+    session.target = { id: "T-default", owner: "relay" }
+    session.targets = [{ id: "T-default", owner: "relay" }]
+
+    expect(sessions.persistedTargetOwner("T-default", { includeHeldTargets: false, browserKey: "browser-1" })).toBeUndefined()
+    expect(sessions.persistedTargetOwner("T-default", { includeHeldTargets: true, browserKey: "browser-1" }))
+      .toEqual({ sessionId: "default-page", owner: "relay" })
+    // A session bound to another browser is not the owner of this announcement.
+    expect(sessions.persistedTargetOwner("T-default", { includeHeldTargets: true, browserKey: "browser-2" })).toBeUndefined()
+    session.target = { id: "T-user", owner: "user" }
+    expect(sessions.persistedTargetOwner("T-user", { includeHeldTargets: false, browserKey: "browser-1" }))
+      .toEqual({ sessionId: "default-page", owner: "user" })
+
+    session.target = { id: "T-default", owner: "relay" }
+    expect(sessions.forgetTargetHeld("T-default")).toBe(true)
+    expect(session.target).toBeUndefined()
+    expect(session.targets).toBeUndefined()
+  })
+
+  test("prune clears a relay-owned default page, dedupes, and leaves unknown-browser sessions alone when asked", () => {
+    const sessions = new OpenCodeBrowserSessions("http://127.0.0.1:0", () => new FakeSandbox(async () => ok("x")))
+    const known = sessions.createNew("known")
+    known.browser = { id: "chrome", key: "browser-1" }
+    known.target = { id: "T-default", owner: "relay" }
+    known.targets = [{ id: "T-default", owner: "relay" }, { id: "T-live", owner: "relay" }]
+    const unknown = sessions.createNew("unknown")
+    unknown.targets = [{ id: "T-unknown", owner: "relay" }]
+
+    expect(sessions.pruneHeldTargets({ browserKey: "browser-1", liveTargetIds: new Set(["T-live"]), includeUnknownBrowser: false }))
+      .toEqual(["T-default"])
+    expect(known.target).toBeUndefined()
+    expect(known.targets).toEqual([{ id: "T-live", owner: "relay" }])
+    expect(unknown.targets).toEqual([{ id: "T-unknown", owner: "relay" }])
+
+    expect(sessions.pruneHeldTargets({ browserKey: "browser-1", liveTargetIds: new Set(["T-live"]), includeUnknownBrowser: true }))
+      .toEqual(["T-unknown"])
+    expect(unknown.targets).toBeUndefined()
   })
 
   test("adopting a tab drops it and the previous target from the session's held targets", async () => {

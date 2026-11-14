@@ -196,18 +196,13 @@ export function launchWindowsRelay(
     }
 
     // A terminal or tool that kills its process tree (a Windows job) would otherwise take the relay with it. A job
-    // that forbids breakaway refuses with ERROR_ACCESS_DENIED (5): start inside the job instead, as before.
+    // that forbids breakaway fails the first attempt; Bun FFI can clobber the error before it can be read, so retry
+    // inside the job on any failure and report what the final attempt says.
     const flags = createNoWindow | createNewProcessGroup | createUnicodeEnvironment
-    let errorCode: number | undefined
     let processInformation = start(flags | createBreakawayFromJob)
+    if (!processInformation) processInformation = start(flags)
     if (!processInformation) {
-      errorCode = lastError()
-      if (errorCode === 5) {
-        processInformation = start(flags)
-        if (!processInformation) errorCode = lastError()
-      }
-    }
-    if (!processInformation) {
+      const errorCode = lastError()
       return fallback(`CreateProcessW failed${errorCode === undefined ? "" : ` (GetLastError() = ${errorCode})`}`)
     }
     // From here the relay is running; a failure to close these handles must not start a second one.
