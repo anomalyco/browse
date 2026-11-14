@@ -18,6 +18,11 @@ export interface AdoptionContext extends SessionContext {
   readonly closeOpenCodeBrowserSessionSettled: (session: OpenCodeBrowserSession) => Effect.Effect<void>
   readonly closeRelayTarget: (targetId: string) => Effect.Effect<void, Error>
   readonly releaseSessionTargetOwnership: (session: OpenCodeBrowserSession) => Effect.Effect<void>
+  readonly clearSessionDefaultTarget: (
+    session: OpenCodeBrowserSession,
+    targetId: string,
+    options?: { readonly releasedByUser?: boolean; readonly reason?: string },
+  ) => boolean
   readonly notifyTargetOwnershipChange: (change: TargetOwnershipChange) => void
 }
 
@@ -81,7 +86,21 @@ export function adoptTargetForSession(
         yield* context.closeRelayTarget(previousTarget.id)
         previousRelayClosed = true
       }
+      // The adopted tab becomes the user's default page; another session's relay-owned default with this id is
+      // cleared through its sandbox before the id is reassigned.
+      for (const other of context.sessions.values()) {
+        if (other.id === session.id) continue
+        if (other.target?.owner === "relay" && other.target.id === options.targetId) {
+          context.clearSessionDefaultTarget(other, options.targetId, { reason: "adopted" })
+        }
+      }
       session.target = { id: options.targetId, owner: "user" }
+      // A target adopted as a user's tab is not a held relay target any more, including when it was its default page.
+      if (session.targets) {
+        const held = session.targets.filter((target) => target.id !== options.targetId && target.id !== previousTargetId)
+        if (held.length > 0) session.targets = held
+        else delete session.targets
+      }
       session.updatedAt = new Date().toISOString()
       yield* context.admission.commitPersistence()
       if (adoptionCancelled()) {
@@ -172,6 +191,7 @@ export function sessionRelayTargetIds(hooks: SessionHooks, session: OpenCodeBrow
   }
   if (session.target?.owner === "relay") ids.add(session.target.id)
   else if (session.target) ids.delete(session.target.id)
+  for (const target of session.targets ?? []) ids.add(target.id)
   return ids
 }
 

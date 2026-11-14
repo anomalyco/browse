@@ -435,7 +435,7 @@ export class ExtensionHandshake {
       replaced.socket.close(4001, "Extension replaced")
       this.options.clearLiveExtensionState(replaced.key, "Extension replaced")
     }
-    link.rpc.markHandshake(getString(message.params, "version"), message.params?.protocolVersion)
+    link.rpc.markHandshake(getString(message.params, "version"), message.params?.protocolVersion, message.params?.capabilities)
     link.build = getString(message.params, "build")
     link.origin = origin
     link.local = local

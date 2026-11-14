@@ -7,7 +7,8 @@ import process from "node:process"
 // ShellExecute path (PowerShell Start-Process) avoids that but gives the console relay a new console through Windows
 // Terminal's default-terminal handoff, which flashes a window for a second or two. Here it inherits nothing, and
 // CREATE_NO_WINDOW gives it a windowless console that its own console children inherit; DETACHED_PROCESS would leave
-// it without one, so they would open visible consoles of their own.
+// it without one, so they would open visible consoles of their own. CREATE_BREAKAWAY_FROM_JOB (with a fallback for a
+// job that forbids breakaway) keeps a terminal or tool that kills its job from taking the relay with it.
 
 export type WindowsRelayLaunch = {
   readonly executable: string
@@ -53,6 +54,8 @@ type Kernel32 = ReturnType<FfiModule["dlopen"]>
 const createNewProcessGroup = 0x00000200
 const createUnicodeEnvironment = 0x00000400
 const createNoWindow = 0x08000000
+/** Leave the caller's job object, when its job allows breakaway. */
+const createBreakawayFromJob = 0x01000000
 
 const startupInfoSize = 104
 const processInformationSize = 24
@@ -154,38 +157,53 @@ export function launchWindowsRelay(
     // Bun resolves this built-in synchronously in source, compiled binaries and bundling; the bundler rewrites it to
     // a createRequire call for the Node package, and the process.versions.bun guard keeps Node from ever running it.
     const kernel32 = kernel32Library()
-
-    // STARTUPINFOW on x64: cb 0, lpReserved 8, lpDesktop 16, lpTitle 24, dwX..dwFillAttribute (seven DWORDs) 32-56,
-    // dwFlags 60, wShowWindow 64, cbReserved2 66, lpReserved2 72, hStdInput/hStdOutput/hStdError 80/88/96; 104 bytes.
-    const startupInfo = new Uint8Array(startupInfoSize)
-    const startup = new DataView(startupInfo.buffer)
-    startup.setUint32(0, startupInfoSize, true)
-    startup.setUint32(60, 0x1, true) // STARTF_USESHOWWINDOW
-    startup.setUint16(64, 0, true) // SW_HIDE
-    // PROCESS_INFORMATION: hProcess 0, hThread 8, dwProcessId 16, dwThreadId 20; 24 bytes.
-    const processInformation = new Uint8Array(processInformationSize)
-
-    const created = kernel32.symbols.CreateProcessW(
-      wideZ(executable),
-      wideZ(windowsCommandLine(executable, launch.args)),
-      null,
-      null,
-      0,
-      createNoWindow | createNewProcessGroup | createUnicodeEnvironment,
-      Buffer.from(windowsEnvironmentBlock(env), "utf16le"),
-      null,
-      startupInfo,
-      processInformation,
-    )
-    if (!created) {
+    const environment = Buffer.from(windowsEnvironmentBlock(env), "utf16le")
+    const executablePath = wideZ(executable)
+    const lastError = (): number | undefined => {
       // Bun FFI may clobber the thread's last error, so this is the best available code rather than a guarantee.
-      let code: number | undefined
       try {
-        code = kernel32.symbols.GetLastError()
+        return kernel32.symbols.GetLastError()
       } catch {
-        // Reporting the failure matters more than the code.
+        return undefined
       }
-      return fallback(`CreateProcessW failed${code === undefined ? "" : ` (GetLastError() = ${code})`}`)
+    }
+
+    const start = (creationFlags: number): Uint8Array | undefined => {
+      // CreateProcessW may write to the command line, so every attempt gets its own buffer.
+      const commandLine = wideZ(windowsCommandLine(executable, launch.args))
+      // STARTUPINFOW on x64: cb 0, lpReserved 8, lpDesktop 16, lpTitle 24, dwX..dwFillAttribute (seven DWORDs) 32-56,
+      // dwFlags 60, wShowWindow 64, cbReserved2 66, lpReserved2 72, hStdInput/hStdOutput/hStdError 80/88/96; 104 bytes.
+      const startupInfo = new Uint8Array(startupInfoSize)
+      const startup = new DataView(startupInfo.buffer)
+      startup.setUint32(0, startupInfoSize, true)
+      startup.setUint32(60, 0x1, true) // STARTF_USESHOWWINDOW
+      startup.setUint16(64, 0, true) // SW_HIDE
+      // PROCESS_INFORMATION: hProcess 0, hThread 8, dwProcessId 16, dwThreadId 20; 24 bytes.
+      const processInformation = new Uint8Array(processInformationSize)
+      const created = kernel32.symbols.CreateProcessW(
+        executablePath,
+        commandLine,
+        null,
+        null,
+        0,
+        creationFlags,
+        environment,
+        null,
+        startupInfo,
+        processInformation,
+      )
+      return created ? processInformation : undefined
+    }
+
+    // A terminal or tool that kills its process tree (a Windows job) would otherwise take the relay with it. A job
+    // that forbids breakaway fails the first attempt; Bun FFI can clobber the error before it can be read, so retry
+    // inside the job on any failure and report what the final attempt says.
+    const flags = createNoWindow | createNewProcessGroup | createUnicodeEnvironment
+    let processInformation = start(flags | createBreakawayFromJob)
+    if (!processInformation) processInformation = start(flags)
+    if (!processInformation) {
+      const errorCode = lastError()
+      return fallback(`CreateProcessW failed${errorCode === undefined ? "" : ` (GetLastError() = ${errorCode})`}`)
     }
     // From here the relay is running; a failure to close these handles must not start a second one.
     started = true

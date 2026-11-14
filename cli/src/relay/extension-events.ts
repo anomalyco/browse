@@ -6,7 +6,7 @@ import type { CdpRuntime } from "../cdp/runtime.ts"
 import type { ExtensionCommandInput } from "./rpc.ts"
 import type { HandoffCancellationReason, HandoffRegistry } from "../session-manager/handoff.ts"
 import type { ProtectedFrameTracker } from "../cdp/protected-frames.ts"
-import { isExtensionEvent, isExtensionResponse, parseJsonObject, type CdpEvent, type JsonObject } from "../protocol.ts"
+import { extensionCapabilityTabRelease, isExtensionEvent, isExtensionResponse, parseJsonObject, type CdpEvent, type JsonObject } from "../protocol.ts"
 import type { RecordingRelay } from "../recording-relay.ts"
 import { getIdText, getNumber, getObject, getString, getTargetInfo, isRestrictedTarget } from "./helpers.ts"
 import { relayLog } from "./log.ts"
@@ -34,7 +34,7 @@ export function createExtensionEventHandler(options: {
   readonly mainFrameIdsByTab: Map<number, string>
   readonly blankNavigationWaiters: Map<number, (url: string, loaderId: string | undefined) => void>
   readonly suppressedChildSessions: Map<string, number>
-  readonly ownersAcrossReconnect: Map<string, { readonly sessionId?: string; readonly owner: "relay" | "user"; readonly browser: string }>
+  readonly ownersAcrossReconnect: Map<string, { readonly sessionId?: string; readonly owner: "relay" | "user"; readonly browser: string; readonly deleted?: boolean }>
   readonly sweptBrowsers: Set<string>
   readonly sendDebuggerCommand: (command: { readonly tabId: number; readonly sessionId?: string; readonly method: string; readonly params: JsonObject }) => Effect.Effect<JsonObject, Error>
   readonly sendExtensionBestEffort: (command: ExtensionCommandInput, link?: BrowserLink) => void
@@ -50,7 +50,7 @@ export function createExtensionEventHandler(options: {
   readonly handleToolbarClick: (tabId: number) => void
   readonly handleDebuggingBarCancel: (tabId: number) => void
   readonly cancelTargetHandoffs: (target: ConnectedTarget, reason: HandoffCancellationReason) => void
-  readonly detachTargetState: (tabId: number, detachOptions?: { readonly preserveSessionTarget?: boolean; readonly updateExtension?: boolean; readonly releasedByUser?: boolean }) => void
+  readonly detachTargetState: (tabId: number, detachOptions?: { readonly preserveSessionTarget?: boolean; readonly updateExtension?: boolean; readonly releasedByUser?: boolean; readonly reason?: string }) => void
   readonly detachChildTargetState: (sessionId: string) => void
   readonly sendEventToTargetViewers: (rootSessionId: string, event: CdpEvent) => void
   readonly announceAttachedChildTarget: (rootSessionId: string, target: ChildTarget) => void
@@ -181,6 +181,7 @@ export function createExtensionEventHandler(options: {
       opencodeBrowserSessionId: sessionId,
       openerTargetId: opener.targetInfo.targetId,
       ...(autoAttachParams ? { autoAttachParams } : {}),
+      deferHeldTarget: true,
     }))
     const attachWithRetry = async () => {
       await Promise.allSettled(Array.from(openedPageReleases.get(openerTabId) ?? []))
@@ -198,7 +199,9 @@ export function createExtensionEventHandler(options: {
     }
     attachWithRetry().then(() => {
       const popup = registry.tabTargets.get(tabId)
-      if (popup) navigationGuard.popupAttached(popup)
+      if (!popup) return
+      const allowed = navigationGuard.popupAttached(popup)
+      if (allowed && popup.opencodeBrowserSessionId) sessions.noteTargetHeld(popup.targetInfo.targetId, popup.opencodeBrowserSessionId)
     }).catch((error: unknown) => {
       relayLog("tab.opened.error", { tabId, error: error instanceof Error ? error.message : String(error) })
     })
@@ -238,29 +241,52 @@ export function createExtensionEventHandler(options: {
         if (failed.length > 0) {
           relayLog("extension.inventory.dropped", { tabIds: failed.join(","), generation })
           for (const tabId of failed) {
-            detachTargetState(tabId)
+            detachTargetState(tabId, { reason: "inventory-dropped" })
             sendExtensionBestEffort({ method: "debugger.detach", params: { tabId } })
           }
         }
         if (settled || failed.length > 0) {
           for (const target of registry.listRootTargets()) {
-            if (mine(target.tabId) && !announcedRootTabIds.has(target.tabId)) detachTargetState(target.tabId)
+            if (mine(target.tabId) && !announcedRootTabIds.has(target.tabId)) detachTargetState(target.tabId, { reason: "inventory-missing" })
           }
           for (const [targetId, known] of ownersAcrossReconnect) {
-            if (known.browser !== link.key) continue
-            if (known.owner !== "relay" || known.sessionId === undefined || sessions.sessions.has(known.sessionId)) continue
+            if (known.browser !== link.key && known.browser !== "") continue
+            if (known.owner !== "relay" || known.sessionId === undefined) continue
+            // A tombstone is always closed, even when a new session reused the deleted session's id.
+            if (known.deleted !== true && sessions.sessions.has(known.sessionId)) continue
             const target = registry.targetsByTargetId.get(targetId)
-            if (!target || target.opencodeBrowserSessionId !== undefined) continue
-            relayLog("extension.inventory.orphan", { tabId: target.tabId, session: known.sessionId })
+            if (!target || (known.deleted !== true && target.opencodeBrowserSessionId !== undefined)) continue
+            relayLog("extension.inventory.orphan", { tabId: target.tabId, session: known.sessionId, reason: "session deleted" })
             sendExtensionBestEffort({ method: "tabs.remove", params: { tabId: target.tabId } })
-            detachTargetState(target.tabId, { updateExtension: false })
+            detachTargetState(target.tabId, { updateExtension: false, reason: "session-deleted" })
+            ownersAcrossReconnect.delete(targetId)
+          }
+          // Unknown-browser tombstones that no announced tab matched cannot be closed by a later inventory either.
+          if (settled) {
+            for (const [targetId, known] of ownersAcrossReconnect) {
+              if (known.browser === "") ownersAcrossReconnect.delete(targetId)
+            }
           }
           for (const target of registry.listRootTargets()) {
             if (!announcedAgentTabIds.has(target.tabId) || target.owner !== "user" || target.opencodeBrowserSessionId !== undefined) continue
-            if (ownersAcrossReconnect.get(target.targetInfo.targetId)?.owner === "user") continue
-            relayLog("extension.inventory.orphan", { tabId: target.tabId, reason: "agent tab without a session" })
-            sendExtensionBestEffort({ method: "tabs.remove", params: { tabId: target.tabId } })
-            detachTargetState(target.tabId, { updateExtension: false })
+            const known = ownersAcrossReconnect.get(target.targetInfo.targetId)
+            if (known?.owner === "user") continue
+            // Every other announced agent tab is one this relay did not keep: an unknown tab, a refused reclaim, or a
+            // page whose session no longer owns it. Release it rather than closing work the user can still see.
+            if (!link.rpc.supports(extensionCapabilityTabRelease)) {
+              relayLog("extension.inventory.orphan", {
+                tabId: target.tabId,
+                reason: `${known ? "relay-owned tab without a session" : "agent tab without a session"} (extension has no release support)`,
+              })
+              sendExtensionBestEffort({ method: "tabs.remove", params: { tabId: target.tabId } })
+              detachTargetState(target.tabId, { updateExtension: false, reason: "session-deleted" })
+              continue
+            }
+            relayLog("extension.inventory.released", { tabId: target.tabId, reason: known ? "relay-owned tab without a session" : "agent tab without a session" })
+            sendExtensionBestEffort({ method: "debugger.detach", params: { tabId: target.tabId, release: true } })
+            sendExtensionBestEffort({ method: "pageStatus.clear", params: { tabId: target.tabId } })
+            sendExtensionBestEffort({ method: "action.setAttached", params: { tabId: target.tabId, attached: false } })
+            detachTargetState(target.tabId, { updateExtension: false, reason: "released" })
           }
           announcedAgentTabIds.clear()
           for (const [targetId, known] of ownersAcrossReconnect) if (known.browser === link.key) ownersAcrossReconnect.delete(targetId)
@@ -271,6 +297,18 @@ export function createExtensionEventHandler(options: {
           if (hasUpdateNotice()) sendUpdateNotice()
           for (const target of registry.listRootTargets()) if (mine(target.tabId)) refreshTabGrouping(target.tabId)
           browsersChanged()
+          if (settled && link.rpc.supports(extensionCapabilityTabRelease)) {
+            // Targets the browser didn't announce are stale hints; never let the next relay try to reclaim them.
+            const liveTargetIds = new Set(
+              registry.listRootTargets().filter((target) => mine(target.tabId)).map((target) => target.targetInfo.targetId),
+            )
+            const pruned = sessions.pruneHeldTargets({
+              browserKey: link.key,
+              liveTargetIds,
+              includeUnknownBrowser: browsers.list().length === 1 && browsers.knownBrowser(undefined) !== undefined,
+            })
+            if (pruned.length > 0) relayLog("extension.inventory.pruned", { browser: link.id, targets: pruned.length })
+          }
           if (!sweptBrowsers.has(link.key)) {
             sweptBrowsers.add(link.key)
             void Effect.runPromise(sessions.sweepOrphanedRelayTargets())
@@ -284,8 +322,9 @@ export function createExtensionEventHandler(options: {
     if (extensionMethod === "debugger.attached") {
       if (eventTabId) {
         announcedRootTabIds.add(eventTabId)
-        if (message.params?.agent === true) announcedAgentTabIds.add(eventTabId)
-        rootLifecycle.queue({ tabId: eventTabId, attachIfMissing: true, verificationRetries: 0, errorMessage: "Debugger re-announce failed", generation })
+        const announcedAgent = message.params?.agent === true
+        if (announcedAgent) announcedAgentTabIds.add(eventTabId)
+        rootLifecycle.queue({ tabId: eventTabId, attachIfMissing: true, verificationRetries: 0, errorMessage: "Debugger re-announce failed", generation, announcedAgent })
       }
       return
     }
@@ -341,11 +380,11 @@ export function createExtensionEventHandler(options: {
       if (reason === "canceled_by_user") {
         if (eventTabId) {
           handleDebuggingBarCancel(eventTabId)
-          detachTargetState(eventTabId, { releasedByUser: true })
+          detachTargetState(eventTabId, { releasedByUser: true, reason: "released-by-user" })
         }
         return
       }
-      if (eventTabId) detachTargetState(eventTabId)
+      if (eventTabId) detachTargetState(eventTabId, { reason: "debugger-detached" })
       return
     }
     if (extensionMethod === "tabs.opened") {
@@ -354,7 +393,7 @@ export function createExtensionEventHandler(options: {
       return
     }
     if (extensionMethod === "tabs.removed") {
-      if (eventTabId) detachTargetState(eventTabId)
+      if (eventTabId) detachTargetState(eventTabId, { reason: "tab-closed" })
       return
     }
     if (extensionMethod !== "debugger.event" || !eventTabId) {

@@ -3,7 +3,7 @@ import { defaultPageClosedWarning, type ExecuteResult } from "../execute.ts"
 import { cliCommand } from "../paths.ts"
 import type { AuthenticatedJsonOutcome, AuthenticatedJsonRequest } from "../relay/schema.ts"
 import type { ConnectedTarget, OpenCodeBrowserSession, SessionSummary, SessionTarget } from "../relay/types.ts"
-import type { PersistedSession } from "./catalog.ts"
+import type { PersistedRelayTarget, PersistedSession } from "./catalog.ts"
 import type { SessionAdmission } from "./admission.ts"
 import type { TargetOwnershipChange } from "../cdp/target-registry.ts"
 
@@ -72,6 +72,12 @@ export type SessionHooks = {
   readonly onTargetOwnershipChange?: (change: TargetOwnershipChange) => void
   /** Close a live relay-owned target by its durable target id. */
   readonly onReleaseRelayTarget?: (targetId: string) => Effect.Effect<void, Error>
+  /** A session's durable default target was cleared (a closed tab, a debugging-bar release): say why it went. */
+  readonly onTargetCleared?: (sessionId: string, targetId: string, reason: string) => void
+  /** A catalog entry was dropped while restoring (a duplicate, a conflicting target): say why, without failing startup. */
+  readonly onRestoreWarning?: (message: string) => void
+  /** A deleted session's restored targets are gone from the catalog; a reconnect must close them. */
+  readonly onTombstoneRelayTargets?: (sessionId: string, targetIds: readonly string[], browserKey: string | undefined) => void
   /** Target ids of every live relay-owned page of a session: its default page and the pages and popups it opened. */
   readonly relayTargetIdsForSession?: (sessionId: string) => readonly string[]
   /** Live root targets currently attached to the relay. */
@@ -241,8 +247,19 @@ export function createdSummary(session: OpenCodeBrowserSession, created: boolean
   }
 }
 
-export function persistedSession(session: OpenCodeBrowserSession): PersistedSession {
+export function persistedSession(session: OpenCodeBrowserSession, hooks?: Pick<SessionHooks, "relayTargetIdsForSession">): PersistedSession {
   const target: SessionTarget | undefined = session.target
+  // Every relay-owned page the session holds survives a relay restart, not just its default page. Older relays
+  // ignore `targets`; older catalogs without it still load.
+  const targets = new Map<string, PersistedRelayTarget>()
+  if (target?.owner === "relay") targets.set(target.id, { id: target.id, owner: "relay" })
+  for (const held of session.targets ?? []) {
+    if (held.owner === "relay") targets.set(held.id, { id: held.id, owner: "relay" })
+  }
+  for (const id of hooks?.relayTargetIdsForSession?.(session.id) ?? []) {
+    if (!targets.has(id)) targets.set(id, { id, owner: "relay" })
+  }
+  const ownedTargets = Array.from(targets.values())
   return {
     id: session.id,
     createdAt: session.createdAt,
@@ -252,6 +269,7 @@ export function persistedSession(session: OpenCodeBrowserSession): PersistedSess
     ...(session.keepVisible ? { keepVisible: true } : {}),
     ...(session.browser ? { browser: session.browser.id, ...(session.browser.key ? { browserKey: session.browser.key } : {}) } : {}),
     ...(target ? { target } : {}),
+    ...(ownedTargets.length > 0 ? { targets: ownedTargets } : {}),
     ...(session.clientPid === undefined ? {} : { clientPid: session.clientPid }),
   }
 }

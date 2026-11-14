@@ -6,6 +6,8 @@ export type JsonObject = { readonly [key: string]: JsonValue }
 
 /** Used by the extension worker, the relay handshake and the public /version probe. */
 export const extensionProtocolVersion = 3
+/** The extension can keep a released agent tab open and tracked for idle cleanup (`debugger.detach` release). */
+export const extensionCapabilityTabRelease = "tab-release"
 /**
  * The oldest extension protocol this relay still speaks. The store extension and the npm package update on their own
  * schedules, so a relay keeps accepting older extensions for a while: raise this only when dropping support for them,

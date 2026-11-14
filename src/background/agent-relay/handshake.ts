@@ -1,4 +1,4 @@
-import { extensionProtocolVersion } from "../../../cli/src/protocol"
+import { extensionCapabilityTabRelease, extensionProtocolVersion } from "../../../cli/src/protocol"
 import { defaultRelayPort, isJsonObject, relayPortHint, relayPorts } from "../../agent-relay/protocol"
 import {
   BROWSER_NAME_KEY,
@@ -257,6 +257,9 @@ export function createRelayHandshake(deps: {
           version: chrome.runtime.getManifest().version,
           build: __OPENCODE_BROWSER_BUILD__,
           protocolVersion: extensionProtocolVersion,
+          // Optional additions an older relay ignores. `tab-release` keeps an agent tab open (and on idle cleanup)
+          // when a relay releases it instead of closing it.
+          capabilities: [extensionCapabilityTabRelease],
           profileId: profile.id,
           profileName: profile.name ?? "browse",
           // What agents call this browser: the name set on the status page, else the relay names it from these
@@ -391,7 +394,8 @@ export function createRelayHandshake(deps: {
     tokenRefused = undefined
     codeRejected = false
     deps.log.add("pairing.ok", { source: using.kind })
-    // Tabs an agent opened say so: one the relay no longer knows after a reconnect is closed, not handed to the user.
+    // Tabs an agent opened say so: a relay that can't match one to a session after a restart releases it rather
+    // than closing it, and a released tab stays tracked so the user's idle-cleanup setting decides when it goes.
     for (const tabId of Array.from(deps.relayTabs)) {
       const agent = await TabCleanup.isTracked(tabId)
       if (deps.currentSocket() !== current) return

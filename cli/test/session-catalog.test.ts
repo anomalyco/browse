@@ -62,3 +62,87 @@ test("session options survive a catalog round trip", async () => {
 
   expect(await catalog.load()).toEqual(sessions)
 })
+
+test("a catalog written before targets were persisted still loads", async () => {
+  const { catalog } = temporaryCatalog()
+  const now = new Date().toISOString()
+  // The shape older relays wrote: one target per session and no `targets` list.
+  fs.writeFileSync(catalog.filePath, JSON.stringify({
+    version: 1,
+    sessions: [{
+      id: "older",
+      createdAt: now,
+      updatedAt: now,
+      readOnly: false,
+      keepVisible: true,
+      browser: "chrome",
+      browserKey: "profile-1",
+      target: { id: "TARGET-OLD", owner: "relay" },
+    }],
+  }))
+
+  expect(await catalog.load()).toEqual([{
+    id: "older",
+    createdAt: now,
+    updatedAt: now,
+    readOnly: false,
+    keepVisible: true,
+    browser: "chrome",
+    browserKey: "profile-1",
+    target: { id: "TARGET-OLD", owner: "relay" },
+  }])
+})
+
+test("every relay-owned target a session holds survives a catalog round trip", async () => {
+  const { catalog } = temporaryCatalog()
+  const now = new Date().toISOString()
+  const sessions = [{
+    id: "pages",
+    createdAt: now,
+    updatedAt: now,
+    readOnly: false,
+    target: { id: "TARGET-1", owner: "relay" as const },
+    targets: [
+      { id: "TARGET-1", owner: "relay" as const },
+      { id: "TARGET-2", owner: "relay" as const },
+    ],
+  }]
+
+  await catalog.save(sessions)
+
+  expect(await catalog.load()).toEqual(sessions)
+})
+
+test("a user-owned entry in targets is dropped instead of moving the catalog aside", async () => {
+  const { catalog } = temporaryCatalog()
+  const now = new Date().toISOString()
+  fs.writeFileSync(catalog.filePath, JSON.stringify({
+    version: 1,
+    sessions: [{
+      id: "mixed",
+      createdAt: now,
+      updatedAt: now,
+      readOnly: false,
+      targets: [
+        { id: "TARGET-RELAY", owner: "relay" },
+        { id: "TARGET-USER", owner: "user" },
+      ],
+    }],
+  }))
+  const errors: unknown[][] = []
+  const original = console.error
+  console.error = (...args: unknown[]) => { errors.push(args) }
+  try {
+    expect(await catalog.load()).toEqual([{
+      id: "mixed",
+      createdAt: now,
+      updatedAt: now,
+      readOnly: false,
+      targets: [{ id: "TARGET-RELAY", owner: "relay" }],
+    }])
+  } finally {
+    console.error = original
+  }
+  expect(fs.existsSync(catalog.filePath)).toBe(true)
+  expect(errors.some((args) => String(args[0]).includes("non-relay target"))).toBe(true)
+})
