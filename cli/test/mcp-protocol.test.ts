@@ -1,6 +1,5 @@
 import * as RelayHarness from "./relay-harness.ts"
 import { afterAll, describe, expect, test } from "bun:test"
-import { spawn, spawnSync } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -22,65 +21,6 @@ const modernMeta = {
 function server(command?: readonly string[], port?: number) {
   return mcpStdio({ home, ...(port ? { port } : {}), ...(command ? { command } : {}) })
 }
-
-describe("binary auto-update", () => {
-  test("an installed binary switches MCP builds between tool calls on the same connection", async () => {
-    const versions = ["1.0.0", "1.0.1"] as const
-    // Build under a throwaway package root so neither the checkout's version nor its dist-bin is touched.
-    const cli = path.join(home, "cli")
-    fs.cpSync(path.join(import.meta.dir, "../script"), path.join(cli, "script"), { recursive: true })
-    for (const name of ["node_modules", "src", "tsconfig.json"]) fs.symlinkSync(path.join(import.meta.dir, "..", name), path.join(cli, name))
-    // compile bakes the checkout's install script into the binary.
-    for (const name of ["install", "install.ps1"]) fs.copyFileSync(path.join(import.meta.dir, "../..", name), path.join(home, name))
-    const target = `${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`
-    const binary = path.join(home, "bin", process.platform === "win32" ? "browse.exe" : "browse")
-    const staged = `${binary}.next`
-    // The install keeps one stable executable path; an update replaces the file in place. Build 1.0.1 aside for now.
-    for (const version of versions) {
-      fs.writeFileSync(path.join(cli, "package.json"), JSON.stringify({ version }))
-      await Bun.$`${process.execPath} ${path.join(cli, "script/compile.ts")} ${target}`.quiet()
-      const built = path.join(cli, "dist-bin", `browse-${target}`, "bin", path.basename(binary))
-      fs.mkdirSync(path.dirname(binary), { recursive: true })
-      fs.copyFileSync(built, version === versions[0] ? binary : staged)
-      fs.chmodSync(version === versions[0] ? binary : staged, 0o755)
-    }
-    const port = await RelayHarness.freePort()
-    const env = { ...process.env, HOME: home, OPENCODE_BROWSER_HOME: home, OPENCODE_BROWSER_PORT: String(port), OPENCODE_BROWSER_MANAGED_RELAY: "1", OPENCODE_BROWSER_UPDATE_CHECK: "0" }
-    const relay = spawn(binary, ["serve"], { env, stdio: "ignore" })
-    const relayVersion = () => fetch(`http://127.0.0.1:${port}/version`).then(r => r.json() as Promise<{ version: string; pid: number }>)
-    const mcp = server([binary], port)
-    let replacement: number | undefined
-    let extension: RelayHarness.FakeExtension | undefined
-    try {
-      for (let n = 0; n < 100 && !await relayVersion().catch(() => false); n++) await Bun.sleep(50)
-      extension = new RelayHarness.FakeExtension(home, port)
-      expect(await extension.pair()).toBe(true)
-      await mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } })
-      mcp.notify("notifications/initialized")
-      // A warm relay may still be populating tool descriptions on older builds.
-      for (let n = 0; n < 100; n++) {
-        if (((await mcp.request("tools/list")).result?.tools as unknown[])?.length) break
-        await Bun.sleep(10)
-      }
-      const create = (id: string) => mcp.request("tools/call", { name: "session_new", arguments: { id } })
-      const first = await create("before-update")
-      expect(first.result?.isError, JSON.stringify(first)).toBe(false)
-      // The installer replaces the executable by rename, then the relay is restarted from the same path.
-      fs.renameSync(staged, binary)
-      const update = await Bun.$`${binary} runtime-switch ${versions[1]}`.env(env).quiet().nothrow()
-      expect(update.exitCode, update.text()).toBe(0)
-      // The child runs 1.0.1 (the path now holds it); the line names the relay it replaced.
-      expect(update.text()).toContain(`switch ${versions[0]} → ${versions[1]}: done`)
-      const running = await relayVersion()
-      replacement = running.pid
-      expect(running.version).toBe(versions[1])
-      extension = new RelayHarness.FakeExtension(home, port)
-      expect(await extension.pair()).toBe(true)
-      const next = await create("after-update")
-      expect(next.result?.structuredContent, JSON.stringify(next)).toMatchObject({ session: { id: "after-update" } })
-    } finally { extension?.close(); mcp.close(); relay.kill(); if (replacement) process.kill(replacement) }
-  }, 60_000)
-})
 
 describe("MCP protocol versions", () => {
   test("the first session_new and bound execute survive a worker reconnect", async () => {

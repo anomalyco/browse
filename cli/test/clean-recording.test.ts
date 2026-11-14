@@ -62,11 +62,17 @@ describe("clean recordings", () => {
     recorder = new RecordingRelay({
       sendDebuggerCommand: send,
       isExtensionConnected: () => true,
+      startVideoEncoder: async () => ({
+        write: async () => {},
+        finish: async () => {},
+        cancel: async () => {},
+      }),
       onTabRecordingChanged: (tabId) => {
         events.push(`changed:${tabId}:${recorder.isRecordingTab(tabId)}`)
       },
     })
-    await recorder.startRecording({ tabId: 5, outputPath: path.join(os.tmpdir(), "unused.webm") })
+    const started = await recorder.startRecording({ tabId: 5, outputPath: path.join(os.tmpdir(), "unused.webm") })
+    expect(started.success).toBe(true)
     expect(events.indexOf("changed:5:true")).toBeGreaterThanOrEqual(0)
     expect(events.indexOf("changed:5:true")).toBeLessThan(events.indexOf("Page.startScreencast"))
     await recorder.cancelRecording({ tabId: 5 })
