@@ -45,6 +45,15 @@
   color: var(--v2-text-text-muted);
 }
 
+/* The outdated CLI line sits directly under the connection, before the steps. */
+.guide-notice {
+  padding: 0 16px 16px;
+}
+
+.guide-notice .note {
+  margin: 0;
+}
+
 /* "· Connected" fades in next to the title once the agent connects. */
 .guide-connected {
   display: inline-flex;

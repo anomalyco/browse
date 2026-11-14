@@ -760,6 +760,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     sendDebuggerCommand,
     sendExtensionBestEffort,
     applyExtensionSettings: settingsSync.applyExtensionSettings,
+    relaySettingsReady: settingsSync.relaySettingsReady,
     hasUpdateNotice: () => updates.current !== undefined,
     sendUpdateNotice,
     announceTab,

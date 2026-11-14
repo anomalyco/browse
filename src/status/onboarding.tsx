@@ -13,6 +13,8 @@ import { TextInput } from "@opencode/ui/text-input"
 import { unpackedExtensionId, unpackedReloadAdvice } from "../../cli/src/protocol"
 import { relayPorts } from "../agent-relay/protocol"
 import { probeRelayPort, type RelayProbe } from "../agent-relay/probe"
+import { cliUpdateNotice } from "../shared/protocol"
+import { cliUpdateText } from "./describe"
 import { firstRunStep, shouldProbe, type FirstRunStep } from "./first-run"
 import { pairingLink } from "./pairing-link"
 import { TRY_PROMPT, checklist } from "./checklist"
@@ -198,6 +200,16 @@ function Onboarding() {
             </Show>
           </p>
         </header>
+
+        <Show when={connected() ? cliUpdateNotice(relay.state()?.autoUpdate) : undefined}>
+          {(notice) => (
+            <div class="guide-notice">
+              <Note tone="warn">
+                <Rich text={cliUpdateText(notice())} />
+              </Note>
+            </div>
+          )}
+        </Show>
 
         <Show
           when={remote()}

@@ -1,5 +1,5 @@
 import { isJsonObject, type JsonObject } from "../../agent-relay/protocol"
-import { autoUpdateMode, BROWSER_NAME_KEY, type RelayAutoUpdate } from "../../shared/protocol"
+import { autoUpdateMode, BROWSER_NAME_KEY, type RelayAutoUpdate, type RelayUpdateFailure } from "../../shared/protocol"
 import type { createAgentRelayLog } from "./log"
 import type { ecdhKeyPair, PairingCode } from "../pairing"
 
@@ -182,10 +182,21 @@ export function string(params: JsonObject | undefined, key: string) {
   return value
 }
 
+/** The relay's last failed installer attempt, keeping only known fields and values. */
+function relayUpdateFailure(input: unknown): RelayUpdateFailure | undefined {
+  if (!isJsonObject(input) || typeof input.message !== "string" || typeof input.at !== "string") return undefined
+  const version = typeof input.version === "string" && input.version.length <= 100 ? input.version : undefined
+  const attempts = typeof input.attempts === "number" && Number.isSafeInteger(input.attempts) && input.attempts > 0 ? input.attempts : undefined
+  return { message: input.message.slice(0, 300), at: input.at.slice(0, 100), ...(version ? { version } : {}), ...(attempts ? { attempts } : {}) }
+}
+
 /** The relay's update state from `relay.settings`, keeping only known fields and values. */
 export function relayAutoUpdate(input: unknown): RelayAutoUpdate | undefined {
   if (!isJsonObject(input)) return undefined
-  const install = input.install === "npm" || input.install === "checkout" ? input.install : "other"
+  const install =
+    input.install === "binary" || input.install === "npm" || input.install === "npx" || input.install === "checkout"
+      ? input.install
+      : "other"
   const mode = autoUpdateMode(input.mode)
   const effective = autoUpdateMode(input.effective)
   if (!mode || !effective) return undefined
@@ -196,8 +207,17 @@ export function relayAutoUpdate(input: unknown): RelayAutoUpdate | undefined {
     version: short(input.version),
     channel: short(input.channel),
     latest: short(input.latest),
+    latestAt: short(input.latestAt),
+    checkedAt: short(input.checkedAt),
     pending: short(input.pending),
     previous: short(input.previous),
   }
-  return { install, mode, effective, ...Object.fromEntries(Object.entries(optional).filter(([, value]) => value !== undefined)) }
+  const lastError = relayUpdateFailure(input.lastError)
+  return {
+    install,
+    mode,
+    effective,
+    ...Object.fromEntries(Object.entries(optional).filter(([, value]) => value !== undefined)),
+    ...(lastError ? { lastError } : {}),
+  }
 }

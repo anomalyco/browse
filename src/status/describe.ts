@@ -1,10 +1,14 @@
 // Plain-word lines both pages show: the connection's status (settings) and what a Connect to a relay led to. Text in
 // backticks shows as code.
-import type { AgentRelayState, ToStatusPage } from "../shared/protocol"
+import type { AgentRelayState, CliUpdateNotice, ToStatusPage } from "../shared/protocol"
 import { unpackedReloadAdvice } from "../../cli/src/protocol"
 import { installCommand } from "./install"
 
 export type RelayResult = Extract<ToStatusPage, { type: "relay.result" }>
+
+/** The line both pages show when the relay's CLI is out of date; backticks mark the command. */
+export const cliUpdateText = (notice: CliUpdateNotice) =>
+  `browse ${notice.current} is out of date (${notice.latest} is out). Run \`${notice.command}\`.`
 
 /** What Connect led to, under the relay form. `codeSent`: the extension now holds the code it was given. */
 export function relayResultText(result: RelayResult["status"], address: string, codeSent: boolean) {

@@ -23,6 +23,7 @@ import {
   agentCursor,
   agentGrouping,
   agentWindowPlacement,
+  cliUpdateNotice,
   handoffNotifications,
   humanInput,
   idleMinutesSetting,
@@ -33,7 +34,7 @@ import {
   type RelayOverrides,
 } from "../shared/protocol"
 import { unpackedExtensionId } from "../../cli/src/protocol"
-import { describeStatus } from "./describe"
+import { cliUpdateText, describeStatus } from "./describe"
 import { RelayForm } from "./relay-form"
 import { applyColorScheme, Brand, CopyBox, createRelay, createStored, Note, Rich } from "./ui"
 import "./settings.css"
@@ -116,6 +117,16 @@ function Settings() {
             )}
           </Show>
         </header>
+
+        <Show when={cliUpdateNotice(state()?.autoUpdate)}>
+          {(notice) => (
+            <div class="head-notice">
+              <Note tone="warn">
+                <Rich text={cliUpdateText(notice())} />
+              </Note>
+            </div>
+          )}
+        </Show>
 
         <Show when={state()?.update}>
           {(update) => (

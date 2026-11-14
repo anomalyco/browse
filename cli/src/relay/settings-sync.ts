@@ -72,9 +72,9 @@ export function createRelaySettingsSync(options: {
   }
 
   /** What the status pages show from the relay: the settings its environment fixes, and the update state. */
-  const sendRelaySettings = (): void => {
+  const sendRelaySettings = (only?: BrowserLink): void => {
     for (const link of browsers.list()) {
-      if (!link.rpc.connected) continue
+      if ((only && link !== only) || !link.rpc.connected) continue
       sendExtensionBestEffort({
         method: "relay.settings",
         params: { overrides: settingOverrides(), autoUpdate: autoUpdateStatus() as unknown as JsonObject, browser: { id: link.id, name: link.name } },
@@ -99,7 +99,15 @@ export function createRelaySettingsSync(options: {
     }
     relayLog("extension.settings", { browser: link.id, cursor: (ghostCursorEnv ?? link.cursor) ? "always" : "off", humanInput: humanInputEnabled(link.humanInput) ? "on" : "off" })
     void ghostCursor.refresh()
-    sendRelaySettings()
+    if (link.rpc.connected) sendRelaySettings()
+    else link.pendingRelaySettings = true
+  }
+
+  /** Sends the settings answer an extension asked for after pairing, once the relay is ready enough to deliver it. */
+  const relaySettingsReady = (link: BrowserLink): void => {
+    if (!link.pendingRelaySettings) return
+    link.pendingRelaySettings = false
+    sendRelaySettings(link)
   }
 
   const httpSettings = {
@@ -128,6 +136,7 @@ export function createRelaySettingsSync(options: {
 
   return {
     applyExtensionSettings,
+    relaySettingsReady,
     sendRelaySettings,
     httpSettings,
   }

@@ -53,6 +53,8 @@ export type BrowserLink = {
   /** The status page settings this browser sent. */
   cursor: boolean
   humanInput: boolean | undefined
+  /** Its settings answer came before the relay marked it ready, so `relay.settings` is sent once it is. */
+  pendingRelaySettings?: boolean
   /** It runs on this computer (not over the network), so its unpacked extension is this computer's folder. */
   local: boolean
 }
