@@ -157,6 +157,8 @@ export class SessionNavigationGuard {
   private observeCommittedUrl(target: NavigationGuardTarget, url: string): boolean {
     const rules = this.rules(target.opencodeBrowserSessionId)
     if (!rules) return true
+    // A popup attaches before its first navigation, with no URL yet (OAuth popups open blank, then go to the provider).
+    if (url === "") return true
     const decision = checkUrl(url, rules)
     if (decision.allowed) {
       if (!/^about:/.test(url)) this.freshPopups.delete(target.tabId)

@@ -82,7 +82,13 @@ export function installPopupAdoption(deps: {
     TabCleanup.track(tabId)
   }
 
-  chrome.webNavigation.onCreatedNavigationTarget.addListener(({ sourceTabId, tabId }) => {
+  chrome.webNavigation.onCreatedNavigationTarget.addListener(({ sourceTabId, tabId, url }) => {
+    // Another extension's page opened from an agent tab (a password manager's "unlock" in its inline menu) is the
+    // user's: the debugger can't attach to it, and attaching tries leave it blank. Leave it where it opened.
+    if (url?.startsWith("chrome-extension://") && !url.startsWith(`chrome-extension://${chrome.runtime.id}/`)) {
+      if (deps.relayTabs.has(sourceTabId)) deps.log.add("tab.opened.extension", { tabId, opener: sourceTabId })
+      return
+    }
     void adoptOpened(tabId, sourceTabId)
       .catch((error: unknown) => deps.log.add("tab.opened.error", { error: text(error) }))
       // Once it's moved and grouped: the relay attaches it as a page of the opener's session, so the agent's
