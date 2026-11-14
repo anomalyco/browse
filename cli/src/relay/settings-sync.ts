@@ -2,7 +2,6 @@ import { Effect } from "effect"
 import { autoUpdateModes, autoUpdateOverride, autoUpdateStatus, setStoredMode, storedMode, type AutoUpdateMode } from "../update/auto-update.ts"
 import type { BrowserLink, BrowserLinks } from "./browser-links.ts"
 import type { ExtensionCommandInput } from "./rpc.ts"
-import type { GhostCursorTabs } from "../ghost-cursor.ts"
 import { humanInputEnabled, humanInputOverride } from "../execute/human-input.ts"
 import { installCommand } from "../paths.ts"
 import type { JsonObject } from "../protocol.ts"
@@ -23,13 +22,11 @@ import type { ExtensionHandshake } from "./extension-handshake.ts"
 export function createRelaySettingsSync(options: {
   readonly browsers: BrowserLinks
   readonly handshake: ExtensionHandshake
-  readonly ghostCursor: GhostCursorTabs
-  readonly ghostCursorEnv: boolean | undefined
   readonly agentWindow: "current" | "separate" | undefined
   readonly sendToExtension: (command: ExtensionCommandInput, link?: BrowserLink) => Effect.Effect<JsonObject, Error>
   readonly sendExtensionBestEffort: (command: ExtensionCommandInput, link?: BrowserLink) => void
 }) {
-  const { browsers, handshake, ghostCursor, ghostCursorEnv, agentWindow, sendToExtension, sendExtensionBestEffort } = options
+  const { browsers, handshake, agentWindow, sendToExtension, sendExtensionBestEffort } = options
 
   /** The extension's settings with the relay's own (autoUpdate) filled in from the data root. */
   const withRelaySettings = (settings: Settings): Settings => ({ ...settings, autoUpdate: storedMode() })
@@ -41,7 +38,6 @@ export function createRelaySettingsSync(options: {
     return {
       ...(autoUpdate ? { autoUpdate: { variable: process.env.OPENCODE_BROWSER_AUTO_UPDATE !== undefined ? "OPENCODE_BROWSER_AUTO_UPDATE" : "OPENCODE_BROWSER_UPDATE_CHECK", value: autoUpdate } } : {}),
       ...(agentWindow ? { window: { variable: "OPENCODE_BROWSER_AGENT_WINDOW", value: agentWindow } } : {}),
-      ...(ghostCursorEnv === undefined ? {} : { cursor: { variable: "OPENCODE_BROWSER_GHOST_CURSOR", value: ghostCursorEnv ? "always" : "off" } }),
       ...(human === undefined ? {} : { humanInput: { variable: "OPENCODE_BROWSER_HUMAN_INPUT", value: human ? "on" : "off" } }),
     }
   }
@@ -66,7 +62,6 @@ export function createRelaySettingsSync(options: {
     const human = humanInputOverride()
     return {
       ...(agentWindow ? { agentWindow } : {}),
-      ...(ghostCursorEnv === undefined ? {} : { cursor: ghostCursorEnv ? "always" : "off" }),
       ...(human === undefined ? {} : { humanInput: human ? "on" : "off" }),
     }
   }
@@ -88,8 +83,6 @@ export function createRelaySettingsSync(options: {
    * the status page which settings the environment fixes.
    */
   const applyExtensionSettings = (link: BrowserLink, params: JsonObject | undefined): void => {
-    const cursor = params?.cursor
-    if (cursor === "off" || cursor === "always") link.cursor = cursor === "always"
     const human = params?.humanInput
     if (human === "on" || human === "off") link.humanInput = human === "on"
     const autoUpdate = params?.autoUpdate
@@ -97,8 +90,7 @@ export function createRelaySettingsSync(options: {
       setStoredMode(autoUpdate as AutoUpdateMode)
       relayLog("autoupdate.mode", { mode: autoUpdate })
     }
-    relayLog("extension.settings", { browser: link.id, cursor: (ghostCursorEnv ?? link.cursor) ? "always" : "off", humanInput: humanInputEnabled(link.humanInput) ? "on" : "off" })
-    void ghostCursor.refresh()
+    relayLog("extension.settings", { browser: link.id, humanInput: humanInputEnabled(link.humanInput) ? "on" : "off" })
     if (link.rpc.connected) sendRelaySettings()
     else link.pendingRelaySettings = true
   }

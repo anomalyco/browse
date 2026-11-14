@@ -50,8 +50,7 @@ export type BrowserLink = {
   readonly announcedRootTabIds: Set<number>
   /** Of those, the ones it says an agent opened. */
   readonly announcedAgentTabIds: Set<number>
-  /** The status page settings this browser sent. */
-  cursor: boolean
+  /** The status page's input setting this browser sent. */
   humanInput: boolean | undefined
   /** Its settings answer came before the relay marked it ready, so `relay.settings` is sent once it is. */
   pendingRelaySettings?: boolean
@@ -133,7 +132,6 @@ export class BrowserLinks {
       connectedAt: Date.now(),
       announcedRootTabIds: new Set(),
       announcedAgentTabIds: new Set(),
-      cursor: false,
       humanInput: undefined,
       local: false,
     }

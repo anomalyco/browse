@@ -57,7 +57,7 @@ describe("unpaired extension sockets", () => {
   test("a paired socket still accepts messages larger than the pre-auth limit", async () => {
     const extension = new FakeExtension(home, port)
     expect(await extension.pair()).toBe(true)
-    extension.emit("settings", { cursor: "off", padding: "x".repeat(1024 * 1024) })
+    extension.emit("settings", { humanInput: "off", padding: "x".repeat(1024 * 1024) })
     await Bun.sleep(250)
     expect(extension.socket.readyState).toBe(WebSocket.OPEN)
     extension.close()

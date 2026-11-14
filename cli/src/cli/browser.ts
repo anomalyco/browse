@@ -2,14 +2,14 @@ import { Console, Effect, Option, Result } from "effect"
 import { Argument, Command, Flag } from "effect/cli"
 import { autoUpdateStatus } from "../update/auto-update.ts"
 import { ExitCode } from "./output.ts"
-import { createDoctorReport, formatDoctorReport, formatTargetSummary } from "../doctor.ts"
 import { cliCommand, installCommand } from "../paths.ts"
 import { extensionProtocolAdvice } from "../protocol.ts"
 import * as RelayClient from "../relay/client.ts"
 import * as RelayLifecycle from "../relay/lifecycle.ts"
-import type { SettingsGetResponse } from "../relay/schema.ts"
+import type { SettingsGetResponse, TargetSummary } from "../relay/schema.ts"
 import * as SessionStore from "../session-manager/store.ts"
 import { formatUpdateNotice, updateJson, updateNotice } from "../update.ts"
+import { opencodeBrowserVersion } from "../version.ts"
 import { formatSettings, settingKeys, type SettingKey, type SettingReport } from "../relay/user-settings.ts"
 import { emitJson, ensureCliRelay, exitWith, failExit, jsonFlag, stderrLine } from "./context.ts"
 import { registerCliCommand } from "./registry.ts"
@@ -98,6 +98,21 @@ const settings = Command.make("settings").pipe(
   ),
   Command.withSubcommands([settingsGet, settingsSet]),
 )
+
+/** The manifest version of the extension built with this CLI version (scripts/version.ts): 1.2.4-dev.42 is 1.2.4.42. */
+function extensionManifestVersion(version: string) {
+  const match = /^(\d+\.\d+\.\d+)(?:-dev\.(\d+)(?:\.\d+)?)?/.exec(version)
+  if (!match) return version
+  return match[2] ? `${match[1]}.${match[2]}` : match[1]!
+}
+
+function formatTargetSummary(target: TargetSummary, options: { readonly includeSession?: boolean } = {}): string {
+  const tab = target.tabId === undefined ? "" : ` tab=${target.tabId}`
+  const session = options.includeSession && target.opencodeBrowserSessionId ? ` session=${target.opencodeBrowserSessionId}` : ""
+  const owner = target.owner ? ` owner=${target.owner}` : ""
+  const health = `${target.crashed ? " crashed=true" : ""}${target.protectedUi ? " protected-ui=true" : ""}`
+  return `${target.type} ${target.id}${tab}${session}${owner}${health} ${target.url || "about:blank"}`
+}
 
 const status = Command.make(
   "status",
@@ -202,6 +217,11 @@ const status = Command.make(
       if (extensionStatus.protocolCompatible === false && !extensionStatus.nextStep)
         yield* Console.log(extensionProtocolAdvice(extensionStatus.protocolVersion, { install: installCommand() }))
     }
+    if (extensionStatus.connected && extensionStatus.version && extensionStatus.version !== extensionManifestVersion(opencodeBrowserVersion)) {
+      yield* Console.log(
+        `Warning: extension ${extensionStatus.version} differs from this CLI's ${extensionManifestVersion(opencodeBrowserVersion)}; update the extension if its protocol is incompatible.`,
+      )
+    }
     yield* Console.log(`Active targets: ${extensionStatus.activeTargets}`)
     if (extensionStatus.childTargets !== undefined) {
       yield* Console.log(`Child targets: ${extensionStatus.childTargets}`)
@@ -210,6 +230,9 @@ const status = Command.make(
       yield* Console.log(`CDP clients: ${extensionStatus.cdpClients}`)
     }
     yield* Console.log(`Current session: ${current ?? "none"}`)
+    if (current && !sessions.some((item) => item.id === current)) {
+      yield* Console.log(`Warning: current session ${current} is stale; run \`${cliCommand("session new")}\` or \`${cliCommand("session use <id>")}\`.`)
+    }
     if (sessions.length === 0) {
       yield* Console.log("Sessions: none")
     } else {
@@ -235,6 +258,12 @@ const status = Command.make(
           `  (${omittedIdleCount} idle session(s) with no page omitted; run ${cliCommand("session list")} to view all)`,
         )
       }
+    }
+    const unhealthy = targets.filter((target) => target.crashed === true || target.url.startsWith("chrome-error://"))
+    if (unhealthy.length > 0) {
+      yield* Console.log(
+        `Warning: ${unhealthy.length} target(s) are crashed or on a browser error page. Run the owning session once to trigger recovery, or reset/re-adopt a user-owned tab.`,
+      )
     }
     if (targets.length === 0) {
       yield* Console.log("Targets: none")
@@ -262,34 +291,4 @@ const mcp = Command.make(
 registerCliCommand(400, () => tabs)
 registerCliCommand(410, () => settings)
 registerCliCommand(500, () => status)
-registerCliCommand(810, ({ packageRoot }) =>
-  Command.make(
-    "doctor",
-    {
-      json: jsonFlag,
-    },
-    Effect.fn("Cli.doctor")(function* ({ json }) {
-      const update = yield* Effect.promise(() => updateNotice())
-      const report = yield* createDoctorReport({ packageRoot, update: updateJson(update) })
-      if (json) {
-        yield* emitJson(report)
-      } else {
-        yield* Console.log(formatDoctorReport(report))
-      }
-      if (report.status === "fail") {
-        yield* failExit
-      }
-    }),
-  ).pipe(Command.withDescription("Diagnose the local browse install and runtime")),
-)
-registerCliCommand(820, () =>
-  Command.make(
-    "skill",
-    {},
-    Effect.fn("Cli.skill")(function* () {
-      const { skillText } = yield* Effect.promise(() => import("../skill-text.ts"))
-      yield* Console.log(skillText.trimEnd())
-    }),
-  ).pipe(Command.withDescription("Print the browse agent skill text")),
-)
 registerCliCommand(900, () => mcp)

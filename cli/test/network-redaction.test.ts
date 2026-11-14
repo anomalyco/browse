@@ -1,13 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { Effect } from "effect"
-import { mkdtemp, readFile, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
-import { finishCapture } from "../src/network-capture/har-redaction.ts"
+import { finishCapture } from "../src/network-capture/capture.ts"
 import { looksLikeTokenSegment, SecretRedactor } from "../src/network-capture/redaction.ts"
 import type { ActiveCapture, CapturedEntry } from "../src/network-capture/types.ts"
 
-// The HAR export protects each entry structurally (names that look secret), then replaces known values wherever
+// The stop result protects each entry structurally (names that look secret), then replaces known values wherever
 // else they appear in URLs and headers (network-capture.ts redactEntryKnownValues, minimum length 8).
 const knownValueMinimum = 8
 const redacted = "[redacted]"
@@ -41,7 +37,7 @@ function capturedEntry(id: string, responseBody: unknown, requestBody?: unknown)
 function activeCapture(entries: readonly CapturedEntry[]): ActiveCapture {
   return {
     startedAt: "2026-01-01T00:00:00.000Z",
-    options: { content: "embed", maxBodyBytes: 1_000_000, maxTotalBodyBytes: 25_000_000, maxEntries: 1_000 },
+    options: { maxBodyBytes: 1_000_000, maxTotalBodyBytes: 25_000_000, maxEntries: 1_000 },
     pending: new Map(),
     entries: [...entries],
     finalizeQueue: [],
@@ -175,46 +171,34 @@ describe("SecretRedactor", () => {
     expect(cookies?.value).toBe(`a=${redacted}; Priority=High\nb=${redacted}; Path=/`)
   })
 
-  test("protects :path query values under the request URL", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "browse-har-path-"))
-    const outputPath = join(directory, "capture.har")
-    try {
-      const short = capturedEntry("short", {})
-      const encoded = capturedEntry("encoded", {})
-      await Effect.runPromise(finishCapture(
-        activeCapture([
-          {
-            ...short,
-            request: {
-              ...short.request,
-              url: "https://docs.example.com/callback?code=492817&x=1",
-              headers: [{ name: ":path", value: "/callback?code=492817&x=1" }, { name: ":authority", value: "docs.example.com" }],
-            },
-          },
-          {
-            ...encoded,
-            request: {
-              ...encoded.request,
-              url: "https://docs.example.com/callback?code=4%2f0ax4xfwi6abcdef789",
-              headers: [{ name: ":path", value: "/callback?code=4%2f0ax4xfwi6abcdef789" }, { name: ":authority", value: "docs.example.com" }],
-            },
-          },
-        ]),
-        { outputPath },
-      ))
-      const har = JSON.parse(await readFile(outputPath, "utf8")) as {
-        log: { entries: Array<{ request: { url: string; headers: Array<{ name: string; value: string }> } }> }
-      }
-      const [shortEntry, encodedEntry] = har.log.entries
-      expect(shortEntry?.request.url).toBe(`https://docs.example.com/callback?code=${redacted}&x=1`)
-      expect(shortEntry?.request.headers).toContainEqual({ name: ":path", value: `/callback?code=${redacted}&x=1` })
-      expect(shortEntry?.request.headers).toContainEqual({ name: ":authority", value: "docs.example.com" })
-      expect(encodedEntry?.request.url).toBe(`https://docs.example.com/callback?code=${redacted}`)
-      expect(encodedEntry?.request.headers).toContainEqual({ name: ":path", value: `/callback?code=${redacted}` })
-      expect(encodedEntry?.request.headers).toContainEqual({ name: ":authority", value: "docs.example.com" })
-    } finally {
-      await rm(directory, { recursive: true, force: true })
-    }
+  test("protects :path query values under the request URL", () => {
+    const short = capturedEntry("short", {})
+    const encoded = capturedEntry("encoded", {})
+    const { exchanges } = finishCapture(activeCapture([
+      {
+        ...short,
+        request: {
+          ...short.request,
+          url: "https://docs.example.com/callback?code=492817&x=1",
+          headers: [{ name: ":path", value: "/callback?code=492817&x=1" }, { name: ":authority", value: "docs.example.com" }],
+        },
+      },
+      {
+        ...encoded,
+        request: {
+          ...encoded.request,
+          url: "https://docs.example.com/callback?code=4%2f0ax4xfwi6abcdef789",
+          headers: [{ name: ":path", value: "/callback?code=4%2f0ax4xfwi6abcdef789" }, { name: ":authority", value: "docs.example.com" }],
+        },
+      },
+    ]))
+    const [shortEntry, encodedEntry] = exchanges
+    expect(shortEntry?.request.url).toBe(`https://docs.example.com/callback?code=${redacted}&x=1`)
+    expect(shortEntry?.request.headers).toContainEqual({ name: ":path", value: `/callback?code=${redacted}&x=1` })
+    expect(shortEntry?.request.headers).toContainEqual({ name: ":authority", value: "docs.example.com" })
+    expect(encodedEntry?.request.url).toBe(`https://docs.example.com/callback?code=${redacted}`)
+    expect(encodedEntry?.request.headers).toContainEqual({ name: ":path", value: `/callback?code=${redacted}` })
+    expect(encodedEntry?.request.headers).toContainEqual({ name: ":authority", value: "docs.example.com" })
   })
 
   test("finds a known secret again under a header or URL that does not look secret", () => {
@@ -343,41 +327,26 @@ describe("SecretRedactor", () => {
       .toBe(`https://auth.example.com/callback?code=${redacted}`)
   })
 
-  test("keeps code listings through HAR output while redacting codes in requests and responses", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "browse-har-code-"))
-    const outputPath = join(directory, "capture.har")
-    try {
-      const listing = { type: "codeListing", code: ["struct MyView: View {", "}"] }
-      const otp = { code: "492817" }
-      const echo = { code: "a7k2m9" }
-      await Effect.runPromise(finishCapture(
-        activeCapture([
-          capturedEntry("listing", listing),
-          capturedEntry("otp", otp),
-          capturedEntry("echo", echo, echo),
-        ]),
-        { outputPath },
-      ))
-      const har = JSON.parse(await readFile(outputPath, "utf8")) as {
-        log: { entries: Array<{
-          request: { postData?: { text?: string } }
-          response: { content: { text?: string } }
-        }> }
-      }
-      const [listingEntry, otpEntry, echoEntry] = har.log.entries
-      const listingText = listingEntry?.response.content.text ?? ""
-      const otpText = otpEntry?.response.content.text ?? ""
-      expect(JSON.parse(listingText || "{}")).toEqual(listing)
-      expect(listingText).not.toContain(redacted)
-      expect(JSON.parse(otpText || "{}")).toEqual({ code: redacted })
+  test("keeps code listings in the exchanges while redacting codes in requests and responses", () => {
+    const listing = { type: "codeListing", code: ["struct MyView: View {", "}"] }
+    const otp = { code: "492817" }
+    const echo = { code: "a7k2m9" }
+    const { exchanges } = finishCapture(activeCapture([
+      capturedEntry("listing", listing),
+      capturedEntry("otp", otp),
+      capturedEntry("echo", echo, echo),
+    ]))
+    const [listingEntry, otpEntry, echoEntry] = exchanges
+    const listingText = listingEntry?.response?.body?.text ?? ""
+    const otpText = otpEntry?.response?.body?.text ?? ""
+    expect(JSON.parse(listingText || "{}")).toEqual(listing)
+    expect(listingText).not.toContain(redacted)
+    expect(JSON.parse(otpText || "{}")).toEqual({ code: redacted })
 
-      const echoRequestText = echoEntry?.request.postData?.text ?? ""
-      const echoResponseText = echoEntry?.response.content.text ?? ""
-      expect(echoRequestText).toBe(echoResponseText)
-      expect(echoRequestText).not.toContain("a7k2m9")
-      expect(JSON.parse(echoRequestText || "{}")).toEqual({ code: redacted })
-    } finally {
-      await rm(directory, { recursive: true, force: true })
-    }
+    const echoRequestText = echoEntry?.request.body?.text ?? ""
+    const echoResponseText = echoEntry?.response?.body?.text ?? ""
+    expect(echoRequestText).toBe(echoResponseText)
+    expect(echoRequestText).not.toContain("a7k2m9")
+    expect(JSON.parse(echoRequestText || "{}")).toEqual({ code: redacted })
   })
 })

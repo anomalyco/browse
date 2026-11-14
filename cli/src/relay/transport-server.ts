@@ -75,7 +75,7 @@ export function createRelayTransportServers(deps: TransportServerDeps): {
 
   /**
    * Requests that don't mean an agent is using the browser: the updater's and CLI's lifecycle calls (POST /shutdown, and
-   * the version probe every client makes first) and the read-only status and doctor reads. They leave
+   * the version probe every client makes first) and the read-only status reads. They leave
    * the auto-updater's idle clock alone; an agent's real request (execute, a session, capture, recording or setting
    * change) restarts it.
    */
@@ -171,7 +171,6 @@ export function createRelayTransportServers(deps: TransportServerDeps): {
     const requestUrl = new URL(request.url ?? "/", endpointUrl)
     if (requestUrl.pathname === "/extension") {
       handshake.handleConnection(socket, request, {
-        onRecordingBinary: (frame) => recordingRelay.handleBinaryData(frame),
         onMessage: (link, raw) => handleExtensionMessage(link, raw),
       })
       return

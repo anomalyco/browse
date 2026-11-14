@@ -38,7 +38,6 @@ describe("guardCdpMethod", () => {
   test("lets ordinary and custom relay methods through", () => {
     expect(guardCdpMethod({ method: "Page.navigate", readOnly: false })).toBeNull()
     expect(guardCdpMethod({ method: "Runtime.evaluate", readOnly: false })).toBeNull()
-    expect(guardCdpMethod({ method: "OpenCodeBrowser.ghostCursor", readOnly: false })).toBeNull()
   })
 
   test("read-only sessions can take snapshots and screenshots", () => {

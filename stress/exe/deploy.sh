@@ -17,7 +17,7 @@ export PATH=/usr/local/bin:$HOME/.bun/bin:$PATH OPENCODE_BROWSER_UPDATE_CHECK=0
 cd ~/browse
 (cd cli && OPENCODE_BROWSER_TEST_HOOKS=1 bun build.ts)
 # Restart first: `pair` runs `session list`, which refuses a relay of another build (lifecycle.ts relayBuildProblem).
-node cli/dist/cli.mjs relay restart --force   # a stress box: nothing a fuzz run left (flight recorders) is worth keeping
+node cli/dist/cli.mjs relay restart --force   # a stress box: nothing a fuzz run left is worth keeping
 # Feed the unpacked extension a real one-time code without running install (which edits the user's MCP config).
 umask 077
 (node cli/dist/cli.mjs pair --wait-seconds 1 || true) | jq -Rse '{code: capture("Pairing code: (?<code>[0-9A-Z]{4}-[0-9A-Z]{4})").code}' > dist/relay-pairing.json

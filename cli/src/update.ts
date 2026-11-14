@@ -5,7 +5,7 @@
 //                   When the tracked branch is gone from the remote (browse's `main` became `dev`), it follows the
 //                   remote's default branch instead and points the local branch's upstream there.
 //   update check    asks the remote for its branch head (`git ls-remote`, never a fetch), at most every 6 hours,
-//                   cached in the cache root. `status`, `doctor`, the MCP server and the extension's status page show
+//                   cached in the cache root. `status`, the MCP server and the extension's status page show
 //                   its notice. It never blocks startup and fails silently. OPENCODE_BROWSER_UPDATE_CHECK=0 turns it off.
 // An installed binary or npm global install (`browse install`) reruns the installer (auto-update.ts); `update` installs
 // the newest version on its channel now, and the notice shows a newer version in "notify" mode. npx is a no-op.
@@ -37,7 +37,7 @@ export type UpdateCheck = {
   readonly failed?: boolean
 }
 
-/** What status, doctor, the MCP server and the status page show: what's new, and the command that updates. */
+/** What status, the MCP server and the status page show: what's new, and the command that updates. */
 export type UpdateNotice = {
   readonly summary: string
   readonly command: string
@@ -146,7 +146,7 @@ export function describeUpdate(check: UpdateCheck): string {
   return `${check.upstream} is at ${short(check.latest ?? "")} (you have ${short(check.head)})`
 }
 
-/** The update notice in `status --json`, `doctor --json` and the MCP `status` tool; null when there's none. */
+/** The update notice in `status --json` and the MCP `status` tool; null when there's none. */
 export type UpdateJson = {
   readonly available: true
   readonly summary: string

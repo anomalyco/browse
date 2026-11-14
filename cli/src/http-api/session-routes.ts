@@ -72,8 +72,7 @@ export function handleNetworkRequest(options: {
     }
     if (options.pathname === "/network/stop" && options.request.method === "POST") {
       const request = yield* decodeRequest(NetworkStopRequest, yield* readJsonBody(options.request), "network stop")
-      const { sessionId, ...stopOptions } = request
-      sendJson(options.response, yield* options.sessions.networkStop(sessionId, stopOptions))
+      sendJson(options.response, yield* options.sessions.networkStop(request.sessionId))
       return
     }
     if (options.pathname === "/network/cancel" && options.request.method === "POST") {

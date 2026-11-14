@@ -60,12 +60,11 @@ if (!values.remote) {
   await step("network capture", async () => {
     check(!(await client.call("network", { action: "start", session })).isError, "network start")
     await run(`await page.goto(${JSON.stringify(fx.url("/network"))}); await page.locator('#out', {hasText: '3 rows'}).waitFor()`)
-    const har = path.join(out, "smoke.har")
-    const stop = await client.call("network", { action: "stop", session, outputPath: har })
+    const stop = await client.call("network", { action: "stop", session })
     check(!stop.isError, stop.text)
-    const entries = JSON.parse(fs.readFileSync(har, "utf8")).log.entries.length
-    check(entries >= 3, `${entries} entries`)
-    return entries
+    const exchanges = (stop.data as { exchanges?: unknown[] } | undefined)?.exchanges ?? []
+    check(exchanges.length >= 3, `${exchanges.length} exchanges`)
+    return exchanges.length
   })
   await step("recording", async () => {
     await run(`await page.goto(${JSON.stringify(fx.url("/animate"))})`)

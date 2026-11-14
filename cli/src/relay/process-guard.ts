@@ -66,16 +66,6 @@ export function sendUpgradeError(options: {
   options.socket.destroy()
 }
 
-export function rawDataToBuffer(data: RawData): Buffer {
-  if (Buffer.isBuffer(data)) {
-    return data
-  }
-  if (Array.isArray(data)) {
-    return Buffer.concat(data)
-  }
-  return Buffer.from(data)
-}
-
 export function targetDiagnosticIdentity(registry: TargetRegistry, target: ConnectedTarget | ChildTarget | undefined): string {
   if (!target) {
     return "target=unknown"

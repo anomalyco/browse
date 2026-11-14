@@ -5,16 +5,12 @@
 import { checkoutReloadPrefix, extensionProtocolVersion, unpackedExtensionId } from "../../cli/src/protocol"
 import {
   defaultRelayPort,
-  encodeRecordingFrame,
   extensionReconnectAlarmPeriodMs,
   isJsonObject,
   type JsonObject,
   type PageStatus,
 } from "../agent-relay/protocol"
-import type { OffscreenOutgoingMessage } from "../agent-relay/recording-types"
 import {
-  AGENT_CURSOR_KEY,
-  agentCursor,
   HUMAN_INPUT_KEY,
   humanInput,
   RELAY_ADDRESS_KEY,
@@ -48,7 +44,6 @@ import {
   type AgentBadge,
 } from "./agent-relay/wire"
 import { installPopupAdoption } from "./agent-relay/popups"
-import { createRelayRecording } from "./agent-relay/recording"
 import { DebuggerHub } from "./debugger-hub"
 import { HandoffNotice } from "./handoff-notice"
 import { TabCleanup } from "./tab-cleanup"
@@ -86,8 +81,6 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   const cdp = { count: 0, errors: 0 }
   const relayTabs = new Set<number>()
   let reloading = false
-  /** Tabs with a recording in progress; cleanup leaves them open. */
-  const recordingTabs = new Set<number>()
   const pageStatuses = new Map<number, PageStatus>()
   const badges = new Map<number, AgentBadge>()
   /** Tabs clicked while the relay was not connected; the value says the click was a lend. Announced once it is. */
@@ -304,9 +297,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   // The relay-side settings apply as soon as they change; the relay answers with what its environment fixes.
   const sendSettings = async () => {
     if (!open()) return
-    const stored = await chrome.storage.local.get([AGENT_CURSOR_KEY, HUMAN_INPUT_KEY])
+    const stored = await chrome.storage.local.get([HUMAN_INPUT_KEY])
     const settings: RelaySettings = {
-      cursor: agentCursor(stored[AGENT_CURSOR_KEY]),
       humanInput: humanInput(stored[HUMAN_INPUT_KEY]),
     }
     log.add("settings", settings)
@@ -326,11 +318,6 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     notify,
     forget,
     send,
-  })
-
-  const recording = createRelayRecording({
-    open,
-    currentSocket: () => socket,
   })
 
   const resetAndConnect = (reason: string, closeReason?: string) => {
@@ -382,7 +369,6 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     log,
     cdp,
     relayTabs,
-    recordingTabs,
     pageStatuses,
     badges,
     currentSocket: () => socket,
@@ -402,8 +388,6 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     group: grouping.group,
     ungroup: grouping.ungroup,
     consumeCanceledUngroup,
-    startRecording: recording.startRecording,
-    recordingCall: recording.recordingCall,
   })
 
   const connect = (reason: string) => {
@@ -514,7 +498,6 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
           opened: openedAt !== undefined,
           ms: lasted,
         })
-      if (!presenceOnly) void chrome.runtime.sendMessage({ action: "recording.cancelAll" }).catch(() => undefined)
       overrides = undefined
       autoUpdate = undefined
       browser = undefined
@@ -596,14 +579,12 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   // Never close a tab while its agent runs a script on it, waits for the user there, or records it.
   TabCleanup.guard((tabId) => {
     const state = pageStatuses.get(tabId)?.state
-    return recordingTabs.has(tabId) || state === "waiting" || state === "running"
+    return state === "waiting" || state === "running"
   })
   AgentGroups.keepOpenWhile((tabId) => pageStatuses.get(tabId)?.state === "waiting")
   const tabRemoved = (tabId: number) => {
-    recordingTabs.delete(tabId)
     canceledAgentTabs.delete(tabId)
     closedWhileRestoring?.add(tabId)
-    void chrome.runtime.sendMessage({ action: "recording.cancel", tabId }).catch(() => undefined)
     if (relayTabs.has(tabId)) log.add("tab.removed", { tabId })
     forget(tabId)
     cancelPending(tabId)
@@ -619,7 +600,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     if (alarm.name === ALARM && !retry) void connect("alarm")
   })
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === "local" && (AGENT_CURSOR_KEY in changes || HUMAN_INPUT_KEY in changes)) void sendSettings()
+    if (area === "local" && HUMAN_INPUT_KEY in changes) void sendSettings()
   })
   // A code entered on the status page, a new relay address or a new name takes effect on a fresh connection.
   chrome.storage.onChanged.addListener(handshake.onPairingStorageChanged)
@@ -696,7 +677,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       void connect("attach")
     },
     /**
-     * Content-script and offscreen messages. Returns undefined when the message isn't for the relay link, true when
+     * Content-script messages. Returns undefined when the message isn't for the relay link, true when
      * the answer comes later through sendResponse (keep the channel open), and false when it was handled.
      */
     runtimeMessage(message: unknown, sender: chrome.runtime.MessageSender, sendResponse: (response: unknown) => void) {
@@ -718,35 +699,6 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
           log.add("handoff.completed", { tabId, from: "page" })
           send({ method: "handoff.completed", params: { tabId, handoffId: message.handoffId } })
         }
-        return false
-      }
-      const offscreenMessage = message as unknown as OffscreenOutgoingMessage
-      if (offscreenMessage.action === "recording.chunk") {
-        // The recording document waits for this answer before it sends the next chunk.
-        void recording
-          .sendRecordingChunk(
-            encodeRecordingFrame({
-              tabId: offscreenMessage.tabId,
-              sequence: offscreenMessage.sequence,
-              final: offscreenMessage.final,
-              payload: offscreenMessage.final
-                ? new Uint8Array()
-                : Uint8Array.from(atob(offscreenMessage.dataBase64), (char) => char.charCodeAt(0)),
-            }),
-          )
-          .then(
-            () => sendResponse({ success: true }),
-            (error: unknown) => {
-              log.add("recording.chunk.error", { tabId: offscreenMessage.tabId, error: text(error) })
-              sendResponse({ success: false, error: text(error) })
-            },
-          )
-        return true
-      }
-      if (offscreenMessage.action === "recording.cancelled") {
-        log.add("recording.cancelled", { tabId: offscreenMessage.tabId })
-        recordingTabs.delete(offscreenMessage.tabId)
-        send({ method: "recording.cancelled", params: { tabId: offscreenMessage.tabId } })
         return false
       }
       return undefined

@@ -103,7 +103,7 @@ function startRelay(entry: string) {
 }
 
 function relayFailure(started: ReturnType<typeof startRelay>): string {
-  return started.stderr?.trim() || `Couldn't reach the browse relay: ${started.error?.message || `run ${cliCommand("doctor")}`}`
+  return started.stderr?.trim() || `Couldn't reach the browse relay: ${started.error?.message || `run ${cliCommand("status")}`}`
 }
 
 export function ensureRelay(entry: string) {

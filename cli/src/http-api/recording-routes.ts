@@ -1,14 +1,8 @@
 import http from "node:http"
 import { Effect, Predicate } from "effect"
-import type { FlightRecorderRelay } from "../recording-relay/flight-recorder.ts"
 import { AmbiguousRecordingTargetError, type RecordingRelay, type RecordingStartOptions, type RecordingTargetOptions } from "../recording-relay.ts"
 import { HttpRouteError, readJsonBody, sendJson } from "../relay/helpers.ts"
-import {
-  FlightRecorderSaveRequest,
-  FlightRecorderStartRequest,
-  RecordingStartRequest,
-  RecordingTargetRequest,
-} from "../relay/schema.ts"
+import { RecordingStartRequest, RecordingTargetRequest } from "../relay/schema.ts"
 import type { TargetRegistry } from "../cdp/target-registry.ts"
 import { decodeRequest, optionalInteger, sendNotFound } from "./errors.ts"
 
@@ -40,7 +34,6 @@ export function handleRecordingRequest(options: {
         ...recordingOptions,
         tabId: target.tabId,
         ...(target.sessionId ? { sessionId: target.sessionId } : {}),
-        owner: target.owner,
       }
       const result = yield* tryRecordingPromise("start recording", () => options.recordingRelay.startRecording(startOptions))
       sendJson(options.response, result, result.success ? 200 : 500)
@@ -66,54 +59,6 @@ export function handleRecordingRequest(options: {
       const target = recordingTargetFromValues({ registry: options.registry, tabId: request.tabId, sessionId: request.sessionId })
       const result = yield* tryRecordingPromise("cancel recording", () => options.recordingRelay.cancelRecording(target))
       sendJson(options.response, result, recordingStatusCode(result))
-      return
-    }
-    sendNotFound(options.response)
-  })
-}
-
-export function handleFlightRecorderRequest(options: {
-  readonly request: http.IncomingMessage
-  readonly response: http.ServerResponse
-  readonly pathname: string
-  readonly requestUrl: URL
-  readonly registry: TargetRegistry
-  readonly flightRecorder: FlightRecorderRelay
-}): Effect.Effect<void, Error> {
-  return Effect.gen(function* () {
-    if (options.pathname === "/flight-recorder/start" && options.request.method === "POST") {
-      const request = yield* decodeRequest(FlightRecorderStartRequest, yield* readJsonBody(options.request), "flight recorder start")
-      const target = resolveAttachedRecordingTarget({ registry: options.registry, tabId: request.tabId, sessionId: request.sessionId })
-      const result = yield* tryRecordingPromise("start flight recorder", () => options.flightRecorder.start({
-        tabId: target.tabId,
-        ...(target.sessionId ? { sessionId: target.sessionId } : {}),
-        ...(request.retentionMs === undefined ? {} : { retentionMs: request.retentionMs }),
-        ...(request.frameRate === undefined ? {} : { frameRate: request.frameRate }),
-        ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
-      }))
-      sendJson(options.response, result)
-      return
-    }
-    if (options.pathname === "/flight-recorder/status" && options.request.method === "GET") {
-      const target = recordingTargetFromQuery({ registry: options.registry, searchParams: options.requestUrl.searchParams })
-      sendJson(options.response, yield* readRecordingStatus(options.registry, () => options.flightRecorder.status(target)))
-      return
-    }
-    if (options.pathname === "/flight-recorder/save-last" && options.request.method === "POST") {
-      const request = yield* decodeRequest(FlightRecorderSaveRequest, yield* readJsonBody(options.request), "flight recorder save-last")
-      const target = recordingTargetFromValues({ registry: options.registry, tabId: request.tabId, sessionId: request.sessionId })
-      const result = yield* tryRecordingPromise("save flight recorder", () => options.flightRecorder.saveLast({
-        ...target,
-        outputPath: request.outputPath,
-        ...(request.durationMs === undefined ? {} : { durationMs: request.durationMs }),
-      }))
-      sendJson(options.response, result)
-      return
-    }
-    if (options.pathname === "/flight-recorder/cancel" && options.request.method === "POST") {
-      const request = yield* decodeRequest(RecordingTargetRequest, yield* readJsonBody(options.request), "flight recorder cancel")
-      const target = recordingTargetFromValues({ registry: options.registry, tabId: request.tabId, sessionId: request.sessionId })
-      sendJson(options.response, yield* Effect.promise(() => options.flightRecorder.cancel(target)))
       return
     }
     sendNotFound(options.response)
@@ -156,14 +101,14 @@ function resolveAttachedRecordingTarget(options: {
   readonly registry: TargetRegistry
   readonly tabId: unknown
   readonly sessionId: unknown
-}): { readonly tabId: number; readonly sessionId?: string; readonly owner: "relay" | "user" } {
+}): { readonly tabId: number; readonly sessionId?: string } {
   const tabId = optionalInteger(options.tabId, "tabId")
   if (tabId !== undefined) {
     const target = options.registry.getRootTargetByTabId(tabId)
     if (!target) {
       throw new HttpRouteError({ message: `No attached tab found for tabId ${tabId}`, status: 404, code: "target-not-found" })
     }
-    return { tabId, sessionId: target.sessionId, owner: target.owner }
+    return { tabId, sessionId: target.sessionId }
   }
   const sessionId = Predicate.isString(options.sessionId) && options.sessionId ? options.sessionId : undefined
   if (sessionId) {
@@ -171,7 +116,7 @@ function resolveAttachedRecordingTarget(options: {
     if (!target) {
       throw new HttpRouteError({ message: `No attached tab found for sessionId ${sessionId}`, status: 404, code: "target-not-found" })
     }
-    return { tabId: target.tabId, sessionId: target.sessionId, owner: target.owner }
+    return { tabId: target.tabId, sessionId: target.sessionId }
   }
   const targets = options.registry.listRootTargets()
   if (targets.length === 0) {
@@ -184,7 +129,7 @@ function resolveAttachedRecordingTarget(options: {
   if (!target) {
     throw new HttpRouteError({ message: "No attached tab available for recording", status: 404, code: "target-not-found" })
   }
-  return { tabId: target.tabId, sessionId: target.sessionId, owner: target.owner }
+  return { tabId: target.tabId, sessionId: target.sessionId }
 }
 
 function recordingTargetFromValues(options: { readonly registry: TargetRegistry; readonly tabId: unknown; readonly sessionId: unknown }): RecordingTargetOptions {

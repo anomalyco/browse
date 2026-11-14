@@ -3,7 +3,7 @@
 //   extension zip  no `update_url`, no relay-pairing.json, no source maps, no test-only hooks, the default relay port,
 //                  the release version, and exactly the capabilities in store/permissions.json; the store zip (stable)
 //                  has no manifest `key`, the dev zip (loaded unpacked) has the checkout's key and a build.json
-//   npm tarball    @opencode/browse at the release version, only dist/, skills/ and package metadata (no extension: npm
+//   npm tarball    @opencode/browse at the release version, only dist/ and package metadata (no extension: npm
 //                  installs get it from the store or, for a dev build, the release service), no install scripts, no
 //                  source maps, and it installs with npm and starts its relay and MCP server
 //   bun scripts/check-artifacts.ts --version 0.1.0 --zip release/browse-extension-0.1.0.zip --tarball release/opencode-browse-0.1.0.tgz
@@ -161,7 +161,7 @@ export async function checkPackageTarball(tarball: string, version: string, exte
     if (structure.some((problem) => !problem.includes("source map"))) return structure
     const names = await files(packageDir)
     const problems: string[] = [...structure]
-    const allowedFile = (name: string) => /^(dist|skills)\//.test(name) || ["package.json", "LICENSE", "README.md"].includes(name)
+    const allowedFile = (name: string) => /^dist\//.test(name) || ["package.json", "LICENSE", "README.md"].includes(name)
     for (const name of names) if (!allowedFile(name)) problems.push(`${label}: unexpected file ${name}`)
     for (const name of names) if (/(^|\/)\.env/.test(name) || /\.(pem|key|p12)$/.test(name)) problems.push(`${label}: looks like a secret: ${name}`)
     const pkg = JSON.parse(await readFile(path.join(packageDir, "package.json"), "utf8")) as {

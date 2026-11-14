@@ -11,8 +11,6 @@ import { CdpRuntime } from "./cdp/runtime.ts"
 import { installedDevExtension, syncDevExtension } from "./setup/dev-extension.ts"
 import { ExecuteSandbox } from "./execute.ts"
 import { pruneStaleExecuteFilesDirectories } from "./execute-realm.ts"
-import { FlightRecorderRelay } from "./recording-relay/flight-recorder.ts"
-import { GhostCursorTabs } from "./ghost-cursor.ts"
 import { HandoffRegistry } from "./session-manager/handoff.ts"
 import { createHttpRequestHandler } from "./http-api.ts"
 import { forgetTab } from "./execute/human-input.ts"
@@ -196,30 +194,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const sweptBrowsers = new Set<string>()
 
   const recordingRelay = new RecordingRelay({
-    sendToExtension: (command) => Effect.runPromise(sendToExtension(command)),
     sendDebuggerCommand: (command) => Effect.runPromise(sendDebuggerCommand(command)),
     isExtensionConnected: () => browsers.connected,
-    isTabUnavailable: (tabId) => flightRecorder.isActiveTab(tabId),
     onTabRecordingChanged: (tabId) => recordingChanged(tabId),
   })
-  const flightRecorder = new FlightRecorderRelay({
-    sendDebuggerCommand: (command) => Effect.runPromise(sendDebuggerCommand(command)),
-    isExtensionConnected: () => browsers.connected,
-    isTabRecording: (tabId) => recordingRelay.isRecordingTab(tabId),
-    onTabRecordingChanged: (tabId) => recordingChanged(tabId),
-  })
-  const isTabRecorded = (tabId: number) => recordingRelay.isRecordingTab(tabId) || flightRecorder.isActiveTab(tabId)
+  const isTabRecorded = (tabId: number) => recordingRelay.isRecordingTab(tabId)
 
-  const ghostCursorEnv = Option.getOrUndefined(yield* Config.option(Config.Boolean("OPENCODE_BROWSER_GHOST_CURSOR")))
-  const ghostCursorAlways = (tabId: number) => ghostCursorEnv ?? browsers.browserTab(tabId)?.link.cursor ?? false
   const agentWindowSetting = Option.getOrUndefined(yield* Config.option(Config.String("OPENCODE_BROWSER_AGENT_WINDOW")))?.trim().toLowerCase()
   const agentWindow = agentWindowSetting === "current" || agentWindowSetting === "separate" ? agentWindowSetting : undefined
-  const ghostCursor = new GhostCursorTabs({
-    send: sendDebuggerCommand,
-    mainFrameId: (tabId) => mainFrameIdsByTab.get(tabId),
-    shownByDefault: (tabId) =>
-      isTabRecorded(tabId) ? recordingRelay.showsGhostCursor(tabId) || flightRecorder.showsGhostCursor(tabId) : ghostCursorAlways(tabId),
-  })
 
   const tabActivity = new TabActivity((tabId, enabled) => sendDebuggerCommand({
     tabId,
@@ -248,7 +230,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   })
 
   const recordingChanged = async (tabId: number): Promise<void> => {
-    await ghostCursor.refresh([tabId])
     const pending = handoffs.pendingForTab(tabId)
     const target = registry.tabTargets.get(tabId)
     if (!pending || !target) return
@@ -263,8 +244,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     const mine = (tabId: number) => browsers.ownerKey(tabId) === key
     for (const target of [...registry.listRootTargets(), ...registry.listStagedRootTargets()]) {
       if (!mine(target.tabId)) continue
-      void recordingRelay.abortRecordingForTab({ tabId: target.tabId, reason }).catch(() => {})
-      void flightRecorder.cancel({ tabId: target.tabId }).catch(() => {})
+      void recordingRelay.abortRecordingForTab(target.tabId).catch(() => {})
       presentation.clearPendingTabGrouping(target.tabId)
       ownersAcrossReconnect.set(target.targetInfo.targetId, {
         browser: key,
@@ -475,8 +455,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const settingsSync = createRelaySettingsSync({
     browsers,
     handshake,
-    ghostCursor,
-    ghostCursorEnv,
     agentWindow,
     sendToExtension,
     sendExtensionBestEffort,
@@ -519,7 +497,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     activeHandoffTabs: presentation.activeHandoffTabs,
     tabActivity,
     recordingRelay,
-    flightRecorder,
     rootLifecycle,
     closeTargetByTargetId: (targetId) => closeTargetByTargetId(targetId),
     sendToEveryBrowser,
@@ -646,7 +623,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     mainFrameIdsByTab.delete(tabId)
     protectedFrames.forgetTab(tabId)
     navigationGuard.forgetTab(tabId)
-    ghostCursor.forget(tabId)
     deviceMetricsOverrides.forget(tabId)
     forgetTab(tabId)
     for (const [sessionId, childTabId] of suppressedChildSessions) {
@@ -665,11 +641,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       // An agent-opened tab stays in its group and on the idle timer after a cancel, so an ungroup here would close it.
       if (detachOptions.releasedByUser !== true || registry.tabTargets.get(tabId)?.owner !== "relay") presentation.scheduleTabGrouping(tabId, "tabs.ungroup")
       sendExtensionBestEffort({ method: "action.setAttached", params: { tabId, attached: false } })
-      void recordingRelay.abortRecordingForTab({ tabId, reason: "Tab detached" }).catch((error: unknown) => {
+      void recordingRelay.abortRecordingForTab(tabId).catch((error: unknown) => {
         console.error("Failed to abort recording for detached tab", error)
-      })
-      void flightRecorder.cancel({ tabId }).catch((error: unknown) => {
-        console.error("Failed to stop flight recorder for detached tab", error)
       })
     }
     const detached = registry.detachRootTargetState(tabId)
@@ -746,9 +719,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     cdpRuntime,
     handoffs,
     recordingRelay,
-    flightRecorder,
     navigationGuard,
-    ghostCursor,
     tabActivity,
     protectedFrames,
     mainFrameIdsByTab,
@@ -787,7 +758,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     cdpRuntime,
     shutdownControl,
     navigationGuard,
-    ghostCursor,
     tabActivity,
     deviceMetricsOverrides,
     mainFrameIdsByTab,
@@ -810,7 +780,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     shutdown: shutdownControl,
     registry,
     recordingRelay,
-    flightRecorder,
     sessions,
     reloadExtension: () => sendToEach({ method: "runtime.reload" }),
     revokeBrowser: (key) => handshake.revokeBrowser(key),
@@ -867,8 +836,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
     handoffs.cancelAll()
     for (const link of browsers.list()) link.rpc.rejectPending(new Error("Relay closed"))
-    yield* Effect.tryPromise(() => recordingRelay.cleanupAll("Relay closed")).pipe(Effect.ignore)
-    yield* Effect.tryPromise(() => flightRecorder.cleanupAll()).pipe(Effect.ignore)
+    yield* Effect.tryPromise(() => recordingRelay.cleanupAll()).pipe(Effect.ignore)
     for (const socket of cdpClients) socket.close()
     for (const link of browsers.list()) link.rpc.close()
     yield* closeWebSocketServer(websocketServer).pipe(logCloseError("Failed to close websocket server"))

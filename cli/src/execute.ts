@@ -682,8 +682,8 @@ export class ExecuteSandbox extends DefaultPageHost {
     return this.networkCapture.status()
   }
 
-  networkStop(options: NetworkCapture.NetworkCaptureStopOptions = {}): Effect.Effect<NetworkCapture.NetworkCaptureResult, Error> {
-    return this.networkCapture.stop(options)
+  networkStop(): Effect.Effect<NetworkCapture.NetworkCaptureResult, Error> {
+    return this.networkCapture.stop()
   }
 
   networkCancel(): Effect.Effect<{ readonly cancelled: boolean }> {

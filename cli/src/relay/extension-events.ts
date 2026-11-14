@@ -4,8 +4,6 @@ import type { BrowserLink, BrowserLinks } from "./browser-links.ts"
 import type { CdpClientPool } from "../cdp/client-pool.ts"
 import type { CdpRuntime } from "../cdp/runtime.ts"
 import type { ExtensionCommandInput } from "./rpc.ts"
-import type { FlightRecorderRelay } from "../recording-relay/flight-recorder.ts"
-import type { GhostCursorTabs } from "../ghost-cursor.ts"
 import type { HandoffCancellationReason, HandoffRegistry } from "../session-manager/handoff.ts"
 import type { ProtectedFrameTracker } from "../cdp/protected-frames.ts"
 import { isExtensionEvent, isExtensionResponse, parseJsonObject, type CdpEvent, type JsonObject } from "../protocol.ts"
@@ -30,9 +28,7 @@ export function createExtensionEventHandler(options: {
   readonly cdpRuntime: CdpRuntime<WebSocket>
   readonly handoffs: HandoffRegistry
   readonly recordingRelay: RecordingRelay
-  readonly flightRecorder: FlightRecorderRelay
   readonly navigationGuard: SessionNavigationGuard
-  readonly ghostCursor: GhostCursorTabs
   readonly tabActivity: TabActivity
   readonly protectedFrames: ProtectedFrameTracker
   readonly mainFrameIdsByTab: Map<number, string>
@@ -71,9 +67,7 @@ export function createExtensionEventHandler(options: {
     cdpRuntime,
     handoffs,
     recordingRelay,
-    flightRecorder,
     navigationGuard,
-    ghostCursor,
     tabActivity,
     protectedFrames,
     mainFrameIdsByTab,
@@ -363,10 +357,6 @@ export function createExtensionEventHandler(options: {
       if (eventTabId) detachTargetState(eventTabId)
       return
     }
-    if (extensionMethod === "recording.cancelled") {
-      recordingRelay.handleRecordingCancelled(message)
-      return
-    }
     if (extensionMethod !== "debugger.event" || !eventTabId) {
       return
     }
@@ -389,7 +379,7 @@ export function createExtensionEventHandler(options: {
     ) {
       return
     }
-    if (flightRecorder.handleDebuggerEvent({ tabId, method, params }) || recordingRelay.handleDebuggerEvent({ tabId, method, params })) return
+    if (recordingRelay.handleDebuggerEvent({ tabId, method, params })) return
     if (sourceSessionId === undefined || sourceSessionId === target.sessionId) navigationGuard.observeEvent(target, method, params)
     let shouldBroadcast = true
     let attachedChildTarget: ChildTarget | undefined
@@ -513,7 +503,6 @@ export function createExtensionEventHandler(options: {
       if (frameUrl !== undefined && frameParentId === undefined && (sourceSessionId === undefined || sourceSessionId === target.sessionId)) {
         if (frameId !== undefined) mainFrameIdsByTab.set(tabId, frameId)
         forgetProtectedFrames(tabId)
-        Effect.runPromise(Effect.ignore(ghostCursor.documentCreated(tabId))).catch(() => {})
         contextDebugLog?.(`main-frame-navigated frame=${boundedToken(frameId)} loader=${boundedToken(getString(frame, "loaderId"))} ${targetDiagnosticIdentity(registry, target)} ${summarizeDiagnosticUrl(frameUrl)}`)
         registry.updateTargetUrl(tabId, frameUrl)
         blankNavigationWaiters.get(tabId)?.(frameUrl, getString(frame, "loaderId"))

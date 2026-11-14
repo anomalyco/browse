@@ -32,8 +32,6 @@
     "tabGroups",
     "storage",
     "alarms",
-    "offscreen",
-    "tabCapture",
     "webNavigation",
     "scripting",
     "notifications"

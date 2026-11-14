@@ -4,10 +4,8 @@
     "alarms",
     "debugger",
     "notifications",
-    "offscreen",
     "scripting",
     "storage",
-    "tabCapture",
     "tabGroups",
     "tabs",
     "webNavigation"

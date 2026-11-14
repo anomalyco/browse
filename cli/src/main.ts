@@ -2,9 +2,10 @@
 // browse: one command for setup, updates and driving the browser.
 //   Setup (setup.ts): install, extension, pair, uninstall. Updating (update.ts): update.
 //   Driving the browser (cli.ts): serve, relay, execute, session, network, recording, journal,
-//   doctor, skill, mcp, status. The relay is the local server agents use; the extension connects to it.
+//   mcp, status. The relay is the local server agents use; the extension connects to it.
 // `browse mcp` runs the MCP server over stdio (as does the bundle invoked as `opencode-browser-mcp`).
 import path from "node:path"
+import { agentHelp } from "./agent-guide.ts"
 import { legacyRootsLeft, legacyRuntime, legacyRuntimeActive, settleLegacyHome } from "./setup/legacy.ts"
 
 const embeddedVersion = globalThis.__OPENCODE_BROWSER_VERSION__
@@ -120,6 +121,8 @@ if (command === "--version" || command === "-v") {
 browse keeps its files in $XDG_CONFIG_HOME/browse, $XDG_DATA_HOME/browse, $XDG_STATE_HOME/browse and
 $XDG_CACHE_HOME/browse (defaults under ~/.config, ~/.local/share, ~/.local/state and ~/.cache), and the
 executable in ~/.local/bin (or $XDG_BIN_HOME).
+
+${agentHelp}
 
 `)
   }

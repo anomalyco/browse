@@ -5,7 +5,6 @@ import type { RootTargetLifecycle } from "../cdp/root-target-lifecycle.ts"
 import type { TabActivity } from "../cdp/tab-activity.ts"
 import type { TargetRegistry } from "../cdp/target-registry.ts"
 import { browserUnresponsive } from "../protocol.ts"
-import type { FlightRecorderRelay } from "../recording-relay/flight-recorder.ts"
 import type { RecordingRelay } from "../recording-relay.ts"
 import type { OpenCodeBrowserSessions } from "../session-manager.ts"
 import { isMcpSession } from "../session-manager.ts"
@@ -55,7 +54,6 @@ export function createRelayHousekeeping(options: {
   readonly activeHandoffTabs: ReadonlyMap<string, Set<number>>
   readonly tabActivity: TabActivity
   readonly recordingRelay: RecordingRelay
-  readonly flightRecorder: FlightRecorderRelay
   readonly rootLifecycle: RootTargetLifecycle
   readonly closeTargetByTargetId: (targetId: string) => Effect.Effect<void, Error>
   readonly sendToEveryBrowser: (command: ExtensionCommandInput) => void
@@ -80,7 +78,6 @@ export function createRelayHousekeeping(options: {
     activeHandoffTabs,
     tabActivity,
     recordingRelay,
-    flightRecorder,
     rootLifecycle,
     closeTargetByTargetId,
     sendToEveryBrowser,
@@ -144,15 +141,13 @@ export function createRelayHousekeeping(options: {
       const busy = [
         ...sessions.activeNetworkCaptures().map((capture) => `a network capture in session ${capture.sessionId}${capture.startedAt ? ` (since ${capture.startedAt})` : ""}`),
         ...recordingRelay.recordingTabIds().map((tabId) => `a recording of tab ${tabId}`),
-        ...flightRecorder.activeTabIds().map((tabId) => `a flight recorder on tab ${tabId}`),
       ]
       return busy.length ? { reason: "recordings", detail: busy.slice(0, 5).join(", ") + (busy.length > 5 ? ` and ${busy.length - 5} more` : "") } : undefined
     },
     release: Effect.gen(function* () {
       relayLog("relay.restart.force", {})
       for (const capture of sessions.activeNetworkCaptures()) yield* sessions.networkEnd(capture.sessionId, "the relay was restarted with --force")
-      yield* Effect.promise(() => recordingRelay.cleanupAll("The relay was restarted with --force").catch(() => {}))
-      yield* Effect.promise(() => flightRecorder.cleanupAll().catch(() => {}))
+      yield* Effect.promise(() => recordingRelay.cleanupAll().catch(() => {}))
       for (const client of Array.from(cdpClients)) if (!cdpClients.isSandbox(client)) client.close(1001, "Relay restarting")
       yield* Effect.sleep(200)
     }),
@@ -195,7 +190,6 @@ export function createRelayHousekeeping(options: {
     !Array.from(cdpClients).some((client) => !cdpClients.isSandbox(client)) &&
     !sessions.hasActiveNetworkCapture() &&
     recordingRelay.recordingTabIds().length === 0 &&
-    flightRecorder.activeTabIds().length === 0 &&
     !Array.from(activeHandoffTabs.values()).some((tabs) => tabs.size > 0) &&
     !Array.from(sessions.sessions.keys()).some((id) => sessions.isExecuting(id) || sessions.hasPendingWork(id)) &&
     Date.now() - lastAgentActivity >= autoUpdateIdleMs

@@ -1,13 +1,10 @@
 import { Effect } from "effect"
-import path from "node:path"
 import * as RelayLifecycle from "../relay/lifecycle.ts"
 import { registerMcpTools } from "./registry.ts"
 import {
   NetworkToolOutput,
   ensureSessionExists,
   objectSchema,
-  optionalPositiveIntegerField,
-  optionalStringArrayField,
   optionalStringField,
   requiredAction,
   requireObject,
@@ -22,14 +19,13 @@ registerMcpTools({
     {
       name: "network",
       description:
-        "Start, inspect, stop, or cancel session-scoped network capture. browse records normalized Playwright exchanges; HAR is only the optional export format. Bodies are embedded by default with per-body and total memory limits. Actions: start begins a capture; status returns bounded metadata for the active capture without captured values; stop ends it and optionally writes a credential-redacted HAR; cancel ends it and discards the in-memory exchanges.",
+        "Start, inspect, stop, or cancel session-scoped network capture. browse records Playwright exchanges and replaces credential-bearing headers, cookies, query fields and structured body fields with [redacted]. Bodies are embedded with per-body and total memory limits. Actions: start begins a capture; status returns bounded metadata without captured values; stop ends it and returns the redacted exchanges; cancel ends it and discards them.",
       inputSchema: objectSchema(
         {
           action: {
             type: "string",
             enum: [...actions],
-            description:
-              "start begins a capture, status reports its bounded metadata, stop writes a redacted HAR, cancel discards it.",
+            description: "start begins a capture, status reports its bounded metadata, stop returns the redacted exchanges, cancel discards them.",
           },
           session: {
             type: "string",
@@ -37,43 +33,6 @@ registerMcpTools({
               "Optional session id. Defaults to your current session; start creates it when missing.",
           },
           urlFilter: { type: "string", description: "For start: capture only request URLs containing this text." },
-          resourceTypes: {
-            type: "array",
-            items: { type: "string" },
-            description: "For start: optional Playwright resource types such as fetch and xhr.",
-          },
-          content: {
-            type: "string",
-            enum: ["embed", "omit"],
-            description: "For start: request and response body mode. Defaults to embed.",
-          },
-          maxBodyBytes: {
-            type: "integer",
-            minimum: 1,
-            description: "For start: maximum bytes captured from each body. Defaults to 1000000.",
-          },
-          maxTotalBodyBytes: {
-            type: "integer",
-            minimum: 1,
-            description: "For start: maximum body bytes retained for the capture. Defaults to 25000000.",
-          },
-          maxEntries: {
-            type: "integer",
-            minimum: 1,
-            description: "For start: maximum captured requests. Defaults to 1000.",
-          },
-          maxDurationMs: {
-            type: "integer",
-            minimum: 1,
-            maximum: 86_400_000,
-            description:
-              "For start: the capture ends by itself, discarding what it captured, after this long. Defaults to 1800000 (30 minutes). It also ends when this MCP server exits.",
-          },
-          outputPath: {
-            type: "string",
-            description:
-              "For stop: optional artifact path, resolved against the MCP process working directory. Credential-bearing headers, cookies, query fields and structured body fields are replaced with [redacted], not captured values.",
-          },
         },
         ["action"],
       ),
@@ -97,15 +56,7 @@ registerMcpTools({
           }
           if (action === "stop") {
             const sessionId = yield* ctx.resolveSessionId(object)
-            const outputPath = optionalStringField(object, "outputPath")
-            return {
-              action,
-              session: sessionId,
-              ...(yield* ctx.relay.networkStop({
-                sessionId,
-                ...(outputPath ? { outputPath: path.resolve(outputPath) } : {}),
-              })),
-            }
+            return { action, session: sessionId, ...(yield* ctx.relay.networkStop({ sessionId })) }
           }
           const explicitSession = optionalStringField(object, "session")
           const caller = yield* ctx.caller
@@ -117,25 +68,10 @@ registerMcpTools({
             caller.established = true
           }
           yield* RelayLifecycle.ensureExtensionConnected({ relay: ctx.relay, sessionId, waitForReconnect: true })
-          const content = optionalStringField(object, "content")
-          if (content !== undefined && content !== "embed" && content !== "omit") {
-            return yield* Effect.fail(new Error("content must be embed or omit"))
-          }
           const urlFilter = optionalStringField(object, "urlFilter")
-          const resourceTypes = optionalStringArrayField(object, "resourceTypes")
-          const maxBodyBytes = optionalPositiveIntegerField(object, "maxBodyBytes")
-          const maxTotalBodyBytes = optionalPositiveIntegerField(object, "maxTotalBodyBytes")
-          const maxEntries = optionalPositiveIntegerField(object, "maxEntries")
-          const maxDurationMs = optionalPositiveIntegerField(object, "maxDurationMs")
           const result = yield* ctx.relay.networkStart({
             sessionId,
             ...(urlFilter ? { urlFilter } : {}),
-            ...(resourceTypes && resourceTypes.length > 0 ? { resourceTypes } : {}),
-            ...(content ? { content } : {}),
-            ...(maxBodyBytes === undefined ? {} : { maxBodyBytes }),
-            ...(maxTotalBodyBytes === undefined ? {} : { maxTotalBodyBytes }),
-            ...(maxEntries === undefined ? {} : { maxEntries }),
-            ...(maxDurationMs === undefined ? {} : { maxDurationMs }),
           })
           return { action, session: sessionId, ...result }
         }),

@@ -31,8 +31,8 @@ const int = (max: number) => Math.floor(rand() * max)
 const ROUTES = ["/", "/version", "/json/version", "/json/list", "/json", "/extension/status", "/extension/reload", "/tabs/cleanup", "/settings",
   "/cli/sessions", "/cli/session/new", "/cli/session/delete", "/cli/session/reset", "/cli/session/adopt", "/cli/execute", "/v1/sessions/ensure",
   "/v1/authenticated-origin/json", "/network/start", "/network/status", "/network/stop", "/network/cancel",
-  "/recording/start", "/recording/stop", "/recording/status", "/recording/cancel", "/flight-recorder/start", "/flight-recorder/status",
-  "/flight-recorder/save-last", "/flight-recorder/cancel", "/cli/../shutdown", "/%2e%2e/shutdown", "/cli/execute/../../shutdown"]
+  "/recording/start", "/recording/stop", "/recording/status", "/recording/cancel",
+  "/cli/../shutdown", "/%2e%2e/shutdown", "/cli/execute/../../shutdown"]
 // Never fuzzed with the token: they would end the run (shutdown) or wipe settings by design.
 const AUTH_EXCLUDED = new Set(["/shutdown", "/extension/reload"])
 
@@ -234,8 +234,8 @@ async function fuzzExtensionEndpoint() {
 }
 
 const TOOLS = ["execute", "status", "session_new", "session_list", "session_use", "session_reset", "session_delete", "session_adopt",
-  "network", "recording", "flight_recorder",
-  "tabs_cleanup", "skill", "settings", "no_such_tool"]
+  "network", "recording",
+  "tabs_cleanup", "settings", "no_such_tool"]
 let mcp: McpClient | undefined
 async function fuzzMcp() {
   stats.mcp++

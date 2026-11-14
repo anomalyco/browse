@@ -10,8 +10,7 @@
     "opencode-browser-cli": "dist/cli.mjs"
   },
   "files": [
-    "dist",
-    "skills"
+    "dist"
   ],
   "engines": {
     "node": ">=22.19.0"

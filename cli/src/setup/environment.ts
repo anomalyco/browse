@@ -40,7 +40,7 @@ export const windows = process.platform === "win32"
 export const home = homedir()
 export const root = dataRoot()
 export const configRoot = process.env.XDG_CONFIG_HOME ?? path.join(home, ".config")
-/** browse's own XDG folders (paths.ts): uninstall removes them, status and doctor show them. */
+/** browse's own XDG folders (paths.ts): uninstall removes them, status shows them. */
 export const paths = {
   config: browseConfigRoot(),
   data: dataRoot(),

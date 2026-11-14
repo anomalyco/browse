@@ -53,8 +53,7 @@ chrome.runtime.onConnect.addListener((port) => {
   post(port, { type: "agents", state: agents.state() })
 })
 
-// Content scripts (page status, handoffs) and the recording document talk to the relay link; extension pages ask
-// it for diagnostics.
+// Content scripts (page status, handoffs) talk to the relay link; extension pages ask it for diagnostics.
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const relay = agents.runtimeMessage(message, sender, sendResponse)
   if (relay !== undefined) return relay

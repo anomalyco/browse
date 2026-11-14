@@ -170,16 +170,6 @@ export const recordingTarget = Effect.fnUntraced(function* (options: {
   }
 })
 
-export const parseRecordingModeOption = Effect.fnUntraced(function* (value: string | undefined) {
-  if (value === undefined) {
-    return undefined
-  }
-  if (value === "auto" || value === "tab-capture" || value === "cdp") {
-    return value
-  }
-  return yield* Effect.fail(new Error("Recording mode must be auto, tab-capture, or cdp"))
-})
-
 export const networkSession = Effect.fnUntraced(function* (session: Option.Option<string>) {
   return yield* resolveSelectedSessionId(Option.getOrUndefined(session) ?? Option.getOrUndefined(yield* sessionIdConfig))
 })

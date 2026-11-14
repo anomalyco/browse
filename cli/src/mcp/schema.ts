@@ -127,20 +127,38 @@ export const NetworkToolOutput = Schema.Struct({
   truncatedBodyCount: Schema.optionalKey(Schema.Number),
   droppedEntryCount: Schema.optionalKey(Schema.Number),
   urlFilter: Schema.optionalKey(Schema.String),
-  resourceTypes: Schema.optionalKey(Schema.Array(Schema.String)),
-  content: Schema.optionalKey(Schema.Literals(["omit", "embed"])),
   endsAt: Schema.optionalKey(Schema.String),
   ended: Schema.optionalKey(Schema.String),
   stoppedAt: Schema.optionalKey(Schema.String),
-  outputPath: Schema.optionalKey(Schema.String),
-  endpoints: Schema.optionalKey(Schema.Array(Schema.Struct({
-    method: Schema.String,
-    url: Schema.String,
-    status: Schema.optionalKey(Schema.Number),
-    count: Schema.Number,
-    requestHeaders: Schema.optionalKey(Schema.Array(Schema.String)),
-    requestKeys: Schema.optionalKey(Schema.Array(Schema.String)),
-    responseKeys: Schema.optionalKey(Schema.Array(Schema.String)),
+  exchanges: Schema.optionalKey(Schema.Array(Schema.Struct({
+    id: Schema.String,
+    startedDateTime: Schema.String,
+    durationMs: Schema.Number,
+    request: Schema.Struct({
+      method: Schema.String,
+      url: Schema.String,
+      headers: Schema.Array(Schema.Struct({ name: Schema.String, value: Schema.String })),
+      resourceType: Schema.String,
+      body: Schema.optionalKey(Schema.Struct({
+        size: Schema.Number,
+        mimeType: Schema.String,
+        text: Schema.optionalKey(Schema.String),
+        truncated: Schema.Boolean,
+      })),
+      redirectedFrom: Schema.optionalKey(Schema.String),
+    }),
+    response: Schema.optionalKey(Schema.Struct({
+      status: Schema.Number,
+      statusText: Schema.String,
+      headers: Schema.Array(Schema.Struct({ name: Schema.String, value: Schema.String })),
+      body: Schema.optionalKey(Schema.Struct({
+        size: Schema.Number,
+        mimeType: Schema.String,
+        text: Schema.optionalKey(Schema.String),
+        truncated: Schema.Boolean,
+      })),
+    })),
+    failure: Schema.optionalKey(Schema.String),
   }))),
   cancelled: Schema.optionalKey(Schema.Boolean),
 })
@@ -154,7 +172,6 @@ export const RecordingToolOutput = Schema.Struct({
   startedAt: Schema.optionalKey(Schema.Number),
   path: Schema.optionalKey(Schema.String),
   mimeType: Schema.optionalKey(Schema.String),
-  mode: Schema.optionalKey(Schema.Literals(["tab-capture", "cdp"])),
   artifactType: Schema.optionalKey(Schema.Literals(["webm", "mp4"])),
   frameRate: Schema.optionalKey(Schema.Number),
   duration: Schema.optionalKey(Schema.Number),
@@ -163,28 +180,6 @@ export const RecordingToolOutput = Schema.Struct({
   quality: Schema.optionalKey(RecordingQuality),
   isRecording: Schema.optionalKey(Schema.Boolean),
   error: Schema.optionalKey(Schema.String),
-})
-
-/** The result of any `flight_recorder` action, with action-specific fields optional. */
-export const FlightRecorderToolOutput = Schema.Struct({
-  action: Schema.Literals(["start", "status", "save_last", "cancel"]),
-  session: Schema.String,
-  active: Schema.optionalKey(Schema.Boolean),
-  tabId: Schema.optionalKey(Schema.Number),
-  sessionId: Schema.optionalKey(Schema.String),
-  startedAt: Schema.optionalKey(Schema.Number),
-  retentionMs: Schema.optionalKey(Schema.Number),
-  retainedDurationMs: Schema.optionalKey(Schema.Number),
-  frameRate: Schema.optionalKey(Schema.Number),
-  bufferedFrames: Schema.optionalKey(Schema.Number),
-  bufferedBytes: Schema.optionalKey(Schema.Number),
-  sourceFrameCount: Schema.optionalKey(Schema.Number),
-  droppedFrameCount: Schema.optionalKey(Schema.Number),
-  saving: Schema.optionalKey(Schema.Boolean),
-  path: Schema.optionalKey(Schema.String),
-  durationMs: Schema.optionalKey(Schema.Number),
-  frameCount: Schema.optionalKey(Schema.Number),
-  cancelled: Schema.optionalKey(Schema.Boolean),
 })
 
 /** Settings the MCP tool may read and change. Update behaviour is the user's to set, never an agent's. */

@@ -35,7 +35,6 @@ import {
   parseJsonObject,
   type JsonObject,
 } from "../protocol.ts"
-import { decodeRecordingFrame, encodeRecordingFrame } from "../recording-relay/protocol.ts"
 import { isLocalPeer } from "./config.ts"
 import { getObject, getString, headerValue, stableUnpackedExtensionOrigin } from "./helpers.ts"
 import { relayLog } from "./log.ts"
@@ -44,7 +43,7 @@ import { secretsEqual } from "./secrets.ts"
 import type { OpenCodeBrowserSession } from "./types.ts"
 import type { TargetRegistry } from "../cdp/target-registry.ts"
 import { opencodeBrowserBuildId } from "../version.ts"
-import { rawDataToBuffer, relayProcessFaultSummary } from "./process-guard.ts"
+import { relayProcessFaultSummary } from "./process-guard.ts"
 
 /** Before pairing a socket may only send its small handshake; after pairing the ws server's 256 MiB limit applies. */
 export const maxPreAuthMessageBytes = 64 * 1024
@@ -201,7 +200,6 @@ export class ExtensionHandshake {
     socket: WebSocket,
     request: http.IncomingMessage,
     handlers: {
-      readonly onRecordingBinary: (frame: Buffer) => void
       readonly onMessage: (link: BrowserLink, raw: string) => void
     },
   ): void {
@@ -219,15 +217,7 @@ export class ExtensionHandshake {
     handshakeTimer.unref()
     const handle = (data: RawData, isBinary: boolean) => {
       if (!link || browsers.ofSocket(socket) !== link || !link.rpc.acceptsEvents) return
-      if (isBinary) {
-        try {
-          const frame = decodeRecordingFrame(rawDataToBuffer(data))
-          handlers.onRecordingBinary(Buffer.from(encodeRecordingFrame({ ...frame, tabId: browsers.relayTabId(link, frame.tabId) })))
-        } catch {
-          socket.close(1002, "Invalid recording frame")
-        }
-        return
-      }
+      if (isBinary) return
       handlers.onMessage(link, data.toString())
     }
     let challenge: Challenge | undefined

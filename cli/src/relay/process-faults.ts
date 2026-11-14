@@ -3,7 +3,7 @@ import { appendManagedRelayProcessLog, relayLog } from "./log.ts"
 
 export type RelayProcessFaultKind = "uncaughtException" | "unhandledRejection"
 
-/** Playwright dispatch faults and unhandled rejections the relay contained to stay alive; reported by `status` and `doctor`. */
+/** Playwright dispatch faults and unhandled rejections the relay contained to stay alive; reported by `status`. */
 const suppressedProcessFaults: { count: number; lastAt?: string; lastMessage?: string } = { count: 0 }
 
 export function relayProcessFaultSummary(): { readonly suppressed: number; readonly lastAt?: string; readonly lastMessage?: string } {
@@ -43,7 +43,7 @@ export function isBenignClosedSessionRejection(cause: unknown): boolean {
 }
 
 const benignRejections = { count: 0, logged: 0, lastLogAt: 0 }
-// Unattributed rejections are logged at most once a minute, or immediately when the message changes; status/doctor
+// Unattributed rejections are logged at most once a minute, or immediately when the message changes; status
 // still see every one through suppressedProcessFaults. The reason may be a sandbox value, so the log never includes it.
 const unattributedRejections: { count: number; logged: number; lastLogAt: number; lastMessage?: string } = { count: 0, logged: 0, lastLogAt: 0 }
 
@@ -73,7 +73,7 @@ export function handleRelayProcessFault(
   }
   // A rejection nobody handled may still be execute code's: a promise created after its call returned, by a helper's
   // fire-and-forget chain, or by full Node execute code in a callback the execute scope no longer covers. Taking the
-  // relay down loses every session and tab, so it is logged and counted; `browse status` / `doctor` report it.
+  // relay down loses every session and tab, so it is logged and counted; `browse status` reports it.
   // Synchronous programming faults (uncaughtException) still stop the relay below.
   if (kind === "unhandledRejection") {
     const description = safeErrorMessage(cause)

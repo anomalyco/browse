@@ -3,28 +3,11 @@ import { spawnSync } from "node:child_process"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { FlightRecorderRelay } from "../src/recording-relay/flight-recorder.ts"
 import { makePageStatus } from "../src/protocol.ts"
-import { RecordingRelay, type SendDebuggerCommand } from "../src/recording-relay.ts"
+import { findByRecordingTarget, RecordingRelay, type SendDebuggerCommand } from "../src/recording-relay.ts"
 
-// Recordings show only the page: no ghost cursor unless asked for, and the relay hears about a recording before
-// capture starts so it can take the handoff card away first.
-
-function flightRecorder(events: string[]) {
-  const send: SendDebuggerCommand = async ({ method }) => {
-    events.push(method)
-    return method === "Page.getLayoutMetrics" ? { cssVisualViewport: { clientWidth: 800, clientHeight: 600 } } : {}
-  }
-  let recorder: FlightRecorderRelay
-  recorder = new FlightRecorderRelay({
-    sendDebuggerCommand: send,
-    isExtensionConnected: () => true,
-    onTabRecordingChanged: (tabId) => {
-      events.push(`changed:${tabId}:${recorder.isActiveTab(tabId)}`)
-    },
-  })
-  return recorder
-}
+// Recordings show only the page: the relay hears about a recording before capture starts so it can take the handoff
+// card away first.
 
 describe("clean recordings", () => {
   test("an extension disconnect drains a pending frame before cancelling ffmpeg", async () => {
@@ -33,17 +16,17 @@ describe("clean recordings", () => {
     const events: string[] = []
     let time = 0
     const relay = new RecordingRelay({
-      sendToExtension: async () => ({}), sendDebuggerCommand: async () => ({}), isExtensionConnected: () => true,
+      sendDebuggerCommand: async () => ({}), isExtensionConnected: () => true,
       monotonicNow: () => time,
       startVideoEncoder: async () => ({
         write: async () => { writing.resolve(); await release.promise; events.push("wrote") },
         cancel: async () => { events.push("cancelled") }, finish: async () => {},
       }),
     })
-    expect((await relay.startRecording({ tabId: 1, owner: "relay", mode: "cdp", outputPath: path.join(os.tmpdir(), "unused.webm") })).success).toBe(true)
+    expect((await relay.startRecording({ tabId: 1, outputPath: path.join(os.tmpdir(), "unused.webm") })).success).toBe(true)
     for (time of [0, 100]) relay.handleDebuggerEvent({ tabId: 1, method: "Page.screencastFrame", params: { data: "AA==", sessionId: 1 } })
     await writing.promise
-    const cleanup = relay.abortRecordingForTab({ tabId: 1, reason: "Browser disconnected" })
+    const cleanup = relay.abortRecordingForTab(1)
     release.resolve()
     await cleanup
     expect(events).toEqual(["wrote", "cancelled"])
@@ -69,31 +52,33 @@ describe("clean recordings", () => {
     } finally { await fs.rm(dir, { force: true, recursive: true }) }
   })
 
-  test("the flight recorder shows no ghost cursor by default", async () => {
-    const events: string[] = []
-    const recorder = flightRecorder(events)
-    await recorder.start({ tabId: 3 })
-    expect(recorder.isActiveTab(3)).toBe(true)
-    expect(recorder.showsGhostCursor(3)).toBe(false)
-    await recorder.cancel({ tabId: 3 })
-  })
-
-  test("cursor: true shows it while the recorder runs", async () => {
-    const recorder = flightRecorder([])
-    await recorder.start({ tabId: 4, cursor: true })
-    expect(recorder.showsGhostCursor(4)).toBe(true)
-    await recorder.cancel({ tabId: 4 })
-    expect(recorder.showsGhostCursor(4)).toBe(false)
-  })
-
   test("the relay hears about the recording before capture starts, and after it ends", async () => {
     const events: string[] = []
-    const recorder = flightRecorder(events)
-    await recorder.start({ tabId: 5 })
+    const send: SendDebuggerCommand = async ({ method }) => {
+      events.push(method)
+      return {}
+    }
+    let recorder: RecordingRelay
+    recorder = new RecordingRelay({
+      sendDebuggerCommand: send,
+      isExtensionConnected: () => true,
+      onTabRecordingChanged: (tabId) => {
+        events.push(`changed:${tabId}:${recorder.isRecordingTab(tabId)}`)
+      },
+    })
+    await recorder.startRecording({ tabId: 5, outputPath: path.join(os.tmpdir(), "unused.webm") })
     expect(events.indexOf("changed:5:true")).toBeGreaterThanOrEqual(0)
     expect(events.indexOf("changed:5:true")).toBeLessThan(events.indexOf("Page.startScreencast"))
-    await recorder.cancel({ tabId: 5 })
+    await recorder.cancelRecording({ tabId: 5 })
     expect(events).toContain("changed:5:false")
+  })
+
+  test("a target without a selector is ambiguous when several recordings exist", () => {
+    const recordings = new Map([[1, { sessionId: "a" }], [2, { sessionId: "b" }]])
+    expect(() => findByRecordingTarget(recordings, {}, "Multiple active recordings; provide sessionId or tabId"))
+      .toThrow("Multiple active recordings")
+    expect(findByRecordingTarget(recordings, { sessionId: "b" }, "unused")?.sessionId).toBe("b")
+    expect(findByRecordingTarget(recordings, { tabId: 1 }, "unused")?.sessionId).toBe("a")
   })
 
   test("page statuses carry the recording flag the extension hides the card for", () => {

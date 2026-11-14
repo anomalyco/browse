@@ -131,7 +131,7 @@ describe("MCP protocol versions", () => {
           const init = await mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } })
           expect(init.result?.capabilities).toHaveProperty("tools")
           mcp.notify("notifications/initialized")
-          expect((await mcp.request("tools/list")).result?.tools).toHaveLength(14)
+          expect((await mcp.request("tools/list")).result?.tools).toHaveLength(13)
         } finally { mcp.close() }
       }
     } finally {

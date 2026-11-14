@@ -1,4 +1,3 @@
-import path from "node:path"
 import { Effect, Semaphore } from "effect"
 import type { Page, Request, Response } from "patchright-core"
 import type { ExecuteAftermath, ExecuteLogEntry } from "./relay/schema.ts"
@@ -15,8 +14,11 @@ import {
   safeValue,
   settleFinalizers,
   truncatedBody,
-} from "./network-capture/har-redaction.ts"
+} from "./network-capture/capture.ts"
 import {
+  defaultMaxBodyBytes,
+  defaultMaxEntries,
+  defaultMaxTotalBodyBytes,
   defaultNetworkCaptureMaxDurationMs,
   formatDuration,
   matches,
@@ -28,8 +30,8 @@ import {
   type CapturedEntry,
   type NetworkCaptureOptions,
   type NetworkCaptureResult,
+  type NetworkCaptureStartOptions,
   type NetworkCaptureStatus,
-  type NetworkCaptureStopOptions,
   type PendingEntry,
 } from "./network-capture/types.ts"
 import { SecretRedactor } from "./network-capture/redaction.ts"
@@ -40,7 +42,6 @@ export {
   type NetworkCaptureOptions,
   type NetworkCaptureResult,
   type NetworkCaptureStatus,
-  type NetworkCaptureStopOptions,
 } from "./network-capture/types.ts"
 
 export class Recorder {
@@ -56,7 +57,7 @@ export class Recorder {
     readonly outputSettleTimeoutMs?: number
   } = {}) {}
 
-  start(page: Page, options: NetworkCaptureOptions = {}): Effect.Effect<NetworkCaptureStatus, NetworkCaptureError> {
+  start(page: Page, options: NetworkCaptureStartOptions = {}): Effect.Effect<NetworkCaptureStatus, NetworkCaptureError> {
     const capture = this
     return this.transition.withPermit(Effect.try({
       try: () => {
@@ -69,11 +70,10 @@ export class Recorder {
         capture.active = {
           startedAt: new Date().toISOString(),
           options: {
-            ...options,
-            content: options.content ?? "embed",
-            maxBodyBytes: options.maxBodyBytes ?? 1_000_000,
-            maxTotalBodyBytes: options.maxTotalBodyBytes ?? 25_000_000,
-            maxEntries: options.maxEntries ?? 1_000,
+            ...(options.urlFilter ? { urlFilter: options.urlFilter } : {}),
+            maxBodyBytes: defaultMaxBodyBytes,
+            maxTotalBodyBytes: defaultMaxTotalBodyBytes,
+            maxEntries: defaultMaxEntries,
           },
           pending: new Map(),
           entries: [],
@@ -136,8 +136,6 @@ export class Recorder {
       truncatedBodyCount: active.truncatedBodyCount,
       droppedEntryCount: active.droppedEntryCount,
       ...(active.options.urlFilter ? { urlFilter: active.options.urlFilter } : {}),
-      ...(active.options.resourceTypes ? { resourceTypes: [...active.options.resourceTypes] } : {}),
-      content: active.options.content,
       ...(active.endsAt ? { endsAt: active.endsAt } : {}),
     }
   }
@@ -149,7 +147,7 @@ export class Recorder {
     })))
   }
 
-  stop(options: NetworkCaptureStopOptions = {}): Effect.Effect<NetworkCaptureResult, NetworkCaptureError> {
+  stop(): Effect.Effect<NetworkCaptureResult, NetworkCaptureError> {
     const capture = this
     return this.transition.withPermit(Effect.gen(function* () {
       const active = capture.active
@@ -179,7 +177,7 @@ export class Recorder {
           capture.discardFinalizers(active)
         }
 
-        const finished = yield* finishCapture(active, options)
+        const finished = finishCapture(active)
         const { endsAt: _endsAt, ...finalStatus } = capture.status()
         capture.active = undefined
         clearTimeout(capture.expiry)
@@ -188,8 +186,7 @@ export class Recorder {
           truncatedBodyCount: finalStatus.truncatedBodyCount + finished.redactionOmissionCount,
           active: false as const,
           stoppedAt: new Date().toISOString(),
-          ...(options.outputPath ? { outputPath: path.resolve(options.outputPath) } : {}),
-          ...(finished.endpoints.length > 0 ? { endpoints: finished.endpoints } : {}),
+          exchanges: finished.exchanges,
         }
       }).pipe(
         Effect.tapError(() => Effect.sync(() => {
@@ -359,14 +356,14 @@ export class Recorder {
       const requestMayHaveBody = requestSize !== undefined
         ? requestSize > 0
         : contentType(requestHeaders) !== undefined && !/^(GET|HEAD)$/i.test(request.method())
-      const requestBody = active.options.content === "embed" && requestMayHaveBody
+      const requestBody = requestMayHaveBody
         ? bodyCanFit(requestHeaders, requestLimit)
           ? captureBuffer(request.postDataBuffer(), contentType(requestHeaders), active)
           : truncatedBody(contentType(requestHeaders), active, requestSize ?? 0)
         : undefined
       const response = pending.response
       const responseHeaders = response ? await safeHeaders(() => response.headersArray()) : []
-      const shouldCaptureResponseBody = response && active.options.content === "embed"
+      const shouldCaptureResponseBody = response
       const hasBodyBudget = active.capturedBodyBytes < active.options.maxTotalBodyBytes
       let responseBody: CapturedBody | undefined
       if (shouldCaptureResponseBody) {

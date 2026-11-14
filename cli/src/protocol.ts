@@ -141,10 +141,6 @@ const extensionCommandMethodValues = [
   "pageStatus.set",
   "pageStatus.clear",
   "runtime.reload",
-  "recording.start",
-  "recording.stop",
-  "recording.status",
-  "recording.cancel",
   "tabs.cleanup",
   "update.notice",
   "relay.settings",
@@ -167,7 +163,6 @@ const extensionEventMethodValues = [
   "tabs.opened",
   "pong",
   "log",
-  "recording.cancelled",
   "pageStatus.requested",
   "settings",
 ] as const

@@ -1,8 +1,8 @@
 // The settings page (settings.html, the extension's options page). One card: the connection's state at the top, then a
-// row per setting (this browser's name, where agent tabs open and how they're grouped and closed, the agent cursor,
-// human-like input and handoff notifications, updates), then an Advanced section for the relay's address and pairing
+// row per setting (this browser's name, where agent tabs open and how they're grouped and closed, human-like
+// input and handoff notifications, updates), then an Advanced section for the relay's address and pairing
 // code, reconnect and diagnostics. Each row is a chrome.storage.local key the background reads when it needs it (or
-// sends to the relay, for the cursor and input); a setting the relay's environment fixes is shown as such.
+// sends to the relay, for input); a setting the relay's environment fixes is shown as such.
 import { createSignal, Show, type JSX } from "solid-js"
 import { render } from "solid-js/web"
 import { Button } from "@opencode/ui/button"
@@ -12,7 +12,6 @@ import { Switch } from "@opencode/ui/switch"
 import { TextInput } from "@opencode/ui/text-input"
 import { showToast, Toast } from "@opencode/ui/toast"
 import {
-  AGENT_CURSOR_KEY,
   AGENT_DIAGNOSTICS,
   AGENT_GROUPING_KEY,
   AGENT_WINDOW_KEY,
@@ -20,7 +19,6 @@ import {
   HANDOFF_NOTIFICATIONS_KEY,
   HUMAN_INPUT_KEY,
   IDLE_MINUTES_KEY,
-  agentCursor,
   agentGrouping,
   agentWindowPlacement,
   cliUpdateNotice,
@@ -48,7 +46,6 @@ function Settings() {
   const [agentWindow, setAgentWindow] = createStored(AGENT_WINDOW_KEY, agentWindowPlacement)
   const [grouping, setGrouping] = createStored(AGENT_GROUPING_KEY, agentGrouping)
   const [idle, setIdle] = createStored(IDLE_MINUTES_KEY, idleMinutesSetting)
-  const [cursor, setCursor] = createStored(AGENT_CURSOR_KEY, agentCursor)
   const [human, setHuman] = createStored(HUMAN_INPUT_KEY, humanInput)
   const [notifications, setNotifications] = createStored(HANDOFF_NOTIFICATIONS_KEY, handoffNotifications)
   const [storedName] = createStored(BROWSER_NAME_KEY, (value) => (typeof value === "string" ? value : ""))
@@ -196,15 +193,6 @@ function Settings() {
         </Section>
 
         <Section title="agent input">
-          <Row
-            label="Show the agent cursor"
-            description="Pages can see the cursor while it's shown. Recordings leave it out unless the agent asks for it."
-          >
-            <Switch hideLabel checked={cursor() === "always"} onChange={(on) => setCursor(on ? "always" : "off")}>
-              Show the agent cursor
-            </Switch>
-          </Row>
-          <Override overrides={state()?.overrides} setting="cursor" />
           <Row
             label="Human-like input"
             description="Curved mouse paths, paced typing and scrolling. Off is faster, but easier for sites to flag as a bot."
@@ -393,7 +381,6 @@ const primaryAction = (state: AgentRelayState | undefined) =>
 // A setting the relay's environment fixes wins over the page's; say so, with the value in effect.
 const overrideNotes: { [Key in keyof RelayOverrides]-?: { variable: string; labels: Record<NonNullable<RelayOverrides[Key]>, string> } } = {
   agentWindow: { variable: "OPENCODE_BROWSER_AGENT_WINDOW", labels: { current: "in your window", separate: "in a separate window" } },
-  cursor: { variable: "OPENCODE_BROWSER_GHOST_CURSOR", labels: { off: "off", always: "always shown" } },
   humanInput: { variable: "OPENCODE_BROWSER_HUMAN_INPUT", labels: { on: "on", off: "off" } },
 }
 function Override(props: { overrides: RelayOverrides | undefined; setting: keyof RelayOverrides }) {
