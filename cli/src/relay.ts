@@ -177,9 +177,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     sendEvent: sendCdpEvent,
     ...(contextDebugLog ? { trace: contextDebugLog } : {}),
   })
+  // Assigned once housekeeping exists (below). A tab's last Fetch-interception owner going away releases it.
+  let releaseIdleInterception: (tabId: number) => void = () => undefined
+  const pendingInterceptionReleases = new Set<number>()
+  let interceptionReleaseScheduled = false
   const cdpClients = new CdpClientPool<WebSocket>(
     (client, event) => cdpRuntime.deliver(client, event),
     (client, sessionId) => cdpRuntime.detach(client, sessionId),
+    (tabId) => releaseIdleInterception(tabId),
   )
 
   const mainFrameIdsByTab = new Map<number, string>()
@@ -525,6 +530,34 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   })
   const { shutdown: shutdownControl, updates, sendUpdateNotice, releaseRelayTarget, browserIdle, startTimers, stopTimers } = housekeeping
 
+  releaseIdleInterception = (tabId) => {
+    // Shutdown releases every tab from cleanup() while the extension link is still open, and the unregister that
+    // dropped this owner happened while stopping: don't start a second release the cleanup cannot wait for.
+    if (shutdownControl.stopping) return
+    pendingInterceptionReleases.add(tabId)
+    if (interceptionReleaseScheduled) return
+    interceptionReleaseScheduled = true
+    // A client can lose several tabs at once (closing it, or pruning its announcements); release them as one batch so
+    // the runtime's small concurrency limit covers all of them and each command stays bounded.
+    queueMicrotask(() => {
+      interceptionReleaseScheduled = false
+      if (shutdownControl.stopping) {
+        pendingInterceptionReleases.clear()
+        return
+      }
+      const tabs = Array.from(pendingInterceptionReleases).filter((id) => !cdpClients.hasInterceptionOwners(id))
+      pendingInterceptionReleases.clear()
+      if (tabs.length === 0) return
+      // The per-command bound is 3 seconds; the whole release must finish well inside the 10 second restart drain.
+      Effect.runPromise(shutdownControl.trackTransport(cdpRuntime.releaseInterception(
+        tabs,
+        (id) => !cdpClients.hasInterceptionOwners(id),
+      ).pipe(Effect.timeoutOption("3 seconds"), Effect.ignore))).catch((error: unknown) => {
+        console.error("Failed to release request interception", error)
+      })
+    })
+  }
+
   const toggleTab = Effect.fnUntraced(function* (tabId: number) {
     if (registry.tabTargets.has(tabId)) return yield* detachTab(tabId)
     announceTab(tabId)
@@ -819,6 +852,13 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         waitedMs: defaultShutdownTimeoutMs,
       }),
     })
+    // A relay restart keeps the extension's debugger attachments, and Patchright enables Fetch on every page it
+    // attaches to. Release every tab while the extension link is still open: the per-owner release was skipped while
+    // stopping, and this one is bounded and concurrent before rootLifecycle.close() and the link close below.
+    yield* cdpRuntime.releaseInterception(
+      registry.listRootTargets().map((target) => target.tabId),
+      () => true,
+    ).pipe(Effect.timeoutOption("5 seconds"), Effect.ignore)
     yield* rootLifecycle.close()
     if (managed) {
       yield* audit(RelayLifecycleEvent.cases.Closed.make({ instanceId: browserId })).pipe(
