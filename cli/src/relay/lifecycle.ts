@@ -124,7 +124,7 @@ export const ensureRelay = Effect.fn("RelayLifecycle.ensureRelay")(function* (op
     } satisfies RelayReadiness
   }
   const relayWasAbsent = isRelayUnreachable(initial.failure) || isForeignListener(initial.failure, options.pinned)
-  if (!relayWasAbsent && !isRelayStarting(initial.failure)) {
+  if (!relayWasAbsent && !isRelayStarting(initial.failure) && !relayDraining(initial.failure)) {
     return yield* initial.failure
   }
 
@@ -146,7 +146,8 @@ export const ensureRelay = Effect.fn("RelayLifecycle.ensureRelay")(function* (op
 })
 
 function waitForRelayReady(options: EnsureRelayOptions): Effect.Effect<RelayVersion, Error | RelayClient.RelayClientError> {
-  const retry = (error: unknown) => isRelayStartingOrUnreachable(error) || isForeignListener(error, options.pinned)
+  const retry = (error: unknown) =>
+    isRelayStartingOrUnreachable(error) || isForeignListener(error, options.pinned) || relayDraining(error)
   return options.relay.version.pipe(
     Effect.retry({
       times: options.retryTimes ?? 200,
@@ -185,8 +186,12 @@ export const restartRelay = Effect.fn("RelayLifecycle.restartRelay")(function* (
     original = initial.success
   } else if (isRelayStarting(initial.failure)) {
     original = yield* waitForRelayReady(options)
-  } else if (!absent(initial.failure)) {
-    return yield* initial.failure
+  } else {
+    // Another process may already be draining the relay: wait for its exit or replacement rather than treating a cut
+    // /version as a foreign listener while relay.json still names a live process.
+    const recorded = relayDraining(initial.failure) ? liveRelayInstanceId() : undefined
+    if (recorded !== undefined) replacement = yield* waitForRelayExitOrReplacement({ ...options, instanceId: recorded })
+    else if (!absent(initial.failure)) return yield* initial.failure
   }
 
   if (original) {
@@ -205,7 +210,9 @@ export const restartRelay = Effect.fn("RelayLifecycle.restartRelay")(function* (
 
     const confirmed = yield* Effect.result(options.relay.version)
     if (Result.isFailure(confirmed)) {
-      if (!absent(confirmed.failure)) return yield* confirmed.failure
+      const recorded = relayDraining(confirmed.failure) ? liveRelayInstanceId() : undefined
+      if (recorded !== undefined) replacement = yield* waitForRelayExitOrReplacement({ ...options, instanceId: recorded })
+      else if (!absent(confirmed.failure)) return yield* confirmed.failure
     } else if (!isSameRelayInstance(original, confirmed.success)) {
       replacement = confirmed.success
     } else {
@@ -227,7 +234,7 @@ export const restartRelay = Effect.fn("RelayLifecycle.restartRelay")(function* (
       else if (!isRelayUnreachable(shutdown.failure) && !isRelayInstanceChanged(shutdown.failure)) {
         return yield* shutdown.failure
       }
-      replacement = yield* waitForRelayExitOrReplacement({ ...options, version: original })
+      replacement = yield* waitForRelayExitOrReplacement({ ...options, instanceId: original.instanceId })
     }
   }
 
@@ -246,21 +253,15 @@ export const restartRelay = Effect.fn("RelayLifecycle.restartRelay")(function* (
 
 function waitForRelayExitOrReplacement(options: {
   readonly relay: RelayClient.Interface
-  readonly version: RelayVersion
+  readonly instanceId: string
   readonly retryTimes?: number
   readonly retryDelayMs?: number
   readonly pinned?: boolean
 }): Effect.Effect<RelayVersion | undefined, Error | RelayClient.RelayClientError> {
   /** relay.json still names the relay being replaced, and its process is alive: it hasn't finished draining. */
-  const stillRecorded = () => {
-    const state = readRelayState()
-    return state !== undefined &&
-      state.configuredPort === configuredRelayPort() &&
-      state.instanceId === options.version.instanceId &&
-      processAlive(state.pid)
-  }
+  const stillRecorded = () => relayRecorded(options.instanceId)
   return options.relay.version.pipe(
-    Effect.flatMap((version) => isSameRelayInstance(options.version, version)
+    Effect.flatMap((version) => version.instanceId !== undefined && version.instanceId === options.instanceId
       ? Effect.fail(new RelayStillRunning("browse relay is still draining; no replacement was started"))
       : Effect.succeed(version)),
     // A foreign listener appears at the endpoint the moment the draining relay stops answering on this port but before
@@ -270,7 +271,7 @@ function waitForRelayExitOrReplacement(options: {
     Effect.catch((error) => {
       if (isRelayUnreachable(error)) return Effect.succeed(undefined)
       const foreign = isForeignListener(error, options.pinned)
-      if ((foreign || error instanceof RelayClient.RelayDecodeFailed) && stillRecorded()) {
+      if (error instanceof RelayClient.RelayDecodeFailed && stillRecorded()) {
         return Effect.fail(new RelayStillRunning("browse relay is still draining; no replacement was started"))
       }
       return foreign ? Effect.succeed(undefined) : Effect.fail(error)
@@ -477,6 +478,28 @@ function isRelayStarting(error: unknown): error is RelayClient.RelayRejected {
 
 function isRelayStartingOrUnreachable(error: unknown): error is RelayClient.RelayRejected | RelayClient.RelayUnreachable {
   return isRelayStarting(error) || isRelayUnreachable(error)
+}
+
+/** The instance relay.json names for this install while its process is alive. */
+function liveRelayInstanceId(): string | undefined {
+  const state = readRelayState()
+  return state !== undefined && state.configuredPort === configuredRelayPort() && processAlive(state.pid)
+    ? state.instanceId
+    : undefined
+}
+
+/** Whether relay.json names this install's live relay, a specific instance when given. */
+function relayRecorded(instanceId?: string): boolean {
+  const live = liveRelayInstanceId()
+  return live !== undefined && (instanceId === undefined || live === instanceId)
+}
+
+/**
+ * A /version that failed while relay.json still names a live relay: that relay is starting or draining, not a foreign
+ * program, and a pinned port must wait for it rather than refuse.
+ */
+function relayDraining(error: unknown): boolean {
+  return error instanceof RelayClient.RelayDecodeFailed && relayRecorded()
 }
 
 /**

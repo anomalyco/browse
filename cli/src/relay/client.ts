@@ -222,8 +222,8 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
       }),
     )
 
-  const transportError = (path: string) => (cause: unknown) => {
-    const endpoint = currentEndpoint()
+  const transportError = (path: string, at?: string) => (cause: unknown) => {
+    const endpoint = at ?? currentEndpoint()
     return new RelayUnreachable({
       message: `browse relay is not reachable at ${endpoint}. Relay-backed CLI commands start it automatically; use \`${cliCommand("serve")}\` only for foreground debugging.`,
       endpoint,
@@ -258,9 +258,9 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
   let relayAnswered = false
   // The open version probe never carries the relay token (or this client's pid): another program holding the port
   // must not receive either. See `version` and the fallback probe in relay/port.ts.
-  const executeUnauthorized = (path: string, request: HttpClientRequest.HttpClientRequest) =>
+  const executeUnauthorized = (path: string, request: HttpClientRequest.HttpClientRequest, at?: string) =>
     httpClient.execute(request).pipe(
-      Effect.mapError(transportError(path)),
+      Effect.mapError(transportError(path, at)),
       Effect.tap(() => Effect.sync(() => { relayAnswered = true })),
     )
 
@@ -275,15 +275,6 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
   const notBrowse = (endpoint: string, cause: unknown) =>
     new RelayDecodeFailed({
       message: `Relay port ${new URL(endpoint).port} is in use by another program (not a browse /version response).`,
-      path: "/version",
-      cause,
-    })
-
-  /** The live relay record this probe started under is gone: the relay left mid-probe, it isn't a foreign listener. */
-  const relayLeaving = (endpoint: string, cause: unknown) =>
-    new RelayUnreachable({
-      message: `browse relay is not reachable at ${endpoint}. Relay-backed CLI commands start it automatically; use \`${cliCommand("serve")}\` only for foreground debugging.`,
-      endpoint,
       path: "/version",
       cause,
     })
@@ -311,8 +302,12 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
   ): Effect.Effect<VerifiedEndpoint, RelayClientError> =>
     Effect.suspend(() => {
       const seconds = relayAnswered ? busyRelayReadSeconds : unknownRelayReadSeconds
-      return executeUnauthorized("/version", HttpClientRequest.get(new URL("/version", endpoint))).pipe(
-        Effect.flatMap((response) => readBody(response, "/version").pipe(Effect.map((body) => ({ response, body })))),
+      return executeUnauthorized("/version", HttpClientRequest.get(new URL("/version", endpoint)), endpoint).pipe(
+        Effect.flatMap((response) => readBody(response, "/version").pipe(
+          // A draining relay can cut this body as it stops; with its relay.json gone, this is that relay leaving.
+          Effect.mapError((error) => state !== undefined && liveRelayState() === undefined ? transportError("/version", endpoint)(error) : error),
+          Effect.map((body) => ({ response, body })),
+        )),
         Effect.flatMap(({ response, body }): Effect.Effect<VerifiedEndpoint, RelayClientError> => {
           const reply = typeof body === "object" && body !== null ? body as Record<string, unknown> : undefined
           // A relay that is still starting answers 503 like handleResponse does, not as another program.
@@ -332,6 +327,7 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
           ) return Effect.fail(notBrowse(endpoint, body))
           // A live relay.json for this install is authoritative: the verified port and instance must be exactly its.
           const after = liveRelayState()
+          if (state !== undefined && after === undefined) return Effect.fail(transportError("/version", endpoint)(body))
           if (state !== undefined && !sameLiveState(state, after)) return Effect.fail(notBrowse(endpoint, body))
           if (after !== undefined && (after.port !== Number(new URL(endpoint).port) || after.instanceId !== reply.instanceId))
             return Effect.fail(notBrowse(endpoint, body))
@@ -454,14 +450,27 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
     },
     version: Effect.suspend(() => {
       const state = liveRelayState()
-      return requestJson("/version", RelayVersion).pipe(
+      const probed = currentEndpoint()
+      // Map transport/decode/404 failures only: a parsed body without instanceId or with a mismatched instance below is
+      // another program, whatever relay.json did.
+      const probe = requestJson("/version", RelayVersion).pipe(
+        Effect.mapError((error) => {
+          if (!(error instanceof RelayDecodeFailed || (error instanceof RelayRejected && !error.code && error.status === 404))) return error
+          // A draining relay can cut this response as it stops; if its relay.json went with it, this is that relay
+          // leaving, not another program holding the port.
+          return state !== undefined && liveRelayState() === undefined
+            ? transportError("/version", probed)(error)
+            : notBrowse(probed, error)
+        }),
+      )
+      return probe.pipe(
         // Another product on the port (Playwriter answers `{ version }` alone): without browse's instanceId this is not
         // a browse relay, and must never be mistaken for one. Same path as any other foreign listener.
         Effect.flatMap(({ value: version, endpoint }): Effect.Effect<RelayVersion, RelayClientError> => {
           const instanceId = version.instanceId
           if (typeof instanceId !== "string") return Effect.fail(notBrowse(endpoint, version))
           const after = liveRelayState()
-          if (state !== undefined && after === undefined) return Effect.fail(relayLeaving(endpoint, version))
+          if (state !== undefined && after === undefined) return Effect.fail(transportError("/version", endpoint)(version))
           if (state !== undefined && !sameLiveState(state, after)) return Effect.fail(notBrowse(endpoint, version))
           if (after !== undefined && (after.port !== Number(new URL(endpoint).port) || after.instanceId !== instanceId))
             return Effect.fail(notBrowse(endpoint, version))
@@ -471,15 +480,6 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
             verified = { endpoint, instanceId, recorded: after?.instanceId }
             return version
           })
-        }),
-        Effect.mapError((error) => {
-          if (!(error instanceof RelayDecodeFailed || (error instanceof RelayRejected && !error.code && error.status === 404))) return error
-          const endpoint = currentEndpoint()
-          // A draining relay can cut this response as it stops; if its relay.json went with it, this is that relay
-          // leaving, not another program holding the port.
-          return state !== undefined && liveRelayState() === undefined
-            ? relayLeaving(endpoint, error)
-            : notBrowse(endpoint, error)
         }),
       )
     }),
