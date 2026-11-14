@@ -5,7 +5,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { terminateChildProcess } from "../update/child-process.ts"
 import { isNodeError, writeJsonFileAtomically } from "../fs-durability.ts"
-import { redactKnownValues, type CredentialSlot } from "../network-capture/redaction.ts"
+import { cleanCredentialSlots, highestSecretRef, redactOutputText, type CredentialSlot } from "../network-capture/redaction.ts"
 
 const StoredCredentialSlot = Schema.Struct({
   ref: Schema.String.check(Schema.isPattern(/^BC_SECRET_[1-9][0-9]*$/)),
@@ -20,6 +20,8 @@ const StoredAuthProfile = Schema.Struct({
   createdAt: Schema.String,
   updatedAt: Schema.String,
   slots: Schema.Array(StoredCredentialSlot),
+  // High-water mark for BC_SECRET_N refs. Optional so profiles written by older builds still read.
+  nextRef: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))),
 }).check(Schema.makeFilter((profile) => {
   const refs = profile.slots.map((slot) => slot.ref)
   if (new Set(refs).size !== refs.length) return "Auth profile refs must be unique"
@@ -28,6 +30,11 @@ const StoredAuthProfile = Schema.Struct({
 }))
 
 interface AuthProfile extends Schema.Schema.Type<typeof StoredAuthProfile> {}
+
+/** Never hand out a ref this profile has used, even when the slot that held it was dropped. */
+function nextSecretRef(profile: Pick<AuthProfile, "nextRef" | "slots">): number {
+  return Math.max(profile.nextRef ?? 1, highestSecretRef(profile.slots) + 1)
+}
 
 export type AuthProfileSummary = {
   readonly name: string
@@ -82,7 +89,7 @@ const staleProfileLockMs = 60_000
 const maximumRunOutputBytes = 10_000_000
 const maximumTimeoutMs = 2_147_483_647
 
-export const read = Effect.fn("AuthProfile.read")(function* (name: string, options: { readonly baseDir?: string } = {}) {
+const readProfileFile = Effect.fnUntraced(function* (name: string, options: { readonly baseDir?: string } = {}) {
   const filePath = yield* profilePath(options.baseDir ?? defaultBaseDir(), name)
   const text = yield* Effect.tryPromise({
     try: () => fs.readFile(filePath, "utf8"),
@@ -100,8 +107,19 @@ export const read = Effect.fn("AuthProfile.read")(function* (name: string, optio
   )
 })
 
+export const read = Effect.fn("AuthProfile.read")(function* (name: string, options: { readonly baseDir?: string } = {}) {
+  const profile = yield* readProfileFile(name, options)
+  return { ...profile, slots: cleanCredentialSlots(profile.slots), nextRef: nextSecretRef(profile) }
+})
+
 export const readOptional = Effect.fn("AuthProfile.readOptional")(function* (name: string, options: { readonly baseDir?: string } = {}) {
   return yield* read(name, options).pipe(
+    Effect.catchIf((error) => error.reason === "not-found", () => Effect.succeed(undefined)),
+  )
+})
+
+const readRawOptional = Effect.fnUntraced(function* (name: string, options: { readonly baseDir?: string } = {}) {
+  return yield* readProfileFile(name, options).pipe(
     Effect.catchIf((error) => error.reason === "not-found", () => Effect.succeed(undefined)),
   )
 })
@@ -161,28 +179,37 @@ export function withLock<A, E, R>(
 const writeProfile = Effect.fnUntraced(function* (options: {
   readonly name: string
   readonly slots: readonly CredentialSlot[]
+  readonly nextRef?: number
   readonly baseDir?: string
 }) {
   const baseDir = options.baseDir ?? defaultBaseDir()
   const filePath = yield* profilePath(baseDir, options.name)
-  const existing = yield* readOptional(options.name, { baseDir })
+  // Compare against the file as stored, not the cleaned view, so a profile polluted by an older
+  // build is rewritten even when its remaining slots did not change.
+  const existing = yield* readRawOptional(options.name, { baseDir })
   const now = new Date().toISOString()
+  const slots = cleanCredentialSlots(options.slots).map((slot) => ({
+    ref: slot.ref,
+    value: slot.value,
+    sources: [...slot.sources],
+    ...(slot.expiresAt ? { expiresAt: slot.expiresAt } : {}),
+  }))
   const profile: AuthProfile = {
     version: 1,
     name: options.name,
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
-    slots: options.slots.map((slot) => ({
-      ref: slot.ref,
-      value: slot.value,
-      sources: [...slot.sources],
-      ...(slot.expiresAt ? { expiresAt: slot.expiresAt } : {}),
-    })),
+    nextRef: Math.max(
+      existing ? nextSecretRef(existing) : 1,
+      options.nextRef ?? 1,
+      highestSecretRef(options.slots) + 1,
+    ),
+    slots,
   }
   yield* Schema.decodeUnknownEffect(StoredAuthProfile)(profile).pipe(
     Effect.mapError((cause) => new AuthProfileError({ message: `Auth profile has an invalid shape: ${options.name}`, operation: "write", reason: "invalid-profile", cause })),
   )
-  if (existing && sameSlots(existing.slots, profile.slots)) return summary(existing)
+  if (existing && existing.nextRef === profile.nextRef && sameSlots(existing.slots, profile.slots)) return summary(existing)
   yield* Effect.tryPromise({
     try: () => writeJsonFileAtomically(filePath, profile, { dirMode: 0o700 }),
     catch: (cause) => new AuthProfileError({ message: `Could not write auth profile: ${options.name}`, operation: "write", reason: "write-failed", cause }),
@@ -193,6 +220,7 @@ const writeProfile = Effect.fnUntraced(function* (options: {
 export const write = Effect.fn("AuthProfile.write")(function* (options: {
   readonly name: string
   readonly slots: readonly CredentialSlot[]
+  readonly nextRef?: number
   readonly baseDir?: string
 }) {
   return yield* writeLock.withPermit(writeProfile(options))
@@ -227,8 +255,8 @@ export const run = Effect.fn("AuthProfile.run")(function* (options: AuthRunOptio
     }).pipe(
       Effect.mapError((cause) => new AuthProfileError({ message: `Could not run command with auth profile ${options.name}`, operation: "run", reason: "run-failed", cause })),
     )
-  const stdout = redactOutput(result.stdout, profile.slots, maxOutputBytes)
-  const stderr = redactOutput(result.stderr, profile.slots, maxOutputBytes)
+  const stdout = redactRunOutput(result.stdout, profile.slots, maxOutputBytes)
+  const stderr = redactRunOutput(result.stderr, profile.slots, maxOutputBytes)
   return {
     ...result,
     stdout: stdout.text,
@@ -267,14 +295,18 @@ function sameSlots(left: readonly CredentialSlot[], right: readonly CredentialSl
   return JSON.stringify(left) === JSON.stringify(right)
 }
 
-function redactOutput(text: string, slots: readonly CredentialSlot[], maxBytes: number): { readonly text: string; readonly truncated: boolean } {
+/**
+ * Redact run output. Slots are cleaned first, so every remaining value is at least 8 characters and
+ * is replaced wherever it appears; an echoed value followed by a newline matches that substring.
+ */
+export function redactRunOutput(text: string, slots: readonly CredentialSlot[], maxBytes: number): { readonly text: string; readonly truncated: boolean } {
+  const usable = cleanCredentialSlots(slots)
   const bytes = Buffer.from(text)
   let cutoff = Math.min(bytes.length, maxBytes)
   let changed = true
   while (changed) {
     changed = false
-    for (const slot of slots) {
-      if (!slot.value) continue
+    for (const slot of usable) {
       const secret = Buffer.from(slot.value)
       let start = bytes.indexOf(secret)
       while (start >= 0 && start < cutoff) {
@@ -288,10 +320,12 @@ function redactOutput(text: string, slots: readonly CredentialSlot[], maxBytes: 
     }
   }
   return {
-    text: redactKnownValues(bytes.subarray(0, cutoff).toString("utf8"), slots),
+    text: redactOutputText(bytes.subarray(0, cutoff).toString("utf8"), usable, noAlwaysRedacted),
     truncated: cutoff < bytes.length,
   }
 }
+
+const noAlwaysRedacted: ReadonlySet<string> = new Set()
 
 function runChild(options: {
   readonly command: string

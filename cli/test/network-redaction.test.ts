@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Effect } from "effect"
-import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { finishCapture } from "../src/network-capture/har-redaction.ts"
@@ -118,22 +118,52 @@ describe("SecretCollector", () => {
       .toBe("${BC_SECRET_1} ${BC_SECRET_2} ${BC_SECRET_3}")
   })
 
-  test("does not replace short captured values inside unrelated execute output", () => {
+  test("never classifies HTTP/2 pseudo-headers as credentials", () => {
+    const collector = new SecretCollector()
+    const headers = [
+      { name: ":authority", value: "jsonplaceholder.typicode.com" },
+      { name: ":method", value: "GET" },
+      { name: ":scheme", value: "https" },
+      { name: ":status", value: "200" },
+      { name: ":protocol", value: "h2" },
+    ]
+    expect(collector.protectHeaders(headers, "request")).toEqual(headers)
+    expect(collector.slots()).toEqual([])
+    const output = '{"host":"jsonplaceholder.typicode.com","status":200}'
+    expect(collector.redactText(output)).toBe(output)
+  })
+
+  test("redacts short captured values in place without storing them", () => {
     const collector = new SecretCollector()
     const url = collector.protectUrl("https://api.example.com/v1/orders?session=42&page=2")
-    expect(url).toBe("https://api.example.com/v1/orders?session=${BC_SECRET_1}&page=2")
+    expect(url).toBe("https://api.example.com/v1/orders?session=${BC_REDACTED_1}&page=2")
+    expect(collector.slots()).toEqual([])
 
-    // "42" is a captured credential, but it is too short to replace inside ordinary text.
+    // "42" was redacted in place, but it is too short to become a reusable slot.
     expect(collector.redactText("order 1423 at 4:42")).toBe("order 1423 at 4:42")
     expect(collector.redactValue("order 1423 at 4:42")).toBe("order 1423 at 4:42")
     expect(collector.redactValue({ echoed: "42", text: "order 1423 at 4:42" })).toEqual({
-      echoed: "${BC_SECRET_1}",
+      echoed: "${BC_REDACTED_1}",
       text: "order 1423 at 4:42",
     })
 
     // A whole value that is exactly the captured credential is still redacted.
-    expect(collector.redactText("42")).toBe("${BC_SECRET_1}")
-    expect(collector.redactValue("42")).toBe("${BC_SECRET_1}")
+    expect(collector.redactText("42")).toBe("${BC_REDACTED_1}")
+    expect(collector.redactValue("42")).toBe("${BC_REDACTED_1}")
+  })
+
+  test("does not store short cookie values as secret slots", () => {
+    const collector = new SecretCollector()
+    const [cookie] = collector.protectHeaders(
+      [{ name: "Cookie", value: "a=B; b=1; sid=abcdef123456" }],
+      "request",
+    )
+    expect(cookie?.value).toBe("a=${BC_REDACTED_1}; b=${BC_REDACTED_2}; sid=${BC_SECRET_1}")
+    expect(collector.slots().map((slot) => slot.value)).toEqual(["abcdef123456"])
+
+    // One-character values must not corrupt the literal references they resemble.
+    const output = "BC_SECRET_1 and B and 1"
+    expect(collector.redactText(output)).toBe(output)
   })
 
   test("keeps replacing short one-time request values inside unrelated execute output", () => {
@@ -153,8 +183,9 @@ describe("SecretCollector", () => {
   test("keeps replacing long captured values inside unrelated execute output", () => {
     const collector = new SecretCollector()
     collector.protectUrl("https://api.example.com/v1/orders?session=42&access_token=tok_live_ABCDEF1234567890")
+    expect(collector.slots().map((slot) => slot.value)).toEqual(["tok_live_ABCDEF1234567890"])
     expect(collector.redactText("order 1423 at 4:42 token tok_live_ABCDEF1234567890 end"))
-      .toBe("order 1423 at 4:42 token ${BC_SECRET_2} end")
+      .toBe("order 1423 at 4:42 token ${BC_SECRET_1} end")
   })
 
   test("keeps replacing explicitly typed secrets of any length in execute output", () => {
@@ -242,6 +273,140 @@ describe("SecretCollector", () => {
       expect(encodedEntry?.request.url).toBe("https://docs.example.com/callback?code=${BC_REDACTED_2}")
       expect(encodedEntry?.request.headers).toContainEqual({ name: ":path", value: "/callback?code=${BC_REDACTED_2}" })
       expect(encodedEntry?.request.headers).toContainEqual({ name: ":authority", value: "docs.example.com" })
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test("heals a profile polluted with a pseudo-header hostname and a one-character cookie", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "browse-har-authority-"))
+    const outputPath = join(directory, "capture.har")
+    const baseDir = join(directory, "secrets")
+    const profilePath = join(baseDir, "pseudo.json")
+    const requestUrl = "https://jsonplaceholder.typicode.com/posts/B"
+    const source = `GET ${requestUrl}`
+    try {
+      await mkdir(baseDir, { recursive: true })
+      await writeFile(profilePath, JSON.stringify({
+        version: 1,
+        name: "pseudo",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        slots: [
+          { ref: "BC_SECRET_1", value: "jsonplaceholder.typicode.com", sources: [`${source}.request.header.:authority`] },
+          { ref: "BC_SECRET_2", value: "B", sources: [`${source}.request.header.cookie.probe`] },
+          { ref: "BC_SECRET_3", value: "tok_live_ABCDEF1234567890", sources: [`${source}.request.header.authorization`] },
+        ],
+      }))
+      const entry = capturedEntry("posts", {})
+      await Effect.runPromise(finishCapture(
+        activeCapture([{
+          ...entry,
+          request: {
+            ...entry.request,
+            url: requestUrl,
+            headers: [
+              { name: ":authority", value: "jsonplaceholder.typicode.com" },
+              { name: ":method", value: "GET" },
+              { name: ":path", value: "/posts/B" },
+              { name: ":scheme", value: "https" },
+              { name: "cookie", value: "probe=B" },
+            ],
+          },
+        }]),
+        { outputPath },
+        "pseudo",
+        { baseDir },
+      ))
+      const har = JSON.parse(await readFile(outputPath, "utf8")) as {
+        log: { entries: Array<{ request: { url: string; headers: Array<{ name: string; value: string }> } }> }
+      }
+      const request = har.log.entries[0]?.request
+      expect(request?.url).toBe("https://jsonplaceholder.typicode.com/posts/B")
+      expect(request?.headers).toContainEqual({ name: ":authority", value: "jsonplaceholder.typicode.com" })
+      expect(request?.headers).toContainEqual({ name: "cookie", value: "probe=${BC_REDACTED_1}" })
+      const profile = JSON.parse(await readFile(profilePath, "utf8")) as {
+        slots: Array<{ ref: string; value: string; sources: string[] }>
+      }
+      expect(profile.slots).toEqual([{ ref: "BC_SECRET_3", value: "tok_live_ABCDEF1234567890", sources: [`${source}.request.header.authorization`] }])
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test("never reuses a ref held by a dropped slot", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "browse-har-refs-"))
+    const baseDir = join(directory, "secrets")
+    const profilePath = join(baseDir, "refs.json")
+    try {
+      await mkdir(baseDir, { recursive: true })
+      await writeFile(profilePath, JSON.stringify({
+        version: 1,
+        name: "refs",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        slots: [
+          { ref: "BC_SECRET_1", value: "tok_live_KEPT1234567890", sources: ["GET https://docs.example.com.request.header.authorization"] },
+          { ref: "BC_SECRET_2", value: "docs.example.com", sources: ["GET https://docs.example.com.request.header.:authority"] },
+        ],
+      }))
+      const entry = capturedEntry("ref", {})
+      const finished = await Effect.runPromise(finishCapture(
+        activeCapture([{
+          ...entry,
+          request: {
+            ...entry.request,
+            url: "https://docs.example.com/ref?access_token=tok_new_ABCDEF1234567890",
+          },
+        }]),
+        {},
+        "refs",
+        { baseDir },
+      ))
+      expect(finished.authProfile?.slots.map((slot) => slot.ref)).toEqual(["BC_SECRET_1", "BC_SECRET_3"])
+      const stored = JSON.parse(await readFile(profilePath, "utf8")) as {
+        nextRef?: number
+        slots: Array<{ ref: string }>
+      }
+      expect(stored.slots.map((slot) => slot.ref)).toEqual(["BC_SECRET_1", "BC_SECRET_3"])
+      expect(stored.nextRef).toBe(4)
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test("starts new refs at a stored high-water mark", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "browse-har-next-ref-"))
+    const baseDir = join(directory, "secrets")
+    const profilePath = join(baseDir, "refs.json")
+    try {
+      await mkdir(baseDir, { recursive: true })
+      await writeFile(profilePath, JSON.stringify({
+        version: 1,
+        name: "refs",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        nextRef: 9,
+        slots: [
+          { ref: "BC_SECRET_1", value: "tok_live_KEPT1234567890", sources: ["GET https://docs.example.com.request.header.authorization"] },
+        ],
+      }))
+      const entry = capturedEntry("ref", {})
+      const finished = await Effect.runPromise(finishCapture(
+        activeCapture([{
+          ...entry,
+          request: {
+            ...entry.request,
+            url: "https://docs.example.com/ref?access_token=tok_new_ABCDEF1234567890",
+          },
+        }]),
+        {},
+        "refs",
+        { baseDir },
+      ))
+      expect(finished.authProfile?.slots.map((slot) => slot.ref)).toEqual(["BC_SECRET_1", "BC_SECRET_9"])
+      const stored = JSON.parse(await readFile(profilePath, "utf8")) as { nextRef?: number }
+      expect(stored.nextRef).toBe(10)
     } finally {
       await rm(directory, { recursive: true, force: true })
     }
@@ -348,9 +513,9 @@ describe("SecretCollector", () => {
     ) ?? "{}")).toEqual({ user_code: "${BC_REDACTED_1}", device_code: "${BC_REDACTED_2}" })
     // Objects and arrays under a bare `code` stay secret for every descendant.
     expect(JSON.parse(new SecretCollector().protectBody(JSON.stringify({ code: { value: "a7k2m9" } }), "application/json", "response") ?? "{}"))
-      .toEqual({ code: { value: "${BC_SECRET_1}" } })
+      .toEqual({ code: { value: "${BC_REDACTED_1}" } })
     expect(JSON.parse(new SecretCollector().protectBody(JSON.stringify({ code: [{ value: "a7k2m9" }] }), "application/json", "response") ?? "{}"))
-      .toEqual({ code: [{ value: "${BC_SECRET_1}" }] })
+      .toEqual({ code: [{ value: "${BC_REDACTED_1}" }] })
 
     // DocC context requires the exact lowercase key and the matching value shape.
     expect(JSON.parse(new SecretCollector().protectBody(JSON.stringify({ type: "codeVoice", CODE: "secret" }), "application/json", "response") ?? "{}"))
@@ -363,12 +528,12 @@ describe("SecretCollector", () => {
       JSON.stringify({ type: "codeListing", code: ["ok line", { value: "a7k2m9" }] }),
       "application/json",
       "response",
-    ) ?? "{}")).toEqual({ type: "codeListing", code: ["ok line", { value: "${BC_SECRET_1}" }] })
+    ) ?? "{}")).toEqual({ type: "codeListing", code: ["ok line", { value: "${BC_REDACTED_1}" }] })
     expect(JSON.parse(new SecretCollector().protectBody(
       JSON.stringify({ type: "codeVoice", code: "x", token: "abc" }),
       "application/json",
       "response",
-    ) ?? "{}")).toEqual({ type: "codeVoice", code: "x", token: "${BC_SECRET_1}" })
+    ) ?? "{}")).toEqual({ type: "codeVoice", code: "x", token: "${BC_REDACTED_1}" })
 
     const request = new SecretCollector()
     expect(JSON.parse(request.protectBody(JSON.stringify({ code: "K4B7X" }), "application/json", "request") ?? "{}"))
