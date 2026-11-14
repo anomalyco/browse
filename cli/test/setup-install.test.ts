@@ -43,7 +43,7 @@ test("OpenCode JSONC keeps comments and other servers across install, reinstall 
     fs.writeFileSync(file, before)
     expect(configureMcp(file, entry)).toContain("added")
     const once = fs.readFileSync(file, "utf8")
-    expect(parse(once).mcp.servers.browse).toMatchObject({ type: "local", command: ["node", entry, "mcp"] })
+    expect(parse(once).mcp.servers.browse).toMatchObject({ type: "local", command: ["node", entry, "mcp"], cwd: "~", pool: true })
     expect(configureMcp(file, entry, entry)).toContain("up to date")
     expect(fs.readFileSync(file, "utf8")).toBe(once)
     expect(removeMcp("browse", entry, file)).toBe(true)
@@ -53,13 +53,43 @@ test("OpenCode JSONC keeps comments and other servers across install, reinstall 
   } finally { fs.rmSync(home, { recursive: true, force: true }) }
 })
 
+test("OpenCode shares one browse server: browse's older entries gain pool and a fixed cwd, user entries stay", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-openpool-"))
+  try {
+    const file = path.join(home, "opencode.json")
+    // An earlier browse install wrote this entry without pool or cwd.
+    fs.writeFileSync(file, JSON.stringify({
+      mcp: {
+        servers: {
+          browse: { type: "local", command: ["browse", "mcp"], environment: { OPENCODE_BROWSER_RUNTIME: "auto-update", KEEP: "1" } },
+          other: { type: "local", command: ["my-server"] },
+        },
+      },
+    }, null, 2))
+    expect(configureMcp(file, "browse", "browse")).toContain("updated")
+    const config = parse(fs.readFileSync(file, "utf8"))
+    expect(config.mcp.servers.browse).toEqual({
+      type: "local",
+      command: ["browse", "mcp"],
+      cwd: "~",
+      pool: true,
+      environment: { OPENCODE_BROWSER_RUNTIME: "auto-update", KEEP: "1" },
+    })
+    expect(config.mcp.servers.other).toEqual({ type: "local", command: ["my-server"] })
+    // A server named browse with a command browse didn't write is the user's; leave it alone.
+    fs.writeFileSync(file, JSON.stringify({ mcp: { servers: { browse: { type: "local", command: ["someone-else", "mcp"] } } } }))
+    expect(configureMcp(file, "browse", "browse")).toBeUndefined()
+    expect(parse(fs.readFileSync(file, "utf8")).mcp.servers.browse).toEqual({ type: "local", command: ["someone-else", "mcp"] })
+  } finally { fs.rmSync(home, { recursive: true, force: true }) }
+})
+
 test("a binary install's entry runs the executable itself, in OpenCode, other agents and the manual entry", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-binary-"))
   try {
     const binary = path.join(home, ".local", "bin", "browse")
     const opencode = path.join(home, "opencode.json")
     expect(configureMcp(opencode, binary)).toContain("added")
-    expect(parse(fs.readFileSync(opencode, "utf8")).mcp.servers.browse).toMatchObject({ command: [binary, "mcp"], environment: { OPENCODE_BROWSER_RUNTIME: "auto-update" } })
+    expect(parse(fs.readFileSync(opencode, "utf8")).mcp.servers.browse).toMatchObject({ command: [binary, "mcp"], cwd: "~", pool: true, environment: { OPENCODE_BROWSER_RUNTIME: "auto-update" } })
     expect(configureMcp(opencode, binary, binary)).toContain("up to date")
     expect(removeMcp("browse", binary, opencode)).toBe(true)
 

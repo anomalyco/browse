@@ -50,8 +50,8 @@ at least once an hour; an npm install checks npm's dist-tag once an hour. When t
 the relay reruns whatever installed browse in the background: a binary install reruns the install script that shipped
 with the browse version it's running (not one downloaded at update time), which checks the file's size and SHA-256 and
 replaces `~/.local/bin/browse`; an npm install runs `npm install -g @opencode/browse@<version>`. It restarts the relay
-when no agent is using the browser, without changing opencode's config. Running MCP servers swap to the new build
-between tool calls. Choose *Only tell me* or *Don't check* under **Updates** on the extension's
+when no agent is using the browser, without changing opencode's config. A running MCP server keeps its old build until
+the agent restarts it, and keeps working against the newer relay until then. Choose *Only tell me* or *Don't check* under **Updates** on the extension's
 settings page (or `settings set autoUpdate=notify`, or `OPENCODE_BROWSER_AUTO_UPDATE=off`). Agents can read the current
 value from `status`, but the MCP `settings` tool can't read or change update behaviour; it stays with you. `browse
 update` updates now; to go back, rerun the installer with `--channel <channel>` (binary installs follow the channel) or

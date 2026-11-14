@@ -118,9 +118,6 @@ function writeForwarder(entry: string, runtime: Runtime) {
       ]
     : [
         `import { pathToFileURL } from "node:url"`,
-        // The shim names itself the client, which tells a server it starts to serve directly (mcp/supervisor.ts). It
-        // won't swap again, so this install supervises its own server and later updates still reach running agents.
-        `if (process.env.OPENCODE_BROWSER_CLIENT_PID === String(process.ppid)) delete process.env.OPENCODE_BROWSER_CLIENT_PID`,
         `process.argv[1] = ${target}`,
         `await import(pathToFileURL(${target}).href)`,
       ]

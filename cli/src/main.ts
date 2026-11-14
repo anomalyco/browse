@@ -50,10 +50,6 @@ if (command !== "--version" && command !== "-v" && !askedForHelp && !takingOver 
 if (command === "--version" || command === "-v") {
   const opencodeBrowserVersion = embeddedVersion ?? (await import("./version.ts")).opencodeBrowserVersion
   process.stdout.write(`${opencodeBrowserVersion}\n`)
-} else if (command === "mcp" && process.env.OPENCODE_BROWSER_MCP_DIRECT !== "1" && (await import("./mcp/supervisor.ts")).supervisesMcp()) {
-  // An installed binary or npm global package: supervise the server so updates swap it (mcp/supervisor.ts).
-  const { runBinaryMcp } = await import("./mcp/supervisor.ts")
-  await runBinaryMcp(process.argv.slice(3))
 } else if (invokedAs === "opencode-browser-mcp" || (command === "mcp" && process.argv.length === 3)) {
   const { NodeRuntime } = await import("@effect/platform-node")
   const { defaultTeardown } = await import("effect/Runtime")
@@ -79,7 +75,8 @@ if (command === "--version" || command === "-v") {
   runMcpServer.pipe(NodeRuntime.runMain({
     teardown: (exit, onExit) =>
       defaultTeardown(exit, (code) => {
-        if (stdinGone && !signalled && code === 130) return process.exit(0)
+        // A client that paused reading leaves answers buffered in stdout; write them out before exiting.
+        if (stdinGone && !signalled && code === 130) return void process.stdout.write("", () => process.exit(0))
         onExit(code)
       }),
   }))

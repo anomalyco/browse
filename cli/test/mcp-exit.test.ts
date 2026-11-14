@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test"
-import { spawn, spawnSync } from "node:child_process"
+import { spawn } from "node:child_process"
 import fs from "node:fs"
 import { createServer, type Socket } from "node:net"
 import os from "node:os"
@@ -12,7 +12,7 @@ fs.mkdirSync(temporary, { recursive: true })
 const home = fs.mkdtempSync(path.join(temporary, "browse-mcp-exit-"))
 const source = path.join(import.meta.dir, "../src/main.ts")
 const children = new Set<ReturnType<typeof spawn>>()
-/** An npm install of this CLI under the test's HOME, so `browse mcp` supervises it under Node, as npm installs do. */
+/** An npm install of this CLI under the test's HOME, so `browse mcp` runs under Node as npm installs do. */
 let installed = ""
 beforeAll(async () => {
   const build = path.join(home, "build")
@@ -27,13 +27,6 @@ beforeAll(async () => {
 afterAll(() => {
   try {
     for (const child of children) child.kill("SIGKILL")
-    for (const server of serversUnder(home)) {
-      try {
-        process.kill(server.pid, "SIGKILL")
-      } catch {
-        // It exited between the listing and the kill.
-      }
-    }
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }
@@ -46,9 +39,8 @@ const env = (extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
   OPENCODE_BROWSER_PORT: "29988",
   OPENCODE_BROWSER_AUTOSTART: "false",
   OPENCODE_BROWSER_UPDATE_CHECK: "0",
-  // The server and supervisor set these themselves; inherit none from whatever started the tests.
+  // An older install's supervisor sets these for a server it starts; inherit none from whatever started the tests.
   OPENCODE_BROWSER_CLIENT_PID: undefined,
-  OPENCODE_BROWSER_MCP_DIRECT: undefined,
   OPENCODE_BROWSER_MCP_SESSION: undefined,
   ...extra,
 })
@@ -67,16 +59,7 @@ type Reply = { result?: Record<string, unknown>; error?: unknown }
 /** A server notification: no id, just a method and params. */
 type Notification = { method: string; params?: Record<string, unknown> }
 
-/** The `mcp` processes running under `folder`, for cleaning up a supervisor's child when a test fails. */
-function serversUnder(folder: string) {
-  const listing = spawnSync("ps", ["-Ao", "pid=,args="], { encoding: "utf8" }).stdout ?? ""
-  return listing.split("\n").flatMap((line) => {
-    const match = /^\s*(\d+)\s+(.*)$/.exec(line)
-    return match && match[2]!.includes(folder) && match[2]!.endsWith(" mcp") ? [{ pid: Number(match[1]) }] : []
-  })
-}
-
-/** A private executable at the installed path, so `browse mcp` supervises the checkout's server. */
+/** A private executable at the installed path, so `browse mcp` runs the checkout's server from it. */
 function installedBinary() {
   const binary = path.join(home, "bin", "browse")
   fs.mkdirSync(path.dirname(binary), { recursive: true })
@@ -88,56 +71,9 @@ await import(${JSON.stringify(source)})
   return binary
 }
 
-/**
- * An npm install whose supervisor is the bundled CLI but whose server ignores stdin EOF, as one with a broken long-lived
- * request would. The child is told to serve directly, so its branch of the entry is the stubborn server.
- */
-function installedStubbornServer() {
-  const root = path.join(home, "stubborn", "lib", "node_modules", "@opencode", "browse")
-  const dist = path.join(root, "dist")
-  fs.cpSync(path.join(home, "build"), dist, { recursive: true })
-  fs.renameSync(path.join(dist, "cli.mjs"), path.join(dist, "server.mjs"))
-  fs.writeFileSync(path.join(dist, "cli.mjs"), `import { createInterface } from "node:readline"
-if (process.env.OPENCODE_BROWSER_MCP_DIRECT === "1") {
-  createInterface({ input: process.stdin }).on("line", (line) => {
-    const message = JSON.parse(line)
-    if (message.id === undefined) return
-    const result = message.method === "initialize"
-      ? { protocolVersion: "2025-11-25", capabilities: { tools: { listChanged: true } }, serverInfo: { name: "stubborn", version: "0" } }
-      : { tools: [] }
-    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\\n")
-  })
-  setInterval(() => {}, 1000)
-} else {
-  await import("./server.mjs")
-}
-`)
-  fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "@opencode/browse", version: "0.0.1" }))
-  // Tests call this more than once, and the symlink is shared.
-  const modules = path.join(root, "node_modules")
-  if (!fs.existsSync(modules)) fs.symlinkSync(path.join(import.meta.dir, "../node_modules"), modules, "junction")
-  return path.join(dist, "cli.mjs")
-}
-
-/** Waits until no `mcp` process started from the test's install is left, proving a supervisor didn't orphan its server. */
-async function noServersLeft(what: string) {
-  for (let attempt = 0; attempt < 100; attempt++) {
-    if (serversUnder(home).length === 0) return
-    await Bun.sleep(50)
-  }
-  throw new Error(`${what}: an mcp server was left running: ${JSON.stringify(serversUnder(home))}`)
-}
-
-/** Kills a test's processes, including a supervisor's child when an expectation failed before it exited. */
+/** Kills a test's process when an expectation failed before it exited. */
 function cleanup(mcp?: ReturnType<typeof server>) {
   mcp?.child.kill("SIGKILL")
-  for (const server of serversUnder(home)) {
-    try {
-      process.kill(server.pid, "SIGKILL")
-    } catch {
-      // It exited between the listing and the kill.
-    }
-  }
 }
 
 /** Starts `browse mcp` and speaks enough of the protocol to prove the server is serving before stdin closes. */
@@ -243,27 +179,26 @@ async function blackholeRelay() {
 }
 
 describe("browse mcp shuts down cleanly when its client closes stdin", () => {
-  test("the direct server exits 0", async () => {
-    const mcp = server([process.execPath, source, "mcp"], { OPENCODE_BROWSER_MCP_DIRECT: "1" })
+  test("the server exits 0", async () => {
+    const mcp = server([process.execPath, source, "mcp"])
     try {
       await mcp.handshake()
       const started = Date.now()
       mcp.child.stdin.end()
-      // Well under the supervisor's 5 second fallback: the server exits on its own.
-      const exit = await within(4_000, mcp.exit, "the direct server's stdin EOF exit")
+      const exit = await within(4_000, mcp.exit, "the server's stdin EOF exit")
       expect({ ...exit, stderr: mcp.stderr(), ms: Date.now() - started }).toMatchObject({ code: 0, signal: null })
     } finally {
       cleanup(mcp)
     }
   }, 20_000)
 
-  test("the direct server exits 0 after a live 2026-07-28 subscription", async () => {
+  test("the server exits 0 after a live 2026-07-28 subscription", async () => {
     // Claude Code opens `subscriptions/listen` on connect; that request never answers while the client is connected.
-    const mcp = await subscribedServer([process.execPath, source, "mcp"], { OPENCODE_BROWSER_MCP_DIRECT: "1" })
+    const mcp = await subscribedServer([process.execPath, source, "mcp"])
     try {
       const started = Date.now()
       mcp.child.stdin.end()
-      const exit = await within(4_000, mcp.exit, "the subscribed direct server's stdin EOF exit")
+      const exit = await within(4_000, mcp.exit, "the subscribed server's stdin EOF exit")
       expect({ ...exit, stderr: mcp.stderr(), ms: Date.now() - started }).toMatchObject({ code: 0, signal: null })
     } finally {
       cleanup(mcp)
@@ -275,10 +210,7 @@ describe("browse mcp shuts down cleanly when its client closes stdin", () => {
     // timeout, so a tool call is genuinely in flight when stdin closes: it must still be answered. Only a request that
     // never answers, such as `subscriptions/listen`, may be cut.
     const relay = await blackholeRelay()
-    const mcp = server([process.execPath, source, "mcp"], {
-      OPENCODE_BROWSER_MCP_DIRECT: "1",
-      OPENCODE_BROWSER_PORT: String(relay.port),
-    })
+    const mcp = server([process.execPath, source, "mcp"], { OPENCODE_BROWSER_PORT: String(relay.port) })
     try {
       await mcp.handshake()
       const reply = mcp.request(3, "tools/call", { name: "tabs_cleanup", arguments: {} })
@@ -290,7 +222,7 @@ describe("browse mcp shuts down cleanly when its client closes stdin", () => {
       // A real tool result, not the error an interrupted request is answered with.
       expect(answer.error).toBeUndefined()
       expect(answer.result).toBeDefined()
-      const exit = await within(10_000, mcp.exit, "the direct server's exit after a slow tool call")
+      const exit = await within(10_000, mcp.exit, "the server's exit after a slow tool call")
       expect({ ...exit, stderr: mcp.stderr(), ms: Date.now() - started }).toMatchObject({ code: 0, signal: null })
     } finally {
       cleanup(mcp)
@@ -298,34 +230,32 @@ describe("browse mcp shuts down cleanly when its client closes stdin", () => {
     }
   }, 30_000)
 
-  test.skipIf(process.platform === "win32")("an installed binary's supervised server exits 0 promptly", async () => {
-    // A private executable path makes `browse mcp` supervise, as an installed binary does.
+  test.skipIf(process.platform === "win32")("an installed binary runs the server and exits 0 promptly", async () => {
     const mcp = server([installedBinary(), "mcp"])
     try {
       await mcp.handshake()
       const started = Date.now()
       mcp.child.stdin.end()
-      // The supervisor's own stdin-close timer is 5 seconds; a prompt exit proves the child ended on its own.
-      const exit = await within(4_000, mcp.exit, "the supervised server's stdin EOF exit")
+      const exit = await within(4_000, mcp.exit, "the binary's stdin EOF exit")
       expect({ ...exit, stderr: mcp.stderr(), ms: Date.now() - started }).toMatchObject({ code: 0, signal: null })
     } finally {
       cleanup(mcp)
     }
   }, 20_000)
 
-  test("the supervisor flushes responses a paused client hasn't read", async () => {
+  test("the server flushes responses a paused client hasn't read", async () => {
     // Node's stdout to a pipe buffers asynchronously; Bun's writes block instead, so only this shape loses data on exit.
     const mcp = server(["node", installed, "mcp"])
     try {
       await mcp.handshake()
       const ids = Array.from({ length: 200 }, (_, index) => 1000 + index)
-      // Stop reading the supervisor's stdout so its writes pile up past the pipe's buffer, as a busy client's do.
+      // Stop reading the server's stdout so its writes pile up past the pipe's buffer, as a busy client's do.
       mcp.child.stdout.pause()
       for (const id of ids) mcp.send(id, "tools/list")
       await Bun.sleep(1_500)
       mcp.child.stdin.end()
       mcp.child.stdout.resume()
-      const exit = await within(15_000, mcp.exit, "the supervisor's stdin EOF exit")
+      const exit = await within(15_000, mcp.exit, "the server's stdin EOF exit")
       expect({ ...exit, stderr: mcp.stderr() }).toMatchObject({ code: 0, signal: null })
       expect(ids.filter((id) => !mcp.answered(id))).toEqual([])
     } finally {
@@ -334,11 +264,11 @@ describe("browse mcp shuts down cleanly when its client closes stdin", () => {
   }, 30_000)
 
   test.skipIf(process.platform === "win32")("a real SIGINT still exits 130", async () => {
-    const mcp = server([process.execPath, source, "mcp"], { OPENCODE_BROWSER_MCP_DIRECT: "1" })
+    const mcp = server([process.execPath, source, "mcp"])
     try {
       await mcp.handshake()
       mcp.child.kill("SIGINT")
-      const exit = await within(4_000, mcp.exit, "the direct server's SIGINT exit")
+      const exit = await within(4_000, mcp.exit, "the server's SIGINT exit")
       // 130 is the default teardown's interrupt exit; some platforms report the signal instead. Never 0.
       expect(exit.signal === "SIGINT" || exit.code === 130).toBe(true)
     } finally {
@@ -347,84 +277,40 @@ describe("browse mcp shuts down cleanly when its client closes stdin", () => {
   }, 20_000)
 })
 
-describe("the MCP supervisor never leaves its server behind", () => {
-  test.skipIf(process.platform === "win32")("closing stdin with a live subscription leaves no child", async () => {
-    // Node, as an npm install runs it: its stdin has its own EOF timing.
+describe("a server npm starts under Node exits on its own", () => {
+  test.skipIf(process.platform === "win32")("closing stdin with a live subscription exits 0", async () => {
+    // Node's stdin has its own EOF timing.
     const mcp = await subscribedServer(["node", installed, "mcp"])
     try {
       const started = Date.now()
       mcp.child.stdin.end()
-      const exit = await within(4_000, mcp.exit, "the supervisor's stdin EOF exit with a subscription")
+      const exit = await within(4_000, mcp.exit, "the Node server's stdin EOF exit with a subscription")
       expect({ ...exit, stderr: mcp.stderr(), ms: Date.now() - started }).toMatchObject({ code: 0, signal: null })
-      await noServersLeft("stdin EOF with a subscription")
     } finally {
       cleanup(mcp)
     }
   }, 20_000)
 
-  test.skipIf(process.platform === "win32")("SIGINT with a live subscription leaves no child", async () => {
-    const mcp = await subscribedServer([installedBinary(), "mcp"])
+  test.skipIf(process.platform === "win32")("SIGINT with a live subscription exits 130", async () => {
+    const mcp = await subscribedServer(["node", installed, "mcp"])
     try {
       mcp.child.kill("SIGINT")
-      const exit = await within(4_000, mcp.exit, "the supervisor's SIGINT exit")
+      const exit = await within(4_000, mcp.exit, "the Node server's SIGINT exit")
       expect(exit.signal === "SIGINT" || exit.code === 130).toBe(true)
-      await noServersLeft("SIGINT with a subscription")
     } finally {
       cleanup(mcp)
     }
   }, 20_000)
 
-  test.skipIf(process.platform === "win32")("SIGTERM with a live subscription leaves no child", async () => {
-    const mcp = await subscribedServer([installedBinary(), "mcp"])
+  test.skipIf(process.platform === "win32")("SIGTERM with a live subscription exits 130", async () => {
+    const mcp = await subscribedServer(["node", installed, "mcp"])
     try {
       mcp.child.kill("SIGTERM")
-      const exit = await within(4_000, mcp.exit, "the supervisor's SIGTERM exit")
-      expect(exit.signal === "SIGTERM" || exit.code === 143).toBe(true)
-      await noServersLeft("SIGTERM with a subscription")
+      const exit = await within(4_000, mcp.exit, "the Node server's SIGTERM exit")
+      // The default teardown reports every signal as 130; some platforms report the signal instead.
+      expect(exit.signal === "SIGTERM" || exit.code === 130).toBe(true)
     } finally {
       cleanup(mcp)
     }
   }, 20_000)
-
-  test.skipIf(process.platform === "win32")("SIGINT terminates a server that ignores stdin EOF", async () => {
-    // The stubborn child ignores EOF, so only the supervisor's own signal handling can take it down.
-    const mcp = server([process.execPath, installedStubbornServer(), "mcp"])
-    try {
-      await mcp.handshake()
-      mcp.child.kill("SIGINT")
-      const exit = await within(4_000, mcp.exit, "the supervisor's SIGINT exit with a stubborn server")
-      expect(exit.signal === "SIGINT" || exit.code === 130).toBe(true)
-      await noServersLeft("SIGINT with a stubborn server")
-    } finally {
-      cleanup(mcp)
-    }
-  }, 20_000)
-
-  test.skipIf(process.platform === "win32")("SIGTERM terminates a server that ignores stdin EOF", async () => {
-    const mcp = server([process.execPath, installedStubbornServer(), "mcp"])
-    try {
-      await mcp.handshake()
-      mcp.child.kill("SIGTERM")
-      const exit = await within(4_000, mcp.exit, "the supervisor's SIGTERM exit with a stubborn server")
-      expect(exit.signal === "SIGTERM" || exit.code === 143).toBe(true)
-      await noServersLeft("SIGTERM with a stubborn server")
-    } finally {
-      cleanup(mcp)
-    }
-  }, 20_000)
-
-  test.skipIf(process.platform === "win32")("a server that ignores stdin EOF is terminated at the fallback", async () => {
-    const mcp = server([process.execPath, installedStubbornServer(), "mcp"])
-    try {
-      await mcp.handshake()
-      const started = Date.now()
-      mcp.child.stdin.end()
-      // The supervisor's stdin-close fallback is 5 seconds; after it the stubborn child must be gone too.
-      const exit = await within(15_000, mcp.exit, "the supervisor's stdin EOF exit with a stubborn server")
-      expect({ ...exit, stderr: mcp.stderr(), ms: Date.now() - started }).toMatchObject({ code: 0, signal: null })
-      await noServersLeft("the stdin EOF fallback")
-    } finally {
-      cleanup(mcp)
-    }
-  }, 30_000)
 })

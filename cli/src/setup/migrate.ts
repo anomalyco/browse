@@ -174,8 +174,7 @@ function rewriteAgent(name: AgentName, file: string, oldBinary: string, newBinar
     return changed === "removed" && editAgentConfig({ name: name as Exclude<AgentName, "opencode">, file, entry: newBinary }) === "added"
   }
   if (absoluteNode(command[0] ?? "") && npmEntry(target)) {
-    // An npm install ran an absolute node and a package path; both move under nvm/fnm. `browse` on PATH is stable and
-    // the supervisor behind it keeps running across updates.
+    // An npm install ran an absolute node and a package path; both move under nvm/fnm. `browse` on PATH is stable.
     if (name === "opencode") return !!configureMcp(file, "browse", target)
     const changed = editAgentConfig({ name: name as Exclude<AgentName, "opencode">, file, node: command[0]!, entry: target }, true)
     return changed === "removed" && editAgentConfig({ name: name as Exclude<AgentName, "opencode">, file, entry: "browse" }) === "added"

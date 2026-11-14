@@ -124,7 +124,7 @@ export function createRelayHousekeeping(options: {
     }
   })
 
-  /** Ask the supervisor to restart us: RelayShutdown calls this once a restart has drained cleanly. */
+  /** End this process once a restart has drained cleanly: whatever started the relay starts the replacement. */
   const stop = () => { setImmediate(() => process.kill(process.pid, "SIGTERM")) }
 
   const settleRootWork = Effect.fnUntraced(function* () {

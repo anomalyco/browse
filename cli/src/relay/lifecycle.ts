@@ -81,12 +81,34 @@ export function relayBuildProblem(version: RelayVersion, buildId = opencodeBrows
     return `Running relay does not report a build id; use \`${cliCommand("relay restart")}\` for upgrade guidance (${buildId}).`
   }
   if (version.buildId !== buildId) {
-    if (isNewerBuild(version.buildId, buildId)) {
-      return `Running relay build ${version.buildId} is newer than CLI build ${buildId}; refresh or restart this CLI or MCP client. Only use \`${cliCommand("relay restart")}\` from the current installation.`
-    }
+    // A newer relay serves older clients: after an update the relay restarts while a running MCP server keeps its old
+    // build. Its requests keep working until one the relay can't decode (olderMcpClientAdvice says what to do then).
+    if (isNewerBuild(version.buildId, buildId)) return undefined
     return `Running relay build ${version.buildId} does not match CLI build ${buildId}; run \`${cliCommand("relay restart")}\` when no agent is using the browser. This leaves browser tabs open but resets in-memory JavaScript state.`
   }
   return undefined
+}
+
+/** Whether the running relay is a later build than this client: the state after an automatic update. */
+export function relayIsNewerThanClient(version: RelayVersion, buildId = opencodeBrowserBuildId): boolean {
+  return version.buildId !== undefined && version.buildId !== buildId && isNewerBuild(version.buildId, buildId)
+}
+
+/**
+ * What an MCP tool call says when a newer relay answered one of this older server's requests in a way it can't use:
+ * the update restarted the relay, and the agent must start the new server rather than keep the old one running.
+ */
+export function olderMcpClientAdvice(version: RelayVersion, error: unknown, buildId = opencodeBrowserBuildId): string | undefined {
+  if (!relayIsNewerThanClient(version, buildId)) return undefined
+  const incompatible = error instanceof RelayClient.RelayDecodeFailed
+    ? error.path !== "/version"
+    : error instanceof RelayClient.RelayRejected &&
+      (error.status === 405 || error.status === 415 ||
+        (error.status === 404 && error.code === undefined) ||
+        (error.status === 400 && error.code === "invalid-request" &&
+          error.message.startsWith("Invalid ") && error.message.includes(" request:")))
+  if (!incompatible) return undefined
+  return "browse was updated, and the running relay can't serve this MCP server's older build. Reconnect browse in the agent so it starts the new version (in OpenCode: /mcps)."
 }
 
 export const ensureRelay = Effect.fn("RelayLifecycle.ensureRelay")(function* (options: EnsureRelayOptions) {

@@ -196,7 +196,11 @@ describe("migration after the old self-managed runtime was taken over", () => {
     write(project, JSON.stringify({ mcp: { servers: { browse: entry } } }))
     write(path.join(oldData, "settings.json"), JSON.stringify({ opencodeConfigs: [project] }))
     withoutHomeOverride(() => migrateLegacy(home, takenOver + 11 * 60_000))
-    for (const file of [jsonc, project]) expect(parse(fs.readFileSync(file, "utf8")).mcp.servers.browse.command).toEqual(["browse", "mcp"])
+    for (const file of [jsonc, project]) {
+      const server = parse(fs.readFileSync(file, "utf8")).mcp.servers.browse
+      expect(server.command).toEqual(["browse", "mcp"])
+      expect(server).toMatchObject({ cwd: "~", pool: true })
+    }
     expect(fs.readFileSync(jsonc, "utf8")).toContain("// mine")
     expect(fs.existsSync(oldData)).toBe(false)
   })
