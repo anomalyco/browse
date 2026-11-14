@@ -15,11 +15,32 @@ const MINIMUM_KNOWN_BODY_SUBSTRING_LENGTH: usize = 16;
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CapturedBody {
-    pub size: usize,
+    /// Decoded size in bytes, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<usize>,
     pub mime_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// The body would have been returned but a size limit or a failure kept it out.
     pub truncated: bool,
+    /// Why there is no text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub omitted: Option<String>,
+}
+
+pub const NOT_RETURNED: &str =
+    "not returned: only JSON, form and multipart bodies are, since other kinds can't be checked for credentials";
+pub const TOO_LARGE: &str = "larger than the 1 MB per-body limit";
+pub const BUDGET_USED: &str = "the capture's 25 MB body budget was used up";
+pub const UNAVAILABLE: &str = "Chrome no longer had the body";
+pub const UNSUPPORTED_ENCODING: &str = "its content-encoding can't be decoded";
+pub const UNREDACTABLE: &str = "it couldn't be parsed to check it for credentials";
+
+/// Bodies the redactor can check and so returns as text (the same kinds `SecretRedactor::protect_body` accepts).
+pub fn is_returnable_mime_type(mime: Option<&str>) -> bool {
+    let Some(mime) = mime else { return false };
+    let mime = mime.to_ascii_lowercase();
+    mime.contains("json") || mime.contains("application/x-www-form-urlencoded") || mime.contains("multipart/form-data")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,29 +91,18 @@ pub fn declared_body_size(headers: &[Header]) -> Option<usize> {
     header(headers, "content-length").and_then(|value| value.trim().parse().ok())
 }
 
-pub fn is_textual_mime_type(mime: Option<&str>) -> bool {
-    let Some(mime) = mime else { return true };
-    let mime = mime.to_ascii_lowercase();
-    mime.starts_with("text/")
-        || ["json", "javascript", "xml", "x-www-form-urlencoded", "multipart/form-data", "graphql"]
-            .iter()
-            .any(|needle| mime.contains(needle))
-}
-
-/// Whether a body of `size` bytes (declared or measured) with these headers fits in `limit`.
-pub fn body_can_fit(headers: &[Header], size: Option<usize>, limit: usize) -> bool {
-    if limit == 0 {
-        return false;
-    }
+/// Whether the encoding can be decoded and a body of `size` bytes (declared or measured) fits in `limit`; `Err` says
+/// why not.
+pub fn body_can_fit(headers: &[Header], size: Option<usize>, limit: usize) -> Result<(), (&'static str, bool)> {
     let encoding = header(headers, "content-encoding").map(|value| value.trim().to_ascii_lowercase());
-    let supported = matches!(encoding.as_deref(), None | Some("identity" | "gzip" | "br" | "deflate" | "zstd"));
-    if !supported {
-        return false;
+    if !matches!(encoding.as_deref(), None | Some("identity" | "gzip" | "br" | "deflate" | "zstd")) {
+        return Err((UNSUPPORTED_ENCODING, true));
     }
     match size.or_else(|| declared_body_size(headers)) {
-        Some(size) => size <= limit,
-        // Unknown size: fetch textual bodies only; the budget still cuts them off at the limit.
-        None => is_textual_mime_type(content_type(headers).as_deref()),
+        Some(size) if size > MAX_BODY_BYTES => Err((TOO_LARGE, true)),
+        Some(size) if size > limit => Err((BUDGET_USED, true)),
+        _ if limit == 0 => Err((BUDGET_USED, true)),
+        _ => Ok(()),
     }
 }
 
@@ -105,30 +115,40 @@ pub struct Budget {
 
 impl Budget {
     pub fn remaining(&self) -> usize {
-        MAX_TOTAL_BODY_BYTES.saturating_sub(self.captured_body_bytes).min(MAX_BODY_BYTES)
+        MAX_TOTAL_BODY_BYTES.saturating_sub(self.captured_body_bytes)
     }
 
+    /// Records a fetched returnable body, cut off when it is over the per-body limit or the remaining budget.
     pub fn capture(&mut self, bytes: &[u8], mime: Option<&str>) -> CapturedBody {
-        let remaining = MAX_TOTAL_BODY_BYTES.saturating_sub(self.captured_body_bytes);
-        let take = bytes.len().min(MAX_BODY_BYTES).min(remaining);
-        let truncated = take < bytes.len();
-        self.captured_body_bytes += take;
-        let textual = is_textual_mime_type(mime);
-        let omitted = truncated || !textual;
-        if omitted {
+        let mime_type = mime.unwrap_or("application/octet-stream").to_string();
+        if bytes.len() > MAX_BODY_BYTES {
+            return self.omitted(mime, Some(bytes.len()), TOO_LARGE, true);
+        }
+        if bytes.len() > self.remaining() {
+            return self.omitted(mime, Some(bytes.len()), BUDGET_USED, true);
+        }
+        self.captured_body_bytes += bytes.len();
+        CapturedBody {
+            size: Some(bytes.len()),
+            mime_type,
+            text: Some(String::from_utf8_lossy(bytes).into_owned()),
+            truncated: false,
+            omitted: None,
+        }
+    }
+
+    /// A body without text; `truncated` ones (kept out by a limit or a failure) are counted.
+    pub fn omitted(&mut self, mime: Option<&str>, size: Option<usize>, reason: &str, truncated: bool) -> CapturedBody {
+        if truncated {
             self.truncated_body_count += 1;
         }
         CapturedBody {
-            size: bytes.len(),
+            size,
             mime_type: mime.unwrap_or("application/octet-stream").to_string(),
-            text: (!truncated && textual).then(|| String::from_utf8_lossy(bytes).into_owned()),
-            truncated: omitted,
+            text: None,
+            truncated,
+            omitted: Some(reason.to_string()),
         }
-    }
-
-    pub fn truncated(&mut self, mime: Option<&str>, size: usize) -> CapturedBody {
-        self.truncated_body_count += 1;
-        CapturedBody { size, mime_type: mime.unwrap_or("application/octet-stream").to_string(), text: None, truncated: true }
     }
 }
 
@@ -158,8 +178,8 @@ fn count_redaction_omissions(original: &[CapturedEntry], redacted: &[CapturedEnt
 
 fn protect_body(body: &Option<CapturedBody>, redactor: &mut SecretRedactor) -> Option<CapturedBody> {
     let body = body.as_ref()?;
-    let omitted = CapturedBody { size: body.size, mime_type: body.mime_type.clone(), text: None, truncated: true };
-    let Some(text) = &body.text else { return Some(omitted) };
+    let Some(text) = &body.text else { return Some(body.clone()) };
+    let omitted = CapturedBody { text: None, truncated: true, omitted: Some(UNREDACTABLE.into()), ..body.clone() };
     match redactor.protect_body(text, Some(&body.mime_type)) {
         Some(text) => Some(CapturedBody { text: Some(text), ..body.clone() }),
         None => Some(omitted),
@@ -216,7 +236,7 @@ fn redact_structured_body(body: CapturedBody, redactor: &SecretRedactor) -> Capt
             let text = serde_json::to_string(&redact_known_scalars(value, redactor)).unwrap_or_default();
             CapturedBody { text: Some(text), ..body }
         }
-        Err(_) => CapturedBody { text: None, truncated: true, ..body },
+        Err(_) => CapturedBody { text: None, truncated: true, omitted: Some(UNREDACTABLE.into()), ..body },
     }
 }
 
@@ -246,10 +266,11 @@ mod tests {
                 headers: request_headers,
                 resource_type: "Fetch".into(),
                 body: request_body.map(|text| CapturedBody {
-                    size: text.len(),
+                    size: Some(text.len()),
                     mime_type: "application/json".into(),
                     text: Some(text.into()),
                     truncated: false,
+                    omitted: None,
                 }),
                 redirected_from: None,
             },
@@ -261,10 +282,11 @@ mod tests {
                     Header { name: "Content-Type".into(), value: "application/json".into() },
                 ],
                 body: response_body.map(|text| CapturedBody {
-                    size: text.len(),
+                    size: Some(text.len()),
                     mime_type: "application/json".into(),
                     text: Some(text.into()),
                     truncated: false,
+                    omitted: None,
                 }),
             }),
             failure: None,
@@ -309,16 +331,25 @@ mod tests {
         assert_eq!(omissions, 1);
         let body = redacted[0].request.body.as_ref().unwrap();
         assert!(body.text.is_none() && body.truncated);
+        assert_eq!(body.omitted.as_deref(), Some(UNREDACTABLE));
     }
 
     #[test]
     fn bodies_respect_limits() {
         let mut budget = Budget::default();
-        let body = budget.capture(b"hello", Some("text/plain"));
-        assert_eq!(body.text.as_deref(), Some("hello"));
-        let binary = budget.capture(&[0u8; 10], Some("image/png"));
-        assert!(binary.text.is_none() && binary.truncated);
-        assert!(!body_can_fit(&[Header { name: "content-length".into(), value: "2000000".into() }], None, MAX_BODY_BYTES));
-        assert!(!body_can_fit(&[Header { name: "content-encoding".into(), value: "compress".into() }], Some(5), 10));
+        let body = budget.capture(b"{}", Some("application/json"));
+        assert_eq!(body.text.as_deref(), Some("{}"));
+        assert_eq!(budget.captured_body_bytes, 2);
+        let big = budget.capture(&vec![b' '; MAX_BODY_BYTES + 1], Some("application/json"));
+        assert!(big.text.is_none() && big.truncated && big.omitted.as_deref() == Some(TOO_LARGE));
+        assert_eq!(budget.captured_body_bytes, 2, "bodies that aren't returned don't use the budget");
+        assert!(is_returnable_mime_type(Some("application/problem+json")));
+        assert!(!is_returnable_mime_type(Some("text/html")) && !is_returnable_mime_type(None));
+        let length = |n: &str| vec![Header { name: "content-length".into(), value: n.into() }];
+        assert_eq!(body_can_fit(&length("2000000"), None, MAX_TOTAL_BODY_BYTES), Err((TOO_LARGE, true)));
+        assert_eq!(body_can_fit(&length("20"), None, 10), Err((BUDGET_USED, true)));
+        assert_eq!(body_can_fit(&length("5"), None, 10), Ok(()));
+        let compress = vec![Header { name: "content-encoding".into(), value: "compress".into() }];
+        assert_eq!(body_can_fit(&compress, Some(5), 10), Err((UNSUPPORTED_ENCODING, true)));
     }
 }

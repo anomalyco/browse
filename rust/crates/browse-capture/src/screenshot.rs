@@ -50,11 +50,47 @@ enum Region {
 
 struct Shot {
     bytes: Vec<u8>,
-    /// Size of the captured area in CSS pixels.
-    css_width: f64,
-    css_height: f64,
+    format: Format,
+    /// Actual image size in pixels.
+    width: u32,
+    height: u32,
     /// Image pixels per CSS pixel.
     scale: f64,
+    /// Why the image differs from what was asked (scaled down, returned as PNG).
+    note: Option<String>,
+}
+
+/// Longest side of an image returned inline; larger captures are scaled down (saving to a path allows more).
+const MAX_INLINE_SIDE: f64 = 8_000.0;
+/// Longest side of a saved image; Chrome can't capture larger surfaces.
+const MAX_SAVED_SIDE: f64 = 16_384.0;
+/// Height in image pixels of each tile when a large capture has to be taken in pieces.
+const TILE_SIDE: f64 = 4_096.0;
+
+/// Width and height of a PNG, JPEG or WebP image.
+pub(crate) fn image_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.len() >= 24 {
+        return Some((u32::from_be_bytes(bytes[16..20].try_into().ok()?), u32::from_be_bytes(bytes[20..24].try_into().ok()?)));
+    }
+    if bytes.starts_with(&[0xFF, 0xD8]) {
+        return crate::mkv::jpeg_size(bytes);
+    }
+    if bytes.len() >= 30 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        let le24 = |at: usize| u32::from(bytes[at]) | u32::from(bytes[at + 1]) << 8 | u32::from(bytes[at + 2]) << 16;
+        return match &bytes[12..16] {
+            b"VP8 " => Some((
+                u32::from(u16::from_le_bytes([bytes[26], bytes[27]]) & 0x3FFF),
+                u32::from(u16::from_le_bytes([bytes[28], bytes[29]]) & 0x3FFF),
+            )),
+            b"VP8L" => {
+                let bits = u32::from_le_bytes(bytes[21..25].try_into().ok()?);
+                Some(((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1))
+            }
+            b"VP8X" => Some((le24(24) + 1, le24(27) + 1)),
+            _ => None,
+        };
+    }
+    None
 }
 
 fn region(args: &Value) -> anyhow::Result<Region> {
@@ -123,14 +159,30 @@ async fn element_rect(page: &Arc<TabPage>, element: &Element) -> anyhow::Result<
     Ok((x, y, width, height))
 }
 
-/// The tab and CDP connection a capture uses; element regions are resolved here into viewport clips.
+fn outside(viewport: &page::Viewport, (x, y, width, height): (f64, f64, f64, f64)) -> bool {
+    const SLACK: f64 = 0.5;
+    x < -SLACK || y < -SLACK || x + width > viewport.width + SLACK || y + height > viewport.height + SLACK
+}
+
+/// The tab and CDP connection a capture uses; element regions are resolved here into viewport clips. An element
+/// outside the viewport that would fit is scrolled into view first, so capturing it doesn't resize the page.
 async fn resolve(ctx: &ToolContext, args: &Value, region: Region) -> anyhow::Result<(TabId, Arc<dyn Cdp>, Region)> {
     match region {
         Region::Element { reference, selector } => {
             let timeout = Duration::from_millis(arg_int(args, "timeoutMs", 0, 60_000)?.unwrap_or(5_000) as u64);
             let (page, element, _) =
                 browse_page::resolve_element(ctx, arg_tab(args)?, reference.as_deref(), selector.as_deref(), timeout).await?;
-            let (x, y, w, h) = element_rect(&page, &element).await?;
+            let mut rect = element_rect(&page, &element).await?;
+            let viewport = page::viewport(page.cdp().as_ref()).await?;
+            if outside(&viewport, rect) && rect.2 <= viewport.width && rect.3 <= viewport.height {
+                let scrolled = page
+                    .send("DOM.scrollIntoViewIfNeeded", json!({ "objectId": element.object_id }), element.session.as_deref())
+                    .await;
+                if scrolled.is_ok() {
+                    rect = element_rect(&page, &element).await?;
+                }
+            }
+            let (x, y, w, h) = rect;
             Ok((page.tab(), page.cdp().clone(), Region::Clip(x, y, w, h)))
         }
         region => {
@@ -140,22 +192,48 @@ async fn resolve(ctx: &ToolContext, args: &Value, region: Region) -> anyhow::Res
     }
 }
 
+fn decode(result: &Value) -> anyhow::Result<Vec<u8>> {
+    let data = result.get("data").and_then(Value::as_str).ok_or_else(|| anyhow::anyhow!("Chrome returned no image"))?;
+    Ok(base64::engine::general_purpose::STANDARD.decode(data)?)
+}
+
+/// Captures `region`. Clips inside the viewport are taken as they are on screen; only full pages and clips that reach
+/// beyond the viewport use captureBeyondViewport, which makes Chrome resize the page while it captures (pages see
+/// resize events), as Playwright does. Captures whose longest side would exceed `max_side` image pixels are scaled
+/// down; ones Chrome can't take in one piece are taken in tiles and returned as PNG.
 async fn capture(
     cdp: &dyn Cdp,
     region: &Region,
     format: Format,
     quality: Option<i64>,
     css_scale: bool,
+    max_side: f64,
 ) -> anyhow::Result<Shot> {
     let viewport = page::viewport(cdp).await?;
     let dpr = viewport.device_pixel_ratio;
-    let clip_scale = if css_scale { 1.0 / dpr } else { 1.0 };
+    let mut clip_scale = if css_scale { 1.0 / dpr } else { 1.0 };
     let (x, y, width, height, beyond) = match region {
         Region::Viewport => (viewport.page_x, viewport.page_y, viewport.width, viewport.height, false),
-        Region::FullPage => (0.0, 0.0, viewport.content_width.max(1.0), viewport.content_height.max(1.0), true),
-        Region::Clip(x, y, w, h) => (viewport.page_x + x, viewport.page_y + y, *w, *h, true),
+        Region::FullPage => {
+            let (width, height) = (viewport.content_width.max(1.0), viewport.content_height.max(1.0));
+            (0.0, 0.0, width, height, outside(&viewport, (-viewport.page_x, -viewport.page_y, width, height)))
+        }
+        Region::Clip(x, y, w, h) => (viewport.page_x + x, viewport.page_y + y, *w, *h, outside(&viewport, (*x, *y, *w, *h))),
         Region::Element { .. } => bail_user!("resolve the element first"),
     };
+    let mut note = None;
+    let longest = width.max(height) * clip_scale * dpr;
+    if longest > max_side {
+        let factor = max_side / longest;
+        clip_scale *= factor;
+        note = Some(format!(
+            "scaled down to {:.0}% to fit {max_side} px per side (the full capture would be {:.0}×{:.0} px); capture a clip or element for full detail{}",
+            factor * 100.0,
+            width * clip_scale / factor * dpr,
+            height * clip_scale / factor * dpr,
+            if max_side < MAX_SAVED_SIDE { ", or save to a path for up to 16384 px" } else { "" },
+        ));
+    }
     let mut params = json!({
         "format": format.name(),
         "clip": { "x": x, "y": y, "width": width, "height": height, "scale": clip_scale },
@@ -165,14 +243,89 @@ async fn capture(
     if format != Format::Png {
         params["quality"] = json!(quality.unwrap_or(80));
     }
-    let result = cdp.send("Page.captureScreenshot", params, None).await?;
-    let data = result.get("data").and_then(Value::as_str).ok_or_else(|| anyhow::anyhow!("Chrome returned no image"))?;
-    Ok(Shot {
-        bytes: base64::engine::general_purpose::STANDARD.decode(data)?,
-        css_width: width,
-        css_height: height,
-        scale: clip_scale * dpr,
-    })
+    let result = cdp.send("Page.captureScreenshot", params, None).await;
+    let (bytes, format) = match result {
+        Ok(result) => (decode(&result)?, format),
+        Err(browse_core::CdpError::Protocol(message)) if beyond && message.contains("Unable to capture screenshot") => {
+            let stitched = tiles(cdp, (x, y, width, height), clip_scale).await.map_err(|error| {
+                anyhow::Error::new(crate::UserError(format!(
+                    "Chrome couldn't capture this {:.0}×{:.0} px screenshot ({message}; in tiles: {error:#}). Capture a clip or an element instead.",
+                    width * clip_scale * dpr,
+                    height * clip_scale * dpr
+                )))
+            })?;
+            if format != Format::Png {
+                let text = format!("taken in tiles and returned as PNG (asked for {})", format.name());
+                note = Some(note.map_or(text.clone(), |note| format!("{note}; {text}")));
+            }
+            (stitched, Format::Png)
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if beyond {
+        restore_viewport(cdp, &viewport).await;
+    }
+    let (image_width, image_height) = image_size(&bytes).ok_or_else(|| anyhow::anyhow!("Chrome returned an unreadable image"))?;
+    Ok(Shot { bytes, format, width: image_width, height: image_height, scale: image_width as f64 / width, note })
+}
+
+/// Captures a large area in horizontal strips and stitches them into one PNG.
+async fn tiles(cdp: &dyn Cdp, (x, y, width, height): (f64, f64, f64, f64), clip_scale: f64) -> anyhow::Result<Vec<u8>> {
+    let dpr = page::viewport(cdp).await?.device_pixel_ratio;
+    let per_css = clip_scale * dpr;
+    let total_width = (width * per_css).round() as u64;
+    let total_height = (height * per_css).round() as u64;
+    if total_width * total_height > pixeldiff::MAX_IMAGE_PIXELS {
+        bail_user!("too large to stitch (over 16 megapixels)");
+    }
+    let strip = (TILE_SIDE / per_css).floor().max(1.0);
+    let mut image = pixeldiff::Rgba { width: total_width as u32, height: 0, data: Vec::new() };
+    let mut offset = 0.0;
+    while offset < height {
+        let part = strip.min(height - offset);
+        let params = json!({
+            "format": "png",
+            "clip": { "x": x, "y": y + offset, "width": width, "height": part, "scale": clip_scale },
+            "captureBeyondViewport": true,
+            "fromSurface": true,
+        });
+        let tile = decode_png(&decode(&cdp.send("Page.captureScreenshot", params, None).await?)?)?;
+        if tile.width != image.width {
+            bail_user!("tiles came back with different widths");
+        }
+        image.height += tile.height;
+        image.data.extend_from_slice(&tile.data);
+        offset += part;
+    }
+    encode_png(&image)
+}
+
+/// captureBeyondViewport can leave a device metrics override (from emulate) at the wrong size. When the viewport
+/// changed, clear overrides; if that doesn't bring the old size back, an override was active: set it again.
+async fn restore_viewport(cdp: &dyn Cdp, before: &page::Viewport) {
+    let same = |after: &page::Viewport| (after.width - before.width).abs() < 1.0 && (after.height - before.height).abs() < 1.0;
+    let Ok(after) = page::viewport(cdp).await else { return };
+    if same(&after) {
+        return;
+    }
+    let _ = cdp.send("Emulation.clearDeviceMetricsOverride", json!({}), None).await;
+    match page::viewport(cdp).await {
+        Ok(after) if same(&after) => {}
+        _ => {
+            let _ = cdp
+                .send(
+                    "Emulation.setDeviceMetricsOverride",
+                    json!({
+                        "width": before.width.round(),
+                        "height": before.height.round(),
+                        "deviceScaleFactor": before.device_pixel_ratio,
+                        "mobile": false,
+                    }),
+                    None,
+                )
+                .await;
+        }
+    }
 }
 
 fn image_content(bytes: &[u8], mime: &str) -> Content {
@@ -194,7 +347,10 @@ impl Tool for ScreenshotTool {
                 ref, including refs inside iframes, or a selector, resolved exactly like the page tools) or a rectangle \
                 (clip, viewport CSS pixels). By default image pixels are CSS pixels, so a point (x, y) in \
                 a viewport screenshot is the same (x, y) mouse tools use. Returns the image, or saves it to path and \
-                returns {path, width, height}. labels: true numbers the visible interactive elements on the image \
+                returns {path, width, height} (actual image pixels). Inline images are scaled down to at most 8000 px \
+                per side, saved ones to 16384 px (a note says so). fullPage on a page taller or wider than the \
+                viewport, and clips reaching outside it, make Chrome briefly resize the page (pages see resize \
+                events); elements are scrolled into view instead when they fit. labels: true numbers the visible interactive elements on the image \
                 (drawn on the PNG, nothing is added to the page) and returns [{label, role, text, context, selector, \
                 rect:[x,y,w,h]}] so an element seen in the image can be targeted by selector or by its rect's center."
                 .into(),
@@ -217,7 +373,7 @@ impl Tool for ScreenshotTool {
                     "scale": { "type": "string", "enum": ["css", "device"], "description": "css (default): one image pixel per CSS pixel. device: full device resolution (e.g. 2x on Retina)." },
                     "labels": { "type": "boolean", "description": "Number visible interactive elements on a viewport PNG and list them." },
                     "maxLabels": { "type": "integer", "minimum": 1, "maximum": 300, "description": "Most elements to label (default 80)." },
-                    "path": { "type": "string", "description": "Save here instead of returning the image: absolute inside the file roots, or relative to the first root. Replaces an existing file." }
+                    "path": { "type": "string", "description": "Save here instead of returning the image: absolute inside the file roots (in a private folder you own, not directly in a shared temp folder), or relative (saved in a private folder in the first root). Replaces an existing file." }
                 },
                 "additionalProperties": false
             }),
@@ -244,7 +400,7 @@ impl Tool for ScreenshotTool {
                 if with_labels && (format != Format::Png || !matches!(region, Region::Viewport)) {
                     bail_user!("labels work on viewport PNG screenshots only");
                 }
-                let path = arg_str(&args, "path")?.map(|raw| files::output_path(&ctx.file_roots, raw)).transpose()?;
+                let path = arg_str(&args, "path")?.map(|raw| files::output_path(&ctx.file_roots, raw, "screenshot path")).transpose()?;
                 let (tab, cdp, region) = resolve(&ctx, &args, region).await?;
                 let mut found = None;
                 if with_labels {
@@ -254,33 +410,41 @@ impl Tool for ScreenshotTool {
                     let value = page::evaluate(cdp.as_ref(), &mut worlds, tab, &labels::script(max)).await?;
                     found = Some(serde_json::from_value::<labels::Found>(value)?.labels);
                 }
-                let mut shot = capture(cdp.as_ref(), &region, format, quality, css_scale).await?;
+                let max_side = if path.is_some() { MAX_SAVED_SIDE } else { MAX_INLINE_SIDE };
+                let mut shot = capture(cdp.as_ref(), &region, format, quality, css_scale, max_side).await?;
                 if let Some(found) = &found {
                     let mut image = decode_png(&shot.bytes)?;
                     labels::draw(&mut image, found, shot.scale);
                     shot.bytes = encode_png(&image)?;
                 }
                 let mut summary = json!({
-                    "width": round(shot.css_width * shot.scale),
-                    "height": round(shot.css_height * shot.scale),
-                    "format": format.name(),
+                    "width": shot.width,
+                    "height": shot.height,
+                    "format": shot.format.name(),
                 });
                 if (shot.scale - 1.0).abs() > 0.001 {
                     summary["scale"] = json!(round(shot.scale));
+                }
+                let mut notes: Vec<String> = shot.note.take().into_iter().collect();
+                if quality.is_some() && format == Format::Png {
+                    notes.push("quality applies to jpeg and webp only; it was ignored for png".into());
+                }
+                if !notes.is_empty() {
+                    summary["note"] = json!(notes.join("; "));
                 }
                 if let Some(found) = found {
                     summary["labels"] = json!(found);
                 }
                 match path {
                     Some(path) => {
-                        files::write(&path, &shot.bytes)?;
+                        files::write(&ctx.file_roots, &path, &shot.bytes, "screenshot path")?;
                         summary["path"] = json!(path);
                         summary["bytes"] = json!(shot.bytes.len());
                         crate::json_output(&summary)
                     }
                     None => Ok(ToolOutput {
                         content: vec![
-                            image_content(&shot.bytes, format.mime()),
+                            image_content(&shot.bytes, shot.format.mime()),
                             Content::Text { text: serde_json::to_string(&summary)? },
                         ],
                         is_error: false,
@@ -334,22 +498,33 @@ impl Tool for ScreenshotDiffTool {
         respond(
             async {
                 let Some(baseline) = arg_str(&args, "baseline")? else { bail_user!("baseline is required") };
-                let baseline = files::input_path(&ctx.file_roots, baseline)?;
+                let operation = "screenshot_diff baseline";
+                let bytes = files::read(&ctx.file_roots, baseline, operation, pixeldiff::MAX_IMAGE_BYTES)
+                    .map_err(|error| match error.downcast::<crate::UserError>() {
+                        Ok(user) if user.0.contains("larger than") => {
+                            anyhow::Error::new(crate::UserError("the baseline must be a PNG no larger than 32 MiB".into()))
+                        }
+                        Ok(user) => anyhow::Error::new(user),
+                        Err(error) => error,
+                    })?;
+                if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                    bail_user!(
+                        "the baseline must be a PNG (screenshot_diff compares PNG screenshots); {baseline} is not one. Save baselines with screenshot format png."
+                    );
+                }
                 let threshold = arg_f64(&args, "threshold")?.unwrap_or(0.1);
                 let css_scale = !matches!(arg_str(&args, "scale")?, Some("device"));
-                let diff_path = arg_str(&args, "diffPath")?.map(|raw| files::output_path(&ctx.file_roots, raw)).transpose()?;
-                let current_path =
-                    arg_str(&args, "currentPath")?.map(|raw| files::output_path(&ctx.file_roots, raw)).transpose()?;
+                let diff_path =
+                    arg_str(&args, "diffPath")?.map(|raw| files::output_path(&ctx.file_roots, raw, "diffPath")).transpose()?;
+                let current_path = arg_str(&args, "currentPath")?
+                    .map(|raw| files::output_path(&ctx.file_roots, raw, "currentPath"))
+                    .transpose()?;
                 let region = region(&args)?;
-                let meta = std::fs::metadata(&baseline)?;
-                if meta.len() as usize > pixeldiff::MAX_IMAGE_BYTES {
-                    bail_user!("the baseline must be a PNG no larger than 32 MiB");
-                }
-                let before = decode_png(&std::fs::read(&baseline)?)?;
+                let before = decode_png(&bytes)?;
                 let (_, cdp, region) = resolve(&ctx, &args, region).await?;
-                let shot = capture(cdp.as_ref(), &region, Format::Png, None, css_scale).await?;
+                let shot = capture(cdp.as_ref(), &region, Format::Png, None, css_scale, MAX_SAVED_SIDE).await?;
                 if let Some(path) = &current_path {
-                    files::write(path, &shot.bytes)?;
+                    files::write(&ctx.file_roots, path, &shot.bytes, "currentPath")?;
                 }
                 let after = decode_png(&shot.bytes)?;
                 let diff = pixeldiff::diff(&before, &after, threshold)?;
@@ -368,8 +543,12 @@ impl Tool for ScreenshotDiffTool {
                 }
                 match diff_path {
                     Some(path) => {
-                        files::write(&path, &encode_png(&diff.image)?)?;
+                        files::write(&ctx.file_roots, &path, &encode_png(&diff.image)?, "diffPath")?;
                         result["diffPath"] = json!(path);
+                        crate::json_output(&result)
+                    }
+                    None if diff.changed_pixels > 0 && before.width.max(before.height) as f64 > MAX_INLINE_SIDE => {
+                        result["note"] = json!("the diff image is larger than 8000 px per side; pass diffPath to save it");
                         crate::json_output(&result)
                     }
                     None if diff.changed_pixels > 0 => Ok(ToolOutput {

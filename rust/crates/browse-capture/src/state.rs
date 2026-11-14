@@ -3,7 +3,7 @@ use std::sync::Arc;
 use browse_core::ToolContext;
 use tokio::sync::Mutex;
 
-use crate::{console, download, network, page, recording};
+use crate::{console, network, page, recording};
 
 const KEY: &str = "browse-capture";
 
@@ -13,7 +13,6 @@ pub(crate) struct CaptureState {
     pub network: Mutex<network::NetworkState>,
     pub console: Mutex<console::ConsoleState>,
     pub recording: Arc<Mutex<recording::RecordingState>>,
-    pub downloads: Mutex<download::DownloadState>,
     pub worlds: Mutex<page::Worlds>,
 }
 

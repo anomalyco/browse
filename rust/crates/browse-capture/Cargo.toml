@@ -17,6 +17,9 @@ tokio.workspace = true
 png = "0.18"
 regex = { version = "1", default-features = false, features = ["std", "perf"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 jpeg-encoder = "0.6"

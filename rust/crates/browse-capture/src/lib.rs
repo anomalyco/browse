@@ -1,6 +1,7 @@
 //! Capture tools: screenshots (labels, element clips, full page, diff), network capture with redaction, opt-in page
-//! console capture, screen recording (CDP screencast → MJPEG Matroska, optionally transcoded with ffmpeg) and
-//! downloads. Everything runs over raw CDP through `ToolContext::browser`; nothing
+//! console capture and screen recording (CDP screencast → MJPEG Matroska, optionally transcoded with ffmpeg).
+//! Downloads aren't offered: Chrome refuses Page/Browser.setDownloadBehavior through chrome.debugger, and the browser
+//! may run on another machine than the relay. Everything runs over raw CDP through `ToolContext::browser`; nothing
 //! enables the Runtime or Console domains unless the agent starts a console capture.
 
 use std::sync::Arc;
@@ -10,7 +11,6 @@ use serde::Serialize;
 use serde_json::Value;
 
 mod console;
-mod download;
 mod files;
 mod labels;
 pub mod mkv;
@@ -22,6 +22,10 @@ mod recording;
 mod screencast;
 mod screenshot;
 mod state;
+#[cfg(test)]
+mod testing;
+#[cfg(test)]
+mod unit_tests;
 
 pub fn tools() -> Vec<Arc<dyn Tool>> {
     vec![
@@ -30,7 +34,6 @@ pub fn tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(network::NetworkTool),
         Arc::new(console::ConsoleTool),
         Arc::new(recording::RecordingTool),
-        Arc::new(download::DownloadTool),
     ]
 }
 

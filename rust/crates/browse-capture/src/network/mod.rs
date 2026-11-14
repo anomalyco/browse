@@ -4,6 +4,8 @@ mod model;
 
 pub use model::{CapturedEntry, finish};
 
+use std::sync::Weak;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as SyncMutex};
 use std::time::{Duration, Instant};
@@ -18,7 +20,7 @@ use tokio::sync::{Semaphore, broadcast};
 use crate::redaction::Header;
 use crate::state::{BusyGuard, TaskGuard};
 use crate::{arg_action, arg_bool, arg_int, arg_str, bail_user, json_output, respond, state, tab_schema, target_tab};
-use model::{Budget, CapturedRequest, CapturedResponse, MAX_ENTRIES, body_can_fit, content_type};
+use model::{Budget, CapturedRequest, CapturedResponse, MAX_ENTRIES, body_can_fit, content_type, is_returnable_mime_type};
 
 const DEFAULT_MAX_DURATION_MS: i64 = 30 * 60_000;
 const MAX_FINALIZERS: usize = 4;
@@ -28,6 +30,8 @@ pub(crate) struct NetworkState {
     active: Option<Active>,
     /// Why the last capture ended on its own, shown by status and by a stop that comes too late.
     ended: Option<String>,
+    /// What a capture whose tab went away had captured, returned by the next stop.
+    ended_result: Option<Value>,
 }
 
 struct Active {
@@ -83,11 +87,16 @@ struct Shared {
     in_flight: tokio::sync::watch::Sender<usize>,
 }
 
+/// A request's CDP session and requestId. Chrome reports some requests across sessions (an out-of-process iframe's
+/// document is requested on the parent's session and loaded on the iframe's), so lookups fall back to the requestId.
+type Key = (Option<String>, String);
+
 #[derive(Default)]
 struct Inner {
-    pending: HashMap<(Option<String>, String), Pending>,
-    request_extra: HashMap<(Option<String>, String), Vec<Header>>,
-    response_extra: HashMap<(Option<String>, String), Vec<Header>>,
+    pending: HashMap<Key, Pending>,
+    /// By requestId.
+    request_extra: HashMap<String, Vec<Header>>,
+    response_extra: HashMap<String, Vec<Header>>,
     entries: Vec<CapturedEntry>,
     next_id: usize,
     budget: Budget,
@@ -96,11 +105,27 @@ struct Inner {
     stopping: bool,
 }
 
+impl Inner {
+    fn pending_key(&self, key: &Key) -> Option<Key> {
+        if self.pending.contains_key(key) {
+            return Some(key.clone());
+        }
+        self.pending.keys().find(|other| other.1 == key.1).cloned()
+    }
+
+    fn take_pending(&mut self, key: &Key) -> Option<Pending> {
+        let key = self.pending_key(key)?;
+        self.pending.remove(&key)
+    }
+}
+
 struct Pending {
     id: String,
     started: Instant,
     started_date_time: String,
     session: Option<String>,
+    /// The session the response arrived on; its Network domain holds the body.
+    body_session: Option<String>,
     request_id: String,
     method: String,
     url: String,
@@ -111,7 +136,8 @@ struct Pending {
     redirected_from: Option<String>,
     response: Option<ResponseInfo>,
     failure: Option<String>,
-    encoded_length: Option<usize>,
+    /// Decoded body bytes reported by Network.dataReceived.
+    data_length: usize,
 }
 
 #[derive(Clone)]
@@ -171,20 +197,22 @@ fn response_info(value: &Value) -> ResponseInfo {
 
 fn status_of(state: &NetworkState) -> Status {
     let Some(active) = &state.active else {
+        let ended = state.ended_result.as_ref();
+        let count = |key: &str| ended.and_then(|result| result.get(key)).and_then(Value::as_u64).unwrap_or(0) as usize;
         return Status {
             active: false,
             tab: None,
             started_at: None,
             ends_at: None,
             ended: state.ended.clone(),
-            entry_count: 0,
+            entry_count: count("entryCount"),
             pending_count: 0,
-            response_count: 0,
-            failure_count: 0,
-            captured_body_bytes: 0,
-            truncated_body_count: 0,
-            dropped_entry_count: 0,
-            missed_event_count: 0,
+            response_count: count("responseCount"),
+            failure_count: count("failureCount"),
+            captured_body_bytes: count("capturedBodyBytes"),
+            truncated_body_count: count("truncatedBodyCount"),
+            dropped_entry_count: count("droppedEntryCount"),
+            missed_event_count: count("missedEventCount") as u64,
         };
     };
     let inner = active.shared.inner.lock().unwrap();
@@ -215,8 +243,8 @@ impl Shared {
 
     fn handle(self: &Arc<Self>, event: CdpEvent) {
         let params = &event.params;
-        let request_id = || params.get("requestId").and_then(Value::as_str).unwrap_or("").to_string();
-        let key = (event.session_id.clone(), request_id());
+        let request_id = params.get("requestId").and_then(Value::as_str).unwrap_or("").to_string();
+        let key: Key = (event.session_id.clone(), request_id.clone());
         let mut inner = self.inner.lock().unwrap();
         if inner.stopping {
             return;
@@ -225,20 +253,21 @@ impl Shared {
             "Network.requestWillBeSent" => {
                 let mut redirected_from = None;
                 if let Some(redirect) = params.get("redirectResponse")
-                    && let Some(mut previous) = inner.pending.remove(&key) {
-                        previous.response = Some(response_info(redirect));
-                        redirected_from = Some(previous.url.clone());
-                        drop(inner);
-                        self.finalize(previous);
-                        inner = self.inner.lock().unwrap();
-                    }
+                    && let Some(mut previous) = inner.take_pending(&key)
+                {
+                    previous.response = Some(response_info(redirect));
+                    redirected_from = Some(previous.url.clone());
+                    drop(inner);
+                    self.finalize(previous);
+                    inner = self.inner.lock().unwrap();
+                }
                 let request = params.get("request").cloned().unwrap_or(Value::Null);
                 let url = request.get("url").and_then(Value::as_str).unwrap_or("").to_string();
                 let method = request.get("method").and_then(Value::as_str).unwrap_or("GET").to_string();
                 let resource_type = params.get("type").and_then(Value::as_str).unwrap_or("Other").to_string();
                 if !self.matches(&url, &resource_type, &method) {
-                    inner.request_extra.remove(&key);
-                    inner.response_extra.remove(&key);
+                    inner.request_extra.remove(&request_id);
+                    inner.response_extra.remove(&request_id);
                     return;
                 }
                 if inner.entries.len() + inner.pending.len() >= MAX_ENTRIES {
@@ -252,7 +281,8 @@ impl Shared {
                     started: Instant::now(),
                     started_date_time: crate::now_iso(),
                     session: event.session_id.clone(),
-                    request_id: key.1.clone(),
+                    body_session: event.session_id.clone(),
+                    request_id,
                     url,
                     method,
                     headers: headers_from(request.get("headers")),
@@ -262,7 +292,7 @@ impl Shared {
                     redirected_from,
                     response: None,
                     failure: None,
-                    encoded_length: None,
+                    data_length: 0,
                 };
                 inner.pending.insert(key, pending);
             }
@@ -270,28 +300,38 @@ impl Shared {
                 if inner.request_extra.len() > 4 * MAX_ENTRIES {
                     inner.request_extra.clear();
                 }
-                inner.request_extra.insert(key, headers_from(params.get("headers")));
+                inner.request_extra.insert(request_id, headers_from(params.get("headers")));
             }
             "Network.responseReceivedExtraInfo" => {
                 if inner.response_extra.len() > 4 * MAX_ENTRIES {
                     inner.response_extra.clear();
                 }
-                inner.response_extra.insert(key, headers_from(params.get("headers")));
+                inner.response_extra.insert(request_id, headers_from(params.get("headers")));
             }
             "Network.responseReceived" => {
-                if let Some(pending) = inner.pending.get_mut(&key) {
+                if let Some(found) = inner.pending_key(&key)
+                    && let Some(pending) = inner.pending.get_mut(&found)
+                {
                     pending.response = params.get("response").map(response_info);
+                    pending.body_session = event.session_id.clone();
+                }
+            }
+            "Network.dataReceived" => {
+                if let Some(found) = inner.pending_key(&key)
+                    && let Some(pending) = inner.pending.get_mut(&found)
+                {
+                    pending.data_length += params.get("dataLength").and_then(Value::as_u64).unwrap_or(0) as usize;
                 }
             }
             "Network.loadingFinished" => {
-                if let Some(mut pending) = inner.pending.remove(&key) {
-                    pending.encoded_length = params.get("encodedDataLength").and_then(Value::as_f64).map(|n| n as usize);
+                if let Some(mut pending) = inner.take_pending(&key) {
+                    pending.body_session = event.session_id.clone();
                     drop(inner);
                     self.finalize(pending);
                 }
             }
             "Network.loadingFailed" => {
-                if let Some(mut pending) = inner.pending.remove(&key) {
+                if let Some(mut pending) = inner.take_pending(&key) {
                     let text = params.get("errorText").and_then(Value::as_str).filter(|text| !text.is_empty());
                     pending.failure = Some(text.unwrap_or("Request failed").to_string());
                     drop(inner);
@@ -326,82 +366,18 @@ impl Shared {
     }
 
     async fn build_entry(&self, pending: Pending) -> CapturedEntry {
-        let key = (pending.session.clone(), pending.request_id.clone());
         let (request_headers, response_headers) = {
             let mut inner = self.inner.lock().unwrap();
-            (inner.request_extra.remove(&key), inner.response_extra.remove(&key))
+            (inner.request_extra.remove(&pending.request_id), inner.response_extra.remove(&pending.request_id))
         };
         // ExtraInfo headers are the raw ones on the wire, cookies included; prefer them.
         let request_headers = request_headers.filter(|headers| !headers.is_empty()).unwrap_or(pending.headers.clone());
-        let session = pending.session.as_deref();
-        let request_body = if !self.filters.bodies {
-            None
-        } else {
-            let mime = content_type(&request_headers);
-            let declared = model::declared_body_size(&request_headers);
-            let may_have_body = match declared {
-                Some(size) => size > 0,
-                None => pending.post_data.is_some() || pending.has_post_data,
-            };
-            if !may_have_body {
-                None
-            } else {
-                let limit = self.inner.lock().unwrap().budget.remaining();
-                let text = match &pending.post_data {
-                    Some(text) => Some(text.clone()),
-                    None if body_can_fit(&request_headers, declared, limit) => self
-                        .cdp
-                        .send("Network.getRequestPostData", json!({ "requestId": pending.request_id }), session)
-                        .await
-                        .ok()
-                        .and_then(|value| value.get("postData").and_then(Value::as_str).map(str::to_string)),
-                    None => None,
-                };
-                let mut inner = self.inner.lock().unwrap();
-                Some(match text {
-                    Some(text) if text.len() <= limit => inner.budget.capture(text.as_bytes(), mime.as_deref()),
-                    Some(text) => inner.budget.truncated(mime.as_deref(), text.len()),
-                    None => inner.budget.truncated(mime.as_deref(), declared.unwrap_or(0)),
-                })
-            }
-        };
+        let request_body = if self.filters.bodies { self.request_body(&pending, &request_headers).await } else { None };
         let response = match &pending.response {
             None => None,
             Some(info) => {
                 let headers = response_headers.filter(|headers| !headers.is_empty()).unwrap_or(info.headers.clone());
-                let mime = content_type(&headers).or(info.mime_type.clone());
-                let redirect = (300..400).contains(&info.status) && model::header(&headers, "location").is_some();
-                let body = if !self.filters.bodies || redirect || pending.failure.is_some() {
-                    None
-                } else {
-                    let limit = self.inner.lock().unwrap().budget.remaining();
-                    if limit > 0 && body_can_fit(&headers, pending.encoded_length.filter(|n| *n > 0), limit) {
-                        let fetched = tokio::time::timeout(
-                            Duration::from_secs(2),
-                            self.cdp.send("Network.getResponseBody", json!({ "requestId": pending.request_id }), session),
-                        )
-                        .await;
-                        let bytes = match fetched {
-                            Ok(Ok(value)) => {
-                                let body = value.get("body").and_then(Value::as_str).unwrap_or("");
-                                if value.get("base64Encoded").and_then(Value::as_bool).unwrap_or(false) {
-                                    base64::engine::general_purpose::STANDARD.decode(body).ok()
-                                } else {
-                                    Some(body.as_bytes().to_vec())
-                                }
-                            }
-                            _ => None,
-                        };
-                        let mut inner = self.inner.lock().unwrap();
-                        Some(match bytes {
-                            Some(bytes) => inner.budget.capture(&bytes, mime.as_deref()),
-                            None => inner.budget.truncated(mime.as_deref(), pending.encoded_length.unwrap_or(0)),
-                        })
-                    } else {
-                        let mut inner = self.inner.lock().unwrap();
-                        Some(inner.budget.truncated(mime.as_deref(), pending.encoded_length.unwrap_or(0)))
-                    }
-                };
+                let body = if self.filters.bodies { self.response_body(&pending, info, &headers).await } else { None };
                 Some(CapturedResponse { status: info.status, status_text: info.status_text.clone(), headers, body })
             }
         };
@@ -422,14 +398,89 @@ impl Shared {
         }
     }
 
+    /// The request body: returned as text when it's a kind redaction can check, else only described. Bodies that
+    /// won't be returned are never fetched.
+    async fn request_body(&self, pending: &Pending, headers: &[Header]) -> Option<model::CapturedBody> {
+        let mime = content_type(headers);
+        let declared = model::declared_body_size(headers);
+        let size = pending.post_data.as_ref().map(String::len).or(declared);
+        if size == Some(0) || (size.is_none() && !pending.has_post_data) {
+            return None;
+        }
+        if !is_returnable_mime_type(mime.as_deref()) {
+            return Some(self.inner.lock().unwrap().budget.omitted(mime.as_deref(), size, model::NOT_RETURNED, false));
+        }
+        let text = match &pending.post_data {
+            Some(text) => Some(text.clone()),
+            None => {
+                let limit = self.inner.lock().unwrap().budget.remaining();
+                if let Err((reason, truncated)) = body_can_fit(headers, size, limit) {
+                    return Some(self.inner.lock().unwrap().budget.omitted(mime.as_deref(), size, reason, truncated));
+                }
+                self.cdp
+                    .send("Network.getRequestPostData", json!({ "requestId": pending.request_id }), pending.session.as_deref())
+                    .await
+                    .ok()
+                    .and_then(|value| value.get("postData").and_then(Value::as_str).map(str::to_string))
+            }
+        };
+        let mut inner = self.inner.lock().unwrap();
+        Some(match text {
+            Some(text) => inner.budget.capture(text.as_bytes(), mime.as_deref()),
+            None => inner.budget.omitted(mime.as_deref(), size, model::UNAVAILABLE, true),
+        })
+    }
+
+    /// The response body, under the same rules as `request_body`.
+    async fn response_body(&self, pending: &Pending, info: &ResponseInfo, headers: &[Header]) -> Option<model::CapturedBody> {
+        let redirect = (300..400).contains(&info.status) && model::header(headers, "location").is_some();
+        if redirect || pending.failure.is_some() || matches!(info.status, 101 | 204 | 205 | 304) {
+            return None;
+        }
+        let mime = content_type(headers).or(info.mime_type.clone());
+        let size = Some(pending.data_length).filter(|n| *n > 0).or_else(|| model::declared_body_size(headers));
+        if size == Some(0) {
+            return None;
+        }
+        if !is_returnable_mime_type(mime.as_deref()) {
+            return Some(self.inner.lock().unwrap().budget.omitted(mime.as_deref(), size, model::NOT_RETURNED, false));
+        }
+        let limit = self.inner.lock().unwrap().budget.remaining();
+        if let Err((reason, truncated)) = body_can_fit(headers, size, limit) {
+            return Some(self.inner.lock().unwrap().budget.omitted(mime.as_deref(), size, reason, truncated));
+        }
+        let fetched = tokio::time::timeout(
+            Duration::from_secs(2),
+            self.cdp.send("Network.getResponseBody", json!({ "requestId": pending.request_id }), pending.body_session.as_deref()),
+        )
+        .await;
+        let bytes = match fetched {
+            Ok(Ok(value)) => {
+                let body = value.get("body").and_then(Value::as_str).unwrap_or("");
+                if value.get("base64Encoded").and_then(Value::as_bool).unwrap_or(false) {
+                    base64::engine::general_purpose::STANDARD.decode(body).ok()
+                } else {
+                    Some(body.as_bytes().to_vec())
+                }
+            }
+            _ => None,
+        };
+        let mut inner = self.inner.lock().unwrap();
+        match bytes {
+            Some(bytes) if bytes.is_empty() => None,
+            Some(bytes) => Some(inner.budget.capture(&bytes, mime.as_deref())),
+            None => Some(inner.budget.omitted(mime.as_deref(), size, model::UNAVAILABLE, true)),
+        }
+    }
+
     /// Ends the capture: open requests become failures, finalizers get up to 5 s, then everything is returned.
-    async fn drain(self: &Arc<Self>) -> Vec<CapturedEntry> {
+    async fn drain(self: &Arc<Self>, reason: &str) -> Vec<CapturedEntry> {
         let leftovers: Vec<Pending> = {
             let mut inner = self.inner.lock().unwrap();
             inner.pending.drain().map(|(_, pending)| pending).collect()
         };
         for mut pending in leftovers {
-            pending.failure.get_or_insert_with(|| "Capture stopped before request completed".into());
+            pending.failure.get_or_insert_with(|| reason.to_string());
             pending.response = None;
             self.finalize(pending);
         }
@@ -489,15 +540,31 @@ async fn start(ctx: &ToolContext, args: &Value) -> anyhow::Result<ToolOutput> {
         in_flight: tokio::sync::watch::channel(0).0,
     });
     let listener = shared.clone();
+    let weak = Arc::downgrade(&capture);
     let task = tokio::spawn(async move {
-        loop {
+        let reason = loop {
             match events.recv().await {
-                Ok(event) => listener.handle(event),
+                Ok(event) => {
+                    if event.session_id.is_none() {
+                        match event.method.as_str() {
+                            "Inspector.detached" => {
+                                let reason = event.params.get("reason").and_then(Value::as_str).unwrap_or("detached");
+                                break format!("its tab went away ({reason})");
+                            }
+                            "Inspector.targetCrashed" | "Target.targetCrashed" => break "its tab crashed".to_string(),
+                            _ => {}
+                        }
+                    }
+                    listener.handle(event)
+                }
                 Err(broadcast::error::RecvError::Lagged(missed)) => listener.inner.lock().unwrap().missed_event_count += missed,
-                Err(broadcast::error::RecvError::Closed) => break,
+                Err(broadcast::error::RecvError::Closed) => break "its tab closed or browse was detached from it".to_string(),
             }
-        }
+        };
+        end_with_tab(weak, listener, reason).await;
     });
+    // Existing out-of-process iframes are announced again (Target.attachedToTarget), so their Network domain is on too.
+    let _ = cdp.send("Target.setAutoAttach", json!({ "autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true }), None).await;
     let weak = Arc::downgrade(&capture);
     let expiry = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(max_duration as u64)).await;
@@ -514,6 +581,7 @@ async fn start(ctx: &ToolContext, args: &Value) -> anyhow::Result<ToolOutput> {
     });
     let ends_at = crate::iso_time(std::time::SystemTime::now() + Duration::from_millis(max_duration as u64));
     network.ended = None;
+    network.ended_result = None;
     network.active = Some(Active {
         tab,
         started_at: crate::now_iso(),
@@ -528,19 +596,25 @@ async fn start(ctx: &ToolContext, args: &Value) -> anyhow::Result<ToolOutput> {
     json_output(&status_of(&network))
 }
 
-async fn stop(ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
-    let capture = state::get(ctx).await;
+/// Ends a capture whose tab went away, keeping what it captured for the next stop.
+async fn end_with_tab(weak: Weak<state::CaptureState>, shared: Arc<Shared>, reason: String) {
+    let Some(capture) = weak.upgrade() else { return };
     let mut network = capture.network.lock().await;
-    let Some(active) = network.active.take() else {
-        match network.ended.take() {
-            Some(reason) => bail_user!("network capture is not active: it ended because {reason}. Start a new one."),
-            None => bail_user!("network capture is not active for this session"),
-        }
-    };
-    let mut active = active;
-    active._events.abort();
-    let entries = active.shared.drain().await;
-    let (redacted, omissions) = finish(&entries);
+    if !network.active.as_ref().is_some_and(|active| Arc::ptr_eq(&active.shared, &shared)) {
+        return;
+    }
+    let Some(mut active) = network.active.take() else { return };
+    // This task is the events task: let it finish instead of aborting itself.
+    active._events.disarm();
+    let entries = active.shared.drain(&format!("the capture ended before the request completed: {reason}")).await;
+    let mut result = stop_result(&active, &entries);
+    result["endedBecause"] = json!(reason);
+    network.ended = Some(reason);
+    network.ended_result = Some(result);
+}
+
+fn stop_result(active: &Active, entries: &[CapturedEntry]) -> Value {
+    let (redacted, omissions) = finish(entries);
     let inner = active.shared.inner.lock().unwrap();
     let mut result = json!({
         "active": false,
@@ -558,7 +632,26 @@ async fn stop(ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
         result["missedEventCount"] = json!(inner.missed_event_count);
     }
     result["exchanges"] = json!(redacted);
-    json_output(&result)
+    result
+}
+
+async fn stop(ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
+    let capture = state::get(ctx).await;
+    let mut network = capture.network.lock().await;
+    let Some(active) = network.active.take() else {
+        if let Some(result) = network.ended_result.take() {
+            network.ended = None;
+            return json_output(&result);
+        }
+        match network.ended.take() {
+            Some(reason) => bail_user!("network capture is not active: it ended because {reason}. Start a new one."),
+            None => bail_user!("network capture is not active for this session"),
+        }
+    };
+    let mut active = active;
+    active._events.abort();
+    let entries = active.shared.drain("the capture stopped before the request completed").await;
+    json_output(&stop_result(&active, &entries))
 }
 
 pub(crate) struct NetworkTool;
@@ -570,9 +663,11 @@ impl Tool for NetworkTool {
             name: "network".into(),
             description: "Capture a tab's network traffic. One capture per session, bound to the tab it started on. \
                 start begins capturing (filters optional); status returns counters only; stop ends it and returns every \
-                exchange (method, url, headers, status, bodies as text when textual and ≤1 MB, 25 MB total, 1000 \
-                requests max); cancel \
-                discards it. Credentials are always replaced with [redacted]: authorization and API-key headers, all \
+                exchange (method, url, headers, status, bodies; 1000 requests max); cancel discards it. JSON, form \
+                and multipart bodies are returned as text (≤1 MB each, 25 MB per capture); other bodies (HTML, \
+                scripts, CSS, images, ...) are never fetched and only described {mimeType, size, omitted}, since they \
+                can't be checked for credentials. If the tab closes the capture ends and the next stop still returns \
+                what it captured, with endedBecause. Credentials are always replaced with [redacted]: authorization and API-key headers, all \
                 cookie values, secret-named query/fragment/JSON/form fields, token-like path segments, and any \
                 captured secret value wherever it reappears. A capture ends itself after maxDurationMs."
                 .into(),
@@ -607,7 +702,7 @@ impl Tool for NetworkTool {
                     _ => {
                         let capture = state::get(&ctx).await;
                         let mut network = capture.network.lock().await;
-                        let cancelled = network.active.take().is_some();
+                        let cancelled = network.active.take().is_some() || network.ended_result.take().is_some();
                         network.ended = None;
                         json_output(&json!({ "cancelled": cancelled }))
                     }

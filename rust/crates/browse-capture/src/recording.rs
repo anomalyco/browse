@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use browse_core::{Cdp, TabId, Tool, ToolContext, ToolOutput, ToolSpec};
 use serde_json::{Value, json};
+use tokio::sync::broadcast;
 
 use crate::screencast::{self, Container, Frame, FrameSink, Screencast, WriterMessage, WriterResult};
 use crate::state::{BusyGuard, TaskGuard};
@@ -30,8 +31,11 @@ pub(crate) struct RecordingState {
 struct Recording {
     tab: TabId,
     cdp: Arc<dyn Cdp>,
+    roots: Vec<PathBuf>,
     path: PathBuf,
     partial: PathBuf,
+    /// Folders start created for path, removed again when the recording is cancelled or fails.
+    created: Vec<PathBuf>,
     container: Container,
     started_at: String,
     started: Instant,
@@ -185,10 +189,12 @@ async fn finish(mut recording: Recording) -> anyhow::Result<Value> {
         Ok(written) => written,
         Err(error) => {
             let _ = std::fs::remove_file(&recording.partial);
+            files::remove_created(&recording.created);
             bail_user!("recording failed: {error}");
         }
     };
-    screencast::finalize_output(
+    if let Err(error) = screencast::finalize_output(
+        &recording.roots,
         &recording.partial,
         &recording.path,
         recording.container,
@@ -196,7 +202,11 @@ async fn finish(mut recording: Recording) -> anyhow::Result<Value> {
         recording.size,
         surface_width,
     )
-    .await?;
+    .await
+    {
+        files::remove_created(&recording.created);
+        return Err(error);
+    }
     let size = std::fs::metadata(&recording.path).map(|meta| meta.len()).unwrap_or(0);
     let (width, height) = match recording.container {
         Container::Mkv => written.pixel_size.unwrap_or(recording.size),
@@ -224,11 +234,31 @@ async fn cancel(mut recording: Recording) {
     let writer = recording.writer;
     let _ = tokio::task::spawn_blocking(move || writer.join()).await;
     let _ = std::fs::remove_file(&recording.partial);
+    files::remove_created(&recording.created);
+}
+
+/// Why a recording's tab can no longer be recorded, from its CDP event stream.
+pub(crate) async fn tab_gone(events: &mut broadcast::Receiver<browse_core::CdpEvent>) -> String {
+    loop {
+        match events.recv().await {
+            Ok(event) if event.session_id.is_none() => match event.method.as_str() {
+                "Inspector.detached" => {
+                    let reason = event.params.get("reason").and_then(Value::as_str).unwrap_or("detached");
+                    return format!("the tab went away ({reason})");
+                }
+                "Inspector.targetCrashed" | "Target.targetCrashed" => return "the tab crashed".into(),
+                _ => {}
+            },
+            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(broadcast::error::RecvError::Closed) => return "the tab closed or browse was detached from it".into(),
+        }
+    }
 }
 
 async fn start(ctx: &ToolContext, args: &Value) -> anyhow::Result<ToolOutput> {
     let Some(raw_path) = arg_str(args, "path")? else { bail_user!("path is required to start a recording") };
-    let path = files::output_path(&ctx.file_roots, raw_path)?;
+    let operation = "recording path";
+    let path = files::output_path(&ctx.file_roots, raw_path, operation)?;
     let container = Container::from_path(&path)?;
     let frame_rate = arg_int(args, "frameRate", 1, 60)?.map_or(DEFAULT_FRAME_RATE, |n| n as u32);
     let quality = arg_int(args, "quality", 1, 100)?.map_or(DEFAULT_QUALITY, |n| n as u32);
@@ -241,13 +271,19 @@ async fn start(ctx: &ToolContext, args: &Value) -> anyhow::Result<ToolOutput> {
         bail_user!("a recording is already running in this session; stop or cancel it first");
     }
     let cdp = ctx.browser.cdp(&ctx.session, tab).await?;
-    let size = screencast::recording_size(cdp.as_ref()).await?;
+    let viewport = crate::page::viewport(cdp.as_ref()).await?;
+    let size = screencast::recording_size(&viewport);
+    let created = files::prepare(&ctx.file_roots, &path, operation)?;
     let partial = files::partial_path(&path, "mkv");
+    let file = match files::create_new(&ctx.file_roots, &partial, operation) {
+        Ok(file) => file,
+        Err(error) => {
+            files::remove_created(&created);
+            return Err(error);
+        }
+    };
     let (tx, rx) = sync_channel(MAX_PENDING_FRAMES);
-    let writer_path = partial.clone();
-    let writer = std::thread::Builder::new()
-        .name("browse-recording".into())
-        .spawn(move || screencast::write_mkv(writer_path, rx))?;
+    let writer = std::thread::Builder::new().name("browse-recording".into()).spawn(move || screencast::write_mkv(file, rx))?;
     let started = Instant::now();
     let sink = Arc::new(SyncMutex::new(Sink {
         started,
@@ -262,31 +298,47 @@ async fn start(ctx: &ToolContext, args: &Value) -> anyhow::Result<ToolOutput> {
         surface_width: None,
         source_size: None,
     }));
+    let mut events = cdp.events();
     let screencast = match Screencast::start(cdp.clone(), frame_rate, quality, sink.clone()).await {
         Ok(screencast) => screencast,
         Err(error) => {
             sink.lock().unwrap().tx = None;
             let _ = writer.join();
             let _ = std::fs::remove_file(&partial);
+            files::remove_created(&created);
             return Err(error.context("could not start the screencast"));
         }
     };
     let weak = Arc::downgrade(&capture.recording);
     let timer = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(max_duration as u64)).await;
+        let reason = tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(max_duration as u64)) => format!("it reached maxDurationMs ({max_duration} ms)"),
+            gone = tab_gone(&mut events) => gone,
+        };
+        drop(events);
         let Some(state) = weak.upgrade() else { return };
         let mut state = state.lock().await;
         let Some(mut recording) = state.active.take() else { return };
         recording.timer.disarm();
-        let mut result = finish(recording).await.unwrap_or_else(|error| json!({ "error": format!("{error:#}") }));
-        result["endedBecause"] = json!(format!("it reached maxDurationMs ({max_duration} ms)"));
+        let mut result = finish(recording).await.unwrap_or_else(|error| json!({ "recording": false, "error": format!("{error:#}") }));
+        result["endedBecause"] = json!(reason);
         state.ended = Some(result);
     });
+    // .mkv keeps the screencast's device pixels; .webm and .mp4 are scaled to the CSS viewport.
+    let (width, height) = match container {
+        Container::Mkv => (
+            (viewport.width * viewport.device_pixel_ratio).round() as u32,
+            (viewport.height * viewport.device_pixel_ratio).round() as u32,
+        ),
+        _ => size,
+    };
     let recording = Recording {
         tab,
         cdp,
+        roots: ctx.file_roots.clone(),
         path,
         partial,
+        created,
         container,
         started_at: crate::now_iso(),
         started,
@@ -305,8 +357,8 @@ async fn start(ctx: &ToolContext, args: &Value) -> anyhow::Result<ToolOutput> {
         "path": recording.path,
         "format": container.name(),
         "frameRate": frame_rate,
-        "width": size.0,
-        "height": size.1,
+        "width": width,
+        "height": height,
     });
     recording_state.ended = None;
     recording_state.active = Some(recording);
@@ -326,14 +378,14 @@ impl Tool for RecordingTool {
                 browsers), .webm (VP8) or .mp4 (H.264) are transcoded with ffmpeg at CSS viewport size when it stops. \
                 status reports duration and frame counters; stop finishes the file and returns {path, bytes, \
                 durationMs, width, height, frameCount, quality}; cancel discards it. A recording stops itself after \
-                maxDurationMs; the next stop or status returns its result."
+                maxDurationMs or when its tab closes; the next stop or status returns its result with endedBecause."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "action": { "type": "string", "enum": ["start", "status", "stop", "cancel"] },
                     "tab": tab_schema(),
-                    "path": { "type": "string", "description": "start: output file ending in .mkv, .webm or .mp4; absolute inside the file roots, or relative to the first root." },
+                    "path": { "type": "string", "description": "start: output file ending in .mkv, .webm or .mp4; absolute inside the file roots (in a private folder you own), or relative (saved in a private folder in the first root)." },
                     "frameRate": { "type": "integer", "minimum": 1, "maximum": 60, "description": "start: frames per second (default 30)." },
                     "quality": { "type": "integer", "minimum": 1, "maximum": 100, "description": "start: JPEG quality of captured frames (default 90)." },
                     "maxDurationMs": { "type": "integer", "minimum": 1000, "maximum": 14_400_000, "description": "start: stop automatically after this long (default 900000)." }

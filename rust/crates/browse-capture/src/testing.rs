@@ -1,0 +1,123 @@
+//! A scripted CDP connection and browser for unit tests: events are pushed by the test, commands are recorded and
+//! answered from a table, and dropping the event sender closes the stream like a closed tab.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use browse_core::{Browser, Cdp, CdpError, CdpEvent, HandoffResult, SessionId, SessionState, TabId, TabInfo, ToolContext};
+use serde_json::{Value, json};
+use tokio::sync::broadcast;
+
+#[derive(Default)]
+pub(crate) struct FakeCdp {
+    events: Mutex<Option<broadcast::Sender<CdpEvent>>>,
+    pub sent: Mutex<Vec<(String, Value, Option<String>)>>,
+    pub replies: Mutex<HashMap<String, Value>>,
+}
+
+impl FakeCdp {
+    pub fn new() -> Arc<Self> {
+        let cdp = Self::default();
+        *cdp.events.lock().unwrap() = Some(broadcast::channel(1024).0);
+        Arc::new(cdp)
+    }
+
+    pub fn emit(&self, method: &str, params: Value, session: Option<&str>) {
+        if let Some(sender) = self.events.lock().unwrap().as_ref() {
+            let _ = sender.send(CdpEvent { method: method.into(), params, session_id: session.map(str::to_string) });
+        }
+    }
+
+    /// Closes the event stream, as the relay does when the tab goes away.
+    pub fn close(&self) {
+        self.events.lock().unwrap().take();
+    }
+
+    pub fn reply(&self, method: &str, value: Value) {
+        self.replies.lock().unwrap().insert(method.into(), value);
+    }
+
+    pub fn calls(&self, method: &str) -> Vec<(Value, Option<String>)> {
+        self.sent.lock().unwrap().iter().filter(|(m, _, _)| m == method).map(|(_, p, s)| (p.clone(), s.clone())).collect()
+    }
+}
+
+#[async_trait]
+impl Cdp for FakeCdp {
+    async fn send(&self, method: &str, params: Value, session_id: Option<&str>) -> Result<Value, CdpError> {
+        self.sent.lock().unwrap().push((method.into(), params, session_id.map(str::to_string)));
+        if self.events.lock().unwrap().is_none() {
+            return Err(CdpError::TargetClosed);
+        }
+        Ok(self.replies.lock().unwrap().get(method).cloned().unwrap_or_else(|| json!({})))
+    }
+
+    fn events(&self) -> broadcast::Receiver<CdpEvent> {
+        match self.events.lock().unwrap().as_ref() {
+            Some(sender) => sender.subscribe(),
+            None => broadcast::channel(1).1,
+        }
+    }
+}
+
+pub(crate) struct FakeBrowser(pub Arc<FakeCdp>);
+
+#[async_trait]
+impl Browser for FakeBrowser {
+    async fn tabs(&self, _: &SessionId) -> anyhow::Result<Vec<TabInfo>> {
+        Ok(vec![tab()])
+    }
+    async fn current_tab(&self, _: &SessionId) -> anyhow::Result<TabInfo> {
+        Ok(tab())
+    }
+    async fn open_tab(&self, _: &SessionId, _: Option<&str>) -> anyhow::Result<TabInfo> {
+        anyhow::bail!("not in tests")
+    }
+    async fn select_tab(&self, _: &SessionId, _: TabId) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn close_tab(&self, _: &SessionId, _: TabId) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn cdp(&self, _: &SessionId, _: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
+        Ok(self.0.clone())
+    }
+    async fn handoff(&self, _: &SessionId, _: TabId, _: &str) -> anyhow::Result<HandoffResult> {
+        anyhow::bail!("not in tests")
+    }
+}
+
+fn tab() -> TabInfo {
+    TabInfo { tab_id: 1, url: String::new(), title: String::new(), active: true }
+}
+
+pub(crate) fn context(cdp: Arc<FakeCdp>, roots: Vec<std::path::PathBuf>) -> ToolContext {
+    ToolContext {
+        session: "test".into(),
+        browser: Arc::new(FakeBrowser(cdp)),
+        state: Arc::new(SessionState::default()),
+        file_roots: roots,
+    }
+}
+
+pub(crate) async fn call(ctx: &ToolContext, tool: &dyn browse_core::Tool, args: Value) -> (bool, Value) {
+    let output = tool.call(ctx.clone(), args).await.unwrap();
+    let text = output
+        .content
+        .iter()
+        .find_map(|content| match content {
+            browse_core::Content::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    (output.is_error, serde_json::from_str(&text).unwrap_or(Value::String(text)))
+}
+
+/// Lets spawned tasks run.
+pub(crate) async fn settle() {
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+}

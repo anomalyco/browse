@@ -138,9 +138,8 @@ pub(crate) async fn still(cdp: &dyn Cdp, quality: u32) -> anyhow::Result<Vec<u8>
 }
 
 /// The size to record at: the CSS viewport, rounded down to even numbers for video encoders.
-pub(crate) async fn recording_size(cdp: &dyn Cdp) -> anyhow::Result<(u32, u32)> {
-    let viewport = crate::page::viewport(cdp).await?;
-    Ok(((viewport.width as u32 & !1).max(2), (viewport.height as u32 & !1).max(2)))
+pub(crate) fn recording_size(viewport: &crate::page::Viewport) -> (u32, u32) {
+    ((viewport.width as u32 & !1).max(2), (viewport.height as u32 & !1).max(2))
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -205,27 +204,20 @@ pub(crate) enum WriterMessage {
     Frame { jpeg: Arc<Vec<u8>>, timestamp_ms: u64, duration_ms: u64 },
 }
 
-/// Writes frames from `messages` into an MJPEG Matroska file at `path` until the channel closes. The track size comes
-/// from the first frame's JPEG.
+/// Writes frames from `messages` into `file` (a new, private MJPEG Matroska file) until the channel closes. The track
+/// size comes from the first frame's JPEG.
 pub(crate) fn write_mkv(
-    path: PathBuf,
+    file: std::fs::File,
     messages: std::sync::mpsc::Receiver<WriterMessage>,
 ) -> std::io::Result<WriterResult> {
+    let mut file = Some(file);
     let mut writer: Option<MjpegWriter<std::io::BufWriter<std::fs::File>>> = None;
     let mut pixel_size = None;
     for message in messages {
         let WriterMessage::Frame { jpeg, timestamp_ms, duration_ms } = message;
-        if writer.is_none() {
+        if let Some(file) = file.take() {
             let size = jpeg_size(&jpeg).unwrap_or((2, 2));
             pixel_size = Some(size);
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create(true).truncate(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let file = options.open(&path)?;
             writer = Some(MjpegWriter::new(std::io::BufWriter::with_capacity(1 << 20, file), size.0, size.1)?);
         }
         if let Some(writer) = writer.as_mut() {
@@ -240,8 +232,10 @@ pub(crate) fn write_mkv(
 }
 
 /// Moves a finished MJPEG Matroska file into place, transcoding it with ffmpeg for .webm and .mp4: frames are scaled
-/// to CSS size (`surface_width`), held at a constant `frame_rate`, and padded/cropped to `width`×`height`.
+/// to CSS size (`surface_width`), held at a constant `frame_rate`, padded/cropped to `width`×`height` and converted
+/// from MJPEG's full-range yuvj420p to limited-range yuv420p. Outputs end up 0600.
 pub(crate) async fn finalize_output(
+    roots: &[PathBuf],
     mkv: &Path,
     output: &Path,
     container: Container,
@@ -249,18 +243,22 @@ pub(crate) async fn finalize_output(
     size: (u32, u32),
     surface_width: Option<f64>,
 ) -> anyhow::Result<()> {
+    let operation = "recording path";
     if container == Container::Mkv {
-        std::fs::rename(mkv, output)?;
-        return Ok(());
+        let committed = crate::files::commit(roots, mkv, output, operation);
+        if committed.is_err() {
+            let _ = std::fs::remove_file(mkv);
+        }
+        return committed;
     }
     let (width, height) = size;
     let surface = surface_width.map_or(width, |w| w.round().max(2.0) as u32);
     let filter = format!(
-        "scale=min(iw\\,{surface}):-1:flags=lanczos,pad=ceil(max(iw\\,{width})/2)*2:ceil(max(ih\\,{height})/2)*2:0:0:gray,crop={width}:{height}:0:0"
+        "scale=min(iw\\,{surface}):-1:flags=lanczos,pad=ceil(max(iw\\,{width})/2)*2:ceil(max(ih\\,{height})/2)*2:0:0:gray,crop={width}:{height}:0:0,scale=out_range=tv,format=yuv420p"
     );
     let codec: &[&str] = match container {
         Container::Webm => &["-c:v", "libvpx", "-crf", "4", "-deadline", "good", "-cpu-used", "4", "-b:v", "6M", "-threads", "2"],
-        _ => &["-c:v", "libx264", "-preset", "fast", "-crf", "14", "-tune", "animation", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+        _ => &["-c:v", "libx264", "-preset", "fast", "-crf", "14", "-tune", "animation", "-movflags", "+faststart"],
     };
     let partial = crate::files::partial_path(output, container.name());
     let _permit = FFMPEG.acquire().await?;
@@ -268,6 +266,7 @@ pub(crate) async fn finalize_output(
         .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
         .arg(mkv)
         .args(["-an", "-r", &frame_rate.to_string(), "-fps_mode", "cfr", "-vf", &filter])
+        .args(["-pix_fmt", "yuv420p", "-color_range", "tv"])
         .args(codec)
         .args(["-f", container.name()])
         .arg(&partial)
@@ -278,8 +277,11 @@ pub(crate) async fn finalize_output(
     let _ = std::fs::remove_file(mkv);
     match result {
         Ok(out) if out.status.success() => {
-            std::fs::rename(&partial, output)?;
-            Ok(())
+            let committed = crate::files::commit(roots, &partial, output, operation);
+            if committed.is_err() {
+                let _ = std::fs::remove_file(&partial);
+            }
+            committed
         }
         Ok(out) => {
             let _ = std::fs::remove_file(&partial);
