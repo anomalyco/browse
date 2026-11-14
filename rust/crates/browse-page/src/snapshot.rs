@@ -462,7 +462,7 @@ async fn resolve_scope(page: &Arc<TabPage>, session: &PageSession, options: &Opt
     if target::is_compact_ref(&within) {
         let id = within.strip_prefix('@').unwrap_or(&within).to_string();
         let refs = session.refs.lock().unwrap();
-        if refs.tab != Some(page.tab()) || refs.url.as_deref() != Some(page.main_url().as_str()) {
+        if refs.tab != Some(page.tab()) || refs.document != Some(main_generation) {
             bail!("Snapshot refs are stale after a page change; call snapshot again");
         }
         let target = refs.selectors.get(&id).cloned().ok_or_else(|| anyhow!("Unknown snapshot ref: {within}; call snapshot to get current refs"))?;
@@ -536,14 +536,13 @@ async fn capture_main(page: &Arc<TabPage>, scope: &Scope, settings: &Settings, d
                 if settings.root_selector.is_some() && scope.report_fallback && (message.contains("not a valid selector") || message.contains("querySelectorAll")) {
                     // A Playwright selector rather than CSS: resolve it with the injected script and capture from it.
                     let selector = target::normalize_selector(settings.root_selector.as_deref().unwrap());
-                    let found = page.call_element_result(&scope.frame, "query", vec![v(&selector), v(false)], true).await?;
-                    let element = match found {
-                        ElementOr::Element(element) => element,
-                        ElementOr::Status(_) => bail!("snapshot within {selector:?} matched nothing"),
-                    };
                     let mut unrooted = settings.clone();
                     unrooted.root_selector = None;
-                    return capture_within(page, &element, &unrooted, deadline).await;
+                    let value = with_deadline(deadline, page.call_value(&scope.frame, "captureSelector", vec![v(&selector), v(unrooted.to_json())], true)).await?;
+                    if value.is_null() {
+                        bail!("snapshot within {selector:?} matched nothing");
+                    }
+                    return serde_json::from_value::<Capture>(value).map_err(|e| anyhow!("unexpected capture result: {e}"));
                 }
                 if (is_context_lost(&message) || message.contains("navigated or re-rendered")) && !diff && Instant::now() + RETRY_DELAY < deadline {
                     tokio::time::sleep(RETRY_DELAY).await;
@@ -558,9 +557,27 @@ async fn capture_main(page: &Arc<TabPage>, scope: &Scope, settings: &Settings, d
     }
 }
 
-async fn capture_within(page: &Arc<TabPage>, element: &Element, settings: &Settings, deadline: Instant) -> Result<Capture> {
-    let value = with_deadline(deadline, page.call_element(element, "captureWithin", vec![v(settings.to_json())], false)).await?;
-    serde_json::from_value::<Capture>(value).map_err(|e| anyhow!("unexpected capture result: {e}"))
+/// Right after a navigation browse watched, pages often render their content from requests made after load (search
+/// results, app shells). While the network is still busy, wait briefly for it to go quiet and the DOM to settle. A
+/// document browse didn't see commit, or one older than 15 s, is captured at once.
+async fn settle_recent_navigation(page: &Arc<TabPage>, deadline: Instant) {
+    let main = page.main_frame();
+    let Some(frame) = page.frame(&main) else { return };
+    let recent = frame.committed_at.map(|at| at.elapsed() < Duration::from_secs(15)).unwrap_or(false);
+    if !recent || frame.lifecycle.is_empty() || frame.lifecycle.contains("networkAlmostIdle") || frame.lifecycle.contains("networkIdle") || page.dialog().is_some() {
+        return;
+    }
+    let left = deadline.saturating_duration_since(Instant::now());
+    let cap = (left / 2).min(Duration::from_millis(2_500));
+    let started = Instant::now();
+    page.wait_until(cap, Duration::from_millis(100), |page| {
+        page.lifecycle_has(&main, "networkAlmostIdle") || page.lifecycle_has(&main, "networkIdle") || page.dialog().is_some()
+    })
+    .await;
+    let quiet_max = cap.saturating_sub(started.elapsed()).min(Duration::from_millis(1_000)).as_millis() as u64;
+    if quiet_max > 100 && page.dialog().is_none() {
+        let _ = tokio::time::timeout(Duration::from_millis(quiet_max + 200), page.call_value(&main, "quiet", vec![v(200), v(quiet_max)], false)).await;
+    }
 }
 
 /// The compact snapshot; registers refs in the session.
@@ -599,14 +616,20 @@ pub async fn snapshot(page: &Arc<TabPage>, session: &PageSession, options: &Opti
         "scope": scope.signature,
     })
     .to_string();
-    let document = (page.main_url(), page.frame(&page.main_frame()).map(|f| f.generation).unwrap_or(0));
+    let document = page.frame(&page.main_frame()).map(|f| f.generation).unwrap_or(0);
     {
         let refs = session.refs.lock().unwrap();
         if options.diff {
-            match refs.previous.as_ref().filter(|p| p.document == document) {
-                None => bail!("snapshot with diff: true requires a previous snapshot baseline in this session"),
-                Some(previous) if previous.tab != page.tab() || previous.signature != signature => {
-                    bail!("snapshot with diff: true must use the same tab and snapshot options as the previous snapshot")
+            match refs.previous.as_ref() {
+                None => bail!("snapshot with diff: true needs an earlier snapshot of this page to compare with; call snapshot without diff first"),
+                Some(previous) if previous.tab != page.tab() => {
+                    bail!("snapshot with diff: true compares with the previous snapshot, which was of another tab; call snapshot without diff on this tab first")
+                }
+                Some(previous) if previous.document != document => {
+                    bail!("The page loaded a new document since the previous snapshot, so there is nothing to diff against; call snapshot without diff")
+                }
+                Some(previous) if previous.signature != signature => {
+                    bail!("snapshot with diff: true must use the same snapshot options (within, interactive, depth, maxItems, frames, compact) as the previous snapshot")
                 }
                 _ => {}
             }
@@ -616,9 +639,12 @@ pub async fn snapshot(page: &Arc<TabPage>, session: &PageSession, options: &Opti
         let mut refs = session.refs.lock().unwrap();
         refs.selectors.clear();
         refs.tab = None;
-        refs.url = None;
+        refs.document = None;
     }
     let main_frame = page.main_frame();
+    if !options.diff {
+        settle_recent_navigation(page, deadline).await;
+    }
     let capture = capture_main(page, &scope, &settings, deadline, options.diff).await?;
 
     let main = render_capture(&capture);
@@ -629,6 +655,9 @@ pub async fn snapshot(page: &Arc<TabPage>, session: &PageSession, options: &Opti
         HashMap::new()
     };
 
+    let is_pdf = capture.entries.len() <= 2
+        && scope.frame == main_frame
+        && matches!(tokio::time::timeout(Duration::from_secs(1), page.call_value(&main_frame, "frameInfo", vec![], false)).await, Ok(Ok(info)) if info["contentType"] == "application/pdf");
     let mut refs_guard = session.refs.lock().unwrap();
     let refs = &mut *refs_guard;
     let mut entries: Vec<RenderedEntry> = Vec::new();
@@ -681,8 +710,14 @@ pub async fn snapshot(page: &Arc<TabPage>, session: &PageSession, options: &Opti
         }
     }
 
+    // A snapshot scoped inside an iframe keeps that frame's key, so its refs match the ones of a full snapshot.
+    let root_key = (scope.frame != main_frame).then(|| {
+        let key = refs.frame_key(&scope.frame);
+        frame_objects.insert(key.clone(), (scope.frame.clone(), scope.owner_generation));
+        key
+    });
     for (index, entry) in main.entries.iter().enumerate() {
-        entries.push(entry.clone());
+        entries.push(RenderedEntry { frame_key: root_key.clone(), ..entry.clone() });
         if let Some(node) = frame_nodes.get(&index) {
             emit(node, main.depths[index] as usize + 1, &mut entries, &mut frame_objects, &mut remaining, &mut omitted, refs, max_items);
         }
@@ -738,14 +773,18 @@ pub async fn snapshot(page: &Arc<TabPage>, session: &PageSession, options: &Opti
         refs.selectors.insert(id.clone(), RefTarget { selector: selector.clone(), role: role.clone(), name: entry.identity_name.clone(), frame: owner });
     }
     refs.tab = Some(page.tab());
-    refs.url = Some(page.main_url());
+    refs.document = Some(document);
     refs.aria = None;
     let use_diff = options.diff || (options.delta && compatible_previous.is_some());
     refs.previous = Some(Baseline { tab: page.tab(), document, signature, entries: rendered.clone() });
     drop(refs_guard);
 
     if !use_diff {
-        let lines: Vec<String> = capture.notes.iter().cloned().chain(rendered.iter().map(|e| format_line(e, e.ref_id.as_deref()))).collect();
+        let mut notes = capture.notes.clone();
+        if is_pdf {
+            notes.push("- ... this tab shows Chrome's PDF viewer: the document's text is not in the page and can't be snapshotted. Use a screenshot to read it, or fetch the PDF and extract its text another way.".into());
+        }
+        let lines: Vec<String> = notes.into_iter().chain(rendered.iter().map(|e| format_line(e, e.ref_id.as_deref()))).collect();
         return match &options.find {
             Some(query) => find_lines(&lines, query, options.context),
             None => Ok(lines.join("\n")),
@@ -791,7 +830,7 @@ async fn aria_snapshot(page: &Arc<TabPage>, session: &PageSession, options: &Opt
             if rest.is_empty() {
                 (frame, None)
             } else {
-                match page.call_element_result(&frame, "query", vec![v(&rest), v(false)], true).await? {
+                match page.call_element_result(&frame, "pickRoot", vec![v(&rest)], true).await? {
                     ElementOr::Element(element) => (frame, Some(element)),
                     ElementOr::Status(_) => bail!("snapshot within {within:?} matched nothing"),
                 }
@@ -800,20 +839,61 @@ async fn aria_snapshot(page: &Arc<TabPage>, session: &PageSession, options: &Opt
         _ => (main.clone(), None),
     };
     let depth = Some(options.depth);
-    let mut budget = MAX_FRAMES;
-    let json = aria_frame(page, &frame, root, depth, deadline, &mut budget, 1).await?;
-    let yaml = page.call_value(&frame, "renderAria", vec![v(&json)], true).await?;
+    let mut frames = AriaFrames { budget: MAX_FRAMES, ..Default::default() };
+    let json = match aria_frame(page, &frame, root, depth, deadline, &mut frames, 1).await {
+        Ok(json) => json,
+        Err(error) if error.to_string() == "timed out" => bail!(
+            "Aria snapshot timed out after {} ms: the page did not finish building its accessibility tree in time. Narrow it with within or depth, use the compact snapshot (leave mode unset), or pass a longer timeout.",
+            options.timeout_ms
+        ),
+        Err(error) => return Err(error),
+    };
+    let render_deadline = deadline.max(Instant::now() + Duration::from_secs(5));
+    let yaml = with_deadline(render_deadline, page.call_value(&frame, "renderAria", vec![v(&json)], true))
+        .await
+        .map_err(|e| if e.to_string() == "timed out" { anyhow!("Aria snapshot timed out while rendering; narrow it with within or depth") } else { e })?;
     let yaml = yaml.as_str().unwrap_or_default().to_string();
-    let rewritten = rewrite_aria_refs(&yaml);
+    let mut rewritten = rewrite_aria_refs(&label_iframes(&yaml, &frames.labels));
+    if frames.skipped_limit > 0 {
+        rewritten.push('\n');
+        rewritten.push_str(&frame_skip_note(frames.skipped_limit, &format!("{MAX_FRAMES} iframes at most per snapshot")));
+    }
+    if frames.skipped_deadline > 0 {
+        rewritten.push('\n');
+        rewritten.push_str(&frame_skip_note(frames.skipped_deadline, "snapshot deadline reached"));
+    }
     {
         let mut refs = session.refs.lock().unwrap();
-        refs.aria = Some(AriaRefs { tab: page.tab(), url: page.main_url(), main_generation: page.frame(&main).map(|f| f.generation).unwrap_or(0) });
+        refs.aria = Some(AriaRefs { tab: page.tab(), main_generation: page.frame(&main).map(|f| f.generation).unwrap_or(0), ids: aria_ref_ids(&rewritten) });
     }
     let lines: Vec<String> = rewritten.lines().map(str::to_string).collect();
-    match &options.find {
-        Some(query) => find_lines(&lines, query, options.context),
-        None => Ok(rewritten),
+    let text = match &options.find {
+        Some(query) => find_lines(&lines, query, options.context)?,
+        None => rewritten,
+    };
+    Ok(cap_aria(text))
+}
+
+/// The most characters an aria snapshot returns.
+const MAX_ARIA_CHARS: usize = 100_000;
+
+fn cap_aria(text: String) -> String {
+    let total = text.chars().count();
+    if total <= MAX_ARIA_CHARS {
+        return text;
     }
+    let cut: String = text.chars().take(MAX_ARIA_CHARS).collect();
+    let cut = cut.rsplit_once('\n').map(|(head, _)| head.to_string()).unwrap_or(cut);
+    format!("{cut}\n- ... truncated: the aria snapshot is {total} characters; narrow it with within, depth or find, or use the compact snapshot")
+}
+
+#[derive(Default)]
+struct AriaFrames {
+    budget: usize,
+    skipped_limit: usize,
+    skipped_deadline: usize,
+    /// Playwright iframe refs to their label and, when the content is missing, why.
+    labels: HashMap<String, (String, String, Option<String>)>,
 }
 
 fn aria_frame<'a>(
@@ -822,7 +902,7 @@ fn aria_frame<'a>(
     root: Option<Element>,
     depth: Option<i64>,
     deadline: Instant,
-    budget: &'a mut usize,
+    frames: &'a mut AriaFrames,
     level: usize,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>> {
     Box::pin(async move {
@@ -831,28 +911,96 @@ fn aria_frame<'a>(
         let mut json = snapshot["json"].clone();
         let depths = snapshot["iframeDepths"].as_object().cloned().unwrap_or_default();
         let iframe_refs: Vec<String> = snapshot["iframeRefs"].as_array().map(|a| a.iter().filter_map(|r| r.as_str().map(str::to_string)).collect()).unwrap_or_default();
+        let shown: Vec<&String> = iframe_refs.iter().filter(|r| depths.contains_key(*r)).collect();
         let mut children: HashMap<String, Value> = HashMap::new();
-        for reference in iframe_refs.iter().filter(|r| depths.contains_key(*r)) {
-            if level > MAX_FRAME_DEPTH || *budget == 0 || Instant::now() >= deadline {
+        for (index, reference) in shown.iter().enumerate() {
+            let reference = (*reference).clone();
+            // The iframe element and its label; cheap, so it gets a short floor past the deadline.
+            let label_deadline = deadline.max(Instant::now() + Duration::from_millis(300));
+            let element = with_deadline(label_deadline, async {
+                match page.call_element_result(frame, "ariaRef", vec![v(&reference)], true).await? {
+                    ElementOr::Element(element) => Ok(element),
+                    ElementOr::Status(_) => bail!("gone"),
+                }
+            })
+            .await
+            .ok();
+            let info = match &element {
+                Some(element) => with_deadline(label_deadline, page.call_element(element, "iframeInfo", vec![], true)).await.unwrap_or(Value::Null),
+                None => Value::Null,
+            };
+            let name = info["name"].as_str().unwrap_or("frame").to_string();
+            let src = info["src"].as_str().unwrap_or_default().to_string();
+            let note = |frames: &mut AriaFrames, note: Option<String>| {
+                frames.labels.insert(reference.clone(), (name.clone(), src.clone(), note));
+            };
+            let Some(element) = element else {
+                note(frames, Some("content not captured (the iframe is gone or has no frame attached)".into()));
+                continue;
+            };
+            if level > MAX_FRAME_DEPTH {
+                note(frames, Some(format!("content not captured (frames nested deeper than {MAX_FRAME_DEPTH})")));
                 continue;
             }
-            *budget -= 1;
-            let child_depth = depth.map(|d| d - depths[reference].as_i64().unwrap_or(0) - 1);
-            let child = async {
-                let element = match page.call_element_result(frame, "ariaRef", vec![v(reference)], true).await? {
-                    ElementOr::Element(element) => element,
-                    ElementOr::Status(_) => bail!("gone"),
-                };
-                let child_frame = page.content_frame(&element, Duration::from_millis(ms_left(deadline).min(2_000))).await?;
-                aria_frame(page, &child_frame, None, child_depth, deadline, budget, level + 1).await
+            if frames.budget == 0 {
+                frames.skipped_limit += 1;
+                note(frames, None);
+                continue;
+            }
+            let remaining = ms_left(deadline);
+            if remaining == 0 {
+                frames.skipped_deadline += 1;
+                note(frames, None);
+                continue;
+            }
+            let timeout = frame_timeout(remaining, frames.budget.min(shown.len() - index));
+            let frame_deadline = deadline.min(Instant::now() + Duration::from_millis(timeout));
+            frames.budget -= 1;
+            let child_depth = depth.map(|d| d - depths[&reference].as_i64().unwrap_or(0) - 1);
+            let child_frame = match page.content_frame(&element, Duration::from_millis(timeout)).await {
+                Ok(child) => child,
+                Err(_) => {
+                    note(frames, Some("content not captured (the iframe is gone or has no frame attached)".into()));
+                    continue;
+                }
             };
-            if let Ok(value) = child.await {
-                children.insert(reference.clone(), value);
+            match aria_frame(page, &child_frame, None, child_depth, frame_deadline, frames, level + 1).await {
+                Ok(value) => {
+                    note(frames, None);
+                    children.insert(reference.clone(), value);
+                }
+                Err(error) => note(frames, Some(format!("content not captured ({})", frame_failure_note(&error.to_string())))),
             }
         }
         merge_iframes(&mut json, &children);
         Ok(json)
     })
+}
+
+/// Gives Playwright's anonymous `- iframe [ref=e5]` lines their label (`- iframe "Checkout" [src=pay.example]`)
+/// and a note under frames whose content is missing.
+fn label_iframes(yaml: &str, labels: &HashMap<String, (String, String, Option<String>)>) -> String {
+    static PATTERN: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
+    let pattern = PATTERN.get_or_init(|| regex_lite::Regex::new(r#"^(\s*)- iframe(?: "(?:[^"\\]|\\.)*")?((?: \[[^\]]*\])*) \[ref=((?:f\d+)?e\d+)\](:?)$"#).unwrap());
+    let mut out = Vec::new();
+    for line in yaml.lines() {
+        let Some(caps) = pattern.captures(line) else {
+            out.push(line.to_string());
+            continue;
+        };
+        let Some((name, src, note)) = labels.get(&caps[3]) else {
+            out.push(line.to_string());
+            continue;
+        };
+        let indent = &caps[1];
+        let src = if src.is_empty() { String::new() } else { format!(" [src={src}]") };
+        let colon = if note.is_some() { ":" } else { &caps[4] };
+        out.push(format!("{indent}- iframe {}{src}{} [ref={}]{colon}", serde_json::to_string(name).unwrap_or_default(), &caps[2], &caps[3]));
+        if let Some(note) = note {
+            out.push(format!("{indent}  - ... {note}"));
+        }
+    }
+    out.join("\n")
 }
 
 fn merge_iframes(node: &mut Value, children: &HashMap<String, Value>) {
@@ -873,6 +1021,12 @@ fn merge_iframes(node: &mut Value, children: &HashMap<String, Value>) {
         }
         _ => {}
     }
+}
+
+fn aria_ref_ids(yaml: &str) -> std::collections::HashSet<String> {
+    static PATTERN: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
+    let pattern = PATTERN.get_or_init(|| regex_lite::Regex::new(r"\[ref=((?:f\d+)?a\d+)\]").unwrap());
+    pattern.captures_iter(yaml).map(|c| c[1].to_string()).collect()
 }
 
 pub fn rewrite_aria_refs(yaml: &str) -> String {
@@ -933,6 +1087,28 @@ mod tests {
     #[test]
     fn aria_refs_are_renamed() {
         assert_eq!(rewrite_aria_refs("- button \"x\" [ref=e5]\n- iframe [ref=f1e2]"), "- button \"x\" [ref=a5]\n- iframe [ref=f1a2]");
+    }
+
+    #[test]
+    fn aria_iframes_get_labels_and_notes() {
+        let mut labels = HashMap::new();
+        labels.insert("e5".to_string(), ("Checkout".to_string(), "pay.example".to_string(), None));
+        labels.insert("e7".to_string(), ("frame".to_string(), String::new(), Some("content not captured (snapshot deadline reached)".to_string())));
+        let yaml = "- main:\n  - iframe [ref=e5]:\n    - button \"Pay\" [ref=f1e2]\n  - iframe [ref=e7]";
+        let labelled = label_iframes(yaml, &labels);
+        assert_eq!(
+            labelled,
+            "- main:\n  - iframe \"Checkout\" [src=pay.example] [ref=e5]:\n    - button \"Pay\" [ref=f1e2]\n  - iframe \"frame\" [ref=e7]:\n    - ... content not captured (snapshot deadline reached)"
+        );
+        assert_eq!(aria_ref_ids(&rewrite_aria_refs(&labelled)), ["a5", "f1a2", "a7"].iter().map(|s| s.to_string()).collect());
+    }
+
+    #[test]
+    fn aria_output_is_capped() {
+        let long = "- text: x\n".repeat(20_000);
+        let capped = cap_aria(long);
+        assert!(capped.chars().count() < MAX_ARIA_CHARS + 200);
+        assert!(capped.ends_with("or use the compact snapshot"));
     }
 
     #[test]

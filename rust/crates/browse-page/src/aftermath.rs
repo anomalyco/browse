@@ -79,10 +79,18 @@ pub async fn after(ctx: &ToolContext, page: &Arc<TabPage>, before: &Before, opti
 }
 
 pub async fn describe(ctx: &ToolContext, page: &Arc<TabPage>, before: &Before, options: AfterOptions) -> Map<String, Value> {
+    // A dialog browse answers by itself (auto policy, beforeunload) is being handled in the background.
+    if page.dialog().is_some() && page.blocking_dialog().is_none() {
+        page.wait_until(Duration::from_secs(2), Duration::from_millis(25), |page| page.dialog().is_none()).await;
+    }
     let events = page.events_since(before.seq);
     let mut out = Map::new();
     let url = page.main_url();
     out.insert("url".into(), json!(url));
+    if let Some(pending) = page.pending_navigation().filter(|p| *p != url) {
+        // A navigation that started and is still loading; `url` is what the tab shows until it commits.
+        out.insert("pending".into(), json!(pending));
+    }
     let navigations: Vec<&str> = events.iter().filter_map(|e| match e { TabEvent::Navigated { url, same_document: false } => Some(url.as_str()), _ => None }).collect();
     let navigated = !navigations.is_empty();
     if navigated {
@@ -98,10 +106,23 @@ pub async fn describe(ctx: &ToolContext, page: &Arc<TabPage>, before: &Before, o
     }
     if navigated && page.dialog().is_none() {
         let main = page.main_frame();
-        if let Ok(Ok(info)) = tokio::time::timeout(Duration::from_secs(2), page.call_value(&main, "frameInfo", vec![], false)).await
-            && let Some(title) = info["title"].as_str() {
+        if let Ok(Ok(info)) = tokio::time::timeout(Duration::from_secs(2), page.call_value(&main, "frameInfo", vec![], false)).await {
+            if let Some(title) = info["title"].as_str() {
                 out.insert("title".into(), json!(title));
             }
+            if let Some(status) = info["status"].as_u64() {
+                out.insert("status".into(), json!(status));
+            }
+            // Server redirects the navigation timing entry saw (same-origin ones) plus client-side ones.
+            let redirects = navigations.len() - 1 + info["redirects"].as_u64().unwrap_or(0) as usize;
+            if redirects > 0 {
+                out.insert("redirects".into(), json!(redirects));
+            }
+            if info["errorPage"].as_bool() == Some(true) && info["status"].as_u64().is_none() {
+                let error = info["netError"].as_str().unwrap_or("a network error");
+                out.insert("warning".into(), json!(format!("Chrome could not load {url} ({error}) and shows its error page instead.")));
+            }
+        }
     }
     let handled: Vec<Value> = events.iter().filter_map(|e| match e { TabEvent::DialogClosed { accepted, auto: true } => Some(json!(if *accepted { "accepted" } else { "dismissed" })), _ => None }).collect();
     let opened: Vec<Value> = events.iter().filter_map(|e| match e { TabEvent::Dialog(d) => Some(json!({ "type": d.kind, "message": d.message })), _ => None }).collect();
@@ -112,6 +133,18 @@ pub async fn describe(ctx: &ToolContext, page: &Arc<TabPage>, before: &Before, o
     }
     if events.iter().any(|e| matches!(e, TabEvent::Crashed)) {
         out.insert("crashed".into(), json!(true));
+    }
+    // A popup the page opened (Page.windowOpen) can take a moment to show up as a tab.
+    let popups = events.iter().filter(|e| matches!(e, TabEvent::Popup { .. })).count();
+    if popups > 0 {
+        let until = Instant::now() + Duration::from_millis(1_500);
+        while Instant::now() < until {
+            match ctx.browser.tabs(&ctx.session).await {
+                Ok(tabs) if tabs.iter().filter(|t| !before.tabs.contains(&t.tab_id)).count() >= popups => break,
+                Ok(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+                Err(_) => break,
+            }
+        }
     }
     if let Ok(tabs) = ctx.browser.tabs(&ctx.session).await {
         let new: Vec<Value> = tabs.iter().filter(|t| !before.tabs.contains(&t.tab_id)).map(|t| json!({ "tab": t.tab_id, "url": t.url })).collect();
@@ -130,6 +163,11 @@ pub async fn describe(ctx: &ToolContext, page: &Arc<TabPage>, before: &Before, o
             out.insert("challenge".into(), serde_json::to_value(&outcome).unwrap_or(Value::Null));
             if outcome.status == "cleared" {
                 out.insert("url".into(), json!(page.main_url()));
+                let main = page.main_frame();
+                if let Ok(Ok(info)) = tokio::time::timeout(Duration::from_secs(2), page.call_value(&main, "frameInfo", vec![], false)).await
+                    && let Some(title) = info["title"].as_str() {
+                        out.insert("title".into(), json!(title));
+                    }
             }
             if let Some(warning) = warning {
                 out.insert("warning".into(), json!(warning));

@@ -225,13 +225,19 @@ pub struct Input<'a> {
     mac: bool,
     viewport: Option<(f64, f64)>,
     pub modifiers: i64,
+    /// Set after a click that may open a new tab (modifiers or the middle button): Chrome can hold replies to input
+    /// for the tab that lost focus, so later events don't wait for theirs.
+    bounded: bool,
 }
+
+/// How long an input event waits for Chrome's reply once replies may be held.
+const BOUNDED_REPLY: std::time::Duration = std::time::Duration::from_millis(800);
 
 impl<'a> Input<'a> {
     pub async fn new(page: &'a Arc<TabPage>, human: bool) -> Input<'a> {
         let state = page.input.lock().await;
         let mac = page.platform().map(|p| p.to_ascii_lowercase().contains("mac")).unwrap_or(false);
-        Input { page, state, human, mac, viewport: None, modifiers: 0 }
+        Input { page, state, human, mac, viewport: None, modifiers: 0, bounded: false }
     }
 
     pub fn human(&self) -> bool {
@@ -254,7 +260,17 @@ impl<'a> Input<'a> {
         let page = self.page.clone();
         let method_owned = method.to_string();
         let task = tokio::spawn(async move { page.send_raw(&method_owned, params, None).await });
+        let bounded = self.bounded;
+        let held = async move {
+            if bounded {
+                tokio::time::sleep(BOUNDED_REPLY).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
         tokio::select! {
+            // The event was delivered; only its reply is late.
+            _ = held => Ok(()),
             result = task => match result {
                 Ok(Ok(_)) => Ok(()),
                 Ok(Err(error)) => Err(error),
@@ -279,6 +295,11 @@ impl<'a> Input<'a> {
         let elapsed = started.elapsed().as_secs_f64() * 1000.0;
         human::sleep_ms(gap_ms - elapsed).await;
         Ok(())
+    }
+
+    /// The layout viewport in CSS pixels.
+    pub async fn viewport_size(&mut self) -> Option<(f64, f64)> {
+        self.viewport().await
     }
 
     async fn viewport(&mut self) -> Option<(f64, f64)> {
@@ -358,8 +379,10 @@ impl<'a> Input<'a> {
 
     pub async fn click(&mut self, at: Point, button: &str, count: i64) -> Result<()> {
         self.move_to(at, 1).await?;
+        let new_tab = button == "middle" || self.modifiers & (CONTROL | META | SHIFT) != 0;
         for n in 1..=count.max(1) {
             self.down(button, n).await?;
+            self.bounded |= new_tab;
             self.up(button, n).await?;
             if n < count && self.human {
                 human::sleep_ms(human::random(70.0, 140.0)).await;
@@ -370,10 +393,9 @@ impl<'a> Input<'a> {
 
     /// A wheel scroll at `at`; with human input it glides in eased ~60 Hz frames.
     pub async fn wheel(&mut self, at: Point, dx: f64, dy: f64) -> Result<()> {
-        if self.state.pointer.map(|p| (p.x - at.x).hypot(p.y - at.y) >= 2.0).unwrap_or(true) {
-            self.move_to(at, 1).await?;
-        }
-        let at = self.state.pointer.unwrap_or(at);
+        // Always move first: the remembered pointer may belong to a previous document, which Chrome no longer
+        // hit-tests the wheel against.
+        let at = self.move_to(at, 1).await?;
         if self.human {
             for frame in human::glide(dx, dy) {
                 self.pace(
@@ -425,8 +447,17 @@ impl<'a> Input<'a> {
         .await
     }
 
-    /// Presses a combination like "Enter", "Control+A" or "ControlOrMeta+Shift+K".
+    /// Presses a combination like "Enter", "Control+A" or "ControlOrMeta+Shift+K". A single character with no US
+    /// key (é, ß, 你) is inserted as text.
     pub async fn press(&mut self, combo: &str) -> Result<()> {
+        let mut chars = combo.chars();
+        if let (Some(c), None) = (chars.next(), chars.next())
+            && char_definition(c).is_none() && key_definition(combo).is_none() {
+                if self.human {
+                    self.state.before_key().await;
+                }
+                return self.insert_text(combo).await;
+            }
         let (modifiers, key) = parse_combo(combo, self.mac)?;
         let mut held = Vec::new();
         for modifier in &modifiers {

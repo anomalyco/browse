@@ -37,9 +37,19 @@
     captureWithin(element, settings) {
       return capture(element, settings)
     },
-    captureRoot(selector) {
-      // Mirrors the within-selector fallback: Playwright selectors that are not CSS resolve with the injected script.
-      return this.query(selector, false)
+    // A within root given as a Playwright selector: the only match, else the first visible one with a note, as the
+    // CSS path in capture does. null when nothing matches.
+    captureSelector(selector, settings) {
+      const matches = this.queryAll(selector)
+      if (matches.length === 0) return null
+      const visible = (element) => element.checkVisibility?.({ visibilityProperty: true }) ?? true
+      const root = matches.length === 1 ? matches[0] : (matches.find(visible) ?? matches[0])
+      const result = capture(root, settings)
+      if (matches.length > 1) {
+        const which = visible(root) ? "the first visible one" : "the first (none is visible)"
+        result.notes = [`within "${selector}" matched ${matches.length} elements; showing ${which}`, ...(result.notes || [])]
+      }
+      return result
     },
 
     // Selectors (Playwright syntax through the injected script).
@@ -62,16 +72,26 @@
     },
 
     // Snapshot refs: the elements matching the ref's selector that still have its role and exact name and are not
-    // hidden from assistive technology. The element, "hidden" (a match exists but is hidden) or "none".
+    // hidden from assistive technology. The element, "hidden" (a match exists but is hidden), "none", or
+    // "multiple:<count>:<preview>\n<preview>" when several elements match (a ref must identify one element).
     refResolve(role, name, selector) {
       const naming = createNaming()
       const bySelector = selector.includes(" >> ") ? this.queryAll(selector) : Array.from(document.querySelectorAll(selector))
-      const sameRole = role === null ? bySelector : bySelector.filter((element) => naming.roleFor(element) === role)
-      const matches = role === null
+      const sameRole = role == null ? bySelector : bySelector.filter((element) => naming.roleFor(element) === role)
+      const matches = role == null
         ? sameRole
-        : sameRole.filter((element) => !hiddenFromAria(element) && (name === null || naming.identityNameFor(element, role) === name))
-      if (matches.length > 0) return matches[0]
-      if (role !== null && sameRole.some(hiddenFromAria)) return "hidden"
+        : sameRole.filter((element) => !hiddenFromAria(element) && (name == null || naming.identityNameFor(element, role) === name))
+      if (matches.length === 1) return matches[0]
+      if (matches.length > 1) {
+        const previews = matches.slice(0, 4).map((element) => {
+          const elementRole = naming.roleFor(element)
+          const label = elementRole ? `${elementRole} ${quoted(naming.identityNameFor(element, elementRole) || "")}` : element.localName
+          const html = element.outerHTML.replace(/\s+/g, " ")
+          return `${label}: ${html.length > 100 ? html.slice(0, 100) + "…" : html}`
+        })
+        return `multiple:${matches.length}:${previews.join("\n")}`
+      }
+      if (role != null && sameRole.some(hiddenFromAria)) return "hidden"
       return "none"
     },
     // The first element for a snapshot selector (CSS, or a `host >> inner` chain through shadow roots).
@@ -109,6 +129,26 @@
     ariaRef(ref) {
       const matches = this.queryAll(`aria-ref=${ref}`)
       return matches[0] ?? "none"
+    },
+    // How an iframe reads in an aria snapshot: its title (or aria-label, name, src host) and src host.
+    iframeInfo(element) {
+      const text = (value) => (value ?? "").trim()
+      let src = ""
+      const raw = element.getAttribute("src")
+      if (raw) {
+        try {
+          const url = new URL(raw, document.baseURI)
+          src = url.host || url.protocol.replace(/:$/, "")
+        } catch {}
+      }
+      const name = text(element.getAttribute("title")) || text(element.getAttribute("aria-label")) || text(element.getAttribute("name"))
+      return { name: name || src || "frame", src }
+    },
+    // The root for a within selector: the only match, else the first visible one. "none" when nothing matches.
+    pickRoot(selector) {
+      const matches = this.queryAll(selector)
+      if (matches.length <= 1) return matches[0] ?? "none"
+      return matches.find((element) => element.checkVisibility?.({ visibilityProperty: true }) ?? true) ?? matches[0]
     },
     redact() {
       // Patches this world's prototypes only: the page's world keeps its own.
@@ -309,6 +349,41 @@
     focus(element) {
       return this.inj.focusNode(element, true)
     },
+    // Focuses a field for typing. A field that wasn't focused gets its caret at the end, so typed text appends;
+    // a focused one keeps its caret and selection.
+    focusForTyping(element) {
+      const target = this.inj.retarget(element, "follow-label") || element
+      let active = document.activeElement
+      while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement
+      if (active === target) return "ok"
+      const result = this.inj.focusNode(target, false)
+      if (result !== "done") return result
+      try {
+        if ((target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) && typeof target.value === "string") {
+          const end = target.value.length
+          target.setSelectionRange(end, end)
+        } else if (target.isContentEditable) {
+          const range = document.createRange()
+          range.selectNodeContents(target)
+          range.collapse(false)
+          const selection = target.ownerDocument.getSelection()
+          selection.removeAllRanges()
+          selection.addRange(range)
+        }
+      } catch {}
+      return "ok"
+    },
+    // Whether a fill result may show the value: not for passwords and one-time codes.
+    isSecret(element) {
+      const target = this.inj.retarget(element, "follow-label") || element
+      if (!(target instanceof HTMLInputElement)) return false
+      return target.type.toLowerCase() === "password" || /one-time-code|password/.test(target.autocomplete || "")
+    },
+    optionLabels(element) {
+      const select = this.inj.retarget(element, "follow-label")
+      if (!(select instanceof HTMLSelectElement)) return []
+      return Array.from(select.options).slice(0, 50).map((option) => ({ value: option.value, label: option.label || option.text, disabled: option.disabled }))
+    },
     selectText(element) {
       return this.inj.selectText(element)
     },
@@ -323,6 +398,42 @@
       const target = this.inj.retarget(element, "follow-label")
       if (target instanceof HTMLInputElement && target.type.toLowerCase() === "file") return target
       return "not-file-input"
+    },
+    // Uploads as in-memory files (like Playwright's setInputFiles with buffers): the bytes arrive in base64 chunks,
+    // then become File objects assigned through a DataTransfer, with input and change events.
+    uploadChunk(id, base64) {
+      this.uploads = this.uploads || new Map()
+      const binary = atob(base64)
+      const bytes = new Uint8Array(binary.length)
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+      if (!this.uploads.has(id)) this.uploads.set(id, [])
+      this.uploads.get(id).push(bytes)
+    },
+    uploadFinish(input, files) {
+      const uploads = this.uploads || new Map()
+      try {
+        if (files.length > 1 && !input.multiple) return "not-multiple"
+        if (input.disabled) return "disabled"
+        const transfer = new DataTransfer()
+        for (const file of files) {
+          transfer.items.add(new File(uploads.get(file.id) || [], file.name, { type: file.mime, lastModified: file.lastModified }))
+        }
+        input.files = transfer.files
+        input.dispatchEvent(new Event("input", { bubbles: true, composed: true }))
+        input.dispatchEvent(new Event("change", { bubbles: true }))
+        return "ok"
+      } finally {
+        for (const file of files) uploads.delete(file.id)
+      }
+    },
+    uploadAbort(ids) {
+      for (const id of ids) this.uploads?.delete(id)
+    },
+    // The focused element, through shadow roots; true when it is `element` (or inside it, for a label's control).
+    isFocused(element) {
+      let active = document.activeElement
+      while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement
+      return !!active && (active === element || element.contains(active))
     },
     activeElementIsEditable() {
       let active = document.activeElement
@@ -346,13 +457,31 @@
     },
 
     // Page state.
+    // status and redirects come from the navigation timing entry (redirectCount only counts same-origin redirects);
+    // Chrome's error page reports the HTTP status or net error it shows.
     frameInfo() {
-      return { url: location.href, origin: location.origin, title: document.title, readyState: document.readyState, platform: navigator.platform }
+      const info = { url: location.href, origin: location.origin, title: document.title, readyState: document.readyState, platform: navigator.platform, contentType: document.contentType }
+      const entry = performance.getEntriesByType?.("navigation")?.[0]
+      if (entry?.responseStatus) info.status = entry.responseStatus
+      if (entry?.redirectCount) info.redirects = entry.redirectCount
+      if (location.protocol === "chrome-error:") {
+        const text = document.body?.innerText || ""
+        info.errorPage = true
+        const http = /HTTP ERROR (\d{3})/.exec(text)
+        if (http) info.status = Number(http[1])
+        const net = /\b(ERR_[A-Z_]+)\b/.exec(text)
+        if (net) info.netError = `net::${net[1]}`
+      }
+      return info
     },
-    hasText(text) {
+    // Like Playwright's text=: whitespace-normalized, case-insensitive substring unless exact.
+    hasText(text, exact) {
       const body = document.body
       if (!body) return false
-      return (body.innerText || "").includes(text)
+      const content = body.innerText || ""
+      if (exact) return content.includes(text)
+      const normalize = (value) => value.replace(/\s+/g, " ").trim().toLowerCase()
+      return normalize(content).includes(normalize(text))
     },
     // Resolves once the document is quiet for `quietMs`, or after `maxMs` at most.
     quiet(quietMs, maxMs) {
@@ -400,6 +529,10 @@
     },
 
     // WebMCP (cli/src/execute/webmcp.ts).
+    // A method's source, so it can run in the page's main world for WebMCP polyfills the isolated world can't see.
+    methodSource(name) {
+      return String(this[name])
+    },
     webmcpList() {
       const context = document.modelContext ?? navigator.modelContext
       if (!context?.getTools) return null

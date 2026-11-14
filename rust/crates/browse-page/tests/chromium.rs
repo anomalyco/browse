@@ -265,3 +265,147 @@ async fn drag_hover_select_reload_and_challenge() {
     assert_eq!(result["challenge"]["kind"], "block", "{result}");
     assert!(result["warning"].as_str().unwrap().contains("refused the visit"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn navigation_statuses_redirects_timeouts_and_fragments() {
+    let h = harness!(false);
+    let landed = h.server.page("/__landed", "<!doctype html><title>Landed</title><main><h1 id=top>Landed Here</h1><p>Some Text</p></main>");
+
+    let missing = h.json("navigate", json!({ "url": format!("http://127.0.0.1:{}/__status/404", h.server.port) })).await;
+    assert_eq!(missing["status"], 404, "{missing}");
+    assert!(missing["url"].as_str().unwrap().ends_with("/__status/404"), "{missing}");
+
+    let redirected = h.json("navigate", json!({ "url": format!("http://127.0.0.1:{}/__redirect/3", h.server.port) })).await;
+    assert_eq!(redirected["url"], landed, "{redirected}");
+    assert_eq!(redirected["redirects"], 3, "{redirected}");
+    assert_eq!(redirected["status"], 200, "{redirected}");
+
+    let started = std::time::Instant::now();
+    let slow = h.json("navigate", json!({ "url": format!("http://127.0.0.1:{}/__slow/4000", h.server.port), "timeout": 800 })).await;
+    assert!(started.elapsed() < std::time::Duration::from_millis(2_500), "took {:?}", started.elapsed());
+    assert!(slow["pending"].as_str().unwrap().ends_with("/__slow/4000"), "{slow}");
+    assert_eq!(slow["url"], landed, "{slow}");
+    // The slow page commits later; wait_for load waits for it rather than the old page.
+    let waited = h.json("wait_for", json!({ "load": "load", "timeout": 8000 })).await;
+    assert!(waited["url"].as_str().unwrap().ends_with("/__slow/4000"), "{waited}");
+    assert_eq!(h.ok("eval", json!({ "expression": "document.title" })).await, "\"Slow\"");
+
+    h.json("navigate", json!({ "url": landed })).await;
+    let fragment = h.json("navigate", json!({ "url": format!("{landed}#top") })).await;
+    assert_eq!(fragment["url"], format!("{landed}#top"), "{fragment}");
+    assert!(fragment.get("urlChanged").is_some(), "{fragment}");
+
+    let error = h.err("navigate", json!({ "url": "javascript:alert(1)" })).await;
+    assert!(error.contains("eval"), "{error}");
+    let error = h.err("navigate", json!({ "url": "" })).await;
+    assert!(error.contains("empty"), "{error}");
+
+    let waited = h.json("wait_for", json!({ "text": "landed   here", "url": "/__landed" })).await;
+    assert_eq!(waited["ok"], true, "{waited}");
+    let error = h.err("wait_for", json!({ "text": "landed here", "exact": true, "timeout": 300 })).await;
+    assert!(error.contains("Timed out"), "{error}");
+    let error = h.err("wait_for", json!({ "load": "none" })).await;
+    assert!(error.contains("commit"), "{error}");
+}
+
+const REFS: &str = r#"<!doctype html><html><head><title>Refs</title></head><body><main>
+<details><summary>More info</summary><p>Hidden details</p></details>
+<div contenteditable="true" id="editor">Dax</div>
+<button id="icon"><svg width="10" height="10"></svg></button>
+<button id="go" onclick="this.dataset.clicked = 'yes'">Go</button>
+<input id="name" value="Dax">
+<select id="size"><option value="1">Small</option><option value="2">Large</option></select>
+</main></body></html>"#;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn refs_nulls_strictness_and_typing() {
+    let h = harness!(false);
+    let url = h.server.page("/refs", REFS);
+    h.json("navigate", json!({ "url": url })).await;
+    let snapshot = h.ok("snapshot", json!({})).await;
+
+    // Refs without a standard role or a name resolve (role and name travel as null).
+    let summary = ref_of(&snapshot, "summary \"More info\"");
+    h.ok("click", json!({ "ref": summary })).await;
+    assert_eq!(h.ok("eval", json!({ "expression": "document.querySelector('details').open" })).await, "true");
+
+    // Nulls, also nested, reach the page.
+    let echoed = h.ok("eval", json!({ "expression": "(el, a) => JSON.stringify(a)", "arg": { "a": null, "b": [null, 1] } })).await;
+    assert_eq!(echoed, "\"{\\\"a\\\":null,\\\"b\\\":[null,1]}\"");
+
+    // A ref that now matches several elements fails instead of picking one.
+    let go = ref_of(&snapshot, "button \"Go\"");
+    h.ok("eval", json!({ "expression": "const b = document.getElementById('go'); b.after(b.cloneNode(true)); return 1" })).await;
+    let error = h.err("click", json!({ "ref": go })).await;
+    assert!(error.contains("matches 2 elements"), "{error}");
+
+    // type appends at the end of a field that wasn't focused; press inserts characters without a US key.
+    h.ok("type", json!({ "selector": "#name", "text": " Jr" })).await;
+    h.ok("press", json!({ "selector": "#name", "key": "é" })).await;
+    assert_eq!(h.ok("eval", json!({ "expression": "document.getElementById('name').value" })).await, "\"Dax Jré\"");
+
+    // select takes a number, and lists the options when nothing matches.
+    let selected = h.json("select", json!({ "selector": "#size", "value": 2 })).await;
+    assert_eq!(selected["selected"][0], "2", "{selected}");
+    let started = std::time::Instant::now();
+    let error = h.err("select", json!({ "selector": "#size", "value": "Huge" })).await;
+    assert!(error.contains("\"Small\"") && error.contains("\"Large\""), "{error}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(4));
+
+    // Aria refs that never existed fail at once.
+    h.ok("snapshot", json!({ "mode": "aria" })).await;
+    let started = std::time::Instant::now();
+    let error = h.err("click", json!({ "ref": "a999" })).await;
+    assert!(error.contains("Unknown aria snapshot ref"), "{error}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn eval_scoping_serialization_errors_and_timeouts() {
+    let h = harness!(false);
+    let url = h.server.page("/eval", "<!doctype html><title>Eval</title><body><div id=a class='x y'>hi</div></body>");
+    h.json("navigate", json!({ "url": url })).await;
+
+    // Declarations stay local: the same code runs twice, and the page never sees them.
+    for world in ["isolated", "main"] {
+        assert_eq!(h.ok("eval", json!({ "expression": "const x = 1; return x", "world": world })).await, "1");
+        assert_eq!(h.ok("eval", json!({ "expression": "const x = 1; return x", "world": world })).await, "1");
+    }
+    assert_eq!(h.ok("eval", json!({ "expression": "typeof x", "world": "main" })).await, "\"undefined\"");
+    assert_eq!(h.ok("eval", json!({ "expression": "\"await is just a word\"" })).await, "\"await is just a word\"");
+    assert_eq!(h.ok("eval", json!({ "expression": "await new Promise((r) => setTimeout(() => r(5), 10))" })).await, "5");
+    let hinted = h.json("eval", json!({ "expression": "const t = document.title" })).await;
+    assert!(hinted["hint"].as_str().unwrap().contains("return"), "{hinted}");
+
+    let value = h.json("eval", json!({ "expression": "(() => { const o = { m: new Map([['k', 1]]), s: new Set([1, 2]), d: new Date(0), n: document.getElementById('a'), big: 10n, r: /x/g }; o.self = o; return o })()" })).await;
+    assert_eq!(value["m"], json!({ "k": 1 }), "{value}");
+    assert_eq!(value["s"], json!([1, 2]), "{value}");
+    assert_eq!(value["d"], "1970-01-01T00:00:00.000Z", "{value}");
+    assert_eq!(value["n"], "<div#a.x.y>", "{value}");
+    assert_eq!(value["big"], "10n", "{value}");
+    assert_eq!(value["r"], "/x/g", "{value}");
+    assert_eq!(value["self"], "[Circular]", "{value}");
+    assert_eq!(h.ok("eval", json!({ "expression": "window" })).await, "\"[Window]\"");
+
+    let error = h.err("eval", json!({ "expression": "throw null" })).await;
+    assert!(error.contains("threw null"), "{error}");
+    let error = h.err("eval", json!({ "expression": "throw { custom: 1 }" })).await;
+    assert!(error.contains("custom"), "{error}");
+    let error = h.err("eval", json!({ "expression": "const a = 1;\nnull.boom" })).await;
+    assert!(error.contains("line 2"), "{error}");
+
+    let started = std::time::Instant::now();
+    let error = h.err("eval", json!({ "expression": "while (true) {}", "timeout": 500 })).await;
+    assert!(error.contains("stopped"), "{error}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(h.ok("eval", json!({ "expression": "1 + 1" })).await, "2");
+
+    // Media emulation settings combine; bad values change nothing.
+    h.json("emulate", json!({ "colorScheme": "dark" })).await;
+    h.json("emulate", json!({ "reducedMotion": "reduce" })).await;
+    let both = h.ok("eval", json!({ "expression": "matchMedia('(prefers-color-scheme: dark)').matches && matchMedia('(prefers-reduced-motion: reduce)').matches" })).await;
+    assert_eq!(both, "true");
+    assert!(h.err("emulate", json!({ "colorScheme": "purple" })).await.contains("colorScheme"));
+    assert!(h.err("emulate", json!({ "timezone": "Europe/Paris" })).await.contains("timezone"));
+    assert!(h.err("emulate", json!({ "viewport": { "width": 0, "height": 10 } })).await.contains("positive"));
+}

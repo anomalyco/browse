@@ -14,8 +14,9 @@ use crate::actions::{self, PointerOptions};
 use crate::aftermath::{self, AfterOptions};
 use crate::human::Point;
 use crate::input::{Input, Interrupted};
-use crate::navigation::{self, WaitUntil};
-use crate::page::{Arg, DialogPolicy, ElementOr, TabPage, exception_message, truncate, v};
+use crate::eval;
+use crate::navigation::{self, NavResult, WaitUntil};
+use crate::page::{Arg, DialogPolicy, ElementOr, TabPage, truncate, v};
 use crate::snapshot;
 use crate::state::{self, PageSession};
 use crate::target::{self, ResolveOptions, Spec};
@@ -182,13 +183,17 @@ async fn navigate(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     let action = str_arg(&args, "action").unwrap_or(if args.get("url").is_some() { "goto" } else { "" });
     let wait = WaitUntil::parse(str_arg(&args, "waitUntil"))?;
     let timeout = timeout_arg(&args, 30_000);
-    let before = aftermath::before(&c.ctx, &c.page).await;
+    // A beforeunload dialog (or one under an auto policy) is being answered in the background: let it finish.
+    if c.page.dialog().is_some() && c.page.blocking_dialog().is_none() {
+        c.page.wait_until(Duration::from_secs(3), Duration::from_millis(50), |page| page.dialog().is_none()).await;
+    }
     c.page.ensure_no_dialog()?;
+    let before = aftermath::before(&c.ctx, &c.page).await;
     let mut out = Map::new();
     let nav = match action {
         "goto" => {
             let url = str_arg(&args, "url").ok_or_else(|| anyhow!("navigate needs a url"))?;
-            let url = navigation::normalize_url(url);
+            let url = navigation::normalize_url(url)?;
             Some(navigation::goto(&c.page, &url, wait, timeout, str_arg(&args, "referrer")).await?)
         }
         "back" | "forward" => {
@@ -202,12 +207,23 @@ async fn navigate(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
         "" => bail!("navigate needs a url, or action back, forward or reload"),
         other => bail!("action must be goto, back, forward or reload; got {other:?}"),
     };
-    if nav.as_ref().map(|n| n.timed_out).unwrap_or(false) {
-        out.insert("warning".into(), json!(format!("Timed out after {} ms waiting for {:?}; the page may still be loading.", timeout.as_millis(), wait)));
+    match &nav {
+        Some(NavResult { pending: Some(pending), .. }) => {
+            out.insert("pending".into(), json!(pending));
+            out.insert(
+                "warning".into(),
+                json!(format!("The navigation to {pending} did not finish within {} ms; it is still loading, and the tab still shows {}.", timeout.as_millis(), c.page.main_url())),
+            );
+        }
+        Some(NavResult { timed_out: true, .. }) => {
+            out.insert("warning".into(), json!(format!("Timed out after {} ms waiting for {wait}; the page may still be loading.", timeout.as_millis())));
+        }
+        _ => {}
     }
     let extra = aftermath::describe(&c.ctx, &c.page, &before, AfterOptions::default()).await;
     let mut extra = extra;
-    if c.page.dialog().is_none() && !extra.contains_key("title") {
+    // While a navigation is pending Chrome holds commands for the page until it commits; don't wait on it.
+    if c.page.dialog().is_none() && !extra.contains_key("title") && c.page.pending_navigation().is_none() {
         let main = c.page.main_frame();
         if let Ok(Ok(info)) = tokio::time::timeout(Duration::from_secs(2), c.page.call_value(&main, "frameInfo", vec![], false)).await {
             extra.insert("title".into(), info["title"].clone());
@@ -258,6 +274,10 @@ async fn click(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
                     at
                 }
                 (None, Some(point)) => {
+                    if let Some((width, height)) = input.viewport_size().await
+                        && (point.x < 0.0 || point.y < 0.0 || point.x > width || point.y > height) {
+                            bail!("x/y ({}, {}) is outside the viewport ({width}×{height} CSS pixels); x/y are viewport coordinates. Scroll first, or click a ref", point.x, point.y);
+                        }
                     out.insert("clicked".into(), json!({ "x": point.x, "y": point.y }));
                     point
                 }
@@ -337,9 +357,17 @@ async fn fill(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     let submit = bool_arg(&args, "submit");
     run_action(&c, AfterOptions::default(), move |c, input| {
         Box::pin(async move {
-            let mut filled = Vec::new();
+            let mut filled: Vec<Value> = Vec::new();
             for field in &fields {
-                filled.push(fill_one(c, input, field, timeout, force).await?);
+                match fill_one(c, input, field, timeout, force).await {
+                    Ok(done) => filled.push(done),
+                    Err(error) if fields.len() > 1 && error.downcast_ref::<Interrupted>().is_none() => {
+                        let done: Vec<String> = filled.iter().map(|f| f["target"].as_str().map(str::to_string).unwrap_or_else(|| f["target"].to_string())).collect();
+                        let before = if done.is_empty() { "No field was filled".to_string() } else { format!("Filled {}", done.join(", ")) };
+                        bail!("{before}; then {} failed: {error}", field.spec.label());
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             if submit {
                 input.press("Enter").await?;
@@ -396,6 +424,10 @@ async fn fill_one(c: &Ctx, input: &mut Input<'_>, field: &Field, timeout: Durati
             let state = c.page.call_element(&resolved.element, "fill", vec![v(&text)], true).await?;
             match state.as_str() {
                 Some("needsinput") => {
+                    // Input goes to whatever has focus: make sure that is the field.
+                    if c.page.call_element(&resolved.element, "isFocused", vec![], false).await?.as_bool() != Some(true) {
+                        bail!("{} did not take focus (it may be disabled, hidden, covered or not editable), so nothing was typed", label);
+                    }
                     if text.is_empty() {
                         input.press("Delete").await?;
                     } else {
@@ -404,6 +436,10 @@ async fn fill_one(c: &Ctx, input: &mut Input<'_>, field: &Field, timeout: Durati
                 }
                 Some("error:notconnected") => bail!("{} was removed from the page while filling it", label),
                 _ => {}
+            }
+            let secret = c.page.call_element(&resolved.element, "isSecret", vec![], true).await.ok().and_then(|v| v.as_bool()).unwrap_or(false);
+            if secret {
+                return Ok(json!({ "target": label, "value": format!("[hidden: {} characters]", text.chars().count()) }));
             }
             Ok(json!({ "target": label, "value": truncate(&text, 80) }))
         }
@@ -419,11 +455,27 @@ async fn focus_target(c: &Ctx, input: &mut Input<'_>, args: &Value) -> Result<Op
         // A person clicks into the field before typing.
         let (resolved, at) = actions::locate(&c.page, &c.session, input, &spec, pointer_options(args, true)).await?;
         input.click(at, "left", 1).await?;
-        return Ok(Some(target_label(&spec, &resolved.label)));
+        let label = target_label(&spec, &resolved.label);
+        if c.page.call_element(&resolved.element, "isFocused", vec![], false).await?.as_bool() != Some(true) {
+            // The click didn't focus it (a custom widget, or the click landed on a non-focusable part): focus it.
+            c.page.call_element(&resolved.element, "focusForTyping", vec![], true).await?;
+            if c.page.call_element(&resolved.element, "isFocused", vec![], false).await?.as_bool() != Some(true) {
+                bail!("{} did not take focus (it may be disabled or not focusable), so no keys were sent", label);
+            }
+        }
+        return Ok(Some(label));
     }
     let resolved = target::resolve(&c.page, &c.session, &spec, ResolveOptions { timeout, act: true }).await?;
-    c.page.call_element(&resolved.element, "focus", vec![], true).await?;
-    Ok(Some(target_label(&spec, &resolved.label)))
+    let label = target_label(&spec, &resolved.label);
+    let focused = c.page.call_element(&resolved.element, "focusForTyping", vec![], true).await?;
+    if focused.as_str() == Some("error:notconnected") {
+        bail!("{} was removed from the page", label);
+    }
+    // Keys go to whatever has focus: make sure that is the target.
+    if c.page.call_element(&resolved.element, "isFocused", vec![], false).await?.as_bool() != Some(true) {
+        bail!("{} did not take focus (it may be disabled, hidden or not focusable), so no keys were sent", label);
+    }
+    Ok(Some(label))
 }
 
 async fn type_tool(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
@@ -477,12 +529,28 @@ async fn press(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
 // select
 
 async fn select_options(c: &Ctx, element: &crate::page::Element, options: &[Value], timeout: Duration) -> Result<Value> {
-    let deadline = std::time::Instant::now() + timeout;
+    // Options that load late get a short wait; a select whose options are all there fails fast with them listed.
+    let deadline = std::time::Instant::now() + timeout.min(Duration::from_millis(1_500));
     loop {
         let result = c.page.call_element(element, "selectOptions", vec![v(options)], true).await?;
         match result.as_str() {
             Some("error:optionsnotfound") if std::time::Instant::now() < deadline => {}
-            Some("error:optionsnotfound") => bail!("No option matches {}", serde_json::to_string(options).unwrap_or_default()),
+            Some("error:optionsnotfound") => {
+                let available = c.page.call_element(element, "optionLabels", vec![], true).await.unwrap_or(Value::Null);
+                let listed: Vec<String> = available
+                    .as_array()
+                    .map(|a| a.iter().map(|o| {
+                        let (value, label) = (o["value"].as_str().unwrap_or(""), o["label"].as_str().unwrap_or(""));
+                        let disabled = if o["disabled"] == true { " (disabled)" } else { "" };
+                        if value == label { format!("{label:?}{disabled}") } else { format!("{label:?} (value {value:?}){disabled}") }
+                    }).collect())
+                    .unwrap_or_default();
+                let wanted: Vec<String> = options.iter().map(|o| o.as_object().and_then(|m| m.values().next()).map(Value::to_string).unwrap_or_default()).collect();
+                if listed.is_empty() {
+                    bail!("No option matches {}; the select has no options", wanted.join(", "));
+                }
+                bail!("No option matches {}. Options: {}", wanted.join(", "), listed.join(", "));
+            }
             Some("error:optionnotenabled") => bail!("The option is disabled"),
             Some("error:notconnected") => bail!("The select was removed from the page"),
             _ => return Ok(result),
@@ -496,6 +564,7 @@ async fn select(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     let spec = Spec::from_args(&args).ok_or_else(|| anyhow!("select needs a ref or a selector"))?;
     let values: Vec<Value> = match args.get("values").or_else(|| args.get("value")) {
         Some(Value::String(value)) => vec![json!(value)],
+        Some(Value::Number(value)) => vec![json!(value.to_string())],
         Some(Value::Array(values)) => values.clone(),
         _ => bail!("select needs values: the option values or labels to select"),
     };
@@ -629,17 +698,40 @@ async fn scroll(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
                     }
                 };
                 input.wheel(at, dx, dy).await?;
-                tokio::time::sleep(Duration::from_millis(100)).await;
             } else if let Some(resolved) = &element {
                 actions::scroll_into_view(&c.page, input, &resolved.element).await?;
             } else {
                 bail!("scroll needs deltaX/deltaY, to, or a ref/selector to scroll into view");
             }
-            // Report the scroll position of what was scrolled: the element when it scrolls itself, else its document.
-            let state = match &element {
-                Some(resolved) if to.is_some() => c.page.call_element(&resolved.element, "scrollState", vec![], false).await?,
-                _ => c.page.call_value(&frame, "scrollState", vec![Arg::Value(Value::Null)], false).await?,
+            // Report the scroll position of what was scrolled: the element when it scrolls itself, else its
+            // document; sampled once smooth scrolling has settled.
+            let scrolls_itself = match &element {
+                Some(_) if to.is_some() => true,
+                Some(resolved) if dx != 0.0 || dy != 0.0 => {
+                    let state = c.page.call_element(&resolved.element, "scrollState", vec![], false).await?;
+                    state["height"].as_f64().unwrap_or(0.0) > state["clientHeight"].as_f64().unwrap_or(0.0) + 1.0
+                        || state["width"].as_f64().unwrap_or(0.0) > state["clientWidth"].as_f64().unwrap_or(0.0) + 1.0
+                }
+                _ => false,
             };
+            let read = || async {
+                match &element {
+                    Some(resolved) if scrolls_itself => c.page.call_element(&resolved.element, "scrollState", vec![], false).await,
+                    _ => c.page.call_value(&frame, "scrollState", vec![Arg::Value(Value::Null)], false).await,
+                }
+            };
+            let settle_until = std::time::Instant::now() + Duration::from_millis(1_000);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let mut state = read().await?;
+            while std::time::Instant::now() < settle_until {
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                let next = read().await?;
+                let same = next["x"] == state["x"] && next["y"] == state["y"];
+                state = next;
+                if same {
+                    break;
+                }
+            }
             let y = state["y"].as_f64().unwrap_or(0.0);
             let height = state["height"].as_f64().unwrap_or(0.0);
             let client = state["clientHeight"].as_f64().unwrap_or(0.0);
@@ -658,10 +750,6 @@ async fn scroll(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
 
 const MAX_EVAL_CHARS: usize = 100_000;
 
-fn has_await(expression: &str) -> bool {
-    regex_lite::Regex::new(r"\bawait\b").unwrap().is_match(expression)
-}
-
 async fn eval(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     let c = open(&ctx, &args).await?;
     let expression = str_arg(&args, "expression").ok_or_else(|| anyhow!("eval needs an expression"))?.to_string();
@@ -669,6 +757,7 @@ async fn eval(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     if !matches!(world, "isolated" | "main") {
         bail!("world must be isolated or main");
     }
+    let main_world = world == "main";
     let timeout = timeout_arg(&args, 30_000);
     c.page.ensure_no_dialog()?;
     let spec = Spec::from_args(&args);
@@ -686,98 +775,71 @@ async fn eval(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
         (None, None) => c.page.main_frame(),
     };
     let page = c.page.clone();
-    let run = async {
-        let main_world = world == "main";
-        let call = |target: Value, element_arg: Value| {
-            let expression = expression.clone();
-            let arg = arg.clone();
-            async move {
-                let declaration = format!("async function (__element, __arg) {{\nconst __value = (\n{expression}\n);\nreturn typeof __value === \"function\" ? await __value(__element, __arg) : await __value;\n}}");
-                let mut params = json!({
-                    "functionDeclaration": declaration,
-                    "arguments": [element_arg, match &arg { Some(a) => json!({ "value": a }), None => json!({}) }],
-                    "returnByValue": true,
-                    "awaitPromise": true,
-                    "userGesture": true,
-                    "objectGroup": crate::page::TRANSIENT_GROUP,
-                });
-                for (key, value) in target.as_object().unwrap() {
-                    params[key] = value.clone();
-                }
-                Ok::<_, anyhow::Error>(params)
+    let callable = element.is_some() || arg.is_some();
+    let generation = |page: &TabPage| page.frame(&page.main_frame()).map(|f| f.generation);
+    let started_generation = generation(&page);
+    let mut attempt = 0;
+    let outcome = loop {
+        attempt += 1;
+        let run = async {
+            let target = match &element {
+                Some(resolved) => eval::element_target(&page, &resolved.element, main_world).await?,
+                None => eval::frame_target(&page, &frame, main_world).await?,
+            };
+            let compile = page.world(&frame).await.ok().map(|w| (w.context_id, w.session));
+            Ok::<_, anyhow::Error>((target, compile))
+        };
+        let (target, compile) = match run.await {
+            Ok(ready) => ready,
+            Err(error) if eval::is_lost(&error) && attempt < 2 && element.is_none() => continue,
+            Err(error) => {
+                c.page.release().await;
+                return Err(error);
             }
         };
-        let (session, params, method) = match (&element, main_world) {
-            (Some(resolved), false) => {
-                let p = call(json!({ "objectId": resolved.element.object_id }), json!({ "objectId": resolved.element.object_id })).await?;
-                (resolved.element.session.clone(), p, "Runtime.callFunctionOn")
-            }
-            (Some(resolved), true) => {
-                let object = page.main_world_object(&resolved.element).await?;
-                let p = call(json!({ "objectId": object }), json!({ "objectId": object })).await?;
-                (resolved.element.session.clone(), p, "Runtime.callFunctionOn")
-            }
-            (None, false) => {
-                let world = page.world(&frame).await?;
-                if arg.is_none() {
-                    let p = json!({ "expression": expression, "contextId": world.context_id, "returnByValue": true, "awaitPromise": true, "userGesture": true, "objectGroup": crate::page::TRANSIENT_GROUP });
-                    (world.session.clone(), p, "Runtime.evaluate")
-                } else {
-                    let p = call(json!({ "executionContextId": world.context_id }), json!({})).await?;
-                    (world.session.clone(), p, "Runtime.callFunctionOn")
-                }
-            }
-            (None, true) => {
-                if frame == page.main_frame() && arg.is_none() {
-                    let p = json!({ "expression": expression, "returnByValue": true, "awaitPromise": true, "userGesture": true, "objectGroup": crate::page::TRANSIENT_GROUP });
-                    (None, p, "Runtime.evaluate")
-                } else {
-                    let document = page.document(&frame).await?;
-                    let object = page.main_world_object(&document).await?;
-                    let p = call(json!({ "objectId": object }), json!({})).await?;
-                    (document.session.clone(), p, "Runtime.callFunctionOn")
-                }
-            }
+        let session_used = match &target {
+            eval::Target::Element { session, .. } | eval::Target::Context { session, .. } | eval::Target::Object { session, .. } => session.clone(),
         };
-        let awaits = method == "Runtime.evaluate" && has_await(&expression);
-        let mut params = params;
-        if awaits {
-            params["expression"] = json!(format!("(async () => (\n{expression}\n))()"));
+        let result = tokio::time::timeout(timeout, eval::run(&page, &target, compile, &expression, arg.as_ref(), callable)).await;
+        match result {
+            Err(_) => {
+                let stopped = eval::stop_if_busy(&page, session_used.as_deref()).await;
+                c.page.release().await;
+                if stopped {
+                    bail!("eval timed out after {} ms; the script was still running, so browse stopped it", timeout.as_millis());
+                }
+                bail!("eval timed out after {} ms (the code may still finish in the page)", timeout.as_millis());
+            }
+            Ok(Err(error)) if eval::is_lost(&error) || error.to_string().contains("Inspected target navigated") => {
+                let navigated = generation(&page) != started_generation;
+                // A stale context that ran nothing: run it once more in a fresh one.
+                if !navigated && attempt < 2 && element.is_none() {
+                    continue;
+                }
+                c.page.release().await;
+                return Err(eval::lost_context(&page, navigated));
+            }
+            Ok(other) => break other,
         }
-        let mut result = page.send(method, params.clone(), session.as_deref()).await?;
-        // Top-level await in statements: run them as an async function body (return the value explicitly).
-        if awaits && result["exceptionDetails"]["exception"]["className"] == "SyntaxError" {
-            params["expression"] = json!(format!("(async () => {{\n{expression}\n}})()"));
-            result = page.send(method, params, session.as_deref()).await?;
-        }
-        // A function result from a statement-style expression: call it.
-        if method == "Runtime.evaluate" && result["result"]["type"] == "function" {
-            bail!("The expression evaluated to a function; pass arg (or a ref/selector) to call it, or call it yourself: (fn)()");
-        }
-        if let Some(details) = result.get("exceptionDetails") {
-            bail!("{}", exception_message(details));
-        }
-        Ok(result["result"].clone())
-    };
-    let remote = match tokio::time::timeout(timeout, run).await {
-        Ok(result) => result,
-        Err(_) => Err(anyhow!("eval timed out after {} ms", timeout.as_millis())),
     };
     c.page.release().await;
-    let remote = remote?;
-    let value = if let Some(unserializable) = remote.get("unserializableValue").and_then(Value::as_str) {
-        json!(unserializable)
-    } else if remote["subtype"] == "node" {
-        json!(remote["description"].as_str().map(|d| format!("<node {d}>")).unwrap_or_else(|| "<node>".into()))
-    } else if remote["type"] == "undefined" {
-        Value::Null
-    } else {
-        remote.get("value").cloned().unwrap_or(Value::Null)
+    let (value, hint) = match outcome? {
+        eval::Outcome::Value(value) => (value, None),
+        eval::Outcome::Undefined { block } => {
+            let hint = (block && !expression.contains("return")).then_some(
+                "The code ran as statements and returned nothing: statements must `return` their result (e.g. `const t = document.title; return t`).",
+            );
+            (Value::Null, hint)
+        }
     };
+    if let Some(hint) = hint {
+        return Ok(json_output(json!({ "result": null, "hint": hint })));
+    }
     let text = serde_json::to_string(&value).unwrap_or_else(|_| "null".into());
-    if text.len() > MAX_EVAL_CHARS {
+    let chars = text.chars().count();
+    if chars > MAX_EVAL_CHARS {
         let cut: String = text.chars().take(MAX_EVAL_CHARS).collect();
-        return Ok(ToolOutput::text(format!("{cut}\n… [truncated: the result is {} characters; return less, or pick the fields you need]", text.len())));
+        return Ok(ToolOutput::text(format!("{cut}\n… [truncated: the result is {chars} characters; return less, or pick the fields you need]", )));
     }
     Ok(ToolOutput::text(text))
 }
@@ -787,8 +849,8 @@ async fn eval(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
 async fn wait_for(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     let c = open(&ctx, &args).await?;
     let conditions = navigation::parse_wait_for(&args)?;
-    if conditions.text.is_none() && conditions.text_gone.is_none() && conditions.url.is_none() && conditions.spec.is_none() && conditions.load.is_none() && conditions.ms.is_none() {
-        bail!("wait_for needs a condition: text, textGone, url, ref or selector (with state), load, or ms");
+    if conditions.text.is_none() && conditions.text_gone.is_none() && conditions.url.is_none() && conditions.url_regex.is_none() && conditions.spec.is_none() && conditions.load.is_none() && conditions.ms.is_none() {
+        bail!("wait_for needs a condition: text, textGone, url, urlRegex, ref or selector (with state), load, or ms");
     }
     let timeout = timeout_arg(&args, ACTION_TIMEOUT_MS);
     let started = std::time::Instant::now();
@@ -821,7 +883,8 @@ async fn dialog(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
             "off" | "manual" => None,
             other => bail!("auto must be accept, dismiss or off; got {other:?}"),
         };
-        c.page.set_dialog_policy(policy);
+        let prompt_text = if policy == Some(DialogPolicy::Accept) { str_arg(&args, "promptText").map(str::to_string) } else { None };
+        c.page.set_dialog_policy(policy, prompt_text);
         out.insert("auto".into(), json!(auto));
     }
     match action {
@@ -867,7 +930,7 @@ async fn upload(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
                 ElementOr::Element(element) => element,
                 ElementOr::Status(_) => bail!("{} is not a file input (input[type=file]) or its label", target_label(&spec, &resolved.label)),
             };
-            c.page.send("DOM.setFileInputFiles", json!({ "files": checked, "objectId": input.object_id }), input.session.as_deref()).await?;
+            set_files(&c.page, &input, &checked).await?;
             let mut out = Map::new();
             out.insert("target".into(), target_label(&spec, &resolved.label));
             out.insert("files".into(), json!(checked.iter().map(|p| std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()).collect::<Vec<_>>()));
@@ -877,106 +940,299 @@ async fn upload(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     .await
 }
 
+/// The most bytes one upload sends into the page.
+const MAX_UPLOAD_BYTES: u64 = 50 * 1024 * 1024;
+/// Raw bytes per chunk sent to the page (base64 makes each call about a third larger).
+const UPLOAD_CHUNK: usize = 768 * 1024;
+
+fn mime_type(path: &std::path::Path) -> &'static str {
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    match extension.as_str() {
+        "txt" | "log" => "text/plain",
+        "csv" => "text/csv",
+        "html" | "htm" => "text/html",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "heic" => "image/heic",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "md" => "text/markdown",
+        _ => "",
+    }
+}
+
+/// Puts files into a file input as in-memory File objects: browse reads them where it runs and sends the bytes,
+/// so it works when the browser is on another machine and without the extension's file URL access.
+async fn set_files(page: &Arc<TabPage>, input: &crate::page::Element, paths: &[String]) -> Result<()> {
+    use base64::Engine;
+    let mut total = 0u64;
+    for path in paths {
+        total += std::fs::metadata(path).map(|m| m.len()).map_err(|e| anyhow!("upload: {path}: {e}"))?;
+    }
+    if total > MAX_UPLOAD_BYTES {
+        bail!("upload: the files are {:.1} MB together; browse uploads at most {} MB per call", total as f64 / 1_048_576.0, MAX_UPLOAD_BYTES / 1_048_576);
+    }
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let mut files = Vec::new();
+    let ids: Vec<String> = (0..paths.len()).map(|i| format!("{stamp:x}-{i}")).collect();
+    let sent = async {
+        for (path, id) in paths.iter().zip(&ids) {
+            let bytes = tokio::fs::read(path).await.map_err(|e| anyhow!("upload: {path}: {e}"))?;
+            for chunk in bytes.chunks(UPLOAD_CHUNK) {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
+                page.call_value(&input.frame, "uploadChunk", vec![v(id), v(encoded)], false).await?;
+            }
+            let path = std::path::Path::new(path);
+            let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0);
+            files.push(json!({
+                "id": id,
+                "name": path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                "mime": mime_type(path),
+                "lastModified": modified,
+            }));
+        }
+        page.call_element(input, "uploadFinish", vec![v(&files)], false).await
+    }
+    .await;
+    match sent {
+        Ok(status) => match status.as_str() {
+            Some("ok") => Ok(()),
+            Some("not-multiple") => bail!("upload: the file input takes a single file (it has no `multiple` attribute); pass one file"),
+            Some("disabled") => bail!("upload: the file input is disabled"),
+            _ => bail!("upload: the page did not accept the files"),
+        },
+        Err(error) => {
+            let _ = page.call_value(&input.frame, "uploadAbort", vec![v(&ids)], false).await;
+            Err(error)
+        }
+    }
+}
+
 // emulate
+
+/// Checks every emulate argument before anything changes.
+fn validate_emulate(args: &Value) -> Result<()> {
+    if args.get("permissions").is_some() {
+        bail!("browse can't grant site permissions: that would answer a permission prompt the user never saw. Ask the user to allow it in the browser (handoff).");
+    }
+    for key in ["timezone", "locale"] {
+        if args.get(key).is_some() {
+            bail!("emulate can't set {key}: Chrome only allows timezone and locale overrides for trusted clients, not the browser extension browse drives it through.");
+        }
+    }
+    let enums: [(&str, &[&str]); 5] = [
+        ("colorScheme", &["light", "dark", "no-preference", "reset"]),
+        ("reducedMotion", &["reduce", "no-preference", "reset"]),
+        ("forcedColors", &["active", "none", "reset"]),
+        ("contrast", &["more", "less", "no-preference", "custom", "reset"]),
+        ("media", &["screen", "print", "reset"]),
+    ];
+    for (key, allowed) in enums {
+        if let Some(value) = args.get(key) {
+            match value.as_str() {
+                Some(value) if allowed.contains(&value) => {}
+                _ => bail!("{key} must be one of {}; got {value}", allowed.join(", ")),
+            }
+        }
+    }
+    match args.get("viewport") {
+        None => {}
+        Some(Value::String(s)) if s == "reset" => {}
+        Some(Value::Object(viewport)) => {
+            for key in ["width", "height"] {
+                match viewport.get(key).and_then(Value::as_u64) {
+                    Some(n) if (1..=10_000_000).contains(&n) => {}
+                    _ => bail!("viewport {key} must be a positive integer (CSS pixels); got {}", viewport.get(key).map(Value::to_string).unwrap_or_else(|| "nothing".into())),
+                }
+            }
+            if let Some(scale) = viewport.get("deviceScaleFactor")
+                && !scale.as_f64().map(|s| (0.0..=10.0).contains(&s)).unwrap_or(false) {
+                    bail!("viewport deviceScaleFactor must be a number from 0 (the screen's) to 10; got {scale}");
+                }
+            if let Some(mobile) = viewport.get("mobile")
+                && !mobile.is_boolean() {
+                    bail!("viewport mobile must be true or false");
+                }
+        }
+        Some(other) => bail!("viewport must be {{ width, height }} or \"reset\"; got {other}"),
+    }
+    match args.get("geolocation") {
+        None => {}
+        Some(Value::String(s)) if s == "reset" => {}
+        Some(Value::Object(geo)) => {
+            let latitude = geo.get("latitude").and_then(Value::as_f64).filter(|l| (-90.0..=90.0).contains(l));
+            let longitude = geo.get("longitude").and_then(Value::as_f64).filter(|l| (-180.0..=180.0).contains(l));
+            if latitude.is_none() || longitude.is_none() {
+                bail!("geolocation needs latitude (-90 to 90) and longitude (-180 to 180)");
+            }
+            if let Some(accuracy) = geo.get("accuracy")
+                && !accuracy.as_f64().map(|a| a >= 0.0).unwrap_or(false) {
+                    bail!("geolocation accuracy must be a non-negative number of meters");
+                }
+        }
+        Some(other) => bail!("geolocation must be {{ latitude, longitude }} or \"reset\"; got {other}"),
+    }
+    for key in ["touch", "offline"] {
+        if args.get(key).map(|v| !v.is_boolean()).unwrap_or(false) {
+            bail!("{key} must be true or false");
+        }
+    }
+    if let Some(agent) = args.get("userAgent")
+        && !agent.as_str().map(|a| !a.trim().is_empty()).unwrap_or(false) {
+            bail!("userAgent must be a non-empty string, or \"reset\"");
+        }
+    Ok(())
+}
 
 async fn emulate(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     let c = open(&ctx, &args).await?;
     let page = &c.page;
+    validate_emulate(&args)?;
     let mut applied = Map::new();
-    if args.get("permissions").is_some() {
-        bail!("browse can't grant site permissions: that would answer a permission prompt the user never saw. Ask the user to allow it in the browser (handoff).");
-    }
+    let mut failed = Map::new();
+    let mut record = |key: &str, result: Result<Value>| match result {
+        Ok(value) => {
+            applied.insert(key.into(), value);
+        }
+        Err(error) => {
+            failed.insert(key.into(), json!(error.to_string()));
+        }
+    };
     match args.get("viewport") {
-        Some(Value::String(s)) if s == "reset" => {
-            page.send("Emulation.clearDeviceMetricsOverride", json!({}), None).await?;
-            // Chrome can drop a single clear that lands while the previous size is still settling.
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            page.send("Emulation.clearDeviceMetricsOverride", json!({}), None).await?;
-            applied.insert("viewport".into(), json!("reset"));
+        Some(Value::String(_)) => {
+            let result = async {
+                page.send("Emulation.clearDeviceMetricsOverride", json!({}), None).await?;
+                // Chrome can drop a single clear that lands while the previous size is still settling.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                page.send("Emulation.clearDeviceMetricsOverride", json!({}), None).await?;
+                Ok(json!("reset"))
+            }
+            .await;
+            record("viewport", result);
         }
         Some(Value::Object(viewport)) => {
-            let width = viewport.get("width").and_then(Value::as_u64).ok_or_else(|| anyhow!("viewport needs width and height"))?;
-            let height = viewport.get("height").and_then(Value::as_u64).ok_or_else(|| anyhow!("viewport needs width and height"))?;
+            let width = viewport["width"].as_u64().unwrap_or(0);
+            let height = viewport["height"].as_u64().unwrap_or(0);
             let scale = viewport.get("deviceScaleFactor").and_then(Value::as_f64).unwrap_or(0.0);
             let mobile = viewport.get("mobile").and_then(Value::as_bool).unwrap_or(false);
-            page.send("Emulation.setDeviceMetricsOverride", json!({ "width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile }), None).await?;
-            applied.insert("viewport".into(), json!({ "width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile }));
+            let settings = json!({ "width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile });
+            let result = page.send("Emulation.setDeviceMetricsOverride", settings.clone(), None).await.map(|_| settings);
+            record("viewport", result);
         }
-        Some(_) => bail!("viewport must be {{ width, height }} or \"reset\""),
-        None => {}
+        _ => {}
     }
-    let mut features = Vec::new();
-    for (key, feature) in [("colorScheme", "prefers-color-scheme"), ("reducedMotion", "prefers-reduced-motion"), ("forcedColors", "forced-colors"), ("contrast", "prefers-contrast")] {
-        if let Some(value) = str_arg(&args, key) {
-            features.push(json!({ "name": feature, "value": if value == "reset" { "" } else { value } }));
-            applied.insert(key.into(), json!(value));
+    let media_keys = [("colorScheme", "prefers-color-scheme"), ("reducedMotion", "prefers-reduced-motion"), ("forcedColors", "forced-colors"), ("contrast", "prefers-contrast")];
+    if media_keys.iter().any(|(key, _)| args.get(*key).is_some()) || args.get("media").is_some() {
+        // Chrome replaces every emulated media feature on each call: merge with what this tab already has.
+        let mut state = page.media_emulation();
+        let mut changed = Vec::new();
+        for (key, feature) in media_keys {
+            if let Some(value) = str_arg(&args, key) {
+                if value == "reset" {
+                    state.features.remove(feature);
+                } else {
+                    state.features.insert(feature.into(), value.into());
+                }
+                changed.push((key, value));
+            }
         }
-    }
-    let media = str_arg(&args, "media");
-    if !features.is_empty() || media.is_some() {
-        let media = match media { Some("reset") | None => "", Some(m) => m };
-        page.send("Emulation.setEmulatedMedia", json!({ "media": media, "features": features }), None).await?;
-        if let Some(m) = str_arg(&args, "media") {
-            applied.insert("media".into(), json!(m));
+        if let Some(media) = str_arg(&args, "media") {
+            state.media = if media == "reset" { String::new() } else { media.into() };
+            changed.push(("media", media));
         }
-    }
-    if let Some(timezone) = str_arg(&args, "timezone") {
-        page.send("Emulation.setTimezoneOverride", json!({ "timezoneId": if timezone == "reset" { "" } else { timezone } }), None).await?;
-        applied.insert("timezone".into(), json!(timezone));
-    }
-    if let Some(locale) = str_arg(&args, "locale") {
-        let params = if locale == "reset" { json!({}) } else { json!({ "locale": locale }) };
-        page.send("Emulation.setLocaleOverride", params, None).await?;
-        applied.insert("locale".into(), json!(locale));
+        let features: Vec<Value> = state.features.iter().map(|(name, value)| json!({ "name": name, "value": value })).collect();
+        match page.send("Emulation.setEmulatedMedia", json!({ "media": state.media, "features": features }), None).await {
+            Ok(_) => {
+                page.set_media_emulation(state);
+                for (key, value) in changed {
+                    record(key, Ok(json!(value)));
+                }
+            }
+            Err(error) => {
+                for (key, _) in changed {
+                    record(key, Err(anyhow!("{error}")));
+                }
+            }
+        }
     }
     if let Some(agent) = str_arg(&args, "userAgent") {
-        if agent != "reset" {
-            page.send("Emulation.setUserAgentOverride", json!({ "userAgent": agent }), None).await?;
-        } else {
-            page.send("Emulation.setUserAgentOverride", json!({ "userAgent": "" }), None).await?;
-        }
-        applied.insert("userAgent".into(), json!(agent));
+        let value = if agent == "reset" { "" } else { agent };
+        let result = page.send("Emulation.setUserAgentOverride", json!({ "userAgent": value }), None).await.map(|_| json!(agent));
+        record("userAgent", result);
     }
     match args.get("geolocation") {
-        Some(Value::String(s)) if s == "reset" => {
-            page.send("Emulation.clearGeolocationOverride", json!({}), None).await?;
-            applied.insert("geolocation".into(), json!("reset"));
+        Some(Value::String(_)) => {
+            let result = page.send("Emulation.clearGeolocationOverride", json!({}), None).await.map(|_| json!("reset"));
+            record("geolocation", result);
         }
         Some(Value::Object(geo)) => {
-            let latitude = geo.get("latitude").and_then(Value::as_f64).ok_or_else(|| anyhow!("geolocation needs latitude and longitude"))?;
-            let longitude = geo.get("longitude").and_then(Value::as_f64).ok_or_else(|| anyhow!("geolocation needs latitude and longitude"))?;
+            let latitude = geo["latitude"].as_f64().unwrap_or(0.0);
+            let longitude = geo["longitude"].as_f64().unwrap_or(0.0);
             let accuracy = geo.get("accuracy").and_then(Value::as_f64).unwrap_or(50.0);
-            page.send("Emulation.setGeolocationOverride", json!({ "latitude": latitude, "longitude": longitude, "accuracy": accuracy }), None).await?;
-            applied.insert("geolocation".into(), json!({ "latitude": latitude, "longitude": longitude, "accuracy": accuracy, "note": "the site still needs the user's location permission" }));
+            let result = page
+                .send("Emulation.setGeolocationOverride", json!({ "latitude": latitude, "longitude": longitude, "accuracy": accuracy }), None)
+                .await
+                .map(|_| json!({ "latitude": latitude, "longitude": longitude, "accuracy": accuracy, "note": "the site still needs the user's location permission" }));
+            record("geolocation", result);
         }
-        Some(_) => bail!("geolocation must be {{ latitude, longitude }} or \"reset\""),
-        None => {}
+        _ => {}
     }
     if let Some(touch) = args.get("touch").and_then(Value::as_bool) {
-        page.send("Emulation.setTouchEmulationEnabled", json!({ "enabled": touch, "maxTouchPoints": if touch { 5 } else { 1 } }), None).await?;
-        applied.insert("touch".into(), json!(touch));
+        let result = page.send("Emulation.setTouchEmulationEnabled", json!({ "enabled": touch, "maxTouchPoints": if touch { 5 } else { 1 } }), None).await.map(|_| json!(touch));
+        record("touch", result);
     }
     if let Some(offline) = args.get("offline").and_then(Value::as_bool) {
         let conditions = json!({ "offline": offline, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1 });
-        if offline {
+        let result = if offline {
             // Chrome applies network emulation only while the Network domain is enabled; enabling it again is
             // harmless, and the conditions are sent after it so they hold even if a disable reset them.
-            page.send("Network.enable", json!({}), None).await?;
-            page.send("Network.emulateNetworkConditions", conditions, None).await?;
-            state::set_offline(&c.ctx, &c.session, page.tab(), true).await;
+            let result = async {
+                page.send("Network.enable", json!({}), None).await?;
+                page.send("Network.emulateNetworkConditions", conditions, None).await
+            }
+            .await;
+            if result.is_ok() {
+                state::set_offline(&c.ctx, &c.session, page.tab(), true).await;
+            }
+            result
         } else {
             let _ = page.send("Network.emulateNetworkConditions", conditions, None).await;
             state::set_offline(&c.ctx, &c.session, page.tab(), false).await;
             if !state::network_capture_active(&c.ctx).await {
                 let _ = page.send("Network.disable", json!({}), None).await;
             }
-        }
-        applied.insert("offline".into(), json!(offline));
+            Ok(Value::Null)
+        };
+        record("offline", result.map(|_| json!(offline)));
+    }
+    if applied.is_empty() && failed.is_empty() {
+        bail!("emulate needs something to change: viewport, colorScheme, reducedMotion, forcedColors, contrast, media, userAgent, geolocation, touch or offline");
     }
     if applied.is_empty() {
-        bail!("emulate needs something to change: viewport, colorScheme, reducedMotion, forcedColors, contrast, media, timezone, locale, userAgent, geolocation, touch or offline");
+        let reasons: Vec<String> = failed.iter().map(|(k, v)| format!("{k}: {}", v.as_str().unwrap_or(""))).collect();
+        bail!("Chrome rejected every setting: {}", reasons.join("; "));
     }
-    Ok(json_output(json!({ "applied": applied })))
+    let mut out = json!({ "applied": applied });
+    if !failed.is_empty() {
+        out["failed"] = Value::Object(failed);
+    }
+    Ok(json_output(out))
 }
 
 // webmcp
@@ -995,10 +1251,15 @@ async fn webmcp(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     }
     let mut available = false;
     let mut discovered: usize = 0;
-    let mut tools: Vec<(String, Value)> = Vec::new();
+    let mut tools: Vec<(String, bool, Value)> = Vec::new();
     for (index, frame) in frames.iter().enumerate() {
         let label = if counts[&frame.url] > 1 { format!("{} (frame {index})", frame.url) } else { frame.url.clone() };
         let listed = tokio::time::timeout(timeout, c.page.call_value(&frame.id, "webmcpList", vec![], false)).await;
+        // A polyfill defines modelContext in the page's own world only; look there when browse's world has none.
+        let (listed, main_world) = match listed {
+            Ok(Ok(Value::Null)) => (tokio::time::timeout(timeout, webmcp_main_world(&c.page, &frame.id, "webmcpList", vec![])).await, true),
+            other => (other, false),
+        };
         let Ok(Ok(Value::Array(list))) = listed else { continue };
         available = true;
         for raw in list {
@@ -1027,30 +1288,37 @@ async fn webmcp(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
             }
             tool.insert("frame".into(), json!(label));
             tool.insert("frameUrl".into(), json!(frame.url));
-            tools.push((frame.id.clone(), Value::Object(tool)));
+            if main_world {
+                tool.insert("world".into(), json!("main"));
+            }
+            tools.push((frame.id.clone(), main_world, Value::Object(tool)));
         }
     }
     let result = match action {
-        "list" => Ok(json_output(json!({ "available": available, "tools": tools.iter().map(|(_, t)| t).collect::<Vec<_>>(), "omitted": discovered.saturating_sub(MAX_WEBMCP_TOOLS) }))),
+        "list" => Ok(json_output(json!({ "available": available, "tools": tools.iter().map(|(_, _, t)| t).collect::<Vec<_>>(), "omitted": discovered.saturating_sub(MAX_WEBMCP_TOOLS) }))),
         "call" => {
             let name = str_arg(&args, "name").filter(|n| !n.trim().is_empty()).ok_or_else(|| anyhow!("webmcp call needs a tool name"))?;
             let frame_filter = str_arg(&args, "frame");
-            let matches: Vec<&(String, Value)> = tools
+            let matches: Vec<&(String, bool, Value)> = tools
                 .iter()
-                .filter(|(_, t)| t["name"] == name && frame_filter.map(|f| t["frame"] == f || t["frameUrl"] == f).unwrap_or(true))
+                .filter(|(_, _, t)| t["name"] == name && frame_filter.map(|f| t["frame"] == f || t["frameUrl"] == f).unwrap_or(true))
                 .collect();
             if matches.is_empty() {
-                let names: std::collections::BTreeSet<&str> = tools.iter().filter_map(|(_, t)| t["name"].as_str()).collect();
+                let names: std::collections::BTreeSet<&str> = tools.iter().filter_map(|(_, _, t)| t["name"].as_str()).collect();
                 let available = if names.is_empty() { " The page does not register any WebMCP tools.".to_string() } else { format!(" Available tools: {}.", names.into_iter().collect::<Vec<_>>().join(", ")) };
                 bail!("No WebMCP tool named {name:?}{}.{available}", frame_filter.map(|f| format!(" in frame {f}")).unwrap_or_default());
             }
             if matches.len() > 1 {
-                bail!("WebMCP tool {name:?} is registered in multiple frames; pass frame. Matching frames: {}", matches.iter().map(|(_, t)| t["frame"].as_str().unwrap_or("")).collect::<Vec<_>>().join(", "));
+                bail!("WebMCP tool {name:?} is registered in multiple frames; pass frame. Matching frames: {}", matches.iter().map(|(_, _, t)| t["frame"].as_str().unwrap_or("")).collect::<Vec<_>>().join(", "));
             }
-            let (frame, _) = matches[0];
+            let (frame, main_world, _) = matches[0];
             let input = args.get("input").cloned().unwrap_or(json!({}));
             let input_json = serde_json::to_string(&input)?;
-            let called = tokio::time::timeout(timeout, c.page.call_value(frame, "webmcpCall", vec![v(name), v(input_json)], false)).await;
+            let called = if *main_world {
+                tokio::time::timeout(timeout, webmcp_main_world(&c.page, frame, "webmcpCall", vec![json!(name), json!(input_json)])).await
+            } else {
+                tokio::time::timeout(timeout, c.page.call_value(frame, "webmcpCall", vec![v(name), v(input_json)], false)).await
+            };
             match called {
                 Ok(Ok(value)) => Ok(ToolOutput::text(serde_json::to_string(&value).unwrap_or_else(|_| "null".into()))),
                 Ok(Err(error)) => Err(error),
@@ -1061,6 +1329,27 @@ async fn webmcp(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     };
     c.page.release().await;
     result
+}
+
+/// Runs one of the WebMCP helpers in the page's main world of `frame` (visible to the page; only used when the
+/// isolated world has no modelContext).
+async fn webmcp_main_world(page: &Arc<TabPage>, frame: &str, method: &str, args: Vec<Value>) -> Result<Value> {
+    let source = page.call_value(frame, "methodSource", vec![v(method)], false).await?;
+    let source = source.as_str().ok_or_else(|| anyhow!("browse could not read its WebMCP helper"))?;
+    let document = page.document(frame).await?;
+    let object = page.main_world_object(&document).await?;
+    let declaration = format!("function (spec) {{ return ({{ {source} }}).{method}(...JSON.parse(spec)) }}");
+    let result = page
+        .send(
+            "Runtime.callFunctionOn",
+            json!({ "functionDeclaration": declaration, "objectId": object, "arguments": [{ "value": Value::Array(args).to_string() }], "returnByValue": true, "awaitPromise": true, "objectGroup": crate::page::TRANSIENT_GROUP }),
+            document.session.as_deref(),
+        )
+        .await?;
+    if let Some(details) = result.get("exceptionDetails") {
+        bail!("{}", crate::page::exception_message(details));
+    }
+    Ok(result["result"].get("value").cloned().unwrap_or(Value::Null))
 }
 
 // Schemas and descriptions.
@@ -1086,7 +1375,7 @@ fn props(value: Value) -> Map<String, Value> {
     map(value)
 }
 
-const NAVIGATE: &str = "Go to a URL, or back/forward/reload, and wait for the page. Returns JSON: url, title, navigated, from, and when relevant redirects, dialog, newTabs, challenge (a bot check or block page was detected; follow its warning, usually handoff) and warning. A bare host gets https:// (\":3000\" means http://localhost:3000). Navigations outside a session's domain allowlist are refused.";
+const NAVIGATE: &str = "Go to a URL, or back/forward/reload, and wait for the page. Returns JSON: url, title, status (the HTTP status, when known), navigated, from, and when relevant redirects, pending (a navigation still loading when the timeout hit; url is what the tab shows meanwhile), dialog, newTabs, challenge (a bot check or block page was detected; follow its warning, usually handoff) and warning. An HTTP error status is a result, not a failure. A bare host gets https:// (\":3000\" means http://localhost:3000); URLs with a scheme are used as given, and javascript: URLs are refused (use eval). Navigations outside a session's domain allowlist are refused.";
 
 fn navigate_schema() -> Value {
     object(
@@ -1094,7 +1383,7 @@ fn navigate_schema() -> Value {
             "url": { "type": "string", "description": "Where to go. Required for goto." },
             "action": { "type": "string", "enum": ["goto", "back", "forward", "reload"], "description": "Default goto when url is given." },
             "waitUntil": { "type": "string", "enum": ["load", "domcontentloaded", "settle", "commit", "none"], "description": "load (default); settle also waits for the network and DOM to go quiet (good before a snapshot of an app); commit returns once the new document starts." },
-            "timeout": { "type": "integer", "description": "Milliseconds to wait for waitUntil (default 30000). Timing out is a warning, not an error." },
+            "timeout": { "type": "integer", "description": "Milliseconds the whole navigation may take, including a slow server (default 30000). Timing out is a warning, not an error." },
             "referrer": { "type": "string" },
             "ignoreCache": { "type": "boolean", "description": "reload only." },
             "tab": tab_prop(),
@@ -1254,7 +1543,7 @@ fn scroll_schema() -> Value {
     )
 }
 
-const EVAL: &str = "Run JavaScript in the page and return its JSON-serializable result (promises are awaited; top-level await works, and statements using it must `return` their result). By default it runs in browse's isolated world: it sees the DOM but not the page's own JS globals, and the page can't see it. world \"main\" runs in the page's own world (window variables, frameworks) and is visible to it. With ref/selector or arg, expression must be a function, called as (element, arg) => ...; e.g. expression \"(el) => el.href\" with ref \"e5\". frame (a selector of an <iframe>) runs in that frame. Results over 100k characters are cut.";
+const EVAL: &str = "Run JavaScript in the page and return its result as JSON. An expression's value is returned (promises are awaited, await works); statements (const/let, loops, several lines) run as an async function body, so they must `return` their result. Declarations stay local to the call and never leak into the page. DOM nodes come back as \"<tag#id.class>\", Map as an object, Set as an array, Date as an ISO string, Errors as {name, message}, cycles as \"[Circular]\". A script still running at the timeout is stopped. By default it runs in browse's isolated world: it sees the DOM but not the page's own JS globals, and the page can't see it. world \"main\" runs in the page's own world (window variables, frameworks) and is visible to it. With ref/selector or arg, expression must be a function, called as (element, arg) => ...; e.g. expression \"(el) => el.href\" with ref \"e5\". frame (a selector of an <iframe>) runs in that frame. Results over 100k characters are cut.";
 
 fn eval_schema() -> Value {
     object(
@@ -1269,16 +1558,18 @@ fn eval_schema() -> Value {
     )
 }
 
-const WAIT_FOR: &str = "Wait until conditions hold (all of them): text appears (or textGone disappears) in the page, the url matches (substring, glob with * and **, or /regex/), ref/selector reaches state (visible by default, hidden, attached, detached), or the page reaches load (load, domcontentloaded, settle). ms just sleeps first. Fails with what it was waiting for on timeout.";
+const WAIT_FOR: &str = "Wait until conditions hold (all of them): text appears (or textGone disappears) in the page (case-insensitive and whitespace-normalized like Playwright's text=, unless exact), the url matches (url: a substring, a glob with * and **, or /regex/flags when the body uses regex syntax; urlRegex: a regular expression), ref/selector reaches state (visible by default, hidden, attached, detached), or the page reaches load (load, domcontentloaded, settle, or commit; a navigation in flight is waited for first). ms just sleeps first. Fails with what it was waiting for on timeout.";
 
 fn wait_for_schema() -> Value {
     object(
         target_props(props(json!({
-            "text": { "type": "string" },
+            "text": { "type": "string", "description": "Text that must appear; case-insensitive substring unless exact." },
             "textGone": { "type": "string" },
-            "url": { "type": "string" },
+            "exact": { "type": "boolean", "description": "Match text/textGone exactly (case and whitespace)." },
+            "url": { "type": "string", "description": "Substring (\"/checkout\" matches any URL containing it), glob (\"**/orders/*\"), or /regex/flags; it is a regex only when the part between the slashes uses regex syntax (\\ ^ $ * + ? ( ) [ ] { } |), so a path like /docs/us stays a substring." },
+            "urlRegex": { "type": "string", "description": "A regular expression the URL must match, without slashes, e.g. \"/orders/\\d+$\". Prefix (?i) for case-insensitive." },
             "state": { "type": "string", "enum": ["visible", "hidden", "attached", "detached"] },
-            "load": { "type": "string", "enum": ["load", "domcontentloaded", "settle"] },
+            "load": { "type": "string", "enum": ["load", "domcontentloaded", "settle", "commit"], "description": "commit waits for a navigation in flight to commit." },
             "ms": { "type": "integer", "description": "Sleep this long before checking." },
             "timeout": { "type": "integer", "description": "Milliseconds (default 10000)." },
         }))),
@@ -1292,7 +1583,7 @@ fn dialog_schema() -> Value {
     object(
         props(json!({
             "action": { "type": "string", "enum": ["status", "accept", "dismiss"] },
-            "promptText": { "type": "string" },
+            "promptText": { "type": "string", "description": "The answer to a prompt() dialog, for action accept or with auto \"accept\"." },
             "auto": { "type": "string", "enum": ["accept", "dismiss", "off"] },
             "tab": tab_prop(),
         })),
@@ -1300,7 +1591,7 @@ fn dialog_schema() -> Value {
     )
 }
 
-const UPLOAD: &str = "Set the files of a file input (input[type=file], or its label) without opening the file chooser. files are absolute paths inside browse's file roots.";
+const UPLOAD: &str = "Set the files of a file input (input[type=file], or its label) without opening the file chooser. files are absolute paths inside browse's file roots, on the machine browse runs on; browse reads them and hands the page in-memory copies (with input and change events), so the browser may be elsewhere. At most 50 MB per call.";
 
 fn upload_schema() -> Value {
     object(
@@ -1312,7 +1603,7 @@ fn upload_schema() -> Value {
     )
 }
 
-const EMULATE: &str = "Change how the tab presents itself: viewport { width, height, deviceScaleFactor, mobile } (or \"reset\"), colorScheme, reducedMotion, forcedColors, contrast, media (\"print\"), timezone (IANA id), locale, userAgent, geolocation { latitude, longitude } (the site still needs the user's permission), touch, offline. \"reset\" restores a setting. Permissions can't be granted.";
+const EMULATE: &str = "Change how the tab presents itself: viewport { width, height, deviceScaleFactor, mobile } (or \"reset\"), colorScheme, reducedMotion, forcedColors, contrast, media (\"print\"), userAgent, geolocation { latitude, longitude } (the site still needs the user's permission), touch, offline. \"reset\" restores a setting. Permissions can't be granted.";
 
 fn emulate_schema() -> Value {
     object(
@@ -1321,10 +1612,8 @@ fn emulate_schema() -> Value {
             "colorScheme": { "type": "string", "enum": ["light", "dark", "no-preference", "reset"] },
             "reducedMotion": { "type": "string", "enum": ["reduce", "no-preference", "reset"] },
             "forcedColors": { "type": "string", "enum": ["active", "none", "reset"] },
-            "contrast": { "type": "string", "enum": ["more", "less", "no-preference", "reset"] },
+            "contrast": { "type": "string", "enum": ["more", "less", "no-preference", "custom", "reset"] },
             "media": { "type": "string", "enum": ["screen", "print", "reset"] },
-            "timezone": { "type": "string" },
-            "locale": { "type": "string" },
             "userAgent": { "type": "string" },
             "geolocation": { "anyOf": [{ "type": "string", "enum": ["reset"] }, { "type": "object", "properties": { "latitude": { "type": "number" }, "longitude": { "type": "number" }, "accuracy": { "type": "number" } }, "required": ["latitude", "longitude"] }] },
             "touch": { "type": "boolean" },
@@ -1335,7 +1624,7 @@ fn emulate_schema() -> Value {
     )
 }
 
-const WEBMCP: &str = "Use tools the page itself offers through WebMCP (navigator.modelContext), in any frame. action list returns { available, tools: [{ name, description, inputSchema, frame }] }; action call runs one by name with input and returns its result. Prefer a site's WebMCP tool over clicking when it does what you need.";
+const WEBMCP: &str = "Use tools the page itself offers through WebMCP (navigator.modelContext), in any frame. action list returns { available, tools: [{ name, description, inputSchema, frame }] }; action call runs one by name with input and returns its result. Prefer a site's WebMCP tool over clicking when it does what you need. Tools are read in browse's isolated world; when a page defines modelContext only in its own world (a polyfill), browse reads and calls them there, which the page can observe (such tools show world \"main\").";
 
 fn webmcp_schema() -> Value {
     object(

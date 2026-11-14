@@ -169,7 +169,7 @@ async fn resolve_ref(page: &Arc<TabPage>, session: &PageSession, id: &str, optio
             }
             bail!("Unknown snapshot ref: {id}; call snapshot to get current refs");
         }
-        if refs.url.as_deref() != Some(page.main_url().as_str()) {
+        if refs.document != page.frame(&page.main_frame()).map(|f| f.generation) {
             bail!("Snapshot refs are stale after a page change; call snapshot again");
         }
         refs.selectors.get(&normalized).cloned().ok_or_else(|| anyhow!("Unknown snapshot ref: {id}; call snapshot to get current refs"))?
@@ -197,6 +197,17 @@ async fn resolve_ref(page: &Arc<TabPage>, session: &PageSession, id: &str, optio
             .await?;
         match result {
             ElementOr::Element(element) => return Ok(element),
+            ElementOr::Status(status) if status.starts_with("multiple:") => {
+                let rest = &status["multiple:".len()..];
+                let (count, previews) = rest.split_once(':').unwrap_or((rest, ""));
+                let shown: Vec<String> = previews.lines().map(|line| format!("  {line}")).collect();
+                bail!(
+                    "Ref {id} ({} {:?}) now matches {count} elements, so browse can't tell which one it was; call snapshot again for fresh refs, or use a more specific selector:\n{}",
+                    target.role,
+                    target.name.clone().unwrap_or_default(),
+                    shown.join("\n")
+                );
+            }
             ElementOr::Status(status) if status == "hidden" => {
                 hidden = true;
                 first_miss = None;
@@ -233,8 +244,11 @@ async fn resolve_aria_ref(page: &Arc<TabPage>, session: &PageSession, id: &str, 
             bail!("Aria ref {id} belongs to tab {}; call snapshot on this tab", aria.tab);
         }
         let main_generation = page.frame(&page.main_frame()).map(|f| f.generation).unwrap_or(0);
-        if aria.url != page.main_url() || aria.main_generation != main_generation {
+        if aria.main_generation != main_generation {
             bail!("Aria snapshot refs are stale after a page change; call snapshot again");
+        }
+        if !aria.ids.contains(id) {
+            bail!("Unknown aria snapshot ref: {id}; the last aria snapshot has no such ref. Call snapshot with mode \"aria\" again for current refs");
         }
     }
     let frame = page.frame_by_seq(seq).ok_or_else(|| anyhow!("Aria ref {id} was captured in an iframe that is gone; call snapshot again"))?;

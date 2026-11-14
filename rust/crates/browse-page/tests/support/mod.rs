@@ -333,6 +333,30 @@ impl Server {
                     let n = stream.read(&mut buffer).await.unwrap_or(0);
                     let request = String::from_utf8_lossy(&buffer[..n]).to_string();
                     let path = request.split_whitespace().nth(1).unwrap_or("/").split('?').next().unwrap_or("/").to_string();
+                    // /__status/<code>: that status with an empty body; /__slow/<ms>: a page after a delay;
+                    // /__redirect/<n>: n redirects, then /__status/200's page.
+                    if let Some(code) = path.strip_prefix("/__status/") {
+                        let response = format!("HTTP/1.1 {code} Status\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        let _ = stream.shutdown().await;
+                        return;
+                    }
+                    if let Some(ms) = path.strip_prefix("/__slow/") {
+                        tokio::time::sleep(std::time::Duration::from_millis(ms.parse().unwrap_or(0))).await;
+                        let body = "<!doctype html><title>Slow</title>slow";
+                        let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        let _ = stream.shutdown().await;
+                        return;
+                    }
+                    if let Some(n) = path.strip_prefix("/__redirect/") {
+                        let n: u32 = n.parse().unwrap_or(0);
+                        let location = if n <= 1 { "/__landed".to_string() } else { format!("/__redirect/{}", n - 1) };
+                        let response = format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        let _ = stream.shutdown().await;
+                        return;
+                    }
                     let body = pages.lock().unwrap().get(&path).cloned();
                     let response = match body {
                         Some(body) => format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body),

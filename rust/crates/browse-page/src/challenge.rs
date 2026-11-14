@@ -190,8 +190,8 @@ pub fn classify(probe: &Probe) -> Option<Detection> {
             return d("generic", "block", signal(format!("title: {shown}")));
         }
         let both = format!("{title}\n{text}");
-        if re(r"verify (?:that )?you are (?:a )?human|confirm you are (?:a )?human|are you a robot\?|pardon our interruption|please verify you are a human|bot (?:check|detection)").is_match(&both) {
-            let found = re(r"verify[^.\n]*human|confirm[^.\n]*human|are you a robot|pardon our interruption|bot (?:check|detection)")
+        if re(r"verify (?:that )?you are (?:a )?human|confirm you are (?:a )?human|are you a robot\?|pardon our interruption|please verify you are a human|\bbot (?:check|detection)\b").is_match(&both) {
+            let found = re(r"verify[^.\n]*human|confirm[^.\n]*human|are you a robot|pardon our interruption|\bbot (?:check|detection)\b")
                 .find(&both)
                 .map(|m| m.as_str().to_string())
                 .unwrap_or_else(|| "verification".into());
@@ -303,6 +303,8 @@ mod tests {
         let text = format!("verify you are human {}", "lorem ipsum ".repeat(200));
         assert!(classify(&probe("News", &text)).is_none());
         assert_eq!(classify(&probe("Check", "Please verify you are a human")).unwrap().vendor, "generic");
+        assert!(classify(&probe("Robot check", "Robot checks are our new product")).is_none());
+        assert_eq!(classify(&probe("Hold on", "Running a bot check")).unwrap().vendor, "generic");
     }
 
     #[test]

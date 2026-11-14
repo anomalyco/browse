@@ -14,6 +14,7 @@
 mod actions;
 mod aftermath;
 pub mod challenge;
+mod eval;
 mod files;
 pub mod human;
 pub mod input;

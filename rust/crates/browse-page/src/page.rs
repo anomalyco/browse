@@ -30,6 +30,8 @@ pub struct FrameInfo {
     pub lifecycle: HashSet<String>,
     /// Bumped on every cross-document navigation; refs captured under an older generation are stale.
     pub generation: u64,
+    /// When browse saw the current document commit; None for documents loaded before browse attached.
+    pub committed_at: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -101,10 +103,22 @@ struct TabState {
     sessions: HashMap<String, String>,
     dialog: Option<Dialog>,
     dialog_policy: Option<DialogPolicy>,
+    /// What an auto-accepted prompt() answers (its default value when unset).
+    auto_prompt_text: Option<String>,
     events: Vec<(u64, TabEvent)>,
     seq: u64,
     drag: Option<Value>,
     platform: Option<String>,
+    /// The URL of a main-frame cross-document navigation that started and has not committed or stopped yet.
+    pending_navigation: Option<String>,
+    /// Emulated media type and features: Chrome replaces the whole set on every setEmulatedMedia.
+    media: MediaEmulation,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MediaEmulation {
+    pub media: String,
+    pub features: std::collections::BTreeMap<String, String>,
 }
 
 struct Shared {
@@ -131,7 +145,15 @@ impl Drop for TabPage {
 }
 
 pub fn cdp_error(error: CdpError) -> anyhow::Error {
-    anyhow!(error.to_string())
+    let message = error.to_string();
+    if message.contains("Detached while handling command") || message.contains("Target closed") || message.contains("No target with given id") {
+        return anyhow!("The tab closed, or browse lost its connection to it, while the command ran ({message}); check the tab list and try again");
+    }
+    // Callers that can retry recognize these by the original text, which stays in the message.
+    if is_context_lost(&message) {
+        return anyhow!("The page navigated or re-rendered while browse was using it; try again ({message})");
+    }
+    anyhow!(message)
 }
 
 /// Errors that mean the world (or the document) the call ran in is gone; the call can run again in a new one.
@@ -281,8 +303,17 @@ impl TabPage {
         self.shared.state.lock().unwrap().dialog.clone()
     }
 
-    pub fn set_dialog_policy(&self, policy: Option<DialogPolicy>) {
-        self.shared.state.lock().unwrap().dialog_policy = policy;
+    /// The open dialog, unless browse answers it by itself (a beforeunload dialog, or an auto policy is set).
+    pub fn blocking_dialog(&self) -> Option<Dialog> {
+        let state = self.shared.state.lock().unwrap();
+        let dialog = state.dialog.clone()?;
+        (state.dialog_policy.is_none() && dialog.kind != "beforeunload").then_some(dialog)
+    }
+
+    pub fn set_dialog_policy(&self, policy: Option<DialogPolicy>, prompt_text: Option<String>) {
+        let mut state = self.shared.state.lock().unwrap();
+        state.dialog_policy = policy;
+        state.auto_prompt_text = prompt_text;
     }
 
     pub fn dialog_policy(&self) -> Option<DialogPolicy> {
@@ -302,8 +333,9 @@ impl TabPage {
     }
 
     fn dialog_error(dialog: &Dialog) -> anyhow::Error {
+        let article = if dialog.kind.starts_with(['a', 'e', 'i', 'o', 'u']) { "An" } else { "A" };
         anyhow!(
-            "A {} dialog is open: {:?}. The page is paused until it is answered: call dialog with action \"accept\" or \"dismiss\".",
+            "{article} {} dialog is open: {:?}. The page is paused until it is answered: call dialog with action \"accept\" or \"dismiss\".",
             dialog.kind,
             truncate(&dialog.message, 200)
         )
@@ -367,6 +399,11 @@ impl TabPage {
             let wait = poll.min(deadline - now);
             let _ = tokio::time::timeout(wait, rx.changed()).await;
         }
+    }
+
+    /// A main-frame navigation that started and has neither committed nor stopped.
+    pub fn pending_navigation(&self) -> Option<String> {
+        self.shared.state.lock().unwrap().pending_navigation.clone()
     }
 
     pub fn lifecycle_has(&self, frame: &str, name: &str) -> bool {
@@ -496,8 +533,7 @@ impl TabPage {
     }
 
     async fn call_on(&self, world: &WorldRef, method: &str, args: &[Arg], by_value: bool) -> Result<Value> {
-        let arguments: Vec<Value> = args.iter().map(Arg::to_cdp).collect();
-        let declaration = format!("function (...args) {{ return this.{method}(...args) }}");
+        let (arguments, declaration) = encode_call(method, args);
         let result = self
             .send(
                 "Runtime.callFunctionOn",
@@ -619,7 +655,8 @@ impl TabPage {
             let state = self.shared.state.lock().unwrap();
             std::iter::once(None).chain(state.sessions.keys().cloned().map(Some)).collect()
         };
-        if self.dialog().is_some() {
+        // A dialog blocks the call; a pending navigation holds it until commit and replaces the document anyway.
+        if self.dialog().is_some() || self.pending_navigation().is_some() {
             return;
         }
         for session in sessions {
@@ -629,6 +666,14 @@ impl TabPage {
             )
             .await;
         }
+    }
+
+    pub fn media_emulation(&self) -> MediaEmulation {
+        self.shared.state.lock().unwrap().media.clone()
+    }
+
+    pub fn set_media_emulation(&self, media: MediaEmulation) {
+        self.shared.state.lock().unwrap().media = media;
     }
 
     pub fn platform(&self) -> Option<String> {
@@ -647,14 +692,28 @@ pub enum Arg {
     Undefined,
 }
 
-impl Arg {
-    fn to_cdp(&self) -> Value {
-        match self {
-            Arg::Value(value) => json!({ "value": value }),
-            Arg::Element(element) => json!({ "objectId": element.object_id }),
-            Arg::Undefined => json!({}),
-        }
-    }
+/// The CDP arguments and function declaration for `helpers[method](...args)`. JSON values travel as one JSON string
+/// parsed in the page, because CDP drops `null` call arguments (and nulls nested in objects) on the way in; element
+/// handles follow it as object ids.
+pub fn encode_call(method: &str, args: &[Arg]) -> (Vec<Value>, String) {
+    let mut handles = Vec::new();
+    let spec: Vec<Value> = args
+        .iter()
+        .map(|arg| match arg {
+            Arg::Value(value) => json!({ "v": value }),
+            Arg::Element(element) => {
+                handles.push(json!({ "objectId": element.object_id }));
+                json!({ "h": handles.len() - 1 })
+            }
+            Arg::Undefined => json!({ "u": 1 }),
+        })
+        .collect();
+    let mut arguments = vec![json!({ "value": Value::Array(spec).to_string() })];
+    arguments.extend(handles);
+    let declaration = format!(
+        "function (spec, ...handles) {{ const args = JSON.parse(spec).map((a) => \"h\" in a ? handles[a.h] : \"u\" in a ? undefined : a.v); return this.{method}(...args) }}"
+    );
+    (arguments, declaration)
 }
 
 pub fn v(value: impl serde::Serialize) -> Arg {
@@ -677,6 +736,12 @@ pub fn exception_message(details: &Value) -> String {
     let message = lines.join("\n");
     let message = message.strip_prefix("Uncaught ").unwrap_or(&message).to_string();
     if message.is_empty() { "the page threw an exception".into() } else { message }
+}
+
+/// Whether `next` is `current` with only a different fragment (`#…`), which navigates within the document.
+pub fn is_fragment_change(current: &str, next: &str) -> bool {
+    let base = |url: &str| url.split('#').next().unwrap_or("").to_string();
+    next.contains('#') && !current.is_empty() && base(current) == base(next)
 }
 
 pub fn truncate(value: &str, max: usize) -> String {
@@ -731,6 +796,7 @@ impl Shared {
             loader_id: String::new(),
             lifecycle: HashSet::new(),
             generation,
+            committed_at: None,
         });
         entry.session = session.map(str::to_string);
         if parent.is_some() {
@@ -788,12 +854,15 @@ impl Shared {
                     loader_id: String::new(),
                     lifecycle: HashSet::new(),
                     generation,
+                    committed_at: None,
                 });
             }
             "Page.frameNavigated" => {
                 let frame = &params["frame"];
                 let id = str_of(frame, "id");
-                let url = format!("{}{}", str_of(frame, "url"), str_of(frame, "urlFragment"));
+                // Chrome's error page (chrome-error://chromewebdata/) stands in for the URL it could not load.
+                let unreachable = str_of(frame, "unreachableUrl");
+                let url = if unreachable.is_empty() { format!("{}{}", str_of(frame, "url"), str_of(frame, "urlFragment")) } else { unreachable };
                 let mut state = self.state.lock().unwrap();
                 let generation = next_generation();
                 let parent = frame.get("parentId").and_then(Value::as_str).map(str::to_string);
@@ -810,6 +879,7 @@ impl Shared {
                     loader_id: String::new(),
                     lifecycle: HashSet::new(),
                     generation,
+                    committed_at: None,
                 });
                 entry.url = url.clone();
                 entry.name = str_of(frame, "name");
@@ -822,6 +892,7 @@ impl Shared {
                     entry.loader_id = loader;
                     entry.generation = generation;
                     entry.lifecycle.clear();
+                    entry.committed_at = Some(std::time::Instant::now());
                 }
                 state.worlds.remove(&id);
                 // A new document's child frames attach again.
@@ -830,6 +901,7 @@ impl Shared {
                     Self::remove_frame_tree(&mut state, &child);
                 }
                 if is_main {
+                    state.pending_navigation = None;
                     self.push(&mut state, TabEvent::Navigated { url, same_document: false });
                 }
             }
@@ -851,10 +923,23 @@ impl Shared {
                 if state.main_frame == id && session.is_none() {
                     let url = str_of(params, "url");
                     let kind = str_of(params, "navigationType");
-                    let same_document = kind == "sameDocument" || kind.starts_with("same");
-                    if !same_document {
+                    // frameRequestedNavigation has no navigationType: a URL that only changes the fragment stays in
+                    // the document.
+                    let current = state.frames.get(&id).map(|f| f.url.clone()).unwrap_or_default();
+                    let same_document = kind == "sameDocument" || kind == "historySameDocument" || (kind.is_empty() && is_fragment_change(&current, &url));
+                    let disposition = str_of(params, "disposition");
+                    let elsewhere = !disposition.is_empty() && disposition != "currentTab";
+                    if !same_document && !elsewhere {
+                        state.pending_navigation = Some(url.clone());
                         self.push(&mut state, TabEvent::NavigationStarted { url });
                     }
+                }
+            }
+            "Page.frameStoppedLoading" => {
+                let id = str_of(params, "frameId");
+                let mut state = self.state.lock().unwrap();
+                if state.main_frame == id && session.is_none() {
+                    state.pending_navigation = None;
                 }
             }
             "Page.frameDetached" => {
@@ -905,6 +990,7 @@ impl Shared {
                 let mut state = self.state.lock().unwrap();
                 state.dialog = Some(dialog.clone());
                 let policy = state.dialog_policy;
+                let prompt_text = state.auto_prompt_text.clone().unwrap_or_else(|| dialog.default_prompt.clone());
                 self.push(&mut state, TabEvent::Dialog(dialog.clone()));
                 drop(state);
                 self.dialog_open.send_replace(true);
@@ -919,7 +1005,7 @@ impl Shared {
                     let session = session.clone();
                     tokio::spawn(async move {
                         let params = if accept && dialog.kind == "prompt" {
-                            json!({ "accept": true, "promptText": dialog.default_prompt })
+                            json!({ "accept": true, "promptText": prompt_text })
                         } else {
                             json!({ "accept": accept })
                         };
@@ -1017,4 +1103,26 @@ async fn pump(shared: Arc<Shared>, mut events: broadcast::Receiver<CdpEvent>) {
         }
     }
     shared.bump();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn call_arguments_keep_nulls() {
+        let (arguments, declaration) = encode_call("refResolve", &[Arg::Value(Value::Null), v(json!({ "a": null })), Arg::Undefined]);
+        assert_eq!(arguments.len(), 1);
+        let spec: Value = serde_json::from_str(arguments[0]["value"].as_str().unwrap()).unwrap();
+        assert_eq!(spec, json!([{ "v": null }, { "v": { "a": null } }, { "u": 1 }]));
+        assert!(declaration.contains("this.refResolve(...args)"));
+    }
+
+    #[test]
+    fn fragment_changes() {
+        assert!(is_fragment_change("https://a.example/x", "https://a.example/x#top"));
+        assert!(is_fragment_change("https://a.example/x#a", "https://a.example/x#b"));
+        assert!(!is_fragment_change("https://a.example/x", "https://a.example/y#top"));
+        assert!(!is_fragment_change("https://a.example/x#a", "https://a.example/x"));
+    }
 }

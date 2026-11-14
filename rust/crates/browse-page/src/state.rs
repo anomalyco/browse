@@ -29,8 +29,9 @@ pub struct RefTarget {
 #[derive(Debug, Clone)]
 pub struct Baseline {
     pub tab: TabId,
-    /// The main document the baseline was captured from (URL and frame generation); a navigation retires it.
-    pub document: (String, u64),
+    /// The main document the baseline was captured from (its frame generation); a cross-document navigation retires
+    /// it, while same-document URL changes (pushState, hash) keep it.
+    pub document: u64,
     pub signature: String,
     pub entries: Vec<RenderedEntry>,
 }
@@ -39,14 +40,16 @@ pub struct Baseline {
 #[derive(Debug, Clone)]
 pub struct AriaRefs {
     pub tab: TabId,
-    pub url: String,
     pub main_generation: u64,
+    /// The refs the snapshot showed (`a5`, `f1a3`).
+    pub ids: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Default)]
 pub struct RefRegistry {
     pub tab: Option<TabId>,
-    pub url: Option<String>,
+    /// The main document generation the refs were captured from.
+    pub document: Option<u64>,
     pub selectors: HashMap<String, RefTarget>,
     pub previous: Option<Baseline>,
     pub next_ref: u64,
@@ -60,7 +63,7 @@ impl RefRegistry {
     pub fn invalidate(&mut self) {
         self.selectors.clear();
         self.tab = None;
-        self.url = None;
+        self.document = None;
         self.previous = None;
     }
 
