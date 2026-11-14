@@ -1,0 +1,19 @@
+[package]
+name = "browse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "browse"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+browse-core.workspace = true
+browse-relay.workspace = true
+browse-page.workspace = true
+browse-capture.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

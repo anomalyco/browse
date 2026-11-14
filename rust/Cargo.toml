@@ -1,0 +1,29 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+browse-core = { path = "crates/browse-core" }
+browse-relay = { path = "crates/browse-relay" }
+browse-page = { path = "crates/browse-page" }
+browse-capture = { path = "crates/browse-capture" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
