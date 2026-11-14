@@ -25,7 +25,7 @@ the Rust relay must speak its exact protocol, so the store extension keeps worki
 | `browse-core` | Shared contracts: `Cdp`, `Browser`, `Secrets`, `Tool`, `ToolContext`, `ToolOutput`, wire types. Change only with care; other crates depend on it. |
 | `browse-relay` | Relay server: extension WebSocket protocol and handshake, pairing and browser tokens, CDP routing per tab (incl. child targets), sessions, tab groups and cleanup, handoff, site secrets, settings sync, the HTTP API (`/version`, `/tools`, `/tools/call`), data paths (XDG), relay logging. Implements `Browser`, `Cdp`, `Secrets`. Tools: sessions, tabs, handoff, demonstrate, secrets, status, settings, tabs_cleanup. |
 | `browse-page` | Page interaction over CDP: isolated worlds, frames, injected script, refs, snapshots, actionability, human-like input, stealth. Tools: navigate, snapshot, click, fill, type, press, select, hover, drag, scroll, eval, wait_for, dialog, upload, emulate, webmcp. |
-| `browse-capture` | Screenshots (labels, ref, full page, diff), network capture (start/status/stop/cancel, HAR with redaction), page console capture, screen recording (MJPEG → Matroska). |
+| `browse-capture` | Screenshots (labels, ref, full page, diff), network capture (start/status/stop/cancel, redacted exchanges), page console capture, screen recording (MJPEG → Matroska). |
 | `browse` | The binary: CLI commands (`serve`, `mcp`, `install`, `pair`, `update`, `doctor`, `status`, `extension`, and `browse <tool> --arg ...` for any tool), the MCP stdio proxy, starting the relay on demand, OpenCode setup, self-update from the release service. |
 
 Each crate exposes `pub fn tools() -> Vec<Arc<dyn browse_core::Tool>>`. The binary concatenates them and passes the
