@@ -143,6 +143,8 @@ export type AutoUpdateState = {
   readonly mode?: AutoUpdateMode
   readonly checkedAt?: number
   readonly latest?: string
+  /** When `latest` first changed to the version it is now, so a pending update can be told apart from a slow one. */
+  readonly latestAt?: number
   /** The ETag of the release service manifest last read, for If-None-Match. */
   readonly etag?: string
   readonly failed?: string
@@ -216,6 +218,7 @@ export type AutoUpdateStatus = {
   readonly version?: string
   readonly channel?: Channel
   readonly latest?: string
+  readonly latestAt?: string
   readonly checkedAt?: string
   readonly lastUpdate?: AutoUpdateState["lastUpdate"]
   readonly lastError?: AutoUpdateState["lastError"]
@@ -235,6 +238,7 @@ export function autoUpdateStatus(options: { readonly env?: NodeJS.ProcessEnv; re
     ...(override ? { overriddenBy: env.OPENCODE_BROWSER_AUTO_UPDATE !== undefined ? "OPENCODE_BROWSER_AUTO_UPDATE" : "OPENCODE_BROWSER_UPDATE_CHECK" } : {}),
     ...(runtime ? { version: runtime.version, channel: channelOf(runtime.version) } : {}),
     ...(state.latest ? { latest: state.latest } : {}),
+    ...(state.latestAt ? { latestAt: new Date(state.latestAt).toISOString() } : {}),
     ...(state.checkedAt ? { checkedAt: new Date(state.checkedAt).toISOString() } : {}),
     ...(state.lastUpdate ? { lastUpdate: state.lastUpdate } : {}),
     ...(state.lastError ? { lastError: state.lastError } : {}),
@@ -466,20 +470,25 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
     })
     if (result.status === "unchanged") {
       deps.log("autoupdate.unchanged", { channel: serviceChannel, running })
-      return updateState(({ failed: _failed, ...rest }) => ({ ...rest, checkedAt: now() }))
+      // A state file from before latestAt existed gets one now, so the pending clock starts rather than never running.
+      return updateState(({ failed: _failed, ...rest }) => ({
+        ...rest,
+        checkedAt: now(),
+        ...(rest.latest && !rest.latestAt ? { latestAt: now() } : {}),
+      }))
     }
     if (result.status === "missing") {
       deps.log("autoupdate.no_release", { channel: serviceChannel, running })
-      return updateState(({ failed: _failed, latest: _latest, etag: _etag, ...rest }) => ({ ...rest, checkedAt: now() }))
+      return updateState(({ failed: _failed, latest: _latest, latestAt: _latestAt, etag: _etag, ...rest }) => ({ ...rest, checkedAt: now() }))
     }
     const decision: ReleaseDecision = result.decision
     if (decision.action === "reject") throw new Error(`the ${serviceChannel} manifest was rejected: ${decision.reason}`)
     deps.log("autoupdate.checked", { channel: serviceChannel, current: result.releaseVersion, running, decision: decision.reason })
-    return updateState(({ failed: _failed, latest: _latest, etag: _etag, ...rest }) => ({
+    return updateState(({ failed: _failed, latest: previous, latestAt: previousAt, etag: _etag, ...rest }) => ({
       ...rest,
       checkedAt: now(),
       ...(result.etag ? { etag: result.etag } : {}),
-      ...(decision.action === "install" ? { latest: decision.version } : {}),
+      ...(decision.action === "install" ? { latest: decision.version, latestAt: previous === decision.version && previousAt ? previousAt : now() } : {}),
     }))
   }
 
@@ -501,7 +510,12 @@ export function createAutoUpdater(deps: AutoUpdaterDeps) {
             state = await checkBinary(state, channel)
           } else {
             const published = await fetchPublished({ registry: await registryUrl(deps.run, env), channel, ...(deps.fetch ? { fetch: deps.fetch } : {}) })
-            state = updateState(({ failed: _failed, ...rest }) => ({ ...rest, checkedAt: now(), latest: published.version }))
+            state = updateState(({ failed: _failed, latest: previous, latestAt: previousAt, ...rest }) => ({
+              ...rest,
+              checkedAt: now(),
+              latest: published.version,
+              latestAt: previous === published.version && previousAt ? previousAt : now(),
+            }))
             deps.log("autoupdate.checked", { channel, latest: published.version, running })
           }
         } catch (error) {

@@ -75,9 +75,13 @@ export type ProtocolSkew = "update-cli" | "update-extension"
 
 export type AutoUpdateMode = "on" | "notify" | "off"
 export const autoUpdateMode = (value: unknown): AutoUpdateMode | undefined => (value === "on" || value === "notify" || value === "off" ? value : undefined)
+/** How this CLI was installed; only binary and npm global installs update themselves. Older relays send only npm, checkout or other. */
+export type RelayInstall = "binary" | "npm" | "npx" | "checkout" | "other"
+/** The last installer attempt that failed, which version it was for, and when. */
+export type RelayUpdateFailure = { message: string; at: string; version?: string; attempts?: number }
 /** The relay's update state: an npm install updates itself; a checkout updates with `update`. */
 export type RelayAutoUpdate = {
-  install: "npm" | "checkout" | "other"
+  install: RelayInstall
   /** The command that runs the relay's CLI in a terminal: `browse` for a binary install, `npx @opencode/browse` for npm. */
   cli?: string
   mode: AutoUpdateMode
@@ -86,8 +90,67 @@ export type RelayAutoUpdate = {
   version?: string
   channel?: string
   latest?: string
+  /** When the relay first saw `latest` (ISO 8601), so an update that never lands can be noticed. */
+  latestAt?: string
+  /** When the relay last checked for a release (ISO 8601). */
+  checkedAt?: string
   pending?: string
   previous?: string
+  lastError?: RelayUpdateFailure
+}
+
+/** An optional update that stayed pending this long is told to the user rather than waited on quietly. */
+export const AUTO_UPDATE_PENDING_MS = 24 * 60 * 60 * 1000
+
+export type CliUpdateNotice = {
+  current: string
+  latest: string
+  /** Why the CLI is behind: the install can't update itself, updates are off/notify, the last attempt failed, or it stayed pending. */
+  reason: "install" | "mode" | "failed" | "pending"
+  /** The command that updates this install in a terminal. */
+  command: string
+}
+
+/** The command that updates a CLI install: binary and checkout update in place, npm global and npx install the latest package. */
+export function cliUpdateCommand(update: Pick<RelayAutoUpdate, "install" | "cli">): string {
+  if (update.install === "npm") return "npm install -g @opencode/browse@latest"
+  if (update.install === "npx") return "npx @opencode/browse@latest install"
+  return `${update.cli?.trim() || "browse"} update`
+}
+
+/** Orders the relay's versions as semver does for these shapes: dev below beta below the release, then by run. */
+function versionOrder(value: string): number[] | undefined {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-(dev|beta)\.(\d+)(?:\.(\d+))?)?$/.exec(value)
+  if (!match) return undefined
+  const stage = match[4] === undefined ? 2 : match[4] === "beta" ? 1 : 0
+  return [Number(match[1]), Number(match[2]), Number(match[3]), stage, Number(match[5] ?? 0), Number(match[6] ?? 0)]
+}
+
+/** Whether `latest` names another build than `current`, ordering known version shapes and treating anything else as different. */
+export function newerCliVersion(latest: string, current: string): boolean {
+  if (latest === current) return false
+  const a = versionOrder(latest)
+  const b = versionOrder(current)
+  if (!a || !b) return true
+  for (let index = 0; index < a.length; index++) if (a[index] !== b[index]) return a[index]! > b[index]!
+  return false
+}
+
+/**
+ * The CLI update the status pages and toolbar should mention, or undefined while there's nothing to say. A normal
+ * pending auto-update stays quiet: only an install that can't update itself, updates that are off or notify-only, a
+ * failed attempt, or a release that stayed uninstalled for a day is told to the user.
+ */
+export function cliUpdateNotice(update: RelayAutoUpdate | undefined, now = Date.now()): CliUpdateNotice | undefined {
+  const { version: current, latest } = update ?? {}
+  if (!update || !current || !latest || !newerCliVersion(latest, current)) return undefined
+  const failed = update.lastError !== undefined && (update.lastError.version === undefined || update.lastError.version === latest)
+  const selfUpdating = update.install === "binary" || update.install === "npm"
+  const since = update.latestAt === undefined ? undefined : Date.parse(update.latestAt)
+  const stale = since !== undefined && Number.isFinite(since) && now - since > AUTO_UPDATE_PENDING_MS
+  const reason = failed ? "failed" : !selfUpdating ? "install" : update.effective !== "on" ? "mode" : stale ? "pending" : undefined
+  if (!reason) return undefined
+  return { current, latest, reason, command: cliUpdateCommand(update) }
 }
 
 export type AgentRelayUpdate = { summary: string; command: string }

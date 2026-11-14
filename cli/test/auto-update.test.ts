@@ -319,14 +319,14 @@ describe("the relay's updater", () => {
       expect(requests[0]!.url).toBe("https://anoma.ly/release/browse/cli/stable.json")
       expect(requests[0]!.headers.get("user-agent")).toBe("browse/stable/0.0.1/cli")
       expect(requests[0]!.headers.get("if-none-match")).toBeNull()
-      expect(readState()).toMatchObject({ latest: "0.0.2", etag: '"one"' })
+      expect(readState()).toMatchObject({ latest: "0.0.2", latestAt: time, etag: '"one"' })
       expect(spawned).toEqual([])
 
-      // An hour later the check runs again with If-None-Match; 304 keeps the answer and changes nothing.
+      // An hour later the check runs again with If-None-Match; 304 keeps the answer, and its original timestamp.
       time += 60 * 60 * 1000
       await updater.tick()
       expect(requests[1]!.headers.get("if-none-match")).toBe('"one"')
-      expect(readState()).toMatchObject({ latest: "0.0.2", etag: '"one"' })
+      expect(readState()).toMatchObject({ latest: "0.0.2", latestAt: 1_000_000, etag: '"one"' })
     } finally {
       delete process.env.OPENCODE_BROWSER_HOME
       delete globals.__OPENCODE_BROWSER_TARGET__
@@ -790,10 +790,12 @@ describe("status", () => {
     process.env.OPENCODE_BROWSER_HOME = home
     try {
       const runtime = runtimeAt(home, "0.0.1")
-      updateState(() => ({ checkedAt: Date.now(), latest: "0.0.2" }))
+      const checkedAt = Date.parse("2026-11-14T12:00:00.000Z")
+      updateState(() => ({ checkedAt, latest: "0.0.2", latestAt: checkedAt - 60_000 }))
       const status = autoUpdateStatus({ runtime, env: {} })
       expect(status.install).toBe("binary")
       expect(status.effective).toBe("on")
+      expect(status.latestAt).toBe(new Date(checkedAt - 60_000).toISOString())
       expect(describeAutoUpdate(status)).toContain("0.0.2 available; the installer runs when no agent is using the browser")
       const installLine = `0.0.2 available; run \`${cliCommand("update")}\` to install it`
       setStoredMode("notify")

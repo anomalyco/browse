@@ -43,6 +43,8 @@ export function createExtensionEventHandler(options: {
   readonly sendDebuggerCommand: (command: { readonly tabId: number; readonly sessionId?: string; readonly method: string; readonly params: JsonObject }) => Effect.Effect<JsonObject, Error>
   readonly sendExtensionBestEffort: (command: ExtensionCommandInput, link?: BrowserLink) => void
   readonly applyExtensionSettings: (link: BrowserLink, params: JsonObject | undefined) => void
+  /** Sends the settings answer an extension asked for before pairing finished, once the browser is ready. */
+  readonly relaySettingsReady: (link: BrowserLink) => void
   readonly hasUpdateNotice: () => boolean
   readonly sendUpdateNotice: () => void
   readonly announceTab: (tabId: number) => void
@@ -82,6 +84,7 @@ export function createExtensionEventHandler(options: {
     sendDebuggerCommand,
     sendExtensionBestEffort,
     applyExtensionSettings,
+    relaySettingsReady,
     hasUpdateNotice,
     sendUpdateNotice,
     announceTab,
@@ -268,6 +271,9 @@ export function createExtensionEventHandler(options: {
           announcedAgentTabIds.clear()
           for (const [targetId, known] of ownersAcrossReconnect) if (known.browser === link.key) ownersAcrossReconnect.delete(targetId)
           link.rpc.markReady()
+          // An extension sends its own settings right after pairing, before the relay marks this browser ready, so
+          // that answer was dropped. Deliver it now that it can arrive, once.
+          relaySettingsReady(link)
           if (hasUpdateNotice()) sendUpdateNotice()
           for (const target of registry.listRootTargets()) if (mine(target.tabId)) refreshTabGrouping(target.tabId)
           browsersChanged()

@@ -46,6 +46,15 @@
   margin-left: auto;
 }
 
+/* The outdated CLI line sits directly under the connection, before any setting. */
+.head-notice {
+  padding: 0 16px 16px;
+}
+
+.head-notice .note {
+  margin: 0;
+}
+
 .dot {
   flex: none;
   width: 6px;
