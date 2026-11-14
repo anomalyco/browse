@@ -105,7 +105,7 @@ export function createRelayGrouping(deps: {
   const group = async (tabId: number, sessionId: string | undefined, current: WebSocket) => {
     const tab = await chrome.tabs.get(tabId)
     // window.open(..., "popup") has no tab strip. A group here can't join the opener's group; creating
-    // and naming a separate saved group needlessly blocks Chrome's UI thread during concurrent opens.
+    // and naming a separate saved group blocks Chrome's UI thread and crashes Brave 156's browser process.
     if ((await chrome.windows.get(tab.windowId)).type === "popup") return chrome.tabGroups.TAB_GROUP_ID_NONE
     const mode = await AgentGroups.mode()
     const existing =
