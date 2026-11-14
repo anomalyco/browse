@@ -9,6 +9,7 @@ import * as RelayClient from "../src/relay/client.ts"
 import { ensureRelay, restartRelay } from "../src/relay/lifecycle.ts"
 import {
   chooseRelayPort,
+  configuredRelayPort,
   endpointForPort,
   lastRelayPortPath,
   liveRelayPort,
@@ -622,6 +623,101 @@ describe("relay port fallback", () => {
         retryDelayMs: 1,
       }))
       expect(calls).toBe(3)
+      expect(starts).toBe(1)
+      expect(readiness.started).toBe(true)
+      expect(readiness.version.instanceId).toBe("started-relay")
+    } finally {
+      fs.rmSync(relayStatePath(), { force: true })
+      if (previousPort === undefined) delete process.env.OPENCODE_BROWSER_PORT
+      else process.env.OPENCODE_BROWSER_PORT = previousPort
+    }
+  })
+
+  test("an unpinned ensureRelay starts past a drain on a stale live record", async () => {
+    const recordedPort = await freePortOutsideBrowseRange()
+    const previousPort = process.env.OPENCODE_BROWSER_PORT
+    delete process.env.OPENCODE_BROWSER_PORT
+    const stale = {
+      version: "0.0.15",
+      buildId: "2026-11-06T00:00:00Z",
+      instanceId: "stale-relay",
+      managed: true,
+      shutdownProtocol: 2 as const,
+    }
+    const startedRelay = { ...stale, instanceId: "started-relay" }
+    let calls = 0
+    let starts = 0
+    const decode = () => new RelayClient.RelayDecodeFailed({
+      message: "in use by another program (not a browse /version response)",
+      path: "/version",
+      cause: { version: "0.10.0" },
+    })
+    const relay = {
+      endpoint: endpointForPort(recordedPort),
+      version: Effect.suspend((): Effect.Effect<RelayVersion, RelayClient.RelayClientError> => {
+        calls++
+        return calls <= 3 ? Effect.fail(decode()) : Effect.succeed(startedRelay)
+      }),
+    } as unknown as RelayClient.Interface
+    try {
+      writeRelayState({ port: recordedPort, configuredPort: configuredRelayPort(), pid: process.pid, instanceId: stale.instanceId, startedAt: new Date().toISOString() })
+      const readiness = await Effect.runPromise(ensureRelay({
+        relay,
+        start: Effect.sync(() => {
+          starts++
+        }),
+        retryTimes: 1,
+        retryDelayMs: 1,
+      }))
+      expect(calls).toBe(4)
+      expect(starts).toBe(1)
+      expect(readiness.started).toBe(true)
+      expect(readiness.version.instanceId).toBe("started-relay")
+    } finally {
+      fs.rmSync(relayStatePath(), { force: true })
+      if (previousPort === undefined) delete process.env.OPENCODE_BROWSER_PORT
+      else process.env.OPENCODE_BROWSER_PORT = previousPort
+    }
+  })
+
+  test("an unpinned restart starts past a drain on a stale live record", async () => {
+    const recordedPort = await freePortOutsideBrowseRange()
+    const previousPort = process.env.OPENCODE_BROWSER_PORT
+    delete process.env.OPENCODE_BROWSER_PORT
+    const stale = {
+      version: "0.0.15",
+      buildId: "2026-11-06T00:00:00Z",
+      instanceId: "stale-relay",
+      managed: true,
+      shutdownProtocol: 2 as const,
+    }
+    const startedRelay = { ...stale, instanceId: "started-relay" }
+    let calls = 0
+    let starts = 0
+    const decode = () => new RelayClient.RelayDecodeFailed({
+      message: "in use by another program (not a browse /version response)",
+      path: "/version",
+      cause: { version: "0.10.0" },
+    })
+    const relay = {
+      endpoint: endpointForPort(recordedPort),
+      version: Effect.suspend((): Effect.Effect<RelayVersion, RelayClient.RelayClientError> => {
+        calls++
+        return calls <= 3 ? Effect.fail(decode()) : Effect.succeed(startedRelay)
+      }),
+    } as unknown as RelayClient.Interface
+    try {
+      writeRelayState({ port: recordedPort, configuredPort: configuredRelayPort(), pid: process.pid, instanceId: stale.instanceId, startedAt: new Date().toISOString() })
+      const readiness = await Effect.runPromise(restartRelay({
+        relay,
+        buildId: stale.buildId,
+        start: Effect.sync(() => {
+          starts++
+        }),
+        retryTimes: 1,
+        retryDelayMs: 1,
+      }))
+      expect(calls).toBe(4)
       expect(starts).toBe(1)
       expect(readiness.started).toBe(true)
       expect(readiness.version.instanceId).toBe("started-relay")

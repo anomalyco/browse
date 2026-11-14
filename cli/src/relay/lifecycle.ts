@@ -40,7 +40,14 @@ export function shouldWaitForExtensionReconnect(readiness: RelayReadiness): bool
   return readiness.started || readiness.waitForReconnect === true
 }
 
-class RelayStillRunning extends Error {}
+class RelayStillRunning extends Error {
+  /** The cut /version that made this a still-draining retry, so a spent budget reports the real port error. */
+  readonly cutProbe: RelayClient.RelayDecodeFailed | undefined
+  constructor(message: string, cutProbe?: RelayClient.RelayDecodeFailed) {
+    super(message)
+    this.cutProbe = cutProbe
+  }
+}
 
 class RelayStartFailed extends Schema.TaggedError<RelayStartFailed>()(
   "RelayLifecycle.RelayStartFailed",
@@ -119,18 +126,19 @@ export const ensureRelay = Effect.fn("RelayLifecycle.ensureRelay")(function* (op
   }
   const initial = yield* Effect.result(options.relay.version)
   if (Result.isSuccess(initial)) return found(initial.success, false)
+  const draining = relayDraining(initial.failure)
   let relayWasAbsent = isRelayUnreachable(initial.failure) || isForeignListener(initial.failure, options.pinned)
-  if (!relayWasAbsent && !isRelayStarting(initial.failure) && !relayDraining(initial.failure)) {
+  if (!relayWasAbsent && !isRelayStarting(initial.failure) && !draining) {
     return yield* initial.failure
   }
 
-  if (relayDraining(initial.failure)) {
+  if (draining) {
     // Another process already asked this relay to stop: wait for it like our own drain. A replacement is the ready
     // relay; no replacement means it is gone, so start one as if it had been absent.
     const recorded = liveRelayInstanceId()
     const replacement = recorded === undefined
       ? undefined
-      : yield* waitForRelayExitOrReplacement({ ...options, instanceId: recorded })
+      : yield* startPastDrain(waitForRelayExitOrReplacement({ ...options, instanceId: recorded }), options.pinned)
     if (replacement !== undefined) return found(replacement, false)
     relayWasAbsent = true
   }
@@ -195,8 +203,9 @@ export const restartRelay = Effect.fn("RelayLifecycle.restartRelay")(function* (
     // Another process may already be draining the relay: wait for its exit or replacement rather than treating a cut
     // /version as a foreign listener while relay.json still names a live process.
     const recorded = relayDraining(initial.failure) ? liveRelayInstanceId() : undefined
-    if (recorded !== undefined) replacement = yield* waitForRelayExitOrReplacement({ ...options, instanceId: recorded })
-    else if (!absent(initial.failure)) return yield* initial.failure
+    if (recorded !== undefined) {
+      replacement = yield* startPastDrain(waitForRelayExitOrReplacement({ ...options, instanceId: recorded }), options.pinned)
+    } else if (!absent(initial.failure)) return yield* initial.failure
   }
 
   if (original) {
@@ -216,8 +225,9 @@ export const restartRelay = Effect.fn("RelayLifecycle.restartRelay")(function* (
     const confirmed = yield* Effect.result(options.relay.version)
     if (Result.isFailure(confirmed)) {
       const recorded = relayDraining(confirmed.failure) ? liveRelayInstanceId() : undefined
-      if (recorded !== undefined) replacement = yield* waitForRelayExitOrReplacement({ ...options, instanceId: recorded })
-      else if (!absent(confirmed.failure)) return yield* confirmed.failure
+      if (recorded !== undefined) {
+        replacement = yield* startPastDrain(waitForRelayExitOrReplacement({ ...options, instanceId: recorded }), options.pinned)
+      } else if (!absent(confirmed.failure)) return yield* confirmed.failure
     } else if (!isSameRelayInstance(original, confirmed.success)) {
       replacement = confirmed.success
     } else {
@@ -277,20 +287,32 @@ function waitForRelayExitOrReplacement(options: {
       if (isRelayUnreachable(error)) return Effect.succeed(undefined)
       // While relay.json still names this relay, a decode failure is its drain, on a pinned or fallback port. Once the
       // record is gone, a pinned port keeps the decode failure (a real foreign listener); a fallback port moves on.
-      if (error instanceof RelayClient.RelayDecodeFailed && stillRecorded()) return Effect.fail(error)
+      if (error instanceof RelayClient.RelayDecodeFailed && stillRecorded()) {
+        return Effect.fail(new RelayStillRunning("browse relay is still draining; no replacement was started", error))
+      }
       return isForeignListener(error, options.pinned) ? Effect.succeed(undefined) : Effect.fail(error)
     }),
     Effect.retry({
       times: options.retryTimes ?? 200,
       schedule: Schedule.spaced(options.retryDelayMs ?? 50),
-      // Retrying the decode itself keeps it as the error if the budget runs out: it is the honest "another program"
-      // for a listener that outlasts the record, while a same-instance answer keeps reporting RelayStillRunning.
-      while: (error) =>
-        (error instanceof RelayClient.RelayDecodeFailed && stillRecorded()) ||
-        error instanceof RelayStillRunning ||
-        isRelayStarting(error),
+      // The catch already classified the failure; its next attempt reads relay.json again.
+      while: (error) => error instanceof RelayStillRunning || isRelayStarting(error),
     }),
+    // A budget spent on cut probes names the port, not a relay that never stopped answering.
+    Effect.mapError((error) => error instanceof RelayStillRunning ? error.cutProbe ?? error : error),
   )
+}
+
+/**
+ * A drain wait abandoned with a foreign-shaped probe on an unpinned port leaves the relay free to start on a fallback
+ * port, as before a drain was waited for at all; a pinned port keeps the error.
+ */
+function startPastDrain(
+  drain: Effect.Effect<RelayVersion | undefined, Error | RelayClient.RelayClientError>,
+  pinned?: boolean,
+): Effect.Effect<RelayVersion | undefined, Error | RelayClient.RelayClientError> {
+  return drain.pipe(Effect.catch((error) =>
+    isForeignListener(error, pinned) ? Effect.succeed(undefined) : Effect.fail(error)))
 }
 
 function isSameRelayInstance(left: RelayVersion, right: RelayVersion): boolean {
