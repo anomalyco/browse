@@ -54,6 +54,35 @@ fn desired(st: &State, tab: i64) -> Option<(Value, Value, Value)> {
     Some((status, badge, group))
 }
 
+struct PendingHandoff {
+    relay: Arc<Relay>,
+    session: String,
+    id: String,
+    tab: i64,
+    armed: bool,
+}
+
+impl PendingHandoff {
+    fn done(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingHandoff {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if self.relay.st().handoffs.get(&self.session).is_some_and(|h| h.id == self.id) {
+            rlog!("handoff.cancelled", tabId = self.tab, session = self.session.clone());
+        }
+        self.relay.finish_handoff_id(&self.session, &self.id, "cancelled");
+        if tokio::runtime::Handle::try_current().is_ok() {
+            self.relay.refresh_presentation(self.tab, false);
+        }
+    }
+}
+
 impl Relay {
     /// Brings what the extension shows for the tab up to date; `regroup` resends its group even when unchanged.
     pub fn refresh_presentation(self: &Arc<Self>, tab: i64, regroup: bool) {
@@ -111,6 +140,24 @@ impl Relay {
                 }
             }
         });
+    }
+
+    /// Shows a tab its session is running in as merely attached, until the next refresh.
+    pub async fn present_attached(&self, tab: i64) {
+        let status = {
+            let st = self.st();
+            match desired(&st, tab) {
+                Some((mut status, _, _)) if status["state"] == "running" => {
+                    status["state"] = "attached".into();
+                    status
+                }
+                _ => return,
+            }
+        };
+        let _ = self.ext_tab(tab, "pageStatus.set", json!({ "status": status })).await;
+        if let Some(presented) = self.st().presented.get_mut(&tab) {
+            presented.status = None;
+        }
     }
 
     pub fn refresh_session_presentation(self: &Arc<Self>, session: &str) {
@@ -248,9 +295,10 @@ impl Relay {
             status
         };
         rlog!("handoff.started", tabId = tab, session = session);
+        // A call stopped while it waits (its client went away, the toolbar button) takes its card down with it.
+        let mut pending = PendingHandoff { relay: self.clone(), session: session.to_string(), id: id.clone(), tab, armed: true };
         if let Err(error) = self.ext_tab(tab, "pageStatus.set", json!({ "status": status })).await {
-            self.finish_handoff_id(session, &id, "cancelled");
-            self.refresh_presentation(tab, false);
+            drop(pending);
             bail!("Couldn't show the handoff in tab {tab}: {error}");
         }
         let outcome = match tokio::time::timeout(timeout, outcome).await {
@@ -258,6 +306,7 @@ impl Relay {
             Ok(Err(_)) => "cancelled",
             Err(_) => "timeout",
         };
+        pending.done();
         self.finish_handoff_id(session, &id, outcome);
         rlog!("handoff.finished", tabId = tab, session = session, outcome = outcome);
         self.refresh_presentation(tab, false);

@@ -75,6 +75,9 @@ pub struct Session {
     pub stopped: Option<String>,
     /// Background work tools reported (`Browser::set_busy`: "network", "recording").
     pub busy_keys: std::collections::HashSet<String>,
+    /// Why the session's current tab went away with no other tab to take its place, until it opens or picks one:
+    /// later calls say so instead of quietly working in a new blank tab.
+    pub lost: Option<String>,
 }
 
 impl Session {
@@ -99,6 +102,7 @@ impl Session {
             warnings: Vec::new(),
             stopped: None,
             busy_keys: std::collections::HashSet::new(),
+            lost: None,
         }
     }
 
@@ -120,7 +124,8 @@ impl Session {
         session
     }
 
-    pub fn persisted(&self, live_relay_targets: &[String]) -> PersistedSession {
+    /// `current`: the identity of the session's current tab, which a restarted relay makes current again.
+    pub fn persisted(&self, live_relay_targets: &[String], current: Option<PersistedTarget>) -> PersistedSession {
         let mut targets: Vec<String> = self.held.clone();
         for id in live_relay_targets {
             if !targets.contains(id) {
@@ -136,7 +141,7 @@ impl Session {
             keep_visible: self.keep_visible.then_some(true),
             browser: self.browser.as_ref().map(|b| b.id.clone()),
             browser_key: self.browser.as_ref().and_then(|b| b.key.clone()),
-            target: self.target.clone(),
+            target: current.or_else(|| self.target.clone()),
             targets: (!targets.is_empty()).then(|| targets.into_iter().map(|id| PersistedTarget { id, owner: "relay".into() }).collect()),
             client_pid: self.client_pid,
         }
@@ -277,7 +282,7 @@ mod tests {
         let session = Session::from_persisted(loaded[0].clone());
         assert_eq!(session.held, vec!["T2"]);
         assert_eq!(session.browser.as_ref().unwrap().key.as_deref(), Some("k1"));
-        let back = session.persisted(&[]);
+        let back = session.persisted(&[], None);
         assert_eq!(back.targets.unwrap()[0].id, "T2");
         assert_eq!(back.target.unwrap().owner, "user");
         let _ = std::fs::remove_dir_all(&dir);

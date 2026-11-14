@@ -1,4 +1,5 @@
-//! `browse <tool> [--arg value | --json '{...}']`: call any relay tool from a terminal and print its result.
+//! `browse <tool> [positional]... [--arg value | --json '{...}']`: call any relay tool from a terminal and print its
+//! result.
 
 use std::path::PathBuf;
 
@@ -9,6 +10,12 @@ use serde_json::{Map, Value};
 
 use crate::{relay, session};
 
+/// Flags the CLI handles itself, for every tool. They may also come before the tool name.
+pub const GLOBAL_FLAGS: &[&str] = &["json", "session", "output"];
+
+/// Options a positional argument fills when no required option is open, in order of preference.
+const PRIMARY: &[&str] = &["url", "text", "value", "expression", "key", "values", "files", "message", "action", "to", "within", "selector"];
+
 pub fn list() -> i32 {
     for spec in relay::specs() {
         let first = spec.description.lines().next().unwrap_or_default();
@@ -18,8 +25,12 @@ pub fn list() -> i32 {
     0
 }
 
-fn property_names(spec: &ToolSpec) -> Vec<String> {
-    spec.input_schema.get("properties").and_then(Value::as_object).map(|p| p.keys().cloned().collect()).unwrap_or_default()
+fn properties(spec: &ToolSpec) -> Map<String, Value> {
+    spec.input_schema.get("properties").and_then(Value::as_object).cloned().unwrap_or_default()
+}
+
+fn required(spec: &ToolSpec) -> Vec<String> {
+    spec.input_schema.get("required").and_then(Value::as_array).map(|r| r.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect()).unwrap_or_default()
 }
 
 fn camel(kebab: &str) -> String {
@@ -38,42 +49,179 @@ fn camel(kebab: &str) -> String {
     out
 }
 
-fn help(spec: &ToolSpec) {
-    println!("browse {} [options]\n\n{}\n", spec.name, spec.description);
-    let required: Vec<&str> = spec.input_schema.get("required").and_then(Value::as_array).map(|r| r.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
-    if let Some(properties) = spec.input_schema.get("properties").and_then(Value::as_object) {
-        for (name, schema) in properties {
-            let kind = schema.get("type").and_then(Value::as_str).unwrap_or("json");
-            let mark = if required.contains(&name.as_str()) { " (required)" } else { "" };
-            println!("  --{name} <{kind}>{mark}\n      {}", schema.get("description").and_then(Value::as_str).unwrap_or_default());
+/// A snapshot ref: "e12", or "a5" / "f1a5" from an aria snapshot.
+fn looks_like_ref(value: &str) -> bool {
+    let body = match value.strip_prefix('f') {
+        Some(rest) if rest.starts_with(|c: char| c.is_ascii_digit()) => rest.trim_start_matches(|c: char| c.is_ascii_digit()),
+        _ => value,
+    };
+    let mut chars = body.chars();
+    chars.next().is_some_and(|c| c.is_ascii_lowercase()) && !chars.as_str().is_empty() && chars.all(|c| c.is_ascii_digit())
+}
+
+/// The option a positional value fills: a ref-looking value goes to `ref`, else the first open required option,
+/// else the tool's primary option.
+fn slot(spec: &ToolSpec, arguments: &Map<String, Value>, value: &str) -> Option<String> {
+    let properties = properties(spec);
+    let open = |key: &str| properties.contains_key(key) && !arguments.contains_key(key);
+    if looks_like_ref(value) && open("ref") {
+        return Some("ref".into());
+    }
+    required(spec).into_iter().find(|key| open(key)).or_else(|| PRIMARY.iter().find(|key| open(key)).map(|key| (*key).to_owned()))
+}
+
+/// What `browse <tool> --help` shows as the positional form.
+fn usage(spec: &ToolSpec) -> String {
+    let properties = properties(spec);
+    let mut slots: Vec<String> = required(spec).into_iter().map(|key| format!("<{key}>")).collect();
+    if slots.is_empty() {
+        if properties.contains_key("ref") {
+            slots.push("[ref]".into());
+        }
+        if let Some(primary) = PRIMARY.iter().find(|key| properties.contains_key(**key)) {
+            slots.push(format!("[{primary}]"));
         }
     }
-    println!("\n  --json '<object>'   all arguments as one JSON object\n  --session <id>      run in another session\n  --output <path>     where to save images");
+    slots.join(" ")
+}
+
+fn help(spec: &ToolSpec) {
+    let usage = usage(spec);
+    println!("browse {}{}{} [options]\n\n{}\n", spec.name, if usage.is_empty() { "" } else { " " }, usage, spec.description);
+    let required = required(spec);
+    for (name, schema) in properties(spec) {
+        let mark = if required.contains(&name) { " (required)" } else { "" };
+        println!("  --{name} <{}>{mark}\n      {}", kinds(&schema).join("|"), schema.get("description").and_then(Value::as_str).unwrap_or_default());
+    }
+    if !usage.is_empty() {
+        println!("\n  Positional values fill {usage} in order (a ref like e12 goes to --ref).");
+    }
+    let session = if spec.name == "session" { "the session to act on (same as --id)" } else { "run in this existing session" };
+    println!("\n  --json '<object>'   all arguments as one JSON object\n  --session <id>      {session}\n  --output <path>     where to save images");
+}
+
+fn variants(schema: &Value) -> Vec<&Value> {
+    match schema.get("anyOf").or_else(|| schema.get("oneOf")).and_then(Value::as_array) {
+        Some(list) => list.iter().collect(),
+        None => vec![schema],
+    }
+}
+
+fn types(schema: &Value) -> Vec<&str> {
+    match schema.get("type") {
+        Some(Value::String(kind)) => vec![kind.as_str()],
+        Some(Value::Array(kinds)) => kinds.iter().filter_map(Value::as_str).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn kinds(schema: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for variant in variants(schema) {
+        for kind in types(variant) {
+            if !out.iter().any(|k| k == kind) {
+                out.push(kind.to_owned());
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push("json".into());
+    }
+    out
+}
+
+fn matches(schema: &Value, value: &Value) -> bool {
+    variants(schema).into_iter().any(|variant| {
+        let kinds = types(variant);
+        let typed = kinds.is_empty()
+            || kinds.iter().any(|kind| match *kind {
+                "string" => value.is_string(),
+                "integer" => value.is_i64() || value.is_u64(),
+                "number" => value.is_number(),
+                "boolean" => value.is_boolean(),
+                "array" => value.is_array(),
+                "object" => value.is_object(),
+                "null" => value.is_null(),
+                _ => true,
+            });
+        let listed = variant.get("enum").and_then(Value::as_array).is_none_or(|options| options.contains(value));
+        typed && listed
+    })
+}
+
+/// A command-line value for an option with `schema`: JSON when that fits the schema, else the raw string when a
+/// string fits, else an error naming what the option takes.
+fn coerce(key: &str, schema: &Value, raw: String) -> anyhow::Result<Value> {
+    if let Ok(parsed) = serde_json::from_str::<Value>(&raw)
+        && matches(schema, &parsed)
+    {
+        return Ok(parsed);
+    }
+    let text = Value::String(raw);
+    if matches(schema, &text) {
+        return Ok(text);
+    }
+    let raw = text.as_str().unwrap_or_default();
+    let options: Vec<String> = variants(schema).iter().filter_map(|v| v.get("enum")?.as_array()).flatten().map(|v| v.to_string()).collect();
+    if options.is_empty() {
+        bail!("--{key} takes {}, not {raw:?}", kinds(schema).join(" or "));
+    }
+    bail!("--{key} is one of {}, not {raw:?}", options.join(", "));
+}
+
+fn check(name: &str, properties: &Map<String, Value>, arguments: &Map<String, Value>) -> anyhow::Result<()> {
+    for (key, value) in arguments {
+        if let Some(schema) = properties.get(key)
+            && !matches(schema, value)
+        {
+            bail!("{name}: {key} takes {}, not {value}; see `browse {name} --help`", kinds(schema).join(" or "));
+        }
+    }
+    Ok(())
+}
+
+/// Moves global flags given before the tool name (`browse --session x navigate ...`) after it.
+pub fn split_globals(args: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut globals = Vec::new();
+    let mut i = 0;
+    while let Some(flag) = args.get(i).and_then(|a| a.strip_prefix("--")) {
+        let name = flag.split_once('=').map_or(flag, |(name, _)| name);
+        if !GLOBAL_FLAGS.contains(&name) {
+            break;
+        }
+        globals.push(args[i].clone());
+        i += 1;
+        if !flag.contains('=')
+            && let Some(value) = args.get(i)
+        {
+            globals.push(value.clone());
+            i += 1;
+        }
+    }
+    (globals, args[i..].to_vec())
 }
 
 pub fn call(name: &str, args: &[String]) -> anyhow::Result<i32> {
-    let spec = relay::specs().into_iter().find(|s| s.name == name);
-    if spec.is_none() {
+    let specs = relay::specs();
+    let Some(spec) = specs.iter().find(|s| s.name == name).or_else(|| specs.iter().find(|s| s.name == name.replace('-', "_"))) else {
         eprintln!("Unknown command or tool: {name}. Run `browse --help`.");
         return Ok(2);
-    }
-    let properties = spec.as_ref().map(property_names).unwrap_or_default();
-    let schema_type = |key: &str| spec.as_ref().and_then(|s| s.input_schema.pointer(&format!("/properties/{key}/type"))?.as_str().map(str::to_owned));
+    };
+    let name = spec.name.as_str();
+    let properties = properties(spec);
     let resolve = |flag: &str| -> anyhow::Result<String> {
-        let candidates = [flag.to_owned(), flag.replace('-', "_"), camel(flag)];
-        if properties.is_empty() {
-            return Ok(candidates[1].clone());
-        }
-        candidates.into_iter().find(|c| properties.contains(c)).with_context(|| format!("{name} has no option --{flag}; see `browse {name} --help`"))
+        [flag.to_owned(), flag.replace('-', "_"), camel(flag)]
+            .into_iter()
+            .find(|c| properties.contains_key(c))
+            .with_context(|| format!("{name} has no option --{flag}; see `browse {name} --help`"))
     };
     let mut arguments = Map::new();
     let (mut session, mut output, mut positional) = (None, None, Vec::new());
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
-        let next = args.get(i + 1).filter(|n| !n.starts_with("--")).cloned();
         i += 1;
-        let Some(flag) = arg.strip_prefix("--") else {
+        let Some(flag) = arg.strip_prefix("--").filter(|f| !f.is_empty()) else {
             positional.push(arg.clone());
             continue;
         };
@@ -81,15 +229,21 @@ pub fn call(name: &str, args: &[String]) -> anyhow::Result<i32> {
             Some((f, v)) => (f, Some(v.to_owned())),
             None => (flag, None),
         };
+        // A value may itself start with "-" (`--deltaY -200`), but not with "--".
+        let take = |i: &mut usize| -> Option<String> {
+            let next = args.get(*i).filter(|n| !n.starts_with("--")).cloned();
+            if next.is_some() {
+                *i += 1;
+            }
+            next
+        };
         match flag {
             "help" | "h" => {
-                if let Some(spec) = &spec {
-                    help(spec);
-                }
+                help(spec);
                 return Ok(0);
             }
             "json" | "session" | "output" => {
-                let value = inline.or_else(|| next.inspect(|_| i += 1)).with_context(|| format!("--{flag} needs a value"))?;
+                let value = inline.or_else(|| take(&mut i)).with_context(|| format!("--{flag} needs a value"))?;
                 match flag {
                     "json" => match serde_json::from_str(&value).context("--json must be a JSON object")? {
                         Value::Object(map) => arguments.extend(map),
@@ -107,29 +261,38 @@ pub fn call(name: &str, args: &[String]) -> anyhow::Result<i32> {
                     continue;
                 }
                 let key = resolve(flag)?;
-                let boolean = schema_type(&key).as_deref() == Some("boolean");
-                let value = match inline.or_else(|| if boolean { None } else { next.inspect(|_| i += 1) }) {
-                    None => Value::Bool(true),
-                    Some(raw) if schema_type(&key).as_deref() == Some("string") => Value::String(raw),
-                    Some(raw) => serde_json::from_str(&raw).unwrap_or(Value::String(raw)),
+                let schema = &properties[&key];
+                let boolean = kinds(schema) == ["boolean"];
+                let value = match inline.or_else(|| if boolean { None } else { take(&mut i) }) {
+                    None if boolean => Value::Bool(true),
+                    None => bail!("--{flag} needs a value; see `browse {name} --help`"),
+                    Some(raw) => coerce(flag, schema, raw)?,
                 };
                 arguments.insert(key, value);
             }
         }
     }
-    // Positional arguments fill the required options in order: `browse navigate https://example.com`.
-    let required: Vec<String> = spec
-        .as_ref()
-        .and_then(|s| s.input_schema.get("required")?.as_array().map(|r| r.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect()))
-        .unwrap_or_default();
-    let open: Vec<&String> = required.iter().filter(|r| !arguments.contains_key(*r)).collect();
-    let mut slots = open.into_iter();
     for value in positional {
-        let key = slots.next().with_context(|| format!("unexpected argument {value:?}; see `browse {name} --help`"))?;
-        let parsed = if schema_type(key).as_deref() == Some("string") { Value::String(value) } else { serde_json::from_str(&value).unwrap_or(Value::String(value)) };
-        arguments.insert(key.clone(), parsed);
+        let key = slot(spec, &arguments, &value).with_context(|| format!("unexpected argument {value:?}; see `browse {name} --help`"))?;
+        let parsed = coerce(&key, &properties[&key], value)?;
+        arguments.insert(key, parsed);
     }
-    let request = ToolCallRequest { name: name.into(), arguments: Value::Object(arguments), session: session::for_cli(session) };
+    // `--session` never creates a session: for the session tool it names the session to act on; any other call runs
+    // in that session when the relay has it.
+    if let Some(id) = session {
+        let key = if name == "session" { "id" } else { "session" };
+        match arguments.get(key).and_then(Value::as_str) {
+            Some(other) if other != id => bail!("--session {id} conflicts with --{key} {other}"),
+            _ => {
+                arguments.insert(key.into(), Value::String(id));
+            }
+        }
+    }
+    check(name, &properties, &arguments)?;
+    if let Some(dir) = output.as_ref().and_then(|p| p.parent()).filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).with_context(|| format!("can't create {} for --output", dir.display()))?;
+    }
+    let request = ToolCallRequest { name: name.into(), arguments: Value::Object(arguments), session: session::for_cli() };
     let result = match relay::call(&request) {
         Ok(result) => result,
         Err(error) => {
@@ -148,15 +311,63 @@ pub fn call(name: &str, args: &[String]) -> anyhow::Result<i32> {
                     Some(path) => path.with_extension(format!("{images}.{ext}")),
                     None => {
                         let dir = std::env::temp_dir().join("browse");
-                        std::fs::create_dir_all(&dir)?;
+                        std::fs::create_dir_all(&dir).with_context(|| format!("can't create {}", dir.display()))?;
                         dir.join(format!("{name}-{:x}.{ext}", session::random_u64() as u32))
                     }
                 };
-                std::fs::write(&file, base64::engine::general_purpose::STANDARD.decode(data).context("bad image data")?)?;
+                let bytes = base64::engine::general_purpose::STANDARD.decode(data).context("bad image data")?;
+                std::fs::write(&file, bytes).with_context(|| format!("can't write {}", file.display()))?;
                 println!("{}", file.display());
                 images += 1;
             }
         }
     }
     Ok(i32::from(result.is_error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn spec(schema: Value) -> ToolSpec {
+        ToolSpec { name: "t".into(), description: String::new(), input_schema: schema }
+    }
+
+    #[test]
+    fn positionals() {
+        let navigate = spec(json!({ "properties": { "url": { "type": "string" }, "action": { "type": "string" } }, "required": [] }));
+        assert_eq!(slot(&navigate, &Map::new(), "https://example.com").as_deref(), Some("url"));
+        let fill = spec(json!({ "properties": { "ref": {}, "selector": {}, "value": { "type": "string" } }, "required": [] }));
+        let mut args = Map::new();
+        assert_eq!(slot(&fill, &args, "e12").as_deref(), Some("ref"));
+        args.insert("ref".into(), json!("e12"));
+        assert_eq!(slot(&fill, &args, "hello").as_deref(), Some("value"));
+        let session = spec(json!({ "properties": { "action": {}, "id": {} }, "required": ["action"] }));
+        assert_eq!(slot(&session, &Map::new(), "list").as_deref(), Some("action"));
+        assert!(looks_like_ref("f1a5") && looks_like_ref("e3") && !looks_like_ref("example") && !looks_like_ref("e"));
+    }
+
+    #[test]
+    fn coercion() {
+        let integer = json!({ "type": "integer" });
+        assert_eq!(coerce("timeout", &integer, "500".into()).unwrap(), json!(500));
+        assert!(coerce("timeout", &integer, "abc".into()).is_err());
+        assert!(coerce("timeout", &integer, "1.5".into()).is_err());
+        let string = json!({ "type": "string" });
+        assert_eq!(coerce("text", &string, "42".into()).unwrap(), json!("42"));
+        let either = json!({ "anyOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }] });
+        assert_eq!(coerce("key", &either, "[\"a\"]".into()).unwrap(), json!(["a"]));
+        let choice = json!({ "type": "string", "enum": ["load", "settle"] });
+        assert!(coerce("waitUntil", &choice, "soon".into()).is_err());
+        assert!(coerce("flag", &json!({ "type": "boolean" }), "maybe".into()).is_err());
+    }
+
+    #[test]
+    fn globals_before_the_tool() {
+        let args: Vec<String> = ["--session", "x", "--output=a.png", "navigate", "u"].map(String::from).to_vec();
+        let (globals, rest) = split_globals(&args);
+        assert_eq!(globals, ["--session", "x", "--output=a.png"]);
+        assert_eq!(rest, ["navigate", "u"]);
+    }
 }

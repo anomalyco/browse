@@ -109,6 +109,40 @@ fn set_mode_bits(_file: &Path, _mode: u32) {
     }
 }
 
+/// Orders versions as semver does for the shapes releases use: dev below beta below the release, then by run.
+fn version_order(value: &str) -> Option<[u64; 6]> {
+    let (core, pre) = value.split_once('-').map_or((value, None), |(c, p)| (c, Some(p)));
+    let core: Vec<u64> = core.split('.').map(|n| n.parse().ok()).collect::<Option<_>>()?;
+    let [major, minor, patch] = core[..] else { return None };
+    let (stage, run, build) = match pre {
+        None => (2, 0, 0),
+        Some(pre) => {
+            let mut parts = pre.split('.');
+            let stage = match parts.next()? {
+                "dev" => 0,
+                "beta" => 1,
+                _ => return None,
+            };
+            let run = parts.next()?.parse().ok()?;
+            let build = parts.next().map(str::parse::<u64>).transpose().ok()?.unwrap_or(0);
+            if parts.next().is_some() {
+                return None;
+            }
+            (stage, run, build)
+        }
+    };
+    Some([major, minor, patch, stage, run, build])
+}
+
+/// Whether `latest` is strictly newer than `current` (src/shared/protocol.ts `newerCliVersion`). Unlike there, an
+/// unknown version shape is never newer: an update must not downgrade.
+pub fn newer(latest: &str, current: &str) -> bool {
+    match (version_order(latest), version_order(current)) {
+        (Some(a), Some(b)) => a > b,
+        _ => false,
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
@@ -176,7 +210,7 @@ pub fn check() -> anyhow::Result<Check> {
     }
     let release = &manifest["release"];
     let version = field(release, "version").context("the release manifest has no version")?;
-    if version == VERSION {
+    if !newer(&version, VERSION) {
         return Ok(Check::UpToDate(version));
     }
     let target_name = target();
@@ -239,7 +273,8 @@ pub fn command(args: &[String]) -> anyhow::Result<()> {
     }
     let binary = installed_binary();
     match check()? {
-        Check::UpToDate(version) => println!("browse {version} is up to date ({} channel).", channel()),
+        Check::UpToDate(version) if version == VERSION => println!("browse {VERSION} is up to date ({} channel).", channel()),
+        Check::UpToDate(version) => println!("browse {VERSION} is up to date ({} channel's latest release is {version}).", channel()),
         Check::Deferred(version) => println!("browse {version} is out, but not for this install yet. Running {VERSION}."),
         Check::Available(release) if check_only => println!("browse {} is available (running {VERSION}). Run `browse update`.", release.version),
         Check::Available(release) => {
@@ -276,7 +311,7 @@ pub fn pending_notice() -> Option<(String, String)> {
         return None;
     }
     let latest = state().get("latest")?.as_str()?.to_owned();
-    (latest != VERSION).then(|| (format!("browse {latest} is available (running {VERSION})"), "browse update".to_owned()))
+    newer(&latest, VERSION).then(|| (format!("browse {latest} is available (running {VERSION})"), "browse update".to_owned()))
 }
 
 /// What the extension's options page shows about updates (cli/src/update/auto-update.ts `AutoUpdateStatus`).
@@ -296,7 +331,7 @@ pub fn status_json() -> Value {
         let by = if std::env::var_os("OPENCODE_BROWSER_AUTO_UPDATE").is_some() { "OPENCODE_BROWSER_AUTO_UPDATE" } else { "OPENCODE_BROWSER_UPDATE_CHECK" };
         status["overriddenBy"] = json!(by);
     }
-    if let Some(latest) = state.get("latest").and_then(Value::as_str).filter(|l| *l != VERSION) {
+    if let Some(latest) = state.get("latest").and_then(Value::as_str).filter(|l| newer(l, VERSION)) {
         status["latest"] = json!(latest);
     }
     for key in ["latestAt", "checkedAt"] {
@@ -342,7 +377,7 @@ pub fn describe() -> String {
     let mode = effective_mode();
     let state = state();
     let mut line = format!("{} ({} channel)", describe_mode(mode), channel());
-    if let Some(latest) = state.get("latest").and_then(Value::as_str).filter(|l| *l != VERSION) {
+    if let Some(latest) = state.get("latest").and_then(Value::as_str).filter(|l| newer(l, VERSION)) {
         line.push_str(&format!(", {latest} available"));
     }
     if let Some(error) = state.get("lastError").and_then(|e| e.get("message")).and_then(Value::as_str) {
@@ -422,4 +457,21 @@ fn tick(mode: Mode, binary: &Path) -> anyhow::Result<()> {
         return Err(error);
     }
     record_install(&release.version)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::newer;
+
+    #[test]
+    fn only_newer_versions() {
+        assert!(!newer("0.0.17", "0.1.0"));
+        assert!(!newer("0.1.0", "0.1.0"));
+        assert!(newer("0.1.1", "0.1.0"));
+        assert!(newer("0.1.0", "0.1.0-beta.3"));
+        assert!(newer("0.1.0-beta.1", "0.1.0-dev.9"));
+        assert!(newer("0.1.0-dev.2.1", "0.1.0-dev.2"));
+        assert!(!newer("garbage", "0.1.0"));
+        assert!(!newer("0.2.0", "local"));
+    }
 }

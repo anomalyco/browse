@@ -26,5 +26,8 @@ sha2 = "0.10"
 tokio-tungstenite = { version = "0.27", default-features = false, features = ["handshake"] }
 url = "2"
 
+[target.'cfg(unix)'.dependencies]
+signal-hook-registry = "1"
+
 [dev-dependencies]
 tokio-tungstenite = { version = "0.27", default-features = false, features = ["handshake", "connect"] }

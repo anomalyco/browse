@@ -36,15 +36,29 @@ RUNNING
   serve                       Run the relay in the foreground (agents start it on demand)
   mcp                         The MCP server OpenCode runs (stdio)
   tools                       List the browser tools
-  <tool> [--arg value]...     Call a tool, e.g. `browse navigate https://example.com`, `browse snapshot`
+  <tool> [value]... [--arg value]...
+                              Call a tool, e.g. `browse navigate https://example.com`, `browse snapshot`,
+                              `browse click e12`, `browse fill e5 hello`, `browse wait-for --text Done --timeout 5000`.
+                              Values fill the tool's main options (see `browse <tool> --help`)
     --json '<object>'         Arguments as one JSON object
-    --session <id>            Session to run in (default: OPENCODE_BROWSER_SESSION, the OpenCode session, or \"cli\")
+    --session <id>            Run in this existing session (for `session`: the session to act on). Without it,
+                              calls use your current session (OPENCODE_BROWSER_SESSION, the OpenCode session, or \"cli\")
     --output <path>           Where to save images (default: a temp file, printed)
   <tool> --help               The tool's options
 ";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Global flags may come before the tool name: `browse --session x navigate ...`.
+    let (globals, mut args) = cli::split_globals(&args);
+    if !globals.is_empty() && args.first().is_some_and(|a| !a.starts_with('-')) {
+        let tail = args.split_off(1);
+        args.extend(globals);
+        args.extend(tail);
+    } else if !globals.is_empty() {
+        eprintln!("{} goes with a tool, e.g. `browse snapshot {}`. Run `browse --help`.", globals[0], globals.join(" "));
+        std::process::exit(2);
+    }
     let command = args.first().map(String::as_str).unwrap_or("--help");
     // `browse status | head` should end quietly, not panic on a closed pipe. The relay and the MCP server keep
     // SIGPIPE ignored: a peer that went away is an error to handle there.

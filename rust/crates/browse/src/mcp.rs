@@ -24,7 +24,7 @@ pub fn run() -> anyhow::Result<()> {
     let out = Arc::new(Mutex::new(std::io::stdout()));
     let running = Arc::new(Running::default());
     let noted = Arc::new(Mutex::new(HashSet::new()));
-    // Calls that don't name their agent share one session for the life of this process.
+    // Calls that don't name their agent share one session (one tab set) for the life of this process, not one per call.
     let shared = session::pinned().unwrap_or_else(session::random);
     let mut line = String::new();
     let mut stdin = std::io::stdin().lock();
@@ -83,9 +83,10 @@ pub fn run() -> anyhow::Result<()> {
             _ => write(&out, &json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": format!("Method not found: {method}")}})),
         }
     }
-    // stdin closed: let running calls answer (bounded) before exiting.
+    // stdin closed: nobody reads the answers anymore, so give quick calls a moment and exit. The relay stops the work
+    // of a client process that is gone.
     let count = running.count.lock().unwrap();
-    let _ = running.idle.wait_timeout_while(count, Duration::from_secs(30), |n| *n > 0);
+    let _ = running.idle.wait_timeout_while(count, Duration::from_secs(2), |n| *n > 0);
     Ok(())
 }
 

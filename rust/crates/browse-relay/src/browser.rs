@@ -117,7 +117,10 @@ impl Relay {
                 _ => bail!("Session {session} belongs to browser '{id}', whose pairing was revoked. Pair it again or start a new session."),
             };
         }
-        let recently = self.st().last_connected.is_some_and(|at| at.elapsed() < Duration::from_secs(120)) || !self.st().links.is_empty();
+        let recently = {
+            let st = self.st();
+            st.last_connected.is_some_and(|at| at.elapsed() < Duration::from_secs(120)) || !st.links.is_empty()
+        };
         let wait = if recently { RECONNECT_WAIT } else { Duration::from_millis(1500) };
         self.wait_until(wait, State::connected).await;
         let link = {
@@ -145,10 +148,29 @@ impl Relay {
     /// The session's current tab, opening one when it has none.
     pub async fn current_or_open(self: &Arc<Self>, session: &str) -> anyhow::Result<i64> {
         self.ensure_session(session)?;
+        // Concurrent first calls wait for the one opening the tab, then use it.
+        let lock = self.tab_lock(session);
+        let _opening = lock.lock().await;
+        // Only a navigation may start over in a new tab; anything else would act on a blank page.
+        let navigating = crate::serve::TOOL.try_with(|tool| tool == "navigate").unwrap_or(false);
         let current = self.st().sessions.get(session).and_then(|s| s.current);
         if let Some(tab) = current {
-            if self.st().tabs.contains_key(&tab) {
-                return Ok(tab);
+            let stuck = self.st().tabs.get(&tab).map(|t| (t.unattachable, t.owner, t.url.clone()));
+            match stuck {
+                Some((true, Owner::Relay, url)) if navigating => {
+                    let fresh = self.create_tab(session, None).await?;
+                    let _ = self.close_or_release(tab).await;
+                    rlog!("tab.replaced", tabId = tab, with = fresh, session = session, reason = "unattachable");
+                    if let Some(entry) = self.st().sessions.get_mut(session) {
+                        entry.add_warning(format!(
+                            "Tab {tab} was stuck on a Chrome error page ({}); browse closed it and opened tab {fresh} for this navigation.",
+                            crate::util::short_url(&url)
+                        ));
+                    }
+                    return Ok(fresh);
+                }
+                Some(_) => return Ok(tab),
+                None => {}
             }
             let key = self.st().owner_key(tab).map(str::to_string);
             if let Some(key) = key {
@@ -159,16 +181,33 @@ impl Relay {
             }
             if let Some(entry) = self.st().sessions.get_mut(session) {
                 entry.current = None;
+                entry.lost.get_or_insert_with(|| format!("Tab {tab}, the session's current tab, went away."));
             }
         }
-        let other = { self.st().session_tabs(session).into_iter().next() };
-        if let Some(tab) = other {
-            if let Some(entry) = self.st().sessions.get_mut(session) {
-                entry.current = Some(tab);
-            }
+        if let Some(tab) = self.adopt_next_tab(session) {
             return Ok(tab);
         }
+        // A browser that is reconnecting (a relay or worker restart) gives the session its tabs back once its
+        // inventory is in: wait for that before opening another.
+        self.session_link(session).await?;
+        if let Some(tab) = self.adopt_next_tab(session) {
+            return Ok(tab);
+        }
+        let lost = self.st().sessions.get(session).and_then(|s| s.lost.clone());
+        if let Some(lost) = lost.filter(|_| !navigating) {
+            bail!("{lost} Open a page with navigate (or tabs new), or pick a tab with tabs select; browse doesn't quietly start over in a blank tab.");
+        }
         self.create_tab(session, None).await
+    }
+
+    /// Makes the session's first tab current, if it has one.
+    fn adopt_next_tab(&self, session: &str) -> Option<i64> {
+        let mut st = self.st();
+        let tab = st.session_tabs(session).into_iter().next()?;
+        let entry = st.sessions.get_mut(session)?;
+        entry.current = Some(tab);
+        entry.lost = None;
+        Some(tab)
     }
 
     /// Makes a tab the user lent the session's current tab.
@@ -213,6 +252,7 @@ impl Relay {
             let previous = entry.target.as_ref().filter(|t| t.owner == "user" && t.id != target_id).map(|t| t.id.clone());
             entry.target = Some(PersistedTarget { id: target_id.clone(), owner: "user".into() });
             entry.current = Some(tab);
+            entry.lost = None;
             entry.held.retain(|id| id != &target_id);
             if entry.browser.as_ref().and_then(|b| b.key.as_ref()).is_none() {
                 entry.browser = Some(BrowserRef { id: link_id, key: Some(link_key) });
@@ -280,6 +320,12 @@ impl Relay {
                 fresh.browser = session.browser.clone();
                 fresh.client_pid = session.client_pid;
                 st.sessions.insert(id.to_string(), fresh);
+            }
+        }
+        if delete {
+            let mut locks = self.tab_locks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if locks.get(id).is_some_and(|lock| Arc::strong_count(lock) == 1) {
+                locks.remove(id);
             }
         }
         rlog!(if delete { "session.deleted" } else { "session.reset" }, session = id);
@@ -444,7 +490,11 @@ impl Browser for RelayBrowser {
 
     async fn open_tab(&self, session: &SessionId, url: Option<&str>) -> anyhow::Result<TabInfo> {
         self.0.ensure_session(session)?;
-        let tab = self.0.create_tab(session, url).await?;
+        let lock = self.0.tab_lock(session);
+        let opening = lock.lock().await;
+        let tab = self.0.create_tab(session, url).await;
+        drop(opening);
+        let tab = tab?;
         let st = self.0.st();
         self.0.tab_info(&st, tab, session).context("The tab went away")
     }
@@ -454,6 +504,7 @@ impl Browser for RelayBrowser {
         self.0.visible_tab(session, tab)?;
         if let Some(entry) = self.0.st().sessions.get_mut(session) {
             entry.current = Some(tab);
+            entry.lost = None;
         }
         Ok(())
     }

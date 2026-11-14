@@ -29,6 +29,7 @@ mod serve;
 mod tabs;
 mod tools;
 mod util;
+mod watchdog;
 
 pub use browser::RelayBrowser;
 pub use client::{Endpoint, caller_session_id};

@@ -20,16 +20,16 @@ pub fn random() -> String {
     format!("mcp-{:08x}", random_u64() as u32)
 }
 
-/// The session of an MCP tools/call: the call's own `session` argument, else the pinned one, else its agent's.
+/// The caller of an MCP tools/call: the pinned session, else its agent's, else this process's `shared` one. A call's
+/// own `session` argument is left to the relay, which runs it there only when that session exists.
 pub fn for_call(params: &Value, shared: &str) -> String {
-    let named = params.get("arguments").and_then(|a| a.get("session")).and_then(Value::as_str).filter(|s| !s.is_empty());
     let agent = params.get("_meta").and_then(|m| m.get(OPENCODE_SESSION_META)).and_then(Value::as_str).filter(|s| !s.is_empty());
-    named.map(str::to_owned).or_else(pinned).or_else(|| agent.map(caller)).unwrap_or_else(|| shared.to_owned())
+    pinned().or_else(|| agent.map(caller)).unwrap_or_else(|| shared.to_owned())
 }
 
-/// The CLI's session: --session, OPENCODE_BROWSER_SESSION, the OpenCode agent session running it, else "cli".
-pub fn for_cli(flag: Option<String>) -> String {
-    flag.or_else(pinned)
+/// The CLI's caller: OPENCODE_BROWSER_SESSION, the OpenCode agent session running it, else "cli".
+pub fn for_cli() -> String {
+    pinned()
         .or_else(|| std::env::var("OPENCODE_SESSION_ID").ok().filter(|s| !s.is_empty()).map(|id| caller(&id)))
         .unwrap_or_else(|| "cli".into())
 }

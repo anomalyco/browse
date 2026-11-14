@@ -221,6 +221,16 @@ pub fn guard(method: &str, params: &Value, read_only: bool, session: &str, page_
                     "browse blocked {method} to a {scheme}: URL: agents can't open browser-internal pages, other extensions, DevTools or local files.{hint}"
                 ));
             }
+    if matches!(method, "Page.navigate" | "Target.createTarget")
+        && let Some(url) = params.get("url").and_then(Value::as_str).and_then(|u| url::Url::parse(u.trim()).ok())
+        && url.scheme() == "about"
+        && !matches!(url.path(), "blank" | "srcdoc")
+    {
+        return Some(format!(
+            "browse blocked {method} to {}: about: pages other than about:blank are the browser's own pages (about:version is chrome://version), which agents can't open.",
+            url.as_str().chars().take(80).collect::<String>()
+        ));
+    }
     if method == "Network.loadNetworkResource" && !env_on("OPENCODE_BROWSER_ALLOW_ALL_STORAGE") {
         let hosts = page_hosts(&page_urls());
         let host = params.get("url").and_then(Value::as_str).and_then(hostname);
@@ -265,6 +275,11 @@ mod tests {
         assert!(guard("Page.enable", &json!({}), true, "s", &urls).is_none());
         assert!(guard("Page.navigate", &json!({"url": "chrome://settings"}), false, "s", &urls).is_some());
         assert!(guard("Page.navigate", &json!({"url": "https://x.com"}), false, "s", &urls).is_none());
+        assert!(guard("Page.navigate", &json!({"url": "about:version"}), false, "s", &urls).is_some());
+        assert!(guard("Target.createTarget", &json!({"url": "ABOUT:settings"}), false, "s", &urls).is_some());
+        assert!(guard("Page.navigate", &json!({"url": "about:blank"}), false, "s", &urls).is_none());
+        assert!(guard("Page.navigate", &json!({"url": "about:blank#x"}), false, "s", &urls).is_none());
+        assert!(guard("Page.navigate", &json!({"url": "about:srcdoc"}), false, "s", &urls).is_none());
         assert!(guard("Network.setCookie", &json!({"domain": ".example.com"}), false, "s", &urls).is_none());
         assert!(guard("Network.setCookie", &json!({"domain": "evil.com"}), false, "s", &urls).is_some());
         assert!(guard("DOMStorage.getDOMStorageItems", &json!({"storageId": {"securityOrigin": "https://app.example.com"}}), false, "s", &urls).is_none());

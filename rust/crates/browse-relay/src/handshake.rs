@@ -257,21 +257,21 @@ impl Handshake {
         Ok(())
     }
 
-    fn accept(&self, hello: &Value, key: String) -> Arc<Link> {
+    /// `computer`: the name of the computer the browser runs on, and whether it is only its address.
+    fn accept(&self, hello: &Value, key: String, computer: (String, bool)) -> Arc<Link> {
         let relay = &self.relay;
         let params = &hello["params"];
         let local = crate::origins::is_local_peer(&self.peer);
-        let computer = if local { crate::util::short_hostname() } else { self.peer.ip().to_string() };
         let named: String = str_field(params, "name").map(str::trim).unwrap_or("").chars().take(60).collect();
         let browser = str_field(params, "browser").map(str::trim).filter(|b| !b.is_empty()).unwrap_or("Browser");
-        let name = if named.is_empty() { format!("{browser} on {computer}") } else { named };
+        let (name, fallback) = if named.is_empty() { (format!("{browser} on {}", computer.0), computer.1) } else { (named, false) };
         let capabilities: HashSet<String> = params["capabilities"]
             .as_array()
             .map(|list| list.iter().filter_map(Value::as_str).filter(|c| c.len() <= 64).map(str::to_string).collect())
             .unwrap_or_default();
         let (link, replaced) = {
             let mut st = relay.st();
-            let id = st.identify(&relay.paths, &key, &name);
+            let (id, name) = st.identify(&relay.paths, &key, &name, fallback);
             st.generation += 1;
             let link = Arc::new(Link::new(
                 LinkInfo {
@@ -328,6 +328,7 @@ where
         }
         let _ = sink.close().await;
     });
+    let mut lookup = Some(tokio::spawn(computer_name(peer)));
     let mut handshake = Handshake { relay: relay.clone(), peer, origin, challenge: None, out: out.clone() };
     let mut link: Option<Arc<Link>> = None;
     let deadline = tokio::time::sleep(PRE_AUTH_TIMEOUT);
@@ -367,7 +368,13 @@ where
                 };
                 match handshake.step(message) {
                     Ok(None) => {}
-                    Ok(Some((hello, key))) => link = Some(handshake.accept(&hello, key)),
+                    Ok(Some((hello, key))) => {
+                        let computer = match lookup.take() {
+                            Some(lookup) => lookup.await.unwrap_or_else(|_| (peer.ip().to_string(), true)),
+                            None => (peer.ip().to_string(), true),
+                        };
+                        link = Some(handshake.accept(&hello, key, computer));
+                    }
                     Err(Closing(code, reason)) => {
                         let _ = out.send(close_frame(code, &reason));
                         break;
@@ -402,6 +409,30 @@ where
     let mut writer = writer;
     if tokio::time::timeout(Duration::from_secs(2), &mut writer).await.is_err() {
         writer.abort();
+    }
+}
+
+/// How long the name of another computer may take to look up.
+const LOOKUP_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// The computer a browser runs on (cli/src/relay/browser-links.ts computerName): this machine's hostname for a
+/// browser here, else the name the network gives the peer's address (Tailscale's MagicDNS answers for its peers),
+/// else the address, flagged as a fallback.
+async fn computer_name(peer: SocketAddr) -> (String, bool) {
+    if crate::origins::is_local_peer(&peer) {
+        return (crate::util::short_hostname(), false);
+    }
+    let ip = peer.ip().to_canonical();
+    let lookup = tokio::task::spawn_blocking(move || crate::util::reverse_lookup(ip));
+    match tokio::time::timeout(LOOKUP_TIMEOUT, lookup).await {
+        Ok(Ok(Some(host))) => match host.trim_end_matches('.').split('.').next().filter(|s| !s.is_empty()) {
+            Some(short) => (short.to_string(), false),
+            None => (ip.to_string(), true),
+        },
+        _ => {
+            rlog!("extension.name_lookup_failed", address = ip.to_string());
+            (ip.to_string(), true)
+        }
     }
 }
 

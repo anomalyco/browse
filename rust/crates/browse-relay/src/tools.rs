@@ -113,10 +113,14 @@ impl Tool for SessionTool {
             }
             "delete" => {
                 let deleted = relay.end_session(&target, true).await?;
-                if current_of(&relay, &caller) == target {
-                    relay.st().callers.remove(&caller);
+                let mut result = json!({ "deleted": deleted, "id": target });
+                if caller == target {
+                    // The caller's own default session: there is no current one until the next call starts it afresh.
+                    result["currentSession"] = Value::Null;
+                    result["note"] = format!("Session {target} is gone; your next call starts a fresh session with that id.").into();
+                    return Ok(json_output(result));
                 }
-                json!({ "deleted": deleted, "id": target })
+                result
             }
             "adopt" => {
                 relay.ensure_session(&target)?;
@@ -191,15 +195,26 @@ impl Tool for TabsTool {
                 };
                 relay.visible_tab(&ctx.session, tab)?;
                 let outcome = relay.close_or_release(tab).await?;
-                Ok(json_output(json!({ "session": ctx.session, "tabId": tab, "outcome": outcome })))
+                let current = relay.st().sessions.get(&ctx.session).and_then(|s| s.current);
+                let note = match current {
+                    Some(current) => format!("Tab {current} is the session's current tab now."),
+                    None => "The session has no tabs left; the next call that needs one opens a new tab.".into(),
+                };
+                Ok(json_output(json!({ "session": ctx.session, "tabId": tab, "outcome": outcome, "currentTab": current, "note": note })))
             }
             other => bail!("Unknown action {other:?}: use list, new, select or close"),
         }
     }
 }
 
-fn handoff_timeout(args: &Value) -> Duration {
-    args.get("timeoutSeconds").and_then(Value::as_u64).filter(|s| *s > 0).map(Duration::from_secs).unwrap_or(crate::presentation::DEFAULT_HANDOFF_TIMEOUT)
+fn handoff_timeout(args: &Value) -> anyhow::Result<Duration> {
+    match args.get("timeoutSeconds") {
+        None | Some(Value::Null) => Ok(crate::presentation::DEFAULT_HANDOFF_TIMEOUT),
+        Some(value) => match value.as_u64().filter(|s| *s > 0) {
+            Some(seconds) => Ok(Duration::from_secs(seconds)),
+            None => bail!("timeoutSeconds must be a whole number of seconds, at least 1 (it defaults to 600); got {value}"),
+        },
+    }
 }
 
 async fn handoff_tab(relay: &Arc<Relay>, ctx: &ToolContext, args: &Value) -> anyhow::Result<i64> {
@@ -248,8 +263,9 @@ impl Tool for HandoffTool {
     async fn call(&self, ctx: ToolContext, args: Value) -> anyhow::Result<ToolOutput> {
         let relay = relay()?;
         let message = string(&args, "message").context("message is required")?;
+        let timeout = handoff_timeout(&args)?;
         let tab = handoff_tab(&relay, &ctx, &args).await?;
-        let result = relay.run_handoff(&ctx.session, tab, &message, handoff_timeout(&args)).await?;
+        let result = relay.run_handoff(&ctx.session, tab, &message, timeout).await?;
         let output = json!({ "outcome": result.outcome, "tabId": tab });
         Ok(if result.outcome == "continued" { json_output(output) } else { ToolOutput { is_error: true, ..json_output(output) } })
     }
@@ -270,8 +286,9 @@ impl Tool for DemonstrateTool {
     async fn call(&self, ctx: ToolContext, args: Value) -> anyhow::Result<ToolOutput> {
         let relay = relay()?;
         let message = string(&args, "message").unwrap_or_default();
+        let timeout = handoff_timeout(&args)?;
         let tab = handoff_tab(&relay, &ctx, &args).await?;
-        let result = crate::demonstrate::demonstrate(&relay, &ctx.session, tab, &message, handoff_timeout(&args)).await?;
+        let result = crate::demonstrate::demonstrate(&relay, &ctx.session, tab, &message, timeout).await?;
         let failed = result["outcome"] != "continued";
         Ok(ToolOutput { is_error: failed, ..json_output(result) })
     }
@@ -386,7 +403,10 @@ impl Tool for TabsCleanupTool {
 
     async fn call(&self, ctx: ToolContext, args: Value) -> anyhow::Result<ToolOutput> {
         let relay = relay()?;
-        let minutes = args.get("idleMinutes").and_then(Value::as_f64).filter(|m| *m >= 0.0);
+        let minutes = match args.get("idleMinutes") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(value.as_f64().filter(|m| m.is_finite() && *m >= 0.0).with_context(|| format!("idleMinutes must be a number of minutes, 0 or more; got {value}"))?),
+        };
         let links: Vec<_> = relay.st().links.iter().filter(|l| l.connected()).cloned().collect();
         if links.is_empty() {
             bail!("{}", relay.not_connected_advice());
@@ -398,11 +418,24 @@ impl Tool for TabsCleanupTool {
                 let st = relay.st();
                 st.session_tabs(&ctx.session).into_iter().filter_map(|tab| st.browser_tab(tab).filter(|(l, _)| Arc::ptr_eq(l, &link)).map(|(_, local)| local)).collect()
             };
+            // The extension never closes a tab whose page says an agent is running in it, and this call is running
+            // in the session: show its own tabs as idle while the extension looks.
+            let shown: Vec<i64> = {
+                let st = relay.st();
+                st.session_tabs(&ctx.session).into_iter().filter(|tab| st.tabs.get(tab).is_some_and(|t| t.link_key == link.key)).collect()
+            };
+            for tab in &shown {
+                relay.present_attached(*tab).await;
+            }
             let mut own = json!({ "tabIds": own });
             if let Some(minutes) = minutes {
                 own["idleMinutes"] = minutes.into();
             }
-            match relay.ext_link(&link, "tabs.cleanup", json!({ "own": own })).await {
+            let answer = relay.ext_link(&link, "tabs.cleanup", json!({ "own": own })).await;
+            for tab in shown {
+                relay.refresh_presentation(tab, false);
+            }
+            match answer {
                 Ok(result) => {
                     for tab in result["closed"].as_array().into_iter().flatten() {
                         let mut tab = tab.clone();

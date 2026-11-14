@@ -32,12 +32,14 @@ pub struct Attach {
     pub reclaim_held: bool,
     /// Look up who owned the tab before (a reconnect, a relay restart). A user's lend restores nothing.
     pub restore: bool,
+    /// Only this page: a tab id that now shows another page (the browser restarted) is let go again.
+    pub expect_target: Option<String>,
     pub timeout: Duration,
 }
 
 impl Attach {
     pub fn new(tab: i64, owner: Owner, session: Option<String>) -> Self {
-        Self { tab, owner, session, already_attached: false, reclaim_held: false, restore: false, timeout: ATTACH_TIMEOUT }
+        Self { tab, owner, session, already_attached: false, reclaim_held: false, restore: false, expect_target: None, timeout: ATTACH_TIMEOUT }
     }
 }
 
@@ -74,6 +76,12 @@ impl Relay {
         }
         let info = self.debugger(tab, None, "Target.getTargetInfo", json!({}), limit).await?;
         let (target_id, _, url, title) = target_info(&info).context("Target.getTargetInfo did not return targetInfo")?;
+        if attach.expect_target.as_ref().is_some_and(|expected| *expected != target_id) {
+            if !attach.already_attached {
+                self.ext_best_effort(tab, "debugger.detach", json!({}));
+            }
+            bail!("Tab {tab} shows another page now");
+        }
         let (owner, session) = if attach.session.is_some() || !attach.restore {
             (attach.owner, attach.session.clone())
         } else {
@@ -99,7 +107,11 @@ impl Relay {
                         }
                     }
                 }
-            let events = broadcast::channel(1024).0;
+            // The same page attached again (a renewed debugger) keeps its event stream and CDP handle.
+            let (events, cdp) = match previous.filter(|p| p.target_id == target_id) {
+                Some(previous) => (previous.events, previous.cdp),
+                None => (broadcast::channel(1024).0, None),
+            };
             st.tabs.insert(
                 tab,
                 Tab {
@@ -119,14 +131,19 @@ impl Relay {
                     focused: false,
                     fresh_popup: false,
                     blanking: 0,
-                    cdp: None,
+                    protected_ui: false,
+                    unattachable: false,
+                    protected_frames: HashSet::new(),
+                    child_frames: HashSet::new(),
+                    cdp,
                 },
             );
             if let Some(entry) = session.as_ref().and_then(|id| st.sessions.get_mut(id)) {
                 if owner == Owner::Relay && !entry.held.contains(&target_id) {
                     entry.held.push(target_id.clone());
                 }
-                if entry.current.is_none() {
+                // A restarted relay gives the session back the tab that was current.
+                if entry.current.is_none() || (attach.restore && entry.target.as_ref().is_some_and(|t| t.id == target_id)) {
                     entry.current = Some(tab);
                 }
             }
@@ -190,16 +207,30 @@ impl Relay {
                     handoff.done.take().map(|done| done.send("closed"));
                 }
             }
-            if let Some(removed) = &removed {
+            if let Some(removed) = &removed
+                && (options.gone || options.released_by_user)
+            {
+                // A session whose current tab went on with its next one, so `tabs` and later calls agree.
+                let orphaned: Vec<String> = st.sessions.values().filter(|s| s.current == Some(tab)).map(|s| s.id.clone()).collect();
+                // The agent closing its own tab, or ending its session, knows; anything else is news to it.
+                let unexpected = !matches!(reason, "target-closed" | "session-ended" | "released" | "attach-failed");
+                for id in orphaned {
+                    let next = st.session_tabs(&id).into_iter().next();
+                    let Some(session) = st.sessions.get_mut(&id) else { continue };
+                    session.current = next;
+                    if unexpected {
+                        let why = lost_reason(reason);
+                        let page = crate::util::short_url(&removed.url);
+                        match next {
+                            Some(next) => session.add_warning(format!("Tab {tab} ({page}) went away ({why}); tab {next} is the session's current tab now.")),
+                            None => session.lost = Some(format!("Tab {tab} ({page}), the session's current tab, went away ({why}).")),
+                        }
+                    }
+                }
                 for session in st.sessions.values_mut() {
-                    if options.gone || options.released_by_user {
-                        if session.current == Some(tab) {
-                            session.current = None;
-                        }
-                        session.held.retain(|id| id != &removed.target_id);
-                        if session.target.as_ref().is_some_and(|t| t.id == removed.target_id) {
-                            session.target = None;
-                        }
+                    session.held.retain(|id| id != &removed.target_id);
+                    if session.target.as_ref().is_some_and(|t| t.id == removed.target_id) {
+                        session.target = None;
                     }
                 }
             }
@@ -236,9 +267,9 @@ impl Relay {
     }
 
     /// The user takes a tab back: the debugger lets go and it is theirs again.
-    pub async fn detach_tab(self: &Arc<Self>, tab: i64) -> anyhow::Result<()> {
+    pub async fn detach_tab(self: &Arc<Self>, tab: i64, reason: &str) -> anyhow::Result<()> {
         self.ext_tab(tab, "debugger.detach", json!({})).await?;
-        self.remove_tab(tab, Release { update_extension: true, gone: true, ..Release::default() }, "relay-detached");
+        self.remove_tab(tab, Release { update_extension: true, gone: true, ..Release::default() }, reason);
         Ok(())
     }
 
@@ -270,6 +301,7 @@ impl Relay {
         }
         if let Some(entry) = self.st().sessions.get_mut(session) {
             entry.current = Some(tab);
+            entry.lost = None;
         }
         if url != "about:blank" {
             let events = self.st().tabs.get(&tab).map(|t| t.events.subscribe());
@@ -312,7 +344,7 @@ impl Relay {
     pub async fn close_or_release(self: &Arc<Self>, tab: i64) -> anyhow::Result<&'static str> {
         let owner = self.st().tabs.get(&tab).map(|t| t.owner).context("That tab isn't attached")?;
         if owner == Owner::User {
-            self.detach_tab(tab).await?;
+            self.detach_tab(tab, "released").await?;
             return Ok("released");
         }
         match self.ext_tab(tab, "tabs.remove", json!({})).await {
@@ -355,7 +387,7 @@ impl Relay {
                 rlog!("call.stopped", tabId = tab, session = session.clone(), from = "toolbar");
                 self.stop_calls(&session, &format!("The user took tab {tab} back (browse toolbar button) while this ran, so it was stopped. Don't use that tab again unless the user lends it back; ask the user how to continue."));
             }
-            if let Err(error) = self.detach_tab(tab).await {
+            if let Err(error) = self.detach_tab(tab, "taken-back-by-user").await {
                 rlog!("toolbar.toggle_failed", tabId = tab, error = error.to_string());
             }
             return;
@@ -379,7 +411,8 @@ impl Relay {
         rlog!("tab.opened", tabId = tab, openerTabId = opener, session = session.clone());
         let relay = self.clone();
         tokio::spawn(async move {
-            if let Some((link, _)) = relay.st().browser_tab(tab) {
+            let link = relay.st().browser_tab(tab);
+            if let Some((link, _)) = link {
                 link.announced.lock().unwrap().insert(tab);
             }
             for delay in [100u64, 250, 500, 1000, 0] {
@@ -482,6 +515,20 @@ impl Relay {
                 self.remove_tab(tab, Release { gone: true, ..Release::default() }, "session-deleted");
             }
         }
+        let lost: Vec<(String, KnownOwner)> = {
+            let st = self.st();
+            st.reconnect_owners
+                .iter()
+                .filter(|(target, known)| {
+                    known.browser == link.key
+                        && !announced.contains(&known.tab)
+                        && st.sessions.contains_key(&known.session)
+                        && !st.tabs.values().any(|t| &t.target_id == *target)
+                        && st.owner_key(known.tab) == Some(link.key.as_str())
+                })
+                .map(|(target, known)| (target.clone(), known.clone()))
+                .collect()
+        };
         {
             let mut st = self.st();
             st.tombstones.retain(|_, key| key != &link.key && !key.is_empty());
@@ -489,6 +536,20 @@ impl Relay {
             st.last_connected = Some(Instant::now());
         }
         link.mark_ready();
+        // Tabs a session held that the browser didn't announce again (its debugger went with the connection):
+        // attach them again, for the same session.
+        for (target, known) in lost {
+            let relay = self.clone();
+            tokio::spawn(async move {
+                let tab = known.tab;
+                let mut attach = Attach::new(tab, known.owner, Some(known.session.clone()));
+                attach.expect_target = Some(target.clone());
+                match relay.setup_tab(attach).await {
+                    Ok(_) => rlog!("extension.reconnect.reattached", tabId = tab, session = known.session),
+                    Err(error) => rlog!("extension.reconnect.lost", tabId = tab, target = target, session = known.session, error = error.to_string()),
+                }
+            });
+        }
         self.send_relay_settings(Some(&link));
         if self.st().update_notice.is_some() {
             self.send_update_notice(&link);
@@ -522,9 +583,9 @@ impl Relay {
             }
             let mine: Vec<(i64, String, Option<String>, Owner)> =
                 st.tabs.values().filter(|t| t.link_key == link.key).map(|t| (t.id, t.target_id.clone(), t.session.clone(), t.owner)).collect();
-            for (_, target, session, owner) in &mine {
+            for (tab, target, session, owner) in &mine {
                 if let Some(session) = session {
-                    st.reconnect_owners.insert(target.clone(), KnownOwner { session: session.clone(), owner: *owner, browser: link.key.clone() });
+                    st.reconnect_owners.insert(target.clone(), KnownOwner { tab: *tab, session: session.clone(), owner: *owner, browser: link.key.clone() });
                 }
             }
             mine.into_iter().map(|(id, ..)| id).collect()
@@ -567,13 +628,24 @@ impl Relay {
                     }
                     return;
                 }
+                // Chrome detaches for many reasons that leave the page in place (another extension's popup in it, a
+                // PDF viewer): keep the tab while it answers, or blocks browse only for that popup.
                 for delay in [50u64, 100, 150] {
                     tokio::time::sleep(Duration::from_millis(delay)).await;
-                    if self.debugger(tab, None, "Target.getTargetInfo", json!({}), Some(INVENTORY_TIMEOUT)).await.is_ok() {
-                        return;
+                    match self.debugger(tab, None, "Target.getTargetInfo", json!({}), Some(INVENTORY_TIMEOUT)).await {
+                        Ok(_) => return,
+                        Err(RpcError::Remote(message)) if message == crate::relay::protected_ui_message(tab) => {
+                            rlog!("debugger.detached.kept", tabId = tab, reason = "protected-ui");
+                            return;
+                        }
+                        Err(RpcError::Remote(message)) if message.starts_with(&format!("Tab {tab} is stuck on a Chrome error page")) => break,
+                        Err(_) if !self.st().tabs.contains_key(&tab) => return,
+                        Err(_) => {}
                     }
                 }
-                self.remove_tab(tab, Release { update_extension: true, gone: true, ..Release::default() }, "debugger-detached");
+                let mut attach = Attach::new(tab, owner, session);
+                attach.expect_target = self.st().tabs.get(&tab).map(|t| t.target_id.clone());
+                self.reattach(attach).await;
             }
             "canceled_by_user" => {
                 let session = self.st().tabs.get(&tab).and_then(|t| t.session.clone());
@@ -583,6 +655,53 @@ impl Relay {
                 self.remove_tab(tab, Release { update_extension: true, released_by_user: true, ..Release::default() }, "released-by-user");
             }
             _ => self.remove_tab(tab, Release { update_extension: true, gone: true, ..Release::default() }, "debugger-detached"),
+        }
+    }
+
+    /// Attaches a tab Chrome detached from again, for the same owner. While another extension's popup blocks it,
+    /// the tab stays (marked blocked) and attaching is retried until the popup goes or the tab does.
+    async fn reattach(self: &Arc<Self>, mut attach: Attach) {
+        let tab = attach.tab;
+        let deadline = Instant::now() + Duration::from_secs(10 * 60);
+        loop {
+            let error = match self.setup_tab(attach.clone()).await {
+                Ok(_) => {
+                    rlog!("debugger.reattached", tabId = tab);
+                    return;
+                }
+                Err(error) => error.to_string(),
+            };
+            // The message the relay makes of it comes from a command after the attach, which went through.
+            if error == crate::relay::protected_ui_message(tab) || error.starts_with(&format!("Tab {tab} is stuck on a Chrome error page")) {
+                attach.already_attached = true;
+            }
+            if error.contains("already attached") && !attach.already_attached {
+                attach.already_attached = true;
+                continue;
+            }
+            let unattachable = crate::relay::unattachable_error(&error);
+            let unattachable = unattachable || error.starts_with(&format!("Tab {tab} is stuck on a Chrome error page"));
+            let blocked = unattachable || crate::relay::protected_ui_error(&error) || error == crate::relay::protected_ui_message(tab);
+            if !blocked || Instant::now() >= deadline {
+                rlog!("debugger.reattach_failed", tabId = tab, error = error);
+                self.remove_tab(tab, Release { update_extension: true, gone: true, ..Release::default() }, "debugger-detached");
+                return;
+            }
+            {
+                let mut st = self.st();
+                let Some(entry) = st.tabs.get_mut(&tab) else { return };
+                if unattachable {
+                    if !std::mem::replace(&mut entry.unattachable, true) {
+                        rlog!("tab.unattachable", tabId = tab, method = "debugger.attach", url = short_url(&entry.url));
+                    }
+                } else if !std::mem::replace(&mut entry.protected_ui, true) {
+                    rlog!("tab.protected_ui", tabId = tab, blocked = true, method = "debugger.attach");
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            if !self.st().tabs.contains_key(&tab) {
+                return;
+            }
         }
     }
 
@@ -607,6 +726,11 @@ impl Relay {
                 }
             }
             let root = source.is_none();
+            let mut forward = true;
+            let mut synthetic: Vec<CdpEvent> = Vec::new();
+            if root && method.starts_with("Page.") {
+                (forward, synthetic) = observe_protected_frame(tab, entry, &method, &event_params);
+            }
             match method.as_str() {
                 "Inspector.targetCrashed" | "Target.targetCrashed" if root => {
                     entry.crashed = true;
@@ -680,7 +804,12 @@ impl Relay {
                 }
                 _ => {}
             }
-            let _ = entry.events.send(CdpEvent { method: method.clone(), params: event_params.clone(), session_id: source.clone() });
+            for event in synthetic {
+                let _ = entry.events.send(event);
+            }
+            if forward {
+                let _ = entry.events.send(CdpEvent { method: method.clone(), params: event_params.clone(), session_id: source.clone() });
+            }
         }
         return_follow_up(self, tab, follow_up);
         if crashed {
@@ -804,6 +933,77 @@ impl Relay {
             let _ = relay.debugger(tab, None, "Page.stopLoading", json!({}), Some(Duration::from_secs(3))).await;
             let _ = relay.debugger(tab, None, "Page.navigate", json!({ "url": "about:blank" }), Some(Duration::from_secs(10))).await;
         });
+    }
+}
+
+/// Child frames showing another extension's document (a password manager's inline menu) stay hidden from tools,
+/// and the tab counts as blocked while one is there (cli/src/cdp/protected-frames.ts). Returns whether to forward
+/// the event, and synthetic events to send first: a `Page.frameDetached` for a frame that just became protected,
+/// a `Page.frameAttached` for one that came back to an ordinary document.
+fn observe_protected_frame(tab: i64, entry: &mut Tab, method: &str, params: &Value) -> (bool, Vec<CdpEvent>) {
+    let frame = params.get("frame");
+    let Some(frame_id) = params.get("frameId").and_then(Value::as_str).or_else(|| frame.and_then(|f| f.get("id")).and_then(Value::as_str)).map(str::to_string) else {
+        return (true, Vec::new());
+    };
+    if Some(frame_id.as_str()) == entry.main_frame.as_deref() || frame_id == entry.target_id {
+        return (true, Vec::new());
+    }
+    if method == "Page.frameAttached" && params.get("parentFrameId").and_then(Value::as_str).is_some() {
+        entry.child_frames.insert(frame_id.clone());
+    }
+    let frame_url = frame.and_then(|f| f.get("url")).and_then(Value::as_str);
+    let parent = frame.and_then(|f| f.get("parentId")).and_then(Value::as_str).map(str::to_string);
+    let intent = matches!(method, "Page.frameRequestedNavigation" | "Page.frameScheduledNavigation" | "Page.frameStartedNavigating");
+    let event = |method: &str, params: Value| CdpEvent { method: method.into(), params, session_id: None };
+    if entry.protected_frames.contains(&frame_id) {
+        if method == "Page.frameDetached" {
+            entry.protected_frames.remove(&frame_id);
+            entry.child_frames.remove(&frame_id);
+            if entry.protected_frames.is_empty() && std::mem::replace(&mut entry.protected_ui, false) {
+                rlog!("tab.protected_ui", tabId = tab, blocked = false);
+            }
+            return (false, Vec::new());
+        }
+        if method == "Page.frameNavigated"
+            && let (Some(url), Some(parent)) = (frame_url, parent)
+            && !is_restricted_url(url)
+        {
+            entry.protected_frames.remove(&frame_id);
+            if entry.protected_frames.is_empty() {
+                entry.protected_ui = false;
+            }
+            return (true, vec![event("Page.frameAttached", json!({ "frameId": frame_id, "parentFrameId": parent }))]);
+        }
+        return (false, Vec::new());
+    }
+    let restricted = if intent {
+        params.get("url").and_then(Value::as_str).is_some_and(is_restricted_url) && entry.child_frames.contains(&frame_id)
+    } else {
+        method == "Page.frameNavigated" && parent.is_some() && frame_url.is_some_and(is_restricted_url)
+    };
+    if method == "Page.frameDetached" {
+        entry.child_frames.remove(&frame_id);
+    }
+    if !restricted {
+        return (true, Vec::new());
+    }
+    entry.protected_frames.insert(frame_id.clone());
+    if !std::mem::replace(&mut entry.protected_ui, true) {
+        rlog!("tab.protected_ui", tabId = tab, blocked = true, frame = "extension");
+    }
+    (false, vec![event("Page.frameDetached", json!({ "frameId": frame_id, "reason": "remove" }))])
+}
+
+fn lost_reason(reason: &str) -> &'static str {
+    match reason {
+        "tab-closed" => "the tab was closed",
+        "released-by-user" => "the user dismissed the browser's debugging bar",
+        "taken-back-by-user" => "the user took it back with the browse toolbar button",
+        "target-missing" => "Chrome no longer has it",
+        "debugger-detached" | "renew-failed" => "Chrome detached browse from it",
+        "session-deleted" => "its session was deleted",
+        "idle" => "it was idle",
+        _ => "browse lost it",
     }
 }
 

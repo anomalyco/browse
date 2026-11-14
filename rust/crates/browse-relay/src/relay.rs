@@ -2,7 +2,10 @@
 //! id unless another connected browser already has a tab with it, and every command and event is translated at the
 //! link's edge (cli/src/relay/browser-links.ts).
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::{Deref, DerefMut};
+use std::panic::Location;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
@@ -59,12 +62,23 @@ pub struct Tab {
     pub focused: bool,
     pub fresh_popup: bool,
     pub blanking: u32,
+    /// Chrome refuses every command for the tab while another extension's frame (a password manager's popup) is in
+    /// it (cli/src/cdp/protected-frames.ts).
+    pub protected_ui: bool,
+    /// Child frames showing another extension's document; their events are hidden from tools.
+    pub protected_frames: HashSet<String>,
+    /// Chrome won't let the debugger into the tab ("Cannot attach to this target": a blocked load's error page).
+    pub unattachable: bool,
+    /// Child frames seen attaching (with a parent), so a navigation intent can be told apart from the main frame's.
+    pub child_frames: HashSet<String>,
     /// The one CDP handle tools get for this attachment, with the session it was made for.
     pub cdp: Option<(String, Arc<crate::cdp::TabCdp>)>,
 }
 
 #[derive(Debug, Clone)]
 pub struct KnownOwner {
+    /// The relay's id for the tab, so a reconnecting browser that doesn't announce it again can get it back.
+    pub tab: i64,
     pub session: String,
     pub owner: Owner,
     pub browser: String,
@@ -172,10 +186,12 @@ impl State {
         Some((self.link(key)?, *local))
     }
 
-    /// The browser's id for a profile: the one it had, else a new slug of its name unique among known browsers.
-    pub fn identify(&mut self, paths: &Paths, key: &str, name: &str) -> String {
-        if let Some(previous) = self.known.get(key).filter(|k| k.name == name) {
-            return previous.id.clone();
+    /// The browser's id and name for a profile: the id it had, else a new slug of its name unique among known
+    /// browsers. A `fallback` name (the computer's address, when its name couldn't be looked up) never replaces the
+    /// one the browser already has.
+    pub fn identify(&mut self, paths: &Paths, key: &str, name: &str, fallback: bool) -> (String, String) {
+        if let Some(previous) = self.known.get(key).filter(|k| k.name == name || fallback) {
+            return (previous.id.clone(), previous.name.clone());
         }
         let taken: HashSet<String> = self.known.iter().filter(|(k, _)| *k != key).map(|(_, v)| v.id.clone()).collect();
         let base = browser_slug(name);
@@ -187,7 +203,7 @@ impl State {
         }
         self.known.insert(key.to_string(), KnownBrowser { id: id.clone(), name: name.to_string() });
         let _ = crate::paths::write_private_json(&paths.browsers(), &self.known);
-        id
+        (id, name.to_string())
     }
 
     pub fn session_tabs(&self, session: &str) -> Vec<i64> {
@@ -199,6 +215,59 @@ impl State {
     pub fn handoff_for_tab(&self, tab: i64) -> Option<&Handoff> {
         self.handoffs.values().find(|h| h.tab == tab)
     }
+}
+
+thread_local! {
+    /// The relays whose state lock this thread holds, and where it took them.
+    static HELD: RefCell<Vec<(usize, &'static Location<'static>)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Who holds the state lock: where it was taken, since when, on which thread.
+#[derive(Debug, Clone, Copy)]
+pub struct Holder {
+    pub at: &'static Location<'static>,
+    pub since: Instant,
+    pub thread: std::thread::ThreadId,
+}
+
+/// The state lock, held. Not `Send`, so it can't be held across an `.await` in a spawned task.
+pub struct StateGuard<'a> {
+    guard: MutexGuard<'a, State>,
+    relay: &'a Relay,
+}
+
+impl Deref for StateGuard<'_> {
+    type Target = State;
+    fn deref(&self) -> &State {
+        &self.guard
+    }
+}
+
+impl DerefMut for StateGuard<'_> {
+    fn deref_mut(&mut self) -> &mut State {
+        &mut self.guard
+    }
+}
+
+impl Drop for StateGuard<'_> {
+    fn drop(&mut self) {
+        let me = self.relay as *const Relay as usize;
+        *self.relay.holder.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        HELD.with(|held| {
+            let mut held = held.borrow_mut();
+            if let Some(index) = held.iter().rposition(|(relay, _)| *relay == me) {
+                held.remove(index);
+            }
+        });
+    }
+}
+
+/// A tool call in flight, for the log when the relay has to be ended.
+#[derive(Debug, Clone)]
+pub struct InFlight {
+    pub tool: String,
+    pub session: String,
+    pub since: Instant,
 }
 
 /// "Chrome on Dax's MacBook Pro" -> "chrome-daxs-macbook-pro".
@@ -236,6 +305,18 @@ pub struct Relay {
     pub tools: RwLock<Vec<Arc<dyn Tool>>>,
     pub next_call: AtomicU64,
     pub ready: AtomicBool,
+    /// Started on demand by a client (OPENCODE_BROWSER_MANAGED_RELAY=1).
+    pub managed: bool,
+    /// Who holds `state`, for the watchdog.
+    pub holder: Mutex<Option<Holder>>,
+    /// Tool calls in flight by call id, for the log.
+    pub inflight: Mutex<HashMap<u64, InFlight>>,
+    /// Bumped every second by a task on the runtime; the watchdog ends a relay whose runtime stopped running it.
+    pub heartbeat: AtomicU64,
+    /// The relay's tasks ended (it closed, or its runtime is gone): the watchdog stops watching.
+    pub finished: AtomicBool,
+    /// One tab opening at a time per session, so concurrent first calls share the tab.
+    pub tab_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 pub struct RelayConfig {
@@ -247,6 +328,7 @@ pub struct RelayConfig {
     pub build_id: String,
     pub auto_update: Option<AutoUpdateStatus>,
     pub idle_shutdown: Option<Duration>,
+    pub managed: bool,
 }
 
 fn env_ms(variable: &str, fallback: u64) -> Option<Duration> {
@@ -306,6 +388,12 @@ impl Relay {
             tools: RwLock::new(Vec::new()),
             next_call: AtomicU64::new(1),
             ready: AtomicBool::new(false),
+            managed: config.managed,
+            holder: Mutex::new(None),
+            inflight: Mutex::new(HashMap::new()),
+            heartbeat: AtomicU64::new(0),
+            finished: AtomicBool::new(false),
+            tab_locks: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -313,8 +401,27 @@ impl Relay {
         self.me.upgrade().expect("the relay outlives its work")
     }
 
-    pub fn st(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    /// The relay's state. The lock is not re-entrant: taking it again on a thread that holds it panics instead of
+    /// deadlocking (a temporary guard in an `if let`/`match` scrutinee lives for the whole block). Whoever holds it
+    /// is recorded for the watchdog, which ends a relay whose lock stays held.
+    #[track_caller]
+    pub fn st(&self) -> StateGuard<'_> {
+        let at = Location::caller();
+        let me = self as *const Relay as usize;
+        let held = HELD.with(|held| held.borrow().iter().find(|(relay, _)| *relay == me).map(|(_, at)| *at));
+        if let Some(held) = held {
+            crate::rlog!("relay.lock.reentrant", at = at.to_string(), heldAt = held.to_string());
+            panic!("browse relay: the state lock is already held on this thread (taken at {held}, again at {at}); that would deadlock");
+        }
+        let guard = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *self.holder.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Holder { at, since: Instant::now(), thread: std::thread::current().id() });
+        HELD.with(|held| held.borrow_mut().push((me, at)));
+        StateGuard { guard, relay: self }
+    }
+
+    /// The session's tab-opening lock.
+    pub fn tab_lock(&self, session: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.tab_locks.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).entry(session.to_string()).or_default().clone()
     }
 
     pub fn browsers_changed(&self) {
@@ -376,10 +483,38 @@ impl Relay {
             },
             None => link.call("debugger.sendCommand", wire, None).await,
         };
-        if let Err(RpcError::Remote(message)) = &result
-            && missing_tab(message) {
-                self.me().forget_missing_tab(tab, method);
+        match &result {
+            Err(RpcError::Remote(message)) if missing_tab(message) => self.me().forget_missing_tab(tab, method),
+            Err(RpcError::Remote(message))
+                if protected_ui_error(message) || (message.contains("not attached") && self.st().tabs.get(&tab).is_some_and(|t| t.protected_ui)) =>
+            {
+                if let Some(entry) = self.st().tabs.get_mut(&tab)
+                    && !std::mem::replace(&mut entry.protected_ui, true) {
+                        crate::rlog!("tab.protected_ui", tabId = tab, blocked = true, method = method);
+                    }
+                return Err(RpcError::Remote(protected_ui_message(tab)));
             }
+            Err(RpcError::Remote(message)) if unattachable_error(message) || (message.contains("not attached") && self.st().tabs.get(&tab).is_some_and(|t| t.unattachable)) => {
+                let url = {
+                    let mut st = self.st();
+                    let Some(entry) = st.tabs.get_mut(&tab) else { return result };
+                    if !std::mem::replace(&mut entry.unattachable, true) {
+                        crate::rlog!("tab.unattachable", tabId = tab, method = method, url = crate::util::short_url(&entry.url));
+                    }
+                    entry.url.clone()
+                };
+                return Err(RpcError::Remote(unattachable_message(tab, &url)));
+            }
+            Ok(_) if session.is_none() => {
+                if let Some(entry) = self.st().tabs.get_mut(&tab) {
+                    if std::mem::replace(&mut entry.protected_ui, false) {
+                        crate::rlog!("tab.protected_ui", tabId = tab, blocked = false);
+                    }
+                    entry.unattachable = false;
+                }
+            }
+            _ => {}
+        }
         result
     }
 
@@ -419,7 +554,8 @@ impl Relay {
                 .map(|session| {
                     let live: Vec<String> =
                         st.tabs.values().filter(|t| t.owner == Owner::Relay && t.session.as_deref() == Some(&session.id)).map(|t| t.target_id.clone()).collect();
-                    session.persisted(&live)
+                    let current = session.current.and_then(|tab| st.tabs.get(&tab)).map(|tab| crate::sessions::PersistedTarget { id: tab.target_id.clone(), owner: tab.owner.name().into() });
+                    session.persisted(&live, current)
                 })
                 .collect()
         };
@@ -436,6 +572,29 @@ impl Relay {
 /// "No tab with given id 7." from chrome.debugger, "No tab with id: 7." from chrome.tabs.
 pub fn missing_tab(message: &str) -> bool {
     message.contains("No tab with given id") || message.contains("No tab with id")
+}
+
+/// chrome.debugger refuses every command for a tab while another extension's frame is in it.
+pub fn protected_ui_error(message: &str) -> bool {
+    message.to_lowercase().contains("cannot access a chrome-extension:// url of different extension")
+}
+
+pub fn protected_ui_message(tab: i64) -> String {
+    format!(
+        "Another extension's popup (a password manager, maybe) is covering the page in tab {tab}, and Chrome blocks browse from the tab while it's open. Ask the user to finish or dismiss it in the browser (or use the handoff tool), then retry. The tab is still yours."
+    )
+}
+
+/// Chrome keeps the debugger out of some error pages (a load blocked by the browser or another extension).
+pub fn unattachable_error(message: &str) -> bool {
+    message.contains("Cannot attach to this target")
+}
+
+pub fn unattachable_message(tab: i64, url: &str) -> String {
+    let page = if url.is_empty() { String::new() } else { format!(" ({})", crate::util::short_url(url)) };
+    format!(
+        "Tab {tab} is stuck on a Chrome error page{page}: its last load failed (blocked by the browser or another extension), and Chrome doesn't let browse into that page. Call navigate without tabId to load another page (browse replaces an agent's tab), or close it with the tabs tool. A tab the user lent has to be navigated by the user."
+    )
 }
 
 /// Folders tools may read and write: the temp folders and OPENCODE_BROWSER_FILE_ROOTS (path-list separated).

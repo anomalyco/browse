@@ -428,13 +428,38 @@ fn installed_server() -> Option<Value> {
 
 pub fn status(args: &[String]) -> anyhow::Result<i32> {
     let json = args.iter().any(|a| a == "--json");
-    let running = relay::extension_status(false);
-    if json {
-        println!("{:#}", running.unwrap_or_else(|| json!({ "endpoint": relay_api::endpoint(), "relay": { "running": false } })));
-        return Ok(0);
-    }
     let settings = settings();
     let entry = settings.get("entry").and_then(Value::as_str);
+    if json {
+        // The relay's `status` tool output (relay, browsers, currentSession, sessions, tabs, autoUpdate) plus this
+        // install's setup. A relay that isn't running isn't started.
+        let mut status = match relay::probe() {
+            relay::Probe::Running(_) => {
+                let request = browse_core::ToolCallRequest { name: "status".into(), arguments: json!({}), session: session::for_cli() };
+                let output = relay::call(&request)?;
+                output
+                    .content
+                    .iter()
+                    .find_map(|c| match c {
+                        browse_core::Content::Text { text } => serde_json::from_str::<Value>(text).ok(),
+                        _ => None,
+                    })
+                    .filter(Value::is_object)
+                    .context("the relay's status tool didn't answer JSON")?
+            }
+            _ => json!({ "relay": { "running": false, "endpoint": relay_api::endpoint() } }),
+        };
+        status["setup"] = json!({
+            "installed": entry.is_some(),
+            "version": VERSION,
+            "executable": relay::current_exe()?,
+            "mcp": installed_server().is_some().then(opencode_config),
+            "updates": update::describe(),
+        });
+        println!("{status:#}");
+        return Ok(0);
+    }
+    let running = relay::extension_status(false);
     println!("Setup:     {}", if entry.is_some() { "installed" } else { "not installed. Run `browse install`." });
     println!("Version:   {VERSION} ({})", relay::current_exe()?.display());
     println!("opencode:  {}", settings.get("opencode").and_then(Value::as_str).map(PathBuf::from).or_else(|| browsers::on_path("opencode")).map_or("not found".into(), |p| p.display().to_string()));
@@ -449,7 +474,11 @@ pub fn status(args: &[String]) -> anyhow::Result<i32> {
     match running {
         Some(status) => {
             println!("Relay:     running at {}", relay_api::endpoint());
-            if let Some(running) = status.pointer("/relay/version").or(status.get("version")).and_then(Value::as_str).filter(|v| *v != VERSION) {
+            let relay_version = match relay::probe() {
+                relay::Probe::Running(version) => version.get("version").and_then(Value::as_str).map(str::to_owned),
+                _ => None,
+            };
+            if let Some(running) = relay_version.filter(|v| v != VERSION) {
                 println!("           runs {running}, this CLI is {VERSION}; it restarts with the new version once idle");
             }
             let state = status.get("pairingState").and_then(Value::as_str).unwrap_or("unknown");

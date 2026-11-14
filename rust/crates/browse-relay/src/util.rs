@@ -92,6 +92,61 @@ pub fn short_hostname() -> String {
     std::env::var("COMPUTERNAME").unwrap_or_else(|_| "this computer".into())
 }
 
+/// The name DNS gives an address (getnameinfo, so /etc/hosts and the system resolver count). Blocks: call it off
+/// the runtime.
+pub fn reverse_lookup(ip: std::net::IpAddr) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::net::IpAddr;
+        // SAFETY: zeroed sockaddrs are valid; getnameinfo gets the right length for the family and a sized buffer.
+        unsafe {
+            let mut storage: libc::sockaddr_storage = std::mem::zeroed();
+            let length = match ip {
+                IpAddr::V4(v4) => {
+                    let address = &mut *(&mut storage as *mut libc::sockaddr_storage).cast::<libc::sockaddr_in>();
+                    address.sin_family = libc::AF_INET as libc::sa_family_t;
+                    address.sin_addr = libc::in_addr { s_addr: u32::from_ne_bytes(v4.octets()) };
+                    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+                    {
+                        address.sin_len = std::mem::size_of::<libc::sockaddr_in>() as u8;
+                    }
+                    std::mem::size_of::<libc::sockaddr_in>()
+                }
+                IpAddr::V6(v6) => {
+                    let address = &mut *(&mut storage as *mut libc::sockaddr_storage).cast::<libc::sockaddr_in6>();
+                    address.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+                    address.sin6_addr = libc::in6_addr { s6_addr: v6.octets() };
+                    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+                    {
+                        address.sin6_len = std::mem::size_of::<libc::sockaddr_in6>() as u8;
+                    }
+                    std::mem::size_of::<libc::sockaddr_in6>()
+                }
+            };
+            let mut host = [0 as libc::c_char; 1025];
+            let status = libc::getnameinfo(
+                (&storage as *const libc::sockaddr_storage).cast(),
+                length as libc::socklen_t,
+                host.as_mut_ptr(),
+                host.len() as libc::socklen_t,
+                std::ptr::null_mut(),
+                0,
+                libc::NI_NAMEREQD,
+            );
+            if status != 0 {
+                return None;
+            }
+            let name = std::ffi::CStr::from_ptr(host.as_ptr()).to_string_lossy().trim().to_string();
+            (!name.is_empty() && name.parse::<IpAddr>().is_err()).then_some(name)
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = ip;
+        None
+    }
+}
+
 pub fn str_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
 }

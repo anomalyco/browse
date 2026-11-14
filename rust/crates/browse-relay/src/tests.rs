@@ -131,7 +131,10 @@ fn fake_extension(socket: Socket, next_tab: i64) -> (Arc<Seen>, mpsc::UnboundedS
             let Some(id) = command["id"].as_u64() else { continue };
             let params = &command["params"];
             let result = match command["method"].as_str().unwrap_or("") {
-                "tabs.create" => json!({ "tabId": next_tab }),
+                "tabs.create" => {
+                    let created = record.0.lock().unwrap().iter().filter(|c| c["method"] == "tabs.create").count() as i64;
+                    json!({ "tabId": next_tab + created - 1 })
+                }
                 "settings.get" | "settings.set" => json!({ "settings": { "window": "current", "grouping": "shared", "idleMinutes": 10, "humanInput": "on", "handoffNotifications": "recording" } }),
                 "debugger.sendCommand" => match params["method"].as_str().unwrap_or("") {
                     "Target.getTargetInfo" => {
@@ -140,6 +143,14 @@ fn fake_extension(socket: Socket, next_tab: i64) -> (Arc<Seen>, mpsc::UnboundedS
                     }
                     "Runtime.evaluate" => json!({ "result": { "type": "number", "value": 42 } }),
                     "Network.getCookies" => json!({ "cookies": [{ "domain": "example.com" }, { "domain": "bank.com" }] }),
+                    "Unattachable.method" => {
+                        let _ = replies.send(json!({ "id": id, "error": "Cannot attach to this target." }));
+                        continue;
+                    }
+                    "Protected.method" => {
+                        let _ = replies.send(json!({ "id": id, "error": "Cannot access a chrome-extension:// URL of different extension" }));
+                        continue;
+                    }
                     "Broken.method" => {
                         let _ = replies.send(json!({ "id": id, "error": "No tab with given id 7." }));
                         continue;
@@ -415,4 +426,226 @@ async fn background_work_keeps_a_session_busy() {
     browser.set_busy(&"capturing".to_string(), "network", false);
     assert!(!h.handle.relay.st().sessions["capturing"].busy());
     assert!(h.handle.idle(Duration::ZERO));
+}
+
+async fn connected(profile: &str, next_tab: i64) -> (Harness, Arc<Seen>, mpsc::UnboundedSender<Value>) {
+    let h = harness().await;
+    let socket = pair_with_token(h.handle.port(), &h.paths, profile).await;
+    let (seen, events) = fake_extension(socket, next_tab);
+    events.send(json!({ "method": "ready" })).unwrap();
+    let relay = h.handle.relay.clone();
+    eventually("the browser to connect", || relay.st().connected()).await;
+    (h, seen, events)
+}
+
+fn text(output: &Value) -> Value {
+    serde_json::from_str(output["content"][0]["text"].as_str().unwrap_or("null")).unwrap_or(Value::Null)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_first_calls_share_one_tab() {
+    let (h, seen, _events) = connected("profile-race", 40).await;
+    let browser = h.handle.browser();
+    let session = "racing".to_string();
+    let calls: Vec<_> = (0..4).map(|_| {
+        let browser = browser.clone();
+        let session = session.clone();
+        tokio::spawn(async move { browser.current_tab(&session).await.map(|t| t.tab_id) })
+    }).collect();
+    let mut tabs = Vec::new();
+    for call in calls {
+        tabs.push(call.await.unwrap().unwrap());
+    }
+    assert_eq!(seen.commands("tabs.create").len(), 1, "one tab for the session");
+    assert!(tabs.iter().all(|t| *t == 40), "{tabs:?}");
+}
+
+#[test]
+#[should_panic(expected = "already held")]
+fn retaking_the_state_lock_panics_instead_of_deadlocking() {
+    let paths = Paths::rooted(std::env::temp_dir().join(format!("browse-relay-lock-{}", crate::util::random_hex(6))));
+    let relay = crate::relay::Relay::new(crate::relay::RelayConfig {
+        paths,
+        configured_port: 0,
+        port: 0,
+        host: "127.0.0.1".into(),
+        version: "0".into(),
+        build_id: String::new(),
+        auto_update: None,
+        idle_shutdown: None,
+        managed: false,
+    })
+    .unwrap();
+    let held = relay.st();
+    assert!(relay.holder.lock().unwrap().is_some());
+    // The temporary in an `if let` scrutinee lives for the whole block: the bug class this catches.
+    if let Some(_session) = held.sessions.get("x") {}
+    let _again = relay.st();
+}
+
+#[test]
+fn the_state_lock_can_be_taken_again_once_released() {
+    let paths = Paths::rooted(std::env::temp_dir().join(format!("browse-relay-lock-{}", crate::util::random_hex(6))));
+    let config = |paths: Paths| crate::relay::RelayConfig {
+        paths,
+        configured_port: 0,
+        port: 0,
+        host: "127.0.0.1".into(),
+        version: "0".into(),
+        build_id: String::new(),
+        auto_update: None,
+        idle_shutdown: None,
+        managed: false,
+    };
+    let one = crate::relay::Relay::new(config(paths.clone())).unwrap();
+    let two = crate::relay::Relay::new(config(paths.clone())).unwrap();
+    {
+        let _a = one.st();
+        let _b = two.st();
+    }
+    drop(one.st());
+    let _c = one.st();
+    assert!(one.holder.lock().unwrap().is_some());
+    drop(_c);
+    assert!(one.holder.lock().unwrap().is_none());
+    let _ = std::fs::remove_dir_all(&paths.data);
+}
+
+#[test]
+fn an_address_never_replaces_a_known_browser_name() {
+    let paths = Paths::rooted(std::env::temp_dir().join(format!("browse-relay-names-{}", crate::util::random_hex(6))));
+    let relay = crate::relay::Relay::new(crate::relay::RelayConfig {
+        paths: paths.clone(),
+        configured_port: 0,
+        port: 0,
+        host: "127.0.0.1".into(),
+        version: "0".into(),
+        build_id: String::new(),
+        auto_update: None,
+        idle_shutdown: None,
+        managed: false,
+    })
+    .unwrap();
+    let mut st = relay.st();
+    assert_eq!(st.identify(&paths, "k", "Chrome on 100.93.238.48", true), ("chrome-100-93-238-48".into(), "Chrome on 100.93.238.48".into()));
+    assert_eq!(st.identify(&paths, "k", "Chrome on apollo", false), ("chrome-apollo".into(), "Chrome on apollo".into()), "a looked-up name wins");
+    assert_eq!(st.identify(&paths, "k", "Chrome on 100.93.238.48", true), ("chrome-apollo".into(), "Chrome on apollo".into()), "an address doesn't");
+    drop(st);
+    let _ = std::fs::remove_dir_all(&paths.data);
+}
+
+#[tokio::test]
+async fn version_reports_a_managed_relay() {
+    let paths = Paths::rooted(std::env::temp_dir().join(format!("browse-relay-test-{}", crate::util::random_hex(6))));
+    let options = ServeOptions { port: Some(0), paths: paths.clone(), managed: true, idle_shutdown: None, ..ServeOptions::default() };
+    let handle = start(options, crate::tools()).await.unwrap();
+    let (_, version) = http(handle.port(), "GET", "/version", None, None).await;
+    assert_eq!(version["managed"], true);
+    handle.stop();
+    let _ = std::fs::remove_dir_all(&paths.data);
+}
+
+#[tokio::test]
+async fn another_extensions_popup_blocks_the_tab_without_dropping_it() {
+    let (h, _seen, events) = connected("profile-protected", 50).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let session = "pm".to_string();
+    let tab = browser.open_tab(&session, None).await.unwrap().tab_id;
+    let cdp = browser.cdp(&session, tab).await.unwrap();
+    let mut subscription = cdp.events();
+    let page = |method: &str, params: Value| json!({ "method": "debugger.event", "params": { "tabId": tab, "method": method, "params": params } });
+    events.send(page("Page.frameAttached", json!({ "frameId": "PM", "parentFrameId": "T50" }))).unwrap();
+    events.send(page("Page.frameNavigated", json!({ "frame": { "id": "PM", "parentId": "T50", "url": "chrome-extension://manager/menu.html" } }))).unwrap();
+    let attached = tokio::time::timeout(Duration::from_secs(2), subscription.recv()).await.unwrap().unwrap();
+    assert_eq!(attached.method, "Page.frameAttached");
+    let retracted = tokio::time::timeout(Duration::from_secs(2), subscription.recv()).await.unwrap().unwrap();
+    assert_eq!((retracted.method.as_str(), retracted.params["frameId"].as_str()), ("Page.frameDetached", Some("PM")), "the extension's frame is retracted, its navigation hidden");
+    eventually("the tab to be marked blocked", || relay.st().tabs.get(&tab).is_some_and(|t| t.protected_ui)).await;
+
+    let error = cdp.send("Protected.method", json!({}), None).await.unwrap_err();
+    assert!(error.to_string().contains("Another extension's popup"), "{error}");
+    events.send(json!({ "method": "debugger.detached", "params": { "tabId": tab, "reason": "target_closed" } })).unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(relay.st().tabs.contains_key(&tab), "the tab stays the session's");
+
+    events.send(page("Page.frameDetached", json!({ "frameId": "PM" }))).unwrap();
+    eventually("the block to lift", || relay.st().tabs.get(&tab).is_some_and(|t| !t.protected_ui)).await;
+}
+
+#[tokio::test]
+async fn closing_the_current_tab_makes_the_next_one_current() {
+    let (h, _seen, _events) = connected("profile-close", 60).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let session = "closer".to_string();
+    let first = browser.open_tab(&session, None).await.unwrap().tab_id;
+    let second = browser.open_tab(&session, None).await.unwrap().tab_id;
+    assert_ne!(first, second);
+    assert_eq!(relay.st().sessions[&session].current, Some(second));
+    relay.close_or_release(second).await.unwrap();
+    assert_eq!(relay.st().sessions[&session].current, Some(first));
+    relay.persist_now();
+    let catalog = std::fs::read_to_string(h.paths.session_catalog(0)).unwrap();
+    assert!(catalog.contains(&format!("T{first}")), "the current tab is kept for a restart: {catalog}");
+}
+
+#[tokio::test]
+async fn tool_arguments_are_checked() {
+    let (h, _seen, _events) = connected("profile-args", 70).await;
+    let port = h.handle.port();
+    let token = h.handle.token().to_string();
+    let call = |name: &str, arguments: Value| json!({ "name": name, "arguments": arguments, "session": "oc-args" });
+    let (_, handoff) = http(port, "POST", "/tools/call", Some(&token), Some(call("handoff", json!({ "message": "x", "timeoutSeconds": 0 })))).await;
+    assert_eq!(handoff["isError"], true);
+    assert!(handoff["content"][0]["text"].as_str().unwrap().contains("timeoutSeconds"));
+    let (_, cleanup) = http(port, "POST", "/tools/call", Some(&token), Some(call("tabs_cleanup", json!({ "idleMinutes": -1 })))).await;
+    assert_eq!(cleanup["isError"], true);
+    let (_, deleted) = http(port, "POST", "/tools/call", Some(&token), Some(call("session", json!({ "action": "delete" })))).await;
+    assert_eq!(text(&deleted)["currentSession"], Value::Null);
+    let (_, navigated) = http(port, "POST", "/tools/call", Some(&token), Some(call("tabs", json!({ "action": "new", "url": "about:version" })))).await;
+    assert_eq!(navigated["isError"], true);
+}
+
+#[tokio::test]
+async fn a_session_waits_for_a_browser_without_deadlocking() {
+    let h = harness().await;
+    let relay = h.handle.relay.clone();
+    relay.ensure_session("lonely").unwrap();
+    // No browser connected yet: this once took the state lock twice in one expression.
+    assert!(relay.session_link("lonely").await.is_err());
+}
+
+#[tokio::test]
+async fn a_tab_stuck_on_an_error_page_is_replaced_by_the_next_navigation() {
+    let (h, seen, _events) = connected("profile-stuck", 80).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let session = "stuck".to_string();
+    let tab = browser.open_tab(&session, None).await.unwrap().tab_id;
+    let cdp = browser.cdp(&session, tab).await.unwrap();
+    let error = cdp.send("Unattachable.method", json!({}), None).await.unwrap_err();
+    assert!(error.to_string().contains("stuck on a Chrome error page"), "{error}");
+    assert_eq!(browser.current_tab(&session).await.unwrap().tab_id, tab, "other tools keep the tab and get the clear error");
+    let replaced = crate::serve::TOOL.scope("navigate".into(), browser.current_tab(&session)).await.unwrap().tab_id;
+    assert_ne!(replaced, tab);
+    assert!(seen.commands("tabs.remove").iter().any(|c| c["params"]["tabId"] == tab), "the stuck tab is closed");
+    assert!(relay.st().sessions[&session].warnings.iter().any(|w| w.contains("Chrome error page")));
+}
+
+#[tokio::test]
+async fn a_lost_tab_is_reported_instead_of_replaced_by_a_blank_one() {
+    let (h, seen, events) = connected("profile-lost", 90).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let session = "lost".to_string();
+    let tab = browser.open_tab(&session, None).await.unwrap().tab_id;
+    events.send(json!({ "method": "tabs.removed", "params": { "tabId": tab } })).unwrap();
+    eventually("the tab to go", || !relay.st().tabs.contains_key(&tab)).await;
+    let error = browser.current_tab(&session).await.unwrap_err();
+    assert!(error.to_string().contains("went away"), "{error}");
+    assert_eq!(seen.commands("tabs.create").len(), 1, "no blank tab behind the agent's back");
+    let fresh = crate::serve::TOOL.scope("navigate".into(), browser.current_tab(&session)).await.unwrap().tab_id;
+    assert_ne!(fresh, tab);
+    assert!(browser.current_tab(&session).await.is_ok());
 }
