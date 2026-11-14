@@ -92,6 +92,7 @@ export class OpenCodeBrowserSessions {
       closeOpenCodeBrowserSessionSettled: (session) => this.closeOpenCodeBrowserSessionSettled(session),
       closeRelayTarget: (targetId) => this.closeRelayTarget(targetId),
       releaseSessionTargetOwnership: (session) => this.releaseSessionTargetOwnership(session),
+      clearSessionDefaultTarget: (session, targetId, options) => this.clearSessionDefaultTarget(session, targetId, options),
       notifyTargetOwnershipChange: (change) => this.notifyTargetOwnershipChange(change),
     }
     this.executionContext = {
@@ -192,12 +193,12 @@ export class OpenCodeBrowserSessions {
 
   persistedTargetOwner(
     targetId: string,
-    options: { readonly includeHeldTargets?: boolean; readonly browserKey?: string } = {},
+    options: { readonly includeHeldTargets?: boolean; readonly browserKey?: string; readonly legacy?: boolean } = {},
   ): { readonly sessionId: string; readonly owner: "relay" | "user" } | undefined {
     for (const session of this.sessions.values()) {
       if (options.browserKey !== undefined && session.browser?.key !== undefined && session.browser.key !== options.browserKey) continue
       const target = session.target
-      if (target?.id === targetId && (options.includeHeldTargets !== false || target.owner === "user")) {
+      if (target?.id === targetId && (options.includeHeldTargets !== false || target.owner === "user" || options.legacy === true)) {
         return { sessionId: session.id, owner: target.owner }
       }
       if (options.includeHeldTargets === false) continue
@@ -217,14 +218,26 @@ export class OpenCodeBrowserSessions {
     this.admission.schedulePersistence()
   }
 
+  /** Clear a session's default target through its sandbox, so the next execute does not rebind the old page. */
+  clearSessionDefaultTarget(
+    session: OpenCodeBrowserSession,
+    targetId: string,
+    options: { readonly releasedByUser?: boolean; readonly reason?: string } = {},
+  ): boolean {
+    if (session.target?.id !== targetId) return false
+    session.sandbox.markTargetDetached(targetId, { releasedByUser: options.releasedByUser === true })
+    this.notifyTargetCleared(session.id, targetId, options.reason ?? "released")
+    this.updateTarget(session, undefined)
+    return true
+  }
+
   /** Drop a target a session no longer holds (a user lend, an adoption): it must not be reclaimed again. */
-  forgetTargetHeld(targetId: string, reason = "released"): boolean {
+  forgetTargetHeld(targetId: string, options: { readonly releasedByUser?: boolean; readonly reason?: string } = {}): boolean {
     let changed = false
     for (const session of this.sessions.values()) {
       let sessionChanged = false
       if (session.target?.owner === "relay" && session.target.id === targetId) {
-        this.notifyTargetCleared(session.id, targetId, reason)
-        delete session.target
+        this.clearSessionDefaultTarget(session, targetId, options)
         sessionChanged = true
       }
       if (session.targets?.some((target) => target.id === targetId)) {
@@ -256,10 +269,9 @@ export class OpenCodeBrowserSessions {
       } else if (session.browser.key !== options.browserKey) {
         continue
       }
-      if (session.target?.owner === "relay" && !options.liveTargetIds.has(session.target.id)) {
+      if (session.target && !options.liveTargetIds.has(session.target.id)) {
         removed.add(session.target.id)
-        this.notifyTargetCleared(session.id, session.target.id, "pruned")
-        delete session.target
+        this.clearSessionDefaultTarget(session, session.target.id, { reason: "pruned" })
         changed = true
       }
       if (session.targets === undefined) continue

@@ -115,7 +115,32 @@ async function seed(home: string, options: {
 
 async function owners(port: number, token: string) {
   const response = await fetch(`http://127.0.0.1:${port}/json/list`, { headers: { authorization: `Bearer ${token}` } })
-  return (await response.json()) as Array<{ tabId: number; url?: string; opencodeBrowserSessionId?: string }>
+  return (await response.json()) as Array<{ tabId: number; title?: string; url?: string; opencodeBrowserSessionId?: string }>
+}
+
+const frameTree = (tabId: number) => ({
+  frameTree: {
+    frame: {
+      id: `TARGET-${tabId}`,
+      loaderId: "L",
+      url: `https://example.com/${tabId}`,
+      domainAndRegistry: "",
+      securityOrigin: "https://example.com",
+      mimeType: "text/html",
+      secureContextType: "Secure",
+      crossOriginIsolatedContextType: "NotIsolated",
+      gatedAPIFeatures: [],
+    },
+  },
+})
+
+async function executeSession(port: number, token: string, sessionId: string, code: string) {
+  const response = await fetch(`http://127.0.0.1:${port}/cli/execute`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ sessionId, code, createIfMissing: false }),
+  })
+  return await response.json() as { isError: boolean; text: string }
 }
 
 async function waitForRestoredSession(port: number, token: string, sessionId: string) {
@@ -375,7 +400,10 @@ test("a refused restored page is published blank and released on the same relay 
       .on("Target.getTargetInfo", (command) => ({ targetInfo: targetInfo(Number(command.params?.tabId), urls) }))
     expect(await replacement.pair({ attachedTabs: [340], agentTabs: [340], capabilities: ["tab-release"], deferReady: true })).toBe(true)
     const refused = () => owners(relay!.port, relay!.token).then((targets) => targets.find((target) => target.tabId === 340))
-    expect(await waitFor(async () => (await refused())?.url === "about:blank")).toBe(true)
+    expect(await waitFor(async () => {
+      const target = await refused()
+      return target?.url === "about:blank" && target?.title === ""
+    })).toBe(true)
     expect((await refused())?.opencodeBrowserSessionId).toBeUndefined()
     replacement.sendReady()
     expect(await waitFor(() => replacement?.commands.some((command) =>
@@ -392,6 +420,174 @@ test("a refused restored page is published blank and released on the same relay 
   }
 }, 40_000)
 
+test("a real execute default page is reclaimed after restart by an extension without release support", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-relay-legacy-default-"))
+  const urls = new Map<number, string>()
+  let next = 500
+  let secondChild: ChildProcess | undefined
+  let first: FakeExtension | undefined
+  let replacement: FakeExtension | undefined
+  let relay: Awaited<ReturnType<typeof startRelay>> | undefined
+  try {
+    relay = await startRelay(home)
+    first = new FakeExtension(home, relay.port)
+      .on("tabs.create", () => ({ tabId: next++ }))
+      .on("Target.getTargetInfo", (command) => ({ targetInfo: targetInfo(Number(command.params?.tabId), urls) }))
+      .on("Page.getFrameTree", (command) => frameTree(Number(command.params?.tabId)))
+    expect(await first.pair()).toBe(true)
+    expect((await fetch(`http://127.0.0.1:${relay.port}/cli/session/new`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${relay.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ id: "legacy-default" }),
+    })).ok).toBe(true)
+    expect((await executeSession(relay.port, relay.token, "legacy-default", "return page.url()")).isError).toBe(false)
+    const saved = JSON.parse(fs.readFileSync(path.join(home, "relays", String(relay.port), "sessions.json"), "utf8")) as {
+      sessions: Array<{ id: string; target?: { id: string } }>
+    }
+    const targetId = saved.sessions.find((entry) => entry.id === "legacy-default")?.target?.id
+    expect(targetId).toMatch(/^TARGET-\d+$/)
+    const tabId = Number(targetId!.slice("TARGET-".length))
+
+    first.close()
+    first = undefined
+    const firstPort = relay.port
+    await stopAndWait(relay.child)
+    relay = undefined
+    const started = await startRelay(home, {}, firstPort)
+    secondChild = started.child
+    replacement = new FakeExtension(home, started.port)
+      .on("Target.getTargetInfo", (command) => ({ targetInfo: targetInfo(Number(command.params?.tabId), urls) }))
+    // No capabilities, no agent flag: this is the pre-target-list extension behaviour.
+    expect(await replacement.pair({ attachedTabs: [tabId] })).toBe(true)
+    const reclaimed = () => owners(started.port, started.token).then((targets) =>
+      targets.some((target) => target.tabId === tabId && target.opencodeBrowserSessionId === "legacy-default"))
+    expect(await waitFor(reclaimed)).toBe(true)
+  } finally {
+    replacement?.close()
+    first?.close()
+    await stopAndWait(secondChild ?? relay?.child)
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+}, 40_000)
+
+test("a toolbar lend of a restored default page clears the sandbox so the next execute opens a new page", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-relay-lend-default-"))
+  const urls = new Map<number, string>()
+  let next = 510
+  let firstChild: ChildProcess | undefined
+  let secondChild: ChildProcess | undefined
+  let first: FakeExtension | undefined
+  let replacement: FakeExtension | undefined
+  try {
+    const relay = await startRelay(home)
+    firstChild = relay.child
+    first = new FakeExtension(home, relay.port)
+      .on("tabs.create", () => ({ tabId: next++ }))
+      .on("Target.getTargetInfo", (command) => ({ targetInfo: targetInfo(Number(command.params?.tabId), urls) }))
+      .on("Page.getFrameTree", (command) => frameTree(Number(command.params?.tabId)))
+    expect(await first.pair()).toBe(true)
+    expect((await fetch(`http://127.0.0.1:${relay.port}/cli/session/new`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${relay.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ id: "lend-default" }),
+    })).ok).toBe(true)
+    expect((await executeSession(relay.port, relay.token, "lend-default", "return page.url()")).isError).toBe(false)
+    const catalog = JSON.parse(fs.readFileSync(path.join(home, "relays", String(relay.port), "sessions.json"), "utf8")) as {
+      sessions: Array<{ id: string; target?: { id: string } }>
+    }
+    const oldTarget = catalog.sessions.find((entry) => entry.id === "lend-default")?.target?.id
+    expect(oldTarget).toMatch(/^TARGET-\d+$/)
+    const tabId = Number(oldTarget!.slice("TARGET-".length))
+    first.close()
+    first = undefined
+    await stopAndWait(relay.child)
+    firstChild = undefined
+
+    const started = await startRelay(home, {}, relay.port)
+    secondChild = started.child
+    replacement = new FakeExtension(home, started.port)
+      .on("tabs.create", () => ({ tabId: next++ }))
+      .on("Target.getTargetInfo", (command) => ({ targetInfo: targetInfo(Number(command.params?.tabId), urls) }))
+      .on("Page.getFrameTree", (command) => frameTree(Number(command.params?.tabId)))
+    expect(await replacement.pair({ deferReady: true, capabilities: ["tab-release"] })).toBe(true)
+    replacement.emit("toolbar.clicked", { tabId })
+    expect(await waitFor(async () => (await owners(started.port, started.token)).some((target) => target.tabId === tabId))).toBe(true)
+    const targetGone = () => {
+      try {
+        const saved = JSON.parse(fs.readFileSync(path.join(home, "relays", String(started.port), "sessions.json"), "utf8")) as {
+          sessions: Array<{ id: string; target?: { id: string } }>
+        }
+        return saved.sessions.find((entry) => entry.id === "lend-default")?.target === undefined
+      } catch {
+        return false
+      }
+    }
+    expect(await waitFor(targetGone)).toBe(true)
+    replacement.sendReady()
+    const creates = replacement.commands.filter((command) => command.method === "tabs.create").length
+    expect((await executeSession(started.port, started.token, "lend-default", "return page.url()")).isError).toBe(false)
+    expect(replacement.commands.filter((command) => command.method === "tabs.create").length).toBeGreaterThan(creates)
+  } finally {
+    replacement?.close()
+    first?.close()
+    await stopAndWait(secondChild ?? firstChild)
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+}, 40_000)
+
+test("pruning a dead default page clears the sandbox so the next execute does not hit target-unavailable", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-relay-prune-dead-"))
+  const urls = new Map<number, string>()
+  let next = 520
+  let first: FakeExtension | undefined
+  let replacement: FakeExtension | undefined
+  let secondChild: ChildProcess | undefined
+  try {
+    const relay = await startRelay(home)
+    first = new FakeExtension(home, relay.port)
+      .on("tabs.create", () => ({ tabId: next++ }))
+      .on("Target.getTargetInfo", (command) => ({ targetInfo: targetInfo(Number(command.params?.tabId), urls) }))
+      .on("Page.getFrameTree", (command) => frameTree(Number(command.params?.tabId)))
+    expect(await first.pair()).toBe(true)
+    expect((await fetch(`http://127.0.0.1:${relay.port}/cli/session/new`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${relay.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ id: "prune-dead" }),
+    })).ok).toBe(true)
+    expect((await executeSession(relay.port, relay.token, "prune-dead", "return page.url()")).isError).toBe(false)
+    first.close()
+    first = undefined
+    await stopAndWait(relay.child)
+
+    const started = await startRelay(home, {}, relay.port)
+    secondChild = started.child
+    replacement = new FakeExtension(home, started.port)
+      .on("tabs.create", () => ({ tabId: next++ }))
+      .on("Target.getTargetInfo", (command) => ({ targetInfo: targetInfo(Number(command.params?.tabId), urls) }))
+      .on("Page.getFrameTree", (command) => frameTree(Number(command.params?.tabId)))
+    // Capable, settled inventory, but the old tab is gone: prune must clear the sandbox default, not just the catalog.
+    expect(await replacement.pair({ capabilities: ["tab-release"] })).toBe(true)
+    expect(await waitFor(() => {
+      try {
+        const saved = JSON.parse(fs.readFileSync(path.join(home, "relays", String(started.port), "sessions.json"), "utf8")) as {
+          sessions: Array<{ id: string; target?: { id: string } }>
+        }
+        return saved.sessions.find((entry) => entry.id === "prune-dead")?.target === undefined
+      } catch {
+        return false
+      }
+    })).toBe(true)
+    const creates = replacement.commands.filter((command) => command.method === "tabs.create").length
+    expect((await executeSession(started.port, started.token, "prune-dead", "return page.url()")).isError).toBe(false)
+    expect(replacement.commands.filter((command) => command.method === "tabs.create").length).toBeGreaterThan(creates)
+  } finally {
+    replacement?.close()
+    first?.close()
+    await stopAndWait(secondChild)
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+}, 40_000)
+
 test("an older extension without release support still closes an unclaimed agent tab", async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-relay-legacy-release-"))
   const urls = new Map<number, string>()
@@ -404,8 +600,8 @@ test("an older extension without release support still closes an unclaimed agent
     replacement = new FakeExtension(home, started.port)
       .on("Target.getTargetInfo", (command) => ({ targetInfo: targetInfo(Number(command.params?.tabId), urls) }))
     expect(await replacement.pair({ attachedTabs: [430], agentTabs: [430] })).toBe(true)
-    // 431 was in the catalog but never announced: prune it. 430 is unclaimed after its session is gone.
-    expect(await waitFor(() => catalogTargets(home, first.port, "restart-legacy").every((target) => target.id !== "TARGET-431"))).toBe(true)
+    // An extension without the capability keeps the old behaviour: no target-list pruning either.
+    expect(catalogTargets(home, first.port, "restart-legacy").some((target) => target.id === "TARGET-431")).toBe(true)
     const post = await fetch(`http://127.0.0.1:${started.port}/cli/session/delete`, {
       method: "POST",
       headers: { authorization: `Bearer ${first.token}`, "content-type": "application/json" },

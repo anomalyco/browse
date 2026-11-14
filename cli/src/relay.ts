@@ -16,7 +16,7 @@ import { createHttpRequestHandler } from "./http-api.ts"
 import { forgetTab } from "./execute/human-input.ts"
 import { devExtension, PUBLIC_STORE_ID, stateRoot, storeConfig } from "./paths.ts"
 import { ProtectedFrameTracker } from "./cdp/protected-frames.ts"
-import type { CdpEvent, JsonObject } from "./protocol.ts"
+import { extensionCapabilityTabRelease, type CdpEvent, type JsonObject } from "./protocol.ts"
 import { RecordingRelay } from "./recording-relay.ts"
 import { relayHostname } from "./relay/config.ts"
 import {
@@ -444,7 +444,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     sessions: {
       persistedTargetOwner: (targetId, restoreOptions) =>
         sessions.persistedTargetOwner(targetId, restoreOptions) ??
-        ownerAcrossReconnect(targetId, restoreOptions?.includeHeldTargets !== false, restoreOptions?.browserKey),
+        ownerAcrossReconnect(
+          targetId,
+          restoreOptions?.legacy === true || restoreOptions?.includeHeldTargets !== false,
+          restoreOptions?.browserKey,
+        ),
       markTargetReplaced: (previousTargetId, targetId) => sessions.markTargetReplaced(previousTargetId, targetId),
       noteTargetHeld: (targetId, sessionId) => sessions.noteTargetHeld(targetId, sessionId),
       forgetTargetHeld: (targetId) => sessions.forgetTargetHeld(targetId),
@@ -471,6 +475,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       generation: (tabId) => browsers.generationOf(tabId),
       isCurrentGeneration: (generation) => browsers.isCurrentGeneration(generation),
       send: (command) => sendToExtension(command),
+      supportsTargetRelease: (tabId) => browsers.browserTab(tabId)?.link.rpc.supports(extensionCapabilityTabRelease) ?? false,
     },
     presentation: {
       replaced: recordRootReplacement,

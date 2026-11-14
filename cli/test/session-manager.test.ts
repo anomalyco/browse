@@ -27,6 +27,7 @@ class FakeSandbox implements ExecuteSandboxLike {
   realmStops = 0
   executions = 0
   readonly calls: Array<ExecuteOptions | undefined> = []
+  readonly detached: Array<{ readonly targetId: string; readonly releasedByUser?: boolean }> = []
   private abortWaiters: Array<() => void> = []
   constructor(readonly script: (sandbox: FakeSandbox) => Promise<ExecuteResult>) {}
   execute(_code: string, options?: ExecuteOptions) {
@@ -58,7 +59,10 @@ class FakeSandbox implements ExecuteSandboxLike {
   redactNetworkCaptureText(text: string) { return text }
   markTargetCrashed() { return false }
   markTargetProtectedUi() { return false }
-  markTargetDetached() { return false }
+  markTargetDetached(targetId: string, options: { readonly releasedByUser?: boolean } = {}) {
+    this.detached.push({ targetId, ...(options.releasedByUser === true ? { releasedByUser: true } : {}) })
+    return false
+  }
   markTargetReplaced() { return false }
   restore() {}
   getStatus() { return { connected: true, pageUrl: null, stateKeys: [] } }
@@ -452,20 +456,36 @@ describe("persisting a session's pages", () => {
     expect(unknown.targets).toBeUndefined()
   })
 
-  test("adopting a tab drops it and the previous target from the session's held targets", async () => {
-    const sessions = new OpenCodeBrowserSessions("http://127.0.0.1:0", () => new FakeSandbox(async () => ok("x")))
+  test("forget and prune clear the sandbox default binding, not only the catalog field", () => {
+    const { sessions, sandboxes } = manager(async () => ok("x"))
+    const relayed = sessions.createNew("relayed")
+    relayed.target = { id: "T-default", owner: "relay" }
+    relayed.targets = [{ id: "T-default", owner: "relay" }]
+
+    expect(sessions.forgetTargetHeld("T-default", { releasedByUser: true, reason: "released-by-user" })).toBe(true)
+    expect(relayed.target).toBeUndefined()
+    expect(sandboxes[0]?.detached).toEqual([{ targetId: "T-default", releasedByUser: true }])
+
+    const user = sessions.createNew("user-page")
+    user.target = { id: "T-user", owner: "user" }
+    expect(sessions.pruneHeldTargets({ browserKey: "browser-1", liveTargetIds: new Set(), includeUnknownBrowser: true })).toEqual(["T-user"])
+    expect(user.target).toBeUndefined()
+    expect(sandboxes[1]?.detached).toEqual([{ targetId: "T-user" }])
+  })
+
+  test("adopting a tab clears another session's relay-owned default through its sandbox", async () => {
+    const { sessions, sandboxes } = manager(async () => ok("x"))
     const session = sessions.createNew("adopt")
     session.target = { id: "T-old", owner: "relay" }
-    session.targets = [
-      { id: "T-old", owner: "relay" },
-      { id: "T-user", owner: "relay" },
-      { id: "T-keep", owner: "relay" },
-    ]
+    session.targets = [{ id: "T-old", owner: "relay" }]
+    const other = sessions.createNew("other")
+    other.target = { id: "T-user", owner: "relay" }
 
     await run(sessions.adopt({ sessionId: "adopt", createIfMissing: false, targetId: "T-user", targetUrl: "https://adopted.test/" }))
 
     expect(session.target).toEqual({ id: "T-user", owner: "user" })
-    expect(session.targets).toEqual([{ id: "T-keep", owner: "relay" }])
+    expect(other.target).toBeUndefined()
+    expect(sandboxes[1]?.detached).toEqual([{ targetId: "T-user" }])
   })
 })
 

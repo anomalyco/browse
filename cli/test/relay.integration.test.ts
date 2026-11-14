@@ -469,7 +469,7 @@ describe("relay", () => {
 
     const second = new FakeExtension(home, port)
       .on("Target.getTargetInfo", (command) => ({ targetInfo: info(Number(command.params?.tabId)) }))
-    expect(await second.pair({ attachedTabs: [101, 102], agentTabs: [101, 102] })).toBe(true)
+    expect(await second.pair({ attachedTabs: [101, 102] })).toBe(true)
     for (let i = 0; i < 50 && (await owners()).length < 2; i++) await Bun.sleep(50)
     expect((await owners()).map((target) => [target.tabId, target.opencodeBrowserSessionId]).sort()).toEqual([[101, "keeps-pages"], [102, "keeps-pages"]])
     // Only the session sees them; before, the page that wasn't the session's default came back as a user's tab, which

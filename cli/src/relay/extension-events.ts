@@ -297,7 +297,7 @@ export function createExtensionEventHandler(options: {
           if (hasUpdateNotice()) sendUpdateNotice()
           for (const target of registry.listRootTargets()) if (mine(target.tabId)) refreshTabGrouping(target.tabId)
           browsersChanged()
-          if (settled) {
+          if (settled && link.rpc.supports(extensionCapabilityTabRelease)) {
             // Targets the browser didn't announce are stale hints; never let the next relay try to reclaim them.
             const liveTargetIds = new Set(
               registry.listRootTargets().filter((target) => mine(target.tabId)).map((target) => target.targetInfo.targetId),

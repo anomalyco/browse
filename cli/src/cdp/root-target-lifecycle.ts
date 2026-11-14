@@ -37,6 +37,8 @@ type Options = {
     readonly generation: (tabId: number) => number
     readonly isCurrentGeneration: (generation: number) => boolean
     readonly send: (command: Omit<ExtensionCommand, "id">) => Effect.Effect<JsonObject, Error>
+    /** Older extensions don't send the agent flag; their inventory keeps the pre-target-list ownership rules. */
+    readonly supportsTargetRelease: (tabId: number) => boolean
   }
   /** A target restored from a session's persisted list must pass the session's allowlist before it is published. */
   readonly authorizeRestoredTarget?: (target: {
@@ -210,7 +212,9 @@ export class RootTargetLifecycle {
               ...(root.opencodeBrowserSessionId ? { opencodeBrowserSessionId: root.opencodeBrowserSessionId } : {}),
             }).pipe(Effect.asVoid)
           }
-          if (lifecycle.options.registry.routingRootTarget(options.tabId)) return lifecycle.reconcileUnlocked(transition)
+          if (lifecycle.options.registry.routingRootTarget(options.tabId)) {
+            return lifecycle.reconcileUnlocked(transition, !lifecycle.options.extension.supportsTargetRelease(options.tabId))
+          }
           return mayAttach
             ? lifecycle.attachUnlocked(transition, { tabId: options.tabId, owner: "user", alreadyAttached: true, reclaimHeldTargets }).pipe(Effect.asVoid)
             : Effect.void
@@ -353,11 +357,14 @@ export class RootTargetLifecycle {
       ? { ...reportedTargetInfo, openerId: options.openerTargetId }
       : reportedTargetInfo
     let publishedTargetInfo = targetInfo
-    const browserKey = this.options.browserKeyForTab?.(tabId)
+    const supportsTargetRelease = this.options.extension.supportsTargetRelease(tabId)
+    const legacyOwnership = !supportsTargetRelease
+    const browserKey = legacyOwnership ? undefined : this.options.browserKeyForTab?.(tabId)
     const restored = options.opencodeBrowserSessionId || options.restoreOwnership === false
       ? undefined
       : this.options.sessions.persistedTargetOwner(targetInfo.targetId, {
-          includeHeldTargets: options.reclaimHeldTargets === true,
+          includeHeldTargets: !legacyOwnership && options.reclaimHeldTargets === true,
+          ...(legacyOwnership ? { legacy: true } : {}),
           ...(browserKey ? { browserKey } : {}),
         })
     let owner = restored?.owner ?? options.owner
@@ -378,7 +385,7 @@ export class RootTargetLifecycle {
       opencodeBrowserSessionId = undefined
       // The page keeps its forbidden URL only until the blank navigation lands; publish it as blank already so a
       // guardrail reading visible pages never sees a URL the session's allowlist refused.
-      publishedTargetInfo = { ...targetInfo, url: "about:blank" }
+      publishedTargetInfo = { ...targetInfo, url: "about:blank", title: "" }
     }
     const target = this.options.registry.stageRootTarget({
       tabId,
@@ -388,10 +395,10 @@ export class RootTargetLifecycle {
       ...(opencodeBrowserSessionId ? { opencodeBrowserSessionId } : {}),
     })
     transition.staged = target
-    return yield* this.finish(transition, target, options.autoAttachParams, options.deferHeldTarget === true)
+    return yield* this.finish(transition, target, options.autoAttachParams, options.deferHeldTarget === true, legacyOwnership, options.restoreOwnership === false)
   })
 
-  private readonly reconcileUnlocked = Effect.fnUntraced(function* (this: RootTargetLifecycle, transition: Transition) {
+  private readonly reconcileUnlocked = Effect.fnUntraced(function* (this: RootTargetLifecycle, transition: Transition, legacyOwnership = false) {
     const { registry } = this.options
     const expected = registry.tabTargets.get(transition.tabId)
     const staged = registry.stagedRootTarget(transition.tabId)
@@ -405,7 +412,7 @@ export class RootTargetLifecycle {
       return yield* Effect.fail(new Error(staged ? "Unable to verify staged root target" : "Unable to verify committed root target"))
     }
     if (staged?.targetInfo.targetId === targetInfo.targetId) {
-      yield* this.finish(transition, staged)
+      yield* this.finish(transition, staged, undefined, false, legacyOwnership)
       return
     }
     if (!staged && expected?.targetInfo.targetId === targetInfo.targetId) return
@@ -417,7 +424,7 @@ export class RootTargetLifecycle {
     })
   })
 
-  private readonly finish = Effect.fnUntraced(function* (this: RootTargetLifecycle, transition: Transition, target: ConnectedTarget, autoAttachParams?: JsonObject, deferHeldTarget = false) {
+  private readonly finish = Effect.fnUntraced(function* (this: RootTargetLifecycle, transition: Transition, target: ConnectedTarget, autoAttachParams?: JsonObject, deferHeldTarget = false, legacyOwnership = false, releasedByUser = false) {
     const { registry, handoffs, sessions, clients, presentation } = this.options
     // Stage before auto-attach: synchronous child events must route to this generation.
     yield* this.command(transition, "Target.setAutoAttach", autoAttachParams ?? { autoAttach: true, waitForDebuggerOnStart: false, flatten: true })
@@ -447,8 +454,11 @@ export class RootTargetLifecycle {
     if (!deferHeldTarget) {
       if (change.target.owner === "relay" && change.target.opencodeBrowserSessionId) {
         sessions.noteTargetHeld(change.target.targetInfo.targetId, change.target.opencodeBrowserSessionId)
-      } else {
-        sessions.forgetTargetHeld(change.target.targetInfo.targetId)
+      } else if (!legacyOwnership) {
+        sessions.forgetTargetHeld(change.target.targetInfo.targetId, {
+          releasedByUser,
+          reason: releasedByUser ? "released-by-user" : "released",
+        })
       }
     }
     // No asynchronous gap between retiring old views and publishing the committed tree.
