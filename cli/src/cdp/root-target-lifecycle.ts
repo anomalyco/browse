@@ -20,7 +20,7 @@ type AttachOptions = {
 
 type Options = {
   readonly registry: TargetRegistry
-  readonly sessions: Pick<OpenCodeBrowserSessions, "persistedTargetOwner" | "markTargetReplaced">
+  readonly sessions: Pick<OpenCodeBrowserSessions, "persistedTargetOwner" | "markTargetReplaced" | "noteTargetHeld">
   readonly handoffs: Pick<HandoffRegistry, "rebindTarget">
   readonly clients: Pick<CdpClientPool<object>, "detachTab">
   readonly extension: {
@@ -387,6 +387,10 @@ export class RootTargetLifecycle {
       sessions.markTargetReplaced(change.previous.targetInfo.targetId, change.target.targetInfo.targetId)
       clients.detachTab(target.tabId)
       presentation.replaced(change)
+    }
+    // Record every relay-owned page the session holds now, so a relay that starts later reclaims it.
+    if (change.target.owner === "relay" && change.target.opencodeBrowserSessionId) {
+      sessions.noteTargetHeld(change.target.targetInfo.targetId, change.target.opencodeBrowserSessionId)
     }
     // No asynchronous gap between retiring old views and publishing the committed tree.
     presentation.committed(change.target)

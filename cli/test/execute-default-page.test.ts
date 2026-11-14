@@ -534,6 +534,21 @@ describe("DefaultPageHost recovery", () => {
     expect(host.changes.at(-1)).toEqual({ id: "target-7", owner: "relay" })
   })
 
+  test("a target id that couldn't be resolved is recorded on a later execute", async () => {
+    const host = new TestHost()
+    // The first probe fails inside its timeout, as a page still loading after a browser transition does.
+    const page = new FakePage("https://late.example/", "")
+    const context = asContext({ pages: () => [], newPage: async () => page.asPage() })
+
+    expect(await host.sessionPage(context)).toBe(page.asPage())
+    expect(host.targetId()).toBeUndefined()
+
+    page.targetId = "target-late"
+    expect(await host.sessionPage(context)).toBe(page.asPage())
+    expect(host.targetId()).toBe("target-late")
+    expect(host.changes.at(-1)).toEqual({ id: "target-late", owner: "relay" })
+  })
+
   test("getSessionPage reattaches the closed default page's tab under the same target", async () => {
     const host = new TestHost()
     const closed = new FakePage()

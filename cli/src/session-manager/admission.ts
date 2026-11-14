@@ -104,7 +104,7 @@ export class SessionAdmission {
   }
 
   private persistedSessions(): PersistedSession[] {
-    return Array.from(this.sessions.values(), (session) => persistedSession(session))
+    return Array.from(this.sessions.values(), (session) => persistedSession(session, this.hooks))
   }
 
   schedulePersistence(): void {

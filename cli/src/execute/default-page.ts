@@ -259,6 +259,19 @@ export abstract class DefaultPageHost {
     this.clearSnapshotRefs()
   }
 
+  /**
+   * The first target-id probe at page creation can fail inside its timeout (a page still loading after a browser
+   * transition). Try again on a later execute so the session's target is eventually recorded.
+   */
+  private async identifyBoundDefaultPage(): Promise<void> {
+    const page = this.page
+    if (!page || page.isClosed() || this.defaultPageTargetId !== undefined) return
+    const targetId = await resolvePageTargetId(page)
+    if (!targetId || this.page !== page || page.isClosed() || this.defaultPageTargetId !== undefined) return
+    this.defaultPageTargetId = targetId
+    this.notifyDefaultTargetChange()
+  }
+
   protected async getSessionPage({ context, targetSelection }: { readonly context: BrowserContext; readonly targetSelection?: ExecuteTargetSelection }): Promise<Page> {
     const selection = targetSelection ?? {}
     if (hasExplicitTargetSelection(selection)) {
@@ -268,6 +281,7 @@ export abstract class DefaultPageHost {
       }
       return selected
     }
+    await this.identifyBoundDefaultPage()
     if (!this.page && this.defaultPageTargetId) {
       const targetId = this.defaultPageTargetId
       const rebind = this.pendingTargetRebind
