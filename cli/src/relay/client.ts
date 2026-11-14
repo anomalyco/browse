@@ -538,12 +538,12 @@ const layer: Layer.Layer<Service, RelayConfigInvalid, HttpClient.HttpClient> = L
 export const layerFetch: Layer.Layer<Service, RelayConfigInvalid> = layer.pipe(Layer.provide(NodeHttpClient.layerNodeHttp))
 
 /**
- * The process the relay watches for this MCP server: the MCP supervisor when it runs one (it outlives
- * the servers it swaps on an update, so the session and its tabs survive), else this process.
+ * The process the relay watches for this MCP server: an older install's supervisor when it started this server
+ * (it outlives the server it swaps on an update, so the session and its tabs survive), else this process.
  */
 function mcpClientPid(): number {
-  const shim = Number(process.env.OPENCODE_BROWSER_CLIENT_PID)
-  return Number.isSafeInteger(shim) && shim > 1 && shim === process.ppid ? shim : process.pid
+  const supervisor = Number(process.env.OPENCODE_BROWSER_CLIENT_PID)
+  return Number.isSafeInteger(supervisor) && supervisor > 1 && supervisor === process.ppid ? supervisor : process.pid
 }
 
 /** layerFetch for the MCP server, which names its process to the relay (see `make`). */

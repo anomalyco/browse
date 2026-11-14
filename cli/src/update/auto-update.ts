@@ -16,10 +16,10 @@
 // install reads the npm dist-tag (latest, or dev for a dev build, which every push to dev publishes). Mode "on"
 // (default) waits for idle before running the installer in its own process and again before restarting the relay from
 // the same entry path. "notify" only shows the update; "off" doesn't check.
-// OPENCODE_BROWSER_AUTO_UPDATE overrides the stored mode. Installed binaries and npm global installs supervise their MCP
-// server (mcp/supervisor.ts): it notices the installed version change and swaps the server between requests once the
-// relay runs it. The installer and npm do their own integrity checks (the release service's size and SHA-256 for a
-// binary); there is no separate checksum path here.
+// OPENCODE_BROWSER_AUTO_UPDATE overrides the stored mode. An installed binary or npm global install runs its MCP
+// server directly (mcp.ts), so a running server keeps its old build until the agent restarts it; the relay it talks to
+// may already be the newer build, and still serves older clients. The installer and npm do their own integrity checks
+// (the release service's size and SHA-256 for a binary); there is no separate checksum path here.
 import { spawn, spawnSync } from "node:child_process"
 import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, realpathSync, writeFileSync } from "node:fs"
 import os from "node:os"

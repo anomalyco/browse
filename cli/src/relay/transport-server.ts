@@ -67,7 +67,7 @@ export function createRelayTransportServers(deps: TransportServerDeps): {
   /** The pathname as the request handler routes it, without its trailing slash. */
   const routePath = (pathname: string | undefined): string => pathname?.replace(/\/$/, "") || "/"
 
-  /** Polled continuously by the supervisor, clients and the extension's status page; too noisy to log. */
+  /** Polled continuously by clients and the extension's status page; too noisy to log. */
   const isSilentProbePath = (pathname: string | undefined): boolean => {
     const path = routePath(pathname)
     return path === "/version" || path === "/json/version" || path === "/extension/status"
@@ -75,7 +75,7 @@ export function createRelayTransportServers(deps: TransportServerDeps): {
 
   /**
    * Requests that don't mean an agent is using the browser: the updater's and CLI's lifecycle calls (POST /shutdown, and
-   * the version probe every client and the supervisor make first) and the read-only status and doctor reads. They leave
+   * the version probe every client makes first) and the read-only status and doctor reads. They leave
    * the auto-updater's idle clock alone; an agent's real request (execute, a session, capture, recording or setting
    * change) restarts it.
    */

@@ -87,8 +87,8 @@ Each agent has its own current session when the client names the agent (OpenCode
 
 The \`status\` tool reports relay and extension state. \`browse doctor\` (setup and connection problems) and \`browse skill\` (the longer agent reference) are shell commands, not MCP tools.`
 
-/** The implicit session the MCP supervisor picked (mcp/supervisor.ts), when valid. */
-function shimSession(): string | undefined {
+/** The implicit session an older install's MCP supervisor passed down, when valid. It keeps an agent's session across that supervisor's swap. */
+function inheritedSession(): string | undefined {
   const value = process.env.OPENCODE_BROWSER_MCP_SESSION
   return value && /^mcp-[0-9a-f]{8}$/.test(value) ? value : undefined
 }
@@ -97,9 +97,10 @@ const registerTools = Effect.gen(function* () {
   const server = yield* McpServer.McpServer
   const relay = yield* RelayClient.Service
   const configuredSession = Option.getOrUndefined(yield* Config.option(Config.String("OPENCODE_BROWSER_SESSION")))
-  // The session of calls that don't name their agent. Every server the MCP supervisor starts keeps the same one.
+  // The session of calls that don't name their agent. An older supervisor's server kept the same one; this one keeps
+  // its own for the life of the process.
   const currentSession: CurrentSession = {
-    id: configuredSession || shimSession() || `mcp-${crypto.randomUUID().slice(0, 8)}`,
+    id: configuredSession || inheritedSession() || `mcp-${crypto.randomUUID().slice(0, 8)}`,
     established: Boolean(configuredSession),
   }
   // Checks for a newer browse in the background (cached; never delays a tool call). The first tool result after one
@@ -147,7 +148,16 @@ const registerTools = Effect.gen(function* () {
         const operation = requiresRelay
           ? RelayLifecycle.ensureRelay({ relay }).pipe(
               Effect.flatMap((readiness) =>
-                readiness.buildProblem ? Effect.fail(new Error(readiness.buildProblem)) : spec.handle(payload),
+                readiness.buildProblem
+                  ? Effect.fail(new Error(readiness.buildProblem))
+                  : spec.handle(payload).pipe(
+                      // A newer relay serves this older server until a request it can't decode; say how to pick up the
+                      // update then, instead of repeating a wire error the agent can't act on.
+                      Effect.mapError((error) => {
+                        const advice = RelayLifecycle.olderMcpClientAdvice(readiness.version, error)
+                        return advice ? new Error(`${error.message}\n\n${advice}`) : error
+                      }),
+                    ),
               ),
             )
           : spec.handle(payload)

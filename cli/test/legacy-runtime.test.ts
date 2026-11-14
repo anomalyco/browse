@@ -17,7 +17,7 @@ const homes: string[] = []
 afterEach(() => {
   for (const home of homes.splice(0)) fs.rmSync(home, { recursive: true, force: true })
 })
-// A real build, which the tests install as npm's global package (a checkout never supervises its MCP server).
+// A real build, which the tests install as npm's global package.
 const build = fs.mkdtempSync(path.join(os.tmpdir(), "browse-takeover-build-"))
 beforeAll(() => bundleCli({ outdir: build, version: "0.0.1" }), 30_000)
 afterAll(() => fs.rmSync(build, { recursive: true, force: true }))
@@ -172,15 +172,15 @@ describe("taking over the old self-managed runtime", () => {
     }
   }, 60_000)
 
-  test("an agent's running shim moves its session onto the current install, which then follows the next update itself", async () => {
-    const { home, shim, packageDir, runtime } = oldRuntimeHome(homes)
+  test("an agent's running shim moves its session onto the current install, which stays until the agent restarts it", async () => {
+    const { home, oldData, shim, packageDir, runtime } = oldRuntimeHome(homes)
     installBuild(packageDir, runtime.version)
-    // No relay: the shim and the supervisor swap after a few checks find none, and tools/call answers without one.
+    // No relay: the shim swaps after a few checks find none, and tools/call answers without one.
     const mcp = mcpStdio({
       home,
       port: await freePort(),
       command: [node, shim],
-      env: { OPENCODE_BROWSER_HOME: undefined, OPENCODE_BROWSER_CLIENT_PID: undefined, OPENCODE_BROWSER_MCP_DIRECT: undefined, OPENCODE_BROWSER_MCP_SESSION: undefined },
+      env: { OPENCODE_BROWSER_HOME: undefined, OPENCODE_BROWSER_CLIENT_PID: undefined, OPENCODE_BROWSER_MCP_SESSION: undefined },
     })
     const call = () => mcp.request("tools/call", { name: "status", arguments: {} })
     try {
@@ -188,13 +188,16 @@ describe("taking over the old self-managed runtime", () => {
       mcp.notify("notifications/initialized")
       adoptLegacyRuntime(legacyRuntime(home), runtime)
       expect((await within(15_000, call(), "a tools/call after the takeover")).result).toBeDefined()
-      // The current install supervises its own server: one server runs from the package, and a later update swaps it.
-      expect(await until(() => serversUnder(packageDir).length === 1)).toBe(true)
-      const [first] = serversUnder(packageDir)
+      // The current install serves directly: one MCP process runs from the forwarder, with no supervisor above it.
+      const forwarder = path.join(oldData, "runtime", "versions", runtime.version, "node_modules", "@opencode", "browse", "dist", "cli.mjs")
+      expect(await until(() => serversUnder(forwarder).length === 1)).toBe(true)
+      const first = serversUnder(forwarder)[0]!
+      // A later update replaces the package in place; the running server keeps its old code until the agent restarts it.
       installBuild(packageDir, "0.0.16-dev.131")
-      expect((await within(15_000, call(), "a tools/call during the next update")).result).toBeDefined()
-      expect(await until(() => serversUnder(packageDir).length === 1 && serversUnder(packageDir)[0] !== first)).toBe(true)
+      await Bun.sleep(1_500)
+      expect(serversUnder(forwarder)).toEqual([first])
       expect((await within(5_000, call(), "a tools/call after the next update")).result).toBeDefined()
+      expect(serversUnder(forwarder)).toEqual([first])
     } finally {
       mcp.close()
       for (const pid of serversUnder(home)) {

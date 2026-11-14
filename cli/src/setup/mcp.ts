@@ -126,26 +126,33 @@ function ownedMcp(server: Servers[string] | undefined, entry: string | undefined
 
 /**
  * The browse MCP server entry: the existing one with its command and runtime fingerprint updated, so environment
- * variables and other settings the user added (`enabled`, `timeout`) stay.
+ * variables and other settings the user added (`disabled`, `timeout`) stay. OpenCode shares one local server across
+ * every directory only when `pool` is true and `cwd` is fixed: browse speaks MCP 2026-07-28 and keys per-agent current
+ * sessions on OpenCode's session id, so one server is safe. Other agents keep their own schema through `editAgentConfig`.
  */
 function mergedMcpServer(existing: Servers[string] | undefined, command: string[], runtime: string) {
   const environment =
     typeof existing?.environment === "object" && existing.environment !== null && !Array.isArray(existing.environment)
       ? existing.environment
       : {}
-  return { ...existing, type: "local", command, environment: { ...environment, OPENCODE_BROWSER_RUNTIME: runtime } }
+  return {
+    ...existing,
+    type: "local",
+    command,
+    cwd: "~",
+    pool: true,
+    environment: { ...environment, OPENCODE_BROWSER_RUNTIME: runtime },
+  }
 }
 
 /** Writes (or updates) the browse MCP server so it runs the installed runtime, keeping the user's settings. */
 export function configureMcp(file: string, entry: string, previousEntry?: string) {
-  // A running MCP server keeps its old code after an update, and its relay calls then fail on the build check.
-  // Stamping the runtime's fingerprint into the entry changes the config whenever the runtime changes, which
-  // makes opencode restart the server with the new code.
+  // A running MCP server keeps its old code after an update. A checkout stamps the bundle's fingerprint into the entry,
+  // so the next install changes the config and makes opencode restart the server; an installed binary or npm package
+  // writes the same entry across updates, and the agent starts the new build when it restarts the server.
   const existing = mcpServers(file)[MCP_NAME]
   if (existing && !ownedMcp(existing, previousEntry)) return undefined
   const renamed = removeMcp(LEGACY_MCP_NAME, previousEntry, file)
-  // An installed binary or npm package supervises its server and swaps it after an update, so its entry stays the same.
-  // A checkout has no supervisor: its fingerprint changes the config, making the agent restart the server.
   const stable = !scriptEntry(entry) || !fromSource
   const server = mergedMcpServer(
     existing,
@@ -231,8 +238,8 @@ export async function installRuntime(): Promise<{ entry: string; version: string
   if (!existsSync(entry)) fail(`npm didn't install ${PACKAGE} in ${root}; run \`npm install -g ${PACKAGE}\` and try again.`)
   const version = readJson<{ version?: string }>(path.join(root, "@opencode", "browse", "package.json"))?.version ?? opencodeBrowserVersion
   // Agents run `browse` from PATH, not an absolute node and package path: nvm/fnm change node between sessions, and the
-  // global npm bin folder is on PATH whenever npm is. The supervisor and npm keep it current. Setup-time self-spawns
-  // use the bundle this install just wrote, since Windows can't start the PATH shim without a shell.
+  // global npm bin folder is on PATH whenever npm is. npm keeps it current. Setup-time self-spawns use the bundle this
+  // install just wrote, since Windows can't start the PATH shim without a shell.
   return { entry: "browse", version, spawnEntry: entry }
 }
 
