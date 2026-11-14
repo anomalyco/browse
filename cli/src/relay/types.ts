@@ -96,6 +96,11 @@ export type OpenCodeBrowserSession = {
   readonly executeSemaphore: Semaphore.Semaphore
   /** Durable default-target identity. Authoritative live ownership remains in TargetRegistry. */
   target?: SessionTarget
+  /**
+   * Relay-owned targets the session held when the catalog was written (its default page included), restored at
+   * startup so every page and popup it opened is reclaimed. Live ownership remains in TargetRegistry.
+   */
+  targets?: readonly SessionTarget[]
   updatedAt: string
   /** The process that last used the session (OpenCode-Browser-Client-Pid); see OpenCodeBrowserSessions.noteClient. */
   clientPid?: number

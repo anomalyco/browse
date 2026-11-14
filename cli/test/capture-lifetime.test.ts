@@ -61,6 +61,7 @@ describe("restarting past a forgotten capture", () => {
     quiescent: () => true,
     audit: () => Effect.void,
     stop: () => {},
+    log: () => {},
   })
   const request = (force?: boolean) => ({
     instanceId: "relay-1",
@@ -96,6 +97,7 @@ describe("restarting past a forgotten capture", () => {
       quiescent: () => true,
       audit: () => Effect.void,
       stop: () => {},
+      log: () => {},
     })
     const started = Date.now()
     const exit = await Effect.runPromise(Effect.exit(control.close()))

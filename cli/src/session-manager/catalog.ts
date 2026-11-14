@@ -7,6 +7,13 @@ import { Schema } from "effect"
 import { isNodeError, isUnsupportedDirectorySyncError } from "../fs-durability.ts"
 import { isValidSessionId } from "../relay/helpers.ts"
 
+const PersistedTarget = Schema.Struct({
+  id: Schema.String,
+  owner: Schema.Literals(["relay", "user"]),
+})
+
+export type PersistedTarget = Schema.Schema.Type<typeof PersistedTarget>
+
 export const PersistedSession = Schema.Struct({
   id: Schema.String,
   createdAt: Schema.String,
@@ -17,10 +24,12 @@ export const PersistedSession = Schema.Struct({
   keepVisible: Schema.optionalKey(Schema.Boolean),
   browser: Schema.optionalKey(Schema.String),
   browserKey: Schema.optionalKey(Schema.String),
-  target: Schema.optionalKey(Schema.Struct({
-    id: Schema.String,
-    owner: Schema.Literals(["relay", "user"]),
-  })),
+  target: Schema.optionalKey(PersistedTarget),
+  /**
+   * Every relay-owned target the session holds, so a relay that starts after this one reclaims all of them.
+   * Older relays ignore it; older catalogs without it still load.
+   */
+  targets: Schema.optionalKey(Schema.Array(PersistedTarget)),
   /** The process (an MCP server, a CLI) that last used the session, so the relay can tell when it is gone. */
   clientPid: Schema.optionalKey(Schema.Int),
 })

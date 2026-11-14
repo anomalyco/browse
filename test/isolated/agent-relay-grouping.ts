@@ -284,6 +284,18 @@ describe("grouping: one shared group for all agents (default)", () => {
     expect(tab(userTab).groupId).toBe(-1)
   })
 
+  test("a released agent tab stays open, ungrouped and off idle cleanup", async () => {
+    await stub.chrome.storage.local.set({ agentTabsGrouping: "shared" })
+    await userWindow()
+    const agent = await agentTab("github")
+    expect(await TabCleanup.isTracked(agent.tabId)).toBe(true)
+    // A relay that can't identify the tab's session releases it instead of closing it.
+    await command("debugger.detach", { tabId: agent.tabId, release: true })
+    expect(stub.state.tabs.has(agent.tabId)).toBe(true)
+    expect(tab(agent.tabId).groupId).toBe(-1)
+    expect(await TabCleanup.isTracked(agent.tabId)).toBe(false)
+  })
+
   test("a debugging bar cancel leaves agent tabs grouped and tracked, and releases a lent tab", async () => {
     await stub.chrome.storage.local.set({ agentTabsGrouping: "shared" })
     const { userTab } = await userWindow()
