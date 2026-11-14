@@ -137,6 +137,43 @@ describe("RelayClient read timeouts", () => {
     expect(relay.calls()).toBe(1)
   })
 
+  test("a relay record gone after /version answered means the relay left, not another program", async () => {
+    writeRelayState({
+      port: 19988,
+      configuredPort: 19988,
+      pid: process.pid,
+      instanceId: "relay-instance",
+      startedAt: new Date().toISOString(),
+    })
+    const leaving = HttpClient.make((request) => Effect.sync(() => fs.rmSync(relayStatePath(), { force: true })).pipe(
+      Effect.as(HttpClientResponse.fromWeb(request, Response.json(version))),
+    ))
+    const exit = await withRelay(leaving, (client) => client.version, 1)
+    expect(exit._tag).toBe("Failure")
+    expect(failureTag(exit)).toContain(`"error":{"_tag":"RelayClient.RelayUnreachable"`)
+    expect(failureTag(exit)).not.toContain(`"error":{"_tag":"RelayClient.RelayDecodeFailed"`)
+  })
+
+  test("a /version cut off as the relay record disappears is the relay leaving too", async () => {
+    writeRelayState({
+      port: 19988,
+      configuredPort: 19988,
+      pid: process.pid,
+      instanceId: "relay-instance",
+      startedAt: new Date().toISOString(),
+    })
+    const leaving = HttpClient.make((request) => Effect.sync(() => fs.rmSync(relayStatePath(), { force: true })).pipe(
+      Effect.as(HttpClientResponse.fromWeb(request, new Response(`{"version":"0.0.15","inst`, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }))),
+    ))
+    const exit = await withRelay(leaving, (client) => client.version, 1)
+    expect(exit._tag).toBe("Failure")
+    expect(failureTag(exit)).toContain(`"error":{"_tag":"RelayClient.RelayUnreachable"`)
+    expect(failureTag(exit)).not.toContain(`"error":{"_tag":"RelayClient.RelayDecodeFailed"`)
+  })
+
   test("a starting relay's 503 is relay-starting while proving the endpoint, not another program", async () => {
     const starting = HttpClient.make((request) => Effect.succeed(HttpClientResponse.fromWeb(
       request,

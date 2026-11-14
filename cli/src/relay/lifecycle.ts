@@ -265,14 +265,16 @@ function waitForRelayExitOrReplacement(options: {
       : Effect.succeed(version)),
     // A foreign listener appears at the endpoint the moment the draining relay stops answering on this port but before
     // its relay.json goes. That is still this relay's shutdown, not an exit: starting a replacement now would hit the
-    // port the draining relay still holds on its fallback.
-    Effect.catch((error) =>
-      isRelayUnreachable(error) ? Effect.succeed(undefined)
-      : isForeignListener(error, options.pinned)
-        ? (stillRecorded()
-          ? Effect.fail(new RelayStillRunning("browse relay is still draining; no replacement was started"))
-          : Effect.succeed(undefined))
-        : Effect.fail(error)),
+    // port the draining relay still holds on its fallback. A draining relay can also cut an in-flight /version
+    // (RelayDecodeFailed), which reads as foreign while its relay.json still names it.
+    Effect.catch((error) => {
+      if (isRelayUnreachable(error)) return Effect.succeed(undefined)
+      const foreign = isForeignListener(error, options.pinned)
+      if ((foreign || error instanceof RelayClient.RelayDecodeFailed) && stillRecorded()) {
+        return Effect.fail(new RelayStillRunning("browse relay is still draining; no replacement was started"))
+      }
+      return foreign ? Effect.succeed(undefined) : Effect.fail(error)
+    }),
     Effect.retry({
       times: options.retryTimes ?? 200,
       schedule: Schedule.spaced(options.retryDelayMs ?? 50),

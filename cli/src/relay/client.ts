@@ -279,6 +279,15 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
       cause,
     })
 
+  /** The live relay record this probe started under is gone: the relay left mid-probe, it isn't a foreign listener. */
+  const relayLeaving = (endpoint: string, cause: unknown) =>
+    new RelayUnreachable({
+      message: `browse relay is not reachable at ${endpoint}. Relay-backed CLI commands start it automatically; use \`${cliCommand("serve")}\` only for foreground debugging.`,
+      endpoint,
+      path: "/version",
+      cause,
+    })
+
   /**
    * relay.json for the configured port when its process is alive. One read per verification: a live file naming
    * another port, or another instance, means the endpoint under test is not this install's relay.
@@ -452,6 +461,7 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
           const instanceId = version.instanceId
           if (typeof instanceId !== "string") return Effect.fail(notBrowse(endpoint, version))
           const after = liveRelayState()
+          if (state !== undefined && after === undefined) return Effect.fail(relayLeaving(endpoint, version))
           if (state !== undefined && !sameLiveState(state, after)) return Effect.fail(notBrowse(endpoint, version))
           if (after !== undefined && (after.port !== Number(new URL(endpoint).port) || after.instanceId !== instanceId))
             return Effect.fail(notBrowse(endpoint, version))
@@ -462,10 +472,15 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
             return version
           })
         }),
-        Effect.mapError((error) =>
-          error instanceof RelayDecodeFailed || (error instanceof RelayRejected && !error.code && error.status === 404)
-            ? new RelayDecodeFailed({ message: `Relay port ${new URL(currentEndpoint()).port} is in use by another program (not a browse /version response).`, path: "/version", cause: error })
-            : error),
+        Effect.mapError((error) => {
+          if (!(error instanceof RelayDecodeFailed || (error instanceof RelayRejected && !error.code && error.status === 404))) return error
+          const endpoint = currentEndpoint()
+          // A draining relay can cut this response as it stops; if its relay.json went with it, this is that relay
+          // leaving, not another program holding the port.
+          return state !== undefined && liveRelayState() === undefined
+            ? relayLeaving(endpoint, error)
+            : notBrowse(endpoint, error)
+        }),
       )
     }),
     shutdown: (request) => postJson("/shutdown", { ...request }, RelayShutdownResponse),
