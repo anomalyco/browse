@@ -271,7 +271,24 @@ export function createCdpDispatcher(options: {
       catch: (error) => error instanceof Error ? error : new Error(String(error)),
     })
     const { tabId } = route
+    // Fetch events are delivered through the tab's root announcement, so a client attached only to a child, or one
+    // that detached the root, cannot answer them. Refuse instead of owning interception nobody can continue.
+    if (message.method === "Fetch.enable") {
+      const rootSessionId = registry.tabTargets.get(tabId)?.sessionId
+      if (!rootSessionId || !cdpClients.hasSession(socket, rootSessionId)) {
+        return yield* Effect.fail(new Error("Fetch.enable requires this client to be attached to the tab's root target; attach the tab before enabling request interception."))
+      }
+      // Recorded at forwarding time, before the command can race a release: a client that enabled Fetch can answer
+      // its paused requests even if the send fails. The guard above refused read-only clients already.
+      cdpClients.markInterceptionOwner(socket, tabId, route.chromeSessionId)
+    }
     tabActivity.touch(tabId)
+    // Dropping this client's ownership is local even when the disable itself is suppressed: another client still
+    // owning the same session keeps Chrome's interception on, and its later disconnect releases the tab.
+    if (message.method === "Fetch.disable") {
+      cdpClients.clearInterceptionOwner(socket, tabId, route.chromeSessionId, false)
+      if (cdpClients.hasInterceptionOwner(tabId, route.chromeSessionId)) return {}
+    }
     const executingSession = cdpClients.sessionId(socket)
     if (executingSession && sessions.isExecuting(executingSession)) {
       yield* tabActivity.focus(tabId, executingSession)

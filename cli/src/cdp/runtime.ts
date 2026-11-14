@@ -6,6 +6,10 @@ import { boundedToken, runtimeFailureKind } from "../update/runtime-diagnostics.
 import type { TargetRegistry } from "./target-registry.ts"
 
 const maxCachedContexts = 512
+/** A Fetch.disable waits this long per session: a wedged tab must not hold the others or a relay drain. */
+const interceptionReleaseTimeout = "3 seconds"
+/** Tabs release side by side; one wedged tab must not starve the rest. */
+const interceptionReleaseConcurrency = 4
 
 type Waiter = {
   readonly sessionId: string
@@ -208,19 +212,54 @@ export class CdpRuntime<Client extends object> {
     return first.result
   })
 
+  /**
+   * Whole-pool idle cleanup: drop Playwright's Runtime domain. Fetch interception is per tab and is released by
+   * `releaseInterception` when the tab's last owner disconnects, so a tab another client still owns keeps it.
+   */
   readonly disableIdle = Effect.fn("CdpRuntime.disableIdle")(function* (this: CdpRuntime<Client>, stillIdle: () => boolean) {
-    const { registry } = this.options
-    const routes: CdpRoutedSession[] = registry.listRootTargets().map((target) => ({ tabId: target.tabId, rootSessionId: target.sessionId }))
-    for (const target of registry.childTargets.values()) {
-      const root = registry.tabTargets.get(target.tabId)
-      if (root) routes.push({ tabId: target.tabId, rootSessionId: root.sessionId, chromeSessionId: target.sessionId })
-    }
-    const targets = routes.map((route) => ({ route, current: this.capture(route) }))
+    const targets = this.routes().map((route) => ({ route, current: this.capture(route) }))
     for (const { route, current } of targets) {
       if (!stillIdle()) break
       yield* this.reset(route, "Runtime.disable", {}, () => stillIdle() && current())
     }
   })
+
+  /**
+   * Releases the Fetch interception Patchright turns on for every page it attaches to. A paused request waits for its
+   * `Fetch.requestPaused` to be answered; once the last client that enabled Fetch on the tab is gone nobody can, so
+   * disabling the domain lets Chrome continue them. Each tab's routes are snapshotted when its turn starts, the owner
+   * set is checked again before every send, and the root and child sends run together.
+   */
+  readonly releaseInterception = Effect.fn("CdpRuntime.releaseInterception")(function* (
+    this: CdpRuntime<Client>,
+    tabIds: readonly number[],
+    shouldRelease: (tabId: number) => boolean,
+  ) {
+    yield* Effect.forEach(Array.from(new Set(tabIds)), (tabId) => Effect.suspend(() => {
+      if (!shouldRelease(tabId)) return Effect.void
+      const targets = this.routes(new Set([tabId])).map((route) => ({ route, current: this.capture(route) }))
+      return Effect.forEach(targets, ({ route, current }) => {
+        if (!shouldRelease(tabId)) return Effect.void
+        return this.reset(route, "Fetch.disable", {}, () => shouldRelease(tabId) && current()).pipe(
+          Effect.timeoutOption(interceptionReleaseTimeout),
+        )
+      }, { concurrency: "unbounded", discard: true })
+    }), { concurrency: interceptionReleaseConcurrency, discard: true })
+  })
+
+  /** Every root target and the child sessions under it (iframes, workers), optionally only for these tabs. */
+  private routes(tabIds?: ReadonlySet<number>): CdpRoutedSession[] {
+    const { registry } = this.options
+    const routes: CdpRoutedSession[] = registry.listRootTargets()
+      .filter((target) => tabIds === undefined || tabIds.has(target.tabId))
+      .map((target) => ({ tabId: target.tabId, rootSessionId: target.sessionId }))
+    for (const target of registry.childTargets.values()) {
+      if (tabIds !== undefined && !tabIds.has(target.tabId)) continue
+      const root = registry.tabTargets.get(target.tabId)
+      if (root) routes.push({ tabId: target.tabId, rootSessionId: root.sessionId, chromeSessionId: target.sessionId })
+    }
+    return routes
+  }
 
   /** Replay a complete cache only when it already holds the requester's root-frame default context. */
   private replayCached(client: Client, route: CdpRoutedSession, frameId: string): boolean {
@@ -265,14 +304,15 @@ export class CdpRuntime<Client extends object> {
     )
   }
 
-  private reset(route: CdpRoutedSession, method: "Runtime.enable" | "Runtime.disable", params: JsonObject, current: () => boolean): Effect.Effect<void> {
+  private reset(route: CdpRoutedSession, method: "Runtime.enable" | "Runtime.disable" | "Fetch.disable", params: JsonObject, current: () => boolean): Effect.Effect<void> {
     return Effect.suspend(() => {
       if (!current()) return Effect.void
-      this.trace(route, `runtime-reset command=${method}`)
+      const trace = method === "Fetch.disable" ? "fetch-release" : "runtime-reset"
+      this.trace(route, `${trace} command=${method}`)
       return this.options.send({ tabId: route.tabId, method, params, ...(route.chromeSessionId === undefined ? {} : { sessionId: route.chromeSessionId }) }).pipe(
         Effect.match({
-          onFailure: (error) => this.trace(route, `runtime-reset command=${method} outcome=failed failure=${runtimeFailureKind(error)}`),
-          onSuccess: () => this.trace(route, `runtime-reset command=${method} outcome=ok`),
+          onFailure: (error) => this.trace(route, `${trace} command=${method} outcome=failed failure=${runtimeFailureKind(error)}`),
+          onSuccess: () => this.trace(route, `${trace} command=${method} outcome=ok`),
         }),
       )
     })
