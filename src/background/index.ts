@@ -2,27 +2,15 @@
 // toolbar button lets agents use the current tab, or stops them (before setup, it opens the onboarding page). The
 // onboarding page (onboarding.html) walks through setup; the settings page (settings.html, the options page) shows the
 // connection.
-import { AGENT_DIAGNOSTICS, cliUpdateNotice, cliUpdateTitle, STATUS_PORT, type FromStatusPage, type ToStatusPage } from "../shared/protocol"
+import { AGENT_DIAGNOSTICS, STATUS_PORT, type FromStatusPage, type ToStatusPage } from "../shared/protocol"
 import { createAgentRelay } from "./agent-relay"
 import { TabCleanup } from "./tab-cleanup"
 
-// Neutral by default; amber while an agent runs, blue while it waits for the user, amber "!" for an outdated CLI.
-const BADGE_COLORS: Record<string, string> = { default: "#3b3b3b", RUN: "#b45309", WAIT: "#2563eb", "!": "#b45309" }
-/** The marker on tabs without an agent badge while the relay's CLI is out of date. */
-const OUTDATED_BADGE = "!"
+// Neutral by default; amber while an agent runs, blue while it waits for the user.
+const BADGE_COLORS: Record<string, string> = { default: "#3b3b3b", RUN: "#b45309", WAIT: "#2563eb" }
 const pages = new Set<chrome.runtime.Port>()
-/** The relay's update state the toolbar marker was last drawn from. */
-let shownUpdate: string | undefined
 const agents = createAgentRelay({
-  changed: (state) => {
-    // The marker follows the relay's update state (relay.settings), not any tab's own badge.
-    const update = JSON.stringify(state.autoUpdate ?? null)
-    if (update !== shownUpdate) {
-      shownUpdate = update
-      void updateBadges()
-    }
-    broadcast({ type: "agents", state })
-  },
+  changed: (state) => broadcast({ type: "agents", state }),
   badgesChanged: () => void updateBadges(),
 })
 
@@ -100,17 +88,13 @@ chrome.tabs.onUpdated.addListener((_tabId, change, tab) => {
 void chrome.action.setBadgeBackgroundColor({ color: BADGE_COLORS.default })
 void chrome.action.setBadgeTextColor?.({ color: "#ffffff" })
 
-/**
- * The toolbar badge shows the agents' state for a tab they use: ON, RUN while one works, WAIT for the user. A tab
- * without an agent badge shows "!" while the relay's CLI is out of date, so the two never fight over a tab.
- */
+/** The toolbar badge shows the agents' state for a tab they use: ON, RUN while one works, WAIT for the user. */
 async function updateBadges(tabs?: chrome.tabs.Tab[]) {
   const targets = tabs ?? (await chrome.tabs.query({}))
-  const outdated = cliUpdateNotice(agents.state().autoUpdate)
   await Promise.all(
     targets.map(async (tab) => {
       if (tab.id === undefined) return
-      const badge = agents.badge(tab.id) ?? (outdated ? { text: OUTDATED_BADGE, title: cliUpdateTitle(outdated) } : undefined)
+      const badge = agents.badge(tab.id)
       await chrome.action.setBadgeText({ tabId: tab.id, text: badge?.text ?? "" }).catch(() => undefined)
       await chrome.action
         .setBadgeBackgroundColor({ tabId: tab.id, color: BADGE_COLORS[badge?.text ?? ""] ?? BADGE_COLORS.default })

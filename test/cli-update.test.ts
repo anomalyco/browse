@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { cliUpdateNotice, cliUpdateTitle, type RelayAutoUpdate } from "../src/shared/protocol"
+import { cliUpdateNotice, type RelayAutoUpdate } from "../src/shared/protocol"
 import { relayAutoUpdate } from "../src/background/agent-relay/wire"
 import { cliUpdateText } from "../src/status/describe"
 
@@ -87,7 +87,6 @@ describe("cliUpdateNotice", () => {
     const notice = cliUpdateNotice({ ...base, cli: "/opt/browse/bin/browse", mode: "notify", effective: "notify" }, NOW)!
     expect(notice.command).toBe("/opt/browse/bin/browse update")
     expect(cliUpdateText(notice)).toBe("browse 0.0.16 is out of date (0.0.17 is out). Run `/opt/browse/bin/browse update`.")
-    expect(cliUpdateTitle(notice)).toBe("browse 0.0.16 is out of date, run /opt/browse/bin/browse update")
   })
 })
 

@@ -153,9 +153,6 @@ export function cliUpdateNotice(update: RelayAutoUpdate | undefined, now = Date.
   return { current, latest, reason, command: cliUpdateCommand(update) }
 }
 
-/** The toolbar title for an outdated CLI: the same plain words as the status pages, without backticks. */
-export const cliUpdateTitle = (notice: CliUpdateNotice) => `browse ${notice.current} is out of date, run ${notice.command}`
-
 export type AgentRelayUpdate = { summary: string; command: string }
 
 /** chrome.runtime.sendMessage request from an extension page; the worker answers with `{ text }`. */
