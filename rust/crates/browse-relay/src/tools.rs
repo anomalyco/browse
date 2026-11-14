@@ -209,7 +209,10 @@ async fn handoff_tab(relay: &Arc<Relay>, ctx: &ToolContext, args: &Value) -> any
             Ok(tab)
         }
         None => {
-            let current = relay.st().sessions.get(&ctx.session).and_then(|s| s.current).filter(|tab| relay.st().tabs.contains_key(tab));
+            let current = {
+                let st = relay.st();
+                st.sessions.get(&ctx.session).and_then(|s| s.current).filter(|tab| st.tabs.contains_key(tab))
+            };
             match current {
                 Some(tab) => Ok(tab),
                 None => Ok(ctx.browser.current_tab(&ctx.session).await?.tab_id),

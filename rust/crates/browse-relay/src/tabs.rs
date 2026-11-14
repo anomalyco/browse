@@ -576,7 +576,8 @@ impl Relay {
                 self.remove_tab(tab, Release { update_extension: true, gone: true, ..Release::default() }, "debugger-detached");
             }
             "canceled_by_user" => {
-                if let Some(session) = self.st().tabs.get(&tab).and_then(|t| t.session.clone()) {
+                let session = self.st().tabs.get(&tab).and_then(|t| t.session.clone());
+                if let Some(session) = session {
                     self.stop_calls(&session, "The user dismissed the browser's debugging bar, which detached browse from their tabs, so this was stopped. Ask the user how to continue.");
                 }
                 self.remove_tab(tab, Release { update_extension: true, released_by_user: true, ..Release::default() }, "released-by-user");
