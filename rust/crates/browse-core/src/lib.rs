@@ -66,13 +66,15 @@ pub trait Browser: Send + Sync {
     async fn close_tab(&self, session: &SessionId, tab: TabId) -> anyhow::Result<()>;
     async fn cdp(&self, session: &SessionId, tab: TabId) -> anyhow::Result<Arc<dyn Cdp>>;
     async fn handoff(&self, session: &SessionId, tab: TabId, message: &str) -> anyhow::Result<HandoffResult>;
-}
-
-/// Stored site secrets. Values never leave the relay except to be typed into an allowed origin.
-#[async_trait]
-pub trait Secrets: Send + Sync {
-    /// The secret's value when `origin` is allowed for it.
-    async fn reveal(&self, name: &str, origin: &str) -> anyhow::Result<String>;
+    /// The extension's "Human-like input" setting for the tab's browser (curved mouse paths, paced keys). On by
+    /// default; OPENCODE_BROWSER_HUMAN_INPUT overrides it in the page tools.
+    async fn human_input(&self, _session: &SessionId, _tab: TabId) -> bool {
+        true
+    }
+    /// A background activity of the session started (`busy`) or ended: a network capture ("network") or a recording
+    /// ("recording"), keyed per kind. While any key is busy the session counts as busy, so idle shutdown, session
+    /// cleanup and relay restarts wait for it. Called again with `false` when the activity ends for any reason.
+    fn set_busy(&self, _session: &SessionId, _key: &str, _busy: bool) {}
 }
 
 /// Per-session state tools keep between calls (snapshot refs, network capture, ...), keyed by a crate-chosen string.
@@ -89,7 +91,6 @@ impl SessionState {
 pub struct ToolContext {
     pub session: SessionId,
     pub browser: Arc<dyn Browser>,
-    pub secrets: Arc<dyn Secrets>,
     pub state: Arc<SessionState>,
     /// Folders tools may read or write files in (uploads, screenshots, downloads, HAR files).
     pub file_roots: Vec<std::path::PathBuf>,

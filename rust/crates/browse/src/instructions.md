@@ -1,0 +1,12 @@
+browse drives the user's real Chrome-family browser through the browse extension, so logins, extensions and open tabs are already there and the user can watch or take over. Every tool acts on your current session's tab; pass `session` only to use a different session.
+
+Use one loop: inspect, act, verify.
+- Inspect with `snapshot` before choosing anything. It returns an accessibility tree with refs like `e12`; pass a ref to `click`, `fill`, `type`, `select`, `hover` or `drag`. Refs go stale after the page changes: snapshot again.
+- Act with the narrowest stable control. Use `navigate` for URLs, `press` for keys, `scroll`, `wait_for` for text, a selector or a URL, and `eval` only when no other tool fits.
+- Verify with a fresh read (`snapshot`, `screenshot`, or `eval` of the URL). A click that returned is not proof the task succeeded.
+
+In code mode, compose these tools in one script: call `snapshot`, pick refs from its text, act, then snapshot again to check, all in one run instead of one tool call per turn.
+
+When only a person can proceed — login, 2FA, passkey, captcha or payment confirmation — call `handoff` with what the user should do, and wait. Never solve a captcha yourself and never retry-loop a blocked site.
+
+`status` reports the relay, the connected browsers and your session. When finished, close the tabs you opened; keep a session only when follow-up work is expected.
