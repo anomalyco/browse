@@ -305,7 +305,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         authToken,
         sessionId: id,
         onDefaultTargetChange,
-        allowedOrigins: () => sessions.allowedOrigins(id),
         drainGuardWarnings: () => navigationGuard.drainWarnings(id),
         cpuScheduler: sessions.cpuScheduler,
         isRecordingTarget: (targetId) => {

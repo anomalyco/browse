@@ -246,8 +246,6 @@ connection itself isn't encrypted by browse; use a network that is (Tailscale or
 | `network` (`action`: `start`, `status`, `stop`, `cancel`) | Capture traffic to a redacted HAR |
 | `recording` (`action`: `start`, `stop`, `status`, `cancel`) | Record a tab to MP4 or WebM (`cursor: true` draws the ghost cursor) |
 | `flight_recorder` (`action`: `start`, `status`, `save_last`, `cancel`) | Keep the last minute of video, save it when something breaks |
-| `secrets_list` | Site secrets you stored for the session's sites; agents type them with `secrets.type()` only on their sites, without seeing them |
-| `secrets_status`, `secrets_refresh`, `secrets_run` | Reuse captured credentials while keeping their values out of transcripts and artifacts |
 | `tabs_cleanup` | Close idle agent tabs (`idleMinutes` applies to the calling agent's own sessions; other agents' wait for the idle setting) |
 | `settings` | Read or change the settings below when the user asks (never the security switches or update behaviour); the options page updates live |
 | `status` | Connection status |
@@ -346,14 +344,6 @@ may try to steer it, and that other programs on your computer may try to use the
   Subresources (images, fetch, iframes, workers) are not blocked: request interception is shared with Playwright's
   `page.route()`, so the relay can't own it reliably. Browsing through a local proxy makes every document look like
   it came from the proxy's address, so name the hosts you need exactly.
-- **Site secrets.** `browse secrets add <name> --origin https://example.com` stores a password, key or (with
-  `--totp`) a TOTP seed, read from stdin or a hidden prompt, in `~/.local/share/browse/site-secrets/`
-  (0700/0600). An agent types it with `secrets.type(locator, "<name>")`: the relay checks the field's frame URL from
-  the browser's frame tree against the secret's origins (and the session's allowlist) right before it inserts the
-  value, so a cross-origin iframe or a redirect gets nothing. The value never enters the execute realm, results,
-  logs, journals or HARs. Once typed it is in the page, where page script could read it, so pair secrets with an
-  allowlist (execute warns when you don't). A stored TOTP seed makes 2FA one factor; keep handing 2FA to yourself
-  when you can. `secrets list` and `secrets remove` manage them.
 - **Bot challenges.** After a navigation, execute reports Cloudflare, Akamai, DataDome, PerimeterX, Imperva, AWS WAF,
   captcha walls and "access denied" pages in `aftermath.challenge`. It waits up to 15 s
   (`OPENCODE_BROWSER_CHALLENGE_WAIT_MS`) for checks the browser clears by itself, and tells the agent to hand
@@ -361,12 +351,8 @@ may try to steer it, and that other programs on your computer may try to use the
 - **Your tabs stay yours.** Agents use only tabs they opened or you lent them. The toolbar button always takes a tab
   back; only a real click on the card or the toolbar button finishes a handoff, so a page can't fake it.
 - **Less on disk.** Session journals are private (0700/0600), redact typed passwords, codes and tokens, and are pruned
-  after 14 days (200 at most). HARs replace credentials with references; typed passwords and one-time codes are never
-  stored. Secret profiles keep values out of transcripts and artifacts, but anything that runs with them (like
-  `secrets_run`) can use them. `secrets_run` commands get the relay's allowlisted environment plus the profile's
-  `BC_SECRET_N` values, not the environment you started opencode with: `PATH`, `HOME`, locale, `HTTP_PROXY`,
-  `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR` and `NODE_EXTRA_CA_CERTS` pass through; other
-  variables (API keys included) don't.
+  after 14 days (200 at most). HARs replace credential-bearing headers, cookies, query fields and structured body
+  fields with `[redacted]`; typed passwords and one-time codes are never stored.
 
 Escape hatches. Set them in the environment you start opencode (or your MCP client) from; the relay inherits
 `OPENCODE_BROWSER_*` variables. Run `node cli/dist/cli.mjs relay restart` after changing them:

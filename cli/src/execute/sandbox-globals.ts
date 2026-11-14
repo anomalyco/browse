@@ -41,7 +41,6 @@ import {
   type RequestHandoff,
 } from "./page-recovery.ts"
 import { pageTargetId } from "./target-selection.ts"
-import type { ExecuteSecretsBridge } from "./secrets-bridge.ts"
 
 export function buildSandboxGlobals(deps: {
   readonly browser: Browser
@@ -51,7 +50,6 @@ export function buildSandboxGlobals(deps: {
   readonly realm: ExecuteRealm | undefined
   readonly snapshotRefs: SnapshotRefRegistry
   readonly networkCapture: NetworkCapture.Recorder
-  readonly secrets: ExecuteSecretsBridge
   readonly requestHandoff: RequestHandoff | undefined
   readonly isRecordingTarget: ((targetId: string) => boolean) | undefined
   readonly isDefaultPage: (candidate: Page) => boolean
@@ -207,9 +205,6 @@ export function buildSandboxGlobals(deps: {
     pageConsole: {
       start: (target) => PageConsole.start(target ?? page),
       stop: (target) => PageConsole.stop(target ?? page),
-    },
-    secrets: {
-      type: (target, name, typeOptions) => deps.secrets.typeSecret(page, target, name, typeOptions),
     },
     handoffTracker,
   }

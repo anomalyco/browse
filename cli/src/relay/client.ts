@@ -12,13 +12,8 @@ import { NodeHttpClient } from "@effect/platform-node"
 import { Config, Context, Effect, Layer, Option, Schema } from "effect"
 import { HttpClient, HttpClientRequest, type HttpClientResponse } from "effect/http"
 import {
-  type AuthProfileRequest,
   type AuthenticatedJsonRequest,
   AuthenticatedJsonOutcome,
-  AuthProfileSummary,
-  type AuthRefreshRequest,
-  type AuthRunRequest,
-  AuthRunResponse,
   ErrorEnvelope,
   type ExecuteRequest,
   ExecuteResponse,
@@ -153,9 +148,6 @@ export interface Interface {
   readonly networkStatus: (request: NetworkSessionRequest) => Effect.Effect<NetworkStatusResponse, RelayClientError>
   readonly networkStop: (request: NetworkStopRequest) => Effect.Effect<NetworkStopResponse, RelayClientError>
   readonly networkCancel: (request: NetworkSessionRequest) => Effect.Effect<NetworkCancelResponse, RelayClientError>
-  readonly authStatus: (request: AuthProfileRequest) => Effect.Effect<AuthProfileSummary, RelayClientError>
-  readonly authRefresh: (request: AuthRefreshRequest) => Effect.Effect<NetworkStopResponse, RelayClientError>
-  readonly authRun: (request: AuthRunRequest) => Effect.Effect<AuthRunResponse, RelayClientError>
   readonly recordingStart: (request: RecordingStartRequest) => Effect.Effect<RecordingStartResponse, RelayClientError>
   readonly recordingStop: (target: RecordingTargetRequest) => Effect.Effect<RecordingStopResponse, RelayClientError>
   readonly recordingStatus: (target: RecordingTargetRequest) => Effect.Effect<RecordingStatusResponse, RelayClientError>
@@ -522,9 +514,6 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
     networkStatus: (request) => postJson("/network/status", { ...request }, NetworkStatusResponse),
     networkStop: (request) => postJson("/network/stop", { ...request }, NetworkStopResponse),
     networkCancel: (request) => postJson("/network/cancel", { ...request }, NetworkCancelResponse),
-    authStatus: (request) => postJson("/auth/status", { ...request }, AuthProfileSummary),
-    authRefresh: (request) => postJson("/auth/refresh", { ...request }, NetworkStopResponse),
-    authRun: (request) => postJson("/auth/run", { ...request }, AuthRunResponse),
     recordingStart: ({ sessionId, tabId, ...request }) =>
       postJson("/recording/start", { ...recordingTargetBody({ sessionId, tabId }), ...request }, RecordingStartResponse),
     recordingStop: (target) => postJson("/recording/stop", recordingTargetBody(target), RecordingStopResponse),

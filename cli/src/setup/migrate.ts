@@ -18,6 +18,7 @@ import { agentLocations, browseServerCommand, editAgentConfig, type AgentName } 
 import { LEGACY_HANDOVER_GRACE_MS, legacyDataRoot, legacyRoots, legacyRuntime } from "./legacy.ts"
 import type { Settings } from "./environment.ts"
 import { configureMcp, OPENCODE_CONFIG_NAMES } from "./mcp.ts"
+import { removeStoredSecrets } from "./remove-stored-secrets.ts"
 
 type Move = { readonly from: string; readonly to: string }
 
@@ -28,6 +29,8 @@ function destination(relative: string, home: string): string | undefined {
   const file = normalized(relative)
   const [top, ...rest] = file.split("/")
   if (top === "runtime" || top === "versions") return undefined
+  // Stored credentials of removed features: never copy them into the new folders.
+  if (top === "secrets" || top === "site-secrets") return undefined
   if (top === "bin") {
     const name = rest.join("/")
     return name === binaryName() ? path.join(binRoot(home), binaryName()) : undefined
@@ -37,7 +40,7 @@ function destination(relative: string, home: string): string | undefined {
   if (file === "old-store-extension" || file === "auto-update.json" || file === "pairing-codes.json" || file === "session.json" || top === "logs" || top === "sessions")
     return path.join(stateRoot(home), file)
   if (top === "relays") return path.join(path.basename(file) === "lifecycle.jsonl" ? stateRoot(home) : dataRoot(home), file)
-  // Pairings, tokens, secrets, session catalogs and anything unknown are durable data.
+  // Pairings, tokens, session catalogs and anything unknown are durable data.
   return path.join(dataRoot(home), file)
 }
 
@@ -54,7 +57,7 @@ const lexists = (file: string) => {
 const privatePath = (relative: string) => {
   const file = normalized(relative)
   return file === "relay-token" || file === "browser-tokens.json" || file === "pairing-codes.json" ||
-    file === "extension-pairing" || file === "session.json" || file.startsWith("secrets/") || file.startsWith("site-secrets/") ||
+    file === "extension-pairing" || file === "session.json" ||
     file.startsWith("sessions/") || file === "auto-update.json" || file === "old-store-extension"
 }
 
@@ -191,7 +194,7 @@ export function copyLegacyData(home = os.homedir()) {
   const root = legacyDataRoot(home)
   const record = takeoverRecord(home)
   // A takeover that stopped before its relay listened left these copies; the old folder is still the truth, so a file
-  // deleted from it since (a site secret, a revoked pairing) must not come back from them.
+  // deleted from it since (a revoked pairing) must not come back from them.
   for (const file of readCopied(record)) fs.rmSync(file, { force: true })
   const copies = filesUnder(root).flatMap((relative) => {
     const to = destination(relative, home)
@@ -287,6 +290,7 @@ function linkLegacyExtension(root: string, home: string) {
 export function migrateLegacy(home = os.homedir(), now = Date.now()): MigrationResult {
   const result: MigrationResult = { moved: 0, rewritten: 0, removed: [] }
   if (process.env.OPENCODE_BROWSER_HOME) return result
+  removeStoredSecrets(home)
   const roots = legacyRoots(home)
   const oldData = legacyDataRoot(home)
   // Read before the files move: settings.json names configs the default locations don't cover.

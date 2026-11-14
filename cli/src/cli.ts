@@ -13,7 +13,6 @@ import {
   exitCodeForError,
   exitWith,
   hoistJsonFlag,
-  normalizeCliArguments,
   stderrLine,
 } from "./cli/context.ts"
 import "./cli/execute.ts"
@@ -21,7 +20,6 @@ import "./cli/network.ts"
 import "./cli/recording.ts"
 import { buildRegisteredCliCommands } from "./cli/registry.ts"
 import "./cli/relay.ts"
-import "./cli/secrets.ts"
 import "./cli/session.ts"
 import * as RelayClient from "./relay/client.ts"
 import * as SessionStore from "./session-manager/store.ts"
@@ -85,7 +83,7 @@ export function runCli(rawArgs: ReadonlyArray<string> = process.argv.slice(2)): 
   const quietJson = cliArgs.json && !askedForHelp
 
   Command.runWith(opencodeBrowser, { version: opencodeBrowserVersion, renderErrors: !quietJson })(
-    normalizeCliArguments(cliArgs.argv),
+    cliArgs.argv,
   ).pipe(
     quietJson ? Effect.provideService(Console.Console, { ...globalThis.console, log: silent }) : (effect) => effect,
     Effect.catchIf(CliError.isCliError, reportUsageError),

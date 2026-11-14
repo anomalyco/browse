@@ -17,13 +17,13 @@ const execFileAsync = promisify(execFile)
 describe("CLI contract helpers", () => {
   test("hoistJsonFlag moves --json before -- and leaves operands after -- untouched", () => {
     expect(hoistJsonFlag(["--json", "status"])).toEqual({ json: true, argv: ["status", "--json"] })
-    expect(hoistJsonFlag(["secrets", "run", "prod", "--", "cmd", "--json"])).toEqual({
+    expect(hoistJsonFlag(["execute", "--", "cmd", "--json"])).toEqual({
       json: false,
-      argv: ["secrets", "run", "prod", "--", "cmd", "--json"],
+      argv: ["execute", "--", "cmd", "--json"],
     })
-    expect(hoistJsonFlag(["--json", "secrets", "run", "prod", "--", "cmd", "--json"])).toEqual({
+    expect(hoistJsonFlag(["--json", "execute", "--", "cmd", "--json"])).toEqual({
       json: true,
-      argv: ["secrets", "run", "prod", "--json", "--", "cmd", "--json"],
+      argv: ["execute", "--json", "--", "cmd", "--json"],
     })
   })
 

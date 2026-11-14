@@ -10,7 +10,6 @@ browse is a browser extension that lets OpenCode, running on your own computer, 
 - Which tabs agents opened, kept in your browser's extension storage so idle ones can be closed.
 - The pairing code you enter on the status page (or that the installer put in the extension's folder), and the key the OpenCode relay gives this browser in exchange for it, kept in extension storage. The key is never sent anywhere: the extension only proves it holds it.
 - A system notification, shown only when an agent needs you while it records a tab.
-- **Site secrets** you choose to store with the `browse secrets add` command (a password, key or one-time-code seed, and the sites it may be typed on). They stay in a file on your computer that only your user account can read, and are typed only into fields on those sites. The extension never stores them; they are never sent anywhere except into the page you allowed, and your agent never receives them.
 
 ## Where it goes
 - To **the OpenCode tools on your computer**, over a local connection (127.0.0.1). The extension only obeys a relay that proves it holds this browser's key, and the relay only answers programs that hold its token, a file only your user account can read.

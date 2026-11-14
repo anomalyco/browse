@@ -393,7 +393,6 @@ export interface NetworkSessionRequest extends Schema.Schema.Type<typeof Network
 
 export const NetworkStopRequest = NetworkSessionRequest.pipe(Schema.fieldsAssign({
   outputPath: Schema.optionalKey(Schema.String),
-  secrets: Schema.optionalKey(Schema.NonEmptyString),
 }))
 export interface NetworkStopRequest extends Schema.Schema.Type<typeof NetworkStopRequest> {}
 
@@ -409,27 +408,10 @@ export const NetworkStatusResponse = Schema.Struct({
   urlFilter: Schema.optionalKey(Schema.String),
   resourceTypes: Schema.optionalKey(Schema.Array(Schema.String)),
   content: Schema.optionalKey(NetworkContentMode),
-  secrets: Schema.optionalKey(Schema.String),
   endsAt: Schema.optionalKey(Schema.String),
   ended: Schema.optionalKey(Schema.String),
 })
 export interface NetworkStatusResponse extends Schema.Schema.Type<typeof NetworkStatusResponse> {}
-
-const AuthProfileSlotSummary = Schema.Struct({
-  ref: Schema.String,
-  sources: Schema.Array(Schema.String),
-  expiresAt: Schema.optionalKey(Schema.String),
-  expired: Schema.Boolean,
-})
-
-export const AuthProfileSummary = Schema.Struct({
-  name: Schema.String,
-  createdAt: Schema.String,
-  updatedAt: Schema.String,
-  slotCount: Schema.Number,
-  slots: Schema.Array(AuthProfileSlotSummary),
-})
-export interface AuthProfileSummary extends Schema.Schema.Type<typeof AuthProfileSummary> {}
 
 const NetworkEndpointDigest = Schema.Struct({
   method: Schema.String,
@@ -445,46 +427,12 @@ export const NetworkStopResponse = NetworkStatusResponse.pipe(Schema.fieldsAssig
   active: Schema.Literal(false),
   stoppedAt: Schema.String,
   outputPath: Schema.optionalKey(Schema.String),
-  authProfile: Schema.optionalKey(AuthProfileSummary),
-  updatedSecretRefs: Schema.Array(Schema.String),
-  observedSecretRefs: Schema.Array(Schema.String),
   endpoints: Schema.optionalKey(Schema.Array(NetworkEndpointDigest)),
 }))
 export interface NetworkStopResponse extends Schema.Schema.Type<typeof NetworkStopResponse> {}
 
 export const NetworkCancelResponse = Schema.Struct({ cancelled: Schema.Boolean })
 export interface NetworkCancelResponse extends Schema.Schema.Type<typeof NetworkCancelResponse> {}
-
-export const AuthProfileRequest = Schema.Struct({ name: Schema.NonEmptyString })
-export interface AuthProfileRequest extends Schema.Schema.Type<typeof AuthProfileRequest> {}
-
-export const AuthRefreshRequest = Schema.Struct({
-  sessionId: Schema.NonEmptyString,
-  name: Schema.NonEmptyString,
-  urlFilter: Schema.optionalKey(Schema.String),
-  timeoutMs: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
-})
-export interface AuthRefreshRequest extends Schema.Schema.Type<typeof AuthRefreshRequest> {}
-
-export const AuthRunRequest = Schema.Struct({
-  name: Schema.NonEmptyString,
-  command: Schema.NonEmptyString,
-  args: Schema.optionalKey(Schema.Array(Schema.String)),
-  cwd: Schema.optionalKey(Schema.String),
-  timeoutMs: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
-})
-export interface AuthRunRequest extends Schema.Schema.Type<typeof AuthRunRequest> {}
-
-export const AuthRunResponse = Schema.Struct({
-  exitCode: Schema.Number,
-  signal: Schema.NullOr(Schema.String),
-  stdout: Schema.String,
-  stderr: Schema.String,
-  stdoutTruncated: Schema.Boolean,
-  stderrTruncated: Schema.Boolean,
-  durationMs: Schema.Number,
-})
-export interface AuthRunResponse extends Schema.Schema.Type<typeof AuthRunResponse> {}
 
 const RecordingMode = Schema.Literals(["tab-capture", "cdp"])
 

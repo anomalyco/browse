@@ -1,9 +1,8 @@
 import path from "node:path"
 import { Effect, Predicate } from "effect"
 import type { Response } from "patchright-core"
-import * as AuthProfile from "../auth/profile.ts"
 import { writeJsonFileAtomically } from "../fs-durability.ts"
-import { looksLikeTokenSegment, minimumKnownSubstringLength, SecretCollector } from "./redaction.ts"
+import { minimumKnownSubstringLength, SecretRedactor } from "./redaction.ts"
 import {
   NetworkCaptureError,
   type ActiveCapture,
@@ -17,35 +16,15 @@ import {
 export function finishCapture(
   active: ActiveCapture,
   options: NetworkCaptureStopOptions,
-  secrets: string | undefined,
-  profileOptions: { readonly baseDir?: string },
 ): Effect.Effect<{
-  readonly authProfile?: AuthProfile.AuthProfileSummary
-  readonly updatedSecretRefs: readonly string[]
-  readonly observedSecretRefs: readonly string[]
   readonly redactionOmissionCount: number
   readonly endpoints: readonly NetworkEndpointDigest[]
-}, NetworkCaptureError | AuthProfile.AuthProfileError> {
+}, NetworkCaptureError> {
   return Effect.gen(function* () {
-    const existingProfile = secrets
-      ? yield* AuthProfile.readOptional(secrets, profileOptions)
-      : undefined
-    const collector = new SecretCollector(existingProfile?.slots ?? [])
-    for (const value of active.extraRedactions) collector.addRedactionOnly(value)
-    const structurallyProtected = active.entries.map((entry) => protectEntry(entry, collector))
-    const protectedEntries = structurallyProtected
-      .map((entry) => redactEntryKnownValues(entry, collector))
-      .map((entry) => redactEntryTypedSecrets(entry, active.extraRedactions, collector))
-    if (options.requireObservedSecrets && collector.observedRefs().length === 0) {
-      return yield* new NetworkCaptureError({
-        message: `Auth refresh did not observe credentials for profile ${secrets ?? "unknown"}`,
-        operation: "auth-profile",
-        reason: "persistence-failed",
-      })
-    }
-    const authProfile = secrets
-      ? yield* AuthProfile.write({ name: secrets, slots: collector.slots(), ...profileOptions })
-      : undefined
+    const redactor = new SecretRedactor()
+    const protectedEntries = active.entries
+      .map((entry) => protectEntry(entry, redactor))
+      .map((entry) => redactEntryKnownValues(entry, redactor))
     if (options.outputPath) {
       yield* writeArtifact(options.outputPath, {
         log: {
@@ -56,9 +35,6 @@ export function finishCapture(
       })
     }
     return {
-      ...(authProfile ? { authProfile } : {}),
-      updatedSecretRefs: collector.updatedRefs(),
-      observedSecretRefs: collector.observedRefs(),
       redactionOmissionCount: options.outputPath ? countRedactionOmissions(active.entries, protectedEntries) : 0,
       endpoints: summarizeEndpoints(protectedEntries),
     }
@@ -92,7 +68,7 @@ function summarizeEndpoints(entries: readonly CapturedEntry[]): readonly Network
       .filter((h) => {
         const lower = h.name.toLowerCase()
         if (lower === "x-client-data" || lower.startsWith("sec-ch-")) return false
-        return h.value.includes("${BC_SECRET_") || lower === "authorization" || lower.startsWith("x-")
+        return h.value.includes("[redacted]") || lower === "authorization" || lower.startsWith("x-")
       })
       .slice(0, 8)
       .map((h) => `${h.name}: ${h.value.slice(0, 80)}`)
@@ -162,20 +138,19 @@ export function truncatedBody(mimeType: string | undefined, active: ActiveCaptur
   return { size, mimeType: mimeType ?? "application/octet-stream", truncated: true }
 }
 
-export function protectEntry(entry: CapturedEntry, collector: SecretCollector): CapturedEntry {
-  const scope = requestScope(entry.request.method, entry.request.url)
-  const requestHeaders = collector.protectHeaders(entry.request.headers, "request", scope)
-  const responseHeaders = entry.response ? collector.protectHeaders(entry.response.headers, "response", scope) : undefined
-  const requestBody = protectCapturedBody(entry.request.body, collector, "request", scope)
-  const responseBody = protectCapturedBody(entry.response?.body, collector, "response", scope)
+export function protectEntry(entry: CapturedEntry, redactor: SecretRedactor): CapturedEntry {
+  const requestHeaders = redactor.protectHeaders(entry.request.headers)
+  const responseHeaders = entry.response ? redactor.protectHeaders(entry.response.headers) : undefined
+  const requestBody = protectCapturedBody(entry.request.body, redactor)
+  const responseBody = protectCapturedBody(entry.response?.body, redactor)
   return {
     ...entry,
     request: {
       ...entry.request,
-      url: collector.protectUrl(entry.request.url, scope),
+      url: redactor.protectUrl(entry.request.url),
       headers: requestHeaders,
       ...(requestBody ? { body: requestBody } : {}),
-      ...(entry.request.redirectedFrom ? { redirectedFrom: collector.protectUrl(entry.request.redirectedFrom, scope) } : {}),
+      ...(entry.request.redirectedFrom ? { redirectedFrom: redactor.protectUrl(entry.request.redirectedFrom) } : {}),
     },
     ...(entry.response ? {
       response: {
@@ -189,15 +164,13 @@ export function protectEntry(entry: CapturedEntry, collector: SecretCollector): 
 
 function protectCapturedBody(
   body: CapturedBody | undefined,
-  collector: SecretCollector,
-  location: "request" | "response",
-  scope: string,
+  redactor: SecretRedactor,
 ): CapturedBody | undefined {
   if (!body) return undefined
   if (!body.text) {
     return { size: body.size, mimeType: body.mimeType, truncated: true }
   }
-  const text = collector.protectBody(body.text, body.mimeType, location, scope)
+  const text = redactor.protectBody(body.text, body.mimeType)
   return text === undefined
     ? { size: body.size, mimeType: body.mimeType, truncated: true }
     : { ...body, text }
@@ -207,8 +180,8 @@ function protectCapturedBody(
 // are replaced: ordinary text rarely contains 16 characters of a credential.
 const minimumKnownBodySubstringLength = 16
 
-function redactEntryKnownValues(entry: CapturedEntry, collector: SecretCollector): CapturedEntry {
-  const redactText = (text: string) => collector.redactKnownSubstrings(text, minimumKnownSubstringLength)
+function redactEntryKnownValues(entry: CapturedEntry, redactor: SecretRedactor): CapturedEntry {
+  const redactText = (text: string) => redactor.redactKnownSubstrings(text, minimumKnownSubstringLength)
   const redactHeaders = (headers: readonly Header[]) => headers.map((item) => ({ ...item, value: redactText(item.value) }))
   return {
     ...entry,
@@ -217,62 +190,34 @@ function redactEntryKnownValues(entry: CapturedEntry, collector: SecretCollector
       url: redactText(entry.request.url),
       headers: redactHeaders(entry.request.headers),
       ...(entry.request.redirectedFrom ? { redirectedFrom: redactText(entry.request.redirectedFrom) } : {}),
-      ...(entry.request.body?.text ? { body: redactStructuredBody(entry.request.body, collector) } : {}),
+      ...(entry.request.body?.text ? { body: redactStructuredBody(entry.request.body, redactor) } : {}),
     },
     ...(entry.response ? {
       response: {
         ...entry.response,
         headers: redactHeaders(entry.response.headers),
-        ...(entry.response.body?.text ? { body: redactStructuredBody(entry.response.body, collector) } : {}),
+        ...(entry.response.body?.text ? { body: redactStructuredBody(entry.response.body, redactor) } : {}),
       },
     } : {}),
   }
 }
 
-/** Typed secrets are replaced wherever they appear (raw, percent- or form-encoded), whatever their length. */
-function redactEntryTypedSecrets(entry: CapturedEntry, values: ReadonlySet<string>, collector: SecretCollector): CapturedEntry {
-  if (values.size === 0) return entry
-  const redact = (text: string) => collector.redactValuesEverywhere(text, values)
-  const redactBody = (body: CapturedBody | undefined) => body?.text ? { ...body, text: redact(body.text) } : body
-  const redactHeaders = (headers: readonly Header[]) => headers.map((item) => ({ ...item, value: redact(item.value) }))
-  const requestBody = redactBody(entry.request.body)
-  const responseBody = redactBody(entry.response?.body)
-  return {
-    ...entry,
-    request: {
-      ...entry.request,
-      url: redact(entry.request.url),
-      headers: redactHeaders(entry.request.headers),
-      ...(entry.request.redirectedFrom ? { redirectedFrom: redact(entry.request.redirectedFrom) } : {}),
-      ...(requestBody ? { body: requestBody } : {}),
-    },
-    ...(entry.response ? {
-      response: {
-        ...entry.response,
-        headers: redactHeaders(entry.response.headers),
-        ...(responseBody ? { body: responseBody } : {}),
-      },
-    } : {}),
-  }
-}
-
-function redactStructuredBody(body: CapturedBody, collector: SecretCollector): CapturedBody {
+function redactStructuredBody(body: CapturedBody, redactor: SecretRedactor): CapturedBody {
   if (!body.text || !body.mimeType.toLowerCase().includes("json")) return body
   try {
-    return { ...body, text: JSON.stringify(redactKnownScalars(JSON.parse(body.text), collector)) }
+    return { ...body, text: JSON.stringify(redactKnownScalars(JSON.parse(body.text), redactor)) }
   } catch {
     return { size: body.size, mimeType: body.mimeType, truncated: true }
   }
 }
 
-function redactKnownScalars(value: unknown, collector: SecretCollector): unknown {
-  if (Array.isArray(value)) return value.map((item) => redactKnownScalars(item, collector))
+function redactKnownScalars(value: unknown, redactor: SecretRedactor): unknown {
+  if (Array.isArray(value)) return value.map((item) => redactKnownScalars(item, redactor))
   if (Predicate.isObject(value)) {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactKnownScalars(item, collector)]))
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactKnownScalars(item, redactor)]))
   }
-  const exact = collector.redactExactValue(value, 8)
-  if (exact !== value || !Predicate.isString(value)) return exact
-  return collector.redactKnownSubstrings(value, minimumKnownBodySubstringLength)
+  if (Predicate.isString(value)) return redactor.redactKnownSubstrings(value, minimumKnownBodySubstringLength)
+  return redactor.redactValue(value)
 }
 
 function toHarEntry(entry: CapturedEntry): Record<string, unknown> {
@@ -376,27 +321,6 @@ export function safeValue<A>(read: () => A, fallback: A): A {
     return read()
   } catch {
     return fallback
-  }
-}
-
-function requestScope(method: string, rawUrl: string): string {
-  let base: string
-  try {
-    const url = new URL(rawUrl)
-    base = `${url.origin}${url.pathname}`
-  } catch {
-    base = rawUrl.split("?", 1)[0] ?? rawUrl
-  }
-  // Scopes name slot sources in stored profiles and status output: keep token-like path segments out of them.
-  const scrubbed = base.split("/").map((segment) => looksLikeTokenSegment(safeDecode(segment)) ? ":token" : segment).join("/")
-  return `${method.toUpperCase()} ${scrubbed}`
-}
-
-function safeDecode(segment: string): string {
-  try {
-    return decodeURIComponent(segment)
-  } catch {
-    return segment
   }
 }
 

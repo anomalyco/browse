@@ -50,12 +50,12 @@ function isolatedEnv(home: string): NodeJS.ProcessEnv {
   return env
 }
 
-/** A browse root with settings and a secret profile: uninstall deletes all of it. */
+/** A browse root with settings: uninstall deletes all of it. */
 function seed(home: string): string {
   const root = path.join(home, "browse")
-  mkdirSync(path.join(root, "secrets"), { recursive: true })
+  mkdirSync(path.join(root, "sessions"), { recursive: true })
   writeFileSync(path.join(root, "settings.json"), '{"entry":"/keep"}\n')
-  writeFileSync(path.join(root, "secrets", "prod.json"), '{"token":"keep"}\n')
+  writeFileSync(path.join(root, "sessions", "catalog.json"), '{"version":1}\n')
   writeFileSync(path.join(home, ".profile"), "sentinel\n")
   return root
 }

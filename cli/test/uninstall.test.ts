@@ -11,11 +11,6 @@ import { freePort } from "./support/ports.ts"
 const legacyHost = process.platform === "win32" && ["Google\\Chrome", "Microsoft\\Edge"].some(browser =>
   spawnSync("reg", ["query", `HKCU\\Software\\${browser}\\NativeMessagingHosts\\ai.opencode.browser`, "/ve"]).status === 0)
 
-// Uninstall must never print what it deletes: a fixture value is easier to grep for than a secret-shaped key.
-const secretValue = "super-secret-value-129"
-const secretJson = () => `${JSON.stringify({ version: 1, name: "prod", value: secretValue })}\n`
-const leaked = ({ stdout, stderr }: { stdout: string; stderr: string }) => `${stdout}${stderr}`.includes(secretValue)
-
 /**
  * A child environment built from scratch: a host OPENCODE_BROWSER_PACKAGE makes uninstall run `npm uninstall -g`, and host
  * agent config variables (CLAUDE_CONFIG_DIR, OPENCODE_CONFIG_DIR, ...) would point it at real agent configs. Only PATH and
@@ -134,93 +129,6 @@ test.skipIf(legacyHost)("uninstall keeps polling while the stopping relay resets
     expect(closed).toBe(true)
   } finally {
     if (relay.listening) await new Promise<void>((resolve) => relay.close(() => resolve()))
-    rmSync(home, { recursive: true, force: true })
-  }
-}, 25_000)
-
-test.skipIf(legacyHost)("uninstall asks before deleting site secrets, and --yes removes them", async () => {
-  const home = mkdtempSync(path.join(tmpdir(), "browse-uninstall-site-secrets-")), root = path.join(home, "data")
-  const siteSecrets = path.join(root, "site-secrets"), secret = path.join(siteSecrets, "prod.json")
-  mkdirSync(siteSecrets, { recursive: true })
-  writeFileSync(secret, secretJson())
-  const port = await freePort()
-  try {
-    const refused = await runUninstall(home, port)
-    expect(refused.code, refused.stderr || refused.stdout).toBe(1)
-    expect(refused.stderr).toContain(`Uninstalling deletes 1 site secret in ${siteSecrets}. Re-run with --yes to confirm.`)
-    expect(leaked(refused)).toBe(false)
-    expect(existsSync(secret)).toBe(true)
-
-    const confirmed = await runUninstall(home, port, ["--yes"])
-    expect(confirmed.code, confirmed.stderr || confirmed.stdout).toBe(0)
-    expect(leaked(confirmed)).toBe(false)
-    expect(existsSync(siteSecrets)).toBe(false)
-  } finally {
-    rmSync(home, { recursive: true, force: true })
-  }
-}, 25_000)
-
-test.skipIf(legacyHost)("uninstall's confirmation names both stored secret profiles and site secrets", async () => {
-  const home = mkdtempSync(path.join(tmpdir(), "browse-uninstall-site-secrets-")), root = path.join(home, "data")
-  const secrets = path.join(root, "secrets"), siteSecrets = path.join(root, "site-secrets")
-  mkdirSync(secrets, { recursive: true })
-  mkdirSync(siteSecrets, { recursive: true })
-  writeFileSync(path.join(secrets, "work.json"), secretJson())
-  writeFileSync(path.join(siteSecrets, "one.json"), '{"version":1}\n')
-  writeFileSync(path.join(siteSecrets, "two.json"), '{"version":1}\n')
-  const port = await freePort()
-  try {
-    const refused = await runUninstall(home, port)
-    expect(refused.code, refused.stderr || refused.stdout).toBe(1)
-    expect(refused.stderr).toContain(
-      `Uninstalling deletes 1 stored secret profile in ${secrets} and 2 site secrets in ${siteSecrets}. Re-run with --yes to confirm.`,
-    )
-    expect(leaked(refused)).toBe(false)
-    expect(existsSync(secrets)).toBe(true)
-    expect(existsSync(siteSecrets)).toBe(true)
-  } finally {
-    rmSync(home, { recursive: true, force: true })
-  }
-}, 25_000)
-
-// paths.ts dataRoot(): OPENCODE_BROWSER_HOME when set, else $XDG_DATA_HOME/browse, so an everyday install lands in xdg-data.
-test.skipIf(legacyHost)("uninstall asks before deleting site secrets at the XDG data root", async () => {
-  const home = mkdtempSync(path.join(tmpdir(), "browse-uninstall-site-secrets-"))
-  const data = path.join(home, "xdg-data", "browse"), siteSecrets = path.join(data, "site-secrets"), secret = path.join(siteSecrets, "prod.json")
-  mkdirSync(siteSecrets, { recursive: true })
-  writeFileSync(secret, secretJson())
-  const port = await freePort()
-  try {
-    const refused = await runUninstall(home, port, [], false)
-    expect(refused.code, refused.stderr || refused.stdout).toBe(1)
-    expect(refused.stderr).toContain(`Uninstalling deletes 1 site secret in ${siteSecrets}. Re-run with --yes to confirm.`)
-    expect(leaked(refused)).toBe(false)
-    expect(existsSync(secret)).toBe(true)
-
-    const confirmed = await runUninstall(home, port, ["--yes"], false)
-    expect(confirmed.code, confirmed.stderr || confirmed.stdout).toBe(0)
-    expect(leaked(confirmed)).toBe(false)
-    expect(existsSync(data)).toBe(false)
-  } finally {
-    rmSync(home, { recursive: true, force: true })
-  }
-}, 25_000)
-
-test.skipIf(legacyHost)("uninstall without stored secrets needs no confirmation", async () => {
-  const home = mkdtempSync(path.join(tmpdir(), "browse-uninstall-site-secrets-")), root = path.join(home, "data")
-  const siteSecrets = path.join(root, "site-secrets")
-  mkdirSync(path.join(root, "secrets"), { recursive: true })
-  mkdirSync(siteSecrets, { recursive: true })
-  writeFileSync(path.join(root, "settings.json"), '{"entry":"/keep"}\n')
-  writeFileSync(path.join(siteSecrets, "x.json.lock"), "")
-  writeFileSync(path.join(siteSecrets, "x.json.123.tmp"), "")
-  const port = await freePort()
-  try {
-    expect(existsSync(root)).toBe(true)
-    const result = await runUninstall(home, port)
-    expect(result.code, result.stderr || result.stdout).toBe(0)
-    expect(existsSync(root)).toBe(false)
-  } finally {
     rmSync(home, { recursive: true, force: true })
   }
 }, 25_000)

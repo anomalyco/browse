@@ -131,7 +131,7 @@ describe("MCP protocol versions", () => {
           const init = await mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } })
           expect(init.result?.capabilities).toHaveProperty("tools")
           mcp.notify("notifications/initialized")
-          expect((await mcp.request("tools/list")).result?.tools).toHaveLength(18)
+          expect((await mcp.request("tools/list")).result?.tools).toHaveLength(14)
         } finally { mcp.close() }
       }
     } finally {
@@ -179,7 +179,7 @@ describe("MCP protocol versions", () => {
     expect(init.result?.instructions).toContain("exist only inside the `code` string")
     mcp.notify("notifications/initialized")
     expect(((await mcp.request("tools/list")).result?.tools as unknown[]).length).toBeGreaterThan(0)
-    expect((await mcp.request("tools/call", { name: "secrets_list", arguments: {} })).result?.isError).toBe(false)
+    expect((await mcp.request("tools/call", { name: "status", arguments: {} })).result).toBeDefined()
     mcp.close()
   }, 30_000)
 
@@ -223,7 +223,6 @@ describe("MCP protocol versions", () => {
       expect(annotations("session_delete")).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false })
       expect(annotations("tabs_cleanup")).toMatchObject({ destructiveHint: true, openWorldHint: false })
       expect(annotations("network")).toMatchObject({ readOnlyHint: false, destructiveHint: true, openWorldHint: false })
-      expect(annotations("secrets_refresh")).toMatchObject({ readOnlyHint: false, destructiveHint: true, openWorldHint: true })
       // A browser joining or leaving changes no description or schema, so the client's prompt cache survives.
       second.close()
       await Bun.sleep(6_000)

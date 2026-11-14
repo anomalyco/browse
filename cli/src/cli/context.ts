@@ -13,8 +13,6 @@ export const sessionIdConfig = Config.option(Config.String("OPENCODE_BROWSER_SES
 export const agentSessionIdConfig = Config.option(Config.String("OPENCODE_SESSION_ID"))
 export const targetUrlConfig = Config.option(Config.String("OPENCODE_BROWSER_TARGET_URL"))
 export const targetIndexConfig = Config.option(Config.Int("OPENCODE_BROWSER_TARGET_INDEX"))
-export const encodedCliOperandsMarker = "bc-cli-operands:v1"
-export const encodedCliOperandPrefix = "bc-cli-operand:"
 export const jsonFlag = Flag.Boolean("json").pipe(
   Flag.withDefault(false),
   Flag.withDescription("Print machine-readable JSON"),
@@ -98,25 +96,6 @@ export function formatRecordingQuality(quality: RecordingQuality | undefined): s
       ? "WARNING: no compositor frames arrived; this video holds a single stop-time screenshot."
       : "Source counts are compositor events, not a measurement of distinct motion. Inspect the video before sharing.",
   ].join("\n")
-}
-
-export function normalizeCliArguments(args: ReadonlyArray<string>): ReadonlyArray<string> {
-  const delimiter = args.indexOf("--")
-  const secretsRun = args.findIndex((argument, index) => argument === "secrets" && args[index + 1] === "run")
-  if (delimiter === -1 || secretsRun === -1 || secretsRun > delimiter) return args
-  return [
-    ...args.slice(0, delimiter),
-    encodedCliOperandsMarker,
-    ...args.slice(delimiter + 1).map((operand) => `${encodedCliOperandPrefix}${encodeURIComponent(operand)}`),
-  ]
-}
-
-export function decodeCliOperands(operands: ReadonlyArray<string>): ReadonlyArray<string> {
-  if (operands[0] !== encodedCliOperandsMarker) return operands
-  return operands.slice(1).map((operand) => {
-    if (!operand.startsWith(encodedCliOperandPrefix)) throw new Error("Invalid encoded secrets run operand")
-    return decodeURIComponent(operand.slice(encodedCliOperandPrefix.length))
-  })
 }
 
 export function formatSessionContinuation(sessionId: string): string {

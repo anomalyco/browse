@@ -1,10 +1,9 @@
 // Isolated headless check of the guarded-agent features against a real browser: challenge detection, per-session
-// domain allowlists, origin-bound secrets and page-visible API warnings.
+// domain allowlists and page-visible API warnings.
 //   bun run build && (cd cli && bun run build) && node --no-warnings test/guarded-agents-browser.ts [--browser <chromium executable>]
 // Same isolation as execute-realm-browser.ts: the temp root, paired relay, port-patched extension and launch come from
 // startBrowserScene; ports come from BROWSE_TEST_RELAY_PORT and BROWSE_TEST_FIXTURE_PORT, or are free ports.
 import assert from "node:assert/strict"
-import fs from "node:fs"
 import path from "node:path"
 import http from "node:http"
 import { spawnSync } from "node:child_process"
@@ -17,7 +16,6 @@ const { values: options } = parseArgs({ options: { browser: { type: "string" } }
 const fixturePort = await portFromEnv("BROWSE_TEST_FIXTURE_PORT")
 const site = `http://127.0.0.1:${fixturePort}`
 const other = `http://localhost:${fixturePort}`
-const secretValue = "s3cr3t-Value!x"
 const scene = await startBrowserScene({
   ...(options.browser === undefined ? {} : { browser: options.browser }),
   name: "guarded-browser-",
@@ -56,7 +54,6 @@ const fixture = http.createServer((request, response) => {
   }
 })
 
-const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 async function api(route: string, body?: unknown) {
   const response = await fetch(`${base}${route}`, {
     ...(body === undefined ? {} : { method: "POST", body: JSON.stringify(body) }),
@@ -72,15 +69,6 @@ async function execute(sessionId: string, code: string) {
 function runCli(args: readonly string[], input?: string): { status: number | null; stdout: string; stderr: string } {
   const result = spawnSync("node", [cli, ...args], { env, input, encoding: "utf8" })
   return { status: result.status, stdout: result.stdout, stderr: result.stderr }
-}
-function filesContaining(directory: string, needle: string, skip: string): string[] {
-  const found: string[] = []
-  for (const entry of fs.readdirSync(directory, { recursive: true })) {
-    const file = path.join(directory, String(entry))
-    if (file.startsWith(skip) || !fs.statSync(file).isFile()) continue
-    if (fs.readFileSync(file).includes(needle)) found.push(file)
-  }
-  return found
 }
 
 const report: Record<string, unknown> = { root }
@@ -180,52 +168,6 @@ try {
   assert.equal(redirect.value.url, "about:blank", JSON.stringify(redirect.value))
   assert.ok(redirect.warnings.some((warning: string) => warning.includes("sent the tab back to about:blank")), JSON.stringify(redirect.warnings))
   report.allowlist = { serverRedirect: "PASS", refused: "PASS", privateIp: "PASS", wildcardPrivate: "PASS", decimalIp: "PASS", newTab: "PASS", inPageLink: "PASS", popup: "PASS" }
-
-  // ---- origin-bound secrets -----------------------------------------------------------------------
-  const added = runCli(["secrets", "add", "shop", "--origin", site], `${secretValue}\n`)
-  assert.equal(added.status, 0, added.stderr)
-  assert.ok(!added.stdout.includes(secretValue) && !added.stderr.includes(secretValue))
-  const secretList = runCli(["secrets", "list", "--json"])
-  assert.deepEqual(JSON.parse(secretList.stdout).secrets.map((secret: { name: string }) => secret.name), ["shop"])
-  await api("/cli/session/new", { id: "guard-secrets" })
-  const typed = await execute("guard-secrets", `
-    await network.start({ content: 'embed' });
-    await page.goto(${JSON.stringify(`${site}/login`)});
-    const result = await secrets.type('#pass', 'shop');
-    const readBack = await page.inputValue('#pass');
-    console.log('typed', readBack);
-    await Promise.all([page.waitForURL('**/submit'), page.click('button')]);
-    const capture = await network.stop({ outputPath: files.path('guarded.har') });
-    return { result, readBack, length: await page.textContent('#len'), har: capture.outputPath }`)
-  assert.equal(typed.isError, false, typed.text)
-  assert.deepEqual(typed.value.result, { typed: true, name: "shop", origin: site, kind: "password" })
-  assert.equal(typed.value.readBack, "[secret shop]")
-  assert.ok(Number(typed.value.length) > secretValue.length, "the form posted the typed value")
-  assert.ok(typed.warnings.some((warning: string) => warning.includes("without a domain allowlist")), JSON.stringify(typed.warnings))
-  assert.ok(!JSON.stringify(typed).includes(secretValue), "the execute result must not contain the secret")
-  const har = fs.readFileSync(typed.value.har, "utf8")
-  assert.ok(har.includes("/submit"), "the HAR has the form post")
-  assert.ok(!har.includes(secretValue) && !har.includes(encodeURIComponent(secretValue)), "the HAR must not contain the secret")
-  const iframe = await execute("guard-secrets", `await page.goto(${JSON.stringify(`${site}/login`)}); return await secrets.type(page.frameLocator('iframe').locator('#inner'), 'shop')`)
-  assert.equal(iframe.isError, true)
-  assert.match(iframe.text, /domain_not_allowed: the field's frame is http:\/\/localhost:\d+/)
-  const redirected = await execute("guard-secrets", `await page.goto(${JSON.stringify(`${site}/redirect`)}); return await secrets.type('#pass', 'shop')`)
-  assert.equal(redirected.isError, true)
-  assert.match(redirected.text, /domain_not_allowed: the field's frame is http:\/\/localhost:\d+/)
-  const notEditable = await execute("guard-secrets", `await page.goto(${JSON.stringify(`${site}/login`)}); return await secrets.type('button', 'shop')`)
-  assert.equal(notEditable.isError, true)
-  assert.match(notEditable.text, /target_not_editable/)
-  const missing = await execute("guard-secrets", `return await secrets.type('#pass', 'nope')`)
-  assert.match(missing.text, /Secret not found: nope/)
-  assert.equal(runCli(["session", "allow", "--session", "guard-secrets", "127.0.0.1"]).status, 0)
-  const withAllowlist = await execute("guard-secrets", `await page.goto(${JSON.stringify(`${site}/login`)}); return await secrets.type('#user', 'shop')`)
-  assert.equal(withAllowlist.isError, false, withAllowlist.text)
-  assert.ok(!withAllowlist.warnings.some((warning: string) => warning.includes("without a domain allowlist")), JSON.stringify(withAllowlist.warnings))
-  await pause(500)
-  // Relay data (journals, logs, session catalog) and the relay log; the browser's own profile is the browser's.
-  const leaks = [...filesContaining(home, secretValue, path.join(home, "site-secrets")), ...filesContaining(path.dirname(path.join(root, "relay.log")), secretValue, path.join(root, "profile")).filter((file) => !file.startsWith(home))]
-  assert.deepEqual(leaks, [], `the secret leaked into ${leaks.join(", ")}`)
-  report.secrets = { typed: "PASS", readBackRedacted: "PASS", harRedacted: "PASS", crossOriginIframe: "PASS", redirect: "PASS", notEditable: "PASS", noLeaksOnDisk: "PASS" }
 
   console.log(JSON.stringify(report, null, 2))
 } finally {

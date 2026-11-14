@@ -480,7 +480,7 @@ export function printSetupStatus() {
 export async function runSetup(command: string, args: string[]) {
   if (command === "install") return install(args)
   if (command === "extension") return extension()
-  if (command === "uninstall") return uninstall(args)
+  if (command === "uninstall") return uninstall()
   if (command === "pair") return pair(args)
   if (command === "set") return set(args)
 }
