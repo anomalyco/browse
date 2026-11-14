@@ -42,6 +42,9 @@ export type DefaultPageHostOptions = {
   readonly pageHealthCheckTimeoutMs?: number
 }
 
+/** Late target-id probes on one page: each may cost its timeout, so stop after a few. */
+const defaultTargetResolveMaxAttempts = 3
+
 /**
  * The session default page: its identity, its binding to a Playwright page, and the
  * recovery bookkeeping that survives a closed page object or a replaced target.
@@ -73,6 +76,8 @@ export abstract class DefaultPageHost {
   private readonly actionTimeoutPages = new Set<Page>()
   /** A page that replaced a closed one: its 2.5s guard owns the timeout until it navigates. */
   private actionTimeoutGuardedPage: Page | undefined
+  /** Late target-id probes spent on the current page; a page that never identifies is not retried forever. */
+  private defaultTargetResolveAttempts = 0
   protected boundPageListeners: {
     readonly page: Page
     readonly close: () => void
@@ -214,12 +219,15 @@ export abstract class DefaultPageHost {
     this.defaultPageTargetId = targetId
     this.ownsPage = ownsPage
     this.pendingTargetRebind = undefined
+    this.defaultTargetResolveAttempts = 0
     // A rebind (adoption, replacement, the next execute) is not the page the user released, so drop any stale notice.
     this.pageReleasedByDebuggingBar = false
     this.recordNonBlankUrl(safePageUrl(page))
     const close = () => {
       if (this.page !== page) return
-      if (targetId !== undefined && !this.pageCrashed) this.closedDefaultPage = { targetId, ownsPage: this.ownsPage }
+      // The target may have been identified after this page was bound (a late probe on the next execute).
+      const currentTargetId = this.defaultPageTargetId
+      if (currentTargetId !== undefined && !this.pageCrashed) this.closedDefaultPage = { targetId: currentTargetId, ownsPage: this.ownsPage }
       if (this.lastKnownNonBlankUrl) {
         this.recreatedFromClosedUrl = this.lastKnownNonBlankUrl
       }
@@ -266,9 +274,12 @@ export abstract class DefaultPageHost {
   private async identifyBoundDefaultPage(): Promise<void> {
     const page = this.page
     if (!page || page.isClosed() || this.defaultPageTargetId !== undefined) return
+    if (this.defaultTargetResolveAttempts >= defaultTargetResolveMaxAttempts) return
+    this.defaultTargetResolveAttempts += 1
     const targetId = await resolvePageTargetId(page)
     if (!targetId || this.page !== page || page.isClosed() || this.defaultPageTargetId !== undefined) return
     this.defaultPageTargetId = targetId
+    this.defaultTargetResolveAttempts = 0
     this.notifyDefaultTargetChange()
   }
 

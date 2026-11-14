@@ -14,6 +14,14 @@ const PersistedTarget = Schema.Struct({
 
 export type PersistedTarget = Schema.Schema.Type<typeof PersistedTarget>
 
+/** Only relay-owned pages are reclaimed after a restart; a user tab is never a held agent target. */
+const PersistedRelayTarget = Schema.Struct({
+  id: Schema.String,
+  owner: Schema.Literal("relay"),
+})
+
+export type PersistedRelayTarget = Schema.Schema.Type<typeof PersistedRelayTarget>
+
 export const PersistedSession = Schema.Struct({
   id: Schema.String,
   createdAt: Schema.String,
@@ -29,7 +37,7 @@ export const PersistedSession = Schema.Struct({
    * Every relay-owned target the session holds, so a relay that starts after this one reclaims all of them.
    * Older relays ignore it; older catalogs without it still load.
    */
-  targets: Schema.optionalKey(Schema.Array(PersistedTarget)),
+  targets: Schema.optionalKey(Schema.Array(PersistedRelayTarget)),
   /** The process (an MCP server, a CLI) that last used the session, so the relay can tell when it is gone. */
   clientPid: Schema.optionalKey(Schema.Int),
 })
@@ -40,6 +48,30 @@ const Catalog = Schema.Struct({
   version: Schema.Literal(1),
   sessions: Schema.Array(PersistedSession),
 })
+
+/**
+ * Older 0.x relays wrote any target they had into `targets`; only relay-owned entries are valid now. Drop the rest
+ * before decoding so one bad entry can never move the whole catalog aside.
+ */
+function relayOwnedCatalog(input: unknown): { readonly value: unknown; readonly dropped: number } {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) return { value: input, dropped: 0 }
+  const catalog = input as Record<string, unknown>
+  if (!Array.isArray(catalog.sessions)) return { value: input, dropped: 0 }
+  let dropped = 0
+  const sessions = catalog.sessions.map((session) => {
+    if (session === null || typeof session !== "object" || Array.isArray(session)) return session
+    const entry = session as Record<string, unknown>
+    if (!Array.isArray(entry.targets)) return session
+    const targets = entry.targets.filter((target) => {
+      const keep = target !== null && typeof target === "object" && !Array.isArray(target) &&
+        (target as Record<string, unknown>).owner === "relay"
+      if (!keep) dropped++
+      return keep
+    })
+    return { ...entry, targets }
+  })
+  return { value: { ...catalog, sessions }, dropped }
+}
 
 export function defaultSessionCatalogPath(port: number, home = os.homedir()): string {
   return path.join(dataRoot(home), "relays", String(port), "sessions.json")
@@ -57,9 +89,13 @@ export class SessionCatalog {
       throw new Error(`Could not read browse session catalog at ${this.filePath}`, { cause: error })
     }
     try {
-      const sessions = Schema.decodeUnknownSync(Catalog)(JSON.parse(text)).sessions
+      const sanitized = relayOwnedCatalog(JSON.parse(text))
+      const sessions = Schema.decodeUnknownSync(Catalog)(sanitized.value).sessions
       const invalid = sessions.find((session) => !isValidSessionId(session.id))
       if (invalid) throw new Error(`Invalid persisted session id: ${invalid.id}`)
+      if (sanitized.dropped > 0) {
+        console.error(`Browse session catalog at ${this.filePath} held ${sanitized.dropped} non-relay target(s); dropped them`)
+      }
       return sessions
     } catch (error) {
       const detail = error instanceof Error && error.message ? `: ${error.message}` : ""

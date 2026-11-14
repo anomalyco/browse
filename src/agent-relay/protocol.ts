@@ -8,6 +8,8 @@ export type JsonObject = { readonly [key: string]: JsonValue }
 
 /** The relay's default port (cli/src/relay/helpers.ts defaultPort). */
 export const defaultRelayPort = 19988
+/** Optional hello capabilities; an older relay ignores them and an older extension advertises none. */
+export const extensionCapabilityTabRelease = "tab-release"
 
 /**
  * The ports an unpinned relay falls back to when another program holds 19988, in the order it tries them. Must match

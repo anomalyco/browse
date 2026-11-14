@@ -16,11 +16,20 @@ type AttachOptions = {
   readonly autoAttachParams?: JsonObject
   /** The opener page's target id, for a popup: clients see it as targetInfo.openerId and report the popup. */
   readonly openerTargetId?: string
+  /**
+   * Only an extension inventory that announced this tab as an agent's may reclaim it from the session's persisted
+   * target list. A user lend (the toolbar) must never turn a remembered agent page back into a relay page.
+   */
+  readonly reclaimHeldTargets?: boolean
+  /** A user lend restores nothing: neither the persisted default page nor relay memory owned the tab being lent. */
+  readonly restoreOwnership?: boolean
+  /** The caller runs the allowlist guard itself and records the target only after it passes. */
+  readonly deferHeldTarget?: boolean
 }
 
 type Options = {
   readonly registry: TargetRegistry
-  readonly sessions: Pick<OpenCodeBrowserSessions, "persistedTargetOwner" | "markTargetReplaced" | "noteTargetHeld">
+  readonly sessions: Pick<OpenCodeBrowserSessions, "persistedTargetOwner" | "markTargetReplaced" | "noteTargetHeld" | "forgetTargetHeld">
   readonly handoffs: Pick<HandoffRegistry, "rebindTarget">
   readonly clients: Pick<CdpClientPool<object>, "detachTab">
   readonly extension: {
@@ -29,6 +38,14 @@ type Options = {
     readonly isCurrentGeneration: (generation: number) => boolean
     readonly send: (command: Omit<ExtensionCommand, "id">) => Effect.Effect<JsonObject, Error>
   }
+  /** A target restored from a session's persisted list must pass the session's allowlist before it is published. */
+  readonly authorizeRestoredTarget?: (target: {
+    readonly tabId: number
+    readonly targetId: string
+    readonly url: string
+    readonly owner: "relay" | "user"
+    readonly sessionId: string
+  }) => boolean
   readonly presentation: {
     readonly replaced: (change: Extract<RootTargetChange, { readonly kind: "replaced" }>) => void
     readonly committed: (target: ConnectedTarget) => void
@@ -67,6 +84,8 @@ type Worker = {
   readonly generation: number
   readonly done: Latch.Latch
   attachIfMissing: boolean
+  /** The extension announced this tab as an agent's: only then may it reclaim persisted held targets. */
+  reclaimHeldTargets: boolean
   /** The extension attached the tab again (a new chrome.debugger session): set the root up from scratch. */
   renewed: boolean
   pending: boolean
@@ -129,6 +148,8 @@ export class RootTargetLifecycle {
     readonly verificationRetries: number
     readonly errorMessage: string
     readonly generation?: number
+    /** The extension announced this tab as an agent's (its inventory's `agent: true`). */
+    readonly announcedAgent?: boolean
     /**
      * The extension re-attached the tab after Chrome dropped its debugger (target_closed: a PDF viewer or another
      * extension's frame appearing). The new attachment has none of the old one's domains enabled, so the root is
@@ -151,6 +172,7 @@ export class RootTargetLifecycle {
     if (existing) {
       existing.pending = true
       existing.attachIfMissing ||= options.attachIfMissing
+      existing.reclaimHeldTargets ||= options.announcedAgent === true
       existing.renewed ||= options.renewed === true
       existing.verificationRetries = Math.max(existing.verificationRetries, options.verificationRetries)
       return
@@ -160,6 +182,7 @@ export class RootTargetLifecycle {
       generation,
       done: Latch.makeUnsafe(),
       attachIfMissing: options.attachIfMissing,
+      reclaimHeldTargets: options.announcedAgent === true,
       renewed: options.renewed === true,
       pending: false,
       verificationRetries: options.verificationRetries,
@@ -169,6 +192,8 @@ export class RootTargetLifecycle {
       worker.pending = false
       const mayAttach = worker.attachIfMissing
       worker.attachIfMissing = false
+      const reclaimHeldTargets = worker.reclaimHeldTargets
+      worker.reclaimHeldTargets = false
       const renewed = worker.renewed
       worker.renewed = false
       yield* Effect.suspend(() => {
@@ -185,7 +210,7 @@ export class RootTargetLifecycle {
           }
           if (lifecycle.options.registry.routingRootTarget(options.tabId)) return lifecycle.reconcileUnlocked(transition)
           return mayAttach
-            ? lifecycle.attachUnlocked(transition, { tabId: options.tabId, owner: "user", alreadyAttached: true }).pipe(Effect.asVoid)
+            ? lifecycle.attachUnlocked(transition, { tabId: options.tabId, owner: "user", alreadyAttached: true, reclaimHeldTargets }).pipe(Effect.asVoid)
             : Effect.void
         }, lifecycle.options.inventoryCommandTimeoutMs ?? DEFAULT_INVENTORY_COMMAND_TIMEOUT_MS)
       }).pipe(
@@ -325,17 +350,37 @@ export class RootTargetLifecycle {
     const targetInfo = options.openerTargetId && !reportedTargetInfo.openerId
       ? { ...reportedTargetInfo, openerId: options.openerTargetId }
       : reportedTargetInfo
-    const restored = options.opencodeBrowserSessionId ? undefined : this.options.sessions.persistedTargetOwner(targetInfo.targetId)
-    const opencodeBrowserSessionId = options.opencodeBrowserSessionId ?? restored?.sessionId
+    const restored = options.opencodeBrowserSessionId || options.restoreOwnership === false
+      ? undefined
+      : this.options.sessions.persistedTargetOwner(targetInfo.targetId, {
+          includeHeldTargets: options.reclaimHeldTargets === true,
+        })
+    let owner = restored?.owner ?? options.owner
+    let opencodeBrowserSessionId = options.opencodeBrowserSessionId ?? restored?.sessionId
+    // A remembered page is only published for its session once the session's allowlist accepts it. A denied entry is
+    // blanked by the caller and comes back as an ordinary user tab, never as a session page host.
+    if (
+      owner === "relay" && opencodeBrowserSessionId && !options.opencodeBrowserSessionId && this.options.authorizeRestoredTarget &&
+      !this.options.authorizeRestoredTarget({
+        tabId,
+        targetId: targetInfo.targetId,
+        url: targetInfo.url,
+        owner,
+        sessionId: opencodeBrowserSessionId,
+      })
+    ) {
+      owner = "user"
+      opencodeBrowserSessionId = undefined
+    }
     const target = this.options.registry.stageRootTarget({
       tabId,
       sessionId: `bc-tab-${this.nextSessionId++}`,
       targetInfo,
-      owner: restored?.owner ?? options.owner,
+      owner,
       ...(opencodeBrowserSessionId ? { opencodeBrowserSessionId } : {}),
     })
     transition.staged = target
-    return yield* this.finish(transition, target, options.autoAttachParams)
+    return yield* this.finish(transition, target, options.autoAttachParams, options.deferHeldTarget === true)
   })
 
   private readonly reconcileUnlocked = Effect.fnUntraced(function* (this: RootTargetLifecycle, transition: Transition) {
@@ -364,7 +409,7 @@ export class RootTargetLifecycle {
     })
   })
 
-  private readonly finish = Effect.fnUntraced(function* (this: RootTargetLifecycle, transition: Transition, target: ConnectedTarget, autoAttachParams?: JsonObject) {
+  private readonly finish = Effect.fnUntraced(function* (this: RootTargetLifecycle, transition: Transition, target: ConnectedTarget, autoAttachParams?: JsonObject, deferHeldTarget = false) {
     const { registry, handoffs, sessions, clients, presentation } = this.options
     // Stage before auto-attach: synchronous child events must route to this generation.
     yield* this.command(transition, "Target.setAutoAttach", autoAttachParams ?? { autoAttach: true, waitForDebuggerOnStart: false, flatten: true })
@@ -388,9 +433,15 @@ export class RootTargetLifecycle {
       clients.detachTab(target.tabId)
       presentation.replaced(change)
     }
-    // Record every relay-owned page the session holds now, so a relay that starts later reclaims it.
-    if (change.target.owner === "relay" && change.target.opencodeBrowserSessionId) {
-      sessions.noteTargetHeld(change.target.targetInfo.targetId, change.target.opencodeBrowserSessionId)
+    // Record every relay-owned page the session holds now, so a relay that starts later reclaims it. A tab that came
+    // back as a user's (a lend, or a denied reclaim) must stop being a remembered agent target. A caller that still
+    // has to run the allowlist guard records it itself once the guard passes.
+    if (!deferHeldTarget) {
+      if (change.target.owner === "relay" && change.target.opencodeBrowserSessionId) {
+        sessions.noteTargetHeld(change.target.targetInfo.targetId, change.target.opencodeBrowserSessionId)
+      } else {
+        sessions.forgetTargetHeld(change.target.targetInfo.targetId)
+      }
     }
     // No asynchronous gap between retiring old views and publishing the committed tree.
     presentation.committed(change.target)

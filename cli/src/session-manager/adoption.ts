@@ -82,6 +82,11 @@ export function adoptTargetForSession(
         previousRelayClosed = true
       }
       session.target = { id: options.targetId, owner: "user" }
+      if (session.targets) {
+        const held = session.targets.filter((target) => target.id !== options.targetId && target.id !== previousTargetId)
+        if (held.length > 0) session.targets = held
+        else delete session.targets
+      }
       session.updatedAt = new Date().toISOString()
       yield* context.admission.commitPersistence()
       if (adoptionCancelled()) {
@@ -172,6 +177,7 @@ export function sessionRelayTargetIds(hooks: SessionHooks, session: OpenCodeBrow
   }
   if (session.target?.owner === "relay") ids.add(session.target.id)
   else if (session.target) ids.delete(session.target.id)
+  for (const target of session.targets ?? []) ids.add(target.id)
   return ids
 }
 

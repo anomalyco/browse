@@ -112,3 +112,37 @@ test("every relay-owned target a session holds survives a catalog round trip", a
 
   expect(await catalog.load()).toEqual(sessions)
 })
+
+test("a user-owned entry in targets is dropped instead of moving the catalog aside", async () => {
+  const { catalog } = temporaryCatalog()
+  const now = new Date().toISOString()
+  fs.writeFileSync(catalog.filePath, JSON.stringify({
+    version: 1,
+    sessions: [{
+      id: "mixed",
+      createdAt: now,
+      updatedAt: now,
+      readOnly: false,
+      targets: [
+        { id: "TARGET-RELAY", owner: "relay" },
+        { id: "TARGET-USER", owner: "user" },
+      ],
+    }],
+  }))
+  const errors: unknown[][] = []
+  const original = console.error
+  console.error = (...args: unknown[]) => { errors.push(args) }
+  try {
+    expect(await catalog.load()).toEqual([{
+      id: "mixed",
+      createdAt: now,
+      updatedAt: now,
+      readOnly: false,
+      targets: [{ id: "TARGET-RELAY", owner: "relay" }],
+    }])
+  } finally {
+    console.error = original
+  }
+  expect(fs.existsSync(catalog.filePath)).toBe(true)
+  expect(errors.some((args) => String(args[0]).includes("non-relay target"))).toBe(true)
+})

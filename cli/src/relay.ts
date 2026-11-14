@@ -378,6 +378,12 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       },
       onTargetOwnershipChange: (change) => reconcileTargetOwnership(change),
       onTargetCleared: (sessionId, targetId, reason) => relayLog("session.target.cleared", { session: sessionId, target: targetId, reason }),
+      onRestoreWarning: (detail) => relayLog("session.restore.dropped", { detail }),
+      onTombstoneRelayTargets: (sessionId, targetIds, browserKey) => {
+        for (const targetId of targetIds) {
+          ownersAcrossReconnect.set(targetId, { browser: browserKey ?? "", owner: "relay", sessionId })
+        }
+      },
       onReleaseRelayTarget: (targetId) => releaseRelayTarget(targetId),
       getTargets: () => registry.listRootTargets(),
       relayTargetIdsForSession: (sessionId) => [
@@ -433,9 +439,26 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const rootLifecycle = yield* RootTargetLifecycle.make({
     registry,
     sessions: {
-      persistedTargetOwner: (targetId) => sessions.persistedTargetOwner(targetId) ?? ownerAcrossReconnect(targetId),
+      persistedTargetOwner: (targetId, restoreOptions) =>
+        sessions.persistedTargetOwner(targetId, restoreOptions) ?? ownerAcrossReconnect(targetId),
       markTargetReplaced: (previousTargetId, targetId) => sessions.markTargetReplaced(previousTargetId, targetId),
       noteTargetHeld: (targetId, sessionId) => sessions.noteTargetHeld(targetId, sessionId),
+      forgetTargetHeld: (targetId) => sessions.forgetTargetHeld(targetId),
+    },
+    authorizeRestoredTarget: ({ tabId, targetId, url, owner, sessionId }) => {
+      // Like a popup or a created tab: the session's allowlist decides before the page is published for it.
+      const allowed = navigationGuard.createdTabNavigated({
+        tabId,
+        opencodeBrowserSessionId: sessionId,
+        owner,
+        targetInfo: { targetId, url },
+      })
+      if (!allowed) {
+        relayLog("allowlist.reclaim-refused", { tabId, session: sessionId })
+        sessions.markTargetDetached(targetId, { reason: "allowlist-reclaim" })
+        sessions.forgetTargetHeld(targetId)
+      }
+      return allowed
     },
     handoffs,
     clients: cdpClients,
@@ -539,7 +562,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const toggleTab = Effect.fnUntraced(function* (tabId: number) {
     if (registry.tabTargets.has(tabId)) return yield* detachTab(tabId)
     announceTab(tabId)
-    yield* rootLifecycle.attach({ tabId, owner: "user" })
+    // A lend is the user's: it restores no persisted owner, and finish drops any stale held-target hint for it.
+    yield* rootLifecycle.attach({ tabId, owner: "user", restoreOwnership: false })
   })
 
   const sessionBrowser = (sessionId: string | undefined): Effect.Effect<BrowserLink, Error> => Effect.suspend(() => {
@@ -574,6 +598,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       owner: "relay",
       ...(createOptions.opencodeBrowserSessionId ? { opencodeBrowserSessionId: createOptions.opencodeBrowserSessionId } : {}),
       ...(createOptions.autoAttachParams ? { autoAttachParams: createOptions.autoAttachParams } : {}),
+      // The created tab's allowlist check runs below; record it only once that check has passed.
+      deferHeldTarget: true,
     }).pipe(
       // The tab exists for this createTarget alone: a failed attach must not leave an unattached blank tab behind.
       Effect.tapError((error) => Effect.sync(() => {
@@ -583,6 +609,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       })),
     )
     const requested = createTargetUrl({ url: createOptions.url })
+    let heldAllowed = true
+    const finishCreatedTarget = (created: ConnectedTarget) => {
+      if (heldAllowed && createOptions.opencodeBrowserSessionId) sessions.noteTargetHeld(created.targetInfo.targetId, createOptions.opencodeBrowserSessionId)
+      return created
+    }
     if (requested !== "about:blank") {
       const data = /^data:/i.test(requested.trim())
       const navigation = yield* (
@@ -603,12 +634,13 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       // disallowed result is blanked here like any other agent tab; only a URL this check allows reaches the registry.
       const current = yield* sendDebuggerCommand({ tabId, method: "Target.getTargetInfo", params: {} }).pipe(Effect.orElseSucceed((): JsonObject => ({})))
       const targetInfo = getTargetInfo(current.targetInfo)
-      if (targetInfo && !isRestrictedTarget(targetInfo) && navigationGuard.createdTabNavigated({ ...target, targetInfo })) {
+      heldAllowed = !targetInfo || isRestrictedTarget(targetInfo) || navigationGuard.createdTabNavigated({ ...target, targetInfo })
+      if (targetInfo && !isRestrictedTarget(targetInfo) && heldAllowed) {
         const updated = registry.updateConnectedTargetInfo({ tabId, targetInfo })
-        if (updated?.kind === "root") return updated.target
+        if (updated?.kind === "root") return finishCreatedTarget(updated.target)
       }
     }
-    return target
+    return finishCreatedTarget(target)
   })
 
   const closeTargetByTargetId = Effect.fnUntraced(function* (targetId: string) {

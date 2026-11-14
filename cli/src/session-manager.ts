@@ -118,23 +118,39 @@ export class OpenCodeBrowserSessions {
   restore(entries: readonly PersistedSession[]): void {
     this.admission.assertAdmission()
     if (this.sessions.size > 0) throw new Error("Cannot restore sessions after session management has started")
-    const ids = new Set<string>()
-    const targetOwners = new Map<string, string>()
-    const recordTarget = (entry: PersistedSession, target: SessionTarget | undefined) => {
-      if (!target) return
-      const owner = targetOwners.get(target.id)
-      if (owner !== undefined && owner !== entry.id) {
-        throw new Error(`Duplicate persisted target owner: ${target.id}`)
+    const sessionIds = new Set<string>()
+    const accepted: PersistedSession[] = []
+    for (const entry of entries) {
+      if (sessionIds.has(entry.id)) {
+        this.warnRestore(`duplicate session ${entry.id}; later entry dropped`)
+        continue
       }
-      targetOwners.set(target.id, entry.id)
+      sessionIds.add(entry.id)
+      accepted.push(entry)
     }
-    for (const entry of entries) {
-      if (ids.has(entry.id)) throw new Error(`Duplicate persisted session: ${entry.id}`)
-      ids.add(entry.id)
-      recordTarget(entry, entry.target)
-      for (const target of entry.targets ?? []) recordTarget(entry, target)
-    }
-    for (const entry of entries) {
+    const targetOwners = new Map<string, string>()
+    for (const entry of accepted) {
+      const target = this.acceptRestoredTarget(entry, entry.target, targetOwners)
+      const targets: SessionTarget[] = []
+      const seen = new Set<string>(target ? [target.id] : [])
+      for (const candidate of entry.targets ?? []) {
+        if ((candidate.owner as string) !== "relay") {
+          this.warnRestore(`session ${entry.id} held a non-relay target ${candidate.id}; target dropped`)
+          continue
+        }
+        if (seen.has(candidate.id)) {
+          this.warnRestore(`session ${entry.id} lists target ${candidate.id} twice; duplicate dropped`)
+          continue
+        }
+        const owner = targetOwners.get(candidate.id)
+        if (owner !== undefined && owner !== entry.id) {
+          this.warnRestore(`session ${entry.id} claims target ${candidate.id} of session ${owner}; target dropped`)
+          continue
+        }
+        targetOwners.set(candidate.id, entry.id)
+        seen.add(candidate.id)
+        targets.push(candidate)
+      }
       const session = this.createOpenCodeBrowserSession(entry.id, entry.readOnly, {
         createdAt: entry.createdAt,
         updatedAt: entry.updatedAt,
@@ -142,18 +158,46 @@ export class OpenCodeBrowserSessions {
       if (entry.allowedOrigins && entry.allowedOrigins.length > 0) session.allowedOrigins = entry.allowedOrigins
       if (entry.keepVisible === true) session.keepVisible = true
       if (entry.browser) session.browser = { id: entry.browser, ...(entry.browserKey ? { key: entry.browserKey } : {}) }
-      if (entry.target) session.target = entry.target
-      if (entry.targets && entry.targets.length > 0) session.targets = entry.targets
+      if (target) session.target = target
+      if (targets.length > 0) session.targets = targets
       if (entry.clientPid !== undefined) session.clientPid = entry.clientPid
-      session.sandbox.restore(entry.target)
+      session.sandbox.restore(target)
       this.sessions.set(entry.id, session)
     }
   }
 
-  persistedTargetOwner(targetId: string): { readonly sessionId: string; readonly owner: "relay" | "user" } | undefined {
+  private acceptRestoredTarget(
+    entry: PersistedSession,
+    target: SessionTarget | undefined,
+    targetOwners: Map<string, string>,
+  ): SessionTarget | undefined {
+    if (!target) return undefined
+    const owner = targetOwners.get(target.id)
+    if (owner !== undefined && owner !== entry.id) {
+      this.warnRestore(`session ${entry.id} claims target ${target.id} of session ${owner}; target dropped`)
+      return undefined
+    }
+    targetOwners.set(target.id, entry.id)
+    return target
+  }
+
+  private warnRestore(message: string): void {
+    try {
+      if (this.hooks.onRestoreWarning) return this.hooks.onRestoreWarning(message)
+    } catch {
+      // The fallback line below is better than a failed startup.
+    }
+    console.error(`browse session restore: ${message}`)
+  }
+
+  persistedTargetOwner(
+    targetId: string,
+    options: { readonly includeHeldTargets?: boolean } = {},
+  ): { readonly sessionId: string; readonly owner: "relay" | "user" } | undefined {
     for (const session of this.sessions.values()) {
       const target = session.target
       if (target?.id === targetId) return { sessionId: session.id, owner: target.owner }
+      if (options.includeHeldTargets === false) continue
       const held = session.targets?.find((candidate) => candidate.id === targetId)
       if (held) return { sessionId: session.id, owner: held.owner }
     }
@@ -168,6 +212,60 @@ export class OpenCodeBrowserSessions {
     if (targets.some((target) => target.id === targetId && target.owner === "relay")) return
     session.targets = [...targets, { id: targetId, owner: "relay" }]
     this.admission.schedulePersistence()
+  }
+
+  /** Drop a target a session no longer holds (a user lend, an adoption): it must not be reclaimed again. */
+  forgetTargetHeld(targetId: string): boolean {
+    let changed = false
+    for (const session of this.sessions.values()) {
+      if (!session.targets?.some((target) => target.id === targetId)) continue
+      const kept = session.targets.filter((target) => target.id !== targetId)
+      if (kept.length > 0) session.targets = kept
+      else delete session.targets
+      changed = true
+    }
+    if (changed) this.admission.schedulePersistence()
+    return changed
+  }
+
+  /**
+   * Keep only targets a settled inventory actually announced, for sessions in that browser (or sessions whose
+   * browser is unknown), and dedupe them. Returns the target ids removed.
+   */
+  pruneHeldTargets(options: { readonly browserKey: string; readonly liveTargetIds: ReadonlySet<string> }): string[] {
+    const removed: string[] = []
+    let changed = false
+    for (const session of this.sessions.values()) {
+      if (session.targets === undefined) continue
+      if (session.browser?.key !== undefined && session.browser.key !== options.browserKey) continue
+      const kept: SessionTarget[] = []
+      const seen = new Set<string>()
+      for (const target of session.targets) {
+        if (!options.liveTargetIds.has(target.id) || seen.has(target.id)) {
+          removed.push(target.id)
+          changed = true
+          continue
+        }
+        seen.add(target.id)
+        kept.push(target)
+      }
+      if (kept.length > 0) session.targets = kept
+      else delete session.targets
+    }
+    if (changed) this.admission.schedulePersistence()
+    return removed
+  }
+
+  /** A deleted session's restored tabs are no longer live: a browser reconnect must close them. */
+  private tombstoneHeldTargets(session: OpenCodeBrowserSession): void {
+    const targetIds = new Set((session.targets ?? []).map((target) => target.id))
+    if (session.target?.owner === "relay") targetIds.add(session.target.id)
+    if (targetIds.size === 0) return
+    try {
+      this.hooks.onTombstoneRelayTargets?.(session.id, [...targetIds], session.browser?.key)
+    } catch (error) {
+      console.error("Session tombstone hook failed", error)
+    }
   }
 
   private updateTarget(session: OpenCodeBrowserSession, target: SessionTarget | undefined): void {
@@ -399,7 +497,13 @@ export class OpenCodeBrowserSessions {
     return this.collectSessionIds((session) => {
       if (session.target?.id === previousTargetId) this.updateTarget(session, { ...session.target, id: targetId })
       if (session.targets?.some((target) => target.id === previousTargetId)) {
-        session.targets = session.targets.map((target) => target.id === previousTargetId ? { ...target, id: targetId } : target)
+        const seen = new Set<string>()
+        session.targets = session.targets.flatMap((target) => {
+          const id = target.id === previousTargetId ? targetId : target.id
+          if (seen.has(id)) return []
+          seen.add(id)
+          return [{ ...target, id }]
+        })
         this.admission.schedulePersistence()
       }
       return session.sandbox.markTargetReplaced(previousTargetId, targetId)
@@ -431,6 +535,9 @@ export class OpenCodeBrowserSessions {
         yield* manager.admission.commitPersistence(() => Effect.sync(() => {
           manager.sessions.set(id, session)
         }))
+        // Restored targets that were never attached are not live to close now; tombstone them so the browser's next
+        // inventory closes their tabs instead of leaving an agent's work open under a session that no longer exists.
+        manager.tombstoneHeldTargets(session)
         yield* manager.releaseSessionTargetOwnership(session)
         yield* manager.closeOpenCodeBrowserSession(session)
         yield* Effect.sync(() => {

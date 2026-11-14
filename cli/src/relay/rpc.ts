@@ -76,8 +76,15 @@ export class ExtensionRpc {
   protocolVersion: number | null | undefined
   protocolCompatible: boolean | undefined
   protocolLegacy: boolean | undefined
+  /** Optional things the extension says it can do, such as an open-tab release on debugger detach. */
+  readonly capabilities = new Set<string>()
 
   constructor(private readonly timeouts: ExtensionRpcTimeouts = {}) {}
+
+  /** Whether the extension advertised a capability in its hello; older extensions advertise none. */
+  supports(capability: string): boolean {
+    return this.capabilities.has(capability)
+  }
 
   get connected(): boolean {
     return this.socket?.readyState === WebSocket.OPEN && this.ready && !this.unresponsive && this.protocolCompatible !== false
@@ -101,12 +108,22 @@ export class ExtensionRpc {
     this.resetConnectionState(socket)
   }
 
-  markHandshake(version: string | undefined, reportedProtocolVersion: JsonValue | undefined): ExtensionProtocolCompatibility {
+  markHandshake(
+    version: string | undefined,
+    reportedProtocolVersion: JsonValue | undefined,
+    reportedCapabilities?: JsonValue | undefined,
+  ): ExtensionProtocolCompatibility {
     const protocol = extensionProtocolCompatibility(reportedProtocolVersion)
     this.version = version
     this.protocolVersion = protocol.version
     this.protocolCompatible = protocol.compatible
     this.protocolLegacy = protocol.legacy
+    this.capabilities.clear()
+    if (Array.isArray(reportedCapabilities)) {
+      for (const capability of reportedCapabilities) {
+        if (typeof capability === "string" && capability.length <= 64) this.capabilities.add(capability)
+      }
+    }
     return protocol
   }
 
@@ -135,6 +152,7 @@ export class ExtensionRpc {
     this.protocolVersion = undefined
     this.protocolCompatible = undefined
     this.protocolLegacy = undefined
+    this.capabilities.clear()
   }
 
   close(): void {

@@ -340,6 +340,91 @@ describe("persisting a session's pages", () => {
     expect(session.target).toBeUndefined()
     expect(cleared).toEqual([["logs", "T-old", "tab-closed"]])
   })
+
+  test("detaching or replacing a target updates the session's held targets", () => {
+    const sessions = new OpenCodeBrowserSessions("http://127.0.0.1:0", () => new FakeSandbox(async () => ok("x")))
+    const session = sessions.createNew("held")
+    session.target = { id: "T-old", owner: "relay" }
+    session.targets = [
+      { id: "T-old", owner: "relay" },
+      { id: "T-keep", owner: "relay" },
+    ]
+
+    sessions.markTargetDetached("T-old", { reason: "tab-closed" })
+    expect(session.target).toBeUndefined()
+    expect(session.targets).toEqual([{ id: "T-keep", owner: "relay" }])
+
+    sessions.markTargetReplaced("T-keep", "T-new")
+    expect(session.targets).toEqual([{ id: "T-new", owner: "relay" }])
+  })
+
+  test("restore drops duplicates and conflicting targets instead of failing startup", () => {
+    const warnings: string[] = []
+    const sessions = new OpenCodeBrowserSessions("http://127.0.0.1:0", () => new FakeSandbox(async () => ok("x")), {
+      onRestoreWarning: (message) => { warnings.push(message) },
+    })
+    const now = new Date().toISOString()
+    const entry = (id: string, target?: { id: string; owner: "relay" | "user" }, targets?: Array<{ id: string; owner: "relay" }>): PersistedSession => ({
+      id,
+      createdAt: now,
+      updatedAt: now,
+      readOnly: false,
+      ...(target ? { target } : {}),
+      ...(targets ? { targets } : {}),
+    })
+
+    sessions.restore([
+      entry("first", { id: "T-shared", owner: "relay" }, [{ id: "T-shared", owner: "relay" }, { id: "T-one", owner: "relay" }, { id: "T-one", owner: "relay" }]),
+      entry("first"),
+      entry("second", undefined, [{ id: "T-shared", owner: "relay" }, { id: "T-two", owner: "relay" }]),
+      entry("third", { id: "T-shared", owner: "relay" }),
+    ])
+
+    expect(Array.from(sessions.sessions.keys())).toEqual(["first", "second", "third"])
+    expect(sessions.sessions.get("first")?.targets).toEqual([{ id: "T-one", owner: "relay" }])
+    expect(sessions.sessions.get("second")?.targets).toEqual([{ id: "T-two", owner: "relay" }])
+    expect(sessions.sessions.get("third")?.target).toBeUndefined()
+    expect(warnings.length).toBeGreaterThanOrEqual(4)
+  })
+
+  test("held targets only restore for an agent inventory, are pruned when stale, and can be forgotten", () => {
+    const sessions = new OpenCodeBrowserSessions("http://127.0.0.1:0", () => new FakeSandbox(async () => ok("x")))
+    const session = sessions.createNew("pages")
+    session.browser = { id: "chrome", key: "browser-1" }
+    session.targets = [
+      { id: "T-live", owner: "relay" },
+      { id: "T-live", owner: "relay" },
+      { id: "T-stale", owner: "relay" },
+    ]
+    const other = sessions.createNew("other")
+    other.browser = { id: "brave", key: "browser-2" }
+    other.targets = [{ id: "T-elsewhere", owner: "relay" }]
+
+    expect(sessions.persistedTargetOwner("T-live", { includeHeldTargets: false })).toBeUndefined()
+    expect(sessions.persistedTargetOwner("T-live")).toEqual({ sessionId: "pages", owner: "relay" })
+    expect(sessions.pruneHeldTargets({ browserKey: "browser-1", liveTargetIds: new Set(["T-live"]) })).toEqual(["T-live", "T-stale"])
+    expect(session.targets).toEqual([{ id: "T-live", owner: "relay" }])
+    expect(other.targets).toEqual([{ id: "T-elsewhere", owner: "relay" }])
+
+    expect(sessions.forgetTargetHeld("T-live")).toBe(true)
+    expect(session.targets).toBeUndefined()
+  })
+
+  test("adopting a tab drops it and the previous target from the session's held targets", async () => {
+    const sessions = new OpenCodeBrowserSessions("http://127.0.0.1:0", () => new FakeSandbox(async () => ok("x")))
+    const session = sessions.createNew("adopt")
+    session.target = { id: "T-old", owner: "relay" }
+    session.targets = [
+      { id: "T-old", owner: "relay" },
+      { id: "T-user", owner: "relay" },
+      { id: "T-keep", owner: "relay" },
+    ]
+
+    await run(sessions.adopt({ sessionId: "adopt", createIfMissing: false, targetId: "T-user", targetUrl: "https://adopted.test/" }))
+
+    expect(session.target).toEqual({ id: "T-user", owner: "user" })
+    expect(session.targets).toEqual([{ id: "T-keep", owner: "relay" }])
+  })
 })
 
 describe("realm timers", () => {

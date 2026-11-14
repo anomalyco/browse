@@ -91,11 +91,11 @@ export class SessionNavigationGuard {
     return `browse blocked ${options.method}: session ${options.sessionId} has a domain allowlist and ${decision.reason}. Ask the user before widening it (session_allowlist / \`session allow\`).`
   }
 
-  /** Apply the session's allowlist to a popup the relay just attached. */
-  popupAttached(target: NavigationGuardTarget): void {
-    if (!this.enforced(target)) return
+  /** Apply the session's allowlist to a popup the relay just attached; false when it was closed or blanked. */
+  popupAttached(target: NavigationGuardTarget): boolean {
+    if (!this.enforced(target)) return true
     this.freshPopups.add(target.tabId)
-    this.observeCommittedUrl(target, target.targetInfo.url)
+    return this.observeCommittedUrl(target, target.targetInfo.url)
   }
 
   /**

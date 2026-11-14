@@ -489,7 +489,7 @@ describe("relay", () => {
     const third = new FakeExtension(home, port)
       .on("Target.getTargetInfo", (command) => ({ targetInfo: info(Number(command.params?.tabId)) }))
     // 103: an agent's tab the relay never knew (its attach was cut short); 104: a tab the user lent.
-    expect(await third.pair({ attachedTabs: [101, 102, 103, 104], agentTabs: [101, 102, 103] })).toBe(true)
+    expect(await third.pair({ attachedTabs: [101, 102, 103, 104], agentTabs: [101, 102, 103], capabilities: ["tab-release"] })).toBe(true)
     expect(await until(() => [101, 102].every((tabId) => third.commands.some((command) => command.method === "tabs.remove" && command.params?.tabId === tabId)), 5_000)).toBe(true)
     // The tab no session claims and this relay has no record of is let go, not closed.
     expect(await until(() => third.commands.some((command) => command.method === "debugger.detach" && command.params?.tabId === 103 && command.params?.release === true), 5_000)).toBe(true)

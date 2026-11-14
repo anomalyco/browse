@@ -184,8 +184,9 @@ export function createRelayGrouping(deps: {
 
   /**
    * After a restart, relay groups may hold tabs the relay no longer uses. Tabs an agent opened stay in their group
-   * (the relay reclaims a named session's tabs, and idle cleanup closes the rest), so a restart never leaves loose
-   * agent tabs behind; a tab the user lent an agent goes back to being an ordinary tab.
+   * (a named session reclaims the ones its inventory marks as an agent's, and idle cleanup closes the rest), so a
+   * restart never leaves loose agent tabs behind; a tab the user lent an agent goes back to being an ordinary tab.
+   * A tab the relay released instead of closing stays grouped and tracked, so the idle setting still applies.
    */
   const ungroupStale = async () => {
     const groups = (await chrome.tabGroups.query({})).filter((item) => ownedGroup(item.title))

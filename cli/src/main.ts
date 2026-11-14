@@ -41,7 +41,12 @@ if (command !== "--version" && command !== "-v" && !askedForHelp && !takingOver)
 if (command === "serve" && !askedForHelp) {
   const { relayLog } = await import("./relay/log.ts")
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
-    process.prependOnceListener(signal, () => relayLog("relay.signal", { signal, pid: process.pid }))
+    process.prependOnceListener(signal, () => {
+      relayLog("relay.signal", { signal, pid: process.pid })
+      // Adding a listener replaces Node's default exit. Effect installs its own handler later; if a signal lands
+      // before that, no one else will end the process, so exit here instead of swallowing it.
+      if (process.listenerCount(signal) === 0) process.exit(signal === "SIGINT" ? 130 : 143)
+    })
   }
 }
 

@@ -21,6 +21,7 @@ class FakePage {
   targetId: string
   closed = false
   defaultTimeoutMs: number | undefined
+  targetProbes = 0
   evaluateCalls = 0
   evaluateError: unknown
   readonly emulatedMedia: Array<{ readonly features: readonly unknown[]; readonly media?: string }> = []
@@ -94,6 +95,7 @@ class FakePage {
       async newCDPSession() {
         return {
           async send(method: string, parameters: { features?: readonly unknown[]; media?: string }) {
+            if (method === "Target.getTargetInfo") page.targetProbes += 1
             if (method === "Emulation.setEmulatedMedia") {
               page.emulatedMedia.push({
                 features: parameters.features ?? [],
@@ -547,6 +549,32 @@ describe("DefaultPageHost recovery", () => {
     expect(await host.sessionPage(context)).toBe(page.asPage())
     expect(host.targetId()).toBe("target-late")
     expect(host.changes.at(-1)).toEqual({ id: "target-late", owner: "relay" })
+  })
+
+  test("the late target-id probe is bounded, so a page that never identifies costs no more time", async () => {
+    const host = new TestHost()
+    const page = new FakePage("https://late.example/", "")
+    const context = asContext({ pages: () => [], newPage: async () => page.asPage() })
+
+    expect(await host.sessionPage(context)).toBe(page.asPage())
+    expect(page.targetProbes).toBe(1)
+    for (let attempt = 0; attempt < 4; attempt++) await host.sessionPage(context)
+    // Three retries, not one per execute forever.
+    expect(page.targetProbes).toBe(4)
+  })
+
+  test("closing a page whose target was identified later remembers it for reattach", async () => {
+    const host = new TestHost()
+    const page = new FakePage("https://late.example/", "")
+    const context = asContext({ pages: () => [], newPage: async () => page.asPage() })
+    host.bind(page.asPage(), undefined, true)
+
+    page.targetId = "target-close"
+    expect(await host.sessionPage(context)).toBe(page.asPage())
+    page.closed = true
+    page.emit("close")
+
+    expect(host.rememberedClosedPage()).toEqual({ targetId: "target-close", ownsPage: true })
   })
 
   test("getSessionPage reattaches the closed default page's tab under the same target", async () => {

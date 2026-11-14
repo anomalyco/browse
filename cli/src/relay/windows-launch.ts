@@ -159,9 +159,18 @@ export function launchWindowsRelay(
     const kernel32 = kernel32Library()
     const environment = Buffer.from(windowsEnvironmentBlock(env), "utf16le")
     const executablePath = wideZ(executable)
-    const commandLine = wideZ(windowsCommandLine(executable, launch.args))
+    const lastError = (): number | undefined => {
+      // Bun FFI may clobber the thread's last error, so this is the best available code rather than a guarantee.
+      try {
+        return kernel32.symbols.GetLastError()
+      } catch {
+        return undefined
+      }
+    }
 
     const start = (creationFlags: number): Uint8Array | undefined => {
+      // CreateProcessW may write to the command line, so every attempt gets its own buffer.
+      const commandLine = wideZ(windowsCommandLine(executable, launch.args))
       // STARTUPINFOW on x64: cb 0, lpReserved 8, lpDesktop 16, lpTitle 24, dwX..dwFillAttribute (seven DWORDs) 32-56,
       // dwFlags 60, wShowWindow 64, cbReserved2 66, lpReserved2 72, hStdInput/hStdOutput/hStdError 80/88/96; 104 bytes.
       const startupInfo = new Uint8Array(startupInfoSize)
@@ -187,18 +196,19 @@ export function launchWindowsRelay(
     }
 
     // A terminal or tool that kills its process tree (a Windows job) would otherwise take the relay with it. A job
-    // that forbids breakaway refuses with ERROR_ACCESS_DENIED: start inside the job instead, as before.
+    // that forbids breakaway refuses with ERROR_ACCESS_DENIED (5): start inside the job instead, as before.
     const flags = createNoWindow | createNewProcessGroup | createUnicodeEnvironment
-    const processInformation = start(flags | createBreakawayFromJob) ?? start(flags)
+    let errorCode: number | undefined
+    let processInformation = start(flags | createBreakawayFromJob)
     if (!processInformation) {
-      // Bun FFI may clobber the thread's last error, so this is the best available code rather than a guarantee.
-      let code: number | undefined
-      try {
-        code = kernel32.symbols.GetLastError()
-      } catch {
-        // Reporting the failure matters more than the code.
+      errorCode = lastError()
+      if (errorCode === 5) {
+        processInformation = start(flags)
+        if (!processInformation) errorCode = lastError()
       }
-      return fallback(`CreateProcessW failed${code === undefined ? "" : ` (GetLastError() = ${code})`}`)
+    }
+    if (!processInformation) {
+      return fallback(`CreateProcessW failed${errorCode === undefined ? "" : ` (GetLastError() = ${errorCode})`}`)
     }
     // From here the relay is running; a failure to close these handles must not start a second one.
     started = true

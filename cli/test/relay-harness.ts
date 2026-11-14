@@ -37,7 +37,7 @@ export class FakeExtension {
    * the relay's proof is wrong; `answerAnyway` sends the extension's proof regardless, as an impostor would. `legacy`
    * speaks the handshake of an extension too old for tokens, with the old shared code.
    */
-  async pair(options: { readonly legacy?: string; readonly token?: string; readonly answerAnyway?: boolean; readonly proofPort?: number; readonly settings?: Record<string, unknown>; readonly attachedTabs?: readonly number[]; readonly agentTabs?: readonly number[]; readonly hello?: Record<string, unknown> } = {}): Promise<boolean> {
+  async pair(options: { readonly legacy?: string; readonly token?: string; readonly answerAnyway?: boolean; readonly proofPort?: number; readonly settings?: Record<string, unknown>; readonly attachedTabs?: readonly number[]; readonly agentTabs?: readonly number[]; readonly capabilities?: readonly string[]; readonly deferReady?: boolean; readonly hello?: Record<string, unknown> } = {}): Promise<boolean> {
     await new Promise<void>((resolve, reject) => {
       this.socket.once("open", () => resolve())
       this.socket.once("error", reject)
@@ -55,7 +55,7 @@ export class FakeExtension {
     })
     this.socket.send(JSON.stringify({
       method: "hello",
-      params: { version: "0.0.0-test", build: "test", protocolVersion: extensionProtocolVersion, profileId: "test", profileName: "Test", ...options.hello, pairing: { nonce, ...(options.legacy === undefined ? { mode: "token" } : {}) } },
+      params: { version: "0.0.0-test", build: "test", protocolVersion: extensionProtocolVersion, ...(options.capabilities ? { capabilities: [...options.capabilities] } : {}), profileId: "test", profileName: "Test", ...options.hello, pairing: { nonce, ...(options.legacy === undefined ? { mode: "token" } : {}) } },
     }))
     const params = await challenge
     // The relay must prove it knows the code before the extension obeys it.
@@ -67,11 +67,16 @@ export class FakeExtension {
     this.socket.on("message", (data) => this.answer(JSON.parse(String(data)) as Command))
     // A reconnecting extension announces the tabs it still has attached, then says it's ready.
     for (const tabId of options.attachedTabs ?? []) this.emit("debugger.attached", { tabId, ...(options.agentTabs?.includes(tabId) ? { agent: true } : {}) })
-    this.socket.send(JSON.stringify({ method: "ready" }))
+    if (!options.deferReady) this.sendReady()
     // A current extension sends its status page settings right after; an older one sends none.
     if (options.settings) this.emit("settings", options.settings)
     await Bun.sleep(100)
     return this.relayProved && this.socket.readyState === WebSocket.OPEN
+  }
+
+  /** Ends a pairing that deferred its `ready` (a test that needs an event before inventory reconciliation). */
+  sendReady() {
+    this.socket.send(JSON.stringify({ method: "ready" }))
   }
 
   private answer(command: Command) {
