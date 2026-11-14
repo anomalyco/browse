@@ -113,19 +113,26 @@ export function olderMcpClientAdvice(version: RelayVersion, error: unknown, buil
 
 export const ensureRelay = Effect.fn("RelayLifecycle.ensureRelay")(function* (options: EnsureRelayOptions) {
   const buildId = options.buildId ?? opencodeBrowserBuildId
-  const probe = options.relay.version
-  const initial = yield* Effect.result(probe)
-  if (Result.isSuccess(initial)) {
-    const buildProblem = relayBuildProblem(initial.success, buildId)
-    return {
-      version: initial.success,
-      started: false,
-      ...(buildProblem ? { buildProblem } : {}),
-    } satisfies RelayReadiness
+  const found = (version: RelayVersion, started: boolean): RelayReadiness => {
+    const buildProblem = relayBuildProblem(version, buildId)
+    return { version, started, ...(buildProblem ? { buildProblem } : {}) }
   }
-  const relayWasAbsent = isRelayUnreachable(initial.failure) || isForeignListener(initial.failure, options.pinned)
+  const initial = yield* Effect.result(options.relay.version)
+  if (Result.isSuccess(initial)) return found(initial.success, false)
+  let relayWasAbsent = isRelayUnreachable(initial.failure) || isForeignListener(initial.failure, options.pinned)
   if (!relayWasAbsent && !isRelayStarting(initial.failure) && !relayDraining(initial.failure)) {
     return yield* initial.failure
+  }
+
+  if (relayDraining(initial.failure)) {
+    // Another process already asked this relay to stop: wait for it like our own drain. A replacement is the ready
+    // relay; no replacement means it is gone, so start one as if it had been absent.
+    const recorded = liveRelayInstanceId()
+    const replacement = recorded === undefined
+      ? undefined
+      : yield* waitForRelayExitOrReplacement({ ...options, instanceId: recorded })
+    if (replacement !== undefined) return found(replacement, false)
+    relayWasAbsent = true
   }
 
   if (relayWasAbsent) {
@@ -141,13 +148,11 @@ export const ensureRelay = Effect.fn("RelayLifecycle.ensureRelay")(function* (op
     if (!supersededRuntime()) yield* options.start ?? startManagedRelay()
   }
   const version = yield* waitForRelayReady(options)
-  const buildProblem = relayBuildProblem(version, buildId)
-  return { version, started: relayWasAbsent, ...(buildProblem ? { buildProblem } : {}) } satisfies RelayReadiness
+  return found(version, relayWasAbsent)
 })
 
 function waitForRelayReady(options: EnsureRelayOptions): Effect.Effect<RelayVersion, Error | RelayClient.RelayClientError> {
-  const retry = (error: unknown) =>
-    isRelayStartingOrUnreachable(error) || isForeignListener(error, options.pinned) || relayDraining(error)
+  const retry = (error: unknown) => isRelayStartingOrUnreachable(error) || isForeignListener(error, options.pinned)
   return options.relay.version.pipe(
     Effect.retry({
       times: options.retryTimes ?? 200,
@@ -270,16 +275,20 @@ function waitForRelayExitOrReplacement(options: {
     // (RelayDecodeFailed), which reads as foreign while its relay.json still names it.
     Effect.catch((error) => {
       if (isRelayUnreachable(error)) return Effect.succeed(undefined)
-      const foreign = isForeignListener(error, options.pinned)
-      if (error instanceof RelayClient.RelayDecodeFailed && stillRecorded()) {
-        return Effect.fail(new RelayStillRunning("browse relay is still draining; no replacement was started"))
-      }
-      return foreign ? Effect.succeed(undefined) : Effect.fail(error)
+      // While relay.json still names this relay, a decode failure is its drain, on a pinned or fallback port. Once the
+      // record is gone, a pinned port keeps the decode failure (a real foreign listener); a fallback port moves on.
+      if (error instanceof RelayClient.RelayDecodeFailed && stillRecorded()) return Effect.fail(error)
+      return isForeignListener(error, options.pinned) ? Effect.succeed(undefined) : Effect.fail(error)
     }),
     Effect.retry({
       times: options.retryTimes ?? 200,
       schedule: Schedule.spaced(options.retryDelayMs ?? 50),
-      while: (error) => error instanceof RelayStillRunning || isRelayStarting(error),
+      // Retrying the decode itself keeps it as the error if the budget runs out: it is the honest "another program"
+      // for a listener that outlasts the record, while a same-instance answer keeps reporting RelayStillRunning.
+      while: (error) =>
+        (error instanceof RelayClient.RelayDecodeFailed && stillRecorded()) ||
+        error instanceof RelayStillRunning ||
+        isRelayStarting(error),
     }),
   )
 }

@@ -26,6 +26,7 @@ import { startRelay } from "../src/relay.ts"
 import { extensionStatus } from "../src/setup/commands.ts"
 import { relayToken } from "../src/relay/secrets.ts"
 import { freePort } from "./support/ports.ts"
+import type { RelayVersion } from "../src/relay/schema.ts"
 
 // Port fallback and relay.json (relay/port.ts). Candidates are passed in so nothing here touches 19988–19997.
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-relay-port-"))
@@ -574,46 +575,152 @@ describe("relay port fallback", () => {
     }
   })
 
-  test("a pinned ensureRelay waits out a relay another process is draining", async () => {
+  test("a pinned ensureRelay starts one relay after a drain ends without a replacement", async () => {
     const port = await freePortOutsideBrowseRange()
     const previousPort = process.env.OPENCODE_BROWSER_PORT
     process.env.OPENCODE_BROWSER_PORT = String(port)
-    const live = {
+    const old = {
       version: "0.0.15",
       buildId: "2026-11-06T00:00:00Z",
-      instanceId: "live-relay",
+      instanceId: "old-relay",
       managed: true,
       shutdownProtocol: 2 as const,
     }
+    const startedRelay = { ...old, instanceId: "started-relay" }
     let calls = 0
-    let started = 0
+    let starts = 0
     const relay = {
       endpoint: endpointForPort(port),
-      version: Effect.suspend(() => {
+      version: Effect.suspend((): Effect.Effect<RelayVersion, RelayClient.RelayClientError> => {
         calls++
-        return calls === 1
-          ? Effect.fail(new RelayClient.RelayDecodeFailed({
-            message: "in use by another program (not a browse /version response)",
+        if (calls === 1) return Effect.fail(new RelayClient.RelayDecodeFailed({
+          message: "in use by another program (not a browse /version response)",
+          path: "/version",
+          cause: { version: "0.10.0" },
+        }))
+        if (calls === 2) {
+          // The other process's drain finished and removed the record without starting a replacement.
+          fs.rmSync(relayStatePath(), { force: true })
+          return Effect.fail(new RelayClient.RelayUnreachable({
+            message: "relay is gone",
+            endpoint: endpointForPort(port),
             path: "/version",
-            cause: { version: "0.10.0" },
+            cause: undefined,
           }))
-          : Effect.succeed(live)
+        }
+        return Effect.succeed(startedRelay)
       }),
     } as unknown as RelayClient.Interface
     try {
-      writeRelayState({ port, configuredPort: port, pid: process.pid, instanceId: live.instanceId, startedAt: new Date().toISOString() })
+      writeRelayState({ port, configuredPort: port, pid: process.pid, instanceId: old.instanceId, startedAt: new Date().toISOString() })
       const readiness = await Effect.runPromise(ensureRelay({
         relay,
         start: Effect.sync(() => {
-          started++
+          starts++
         }),
         retryTimes: 1,
         retryDelayMs: 1,
       }))
-      expect(calls).toBe(2)
-      expect(started).toBe(0)
-      expect(readiness.started).toBe(false)
-      expect(readiness.version.instanceId).toBe("live-relay")
+      expect(calls).toBe(3)
+      expect(starts).toBe(1)
+      expect(readiness.started).toBe(true)
+      expect(readiness.version.instanceId).toBe("started-relay")
+    } finally {
+      fs.rmSync(relayStatePath(), { force: true })
+      if (previousPort === undefined) delete process.env.OPENCODE_BROWSER_PORT
+      else process.env.OPENCODE_BROWSER_PORT = previousPort
+    }
+  })
+
+  test("a pinned port with a live-looking relay.json and another program fails with the port error", async () => {
+    const port = await freePortOutsideBrowseRange()
+    const previousPort = process.env.OPENCODE_BROWSER_PORT
+    process.env.OPENCODE_BROWSER_PORT = String(port)
+    const stale = {
+      version: "0.0.15",
+      buildId: "2026-11-06T00:00:00Z",
+      instanceId: "stale-relay",
+      managed: true,
+      shutdownProtocol: 2 as const,
+    }
+    let calls = 0
+    let starts = 0
+    const decode = () => new RelayClient.RelayDecodeFailed({
+      message: "in use by another program (not a browse /version response)",
+      path: "/version",
+      cause: { version: "0.10.0" },
+    })
+    const relay = {
+      endpoint: endpointForPort(port),
+      version: Effect.suspend(() => {
+        calls++
+        return Effect.fail(decode())
+      }),
+      shutdown: () => Effect.succeed({ stopping: true as const }),
+    } as unknown as RelayClient.Interface
+    try {
+      writeRelayState({ port, configuredPort: port, pid: process.pid, instanceId: stale.instanceId, startedAt: new Date().toISOString() })
+      const restart = await Effect.runPromise(restartRelay({
+        relay,
+        buildId: stale.buildId,
+        start: Effect.sync(() => {
+          starts++
+        }),
+        retryTimes: 1,
+        retryDelayMs: 1,
+      }).pipe(Effect.flip))
+      expect(restart).toBeInstanceOf(RelayClient.RelayDecodeFailed)
+      expect(calls).toBe(3)
+      calls = 0
+      const ensure = await Effect.runPromise(ensureRelay({
+        relay,
+        start: Effect.sync(() => {
+          starts++
+        }),
+        retryTimes: 1,
+        retryDelayMs: 1,
+      }).pipe(Effect.flip))
+      expect(ensure).toBeInstanceOf(RelayClient.RelayDecodeFailed)
+      expect(calls).toBe(3)
+      expect(starts).toBe(0)
+    } finally {
+      fs.rmSync(relayStatePath(), { force: true })
+      if (previousPort === undefined) delete process.env.OPENCODE_BROWSER_PORT
+      else process.env.OPENCODE_BROWSER_PORT = previousPort
+    }
+  })
+
+  test("a pinned-port drain that keeps answering as the old relay stays RelayStillRunning", async () => {
+    const port = await freePortOutsideBrowseRange()
+    const previousPort = process.env.OPENCODE_BROWSER_PORT
+    process.env.OPENCODE_BROWSER_PORT = String(port)
+    const old = {
+      version: "0.0.15",
+      buildId: "2026-11-06T00:00:00Z",
+      instanceId: "old-relay",
+      managed: true,
+      shutdownProtocol: 2 as const,
+    }
+    let calls = 0
+    const relay = {
+      endpoint: endpointForPort(port),
+      version: Effect.suspend(() => {
+        calls++
+        return Effect.succeed(old)
+      }),
+      shutdown: () => Effect.succeed({ stopping: true as const }),
+    } as unknown as RelayClient.Interface
+    try {
+      writeRelayState({ port, configuredPort: port, pid: process.pid, instanceId: old.instanceId, startedAt: new Date().toISOString() })
+      const error = await Effect.runPromise(restartRelay({
+        relay,
+        buildId: old.buildId,
+        retryTimes: 1,
+        retryDelayMs: 1,
+      }).pipe(Effect.flip))
+      expect(error).toBeInstanceOf(Error)
+      expect((error as Error).message).toContain("still draining")
+      expect(calls).toBe(4)
     } finally {
       fs.rmSync(relayStatePath(), { force: true })
       if (previousPort === undefined) delete process.env.OPENCODE_BROWSER_PORT
