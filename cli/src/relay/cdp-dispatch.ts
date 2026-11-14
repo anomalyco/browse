@@ -11,7 +11,6 @@ import {
   replayChildTargetsForParent,
   replayTargetCreated,
 } from "../cdp/shims.ts"
-import { ghostCursorCommandMethod, type GhostCursorTabs } from "../ghost-cursor.ts"
 import { clearDeviceMetricsOverride, type DeviceMetricsOverrides } from "../cdp/emulation.ts"
 import { beforeInput } from "../execute/human-input.ts"
 import { isCdpRequest, parseJsonObject, type CdpRequest, type JsonObject } from "../protocol.ts"
@@ -36,7 +35,6 @@ export function createCdpDispatcher(options: {
   readonly cdpRuntime: CdpRuntime<WebSocket>
   readonly shutdownControl: RelayShutdown
   readonly navigationGuard: SessionNavigationGuard
-  readonly ghostCursor: GhostCursorTabs
   readonly tabActivity: TabActivity
   readonly deviceMetricsOverrides: DeviceMetricsOverrides
   readonly mainFrameIdsByTab: Map<number, string>
@@ -63,7 +61,6 @@ export function createCdpDispatcher(options: {
     cdpRuntime,
     shutdownControl,
     navigationGuard,
-    ghostCursor,
     tabActivity,
     deviceMetricsOverrides,
     mainFrameIdsByTab,
@@ -98,11 +95,6 @@ export function createCdpDispatcher(options: {
     const route = cdpRouter.session(socket, sessionId)
     return route && cdpRuntime.frameTreeResponse(socket, route, () => clientRoutesSession(socket, sessionId))
   }
-
-  const applyGhostCursorMouseEvent = Effect.fnUntraced(function* (mouseOptions: { readonly tabId: number; readonly message: CdpRequest }) {
-    if (mouseOptions.message.method !== "Input.dispatchMouseEvent") return
-    yield* ghostCursor.mouseEvent(mouseOptions.tabId, mouseOptions.message.params)
-  })
 
   // A hidden tab can leave Page.captureScreenshot pending until another capture reaches it. The nudge is what releases
   // it, and Chromium answers every pending capture with the surface's bitmap tiled out to its own size, so the nudge
@@ -293,7 +285,6 @@ export function createCdpDispatcher(options: {
     if (executingSession && sessions.isExecuting(executingSession)) {
       yield* tabActivity.focus(tabId, executingSession)
     }
-    if (message.method === ghostCursorCommandMethod) return yield* ghostCursor.command(tabId, message.params)
     // A page's CDP sessions are aliases onto the tab's chrome.debugger session, so a clear from
     // context.newCDPSession(page) already reaches the session that set the override; repeating it
     // covers Chrome dropping one that races the set's visible-size update. Emulation only applies
@@ -342,14 +333,11 @@ export function createCdpDispatcher(options: {
     }
     const sessionId = message.sessionId
     const announced = sessionId !== undefined && cdpClients.hasSession(socket, sessionId)
-    yield* Effect.all([
-      applyGhostCursorMouseEvent({ tabId, message }).pipe(Effect.ignore),
-      Effect.promise(() =>
-        beforeInput(tabId, command.method, command.params, route.chromeSessionId === undefined, (method, params) =>
-          Effect.runPromise(sendDebuggerCommand({ ...command, method, params })),
-        browsers.browserTab(tabId)?.link.humanInput).catch(() => undefined),
-      ),
-    ], { concurrency: "unbounded", discard: true })
+    yield* Effect.promise(() =>
+      beforeInput(tabId, command.method, command.params, route.chromeSessionId === undefined, (method, params) =>
+        Effect.runPromise(sendDebuggerCommand({ ...command, method, params })),
+      browsers.browserTab(tabId)?.link.humanInput).catch(() => undefined),
+    )
     const result = yield* (message.method === "Runtime.enable" && sessionId
       ? cdpRuntime.enable(route, command.params, () => clientRoutesSession(socket, sessionId) && (!announced || cdpClients.hasSession(socket, sessionId)), announced ? socket : undefined)
       : command.method === "Page.captureScreenshot" && route.chromeSessionId === undefined

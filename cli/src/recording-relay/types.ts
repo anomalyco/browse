@@ -1,9 +1,6 @@
-import type fs from "node:fs/promises"
 import path from "node:path"
-import { Option, Predicate, Schema } from "effect"
 import type { JsonObject } from "../protocol.ts"
 import type { RecordingCancelResponse, RecordingQuality, RecordingStatusResponse, RecordingTargetRequest } from "../relay/schema.ts"
-import type { ConnectedTarget } from "../relay/types.ts"
 
 export const defaultMaxDurationMs = 15 * 60 * 1_000
 export const defaultCdpFrameRate = 60
@@ -12,11 +9,7 @@ export const maxPendingCdpFrames = 30
 export const fallbackCdpWidth = 1_280
 export const fallbackCdpHeight = 720
 export const cdpJpegQuality = 100
-export const maxPendingTabCaptureBytes = 16 * 1024 * 1024
-export const maxTabCaptureOutputBytes = 1024 * 1024 * 1024
 
-export type RecordingMode = "auto" | "tab-capture" | "cdp"
-export type ActiveRecordingMode = "tab-capture" | "cdp"
 export type RecordingArtifactType = "webm" | "mp4"
 
 export type SendDebuggerCommand = (options: {
@@ -29,16 +22,9 @@ export type SendDebuggerCommand = (options: {
 export type RecordingStartOptions = {
   readonly tabId: number
   readonly sessionId?: string
-  readonly owner: ConnectedTarget["owner"]
   readonly outputPath: string
-  readonly mode?: RecordingMode
   readonly frameRate?: number
-  readonly audio?: boolean
-  readonly videoBitsPerSecond?: number
-  readonly audioBitsPerSecond?: number
   readonly maxDurationMs?: number
-  /** Draw the ghost cursor in the recorded page (demo videos). Off by default: recordings show only the page. */
-  readonly cursor?: boolean
 }
 
 export type RecordingTargetOptions = RecordingTargetRequest
@@ -50,7 +36,6 @@ export type RecordingStartResult =
     readonly startedAt: number
     readonly path: string
     readonly mimeType: string
-    readonly mode: ActiveRecordingMode
     readonly artifactType: RecordingArtifactType
     readonly frameRate?: number
   }
@@ -66,7 +51,6 @@ export type RecordingStopResult =
     readonly duration: number
     readonly path: string
     readonly size: number
-    readonly mode: ActiveRecordingMode
     readonly artifactType: RecordingArtifactType
     readonly frameCount?: number
     readonly quality?: RecordingQuality
@@ -80,37 +64,14 @@ export type RecordingStatusResult = RecordingStatusResponse
 
 export type RecordingCancelResult = RecordingCancelResponse
 
-export type ActiveRecordingBase = {
+export type CdpRecording = {
   tabId: number
   sessionId?: string
   outputPath: string
   startedAt: number
-  mode: ActiveRecordingMode
   artifactType: RecordingArtifactType
   maxDurationTimer?: ReturnType<typeof setTimeout>
-  resolveStop?: (result: RecordingStopResult) => void
   cleanupPromise?: Promise<void>
-}
-
-export type TabCaptureRecording = ActiveRecordingBase & {
-  mode: "tab-capture"
-  artifactType: "webm"
-  temporaryPath: string
-  file: Awaited<ReturnType<typeof fs.open>>
-  expectedSequence: number
-  receivedBytes: number
-  pendingWriteBytes: number
-  writePromise: Promise<void>
-  writeError?: Error
-  stopping: boolean
-  finalized: boolean
-  stopPromise?: Promise<RecordingStopResult>
-  finalizePromise?: Promise<void>
-}
-
-export type CdpRecording = ActiveRecordingBase & {
-  mode: "cdp"
-  artifactType: "webm" | "mp4"
   frameRate: number
   encoder: VideoEncoder
   lastFrame?: CdpVideoFrame
@@ -137,6 +98,8 @@ export type CdpRecording = ActiveRecordingBase & {
   stopFallback?: () => void
 }
 
+export type ActiveRecording = CdpRecording
+
 export type CdpVideoFrame = {
   readonly buffer: Buffer
   readonly frameNumber: number
@@ -157,118 +120,11 @@ export type StartVideoEncoder = (options: {
   readonly height: number
 }) => Promise<VideoEncoder>
 
-export type ActiveRecording = TabCaptureRecording | CdpRecording
-
 export type StartingRecording = {
   readonly tabId: number
   readonly sessionId?: string
   cancelled: boolean
   promise?: Promise<RecordingStartResult>
-}
-
-export type ExtensionStartResult =
-  | {
-    readonly success: true
-    readonly tabId: number
-    readonly startedAt: number
-    readonly mimeType?: string
-  }
-  | {
-    readonly success: false
-    readonly error: string
-  }
-
-export type ExtensionStopResult =
-  | {
-    readonly success: true
-    readonly tabId: number
-    readonly duration: number
-  }
-  | {
-    readonly success: false
-    readonly error: string
-  }
-
-export type ExtensionStatusResult = {
-  readonly isRecording: boolean
-  readonly tabId?: number
-  readonly startedAt?: number
-}
-
-export function selectRecordingMode(options: RecordingStartOptions): ActiveRecordingMode {
-  if (options.mode === "cdp") {
-    return "cdp"
-  }
-  if (options.mode === "tab-capture") {
-    return "tab-capture"
-  }
-  return options.owner === "relay" ? "cdp" : "tab-capture"
-}
-
-export function recordingStartParams(options: RecordingStartOptions): JsonObject {
-  return {
-    tabId: options.tabId,
-    ...(options.frameRate === undefined ? {} : { frameRate: options.frameRate }),
-    ...(options.audio === undefined ? {} : { audio: options.audio }),
-    ...(options.videoBitsPerSecond === undefined ? {} : { videoBitsPerSecond: options.videoBitsPerSecond }),
-    ...(options.audioBitsPerSecond === undefined ? {} : { audioBitsPerSecond: options.audioBitsPerSecond }),
-  }
-}
-
-const ExtensionStartResultSchema = Schema.Union([
-  Schema.Struct({
-    success: Schema.Literal(true),
-    tabId: Schema.Number,
-    startedAt: Schema.Number,
-    mimeType: Schema.optionalKey(Schema.String),
-  }),
-  Schema.Struct({
-    success: Schema.Literal(false),
-    error: Schema.String,
-  }),
-])
-const decodeExtensionStartResult = Schema.decodeUnknownOption(ExtensionStartResultSchema)
-
-const ExtensionStopResultSchema = Schema.Union([
-  Schema.Struct({
-    success: Schema.Literal(true),
-    tabId: Schema.Number,
-    duration: Schema.Number,
-  }),
-  Schema.Struct({
-    success: Schema.Literal(false),
-    error: Schema.String,
-  }),
-])
-const decodeExtensionStopResult = Schema.decodeUnknownOption(ExtensionStopResultSchema)
-
-export function parseExtensionStartResult(value: JsonObject): ExtensionStartResult {
-  return Option.getOrElse(decodeExtensionStartResult(value), () => ({
-    success: false,
-    error: "Invalid recording.start response from extension",
-  }))
-}
-
-export function parseExtensionStopResult(value: JsonObject): ExtensionStopResult {
-  return Option.getOrElse(decodeExtensionStopResult(value), () => ({
-    success: false,
-    error: "Invalid recording.stop response from extension",
-  }))
-}
-
-export function parseExtensionStatusResult(value: JsonObject): ExtensionStatusResult {
-  return {
-    isRecording: value.isRecording === true,
-    ...(Predicate.isNumber(value.tabId) ? { tabId: value.tabId } : {}),
-    ...(Predicate.isNumber(value.startedAt) ? { startedAt: value.startedAt } : {}),
-  }
-}
-
-export function parseCancelResult(value: JsonObject): RecordingCancelResult {
-  return {
-    success: value.success === true,
-    ...(Predicate.isString(value.error) ? { error: value.error } : {}),
-  }
 }
 
 export class AmbiguousRecordingTargetError extends Error {

@@ -18,11 +18,6 @@ import {
   type ExecuteRequest,
   ExecuteResponse,
   ExtensionStatus,
-  FlightRecorderCancelResponse,
-  type FlightRecorderSaveRequest,
-  FlightRecorderSaveResponse,
-  type FlightRecorderStartRequest,
-  FlightRecorderStatusResponse,
   NetworkCancelResponse,
   type NetworkSessionRequest,
   type NetworkStartRequest,
@@ -158,10 +153,6 @@ export interface Interface {
   readonly settingsGet: Effect.Effect<SettingsGetResponse, RelayClientError>
   /** Changes settings; validated strictly by the relay. */
   readonly settingsSet: (changes: Record<string, unknown>) => Effect.Effect<SettingsSetResponse, RelayClientError>
-  readonly flightRecorderStart: (request: FlightRecorderStartRequest) => Effect.Effect<FlightRecorderStatusResponse, RelayClientError>
-  readonly flightRecorderStatus: (target: RecordingTargetRequest) => Effect.Effect<FlightRecorderStatusResponse, RelayClientError>
-  readonly flightRecorderSaveLast: (request: FlightRecorderSaveRequest) => Effect.Effect<FlightRecorderSaveResponse, RelayClientError>
-  readonly flightRecorderCancel: (target: RecordingTargetRequest) => Effect.Effect<FlightRecorderCancelResponse, RelayClientError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("opencode-browser-cli/RelayClient") {}
@@ -523,12 +514,6 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
       postJson("/tabs/cleanup", { ...(idleMinutes === undefined ? {} : { idleMinutes }), ...(sessions ? { sessions } : {}) }, TabsCleanupResponse),
     settingsGet: getJson("/settings", SettingsGetResponse),
     settingsSet: (changes) => postJson("/settings", { set: changes }, SettingsSetResponse),
-    flightRecorderStart: ({ sessionId, tabId, ...request }) =>
-      postJson("/flight-recorder/start", { ...recordingTargetBody({ sessionId, tabId }), ...request }, FlightRecorderStatusResponse),
-    flightRecorderStatus: (target) => getJson(`/flight-recorder/status${recordingTargetQuery(target)}`, FlightRecorderStatusResponse),
-    flightRecorderSaveLast: ({ sessionId, tabId, ...request }) =>
-      postJson("/flight-recorder/save-last", { ...recordingTargetBody({ sessionId, tabId }), ...request }, FlightRecorderSaveResponse),
-    flightRecorderCancel: (target) => postJson("/flight-recorder/cancel", recordingTargetBody(target), FlightRecorderCancelResponse),
   })
 })
 

@@ -1,7 +1,7 @@
 import { Deferred, Effect, Option, Semaphore } from "effect"
 import { ExecuteSandbox, type ExecuteTargetSelection } from "./execute.ts"
 import { ExecuteCpuScheduler } from "./execute-realm.ts"
-import type { NetworkCaptureOptions, NetworkCaptureResult, NetworkCaptureStatus, NetworkCaptureStopOptions } from "./network-capture.ts"
+import type { NetworkCaptureOptions, NetworkCaptureResult, NetworkCaptureStatus } from "./network-capture.ts"
 import { generateSessionId } from "./relay/helpers.ts"
 import type { AuthenticatedJsonOutcome, AuthenticatedJsonRequest } from "./relay/schema.ts"
 import type { ConnectedTarget, ExecuteSandboxLike, OpenCodeBrowserSession, SessionSummary, SessionTarget } from "./relay/types.ts"
@@ -464,8 +464,8 @@ export class OpenCodeBrowserSessions {
       : Effect.fail(sessionError("not-found", `Session not found: ${id}`, id))
   }
 
-  networkStop(id: string, options: NetworkCaptureStopOptions = {}): Effect.Effect<NetworkCaptureResult, Error> {
-    return this.withSessionOperation(id, "network stop", (session) => session.sandbox.networkStop(options))
+  networkStop(id: string): Effect.Effect<NetworkCaptureResult, Error> {
+    return this.withSessionOperation(id, "network stop", (session) => session.sandbox.networkStop())
   }
 
   networkCancel(id: string): Effect.Effect<{ readonly cancelled: boolean }, Error> {

@@ -177,11 +177,6 @@ export const DEFAULT_IDLE_MINUTES = 10
 export const idleMinutesSetting = (value: unknown): number =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : DEFAULT_IDLE_MINUTES
 
-/** Whether the relay draws the agent (ghost) cursor on agent tabs outside recordings: "off" (default) or "always". */
-export const AGENT_CURSOR_KEY = "agentCursor"
-export type AgentCursor = "off" | "always"
-export const agentCursor = (value: unknown): AgentCursor => (value === "always" ? "always" : "off")
-
 /** Whether the relay sends human-like input (curved paths, paced keys): "on" (default) or "off". */
 export const HUMAN_INPUT_KEY = "humanInput"
 export type HumanInput = "on" | "off"
@@ -193,10 +188,10 @@ export type HandoffNotifications = "recording" | "always"
 export const handoffNotifications = (value: unknown): HandoffNotifications => (value === "always" ? "always" : "recording")
 
 /** The settings the relay applies, sent to it after pairing and whenever they change (the `settings` event). */
-export type RelaySettings = { cursor: AgentCursor; humanInput: HumanInput }
+export type RelaySettings = { humanInput: HumanInput }
 
 /** Settings the relay's environment fixes, whatever the status page says (the relay's `relay.settings` answer). */
-export type RelayOverrides = { agentWindow?: "current" | "separate"; cursor?: AgentCursor; humanInput?: HumanInput }
+export type RelayOverrides = { agentWindow?: "current" | "separate"; humanInput?: HumanInput }
 
 export const STATUS_PORT = "opencode-browser.status"
 

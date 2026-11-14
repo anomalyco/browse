@@ -373,28 +373,15 @@ export const RelayShutdownResponse = Schema.Struct({
 
 export interface RelayShutdownResponse extends Schema.Schema.Type<typeof RelayShutdownResponse> {}
 
-const NetworkContentMode = Schema.Literals(["omit", "embed"])
-
 export const NetworkStartRequest = Schema.Struct({
   sessionId: Schema.NonEmptyString,
   urlFilter: Schema.optionalKey(Schema.String),
-  resourceTypes: Schema.optionalKey(Schema.Array(Schema.NonEmptyString).check(Schema.isMaxLength(50))),
-  content: Schema.optionalKey(NetworkContentMode),
-  maxBodyBytes: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 10_000_000 }))),
-  maxTotalBodyBytes: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100_000_000 }))),
-  maxEntries: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 10_000 }))),
-  maxDurationMs: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 86_400_000 }))),
 })
 
 export interface NetworkStartRequest extends Schema.Schema.Type<typeof NetworkStartRequest> {}
 
 export const NetworkSessionRequest = Schema.Struct({ sessionId: Schema.NonEmptyString })
 export interface NetworkSessionRequest extends Schema.Schema.Type<typeof NetworkSessionRequest> {}
-
-export const NetworkStopRequest = NetworkSessionRequest.pipe(Schema.fieldsAssign({
-  outputPath: Schema.optionalKey(Schema.String),
-}))
-export interface NetworkStopRequest extends Schema.Schema.Type<typeof NetworkStopRequest> {}
 
 export const NetworkStatusResponse = Schema.Struct({
   active: Schema.Boolean,
@@ -406,37 +393,59 @@ export const NetworkStatusResponse = Schema.Struct({
   truncatedBodyCount: Schema.Number,
   droppedEntryCount: Schema.Number,
   urlFilter: Schema.optionalKey(Schema.String),
-  resourceTypes: Schema.optionalKey(Schema.Array(Schema.String)),
-  content: Schema.optionalKey(NetworkContentMode),
   endsAt: Schema.optionalKey(Schema.String),
   ended: Schema.optionalKey(Schema.String),
 })
 export interface NetworkStatusResponse extends Schema.Schema.Type<typeof NetworkStatusResponse> {}
 
-const NetworkEndpointDigest = Schema.Struct({
-  method: Schema.String,
-  url: Schema.String,
-  status: Schema.optionalKey(Schema.Number),
-  count: Schema.Number,
-  requestHeaders: Schema.optionalKey(Schema.Array(Schema.String)),
-  requestKeys: Schema.optionalKey(Schema.Array(Schema.String)),
-  responseKeys: Schema.optionalKey(Schema.Array(Schema.String)),
+export const NetworkHeader = Schema.Struct({
+  name: Schema.String,
+  value: Schema.String,
 })
+
+export const NetworkBody = Schema.Struct({
+  size: Schema.Number,
+  mimeType: Schema.String,
+  text: Schema.optionalKey(Schema.String),
+  truncated: Schema.Boolean,
+})
+
+/** One captured exchange, credential-bearing values replaced. */
+export const NetworkExchange = Schema.Struct({
+  id: Schema.String,
+  startedDateTime: Schema.String,
+  durationMs: Schema.Number,
+  request: Schema.Struct({
+    method: Schema.String,
+    url: Schema.String,
+    headers: Schema.Array(NetworkHeader),
+    resourceType: Schema.String,
+    body: Schema.optionalKey(NetworkBody),
+    redirectedFrom: Schema.optionalKey(Schema.String),
+  }),
+  response: Schema.optionalKey(Schema.Struct({
+    status: Schema.Number,
+    statusText: Schema.String,
+    headers: Schema.Array(NetworkHeader),
+    body: Schema.optionalKey(NetworkBody),
+  })),
+  failure: Schema.optionalKey(Schema.String),
+})
+
+export interface NetworkExchange extends Schema.Schema.Type<typeof NetworkExchange> {}
+
+export const NetworkStopRequest = NetworkSessionRequest
+export interface NetworkStopRequest extends Schema.Schema.Type<typeof NetworkStopRequest> {}
 
 export const NetworkStopResponse = NetworkStatusResponse.pipe(Schema.fieldsAssign({
   active: Schema.Literal(false),
   stoppedAt: Schema.String,
-  outputPath: Schema.optionalKey(Schema.String),
-  endpoints: Schema.optionalKey(Schema.Array(NetworkEndpointDigest)),
+  exchanges: Schema.Array(NetworkExchange),
 }))
 export interface NetworkStopResponse extends Schema.Schema.Type<typeof NetworkStopResponse> {}
 
 export const NetworkCancelResponse = Schema.Struct({ cancelled: Schema.Boolean })
 export interface NetworkCancelResponse extends Schema.Schema.Type<typeof NetworkCancelResponse> {}
-
-const RecordingMode = Schema.Literals(["tab-capture", "cdp"])
-
-const RecordingRequestedMode = Schema.Literals(["auto", "tab-capture", "cdp"])
 
 const RecordingFrameRate = Schema.Number.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 60 }))
 
@@ -466,13 +475,8 @@ export interface RecordingTargetRequest extends Schema.Schema.Type<typeof Record
 
 export const RecordingStartRequest = RecordingTargetRequest.pipe(Schema.fieldsAssign({
   outputPath: Schema.String,
-  mode: Schema.optionalKey(RecordingRequestedMode),
-  audio: Schema.optionalKey(Schema.Boolean),
   frameRate: Schema.optionalKey(RecordingFrameRate),
-  videoBitsPerSecond: Schema.optionalKey(Schema.Number),
-  audioBitsPerSecond: Schema.optionalKey(Schema.Number),
   maxDurationMs: Schema.optionalKey(Schema.Number),
-  cursor: Schema.optionalKey(Schema.Boolean),
 }))
 
 export interface RecordingStartRequest extends Schema.Schema.Type<typeof RecordingStartRequest> {}
@@ -485,7 +489,6 @@ export const RecordingStartResponse = Schema.Struct({
   startedAt: Schema.optionalKey(Schema.Number),
   path: Schema.optionalKey(Schema.String),
   mimeType: Schema.optionalKey(Schema.String),
-  mode: Schema.optionalKey(RecordingMode),
   artifactType: Schema.optionalKey(RecordingArtifactType),
   frameRate: Schema.optionalKey(Schema.Number),
   error: Schema.optionalKey(Schema.String),
@@ -499,7 +502,6 @@ export const RecordingStopResponse = Schema.Struct({
   duration: Schema.optionalKey(Schema.Number),
   path: Schema.optionalKey(Schema.String),
   size: Schema.optionalKey(Schema.Number),
-  mode: Schema.optionalKey(RecordingMode),
   artifactType: Schema.optionalKey(RecordingArtifactType),
   frameCount: Schema.optionalKey(Schema.Number),
   quality: Schema.optionalKey(RecordingQuality),
@@ -514,7 +516,6 @@ export const RecordingStatusResponse = Schema.Struct({
   startedAt: Schema.optionalKey(Schema.Number),
   path: Schema.optionalKey(Schema.String),
   size: Schema.optionalKey(Schema.Number),
-  mode: Schema.optionalKey(RecordingMode),
   artifactType: Schema.optionalKey(RecordingArtifactType),
   frameCount: Schema.optionalKey(Schema.Number),
   quality: Schema.optionalKey(RecordingQuality),
@@ -556,47 +557,6 @@ export const RecordingCancelResponse = Schema.Struct({
 })
 
 export interface RecordingCancelResponse extends Schema.Schema.Type<typeof RecordingCancelResponse> {}
-
-export const FlightRecorderStartRequest = RecordingTargetRequest.pipe(Schema.fieldsAssign({
-  retentionMs: Schema.optionalKey(Schema.Number.check(Schema.isInt(), Schema.isBetween({ minimum: 1_000, maximum: 120_000 }))),
-  frameRate: Schema.optionalKey(RecordingFrameRate),
-  cursor: Schema.optionalKey(Schema.Boolean),
-}))
-export interface FlightRecorderStartRequest extends Schema.Schema.Type<typeof FlightRecorderStartRequest> {}
-
-export const FlightRecorderStatusResponse = Schema.Struct({
-  active: Schema.Boolean,
-  tabId: Schema.optionalKey(Schema.Number),
-  sessionId: Schema.optionalKey(Schema.String),
-  startedAt: Schema.optionalKey(Schema.Number),
-  retentionMs: Schema.optionalKey(Schema.Number),
-  retainedDurationMs: Schema.optionalKey(Schema.Number),
-  frameRate: Schema.optionalKey(Schema.Number),
-  bufferedFrames: Schema.optionalKey(Schema.Number),
-  bufferedBytes: Schema.optionalKey(Schema.Number),
-  sourceFrameCount: Schema.optionalKey(Schema.Number),
-  droppedFrameCount: Schema.optionalKey(Schema.Number),
-  saving: Schema.optionalKey(Schema.Boolean),
-})
-export interface FlightRecorderStatusResponse extends Schema.Schema.Type<typeof FlightRecorderStatusResponse> {}
-
-export const FlightRecorderSaveRequest = RecordingTargetRequest.pipe(Schema.fieldsAssign({
-  outputPath: Schema.String,
-  durationMs: Schema.optionalKey(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0))),
-}))
-export interface FlightRecorderSaveRequest extends Schema.Schema.Type<typeof FlightRecorderSaveRequest> {}
-
-export const FlightRecorderSaveResponse = Schema.Struct({
-  path: Schema.String,
-  durationMs: Schema.Number,
-  frameCount: Schema.Number,
-  sourceFrameCount: Schema.Number,
-  droppedFrameCount: Schema.Number,
-})
-export interface FlightRecorderSaveResponse extends Schema.Schema.Type<typeof FlightRecorderSaveResponse> {}
-
-export const FlightRecorderCancelResponse = Schema.Struct({ cancelled: Schema.Boolean })
-export interface FlightRecorderCancelResponse extends Schema.Schema.Type<typeof FlightRecorderCancelResponse> {}
 
 export const RelayErrorCode = Schema.Literals([
   "browser-unavailable",

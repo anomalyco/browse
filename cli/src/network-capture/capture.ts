@@ -1,98 +1,33 @@
-import path from "node:path"
-import { Effect, Predicate } from "effect"
+import { Predicate } from "effect"
 import type { Response } from "patchright-core"
-import { writeJsonFileAtomically } from "../fs-durability.ts"
 import { minimumKnownSubstringLength, SecretRedactor } from "./redaction.ts"
 import {
-  NetworkCaptureError,
   type ActiveCapture,
   type CapturedBody,
   type CapturedEntry,
   type Header,
-  type NetworkCaptureStopOptions,
-  type NetworkEndpointDigest,
 } from "./types.ts"
 
-export function finishCapture(
-  active: ActiveCapture,
-  options: NetworkCaptureStopOptions,
-): Effect.Effect<{
+/** Every captured exchange, redacted, for a stop result: the redactor also covers values learned from later entries. */
+export function finishCapture(active: ActiveCapture): {
   readonly redactionOmissionCount: number
-  readonly endpoints: readonly NetworkEndpointDigest[]
-}, NetworkCaptureError> {
-  return Effect.gen(function* () {
-    const redactor = new SecretRedactor()
-    const protectedEntries = active.entries
-      .map((entry) => protectEntry(entry, redactor))
-      .map((entry) => redactEntryKnownValues(entry, redactor))
-    if (options.outputPath) {
-      yield* writeArtifact(options.outputPath, {
-        log: {
-          version: "1.2",
-          creator: { name: "browse", version: "1" },
-          entries: protectedEntries.map(toHarEntry),
-        },
-      })
-    }
-    return {
-      redactionOmissionCount: options.outputPath ? countRedactionOmissions(active.entries, protectedEntries) : 0,
-      endpoints: summarizeEndpoints(protectedEntries),
-    }
-  })
-}
-
-function extractTopLevelJsonKeys(body: CapturedBody | undefined): readonly string[] | undefined {
-  if (!body?.text || !body.mimeType.toLowerCase().includes("json")) return undefined
-  try {
-    const parsed: unknown = JSON.parse(body.text)
-    if (Predicate.isObject(parsed) && !Array.isArray(parsed)) {
-      const keys = Object.keys(parsed).slice(0, 15)
-      return keys.length > 0 ? keys : undefined
-    }
-  } catch {}
-  return undefined
-}
-
-function summarizeEndpoints(entries: readonly CapturedEntry[]): readonly NetworkEndpointDigest[] {
-  const byRoute = new Map<string, NetworkEndpointDigest>()
-  for (const entry of entries) {
-    if (["image", "stylesheet", "font", "media"].includes(entry.request.resourceType)) continue
-    let routePath = entry.request.url
-    try {
-      const u = new URL(entry.request.url)
-      routePath = `${u.origin}${u.pathname}`
-    } catch {}
-    const key = `${entry.request.method} ${routePath}`
-    const existing = byRoute.get(key)
-    const notableHeaders = entry.request.headers
-      .filter((h) => {
-        const lower = h.name.toLowerCase()
-        if (lower === "x-client-data" || lower.startsWith("sec-ch-")) return false
-        return h.value.includes("[redacted]") || lower === "authorization" || lower.startsWith("x-")
-      })
-      .slice(0, 8)
-      .map((h) => `${h.name}: ${h.value.slice(0, 80)}`)
-    const requestKeys = extractTopLevelJsonKeys(entry.request.body)
-    const responseKeys = extractTopLevelJsonKeys(entry.response?.body)
-    byRoute.set(key, {
-      method: entry.request.method,
-      url: entry.request.url.slice(0, 240),
-      ...(entry.response ? { status: entry.response.status } : existing?.status !== undefined ? { status: existing.status } : {}),
-      count: (existing?.count ?? 0) + 1,
-      ...(notableHeaders.length > 0 ? { requestHeaders: notableHeaders } : existing?.requestHeaders ? { requestHeaders: existing.requestHeaders } : {}),
-      ...(requestKeys ? { requestKeys } : existing?.requestKeys ? { requestKeys: existing.requestKeys } : {}),
-      ...(responseKeys ? { responseKeys } : existing?.responseKeys ? { responseKeys: existing.responseKeys } : {}),
-    })
-    if (byRoute.size >= 30) break
+  readonly exchanges: readonly CapturedEntry[]
+} {
+  const redactor = new SecretRedactor()
+  const exchanges = active.entries
+    .map((entry) => protectEntry(entry, redactor))
+    .map((entry) => redactEntryKnownValues(entry, redactor))
+  return {
+    redactionOmissionCount: countRedactionOmissions(active.entries, exchanges),
+    exchanges,
   }
-  return [...byRoute.values()]
 }
 
-function countRedactionOmissions(original: readonly CapturedEntry[], protectedEntries: readonly CapturedEntry[]): number {
+export function countRedactionOmissions(original: readonly CapturedEntry[], redacted: readonly CapturedEntry[]): number {
   let count = 0
   for (let index = 0; index < original.length; index += 1) {
     const before = original[index]
-    const after = protectedEntries[index]
+    const after = redacted[index]
     if (before?.request.body?.text && !before.request.body.truncated && !after?.request.body?.text) count += 1
     if (before?.response?.body?.text && !before.response.body.truncated && !after?.response?.body?.text) count += 1
   }
@@ -220,58 +155,6 @@ function redactKnownScalars(value: unknown, redactor: SecretRedactor): unknown {
   return redactor.redactValue(value)
 }
 
-function toHarEntry(entry: CapturedEntry): Record<string, unknown> {
-  return {
-    startedDateTime: entry.startedDateTime,
-    time: entry.durationMs,
-    request: {
-      method: entry.request.method,
-      url: entry.request.url,
-      httpVersion: "",
-      cookies: [],
-      headers: entry.request.headers,
-      queryString: queryString(entry.request.url),
-      headersSize: -1,
-      bodySize: entry.request.body?.size ?? 0,
-      ...(entry.request.body?.text ? {
-        postData: { mimeType: entry.request.body.mimeType, text: entry.request.body.text },
-      } : {}),
-    },
-    response: entry.response ? {
-      status: entry.response.status,
-      statusText: entry.response.statusText,
-      httpVersion: "",
-      cookies: [],
-      headers: entry.response.headers,
-      content: {
-        size: entry.response.body?.size ?? 0,
-        mimeType: entry.response.body?.mimeType ?? contentType(entry.response.headers) ?? "application/octet-stream",
-        ...(entry.response.body?.text ? { text: entry.response.body.text } : {}),
-      },
-      redirectURL: header(entry.response.headers, "location") ?? "",
-      headersSize: -1,
-      bodySize: entry.response.body?.size ?? 0,
-    } : { status: 0, statusText: entry.failure ?? "No response", httpVersion: "", cookies: [], headers: [], content: { size: 0, mimeType: "application/octet-stream" }, redirectURL: "", headersSize: -1, bodySize: 0 },
-    cache: {},
-    timings: { send: 0, wait: entry.durationMs, receive: 0 },
-    _opencodeBrowser: {
-      id: entry.id,
-      resourceType: entry.request.resourceType,
-      ...(entry.request.redirectedFrom ? { redirectedFrom: entry.request.redirectedFrom } : {}),
-      ...(entry.failure ? { failure: entry.failure } : {}),
-      requestBodyTruncated: entry.request.body?.truncated ?? false,
-      responseBodyTruncated: entry.response?.body?.truncated ?? false,
-    },
-  }
-}
-
-function writeArtifact(outputPath: string, value: unknown): Effect.Effect<void, NetworkCaptureError> {
-  return Effect.tryPromise({
-    try: () => writeJsonFileAtomically(path.resolve(outputPath), value),
-    catch: (cause) => new NetworkCaptureError({ message: `Could not write network capture: ${outputPath}`, operation: "write", reason: "persistence-failed", cause }),
-  })
-}
-
 export async function safeHeaders(read: () => Promise<Header[]>): Promise<Header[]> {
   return read().catch(() => [])
 }
@@ -330,14 +213,6 @@ export function contentType(headers: readonly Header[]): string | undefined {
 
 function header(headers: readonly Header[], name: string): string | undefined {
   return headers.find((candidate) => candidate.name.toLowerCase() === name)?.value
-}
-
-function queryString(rawUrl: string): Array<{ name: string; value: string }> {
-  try {
-    return Array.from(new URL(rawUrl).searchParams, ([name, value]) => ({ name, value }))
-  } catch {
-    return []
-  }
 }
 
 function isTextualMimeType(mimeType: string | undefined): boolean {

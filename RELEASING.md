@@ -199,4 +199,4 @@ The store extension and the CLI update independently, so either can be ahead for
 extension moves with its CLI. The relay accepts extension protocols from `minExtensionProtocolVersion` to
 `extensionProtocolVersion` (`cli/src/protocol.ts`). Bump `extensionProtocolVersion` only for a change an older relay
 can't handle, and raise the minimum only when dropping older extensions. When they don't match, the status page,
-`status`, `doctor` and tool errors name the side that's behind.
+`status` and tool errors name the side that's behind.

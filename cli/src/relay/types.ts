@@ -1,6 +1,6 @@
 import type { Effect, Semaphore } from "effect"
 import type { ExecuteOptions, ExecuteResult } from "../execute.ts"
-import type { NetworkCaptureOptions, NetworkCaptureResult, NetworkCaptureStatus, NetworkCaptureStopOptions } from "../network-capture.ts"
+import type { NetworkCaptureOptions, NetworkCaptureResult, NetworkCaptureStatus } from "../network-capture.ts"
 import type { JsonObject, TargetInfo } from "../protocol.ts"
 import type { AuthenticatedJsonOutcome, AuthenticatedJsonRequest, SessionSummary } from "./schema.ts"
 export type SessionTarget = {
@@ -59,7 +59,7 @@ export interface ExecuteSandboxLike {
   closeSettled(options?: { readonly clearState?: boolean }): Effect.Effect<void, Error>
   networkStart(options?: NetworkCaptureOptions): Effect.Effect<NetworkCaptureStatus, Error>
   networkStatus(): NetworkCaptureStatus
-  networkStop(options?: NetworkCaptureStopOptions): Effect.Effect<NetworkCaptureResult, Error>
+  networkStop(): Effect.Effect<NetworkCaptureResult, Error>
   networkCancel(): Effect.Effect<{ readonly cancelled: boolean }>
   /** Ends an active capture without a result, saying why on the next status or stop. */
   networkEnd(reason: string): Effect.Effect<{ readonly cancelled: boolean }>

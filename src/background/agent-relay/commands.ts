@@ -6,11 +6,6 @@ import {
   type JsonObject,
   type PageStatus,
 } from "../../agent-relay/protocol"
-import type {
-  OffscreenCancelRecordingResult,
-  OffscreenStatusRecordingResult,
-  OffscreenStopRecordingResult,
-} from "../../agent-relay/recording-types"
 import type { AgentRelayUpdate, RelayAutoUpdate, RelayOverrides } from "../../shared/protocol"
 import { AgentGroups } from "./groups"
 import { AgentWindow } from "./window"
@@ -65,7 +60,6 @@ export function createRelayCommands(deps: {
   readonly log: AgentRelayLog
   readonly cdp: { count: number; errors: number }
   readonly relayTabs: Set<number>
-  readonly recordingTabs: Set<number>
   readonly pageStatuses: Map<number, PageStatus>
   readonly badges: Map<number, AgentBadge>
   readonly currentSocket: () => WebSocket | undefined
@@ -84,8 +78,6 @@ export function createRelayCommands(deps: {
   readonly ungroup: (tabId: number, options?: { finished?: boolean; released?: boolean }) => Promise<void>
   /** True for the first `tabs.ungroup` after a debugging-bar cancel of a tab an agent opened: it must stay as it is. */
   readonly consumeCanceledUngroup: (tabId: number) => boolean
-  readonly startRecording: (params: JsonObject | undefined) => Promise<JsonObject>
-  readonly recordingCall: <Result>(action: string, tabId: number) => Promise<Result>
 }) {
   /** Each tab's page status deliveries, in order (see deliverPageStatus). */
   const pageDeliveries = new Map<number, Promise<void>>()
@@ -288,7 +280,6 @@ export function createRelayCommands(deps: {
           ...(fixed.agentWindow === "current" || fixed.agentWindow === "separate"
             ? { agentWindow: fixed.agentWindow }
             : {}),
-          ...(fixed.cursor === "off" || fixed.cursor === "always" ? { cursor: fixed.cursor } : {}),
           ...(fixed.humanInput === "on" || fixed.humanInput === "off" ? { humanInput: fixed.humanInput } : {}),
         }
         const named = isJsonObject(params?.browser) ? params.browser : undefined
@@ -315,30 +306,6 @@ export function createRelayCommands(deps: {
         deps.notify()
         return {}
       }
-      case "recording.start": {
-        const result = await deps.startRecording(params)
-        if (result.success === true) deps.recordingTabs.add(number(params, "tabId"))
-        return result
-      }
-      case "recording.stop":
-        deps.recordingTabs.delete(number(params, "tabId"))
-        return deps.recordingCall<OffscreenStopRecordingResult>("recording.stop", number(params, "tabId")).then((result) =>
-          result.success ? { success: true, tabId: result.tabId, duration: result.duration } : result,
-        )
-      case "recording.status": {
-        const tabId = number(params, "tabId")
-        const result = await deps.recordingCall<OffscreenStatusRecordingResult>("recording.status", tabId)
-        return {
-          isRecording: result.isRecording,
-          tabId,
-          ...(result.startedAt === undefined ? {} : { startedAt: result.startedAt }),
-        }
-      }
-      case "recording.cancel":
-        deps.recordingTabs.delete(number(params, "tabId"))
-        return deps.recordingCall<OffscreenCancelRecordingResult>("recording.cancel", number(params, "tabId")).then((result) =>
-          result.success ? { success: true } : result,
-        )
     }
   }
 

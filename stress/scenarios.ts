@@ -256,14 +256,11 @@ export const scenarios: Scenario[] = [
     assert(!start.isError, start.text)
     const nav = await client.call("execute", { session, code: `await page.goto(${j(fx.url("/network"))}); await page.locator('#out', {hasText: '3 rows'}).waitFor(); return 1` })
     assert(!nav.isError, nav.text)
-    const har = path.join(artifacts, `${session}.har`)
-    const stop = await client.call("network", { action: "stop", session, outputPath: har })
+    const stop = await client.call("network", { action: "stop", session })
     assert(!stop.isError, stop.text)
-    const parsed = JSON.parse(fs.readFileSync(har, "utf8"))
-    const entries = parsed.log.entries as any[]
-    assert(entries.filter((e) => e.request.url.includes("/api/data")).length === 3, `HAR has ${entries.length} entries`)
-    assert(!fs.readFileSync(har, "utf8").includes("stress-fake-token"), "HAR leaked the bearer token")
-    fs.rmSync(har, { force: true })
+    const exchanges = (stop.data as { exchanges?: any[] } | undefined)?.exchanges ?? []
+    assert(exchanges.filter((e) => e.request.url.includes("/api/data")).length === 3, `result has ${exchanges.length} exchanges`)
+    assert(!JSON.stringify(stop.data).includes("stress-fake-token"), "exchange leaked the bearer token")
   } },
   { name: "network-cancel", tags: ["network"], run: async ({ client, session, fx }) => {
     assert(!(await client.call("network", { action: "start", session })).isError, "start")

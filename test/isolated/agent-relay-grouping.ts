@@ -4,7 +4,7 @@ import { installFakeRelaySocket } from "../relay-stub"
 
 // The status page's Grouping setting (agent-relay.ts group, agent-groups.ts): one shared "Agents · N" group for every
 // agent (the default), one group per session, or none; with popups, handoffs, the toolbar's kill switch (the relay
-// detaching a tab) and both window modes. Also the relay-side settings the extension sends (cursor, human input) and
+// detaching a tab) and both window modes. Also the relay-side settings the extension sends (human input) and
 // the environment overrides the relay reports back, and the relay's settings tool reading and writing them
 // (settings.get / settings.set). Run by ../isolated.test.ts in a process of its own.
 
@@ -97,7 +97,7 @@ beforeEach(async () => {
   stub.state.activations.length = 0
   stub.state.focusedWindowId = undefined
   socket().received.length = 0
-  await stub.chrome.storage.local.remove(["agentTabsWindow", "agentTabsGrouping", "agentCursor", "humanInput", "tabCleanupIdleMinutes", "handoffNotifications"])
+  await stub.chrome.storage.local.remove(["agentTabsWindow", "agentTabsGrouping", "humanInput", "tabCleanupIdleMinutes", "handoffNotifications"])
   await stub.chrome.storage.session.remove("agentWindowId")
 })
 
@@ -534,22 +534,22 @@ describe("toolbar clicks that can't attach", () => {
 })
 
 describe("relay settings", () => {
-  test("the extension sends the cursor and input settings, again when they change, and never invalid values", async () => {
-    // The first connection's settings went out with pairing (before beforeEach cleared the log); ask again.
-    await stub.chrome.storage.local.set({ agentCursor: "always" })
-    await until(() => settings().length === 1)
-    expect(settings()[0]).toEqual({ cursor: "always", humanInput: "on" })
+  test("the extension sends the input setting, again when it changes, and never invalid values", async () => {
+    // The first connection's settings went out with pairing (beforeEach cleared the log); ask again.
     await stub.chrome.storage.local.set({ humanInput: "off" })
+    await until(() => settings().length === 1)
+    expect(settings()[0]).toEqual({ humanInput: "off" })
+    await stub.chrome.storage.local.set({ humanInput: "on" })
     await until(() => settings().length === 2)
-    expect(settings()[1]).toEqual({ cursor: "always", humanInput: "off" })
-    await stub.chrome.storage.local.set({ agentCursor: "sometimes", humanInput: 3 })
+    expect(settings()[1]).toEqual({ humanInput: "on" })
+    await stub.chrome.storage.local.set({ humanInput: 3 })
     await until(() => settings().length === 3)
-    expect(settings()[2]).toEqual({ cursor: "off", humanInput: "on" })
+    expect(settings()[2]).toEqual({ humanInput: "on" })
   })
 
   test("the relay's overrides show on the status page; unknown ones are dropped, and they go with the connection", async () => {
-    await command("relay.settings", { overrides: { cursor: "always", humanInput: "maybe", agentWindow: "separate", other: 1 } })
-    expect(relay.state().overrides).toEqual({ cursor: "always", agentWindow: "separate" })
+    await command("relay.settings", { overrides: { humanInput: "off", agentWindow: "separate", other: 1 } })
+    expect(relay.state().overrides).toEqual({ humanInput: "off", agentWindow: "separate" })
     await command("relay.settings", { overrides: {} })
     expect(relay.state().overrides).toBeUndefined()
     await command("relay.settings", { overrides: { humanInput: "off" } })
@@ -573,20 +573,20 @@ describe("the relay's settings tool", () => {
 
   test("settings.get reads every setting, defaults for what was never set", async () => {
     expect(await command("settings.get", {})).toEqual({
-      settings: { window: "current", grouping: "shared", idleMinutes: 10, cursor: "off", humanInput: "on", handoffNotifications: "recording" },
+      settings: { window: "current", grouping: "shared", idleMinutes: 10, humanInput: "on", handoffNotifications: "recording" },
     })
   })
 
   test("settings.set writes storage, which the page and the relay follow, and new tabs use it", async () => {
     pageSaw.length = 0
-    const result = await command("settings.set", { values: { grouping: "shared", cursor: "always", idleMinutes: 0, handoffNotifications: "always" } })
-    expect(result.settings).toEqual({ window: "current", grouping: "shared", idleMinutes: 0, cursor: "always", humanInput: "on", handoffNotifications: "always" })
-    expect(await stub.chrome.storage.local.get(["agentTabsGrouping", "agentCursor", "tabCleanupIdleMinutes", "handoffNotifications"])).toEqual({
-      agentTabsGrouping: "shared", agentCursor: "always", tabCleanupIdleMinutes: 0, handoffNotifications: "always",
+    const result = await command("settings.set", { values: { grouping: "shared", idleMinutes: 0, humanInput: "off", handoffNotifications: "always" } })
+    expect(result.settings).toEqual({ window: "current", grouping: "shared", idleMinutes: 0, humanInput: "off", handoffNotifications: "always" })
+    expect(await stub.chrome.storage.local.get(["agentTabsGrouping", "humanInput", "tabCleanupIdleMinutes", "handoffNotifications"])).toEqual({
+      agentTabsGrouping: "shared", humanInput: "off", tabCleanupIdleMinutes: 0, handoffNotifications: "always",
     })
-    expect(pageSaw).toEqual([{ agentTabsGrouping: "shared", agentCursor: "always", tabCleanupIdleMinutes: 0, handoffNotifications: "always" }])
+    expect(pageSaw).toEqual([{ agentTabsGrouping: "shared", humanInput: "off", tabCleanupIdleMinutes: 0, handoffNotifications: "always" }])
     await until(() => settings().length === 1)
-    expect(settings()[0]).toEqual({ cursor: "always", humanInput: "on" })
+    expect(settings()[0]).toEqual({ humanInput: "off" })
     await userWindow()
     const agent = await agentTab("github")
     expect(group(agent.groupId)!.title).toBe(`Agents · 1${MARKER}${MARKER}`)

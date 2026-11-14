@@ -96,7 +96,7 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 node cli/dist/cli.mjs status || true
-node cli/dist/cli.mjs doctor || true
+node cli/dist/cli.mjs status || true
 sleep 1; curl -fsS -o /dev/null -w "noVNC on :$NOVNC_PORT -> HTTP %{http_code}\n" "http://127.0.0.1:$NOVNC_PORT/vnc.html" || true
 
 bash "$REPO/stress/canary/provision.sh" "$CFT_DIR/current"

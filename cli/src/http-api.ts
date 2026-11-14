@@ -1,9 +1,8 @@
 import http from "node:http"
 import { Effect } from "effect"
 import { pairingScheme } from "./relay/browser-pairing.ts"
-import type { FlightRecorderRelay } from "./recording-relay/flight-recorder.ts"
 import { decodeRequest, hasRelayToken, runRequestEffect, sendNotFound, targetSummaries } from "./http-api/errors.ts"
-import { handleFlightRecorderRequest, handleRecordingRequest } from "./http-api/recording-routes.ts"
+import { handleRecordingRequest } from "./http-api/recording-routes.ts"
 import { handleCliRequest, handleClientRequest, handleNetworkRequest } from "./http-api/session-routes.ts"
 import type { JsonObject } from "./protocol.ts"
 import { extensionProtocolVersion, minExtensionProtocolVersion } from "./protocol.ts"
@@ -40,7 +39,6 @@ export function createHttpRequestHandler(options: {
     "connected" | "pairingState" | "nextStep" | "version" | "build" | "origin" | "protocolVersion" | "protocolCompatible" | "protocolLegacy" | "browsers" | "rejectedConnections" | "pairingFailures" | "cdpClients" | "processFaults"
   >
   readonly recordingRelay: RecordingRelay
-  readonly flightRecorder: FlightRecorderRelay
   readonly registry: TargetRegistry
   readonly sessions: OpenCodeBrowserSessions
   /**
@@ -179,10 +177,6 @@ export function createHttpRequestHandler(options: {
     }
     if (pathname.startsWith("/recording/")) {
       run(handleRecordingRequest({ request, response, pathname, requestUrl, registry: options.registry, recordingRelay: options.recordingRelay }), true)
-      return
-    }
-    if (pathname.startsWith("/flight-recorder/")) {
-      run(handleFlightRecorderRequest({ request, response, pathname, requestUrl, registry: options.registry, flightRecorder: options.flightRecorder }), true)
       return
     }
     if (pathname.startsWith("/network/")) {

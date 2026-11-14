@@ -98,9 +98,6 @@ export async function startCdpRecording(
   starting: StartingRecording,
 ): Promise<RecordingStartResult> {
   const cancelledResult = (): RecordingStartResult => ({ success: false, error: "Recording was cancelled while starting" })
-  if (options.audio === true) {
-    return { success: false, error: "CDP recording captures video frames only; audio is not supported" }
-  }
   const artifactType = cdpArtifactType(options.outputPath)
   if (!artifactType) {
     return { success: false, error: "CDP recording output path must end in .webm or .mp4" }
@@ -137,7 +134,6 @@ export async function startCdpRecording(
     tabId: options.tabId,
     ...(options.sessionId ? { sessionId: options.sessionId } : {}),
     outputPath: options.outputPath,
-    mode: "cdp",
     artifactType,
     startedAt,
     frameRate,
@@ -188,7 +184,6 @@ export async function startCdpRecording(
     startedAt,
     path: options.outputPath,
     mimeType: artifactType === "mp4" ? "video/mp4" : "video/webm",
-    mode: "cdp",
     artifactType,
     frameRate,
   }
@@ -245,7 +240,6 @@ async function finishCdpRecording(context: CdpCaptureContext, recording: CdpReco
     const stat = await fs.stat(recording.outputPath)
     const quality = recordingQuality(recording, durationMs)
     const metadata = {
-      mode: "cdp",
       artifactType: recording.artifactType,
       tabId: recording.tabId,
       ...(recording.sessionId ? { sessionId: recording.sessionId } : {}),
@@ -263,7 +257,6 @@ async function finishCdpRecording(context: CdpCaptureContext, recording: CdpReco
       duration: durationMs,
       path: recording.outputPath,
       size: stat.size,
-      mode: "cdp",
       artifactType: recording.artifactType,
       frameCount: recording.frameCount,
       quality,

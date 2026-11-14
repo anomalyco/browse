@@ -89,7 +89,7 @@ This needs [Bun](https://bun.sh) as well. A checkout never updates itself: run `
 `browse` folder (or ask your agent to update browse). It pulls the new commits (fast-forward
 only, and never over local changes), rebuilds, and requests an extension reload. If the old extension cannot accept
 the request, **reload browse on your browser's extensions page (↻)**. The manual equivalent of `update` is
-`git pull && bun run setup`. When there's an update, `status`, `doctor`, the extension's settings page and the agent (once
+`git pull && bun run setup`. When there's an update, `status`, the extension's settings page and the agent (once
 per session) say so; browse checks the clone's remote at most every six hours. Set `OPENCODE_BROWSER_UPDATE_CHECK=0` to
 turn the check off.
 
@@ -210,11 +210,9 @@ connection itself isn't encrypted by browse; use a network that is (Tailscale or
   - **Close tabs agents haven't touched for:** 10 minutes (default), 30, 60, or *never*. Tabs a script runs on, a
     handoff waits on or a recording records stay open regardless. With *never*, an agent's `tabs_cleanup` without a
     time still closes only tabs idle for 10 minutes.
-  - **Agent cursor:** off (default) or *always show* it on agent tabs. Pages can detect it while it's shown.
-    Recordings still leave it out unless they ask for it (`cursor: true`).
   - **Human-like input:** on (default), or *off*: faster, but easier for sites to flag as a bot.
   - **Handoff notifications:** only while the tab is recorded (default), or *on every handoff*, as well as the card.
-  The relay's environment variables below override the window, cursor and input settings; the options page then
+  The relay's environment variables below override the window and input settings; the options page then
   shows the value in effect and which variable set it. Agents can read and change these settings with the `settings`
   tool when you ask them to (`node cli/dist/cli.mjs settings get`, `settings set grouping=shared` on the CLI); the
   options page follows at once. The security switches below are environment-only, never settings.
@@ -229,10 +227,9 @@ connection itself isn't encrypted by browse; use a network that is (Tailscale or
 - **Handoffs:** the page shows a small card with the site's origin. Do the human part, then click **Continue** on the
   card or the toolbar button. While one waits, `browse session list --json` and `session_list` include it (message,
   tab and start time) so other tools can see what is waiting on you.
-- **Recordings show only the page.** Nothing from browse is drawn while a tab is recorded: no cursor, no
-  labels, no handoff card (you get a system notification instead; click it to go to the tab). If notifications are
-  turned off for the extension, the card is shown after all, and the recording includes it. For a demo video, ask for
-  the ghost cursor with `cursor: true` on the `recording` tool (`action: "start"`; `--cursor` on the CLI).
+- **Recordings show only the page.** Nothing from browse is drawn while a tab is recorded: no labels, no handoff
+  card (you get a system notification instead; click it to go to the tab). If notifications are turned off for the
+  extension, the card is shown after all, and the recording includes it.
 - **Status:** the extension's options page shows whether the relay is connected and paired, and can copy diagnostics.
 
 ## Tools
@@ -243,9 +240,8 @@ connection itself isn't encrypted by browse; use a network that is (Tailscale or
 | `session_new`, `session_list`, `session_use`, `session_reset`, `session_delete` | Named sessions, each with its own tabs; they survive restarts |
 | `session_adopt` | Take over a tab you handed over with the toolbar button |
 | `session_allowlist` | Limit a session's tabs to the sites you name (also `allowedOrigins` on `session_new`) |
-| `network` (`action`: `start`, `status`, `stop`, `cancel`) | Capture traffic to a redacted HAR |
-| `recording` (`action`: `start`, `stop`, `status`, `cancel`) | Record a tab to MP4 or WebM (`cursor: true` draws the ghost cursor) |
-| `flight_recorder` (`action`: `start`, `status`, `save_last`, `cancel`) | Keep the last minute of video, save it when something breaks |
+| `network` (`action`: `start`, `status`, `stop`, `cancel`) | Capture traffic and return credential-redacted exchanges |
+| `recording` (`action`: `start`, `stop`, `status`, `cancel`) | Record a tab to MP4 or WebM through CDP |
 | `tabs_cleanup` | Close idle agent tabs (`idleMinutes` applies to the calling agent's own sessions; other agents' wait for the idle setting) |
 | `settings` | Read or change the settings below when the user asks (never the security switches or update behaviour); the options page updates live |
 | `status` | Connection status |
@@ -269,10 +265,8 @@ Each agent has its own current session only when the client names the agent (Ope
 `sharedSession`). With other clients, agents on one server share one current session; when several use it, each
 should `session_new` its own and pass `session` on every call.
 
-The agent reference is [`cli/skills/browse/SKILL.md`](cli/skills/browse/SKILL.md)
-(`browse skill` prints it). The MCP server also sends a short usage guide in its
-initialize instructions. Everything is also a CLI:
-`node cli/dist/cli.mjs --help`.
+`browse --help` has a short agent guide, and the MCP server sends the same guidance in
+its initialize instructions. Everything is also a CLI: `node cli/dist/cli.mjs --help`.
 
 ## How it works
 
@@ -292,17 +286,17 @@ extension, connected to the relay over a WebSocket, runs it in your browser thro
 - **Quiet in the page.** `execute` uses [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright), which hides
   the usual automation tells (`navigator.webdriver`, the `Runtime.enable` leak), and the relay drops Patchright's media
   emulation overrides. The extension adds nothing to pages you browse; in agent tabs it adds nothing to the DOM except
-  the handoff card while a handoff waits (and the ghost cursor when asked for). Both live in a closed shadow root on an
-  anonymous element, drawn from an isolated world. Input moves like a person: curved mouse paths, paced typing,
+  the handoff card while a handoff waits. It lives in a closed shadow root on an anonymous element, drawn from an
+  isolated world. Input moves like a person: curved mouse paths, paced typing,
   gliding scroll (turn *Human-like input* off on the options page, or `OPENCODE_BROWSER_HUMAN_INPUT=0`, for full speed). This makes an agent hard to spot, not impossible: the
   browser shows its "started debugging" bar while the debugger is attached, focus emulation keeps background agent tabs
-  "visible" while a script runs on them (and between calls for a `keepVisible` session), the card and cursor elements
-  exist while shown, and `fillInput`'s fallback dispatches synthetic events (it warns when it does).
+  "visible" while a script runs on them (and between calls for a `keepVisible` session), the card element exists while
+  it's shown, and `fillInput`'s fallback dispatches synthetic events (it warns when it does).
 
-Permissions: `debugger`, `tabs`, `tabGroups`, `storage`, `alarms`, `offscreen` and `tabCapture` (recordings),
-`scripting` (to add the handoff script only to tabs agents use, never to every page), `webNavigation` (to keep popups
-agents open with their other tabs), `notifications` (to tell you an agent needs you while it records a tab), and access to
-all sites so agents can work wherever you ask. Nothing leaves your computer except what your agent sends to its model
+Permissions: `debugger`, `tabs`, `tabGroups`, `storage`, `alarms`, `scripting` (to add the handoff script only to
+tabs agents use, never to every page), `webNavigation` (to keep popups agents open with their other tabs),
+`notifications` (to tell you an agent needs you while it records a tab), and access to all sites so agents can work
+wherever you ask. Nothing leaves your computer except what your agent sends to its model
 provider; see the [privacy policy](store/privacy-policy.md).
 
 ## Security
@@ -351,8 +345,8 @@ may try to steer it, and that other programs on your computer may try to use the
 - **Your tabs stay yours.** Agents use only tabs they opened or you lent them. The toolbar button always takes a tab
   back; only a real click on the card or the toolbar button finishes a handoff, so a page can't fake it.
 - **Less on disk.** Session journals are private (0700/0600), redact typed passwords, codes and tokens, and are pruned
-  after 14 days (200 at most). HARs replace credential-bearing headers, cookies, query fields and structured body
-  fields with `[redacted]`; typed passwords and one-time codes are never stored.
+  after 14 days (200 at most). Network captures replace credential-bearing headers, cookies, query fields and
+  structured body fields with `[redacted]`; typed passwords and one-time codes are never stored.
 
 Escape hatches. Set them in the environment you start opencode (or your MCP client) from; the relay inherits
 `OPENCODE_BROWSER_*` variables. Run `node cli/dist/cli.mjs relay restart` after changing them:
@@ -365,7 +359,6 @@ Escape hatches. Set them in the environment you start opencode (or your MCP clie
 | `OPENCODE_BROWSER_AGENT_WINDOW=separate` | Open agent tabs in a separate window (`current`: in the user's window), overriding the options page's *Where agents open their tabs* |
 | `OPENCODE_BROWSER_EXECUTE_TIMEOUT_MS=120000` | When set, the default budget for an `execute` that passes no `timeoutMs`, plus Playwright's action and navigation timeout for it (at least 30 seconds; 0 removes both) |
 | `OPENCODE_BROWSER_EXECUTE_SLICE_MS=2000` | Longest `execute` JavaScript may run without yielding before it is stopped (50 to 60000; every session waits meanwhile) |
-| `OPENCODE_BROWSER_GHOST_CURSOR=1` | Show the agent cursor on every agent tab outside recordings (pages can see it); `0` keeps it off. Overrides the options page's *Agent cursor* |
 | `OPENCODE_BROWSER_AUTO_UPDATE=notify` | Installs: only show new versions (`off`: don't check; `on`: install them when idle, the default). Overrides the status page's *Updates* |
 | `OPENCODE_BROWSER_HUMAN_INPUT=0` | Send input at full speed instead of human-like paths and pacing; `1` keeps them on. Overrides the options page's *Human-like input* |
 | `OPENCODE_BROWSER_CHALLENGE_WAIT_MS=15000` | How long `execute` waits for a bot check the browser clears by itself (0 to 60000; 0 reports it without waiting) |
@@ -375,8 +368,8 @@ Escape hatches. Set them in the environment you start opencode (or your MCP clie
 
 ## Troubleshooting
 
-- `node cli/dist/cli.mjs status` shows the relay, the extension and every tab agents can use.
-- `node cli/dist/cli.mjs doctor` checks the install.
+- `node cli/dist/cli.mjs status` shows the relay, the extension and every tab agents can use, and says what to do
+  when the extension is missing, unpaired or out of date.
 - Agents fail with "The browser isn't answering" while the computer is very busy: the browser may just be slow. Raise
   `OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS` and `OPENCODE_BROWSER_PING_TIMEOUT_MS`, then run `browse relay restart`.
 - Logs: `~/.local/state/browse/logs/relay.log`.

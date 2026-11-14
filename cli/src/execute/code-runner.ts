@@ -8,13 +8,6 @@ import { classifyChallenge, probePageScript, probeSelectors, type ChallengeOutco
 import type { DemonstrationResult } from "./demonstration.ts"
 import { pageVisibleApiWarningForName, sandboxModules, type ExecuteFiles, type ExecuteRealm } from "../execute-realm.ts"
 import { ExecuteRejectionScope } from "./rejection-scope.ts"
-import type {
-  GhostCursorCalloutOptions,
-  GhostCursorCaptionOptions,
-  GhostCursorClientOptions,
-  GhostCursorSpotlightOptions,
-  GhostCursorZoomOptions,
-} from "../ghost-cursor.ts"
 import type * as NetworkCapture from "../network-capture.ts"
 import { PageConsole } from "./console.ts"
 import type { ExecuteAftermath, ExecuteLogEntry, ExecuteLogSummary } from "../relay/schema.ts"
@@ -42,14 +35,6 @@ export type HandoffCallOptions = {
   readonly start?: () => unknown | Promise<unknown>
 }
 
-export type ShowGhostCursorOptions = GhostCursorClientOptions & {
-  readonly page?: Page
-}
-
-export type HideGhostCursorOptions = {
-  readonly page?: Page
-}
-
 export type SandboxGlobals = {
   readonly browser: Browser
   readonly context: BrowserContext
@@ -65,27 +50,12 @@ export type SandboxGlobals = {
   readonly snapshot: SnapshotHelper
   readonly ref: SnapshotRefHelper
   readonly webmcp: WebMcpHelper
-  readonly showGhostCursor: (options?: ShowGhostCursorOptions) => Promise<void>
-  readonly hideGhostCursor: (options?: HideGhostCursorOptions) => Promise<void>
-  readonly ghostCursor: {
-    readonly show: (options?: ShowGhostCursorOptions) => Promise<void>
-    readonly hide: (options?: HideGhostCursorOptions) => Promise<void>
-    readonly caption: (title: string | null, options?: GhostCursorCaptionOptions & { readonly page?: Page }) => Promise<void>
-    readonly clearCaption: (options?: { readonly page?: Page }) => Promise<void>
-    readonly callout: (target: Locator | string, label: string, options?: GhostCursorCalloutOptions & { readonly page?: Page }) => Promise<void>
-    readonly clearCallouts: (options?: { readonly page?: Page }) => Promise<void>
-    readonly zoom: (target: Locator | string | { readonly x: number; readonly y: number } | null, options?: GhostCursorZoomOptions & { readonly page?: Page }) => Promise<void>
-    readonly resetZoom: (options?: { readonly durationMs?: number; readonly page?: Page }) => Promise<void>
-    readonly spotlight: (target: Locator | string | null, options?: GhostCursorSpotlightOptions & { readonly page?: Page }) => Promise<void>
-    readonly clearSpotlight: (options?: { readonly page?: Page }) => Promise<void>
-    readonly keys: (keys: string | readonly string[], label?: string, options?: { readonly page?: Page }) => Promise<void>
-  }
-  readonly handoff: (message?: string, options?: HandoffCallOptions) => Promise<void>
   readonly demonstrate: (message?: string, options?: HandoffCallOptions) => Promise<DemonstrationResult>
+  readonly handoff: (message?: string, options?: HandoffCallOptions) => Promise<void>
   readonly network: {
     readonly start: (options?: NetworkCapture.NetworkCaptureOptions) => Promise<NetworkCapture.NetworkCaptureStatus>
     readonly status: () => NetworkCapture.NetworkCaptureStatus
-    readonly stop: (options?: NetworkCapture.NetworkCaptureStopOptions) => Promise<NetworkCapture.NetworkCaptureResult>
+    readonly stop: () => Promise<NetworkCapture.NetworkCaptureResult>
     readonly cancel: () => Promise<{ readonly cancelled: boolean }>
   }
   readonly pageConsole: {
@@ -203,9 +173,6 @@ const sandboxGlobalKeys = [
   "snapshot",
   "ref",
   "webmcp",
-  "showGhostCursor",
-  "hideGhostCursor",
-  "ghostCursor",
   "handoff",
   "demonstrate",
   "network",

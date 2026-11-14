@@ -1,14 +1,14 @@
 // The user's browse settings: the same ones as the extension's options page (where agent tabs open, how
-// they're grouped, when idle ones close, the agent cursor, human-like input, handoff notifications). The extension
+// they're grouped, when idle ones close, human-like input, handoff notifications). The extension
 // owns them (chrome.storage.local); the relay reads and writes them through it (`settings.get`, `settings.set`) for the
-// `settings` MCP tool and CLI command, so the options page updates live and the relay hears of cursor and input changes
+// `settings` MCP tool and CLI command, so the options page updates live and the relay hears of input changes
 // the way it does for changes made on the page. Environment variables on the relay override some of them; security
 // switches are environment-only and never settable here. autoUpdate is the relay's own (auto-update.ts keeps it in the
 // state root, so it works without the extension); the relay merges it in and never sends it to the extension.
 import type { JsonObject } from "../protocol.ts"
 import { cliCommand } from "../paths.ts"
 
-export const settingKeys = ["window", "grouping", "idleMinutes", "cursor", "humanInput", "handoffNotifications", "autoUpdate"] as const
+export const settingKeys = ["window", "grouping", "idleMinutes", "humanInput", "handoffNotifications", "autoUpdate"] as const
 /** Settings the relay stores itself rather than in the extension. */
 export const relaySettingKeys: readonly SettingKey[] = ["autoUpdate"]
 export type SettingKey = (typeof settingKeys)[number]
@@ -21,7 +21,6 @@ export const settingSpecs: Record<SettingKey, { readonly label: string; readonly
   window: { label: "Where agents open their tabs (current: the user's window; separate: an unfocused window of their own)", values: ["current", "separate"], variable: "OPENCODE_BROWSER_AGENT_WINDOW" },
   grouping: { label: "How agent tabs are grouped (one shared group, one group per session, or none)", values: ["shared", "session", "none"] },
   idleMinutes: { label: "Close agent tabs untouched for this many minutes", values: [10, 30, 60, "never"] },
-  cursor: { label: "Agent cursor on agent tabs outside recordings (pages can detect it)", values: ["off", "always"], variable: "OPENCODE_BROWSER_GHOST_CURSOR" },
   humanInput: { label: "Human-like input (off is faster, but easier for sites to flag)", values: ["on", "off"], variable: "OPENCODE_BROWSER_HUMAN_INPUT" },
   handoffNotifications: { label: "System notification on a handoff (only while recorded, or every handoff)", values: ["recording", "always"] },
   autoUpdate: { label: "installs: install updates automatically when idle, only notify, or never check", values: ["on", "notify", "off"], variable: "OPENCODE_BROWSER_AUTO_UPDATE" },

@@ -1,6 +1,5 @@
 import { Console, Effect, Option } from "effect"
 import { Command, Flag } from "effect/cli"
-import path from "node:path"
 import * as RelayClient from "../relay/client.ts"
 import type { NetworkStatusResponse, NetworkStopResponse } from "../relay/schema.ts"
 import {
@@ -13,12 +12,6 @@ import {
 } from "./context.ts"
 import { registerCliCommand } from "./registry.ts"
 
-const parseNetworkContent = Effect.fnUntraced(function* (content: Option.Option<string>) {
-  const value = Option.getOrUndefined(content)
-  if (value === undefined || value === "embed" || value === "omit") return value
-  return yield* Effect.fail(new Error("Network content must be embed or omit"))
-})
-
 function formatNetworkStatus(status: NetworkStatusResponse): string {
   if (!status.active)
     return status.ended
@@ -28,8 +21,7 @@ function formatNetworkStatus(status: NetworkStatusResponse): string {
 }
 
 function formatNetworkResult(result: NetworkStopResponse): string {
-  const output = result.outputPath ? ` output=${result.outputPath}` : ""
-  return `Network capture stopped: entries=${result.entryCount} responses=${result.responseCount} failures=${result.failureCount} bodyBytes=${result.capturedBodyBytes} truncated=${result.truncatedBodyCount} dropped=${result.droppedEntryCount}${output}`
+  return `Network capture stopped: exchanges=${result.exchanges.length} entries=${result.entryCount} responses=${result.responseCount} failures=${result.failureCount} bodyBytes=${result.capturedBodyBytes} truncated=${result.truncatedBodyCount} dropped=${result.droppedEntryCount}`
 }
 
 const networkStart = Command.make(
@@ -40,56 +32,15 @@ const networkStart = Command.make(
       Flag.optional,
       Flag.withDescription("Capture only requests whose URL contains this text"),
     ),
-    resourceTypes: Flag.String("resource-type").pipe(
-      Flag.atMost(50),
-      Flag.withDescription("Capture this Playwright resource type; repeat for multiple types"),
-    ),
-    content: Flag.String("content").pipe(
-      Flag.optional,
-      Flag.withDescription("Response and request body mode: embed (default) or omit"),
-    ),
-    maxBodyBytes: Flag.Int("max-body-bytes").pipe(
-      Flag.optional,
-      Flag.withDescription("Maximum captured bytes per body, defaults to 1000000"),
-    ),
-    maxTotalBodyBytes: Flag.Int("max-total-body-bytes").pipe(
-      Flag.optional,
-      Flag.withDescription("Maximum captured body bytes for the whole capture, defaults to 25000000"),
-    ),
-    maxEntries: Flag.Int("max-entries").pipe(
-      Flag.optional,
-      Flag.withDescription("Maximum request entries, defaults to 1000"),
-    ),
-    maxDuration: Flag.Int("max-duration-ms").pipe(
-      Flag.optional,
-      Flag.withDescription("End the capture by itself (discarding it) after this long, defaults to 1800000 (30 minutes)"),
-    ),
     json: jsonFlag,
   },
-  Effect.fn("Cli.networkStart")(function* ({
-    session,
-    urlFilter,
-    resourceTypes,
-    content,
-    maxBodyBytes,
-    maxTotalBodyBytes,
-    maxEntries,
-    maxDuration,
-    json,
-  }) {
+  Effect.fn("Cli.networkStart")(function* ({ session, urlFilter, json }) {
     const relay = yield* RelayClient.Service
     yield* ensureCliRelayAndExtension()
     const sessionId = yield* networkSession(session)
-    const contentValue = yield* parseNetworkContent(content)
     const result = yield* relay.networkStart({
       sessionId,
       ...(Option.isSome(urlFilter) ? { urlFilter: urlFilter.value } : {}),
-      ...(resourceTypes.length === 0 ? {} : { resourceTypes }),
-      ...(contentValue === undefined ? {} : { content: contentValue }),
-      ...(Option.isSome(maxBodyBytes) ? { maxBodyBytes: maxBodyBytes.value } : {}),
-      ...(Option.isSome(maxTotalBodyBytes) ? { maxTotalBodyBytes: maxTotalBodyBytes.value } : {}),
-      ...(Option.isSome(maxEntries) ? { maxEntries: maxEntries.value } : {}),
-      ...(Option.isSome(maxDuration) ? { maxDurationMs: maxDuration.value } : {}),
     })
     yield* printOr(json, result, formatNetworkStatus(result))
   }),
@@ -114,25 +65,16 @@ const networkStop = Command.make(
   "stop",
   {
     session: sessionFlag(),
-    output: Flag.String("output").pipe(
-      Flag.optional,
-      Flag.withAlias("o"),
-      Flag.withDescription("Write a credential-redacted HAR artifact to this path"),
-    ),
     json: jsonFlag,
   },
-  Effect.fn("Cli.networkStop")(function* ({ session, output, json }) {
+  Effect.fn("Cli.networkStop")(function* ({ session, json }) {
     const relay = yield* RelayClient.Service
-    const outputValue = Option.getOrUndefined(output)
     const sessionId = yield* networkSession(session)
     yield* ensureCliRelay()
-    const result = yield* relay.networkStop({
-      sessionId,
-      ...(outputValue ? { outputPath: path.resolve(outputValue) } : {}),
-    })
+    const result = yield* relay.networkStop({ sessionId })
     yield* printOr(json, result, formatNetworkResult(result))
   }),
-).pipe(Command.withDescription("Stop capture and optionally write a credential-redacted artifact"))
+).pipe(Command.withDescription("Stop capture and return the redacted exchanges"))
 
 const networkCancel = Command.make(
   "cancel",
@@ -144,7 +86,7 @@ const networkCancel = Command.make(
     const result = yield* relay.networkCancel({ sessionId })
     yield* Console.log(result.cancelled ? "Network capture cancelled" : "Network capture was not active")
   }),
-).pipe(Command.withDescription("Cancel capture without writing an artifact"))
+).pipe(Command.withDescription("Cancel capture without returning its exchanges"))
 
 const network = Command.make("network").pipe(
   Command.withDescription("Capture authenticated network exchanges for direct client derivation"),
