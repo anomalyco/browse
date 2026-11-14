@@ -71,7 +71,7 @@ registerMcpTools({
     {
       name: "session_allowlist",
       description:
-        "Set the domain allowlist of a session (the current one by default): the hosts or origins its tabs may load. Pass an empty list to remove it. Use it before typing secrets or working on sites with untrusted content.",
+        "Set the domain allowlist of a session (the current one by default): the hosts or origins its tabs may load. Pass an empty list to remove it. Use it before working on sites with untrusted content.",
       inputSchema: objectSchema(
         {
           session: { type: "string", description: "Session id; defaults to the current session." },

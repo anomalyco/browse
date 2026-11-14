@@ -472,10 +472,6 @@ export class OpenCodeBrowserSessions {
     return this.withSessionOperation(id, "network cancel", (session) => session.sandbox.networkCancel())
   }
 
-  authRefresh(id: string, options: { readonly name: string; readonly urlFilter?: string; readonly timeoutMs?: number }): Effect.Effect<NetworkCaptureResult, Error> {
-    return this.withSessionOperation(id, "auth refresh", (session) => session.sandbox.authRefresh(options))
-  }
-
   private withSessionOperation<A>(
     id: string,
     operation: string,

@@ -19,7 +19,6 @@ import type * as NetworkCapture from "../network-capture.ts"
 import { PageConsole } from "./console.ts"
 import type { ExecuteAftermath, ExecuteLogEntry, ExecuteLogSummary } from "../relay/schema.ts"
 import type { ScreenshotDiffOptions, ScreenshotDiffResult } from "../snapshot/screenshot-diff.ts"
-import type * as SiteSecrets from "../auth/site-secrets.ts"
 import type {
   AriaSnapshotHelper,
   InputField,
@@ -36,15 +35,6 @@ import { safePageUrl } from "./target-selection.ts"
 
 // Full Node modules, only with OPENCODE_BROWSER_ALLOW_NODE=1. Sandboxed execute code gets sandboxModules.
 export const nodeModules = { ...sandboxModules, fs, os, http, https }
-
-export type TypeSecretOptions = {
-  /** Clear the field first (default true). */
-  readonly clear?: boolean
-  /** How long to wait for the target element, in milliseconds (default 10000). */
-  readonly timeout?: number
-}
-
-export type TypeSecretResult = { readonly typed: true; readonly name: string; readonly origin: string; readonly kind: SiteSecrets.SiteSecretKind }
 
 export type HandoffCallOptions = {
   readonly timeoutMs?: number
@@ -101,9 +91,6 @@ export type SandboxGlobals = {
   readonly pageConsole: {
     readonly start: (page?: Page) => Promise<{ readonly capturing: boolean }>
     readonly stop: (page?: Page) => Promise<{ readonly capturing: boolean }>
-  }
-  readonly secrets: {
-    readonly type: (target: Locator | string, name: string, options?: TypeSecretOptions) => Promise<TypeSecretResult>
   }
   readonly handoffTracker: { count: number }
 }
@@ -223,7 +210,6 @@ const sandboxGlobalKeys = [
   "demonstrate",
   "network",
   "pageConsole",
-  "secrets",
 ] as const satisfies readonly (keyof Omit<SandboxGlobals, "handoffTracker">)[]
 
 export async function runUserCode({ code, globals, realm, onUnhandledRejection }: {

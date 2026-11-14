@@ -4,7 +4,6 @@ import type { JsonObject } from "../protocol.ts"
 import * as RelayClient from "../relay/client.ts"
 import { getObject, getString, parseTargetSelection } from "../relay/helpers.ts"
 import {
-  AuthProfileSummary,
   ExecuteAftermath,
   ExecuteLogEntry,
   ExecuteLogSummary,
@@ -77,9 +76,6 @@ export const sessionSchemaProperty = {
   description: "Optional session id. Defaults to your current session.",
 } as const
 export const sessionAliasSchemaProperty = { type: "string", description: "Same as id." } as const
-export const sessionOnlyInputSchema = objectSchema({
-  session: sessionSchemaProperty,
-})
 
 /**
  * The execute tool's structured result. The agent's return value appears once (as `value`), and only context that has
@@ -133,14 +129,10 @@ export const NetworkToolOutput = Schema.Struct({
   urlFilter: Schema.optionalKey(Schema.String),
   resourceTypes: Schema.optionalKey(Schema.Array(Schema.String)),
   content: Schema.optionalKey(Schema.Literals(["omit", "embed"])),
-  secrets: Schema.optionalKey(Schema.String),
   endsAt: Schema.optionalKey(Schema.String),
   ended: Schema.optionalKey(Schema.String),
   stoppedAt: Schema.optionalKey(Schema.String),
   outputPath: Schema.optionalKey(Schema.String),
-  authProfile: Schema.optionalKey(AuthProfileSummary),
-  updatedSecretRefs: Schema.optionalKey(Schema.Array(Schema.String)),
-  observedSecretRefs: Schema.optionalKey(Schema.Array(Schema.String)),
   endpoints: Schema.optionalKey(Schema.Array(Schema.Struct({
     method: Schema.String,
     url: Schema.String,
@@ -218,16 +210,6 @@ export const SettingsToolOutput = Schema.Struct({
   unchanged: Schema.optionalKey(SettingsSetResponse.fields.unchanged),
   overridden: Schema.optionalKey(SettingsSetResponse.fields.overridden),
   message: Schema.optionalKey(SettingsSetResponse.fields.message),
-})
-
-export const SecretsListToolOutput = Schema.Struct({
-  secrets: Schema.Array(Schema.Struct({
-    name: Schema.String,
-    kind: Schema.Literals(["password", "totp"]),
-    allowedOrigins: Schema.Array(Schema.String),
-    createdAt: Schema.String,
-    updatedAt: Schema.String,
-  })),
 })
 
 /** The JSON Schema a tool advertises from its Effect Schema (the same conversion Effect's McpServer uses). */

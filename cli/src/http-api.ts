@@ -4,7 +4,7 @@ import { pairingScheme } from "./relay/browser-pairing.ts"
 import type { FlightRecorderRelay } from "./recording-relay/flight-recorder.ts"
 import { decodeRequest, hasRelayToken, runRequestEffect, sendNotFound, targetSummaries } from "./http-api/errors.ts"
 import { handleFlightRecorderRequest, handleRecordingRequest } from "./http-api/recording-routes.ts"
-import { handleAuthRequest, handleCliRequest, handleClientRequest, handleNetworkRequest } from "./http-api/session-routes.ts"
+import { handleCliRequest, handleClientRequest, handleNetworkRequest } from "./http-api/session-routes.ts"
 import type { JsonObject } from "./protocol.ts"
 import { extensionProtocolVersion, minExtensionProtocolVersion } from "./protocol.ts"
 import type { RecordingRelay } from "./recording-relay.ts"
@@ -187,10 +187,6 @@ export function createHttpRequestHandler(options: {
     }
     if (pathname.startsWith("/network/")) {
       run(handleNetworkRequest({ request, response, pathname, sessions: options.sessions }))
-      return
-    }
-    if (pathname.startsWith("/auth/")) {
-      run(handleAuthRequest({ request, response, pathname, sessions: options.sessions }), pathname === "/auth/run")
       return
     }
     if (pathname.startsWith("/v1/")) {

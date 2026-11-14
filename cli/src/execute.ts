@@ -2,7 +2,6 @@ import { Effect, Fiber } from "effect"
 import type { Browser, BrowserContext, Page } from "patchright-core"
 import { registerAriaSnapshotSelector } from "./snapshot/aria-snapshot.ts"
 import { registerRefSelector } from "./snapshot/ref-selector.ts"
-import * as AuthProfile from "./auth/profile.ts"
 import * as AuthenticatedOrigin from "./auth/authenticated-origin.ts"
 import { challengeWarning } from "./execute/challenge-detection.ts"
 import { executeAllowsNode, ExecuteRealm, pageVisibleApiWarning, type ExecuteCpuScheduler } from "./execute-realm.ts"
@@ -76,7 +75,6 @@ import {
   toJsonSafeValue,
 } from "./execute/result-formatting.ts"
 import { buildSandboxGlobals } from "./execute/sandbox-globals.ts"
-import { ExecuteSecretsBridge } from "./execute/secrets-bridge.ts"
 import * as NetworkCapture from "./network-capture.ts"
 import { installPageReadTimeout } from "./execute/read-timeout.ts"
 import { tunePatchright } from "./execute/patchright-tuning.ts"
@@ -159,8 +157,6 @@ type ExecuteSandboxOptions = {
   readonly pageHealthCheckTimeoutMs?: number
   /** Whether the page with this target id is being recorded; helpers then draw nothing into it. */
   readonly isRecordingTarget?: (targetId: string) => boolean
-  /** The session's domain allowlist patterns (domain-policy.ts), or undefined when it has none. */
-  readonly allowedOrigins?: () => readonly string[] | undefined
   /** Allowlist violations the relay saw in this session's tabs since the last execute. */
   readonly drainGuardWarnings?: () => readonly string[]
   /** Shares the relay's event loop fairly with other sessions' execute code. */
@@ -193,7 +189,6 @@ export class ExecuteSandbox extends DefaultPageHost {
   private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
   private readonly networkCapture = new NetworkCapture.Recorder()
   private readonly viewportGuardContexts = new WeakSet<BrowserContext>()
-  private readonly secrets: ExecuteSecretsBridge
   /** The context whose pages this call gave its action budget, for the restore. */
   private actionTimeoutContext: BrowserContext | undefined
   private realm: ExecuteRealm | undefined
@@ -203,11 +198,6 @@ export class ExecuteSandbox extends DefaultPageHost {
     super({
       ...(options.onDefaultTargetChange ? { onDefaultTargetChange: options.onDefaultTargetChange } : {}),
       ...(options.pageHealthCheckTimeoutMs === undefined ? {} : { pageHealthCheckTimeoutMs: options.pageHealthCheckTimeoutMs }),
-    })
-    this.secrets = new ExecuteSecretsBridge({
-      networkCapture: this.networkCapture,
-      allowedOrigins: () => this.options.allowedOrigins?.(),
-      addWarningOnce: (warning) => this.addWarningOnce(warning),
     })
     this.realm = this.allowNode ? undefined : this.createRealm()
     this.state = this.realm?.state ?? {}
@@ -256,7 +246,7 @@ export class ExecuteSandbox extends DefaultPageHost {
                 })
               await this.networkCapture.settleForOutput()
               const extracted = extractExecuteMedia(result)
-              const redactedValue = this.secrets.redactOutputValue(extracted.value)
+              const redactedValue = this.networkCapture.redactValue(extracted.value)
               const jsonSafeResult = toJsonSafeValue(redactedValue)
               const bounded = boundExecuteResult(stringifyResult(redactedValue), jsonSafeResult.serializable ? jsonSafeResult.value : undefined, jsonSafeResult.serializable)
               const warnings = this.finalizeWarnings(
@@ -269,10 +259,10 @@ export class ExecuteSandbox extends DefaultPageHost {
                 ...(bounded.hasValue ? { value: bounded.value } : {}),
                 ...(extracted.media.length > 0 ? { media: extracted.media } : {}),
                 isError: false,
-                logs: this.secrets.redactCaptureLogs(logs),
+                logs: this.networkCapture.redactCaptureLogs(logs),
                 logSummary,
                 warnings,
-                aftermath: this.secrets.redactCaptureAftermath(aftermath),
+                aftermath: this.networkCapture.redactCaptureAftermath(aftermath),
               }
             },
           })
@@ -315,13 +305,13 @@ export class ExecuteSandbox extends DefaultPageHost {
               : formatLocatorFailurePageWarning(error instanceof ExecuteCodeError ? error.originalError : error, aftermath, this.recreatedFromClosedUrl),
           )
           return {
-            text: this.secrets.redactOutputText(error instanceof ExecuteCodeError ? userCodeStack(error) : error.message),
+            text: this.networkCapture.redactText(error instanceof ExecuteCodeError ? userCodeStack(error) : error.message),
             isError: true,
-            logs: this.secrets.redactCaptureLogs(error instanceof ExecuteCodeError ? error.logs : []),
+            logs: this.networkCapture.redactCaptureLogs(error instanceof ExecuteCodeError ? error.logs : []),
             logSummary,
             warnings,
-            ...(diagnostic ? { diagnostic: this.secrets.redactOutputText(diagnostic) } : {}),
-            ...(aftermath ? { aftermath: this.secrets.redactCaptureAftermath(aftermath) } : {}),
+            ...(diagnostic ? { diagnostic: this.networkCapture.redactText(diagnostic) } : {}),
+            ...(aftermath ? { aftermath: this.networkCapture.redactCaptureAftermath(aftermath) } : {}),
             ...(error instanceof ExecuteCodeError ? {} : { setupFailed: true as const }),
           }
         },
@@ -410,11 +400,11 @@ export class ExecuteSandbox extends DefaultPageHost {
     if (logCompactionWarning) {
       warnings.push(logCompactionWarning)
     }
-    return warnings.map((warning) => this.secrets.redactOutputText(warning))
+    return warnings.map((warning) => this.networkCapture.redactText(warning))
   }
 
   redactNetworkCaptureText(text: string): string {
-    return this.secrets.redactOutputText(text)
+    return this.networkCapture.redactText(text)
   }
 
   /**
@@ -651,7 +641,6 @@ export class ExecuteSandbox extends DefaultPageHost {
       realm: this.realm,
       snapshotRefs: this.snapshotRefs,
       networkCapture: this.networkCapture,
-      secrets: this.secrets,
       requestHandoff: this.options.requestHandoff,
       isRecordingTarget: this.options.isRecordingTarget,
       isDefaultPage: (candidate) => candidate === this.page,
@@ -703,32 +692,6 @@ export class ExecuteSandbox extends DefaultPageHost {
 
   networkEnd(reason: string): Effect.Effect<{ readonly cancelled: boolean }> {
     return this.networkCapture.end(reason)
-  }
-
-  authRefresh(options: {
-    readonly name: string
-    readonly urlFilter?: string
-    readonly timeoutMs?: number
-  }): Effect.Effect<NetworkCapture.NetworkCaptureResult, Error> {
-    const sandbox = this
-    return Effect.gen(function* () {
-      const page = yield* sandbox.ensureSessionPage("Set up page for auth refresh")
-      yield* AuthProfile.read(options.name).pipe(Effect.asVoid)
-      yield* sandbox.networkCapture.start(page, {
-        ...(options.urlFilter ? { urlFilter: options.urlFilter } : {}),
-      })
-      return yield* Effect.gen(function* () {
-        yield* Effect.tryPromise({
-          try: () => page.reload({ waitUntil: "domcontentloaded", timeout: options.timeoutMs ?? 30_000 }),
-          catch: (cause) => cause instanceof Error ? cause : new Error("Refresh auth profile", { cause }),
-        })
-        yield* Effect.tryPromise({
-          try: () => page.waitForLoadState("networkidle", { timeout: Math.min(options.timeoutMs ?? 30_000, 5_000) }).catch(() => {}),
-          catch: (cause) => cause instanceof Error ? cause : new Error("Wait for auth refresh network", { cause }),
-        })
-        return yield* sandbox.networkCapture.stop({ secrets: options.name, requireObservedSecrets: true })
-      }).pipe(Effect.ensuring(sandbox.networkCapture.cancel()))
-    }).pipe(Effect.uninterruptible)
   }
 
   /** fillInput sets values directly: the page sees untrusted input events without key presses. */

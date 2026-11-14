@@ -1,7 +1,6 @@
 import { Schema } from "effect"
 import type { Request, Response } from "patchright-core"
-import type * as AuthProfile from "../auth/profile.ts"
-import type { SecretCollector } from "./redaction.ts"
+import type { SecretRedactor } from "./redaction.ts"
 
 export type NetworkCaptureOptions = {
   readonly urlFilter?: string
@@ -20,8 +19,6 @@ const maxAllowedDurationMs = 24 * 60 * 60_000
 
 export type NetworkCaptureStopOptions = {
   readonly outputPath?: string
-  readonly secrets?: string
-  readonly requireObservedSecrets?: boolean
 }
 
 export type NetworkCaptureStatus = {
@@ -36,7 +33,6 @@ export type NetworkCaptureStatus = {
   readonly urlFilter?: string
   readonly resourceTypes?: readonly string[]
   readonly content?: "omit" | "embed"
-  readonly secrets?: string
   /** When the capture ends by itself: when, and the maximum duration it reached (or that its client went away). */
   readonly endsAt?: string
   readonly ended?: string
@@ -56,9 +52,6 @@ export type NetworkCaptureResult = NetworkCaptureStatus & {
   readonly active: false
   readonly stoppedAt: string
   readonly outputPath?: string
-  readonly authProfile?: AuthProfile.AuthProfileSummary
-  readonly updatedSecretRefs: readonly string[]
-  readonly observedSecretRefs: readonly string[]
   readonly endpoints?: readonly NetworkEndpointDigest[]
 }
 
@@ -125,9 +118,7 @@ export type ActiveCapture = {
   readonly entries: CapturedEntry[]
   readonly finalizeQueue: FinalizeWork[]
   readonly finalizeWaiters: Set<() => void>
-  readonly liveCollector: SecretCollector
-  /** Values typed with secrets.type(): redaction-only, never stored in a profile. */
-  readonly extraRedactions: ReadonlySet<string>
+  readonly liveRedactor: SecretRedactor
   finalizeWorkers: number
   finalizeGeneration: number
   capturedBodyBytes: number

@@ -1,6 +1,5 @@
 import http from "node:http"
 import { Effect, Match, Predicate, Schema } from "effect"
-import * as AuthProfile from "../auth/profile.ts"
 import { AuthenticatedOriginError } from "../auth/authenticated-origin.ts"
 import { normalizeOriginPatterns, OriginPatternError } from "../auth/domain-policy.ts"
 import { TargetSelectionError } from "../execute.ts"
@@ -111,14 +110,6 @@ export function relayHttpError(error: unknown): HttpRouteError {
       Match.when("invalid-options", () => [400, "invalid-request"] as const),
       Match.when("already-active", () => [409, "capture-conflict"] as const),
       Match.when("inactive", () => [409, "capture-conflict"] as const),
-      Match.orElse(() => [500, "internal"] as const),
-    )
-    return routeError(error.message, status, code)
-  }
-  if (error instanceof AuthProfile.AuthProfileError) {
-    const [status, code] = Match.value(error.reason).pipe(
-      Match.when("invalid-name", () => [400, "invalid-request"] as const),
-      Match.when("not-found", () => [404, "auth-profile-not-found"] as const),
       Match.orElse(() => [500, "internal"] as const),
     )
     return routeError(error.message, status, code)

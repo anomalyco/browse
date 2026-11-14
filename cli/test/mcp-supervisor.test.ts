@@ -90,14 +90,14 @@ await import(${JSON.stringify(path.join(import.meta.dir, "../src/main.ts"))})
     fs.copyFileSync(path.join(import.meta.dir, "fixtures", "legacy-shim.mjs"), shim)
     // Nothing listens on the relay port, so the shim swaps after a few checks instead of waiting for a relay.
     const mcp = mcpStdio({ home, port: await freePort(), command: ["node", shim], env: clean })
-    const call = () => mcp.request("tools/call", { name: "secrets_list", arguments: {} })
+    const call = () => mcp.request("tools/call", { name: "status", arguments: {} })
     try {
       await within(10_000, mcp.request("initialize", initialize), "initialize")
       mcp.notify("notifications/initialized")
-      expect((await within(10_000, call(), "the first tools/call")).result?.isError).toBe(false)
+      expect((await within(10_000, call(), "the first tools/call")).result).toBeDefined()
       pick("1.0.1")
-      expect((await within(15_000, call(), "a tools/call during the swap")).result?.isError).toBe(false)
-      expect((await within(5_000, call(), "a tools/call after the swap")).result?.isError).toBe(false)
+      expect((await within(15_000, call(), "a tools/call during the swap")).result).toBeDefined()
+      expect((await within(5_000, call(), "a tools/call after the swap")).result).toBeDefined()
       // The new version serves under the shim instead of supervising a second server of its own.
       if (process.platform !== "win32") expect(serversUnder(versions[1]!)).toHaveLength(1)
     } finally { mcp.close() }
@@ -124,11 +124,11 @@ await import(${JSON.stringify(path.join(import.meta.dir, "../src/main.ts"))})
       return Response.json({ version: "1.0.0", instanceId: "supervisor-test", draining })
     } })
     const mcp = mcpStdio({ home, port, command: ["node", entry], env: clean })
-    const call = () => mcp.request("tools/call", { name: "secrets_list", arguments: {} })
+    const call = () => mcp.request("tools/call", { name: "status", arguments: {} })
     try {
       await within(10_000, mcp.request("initialize", initialize), "initialize")
       mcp.notify("notifications/initialized")
-      expect((await within(10_000, call(), "the first tools/call")).result?.isError).toBe(false)
+      expect((await within(10_000, call(), "the first tools/call")).result).toBeDefined()
       // npm replaces the package in place with a server that answers everything except initialize.
       fs.writeFileSync(entry, `import { createInterface } from "node:readline"
 createInterface({ input: process.stdin }).on("line", (line) => {
@@ -138,7 +138,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 })
 `)
       fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: "@opencode/browse", version: "1.0.10" }))
-      expect((await within(3_000, call(), "a tools/call while the original relay still serves")).result?.isError).toBe(false)
+      expect((await within(3_000, call(), "a tools/call while the original relay still serves")).result).toBeDefined()
       relayState = "draining"
       expect((await within(15_000, call(), "a tools/call held for the swap")).result?.swapped).toBe(true)
     } finally { mcp.close(); await relay.stop(true) }

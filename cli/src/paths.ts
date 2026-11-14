@@ -1,6 +1,6 @@
 // Where browse keeps its files, on every OS (the same scheme opencode uses on macOS):
 //   config  $XDG_CONFIG_HOME/browse      settings.json, config.json
-//   data    $XDG_DATA_HOME/browse        session catalogs, secrets, auth profiles, paired browsers
+//   data    $XDG_DATA_HOME/browse        session catalogs, relay token, paired browsers
 //   state   $XDG_STATE_HOME/browse       logs, journals, current session, pairing codes, update state
 //   cache   $XDG_CACHE_HOME/browse       update checks and the dev extension (re-creatable)
 //   bin     $XDG_BIN_HOME              the installer's executable (XDG_BIN_HOME, else ~/.local/bin)// Unset variables fall back to ~/.config, ~/.local/share, ~/.local/state, ~/.cache and ~/.local/bin;

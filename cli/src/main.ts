@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // browse: one command for setup, updates and driving the browser.
 //   Setup (setup.ts): install, extension, pair, uninstall. Updating (update.ts): update.
-//   Driving the browser (cli.ts): serve, relay, execute, session, network, secrets, recording, journal,
+//   Driving the browser (cli.ts): serve, relay, execute, session, network, recording, journal,
 //   doctor, skill, mcp, status. The relay is the local server agents use; the extension connects to it.
 // `browse mcp` runs the MCP server over stdio (as does the bundle invoked as `opencode-browser-mcp`).
 import path from "node:path"
@@ -14,7 +14,7 @@ const args = process.argv.slice(3)
 const invokedAs = path.basename(process.argv[1] ?? "")
 // Setup commands and update run before the Effect CLI parses arguments (below), so they would act on --help instead of
 // printing it. This mirrors the help check in cli.ts's quiet-JSON handling, but stops at `--`: everything after it belongs
-// to another program (browse secrets run prod -- mytool --help), so it is not a help request for browse.
+// to another program, so it is not a help request for browse.
 const separator = args.indexOf("--")
 const options = separator === -1 ? args : args.slice(0, separator)
 const askedForHelp = command === "--help" || command === "-h" || options.some((arg) => arg === "--help" || arg === "-h")
@@ -28,6 +28,12 @@ const oldRuntime = legacyRuntime()
 const takingOver = command === "serve" && !askedForHelp && legacyRuntimeActive(oldRuntime) &&
   (await import("./setup/legacy-runtime.ts").then((module) => module.prepareLegacyTakeover(oldRuntime)).catch(() => false))
 if (!takingOver) settleLegacyHome(process.env, oldRuntime)
+
+// Credentials left by removed features (site secrets, captured secret profiles) are deleted on every start.
+if (command !== "--version" && command !== "-v" && !askedForHelp && !takingOver) {
+  const { removeStoredSecrets } = await import("./setup/remove-stored-secrets.ts")
+  removeStoredSecrets()
+}
 
 // Earlier layouts (~/.browse, and the old opencode-browser data root) move to the XDG folders on the first run.
 // opencode briefly shows the update, and no other command pays for the import.
@@ -112,8 +118,7 @@ if (command === "--version" || command === "-v") {
   update [--check]               Update now: rerun whatever installed browse (the install script for a binary
                                  install, npm install -g for an npm one); --check only says whether there's an
                                  update. A git clone pulls the newer commits and runs setup again.
-  uninstall [--yes]              Remove everything install set up (--yes skips confirming that stored
-                                 secret profiles and site secrets are deleted)
+  uninstall                      Remove everything install set up
 
 browse keeps its files in $XDG_CONFIG_HOME/browse, $XDG_DATA_HOME/browse, $XDG_STATE_HOME/browse and
 $XDG_CACHE_HOME/browse (defaults under ~/.config, ~/.local/share, ~/.local/state and ~/.cache), and the

@@ -63,7 +63,6 @@ export interface ExecuteSandboxLike {
   networkCancel(): Effect.Effect<{ readonly cancelled: boolean }>
   /** Ends an active capture without a result, saying why on the next status or stop. */
   networkEnd(reason: string): Effect.Effect<{ readonly cancelled: boolean }>
-  authRefresh(options: { readonly name: string; readonly urlFilter?: string; readonly timeoutMs?: number }): Effect.Effect<NetworkCaptureResult, Error>
   redactNetworkCaptureText(text: string): string
   markTargetCrashed(targetId: string): boolean
   markTargetProtectedUi(targetId: string, protectedUi: boolean): boolean

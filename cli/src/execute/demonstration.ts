@@ -121,7 +121,7 @@ export function formatDemonstrationCode(options: {
         }),
         Match.when({ kind: "fill" }, ({ selector, value, redacted }) =>
           redacted
-            ? `// Fill ${JSON.stringify(selector)} from an approved secret source.`
+            ? `// Fill ${JSON.stringify(selector)} from an approved credential source.`
             : `await page.locator(${JSON.stringify(selector)}).fill(${JSON.stringify(value)})`),
         Match.when({ kind: "check" }, ({ selector, checked }) =>
           `await page.locator(${JSON.stringify(selector)}).${checked ? "check" : "uncheck"}()`),

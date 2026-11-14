@@ -22,14 +22,14 @@ registerMcpTools({
     {
       name: "network",
       description:
-        "Start, inspect, stop, or cancel session-scoped network capture. browse records normalized Playwright exchanges; HAR is only the optional export format. Bodies are embedded by default with per-body and total memory limits. Actions: start begins a capture; status returns bounded metadata for the active capture without captured values; stop ends it and optionally writes a credential-redacted HAR and stores lossless credential values in a reusable secret profile (at least one of outputPath or secrets is required); cancel ends it and discards the in-memory exchanges.",
+        "Start, inspect, stop, or cancel session-scoped network capture. browse records normalized Playwright exchanges; HAR is only the optional export format. Bodies are embedded by default with per-body and total memory limits. Actions: start begins a capture; status returns bounded metadata for the active capture without captured values; stop ends it and optionally writes a credential-redacted HAR; cancel ends it and discards the in-memory exchanges.",
       inputSchema: objectSchema(
         {
           action: {
             type: "string",
             enum: [...actions],
             description:
-              "start begins a capture, status reports its bounded metadata, stop writes a redacted HAR and/or secret profile, cancel discards it.",
+              "start begins a capture, status reports its bounded metadata, stop writes a redacted HAR, cancel discards it.",
           },
           session: {
             type: "string",
@@ -72,11 +72,7 @@ registerMcpTools({
           outputPath: {
             type: "string",
             description:
-              "For stop: optional artifact path, resolved against the MCP process working directory. The HAR contains stable ${BC_SECRET_N} references (and redaction-only ${BC_REDACTED_N} for passwords, one-time codes and token-like URL path segments), not captured values.",
-          },
-          secrets: {
-            type: "string",
-            description: "For stop: optional reusable profile name for captured credential values.",
+              "For stop: optional artifact path, resolved against the MCP process working directory. Credential-bearing headers, cookies, query fields and structured body fields are replaced with [redacted], not captured values.",
           },
         },
         ["action"],
@@ -102,17 +98,12 @@ registerMcpTools({
           if (action === "stop") {
             const sessionId = yield* ctx.resolveSessionId(object)
             const outputPath = optionalStringField(object, "outputPath")
-            const secrets = optionalStringField(object, "secrets")
-            if (!outputPath && !secrets) {
-              return yield* Effect.fail(new Error("network stop requires outputPath, secrets, or both"))
-            }
             return {
               action,
               session: sessionId,
               ...(yield* ctx.relay.networkStop({
                 sessionId,
                 ...(outputPath ? { outputPath: path.resolve(outputPath) } : {}),
-                ...(secrets ? { secrets } : {}),
               })),
             }
           }

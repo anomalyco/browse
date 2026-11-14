@@ -39,6 +39,30 @@ function legacyHome() {
   return { home, old, oldData }
 }
 
+describe("stored credentials of removed features", () => {
+  test("migration removes site secret and secret profile folders, idempotently and without throwing", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-remove-secrets-"))
+    homes.push(home)
+    const data = path.join(home, ".local", "share", "browse")
+    write(path.join(data, "site-secrets", "example.json"), "{}\n", 0o600)
+    write(path.join(data, "secrets", "profile.json"), "{}\n", 0o600)
+    write(path.join(data, "relay-token"), "token\n", 0o600)
+    const previousHome = process.env.OPENCODE_BROWSER_HOME
+    delete process.env.OPENCODE_BROWSER_HOME
+    try {
+      migrateLegacy(home)
+      expect(fs.existsSync(path.join(data, "site-secrets"))).toBe(false)
+      expect(fs.existsSync(path.join(data, "secrets"))).toBe(false)
+      expect(fs.readFileSync(path.join(data, "relay-token"), "utf8")).toBe("token\n")
+      // A second run is a no-op and a missing data root is fine.
+      expect(migrateLegacy(home)).toMatchObject({ moved: 0, rewritten: 0, removed: [] })
+    } finally {
+      if (previousHome === undefined) delete process.env.OPENCODE_BROWSER_HOME
+      else process.env.OPENCODE_BROWSER_HOME = previousHome
+    }
+  })
+})
+
 describe("migration from the old layouts", () => {
   test("moves every file, rewrites agent entries, deletes the old roots, and is idempotent", () => {
     const { home, old, oldData } = legacyHome()
@@ -67,13 +91,13 @@ describe("migration from the old layouts", () => {
       expect(fs.existsSync(path.join(data, "browser-tokens.json"))).toBe(true)
       expect(fs.existsSync(path.join(data, "sessions.json"))).toBe(true)
       expect(fs.readFileSync(path.join(data, "relay-token"), "utf8")).toBe("token\n")
-      expect(fs.existsSync(path.join(data, "secrets", "github.json"))).toBe(true)
+      // Stored credentials of removed features are not carried over.
+      expect(fs.existsSync(path.join(data, "secrets"))).toBe(false)
       expect(fs.readFileSync(path.join(state, "logs", "relay.log"), "utf8")).toContain("relay started")
       expect(fs.existsSync(path.join(home, ".local", "bin", "browse"))).toBe(true)
       expect(fs.existsSync(path.join(home, ".local", "lib"))).toBe(false)
       if (process.platform !== "win32") {
         expect(fs.statSync(path.join(data, "relay-token")).mode & 0o777).toBe(0o600)
-        expect(fs.statSync(path.join(data, "secrets", "github.json")).mode & 0o777).toBe(0o600)
         expect(fs.statSync(path.join(home, ".local", "bin", "browse")).mode & 0o777).toBe(0o755)
       }
       const newBinary = path.join(home, ".local", "bin", process.platform === "win32" ? "browse.exe" : "browse")
@@ -179,8 +203,8 @@ describe("migration after the old self-managed runtime was taken over", () => {
 
   test("a file deleted from the new folders during the grace period stays deleted", () => {
     const { home, oldData } = takenOverHome()
-    write(path.join(oldData, "secrets", "github.json"), "{}\n", 0o600)
-    const secret = path.join(home, ".local", "share", "browse", "secrets", "github.json")
+    write(path.join(oldData, "browser-tokens.json"), "{}\n", 0o600)
+    const secret = path.join(home, ".local", "share", "browse", "browser-tokens.json")
     withoutHomeOverride(() => migrateLegacy(home, takenOver + 60_000))
     expect(fs.existsSync(secret)).toBe(true)
     fs.rmSync(secret)

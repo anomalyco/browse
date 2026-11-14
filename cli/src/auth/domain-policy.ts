@@ -1,5 +1,5 @@
 /**
- * Per-session domain allowlists, and the origin patterns secrets declare.
+ * Per-session domain allowlists.
  *
  * A session can be given a list of allowed hosts (opt-in; sessions without one may go anywhere, because localhost dev
  * servers are a core use). With a list, the relay refuses agent navigations to other hosts (Page.navigate,
@@ -172,7 +172,7 @@ const neutralSchemes = new Set(["about:", "data:", "blob:"])
 
 /**
  * Check a URL against allowed origin patterns (synchronously: by spelling, without DNS).
- * `httpsOnlyWithoutScheme` makes bare-host patterns match https only (used for secrets), except for local hosts.
+ * `httpsOnlyWithoutScheme` makes bare-host patterns match https only, except for local hosts.
  */
 export function checkUrl(rawUrl: string, rules: readonly OriginRule[], options: { readonly httpsOnlyWithoutScheme?: boolean } = {}): UrlDecision {
   let url: URL

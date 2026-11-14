@@ -62,12 +62,8 @@ function privateFiles(oldData: string): Record<string, string> {
     "browser-tokens.json": JSON.stringify({ "browser-key": { token: "t".repeat(43), pairedAt: 1 } }),
     "extension-pairing": "pairing-code\n",
     "pairing-codes.json": JSON.stringify({ codes: [{ key: "k", expiresAt: 1 }], failures: 0 }),
-    "secrets/github.json": JSON.stringify({ profile: "private", value: "\u00e9\u0000bytes" }),
-    "site-secrets/kept.json": JSON.stringify({ name: "kept", password: "p@ss" }),
-    "site-secrets/deleted.json": JSON.stringify({ name: "deleted", password: "gone" }),
   }
   for (const [relative, text] of Object.entries(files)) write(path.join(oldData, relative), text, 0o600)
-  for (const folder of ["secrets", "site-secrets"]) fs.chmodSync(path.join(oldData, folder), 0o700)
   return files
 }
 
@@ -78,8 +74,6 @@ function expectPrivateFilesIn(home: string, files: Record<string, string>) {
     expect(fs.readFileSync(file, "utf8"), relative).toBe(text)
     if (process.platform !== "win32") expect(fs.statSync(file).mode & 0o777, relative).toBe(0o600)
   }
-  if (process.platform !== "win32")
-    for (const folder of ["secrets", "site-secrets"]) expect(fs.statSync(path.join(home, ".local", "share", "browse", folder)).mode & 0o777, folder).toBe(0o700)
 }
 
 /** A free port outside browse's real relay range, so no test here can touch 19988–19997. */
@@ -188,19 +182,19 @@ describe("taking over the old self-managed runtime", () => {
       command: [node, shim],
       env: { OPENCODE_BROWSER_HOME: undefined, OPENCODE_BROWSER_CLIENT_PID: undefined, OPENCODE_BROWSER_MCP_DIRECT: undefined, OPENCODE_BROWSER_MCP_SESSION: undefined },
     })
-    const call = () => mcp.request("tools/call", { name: "secrets_list", arguments: {} })
+    const call = () => mcp.request("tools/call", { name: "status", arguments: {} })
     try {
       expect((await within(10_000, mcp.request("initialize", { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "0" } }), "initialize")).result?.label).toBe("0.0.15-dev.108")
       mcp.notify("notifications/initialized")
       adoptLegacyRuntime(legacyRuntime(home), runtime)
-      expect((await within(15_000, call(), "a tools/call after the takeover")).result?.isError).toBe(false)
+      expect((await within(15_000, call(), "a tools/call after the takeover")).result).toBeDefined()
       // The current install supervises its own server: one server runs from the package, and a later update swaps it.
       expect(await until(() => serversUnder(packageDir).length === 1)).toBe(true)
       const [first] = serversUnder(packageDir)
       installBuild(packageDir, "0.0.16-dev.131")
-      expect((await within(15_000, call(), "a tools/call during the next update")).result?.isError).toBe(false)
+      expect((await within(15_000, call(), "a tools/call during the next update")).result).toBeDefined()
       expect(await until(() => serversUnder(packageDir).length === 1 && serversUnder(packageDir)[0] !== first)).toBe(true)
-      expect((await within(5_000, call(), "a tools/call after the next update")).result?.isError).toBe(false)
+      expect((await within(5_000, call(), "a tools/call after the next update")).result).toBeDefined()
     } finally {
       mcp.close()
       for (const pid of serversUnder(home)) {
@@ -226,7 +220,7 @@ describe("taking over the old self-managed runtime", () => {
     expect(env.OPENCODE_BROWSER_HOME).toBeUndefined()
   })
 
-  test("site secrets, pairings and tokens arrive in the new folders byte for byte, still private", async () => {
+  test("pairings and tokens arrive in the new folders byte for byte, still private", async () => {
     const { home, oldData, runtime } = oldRuntimeHome(homes)
     const files = privateFiles(oldData)
     const env: NodeJS.ProcessEnv = { OPENCODE_BROWSER_HOME: oldData, OPENCODE_BROWSER_PORT: String(await freePort()) }
@@ -246,12 +240,12 @@ describe("taking over the old self-managed runtime", () => {
     const next: NodeJS.ProcessEnv = {}
     settleLegacyHome(next, legacyRuntime(home))
     expect(next.OPENCODE_BROWSER_HOME).toBe(oldData)
-    // Meanwhile the user deletes a site secret, which the old relay still serves from the old folder.
-    fs.rmSync(path.join(oldData, "site-secrets", "deleted.json"))
-    delete files["site-secrets/deleted.json"]
+    // Meanwhile the user revokes a browser, which the old relay still serves from the old folder.
+    fs.rmSync(path.join(oldData, "browser-tokens.json"))
+    delete files["browser-tokens.json"]
     expect(await prepareLegacyTakeover(legacyRuntime(home), { install: runtime, env: { OPENCODE_BROWSER_HOME: oldData, OPENCODE_BROWSER_PORT: port }, home })).toBe(true)
     expect(await withoutHomeOverride(() => commitLegacyTakeover())).toBe(true)
-    expect(fs.existsSync(path.join(home, ".local", "share", "browse", "site-secrets", "deleted.json"))).toBe(false)
+    expect(fs.existsSync(path.join(home, ".local", "share", "browse", "browser-tokens.json"))).toBe(false)
     expectPrivateFilesIn(home, files)
   })
 

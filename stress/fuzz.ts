@@ -30,11 +30,11 @@ const int = (max: number) => Math.floor(rand() * max)
 
 const ROUTES = ["/", "/version", "/json/version", "/json/list", "/json", "/extension/status", "/extension/reload", "/tabs/cleanup", "/settings",
   "/cli/sessions", "/cli/session/new", "/cli/session/delete", "/cli/session/reset", "/cli/session/adopt", "/cli/execute", "/v1/sessions/ensure",
-  "/v1/authenticated-origin/json", "/network/start", "/network/status", "/network/stop", "/network/cancel", "/auth/status", "/auth/refresh",
+  "/v1/authenticated-origin/json", "/network/start", "/network/status", "/network/stop", "/network/cancel",
   "/recording/start", "/recording/stop", "/recording/status", "/recording/cancel", "/flight-recorder/start", "/flight-recorder/status",
   "/flight-recorder/save-last", "/flight-recorder/cancel", "/cli/../shutdown", "/%2e%2e/shutdown", "/cli/execute/../../shutdown"]
-// Never fuzzed with the token: they would end the run (shutdown), run commands (auth/run) or wipe settings by design.
-const AUTH_EXCLUDED = new Set(["/shutdown", "/auth/run", "/extension/reload"])
+// Never fuzzed with the token: they would end the run (shutdown) or wipe settings by design.
+const AUTH_EXCLUDED = new Set(["/shutdown", "/extension/reload"])
 
 function randomString(max = 64): string {
   const alphabets = ["abcdefghijklmnopqrstuvwxyz0123456789", "\u0000\u0001\u001f\u007f\"'\\`{}[]<>\n\r\t", "😀𝔘ñ中文\u202e\ud800", "../../etc/passwd", "%00%2e%2e%2f"]
@@ -96,7 +96,7 @@ async function health(context: string): Promise<boolean> {
 }
 
 async function fuzzHttp(token: string, authorized: boolean) {
-  const route = authorized ? pick(ROUTES.filter((r) => !AUTH_EXCLUDED.has(r))) : pick([...ROUTES, "/shutdown", "/auth/run", "/extension/reload"])
+  const route = authorized ? pick(ROUTES.filter((r) => !AUTH_EXCLUDED.has(r))) : pick([...ROUTES, "/shutdown", "/extension/reload"])
   const method = pick(["GET", "POST", "POST", "POST", "PUT", "DELETE", "OPTIONS"])
   const headers: Record<string, string> = { "content-type": pick(["application/json", "text/plain", "application/x-www-form-urlencoded", ""]) }
   if (authorized) headers.authorization = `Bearer ${token}`
@@ -234,7 +234,7 @@ async function fuzzExtensionEndpoint() {
 }
 
 const TOOLS = ["execute", "status", "session_new", "session_list", "session_use", "session_reset", "session_delete", "session_adopt",
-  "network", "recording", "flight_recorder", "secrets_status", "secrets_refresh",
+  "network", "recording", "flight_recorder",
   "tabs_cleanup", "skill", "settings", "no_such_tool"]
 let mcp: McpClient | undefined
 async function fuzzMcp() {

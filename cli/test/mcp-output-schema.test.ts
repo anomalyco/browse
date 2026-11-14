@@ -109,10 +109,6 @@ describe("tool output schemas", () => {
       "flight_recorder",
       "tabs_cleanup",
       "settings",
-      "secrets_list",
-      "secrets_status",
-      "secrets_refresh",
-      "secrets_run",
     ]
     for (const name of expected) {
       const spec = byName.get(name)
@@ -151,7 +147,6 @@ describe("tool output schemas", () => {
     expect(annotation("session_reset")).toEqual({ readOnly: false, destructive: true, idempotent: false, openWorld: false })
     expect(annotation("tabs_cleanup")).toEqual({ readOnly: false, destructive: true, idempotent: true, openWorld: false })
     expect(annotation("network")).toEqual({ readOnly: false, destructive: true, idempotent: false, openWorld: false })
-    expect(annotation("secrets_refresh")).toEqual({ readOnly: false, destructive: true, idempotent: false, openWorld: true })
     expect(annotation("settings")).toEqual({ readOnly: false, destructive: false, idempotent: true, openWorld: false })
     for (const spec of specs()) expect(typeof spec.openWorld, spec.name).toBe("boolean")
   })
@@ -204,8 +199,6 @@ describe("tool output schemas", () => {
         ...networkReport,
         active: false,
         stoppedAt: "2026-01-01T00:01:00.000Z",
-        updatedSecretRefs: [],
-        observedSecretRefs: [],
       }),
       networkCancel: () => Effect.succeed({ cancelled: true }),
       recordingStart: () => Effect.succeed({

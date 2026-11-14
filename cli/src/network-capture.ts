@@ -1,7 +1,7 @@
 import path from "node:path"
 import { Effect, Semaphore } from "effect"
 import type { Page, Request, Response } from "patchright-core"
-import * as AuthProfile from "./auth/profile.ts"
+import type { ExecuteAftermath, ExecuteLogEntry } from "./relay/schema.ts"
 import {
   bodyCanFit,
   bodyWithTimeout,
@@ -32,7 +32,7 @@ import {
   type NetworkCaptureStopOptions,
   type PendingEntry,
 } from "./network-capture/types.ts"
-import { SecretCollector } from "./network-capture/redaction.ts"
+import { SecretRedactor } from "./network-capture/redaction.ts"
 
 export {
   defaultNetworkCaptureMaxDurationMs,
@@ -51,10 +51,8 @@ export class Recorder {
   private page: Page | undefined
   private pageEpoch = 0
   private readonly transition = Semaphore.makeUnsafe(1)
-  private readonly extraRedactions = new Set<string>()
 
   constructor(private readonly recorderOptions: {
-    readonly authProfileBaseDir?: string
     readonly outputSettleTimeoutMs?: number
   } = {}) {}
 
@@ -81,8 +79,7 @@ export class Recorder {
           entries: [],
           finalizeQueue: [],
           finalizeWaiters: new Set(),
-          liveCollector: new SecretCollector(),
-          extraRedactions: capture.extraRedactions,
+          liveRedactor: new SecretRedactor(),
           finalizeWorkers: 0,
           finalizeGeneration: 0,
           capturedBodyBytes: 0,
@@ -92,7 +89,6 @@ export class Recorder {
           cancelled: false,
           outputUnsafe: false,
         }
-        for (const value of capture.extraRedactions) capture.active.liveCollector.addRedactionOnly(value)
         capture.bindPage(page)
         const active = capture.active
         clearTimeout(capture.expiry)
@@ -183,30 +179,16 @@ export class Recorder {
           capture.discardFinalizers(active)
         }
 
-        const secrets = options.secrets
-        const profileOptions = capture.recorderOptions.authProfileBaseDir ? { baseDir: capture.recorderOptions.authProfileBaseDir } : {}
-        const finish = finishCapture(active, options, secrets, profileOptions)
-        const finished = yield* (secrets
-          ? AuthProfile.withLock(secrets, profileOptions, finish)
-          : finish
-        ).pipe(
-          Effect.mapError((cause) => cause instanceof NetworkCaptureError
-            ? cause
-            : new NetworkCaptureError({ message: cause.message, operation: "auth-profile", reason: "persistence-failed", cause })),
-        )
+        const finished = yield* finishCapture(active, options)
         const { endsAt: _endsAt, ...finalStatus } = capture.status()
         capture.active = undefined
         clearTimeout(capture.expiry)
         return {
           ...finalStatus,
-          ...(secrets ? { secrets } : {}),
           truncatedBodyCount: finalStatus.truncatedBodyCount + finished.redactionOmissionCount,
           active: false as const,
           stoppedAt: new Date().toISOString(),
           ...(options.outputPath ? { outputPath: path.resolve(options.outputPath) } : {}),
-          ...(finished.authProfile ? { authProfile: finished.authProfile } : {}),
-          updatedSecretRefs: finished.updatedSecretRefs,
-          observedSecretRefs: finished.observedSecretRefs,
           ...(finished.endpoints.length > 0 ? { endpoints: finished.endpoints } : {}),
         }
       }).pipe(
@@ -265,30 +247,43 @@ export class Recorder {
     active.outputUnsafe = !await settleFinalizers(active, this.recorderOptions.outputSettleTimeoutMs ?? 5_000)
   }
 
-  /** Redact this value (a typed secret) from every capture output from now on, without storing it. */
-  addRedaction(value: string): void {
-    if (!value) return
-    this.extraRedactions.add(value)
-    this.active?.liveCollector.addRedactionOnly(value)
-  }
-
   redactText(text: string): string {
     const active = this.active
     if (!active) return text
-    return active.outputUnsafe ? "[REDACTED: network capture finalization pending]" : active.liveCollector.redactText(text)
+    return active.outputUnsafe ? "[REDACTED: network capture finalization pending]" : active.liveRedactor.redactText(text)
   }
 
   redactValue(value: unknown): unknown {
     const active = this.active
     if (!active) return value
-    return active.outputUnsafe ? "[REDACTED: network capture finalization pending]" : active.liveCollector.redactValue(value)
+    return active.outputUnsafe ? "[REDACTED: network capture finalization pending]" : active.liveRedactor.redactValue(value)
   }
 
   redactUrl(url: string): string {
     const active = this.active
     if (!active) return url
     if (active.outputUnsafe) return "[REDACTED: network capture finalization pending]"
-    return active.liveCollector.redactText(active.liveCollector.protectUrl(url, "execute"))
+    return active.liveRedactor.redactUrl(url)
+  }
+
+  redactCaptureLogs(logs: readonly ExecuteLogEntry[]): readonly ExecuteLogEntry[] {
+    return logs.map((log) => ({
+      ...log,
+      text: this.redactText(log.text),
+      ...(log.location ? {
+        location: { ...log.location, url: this.redactUrl(log.location.url) },
+      } : {}),
+    }))
+  }
+
+  redactCaptureAftermath(aftermath: ExecuteAftermath): ExecuteAftermath {
+    return {
+      ...aftermath,
+      startUrl: aftermath.startUrl ? this.redactUrl(aftermath.startUrl) : aftermath.startUrl,
+      endUrl: aftermath.endUrl ? this.redactUrl(aftermath.endUrl) : aftermath.endUrl,
+      navigations: aftermath.navigations.map((url) => this.redactUrl(url)),
+      ...(aftermath.challenge ? { challenge: { ...aftermath.challenge, url: this.redactUrl(aftermath.challenge.url) } } : {}),
+    }
   }
 
   private readonly onRequest = (request: Request): void => {
@@ -430,7 +425,7 @@ export class Recorder {
   private recordEntry(active: ActiveCapture, generation: number, entry: CapturedEntry): void {
     if (active.cancelled || generation !== active.finalizeGeneration) return
     active.entries.push(entry)
-    void protectEntry(entry, active.liveCollector)
+    void protectEntry(entry, active.liveRedactor)
   }
 
   private unbindPage(): void {

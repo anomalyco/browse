@@ -29,8 +29,7 @@ function formatNetworkStatus(status: NetworkStatusResponse): string {
 
 function formatNetworkResult(result: NetworkStopResponse): string {
   const output = result.outputPath ? ` output=${result.outputPath}` : ""
-  const profile = result.authProfile ? ` secrets=${result.authProfile.name}(${result.authProfile.slotCount})` : ""
-  return `Network capture stopped: entries=${result.entryCount} responses=${result.responseCount} failures=${result.failureCount} bodyBytes=${result.capturedBodyBytes} truncated=${result.truncatedBodyCount} dropped=${result.droppedEntryCount}${output}${profile}`
+  return `Network capture stopped: entries=${result.entryCount} responses=${result.responseCount} failures=${result.failureCount} bodyBytes=${result.capturedBodyBytes} truncated=${result.truncatedBodyCount} dropped=${result.droppedEntryCount}${output}`
 }
 
 const networkStart = Command.make(
@@ -120,29 +119,20 @@ const networkStop = Command.make(
       Flag.withAlias("o"),
       Flag.withDescription("Write a credential-redacted HAR artifact to this path"),
     ),
-    secrets: Flag.String("secrets").pipe(
-      Flag.optional,
-      Flag.withDescription("Store captured credentials under this reusable profile name"),
-    ),
     json: jsonFlag,
   },
-  Effect.fn("Cli.networkStop")(function* ({ session, output, secrets, json }) {
+  Effect.fn("Cli.networkStop")(function* ({ session, output, json }) {
     const relay = yield* RelayClient.Service
     const outputValue = Option.getOrUndefined(output)
-    const secretsValue = Option.getOrUndefined(secrets)
-    if (!outputValue && !secretsValue) {
-      return yield* Effect.fail(new Error("network stop requires --output, --secrets, or both"))
-    }
     const sessionId = yield* networkSession(session)
     yield* ensureCliRelay()
     const result = yield* relay.networkStop({
       sessionId,
       ...(outputValue ? { outputPath: path.resolve(outputValue) } : {}),
-      ...(secretsValue ? { secrets: secretsValue } : {}),
     })
     yield* printOr(json, result, formatNetworkResult(result))
   }),
-).pipe(Command.withDescription("Stop capture and write a redacted artifact or reusable secret profile"))
+).pipe(Command.withDescription("Stop capture and optionally write a credential-redacted artifact"))
 
 const networkCancel = Command.make(
   "cancel",
