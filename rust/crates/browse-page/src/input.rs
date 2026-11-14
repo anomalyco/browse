@@ -411,6 +411,13 @@ impl<'a> Input<'a> {
         }
     }
 
+    /// One plain wheel event at `at`, human input or not.
+    pub async fn wheel_direct(&mut self, at: Point, dx: f64, dy: f64) -> Result<()> {
+        self.dispatch("Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": at.x, "y": at.y, "button": "none", "buttons": self.state.buttons, "modifiers": self.modifiers })).await?;
+        self.state.pointer = Some(at);
+        self.dispatch("Input.dispatchMouseEvent", json!({ "type": "mouseWheel", "x": at.x, "y": at.y, "deltaX": dx, "deltaY": dy, "modifiers": self.modifiers })).await
+    }
+
     pub async fn key_down(&mut self, key: &KeyDef) -> Result<()> {
         if self.human {
             self.state.before_key().await;

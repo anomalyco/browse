@@ -93,6 +93,11 @@ impl Cdp for WsCdp {
 }
 
 pub async fn launch() -> Option<(Chrome, Arc<WsCdp>)> {
+    launch_with(&["--hide-scrollbars"]).await
+}
+
+/// Launches with extra Chromium flags on top of the defaults (headless, 2x scale, 800×600 window).
+pub async fn launch_with(extra: &[&str]) -> Option<(Chrome, Arc<WsCdp>)> {
     let (binary, full) = find_chrome()?;
     let profile = std::env::temp_dir().join(format!("browse-capture-live-{}-{}", std::process::id(), rand_suffix()));
     std::fs::create_dir_all(&profile).ok()?;
@@ -109,8 +114,8 @@ pub async fn launch() -> Option<(Chrome, Arc<WsCdp>)> {
             "--no-sandbox",
             "--force-device-scale-factor=2",
             "--window-size=800,600",
-            "--hide-scrollbars",
         ])
+        .args(extra)
         .arg(format!("--user-data-dir={}", profile.display()))
         .arg("about:blank")
         .stdout(std::process::Stdio::null())

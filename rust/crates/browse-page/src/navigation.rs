@@ -52,6 +52,8 @@ impl std::fmt::Display for WaitUntil {
     }
 }
 
+const WEB_SCHEMES: &[&str] = &["http", "https", "about", "data", "blob", "file", "view-source"];
+
 /// `example.com` → `https://example.com`, `localhost:3000` / `:3000` → `http://localhost:3000`. Anything with a
 /// scheme (`https:`, `mailto:`, `about:`, …) is left alone; only a bare host[:port][/path] gets one.
 pub fn normalize_url(url: &str) -> Result<String> {
@@ -69,8 +71,14 @@ pub fn normalize_url(url: &str) -> Result<String> {
         let port = rest.split(['/', '?', '#']).next().unwrap_or("");
         let is_port = !port.is_empty() && port.chars().all(|c| c.is_ascii_digit());
         if is_scheme && !is_port {
-            if scheme.eq_ignore_ascii_case("javascript") {
+            let scheme = scheme.to_ascii_lowercase();
+            if scheme == "javascript" {
                 bail!("navigate can't run javascript: URLs; use eval to run code in the page");
+            }
+            // Other schemes hand the URL to another app (mailto:, tel:, sms:, intent:, zoommtg:, …), which takes
+            // over the tab or the user's desktop.
+            if !WEB_SCHEMES.contains(&scheme.as_str()) {
+                bail!("navigate only opens web pages (http, https, about:blank, data:, blob:, file:, view-source:); {scheme}: URLs open another app, so browse doesn't follow them");
             }
             return Ok(url.to_string());
         }
@@ -472,8 +480,9 @@ mod tests {
         assert_eq!(n("https://a.b/c"), "https://a.b/c");
         assert_eq!(n("about:blank"), "about:blank");
         assert_eq!(n("data:text/html,hi"), "data:text/html,hi");
-        assert_eq!(n("mailto:a@b.c"), "mailto:a@b.c");
-        assert_eq!(n("tel:+15551234"), "tel:+15551234");
+        assert!(normalize_url("mailto:a@b.c").unwrap_err().to_string().contains("another app"));
+        assert!(normalize_url("tel:+15551234").is_err());
+        assert!(normalize_url("intent://x#Intent;end").is_err());
         assert!(normalize_url("").is_err());
         assert!(normalize_url("  ").is_err());
         assert!(normalize_url("javascript:alert(1)").unwrap_err().to_string().contains("eval"));

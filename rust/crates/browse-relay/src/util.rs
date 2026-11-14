@@ -147,6 +147,41 @@ pub fn reverse_lookup(ip: std::net::IpAddr) -> Option<String> {
     }
 }
 
+/// Keeps the allocator from holding on to memory the relay is done with: big buffers (CDP answers of megabytes,
+/// screenshots) get their own mappings, which go straight back to the OS when freed, and a few arenas instead of one
+/// per thread. Once per process; glibc only (other allocators already give memory back).
+pub fn tune_allocator() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            // SAFETY: mallopt only changes allocator parameters.
+            unsafe {
+                libc::mallopt(libc::M_MMAP_THRESHOLD, 256 * 1024);
+                libc::mallopt(libc::M_TRIM_THRESHOLD, 4 * 1024 * 1024);
+                libc::mallopt(libc::M_ARENA_MAX, 2);
+            }
+        });
+    }
+}
+
+/// Hands freed heap memory back to the OS (glibc keeps it otherwise). Takes a few milliseconds: call it off the
+/// runtime.
+pub fn release_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim only returns free memory.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
+/// The process's resident memory in bytes, where the OS says.
+pub fn resident_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let kb: u64 = status.lines().find(|l| l.starts_with("VmRSS:"))?.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb * 1024)
+}
+
 pub fn str_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
 }

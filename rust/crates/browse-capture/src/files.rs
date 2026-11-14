@@ -483,6 +483,7 @@ pub(crate) fn write(roots: &[PathBuf], path: &Path, bytes: &[u8], operation: &st
             bail_user!("{operation}: {} is a directory; give a file path", path.display());
         }
         std::fs::rename(&temp, path)?;
+        sync_parent(path);
         Ok(())
     })();
     if let Err(error) = result {
@@ -507,6 +508,7 @@ pub(crate) fn secure(roots: &[PathBuf], path: &Path, operation: &str) -> anyhow:
         }
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         check_open(roots, &file, path, operation)?;
+        file.sync_all()?;
     }
     #[cfg(not(unix))]
     let _ = (roots, path, operation);
@@ -518,7 +520,18 @@ pub(crate) fn commit(roots: &[PathBuf], partial: &Path, path: &Path, operation: 
     secure(roots, partial, operation)?;
     check(roots, path, operation)?;
     std::fs::rename(partial, path)?;
+    sync_parent(path);
     Ok(())
+}
+
+/// Flushes the folder entry of a file just renamed into place, so it is there before the tool returns.
+fn sync_parent(path: &Path) {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent()
+        && let Ok(folder) = File::open(parent)
+    {
+        let _ = folder.sync_all();
+    }
 }
 
 /// A sibling path for an in-progress artifact, renamed into place when it's done.

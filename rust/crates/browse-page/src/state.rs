@@ -79,9 +79,15 @@ impl RefRegistry {
     }
 }
 
+/// A tab's page model for one debugger attachment: concurrent first calls share one attach.
+struct Slot {
+    cdp: Arc<dyn browse_core::Cdp>,
+    page: tokio::sync::OnceCell<Arc<TabPage>>,
+}
+
 #[derive(Default)]
 pub struct PageSession {
-    tabs: tokio::sync::Mutex<HashMap<TabId, Arc<TabPage>>>,
+    tabs: Mutex<HashMap<TabId, Arc<Slot>>>,
     pub refs: Mutex<RefRegistry>,
     /// Tabs with offline emulation on.
     pub offline_tabs: Mutex<std::collections::HashSet<TabId>>,
@@ -131,22 +137,36 @@ impl PageSession {
             None => ctx.browser.current_tab(&ctx.session).await?.tab_id,
         };
         let cdp = ctx.browser.cdp(&ctx.session, tab).await?;
-        let mut tabs = self.tabs.lock().await;
-        if let Some(page) = tabs.get(&tab)
-            && same_cdp(page.cdp(), &cdp) && page.alive() {
-                return Ok(page.clone());
-            }
-        tabs.retain(|_, page| page.alive());
-        let page = TabPage::attach(tab, cdp).await?;
-        if page.platform().is_none() {
-            let main = page.main_frame();
-            if let Ok(info) = page.call_value(&main, "frameInfo", vec![], false).await
-                && let Some(platform) = info["platform"].as_str() {
-                    page.set_platform(platform.to_string());
+        // The map lock is held only to pick the slot, never across the attach: other tabs never wait on it, and
+        // concurrent callers for this tab await the same attach.
+        let slot = {
+            let mut tabs = self.tabs.lock().unwrap();
+            tabs.retain(|_, slot| slot.page.get().map(|page| page.alive()).unwrap_or(true));
+            let current = tabs.get(&tab).filter(|slot| same_cdp(&slot.cdp, &cdp) && slot.page.get().map(|page| page.alive()).unwrap_or(true)).cloned();
+            match current {
+                Some(slot) => slot,
+                None => {
+                    let slot = Arc::new(Slot { cdp: cdp.clone(), page: tokio::sync::OnceCell::new() });
+                    tabs.insert(tab, slot.clone());
+                    slot
                 }
-        }
-        tabs.insert(tab, page.clone());
-        Ok(page)
+            }
+        };
+        let page = slot
+            .page
+            .get_or_try_init(|| async {
+                let page = TabPage::attach(tab, slot.cdp.clone()).await?;
+                if page.platform().is_none() {
+                    let main = page.main_frame();
+                    if let Ok(Ok(info)) = tokio::time::timeout(std::time::Duration::from_secs(2), page.call_value(&main, "frameInfo", vec![], false)).await
+                        && let Some(platform) = info["platform"].as_str() {
+                            page.set_platform(platform.to_string());
+                        }
+                }
+                Ok::<_, anyhow::Error>(page)
+            })
+            .await?;
+        Ok(page.clone())
     }
 
     /// The tab the registry's refs belong to.

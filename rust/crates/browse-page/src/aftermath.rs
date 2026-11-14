@@ -15,11 +15,17 @@ pub struct Before {
     url: String,
     tabs: Vec<TabId>,
     started: Instant,
+    /// The main document's generation: a navigation that really replaced the document changes it.
+    generation: Option<u64>,
+}
+
+fn generation(page: &TabPage) -> Option<u64> {
+    page.frame(&page.main_frame()).map(|f| f.generation)
 }
 
 pub async fn before(ctx: &ToolContext, page: &Arc<TabPage>) -> Before {
     let tabs = ctx.browser.tabs(&ctx.session).await.map(|tabs| tabs.into_iter().map(|t| t.tab_id).collect()).unwrap_or_default();
-    Before { seq: page.event_seq(), url: page.main_url(), tabs, started: Instant::now() }
+    Before { seq: page.event_seq(), url: page.main_url(), tabs, started: Instant::now(), generation: generation(page) }
 }
 
 #[derive(Clone, Copy)]
@@ -55,8 +61,9 @@ fn started_navigation(events: &[TabEvent]) -> (bool, bool) {
 pub async fn after(ctx: &ToolContext, page: &Arc<TabPage>, before: &Before, options: AfterOptions) -> Map<String, Value> {
     let seq = before.seq;
     if options.expect_navigation && page.dialog().is_none() {
-        // Clicks that navigate usually start within a frame or two.
-        page.wait_until(Duration::from_millis(150), Duration::from_millis(50), |page| {
+        // A navigation the input started synchronously is announced before Chrome answers the input event, so it
+        // is already queued; this short wait catches it and ones started a frame later.
+        page.wait_until(Duration::from_millis(75), Duration::from_millis(50), |page| {
             let (started, _) = started_navigation(&page.events_since(seq));
             started || page.dialog().is_some()
         })
@@ -92,7 +99,8 @@ pub async fn describe(ctx: &ToolContext, page: &Arc<TabPage>, before: &Before, o
         out.insert("pending".into(), json!(pending));
     }
     let navigations: Vec<&str> = events.iter().filter_map(|e| match e { TabEvent::Navigated { url, same_document: false } => Some(url.as_str()), _ => None }).collect();
-    let navigated = !navigations.is_empty();
+    // A late commit event of the previous document doesn't count: the document itself must have changed.
+    let navigated = !navigations.is_empty() && generation(page) != before.generation;
     if navigated {
         out.insert("navigated".into(), json!(true));
         if before.url != url {

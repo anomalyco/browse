@@ -333,9 +333,13 @@ async fn refs_nulls_strictness_and_typing() {
     let echoed = h.ok("eval", json!({ "expression": "(el, a) => JSON.stringify(a)", "arg": { "a": null, "b": [null, 1] } })).await;
     assert_eq!(echoed, "\"{\\\"a\\\":null,\\\"b\\\":[null,1]}\"");
 
-    // A ref that now matches several elements fails instead of picking one.
+    // A lookalike inserted before a ref's element doesn't take the ref over.
     let go = ref_of(&snapshot, "button \"Go\"");
-    h.ok("eval", json!({ "expression": "const b = document.getElementById('go'); b.after(b.cloneNode(true)); return 1" })).await;
+    h.ok("eval", json!({ "expression": "const b = document.getElementById('go'); const twin = b.cloneNode(true); twin.id = 'twin'; b.before(twin); return 1" })).await;
+    h.ok("click", json!({ "ref": go })).await;
+    assert_eq!(h.ok("eval", json!({ "expression": "[document.getElementById('go').dataset.clicked, document.getElementById('twin').dataset.clicked]" })).await, "[\"yes\",null]");
+    // When the element is gone and several lookalikes remain, the ref fails instead of picking one.
+    h.ok("eval", json!({ "expression": "const b = document.getElementById('go'); b.after(b.cloneNode(true)); b.remove(); return 1" })).await;
     let error = h.err("click", json!({ "ref": go })).await;
     assert!(error.contains("matches 2 elements"), "{error}");
 
@@ -366,6 +370,10 @@ async fn eval_scoping_serialization_errors_and_timeouts() {
     let url = h.server.page("/eval", "<!doctype html><title>Eval</title><body><div id=a class='x y'>hi</div></body>");
     h.json("navigate", json!({ "url": url })).await;
 
+    // Concurrent calls share the tab's page model and don't wait on each other.
+    let (a, b) = tokio::join!(h.ok("eval", json!({ "expression": "1" })), h.ok("eval", json!({ "expression": "2" })));
+    assert_eq!((a.as_str(), b.as_str()), ("1", "2"));
+
     // Declarations stay local: the same code runs twice, and the page never sees them.
     for world in ["isolated", "main"] {
         assert_eq!(h.ok("eval", json!({ "expression": "const x = 1; return x", "world": world })).await, "1");
@@ -381,7 +389,7 @@ async fn eval_scoping_serialization_errors_and_timeouts() {
     assert_eq!(value["m"], json!({ "k": 1 }), "{value}");
     assert_eq!(value["s"], json!([1, 2]), "{value}");
     assert_eq!(value["d"], "1970-01-01T00:00:00.000Z", "{value}");
-    assert_eq!(value["n"], "<div#a.x.y>", "{value}");
+    assert_eq!(value["n"], "<div#a.x.y \"hi\">", "{value}");
     assert_eq!(value["big"], "10n", "{value}");
     assert_eq!(value["r"], "/x/g", "{value}");
     assert_eq!(value["self"], "[Circular]", "{value}");
@@ -394,11 +402,33 @@ async fn eval_scoping_serialization_errors_and_timeouts() {
     let error = h.err("eval", json!({ "expression": "const a = 1;\nnull.boom" })).await;
     assert!(error.contains("line 2"), "{error}");
 
-    let started = std::time::Instant::now();
-    let error = h.err("eval", json!({ "expression": "while (true) {}", "timeout": 500 })).await;
-    assert!(error.contains("stopped"), "{error}");
-    assert!(started.elapsed() < std::time::Duration::from_secs(5));
-    assert_eq!(h.ok("eval", json!({ "expression": "1 + 1" })).await, "2");
+    // Like a console: the last expression statement's value.
+    assert_eq!(h.ok("eval", json!({ "expression": "1+1; 2" })).await, "2");
+    assert_eq!(h.ok("eval", json!({ "expression": "const a = 3; a" })).await, "3");
+    assert_eq!(h.ok("eval", json!({ "expression": "const s = 'a;b // c';\ns.length" })).await, "8");
+    assert_eq!(h.ok("eval", json!({ "expression": "let n = 0\nfor (const i of [1, 2]) n += i\nn * 10" })).await, "30");
+    let hinted = h.json("eval", json!({ "expression": "const t = 'return me'" })).await;
+    assert!(hinted["hint"].as_str().unwrap().contains("return"), "{hinted}");
+    let error = h.err("eval", json!({ "expression": "el.textContent", "selector": "#a" })).await;
+    assert!(error.contains("must be a function"), "{error}");
+    let error = h.err("eval", json!({ "expression": "document.title", "selector": "#a" })).await;
+    assert!(error.contains("must be a function"), "{error}");
+    let pairs = h.json("eval", json!({ "expression": "new Map([[{ k: 1 }, 'v']])" })).await;
+    assert_eq!(pairs, json!([[{ "k": 1 }, "v"]]), "{pairs}");
+
+    // A busy loop is stopped at the timeout and the tab answers again right away.
+    for world in ["isolated", "main"] {
+        let started = std::time::Instant::now();
+        let error = h.err("eval", json!({ "expression": "while (true) {}", "timeout": 1000, "world": world })).await;
+        assert!(error.contains("stopped"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+        let started = std::time::Instant::now();
+        assert_eq!(h.ok("eval", json!({ "expression": "1 + 1" })).await, "2");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "{:?}", started.elapsed());
+    }
+    h.json("navigate", json!({ "url": url })).await;
+    let error = h.err("navigate", json!({ "url": "mailto:someone@example.com" })).await;
+    assert!(error.contains("another app"), "{error}");
 
     // Media emulation settings combine; bad values change nothing.
     h.json("emulate", json!({ "colorScheme": "dark" })).await;
@@ -407,5 +437,6 @@ async fn eval_scoping_serialization_errors_and_timeouts() {
     assert_eq!(both, "true");
     assert!(h.err("emulate", json!({ "colorScheme": "purple" })).await.contains("colorScheme"));
     assert!(h.err("emulate", json!({ "timezone": "Europe/Paris" })).await.contains("timezone"));
-    assert!(h.err("emulate", json!({ "viewport": { "width": 0, "height": 10 } })).await.contains("positive"));
+    assert!(h.err("emulate", json!({ "viewport": { "width": 0, "height": 10 } })).await.contains("1 to 10000"));
+    assert!(h.err("emulate", json!({ "viewport": { "width": 100000, "height": 10 } })).await.contains("1 to 10000"));
 }

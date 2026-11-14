@@ -67,6 +67,10 @@ fn slot(spec: &ToolSpec, arguments: &Map<String, Value>, value: &str) -> Option<
     if looks_like_ref(value) && open("ref") {
         return Some("ref".into());
     }
+    // A word naming one of an enum option's values (`browse tabs close`) fills that option.
+    if let Some(key) = properties.iter().find(|(key, schema)| open(key) && schema["enum"].as_array().is_some_and(|values| values.iter().any(|v| v == value))).map(|(key, _)| key.clone()) {
+        return Some(key);
+    }
     required(spec).into_iter().find(|key| open(key)).or_else(|| PRIMARY.iter().find(|key| open(key)).map(|key| (*key).to_owned()))
 }
 

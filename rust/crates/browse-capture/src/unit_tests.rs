@@ -75,6 +75,51 @@ async fn out_of_process_iframe_documents_complete_across_sessions() {
     assert_eq!(cdp.calls("Network.enable").iter().filter(|(_, session)| session.as_deref() == Some("child")).count(), 1);
 }
 
+/// Through chrome.debugger an iframe's session attaches without waiting for the debugger, so its loadingFinished (and
+/// sometimes its responseReceived) is lost before Network is enabled there. The document still completes, with the
+/// status from the parent's responseReceived or the raw headers (ExtraInfo).
+#[tokio::test]
+async fn iframe_documents_complete_when_their_own_events_are_lost() {
+    let cdp = FakeCdp::new();
+    let ctx = context(cdp.clone(), vec![]);
+    let network = tool("network");
+    assert!(!call(&ctx, network.as_ref(), json!({ "action": "start" })).await.0);
+    let request = |id: &str, frame: &str, url: &str| {
+        json!({ "requestId": id, "frameId": frame, "type": "Document", "request": { "url": url, "method": "GET", "headers": {} } })
+    };
+    // Seen on the parent: the request and its response, then the iframe attaches and nothing more arrives.
+    cdp.emit("Network.requestWillBeSent", request("L1", "F1", "https://a.test/frame"), None);
+    let html = json!({ "status": 200, "statusText": "OK", "headers": { "content-type": "text/html" }, "mimeType": "text/html" });
+    cdp.emit("Network.responseReceived", json!({ "requestId": "L1", "response": html }), None);
+    cdp.emit("Target.attachedToTarget", json!({ "sessionId": "s1", "targetInfo": { "targetId": "F1", "type": "iframe" } }), None);
+    // Only the raw headers: the capture stops before the grace period is over.
+    cdp.emit("Network.requestWillBeSent", request("L2", "F2", "https://b.test/frame?name=sandboxed"), None);
+    cdp.emit(
+        "Network.responseReceivedExtraInfo",
+        json!({ "requestId": "L2", "statusCode": 404, "headers": { "content-type": "text/html; charset=utf-8" } }),
+        Some("s2"),
+    );
+    cdp.emit("Target.attachedToTarget", json!({ "sessionId": "s2", "targetInfo": { "targetId": "F2", "type": "iframe" } }), None);
+    settle().await;
+    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+    let (_, status) = call(&ctx, network.as_ref(), json!({ "action": "status" })).await;
+    assert_eq!(status["pendingCount"], json!(0), "{status}");
+    let (_, stopped) = call(&ctx, network.as_ref(), json!({ "action": "stop" })).await;
+    let exchanges = stopped["exchanges"].as_array().unwrap();
+    assert_eq!(exchanges.len(), 2, "{stopped}");
+    assert_eq!(exchanges[0]["response"]["status"], json!(200), "{stopped}");
+    assert_eq!(exchanges[1]["response"]["status"], json!(404), "{stopped}");
+    assert!(exchanges.iter().all(|exchange| exchange.get("failure").is_none()), "{stopped}");
+    // At stop, before the grace period, a committed iframe document with a known status completes too.
+    assert!(!call(&ctx, network.as_ref(), json!({ "action": "start" })).await.0);
+    cdp.emit("Network.requestWillBeSent", request("L3", "F3", "https://c.test/"), None);
+    cdp.emit("Network.responseReceivedExtraInfo", json!({ "requestId": "L3", "statusCode": 200, "headers": {} }), None);
+    cdp.emit("Target.attachedToTarget", json!({ "sessionId": "s3", "targetInfo": { "targetId": "F3", "type": "iframe" } }), None);
+    settle().await;
+    let (_, stopped) = call(&ctx, network.as_ref(), json!({ "action": "stop" })).await;
+    assert_eq!(stopped["exchanges"][0]["response"]["status"], json!(200), "{stopped}");
+}
+
 #[tokio::test]
 async fn captures_end_when_their_tab_closes() {
     let cdp = FakeCdp::new();

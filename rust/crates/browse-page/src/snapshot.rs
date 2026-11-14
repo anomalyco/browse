@@ -451,13 +451,15 @@ struct Scope {
     signature: Value,
     /// The frame of a ref root and its generation, so refs registered under it stay bound to that document.
     owner_generation: u64,
+    /// A ref root: its id, captured from the element the ref resolves to.
+    ref_root: Option<String>,
 }
 
 async fn resolve_scope(page: &Arc<TabPage>, session: &PageSession, options: &Options) -> Result<Scope> {
     let main = page.main_frame();
     let main_generation = page.frame(&main).map(|f| f.generation).unwrap_or(0);
     let Some(within) = options.within.as_ref().map(|w| w.trim().to_string()).filter(|w| !w.is_empty()) else {
-        return Ok(Scope { frame: main, settings_root: None, report_fallback: false, signature: json!({ "kind": "page" }), owner_generation: main_generation });
+        return Ok(Scope { frame: main, settings_root: None, report_fallback: false, signature: json!({ "kind": "page" }), owner_generation: main_generation, ref_root: None });
     };
     if target::is_compact_ref(&within) {
         let id = within.strip_prefix('@').unwrap_or(&within).to_string();
@@ -481,6 +483,7 @@ async fn resolve_scope(page: &Arc<TabPage>, session: &PageSession, options: &Opt
             report_fallback: false,
             signature: json!({ "kind": "ref", "selector": target.selector, "role": target.role, "name": target.name }),
             owner_generation: generation,
+            ref_root: Some(id),
         });
     }
     if target::parse_aria_ref(&within).is_some() {
@@ -492,7 +495,7 @@ async fn resolve_scope(page: &Arc<TabPage>, session: &PageSession, options: &Opt
         let generation = page.frame(&frame).map(|f| f.generation).unwrap_or(0);
         let rest = rest.trim().to_string();
         let root = if rest.is_empty() || rest == "html" || rest == "body" { None } else { Some((target::normalize_selector(&rest), None, None)) };
-        return Ok(Scope { report_fallback: root.is_some(), settings_root: root, frame, signature: json!({ "kind": "selector", "selector": within }), owner_generation: generation });
+        return Ok(Scope { report_fallback: root.is_some(), settings_root: root, frame, signature: json!({ "kind": "selector", "selector": within }), owner_generation: generation, ref_root: None });
     }
     Ok(Scope {
         frame: main,
@@ -500,6 +503,7 @@ async fn resolve_scope(page: &Arc<TabPage>, session: &PageSession, options: &Opt
         report_fallback: true,
         signature: json!({ "kind": "selector", "selector": within }),
         owner_generation: main_generation,
+        ref_root: None,
     })
 }
 
@@ -509,7 +513,26 @@ async fn capture_main(page: &Arc<TabPage>, scope: &Scope, settings: &Settings, d
     loop {
         let start_generation = page.frame(&main).map(|f| f.generation);
         let result = with_deadline(deadline, async {
-            let value = page.call_value(&scope.frame, "capture", vec![v(settings.to_json())], false).await?;
+            let value = match (&scope.ref_root, &scope.settings_root) {
+                (Some(id), Some((selector, role, name))) => {
+                    let checked_role = role.as_deref().filter(|r| target::aria_role(r)).map(str::to_string);
+                    let checked_name = if checked_role.is_some() { name.clone() } else { None };
+                    let mut unrooted = settings.clone();
+                    unrooted.root_selector = None;
+                    unrooted.root_role = None;
+                    unrooted.root_name = None;
+                    let value = page
+                        .call_value(&scope.frame, "captureRef", vec![v(id), v(checked_role), v(checked_name), v(selector), v(unrooted.to_json())], selector.contains(" >> "))
+                        .await?;
+                    match value["refStatus"].as_str() {
+                        Some(status) if status.starts_with("multiple:") => bail!("within {id} now matches several elements; call snapshot again for fresh refs"),
+                        Some("hidden") => bail!("within {id}: the element is hidden"),
+                        Some(_) => bail!("within {id} no longer matches an element (the page removed or re-rendered it); call snapshot again"),
+                        None => value,
+                    }
+                }
+                _ => page.call_value(&scope.frame, "capture", vec![v(settings.to_json())], false).await?,
+            };
             serde_json::from_value::<Capture>(value).map_err(|e| anyhow!("unexpected capture result: {e}"))
         })
         .await;
@@ -559,24 +582,24 @@ async fn capture_main(page: &Arc<TabPage>, scope: &Scope, settings: &Settings, d
 
 /// Right after a navigation browse watched, pages often render their content from requests made after load (search
 /// results, app shells). While the network is still busy, wait briefly for it to go quiet and the DOM to settle. A
-/// document browse didn't see commit, or one older than 15 s, is captured at once.
+/// document browse didn't see commit, or one older than 5 s, is captured at once; the wait is capped at about 1.4 s.
 async fn settle_recent_navigation(page: &Arc<TabPage>, deadline: Instant) {
     let main = page.main_frame();
     let Some(frame) = page.frame(&main) else { return };
-    let recent = frame.committed_at.map(|at| at.elapsed() < Duration::from_secs(15)).unwrap_or(false);
+    let recent = frame.committed_at.map(|at| at.elapsed() < Duration::from_secs(5)).unwrap_or(false);
     if !recent || frame.lifecycle.is_empty() || frame.lifecycle.contains("networkAlmostIdle") || frame.lifecycle.contains("networkIdle") || page.dialog().is_some() {
         return;
     }
     let left = deadline.saturating_duration_since(Instant::now());
-    let cap = (left / 2).min(Duration::from_millis(2_500));
+    let cap = (left / 2).min(Duration::from_millis(1_000));
     let started = Instant::now();
     page.wait_until(cap, Duration::from_millis(100), |page| {
         page.lifecycle_has(&main, "networkAlmostIdle") || page.lifecycle_has(&main, "networkIdle") || page.dialog().is_some()
     })
     .await;
-    let quiet_max = cap.saturating_sub(started.elapsed()).min(Duration::from_millis(1_000)).as_millis() as u64;
-    if quiet_max > 100 && page.dialog().is_none() {
-        let _ = tokio::time::timeout(Duration::from_millis(quiet_max + 200), page.call_value(&main, "quiet", vec![v(200), v(quiet_max)], false)).await;
+    let quiet_max = cap.saturating_sub(started.elapsed()).max(Duration::from_millis(150)).min(Duration::from_millis(400)).as_millis() as u64;
+    if page.dialog().is_none() {
+        let _ = tokio::time::timeout(Duration::from_millis(quiet_max + 200), page.call_value(&main, "quiet", vec![v(120), v(quiet_max)], false)).await;
     }
 }
 
@@ -635,12 +658,6 @@ pub async fn snapshot(page: &Arc<TabPage>, session: &PageSession, options: &Opti
             }
         }
     }
-    {
-        let mut refs = session.refs.lock().unwrap();
-        refs.selectors.clear();
-        refs.tab = None;
-        refs.document = None;
-    }
     let main_frame = page.main_frame();
     if !options.diff {
         settle_recent_navigation(page, deadline).await;
@@ -658,126 +675,140 @@ pub async fn snapshot(page: &Arc<TabPage>, session: &PageSession, options: &Opti
     let is_pdf = capture.entries.len() <= 2
         && scope.frame == main_frame
         && matches!(tokio::time::timeout(Duration::from_secs(1), page.call_value(&main_frame, "frameInfo", vec![], false)).await, Ok(Ok(info)) if info["contentType"] == "application/pdf");
-    let mut refs_guard = session.refs.lock().unwrap();
-    let refs = &mut *refs_guard;
-    let mut entries: Vec<RenderedEntry> = Vec::new();
-    let mut frame_objects: HashMap<String, (String, u64)> = HashMap::new();
-    let mut remaining = (max_items - main.entries.len() as i64).max(0);
-    let mut omitted = 0usize;
+    // The registry lock never lives across an await.
+    let (rendered, compatible_previous, use_diff, remember) = {
+        let mut refs_guard = session.refs.lock().unwrap();
+        let refs = &mut *refs_guard;
+        let mut entries: Vec<RenderedEntry> = Vec::new();
+        let mut frame_objects: HashMap<String, (String, u64)> = HashMap::new();
+        let mut remaining = (max_items - main.entries.len() as i64).max(0);
+        let mut omitted = 0usize;
 
-    #[allow(clippy::too_many_arguments)]
-    fn emit(
-        node: &FrameNode,
-        indent: usize,
-        entries: &mut Vec<RenderedEntry>,
-        frame_objects: &mut HashMap<String, (String, u64)>,
-        remaining: &mut i64,
-        omitted: &mut usize,
-        refs: &mut crate::state::RefRegistry,
-        max_items: i64,
-    ) {
-        let indentation = "  ".repeat(indent);
-        if let Some(note) = &node.note {
-            entries.push(RenderedEntry { prefix: format!("{indentation}- ... {note}"), ..Default::default() });
-            return;
-        }
-        let Some(frame) = &node.frame else { return };
-        if *remaining <= 0 {
-            *omitted += node.count();
-            return;
-        }
-        let key = refs.frame_key(frame);
-        frame_objects.insert(key.clone(), (frame.clone(), node.generation));
-        let child = render_capture(&node.capture);
-        for (index, entry) in child.entries.iter().enumerate() {
+        #[allow(clippy::too_many_arguments)]
+        fn emit(
+            node: &FrameNode,
+            indent: usize,
+            entries: &mut Vec<RenderedEntry>,
+            frame_objects: &mut HashMap<String, (String, u64)>,
+            remaining: &mut i64,
+            omitted: &mut usize,
+            refs: &mut crate::state::RefRegistry,
+            max_items: i64,
+        ) {
+            let indentation = "  ".repeat(indent);
+            if let Some(note) = &node.note {
+                entries.push(RenderedEntry { prefix: format!("{indentation}- ... {note}"), ..Default::default() });
+                return;
+            }
+            let Some(frame) = &node.frame else { return };
             if *remaining <= 0 {
-                entries.push(RenderedEntry { prefix: format!("{indentation}- ... frame content truncated (maxItems reached)"), ..Default::default() });
-                for (nested_index, nested) in &node.children {
-                    if *nested_index >= index {
-                        *omitted += nested.count();
+                *omitted += node.count();
+                return;
+            }
+            let key = refs.frame_key(frame);
+            frame_objects.insert(key.clone(), (frame.clone(), node.generation));
+            let child = render_capture(&node.capture);
+            for (index, entry) in child.entries.iter().enumerate() {
+                if *remaining <= 0 {
+                    entries.push(RenderedEntry { prefix: format!("{indentation}- ... frame content truncated (maxItems reached)"), ..Default::default() });
+                    for (nested_index, nested) in &node.children {
+                        if *nested_index >= index {
+                            *omitted += nested.count();
+                        }
                     }
+                    break;
                 }
-                break;
+                entries.push(RenderedEntry { prefix: format!("{indentation}{}", entry.prefix), frame_key: Some(key.clone()), ..entry.clone() });
+                *remaining -= 1;
+                if let Some(nested) = node.children.get(&index) {
+                    emit(nested, indent + child.depths[index] as usize + 1, entries, frame_objects, remaining, omitted, refs, max_items);
+                }
             }
-            entries.push(RenderedEntry { prefix: format!("{indentation}{}", entry.prefix), frame_key: Some(key.clone()), ..entry.clone() });
-            *remaining -= 1;
-            if let Some(nested) = node.children.get(&index) {
-                emit(nested, indent + child.depths[index] as usize + 1, entries, frame_objects, remaining, omitted, refs, max_items);
+            if node.capture.truncated && *remaining > 0 {
+                entries.push(RenderedEntry { prefix: format!("{indentation}- ... frame content truncated after {max_items} items"), ..Default::default() });
             }
         }
-        if node.capture.truncated && *remaining > 0 {
-            entries.push(RenderedEntry { prefix: format!("{indentation}- ... frame content truncated after {max_items} items"), ..Default::default() });
-        }
-    }
 
-    // A snapshot scoped inside an iframe keeps that frame's key, so its refs match the ones of a full snapshot.
-    let root_key = (scope.frame != main_frame).then(|| {
-        let key = refs.frame_key(&scope.frame);
-        frame_objects.insert(key.clone(), (scope.frame.clone(), scope.owner_generation));
-        key
-    });
-    for (index, entry) in main.entries.iter().enumerate() {
-        entries.push(RenderedEntry { frame_key: root_key.clone(), ..entry.clone() });
-        if let Some(node) = frame_nodes.get(&index) {
-            emit(node, main.depths[index] as usize + 1, &mut entries, &mut frame_objects, &mut remaining, &mut omitted, refs, max_items);
-        }
-    }
-    if capture.truncated {
-        entries.push(RenderedEntry { prefix: format!("- ... truncated after {max_items} items"), ..Default::default() });
-    }
-    if budget.skipped_items > 0 {
-        entries.push(RenderedEntry { prefix: frame_skip_note(budget.skipped_items, "maxItems reached"), ..Default::default() });
-    }
-    if budget.skipped_budget > 0 {
-        entries.push(RenderedEntry { prefix: frame_skip_note(budget.skipped_budget, &format!("{MAX_FRAMES} iframes at most per snapshot")), ..Default::default() });
-    }
-    if budget.skipped_deadline > 0 {
-        entries.push(RenderedEntry { prefix: frame_skip_note(budget.skipped_deadline, "snapshot deadline reached"), ..Default::default() });
-    }
-    if omitted > 0 {
-        entries.push(RenderedEntry { prefix: frame_skip_note(omitted, "maxItems reached"), ..Default::default() });
-    }
-
-    // Refs carry over from the previous snapshot of this tab even if its options differed.
-    let same_tab_previous = refs.previous.as_ref().filter(|p| p.tab == page.tab() && p.document == document).cloned();
-    let compatible_previous = same_tab_previous.as_ref().filter(|p| p.signature == signature).cloned();
-    let mut next_ref = refs.next_ref.max(1);
-    let mut reusable: HashMap<String, VecDeque<String>> = HashMap::new();
-    for entry in same_tab_previous.as_ref().map(|p| p.entries.as_slice()).unwrap_or(&[]) {
-        if let (Some(id), Some(key)) = (&entry.ref_id, ref_identity(entry)) {
-            reusable.entry(key).or_default().push_back(id.clone());
-        }
-    }
-    let rendered: Vec<RenderedEntry> = entries
-        .into_iter()
-        .map(|entry| match ref_identity(&entry) {
-            None => entry,
-            Some(key) => {
-                let id = reusable.get_mut(&key).and_then(VecDeque::pop_front).unwrap_or_else(|| {
-                    let id = format!("e{next_ref}");
-                    next_ref += 1;
-                    id
-                });
-                RenderedEntry { ref_id: Some(id), ..entry }
+        // A snapshot scoped inside an iframe keeps that frame's key, so its refs match the ones of a full snapshot.
+        let root_key = (scope.frame != main_frame).then(|| {
+            let key = refs.frame_key(&scope.frame);
+            frame_objects.insert(key.clone(), (scope.frame.clone(), scope.owner_generation));
+            key
+        });
+        for (index, entry) in main.entries.iter().enumerate() {
+            entries.push(RenderedEntry { frame_key: root_key.clone(), ..entry.clone() });
+            if let Some(node) = frame_nodes.get(&index) {
+                emit(node, main.depths[index] as usize + 1, &mut entries, &mut frame_objects, &mut remaining, &mut omitted, refs, max_items);
             }
-        })
-        .collect();
-    refs.next_ref = next_ref;
-    let root_owner = if scope.frame == main_frame { None } else { Some((scope.frame.clone(), scope.owner_generation)) };
-    for entry in &rendered {
-        let (Some(id), Some(selector), Some(role)) = (&entry.ref_id, &entry.selector, &entry.role) else { continue };
-        let owner = match &entry.frame_key {
-            Some(key) => frame_objects.get(key).cloned(),
-            None => root_owner.clone(),
-        };
-        refs.selectors.insert(id.clone(), RefTarget { selector: selector.clone(), role: role.clone(), name: entry.identity_name.clone(), frame: owner });
+        }
+        if capture.truncated {
+            entries.push(RenderedEntry { prefix: format!("- ... truncated after {max_items} items"), ..Default::default() });
+        }
+        if budget.skipped_items > 0 {
+            entries.push(RenderedEntry { prefix: frame_skip_note(budget.skipped_items, "maxItems reached"), ..Default::default() });
+        }
+        if budget.skipped_budget > 0 {
+            entries.push(RenderedEntry { prefix: frame_skip_note(budget.skipped_budget, &format!("{MAX_FRAMES} iframes at most per snapshot")), ..Default::default() });
+        }
+        if budget.skipped_deadline > 0 {
+            entries.push(RenderedEntry { prefix: frame_skip_note(budget.skipped_deadline, "snapshot deadline reached"), ..Default::default() });
+        }
+        if omitted > 0 {
+            entries.push(RenderedEntry { prefix: frame_skip_note(omitted, "maxItems reached"), ..Default::default() });
+        }
+
+        // Refs carry over from the previous snapshot of this tab even if its options differed.
+        let same_tab_previous = refs.previous.as_ref().filter(|p| p.tab == page.tab() && p.document == document).cloned();
+        let compatible_previous = same_tab_previous.as_ref().filter(|p| p.signature == signature).cloned();
+        let mut next_ref = refs.next_ref.max(1);
+        let mut reusable: HashMap<String, VecDeque<String>> = HashMap::new();
+        for entry in same_tab_previous.as_ref().map(|p| p.entries.as_slice()).unwrap_or(&[]) {
+            if let (Some(id), Some(key)) = (&entry.ref_id, ref_identity(entry)) {
+                reusable.entry(key).or_default().push_back(id.clone());
+            }
+        }
+        let rendered: Vec<RenderedEntry> = entries
+            .into_iter()
+            .map(|entry| match ref_identity(&entry) {
+                None => entry,
+                Some(key) => {
+                    let id = reusable.get_mut(&key).and_then(VecDeque::pop_front).unwrap_or_else(|| {
+                        let id = format!("e{next_ref}");
+                        next_ref += 1;
+                        id
+                    });
+                    RenderedEntry { ref_id: Some(id), ..entry }
+                }
+            })
+            .collect();
+        refs.next_ref = next_ref;
+        let root_owner = if scope.frame == main_frame { None } else { Some((scope.frame.clone(), scope.owner_generation)) };
+        let mut remember: HashMap<String, Vec<Value>> = HashMap::new();
+        refs.selectors.clear();
+        for entry in &rendered {
+            let (Some(id), Some(selector), Some(role)) = (&entry.ref_id, &entry.selector, &entry.role) else { continue };
+            let owner = match &entry.frame_key {
+                Some(key) => frame_objects.get(key).cloned(),
+                None => root_owner.clone(),
+            };
+            // As target::resolve_ref checks it: role and name only for roles getByRole knows.
+            let checked_role = target::aria_role(role).then(|| role.clone());
+            let checked_name = if checked_role.is_some() { entry.identity_name.clone() } else { None };
+            let frame = owner.as_ref().map(|(frame, _)| frame.clone()).unwrap_or_else(|| main_frame.clone());
+            remember.entry(frame).or_default().push(json!({ "id": id, "role": checked_role, "name": checked_name, "selector": selector }));
+            refs.selectors.insert(id.clone(), RefTarget { selector: selector.clone(), role: role.clone(), name: entry.identity_name.clone(), frame: owner });
+        }
+        refs.tab = Some(page.tab());
+        refs.document = Some(document);
+        refs.aria = None;
+        let use_diff = options.diff || (options.delta && compatible_previous.is_some());
+        refs.previous = Some(Baseline { tab: page.tab(), document, signature, entries: rendered.clone() });
+        (rendered, compatible_previous, use_diff, remember)
+    };
+    for (frame, list) in remember {
+        let injected = list.iter().any(|r| r["selector"].as_str().map(|s| s.contains(" >> ")).unwrap_or(false));
+        let _ = tokio::time::timeout(Duration::from_secs(2), page.call_value(&frame, "rememberRefs", vec![v(list)], injected)).await;
     }
-    refs.tab = Some(page.tab());
-    refs.document = Some(document);
-    refs.aria = None;
-    let use_diff = options.diff || (options.delta && compatible_previous.is_some());
-    refs.previous = Some(Baseline { tab: page.tab(), document, signature, entries: rendered.clone() });
-    drop(refs_guard);
 
     if !use_diff {
         let mut notes = capture.notes.clone();

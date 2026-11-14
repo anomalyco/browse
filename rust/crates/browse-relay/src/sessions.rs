@@ -10,6 +10,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::task::AbortHandle;
 
+/// A tool call running in a session, and the process that made it.
+pub struct RunningCall {
+    pub abort: AbortHandle,
+    pub pid: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedTarget {
     pub id: String,
@@ -65,14 +71,17 @@ pub struct Session {
     pub target: Option<PersistedTarget>,
     /// Target ids of the agent tabs the session opened, reclaimed after a relay restart.
     pub held: Vec<String>,
+    /// The process that last called, kept in the catalog.
     pub client_pid: Option<u32>,
+    /// Every process that has called (OpenCode-Browser-Client-Pid): the session is collected only once all are gone.
+    pub clients: std::collections::HashSet<u32>,
     pub state: Arc<SessionState>,
-    pub calls: HashMap<u64, AbortHandle>,
+    pub calls: HashMap<u64, RunningCall>,
     pub idle_epoch: u64,
     pub last_used: Instant,
     pub warnings: Vec<String>,
-    /// Why the session's running calls were stopped (the toolbar button, a reset), for their callers.
-    pub stopped: Option<String>,
+    /// Why running calls were stopped (the toolbar button, a reset, their client exiting), by call id.
+    pub stopped: HashMap<u64, String>,
     /// Background work tools reported (`Browser::set_busy`: "network", "recording").
     pub busy_keys: std::collections::HashSet<String>,
     /// Why the session's current tab went away with no other tab to take its place, until it opens or picks one:
@@ -95,12 +104,13 @@ impl Session {
             target: None,
             held: Vec::new(),
             client_pid: None,
+            clients: std::collections::HashSet::new(),
             state: Arc::new(SessionState::default()),
             calls: HashMap::new(),
             idle_epoch: 0,
             last_used: Instant::now(),
             warnings: Vec::new(),
-            stopped: None,
+            stopped: HashMap::new(),
             busy_keys: std::collections::HashSet::new(),
             lost: None,
         }
@@ -121,6 +131,7 @@ impl Session {
                 session.held.push(target.id.clone());
             }
         session.client_pid = entry.client_pid;
+        session.clients.extend(entry.client_pid);
         session
     }
 

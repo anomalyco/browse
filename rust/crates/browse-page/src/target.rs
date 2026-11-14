@@ -120,6 +120,13 @@ pub fn frame_parts(selector: &str) -> Vec<String> {
     parts
 }
 
+/// Whether a query failed because of the selector itself (parse errors from the selector engines).
+fn is_selector_error(message: &str) -> bool {
+    ["not a valid selector", "Unknown engine", "Malformed", "SyntaxError", "Unexpected token", "Unexpected end", "Unsupported", "Invalid selector", "Error while parsing selector", "Expected "]
+        .iter()
+        .any(|needle| message.contains(needle))
+}
+
 pub struct Resolved {
     pub element: Element,
     /// How the element reads in results: `button "Save"`.
@@ -193,7 +200,7 @@ async fn resolve_ref(page: &Arc<TabPage>, session: &PageSession, id: &str, optio
     loop {
         page.ensure_no_dialog()?;
         let result = page
-            .call_element_result(&frame, "refResolve", vec![v(&role), v(&name), v(&target.selector)], injected)
+            .call_element_result(&frame, "refResolve", vec![v(&normalized), v(&role), v(&name), v(&target.selector)], injected)
             .await?;
         match result {
             ElementOr::Element(element) => return Ok(element),
@@ -311,8 +318,10 @@ async fn wait_query(page: &Arc<TabPage>, frame: &str, part: &str, full: &str, de
                 let message = error.to_string();
                 if message.contains("navigated or re-rendered") {
                     // Keep waiting through a navigation.
-                } else {
+                } else if is_selector_error(&message) {
                     bail!("Invalid selector {full:?}: {message}");
+                } else {
+                    return Err(error);
                 }
             }
         }

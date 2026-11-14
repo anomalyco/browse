@@ -1,6 +1,7 @@
 //! The relay process: one HTTP listener for the extension's WebSocket (/extension), the open version probe
 //! (/version) and the token-protected tool API (/tools, /tools/call), plus its housekeeping.
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -108,7 +109,7 @@ impl RelayHandle {
 
     pub fn idle(&self, quiet: Duration) -> bool {
         let st = self.relay.st();
-        let clients = st.sessions.values().any(|s| s.client_pid.is_some_and(crate::util::process_alive));
+        let clients = st.sessions.values().any(|s| s.clients.iter().any(|pid| crate::util::process_alive(*pid)));
         !clients && !st.sessions.values().any(|s| s.busy()) && st.handoffs.is_empty() && st.last_activity.elapsed() >= quiet
     }
 
@@ -161,6 +162,7 @@ fn relay_host(paths: &Paths) -> IpAddr {
 /// Binds the relay and starts serving in the background.
 pub async fn start(options: ServeOptions, tools: Vec<Arc<dyn Tool>>) -> anyhow::Result<RelayHandle> {
     let paths = options.paths.clone();
+    crate::util::tune_allocator();
     crate::log::set_path(paths.relay_log());
     crate::secrets::remove_stored_secrets(&paths);
     let configured = options.port.unwrap_or_else(port::configured_port);
@@ -424,6 +426,8 @@ tokio::task_local! {
     pub static CALL: u64;
     /// The running call's tool name.
     pub static TOOL: String;
+    /// The process that made the running call (OpenCode-Browser-Client-Pid).
+    pub static CLIENT: Option<u32>;
 }
 
 /// Runs one tool call for `request.session`'s current browse session (or `arguments.session` when it names one).
@@ -446,8 +450,8 @@ pub async fn call_tool(relay: &Arc<Relay>, request: ToolCallRequest, client_pid:
         let entry = st.sessions.get_mut(&session).expect("ensured");
         if let Some(pid) = client_pid {
             entry.client_pid = Some(pid);
+            entry.clients.insert(pid);
         }
-        entry.stopped = None;
         entry.state.clone()
     };
     let context = ToolContext {
@@ -463,9 +467,9 @@ pub async fn call_tool(relay: &Arc<Relay>, request: ToolCallRequest, client_pid:
     relay.inflight.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(id, InFlight { tool: name.clone(), session: session.clone(), since: started });
     let task = tokio::spawn(RELAY.scope(
         relay.clone(),
-        CALL.scope(id, TOOL.scope(name.clone(), CALLER.scope(caller, async move { tool.call(context, arguments).await }))),
+        CALL.scope(id, TOOL.scope(name.clone(), CLIENT.scope(client_pid, CALLER.scope(caller, async move { tool.call(context, arguments).await })))),
     ));
-    relay.call_started(&session, id, task.abort_handle());
+    relay.call_started(&session, id, task.abort_handle(), client_pid);
     let outcome = task.await;
     relay.call_finished(&session, id);
     relay.inflight.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&id);
@@ -474,7 +478,7 @@ pub async fn call_tool(relay: &Arc<Relay>, request: ToolCallRequest, client_pid:
         Ok(Ok(output)) => output,
         Ok(Err(error)) => ToolOutput::error(format!("{error:#}")),
         Err(join) if join.is_cancelled() => {
-            let message = relay.st().sessions.get_mut(&session).and_then(|s| s.stopped.take());
+            let message = relay.st().sessions.get_mut(&session).and_then(|s| s.stopped.remove(&id));
             rlog!("tool.stopped", tool = name.clone(), session = session.clone(), ms = ms, reason = message.clone());
             ToolOutput::error(message.unwrap_or_else(|| "The call was stopped.".into()))
         }
@@ -485,9 +489,28 @@ pub async fn call_tool(relay: &Arc<Relay>, request: ToolCallRequest, client_pid:
     };
     if output.is_error {
         let text: String = output.content.iter().filter_map(|c| if let Content::Text { text } = c { Some(text.as_str()) } else { None }).collect::<Vec<_>>().join(" ");
-        rlog!("tool.error", tool = name.clone(), session = session.clone(), ms = ms, error = text.chars().take(500).collect::<String>());
+        // A handoff the user didn't finish (timeout, closed, cancelled) is an outcome, not a failure.
+        let outcome = matches!(name.as_str(), "handoff" | "demonstrate")
+            .then(|| serde_json::from_str::<Value>(&text).ok())
+            .flatten()
+            .and_then(|v| v["outcome"].as_str().map(str::to_string));
+        match outcome {
+            Some(outcome) => rlog!("tool.outcome", tool = name.clone(), session = session.clone(), ms = ms, outcome = outcome),
+            None => rlog!("tool.error", tool = name.clone(), session = session.clone(), ms = ms, error = text.chars().take(500).collect::<String>()),
+        }
     } else if ms >= 20_000 {
         rlog!("tool.slow", tool = name.clone(), session = session.clone(), ms = ms);
+    }
+    let size: usize = output
+        .content
+        .iter()
+        .map(|c| match c {
+            Content::Text { text } => text.len(),
+            Content::Image { data, .. } => data.len(),
+        })
+        .sum();
+    if size >= LARGE_OUTPUT {
+        release_memory_soon();
     }
     let warnings = relay.st().sessions.get_mut(&session).map(|s| std::mem::take(&mut s.warnings)).unwrap_or_default();
     for warning in warnings {
@@ -497,12 +520,74 @@ pub async fn call_tool(relay: &Arc<Relay>, request: ToolCallRequest, client_pid:
     Ok(output)
 }
 
+/// An output this big (a large eval result, a full-page screenshot) leaves freed memory worth handing back.
+const LARGE_OUTPUT: usize = 1024 * 1024;
+
+/// Returns freed memory to the OS shortly, once at a time.
+fn release_memory_soon() {
+    static RELEASING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if RELEASING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    tokio::spawn(async {
+        // After the response is written and its buffers are gone.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let _ = tokio::task::spawn_blocking(crate::util::release_memory).await;
+        RELEASING.store(false, Ordering::SeqCst);
+    });
+}
+
+/// Calls and handoffs whose own process exited are stopped (the session's other callers carry on); a session is
+/// collected once every process that used it is gone.
+pub(crate) async fn sweep_clients(relay: &Arc<Relay>, now: Instant, client_gone_grace: Duration) {
+    let (gone, abandoned) = {
+        let mut st = relay.st();
+        let crate::relay::State { sessions, handoffs, client_gone_since, .. } = &mut *st;
+        let mut alive = HashMap::new();
+        let mut alive = |pid: u32| *alive.entry(pid).or_insert_with(|| crate::util::process_alive(pid));
+        let mut gone = Vec::new();
+        let mut abandoned: Vec<(String, u32)> = Vec::new();
+        for session in sessions.values_mut() {
+            // A call or a handoff whose own process exited has nobody waiting for it; the session's other
+            // callers carry on.
+            let mut dead: Vec<u32> = session.calls.values().filter_map(|c| c.pid).filter(|pid| !alive(*pid)).collect();
+            dead.extend(handoffs.get(&session.id).and_then(|h| h.pid).filter(|pid| !alive(*pid)));
+            dead.sort();
+            dead.dedup();
+            abandoned.extend(dead.into_iter().map(|pid| (session.id.clone(), pid)));
+            session.clients.retain(|pid| alive(*pid));
+            let used = session.client_pid.is_some();
+            if !used || !session.clients.is_empty() {
+                client_gone_since.remove(&session.id);
+                continue;
+            }
+            let since = *client_gone_since.entry(session.id.clone()).or_insert(now);
+            let busy = session.busy() || handoffs.contains_key(&session.id);
+            if now - since >= client_gone_grace && crate::sessions::mcp_named(&session.id) && !busy {
+                gone.push(session.id.clone());
+            }
+        }
+        (gone, abandoned)
+    };
+    for (id, pid) in abandoned {
+        let message = format!("The client that called this (process {pid}) exited, so it was stopped.");
+        let stopped = relay.stop_client_calls(&id, pid, &message);
+        rlog!("session.client_gone", session = id.clone(), pid = pid, calls = stopped);
+        relay.finish_client_handoff(&id, pid);
+    }
+    for id in gone {
+        rlog!("session.collected", session = id.clone(), reason = "client gone");
+        relay.st().client_gone_since.remove(&id);
+        let _ = relay.end_session(&id, true).await;
+    }
+}
+
 /// Keepalive pings, idle sessions and tabs, sessions whose client exited, and idle shutdown.
 async fn housekeeping(relay: Arc<Relay>) {
     let keepalive = std::env::var("OPENCODE_BROWSER_KEEPALIVE_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(20_000);
     let client_gone_grace = Duration::from_millis(std::env::var("OPENCODE_BROWSER_CLIENT_GONE_GRACE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(60_000));
     let started = Instant::now();
-    let (mut last_ping, mut last_reap, mut last_orphans) = (started, started, started);
+    let (mut last_ping, mut last_reap, mut last_orphans, mut last_memory) = (started, started, started, started);
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     loop {
         interval.tick().await;
@@ -564,46 +649,23 @@ async fn housekeeping(relay: Arc<Relay>) {
         }
         if now - last_orphans >= Duration::from_secs(5).min(client_gone_grace / 2).max(Duration::from_secs(1)) {
             last_orphans = now;
-            let (gone, abandoned) = {
-                let mut st = relay.st();
-                let mut gone = Vec::new();
-                let mut abandoned = Vec::new();
-                let entries: Vec<(String, Option<u32>, bool)> = st.sessions.values().map(|s| (s.id.clone(), s.client_pid, s.busy() || st.handoffs.contains_key(&s.id))).collect();
-                for (id, pid, busy) in entries {
-                    match pid {
-                        Some(pid) if !crate::util::process_alive(pid) => {
-                            // Nobody waits for its handoff or its running calls any more.
-                            let waiting = st.handoffs.contains_key(&id) || st.sessions.get(&id).is_some_and(|s| !s.calls.is_empty());
-                            if !st.client_gone_since.contains_key(&id) && waiting {
-                                abandoned.push((id.clone(), pid));
-                            }
-                            let since = *st.client_gone_since.entry(id.clone()).or_insert(now);
-                            if now - since >= client_gone_grace && crate::sessions::mcp_named(&id) && !busy {
-                                gone.push(id);
-                            }
-                        }
-                        _ => {
-                            st.client_gone_since.remove(&id);
-                        }
-                    }
-                }
-                (gone, abandoned)
-            };
-            for (id, pid) in abandoned {
-                rlog!("session.client_gone", session = id.clone(), pid = pid);
-                relay.finish_handoff(&id, "cancelled");
-                relay.stop_calls(&id, &format!("The client that called this (process {pid}) exited, so it was stopped."));
-            }
-            for id in gone {
-                rlog!("session.collected", session = id.clone(), reason = "client gone");
-                relay.st().client_gone_since.remove(&id);
-                let _ = relay.end_session(&id, true).await;
+            sweep_clients(&relay, now, client_gone_grace).await;
+        }
+        if now - last_memory >= Duration::from_secs(60) {
+            last_memory = now;
+            release_memory_soon();
+            if let Some(bytes) = crate::util::resident_bytes().filter(|b| *b >= 256 * 1024 * 1024) {
+                let (sessions, tabs) = {
+                    let st = relay.st();
+                    (st.sessions.len(), st.tabs.len())
+                };
+                rlog!("relay.memory", rssMb = bytes / (1024 * 1024), sessions = sessions, tabs = tabs);
             }
         }
         if let Some(idle) = relay.idle_shutdown {
             let quiet = {
                 let st = relay.st();
-                let clients = st.sessions.values().any(|s| s.client_pid.is_some_and(crate::util::process_alive));
+                let clients = st.sessions.values().any(|s| s.clients.iter().any(|pid| crate::util::process_alive(*pid)));
                 let busy = st.sessions.values().any(|s| s.busy()) || !st.handoffs.is_empty();
                 !clients && !busy && st.last_activity.elapsed() >= idle
             };

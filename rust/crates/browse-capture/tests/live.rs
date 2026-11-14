@@ -134,6 +134,16 @@ async fn live_capture_tools() {
         assert!(probe.contains("codec_name=mjpeg"), "{probe}");
     }
 
+    // A page that stops changing: the screencast goes quiet and screenshots fill in.
+    evaluate(&cdp, "document.getElementById('spin').style.animationPlayState = 'paused'").await;
+    call(&ctx, "recording", json!({ "action": "start", "path": "rec/still.mkv", "frameRate": 10 })).await;
+    tokio::time::sleep(Duration::from_millis(2_000)).await;
+    let still = text(&call(&ctx, "recording", json!({ "action": "stop" })).await);
+    eprintln!("still {still}");
+    assert_eq!(still["quality"]["screenshotFallback"], json!(true), "{still}");
+    assert!(still["quality"]["sourceFrameCount"].as_u64().unwrap() >= 3, "{still}");
+    evaluate(&cdp, "document.getElementById('spin').style.animationPlayState = 'running'").await;
+
     // Recording transcoded to MP4 (needs ffmpeg).
     if which("ffmpeg") {
         call(&ctx, "recording", json!({ "action": "start", "path": "rec/clip.mp4", "frameRate": 10 })).await;
@@ -197,27 +207,14 @@ async fn network_capture_completes_out_of_process_iframe_documents() {
     let port = serve().await;
     let (ctx, root, _) = context(&cdp);
     goto(&cdp, "about:blank").await;
-    cdp.send("Target.setAutoAttach", json!({ "autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true }), None).await.unwrap();
-    // Let attached iframes run once the capture has enabled their Network domain.
-    let mut events = cdp.events();
-    let resume = cdp.clone();
-    let resumer = tokio::spawn(async move {
-        while let Ok(event) = events.recv().await {
-            if event.method == "Target.attachedToTarget" {
-                let session = event.params["sessionId"].as_str().unwrap_or("").to_string();
-                let resume = resume.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                    let _ = resume.send("Runtime.runIfWaitingForDebugger", json!({}), Some(&session)).await;
-                });
-            }
-        }
-    });
+    // Like the relay: iframes attach without waiting for the debugger, so their first Network events can be missed.
+    cdp.send("Target.setAutoAttach", json!({ "autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true }), None).await.unwrap();
     call(&ctx, "network", json!({ "action": "start", "resourceTypes": ["Document"] })).await;
     goto(&cdp, &format!("http://127.0.0.1:{port}/oopif")).await;
-    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let status = text(&call(&ctx, "network", json!({ "action": "status" })).await);
+    assert_eq!(status["pendingCount"], json!(0), "{status}");
     let stopped = text(&call(&ctx, "network", json!({ "action": "stop" })).await);
-    resumer.abort();
     let exchanges: Vec<Value> = stopped["exchanges"].as_array().unwrap().clone();
     let frame = exchanges.iter().find(|exchange| exchange["request"]["url"].as_str().unwrap().ends_with("/frame")).expect("the iframe document");
     assert_eq!(frame["response"]["status"], json!(200), "{stopped}");
@@ -225,5 +222,35 @@ async fn network_capture_completes_out_of_process_iframe_documents() {
     // HTML isn't returned and isn't fetched.
     assert_eq!(frame["response"]["body"]["truncated"], json!(false), "{stopped}");
     assert_eq!(stopped["capturedBodyBytes"], json!(0));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// Full-page screenshots must leave the viewport as it was, with or without an emulated viewport and scrollbars.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn full_page_screenshots_keep_the_viewport() {
+    let Some((_chrome, cdp)) = launch_with(&[]).await else {
+        eprintln!("skipping: no Chromium found");
+        return;
+    };
+    let port = serve().await;
+    let (ctx, root, _) = context(&cdp);
+    goto(&cdp, &format!("http://127.0.0.1:{port}/tall")).await;
+    let size = || async { evaluate(&cdp, "[innerWidth, innerHeight, devicePixelRatio]").await };
+    let before = size().await;
+    for _ in 0..3 {
+        call(&ctx, "screenshot", json!({ "fullPage": true })).await;
+        assert_eq!(size().await, before);
+    }
+    let viewport = text(&call(&ctx, "screenshot", json!({})).await);
+    assert_eq!(viewport["width"], before[0]);
+    cdp.send("Emulation.setDeviceMetricsOverride", json!({ "width": 600, "height": 400, "deviceScaleFactor": 1, "mobile": false }), None)
+        .await
+        .unwrap();
+    let emulated = size().await;
+    assert_eq!(emulated, json!([600, 400, 1]));
+    for _ in 0..3 {
+        call(&ctx, "screenshot", json!({ "fullPage": true })).await;
+        assert_eq!(size().await, emulated);
+    }
     std::fs::remove_dir_all(root).unwrap();
 }

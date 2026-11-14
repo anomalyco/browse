@@ -74,7 +74,7 @@ impl Drop for PendingHandoff {
             return;
         }
         if self.relay.st().handoffs.get(&self.session).is_some_and(|h| h.id == self.id) {
-            rlog!("handoff.cancelled", tabId = self.tab, session = self.session.clone());
+            rlog!("handoff.finished", tabId = self.tab, session = self.session.clone(), outcome = "cancelled", reason = "call stopped");
         }
         self.relay.finish_handoff_id(&self.session, &self.id, "cancelled");
         if tokio::runtime::Handle::try_current().is_ok() {
@@ -142,24 +142,6 @@ impl Relay {
         });
     }
 
-    /// Shows a tab its session is running in as merely attached, until the next refresh.
-    pub async fn present_attached(&self, tab: i64) {
-        let status = {
-            let st = self.st();
-            match desired(&st, tab) {
-                Some((mut status, _, _)) if status["state"] == "running" => {
-                    status["state"] = "attached".into();
-                    status
-                }
-                _ => return,
-            }
-        };
-        let _ = self.ext_tab(tab, "pageStatus.set", json!({ "status": status })).await;
-        if let Some(presented) = self.st().presented.get_mut(&tab) {
-            presented.status = None;
-        }
-    }
-
     pub fn refresh_session_presentation(self: &Arc<Self>, session: &str) {
         let tabs = self.st().session_tabs(session);
         for tab in tabs {
@@ -167,12 +149,12 @@ impl Relay {
         }
     }
 
-    pub fn call_started(self: &Arc<Self>, session: &str, id: u64, abort: tokio::task::AbortHandle) {
+    pub fn call_started(self: &Arc<Self>, session: &str, id: u64, abort: tokio::task::AbortHandle, pid: Option<u32>) {
         let first = {
             let mut st = self.st();
             let Some(entry) = st.sessions.get_mut(session) else { return };
             entry.touch();
-            entry.calls.insert(id, abort);
+            entry.calls.insert(id, crate::sessions::RunningCall { abort, pid });
             entry.calls.len() == 1
         };
         if first {
@@ -212,12 +194,24 @@ impl Relay {
             return;
         }
         let own = crate::serve::CALL.try_with(|id| *id).ok();
-        entry.stopped = Some(message.to_string());
-        for (id, abort) in &entry.calls {
+        for (id, call) in &entry.calls {
             if Some(*id) != own {
-                abort.abort();
+                entry.stopped.insert(*id, message.to_string());
+                call.abort.abort();
             }
         }
+    }
+
+    /// Ends the calls one process made in a session (it exited); the session's other callers carry on.
+    pub fn stop_client_calls(&self, session: &str, pid: u32, message: &str) -> usize {
+        let mut st = self.st();
+        let Some(entry) = st.sessions.get_mut(session) else { return 0 };
+        let mine: Vec<u64> = entry.calls.iter().filter(|(_, call)| call.pid == Some(pid)).map(|(id, _)| *id).collect();
+        for id in &mine {
+            entry.stopped.insert(*id, message.to_string());
+            entry.calls[id].abort.abort();
+        }
+        mine.len()
     }
 
     /// While a session works in a tab, the page sees it focused, so background tabs aren't throttled.
@@ -284,6 +278,7 @@ impl Relay {
                     target_id,
                     message: message.to_string(),
                     started_at: crate::util::now_iso(),
+                    pid: crate::serve::CLIENT.try_with(|pid| *pid).ok().flatten(),
                     done: Some(done),
                 },
             );
@@ -319,6 +314,15 @@ impl Relay {
             && let Some(mut handoff) = st.handoffs.remove(session) {
                 handoff.done.take().map(|d| d.send(outcome));
             }
+    }
+
+    /// Cancels the session's handoff if the process waiting for it is `pid`.
+    pub fn finish_client_handoff(self: &Arc<Self>, session: &str, pid: u32) {
+        let waiting = self.st().handoffs.get(session).is_some_and(|h| h.pid == Some(pid));
+        if waiting {
+            rlog!("handoff.finished", session = session, outcome = "cancelled", reason = "client exited", pid = pid);
+            self.finish_handoff(session, "cancelled");
+        }
     }
 
     pub fn finish_handoff(self: &Arc<Self>, session: &str, outcome: &'static str) {

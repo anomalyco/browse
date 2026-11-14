@@ -102,7 +102,7 @@ pub fn trajectory(from: Point, to: Point) -> Vec<(Point, f64)> {
     if distance < 2.0 {
         return Vec::new();
     }
-    let duration = ((90.0 + 110.0 * (distance / 40.0 + 1.0).log2()) * random(0.85, 1.25)).min(1100.0);
+    let duration = ((70.0 + 90.0 * (distance / 40.0 + 1.0).log2()) * random(0.85, 1.2)).min(700.0);
     let normal = Point { x: -dy / distance, y: dx / distance };
     let bow = if unit() < 0.5 { -1.0 } else { 1.0 } * random(0.04, 0.18) * distance;
     let c1 = Point { x: from.x + dx * random(0.2, 0.35) + normal.x * bow, y: from.y + dy * random(0.2, 0.35) + normal.y * bow };

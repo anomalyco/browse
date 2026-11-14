@@ -422,21 +422,28 @@ impl TabPage {
         }
         let info = self.frame(frame).ok_or_else(|| anyhow!("The frame is gone (it navigated away or was removed)."))?;
         let session = info.session.clone();
-        let created = self
-            .send(
-                "Page.createIsolatedWorld",
-                json!({ "frameId": frame, "worldName": self.world_name, "grantUniveralAccess": true }),
-                session.as_deref(),
-            )
-            .await?;
-        let context_id = created["executionContextId"].as_i64().ok_or_else(|| anyhow!("Chrome did not create an isolated world for the frame"))?;
-        let evaluated = self
-            .send(
-                "Runtime.evaluate",
-                json!({ "expression": scripts::helpers(), "contextId": context_id, "returnByValue": false, "objectGroup": WORLD_GROUP }),
-                session.as_deref(),
-            )
-            .await?;
+        // Bounded: the lock is per tab, so a frame that doesn't answer must not hold up every other frame.
+        let setup = async {
+            let created = self
+                .send(
+                    "Page.createIsolatedWorld",
+                    json!({ "frameId": frame, "worldName": self.world_name, "grantUniveralAccess": true }),
+                    session.as_deref(),
+                )
+                .await?;
+            let context_id = created["executionContextId"].as_i64().ok_or_else(|| anyhow!("Chrome did not create an isolated world for the frame"))?;
+            let evaluated = self
+                .send(
+                    "Runtime.evaluate",
+                    json!({ "expression": scripts::helpers(), "contextId": context_id, "returnByValue": false, "objectGroup": WORLD_GROUP }),
+                    session.as_deref(),
+                )
+                .await?;
+            Ok::<_, anyhow::Error>((context_id, evaluated))
+        };
+        let (context_id, evaluated) = tokio::time::timeout(Duration::from_secs(10), setup)
+            .await
+            .map_err(|_| anyhow!("The page did not answer within 10 s while browse set up its helpers (it may be busy or still navigating)"))??;
         if let Some(details) = evaluated.get("exceptionDetails") {
             bail!("browse could not set up its page helpers: {}", exception_message(details));
         }
@@ -659,13 +666,16 @@ impl TabPage {
         if self.dialog().is_some() || self.pending_navigation().is_some() {
             return;
         }
+        // All sessions at once, briefly: a frame session that doesn't answer must not hold up the result.
+        let mut releases = tokio::task::JoinSet::new();
         for session in sessions {
-            let _ = tokio::time::timeout(
-                Duration::from_secs(2),
-                self.shared.cdp.send("Runtime.releaseObjectGroup", json!({ "objectGroup": TRANSIENT_GROUP }), session.as_deref()),
-            )
-            .await;
+            let cdp = self.shared.cdp.clone();
+            releases.spawn(async move {
+                let _ = cdp.send("Runtime.releaseObjectGroup", json!({ "objectGroup": TRANSIENT_GROUP }), session.as_deref()).await;
+            });
         }
+        let _ = tokio::time::timeout(Duration::from_millis(400), async { while releases.join_next().await.is_some() {} }).await;
+        releases.detach_all();
     }
 
     pub fn media_emulation(&self) -> MediaEmulation {

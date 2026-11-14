@@ -125,6 +125,9 @@ impl Tool for SessionTool {
             "adopt" => {
                 relay.ensure_session(&target)?;
                 let tab = args.get("tabId").and_then(Value::as_i64);
+                if let Some(tab) = tab {
+                    relay.await_tab(tab).await;
+                }
                 let url = string(&args, "url");
                 let info = relay.adopt(&target, tab, url.as_deref())?;
                 set_current(&relay, &caller, &target);
@@ -193,7 +196,9 @@ impl Tool for TabsTool {
                     Some(tab) => tab,
                     None => relay.st().sessions.get(&ctx.session).and_then(|s| s.current).context("The session has no current tab; pass tabId")?,
                 };
-                relay.visible_tab(&ctx.session, tab)?;
+                relay.await_tab(tab).await;
+                relay.await_tab(tab).await;
+            relay.visible_tab(&ctx.session, tab)?;
                 let outcome = relay.close_or_release(tab).await?;
                 let current = relay.st().sessions.get(&ctx.session).and_then(|s| s.current);
                 let note = match current {
@@ -385,15 +390,18 @@ impl Tool for SettingsTool {
 
 struct TabsCleanupTool;
 
+/// How long the browser gets to look for other agents' idle tabs.
+const CLEANUP_BUDGET: Duration = Duration::from_secs(5);
+
 #[async_trait]
 impl Tool for TabsCleanupTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "tabs_cleanup".into(),
-            description: "Close tabs agents opened that nobody has used for a while (no agent command and not visited by the user). Tabs the user lent or pinned, the active tab, tabs playing audio and tabs waiting for a handoff stay open. `idleMinutes` applies to your current session's tabs; every other agent tab closes only once idle for the user's setting. To finish your own work, the session tool's reset or delete is more direct. browse also does this automatically after the user's idle setting (10 minutes unless they changed it).".into(),
+            description: "Close tabs agents opened that nobody has used for a while. Your session's own tabs close once no command used them for `idleMinutes` (default: the user's idle setting); 0 closes all of them except one waiting for a handoff. Tabs the user lent stay open (they're released instead by the session tool's reset or delete). Every other agent's tab closes only once idle for the user's setting, and never while it's pinned, active, playing audio or in use. To finish your own work, the session tool's reset or delete is more direct. browse also does this automatically after the user's idle setting (10 minutes unless they changed it).".into(),
             input_schema: object(
                 json!({
-                    "idleMinutes": { "type": "integer", "minimum": 0, "description": "Close your session's tabs idle at least this long; 0 closes all of them. Defaults to the user's setting." },
+                    "idleMinutes": { "type": "number", "minimum": 0, "description": "Close your session's tabs idle at least this long; 0 closes all of them. Defaults to the user's setting." },
                     "session": { "type": "string", "description": "Optional session id; defaults to your current session." },
                 }),
                 &[],
@@ -411,32 +419,50 @@ impl Tool for TabsCleanupTool {
         if links.is_empty() {
             bail!("{}", relay.not_connected_advice());
         }
+        let mut notes = Vec::new();
+        // The session's own tabs: the relay knows when it last used each, so it decides, the same before and after a
+        // restart. The user's setting stands in when no idleMinutes was given.
+        let own_minutes = match minutes {
+            Some(minutes) => Some(minutes),
+            None => match tokio::time::timeout(CLEANUP_BUDGET, relay.ext_link(&links[0], "settings.get", Value::Null)).await {
+                Ok(Ok(answer)) => crate::settings::from_extension(&answer)
+                    .ok()
+                    .and_then(|values| values.into_iter().find(|(k, _)| k == "idleMinutes"))
+                    .and_then(|(_, v)| v.parse::<f64>().ok()),
+                _ => {
+                    notes.push("The browser didn't say what the user's idle setting is, so your session's tabs were left alone.".to_string());
+                    None
+                }
+            },
+        };
         let mut closed = Vec::new();
-        let mut failures = Vec::new();
-        for link in links {
-            let own: Vec<i64> = {
+        if let Some(limit) = own_minutes {
+            let limit = Duration::from_secs_f64(limit * 60.0);
+            let idle: Vec<(i64, String, String, u64)> = {
                 let st = relay.st();
-                st.session_tabs(&ctx.session).into_iter().filter_map(|tab| st.browser_tab(tab).filter(|(l, _)| Arc::ptr_eq(l, &link)).map(|(_, local)| local)).collect()
+                st.session_tabs(&ctx.session)
+                    .into_iter()
+                    .filter_map(|tab| st.tabs.get(&tab))
+                    .filter(|t| t.owner == Owner::Relay && t.last_used.elapsed() >= limit && st.handoff_for_tab(t.id).is_none())
+                    .map(|t| (t.id, t.title.clone(), st.link(&t.link_key).map(|l| l.id.clone()).unwrap_or_default(), t.last_used.elapsed().as_secs() / 60))
+                    .collect()
             };
-            // The extension never closes a tab whose page says an agent is running in it, and this call is running
-            // in the session: show its own tabs as idle while the extension looks.
-            let shown: Vec<i64> = {
-                let st = relay.st();
-                st.session_tabs(&ctx.session).into_iter().filter(|tab| st.tabs.get(tab).is_some_and(|t| t.link_key == link.key)).collect()
-            };
-            for tab in &shown {
-                relay.present_attached(*tab).await;
+            for (tab, title, browser, idle_minutes) in idle {
+                match tokio::time::timeout(CLEANUP_BUDGET, relay.close_or_release(tab)).await {
+                    Ok(Ok(_)) => closed.push(json!({ "tabId": tab, "title": title, "idleMinutes": idle_minutes, "browser": browser })),
+                    Ok(Err(error)) => notes.push(format!("Tab {tab} didn't close: {error}")),
+                    Err(_) => notes.push(format!("Tab {tab} didn't close within {} s.", CLEANUP_BUDGET.as_secs())),
+                }
             }
-            let mut own = json!({ "tabIds": own });
+        }
+        // Everyone else's tabs: the extension's own idle rules, with a bounded wait.
+        for link in links {
+            let mut own = json!({ "tabIds": [] });
             if let Some(minutes) = minutes {
                 own["idleMinutes"] = minutes.into();
             }
-            let answer = relay.ext_link(&link, "tabs.cleanup", json!({ "own": own })).await;
-            for tab in shown {
-                relay.refresh_presentation(tab, false);
-            }
-            match answer {
-                Ok(result) => {
+            match tokio::time::timeout(CLEANUP_BUDGET, relay.ext_link(&link, "tabs.cleanup", json!({ "own": own }))).await {
+                Ok(Ok(result)) => {
                     for tab in result["closed"].as_array().into_iter().flatten() {
                         let mut tab = tab.clone();
                         if let Some(local) = tab["tabId"].as_i64() {
@@ -446,13 +472,15 @@ impl Tool for TabsCleanupTool {
                         closed.push(tab);
                     }
                 }
-                Err(error) => failures.push(format!("{}: {error}", link.id)),
+                Ok(Err(error)) => notes.push(format!("{}: other agents' tabs weren't checked: {error}", link.id)),
+                Err(_) => notes.push(format!("{}: the browser didn't finish checking other agents' tabs within {} s.", link.id, CLEANUP_BUDGET.as_secs())),
             }
         }
-        if closed.is_empty() && !failures.is_empty() {
-            bail!("{}", failures.join("; "));
+        let mut output = json!({ "closed": closed });
+        if !notes.is_empty() {
+            output["notes"] = notes.into();
         }
-        Ok(json_output(json!({ "closed": closed })))
+        Ok(json_output(output))
     }
 }
 

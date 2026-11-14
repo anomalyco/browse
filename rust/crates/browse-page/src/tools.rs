@@ -39,9 +39,17 @@ impl Tool for PageTool {
 
     async fn call(&self, ctx: ToolContext, args: Value) -> Result<ToolOutput> {
         let args = if args.is_null() { json!({}) } else { args };
-        match (self.handler)(ctx, args).await {
-            Ok(output) => Ok(output),
-            Err(error) => Ok(ToolOutput::error(error.to_string())),
+        // Every call is bounded as a whole, so a browser or relay that stops answering can't hold it past its
+        // timeout (each tool's own waits finish well inside this).
+        let limit = overall_limit(self.name, &args);
+        match tokio::time::timeout(limit, (self.handler)(ctx, args)).await {
+            Ok(Ok(output)) => Ok(output),
+            Ok(Err(error)) => Ok(ToolOutput::error(error.to_string())),
+            Err(_) => Ok(ToolOutput::error(format!(
+                "{} did not finish within {} s: the browser stopped answering (the relay or extension may be restarting). Try again; if it keeps happening, check the tab",
+                self.name,
+                limit.as_secs()
+            ))),
         }
     }
 }
@@ -69,6 +77,26 @@ pub fn tools() -> Vec<Arc<dyn Tool>> {
 }
 
 // Shared argument handling.
+
+/// The most a whole tool call may take: its own timeout (or default) plus room for the work around it.
+fn overall_limit(name: &str, args: &Value) -> Duration {
+    let default_ms = match name {
+        "navigate" | "eval" | "webmcp" => 30_000,
+        // Large files go to the page in many chunks.
+        "upload" => 120_000,
+        _ => ACTION_TIMEOUT_MS,
+    };
+    let mut ms = args.get("timeout").and_then(Value::as_u64).unwrap_or(default_ms).max(default_ms.min(10_000));
+    if name == "wait_for" {
+        ms += args.get("ms").and_then(Value::as_u64).unwrap_or(0).min(120_000);
+    }
+    if name == "fill" {
+        // Each field gets the timeout.
+        let fields = args.get("fields").and_then(Value::as_array).map(Vec::len).unwrap_or(1).max(1) as u64;
+        ms = ms.saturating_mul(fields);
+    }
+    Duration::from_millis(ms.min(600_000) + 10_000)
+}
 
 fn tab_arg(args: &Value) -> Option<i64> {
     args.get("tab").and_then(Value::as_i64)
@@ -452,10 +480,19 @@ async fn focus_target(c: &Ctx, input: &mut Input<'_>, args: &Value) -> Result<Op
     let Some(spec) = Spec::from_args(args) else { return Ok(None) };
     let timeout = timeout_arg(args, ACTION_TIMEOUT_MS);
     if input.human() {
-        // A person clicks into the field before typing.
+        // A person clicks into the field before typing, unless it already has focus.
+        let resolved = target::resolve(&c.page, &c.session, &spec, ResolveOptions { timeout, act: true }).await?;
+        if c.page.call_element(&resolved.element, "isFocused", vec![], false).await?.as_bool() == Some(true) {
+            return Ok(Some(target_label(&spec, &resolved.label)));
+        }
         let (resolved, at) = actions::locate(&c.page, &c.session, input, &spec, pointer_options(args, true)).await?;
+        let was_focused = c.page.call_element(&resolved.element, "isFocused", vec![], false).await?.as_bool() == Some(true);
         input.click(at, "left", 1).await?;
         let label = target_label(&spec, &resolved.label);
+        // The click lands mid-field; typing into a field that wasn't focused appends, unless a position was given.
+        if !was_focused && args.get("position").is_none() {
+            c.page.call_element(&resolved.element, "caretToEnd", vec![], true).await?;
+        }
         if c.page.call_element(&resolved.element, "isFocused", vec![], false).await?.as_bool() != Some(true) {
             // The click didn't focus it (a custom widget, or the click landed on a non-focusable part): focus it.
             c.page.call_element(&resolved.element, "focusForTyping", vec![], true).await?;
@@ -530,7 +567,7 @@ async fn press(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
 
 async fn select_options(c: &Ctx, element: &crate::page::Element, options: &[Value], timeout: Duration) -> Result<Value> {
     // Options that load late get a short wait; a select whose options are all there fails fast with them listed.
-    let deadline = std::time::Instant::now() + timeout.min(Duration::from_millis(1_500));
+    let deadline = std::time::Instant::now() + timeout.min(Duration::from_millis(500));
     loop {
         let result = c.page.call_element(element, "selectOptions", vec![v(options)], true).await?;
         match result.as_str() {
@@ -683,28 +720,8 @@ async fn scroll(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
                 out.insert("target".into(), target_label(spec.as_ref().unwrap(), &resolved.label));
             }
             let frame = element.as_ref().map(|r| r.element.frame.clone()).unwrap_or_else(|| main.clone());
-            if let Some(edge) = &to {
-                let arg = element.as_ref().map(|r| Arg::Element(r.element.clone())).unwrap_or(Arg::Value(Value::Null));
-                c.page.call_value(&frame, "scrollTo", vec![arg, v(edge)], false).await?;
-            } else if dx != 0.0 || dy != 0.0 {
-                let at = match &spec {
-                    Some(spec) => {
-                        let (_, at) = actions::locate(&c.page, &c.session, input, spec, PointerOptions { timeout, force: false, position: None, hit_test: false, enabled: false }).await?;
-                        at
-                    }
-                    None => {
-                        let vp = c.page.call_value(&main, "viewport", vec![], false).await?;
-                        input.pointer().unwrap_or(Point { x: vp["width"].as_f64().unwrap_or(800.0) / 2.0, y: vp["height"].as_f64().unwrap_or(600.0) / 2.0 })
-                    }
-                };
-                input.wheel(at, dx, dy).await?;
-            } else if let Some(resolved) = &element {
-                actions::scroll_into_view(&c.page, input, &resolved.element).await?;
-            } else {
-                bail!("scroll needs deltaX/deltaY, to, or a ref/selector to scroll into view");
-            }
             // Report the scroll position of what was scrolled: the element when it scrolls itself, else its
-            // document; sampled once smooth scrolling has settled.
+            // document.
             let scrolls_itself = match &element {
                 Some(_) if to.is_some() => true,
                 Some(resolved) if dx != 0.0 || dy != 0.0 => {
@@ -720,18 +737,51 @@ async fn scroll(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
                     _ => c.page.call_value(&frame, "scrollState", vec![Arg::Value(Value::Null)], false).await,
                 }
             };
-            let settle_until = std::time::Instant::now() + Duration::from_millis(1_000);
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let mut state = read().await?;
-            while std::time::Instant::now() < settle_until {
-                tokio::time::sleep(Duration::from_millis(80)).await;
-                let next = read().await?;
-                let same = next["x"] == state["x"] && next["y"] == state["y"];
-                state = next;
-                if same {
-                    break;
+            let start = read().await?;
+            if let Some(edge) = &to {
+                let arg = element.as_ref().map(|r| Arg::Element(r.element.clone())).unwrap_or(Arg::Value(Value::Null));
+                c.page.call_value(&frame, "scrollTo", vec![arg, v(edge)], false).await?;
+            } else if dx != 0.0 || dy != 0.0 {
+                let at = match &spec {
+                    Some(spec) => {
+                        let (_, at) = actions::locate(&c.page, &c.session, input, spec, PointerOptions { timeout, force: false, position: None, hit_test: false, enabled: false }).await?;
+                        at
+                    }
+                    None => {
+                        // A page-level scroll goes over the page's own scroller, not a nested scrollable area the
+                        // pointer happens to be over.
+                        let point = c.page.call_value(&main, "pageScrollPoint", vec![], false).await.unwrap_or(Value::Null);
+                        match (point["x"].as_f64(), point["y"].as_f64()) {
+                            (Some(x), Some(y)) => Point { x, y },
+                            _ => {
+                                let vp = c.page.call_value(&main, "viewport", vec![], false).await?;
+                                Point { x: vp["width"].as_f64().unwrap_or(800.0) / 2.0, y: vp["height"].as_f64().unwrap_or(600.0) / 2.0 }
+                            }
+                        }
+                    }
+                };
+                input.wheel(at, dx, dy).await?;
+                let moved = settle_scroll(&read, &start).await?;
+                // Right after a navigation Chrome can drop wheel events it can't hit-test yet: send it again, at
+                // once, when nothing moved but there was room to.
+                let room = if dy > 0.0 {
+                    start["y"].as_f64().unwrap_or(0.0) + start["clientHeight"].as_f64().unwrap_or(0.0) < start["height"].as_f64().unwrap_or(0.0) - 2.0
+                } else if dy < 0.0 {
+                    start["y"].as_f64().unwrap_or(0.0) > 0.0
+                } else if dx > 0.0 {
+                    start["x"].as_f64().unwrap_or(0.0) + start["clientWidth"].as_f64().unwrap_or(0.0) < start["width"].as_f64().unwrap_or(0.0) - 2.0
+                } else {
+                    start["x"].as_f64().unwrap_or(0.0) > 0.0
+                };
+                if moved["x"] == start["x"] && moved["y"] == start["y"] && room {
+                    input.wheel_direct(at, dx, dy).await?;
                 }
+            } else if let Some(resolved) = &element {
+                actions::scroll_into_view(&c.page, input, &resolved.element).await?;
+            } else {
+                bail!("scroll needs deltaX/deltaY, to, or a ref/selector to scroll into view");
             }
+            let state = settle_scroll(&read, &start).await?;
             let y = state["y"].as_f64().unwrap_or(0.0);
             let height = state["height"].as_f64().unwrap_or(0.0);
             let client = state["clientHeight"].as_f64().unwrap_or(0.0);
@@ -744,6 +794,34 @@ async fn scroll(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
         })
     })
     .await
+}
+
+/// The scroll position once scrolling settles: it moved from `start` and held still for 150 ms, or it never moved
+/// within 400 ms; at most about 1.2 s.
+async fn settle_scroll<F, Fut>(read: &F, start: &Value) -> Result<Value>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<Value>>,
+{
+    let began = std::time::Instant::now();
+    let mut state = read().await?;
+    let mut still_since = std::time::Instant::now();
+    while began.elapsed() < Duration::from_millis(1_200) {
+        let moved = state["x"] != start["x"] || state["y"] != start["y"];
+        if moved && still_since.elapsed() >= Duration::from_millis(150) {
+            break;
+        }
+        if !moved && began.elapsed() >= Duration::from_millis(400) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let next = read().await?;
+        if next["x"] != state["x"] || next["y"] != state["y"] {
+            still_since = std::time::Instant::now();
+        }
+        state = next;
+    }
+    Ok(state)
 }
 
 // eval
@@ -786,12 +864,18 @@ async fn eval(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
                 Some(resolved) => eval::element_target(&page, &resolved.element, main_world).await?,
                 None => eval::frame_target(&page, &frame, main_world).await?,
             };
-            let compile = page.world(&frame).await.ok().map(|w| (w.context_id, w.session));
+            let compile = Some(frame.clone());
             Ok::<_, anyhow::Error>((target, compile))
         };
         let (target, compile) = match run.await {
             Ok(ready) => ready,
-            Err(error) if eval::is_lost(&error) && attempt < 2 && element.is_none() => continue,
+            Err(error) if eval::is_lost(&error) && attempt < 2 && element.is_none() && generation(&page) == started_generation => continue,
+            Err(error) if eval::is_lost(&error) => {
+                c.page.release().await;
+                page.wait_until(Duration::from_millis(1_000), Duration::from_millis(50), |page| generation(page) != started_generation || page.pending_navigation().is_some()).await;
+                let navigated = generation(&page) != started_generation || page.pending_navigation().is_some();
+                return Err(eval::lost_context(&page, navigated));
+            }
             Err(error) => {
                 c.page.release().await;
                 return Err(error);
@@ -803,15 +887,18 @@ async fn eval(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
         let result = tokio::time::timeout(timeout, eval::run(&page, &target, compile, &expression, arg.as_ref(), callable)).await;
         match result {
             Err(_) => {
-                let stopped = eval::stop_if_busy(&page, session_used.as_deref()).await;
+                let stopped = eval::stop(&page, session_used.as_deref()).await;
                 c.page.release().await;
-                if stopped {
-                    bail!("eval timed out after {} ms; the script was still running, so browse stopped it", timeout.as_millis());
+                match stopped {
+                    eval::Stop::Stopped => bail!("eval timed out after {} ms; the script was still running, so browse stopped it", timeout.as_millis()),
+                    eval::Stop::Idle => bail!("eval timed out after {} ms waiting for its result (the code may still finish in the page)", timeout.as_millis()),
+                    eval::Stop::Stuck => bail!("eval timed out after {} ms and browse could not stop the script: the tab is not responding. Close or reload the tab", timeout.as_millis()),
                 }
-                bail!("eval timed out after {} ms (the code may still finish in the page)", timeout.as_millis());
             }
             Ok(Err(error)) if eval::is_lost(&error) || error.to_string().contains("Inspected target navigated") => {
-                let navigated = generation(&page) != started_generation;
+                // The navigation's events can trail the error: give them a moment.
+                page.wait_until(Duration::from_millis(1_000), Duration::from_millis(50), |page| generation(page) != started_generation || page.pending_navigation().is_some()).await;
+                let navigated = generation(&page) != started_generation || page.pending_navigation().is_some();
                 // A stale context that ran nothing: run it once more in a fresh one.
                 if !navigated && attempt < 2 && element.is_none() {
                     continue;
@@ -826,7 +913,7 @@ async fn eval(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     let (value, hint) = match outcome? {
         eval::Outcome::Value(value) => (value, None),
         eval::Outcome::Undefined { block } => {
-            let hint = (block && !expression.contains("return")).then_some(
+            let hint = (block && !eval::has_return(&expression)).then_some(
                 "The code ran as statements and returned nothing: statements must `return` their result (e.g. `const t = document.title; return t`).",
             );
             (Value::Null, hint)
@@ -1057,8 +1144,8 @@ fn validate_emulate(args: &Value) -> Result<()> {
         Some(Value::Object(viewport)) => {
             for key in ["width", "height"] {
                 match viewport.get(key).and_then(Value::as_u64) {
-                    Some(n) if (1..=10_000_000).contains(&n) => {}
-                    _ => bail!("viewport {key} must be a positive integer (CSS pixels); got {}", viewport.get(key).map(Value::to_string).unwrap_or_else(|| "nothing".into())),
+                    Some(n) if (1..=10_000).contains(&n) => {}
+                    _ => bail!("viewport {key} must be a whole number of CSS pixels from 1 to 10000; got {}", viewport.get(key).map(Value::to_string).unwrap_or_else(|| "nothing".into())),
                 }
             }
             if let Some(scale) = viewport.get("deviceScaleFactor")
@@ -1375,7 +1462,7 @@ fn props(value: Value) -> Map<String, Value> {
     map(value)
 }
 
-const NAVIGATE: &str = "Go to a URL, or back/forward/reload, and wait for the page. Returns JSON: url, title, status (the HTTP status, when known), navigated, from, and when relevant redirects, pending (a navigation still loading when the timeout hit; url is what the tab shows meanwhile), dialog, newTabs, challenge (a bot check or block page was detected; follow its warning, usually handoff) and warning. An HTTP error status is a result, not a failure. A bare host gets https:// (\":3000\" means http://localhost:3000); URLs with a scheme are used as given, and javascript: URLs are refused (use eval). Navigations outside a session's domain allowlist are refused.";
+const NAVIGATE: &str = "Go to a URL, or back/forward/reload, and wait for the page. Returns JSON: url, title, status (the HTTP status, when known), navigated, from, and when relevant redirects, pending (a navigation still loading when the timeout hit; url is what the tab shows meanwhile), dialog, newTabs, challenge (a bot check or block page was detected; follow its warning, usually handoff) and warning. An HTTP error status is a result, not a failure. A bare host gets https:// (\":3000\" means http://localhost:3000); http(s), about:blank, data:, blob:, file: and view-source: URLs are used as given; javascript: (use eval) and app schemes such as mailto: or tel: are refused. Navigations outside a session's domain allowlist are refused.";
 
 fn navigate_schema() -> Value {
     object(
@@ -1543,7 +1630,7 @@ fn scroll_schema() -> Value {
     )
 }
 
-const EVAL: &str = "Run JavaScript in the page and return its result as JSON. An expression's value is returned (promises are awaited, await works); statements (const/let, loops, several lines) run as an async function body, so they must `return` their result. Declarations stay local to the call and never leak into the page. DOM nodes come back as \"<tag#id.class>\", Map as an object, Set as an array, Date as an ISO string, Errors as {name, message}, cycles as \"[Circular]\". A script still running at the timeout is stopped. By default it runs in browse's isolated world: it sees the DOM but not the page's own JS globals, and the page can't see it. world \"main\" runs in the page's own world (window variables, frameworks) and is visible to it. With ref/selector or arg, expression must be a function, called as (element, arg) => ...; e.g. expression \"(el) => el.href\" with ref \"e5\". frame (a selector of an <iframe>) runs in that frame. Results over 100k characters are cut.";
+const EVAL: &str = "Run JavaScript in the page and return its result as JSON. An expression's value is returned (promises are awaited, await works). Statements (const/let, loops, several lines) return the value of their last expression statement, like a console (`const a = 3; a` gives 3), or what they `return`. Declarations stay local to the call and never leak into the page. DOM nodes come back as \"<tag#id.class>\", Map as an object, Set as an array, Date as an ISO string, Errors as {name, message}, cycles as \"[Circular]\". A script still running at the timeout is stopped. By default it runs in browse's isolated world: it sees the DOM but not the page's own JS globals, and the page can't see it. world \"main\" runs in the page's own world (window variables, frameworks) and is visible to it. With ref/selector or arg, expression must be a function, called as (element, arg) => ...; e.g. expression \"(el) => el.href\" with ref \"e5\". frame (a selector of an <iframe>) runs in that frame. Results over 100k characters are cut.";
 
 fn eval_schema() -> Value {
     object(

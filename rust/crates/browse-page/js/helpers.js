@@ -37,6 +37,13 @@
     captureWithin(element, settings) {
       return capture(element, settings)
     },
+    // A within root given as a snapshot ref, resolved as actions resolve it (selector chains through shadow roots
+    // included). { refStatus } when it doesn't resolve to one element.
+    captureRef(id, role, name, selector, settings) {
+      const found = this.refResolve(id, role, name, selector)
+      if (typeof found === "string") return { refStatus: found }
+      return capture(found, settings)
+    },
     // A within root given as a Playwright selector: the only match, else the first visible one with a note, as the
     // CSS path in capture does. null when nothing matches.
     captureSelector(selector, settings) {
@@ -72,24 +79,55 @@
     },
 
     // Snapshot refs: the elements matching the ref's selector that still have its role and exact name and are not
-    // hidden from assistive technology. The element, "hidden" (a match exists but is hidden), "none", or
-    // "multiple:<count>:<preview>\n<preview>" when several elements match (a ref must identify one element).
-    refResolve(role, name, selector) {
+    // hidden from assistive technology.
+    refMatches(role, name, selector) {
       const naming = createNaming()
       const bySelector = selector.includes(" >> ") ? this.queryAll(selector) : Array.from(document.querySelectorAll(selector))
       const sameRole = role == null ? bySelector : bySelector.filter((element) => naming.roleFor(element) === role)
       const matches = role == null
         ? sameRole
         : sameRole.filter((element) => !hiddenFromAria(element) && (name == null || naming.identityNameFor(element, role) === name))
-      if (matches.length === 1) return matches[0]
-      if (matches.length > 1) {
-        const previews = matches.slice(0, 4).map((element) => {
-          const elementRole = naming.roleFor(element)
-          const label = elementRole ? `${elementRole} ${quoted(naming.identityNameFor(element, elementRole) || "")}` : element.localName
-          const html = element.outerHTML.replace(/\s+/g, " ")
-          return `${label}: ${html.length > 100 ? html.slice(0, 100) + "…" : html}`
-        })
-        return `multiple:${matches.length}:${previews.join("\n")}`
+      return { naming, sameRole, matches }
+    },
+    // Remembers the element behind each ref of a snapshot (weakly, in this world only, invisible to the page), so a
+    // ref keeps meaning that element even when a lookalike is inserted before it.
+    rememberRefs(refs) {
+      this.refElements = new Map()
+      for (const ref of refs) {
+        try {
+          const { matches } = this.refMatches(ref.role, ref.name, ref.selector)
+          if (matches.length === 1) this.refElements.set(ref.id, new WeakRef(matches[0]))
+        } catch {}
+      }
+      return this.refElements.size
+    },
+    // The element, "hidden" (a match exists but is hidden), "none", or "multiple:<count>:<preview>\n<preview>" when
+    // browse can't tell which element the ref meant. The remembered element wins while it is in the page; only when
+    // it is gone does the ref fall back to its role, name and selector.
+    refResolve(id, role, name, selector) {
+      const naming = createNaming()
+      const remembered = this.refElements?.get(id)?.deref()
+      if (remembered && remembered.isConnected) {
+        if (role == null) return remembered
+        if (naming.roleFor(remembered) !== role || (name != null && naming.identityNameFor(remembered, role) !== name)) return "none"
+        return hiddenFromAria(remembered) ? "hidden" : remembered
+      }
+      const { sameRole, matches } = this.refMatches(role, name, selector)
+      const preview = (list) => list.slice(0, 4).map((element) => {
+        const elementRole = naming.roleFor(element)
+        const label = elementRole ? `${elementRole} ${quoted(naming.identityNameFor(element, elementRole) || "")}` : element.localName
+        const html = element.outerHTML.replace(/\s+/g, " ")
+        return `${label}: ${html.length > 100 ? html.slice(0, 100) + "…" : html}`
+      }).join("\n")
+      if (matches.length > 1) return `multiple:${matches.length}:${preview(matches)}`
+      if (matches.length === 1) {
+        // The original element was replaced: accept the new one only when nothing else reads the same.
+        if (remembered && role != null) {
+          const local = matches[0].localName
+          const lookalikes = Array.from(document.querySelectorAll(local)).filter((element) => naming.roleFor(element) === role && !hiddenFromAria(element) && (name == null || naming.identityNameFor(element, role) === name))
+          if (lookalikes.length > 1) return `multiple:${lookalikes.length}:${preview(lookalikes)}`
+        }
+        return matches[0]
       }
       if (role != null && sameRole.some(hiddenFromAria)) return "hidden"
       return "none"
@@ -358,6 +396,12 @@
       if (active === target) return "ok"
       const result = this.inj.focusNode(target, false)
       if (result !== "done") return result
+      this.caretToEnd(target)
+      return "ok"
+    },
+    // Puts the caret after the field's text (inputs, textareas, contenteditable).
+    caretToEnd(element) {
+      const target = this.inj.retarget(element, "follow-label") || element
       try {
         if ((target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) && typeof target.value === "string") {
           const end = target.value.length
@@ -371,7 +415,6 @@
           selection.addRange(range)
         }
       } catch {}
-      return "ok"
     },
     // Whether a fill result may show the value: not for passwords and one-time codes.
     isSecret(element) {
@@ -448,12 +491,44 @@
       const root = document.scrollingElement || document.documentElement
       return { x: scrollX, y: scrollY, width: root.scrollWidth, height: root.scrollHeight, clientWidth: root.clientWidth, clientHeight: root.clientHeight }
     },
+    // A viewport point over the page's own scroller, not inside a nested scrollable area; null when none is found.
+    pageScrollPoint() {
+      const root = document.scrollingElement || document.documentElement
+      const nested = (element) => {
+        for (let e = element; e && e !== root && e !== document.body && e !== document.documentElement; e = e.parentElement) {
+          const style = getComputedStyle(e)
+          const scrollsY = /(auto|scroll|overlay)/.test(style.overflowY) && e.scrollHeight > e.clientHeight + 1
+          const scrollsX = /(auto|scroll|overlay)/.test(style.overflowX) && e.scrollWidth > e.clientWidth + 1
+          if (scrollsY || scrollsX) return true
+        }
+        return false
+      }
+      const width = innerWidth, height = innerHeight
+      const points = [[0.5, 0.5]]
+      for (const fy of [0.3, 0.7, 0.15, 0.85]) for (const fx of [0.5, 0.25, 0.75, 0.1, 0.9]) points.push([fx, fy])
+      for (const [fx, fy] of points) {
+        const x = Math.round(width * fx), y = Math.round(height * fy)
+        const element = document.elementFromPoint(x, y)
+        if (element && element.localName !== "iframe" && !nested(element)) return { x, y }
+      }
+      return null
+    },
     scrollTo(element, edge) {
       const target = element || document.scrollingElement || document.documentElement
       if (edge === "top") target.scrollTo({ top: 0, behavior: "instant" })
       else if (edge === "bottom") target.scrollTo({ top: target.scrollHeight, behavior: "instant" })
       else if (edge === "left") target.scrollTo({ left: 0, behavior: "instant" })
       else if (edge === "right") target.scrollTo({ left: target.scrollWidth, behavior: "instant" })
+    },
+
+    // Whether code parses as an async function body; compiling runs nothing. null when a policy blocks compiling.
+    parses(body) {
+      try {
+        new (Object.getPrototypeOf(async function () {}).constructor)(body)
+        return true
+      } catch (error) {
+        return error instanceof SyntaxError ? false : null
+      }
     },
 
     // Page state.

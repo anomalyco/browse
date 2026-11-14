@@ -15,6 +15,12 @@ use crate::mkv::{MjpegWriter, jpeg_size};
 
 /// How long a screencast may stay silent before screenshots stand in for it.
 const FALLBACK_GRACE: Duration = Duration::from_millis(1_500);
+/// How long the screencast may go quiet mid-recording before screenshots fill in.
+const QUIET_GRACE: Duration = Duration::from_millis(400);
+/// Longest wait for one fallback screenshot.
+const MAX_FALLBACK_WAIT: Duration = Duration::from_secs(3);
+/// Slowest fallback rate while screenshots keep coming back identical.
+const MAX_FALLBACK_BACKOFF: Duration = Duration::from_secs(1);
 /// Screenshots are slower than screencast frames; this many per second at most.
 const MAX_FALLBACK_FRAME_RATE: u32 = 10;
 /// Never run more than this many ffmpeg processes at once; each is already multithreaded.
@@ -53,14 +59,18 @@ impl Screencast {
         let (stop, mut stopped) = oneshot::channel::<()>();
         let task = tokio::spawn(async move {
             let interval = Duration::from_millis(1_000 / frame_rate.clamp(1, MAX_FALLBACK_FRAME_RATE) as u64);
+            // Screenshots stand in whenever the screencast goes quiet: Chrome stops painting background and
+            // occluded tabs, and sends nothing while a page doesn't change. Identical screenshots back off.
             let mut next_fallback = tokio::time::Instant::now() + FALLBACK_GRACE;
-            let mut real_frames = false;
+            let mut backoff = interval;
+            let mut previous: Option<Arc<Vec<u8>>> = None;
             loop {
                 tokio::select! {
                     _ = &mut stopped => break,
                     event = events.recv() => match event {
                         Ok(event) if event.method == "Page.screencastFrame" && event.session_id.is_none() => {
-                            real_frames = true;
+                            next_fallback = tokio::time::Instant::now() + QUIET_GRACE;
+                            backoff = interval;
                             if let Some(id) = event.params.get("sessionId").cloned() {
                                 let ack = cdp.clone();
                                 tokio::spawn(async move {
@@ -68,22 +78,26 @@ impl Screencast {
                                 });
                             }
                             if let Some(frame) = decode_frame(&event.params, false) {
+                                previous = Some(frame.jpeg.clone());
                                 sink.lock().unwrap().frame(frame);
                             }
                         }
                         Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
                         Err(broadcast::error::RecvError::Closed) => break,
                     },
-                    _ = tokio::time::sleep_until(next_fallback), if !real_frames => {
+                    _ = tokio::time::sleep_until(next_fallback) => {
                         let started = tokio::time::Instant::now();
-                        let shot = cdp.send("Page.captureScreenshot", json!({
+                        let shot = tokio::time::timeout(MAX_FALLBACK_WAIT, cdp.send("Page.captureScreenshot", json!({
                             "format": "jpeg", "quality": quality, "fromSurface": true, "captureBeyondViewport": false
-                        }), None).await;
-                        if let Ok(shot) = shot
+                        }), None)).await;
+                        if let Ok(Ok(shot)) = shot
                             && let Some(frame) = decode_frame(&shot, true) {
+                                let unchanged = previous.as_ref().is_some_and(|previous| **previous == *frame.jpeg);
+                                backoff = if unchanged { (backoff * 2).min(MAX_FALLBACK_BACKOFF) } else { interval };
+                                previous = Some(frame.jpeg.clone());
                                 sink.lock().unwrap().frame(frame);
                             }
-                        next_fallback = started + interval;
+                        next_fallback = started + backoff;
                     }
                 }
             }

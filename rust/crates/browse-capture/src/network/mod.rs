@@ -24,6 +24,8 @@ use model::{Budget, CapturedRequest, CapturedResponse, MAX_ENTRIES, body_can_fit
 
 const DEFAULT_MAX_DURATION_MS: i64 = 30 * 60_000;
 const MAX_FINALIZERS: usize = 4;
+/// How long an out-of-process iframe's own Network events get before its document is completed from what is known.
+const CHILD_DOCUMENT_GRACE: Duration = Duration::from_millis(1_000);
 
 #[derive(Default)]
 pub(crate) struct NetworkState {
@@ -96,7 +98,9 @@ struct Inner {
     pending: HashMap<Key, Pending>,
     /// By requestId.
     request_extra: HashMap<String, Vec<Header>>,
-    response_extra: HashMap<String, Vec<Header>>,
+    response_extra: HashMap<String, ExtraResponse>,
+    /// Out-of-process iframes and workers attached to the tab: target id → session.
+    children: HashMap<String, String>,
     entries: Vec<CapturedEntry>,
     next_id: usize,
     budget: Budget,
@@ -117,6 +121,36 @@ impl Inner {
         let key = self.pending_key(key)?;
         self.pending.remove(&key)
     }
+
+    /// A document request that was handed to an out-of-process iframe. Through chrome.debugger the iframe's session
+    /// attaches without waiting for the debugger, so its response and loadingFinished can come before its Network
+    /// domain is on and never arrive. Its status is known from the raw response headers (ExtraInfo) or a
+    /// responseReceived, and the attached iframe means the document was committed.
+    fn committed_in_child(&self, pending: &Pending) -> bool {
+        pending.resource_type == "Document" && pending.frame_id.as_ref().is_some_and(|frame| self.children.contains_key(frame))
+    }
+
+    /// Fills in a missing response from ExtraInfo; true when the request now has one.
+    fn known_response(&self, pending: &mut Pending) -> bool {
+        if pending.response.is_none()
+            && let Some(extra) = self.response_extra.get(&pending.request_id)
+            && let Some(status) = extra.status
+        {
+            pending.response = Some(ResponseInfo {
+                status,
+                status_text: String::new(),
+                headers: extra.headers.clone(),
+                mime_type: model::content_type(&extra.headers).map(|mime| mime.split(';').next().unwrap_or("").trim().to_string()),
+            });
+        }
+        pending.response.is_some()
+    }
+}
+
+/// Raw response headers and status from Network.responseReceivedExtraInfo.
+struct ExtraResponse {
+    headers: Vec<Header>,
+    status: Option<i64>,
 }
 
 struct Pending {
@@ -138,6 +172,8 @@ struct Pending {
     failure: Option<String>,
     /// Decoded body bytes reported by Network.dataReceived.
     data_length: usize,
+    /// The frame that made the request (for an iframe's document, the iframe; an out-of-process iframe's target id).
+    frame_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -293,6 +329,7 @@ impl Shared {
                     response: None,
                     failure: None,
                     data_length: 0,
+                    frame_id: params.get("frameId").and_then(Value::as_str).map(str::to_string),
                 };
                 inner.pending.insert(key, pending);
             }
@@ -306,7 +343,11 @@ impl Shared {
                 if inner.response_extra.len() > 4 * MAX_ENTRIES {
                     inner.response_extra.clear();
                 }
-                inner.response_extra.insert(request_id, headers_from(params.get("headers")));
+                let extra = ExtraResponse {
+                    headers: headers_from(params.get("headers")),
+                    status: params.get("statusCode").and_then(Value::as_i64),
+                };
+                inner.response_extra.insert(request_id, extra);
             }
             "Network.responseReceived" => {
                 if let Some(found) = inner.pending_key(&key)
@@ -341,14 +382,58 @@ impl Shared {
             "Target.attachedToTarget" => {
                 // Out-of-process iframes and workers have their own Network domain.
                 if let Some(session) = params.get("sessionId").and_then(Value::as_str) {
-                    let cdp = self.cdp.clone();
                     let session = session.to_string();
+                    let target = params.pointer("/targetInfo/targetId").and_then(Value::as_str).map(str::to_string);
+                    if let Some(target) = &target {
+                        inner.children.insert(target.clone(), session.clone());
+                    }
+                    drop(inner);
+                    let shared = self.clone();
                     tokio::spawn(async move {
-                        let _ = cdp.send("Network.enable", network_enable_params(), Some(&session)).await;
+                        let _ = shared.cdp.send("Network.enable", network_enable_params(), Some(&session)).await;
+                        // Give the iframe's own events a moment, then complete its document from what is known.
+                        tokio::time::sleep(CHILD_DOCUMENT_GRACE).await;
+                        if let Some(target) = target {
+                            shared.complete_child_documents(&target);
+                        }
                     });
                 }
             }
+            "Target.detachedFromTarget" => {
+                if let Some(session) = params.get("sessionId").and_then(Value::as_str) {
+                    inner.children.retain(|_, child| child != session);
+                }
+            }
             _ => {}
+        }
+    }
+
+    /// Completes document requests committed in the out-of-process iframe `target` whose response is known.
+    fn complete_child_documents(self: &Arc<Self>, target: &str) {
+        let ready: Vec<Pending> = {
+            let mut inner = self.inner.lock().unwrap();
+            if inner.stopping {
+                return;
+            }
+            let keys: Vec<Key> = inner
+                .pending
+                .iter()
+                .filter(|(_, pending)| pending.resource_type == "Document" && pending.frame_id.as_deref() == Some(target))
+                .map(|(key, _)| key.clone())
+                .collect();
+            let mut ready = Vec::new();
+            for key in keys {
+                let Some(mut pending) = inner.pending.remove(&key) else { continue };
+                if inner.known_response(&mut pending) {
+                    ready.push(pending);
+                } else {
+                    inner.pending.insert(key, pending);
+                }
+            }
+            ready
+        };
+        for pending in ready {
+            self.finalize(pending);
         }
     }
 
@@ -368,7 +453,10 @@ impl Shared {
     async fn build_entry(&self, pending: Pending) -> CapturedEntry {
         let (request_headers, response_headers) = {
             let mut inner = self.inner.lock().unwrap();
-            (inner.request_extra.remove(&pending.request_id), inner.response_extra.remove(&pending.request_id))
+            (
+                inner.request_extra.remove(&pending.request_id),
+                inner.response_extra.remove(&pending.request_id).map(|extra| extra.headers),
+            )
         };
         // ExtraInfo headers are the raw ones on the wire, cookies included; prefer them.
         let request_headers = request_headers.filter(|headers| !headers.is_empty()).unwrap_or(pending.headers.clone());
@@ -477,11 +565,25 @@ impl Shared {
     async fn drain(self: &Arc<Self>, reason: &str) -> Vec<CapturedEntry> {
         let leftovers: Vec<Pending> = {
             let mut inner = self.inner.lock().unwrap();
-            inner.pending.drain().map(|(_, pending)| pending).collect()
+            let pending: Vec<Pending> = inner.pending.drain().map(|(_, pending)| pending).collect();
+            pending
+                .into_iter()
+                .map(|mut pending| {
+                    let child = inner.committed_in_child(&pending);
+                    if !(child && inner.known_response(&mut pending)) {
+                        let reason = if child {
+                            "the iframe loaded its document in its own process before its response could be captured"
+                        } else {
+                            reason
+                        };
+                        pending.failure.get_or_insert_with(|| reason.to_string());
+                        pending.response = None;
+                    }
+                    pending
+                })
+                .collect()
         };
-        for mut pending in leftovers {
-            pending.failure.get_or_insert_with(|| reason.to_string());
-            pending.response = None;
+        for pending in leftovers {
             self.finalize(pending);
         }
         let mut watch = self.in_flight.subscribe();

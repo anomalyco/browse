@@ -200,7 +200,8 @@ fn decode(result: &Value) -> anyhow::Result<Vec<u8>> {
 /// Captures `region`. Clips inside the viewport are taken as they are on screen; only full pages and clips that reach
 /// beyond the viewport use captureBeyondViewport, which makes Chrome resize the page while it captures (pages see
 /// resize events), as Playwright does. Captures whose longest side would exceed `max_side` image pixels are scaled
-/// down; ones Chrome can't take in one piece are taken in tiles and returned as PNG.
+/// down; ones Chrome can't take in one piece are taken in tiles and returned as PNG. Chrome restores any device
+/// metrics override (from emulate) itself afterwards, so nothing is re-applied here.
 async fn capture(
     cdp: &dyn Cdp,
     region: &Region,
@@ -262,9 +263,6 @@ async fn capture(
         }
         Err(error) => return Err(error.into()),
     };
-    if beyond {
-        restore_viewport(cdp, &viewport).await;
-    }
     let (image_width, image_height) = image_size(&bytes).ok_or_else(|| anyhow::anyhow!("Chrome returned an unreadable image"))?;
     Ok(Shot { bytes, format, width: image_width, height: image_height, scale: image_width as f64 / width, note })
 }
@@ -298,34 +296,6 @@ async fn tiles(cdp: &dyn Cdp, (x, y, width, height): (f64, f64, f64, f64), clip_
         offset += part;
     }
     encode_png(&image)
-}
-
-/// captureBeyondViewport can leave a device metrics override (from emulate) at the wrong size. When the viewport
-/// changed, clear overrides; if that doesn't bring the old size back, an override was active: set it again.
-async fn restore_viewport(cdp: &dyn Cdp, before: &page::Viewport) {
-    let same = |after: &page::Viewport| (after.width - before.width).abs() < 1.0 && (after.height - before.height).abs() < 1.0;
-    let Ok(after) = page::viewport(cdp).await else { return };
-    if same(&after) {
-        return;
-    }
-    let _ = cdp.send("Emulation.clearDeviceMetricsOverride", json!({}), None).await;
-    match page::viewport(cdp).await {
-        Ok(after) if same(&after) => {}
-        _ => {
-            let _ = cdp
-                .send(
-                    "Emulation.setDeviceMetricsOverride",
-                    json!({
-                        "width": before.width.round(),
-                        "height": before.height.round(),
-                        "deviceScaleFactor": before.device_pixel_ratio,
-                        "mobile": false,
-                    }),
-                    None,
-                )
-                .await;
-        }
-    }
 }
 
 fn image_content(bytes: &[u8], mime: &str) -> Content {

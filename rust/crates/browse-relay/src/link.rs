@@ -95,6 +95,8 @@ pub struct Link {
     pub announced: Mutex<HashSet<i64>>,
     pub announced_agent: Mutex<HashSet<i64>>,
     pub inventory: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Announced tabs still being set up.
+    pub inventory_pending: Mutex<HashSet<i64>>,
 }
 
 pub struct LinkInfo {
@@ -141,6 +143,7 @@ impl Link {
             announced: Mutex::new(HashSet::new()),
             announced_agent: Mutex::new(HashSet::new()),
             inventory: Mutex::new(Vec::new()),
+            inventory_pending: Mutex::new(HashSet::new()),
         }
     }
 
@@ -169,6 +172,11 @@ impl Link {
         if self.protocol.compatible {
             self.ready.store(true, Ordering::SeqCst);
         }
+    }
+
+    /// Announced tabs are still being set up.
+    pub fn inventory_pending(&self) -> bool {
+        !self.inventory_pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_empty()
     }
 
     pub fn ping_pending(&self) -> bool {

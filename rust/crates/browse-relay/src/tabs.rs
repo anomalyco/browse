@@ -21,6 +21,11 @@ use crate::util::short_url;
 
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(10);
 const INVENTORY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Events a slow subscriber may fall behind by before it skips ahead (RecvError::Lagged). Each holds its CDP params
+/// (a screencast frame is a few hundred KB), so this bounds what one stalled reader keeps alive.
+const EVENT_BUFFER: usize = 256;
+/// How long a reconnecting browser's announced tabs may take before it counts as connected anyway.
+const INVENTORY_GRACE: Duration = Duration::from_millis(1500);
 
 #[derive(Debug, Clone)]
 pub struct Attach {
@@ -110,7 +115,7 @@ impl Relay {
             // The same page attached again (a renewed debugger) keeps its event stream and CDP handle.
             let (events, cdp) = match previous.filter(|p| p.target_id == target_id) {
                 Some(previous) => (previous.events, previous.cdp),
-                None => (broadcast::channel(1024).0, None),
+                None => (broadcast::channel(EVENT_BUFFER).0, None),
             };
             st.tabs.insert(
                 tab,
@@ -133,6 +138,7 @@ impl Relay {
                     blanking: 0,
                     protected_ui: false,
                     unattachable: false,
+                    closing: false,
                     protected_frames: HashSet::new(),
                     child_frames: HashSet::new(),
                     cdp,
@@ -213,9 +219,9 @@ impl Relay {
                 // A session whose current tab went on with its next one, so `tabs` and later calls agree.
                 let orphaned: Vec<String> = st.sessions.values().filter(|s| s.current == Some(tab)).map(|s| s.id.clone()).collect();
                 // The agent closing its own tab, or ending its session, knows; anything else is news to it.
-                let unexpected = !matches!(reason, "target-closed" | "session-ended" | "released" | "attach-failed");
+                let unexpected = !removed.closing && !matches!(reason, "target-closed" | "session-ended" | "released" | "attach-failed");
                 for id in orphaned {
-                    let next = st.session_tabs(&id).into_iter().next();
+                    let next = st.session_tabs(&id).into_iter().find(|t| st.tabs.get(t).is_some_and(|t| !t.closing));
                     let Some(session) = st.sessions.get_mut(&id) else { continue };
                     session.current = next;
                     if unexpected {
@@ -342,15 +348,31 @@ impl Relay {
 
     /// Closes an agent's tab; a tab the user lent is released to them instead.
     pub async fn close_or_release(self: &Arc<Self>, tab: i64) -> anyhow::Result<&'static str> {
-        let owner = self.st().tabs.get(&tab).map(|t| t.owner).context("That tab isn't attached")?;
+        let owner = {
+            let mut st = self.st();
+            let entry = st.tabs.get_mut(&tab).context("That tab isn't attached")?;
+            entry.closing = true;
+            entry.owner
+        };
+        let failed = |relay: &Self| {
+            if let Some(entry) = relay.st().tabs.get_mut(&tab) {
+                entry.closing = false;
+            }
+        };
         if owner == Owner::User {
-            self.detach_tab(tab, "released").await?;
+            if let Err(error) = self.detach_tab(tab, "released").await {
+                failed(self);
+                return Err(error);
+            }
             return Ok("released");
         }
         match self.ext_tab(tab, "tabs.remove", json!({})).await {
             Ok(_) => {}
             Err(RpcError::Remote(message)) if crate::relay::missing_tab(&message) => {}
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                failed(self);
+                return Err(error.into());
+            }
         }
         self.remove_tab(tab, Release { gone: true, ..Release::default() }, "target-closed");
         Ok("closed")
@@ -445,8 +467,11 @@ impl Relay {
         if agent {
             link.announced_agent.lock().unwrap().insert(tab);
         }
+        link.inventory_pending.lock().unwrap().insert(tab);
         let relay = self.clone();
+        let owner = link.clone();
         let handle = tokio::spawn(async move {
+            let link = owner;
             let mut attach = Attach::new(tab, Owner::User, None);
             attach.already_attached = true;
             attach.reclaim_held = agent;
@@ -454,23 +479,35 @@ impl Relay {
             attach.timeout = INVENTORY_TIMEOUT;
             for attempt in 0..3 {
                 match relay.setup_tab(attach.clone()).await {
-                    Ok(_) => return,
+                    Ok(_) => break,
                     Err(error) if attempt == 2 || error.to_string().contains("did not answer") => {
                         rlog!("extension.inventory.failed", tabId = tab, error = error.to_string());
-                        return;
+                        // Too late for the reconciliation (the browser is already ready): let the tab go here.
+                        if link.is_ready() && !relay.st().tabs.contains_key(&tab) {
+                            relay.ext_best_effort(tab, "debugger.detach", json!({}));
+                        }
+                        break;
                     }
                     Err(_) => tokio::time::sleep(Duration::from_millis(100 * (attempt + 1))).await,
                 }
             }
+            link.inventory_pending.lock().unwrap().remove(&tab);
+            relay.browsers_changed();
         });
         link.inventory.lock().unwrap().push(handle);
     }
 
     /// The extension finished announcing its tabs: reconcile, then the browser counts as connected.
     pub async fn link_ready(self: &Arc<Self>, link: Arc<Link>) {
+        // A tab that is slow to set up (a frozen page) finishes on its own: it doesn't hold the browser back.
         let handles: Vec<_> = std::mem::take(&mut *link.inventory.lock().unwrap());
+        let deadline = tokio::time::Instant::now() + INVENTORY_GRACE;
         for handle in handles {
-            let _ = handle.await;
+            let _ = tokio::time::timeout_at(deadline, handle).await;
+        }
+        let still_pending: HashSet<i64> = link.inventory_pending.lock().unwrap().clone();
+        if !still_pending.is_empty() {
+            rlog!("extension.inventory.slow", tabs = still_pending.iter().map(i64::to_string).collect::<Vec<_>>().join(","));
         }
         if !self.st().links.iter().any(|l| Arc::ptr_eq(l, &link)) {
             return;
@@ -480,7 +517,7 @@ impl Relay {
         let (failed, missing, tombstoned, orphaned, own) = {
             let st = self.st();
             let mine: Vec<&Tab> = st.tabs.values().filter(|t| t.link_key == link.key).collect();
-            let failed: Vec<i64> = announced.iter().copied().filter(|id| !st.tabs.contains_key(id)).collect();
+            let failed: Vec<i64> = announced.iter().copied().filter(|id| !st.tabs.contains_key(id) && !still_pending.contains(id)).collect();
             let missing: Vec<i64> = mine.iter().filter(|t| !announced.contains(&t.id)).map(|t| t.id).collect();
             let tombstoned: Vec<i64> = mine.iter().filter(|t| st.tombstones.get(&t.target_id).is_some_and(|k| k == &link.key || k.is_empty())).map(|t| t.id).collect();
             let orphaned: Vec<i64> = mine
@@ -608,7 +645,7 @@ impl Relay {
             return;
         }
         let reason = params.get("reason").and_then(Value::as_str).unwrap_or("");
-        if !self.st().tabs.contains_key(&tab) {
+        if self.st().tabs.get(&tab).is_none_or(|t| t.closing) {
             return;
         }
         match reason {

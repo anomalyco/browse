@@ -143,6 +143,7 @@ fn fake_extension(socket: Socket, next_tab: i64) -> (Arc<Seen>, mpsc::UnboundedS
                     }
                     "Runtime.evaluate" => json!({ "result": { "type": "number", "value": 42 } }),
                     "Network.getCookies" => json!({ "cookies": [{ "domain": "example.com" }, { "domain": "bank.com" }] }),
+                    "Big.method" => json!({ "result": { "type": "string", "value": "x".repeat(params["params"]["bytes"].as_u64().unwrap_or(0) as usize) } }),
                     "Unattachable.method" => {
                         let _ = replies.send(json!({ "id": id, "error": "Cannot attach to this target." }));
                         continue;
@@ -648,4 +649,146 @@ async fn a_lost_tab_is_reported_instead_of_replaced_by_a_blank_one() {
     let fresh = crate::serve::TOOL.scope("navigate".into(), browser.current_tab(&session)).await.unwrap().tab_id;
     assert_ne!(fresh, tab);
     assert!(browser.current_tab(&session).await.is_ok());
+}
+
+fn rss_mb() -> f64 {
+    crate::util::release_memory();
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    status.lines().find(|l| l.starts_with("VmRSS:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|kb| kb.parse::<f64>().ok()).unwrap_or(0.0) / 1024.0
+}
+
+/// `cargo test -p browse-relay memory_after_big_results -- --ignored --nocapture`: RSS around big CDP answers and
+/// big events into a subscriber that doesn't read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore]
+async fn memory_after_big_results() {
+    let (h, _seen, events) = connected("profile-memory", 100).await;
+    let browser = h.handle.browser();
+    let session = "memory".to_string();
+    let tab = browser.open_tab(&session, None).await.unwrap().tab_id;
+    let cdp = browser.cdp(&session, tab).await.unwrap();
+    let start = rss_mb();
+    for _ in 0..20 {
+        let result = cdp.send("Big.method", json!({ "bytes": 5_000_000 }), None).await.unwrap();
+        assert_eq!(result["result"]["value"].as_str().unwrap().len(), 5_000_000);
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let after_results = rss_mb();
+    let idle = cdp.events();
+    let frame = "y".repeat(200_000);
+    for batch in 0..30 {
+        for _ in 0..50 {
+            events.send(json!({ "method": "debugger.event", "params": { "tabId": tab, "method": "Page.screencastFrame", "params": { "data": frame, "sessionId": batch } } })).unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let after_events = rss_mb();
+    drop(idle);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    println!("rss start {start:.0} MB, after 20 x 5 MB results {after_results:.0} MB, after 1500 x 200 KB events with an idle subscriber {after_events:.0} MB, after it went {:.0} MB", rss_mb());
+}
+
+fn exited_pid() -> u32 {
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let pid = child.id();
+    child.wait().unwrap();
+    pid
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_client_exiting_stops_only_its_own_calls() {
+    let (h, _seen, _events) = connected("profile-clients", 110).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let live = std::process::id();
+    let dead = exited_pid();
+    let request = |name: &str, arguments: Value| browse_core::ToolCallRequest { name: name.into(), arguments, session: "new-x".into() };
+    let tab = browser.open_tab(&"new-x".to_string(), None).await.unwrap().tab_id;
+
+    // The live client waits on a handoff; a client that has since exited made a call in the same session.
+    let waiting = {
+        let relay = relay.clone();
+        let call = request("handoff", json!({ "message": "wait", "tabId": tab, "timeoutSeconds": 30 }));
+        tokio::spawn(async move { crate::serve::call_tool(&relay, call, Some(live)).await })
+    };
+    eventually("the handoff", || relay.st().handoffs.contains_key("new-x")).await;
+    crate::serve::call_tool(&relay, request("status", json!({})), Some(dead)).await.unwrap();
+    crate::serve::sweep_clients(&relay, std::time::Instant::now(), Duration::from_secs(60)).await;
+    assert!(relay.st().handoffs.contains_key("new-x"), "another process exiting doesn't stop this one's handoff");
+    assert!(!waiting.is_finished());
+    assert_eq!(relay.st().sessions["new-x"].clients.iter().copied().collect::<Vec<_>>(), vec![live]);
+
+    // A call whose own process exited is stopped, naming that process.
+    relay.finish_handoff("new-x", "continued");
+    let output = waiting.await.unwrap().unwrap();
+    assert!(!output.is_error);
+    let orphan = {
+        let relay = relay.clone();
+        let call = request("handoff", json!({ "message": "wait", "tabId": tab, "timeoutSeconds": 30 }));
+        tokio::spawn(async move { crate::serve::call_tool(&relay, call, Some(dead)).await })
+    };
+    eventually("the second handoff", || relay.st().handoffs.contains_key("new-x")).await;
+    crate::serve::sweep_clients(&relay, std::time::Instant::now(), Duration::from_secs(60)).await;
+    let stopped = tokio::time::timeout(Duration::from_secs(5), orphan).await.unwrap().unwrap().unwrap();
+    assert!(stopped.is_error);
+    let text = match &stopped.content[0] {
+        browse_core::Content::Text { text } => text.clone(),
+        _ => String::new(),
+    };
+    assert!(text.contains(&format!("process {dead}")), "{text}");
+    eventually("the card to come down", || !relay.st().handoffs.contains_key("new-x")).await;
+}
+
+#[tokio::test]
+async fn cleanup_closes_the_sessions_own_idle_tabs() {
+    let (h, seen, _events) = connected("profile-cleanup", 120).await;
+    let port = h.handle.port();
+    let token = h.handle.token().to_string();
+    let browser = h.handle.browser();
+    let tab = browser.open_tab(&"tidy".to_string(), None).await.unwrap().tab_id;
+    let started = std::time::Instant::now();
+    let (_, cleaned) = http(port, "POST", "/tools/call", Some(&token), Some(json!({ "name": "tabs_cleanup", "arguments": { "idleMinutes": 0 }, "session": "tidy" }))).await;
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let closed = text(&cleaned)["closed"].as_array().cloned().unwrap_or_default();
+    assert_eq!(closed.len(), 1, "{cleaned}");
+    assert_eq!(closed[0]["tabId"], tab);
+    assert!(seen.commands("tabs.remove").iter().any(|c| c["params"]["tabId"] == tab));
+}
+
+#[tokio::test]
+async fn closing_a_tab_yourself_warns_nothing() {
+    let (h, _seen, events) = connected("profile-quiet", 130).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let session = "quiet".to_string();
+    let first = browser.open_tab(&session, None).await.unwrap().tab_id;
+    let second = browser.open_tab(&session, None).await.unwrap().tab_id;
+    // The browser reports the tab closed before it answers the close.
+    relay.st().tabs.get_mut(&second).unwrap().closing = true;
+    events.send(json!({ "method": "tabs.removed", "params": { "tabId": second } })).unwrap();
+    eventually("the tab to go", || !relay.st().tabs.contains_key(&second)).await;
+    relay.close_or_release(first).await.unwrap();
+    let st = relay.st();
+    assert!(st.sessions[&session].warnings.is_empty(), "{:?}", st.sessions[&session].warnings);
+    assert!(st.sessions[&session].lost.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_naming_a_tab_waits_for_the_reconnecting_browser() {
+    let h = harness().await;
+    let relay = h.handle.relay.clone();
+    relay.ensure_session("keeper").unwrap();
+    relay.st().sessions.get_mut("keeper").unwrap().held.push("T41".into());
+    let browser = h.handle.browser();
+    let call = {
+        let browser = browser.clone();
+        tokio::spawn(async move { browser.cdp(&"keeper".to_string(), 41).await.map(|_| ()) })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let socket = pair_with_token(h.handle.port(), &h.paths, "profile-restart").await;
+    let (_seen, events) = fake_extension(socket, 140);
+    events.send(json!({ "method": "debugger.attached", "params": { "tabId": 41, "agent": true } })).unwrap();
+    events.send(json!({ "method": "ready" })).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), call).await.unwrap().unwrap().expect("the tab came back with the inventory");
 }

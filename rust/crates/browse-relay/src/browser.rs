@@ -18,6 +18,8 @@ use crate::tabs::Release;
 
 /// How long a call waits for a browser that is reconnecting (a worker or relay restart) before failing.
 const RECONNECT_WAIT: Duration = Duration::from_secs(12);
+/// How long a call naming a tab waits for it to come back with a reconnecting browser.
+const TAB_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Default)]
 pub struct SessionOptions {
@@ -32,6 +34,25 @@ impl Relay {
         let entry = st.tabs.get(&tab)?;
         let current = st.sessions.get(session).and_then(|s| s.current);
         Some(TabInfo { tab_id: tab, url: entry.url.clone(), title: entry.title.clone(), active: current == Some(tab) })
+    }
+
+    /// A tab a call names that isn't attached yet comes back with a reconnecting browser's inventory (after a relay
+    /// or worker restart): wait for that, briefly, instead of failing at once.
+    pub async fn await_tab(&self, tab: i64) {
+        let reconnecting = {
+            let st = self.st();
+            if st.tabs.contains_key(&tab) {
+                return;
+            }
+            let recent = self.started.elapsed() < Duration::from_secs(60) || st.last_connected.is_some_and(|at| at.elapsed() < Duration::from_secs(120));
+            st.links.iter().any(|l| !l.is_ready() || l.inventory_pending()) || (st.links.is_empty() && recent)
+        };
+        if reconnecting {
+            self.wait_until(TAB_WAIT, |st| {
+                st.tabs.contains_key(&tab) || (!st.links.is_empty() && st.links.iter().all(|l| l.is_ready() && !l.inventory_pending()))
+            })
+            .await;
+        }
     }
 
     /// The session's tab, or why it can't use it.
@@ -501,6 +522,7 @@ impl Browser for RelayBrowser {
 
     async fn select_tab(&self, session: &SessionId, tab: TabId) -> anyhow::Result<()> {
         self.0.ensure_session(session)?;
+        self.0.await_tab(tab).await;
         self.0.visible_tab(session, tab)?;
         if let Some(entry) = self.0.st().sessions.get_mut(session) {
             entry.current = Some(tab);
@@ -510,6 +532,7 @@ impl Browser for RelayBrowser {
     }
 
     async fn close_tab(&self, session: &SessionId, tab: TabId) -> anyhow::Result<()> {
+        self.0.await_tab(tab).await;
         self.0.visible_tab(session, tab)?;
         self.0.close_or_release(tab).await?;
         Ok(())
@@ -517,6 +540,7 @@ impl Browser for RelayBrowser {
 
     async fn cdp(&self, session: &SessionId, tab: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
         self.0.ensure_session(session)?;
+        self.0.await_tab(tab).await;
         self.0.visible_tab(session, tab)?;
         let mut st = self.0.st();
         let entry = st.tabs.get_mut(&tab).context("The tab went away")?;
@@ -530,6 +554,7 @@ impl Browser for RelayBrowser {
     }
 
     async fn handoff(&self, session: &SessionId, tab: TabId, message: &str) -> anyhow::Result<HandoffResult> {
+        self.0.await_tab(tab).await;
         self.0.visible_tab(session, tab)?;
         self.0.run_handoff(session, tab, message, crate::presentation::DEFAULT_HANDOFF_TIMEOUT).await
     }

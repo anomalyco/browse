@@ -69,6 +69,8 @@ pub struct Tab {
     pub protected_frames: HashSet<String>,
     /// Chrome won't let the debugger into the tab ("Cannot attach to this target": a blocked load's error page).
     pub unattachable: bool,
+    /// browse is closing it (the agent asked, its session ended): its going away is no news to the agent.
+    pub closing: bool,
     /// Child frames seen attaching (with a parent), so a navigation intent can be told apart from the main frame's.
     pub child_frames: HashSet<String>,
     /// The one CDP handle tools get for this attachment, with the session it was made for.
@@ -91,6 +93,8 @@ pub struct Handoff {
     pub target_id: String,
     pub message: String,
     pub started_at: String,
+    /// The process whose call waits for it.
+    pub pid: Option<u32>,
     pub done: Option<oneshot::Sender<&'static str>>,
 }
 
@@ -288,6 +292,7 @@ pub struct Relay {
     pub host: String,
     pub instance_id: String,
     pub started_at: String,
+    pub started: Instant,
     pub version: String,
     pub build_id: String,
     pub token: String,
@@ -350,6 +355,7 @@ impl Relay {
             host: config.host,
             instance_id: crate::util::random_hex(16),
             started_at: crate::util::now_iso(),
+            started: Instant::now(),
             version: config.version,
             build_id: config.build_id,
             token,
