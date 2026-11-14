@@ -375,7 +375,10 @@ async fn serves_the_tool_api_behind_the_token() {
     assert!(names.contains(&"session") && names.contains(&"tabs") && names.contains(&"status"));
 
     let call = |arguments: Value| json!({ "name": "session", "arguments": arguments, "session": "oc-caller" });
-    let (_, created) = http(port, "POST", "/tools/call", Some(&token), Some(call(json!({ "action": "new", "id": "research", "allowedOrigins": ["Example.com"] })))).await;
+    let (_, side) = http(port, "POST", "/tools/call", Some(&token), Some(call(json!({ "action": "new", "id": "side" })))).await;
+    let side: Value = serde_json::from_str(side["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(side["currentSession"], "oc-caller", "a side session doesn't take over bare calls");
+    let (_, created) = http(port, "POST", "/tools/call", Some(&token), Some(call(json!({ "action": "new", "id": "research", "use": true, "allowedOrigins": ["Example.com"] })))).await;
     let created: Value = serde_json::from_str(created["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(created["currentSession"], "research");
     assert_eq!(created["session"]["allowedOrigins"], json!(["example.com"]));

@@ -60,13 +60,14 @@ impl Tool for SessionTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "session".into(),
-            description: "Manage browse sessions. A session owns the tabs it opens (or adopts), its current tab, and an optional domain allowlist; every other tool acts on your current session unless you pass `session`. Actions: `new` creates a session and makes it current; `list` shows every session; `use` makes an existing one current; `reset` closes its tabs and clears its state; `delete` closes its tabs and removes it; `adopt` makes a tab the user lent you (they click the browse toolbar button on it) the session's current tab; `allowlist` sets the hosts its tabs may load. Each call returns JSON with `currentSession`.".into(),
+            description: "Manage browse sessions. A session owns the tabs it opens (or adopts), its current tab, and an optional domain allowlist; every other tool acts on your current session unless you pass `session`. Actions: `new` creates a session (pass `session` to other tools to use it, or `use: true` to make it current); `list` shows every session; `use` makes an existing one current; `reset` closes its tabs and clears its state; `delete` closes its tabs and removes it; `adopt` makes a tab the user lent you (they click the browse toolbar button on it) the session's current tab; `allowlist` sets the hosts its tabs may load. Each call returns JSON with `currentSession`.".into(),
             input_schema: object(
                 json!({
                     "action": { "type": "string", "enum": ["new", "list", "use", "reset", "delete", "adopt", "allowlist"], "description": "What to do." },
                     "id": { "type": "string", "description": "Session id (lowercase letters, numbers, dashes). new: optional, generated when omitted. use: required. reset, delete, adopt, allowlist: defaults to your current session." },
                     "readOnly": { "type": "boolean", "description": "new: a read-only session that can only adopt lent tabs and read them (snapshots, screenshots); input, navigation and new tabs are refused." },
                     "allowedOrigins": { "type": "array", "items": { "type": "string" }, "description": "new, allowlist: hosts or origins the session's tabs may load (example.com, *.example.com, https://app.example.com, http://localhost:3000). Navigations elsewhere are refused or sent back to about:blank; private and loopback addresses need an exact entry. allowlist with an empty list removes it." },
+                    "use": { "type": "boolean", "description": "new: also make the new session your current one. Off by default, so a side session never moves your bare calls off the tab you were using." },
                     "keepVisible": { "type": "boolean", "description": "new: keep the session's own tabs focused to the page between calls, for apps that pause while hidden. Pages can notice." },
                     "browser": { "type": "string", "description": "new: which connected browser to use, by the id or name `status` lists. Defaults to the first connected one." },
                     "tabId": { "type": "integer", "description": "adopt: the lent tab's id (from `tabs` action list, under `lent`). Optional when only one tab is lent." },
@@ -95,7 +96,9 @@ impl Tool for SessionTool {
                     browser: string(&args, "browser"),
                 };
                 let created = relay.create_session(id.as_deref(), options)?;
-                set_current(&relay, &caller, &created);
+                if args["use"] == true {
+                    set_current(&relay, &caller, &created);
+                }
                 json!({ "session": relay.session_summary(&created) })
             }
             "list" => json!({ "sessions": relay.session_summaries() }),
@@ -120,6 +123,7 @@ impl Tool for SessionTool {
                     result["note"] = format!("Session {target} is gone; your next call starts a fresh session with that id.").into();
                     return Ok(json_output(result));
                 }
+                result["currentSession"] = current_of(&relay, &caller).into();
                 result
             }
             "adopt" => {
