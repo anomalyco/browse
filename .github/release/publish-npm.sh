@@ -8,7 +8,7 @@
 . "$(dirname "$0")/lib.sh"
 
 build_dir=$1 binaries_dir=$2 signed_dir=${3:-}
-# The install script's targets (install); keep in step with cli/script/compile.ts.
+# The install script's targets (install); keep in step with scripts/npm-package.ts.
 targets="linux-x64 linux-x64-baseline linux-arm64 linux-x64-musl linux-x64-baseline-musl linux-arm64-musl darwin-arm64 darwin-x64 darwin-x64-baseline windows-x64 windows-x64-baseline"
 
 check_package() { # <file> <name> [<os> <cpu> <libc or "">]
@@ -59,7 +59,9 @@ cd "$(mktemp -d)" || exit
 flags=(--tag "$BROWSE_NPM_TAG" --access public --ignore-scripts)
 if dry_run; then flags+=(--dry-run); else flags+=(--provenance); fi
 while IFS=$'\t' read -r name file; do
-  if ! dry_run && [ "$(npm view "$name@$BROWSE_VERSION" version 2> /dev/null)" = "$BROWSE_VERSION" ]; then
+  if [ "$(npm view "$name@$BROWSE_VERSION" version 2> /dev/null)" = "$BROWSE_VERSION" ]; then
+    # A dry run of an already published version (a check run of the current release) still checks the tarball.
+    if dry_run; then npm pack "$file" --dry-run > /dev/null; fi
     summary "$name@$BROWSE_VERSION is already on npm; nothing to publish."
     continue
   fi

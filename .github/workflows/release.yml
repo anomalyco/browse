@@ -1,9 +1,10 @@
 name: Release
 run-name: "${{ github.event_name == 'workflow_dispatch' && format('Release {0} {1}', inputs.bump, inputs.version) || '' }}"
 
-# Releases browse: the extension zip, the @opencode/browse npm package and the browse binaries (an npm package
-# @opencode/browse-<target> per platform, and the same targets on Anomaly's release service, which the install script
-# downloads). RELEASING.md has the flow and the setup.
+# Releases browse: the extension zip, the @opencode/browse npm package (a Node launcher for the native binary) and the
+# browse binaries, built from the Rust workspace in rust/ (an npm package @opencode/browse-<target> per platform, and
+# the same targets on Anomaly's release service, which the install script downloads). RELEASING.md has the flow and the
+# setup.
 #
 #   push to dev                        dev:    <next>-dev.<run> to the release service (extension + every binary
 #                                              target) and npm dist-tag dev
@@ -14,9 +15,9 @@ run-name: "${{ github.event_name == 'workflow_dispatch' && format('Release {0} {
 #                                              runs as a dry run and publishes nothing
 #
 # Builds are separated from publishing:
-# - build and build-binaries run repository code (bun install, typecheck, tests, scripts/release-check.ts,
-#   cli/script/compile.ts) with no environment, secrets or id-token, and upload the artifacts with a SHA256SUMS whose
-#   digest they output.
+# - build, build-binary and build-binaries run repository code (bun install, typecheck, tests, scripts/release-check.ts,
+#   cargo, scripts/npm-package.ts) with no environment, secrets or id-token, and upload the artifacts with a SHA256SUMS
+#   whose digest they output (build-binary's per-target executables are only build-binaries' input).
 # - sign-macos (optional, off until the repository variable MACOS_SIGNING is true) runs only .github/release/ scripts.
 # - tag runs only .github/release/tag-release.sh (git and jq) with the release deploy key.
 # - attest and every publish job check out only .github/release/, verify each artifact against the digest of the job
@@ -61,6 +62,13 @@ defaults:
   run:
     shell: bash
 
+env:
+  # The Rust toolchain every build uses, and the Linux cross-compilers (build-binary).
+  RUST_TOOLCHAIN: "1.99.1"
+  ZIG_VERSION: "0.16.0"
+  ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+  CARGO_ZIGBUILD_VERSION: "0.24.1"
+
 jobs:
   plan:
     name: Plan
@@ -74,6 +82,7 @@ jobs:
       channel: ${{ steps.plan.outputs.channel }}
       npm_tag: ${{ steps.plan.outputs.npm_tag }}
       dry_run: ${{ steps.plan.outputs.dry_run }}
+      build_id: ${{ steps.plan.outputs.build_id }}
     steps:
       - name: Check out release scripts
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -164,33 +173,33 @@ jobs:
       - name: Install (extension)
         run: bun install --frozen-lockfile
 
-      - name: Install (cli)
-        run: bun install --frozen-lockfile
-        working-directory: cli
-
       # Stamped into the checkout only (never committed).
       - name: Stamp the dev version
         if: needs.plan.outputs.mode == 'dev'
         run: bun scripts/version.ts set "$VERSION"
 
-      - name: Versions agree (cli/package.json, package.json, manifest) and the changelog is ready
+      - name: Versions agree (cli/package.json, package.json, manifest, rust/) and the changelog is ready
         run: |
           bun scripts/release-check.ts --versions-only
           [ "$(node -p 'require("./cli/package.json").version')" = "$VERSION" ] || { echo "::error::The checkout isn't version $VERSION."; exit 1; }
           if [ "$MODE" = stable ]; then bun scripts/changelog.ts check "$VERSION"; fi
 
-      - name: Typecheck (extension)
+      - name: Typecheck (extension and scripts)
         run: bun run typecheck
 
-      - name: Typecheck (cli)
-        run: bun run typecheck
-        working-directory: cli
+      - name: Test (extension)
+        run: bun test ./test
 
-      - name: Test
-        run: bun run test
+      - name: Install Rust
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal && rustup default "$RUST_TOOLCHAIN"
 
-      # The extension zip (the store zip, or a dev build's unpacked zip) and the npm tarball (with the store item ID,
-      # and a dev build's zip sha256, baked in: cli/build.ts), with the artifact checks: `bun run release:check`.
+      - name: Test (rust)
+        working-directory: rust
+        run: cargo test --workspace --locked
+
+      # The extension zip (the store zip, or a dev build's unpacked zip) and the npm launcher tarball
+      # (scripts/npm-package.ts), with the artifact checks: `bun run release:check`. The npm install check runs in
+      # build-binaries, once there is a binary for it to launch.
       - name: Build and check the extension zip and npm tarball
         env:
           OPENCODE_BROWSER_STORE_ID: ${{ vars.CWS_ITEM_ID }}
@@ -205,20 +214,30 @@ jobs:
           name: build
           path: release
 
-  # The browse binaries (bun build --compile, cli/script/compile.ts), one npm tarball per platform
-  # (opencode-browse-<target>-<version>.tgz, cli/script/pack.ts), cross-compiled here against each target's Bun runtime
-  # from the pinned Bun release, checked against its SHASUMS256.txt. A dev build's binaries carry the sha256 of the
-  # build job's extension zip, like the npm package, so build's artifact is downloaded (and verified) as data.
-  build-binaries:
-    name: Build binaries
+  # One browse binary per build (rust/script/release.sh's names): Linux cross-compiled with cargo-zigbuild (zig cc
+  # also builds QuickJS, browse-script's C code; the gnu builds against glibc 2.17), macOS with Xcode's clang on an
+  # arm64 runner, Windows with MSVC and a static C runtime. The version and the run's build id are baked in
+  # (BROWSE_VERSION, BROWSE_BUILD_ID: crates/browse/src/main.rs, serve.rs). The -baseline targets reuse these: Rust's
+  # x86-64 target doesn't use AVX2.
+  build-binary:
+    name: Build ${{ matrix.build }}
     needs: [plan, tag, build]
     if: ${{ !cancelled() && needs.build.result == 'success' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
     permissions:
       contents: read
-    outputs:
-      digest: ${{ steps.upload.outputs.digest }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { build: linux-x64, runner: ubuntu-24.04, triple: x86_64-unknown-linux-gnu, zig: x86_64-unknown-linux-gnu.2.17, run: true }
+          - { build: linux-x64-musl, runner: ubuntu-24.04, triple: x86_64-unknown-linux-musl, zig: x86_64-unknown-linux-musl, run: true }
+          - { build: linux-arm64, runner: ubuntu-24.04, triple: aarch64-unknown-linux-gnu, zig: aarch64-unknown-linux-gnu.2.17 }
+          - { build: linux-arm64-musl, runner: ubuntu-24.04, triple: aarch64-unknown-linux-musl, zig: aarch64-unknown-linux-musl }
+          - { build: darwin-arm64, runner: macos-15, triple: aarch64-apple-darwin, run: true }
+          - { build: darwin-x64, runner: macos-15, triple: x86_64-apple-darwin }
+          - { build: windows-x64, runner: windows-2025, triple: x86_64-pc-windows-msvc, run: true }
     env:
       MODE: ${{ needs.plan.outputs.mode }}
       VERSION: ${{ needs.plan.outputs.version }}
@@ -232,9 +251,98 @@ jobs:
         with:
           bun-version-file: package.json
 
-      - name: Install (cli)
-        run: bun install --frozen-lockfile
-        working-directory: cli
+      - name: Stamp the dev version
+        if: needs.plan.outputs.mode == 'dev'
+        run: bun scripts/version.ts set "$VERSION"
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target "$TRIPLE"
+          rustup default "$RUST_TOOLCHAIN"
+        env:
+          TRIPLE: ${{ matrix.triple }}
+
+      # Zig from ziglang.org, checked against its published SHA-256; cargo-zigbuild from crates.io with its lockfile.
+      - name: Install zig and cargo-zigbuild
+        if: matrix.zig
+        run: |
+          curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/zig.tar.xz" "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz"
+          echo "$ZIG_SHA256  $RUNNER_TEMP/zig.tar.xz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+          cargo install --locked "cargo-zigbuild@$CARGO_ZIGBUILD_VERSION"
+
+      - name: Build
+        working-directory: rust
+        env:
+          BROWSE_VERSION: ${{ needs.plan.outputs.version }}
+          BROWSE_BUILD_ID: ${{ needs.plan.outputs.build_id }}
+          TRIPLE: ${{ matrix.triple }}
+          ZIG_TARGET: ${{ matrix.zig }}
+          BUILD: ${{ matrix.build }}
+          # No Visual C++ runtime to depend on: not every Windows has it.
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          [ "$(node -p 'require("../cli/package.json").version')" = "$VERSION" ] || { echo "::error::The checkout isn't version $VERSION."; exit 1; }
+          if [ -n "$ZIG_TARGET" ]; then cargo zigbuild --release --locked -p browse --target "$ZIG_TARGET"
+          else cargo build --release --locked -p browse --target "$TRIPLE"; fi
+          exe=browse; case "$BUILD" in windows-*) exe=browse.exe ;; esac
+          mkdir -p "$RUNNER_TEMP/out/$BUILD"
+          cp "target/$TRIPLE/release/$exe" "$RUNNER_TEMP/out/$BUILD/$exe"
+          ls -l "$RUNNER_TEMP/out/$BUILD/$exe"
+
+      - name: Run it
+        if: matrix.run
+        env:
+          BUILD: ${{ matrix.build }}
+        run: |
+          exe=browse; case "$BUILD" in windows-*) exe=browse.exe ;; esac
+          actual=$("$RUNNER_TEMP/out/$BUILD/$exe" --version | tr -d '\r')
+          [ "$actual" = "$VERSION" ] || { echo "::error::$BUILD --version printed $actual, expected $VERSION"; exit 1; }
+          echo "$BUILD: $actual"
+          "$RUNNER_TEMP/out/$BUILD/$exe" tools > /dev/null
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rust-${{ matrix.build }}
+          path: ${{ runner.temp }}/out
+          if-no-files-found: error
+          retention-days: 7
+
+  # The platform packages: opencode-browse-<target>-<version>.tgz for every install script target (scripts/npm-package.ts,
+  # which checks each binary's format, CPU, C library and glibc floor), from build-binary's executables. Then the
+  # linux-x64 ones as users get them: the install script against a local copy of the release service, the relay and MCP
+  # server, and `npm install` of build's @opencode/browse next to its platform package.
+  build-binaries:
+    name: Build binaries
+    needs: [plan, tag, build, build-binary]
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.build-binary.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      digest: ${{ steps.upload.outputs.digest }}
+    env:
+      MODE: ${{ needs.plan.outputs.mode }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      NPM_CHANNEL: ${{ needs.plan.outputs.channel }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.tag.outputs.sha || github.sha }}
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
 
       - name: Stamp the dev version
         if: needs.plan.outputs.mode == 'dev'
@@ -246,20 +354,21 @@ jobs:
           pattern: build
           digests: build=${{ needs.build.outputs.digest }}
 
-      # The Bun release is the one setup-bun installed from package.json's packageManager.
-      - name: Compile and pack
-        working-directory: cli
-        env:
-          OPENCODE_BROWSER_STORE_ID: ${{ vars.CWS_ITEM_ID }}
+      - name: Download the Rust builds
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: rust-*
+          path: ${{ runner.temp }}/rust
+          merge-multiple: true
+
+      - name: Pack the platform packages
         run: |
-          [ "$(node -p 'require("./package.json").version')" = "$VERSION" ] || { echo "::error::The checkout isn't version $VERSION."; exit 1; }
-          if [ "$MODE" = dev ]; then export OPENCODE_BROWSER_EXTENSION_ZIP="$RUNNER_TEMP/in/build/browse-extension-$VERSION.zip"; fi
-          BUN_COMPILE_RELEASE="bun-v$(bun --version)" bun script/compile.ts
-          bun script/pack.ts --out "$RUNNER_TEMP/binaries"
+          [ "$(node -p 'require("./cli/package.json").version')" = "$VERSION" ] || { echo "::error::The checkout isn't version $VERSION."; exit 1; }
+          bun scripts/npm-package.ts platforms --binaries "$RUNNER_TEMP/rust" --out "$RUNNER_TEMP/binaries"
 
       - name: Smoke test the linux-x64 binaries
         run: |
-          for target in linux-x64 linux-x64-baseline; do
+          for target in linux-x64 linux-x64-baseline linux-x64-musl linux-x64-baseline-musl; do
             dir=$(mktemp -d)
             tar -xzf "$RUNNER_TEMP/binaries/opencode-browse-$target-$VERSION.tgz" -C "$dir"
             actual=$("$dir/package/bin/browse" --version)
@@ -267,11 +376,33 @@ jobs:
             echo "$target: $actual"
           done
 
-      # The linux-x64 binary as a user gets it: cli/node_modules is moved out of the way, so a file it reads at run time
-      # from a path built on __dirname (the build machine's node_modules, baked into the executable) fails here too.
-      # `browse serve` is the relay install and the MCP server start; `browse mcp` serves the tools. Put back for the
-      # upload.
-      - name: Smoke test the relay and MCP server without node_modules
+      # The install script reads the channel manifest and downloads the tarball the way it does from
+      # https://anoma.ly/release; here both come from a local server.
+      - name: Install script against a local release service
+        run: |
+          set -eu
+          channel=stable; [ "$NPM_CHANNEL" = dev ] && channel=dev
+          file="opencode-browse-linux-x64-$VERSION.tgz"
+          root=$(mktemp -d)
+          mkdir -p "$root/release/browse/cli" "$root/release/files"
+          cp "$RUNNER_TEMP/binaries/$file" "$root/release/files/"
+          size=$(wc -c < "$root/release/files/$file" | tr -d ' ')
+          sum=$(sha256sum "$root/release/files/$file" | cut -d' ' -f1)
+          printf '{"schema":1,"app":"browse","artifact":"cli","channel":"%s","release":{"version":"%s","targets":{"linux-x64":{"url":"/release/files/%s","size":%s,"sha256":"%s"}}}}\n' \
+            "$channel" "$VERSION" "$file" "$size" "$sum" > "$root/release/browse/cli/$channel.json"
+          (cd "$root" && exec python3 -m http.server 29987 --bind 127.0.0.1) > /dev/null 2>&1 &
+          server=$!
+          trap 'kill "$server"' EXIT
+          sleep 1
+          home=$(mktemp -d)
+          env -i HOME="$home" PATH=/usr/bin:/bin OPENCODE_BROWSER_RELEASE_SERVICE=http://127.0.0.1:29987/release \
+            sh ./install --channel "$channel" --no-setup
+          actual=$("$home/.local/bin/browse" --version)
+          [ "$actual" = "$VERSION" ] || { echo "::error::the install script installed $actual, expected $VERSION"; exit 1; }
+          echo "installed: $actual"
+
+      # `browse serve` is the relay; `browse mcp` serves the tools through it.
+      - name: Smoke test the relay and MCP server
         run: |
           set -eu
           dir=$(mktemp -d)
@@ -280,12 +411,7 @@ jobs:
           home=$(mktemp -d)
           port=29988
           relay=
-          restore() {
-            if [ -n "$relay" ]; then kill "$relay" 2>/dev/null || true; fi
-            if [ -d cli/node_modules.away ]; then mv cli/node_modules.away cli/node_modules; fi
-          }
-          trap restore EXIT
-          mv cli/node_modules cli/node_modules.away
+          trap 'if [ -n "$relay" ]; then kill "$relay" 2>/dev/null || true; fi' EXIT
           env -i HOME="$home" PATH=/usr/bin:/bin OPENCODE_BROWSER_PORT="$port" OPENCODE_BROWSER_MANAGED_RELAY=1 \
             "$binary" serve > "$RUNNER_TEMP/relay.log" 2>&1 &
           relay=$!
@@ -297,11 +423,12 @@ jobs:
           done
           if [ -z "$up" ]; then
             cat "$RUNNER_TEMP/relay.log"
-            echo "::error::The relay from the linux-x64 binary did not answer /version without node_modules."
+            echo "::error::The relay from the linux-x64 binary did not answer /version."
             exit 1
           fi
           echo "relay: $(cat "$RUNNER_TEMP/version.json")"
-          # Closing its stdin interrupts the MCP server (Effect exits 130), which isn't a failure; the tools are the test.
+          [ "$(jq -r .version "$RUNNER_TEMP/version.json")" = "$VERSION" ] || { echo "::error::The relay reports another version."; exit 1; }
+          [ "$(jq -r .buildId "$RUNNER_TEMP/version.json")" = "$BUILD_ID" ] || { echo "::error::The relay reports another build id."; exit 1; }
           {
             printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release-smoke","version":"0"}}}'
             sleep 2
@@ -312,10 +439,18 @@ jobs:
           tools=$(grep -o '"name":"[a-z0-9_-]*"' "$RUNNER_TEMP/mcp.json" | wc -l)
           if [ "$tools" -lt 1 ]; then
             cat "$RUNNER_TEMP/mcp.json"
-            echo "::error::The linux-x64 binary's MCP server listed no tools without node_modules."
+            echo "::error::The linux-x64 binary's MCP server listed no tools."
             exit 1
           fi
           echo "mcp: $tools tools"
+        env:
+          BUILD_ID: ${{ needs.plan.outputs.build_id }}
+
+      - name: npm install of @opencode/browse with its linux-x64 package
+        run: >-
+          bun scripts/check-artifacts.ts --version "$VERSION"
+          --tarball "$RUNNER_TEMP/in/build/opencode-browse-$VERSION.tgz"
+          --platform-tarball "$RUNNER_TEMP/binaries/opencode-browse-linux-x64-$VERSION.tgz"
 
       - id: upload
         name: Upload
@@ -327,7 +462,7 @@ jobs:
   # OPTIONAL, off by default: signs the macOS binaries with a Developer ID (hardened runtime, .github/release/entitlements/
   # cli.plist) once the repository variable MACOS_SIGNING is true. The certificate comes from AWS Secrets Manager
   # (shared/APPLE_SIGNING_CERTIFICATE: a base64 .p12 without a password). Until then this job is skipped and the macOS
-  # packages ship with the ad-hoc signature bun build --compile gives them, which runs: neither the install script's curl
+  # packages ship with the ad-hoc signature the Rust linker gives them, which runs: neither the install script's curl
   # nor npm sets quarantine.
   sign-macos:
     name: Sign the macOS binaries (optional)

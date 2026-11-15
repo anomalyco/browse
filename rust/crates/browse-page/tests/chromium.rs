@@ -1,0 +1,461 @@
+//! End-to-end checks against a real headless Chromium (skipped when none is installed; set BROWSE_TEST_CHROME).
+
+mod support;
+
+use serde_json::json;
+use support::Harness;
+
+macro_rules! harness {
+    ($human:expr) => {
+        match Harness::start($human).await {
+            Some(h) => h,
+            None => {
+                eprintln!("no Chromium found; skipping");
+                return;
+            }
+        }
+    };
+}
+
+fn ref_of(snapshot: &str, needle: &str) -> String {
+    let line = snapshot.lines().find(|l| l.contains(needle)).unwrap_or_else(|| panic!("no line with {needle:?} in:\n{snapshot}"));
+    let start = line.find("ref=").expect("ref") + 4;
+    line[start..].split([']', ' ']).next().unwrap().to_string()
+}
+
+const FORM: &str = r#"<!doctype html><html><head><title>Form</title></head><body>
+<main>
+<h1>Sign up</h1>
+<label>Email <input id="email" name="email"></label>
+<label>Password <input id="pw" type="password"></label>
+<label><input type="checkbox" id="terms"> I agree</label>
+<select id="plan"><option value="free">Free</option><option value="pro">Pro plan</option></select>
+<button id="save" onclick="document.getElementById('out').textContent = 'saved ' + document.getElementById('email').value">Save</button>
+<p id="out">nothing yet</p>
+<a href="/next">Next page</a>
+</main>
+</body></html>"#;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn snapshot_click_fill_and_refs() {
+    let h = harness!(false);
+    let url = h.server.page("/form", FORM);
+    h.server.page("/next", "<!doctype html><title>Next</title><h1>Second page</h1>");
+    let nav = h.json("navigate", json!({ "url": url })).await;
+    assert_eq!(nav["title"], "Form");
+
+    let snapshot = h.ok("snapshot", json!({})).await;
+    assert!(snapshot.contains("- heading \"Sign up\" [level=1]"), "{snapshot}");
+    let email = ref_of(&snapshot, "textbox \"Email\"");
+    let save = ref_of(&snapshot, "button \"Save\"");
+
+    let filled = h.json("fill", json!({ "fields": [ { "ref": email, "value": "a@b.co" }, { "selector": "#terms", "checked": true }, { "selector": "#plan", "value": "Pro plan" } ] })).await;
+    assert_eq!(filled["filled"][1]["checked"], true, "{filled}");
+    assert_eq!(filled["filled"][2]["selected"][0], "pro", "{filled}");
+
+    let clicked = h.json("click", json!({ "ref": save })).await;
+    assert!(clicked["clicked"].as_str().unwrap().contains("button \"Save\""), "{clicked}");
+    let text = h.ok("eval", json!({ "expression": "document.getElementById('out').textContent" })).await;
+    assert_eq!(text, "\"saved a@b.co\"");
+
+    // Refs survive a second snapshot, and delta shows only what changed.
+    let again = h.ok("snapshot", json!({})).await;
+    assert_eq!(ref_of(&again, "button \"Save\""), save);
+    let delta = h.ok("snapshot", json!({ "delta": true })).await;
+    assert!(delta.ends_with("0 additions, 0 removals, 12 unchanged") || delta.contains("unchanged"), "{delta}");
+    let found = h.ok("snapshot", json!({ "find": "button \"save" })).await;
+    assert!(found.starts_with("1 matching snapshot line"), "{found}");
+
+    // Playwright selectors.
+    h.ok("click", json!({ "selector": "role=checkbox[name=\"I agree\"]" })).await;
+    let checked = h.ok("eval", json!({ "expression": "document.getElementById('terms').checked" })).await;
+    assert_eq!(checked, "false");
+    let typed = h.json("type", json!({ "selector": "label=Password", "text": "Ab1!" })).await;
+    assert_eq!(typed["typed"], 4);
+    let value = h.ok("eval", json!({ "expression": "(el) => el.value", "selector": "#pw" })).await;
+    assert_eq!(value, "\"Ab1!\"");
+
+    // Ambiguous selectors fail with the matches.
+    let error = h.err("click", json!({ "selector": "input" })).await;
+    assert!(error.contains("matches 3 elements"), "{error}");
+
+    // A link click navigates; old refs are stale.
+    let next = ref_of(&again, "link \"Next page\"");
+    let result = h.json("click", json!({ "ref": next })).await;
+    assert_eq!(result["navigated"], true, "{result}");
+    assert_eq!(result["title"], "Next");
+    let stale = h.err("click", json!({ "ref": save })).await;
+    assert!(stale.contains("stale"), "{stale}");
+
+    let back = h.json("navigate", json!({ "action": "back" })).await;
+    assert!(back["url"].as_str().unwrap().ends_with("/form"), "{back}");
+
+    // Nothing browse did is visible to the page, and Runtime/Console were never enabled.
+    let methods = h.tab.methods();
+    assert!(!methods.iter().any(|m| m == "Runtime.enable" || m == "Console.enable"), "{methods:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stealth_isolated_world_and_main_world() {
+    let h = harness!(false);
+    let url = h.server.page("/s", "<!doctype html><script>window.pageSecret = 42; window.baseline = new Set(Object.getOwnPropertyNames(window).concat(['baseline']))</script><button>Go</button>");
+    h.ok("navigate", json!({ "url": url })).await;
+    h.ok("snapshot", json!({})).await;
+    h.ok("click", json!({ "selector": "role=button[name=\"Go\"]" })).await;
+    h.ok("snapshot", json!({ "mode": "aria" })).await;
+    let isolated = h.ok("eval", json!({ "expression": "typeof window.pageSecret" })).await;
+    assert_eq!(isolated, "\"undefined\"");
+    let main = h.ok("eval", json!({ "expression": "window.pageSecret", "world": "main" })).await;
+    assert_eq!(main, "42");
+    let globals = h.ok("eval", json!({ "expression": "Object.getOwnPropertyNames(window).filter((name) => !window.baseline.has(name))", "world": "main" })).await;
+    assert_eq!(globals, "[]");
+    let with_el = h.ok("eval", json!({ "expression": "(el, arg) => el.textContent + arg", "selector": "button", "arg": "!", "world": "main" })).await;
+    assert_eq!(with_el, "\"Go!\"");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn covered_elements_fail_fast_and_dialogs_pause() {
+    let h = harness!(false);
+    let url = h.server.page(
+        "/c",
+        r#"<!doctype html><button id="under" onclick="this.textContent='hit'">Under</button>
+<div id="overlay" style="position:fixed;inset:0;background:rgba(0,0,0,.3)"></div>
+<button id="alert" style="position:fixed;bottom:10px;z-index:2" onclick="document.title = String(confirm('Sure?'))">Ask</button>"#,
+    );
+    h.ok("navigate", json!({ "url": url })).await;
+    let started = std::time::Instant::now();
+    let error = h.err("click", json!({ "selector": "#under" })).await;
+    assert!(error.contains("div id=\"overlay\""), "{error}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+
+    let clicked = h.json("click", json!({ "selector": "#alert" })).await;
+    assert_eq!(clicked["dialog"]["type"], "confirm", "{clicked}");
+    let blocked = h.err("snapshot", json!({})).await;
+    assert!(blocked.contains("dialog is open"), "{blocked}");
+    let status = h.json("dialog", json!({})).await;
+    assert_eq!(status["dialog"]["message"], "Sure?");
+    h.ok("dialog", json!({ "action": "accept" })).await;
+    let title = h.ok("eval", json!({ "expression": "document.title" })).await;
+    assert_eq!(title, "\"true\"");
+    h.ok("dialog", json!({ "auto": "dismiss" })).await;
+    h.ok("click", json!({ "selector": "#alert" })).await;
+    let title = h.ok("eval", json!({ "expression": "document.title" })).await;
+    assert_eq!(title, "\"false\"");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn iframes_same_and_cross_origin() {
+    let h = harness!(false);
+    let inner = h.server.page("/inner", r#"<!doctype html><button onclick="this.textContent='inner clicked'">Inner button</button>"#);
+    let cross = h.server.other_origin("/inner");
+    let _ = inner;
+    let url = h.server.page(
+        "/frames",
+        &format!(
+            r#"<!doctype html><h1>Outer</h1>
+<iframe title="Same" srcdoc="<button onclick=&quot;this.textContent='same clicked'&quot;>Same button</button>" style="width:300px;height:100px"></iframe>
+<iframe title="Cross" src="{cross}" style="width:300px;height:100px;margin-top:50px"></iframe>"#
+        ),
+    );
+    h.json("navigate", json!({ "url": url, "waitUntil": "settle" })).await;
+    let snapshot = h.ok("snapshot", json!({})).await;
+    assert!(snapshot.contains("iframe \"Same\""), "{snapshot}");
+    let same = ref_of(&snapshot, "button \"Same button\"");
+    let cross_ref = ref_of(&snapshot, "button \"Inner button\"");
+    h.ok("click", json!({ "ref": same })).await;
+    h.ok("click", json!({ "ref": cross_ref })).await;
+    let after = h.ok("snapshot", json!({})).await;
+    assert!(after.contains("same clicked") && after.contains("inner clicked"), "{after}");
+    let via_selector = h.ok("eval", json!({ "expression": "document.querySelector('button').textContent", "frame": "iframe[title=Cross]" })).await;
+    assert_eq!(via_selector, "\"inner clicked\"");
+    h.ok("click", json!({ "selector": "iframe[title=Cross] >> frame >> role=button" })).await;
+    let aria = h.ok("snapshot", json!({ "mode": "aria" })).await;
+    assert!(aria.contains("inner clicked"), "{aria}");
+    let aria_ref = ref_of(&aria, "button \"same clicked\"");
+    assert!(aria_ref.starts_with('f'), "{aria}");
+    h.ok("click", json!({ "ref": aria_ref })).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fill_uploads_keys_scroll_and_waits() {
+    let h = harness!(true);
+    let url = h.server.page(
+        "/misc",
+        r#"<!doctype html><input id="pw" type="password"><input id="file" type="file" multiple>
+<input id="q" onkeydown="if (event.key === 'Enter') document.title = 'searched ' + this.value">
+<div style="height:3000px"></div><button id="far" onclick="setTimeout(() => { const p = document.createElement('p'); p.textContent = 'Loaded later'; document.body.append(p) }, 300)">Far away</button>"#,
+    );
+    h.ok("navigate", json!({ "url": url })).await;
+    h.ok("fill", json!({ "selector": "#pw", "value": "pw-123" })).await;
+    let value = h.ok("eval", json!({ "expression": "document.getElementById('pw').value" })).await;
+    assert_eq!(value, "\"pw-123\"");
+    let rejected = h.err("fill", json!({ "selector": "#pw", "secret": "password" })).await;
+    assert!(rejected.contains("value or checked"), "{rejected}");
+
+    let file = h.files.0.join("upload.txt");
+    std::fs::write(&file, "hello").unwrap();
+    let uploaded = h.json("upload", json!({ "selector": "#file", "files": [file.display().to_string()] })).await;
+    assert_eq!(uploaded["files"][0], "upload.txt");
+    let names = h.ok("eval", json!({ "expression": "document.getElementById('file').files[0].name" })).await;
+    assert_eq!(names, "\"upload.txt\"");
+    h.err("upload", json!({ "selector": "#file", "files": ["/etc/passwd"] })).await;
+
+    h.ok("type", json!({ "selector": "#q", "text": "rust lang", "submit": true })).await;
+    let title = h.ok("eval", json!({ "expression": "document.title" })).await;
+    assert_eq!(title, "\"searched rust lang\"");
+    h.ok("press", json!({ "selector": "#q", "key": ["ControlOrMeta+a", "Backspace"] })).await;
+    let cleared = h.ok("eval", json!({ "expression": "document.getElementById('q').value" })).await;
+    assert_eq!(cleared, "\"\"");
+
+    // Human input scrolls toward the far button with the wheel before clicking it.
+    h.ok("click", json!({ "selector": "#far" })).await;
+    let waited = h.json("wait_for", json!({ "text": "Loaded later", "timeout": 3000 })).await;
+    assert_eq!(waited["ok"], true);
+    let scrolled = h.json("scroll", json!({ "to": "top" })).await;
+    assert_eq!(scrolled["scrollY"], 0.0);
+    let down = h.json("scroll", json!({ "deltaY": 500 })).await;
+    assert!(down["scrollY"].as_f64().unwrap() > 100.0, "{down}");
+    let timeout = h.err("wait_for", json!({ "selector": "#missing", "timeout": 300 })).await;
+    assert!(timeout.contains("Timed out"), "{timeout}");
+    let webmcp = h.json("webmcp", json!({ "action": "list" })).await;
+    assert_eq!(webmcp["tools"].as_array().unwrap().len(), 0);
+    let emulated = h.json("emulate", json!({ "viewport": { "width": 500, "height": 400 }, "colorScheme": "dark" })).await;
+    assert_eq!(emulated["applied"]["viewport"]["width"], 500);
+    let dark = h.ok("eval", json!({ "expression": "matchMedia('(prefers-color-scheme: dark)').matches && innerWidth" })).await;
+    assert_eq!(dark, "500");
+    h.ok("emulate", json!({ "viewport": "reset", "colorScheme": "reset" })).await;
+
+    let fetch = "fetch(location.href).then(() => 'online', () => 'offline')";
+    h.ok("emulate", json!({ "offline": true })).await;
+    assert_eq!(h.ok("eval", json!({ "expression": fetch })).await, "\"offline\"");
+    let flag = h.state.inner().lock().await.get("browse.network.offline").and_then(|v| v.downcast_ref::<bool>()).copied();
+    assert_eq!(flag, Some(true));
+    h.ok("emulate", json!({ "offline": false })).await;
+    assert_eq!(h.ok("eval", json!({ "expression": fetch })).await, "\"online\"");
+    let flag = h.state.inner().lock().await.get("browse.network.offline").and_then(|v| v.downcast_ref::<bool>()).copied();
+    assert_eq!(flag, Some(false));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drag_hover_select_reload_and_challenge() {
+    let h = harness!(false);
+    let url = h.server.page(
+        "/d",
+        r#"<!doctype html><style>#src,#dst{width:100px;height:100px;margin:20px;display:inline-block}</style>
+<div id="src" draggable="true" ondragstart="event.dataTransfer.setData('text/plain','moved')" style="background:#c00">drag me</div>
+<div id="dst" ondragover="event.preventDefault()" ondrop="event.preventDefault(); this.textContent = event.dataTransfer.getData('text/plain')" style="background:#0c0">drop here</div>
+<div id="tip" onmouseenter="document.title='hovered'" style="width:50px;height:50px">tip</div>
+<select id="multi" multiple><option>a</option><option>b</option><option>c</option></select>"#,
+    );
+    h.ok("navigate", json!({ "url": url })).await;
+    let dragged = h.json("drag", json!({ "from": "#src", "to": "#dst" })).await;
+    assert_eq!(dragged["html5"], true, "{dragged}");
+    let dropped = h.ok("eval", json!({ "expression": "document.getElementById('dst').textContent" })).await;
+    assert_eq!(dropped, "\"moved\"");
+    h.ok("hover", json!({ "selector": "#tip" })).await;
+    assert_eq!(h.ok("eval", json!({ "expression": "document.title" })).await, "\"hovered\"");
+    let selected = h.json("select", json!({ "selector": "#multi", "values": ["a", "c"] })).await;
+    assert_eq!(selected["selected"], json!(["a", "c"]));
+    let reloaded = h.json("navigate", json!({ "action": "reload" })).await;
+    assert_eq!(reloaded["navigated"], true, "{reloaded}");
+    h.json("wait_for", json!({ "url": "**/d", "load": "load" })).await;
+
+    let blocked = h.server.page("/blocked", "<!doctype html><title>Access Denied</title><p>Access denied</p>");
+    let result = h.json("navigate", json!({ "url": blocked })).await;
+    assert_eq!(result["challenge"]["kind"], "block", "{result}");
+    assert!(result["warning"].as_str().unwrap().contains("refused the visit"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn navigation_statuses_redirects_timeouts_and_fragments() {
+    let h = harness!(false);
+    let landed = h.server.page("/__landed", "<!doctype html><title>Landed</title><main><h1 id=top>Landed Here</h1><p>Some Text</p></main>");
+
+    let missing = h.json("navigate", json!({ "url": format!("http://127.0.0.1:{}/__status/404", h.server.port) })).await;
+    assert_eq!(missing["status"], 404, "{missing}");
+    assert!(missing["url"].as_str().unwrap().ends_with("/__status/404"), "{missing}");
+
+    let redirected = h.json("navigate", json!({ "url": format!("http://127.0.0.1:{}/__redirect/3", h.server.port) })).await;
+    assert_eq!(redirected["url"], landed, "{redirected}");
+    assert_eq!(redirected["redirects"], 3, "{redirected}");
+    assert_eq!(redirected["status"], 200, "{redirected}");
+
+    let started = std::time::Instant::now();
+    let slow = h.json("navigate", json!({ "url": format!("http://127.0.0.1:{}/__slow/4000", h.server.port), "timeout": 800 })).await;
+    assert!(started.elapsed() < std::time::Duration::from_millis(2_500), "took {:?}", started.elapsed());
+    assert!(slow["pending"].as_str().unwrap().ends_with("/__slow/4000"), "{slow}");
+    assert_eq!(slow["url"], landed, "{slow}");
+    // The slow page commits later; wait_for load waits for it rather than the old page.
+    let waited = h.json("wait_for", json!({ "load": "load", "timeout": 8000 })).await;
+    assert!(waited["url"].as_str().unwrap().ends_with("/__slow/4000"), "{waited}");
+    assert_eq!(h.ok("eval", json!({ "expression": "document.title" })).await, "\"Slow\"");
+
+    h.json("navigate", json!({ "url": landed })).await;
+    let fragment = h.json("navigate", json!({ "url": format!("{landed}#top") })).await;
+    assert_eq!(fragment["url"], format!("{landed}#top"), "{fragment}");
+    assert!(fragment.get("urlChanged").is_some(), "{fragment}");
+
+    let error = h.err("navigate", json!({ "url": "javascript:alert(1)" })).await;
+    assert!(error.contains("eval"), "{error}");
+    let error = h.err("navigate", json!({ "url": "" })).await;
+    assert!(error.contains("empty"), "{error}");
+
+    let waited = h.json("wait_for", json!({ "text": "landed   here", "url": "/__landed" })).await;
+    assert_eq!(waited["ok"], true, "{waited}");
+    let error = h.err("wait_for", json!({ "text": "landed here", "exact": true, "timeout": 300 })).await;
+    assert!(error.contains("Timed out"), "{error}");
+    let error = h.err("wait_for", json!({ "load": "none" })).await;
+    assert!(error.contains("commit"), "{error}");
+}
+
+const REFS: &str = r#"<!doctype html><html><head><title>Refs</title></head><body><main>
+<details><summary>More info</summary><p>Hidden details</p></details>
+<div contenteditable="true" id="editor">Dax</div>
+<button id="icon"><svg width="10" height="10"></svg></button>
+<button id="go" onclick="this.dataset.clicked = 'yes'">Go</button>
+<input id="name" value="Dax">
+<select id="size"><option value="1">Small</option><option value="2">Large</option></select>
+</main></body></html>"#;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn refs_nulls_strictness_and_typing() {
+    let h = harness!(false);
+    let url = h.server.page("/refs", REFS);
+    h.json("navigate", json!({ "url": url })).await;
+    let snapshot = h.ok("snapshot", json!({})).await;
+
+    // Refs without a standard role or a name resolve (role and name travel as null).
+    let summary = ref_of(&snapshot, "summary \"More info\"");
+    h.ok("click", json!({ "ref": summary })).await;
+    assert_eq!(h.ok("eval", json!({ "expression": "document.querySelector('details').open" })).await, "true");
+
+    // Nulls, also nested, reach the page.
+    let echoed = h.ok("eval", json!({ "expression": "(el, a) => JSON.stringify(a)", "arg": { "a": null, "b": [null, 1] } })).await;
+    assert_eq!(echoed, "\"{\\\"a\\\":null,\\\"b\\\":[null,1]}\"");
+
+    // A lookalike inserted before a ref's element doesn't take the ref over.
+    let go = ref_of(&snapshot, "button \"Go\"");
+    h.ok("eval", json!({ "expression": "const b = document.getElementById('go'); const twin = b.cloneNode(true); twin.id = 'twin'; b.before(twin); return 1" })).await;
+    h.ok("click", json!({ "ref": go })).await;
+    assert_eq!(h.ok("eval", json!({ "expression": "[document.getElementById('go').dataset.clicked, document.getElementById('twin').dataset.clicked]" })).await, "[\"yes\",null]");
+    // When the element is gone and several lookalikes remain, the ref fails instead of picking one.
+    h.ok("eval", json!({ "expression": "const b = document.getElementById('go'); b.after(b.cloneNode(true)); b.remove(); return 1" })).await;
+    let error = h.err("click", json!({ "ref": go })).await;
+    assert!(error.contains("matches 2 elements"), "{error}");
+
+    // type appends at the end of a field that wasn't focused; press inserts characters without a US key.
+    h.ok("type", json!({ "selector": "#name", "text": " Jr" })).await;
+    h.ok("press", json!({ "selector": "#name", "key": "é" })).await;
+    assert_eq!(h.ok("eval", json!({ "expression": "document.getElementById('name').value" })).await, "\"Dax Jré\"");
+
+    // select takes a number, and lists the options when nothing matches.
+    let selected = h.json("select", json!({ "selector": "#size", "value": 2 })).await;
+    assert_eq!(selected["selected"][0], "2", "{selected}");
+    let started = std::time::Instant::now();
+    let error = h.err("select", json!({ "selector": "#size", "value": "Huge" })).await;
+    assert!(error.contains("\"Small\"") && error.contains("\"Large\""), "{error}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(4));
+
+    // Aria refs that never existed fail at once.
+    h.ok("snapshot", json!({ "mode": "aria" })).await;
+    let started = std::time::Instant::now();
+    let error = h.err("click", json!({ "ref": "a999" })).await;
+    assert!(error.contains("Unknown aria snapshot ref"), "{error}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn eval_scoping_serialization_errors_and_timeouts() {
+    let h = harness!(false);
+    let url = h.server.page("/eval", "<!doctype html><title>Eval</title><body><div id=a class='x y'>hi</div></body>");
+    h.json("navigate", json!({ "url": url })).await;
+
+    // Concurrent calls share the tab's page model and don't wait on each other.
+    let (a, b) = tokio::join!(h.ok("eval", json!({ "expression": "1" })), h.ok("eval", json!({ "expression": "2" })));
+    assert_eq!((a.as_str(), b.as_str()), ("1", "2"));
+
+    // Declarations stay local: the same code runs twice, and the page never sees them.
+    for world in ["isolated", "main"] {
+        assert_eq!(h.ok("eval", json!({ "expression": "const x = 1; return x", "world": world })).await, "1");
+        assert_eq!(h.ok("eval", json!({ "expression": "const x = 1; return x", "world": world })).await, "1");
+    }
+    assert_eq!(h.ok("eval", json!({ "expression": "typeof x", "world": "main" })).await, "\"undefined\"");
+    assert_eq!(h.ok("eval", json!({ "expression": "\"await is just a word\"" })).await, "\"await is just a word\"");
+    assert_eq!(h.ok("eval", json!({ "expression": "await new Promise((r) => setTimeout(() => r(5), 10))" })).await, "5");
+    let hinted = h.json("eval", json!({ "expression": "const t = document.title" })).await;
+    assert!(hinted["hint"].as_str().unwrap().contains("return"), "{hinted}");
+
+    let value = h.json("eval", json!({ "expression": "(() => { const o = { m: new Map([['k', 1]]), s: new Set([1, 2]), d: new Date(0), n: document.getElementById('a'), big: 10n, r: /x/g }; o.self = o; return o })()" })).await;
+    assert_eq!(value["m"], json!({ "k": 1 }), "{value}");
+    assert_eq!(value["s"], json!([1, 2]), "{value}");
+    assert_eq!(value["d"], "1970-01-01T00:00:00.000Z", "{value}");
+    assert_eq!(value["n"], "<div#a.x.y \"hi\">", "{value}");
+    assert_eq!(value["big"], "10n", "{value}");
+    assert_eq!(value["r"], "/x/g", "{value}");
+    assert_eq!(value["self"], "[Circular]", "{value}");
+    assert_eq!(h.ok("eval", json!({ "expression": "window" })).await, "\"[Window]\"");
+
+    let error = h.err("eval", json!({ "expression": "throw null" })).await;
+    assert!(error.contains("threw null"), "{error}");
+    let error = h.err("eval", json!({ "expression": "throw { custom: 1 }" })).await;
+    assert!(error.contains("custom"), "{error}");
+    let error = h.err("eval", json!({ "expression": "const a = 1;\nnull.boom" })).await;
+    assert!(error.contains("line 2"), "{error}");
+
+    // Like a console: the last expression statement's value.
+    assert_eq!(h.ok("eval", json!({ "expression": "1+1; 2" })).await, "2");
+    assert_eq!(h.ok("eval", json!({ "expression": "const a = 3; a" })).await, "3");
+    assert_eq!(h.ok("eval", json!({ "expression": "const s = 'a;b // c';\ns.length" })).await, "8");
+    assert_eq!(h.ok("eval", json!({ "expression": "let n = 0\nfor (const i of [1, 2]) n += i\nn * 10" })).await, "30");
+    let hinted = h.json("eval", json!({ "expression": "const t = 'return me'" })).await;
+    assert!(hinted["hint"].as_str().unwrap().contains("return"), "{hinted}");
+    let error = h.err("eval", json!({ "expression": "el.textContent", "selector": "#a" })).await;
+    assert!(error.contains("must be a function"), "{error}");
+    let error = h.err("eval", json!({ "expression": "document.title", "selector": "#a" })).await;
+    assert!(error.contains("must be a function"), "{error}");
+    let pairs = h.json("eval", json!({ "expression": "new Map([[{ k: 1 }, 'v']])" })).await;
+    assert_eq!(pairs, json!([[{ "k": 1 }, "v"]]), "{pairs}");
+
+    // A busy loop is stopped at the timeout and the tab answers again right away.
+    for world in ["isolated", "main"] {
+        let started = std::time::Instant::now();
+        let error = h.err("eval", json!({ "expression": "while (true) {}", "timeout": 1000, "world": world })).await;
+        assert!(error.contains("stopped"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+        let started = std::time::Instant::now();
+        assert_eq!(h.ok("eval", json!({ "expression": "1 + 1" })).await, "2");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "{:?}", started.elapsed());
+    }
+    h.json("navigate", json!({ "url": url })).await;
+    let error = h.err("navigate", json!({ "url": "mailto:someone@example.com" })).await;
+    assert!(error.contains("another app"), "{error}");
+
+    // Media emulation settings combine; bad values change nothing.
+    h.json("emulate", json!({ "colorScheme": "dark" })).await;
+    h.json("emulate", json!({ "reducedMotion": "reduce" })).await;
+    let both = h.ok("eval", json!({ "expression": "matchMedia('(prefers-color-scheme: dark)').matches && matchMedia('(prefers-reduced-motion: reduce)').matches" })).await;
+    assert_eq!(both, "true");
+    assert!(h.err("emulate", json!({ "colorScheme": "purple" })).await.contains("colorScheme"));
+    assert!(h.err("emulate", json!({ "timezone": "Europe/Paris" })).await.contains("timezone"));
+    assert!(h.err("emulate", json!({ "viewport": { "width": 0, "height": 10 } })).await.contains("1 to 10000"));
+    assert!(h.err("emulate", json!({ "viewport": { "width": 100000, "height": 10 } })).await.contains("1 to 10000"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn page_tools_need_a_tab() {
+    let h = harness!(false);
+    for tool in &h.tools {
+        let name = tool.spec().name;
+        let required = tool.spec().input_schema["required"].clone();
+        assert_eq!(required.as_array().is_some_and(|r| r.contains(&json!("tab"))), name != "navigate", "{name}: {required}");
+        if name == "navigate" {
+            continue;
+        }
+        let output = h.call(&name, json!({ "tab": null, "text": "x", "key": "x", "values": "x", "expression": "1", "files": "x", "from": "a", "to": "b" })).await;
+        assert!(output.is_error, "{name}");
+        assert!(support::text_of(&output).contains("Pass `tab`"), "{name}: {}", support::text_of(&output));
+    }
+    // Options for a new tab don't apply to an open one.
+    let output = h.call("navigate", json!({ "url": "about:blank", "group": "x" })).await;
+    assert!(output.is_error && support::text_of(&output).contains("only apply when navigate opens a tab"), "{}", support::text_of(&output));
+}

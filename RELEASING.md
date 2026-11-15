@@ -1,17 +1,26 @@
 # Releasing browse
 
-One version ships an extension zip, the npm package `@opencode/browse` (`opencode-browse-<version>.tgz`: the CLI,
-relay and MCP server, for `npx`) and the `browse` binaries. The npm package carries no extension.
+One version ships an extension zip, the npm package `@opencode/browse` (`opencode-browse-<version>.tgz`: a Node
+launcher, for `npx` and `npm install -g`) and the `browse` binaries. The npm package carries no extension.
 
-The binaries are `bun build --compile` executables of the same CLI (`cli/script/compile.ts`), each published two ways:
+The CLI, relay and MCP server are the Rust `browse` binary (crate `rust/crates/browse`, workspace `rust/`; the
+TypeScript CLI in `cli/` is kept as the reference and isn't built or released anymore). `@opencode/browse` holds only
+`dist/cli.mjs` ([rust/npm/browse.mjs](rust/npm/browse.mjs)), which runs the binary of the optional dependency npm
+installed for the machine, `@opencode/browse-<target>`; `dist/cli.mjs` stays the bin path because agent configs written
+by the TypeScript CLI run `node .../dist/cli.mjs mcp`. The version is baked into the binary at build time
+(`BROWSE_VERSION`, with the run's `BROWSE_BUILD_ID`), and `rust/Cargo.toml`/`Cargo.lock` carry it too
+(`scripts/version.ts`). Each binary is published two ways:
 as an npm package `@opencode/browse-<target>` holding `bin/browse` (`bin/browse.exe` on Windows) and a package.json with
 `os`, `cpu` and, on Linux, `libc`; and as one target per binary on Anomaly's release service, which the [install
 script](install) downloads. The [release service](#the-release-service) file is
 `opencode-browse-<target>-<version>.tgz`; it carries the same verified bytes as the npm package. Targets:
 `linux-x64`, `linux-x64-baseline`, `linux-arm64`, `linux-x64-musl`, `linux-x64-baseline-musl`, `linux-arm64-musl`,
 `darwin-arm64`, `darwin-x64`, `darwin-x64-baseline`, `windows-x64`, `windows-x64-baseline` (Windows on ARM64 runs x64).
-The service names macOS `macos-*`. Locally: `cd cli && bun script/compile.ts linux-x64 && bun script/pack.ts` (no target:
-all of them; `BUN_COMPILE_RELEASE=bun-v<version>` cross-compiles against verified Bun runtimes, as the release does).
+The service names macOS `macos-*`. A `-baseline` target carries the same binary as its base target (Rust's x86-64
+target doesn't use AVX2), and `@opencode/browse` depends only on the seven base targets. Locally:
+`cd rust && BROWSE_VERSION=<version> script/release.sh linux-x64 linux-x64-musl`, then
+`bun scripts/npm-package.ts platforms --binaries rust/dist --out <dir>` (with `--target <name>` for only some) and
+`bun scripts/npm-package.ts main --out <dir>`.
 
 Releases run only in GitHub Actions ([.github/workflows/release.yml](.github/workflows/release.yml)). Nobody has release
 secrets locally, and nothing is built, tagged or published from a laptop. Work lands on `dev`, the default branch.
@@ -20,7 +29,7 @@ secrets locally, and nothing is built, tagged or published from a laptop. Work l
 | --- | --- | --- | --- |
 | dev | every push to `dev` (not Markdown-only) | `<next patch>-dev.<run>`, e.g. `0.2.1-dev.57` | the [release service](#the-release-service) channel `dev` (`browse-extension-<version>.zip`, loaded unpacked, and every CLI binary target), then npm dist-tag `dev` (the binaries, then `@opencode/browse`) |
 | stable | **Actions → Release → Run workflow** on `dev` with a bump or version and release notes | `x.y.z` | tag `v<version>`, the [release service](#the-release-service) channel `stable` (the extension zip and every CLI binary target), npm `latest`, the public Chrome Web Store item (`browse-extension-<version>.zip`), the GitHub release |
-| check | the same button with bump `check` and no version, on any branch | `cli/package.json` | nothing: builds, checks and attests the stable artifacts and runs every publish script, the release service included, as a dry run |
+| check | the same button with bump `check` and no version, on any branch (`gh workflow run release.yml --ref <branch>`) | `cli/package.json` | nothing: builds, checks and attests the stable artifacts and runs every publish script, the release service included, as a dry run |
 
 There's no `production` branch: browse has no website. If it gets one, the site deploys from `production`, as in
 opencode and Hex; releases still come from `dev`.
@@ -37,11 +46,16 @@ opencode and Hex; releases still come from `dev`.
 
 ```
 plan    version from cli/package.json + bump; actor is admin or maintain; notes well-formed; not on npm yet
-tag     commits the versions (cli/package.json, package.json, public/manifest.json) and changelog/<version>.md from the
-        notes on the dispatched commit, pushes only the tag v<version> (deploy key); git and jq only
-build   from the tag: install, typecheck, test, release:check (zip + tarball + artifact checks), SHA256SUMS digest
-build-binaries  from the tag: compile every target against the pinned Bun release, pack and check the
-        @opencode/browse-<target> tarballs, run the linux-x64 one; no secrets
+tag     commits the versions (cli/package.json, package.json, public/manifest.json, rust/Cargo.toml, rust/Cargo.lock)
+        and changelog/<version>.md from the notes on the dispatched commit, pushes only the tag v<version> (deploy key);
+        git, sed, awk and jq only
+build   from the tag: install, typecheck, extension and cargo tests, release:check (zip + npm launcher tarball +
+        artifact checks), SHA256SUMS digest
+build-binary    one job per Rust build (linux gnu/musl x64/arm64 with cargo-zigbuild, glibc 2.17; macOS arm64/x64 on
+        macos-15; windows-x64 with a static C runtime), version and build id baked in; no secrets
+build-binaries  packs and checks the @opencode/browse-<target> tarballs (every target; baseline = base binary), runs
+        the linux-x64 ones: the install script against a local release service, relay + MCP, npm install of
+        @opencode/browse with its platform package
 sign-macos      optional (repository variable MACOS_SIGNING=true): Developer ID signs the macOS binaries; skipped now
 attest  build provenance for the zip and every tarball (Sigstore)
 publish-release-service       the extension and every CLI binary target to the release service (channel dev or
@@ -81,13 +95,12 @@ rulesets below require their review. The jobs that need a secret run in the envi
 ## How a dev install gets its extension
 
 The dev zip keeps the manifest `key`, so it loads with the same unpacked ID as a checkout's `dist/`, which the relay
-trusts. The dev CLI has the zip's sha256 baked in (`cli/build.ts`), and the zip reaches the release service before the
-package reaches npm. `npx @opencode/browse@dev install` downloads exactly that zip from
-`https://anoma.ly/release/browse/files/<sha256>/browse-extension-<version>.zip`, checks it, unpacks it into
-`<cache root>/extension` and pairs it (`cli/src/dev-extension.ts`). Install points at the Chrome Web Store build and
-says nothing about that folder; `browse extension` shows it to a developer loading it unpacked. When the
-relay of a newer dev version starts, it puts that version's zip in the same folder and reloads the extension. Dev
-builds never go to the Chrome Web Store: every upload is reviewed, too slow for a build per push.
+trusts, and every dev build still publishes it to the release service
+(`https://anoma.ly/release/browse/extension/dev/chromium`). The Rust CLI doesn't fetch it: `browse install` points at
+the Chrome Web Store item on every channel. To try a dev extension, download the zip, unpack it and load it unpacked;
+it pairs like the store build. (The TypeScript CLI baked the dev zip's sha256 in and unpacked it into
+`<cache root>/extension`; that is gone with it.) Dev builds never go to the Chrome Web Store: every upload is
+reviewed, too slow for a build per push.
 
 ## The release service
 
@@ -108,8 +121,12 @@ file's size and SHA-256 and installs it; a binary install's updater polls `cli/<
 least hourly with `If-None-Match` and User-Agent `browse/<channel>/<version>/cli`. `--version` stays on npm because the
 protocol has one current release per channel and no version lookup. npm global installs keep reading npm's dist-tag.
 
-A binary install's updater runs the install script baked into the binary it is running ([cli/script/compile.ts](cli/script/compile.ts)),
-so older releases keep reading future channel manifests with their own installer. Manifest changes must stay readable by
+A TypeScript binary install's updater (0.0.17 and earlier) runs the install script baked into the binary it is running,
+so those releases keep reading future channel manifests with their own installer: the cli tarballs keep the layout
+`package/bin/browse[.exe]`. The Rust binary's updater ([rust/crates/browse/src/update.rs](rust/crates/browse/src/update.rs))
+reads the manifest itself and unpacks the same tarball. When a TypeScript relay has installed the Rust binary it runs
+`browse runtime-switch <version>`, and the Rust CLI stops any TypeScript relay it finds (POST /shutdown), so the Rust
+relay takes over ([rust/crates/browse/src/legacy.rs](rust/crates/browse/src/legacy.rs)). Manifest changes must stay readable by
 older installers: relative `url`s, flat target objects, and `release.version` before any other `version` key.
 
 ## One-time setup
@@ -160,7 +177,7 @@ older installers: relative `url`s, flat target objects, and `release.version` be
    ```
 
    `npm trust list @opencode/browse-<target>` checks one.
-10. **macOS signing (optional).** Without it the macOS binaries carry the ad-hoc signature `bun build --compile` gives
+10. **macOS signing (optional).** Without it the macOS binaries carry the ad-hoc signature the Rust linker gives
     them, which runs fine from the install script and npm (neither sets quarantine). To sign with a Developer ID:
     the certificate is `shared/APPLE_SIGNING_CERTIFICATE` in AWS (a Developer ID Application certificate exported
     without a password, base64 encoded, shared with every Anomaly app); then `gh variable set MACOS_SIGNING --body true`

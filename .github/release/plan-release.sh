@@ -72,8 +72,13 @@ else
   version=$current channel=latest npm_tag=latest dry_run=true
 fi
 
+# The build id every binary of this run reports (the relay's /version buildId): an ISO time, which clients order
+# builds by (the TypeScript CLI's relay lifecycle), so a relay of this run is newer than any earlier build.
+build_id=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+
 {
   echo "mode=$mode"
+  echo "build_id=$build_id"
   echo "version=$version"
   echo "channel=$channel"
   echo "npm_tag=$npm_tag"

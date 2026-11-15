@@ -12,9 +12,22 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash
+
+env:
+  # The same toolchain and Linux cross-compilers the release builds with (release.yml).
+  RUST_TOOLCHAIN: "1.99.1"
+  ZIG_VERSION: "0.16.0"
+  ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+  CARGO_ZIGBUILD_VERSION: "0.24.1"
+
+# The CLI ships from rust/; cli/ (the TypeScript CLI) stays in the repository as the reference the Rust one follows, and
+# CI no longer builds or tests it.
 jobs:
   check:
-    name: Typecheck, build and test
+    name: Extension and release scripts
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -27,7 +40,7 @@ jobs:
         with:
           bun-version-file: package.json
 
-      # The MCP server and relay run under Node (cli/package.json engines), and the execute sandbox tests run in it too.
+      # npm packs and installs the npm package in the release checks; its launcher runs under Node.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
@@ -36,97 +49,29 @@ jobs:
       - name: Install (extension)
         run: bun install --frozen-lockfile
 
-      - name: Install (cli)
-        run: bun install --frozen-lockfile
-        working-directory: cli
-
-      - name: Typecheck (extension)
+      - name: Typecheck (extension and scripts)
         run: bun run typecheck
-
-      - name: Typecheck (cli)
-        run: bun run typecheck
-        working-directory: cli
 
       - name: Build (extension)
         run: bun run build
 
-      - name: Build (cli)
-        run: bun build.ts
-        working-directory: cli
-
       - name: Test (extension)
         run: bun test ./test
 
-      - name: Test (cli)
-        run: bun run test
-        working-directory: cli
-
-      # The store zip and npm tarball the release workflow would build, with its artifact checks (permission allowlist,
-      # no key, pairing code, source maps or test hooks), so a problem shows up on the PR rather than at release time.
+      # The extension zip and npm tarball the release workflow would build, with its artifact checks (permission
+      # allowlist, no key, pairing code, source maps or test hooks; the npm launcher's package), and the versions agreeing
+      # across package.json, the manifest and rust/, so a problem shows up on the PR rather than at release time.
       - name: Release artifacts check
         run: bun run release:check
-
-      # The release builds a binary per platform (cli/script/compile.ts); this host's one shows a compile break early.
-      - name: Compile and pack the linux-x64 binary
-        working-directory: cli
-        run: |
-          bun script/compile.ts linux-x64
-          ./dist-bin/browse-linux-x64/bin/browse --version
-          bun script/pack.ts
 
       # The scripts the release jobs that hold secrets run (.github/release/); shellcheck comes with the runner image.
       - name: Shellcheck release scripts
         run: shellcheck -x .github/release/*.sh
 
-  windows-launch:
-    name: Windows relay launch
-    runs-on: windows-latest
-    timeout-minutes: 20
-    # Informational: the Windows launcher (kernel32 CreateProcessW, cli/src/relay/windows-launch.ts) and the compiled
-    # browse.exe, which a failure here shouldn't block merges on.
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version-file: package.json
-
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24
-          package-manager-cache: false
-
-      - name: Install (extension)
-        run: bun install --frozen-lockfile
-
-      - name: Install (cli)
-        run: bun install --frozen-lockfile
-        working-directory: cli
-
-      - name: Compile the windows-x64 binary
-        run: bun script/compile.ts windows-x64
-        working-directory: cli
-
-      # The test spawns the binary from an isolated HOME, so give it an absolute path.
-      - name: Test the compiled relay launch
-        run: bun test test/windows-launch.test.ts
-        working-directory: cli
-        env:
-          BROWSE_TEST_BINARY: ${{ github.workspace }}/cli/dist-bin/browse-windows-x64/bin/browse.exe
-
-      - name: Test the source relay launch and CreateProcessW path
-        run: bun test test/windows-launch.test.ts test/windows-create-process.test.ts
-        working-directory: cli
-
-  browser:
-    name: Execute sandbox in headless Chromium (optional)
+  rust:
+    name: Rust (clippy, test, linux-x64 package)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    # Informational: a real-browser check of the execute sandbox; a failure here doesn't fail CI.
-    continue-on-error: true
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -141,29 +86,58 @@ jobs:
           node-version: 24
           package-manager-cache: false
 
-      - name: Install (extension)
-        run: bun install --frozen-lockfile
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
+          rustup default "$RUST_TOOLCHAIN"
 
-      - name: Install (cli)
-        run: bun install --frozen-lockfile
-        working-directory: cli
+      - name: Clippy
+        working-directory: rust
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - name: Build (extension)
-        run: bun run build
+      - name: Test
+        working-directory: rust
+        run: cargo test --workspace --locked
 
-      - name: Build (cli)
-        run: bun build.ts
-        working-directory: cli
+      - name: Install zig and cargo-zigbuild
+        run: |
+          curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/zig.tar.xz" "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz"
+          echo "$ZIG_SHA256  $RUNNER_TEMP/zig.tar.xz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP/zig" --strip-components=1
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+          cargo install --locked "cargo-zigbuild@$CARGO_ZIGBUILD_VERSION"
 
-      # The Chromium the pinned patchright-core expects, with its system libraries.
-      - name: Install Chromium
-        run: node node_modules/patchright-core/cli.js install --with-deps --no-shell chromium
-        working-directory: cli
+      # The linux-x64 release binary built as the release builds it (glibc 2.17), packed as the release packs it
+      # (scripts/npm-package.ts), then installed with npm next to @opencode/browse and run through its launcher: relay
+      # and MCP server.
+      - name: Build, pack and install the linux-x64 package
+        run: |
+          version=$(node -p 'require("./cli/package.json").version')
+          (cd rust && BROWSE_VERSION="$version" cargo zigbuild --release --locked -p browse --target x86_64-unknown-linux-gnu.2.17)
+          mkdir -p "$RUNNER_TEMP/rust/linux-x64"
+          cp rust/target/x86_64-unknown-linux-gnu/release/browse "$RUNNER_TEMP/rust/linux-x64/browse"
+          bun scripts/npm-package.ts platforms --binaries "$RUNNER_TEMP/rust" --out "$RUNNER_TEMP/npm" --target linux-x64
+          bun scripts/npm-package.ts main --out "$RUNNER_TEMP/npm"
+          bun scripts/check-artifacts.ts --version "$version" --tarball "$RUNNER_TEMP/npm/opencode-browse-$version.tgz" \
+            --platform-tarball "$RUNNER_TEMP/npm/opencode-browse-linux-x64-$version.tgz"
 
-      - name: Execute sandbox browser harness
-        run: node --no-warnings test/execute-realm-browser.ts
-        working-directory: cli
+  rust-windows:
+    name: Rust on Windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    # Informational: a failure here shouldn't block merges on.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Snapshot within selector harness
-        run: bun test/snapshot-within-browser.ts
-        working-directory: cli
+      - name: Install Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: Test
+        working-directory: rust
+        run: cargo test --workspace --locked

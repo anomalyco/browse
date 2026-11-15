@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # sign-macos.sh <binaries dir> <out dir>: signs the macOS browse binaries inside their npm tarballs with the Developer ID
-# in build.keychain (hardened runtime, entitlements/cli.plist: Bun's JIT needs allow-jit and unsigned executable
-# memory), and writes the re-packed tarballs to <out dir>. Dry runs sign ad-hoc. Optional: the release workflow runs it
-# only when the repository variable MACOS_SIGNING is true; without it the packages ship with the ad-hoc signature
-# `bun build --compile` gives them.
+# in build.keychain (hardened runtime, entitlements/cli.plist, which grants no exceptions), and writes the re-packed
+# tarballs to <out dir>. Dry runs sign ad-hoc. Optional: the release workflow runs it only when the repository variable
+# MACOS_SIGNING is true; without it the packages ship with the ad-hoc signature the Rust linker gives them.
 . "$(dirname "$0")/lib.sh"
 
 in=$1 out=$2
