@@ -31,8 +31,14 @@ async fn signalled() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
+/// QUIET, or less with OPENCODE_BROWSER_AUTO_UPDATE_QUIET_MS (for tests).
+fn quiet() -> Duration {
+    std::env::var("OPENCODE_BROWSER_AUTO_UPDATE_QUIET_MS").ok().and_then(|v| v.parse().ok()).map(Duration::from_millis).map_or(QUIET, |q| q.min(QUIET))
+}
+
 pub fn run() -> anyhow::Result<i32> {
     let managed = std::env::var("OPENCODE_BROWSER_MANAGED_RELAY").as_deref() == Ok("1");
+    let quiet = quiet();
     let options = ServeOptions {
         version: VERSION.into(),
         build_id: BUILD_ID.into(),
@@ -46,7 +52,7 @@ pub fn run() -> anyhow::Result<i32> {
             eprintln!("browse relay listening at http://127.0.0.1:{}", handle.port());
         }
         let relay = handle.relay.clone();
-        let mut updater = if managed { update::Updater::spawn(Arc::new(move || relay.idle(QUIET))) } else { None };
+        let mut updater = if managed { update::Updater::spawn(Arc::new(move || relay.idle(quiet))) } else { None };
         let mut notice = None;
         let mut restart = None;
         let mut tick = tokio::time::interval(Duration::from_secs(5));
@@ -66,7 +72,7 @@ pub fn run() -> anyhow::Result<i32> {
                 notice = pending;
                 handle.update_notice(notice.clone());
             }
-            if handle.idle(QUIET)
+            if handle.idle(quiet)
                 && let Some(next) = updater.replacement()
             {
                 restart = Some(next);

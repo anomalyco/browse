@@ -70,7 +70,7 @@ const ENV_NAMES: &[&str] = &[
     "PROGRAMFILES(X86)", "HOMEDRIVE", "HOMEPATH", "USERNAME",
 ];
 
-/// Starts `browse serve` detached from this install's executable: for an npm install, the binary the launcher runs
+/// Starts `browse serve` detached from this install's executable: for a global install, the binary the launcher runs
 /// now, which an update may have moved to another platform package.
 pub fn start() -> anyhow::Result<()> {
     match crate::update::install().executable() {
@@ -85,8 +85,8 @@ pub fn start_from(executable: &std::path::Path) -> anyhow::Result<()> {
     command.arg("serve").env_clear().stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     for (name, value) in std::env::vars_os() {
         let upper = name.to_string_lossy().to_uppercase();
-        // npm's own settings, for an npm install's updates.
-        let npm = upper.starts_with("NPM_CONFIG_") || upper == "NODE_EXTRA_CA_CERTS";
+        // The package managers' own settings, for a global install's updates.
+        let npm = ["NPM_CONFIG_", "BUN_", "PNPM_", "YARN_", "VOLTA_", "COREPACK_"].iter().any(|p| upper.starts_with(p)) || upper == "NODE_EXTRA_CA_CERTS";
         if ENV_NAMES.contains(&upper.as_str()) || upper.starts_with("OPENCODE_BROWSER_") || upper.starts_with("LC_") || npm {
             command.env(name, value);
         }

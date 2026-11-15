@@ -25,6 +25,7 @@ import {
   handoffNotifications,
   humanInput,
   idleMinutesSetting,
+  packageManagerInstall,
   type AgentGrouping,
   type AgentRelayState,
   type AgentWindowPlacement,
@@ -215,7 +216,7 @@ function Settings() {
           </Row>
         </Section>
 
-        <Show when={state()?.autoUpdate?.install === "npm" && state()?.autoUpdate}>
+        <Show when={packageManagerInstall(state()?.autoUpdate) && state()?.autoUpdate}>
           {(autoUpdate) => (
             <Section title="updates">
               <Row label="When a new version is published" description={updateFacts(autoUpdate())}>

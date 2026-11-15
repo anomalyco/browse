@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { cliUpdateNotice, type RelayAutoUpdate } from "../src/shared/protocol"
+import { cliUpdateNotice, packageManagerInstall, type RelayAutoUpdate } from "../src/shared/protocol"
 import { relayAutoUpdate } from "../src/background/agent-relay/wire"
 import { cliUpdateText } from "../src/status/describe"
 
@@ -90,7 +90,49 @@ describe("cliUpdateNotice", () => {
   })
 })
 
+describe("package manager installs", () => {
+  test("use the relay's exact update command for each method", () => {
+    const table: Array<[RelayAutoUpdate["install"], RelayAutoUpdate["method"], string]> = [
+      ["binary", "bun", "bun add -g @opencode/browse@dev"],
+      ["binary", "pnpm", "pnpm add -g @opencode/browse@dev"],
+      ["binary", "yarn", "yarn global add @opencode/browse@dev"],
+      ["binary", "volta", "volta install @opencode/browse@dev"],
+      ["npm", "npm", "npm install -g @opencode/browse@dev"],
+      ["npx", "bunx", "bunx @opencode/browse@dev install"],
+      ["npx", "pnpm-dlx", "pnpm dlx @opencode/browse@dev install"],
+    ]
+    for (const [install, method, updateCommand] of table) {
+      const update = { ...base, install, method, updateCommand, mode: "notify" as const, effective: "notify" as const }
+      // A runner can't update itself, whatever the mode.
+      expect(cliUpdateNotice(update, NOW)).toMatchObject({ reason: install === "npx" ? "install" : "mode", command: updateCommand })
+    }
+  })
+
+  test("a self-updating bun install stays quiet while its update is pending, as a binary does", () => {
+    expect(cliUpdateNotice({ ...base, install: "binary", method: "bun", updateCommand: "bun add -g @opencode/browse@dev" }, NOW)).toBeUndefined()
+    expect(cliUpdateNotice({ ...base, install: "npx", method: "bunx", effective: "off", updateCommand: "bunx @opencode/browse install" }, NOW)).toMatchObject({
+      reason: "install",
+      command: "bunx @opencode/browse install",
+    })
+  })
+
+  test("offer the update mode for installs a package manager updates", () => {
+    expect(packageManagerInstall({ install: "npm" })).toBe(true)
+    expect(packageManagerInstall({ install: "binary", method: "pnpm" })).toBe(true)
+    expect(packageManagerInstall({ install: "binary", method: "binary" })).toBe(false)
+    expect(packageManagerInstall({ install: "npx", method: "bunx" })).toBe(false)
+    expect(packageManagerInstall(undefined)).toBe(false)
+  })
+})
+
 describe("relayAutoUpdate", () => {
+  test("keeps the exact method and update command a newer relay sends", () => {
+    const update = relayAutoUpdate({ install: "binary", method: "yarn", updateCommand: "yarn global add @opencode/browse", mode: "on", effective: "on" })
+    expect(update).toMatchObject({ install: "binary", method: "yarn", updateCommand: "yarn global add @opencode/browse" })
+    expect(relayAutoUpdate({ install: "binary", method: "brew", mode: "on", effective: "on" })?.method).toBeUndefined()
+    expect(relayAutoUpdate({ install: "binary", updateCommand: "x".repeat(501), mode: "on", effective: "on" })?.updateCommand).toBeUndefined()
+  })
+
   test("keeps the install kind, timestamps and the last failure the relay sent", () => {
     expect(
       relayAutoUpdate({
