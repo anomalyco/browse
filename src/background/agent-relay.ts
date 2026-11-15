@@ -1,5 +1,5 @@
 // The link to the browse relay (ws://127.0.0.1:19988/extension). The relay runs agent sessions
-// for the browse MCP server and the browse CLI (Playwright `execute`, recordings, handoffs) and drives tabs
+// for the browse MCP server and the browse CLI (page tools, `execute` scripts, recordings, handoffs) and drives tabs
 // through this extension; this module runs its commands. The wire protocol is in ../agent-relay/protocol.ts,
 // the relay itself in cli/src/relay.ts.
 import { checkoutReloadPrefix, extensionProtocolVersion, unpackedExtensionId } from "../../cli/src/protocol"

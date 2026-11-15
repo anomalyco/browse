@@ -13,7 +13,7 @@ import { TextInput } from "@opencode/ui/text-input"
 import { unpackedExtensionId, unpackedReloadAdvice } from "../../cli/src/protocol"
 import { relayPorts } from "../agent-relay/protocol"
 import { probeRelayPort, type RelayProbe } from "../agent-relay/probe"
-import { cliUpdateNotice } from "../shared/protocol"
+import { cliUpdateCommand, cliUpdateNotice } from "../shared/protocol"
 import { cliUpdateText } from "./describe"
 import { firstRunStep, shouldProbe, type FirstRunStep } from "./first-run"
 import { pairingLink } from "./pairing-link"
@@ -478,7 +478,7 @@ function AgentStep(props: {
             This extension is newer than the browse CLI on this computer. Run this, then restart your agent. (With automatic
             updates on, the CLI catches up by itself within a day.)
           </Note>
-          <Command text={installCommand} label="Copy command" />
+          <Command text={props.relay.state()?.autoUpdate ? cliUpdateCommand(props.relay.state()!.autoUpdate!) : installCommand} label="Copy command" />
         </Match>
         <Match when={kind() === "update-extension"}>
           <Show

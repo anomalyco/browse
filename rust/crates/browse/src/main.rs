@@ -1,12 +1,16 @@
+mod agents;
 mod browsers;
 mod cli;
 mod http;
+mod install;
 mod jsonc;
 mod legacy;
 mod mcp;
 mod method;
+mod picker;
 mod relay;
 mod relay_api;
+mod remote;
 mod serve;
 mod session;
 mod setup;
@@ -17,10 +21,15 @@ pub const VERSION: &str = match option_env!("BROWSE_VERSION") {
     None => env!("CARGO_PKG_VERSION"),
 };
 
-const HELP: &str = "browse drives your real Chrome-family browser through the browse extension.
+const HELP: &str = "browse lets your AI agents use your real Chrome-family browser through the browse extension.
 
 SETUP
-  install                     Install browse, add it to OpenCode and connect the extension
+  install                     Install browse, add it to your agents and connect the extension
+    -a, --agent <name>...     Set up these agents without asking (opencode, claude, codex, cursor, ...; '*' for
+                              all, 'none' to print the MCP entry instead)
+    -y, --yes                 Set up every agent found on this computer without asking
+    --remote                  The browser is on another computer: open the relay to the network and print its
+                              address and a pairing code
     --no-open                 Print the steps without opening anything
     --no-wait                 Don't wait for the extension to connect
     --wait-seconds <seconds>  How long to wait (default 180 in a terminal, 90 otherwise)
@@ -29,14 +38,18 @@ SETUP
   pair [--wait-seconds <s>]   Print a one-time pairing code and wait for the browser that redeems it
     --list                    Show paired browsers
     --revoke <browser>        Unpair a browser (its id, name or profile)
+  set hostname <127.0.0.1|0.0.0.0>
+                              Who can reach the relay: this computer only (default), or other computers too
   update [--check]            Update now, or only check
     --mode <on|notify|off>    Automatic updates (OPENCODE_BROWSER_AUTO_UPDATE overrides)
   status [--json]             Setup, relay and extension state
+  uninstall                   Remove browse from your agents, stop the relay and delete its files
   version                     Print the version
 
 RUNNING
   serve                       Run the relay in the foreground (agents start it on demand)
-  mcp                         The MCP server OpenCode runs (stdio)
+  restart                     Restart the relay with this terminal's environment; agent tabs stay open
+  mcp                         The MCP server agents run (stdio)
   tools                       List the browser tools
   <tool> [value]... [--arg value]...
                               Call a tool. `browse navigate https://example.com` opens a tab and prints its id
@@ -85,7 +98,13 @@ fn main() {
         }
         "serve" => serve::run(),
         "mcp" => mcp::run().map(|_| 0),
-        "install" => setup::install(rest),
+        "install" => install::install(rest),
+        "uninstall" => install::uninstall(rest),
+        "set" => remote::command(rest),
+        "restart" => relay::stop().and_then(|_| relay::ensure()).map(|_| {
+            println!("✓ The relay restarted");
+            0
+        }),
         "pair" => setup::pair(rest),
         "extension" => Ok(setup::extension()),
         "update" => update::command(rest).map(|_| 0),

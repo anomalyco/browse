@@ -197,9 +197,9 @@ impl Relay {
                 "{}. Run `browse install` again: it pairs the browser when it can open it, or prints a code to enter in browse's Options (`browse pair` prints one too).",
                 if state == "refused" { "browse refused the pairing attempt" } else { "browse is installed but not paired" }
             )),
-            "paired-offline" => Some("Open the browser profile already paired with browse and enable the extension; it reconnects automatically.".into()),
+            "paired-offline" => Some("The paired browser isn't connected right now: open it (the profile with browse) and check that the extension is turned on. It reconnects by itself.".into()),
             _ => Some(format!(
-                "No browser has contacted this relay yet. If browse is installed, open that browser and run `browse install` to pair it. Otherwise add browse from https://chromewebstore.google.com/detail/{}.",
+                "No browser has connected to browse yet. Add the browse extension from https://chromewebstore.google.com/detail/{} (if it's already added, open that browser), then run `browse install` to pair it, or `browse pair` for a code to enter in the extension.",
                 protocol::store_id()
             )),
         };

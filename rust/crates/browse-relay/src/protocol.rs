@@ -82,7 +82,7 @@ pub fn advice(version: Option<i64>, distribution: Option<&str>) -> String {
     let versions = format!("extension protocol {shown}, this relay speaks {speaks}");
     match skew(version) {
         Some("extension-newer") => format!(
-            "The browse extension is newer than this browse CLI ({versions}). Update the CLI: run `browse update`, then restart opencode."
+            "The browse extension is newer than this browse CLI ({versions}). Update the CLI: run `browse update`, then restart your agent."
         ),
         Some(_) => {
             let unpacked = "Reload browse on your browser's extensions page (↻).";

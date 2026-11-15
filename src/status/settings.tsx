@@ -25,7 +25,7 @@ import {
   handoffNotifications,
   humanInput,
   idleMinutesSetting,
-  packageManagerInstall,
+  selfUpdatingInstall,
   type AgentGrouping,
   type AgentRelayState,
   type AgentWindowPlacement,
@@ -169,14 +169,14 @@ function Settings() {
             </SegmentedControl>
           </Row>
           <Override overrides={state()?.overrides} setting="agentWindow" />
-          <Row label="Group tabs" description="One shared group, or one per agent session.">
+          <Row label="Group tabs" description="One shared group, or one per task (the group name an agent gives its tabs).">
             <SegmentedControl
               class="seg-group"
               value={grouping()}
               onChange={(value) => value && setGrouping(value as AgentGrouping)}
             >
               <SegmentedControlItem value="shared">All agents</SegmentedControlItem>
-              <SegmentedControlItem value="session">Per session</SegmentedControlItem>
+              <SegmentedControlItem value="session">Per task</SegmentedControlItem>
               <SegmentedControlItem value="none">None</SegmentedControlItem>
             </SegmentedControl>
           </Row>
@@ -216,7 +216,7 @@ function Settings() {
           </Row>
         </Section>
 
-        <Show when={packageManagerInstall(state()?.autoUpdate) && state()?.autoUpdate}>
+        <Show when={selfUpdatingInstall(state()?.autoUpdate) && state()?.autoUpdate}>
           {(autoUpdate) => (
             <Section title="updates">
               <Row label="When a new version is published" description={updateFacts(autoUpdate())}>

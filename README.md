@@ -3,14 +3,14 @@
   <img src="assets/banner-light.png" alt="browse: let your AI agents use your real browser. An isometric desk computer whose screen shows a web browser with an agent's tab group, cabled to a small relay box.">
 </picture>
 
-Let your AI agents use your real browser: your tabs, your logins, your extensions. An MCP server and a Chromium
-extension, for [opencode](https://opencode.ai) and any other MCP client.
+Let your AI agents use your real browser: your tabs, your logins, your extensions. A small native MCP server and a
+Chromium extension, for [OpenCode](https://opencode.ai), Claude Code, Codex, Cursor and any other MCP client.
 
 ---
 
-Agents get a `browse` MCP server. They open and drive tabs with Playwright, take screenshots, capture network
-traffic and record the screen, in background tabs grouped out of your way. When it's your turn (a login,
-a 2FA prompt, a payment), they hand the tab back to you and continue once you click **Continue**.
+Agents get a `browse` MCP server. They open tabs in the background, read pages, click, type, take screenshots,
+capture network traffic and record the screen, in tabs grouped out of your way. When it's your turn (a login, a 2FA
+prompt, a payment), they hand the tab back to you and continue once you click **Continue**.
 
 It works in Chrome, Edge, Brave, Arc, Helium, Vivaldi, Opera and Chromium.
 
@@ -20,100 +20,53 @@ It works in Chrome, Edge, Brave, Arc, Helium, Vivaldi, Opera and Chromium.
 curl -fsSL https://opencode.ai/browse/install | bash
 ```
 
-On Windows, run `irm https://opencode.ai/browse/install.ps1 | iex` in PowerShell. With Node.js,
-`npx @opencode/browse install` works too: it installs the package globally so agents run `browse` from PATH. The
-installer puts the `browse` command in `~/.local/bin` (`$XDG_BIN_HOME` when set) and runs `browse install`. It reads
-the channel's manifest from [Anomaly's release service](https://anoma.ly/release), downloads the binary for this
-computer, and verifies its size and SHA-256 before installing it. `--channel stable|beta|dev` picks the channel
-(`stable` by default); `--version <version>` installs a specific version from npm, checked against npm's published
-SHA-512 integrity.
+Or paste this into your agent: *"Set up browse so you can use my Chrome: run
+`curl -fsSL https://opencode.ai/browse/install | bash`"*. It sets browse up for the agent that ran it.
 
-`install` keeps its files in the XDG folders (`~/.config/browse`, `~/.local/share/browse`, `~/.local/state/browse`
-and `~/.cache/browse`; each honours its `XDG_*` variable), adds the `browse` MCP server to the agents you choose, and
-connects the extension:
+Other ways to install, all of which end in the same `browse install`:
 
-1. **Choose your agents.** Detected agents start checked. Type to filter, use ↑/↓ to move, Space to toggle and
-   Enter to confirm. You can uncheck OpenCode, choose an agent you haven't installed yet, or choose none for CLI-only use.
-   Your next interactive install starts with your last selection.
-2. **Add the extension.** `install` opens browse in the Chrome Web Store; add it to your browser, and `install` pairs
-   it once it's there. If it's already there, `install` opens its setup page with a one-time pairing code, so it
-   pairs without copying anything.
+| How | Command | Where `browse` lives, and what updates it |
+| --- | --- | --- |
+| Install script (macOS, Linux) | `curl -fsSL https://opencode.ai/browse/install \| bash` | `~/.local/bin/browse` (`$XDG_BIN_HOME` when set); updates itself |
+| Install script (Windows) | `irm https://opencode.ai/browse/install.ps1 \| iex` in PowerShell | `%USERPROFILE%\.local\bin\browse.exe`; updates itself |
+| npx, bunx | `npx @opencode/browse install` | copied to `~/.local/bin/browse` once; updates itself from then on |
+| npm | `npm i -g @opencode/browse`, then `browse install` | npm's global `browse`; browse runs `npm install -g` to update |
+| bun | `bun add -g @opencode/browse`, then `browse install` | `~/.bun/bin/browse`; browse runs `bun add -g` to update |
+| pnpm, yarn, volta | `pnpm add -g` / `yarn global add` / `volta install @opencode/browse`, then `browse install` | that manager's `browse`; updated with the same manager |
 
-That's it. Ask an agent to *"open news.ycombinator.com and tell me the top story"*. Or paste this into opencode:
-*"Install browse with `npx @opencode/browse install`."*
+There's always exactly one `browse`: a global package install is left to its package manager (nothing is copied next
+to it, and a leftover `~/.local/bin/browse` from an earlier install is removed), and agents run the same `browse` your
+terminal does. If `browse install` finds another `browse` on your PATH it tells you which one and how to remove it.
 
-Requirements: a Chromium browser, and [opencode](https://opencode.ai) or another MCP client. The npx install also needs
-Node.js 22.19+.
+The install script reads the channel's manifest from [Anomaly's release service](https://anoma.ly/release), downloads
+the binary for this computer and checks its size and SHA-256 before installing it. `--channel stable|beta|dev` picks
+the channel (`stable` by default); `--version <version>` installs a specific version from npm, checked against npm's
+published SHA-512 integrity. With npm, `@opencode/browse@dev` is the dev channel. The npm package is a small Node
+launcher (Node 22+) that runs the native binary npm installed for your platform.
 
-**Updates are automatic.** A binary install reads its channel's manifest from Anomaly's release service at launch and
-at least once an hour; a global package install checks npm's dist-tag once an hour. When the current release is a
-different build, the relay reruns whatever installed browse in the background: a binary install reruns the install
-script that shipped with the browse version it's running (not one downloaded at update time), which checks the file's
-size and SHA-256 and replaces `~/.local/bin/browse`; a global install runs the package manager that installed it
-(`npm install -g`, `bun add -g`, `pnpm add -g`, `yarn global add` or `volta install` of
-`@opencode/browse@<version>`). npx, bunx, pnpm dlx and yarn dlx resolve the package themselves, so those only say when
-there's a newer release. It restarts the relay
-when no agent is using the browser, without changing opencode's config. A running MCP server keeps its old build until
-the agent restarts it, and keeps working against the newer relay until then. Choose *Only tell me* or *Don't check* under **Updates** on the extension's
-settings page (or `settings set autoUpdate=notify`, or `OPENCODE_BROWSER_AUTO_UPDATE=off`). Agents can read the current
-value from `status`, but the MCP `settings` tool can't read or change update behaviour; it stays with you. `browse
-update` updates now; to go back, rerun the installer with `--channel <channel>` (binary installs follow the channel) or
-`--version <version>` / `npm install -g @opencode/browse@<version>` (both from npm). The Chrome Web Store updates the
-extension.
+### What `browse install` does
 
-**Dev builds**: every push to `dev` publishes one. `npx @opencode/browse@dev install` follows the dev channel: it
-downloads that build's extension into `<cache root>/extension`, which you load unpacked once (`browse extension` shows
-the folder), and each update refreshes the folder and reloads the extension. A binary install follows the same dev
-channel with `curl -fsSL https://opencode.ai/browse/install | bash -s -- --channel dev`. The zip is also at
-https://anoma.ly/release/browse/extension/dev/chromium and each binary at
-https://anoma.ly/release/browse/cli/dev/<target>.
+1. **Puts browse in place** (see above) and adds `~/.local/bin` to your PATH when it copied browse there
+   (`--no-modify-path` skips that).
+2. **Adds the browse MCP server to your agents.** In a terminal you get a picker: OpenCode and the agents found on this
+   computer start checked (your last choice next time). Type to search all supported agents, ↑/↓ to move, Space or Tab
+   to toggle, Enter to confirm. An agent running `browse install` sets up itself. Without a terminal OpenCode is the
+   default. Edits keep the comments and formatting of each agent's config.
+3. **Connects the extension.** If no browser has browse yet, install opens it in the Chrome Web Store; add it, and
+   install pairs it once it's there. If a browser already has it, install opens its setup page with a one-time pairing
+   code in the link, so it pairs without copying anything. Over SSH or without a display it prints a code instead.
 
-There's nothing to sign in to. Each browser pairs with the relay once and gets a key of its own (see
-[Security](#security)). If pairing didn't happen by itself, run `browse install` again to open a
-pairing link. To pair by hand, run `browse pair` (from a checkout: `node cli/dist/cli.mjs pair`).
-It starts the relay and waits. Open **Extensions → browse → Options**, expand **advanced** (or click **Pair with a code**),
-enter the printed code under **Pairing code**, and click **Connect**.
-The command confirms which browser paired. `pair --list` shows paired browsers; `pair --revoke <browser>` unpairs one.
-
-### From source
-
-For contributors, or before a release you need is on npm:
+Then ask your agent to *"open news.ycombinator.com and tell me the top story"*. An agent that was already running
+needs a restart (or an MCP reload) to load browse.
 
 ```sh
-git clone https://github.com/anomalyco/browse.git && cd browse && bun run setup
+browse install -a claude codex   # these agents, without asking (--agent; names below)
+browse install -a '*'            # every supported agent, installed or not
+browse install -y                # every agent found on this computer
+browse install --agent none      # no agent: print the MCP entry to add by hand
 ```
 
-`setup` builds the extension and the CLI, adds the `browse` MCP server to your selected agents, and puts a one-time pairing code
-in `browse/dist` (good for an hour), which the extension exchanges for its own key when it first connects. `install` points
-every channel at the Chrome Web Store build; to use the build from your checkout instead, run
-`node cli/dist/cli.mjs extension`, which shows the `browse/dist` folder to load unpacked.
-
-This needs [Bun](https://bun.sh) as well. A checkout never updates itself: run `node cli/dist/cli.mjs update` in your
-`browse` folder (or ask your agent to update browse). It pulls the new commits (fast-forward
-only, and never over local changes), rebuilds, and requests an extension reload. If the old extension cannot accept
-the request, **reload browse on your browser's extensions page (↻)**. The manual equivalent of `update` is
-`git pull && bun run setup`. When there's an update, `status`, the extension's settings page and the agent (once
-per session) say so; browse checks the clone's remote at most every six hours. Set `OPENCODE_BROWSER_UPDATE_CHECK=0` to
-turn the check off.
-
-### Other MCP clients
-
-To skip the picker, name one or more agents. Explicit names take precedence over caller detection:
-
-```sh
-browse install -a claude cursor --agent gemini
-browse install -a '*'   # every supported client, including those not installed (--all-agents)
-browse install -y       # detected clients in an ordinary shell (--yes)
-```
-
-Inside a recognized agent, `install` targets that caller automatically. Without a terminal it configures the caller
-if it recognizes it. If it can't tell which agent ran it, it configures nothing and prints the MCP entry to add by
-hand, plus a `browse install --agent <name>` command for each agent it found. Outside a recognized agent, `-y` sets
-up every detected agent instead of opening the picker, with or without a terminal. Re-running install is additive:
-unchecking a client skips it, not a removal. `uninstall` removes the entries browse wrote, not unrelated servers or
-conflicting entries.
-
-<details><summary>Supported agents and user-level config files</summary>
+<details><summary>Supported agents and their user-level config files</summary>
 
 `CONFIG` is `$XDG_CONFIG_HOME` or `~/.config`. `APP` is `~/Library/Application Support` on macOS, `%APPDATA%` on
 Windows, or `CONFIG` on Linux. The paths below are defaults; a client's existing config or location override can apply.
@@ -154,263 +107,221 @@ Windows, or `CONFIG` on Linux. The paths below are defaults; a client's existing
 
 </details>
 
-For another stdio MCP client, add the `browse` command with the `mcp` argument. That works for a binary install and a
-global npm install, and keeps working when node changes under nvm/fnm:
+For any other stdio MCP client, run `browse mcp`:
 
 ```json
-{ "mcpServers": { "browse": { "command": "browse", "args": ["mcp"] } } }
+{ "mcpServers": { "browse": { "command": "/home/you/.local/bin/browse", "args": ["mcp"] } } }
 ```
 
-`browse install --agent '*'` writes this for every agent it knows. An npx-only client can run
-`npx @opencode/browse mcp` instead, but that entry updates only when npx resolves a newer package.
+(`browse install --agent none` prints this with your path.) Re-running install updates the entries it wrote and
+leaves servers named browse that it didn't write alone.
+
+### Pairing
+
+There's nothing to sign in to. Each browser pairs with browse once and gets a key of its own (see
+[Security](#security)). If pairing didn't happen by itself, run `browse install` again, or run `browse pair`: it
+prints a one-time code (`XXXX-XXXX`, good for 10 minutes) and waits. Open **Extensions → browse → Options**, expand
+**advanced** (or click **Pair with a code**), enter the code under **Pairing code** and click **Connect**. `browse pair
+--list` shows paired browsers; `browse pair --revoke <browser>` unpairs one.
 
 ### Browser on another computer
 
-When opencode runs on one machine and your browser on another (over Tailscale, say), the relay runs next to opencode
+When your agent runs on one machine and your browser on another (over Tailscale, say), browse runs next to the agent
 and the extension connects to it across the network:
 
-1. On the opencode machine, install browse, then run `browse set hostname 0.0.0.0`.
-   The relay then listens on every network, restarting it if it runs (or starting it when it doesn't). Other
-   computers reach only the extension link; the HTTP API and CDP answer on `127.0.0.1` only. The command prints the
-   address (with its port when it isn't 19988) and a pairing code for step 2 (`browse pair` prints another; each works
-   once, within 10 minutes).
-   If another program holds 19988, enter the port printed after the address; the relay keeps its last port while it
-   stays free, but it can change if that port is taken.
-2. In the browser, open the extension's settings page (right-click the toolbar button, then **Options**). Under
-   **advanced**, replace `localhost:19988` in **Relay address** with that machine's address and port (a Tailscale IP
-   or name, `:port` added when it isn't 19988), enter the code under **Pairing code**, then click **Connect**. The
-   page says right there whether the relay answered and accepted the code.
+1. On the agent's machine run `browse install --remote` (or `browse set hostname 0.0.0.0` after installing). browse
+   then listens on every network, restarting the relay if it runs, and prints this machine's address and a pairing
+   code. Other computers reach only the extension link; the HTTP API answers on `127.0.0.1` only.
+2. In the browser, open browse's setup page, choose **Connect an agent on another computer** and enter the address and
+   code (or use **Relay address** and **Pairing code** under **advanced** on the options page).
 
+The connection isn't encrypted by browse; use a network that is (Tailscale or WireGuard), not the open internet.
 `browse set hostname 127.0.0.1` goes back to this computer only.
 
-Pairing works as it does locally: the browser exchanges the code for a key of its own, and from then on both sides
-prove they hold that key on every connection, so anyone else on the network who reaches the port gets nothing. The
-connection itself isn't encrypted by browse; use a network that is (Tailscale or WireGuard), not the open internet. Set
-**Relay** back to `localhost` (or clear it) to go back to a relay on the browser's computer.
+### Updates
+
+**Updates are automatic.** The relay checks once at start and then hourly, and installs a new version when no agent
+is using the browser:
+
+- the install script's binary (and npx/bunx copies) read the channel's manifest from the release service and replace
+  `~/.local/bin/browse` after checking its size and SHA-256;
+- global installs read npm's dist-tag (`latest`, or `dev`/`beta` for those builds) and run the package manager that
+  installed them (`npm install -g`, `bun add -g`, `pnpm add -g`, `yarn global add`, `volta install`) into the same
+  place.
+
+The relay restarts on the new version when it's idle; agent tabs stay open and come back. A running MCP server keeps
+working with the newer relay until the agent restarts it. `browse update` updates now and `browse update --check` only
+looks. Choose **Tell me** or **Off** under **updates** on the extension's options page, or run `browse update --mode
+notify|off` (`OPENCODE_BROWSER_AUTO_UPDATE=off` in the environment overrides both). To go back, rerun the install
+script with `--channel <channel>` or `--version <version>`, or install `@opencode/browse@<version>` with your package
+manager. The Chrome Web Store updates the extension.
+
+**Dev builds**: every push to `dev` publishes one: `curl -fsSL https://opencode.ai/browse/install | bash -s --
+--channel dev`, or `npx @opencode/browse@dev install`. The store extension works with dev builds. To try the dev
+extension too, download https://anoma.ly/release/browse/extension/dev/chromium, unzip it, turn on **Developer mode** on
+your browser's extensions page, click **Load unpacked**, pick the folder and run `browse pair` (`browse extension`
+prints these steps on the dev channel). Remove the store extension first so only one browse runs in that profile.
+
+### Uninstall
+
+```sh
+browse uninstall
+```
+
+It removes browse from every agent config it was added to, stops the relay, deletes `~/.local/bin/browse` (for the
+install script and npx installs), the PATH line it added and browse's files. A global package stays with its package
+manager: uninstall prints the command (`npm rm -g @opencode/browse`, `bun remove -g @opencode/browse`, ...). Remove the
+extension from your browser to finish.
 
 ## Using it
 
-- **Agents open their own tabs** in the background of the window you last used, grouped together at the start of your
-  tab strip and collapsed unless you're looking at one. Agents can't switch you to their tabs or bring a window to the
-  front; popups an agent opens join its group, and if one takes over your window you get your tab back. Tabs nobody
-  touches for 10 minutes close by themselves (never while a script runs on them).
-- **Relay restarts keep agent tabs.** A session records the tabs the agent opened, so a relay that starts again
-  reclaims them; a tab you lent is reclaimed only when it is the session's default page. A tab browse can't match is
-  detached and left to normal idle cleanup. Tabs of a session deleted while the browser was disconnected are closed
-  when the browser reconnects. A tab you move out of the agents' group or pin is yours and is not reclaimed after a
-  restart.
-- **What a page sees.** Between calls a page sees an agent's tab hidden and unfocused; only while an `execute` runs on
-  it does browse emulate focus, so background work isn't throttled. Some apps pause or disconnect when hidden, so a
-  session can be created with `browse session new live --keep-visible` (or `keepVisible: true` on `session_new`): the
-  tabs that session opened itself stay visible and focused to the page between calls. Pages can notice either way, it
-  never raises or focuses the window, tabs you lent the session behave as usual (released when the call ends), and it is
-  released when the session is deleted or reset or the tab closes.
-- **Several browsers at once.** Each connected browser has an id (like `chrome-macbook`) and a name; `browse status
-  --json` lists them. New sessions open their tabs in the default browser, the first connected and ready, unless one is
-  named: `browse session new work --browser "Home Brave"` (or `browser` on the `session_new` tool, or on the first
-  `execute` that creates the session). A session stays in its browser, so start a new one to use another.
-- **Settings** (the extension's options page; each applies right away, to new tabs for window and grouping):
-  - **Where agents open their tabs:** in your window (default), or *in a separate window* of their own that opens
-    unfocused beside yours (on another display when there's no room on yours); their popups move there too.
-  - **Grouping:** one shared group for every agent (default; "Agents · 3", one per window, popups included; a handoff
-    opens it), *one collapsed group per agent session*, or *don't group* (agent tabs sit in the background of your tab
-    strip; pin one to keep it). Tabs already grouped stay where they are when you switch.
-  - **Close tabs agents haven't touched for:** 10 minutes (default), 30, 60, or *never*. Tabs a script runs on, a
-    handoff waits on or a recording records stay open regardless. With *never*, an agent's `tabs_cleanup` without a
-    time still closes only tabs idle for 10 minutes.
-  - **Human-like input:** on (default), or *off*: faster, but easier for sites to flag as a bot.
-  - **Handoff notifications:** only while the tab is recorded (default), or *on every handoff*, as well as the card.
-  The relay's environment variables below override the window and input settings; the options page then
-  shows the value in effect and which variable set it. Agents can read and change these settings with the `settings`
-  tool when you ask them to (`node cli/dist/cli.mjs settings get`, `settings set grouping=shared` on the CLI); the
-  options page follows at once. The security switches below are environment-only, never settings.
+- **Tabs are the handle.** `navigate` without a `tab` opens a new background tab and returns its id; every other call
+  passes that `tab`. Each agent works only in tabs it opened (and tabs you lend it), so several agents never collide.
+  Tabs can be opened with options that stick: `group` (the tab group's title, and a handle to close them together),
+  `allowedOrigins`, `readOnly`, `keepVisible` and `browser`. Popups a page opens become the agent's tabs too.
+- **Agents open their own tabs** in the background of the window you last used, grouped together and collapsed unless
+  you're looking at one. Agents can't switch you to their tabs or bring a window to the front. Tabs nobody touches for
+  10 minutes close by themselves (never while something runs on them).
+- **Relay restarts keep agent tabs.** The relay saves the tabs agents opened and their options, and takes them back
+  when it starts again (after an update, say).
 - **Hand an agent one of your tabs** by clicking the toolbar button on it. The badge shows **ON**; click again to take
-  it back. While an agent works the badge reads **RUN**, and **WAIT** when it needs you. If the relay isn't running yet
-  the badge shows **…** and the tab is handed over once an agent starts browse; click again to cancel. The button always
-  works: a click while a script runs takes the tab back and stops the script. Agents can't close a tab you lent them. The
-  browser's debugging bar button (**Cancel** in Chrome, **OK** in some browsers like Dia) disconnects browse from
-  every tab: tabs you lent go back to you, and tabs agents opened stay open until idle cleanup closes them. File pages
-  need **Allow access to file URLs** for browse on its details page in `chrome://extensions`, and Chrome's own pages,
-  the Web Store included, can't be lent.
+  it back. While an agent works the badge reads **RUN**, and **WAIT** when it needs you. The button always works: a
+  click while an agent runs takes the tab back. The browser's debugging bar (**Cancel**) disconnects browse from every
+  tab. Chrome's own pages, the Web Store included, can't be lent.
 - **Handoffs:** the page shows a small card with the site's origin. Do the human part, then click **Continue** on the
-  card or the toolbar button. While one waits, `browse session list --json` and `session_list` include it (message,
-  tab and start time) so other tools can see what is waiting on you.
-- **Recordings show only the page.** Nothing from browse is drawn while a tab is recorded: no labels, no handoff
-  card (you get a system notification instead; click it to go to the tab). If notifications are turned off for the
-  extension, the card is shown after all, and the recording includes it.
-- **Status:** the extension's options page shows whether the relay is connected and paired, and can copy diagnostics.
+  card or the toolbar button. While a tab is recorded you get a system notification instead of the card.
+- **Several browsers at once.** Each connected browser has an id (like `chrome-macbook`); `status` lists them, and new
+  tabs open in the default browser unless `browser` names another.
+- **Settings** (the extension's options page, applied right away): where agent tabs open (your window or their own),
+  grouping (one shared group, one per task, or none), when idle tabs close (10, 30, 60 minutes or never), human-like
+  input, and handoff notifications. Agents can read and change these with the `settings` tool when you ask them to.
 
 ## Tools
 
+OpenCode, which composes tools in code mode, gets the plain tools. Every other MCP client gets `execute`, `status` and
+`tabs`; `execute` runs JavaScript that can call all of them. The relay decides by the client's name
+(`OPENCODE_BROWSER_TOOLS=plain|execute|all` on the relay overrides it).
+
 | Tool | What it does |
 | --- | --- |
-| `execute` | Run Playwright code against the session's page (`page`, `context`, `snapshot()`, `handoff()`, …). `snapshot()` and `ariaSnapshot()` outline the page and the content of its iframes, with refs that work inside frames |
-| `session_new`, `session_list`, `session_use`, `session_reset`, `session_delete` | Named sessions, each with its own tabs; they survive restarts |
-| `session_adopt` | Take over a tab you handed over with the toolbar button |
-| `session_allowlist` | Limit a session's tabs to the sites you name (also `allowedOrigins` on `session_new`) |
-| `network` (`action`: `start`, `status`, `stop`, `cancel`) | Capture traffic and return credential-redacted exchanges |
-| `recording` (`action`: `start`, `stop`, `status`, `cancel`) | Record a tab to MP4 or WebM through CDP |
-| `tabs_cleanup` | Close idle agent tabs (`idleMinutes` applies to the calling agent's own sessions; other agents' wait for the idle setting) |
-| `settings` | Read or change the settings below when the user asks (never the security switches or update behaviour); the options page updates live |
-| `status` | Connection status |
+| `navigate` | Open a page: without `tab`, in a new background tab whose id it returns |
+| `snapshot` | A compact outline of the page with refs (`e12`) for the other tools, iframes included |
+| `click`, `fill`, `type`, `press`, `select`, `hover`, `drag`, `scroll` | Act on a ref, selector or point, with human-like input |
+| `wait_for`, `dialog`, `upload`, `eval` | Wait for text, a URL or an element; answer dialogs; set files; run JavaScript in the page |
+| `screenshot`, `screenshot_diff` | The viewport, full page, an element or a rectangle; compare with a baseline |
+| `network`, `console` | Capture a tab's traffic (credentials redacted) or its console messages and errors |
+| `recording` | Record a tab to a video file |
+| `emulate`, `webmcp` | Viewport, color scheme, user agent, geolocation and more; tools a page offers through WebMCP |
+| `tabs` | List, open or close tabs (`group` closes a whole group) |
+| `handoff`, `demonstrate` | Ask you to do something only a person can do; ask you to show a flow while it records your steps |
+| `settings`, `status` | Read or change your settings when you ask; the relay, browsers, pairing state and what to do next |
+| `execute` | For other clients: JavaScript with a Playwright-style `page`, `snapshot()`, `ref()`, `handoff()`, `state` and `browse.<tool>()`. Each result starts with the tab it ended in, to pass back as `tab` |
 
-`execute` takes an optional `timeoutMs` (`--timeout-ms` on the CLI), the budget for the whole script: 60000
-milliseconds by default, 0 disables it, and time spent in `handoff()` doesn't count. It starts when the call does,
-so time spent waiting behind another execute on the same session counts, and that other call's handoff doesn't
-pause it. An explicit `timeoutMs` (or `OPENCODE_BROWSER_EXECUTE_TIMEOUT_MS`) is also how long Playwright actions
-and navigations may take in that call, at least 30 seconds; without one they keep Playwright's 30-second default.
-At 0 their timeout is off too, so a stuck wait only ends when the call is stopped.
-
-`snapshot()` and `ariaSnapshot()` hide the values of editable fields and of password, one-time-code and card
-fields (`autocomplete` `cc-number`, `cc-csc`, `cc-exp*`). Other readonly fields show their value, so a generated
-address or code is readable; a field the page locks after you type into it counts as readonly.
-
-`page.setViewportSize()` emulates a viewport inside the real window, so the tab is letterboxed while it is set; when
-the script ends browse clears the override, retrying one Chrome drops, and the tab goes back to the window's size
-within a couple of seconds.
-
-Each agent has its own current session only when the client names the agent (OpenCode does; `status` reports
-`sharedSession`). With other clients, agents on one server share one current session; when several use it, each
-should `session_new` its own and pass `session` on every call.
-
-`browse --help` has a short agent guide, and the MCP server sends the same guidance in
-its initialize instructions. Everything is also a CLI: `node cli/dist/cli.mjs --help`.
+Everything is a CLI too: `browse navigate https://example.com` prints the new tab's id, then `browse snapshot --tab
+<id>`, `browse click e12 --tab <id>`, `browse execute --file script.js`. `browse tools` lists them and `browse <tool>
+--help` shows a tool's options.
 
 ## How it works
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/how-dark.png">
-  <img src="assets/how-light.png" alt="Three machines on one bench, cabled in a line: the agent's terminal calling browse.execute, the relay box in the middle, and the computer whose browser the agent drives.">
+  <img src="assets/how-light.png" alt="Three machines on one bench, cabled in a line: the agent's terminal calling browse, the relay box in the middle, and the computer whose browser the agent drives.">
 </picture>
 
-The agent talks to the `browse` MCP server over stdio. The server hands each command to the relay on
-`127.0.0.1:19988` (or the next free port from 19990–19997 when another program's HTTP server holds it), and the
-extension, connected to the relay over a WebSocket, runs it in your browser through `chrome.debugger`.
+The agent starts `browse mcp`, a small stdio proxy, which starts the relay on demand and forwards each call to it on
+`127.0.0.1:19988` (or the next free port from 19990–19997 when another program holds it). The extension connects to
+the relay over a WebSocket and runs its commands in your browser through `chrome.debugger`.
 
-- **The relay** (`cli/`) is a local Chrome DevTools endpoint backed by the extension. It keeps named sessions,
-  handoffs, recordings, network capture and a journal, and starts on demand.
-- **The extension** (`src/`) connects to the relay and runs its commands through `chrome.debugger`. It keeps agent
-  tabs in collapsed groups (or their own window), closes idle ones, and shows the toolbar badge and the handoff card.
-- **Quiet in the page.** `execute` uses [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright), which hides
-  the usual automation tells (`navigator.webdriver`, the `Runtime.enable` leak), and the relay drops Patchright's media
-  emulation overrides. The extension adds nothing to pages you browse; in agent tabs it adds nothing to the DOM except
-  the handoff card while a handoff waits. It lives in a closed shadow root on an anonymous element, drawn from an
-  isolated world. Input moves like a person: curved mouse paths, paced typing,
-  gliding scroll (turn *Human-like input* off on the options page, or `OPENCODE_BROWSER_HUMAN_INPUT=0`, for full speed). This makes an agent hard to spot, not impossible: the
-  browser shows its "started debugging" bar while the debugger is attached, focus emulation keeps background agent tabs
-  "visible" while a script runs on them (and between calls for a `keepVisible` session), the card element exists while
-  it's shown, and `fillInput`'s fallback dispatches synthetic events (it warns when it does).
+- **The relay** (`browse serve`, in `rust/`) keeps agent tabs, handoffs, recordings and network captures, talks the
+  Chrome DevTools Protocol to each tab, and runs `execute` scripts in an embedded JavaScript engine (QuickJS). It
+  exits when nothing uses it.
+- **The extension** (`src/`) runs the relay's commands through `chrome.debugger`, keeps agent tabs in collapsed groups
+  (or their own window), closes idle ones, and shows the toolbar badge and the handoff card.
+- **Quiet in the page.** browse doesn't enable the CDP domains pages can detect, runs its own code in isolated worlds
+  and leaves no globals behind. Input moves like a person: curved mouse paths, paced typing, gliding scroll (turn
+  *Human-like input* off for full speed). This makes an agent hard to spot, not impossible: the browser shows its
+  "started debugging" bar while the debugger is attached.
 
-Permissions: `debugger`, `tabs`, `tabGroups`, `storage`, `alarms`, `scripting` (to add the handoff script only to
-tabs agents use, never to every page), `webNavigation` (to keep popups agents open with their other tabs),
-`notifications` (to tell you an agent needs you while it records a tab), and access to all sites so agents can work
-wherever you ask. Nothing leaves your computer except what your agent sends to its model
-provider; see the [privacy policy](store/privacy-policy.md).
+Permissions: `debugger`, `tabs`, `tabGroups`, `storage`, `alarms`, `scripting` (to add the handoff card only to tabs
+agents use), `webNavigation` (to keep popups agents open with their other tabs), `notifications` (to tell you an agent
+needs you while it records a tab), and access to all sites so agents can work wherever you ask. Nothing leaves your
+computer except what your agent sends to its model provider; see the [privacy policy](store/privacy-policy.md).
 
 ## Security
 
-browse drives the browser you're signed in to, so it assumes that what an agent reads (a web page, an email)
-may try to steer it, and that other programs on your computer may try to use the relay.
+browse drives the browser you're signed in to, so it assumes that what an agent reads (a web page, an email) may try
+to steer it, and that other programs on your computer may try to use the relay.
 
-- **Relay token.** Every HTTP request and CDP connection to the relay needs the token in
-  `~/.local/share/browse/relay-token` (readable only by you): an `Authorization: Bearer` header, or
-  `?opencodeBrowserToken=` on the CDP WebSocket URL. The MCP server and CLI read it for you. The relay listens on
-  `127.0.0.1` only and refuses cross-site browser requests and foreign `Host` headers.
-- **Pairing.** `pair` prints a short code (`XXXX-XXXX`) that works once, within 10 minutes; five wrong codes in a row
-  void every pending one. A browser exchanges it for a random key of its own, kept by the relay
-  (`browser-tokens.json` in the data folder, readable only by you) and in the extension's storage. The exchange runs
-  over a fresh key agreement (ECDH), so neither the code nor the key crosses the connection, and each side proves it
-  knows the code before the other gives anything away. On every later connection both sides prove they hold the key
-  (HMAC over fresh nonces) before the extension obeys anything, so a program that grabs the port first can't drive
-  your browser. `pair --list` shows paired browsers and when each was last seen; `pair --revoke <browser>` deletes a
-  browser's key and disconnects it. The relay accepts only the two published extension IDs (plus any listed in
-  `OPENCODE_BROWSER_EXTENSION_ORIGINS`). Browsers paired by an earlier version with its shared code switch to a key of
-  their own the next time they connect; `pair --revoke legacy` retires that code once they all have.
-- **Restricted `execute`.** Agent code runs in a restricted JavaScript realm on the relay: it withholds Node
-  APIs (`process`, `require`, `import()`, `fs`, network modules, Node fetch), limits files to the file roots, requires
-  the folders and files below a root to be yours and not group/world writable (use `files.path()` or `files.dir`),
-  checks the file paths in the raw CDP commands that take them, and stops synchronous code after about 2 seconds. It
-  shares the relay's process, so it is not a security boundary: treat code an agent runs as code running as you. The
-  relay starts with an allowlisted environment (the basics plus `OPENCODE_BROWSER_*`, proxy variables and CA
-  certificate paths), so your API keys aren't in it.
-- **CDP guardrails.** Cookie reads return only cookies for the session's own pages; cookie writes are limited to
-  those hosts. Clearing cookies, cache or site data, and closing the browser, are always refused. Granting or
-  changing site permissions (`context.grantPermissions()`, `context.clearPermissions()`, `Browser.setPermission`,
-  `Browser.grantPermissions`, `Browser.resetPermissions`) is refused too. `page.bringToFront()` is refused so agents
-  can't raise windows over your work.
-- **Domain allowlists (opt-in).** `session new <name> --allow-origin example.com` (or `session allow`, or
-  `allowedOrigins` on `session_new` / `session_allowlist`) limits where a session's tabs go. The relay refuses agent
-  navigations and new tabs to other hosts, stops or blanks links, redirects and script navigations that leave the
-  list, and closes popups that open elsewhere. Private, loopback and link-local addresses need an entry naming that
-  exact host; names are resolved first and the document's real remote IP is checked, against DNS rebinding.
-  Subresources (images, fetch, iframes, workers) are not blocked: request interception is shared with Playwright's
-  `page.route()`, so the relay can't own it reliably. Browsing through a local proxy makes every document look like
-  it came from the proxy's address, so name the hosts you need exactly.
-- **Bot challenges.** After a navigation, execute reports Cloudflare, Akamai, DataDome, PerimeterX, Imperva, AWS WAF,
-  captcha walls and "access denied" pages in `aftermath.challenge`. It waits up to 15 s
-  (`OPENCODE_BROWSER_CHALLENGE_WAIT_MS`) for checks the browser clears by itself, and tells the agent to hand
-  interactive ones to you. It never solves them.
-- **Your tabs stay yours.** Agents use only tabs they opened or you lent them. The toolbar button always takes a tab
-  back; only a real click on the card or the toolbar button finishes a handoff, so a page can't fake it.
-- **Less on disk.** Session journals are private (0700/0600), redact typed passwords, codes and tokens, and are pruned
-  after 14 days (200 at most). Network captures replace credential-bearing headers, cookies, query fields and
-  structured body fields with `[redacted]`; typed passwords and one-time codes are never stored.
+- **Relay token.** Every request to the relay needs the token in `~/.local/share/browse/relay-token` (readable only by
+  you). The MCP server and CLI read it for you. The relay listens on `127.0.0.1` only (unless you open it with `set
+  hostname`, and then only the extension link) and refuses cross-site browser requests and foreign `Host` headers.
+- **Pairing.** A pairing code works once, within 10 minutes; five wrong codes in a row void every pending one. A
+  browser exchanges it for a random key of its own over a fresh key agreement (ECDH), so neither the code nor the key
+  crosses the connection. On every later connection both sides prove they hold the key before the extension obeys
+  anything, so a program that grabs the port first can't drive your browser. The relay accepts only the published
+  extension IDs (plus any listed in `OPENCODE_BROWSER_EXTENSION_ORIGINS`).
+- **`execute` is sandboxed, not a boundary.** Scripts run in QuickJS inside the relay with CPU, memory and time
+  limits, no Node, network or file access beyond the file roots (temp folders and `OPENCODE_BROWSER_FILE_ROOTS`).
+  Treat code an agent runs as code running as you. The relay starts with an allowlisted environment, so your API keys
+  aren't in it.
+- **CDP guardrails.** Clearing cookies, cache or site data, closing the browser and changing site permissions are
+  refused. Cookie and storage access is limited to the hosts of the tab's own pages. Agents can't open browser-internal
+  pages, other extensions or local files, or raise windows over your work.
+- **Allowed sites (opt-in).** A tab opened with `allowedOrigins` can only go to those sites; read-only tabs only
+  inspect.
+- **Bot challenges.** After a navigation browse reports Cloudflare, captcha walls and "access denied" pages and tells
+  the agent to hand interactive ones to you. It never solves them.
+- **Your tabs stay yours.** Agents use only tabs they opened or you lent them. Only a real click on the card or the
+  toolbar button finishes a handoff, so a page can't fake it.
 
-Escape hatches. Set them in the environment you start opencode (or your MCP client) from; the relay inherits
-`OPENCODE_BROWSER_*` variables. Run `node cli/dist/cli.mjs relay restart` after changing them:
+Escape hatches, set in the environment you start your agent from. The relay inherits `OPENCODE_BROWSER_*` variables
+when it starts: it stops after 30 minutes without use, or run `browse restart` from a shell with the same variables:
 
 | Variable | Effect |
 | --- | --- |
-| `OPENCODE_BROWSER_ALLOW_NODE=1` | Run `execute` code with full Node access (`process`, `fs`, `import()`, any file path) |
-| `OPENCODE_BROWSER_ALLOW_ALL_COOKIES=1` | Let sessions read and write every cookie in the profile |
-| `OPENCODE_BROWSER_ALLOW_FOREGROUND=1` | Allow `page.bringToFront()` |
-| `OPENCODE_BROWSER_AGENT_WINDOW=separate` | Open agent tabs in a separate window (`current`: in the user's window), overriding the options page's *Where agents open their tabs* |
-| `OPENCODE_BROWSER_EXECUTE_TIMEOUT_MS=120000` | When set, the default budget for an `execute` that passes no `timeoutMs`, plus Playwright's action and navigation timeout for it (at least 30 seconds; 0 removes both) |
-| `OPENCODE_BROWSER_EXECUTE_SLICE_MS=2000` | Longest `execute` JavaScript may run without yielding before it is stopped (50 to 60000; every session waits meanwhile) |
-| `OPENCODE_BROWSER_AUTO_UPDATE=notify` | Installs: only show new versions (`off`: don't check; `on`: install them when idle, the default). Overrides the status page's *Updates* |
-| `OPENCODE_BROWSER_HUMAN_INPUT=0` | Send input at full speed instead of human-like paths and pacing; `1` keeps them on. Overrides the options page's *Human-like input* |
-| `OPENCODE_BROWSER_CHALLENGE_WAIT_MS=15000` | How long `execute` waits for a bot check the browser clears by itself (0 to 60000; 0 reports it without waiting) |
-| `OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS=30000` | How long the relay waits for the extension to answer a command (15000 to 300000); raise it on a heavily loaded computer |
-| `OPENCODE_BROWSER_PING_TIMEOUT_MS=10000` | How long a ping may go unanswered before the browser counts as asleep (1000 to 30000) |
-| `OPENCODE_BROWSER_PORT=20000` | Pin the relay's port, with no fallback; clients dial it too (unset, browse uses 19988 and steps to the next free port of 19990–19997 when another program's HTTP server answers there) |
+| `OPENCODE_BROWSER_ALLOW_ALL_COOKIES=1` | Let tabs read and write every cookie in the profile |
+| `OPENCODE_BROWSER_ALLOW_ALL_STORAGE=1` | Let tabs use every site's storage, and load resources from any host with your credentials |
+| `OPENCODE_BROWSER_ALLOW_FOREGROUND=1` | Allow bringing a tab's window to the front |
+| `OPENCODE_BROWSER_ALLOW_FILE_URLS=1` | Allow `file:` URLs |
+| `OPENCODE_BROWSER_FILE_ROOTS` | More folders tools may read and write (path-list separated) |
+| `OPENCODE_BROWSER_AGENT_WINDOW=separate` | Open agent tabs in a separate window (`current`: in yours), overriding the options page |
+| `OPENCODE_BROWSER_HUMAN_INPUT=0` | Send input at full speed; overrides the options page |
+| `OPENCODE_BROWSER_AUTO_UPDATE=notify` | Only tell about new versions (`off`: don't check; `on`: install them, the default) |
+| `OPENCODE_BROWSER_CHALLENGE_WAIT_MS=15000` | How long to wait for a bot check the browser clears by itself |
+| `OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS=30000` | How long the relay waits for the extension to answer a command |
+| `OPENCODE_BROWSER_PING_TIMEOUT_MS=10000` | How long a ping may go unanswered before the browser counts as asleep |
+| `OPENCODE_BROWSER_PORT=20000` | Pin the relay's port, with no fallback. The extension finds only browse's own ports (19988, 19990–19997) by itself, so enter `localhost:<port>` as its relay address when you pair |
+| `OPENCODE_BROWSER_TOOLS=plain\|execute\|all` | Which tools every client gets |
 
 ## Troubleshooting
 
-- `node cli/dist/cli.mjs status` shows the relay, the extension and every tab agents can use, and says what to do
-  when the extension is missing, unpaired or out of date.
-- Agents fail with "The browser isn't answering" while the computer is very busy: the browser may just be slow. Raise
-  `OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS` and `OPENCODE_BROWSER_PING_TIMEOUT_MS`, then run `browse relay restart`.
+- `browse status` shows the install, the agents browse is set up in, updates, the relay, the extension and agent tabs,
+  and says what to do when the extension is missing, unpaired, closed or out of date. Agents get the same from the
+  `status` tool.
+- An agent says browse's tools are missing: restart the agent (or reload its MCP servers) after `browse install`.
+- "The browser isn't answering" while the computer is very busy: raise `OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS` and
+  `OPENCODE_BROWSER_PING_TIMEOUT_MS`.
 - Logs: `~/.local/state/browse/logs/relay.log`.
-- Another program's HTTP server already on port 19988 (Playwriter's relay, say): browse picks the next free port from
-  19990–19997 by itself; while the relay is running, install's pairing link or file tells the extension that port, and
-  once paired it finds the relay again by itself, so both can run side by side. A port held by something that doesn't
-  answer HTTP is treated as in use, so browse won't start a second relay elsewhere: stop that program or set
-  `OPENCODE_BROWSER_PORT`.
-- Stuck on 0.0.15 or earlier with `~/.local/share/opencode-browser` (`%LOCALAPPDATA%\opencode-browser` on Windows) still
-  there: installs from before 0.0.11 download each update but keep running the old version. Run
-  `npm install -g @opencode/browse@latest` (`@dev` on the dev channel), then `browse relay restart` once no agent is
-  using the browser. Running agents move to the new version, and the old folder's files move to the folders above.
-- Extension says another browser is connected: the relay is running an older browse that drives one browser profile at
-  a time. Update browse on the computer running the relay (or close the other browser), then click **Reconnect** on the
-  status page.
-- Extension says it's not paired (or that the relay was refused): run `bun run setup` again, then reload the extension
-  on your browser's extensions page.
-- **Load unpacked** fails, or the extension shows errors: load the `browse/dist` folder (built by `setup`), not
-  `browse` itself or `browse/public`. `node cli/dist/cli.mjs extension` shows the right folder.
+- Another program's server on port 19988: browse takes the next free port from 19990–19997 and the extension finds it
+  there. A port held by something that doesn't answer HTTP stops it; stop that program or set `OPENCODE_BROWSER_PORT`.
+- The extension says it's not paired, or the relay refused it: run `browse install` again, or `browse pair` and enter
+  the code in the extension's options.
+- An agent says browse was updated and its MCP server must restart: an MCP server started before an update to this
+  version can't talk to the new relay. Restart the agent.
 
 ## Development
 
 ```sh
-bun install && bun run dev       # rebuilds dist/ on change; reload the extension to pick it up
-bun run typecheck
-bun run test                     # the extension and cli/ test suites (bun test), no browser needed
-cd cli && bun src/main.ts status # the CLI from source
-bun run release:check            # the store zip and npm tarball a release would publish, with its checks
+bun install && bun run dev       # rebuilds the extension into dist/ on change; load it unpacked, reload to pick it up
+bun run typecheck && bun test ./test
+cd rust && cargo test --workspace && cargo run -p browse -- status
 ```
 
-`cli/` is the npm package `@opencode/browse` with its own lockfile. The extension and the package share one version;
+A build from a checkout (`cargo run -p browse -- install`) is used in place and never updates itself. The extension in
+`dist/` keeps the manifest key, so it loads with the unpacked ID the relay trusts; run `browse pair` to pair it.
 [RELEASING.md](RELEASING.md) has the release flow (dev builds from every push to `dev`; stable releases only from the
-Release workflow in GitHub Actions).
+Release workflow in GitHub Actions), and [rust/PLAN.md](rust/PLAN.md) the layout of the Rust crates. `cli/` is the
+earlier TypeScript implementation, kept as a reference.
 
 ## Contributing
 

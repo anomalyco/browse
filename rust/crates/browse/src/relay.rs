@@ -26,7 +26,10 @@ pub fn probe() -> Probe {
             Ok(version) if response.status == 200 && version.get("version").is_some_and(Value::is_string) => Probe::Running(version),
             // A relay still starting up answers 503.
             _ if response.status == 503 => Probe::Absent,
-            _ => Probe::Foreign(format!("port {} is in use by another program", endpoint.rsplit(':').next().unwrap_or(""))),
+            _ => Probe::Foreign(format!(
+                "port {} is in use by another program, so the browse relay can't start there. Stop that program, or pick another port for browse with OPENCODE_BROWSER_PORT (set it where your agent starts, then restart the agent)",
+                endpoint.rsplit(':').next().unwrap_or("")
+            )),
         },
     }
 }
@@ -37,8 +40,9 @@ pub fn ensure() -> anyhow::Result<Value> {
         // A relay of the TypeScript browse can't serve this build: hand over to this one.
         Probe::Running(version) if crate::legacy::is_legacy(&version) => crate::legacy::stop(&version, false)?,
         Probe::Running(version) => return Ok(version),
-        Probe::Foreign(message) => bail!(message),
-        Probe::Absent => {}
+        // Another program's server on the default port: a relay that may choose its port takes a free fallback one.
+        Probe::Foreign(message) if browse_relay::port::pinned() => bail!(message),
+        Probe::Foreign(_) | Probe::Absent => {}
     }
     if matches!(std::env::var("OPENCODE_BROWSER_AUTOSTART").as_deref(), Ok("0" | "false")) {
         bail!("automatic relay startup is disabled; no relay is running at {}", relay_api::endpoint());
@@ -52,6 +56,45 @@ pub fn ensure() -> anyhow::Result<Value> {
             _ if Instant::now() > deadline => bail!("browse relay did not start at {}", relay_api::endpoint()),
             _ => std::thread::sleep(Duration::from_millis(50)),
         }
+    }
+}
+
+/// Stops a running relay and waits until it's gone. Agent tabs stay open and the next relay takes them back.
+pub fn stop() -> anyhow::Result<bool> {
+    let version = match probe() {
+        Probe::Running(version) => version,
+        _ => return Ok(false),
+    };
+    if crate::legacy::is_legacy(&version) {
+        crate::legacy::stop(&version, true)?;
+        return Ok(true);
+    }
+    let instance = version.get("instanceId").and_then(Value::as_str).unwrap_or_default().to_owned();
+    match send("POST", "/shutdown", &[], Some(b"{}"), Some(Duration::from_secs(10))) {
+        Ok(response) if (200..300).contains(&response.status) => {}
+        Err(http::Error::Unreachable(_)) => return Ok(true),
+        Ok(response) => bail!("the browse relay didn't stop: {}", String::from_utf8_lossy(&response.body).trim()),
+        Err(error) => bail!("the browse relay didn't stop: {error}"),
+    }
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match probe() {
+            Probe::Running(v) if v.get("instanceId").and_then(Value::as_str) == Some(instance.as_str()) => {}
+            _ => return Ok(true),
+        }
+        if Instant::now() > deadline {
+            bail!("the browse relay accepted the shutdown but is still running");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Restarts a running relay so it picks up changed settings (where it listens). Returns false when it couldn't.
+pub fn restart() -> anyhow::Result<bool> {
+    match stop() {
+        Ok(true) => ensure().map(|_| true),
+        Ok(false) => Ok(true),
+        Err(_) => Ok(false),
     }
 }
 

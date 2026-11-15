@@ -79,7 +79,7 @@ pub fn parse_changes(input: &Value) -> Result<Vec<(String, String)>, String> {
     let mut changes = Vec::new();
     for (key, raw) in object {
         if key == "autoUpdate" {
-            problems.push("autoUpdate can't be read or changed here. The user changes it with `browse settings` or the extension's options page.".to_string());
+            problems.push("autoUpdate can't be read or changed here. The user changes it with `browse update --mode <on|notify|off>` or the extension's options page.".to_string());
             continue;
         }
         let Some(spec) = spec(key) else {

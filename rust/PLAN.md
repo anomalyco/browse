@@ -1,6 +1,6 @@
 # browse in Rust
 
-A rewrite of the browse CLI/relay (`cli/`) in Rust, for OpenCode only. The Chrome extension (`src/`) stays as is and
+A rewrite of the browse CLI/relay (`cli/`) in Rust. The Chrome extension (`src/`) stays as is and
 the Rust relay must speak its exact protocol, so the store extension keeps working unchanged.
 
 ## Decisions
@@ -30,7 +30,10 @@ the Rust relay must speak its exact protocol, so the store extension keeps worki
   with `browse_core::ToolCallRequest`). No update supervisor process: the proxy reconnects to whatever relay is
   running.
 - **Goals:** small binary (single-digit MB), low memory (a few MB per MCP proxy, tens of MB for the relay).
-- Only OpenCode is configured by `browse install`. Other agents are out of scope.
+- `browse install` configures the agents the TypeScript installer did (OpenCode by default, plus Claude Code, Codex,
+  Cursor and the rest in `agents.rs`, chosen with a picker or `--agent`), since non-OpenCode clients get `execute`. It
+  keeps one browse per computer: the install script's binary and npx/bunx copies live in `~/.local/bin` and update
+  themselves; global package installs are left to their package manager and agents run its `browse` shim.
 
 ## Layout (`rust/`, cargo workspace)
 
@@ -41,7 +44,7 @@ the Rust relay must speak its exact protocol, so the store extension keeps worki
 | `browse-page` | Page interaction over CDP: isolated worlds, frames, injected script, refs, snapshots, actionability, human-like input, stealth. Tools: navigate, snapshot, click, fill, type, press, select, hover, drag, scroll, eval, wait_for, dialog, upload, emulate, webmcp. |
 | `browse-capture` | Screenshots (labels, ref, full page, diff), network capture (start/status/stop/cancel, redacted exchanges), page console capture, screen recording (MJPEG → Matroska). |
 | `browse-script` | The `execute` tool for non-OpenCode clients: QuickJS on its own thread per run, `browse.<tool>()` bindings, a Playwright-style `page`/`locator` shim bound to the `tab` passed in (or opened by its first `goto`), TS-compatible helpers (`snapshot`, `ref`, `handoff`, `files`, `state` kept per tab, ...), CPU/memory/time limits. Every result names the tab to continue in. |
-| `browse` | The binary: CLI commands (`serve`, `mcp`, `execute`, `install`, `pair`, `update`, `status`, `extension`, and `browse <tool> --arg ...` for any tool, `--tab <id>` to name the tab), the MCP stdio proxy (forwards the client name; the relay decides its tools), starting the relay on demand, OpenCode setup, self-update (from the release service, or with npm for an npm install). |
+| `browse` | The binary: CLI commands (`serve`, `mcp`, `execute`, `install`, `uninstall`, `pair`, `set hostname`, `update`, `status`, `extension`, and `browse <tool> --arg ...` for any tool, `--tab <id>` to name the tab), the MCP stdio proxy (forwards the client name; the relay decides its tools), starting the relay on demand, agent setup (`install.rs`, `agents.rs`, `picker.rs`), remote relays (`remote.rs`), self-update (from the release service, or with the package manager of a global install). |
 
 Each crate exposes `pub fn tools() -> Vec<Arc<dyn browse_core::Tool>>`. The binary concatenates them and passes the
 registry to the relay.
