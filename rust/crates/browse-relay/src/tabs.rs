@@ -73,6 +73,7 @@ impl Attach {
         attach.opener = tab.opener;
         attach.state = Some(tab.state.clone());
         attach.created_at = Some(tab.created_at.clone());
+        attach.fresh_popup = tab.fresh_popup;
         attach
     }
 }
@@ -453,15 +454,34 @@ impl Relay {
             }
             // A popup attaches before its first navigation commits. A disallowed commit in the gap between setup_tab's
             // snapshot and the tab being in st.tabs never reached observe_navigation, so ask again now that it would.
-            let info = relay.debugger(tab, None, "Target.getTargetInfo", json!({}), Some(ATTACH_TIMEOUT)).await.ok();
-            if let Some((_, _, current, _)) = info.as_ref().and_then(target_info)
-                && !current.is_empty()
-                && current != url
-            {
-                if let Some(entry) = relay.st().tabs.get_mut(&tab) {
-                    entry.url = current.clone();
+            let info = relay.debugger(tab, None, "Target.getTargetInfo", json!({}), Some(ATTACH_TIMEOUT)).await;
+            match info {
+                Ok(info) => {
+                    if let Some((_, _, current, _)) = target_info(&info)
+                        && !current.is_empty()
+                        && current != url
+                    {
+                        // Only while nothing arrived during the query: a newer URL here is a document already checked.
+                        let applied = {
+                            let mut st = relay.st();
+                            match st.tabs.get_mut(&tab) {
+                                Some(entry) if entry.fresh_popup && !entry.closing && entry.url == url => {
+                                    entry.url = current.clone();
+                                    true
+                                }
+                                _ => false,
+                            }
+                        };
+                        if applied {
+                            relay.check_committed_url(tab, &current);
+                        }
+                    }
                 }
-                relay.check_committed_url(tab, &current);
+                Err(error) => {
+                    if relay.enforced(tab).is_some() {
+                        relay.close_unverified_popup(tab, &url, &error.to_string());
+                    }
+                }
             }
         });
     }
@@ -970,6 +990,34 @@ impl Relay {
             }
             let _ = relay.debugger(tab, None, "Page.stopLoading", json!({}), Some(Duration::from_secs(3))).await;
             let _ = relay.debugger(tab, None, "Page.navigate", json!({ "url": "about:blank" }), Some(Duration::from_secs(10))).await;
+        });
+    }
+
+    /// A fresh popup whose URL couldn't be asked again is unverified: close it, leaving the news with its opener the
+    /// way `allowlist_violation` does. Only a popup still undecided since `snapshot` is acted on.
+    fn close_unverified_popup(self: &Arc<Self>, tab: i64, snapshot: &str, error: &str) {
+        {
+            let mut st = self.st();
+            let Some(entry) = st.tabs.get_mut(&tab) else { return };
+            if !entry.fresh_popup || entry.closing || entry.url != snapshot || entry.owner != Owner::Relay {
+                return;
+            }
+            entry.fresh_popup = false;
+            let warning = format!("Domain allowlist: browse could not confirm tab {tab}'s first document, so it closed the popup. Ask the user before going elsewhere.");
+            // A closed popup can't carry the news: its opener does.
+            match entry.opener {
+                Some(opener) => {
+                    if let Some(opener) = st.tabs.get_mut(&opener) {
+                        opener.add_warning(warning);
+                    }
+                }
+                None => entry.add_warning(warning),
+            }
+        }
+        rlog!("allowlist.popup-unverified", tabId = tab, error = error);
+        let relay = self.clone();
+        tokio::spawn(async move {
+            let _ = relay.close_or_release(tab).await;
         });
     }
 }

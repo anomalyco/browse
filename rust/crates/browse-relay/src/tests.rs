@@ -114,7 +114,7 @@ impl Seen {
 }
 
 /// What `Target.getTargetInfo` answers for a tab, per call: a queued URL is taken first ("" for a popup whose first
-/// navigation hasn't committed), then about:blank.
+/// navigation hasn't committed, "!error" to answer with an error), then about:blank.
 type TargetUrls = Arc<Mutex<HashMap<i64, VecDeque<String>>>>;
 
 /// Answers the relay's commands like the extension, records them, and sends whatever is pushed to `events`.
@@ -157,6 +157,10 @@ fn fake_extension_with_urls(socket: Socket, next_tab: i64, urls: TargetUrls) -> 
                     "Target.getTargetInfo" => {
                         let tab = params["tabId"].as_i64().unwrap();
                         let url = urls.lock().unwrap().get_mut(&tab).and_then(VecDeque::pop_front).unwrap_or_else(|| "about:blank".into());
+                        if url == "!error" {
+                            let _ = replies.send(json!({ "id": id, "error": "Target.getTargetInfo failed" }));
+                            continue;
+                        }
                         json!({ "targetInfo": { "targetId": format!("T{tab}"), "type": "page", "url": url, "title": "", "attached": true } })
                     }
                     "Runtime.evaluate" => json!({ "result": { "type": "number", "value": 42 } }),
@@ -746,11 +750,12 @@ async fn popups_inherit_their_openers_options() {
 }
 
 /// A popup attaches before its first navigation commits and reports no URL yet: that is nothing to check, so it stays
-/// open and the first document that really commits decides (cli/src/session-manager/navigation-guard.ts).
+/// open and the first document that really commits decides. Once one did, a later disallowed navigation blanks it
+/// rather than closing it (cli/src/session-manager/navigation-guard.ts).
 #[tokio::test]
 async fn a_popup_without_a_committed_document_stays_open() {
     let urls = TargetUrls::default();
-    urls.lock().unwrap().insert(101, VecDeque::from(["".to_string()]));
+    urls.lock().unwrap().insert(101, VecDeque::from(["".to_string(), "".to_string()]));
     let (h, seen, events) = connected_with_urls("profile-popup-blank", 100, urls).await;
     let relay = h.handle.relay.clone();
     let browser = h.handle.browser();
@@ -767,6 +772,10 @@ async fn a_popup_without_a_committed_document_stays_open() {
     eventually("the committed url", || relay.st().tabs.get(&101).is_some_and(|t| t.url == "https://example.com/shop")).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(relay.st().tabs.contains_key(&101), "an allowed first document keeps the popup open");
+    events.send(json!({ "method": "debugger.event", "params": { "tabId": 101, "method": "Page.frameNavigated", "params": { "frame": { "id": "T101", "url": "https://evil.test/" } } } })).unwrap();
+    eventually("the popup to be blanked", || seen.cdp("Page.navigate").iter().any(|c| c["params"]["tabId"] == 101 && c["params"]["params"]["url"] == "about:blank")).await;
+    assert!(relay.st().tabs.contains_key(&101), "a popup that already committed is blanked, not closed");
+    assert!(seen.commands("tabs.remove").iter().all(|c| c["params"]["tabId"] != 101));
 }
 
 /// Once a popup's first document commits, the allowlist decides it as before: a disallowed one closes the popup.
@@ -783,7 +792,7 @@ async fn a_popups_first_document_must_be_allowed() {
     eventually("the popup to attach", || relay.st().tabs.contains_key(&106)).await;
     events.send(json!({ "method": "debugger.event", "params": { "tabId": 106, "method": "Page.frameNavigated", "params": { "frame": { "id": "T106", "url": "https://evil.test/" } } } })).unwrap();
     eventually("the popup to close", || seen.commands("tabs.remove").iter().any(|c| c["params"]["tabId"] == 106)).await;
-    assert!(!relay.st().tabs.contains_key(&106));
+    eventually("the popup to leave the tabs list", || !relay.st().tabs.contains_key(&106)).await;
     assert!(relay.st().tabs[&opener].warnings.iter().any(|w| w.contains("Domain allowlist")), "a closed popup's news goes to its opener");
 }
 
@@ -800,8 +809,40 @@ async fn a_commit_before_the_popup_is_routed_still_closes_it() {
     let opener = browser.open_tab(None, &options).await.unwrap().tab;
     events.send(json!({ "method": "tabs.opened", "params": { "tabId": 111, "openerTabId": opener } })).unwrap();
     eventually("the popup to close", || seen.commands("tabs.remove").iter().any(|c| c["params"]["tabId"] == 111)).await;
-    assert!(!relay.st().tabs.contains_key(&111));
+    eventually("the popup to leave the tabs list", || !relay.st().tabs.contains_key(&111)).await;
     assert!(relay.st().tabs[&opener].warnings.iter().any(|w| w.contains("Domain allowlist")), "a closed popup's news goes to its opener");
+}
+
+/// A fresh popup whose URL can't be asked again is unverified: under an allowlist it is closed rather than left blank.
+#[tokio::test]
+async fn a_fresh_popup_is_closed_when_its_url_cannot_be_checked() {
+    let urls = TargetUrls::default();
+    urls.lock().unwrap().insert(116, VecDeque::from(["".to_string(), "!error".to_string()]));
+    let (h, seen, events) = connected_with_urls("profile-popup-unverified", 115, urls).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let options = TabOptions { allowed_origins: Some(vec!["example.com".into()]), ..TabOptions::default() };
+    let opener = browser.open_tab(None, &options).await.unwrap().tab;
+    events.send(json!({ "method": "tabs.opened", "params": { "tabId": 116, "openerTabId": opener } })).unwrap();
+    eventually("the popup to close", || seen.commands("tabs.remove").iter().any(|c| c["params"]["tabId"] == 116)).await;
+    eventually("the popup to leave the tabs list", || !relay.st().tabs.contains_key(&116)).await;
+    assert!(relay.st().tabs[&opener].warnings.iter().any(|w| w.contains("could not confirm")), "the opener carries the news");
+}
+
+/// Without an allowlist there is nothing to check, so a failed re-query changes nothing.
+#[tokio::test]
+async fn a_popup_without_an_allowlist_stays_open_when_its_url_cannot_be_checked() {
+    let urls = TargetUrls::default();
+    urls.lock().unwrap().insert(121, VecDeque::from(["".to_string(), "!error".to_string()]));
+    let (h, seen, events) = connected_with_urls("profile-popup-unverified-open", 120, urls).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let opener = browser.open_tab(None, &TabOptions::default()).await.unwrap().tab;
+    events.send(json!({ "method": "tabs.opened", "params": { "tabId": 121, "openerTabId": opener } })).unwrap();
+    eventually("the popup's url asked again", || seen.cdp("Target.getTargetInfo").iter().filter(|c| c["params"]["tabId"] == 121).count() >= 2).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(relay.st().tabs.contains_key(&121));
+    assert!(seen.commands("tabs.remove").iter().all(|c| c["params"]["tabId"] != 121));
 }
 
 /// A tab the user lends (the toolbar button) is usable by its id from tabs list, and closing it gives it back.
