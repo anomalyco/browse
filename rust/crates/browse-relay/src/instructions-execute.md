@@ -12,3 +12,5 @@ When only a person can proceed — login, 2FA, passkey, captcha or payment confi
 The code runs in a small sandboxed engine on the relay, not Node: no require/import, fs, process or fetch (use `page.evaluate` for things that belong to the page, `files` for files). Unsupported Playwright calls throw an error naming what to use instead.
 
 When finished, close the tabs you opened (`await page.close()`, or the `tabs` tool with action `close`). `status` reports the relay and the connected browsers.
+
+If a call fails because no browser is connected (the extension isn't added, paired or open), `status` says why in `nextStep`: pass that step to the user and wait for them instead of retrying.

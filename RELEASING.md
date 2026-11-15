@@ -97,8 +97,9 @@ rulesets below require their review. The jobs that need a secret run in the envi
 The dev zip keeps the manifest `key`, so it loads with the same unpacked ID as a checkout's `dist/`, which the relay
 trusts, and every dev build still publishes it to the release service
 (`https://anoma.ly/release/browse/extension/dev/chromium`). The Rust CLI doesn't fetch it: `browse install` points at
-the Chrome Web Store item on every channel. To try a dev extension, download the zip, unpack it and load it unpacked;
-it pairs like the store build. (The TypeScript CLI baked the dev zip's sha256 in and unpacked it into
+the Chrome Web Store item on every channel, and the store build works with dev CLIs (the relay keeps accepting older
+extension protocols). To try a dev extension, download the zip, unpack it and load it unpacked, then `browse pair`;
+`browse extension` prints these steps on the dev channel and the README's Updates section has them. (The TypeScript CLI baked the dev zip's sha256 in and unpacked it into
 `<cache root>/extension`; that is gone with it.) Dev builds never go to the Chrome Web Store: every upload is
 reviewed, too slow for a build per push.
 

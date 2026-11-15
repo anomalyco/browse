@@ -1,6 +1,6 @@
 {
   "name": "@opencode/browse",
-  "description": "browse: connect the browse extension to OpenCode and drive your browser from your agent.",
+  "description": "browse: let your AI agents use your real browser. The MCP server and relay for the browse Chrome extension.",
   "type": "module",
   "license": "MIT",
   "bin": {

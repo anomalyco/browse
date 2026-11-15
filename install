@@ -138,6 +138,10 @@ fi
 requested_version="${requested_version#v}"
 
 INSTALL_DIR=${XDG_BIN_HOME:-$HOME/.local/bin}
+# `browse install` and the updater use $OPENCODE_BROWSER_HOME/bin when it's set, so install there too.
+if [ -n "${OPENCODE_BROWSER_HOME:-}" ]; then
+    INSTALL_DIR=$OPENCODE_BROWSER_HOME/bin
+fi
 # XDG paths must be absolute; a relative one would put browse in the current directory.
 case "$INSTALL_DIR" in
     /*) ;;

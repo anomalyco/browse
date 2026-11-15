@@ -14,10 +14,10 @@ Let your coding agent use your real browser: open and drive tabs, take screensho
 **Description:**
 browse lets your coding agent use your real browser: OpenCode, Claude Code, Codex, Cursor or any agent that supports MCP.
 
-- Agents open their own tabs in the background, together in one "Agents" group at the start of your tab strip, so they stay out of your way. Prefer a separate window, a group per session or no groups? Change it in browse's settings. Idle agent tabs close by themselves after 10 minutes, or the time you set.
+- Agents open their own tabs in the background, together in one "Agents" group at the start of your tab strip, so they stay out of your way. Prefer a separate window, a group per task or no groups? Change it in browse's settings. Idle agent tabs close by themselves after 10 minutes, or the time you set.
 - Want an agent to use a tab you already have open? Click the toolbar button on it. Click again to take it back, even while the agent is working.
 - Hand off when it's your turn: logins, 2FA, passkeys and payments stay with you, then the agent continues.
-- Agents use Playwright, take screenshots, capture network traffic and record the tab when you ask. Recordings show only the page.
+- Agents click, type, read pages, take screenshots, capture network traffic and record the tab when you ask. Recordings show only the page.
 
 Set it up once: ask your agent to set up browse, or run
 curl -fsSL https://opencode.ai/browse/install | bash

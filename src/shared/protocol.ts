@@ -109,9 +109,12 @@ export const relayInstallMethods: readonly RelayInstallMethod[] = [
   "checkout",
   "other",
 ]
-/** Global installs that a package manager updates, whose update mode the options page offers. */
-export const packageManagerInstall = (update: Pick<RelayAutoUpdate, "install" | "method"> | undefined): boolean =>
-  update?.install === "npm" || update?.method === "bun" || update?.method === "pnpm" || update?.method === "yarn" || update?.method === "volta"
+/**
+ * Installs that update themselves (the install script's binary, or a global install its package manager updates), whose
+ * update mode the options page offers. Bun, pnpm, yarn and volta installs report `install: "binary"` for older pages.
+ */
+export const selfUpdatingInstall = (update: Pick<RelayAutoUpdate, "install" | "method"> | undefined): boolean =>
+  update?.install === "npm" || update?.install === "binary"
 /** The last installer attempt that failed, which version it was for, and when. */
 export type RelayUpdateFailure = { message: string; at: string; version?: string; attempts?: number }
 /** The relay's update state: an npm install updates itself; a checkout updates with `update`. */

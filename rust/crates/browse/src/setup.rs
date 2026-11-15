@@ -27,7 +27,7 @@ pub fn config_home() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home().join(".config"))
 }
 
-fn tilde(path: &Path) -> String {
+pub fn tilde(path: &Path) -> String {
     let home = home();
     match path.strip_prefix(&home) {
         Ok(rest) if !home.as_os_str().is_empty() => format!("~/{}", rest.display()),
@@ -37,10 +37,6 @@ fn tilde(path: &Path) -> String {
 
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(String::as_str)
-}
-
-pub fn binary_name() -> &'static str {
-    if cfg!(windows) { "browse.exe" } else { "browse" }
 }
 
 /// OpenCode's global config file: the first that exists, else opencode.json.
@@ -72,7 +68,26 @@ fn owned(server: &Value, entry: &Path) -> bool {
     }
     let target = command[command.len() - 2].as_str().unwrap_or_default();
     let name = Path::new(target).file_name().and_then(|n| n.to_str()).unwrap_or_default();
-    Path::new(target) == entry || ["browse", "browse.exe", "cli.mjs", "opencode-browser.mjs"].contains(&name)
+    Path::new(target) == entry || ["browse", "browse.exe", "browse.cmd", "cli.mjs", "opencode-browser.mjs"].contains(&name)
+}
+
+/// Removes the browse server (and the legacy opencode-browser one) an install wrote from an OpenCode config.
+pub fn remove_opencode(file: &Path) -> anyhow::Result<bool> {
+    if !file.is_file() {
+        return Ok(false);
+    }
+    let (mut text, servers) = mcp_servers(file)?;
+    let mut removed = false;
+    for name in [MCP_NAME, LEGACY_MCP_NAME] {
+        if servers.get(name).is_some_and(|s| owned(s, Path::new(""))) {
+            text = jsonc::modify(&text, &["mcp", "servers", name], None)?;
+            removed = true;
+        }
+    }
+    if removed {
+        write_keeping_mode(file, text.as_bytes())?;
+    }
+    Ok(removed)
 }
 
 pub enum McpEdit {
@@ -109,7 +124,7 @@ pub fn configure_opencode(file: &Path, entry: &Path) -> anyhow::Result<McpEdit> 
     Ok(if existing.is_some() { McpEdit::Updated } else { McpEdit::Added })
 }
 
-fn write_keeping_mode(file: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+pub fn write_keeping_mode(file: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     let dir = file.parent().context("no parent folder")?;
     std::fs::create_dir_all(dir)?;
     let temporary = dir.join(format!(".{}.{}.tmp", file.file_name().unwrap_or_default().to_string_lossy(), std::process::id()));
@@ -123,43 +138,8 @@ fn write_keeping_mode(file: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Puts this executable at the install's stable path (~/.local/bin/browse); updates replace that file in place.
-fn install_binary() -> anyhow::Result<PathBuf> {
-    let target = bin_root().join(binary_name());
-    let running = relay::current_exe()?;
-    if std::fs::canonicalize(&target).ok() == std::fs::canonicalize(&running).ok() {
-        return Ok(target);
-    }
-    let dir = target.parent().context("no bin folder")?;
-    std::fs::create_dir_all(dir)?;
-    let staged = dir.join(format!(".browse.{}.new", std::process::id()));
-    std::fs::copy(&running, &staged).with_context(|| format!("could not install browse to {}", target.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
-    }
-    if cfg!(windows) && target.exists() {
-        std::fs::rename(&target, dir.join(format!("browse.exe.old-{}", session::random_u64() as u32)))?;
-    }
-    std::fs::rename(&staged, &target)?;
-    Ok(target)
-}
-
-/// Adds the bin folder to PATH in the shell's startup file (or the Windows user PATH). Returns where.
-fn add_to_path(dir: &Path) -> Option<String> {
-    if std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|e| e == dir)) {
-        return None;
-    }
-    if cfg!(windows) {
-        let script = "$p=[Environment]::GetEnvironmentVariable('Path','User'); if (($p -split ';') -notcontains $env:BROWSE_DIR) { [Environment]::SetEnvironmentVariable('Path', ($(if ($p) { \"$p;\" }) + $env:BROWSE_DIR), 'User') }";
-        let ok = std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", script])
-            .env("BROWSE_DIR", dir)
-            .status()
-            .is_ok_and(|s| s.success());
-        return ok.then(|| "Windows user PATH".into());
-    }
+/// The shell's startup files (the first that exists is used) and the line that puts `dir` on PATH there.
+fn path_line(dir: &Path) -> (Vec<PathBuf>, String) {
     let shell = std::env::var("SHELL").unwrap_or_default();
     let shell = shell.rsplit('/').next().unwrap_or("sh");
     let home = home();
@@ -172,6 +152,41 @@ fn add_to_path(dir: &Path) -> Option<String> {
     };
     let quoted = format!("'{}'", dir.to_string_lossy().replace('\'', "'\\''"));
     let line = if shell == "fish" { format!("fish_add_path {quoted}") } else { format!("export PATH={quoted}:\"$PATH\"") };
+    (candidates, line)
+}
+
+/// Takes out the PATH line `add_to_path` wrote (with its `# browse` comment). Returns the file it was in.
+pub fn remove_from_path(dir: &Path) -> Option<String> {
+    if cfg!(windows) {
+        return None;
+    }
+    let (candidates, line) = path_line(dir);
+    for file in candidates {
+        let Ok(text) = std::fs::read_to_string(&file) else { continue };
+        let block = format!("\n# browse\n{line}\n");
+        if text.contains(&block) {
+            std::fs::write(&file, text.replacen(&block, "", 1)).ok()?;
+            return Some(tilde(&file));
+        }
+    }
+    None
+}
+
+/// Adds the bin folder to PATH in the shell's startup file (or the Windows user PATH). Returns where.
+pub fn add_to_path(dir: &Path) -> Option<String> {
+    if std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|e| e == dir)) {
+        return None;
+    }
+    if cfg!(windows) {
+        let script = "$p=[Environment]::GetEnvironmentVariable('Path','User'); if (($p -split ';') -notcontains $env:BROWSE_DIR) { [Environment]::SetEnvironmentVariable('Path', ($(if ($p) { \"$p;\" }) + $env:BROWSE_DIR), 'User') }";
+        let ok = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .env("BROWSE_DIR", dir)
+            .status()
+            .is_ok_and(|s| s.success());
+        return ok.then(|| "Windows user PATH".into());
+    }
+    let (candidates, line) = path_line(dir);
     let file = candidates.iter().find(|f| f.exists()).unwrap_or(&candidates[0]);
     let text = std::fs::read_to_string(file).unwrap_or_default();
     if text.lines().any(|l| l == line) {
@@ -183,51 +198,12 @@ fn add_to_path(dir: &Path) -> Option<String> {
     Some(tilde(file))
 }
 
-fn settings_path() -> PathBuf {
+pub fn settings_path() -> PathBuf {
     relay_api::paths().config.join("settings.json")
 }
 
 pub fn settings() -> Value {
     std::fs::read(settings_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_else(|| json!({}))
-}
-
-pub fn install(args: &[String]) -> anyhow::Result<i32> {
-    let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let no_open = args.iter().any(|a| a == "--no-open");
-    let entry = install_binary()?;
-    println!("✓ browse {VERSION} installed ({})", tilde(&entry));
-    if !args.iter().any(|a| a == "--no-modify-path")
-        && let Some(file) = entry.parent().and_then(add_to_path)
-    {
-        println!("✓ Added browse to your PATH ({file}). Open a new terminal to use it.");
-    }
-    let file = opencode_config();
-    let mut status = 0;
-    match configure_opencode(&file, &entry)? {
-        McpEdit::Added => println!("✓ Added browse to OpenCode ({})", tilde(&file)),
-        McpEdit::Updated => println!("✓ Updated browse in OpenCode ({})", tilde(&file)),
-        McpEdit::UpToDate => println!("✓ OpenCode already has browse"),
-        McpEdit::Conflict => {
-            println!("! OpenCode already has a different server named browse in {}; left it unchanged.", tilde(&file));
-            status = 1;
-        }
-    }
-    let opencode = flag(args, "--opencode").map(PathBuf::from).or_else(|| browsers::on_path("opencode"));
-    let mut saved = settings();
-    saved["entry"] = json!(entry);
-    saved["version"] = json!(VERSION);
-    saved["opencodeConfigs"] = json!([file]);
-    if let Some(opencode) = opencode {
-        saved["opencode"] = json!(opencode);
-    }
-    update::write_private(&settings_path(), format!("{saved:#}\n").as_bytes())?;
-    let seconds = match flag(args, "--wait-seconds") {
-        Some(s) => s.parse::<u64>().ok().filter(|s| (1..=3600).contains(s)).context("--wait-seconds must be between 1 and 3600")?,
-        None if tty => 180,
-        None => 90,
-    };
-    let wait = !args.iter().any(|a| a == "--no-wait");
-    Ok(status.max(connect_extension(!no_open, wait, Duration::from_secs(seconds))?))
 }
 
 /// The relay's view of the extension.
@@ -263,7 +239,10 @@ fn pair_in_browser(browser: &Browser, profile: &str, open: bool) -> anyhow::Resu
     let listen = relay_api::port();
     let port = if listen == relay_api::DEFAULT_PORT { String::new() } else { format!("&port={listen}") };
     let url = format!("chrome-extension://{}/welcome.html#code={code}{port}", browsers::store_id());
-    if open && browsers::open_in(browser, &url, Some(profile)) {
+    // The extension takes a port from the link only when it's one of browse's own (19988, 19990-19997); a relay pinned
+    // elsewhere with OPENCODE_BROWSER_PORT is entered by hand, with its address.
+    let known = listen == relay_api::DEFAULT_PORT || browse_relay::protocol::FALLBACK_PORTS.contains(&listen);
+    if open && known && browsers::open_in(browser, &url, Some(profile)) {
         println!("✓ Opened browse in {} to connect it", browser.name);
         return Ok(true);
     }
@@ -271,7 +250,7 @@ fn pair_in_browser(browser: &Browser, profile: &str, open: bool) -> anyhow::Resu
     Ok(false)
 }
 
-fn connect_extension(open: bool, wait: bool, timeout: Duration) -> anyhow::Result<i32> {
+pub fn connect_extension(open: bool, wait: bool, timeout: Duration) -> anyhow::Result<i32> {
     relay::ensure()?;
     let initial = extension_status(false);
     if initial.as_ref().is_some_and(|s| s.connected) {
@@ -419,7 +398,23 @@ pub fn pair(args: &[String]) -> anyhow::Result<i32> {
 pub fn extension() -> i32 {
     println!("Add browse to your Chrome-family browser from the Chrome Web Store: {}", browsers::store_url());
     println!("Then run `browse install` (or `browse pair`) to connect it.");
+    if update::channel() == "dev" {
+        println!();
+        println!("The store extension works with dev builds too. To try the dev extension instead, download");
+        println!("https://anoma.ly/release/browse/extension/dev/chromium, unzip it, turn on Developer mode on your browser's");
+        println!("extensions page, click Load unpacked and pick the unzipped folder; then run `browse pair`.");
+    }
     0
+}
+
+/// The agents (OpenCode included) whose config has a browse server an install wrote, with the file.
+fn configured_agents() -> Vec<(&'static str, PathBuf)> {
+    let opencode = opencode_config();
+    crate::agents::locations(&opencode, None)
+        .into_iter()
+        .filter(|location| if location.name == "opencode" { installed_server().is_some_and(|s| owned(&s, Path::new(""))) } else { crate::agents::current(location).is_some_and(|s| crate::agents::owned(&s)) })
+        .map(|location| (location.name, location.file))
+        .collect()
 }
 
 fn installed_server() -> Option<Value> {
@@ -454,6 +449,7 @@ pub fn status(args: &[String]) -> anyhow::Result<i32> {
             "version": VERSION,
             "executable": relay::current_exe()?,
             "mcp": installed_server().is_some().then(opencode_config),
+            "agents": configured_agents().iter().map(|(name, file)| json!({ "name": name, "file": file })).collect::<Vec<_>>(),
             "updates": update::describe(),
         });
         println!("{status:#}");
@@ -463,12 +459,21 @@ pub fn status(args: &[String]) -> anyhow::Result<i32> {
     println!("Setup:     {}", if entry.is_some() { "installed" } else { "not installed. Run `browse install`." });
     println!("Version:   {VERSION} ({})", relay::current_exe()?.display());
     println!("opencode:  {}", settings.get("opencode").and_then(Value::as_str).map(PathBuf::from).or_else(|| browsers::on_path("opencode")).map_or("not found".into(), |p| p.display().to_string()));
-    println!("MCP:       {}", if installed_server().is_some() { format!("\"{MCP_NAME}\" configured in {}", tilde(&opencode_config())) } else { "not configured".into() });
+    let configured = configured_agents();
+    println!(
+        "Agents:    {}",
+        if configured.is_empty() {
+            "none has browse. Run `browse install`.".to_owned()
+        } else {
+            configured.iter().map(|(name, file)| format!("{} ({})", crate::agents::label(name), tilde(file))).collect::<Vec<_>>().join(", ")
+        }
+    );
     println!("Updates:   {}", update::describe());
     println!("Files:     {}", relay_api::browse_files().iter().map(|p| tilde(p)).collect::<Vec<_>>().join(", "));
     println!("Logs:      {}", tilde(&relay_api::paths().state.join("logs")));
     if browsers::on_path("browse").is_none() {
-        println!("Warning:   browse isn't on PATH; add {} to it", tilde(&bin_root()));
+        let dir = entry.map(PathBuf::from).and_then(|e| e.parent().map(Path::to_path_buf)).unwrap_or_else(bin_root);
+        println!("Warning:   browse isn't on PATH; add {} to it (agents run it by its full path, so they work either way)", tilde(&dir));
     }
     println!();
     match running {
@@ -481,7 +486,15 @@ pub fn status(args: &[String]) -> anyhow::Result<i32> {
             if let Some(running) = relay_version.filter(|v| v != VERSION) {
                 println!("           runs {running}, this CLI is {VERSION}; it restarts with the new version once idle");
             }
-            let state = status.get("pairingState").and_then(Value::as_str).unwrap_or("unknown");
+            let state = match status.get("pairingState").and_then(Value::as_str).unwrap_or_default() {
+                "connected" => "connected",
+                "not-seen" => "not connected yet",
+                "unpaired" => "in a browser, but not paired",
+                "refused" => "refused: its pairing isn't valid here",
+                "paired-offline" => "paired, but the browser isn't connected",
+                "incompatible" => "doesn't match this browse version",
+                _ => "unknown",
+            };
             println!("Extension: {state}");
             if let Some(next) = status.get("nextStep").and_then(Value::as_str) {
                 println!("           {next}");

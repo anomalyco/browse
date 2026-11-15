@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { cliUpdateNotice, packageManagerInstall, type RelayAutoUpdate } from "../src/shared/protocol"
+import { cliUpdateNotice, selfUpdatingInstall, type RelayAutoUpdate } from "../src/shared/protocol"
 import { relayAutoUpdate } from "../src/background/agent-relay/wire"
 import { cliUpdateText } from "../src/status/describe"
 
@@ -116,12 +116,13 @@ describe("package manager installs", () => {
     })
   })
 
-  test("offer the update mode for installs a package manager updates", () => {
-    expect(packageManagerInstall({ install: "npm" })).toBe(true)
-    expect(packageManagerInstall({ install: "binary", method: "pnpm" })).toBe(true)
-    expect(packageManagerInstall({ install: "binary", method: "binary" })).toBe(false)
-    expect(packageManagerInstall({ install: "npx", method: "bunx" })).toBe(false)
-    expect(packageManagerInstall(undefined)).toBe(false)
+  test("offer the update mode for installs that update themselves", () => {
+    expect(selfUpdatingInstall({ install: "npm" })).toBe(true)
+    expect(selfUpdatingInstall({ install: "binary", method: "pnpm" })).toBe(true)
+    expect(selfUpdatingInstall({ install: "binary", method: "binary" })).toBe(true)
+    expect(selfUpdatingInstall({ install: "checkout", method: "checkout" })).toBe(false)
+    expect(selfUpdatingInstall({ install: "npx", method: "bunx" })).toBe(false)
+    expect(selfUpdatingInstall(undefined)).toBe(false)
   })
 })
 

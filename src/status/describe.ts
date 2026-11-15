@@ -1,6 +1,6 @@
 // Plain-word lines both pages show: the connection's status (settings) and what a Connect to a relay led to. Text in
 // backticks shows as code.
-import type { AgentRelayState, CliUpdateNotice, ToStatusPage } from "../shared/protocol"
+import { cliUpdateCommand, type AgentRelayState, type CliUpdateNotice, type ToStatusPage } from "../shared/protocol"
 import { unpackedReloadAdvice } from "../../cli/src/protocol"
 import { installCommand } from "./install"
 
@@ -47,7 +47,7 @@ export function describeStatus(state: AgentRelayState, unpacked: boolean) {
   if (state.status === "conflict")
     return "browse in another browser or profile is connected. Close it there (or quit that browser), then click Reconnect."
   if (state.status === "incompatible" && state.skew === "update-cli")
-    return `This extension is newer than the browse CLI on this computer. Update the CLI: run \`${installCommand}\` (with automatic updates on, it catches up by itself within a day), then click Reconnect.`
+    return `This extension is newer than the browse CLI on this computer. Update the CLI: run \`${state.autoUpdate ? cliUpdateCommand(state.autoUpdate) : installCommand}\` (with automatic updates on, it catches up by itself within a day), then click Reconnect.`
   if (state.status === "incompatible" && state.skew === "update-extension")
     return state.unpacked || unpacked
       ? unpackedReloadAdvice
