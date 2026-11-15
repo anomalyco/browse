@@ -6,7 +6,7 @@ import type { CdpRuntime } from "../cdp/runtime.ts"
 import type { ExtensionCommandInput } from "./rpc.ts"
 import type { HandoffCancellationReason, HandoffRegistry } from "../session-manager/handoff.ts"
 import type { ProtectedFrameTracker } from "../cdp/protected-frames.ts"
-import { extensionCapabilityTabRelease, isExtensionEvent, isExtensionResponse, parseJsonObject, type CdpEvent, type JsonObject } from "../protocol.ts"
+import { extensionCapabilityTabRelease, isExtensionEvent, isExtensionResponse, parseJsonObject, type CdpEvent, type JsonObject, type TargetInfo } from "../protocol.ts"
 import type { RecordingRelay } from "../recording-relay.ts"
 import { getIdText, getNumber, getObject, getString, getTargetInfo, isRestrictedTarget } from "./helpers.ts"
 import { relayLog } from "./log.ts"
@@ -164,21 +164,41 @@ export function createExtensionEventHandler(options: {
     })
   }
 
+  /** Close a popup whose allowlist decision could not be made, the way the guard closes a violation. */
+  const closeUncheckedPopup = (popup: ConnectedTarget, error: unknown): false => {
+    relayLog("allowlist.close-unverified", {
+      tabId: popup.tabId,
+      session: popup.opencodeBrowserSessionId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    sendExtensionBestEffort({ method: "tabs.remove", params: { tabId: popup.tabId } })
+    detachTargetState(popup.tabId, { reason: "navigation-blocked" })
+    return false
+  }
+
   /**
    * The allowlist decision for a freshly attached popup. Chrome reports no URL for a popup that has not navigated yet,
    * and a commit that lands while the tab is still being registered is dropped as an event, so the stored URL can stay
    * "". The tab is registered when this runs: ask Chrome where it is now, then judge that. A later commit reaches the
-   * guard as a normal event.
+   * guard as a normal event. Only an allowlisted session asks Chrome: without one there is nothing to judge.
    */
   const decideOpenedPopup = async (popup: ConnectedTarget): Promise<boolean> => {
     if (popup.targetInfo.url !== "") return navigationGuard.popupAttached(popup)
-    const result = await Effect.runPromise(sendDebuggerCommand({ tabId: popup.tabId, method: "Target.getTargetInfo", params: {} }))
-    const targetInfo = getTargetInfo(result.targetInfo)
-    if (!targetInfo || targetInfo.targetId !== popup.targetInfo.targetId) {
-      throw new Error(`Target.getTargetInfo changed while checking opened tab ${popup.tabId}`)
+    if (!navigationGuard.rules(popup.opencodeBrowserSessionId)) return navigationGuard.popupAttached(popup)
+    let targetInfo: TargetInfo | undefined
+    try {
+      const result = await Effect.runPromise(sendDebuggerCommand({ tabId: popup.tabId, method: "Target.getTargetInfo", params: {} }))
+      targetInfo = getTargetInfo(result.targetInfo)
+    } catch (error) {
+      // The tab is gone or the debugger will not answer: never leave a popup that started off-list unchecked.
+      return closeUncheckedPopup(popup, error)
     }
-    const updated = registry.updateConnectedTargetInfo({ tabId: popup.tabId, targetInfo })
-    return navigationGuard.popupAttached(updated?.kind === "root" ? updated.target : popup)
+    if (!targetInfo || targetInfo.targetId !== popup.targetInfo.targetId) {
+      return closeUncheckedPopup(popup, new Error("Target.getTargetInfo did not answer for this target"))
+    }
+    // Only the URL changed: keep the openerId and the rest of the registered target info.
+    registry.updateTargetUrl(popup.tabId, targetInfo.url)
+    return navigationGuard.popupAttached(registry.tabTargets.get(popup.tabId) ?? popup)
   }
 
   function adoptOpenedTab(tabId: number, openerTabId: number): void {
