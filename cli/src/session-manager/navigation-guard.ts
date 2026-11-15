@@ -95,6 +95,9 @@ export class SessionNavigationGuard {
   popupAttached(target: NavigationGuardTarget): boolean {
     if (!this.enforced(target)) return true
     this.freshPopups.add(target.tabId)
+    // A popup attaches before its first navigation commits and reports no URL yet. Like about:blank, that is not a
+    // document to check: staying fresh makes the guard decide on the first document that really commits.
+    if (target.targetInfo.url === "") return true
     return this.observeCommittedUrl(target, target.targetInfo.url)
   }
 
