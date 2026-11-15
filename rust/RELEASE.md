@@ -40,8 +40,18 @@ and SHA-256, unpack it with tar and replace `~/.local/bin/browse` in place. The 
 agent is using the browser; `browse mcp` proxies reconnect to it on their own.
 
 `@opencode/browse` (npm) is `npm/browse.mjs`, shipped as `dist/cli.mjs`: it runs the binary of whichever
-`@opencode/browse-<target>` npm installed. npm installs don't update themselves; `browse install` moves them to the
-self-updating binary in `~/.local/bin`.
+`@opencode/browse-<target>` npm installed, passing its own path and node's (`OPENCODE_BROWSER_NPM_LAUNCHER`,
+`OPENCODE_BROWSER_NPM_NODE`). A global npm install updates like the TypeScript one did: the relay reads the dist-tag
+(`latest`, or `dev`/`beta` for those builds) at launch and hourly, and once no agent is using the browser runs
+`npm install -g --prefix <its prefix> @opencode/browse@<version>` with the npm beside that node, then restarts on the
+platform package's new binary. Failures land in `auto-update.json` (`lastError`) for the options page. npx runs and
+checkout builds don't update; `browse install` moves any install to the self-updating binary in `~/.local/bin`.
 
 Update settings: `browse update --mode on|notify|off`, overridden by `OPENCODE_BROWSER_AUTO_UPDATE`
-(`OPENCODE_BROWSER_UPDATE_CHECK=0` means off). `OPENCODE_BROWSER_RELEASE_SERVICE` points at another service for tests.
+(`OPENCODE_BROWSER_UPDATE_CHECK=0` means off). `OPENCODE_BROWSER_RELEASE_SERVICE` and `OPENCODE_BROWSER_NPM_REGISTRY` point
+at another release service or npm registry for tests.
+
+MCP servers of the TypeScript browse that OpenCode started before the update keep running until OpenCode restarts
+them. The relay answers their API (`/v1/…`, `/cli/…`, `/json/…`, `/network/…`, `/recording/…`, `/tabs/cleanup`,
+`/settings`, the CDP WebSocket, and `/extension/status` for a client sending Effect's `b3` trace header) with 410 and
+an error telling the agent to restart OpenCode or reconnect browse with /mcps.

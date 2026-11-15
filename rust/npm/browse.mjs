@@ -7,6 +7,7 @@ import { spawn } from "node:child_process"
 import { existsSync } from "node:fs"
 import { createRequire } from "node:module"
 import path from "node:path"
+import { fileURLToPath } from "node:url"
 
 const require = createRequire(import.meta.url)
 const os = { darwin: "darwin", linux: "linux", win32: "windows" }[process.platform]
@@ -46,7 +47,10 @@ if (!file) {
   process.exit(1)
 }
 
-const child = spawn(file, process.argv.slice(2), { stdio: "inherit", windowsHide: true })
+// The binary updates this npm install with `npm install -g` (crates/browse/src/update.rs): it needs this package's
+// launcher, which tells it where the install lives, and the node running it, whose npm it uses.
+const env = { ...process.env, OPENCODE_BROWSER_NPM_LAUNCHER: fileURLToPath(import.meta.url), OPENCODE_BROWSER_NPM_NODE: process.execPath }
+const child = spawn(file, process.argv.slice(2), { stdio: "inherit", windowsHide: true, env })
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.on(signal, () => {
     if (child.exitCode === null && child.signalCode === null) child.kill(signal)

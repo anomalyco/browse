@@ -539,6 +539,40 @@ fn an_address_never_replaces_a_known_browser_name() {
 }
 
 #[tokio::test]
+async fn tells_a_typescript_client_to_restart() {
+    let h = harness().await;
+    let port = h.handle.port();
+    let token = h.handle.token().to_string();
+    for (method, path) in [("GET", "/cli/sessions"), ("POST", "/v1/sessions/ensure"), ("POST", "/cli/execute"), ("GET", "/json/version"), ("GET", "/json/list"), ("POST", "/network/start"), ("GET", "/recording/status"), ("POST", "/tabs/cleanup"), ("GET", "/settings")] {
+        assert_eq!(http(port, method, path, None, None).await.0, 401, "{path} still needs the token");
+        let (status, body) = http(port, method, path, Some(&token), Some(json!({}))).await;
+        assert_eq!(status, 410, "{path}");
+        assert_eq!(body, json!({ "error": crate::serve::LEGACY_CLIENT }), "{path}: an envelope the old client shows as is");
+    }
+    assert_eq!(http(port, "GET", "/nothing", Some(&token), None).await.0, 404);
+    assert_eq!(http(port, "GET", "/extension/status", Some(&token), None).await.0, 200);
+    let auth = format!("Bearer {token}");
+    let headers = [("Authorization", auth.as_str()), ("b3", "aa9d92562c43cc66ff058acafdd739a5-6f0c2ae0224bd859-1")];
+    let response = crate::client::request(port, "GET", "/extension/status", &headers, None, Duration::from_secs(5)).await.unwrap();
+    assert_eq!((response.status, response.json().unwrap()), (410, json!({ "error": crate::serve::LEGACY_CLIENT })), "the TypeScript client's extension check");
+
+    // connectOverCDP with the WebSocket URL the TypeScript relay's /json/version gave out.
+    let upgrade = |token: &str| format!("ws://127.0.0.1:{port}/devtools/browser/abc?opencodeBrowserToken={token}");
+    match tokio_tungstenite::connect_async(upgrade(&token)).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            assert_eq!(response.status(), 410);
+            let body: Value = serde_json::from_slice(response.body().as_deref().unwrap_or_default()).unwrap();
+            assert_eq!(body["error"], crate::serve::LEGACY_CLIENT);
+        }
+        other => panic!("expected a refused upgrade, got {:?}", other.map(|(_, response)| response.status())),
+    }
+    match tokio_tungstenite::connect_async(upgrade("wrong")).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => assert_eq!(response.status(), 401),
+        other => panic!("expected 401, got {:?}", other.map(|(_, response)| response.status())),
+    }
+}
+
+#[tokio::test]
 async fn version_reports_a_managed_relay() {
     let paths = Paths::rooted(std::env::temp_dir().join(format!("browse-relay-test-{}", crate::util::random_hex(6))));
     let options = ServeOptions { port: Some(0), paths: paths.clone(), managed: true, idle_shutdown: None, ..ServeOptions::default() };

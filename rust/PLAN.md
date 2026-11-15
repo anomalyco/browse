@@ -29,7 +29,7 @@ the Rust relay must speak its exact protocol, so the store extension keeps worki
 | `browse-page` | Page interaction over CDP: isolated worlds, frames, injected script, refs, snapshots, actionability, human-like input, stealth. Tools: navigate, snapshot, click, fill, type, press, select, hover, drag, scroll, eval, wait_for, dialog, upload, emulate, webmcp. |
 | `browse-capture` | Screenshots (labels, ref, full page, diff), network capture (start/status/stop/cancel, redacted exchanges), page console capture, screen recording (MJPEG → Matroska). |
 | `browse-script` | The `execute` tool for non-OpenCode clients: QuickJS on its own thread per run, `browse.<tool>()` bindings, a Playwright-style `page`/`locator` shim, TS-compatible helpers (`snapshot`, `ref`, `handoff`, `files`, `state`, ...), CPU/memory/time limits. |
-| `browse` | The binary: CLI commands (`serve`, `mcp`, `execute`, `install`, `pair`, `update`, `status`, `extension`, and `browse <tool> --arg ...` for any tool), the MCP stdio proxy (plain tools for OpenCode, `execute` for other clients), starting the relay on demand, OpenCode setup, self-update from the release service. |
+| `browse` | The binary: CLI commands (`serve`, `mcp`, `execute`, `install`, `pair`, `update`, `status`, `extension`, and `browse <tool> --arg ...` for any tool), the MCP stdio proxy (plain tools for OpenCode, `execute` for other clients), starting the relay on demand, OpenCode setup, self-update (from the release service, or with npm for an npm install). |
 
 Each crate exposes `pub fn tools() -> Vec<Arc<dyn browse_core::Tool>>`. The binary concatenates them and passes the
 registry to the relay.

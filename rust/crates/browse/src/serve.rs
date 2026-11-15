@@ -45,9 +45,10 @@ pub fn run() -> anyhow::Result<i32> {
         if !managed {
             eprintln!("browse relay listening at http://127.0.0.1:{}", handle.port());
         }
-        let updater = if managed { update::Updater::spawn() } else { None };
+        let relay = handle.relay.clone();
+        let mut updater = if managed { update::Updater::spawn(Arc::new(move || relay.idle(QUIET))) } else { None };
         let mut notice = None;
-        let mut restart = false;
+        let mut restart = None;
         let mut tick = tokio::time::interval(Duration::from_secs(5));
         let stop = signalled();
         tokio::pin!(stop);
@@ -59,14 +60,16 @@ pub fn run() -> anyhow::Result<i32> {
             if handle.relay.is_stopping() {
                 break;
             }
-            let Some(updater) = &updater else { continue };
+            let Some(updater) = &mut updater else { continue };
             let pending = update::pending_notice();
             if pending != notice {
                 notice = pending;
                 handle.update_notice(notice.clone());
             }
-            if updater.changed() && handle.idle(QUIET) {
-                restart = true;
+            if handle.idle(QUIET)
+                && let Some(next) = updater.replacement()
+            {
+                restart = Some(next);
                 break;
             }
         }
@@ -75,9 +78,9 @@ pub fn run() -> anyhow::Result<i32> {
         anyhow::Ok(restart)
     })?;
     drop(runtime);
-    if restart {
+    if let Some(next) = restart {
         // The port is free again: start the updated executable in our place.
-        relay::start()?;
+        relay::start_from(&next)?;
     }
     Ok(0)
 }

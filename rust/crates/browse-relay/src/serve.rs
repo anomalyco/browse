@@ -100,22 +100,29 @@ impl RelayHandle {
         self.relay.stop();
     }
 
-    /// Nothing would be interrupted by a restart (an update): no call running, no handoff waiting, and no agent
-    /// activity for `quiet`.
     /// See `Relay::set_update_notice`: `(summary, command)`, or None once browse is current.
     pub fn update_notice(&self, notice: Option<(String, String)>) {
         self.relay.set_update_notice(notice);
     }
 
+    /// See `Relay::idle`.
     pub fn idle(&self, quiet: Duration) -> bool {
-        let st = self.relay.st();
-        let clients = st.sessions.values().any(|s| s.clients.iter().any(|pid| crate::util::process_alive(*pid)));
-        !clients && !st.sessions.values().any(|s| s.busy()) && st.handoffs.is_empty() && st.last_activity.elapsed() >= quiet
+        self.relay.idle(quiet)
     }
 
     /// Runs until the relay stops (`stop`, POST /shutdown, idle shutdown).
     pub async fn wait(self) {
         let _ = self.task.await;
+    }
+}
+
+impl Relay {
+    /// Nothing would be interrupted by a restart (an update): no call running, no handoff waiting, and no agent
+    /// activity for `quiet`.
+    pub fn idle(&self, quiet: Duration) -> bool {
+        let st = self.st();
+        let clients = st.sessions.values().any(|s| s.clients.iter().any(|pid| crate::util::process_alive(*pid)));
+        !clients && !st.sessions.values().any(|s| s.busy()) && st.handoffs.is_empty() && st.last_activity.elapsed() >= quiet
     }
 }
 
@@ -321,13 +328,19 @@ async fn route(relay: Arc<Relay>, peer: SocketAddr, request: Request<Incoming>) 
         }
         return json_response(StatusCode::OK, &body);
     }
-    let authorized = header(&request, "authorization").and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer "))).map(str::trim);
-    if !secrets_equal(&relay.token, authorized) {
+    let mut authorized = header(&request, "authorization").and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer "))).map(str::trim).map(str::to_string);
+    // The TypeScript relay's /json/version handed connectOverCDP clients a WebSocket URL with the token in its query.
+    if authorized.is_none() && path.starts_with("/devtools/") {
+        authorized = url::form_urlencoded::parse(request.uri().query().unwrap_or_default().as_bytes()).find(|(k, _)| k == LEGACY_TOKEN_PARAM).map(|(_, v)| v.into_owned());
+    }
+    if !secrets_equal(&relay.token, authorized.as_deref()) {
         return json_response(StatusCode::UNAUTHORIZED, &json!({ "error": "Missing or invalid browse relay token", "code": "unauthorized" }));
     }
     let method = request.method().clone();
     let waiting = header(&request, "x-browse-install") == Some("waiting");
     let client_pid = header(&request, "opencode-browser-client-pid").and_then(|v| v.parse::<u32>().ok()).filter(|p| *p > 0);
+    // The TypeScript client's HTTP client (Effect's) sends trace headers on every request; this build's never does.
+    let typescript_client = header(&request, "b3").is_some();
     let body = if method == hyper::Method::POST {
         match Limited::new(request.into_body(), MAX_BODY).collect().await {
             Ok(collected) => collected.to_bytes(),
@@ -358,6 +371,8 @@ async fn route(relay: Arc<Relay>, peer: SocketAddr, request: Request<Incoming>) 
                 Err((status, message)) => json_response(status, &json!({ "error": message })),
             }
         }
+        // An old MCP server checks the extension before each browser call, and this relay's answer doesn't decode there.
+        ("GET", "/extension/status") if typescript_client => json_response(StatusCode::GONE, &json!({ "error": LEGACY_CLIENT })),
         ("GET", "/extension/status") => {
             if waiting {
                 relay.st().install_waiting_until = Some(Instant::now() + Duration::from_secs(5));
@@ -387,8 +402,24 @@ async fn route(relay: Arc<Relay>, peer: SocketAddr, request: Request<Incoming>) 
             relay.stop();
             json_response(StatusCode::OK, &json!({ "stopping": true }))
         }
+        // An error envelope without a code, which the TypeScript client (cli/src/relay/client.ts) passes on as the
+        // tool's error text as is.
+        (_, path) if legacy_route(path) => json_response(StatusCode::GONE, &json!({ "error": LEGACY_CLIENT })),
         _ => json_response(StatusCode::NOT_FOUND, &json!({ "error": "Not found", "code": "not-found" })),
     }
+}
+
+/// What a client of the TypeScript browse (0.0.17 and earlier) gets from this relay: an MCP server OpenCode started
+/// before the update keeps running the old build until it is restarted.
+pub const LEGACY_CLIENT: &str = "browse was updated to a new version, and this browse MCP server is still the old one, so it can't use the browser anymore. Restart OpenCode (or run /mcps to reconnect browse) to use the new version.";
+
+const LEGACY_TOKEN_PARAM: &str = "opencodeBrowserToken";
+
+/// The TypeScript relay's HTTP API (cli/src/http-api.ts) and its CDP WebSocket (/devtools/browser/<id>), which this
+/// relay doesn't serve.
+fn legacy_route(path: &str) -> bool {
+    ["/v1/", "/cli/", "/network/", "/recording/", "/auth/", "/devtools/", "/json/"].iter().any(|prefix| path.starts_with(prefix))
+        || matches!(path, "/json" | "/tabs/cleanup" | "/settings")
 }
 
 fn upgrade_extension(relay: Arc<Relay>, peer: SocketAddr, mut request: Request<Incoming>) -> Response<Full<Bytes>> {
