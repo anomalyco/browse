@@ -41,6 +41,8 @@ pub struct Attach {
     pub reclaim_held: bool,
     /// Look up who owned the tab before (a reconnect, a relay restart). A user's lend restores nothing.
     pub restore: bool,
+    /// Register the tab fresh (an opened popup): a disallowed first document closes it rather than blanking it.
+    pub fresh_popup: bool,
     /// Only this page: a tab id that now shows another page (the browser restarted) is let go again.
     pub expect_target: Option<String>,
     pub timeout: Duration,
@@ -58,6 +60,7 @@ impl Attach {
             already_attached: false,
             reclaim_held: false,
             restore: false,
+            fresh_popup: false,
             expect_target: None,
             timeout: ATTACH_TIMEOUT,
         }
@@ -175,7 +178,7 @@ impl Relay {
                     main_frame: Some(target_id.clone()),
                     last_used: Instant::now(),
                     focused: false,
-                    fresh_popup: false,
+                    fresh_popup: attach.fresh_popup,
                     blanking: 0,
                     protected_ui: false,
                     unattachable: false,
@@ -424,6 +427,7 @@ impl Relay {
                 let mut attach = Attach::new(tab, Owner::Relay);
                 attach.options = options.clone();
                 attach.opener = Some(opener);
+                attach.fresh_popup = true;
                 match relay.setup_tab(attach).await {
                     Ok(_) => break,
                     Err(error) => {
@@ -438,12 +442,27 @@ impl Relay {
                 }
             }
             let url = {
-                let mut st = relay.st();
-                let Some(popup) = st.tabs.get_mut(&tab) else { return };
-                popup.fresh_popup = true;
+                let st = relay.st();
+                // An event may already have decided (the popup's first document was checked), or closed it.
+                let Some(popup) = st.tabs.get(&tab).filter(|popup| popup.fresh_popup) else { return };
                 popup.url.clone()
             };
-            relay.check_committed_url(tab, &url);
+            if !url.is_empty() && !url.starts_with("about:") {
+                relay.check_committed_url(tab, &url);
+                return;
+            }
+            // A popup attaches before its first navigation commits. A disallowed commit in the gap between setup_tab's
+            // snapshot and the tab being in st.tabs never reached observe_navigation, so ask again now that it would.
+            let info = relay.debugger(tab, None, "Target.getTargetInfo", json!({}), Some(ATTACH_TIMEOUT)).await.ok();
+            if let Some((_, _, current, _)) = info.as_ref().and_then(target_info)
+                && !current.is_empty()
+                && current != url
+            {
+                if let Some(entry) = relay.st().tabs.get_mut(&tab) {
+                    entry.url = current.clone();
+                }
+                relay.check_committed_url(tab, &current);
+            }
         });
     }
 
