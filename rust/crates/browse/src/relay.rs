@@ -116,7 +116,7 @@ fn detach(command: &mut Command) {
 
 fn send(method: &str, path: &str, extra: &[(&str, &str)], body: Option<&[u8]>, timeout: Option<Duration>) -> Result<http::Response, http::Error> {
     let auth = format!("Bearer {}", relay_api::token().unwrap_or_default());
-    // The relay ends a session's work when the process that called it is gone.
+    // The relay stops the calls of a process that is gone.
     let pid = std::process::id().to_string();
     let mut headers = vec![("Authorization", auth.as_str()), ("OpenCode-Browser-Client-Pid", pid.as_str())];
     headers.extend_from_slice(extra);
@@ -148,16 +148,31 @@ fn authorized(method: &str, path: &str, extra: &[(&str, &str)], body: Option<&[u
     Ok(value)
 }
 
-pub fn tools() -> anyhow::Result<Vec<ToolSpec>> {
-    Ok(serde_json::from_value(authorized("GET", "/tools", &[], None, Some(Duration::from_secs(30)))?)?)
+/// The header naming the MCP client, when there is one: the relay decides its tools and instructions by it.
+fn client_header(client: Option<&str>) -> Vec<(&'static str, &str)> {
+    client.map(|name| vec![(browse_core::CLIENT_HEADER, name)]).unwrap_or_default()
 }
 
-pub fn call(request: &ToolCallRequest) -> anyhow::Result<ToolOutput> {
+/// The tools the relay offers `client` (every tool for None, the CLI).
+pub fn tools(client: Option<&str>) -> anyhow::Result<Vec<ToolSpec>> {
+    Ok(serde_json::from_value(authorized("GET", "/tools", &client_header(client), None, Some(Duration::from_secs(30)))?)?)
+}
+
+pub fn call(request: &ToolCallRequest, client: Option<&str>) -> anyhow::Result<ToolOutput> {
     let body = serde_json::to_vec(request)?;
-    Ok(serde_json::from_value(authorized("POST", "/tools/call", &[], Some(&body), None)?)?)
+    Ok(serde_json::from_value(authorized("POST", "/tools/call", &client_header(client), Some(&body), None)?)?)
 }
 
-/// The extension's state (`connected`, `pairingState`, `nextStep`, browsers, sessions) when a relay is running.
+/// The MCP instructions for `client`: the running relay's, else this build's, without starting a relay.
+pub fn instructions(client: &str) -> String {
+    let running = match probe() {
+        Probe::Running(_) => authorized("GET", "/instructions", &client_header(Some(client)), None, Some(Duration::from_secs(10))).ok(),
+        _ => None,
+    };
+    running.and_then(|v| v["instructions"].as_str().map(str::to_string)).unwrap_or_else(|| browse_relay::surface::instructions(client).to_string())
+}
+
+/// The extension's state (`connected`, `pairingState`, `nextStep`, browsers, tabs) when a relay is running.
 /// `waiting` tells the relay an install is waiting for the extension to come.
 pub fn extension_status(waiting: bool) -> Option<Value> {
     let Probe::Running(_) = probe() else { return None };
@@ -187,11 +202,12 @@ pub fn local_specs() -> Vec<ToolSpec> {
     local_tools().iter().map(|tool| tool.spec()).collect()
 }
 
-/// A running relay's tools (authoritative), else this build's, without starting a relay.
-pub fn specs() -> Vec<ToolSpec> {
+/// A running relay's tools for `client` (authoritative), else this build's, without starting a relay.
+pub fn specs(client: Option<&str>) -> Vec<ToolSpec> {
+    let local = || browse_relay::surface::tools(client, local_specs());
     match probe() {
-        Probe::Running(_) => tools().unwrap_or_else(|_| local_specs()),
-        _ => local_specs(),
+        Probe::Running(_) => tools(client).unwrap_or_else(|_| local()),
+        _ => local(),
     }
 }
 

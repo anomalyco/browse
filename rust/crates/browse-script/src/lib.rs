@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use browse_core::{Content, Tool, ToolContext, ToolOutput, ToolSpec};
+use browse_core::{Content, TabId, Tool, ToolContext, ToolOutput, ToolSpec};
 use serde_json::{Value, json};
 
 pub use engine::CPU_SLICE;
@@ -53,17 +53,17 @@ struct ExecuteTool {
     tools: Arc<HashMap<String, Arc<dyn Tool>>>,
 }
 
-pub const DESCRIPTION: &str = "Run JavaScript that drives the browser: the user's real Chrome-family browser, through the browse extension. The code is an async function body (a single expression is returned; `return` a value to get it back) running in a small sandboxed JavaScript engine on the relay: no Node, no require/import, no fs, process or fetch (fetch belongs to the page: use page.evaluate). Synchronous code stops after about 2 seconds without an await. The result has the returned value (JSON, or the string as is), console output, warnings, and what happened to the page (URL changes, navigations, handoffs, a bot challenge: hand interactive ones to the user with handoff(), never solve or retry-loop them). Return a screenshot (`return await page.screenshot()`) to see it.";
+pub const DESCRIPTION: &str = "Run JavaScript that drives the browser: the user's real Chrome-family browser, through the browse extension. The code is an async function body (a single expression is returned; `return` a value to get it back) running in a small sandboxed JavaScript engine on the relay: no Node, no require/import, no fs, process or fetch (fetch belongs to the page: use page.evaluate). Synchronous code stops after about 2 seconds without an await. The result has the returned value (JSON, or the string as is), console output, warnings, and what happened to the page (URL changes, navigations, handoffs, a bot challenge: hand interactive ones to the user with handoff(), never solve or retry-loop them). Return a screenshot (`return await page.screenshot()`) to see it. Tabs are the handle: without `tab`, `page.goto(url)` opens a new tab; the result starts with `tab: <id>`, which you pass as `tab` to the next execute to continue there (with the same `state`). Close tabs you opened when you're done (`page.close()`).";
 
 const CODE_DESCRIPTION: &str = "JavaScript (an async function body). Globals:
-- page: a Playwright-style Page for the session's current tab: goto(url, {waitUntil, timeout}), url(), title(), content(), evaluate(fn | string, arg), $eval/$$eval, waitForTimeout/Selector/URL/LoadState/Function, click/fill/type/press/hover/selectOption/check/uncheck(selector, ...), locator(selector), getByRole/Text/Label/Placeholder/TestId/AltText/Title, frameLocator, keyboard.press/type, mouse.click/move/wheel, screenshot({path, fullPage}), goBack/goForward/reload, setViewportSize, close(). Locators: click, dblclick, fill, clear, type, pressSequentially, press, hover, check, uncheck, selectOption, setInputFiles, textContent, innerText, innerHTML, inputValue, getAttribute, isVisible/Hidden/Checked/Enabled/Disabled, count, all, first, last, nth, filter, locator, getBy*, waitFor, evaluate, evaluateAll, allTextContents, boundingBox, screenshot, dragTo. Selectors are CSS or Playwright selectors (role=button[name=\"Save\"], text=Sign in, >> nth=0, iframe >> frame >> ...). Locators are strict: one element.
-- context.newPage() (a new tab), context.pages(); browser.contexts().
+- page: a Playwright-style Page for the tab passed as `tab`; without one it has no tab until its first goto(url), which opens a new tab. goto(url, {waitUntil, timeout}), url(), title(), content(), evaluate(fn | string, arg), $eval/$$eval, waitForTimeout/Selector/URL/LoadState/Function, click/fill/type/press/hover/selectOption/check/uncheck(selector, ...), locator(selector), getByRole/Text/Label/Placeholder/TestId/AltText/Title, frameLocator, keyboard.press/type, mouse.click/move/wheel, screenshot({path, fullPage}), goBack/goForward/reload, setViewportSize, close(). Locators: click, dblclick, fill, clear, type, pressSequentially, press, hover, check, uncheck, selectOption, setInputFiles, textContent, innerText, innerHTML, inputValue, getAttribute, isVisible/Hidden/Checked/Enabled/Disabled, count, all, first, last, nth, filter, locator, getBy*, waitFor, evaluate, evaluateAll, allTextContents, boundingBox, screenshot, dragTo. Selectors are CSS or Playwright selectors (role=button[name=\"Save\"], text=Sign in, >> nth=0, iframe >> frame >> ...). Locators are strict: one element.
+- context.newPage() (a new tab), context.pages() (the tabs this execute works in and their popups); browser.contexts().
 - snapshot(options?) → a compact outline with refs (options: find, diff, delta, interactive, within, mode: \"aria\"); ref(\"e12\") → a locator for a snapshot ref. Prefer snapshot + ref over guessing selectors.
 - handoff(message, {timeoutMs?, start?}) when only the user can proceed (login, 2FA, captcha, payment); demonstrate(message) to watch the user do a flow.
 - screenshotWithLabels(), screenshotDiff({baseline}), network.start/status/stop/cancel, pageConsole.start/read/stop, webmcp.list/call(name, input).
-- browse.<tool>(args): any browse tool directly (navigate, snapshot, click, fill, type, press, select, hover, drag, scroll, eval, wait_for, dialog, upload, emulate, webmcp, screenshot, screenshot_diff, network, console, recording, tabs, session, handoff, demonstrate, status, settings, tabs_cleanup); returns its JSON and throws its error.
+- browse.<tool>(args): any browse tool directly (navigate, snapshot, click, fill, type, press, select, hover, drag, scroll, eval, wait_for, dialog, upload, emulate, webmcp, screenshot, screenshot_diff, network, console, recording, tabs, handoff, demonstrate, status, settings); they act in `page`'s tab unless you pass `tab` (browse.navigate without one opens a tab for `page`); returns its JSON and throws its error.
 - files.path(name), files.write(name, data), files.read(name, encoding?) inside the file roots (files.dir, files.roots).
-- state: an object kept between execute calls of the session (JSON values only).
+- state: an object kept with the tab between execute calls that pass it as `tab` (JSON values only).
 - console.log/warn/error (shown in the result), setTimeout/clearTimeout/setInterval/clearInterval.";
 
 #[async_trait]
@@ -76,9 +76,8 @@ impl Tool for ExecuteTool {
                 "type": "object",
                 "properties": {
                     "code": { "type": "string", "description": CODE_DESCRIPTION },
-                    "timeoutMs": { "type": "integer", "minimum": 0, "description": "Overall timeout in milliseconds (paused while handoff waits on the user); default 60000, 0 for none. Includes waiting behind another execute of the same session." },
-                    "tab": { "type": "integer", "description": "The tab `page` stands for (from tabs); defaults to the session's current tab." },
-                    "session": { "type": "string", "description": "Optional existing session id; leave it out to use your current session." },
+                    "timeoutMs": { "type": "integer", "minimum": 0, "description": "Overall timeout in milliseconds (paused while handoff waits on the user); default 60000, 0 for none. Includes waiting behind another execute in the same tab." },
+                    "tab": { "type": "integer", "description": "The tab `page` stands for: the `tab` an earlier execute (or navigate, tabs) returned. Leave it out to start without a tab; page.goto(url) then opens one." },
                 },
                 "required": ["code"],
                 "additionalProperties": false,
@@ -93,24 +92,22 @@ impl Tool for ExecuteTool {
         let timeout_ms = args.get("timeoutMs").and_then(Value::as_u64).unwrap_or(DEFAULT_TIMEOUT_MS);
         let tab = args.get("tab").and_then(Value::as_i64);
         let started = std::time::Instant::now();
-        // One execute at a time per session: they share `page` and `state`.
-        let slot = {
-            let mut map = ctx.state.inner().lock().await;
-            let entry = map.entry(STATE_KEY.to_string()).or_insert_with(|| Box::new(Arc::new(tokio::sync::Mutex::new("{}".to_string()))));
-            match entry.downcast_ref::<Arc<tokio::sync::Mutex<String>>>() {
-                Some(slot) => slot.clone(),
-                None => {
-                    let slot = Arc::new(tokio::sync::Mutex::new("{}".to_string()));
-                    *entry = Box::new(slot.clone());
-                    slot
-                }
-            }
+        // One execute at a time per tab: they share its `page` and `state`.
+        let slot = match tab {
+            Some(tab) => match state_slot(&ctx, tab).await {
+                Ok(slot) => Some(slot),
+                Err(error) => return Ok(ToolOutput::error(format!("{error:#}"))),
+            },
+            None => None,
         };
-        let mut state = match timeout_ms {
-            0 => slot.lock().await,
-            ms => match tokio::time::timeout(std::time::Duration::from_millis(ms), slot.lock()).await {
-                Ok(guard) => guard,
-                Err(_) => return Ok(ToolOutput::error(format!("execute timed out after {ms} ms waiting for another execute of this session to finish"))),
+        let mut held = match &slot {
+            None => None,
+            Some(slot) => match timeout_ms {
+                0 => Some(slot.clone().lock_owned().await),
+                ms => match tokio::time::timeout(std::time::Duration::from_millis(ms), slot.clone().lock_owned()).await {
+                    Ok(guard) => Some(guard),
+                    Err(_) => return Ok(ToolOutput::error(format!("execute timed out after {ms} ms waiting for another execute in tab {} to finish", tab.unwrap_or_default()))),
+                },
             },
         };
         let remaining = match timeout_ms {
@@ -119,20 +116,43 @@ impl Tool for ExecuteTool {
         };
         let mut tools: Vec<String> = self.tools.keys().cloned().collect();
         tools.sort();
-        let job = engine::Job { code: code.to_string(), state: state.clone(), tools, tab, timeout_ms: remaining };
-        let host = host::Host { ctx, tools: self.tools.clone() };
+        let state = held.as_deref().cloned().unwrap_or_else(|| "{}".to_string());
+        let job = engine::Job { code: code.to_string(), state, tools, tab, timeout_ms: remaining };
+        let host = host::Host { ctx: ctx.clone(), tools: self.tools.clone() };
         let outcome = host.run(job).await;
         let mut warnings = outcome.warnings.clone();
+        let report = outcome.finished.as_ref().and_then(|f| f.report.as_ref());
+        // The tab `page` ended on (none once it closed its tab); without a report (a timeout), the one it started on.
+        let ended_on = match report {
+            Some(report) => report["tab"].as_i64(),
+            None => tab,
+        };
+        let mut used: Vec<TabId> = report.and_then(|r| r["tabs"].as_array()).map(|list| list.iter().filter_map(Value::as_i64).collect()).unwrap_or_default();
+        used.retain(|t| Some(*t) != ended_on);
         if let Some(saved) = outcome.finished.as_ref().and_then(|f| f.state.clone()) {
             if saved.len() > MAX_STATE {
                 warnings.push(format!("state is {} KB as JSON, more than the {} KB kept between calls, so this call's changes to it were dropped", saved.len() / 1024, MAX_STATE / 1024));
             } else {
-                *state = saved;
+                match (&mut held, ended_on) {
+                    (Some(guard), Some(on)) if Some(on) == tab => **guard = saved,
+                    // `page` opened its tab during the run: the state goes with that tab.
+                    (_, Some(on)) => {
+                        if let Ok(slot) = state_slot(&ctx, on).await {
+                            *slot.lock().await = saved;
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
-        drop(state);
-        Ok(render(outcome, warnings))
+        drop(held);
+        Ok(render(outcome, warnings, ended_on, &used))
     }
+}
+
+/// The tab's execute slot: its `state` as JSON, locked while an execute runs in the tab.
+async fn state_slot(ctx: &ToolContext, tab: TabId) -> anyhow::Result<Arc<tokio::sync::Mutex<String>>> {
+    Ok(ctx.state(tab).await?.get_or_insert(STATE_KEY, || Arc::new(tokio::sync::Mutex::new("{}".to_string()))).await)
 }
 
 fn clip(text: &str, limit: usize) -> String {
@@ -143,8 +163,9 @@ fn clip(text: &str, limit: usize) -> String {
     format!("{cut}\n… [truncated {} characters]", text.chars().count() - limit)
 }
 
-/// The execute result: the value (or error), then warnings, the page summary and console output, then images.
-fn render(outcome: host::Outcome, mut warnings: Vec<String>) -> ToolOutput {
+/// The execute result: the tab to continue in, the value (or error), then warnings, the page summary and console
+/// output, then images.
+fn render(outcome: host::Outcome, mut warnings: Vec<String>, tab: Option<TabId>, others: &[TabId]) -> ToolOutput {
     let report = outcome.finished.as_ref().and_then(|f| f.report.clone());
     let stopped = outcome.finished.as_ref().and_then(|f| f.stopped.clone());
     let mut is_error = true;
@@ -175,7 +196,12 @@ fn render(outcome: host::Outcome, mut warnings: Vec<String>) -> ToolOutput {
     } else {
         "Error: execute ended without a result".into()
     };
-    let mut parts = vec![head];
+    let mut parts = Vec::new();
+    if let Some(tab) = tab {
+        let also = if others.is_empty() { String::new() } else { format!(" (also used: {})", others.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", ")) };
+        parts.push(format!("tab: {tab}{also}"));
+    }
+    parts.push(head);
     if !warnings.is_empty() {
         parts.push(format!("Warnings:\n{}", warnings.iter().map(|w| format!("- {w}")).collect::<Vec<_>>().join("\n")));
     }
@@ -207,6 +233,8 @@ fn aftermath_line(after: &host::Aftermath) -> Option<String> {
     let mut parts = Vec::new();
     match (&after.start_url, &after.end_url) {
         (Some(_), None) => parts.push("the page closed".to_string()),
+        // The page opened its tab during the run: the navigations say where it went.
+        (None, Some(_)) => {}
         (start, Some(end)) if start.as_deref() != Some(end.as_str()) => {
             parts.push(format!("moved from {} to {}", clip(start.as_deref().unwrap_or("nowhere"), 200), clip(end, 200)))
         }

@@ -219,3 +219,18 @@ async fn console_reads_clear_only_what_they_return() {
     let (_, empty) = call(&ctx, console.as_ref(), json!({ "action": "read" })).await;
     assert_eq!(empty["entries"], json!([]));
 }
+
+#[tokio::test]
+async fn every_capture_needs_a_tab() {
+    let cdp = FakeCdp::new();
+    let ctx = context(cdp, vec![std::env::temp_dir()]);
+    for tool in crate::tools() {
+        let name = tool.spec().name;
+        let required = tool.spec().input_schema["required"].clone();
+        assert!(required.as_array().is_some_and(|r| r.contains(&json!("tab"))), "{name} requires tab in its schema");
+        let action = if name == "console" { "read" } else { "status" };
+        let (error, text) = call(&ctx, tool.as_ref(), json!({ "action": action, "baseline": "x.png", "tab": null })).await;
+        assert!(error, "{name}");
+        assert!(text.as_str().is_some_and(|t| t.contains("Pass `tab`")), "{name}: {text}");
+    }
+}

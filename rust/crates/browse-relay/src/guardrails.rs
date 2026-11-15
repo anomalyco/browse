@@ -1,5 +1,5 @@
 //! CDP guardrails (cli/src/cdp/guardrails.ts): methods that would destroy the user's real browser state are refused,
-//! read-only sessions only inspect, cookies and site storage are scoped to the session's page hosts, and
+//! read-only tabs only inspect, cookies and site storage are scoped to the tab's page hosts, and
 //! browser-internal or local documents can't be opened.
 
 use serde_json::Value;
@@ -158,7 +158,7 @@ fn storage_origins(params: &Value) -> Vec<String> {
 }
 
 /// A rejection message when the command must be refused, else None.
-pub fn guard(method: &str, params: &Value, read_only: bool, session: &str, page_urls: &dyn Fn() -> Vec<String>) -> Option<String> {
+pub fn guard(method: &str, params: &Value, read_only: bool, page_urls: &dyn Fn() -> Vec<String>) -> Option<String> {
     if let Some((_, reason)) = ALWAYS_BLOCKED.iter().find(|(m, _)| *m == method) {
         return Some(format!("browse blocked {method}: {reason}. This command is always blocked by the relay."));
     }
@@ -169,7 +169,7 @@ pub fn guard(method: &str, params: &Value, read_only: bool, session: &str, page_
     }
     if read_only && !read_only_allowed(method) {
         return Some(format!(
-            "Session {session} is read-only: {method} is blocked because this tab is read-only. Read-only sessions can take snapshots and screenshots, read page information and subscribe to events. Use a session created without readOnly to interact with pages."
+            "browse blocked {method}: this tab is read-only. Read-only tabs can take snapshots and screenshots, read page information and subscribe to events. Open a tab without readOnly to interact with pages."
         ));
     }
     if method == "Page.bringToFront" && !env_on("OPENCODE_BROWSER_ALLOW_FOREGROUND") {
@@ -186,7 +186,7 @@ pub fn guard(method: &str, params: &Value, read_only: bool, session: &str, page_
             let domain = cookie_domain(cookie);
             if !domain.as_deref().is_some_and(|d| hosts.iter().any(|h| cookie_applies(d, h))) {
                 return Some(format!(
-                    "browse blocked {method}: cookies can only be set for the hosts of this session's attached pages ({}), not {}. Set OPENCODE_BROWSER_ALLOW_ALL_COOKIES=1 on the relay to allow it.",
+                    "browse blocked {method}: cookies can only be set for the hosts of this tab's pages ({}), not {}. Set OPENCODE_BROWSER_ALLOW_ALL_COOKIES=1 on the relay to allow it.",
                     hosts_text(&hosts),
                     domain.unwrap_or_else(|| "a cookie without a domain or url".into())
                 ));
@@ -207,7 +207,7 @@ pub fn guard(method: &str, params: &Value, read_only: bool, session: &str, page_
             };
             if let Some(outside) = outside {
                 return Some(format!(
-                    "browse blocked {method}: site storage can only be used for the hosts of this session's attached pages ({}), not {outside}. Set OPENCODE_BROWSER_ALLOW_ALL_STORAGE=1 on the relay to allow it.",
+                    "browse blocked {method}: site storage can only be used for the hosts of this tab's pages ({}), not {outside}. Set OPENCODE_BROWSER_ALLOW_ALL_STORAGE=1 on the relay to allow it.",
                     hosts_text(&hosts)
                 ));
             }
@@ -236,7 +236,7 @@ pub fn guard(method: &str, params: &Value, read_only: bool, session: &str, page_
         let host = params.get("url").and_then(Value::as_str).and_then(hostname);
         if !host.is_some_and(|h| hosts.contains(&h)) {
             return Some(format!(
-                "browse blocked Network.loadNetworkResource: it loads URLs with the user's credentials outside the page's same-origin policy, so only the hosts of this session's attached pages ({}) are allowed. Set OPENCODE_BROWSER_ALLOW_ALL_STORAGE=1 on the relay to allow it.",
+                "browse blocked Network.loadNetworkResource: it loads URLs with the user's credentials outside the page's same-origin policy, so only the hosts of this tab's pages ({}) are allowed. Set OPENCODE_BROWSER_ALLOW_ALL_STORAGE=1 on the relay to allow it.",
                 hosts_text(&hosts)
             ));
         }
@@ -244,7 +244,7 @@ pub fn guard(method: &str, params: &Value, read_only: bool, session: &str, page_
     None
 }
 
-/// Cookie reads keep only the cookies that apply to the session's page hosts.
+/// Cookie reads keep only the cookies that apply to the tab's page hosts.
 pub fn scope_result(method: &str, mut result: Value, page_urls: &dyn Fn() -> Vec<String>) -> Value {
     if !COOKIE_READS.contains(&method) || env_on("OPENCODE_BROWSER_ALLOW_ALL_COOKIES") {
         return result;
@@ -269,21 +269,21 @@ mod tests {
     #[test]
     fn guards() {
         let urls = || vec!["https://app.example.com/x".to_string()];
-        assert!(guard("Browser.close", &json!({}), false, "s", &urls).is_some());
-        assert!(guard("Input.dispatchMouseEvent", &json!({}), true, "s", &urls).is_some());
-        assert!(guard("Runtime.evaluate", &json!({}), true, "s", &urls).is_none());
-        assert!(guard("Page.enable", &json!({}), true, "s", &urls).is_none());
-        assert!(guard("Page.navigate", &json!({"url": "chrome://settings"}), false, "s", &urls).is_some());
-        assert!(guard("Page.navigate", &json!({"url": "https://x.com"}), false, "s", &urls).is_none());
-        assert!(guard("Page.navigate", &json!({"url": "about:version"}), false, "s", &urls).is_some());
-        assert!(guard("Target.createTarget", &json!({"url": "ABOUT:settings"}), false, "s", &urls).is_some());
-        assert!(guard("Page.navigate", &json!({"url": "about:blank"}), false, "s", &urls).is_none());
-        assert!(guard("Page.navigate", &json!({"url": "about:blank#x"}), false, "s", &urls).is_none());
-        assert!(guard("Page.navigate", &json!({"url": "about:srcdoc"}), false, "s", &urls).is_none());
-        assert!(guard("Network.setCookie", &json!({"domain": ".example.com"}), false, "s", &urls).is_none());
-        assert!(guard("Network.setCookie", &json!({"domain": "evil.com"}), false, "s", &urls).is_some());
-        assert!(guard("DOMStorage.getDOMStorageItems", &json!({"storageId": {"securityOrigin": "https://app.example.com"}}), false, "s", &urls).is_none());
-        assert!(guard("DOMStorage.getDOMStorageItems", &json!({"storageId": {"securityOrigin": "https://bank.com"}}), false, "s", &urls).is_some());
+        assert!(guard("Browser.close", &json!({}), false, &urls).is_some());
+        assert!(guard("Input.dispatchMouseEvent", &json!({}), true, &urls).is_some());
+        assert!(guard("Runtime.evaluate", &json!({}), true, &urls).is_none());
+        assert!(guard("Page.enable", &json!({}), true, &urls).is_none());
+        assert!(guard("Page.navigate", &json!({"url": "chrome://settings"}), false, &urls).is_some());
+        assert!(guard("Page.navigate", &json!({"url": "https://x.com"}), false, &urls).is_none());
+        assert!(guard("Page.navigate", &json!({"url": "about:version"}), false, &urls).is_some());
+        assert!(guard("Target.createTarget", &json!({"url": "ABOUT:settings"}), false, &urls).is_some());
+        assert!(guard("Page.navigate", &json!({"url": "about:blank"}), false, &urls).is_none());
+        assert!(guard("Page.navigate", &json!({"url": "about:blank#x"}), false, &urls).is_none());
+        assert!(guard("Page.navigate", &json!({"url": "about:srcdoc"}), false, &urls).is_none());
+        assert!(guard("Network.setCookie", &json!({"domain": ".example.com"}), false, &urls).is_none());
+        assert!(guard("Network.setCookie", &json!({"domain": "evil.com"}), false, &urls).is_some());
+        assert!(guard("DOMStorage.getDOMStorageItems", &json!({"storageId": {"securityOrigin": "https://app.example.com"}}), false, &urls).is_none());
+        assert!(guard("DOMStorage.getDOMStorageItems", &json!({"storageId": {"securityOrigin": "https://bank.com"}}), false, &urls).is_some());
         let scoped = scope_result("Network.getCookies", json!({"cookies": [{"domain": "example.com"}, {"domain": "bank.com"}]}), &urls);
         assert_eq!(scoped["cookies"].as_array().unwrap().len(), 1);
     }

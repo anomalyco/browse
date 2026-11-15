@@ -38,21 +38,22 @@ RUNNING
   mcp                         The MCP server OpenCode runs (stdio)
   tools                       List the browser tools
   <tool> [value]... [--arg value]...
-                              Call a tool, e.g. `browse navigate https://example.com`, `browse snapshot`,
-                              `browse click e12`, `browse fill e5 hello`, `browse wait-for --text Done --timeout 5000`.
+                              Call a tool. `browse navigate https://example.com` opens a tab and prints its id
+                              (\"tab\"); pass it to the rest: `browse snapshot --tab 12`, `browse click e12 --tab 12`,
+                              `browse fill e5 hello --tab 12`, `browse tabs close --tab 12`.
                               Values fill the tool's main options (see `browse <tool> --help`)
+    --tab <id>                The tab to act on (from navigate or `browse tabs`)
     --json '<object>'         Arguments as one JSON object
-    --session <id>            Run in this existing session (for `session`: the session to act on). Without it,
-                              calls use your current session (OPENCODE_BROWSER_SESSION, the OpenCode session, or \"cli\")
     --output <path>           Where to save images (default: a temp file, printed)
   <tool> --help               The tool's options
   execute --file <script.js>  Run a JavaScript file (Playwright-style `page`, snapshot(), ref(), handoff(), browse.*);
-                              --code '<js>' or a positional value runs inline code, --file - reads stdin
+                              --code '<js>' or a positional value runs inline code, --file - reads stdin.
+                              It prints the tab it ended in; --tab <id> continues there
 ";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // Global flags may come before the tool name: `browse --session x navigate ...`.
+    // Global flags may come before the tool name: `browse --tab 12 snapshot`.
     let (globals, mut args) = cli::split_globals(&args);
     if !globals.is_empty() && args.first().is_some_and(|a| !a.starts_with('-')) {
         let tail = args.split_off(1);

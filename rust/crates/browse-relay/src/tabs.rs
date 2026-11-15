@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
-use browse_core::CdpEvent;
+use browse_core::{CdpEvent, TabOptions, TabState};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
@@ -27,13 +27,17 @@ const EVENT_BUFFER: usize = 256;
 /// How long a reconnecting browser's announced tabs may take before it counts as connected anyway.
 const INVENTORY_GRACE: Duration = Duration::from_millis(1500);
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Attach {
     pub tab: i64,
     pub owner: Owner,
-    pub session: Option<String>,
+    pub options: TabOptions,
+    pub opener: Option<i64>,
+    /// What tools kept for the tab, when it is attached again (a reconnect).
+    pub state: Option<Arc<TabState>>,
+    pub created_at: Option<String>,
     pub already_attached: bool,
-    /// An inventory tab the extension says an agent opened: it may be reclaimed by the session that held it.
+    /// An inventory tab the extension says an agent opened: it may be reclaimed from the tab registry.
     pub reclaim_held: bool,
     /// Look up who owned the tab before (a reconnect, a relay restart). A user's lend restores nothing.
     pub restore: bool,
@@ -43,16 +47,47 @@ pub struct Attach {
 }
 
 impl Attach {
-    pub fn new(tab: i64, owner: Owner, session: Option<String>) -> Self {
-        Self { tab, owner, session, already_attached: false, reclaim_held: false, restore: false, expect_target: None, timeout: ATTACH_TIMEOUT }
+    pub fn new(tab: i64, owner: Owner) -> Self {
+        Self {
+            tab,
+            owner,
+            options: TabOptions::default(),
+            opener: None,
+            state: None,
+            created_at: None,
+            already_attached: false,
+            reclaim_held: false,
+            restore: false,
+            expect_target: None,
+            timeout: ATTACH_TIMEOUT,
+        }
     }
+
+    /// The same tab again, as it is now (a renewed or lost debugger).
+    fn again(tab: &Tab) -> Self {
+        let mut attach = Self::new(tab.id, tab.owner);
+        attach.options = tab.options.clone();
+        attach.opener = tab.opener;
+        attach.state = Some(tab.state.clone());
+        attach.created_at = Some(tab.created_at.clone());
+        attach
+    }
+}
+
+/// Who owned a tab before it was announced again.
+struct Restored {
+    owner: Owner,
+    options: TabOptions,
+    opener: Option<i64>,
+    state: Option<Arc<TabState>>,
+    created_at: String,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Release {
     pub update_extension: bool,
     pub released_by_user: bool,
-    /// The tab is gone for good (closed, or its page replaced): sessions stop holding it.
+    /// The tab is gone for good (closed, or its page replaced): the registry forgets it.
     pub gone: bool,
 }
 
@@ -87,35 +122,35 @@ impl Relay {
             }
             bail!("Tab {tab} shows another page now");
         }
-        let (owner, session) = if attach.session.is_some() || !attach.restore {
-            (attach.owner, attach.session.clone())
-        } else {
-            self.restored_owner(&link, &target_id, attach.reclaim_held).unwrap_or((attach.owner, None))
-        };
-        let (owner, session) = if attach.session.is_none() && owner == Owner::Relay && session.is_some() && !self.url_allowed(session.as_deref(), &url) {
-            rlog!("allowlist.reclaim-refused", tabId = tab, session = session.clone());
+        let restored = if attach.restore { self.restored_owner(&link, &target_id, attach.reclaim_held) } else { None };
+        let reclaimed = restored.is_some();
+        let Restored { mut owner, mut options, opener, state, created_at } = restored.unwrap_or_else(|| Restored {
+            owner: attach.owner,
+            options: attach.options.clone(),
+            opener: attach.opener,
+            state: attach.state.clone(),
+            created_at: attach.created_at.clone().unwrap_or_else(crate::util::now_iso),
+        });
+        if reclaimed && owner == Owner::Relay && !url_allowed(&options, &url) {
+            rlog!("allowlist.reclaim-refused", tabId = tab);
             self.debugger_best_effort(tab, None, "Page.navigate", json!({ "url": "about:blank" }));
-            (Owner::User, None)
-        } else {
-            (owner, session)
-        };
+            owner = Owner::User;
+            options = TabOptions::default();
+        }
         self.debugger(tab, None, "Target.setAutoAttach", json!({ "autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true }), limit).await?;
         {
             let mut st = self.st();
             let previous = st.tabs.remove(&tab);
             if let Some(previous) = &previous
-                && previous.target_id != target_id {
-                    let ids: Vec<String> = st.handoffs.iter().filter(|(_, h)| h.tab == tab).map(|(s, _)| s.clone()).collect();
-                    for id in ids {
-                        if let Some(mut handoff) = st.handoffs.remove(&id) {
-                            handoff.done.take().map(|done| done.send("closed"));
-                        }
-                    }
-                }
-            // The same page attached again (a renewed debugger) keeps its event stream and CDP handle.
-            let (events, cdp) = match previous.filter(|p| p.target_id == target_id) {
-                Some(previous) => (previous.events, previous.cdp),
-                None => (broadcast::channel(EVENT_BUFFER).0, None),
+                && previous.target_id != target_id
+                && let Some(mut handoff) = st.handoffs.remove(&tab)
+            {
+                handoff.done.take().map(|done| done.send("closed"));
+            }
+            // The same page attached again (a renewed debugger) keeps its event stream, CDP handle and state.
+            let (events, cdp, state, busy_keys, warnings) = match previous.filter(|p| p.target_id == target_id) {
+                Some(previous) => (previous.events, previous.cdp, previous.state, previous.busy_keys, previous.warnings),
+                None => (broadcast::channel(EVENT_BUFFER).0, None, state.unwrap_or_default(), HashSet::new(), Vec::new()),
             };
             st.tabs.insert(
                 tab,
@@ -126,7 +161,13 @@ impl Relay {
                     url,
                     title,
                     owner,
-                    session: session.clone(),
+                    options,
+                    opener,
+                    state,
+                    busy_keys,
+                    warnings,
+                    idle_epoch: 0,
+                    created_at,
                     events,
                     children: HashMap::new(),
                     suppressed: HashSet::new(),
@@ -144,61 +185,25 @@ impl Relay {
                     cdp,
                 },
             );
-            if let Some(entry) = session.as_ref().and_then(|id| st.sessions.get_mut(id)) {
-                if owner == Owner::Relay && !entry.held.contains(&target_id) {
-                    entry.held.push(target_id.clone());
-                }
-                // A restarted relay gives the session back the tab that was current.
-                if entry.current.is_none() || (attach.restore && entry.target.as_ref().is_some_and(|t| t.id == target_id)) {
-                    entry.current = Some(tab);
-                }
-            }
-            if owner == Owner::User && session.is_none() {
-                for entry in st.sessions.values_mut() {
-                    entry.held.retain(|id| id != &target_id);
-                }
-            }
             st.reconnect_owners.remove(&target_id);
+            st.restorable.remove(&target_id);
         }
         self.schedule_persist();
         self.ext_best_effort(tab, "action.setAttached", json!({ "attached": true }));
         self.refresh_presentation(tab, true);
-        rlog!("target.attached", tabId = tab, owner = owner.name(), session = session);
+        rlog!("target.attached", tabId = tab, owner = owner.name());
         Ok(tab)
     }
 
-    /// Who owned a tab before it was announced again: the same browser's reconnect, a session's adopted tab, or
-    /// (only for a tab the extension says an agent opened) a session that held it.
-    fn restored_owner(&self, link: &Link, target_id: &str, reclaim_held: bool) -> Option<(Owner, Option<String>)> {
+    /// Who owned a tab before it was announced again: the same browser's reconnect, or (only for a tab the extension
+    /// says an agent opened) the previous relay's tab registry.
+    fn restored_owner(&self, link: &Link, target_id: &str, reclaim_held: bool) -> Option<Restored> {
         let st = self.st();
-        if let Some(known) = st.reconnect_owners.get(target_id).filter(|k| k.browser == link.key && st.sessions.contains_key(&k.session)) {
-            return Some((known.owner, Some(known.session.clone())));
+        if let Some(known) = st.reconnect_owners.get(target_id).filter(|k| k.browser == link.key) {
+            return Some(Restored { owner: known.owner, options: known.options.clone(), opener: known.opener, state: Some(known.state.clone()), created_at: known.created_at.clone() });
         }
-        let bound = |s: &&crate::sessions::Session| s.browser.as_ref().and_then(|b| b.key.as_deref()).is_none_or(|k| k == link.key);
-        if let Some(session) = st.sessions.values().filter(bound).find(|s| s.target.as_ref().is_some_and(|t| t.id == target_id)) {
-            let owner = if session.target.as_ref().is_some_and(|t| t.owner == "relay") { Owner::Relay } else { Owner::User };
-            if owner == Owner::User || reclaim_held {
-                return Some((owner, Some(session.id.clone())));
-            }
-        }
-        if reclaim_held
-            && let Some(session) = st.sessions.values().filter(bound).find(|s| s.held.iter().any(|id| id == target_id)) {
-                return Some((Owner::Relay, Some(session.id.clone())));
-            }
-        None
-    }
-
-    pub fn url_allowed(&self, session: Option<&str>, url: &str) -> bool {
-        match self.session_rules(session) {
-            Some(rules) => domain::check_url(url, &rules, false).allowed(),
-            None => true,
-        }
-    }
-
-    pub fn session_rules(&self, session: Option<&str>) -> Option<Vec<domain::OriginRule>> {
-        let st = self.st();
-        let origins = st.sessions.get(session?)?.allowed_origins.clone()?;
-        domain::parse_origin_patterns(&origins).ok().filter(|r| !r.is_empty())
+        let held = st.restorable.get(target_id).filter(|r| reclaim_held && r.browser_key == link.key)?;
+        Some(Restored { owner: Owner::Relay, options: held.options.clone(), opener: held.opener, state: None, created_at: held.created_at.clone() })
     }
 
     /// Forgets a tab: its events end, handoffs on it are cancelled, and the extension (when told) clears what it shows.
@@ -207,38 +212,13 @@ impl Relay {
             let mut st = self.st();
             let removed = st.tabs.remove(&tab);
             st.presented.remove(&tab);
-            let ids: Vec<String> = st.handoffs.iter().filter(|(_, h)| h.tab == tab).map(|(s, _)| s.clone()).collect();
-            for id in ids {
-                if let Some(mut handoff) = st.handoffs.remove(&id) {
-                    handoff.done.take().map(|done| done.send("closed"));
-                }
+            if let Some(mut handoff) = st.handoffs.remove(&tab) {
+                handoff.done.take().map(|done| done.send("closed"));
             }
             if let Some(removed) = &removed
-                && (options.gone || options.released_by_user)
+                && !st.reconnect_owners.contains_key(&removed.target_id)
             {
-                // A session whose current tab went on with its next one, so `tabs` and later calls agree.
-                let orphaned: Vec<String> = st.sessions.values().filter(|s| s.current == Some(tab)).map(|s| s.id.clone()).collect();
-                // The agent closing its own tab, or ending its session, knows; anything else is news to it.
-                let unexpected = !removed.closing && !matches!(reason, "target-closed" | "session-ended" | "released" | "attach-failed");
-                for id in orphaned {
-                    let next = st.session_tabs(&id).into_iter().find(|t| st.tabs.get(t).is_some_and(|t| !t.closing));
-                    let Some(session) = st.sessions.get_mut(&id) else { continue };
-                    session.current = next;
-                    if unexpected {
-                        let why = lost_reason(reason);
-                        let page = crate::util::short_url(&removed.url);
-                        match next {
-                            Some(next) => session.add_warning(format!("Tab {tab} ({page}) went away ({why}); tab {next} is the session's current tab now.")),
-                            None => session.lost = Some(format!("Tab {tab} ({page}), the session's current tab, went away ({why}).")),
-                        }
-                    }
-                }
-                for session in st.sessions.values_mut() {
-                    session.held.retain(|id| id != &removed.target_id);
-                    if session.target.as_ref().is_some_and(|t| t.id == removed.target_id) {
-                        session.target = None;
-                    }
-                }
+                st.remember_gone(tab, lost_reason(reason).to_string(), removed.state.clone());
             }
             removed
         };
@@ -251,7 +231,7 @@ impl Relay {
             self.ext_best_effort(tab, "action.setAttached", json!({ "attached": false }));
         }
         if let Some(removed) = removed {
-            rlog!("target.detached", tabId = tab, reason = reason, session = removed.session);
+            rlog!("target.detached", tabId = tab, reason = reason, owner = removed.owner.name());
             self.schedule_persist();
         }
     }
@@ -279,19 +259,22 @@ impl Relay {
         Ok(())
     }
 
-    /// Opens a background tab for a session, attaches it blank, then navigates (so the allowlist sees the real load).
-    pub async fn create_tab(self: &Arc<Self>, session: &str, url: Option<&str>) -> anyhow::Result<i64> {
+    /// Opens a background agent tab, attaches it blank, then navigates (so the allowlist sees the real load). A tab
+    /// an agent's page opens (`opener`) goes in the opener's browser.
+    pub async fn create_tab(self: &Arc<Self>, url: Option<&str>, options: &TabOptions, opener: Option<i64>) -> anyhow::Result<i64> {
         let url = url.filter(|u| !u.is_empty()).unwrap_or("about:blank");
-        if let Some(refusal) = crate::guardrails::guard("Target.createTarget", &json!({ "url": url }), false, session, &Vec::new) {
+        let mut options = Self::normalize_options(options)?;
+        if let Some(refusal) = crate::guardrails::guard("Target.createTarget", &json!({ "url": url }), false, &Vec::new) {
             bail!(refusal);
         }
-        if let Some(refusal) = self.navigation_refusal(session, "Target.createTarget", url).await {
+        if let Some(refusal) = self.navigation_refusal(&options, None, "Target.createTarget", url).await {
             bail!(refusal);
         }
-        if self.st().sessions.get(session).is_some_and(|s| s.read_only) {
-            bail!("Session {session} is read-only: it can't open tabs. Adopt a tab the user lent you instead (session tool, action adopt).");
-        }
-        let link = self.session_link(session).await?;
+        let link = match opener.and_then(|o| self.st().browser_tab(o)) {
+            Some((link, _)) => link,
+            None => self.link_for(options.browser.as_deref()).await?,
+        };
+        options.browser = None;
         let mut params = json!({ "url": "about:blank", "active": false });
         if let Some(window) = crate::settings::agent_window_override() {
             params["window"] = window.into();
@@ -299,16 +282,16 @@ impl Relay {
         let created = self.ext_link(&link, "tabs.create", params).await?;
         let tab = created.get("tabId").and_then(Value::as_i64).context("tabs.create did not return a tabId")?;
         link.announced.lock().unwrap().insert(tab);
-        if let Err(error) = self.setup_tab(Attach::new(tab, Owner::Relay, Some(session.to_string()))).await {
+        let mut attach = Attach::new(tab, Owner::Relay);
+        attach.options = options.clone();
+        attach.opener = opener;
+        if let Err(error) = self.setup_tab(attach).await {
             rlog!("create.attach-failed", tabId = tab, error = error.to_string());
             self.ext_best_effort(tab, "tabs.remove", json!({}));
             self.remove_tab(tab, Release { gone: true, ..Release::default() }, "attach-failed");
             return Err(error);
         }
-        if let Some(entry) = self.st().sessions.get_mut(session) {
-            entry.current = Some(tab);
-            entry.lost = None;
-        }
+        rlog!("tab.created", tabId = tab, group = options.group.clone());
         if url != "about:blank" {
             let events = self.st().tabs.get(&tab).map(|t| t.events.subscribe());
             let navigated = self.debugger(tab, None, "Page.navigate", json!({ "url": url }), Some(Duration::from_secs(30))).await;
@@ -329,7 +312,7 @@ impl Relay {
                     }
                     let info = self.debugger(tab, None, "Target.getTargetInfo", json!({}), Some(Duration::from_secs(5))).await.ok();
                     if let Some((_, _, url, title)) = info.as_ref().and_then(target_info) {
-                        if !self.url_allowed(Some(session), &url) {
+                        if !url_allowed(&options, &url) {
                             self.debugger_best_effort(tab, None, "Page.navigate", json!({ "url": "about:blank" }));
                         } else if let Some(entry) = self.st().tabs.get_mut(&tab) {
                             entry.url = url;
@@ -378,15 +361,16 @@ impl Relay {
         Ok("closed")
     }
 
-    /// Why an agent navigation must not go ahead under the session's allowlist, if it mustn't.
-    pub async fn navigation_refusal(&self, session: &str, method: &str, url: &str) -> Option<String> {
-        let rules = self.session_rules(Some(session))?;
+    /// Why an agent navigation must not go ahead under the tab's allowlist, if it mustn't.
+    pub async fn navigation_refusal(&self, options: &TabOptions, tab: Option<i64>, method: &str, url: &str) -> Option<String> {
+        let rules = rules(options)?;
         match domain::check_navigation_url(url, &rules).await {
             domain::UrlDecision::Allowed { .. } => None,
             domain::UrlDecision::Refused(reason) => {
-                rlog!("allowlist.refused", session = session, method = method, reason = reason.clone());
+                rlog!("allowlist.refused", tabId = tab, method = method, reason = reason.clone());
+                let which = tab.map(|t| format!("tab {t}")).unwrap_or_else(|| "the new tab".into());
                 Some(format!(
-                    "browse blocked {method}: session {session} has a domain allowlist and {reason}. Ask the user before widening it (session tool, action allowlist)."
+                    "browse blocked {method}: {which} has a domain allowlist and {reason}. Ask the user before going elsewhere: a wider allowlist means opening a new tab with it (navigate with allowedOrigins)."
                 ))
             }
         }
@@ -394,43 +378,42 @@ impl Relay {
 
     /// The toolbar button: complete a handoff, stop an agent and take the tab back, or lend the tab.
     pub async fn toolbar_clicked(self: &Arc<Self>, tab: i64) {
-        let (registered, handoff, session) = {
+        let (registered, handoff, busy) = {
             let st = self.st();
-            let target = st.tabs.get(&tab);
-            (target.is_some(), st.handoff_for_tab(tab).map(|h| h.session.clone()), target.and_then(|t| t.session.clone()))
+            (st.tabs.contains_key(&tab), st.handoff_for_tab(tab).is_some(), st.tab_busy(tab))
         };
         if registered {
-            if let Some(session) = handoff {
+            if handoff {
                 rlog!("handoff.completed", tabId = tab, from = "toolbar");
-                self.finish_handoff(&session, "continued");
+                self.finish_handoff(tab, "continued");
                 return;
             }
-            if let Some(session) = session.filter(|s| self.st().sessions.get(s).is_some_and(|s| s.busy())) {
-                rlog!("call.stopped", tabId = tab, session = session.clone(), from = "toolbar");
-                self.stop_calls(&session, &format!("The user took tab {tab} back (browse toolbar button) while this ran, so it was stopped. Don't use that tab again unless the user lends it back; ask the user how to continue."));
+            if busy {
+                rlog!("call.stopped", tabId = tab, from = "toolbar");
+                self.stop_calls(tab, &format!("The user took tab {tab} back (browse toolbar button) while this ran, so it was stopped. Don't use that tab again unless the user lends it back; ask the user how to continue."));
             }
             if let Err(error) = self.detach_tab(tab, "taken-back-by-user").await {
                 rlog!("toolbar.toggle_failed", tabId = tab, error = error.to_string());
             }
             return;
         }
-        if let Err(error) = self.setup_tab(Attach::new(tab, Owner::User, None)).await {
+        if let Err(error) = self.setup_tab(Attach::new(tab, Owner::User)).await {
             rlog!("toolbar.attach_failed", tabId = tab, error = error.to_string());
         }
     }
 
-    /// A tab an agent's page opened (target=_blank, window.open) belongs to the opener's session.
+    /// A tab an agent's page opened (target=_blank, window.open) is an agent tab too, with the opener's options
+    /// (group, allowlist, read-only). A lent tab's popups count only while an agent works in it.
     pub fn adopt_opened_tab(self: &Arc<Self>, tab: i64, opener: i64) {
-        let session = {
+        let options = {
             let st = self.st();
             let Some(opener_tab) = st.tabs.get(&opener) else { return };
-            let Some(session) = opener_tab.session.clone() else { return };
-            if st.tabs.contains_key(&tab) || (opener_tab.owner == Owner::User && !st.sessions.get(&session).is_some_and(|s| s.busy())) {
+            if st.tabs.contains_key(&tab) || (opener_tab.owner == Owner::User && !st.tab_busy(opener)) {
                 return;
             }
-            session
+            opener_tab.options.clone()
         };
-        rlog!("tab.opened", tabId = tab, openerTabId = opener, session = session.clone());
+        rlog!("tab.opened", tabId = tab, openerTabId = opener, group = options.group.clone());
         let relay = self.clone();
         tokio::spawn(async move {
             let link = relay.st().browser_tab(tab);
@@ -438,7 +421,10 @@ impl Relay {
                 link.announced.lock().unwrap().insert(tab);
             }
             for delay in [100u64, 250, 500, 1000, 0] {
-                match relay.setup_tab(Attach::new(tab, Owner::Relay, Some(session.clone()))).await {
+                let mut attach = Attach::new(tab, Owner::Relay);
+                attach.options = options.clone();
+                attach.opener = Some(opener);
+                match relay.setup_tab(attach).await {
                     Ok(_) => break,
                     Err(error) => {
                         let message = error.to_string();
@@ -472,7 +458,7 @@ impl Relay {
         let owner = link.clone();
         let handle = tokio::spawn(async move {
             let link = owner;
-            let mut attach = Attach::new(tab, Owner::User, None);
+            let mut attach = Attach::new(tab, Owner::User);
             attach.already_attached = true;
             attach.reclaim_held = agent;
             attach.restore = true;
@@ -522,7 +508,7 @@ impl Relay {
             let tombstoned: Vec<i64> = mine.iter().filter(|t| st.tombstones.get(&t.target_id).is_some_and(|k| k == &link.key || k.is_empty())).map(|t| t.id).collect();
             let orphaned: Vec<i64> = mine
                 .iter()
-                .filter(|t| agent.contains(&t.id) && t.owner == Owner::User && t.session.is_none() && !tombstoned.contains(&t.id))
+                .filter(|t| agent.contains(&t.id) && t.owner == Owner::User && !tombstoned.contains(&t.id))
                 .map(|t| t.id)
                 .collect();
             let own: Vec<i64> = mine.iter().map(|t| t.id).collect();
@@ -536,20 +522,20 @@ impl Relay {
             self.remove_tab(tab, Release::default(), "inventory-missing");
         }
         for tab in tombstoned {
-            rlog!("extension.inventory.orphan", tabId = tab, reason = "session deleted");
+            rlog!("extension.inventory.orphan", tabId = tab, reason = "closed while its browser was away");
             self.ext_best_effort(tab, "tabs.remove", json!({}));
-            self.remove_tab(tab, Release { gone: true, ..Release::default() }, "session-deleted");
+            self.remove_tab(tab, Release { gone: true, ..Release::default() }, "closed-while-away");
         }
         for tab in orphaned {
             if link.supports(CAPABILITY_TAB_RELEASE) {
-                rlog!("extension.inventory.released", tabId = tab, reason = "agent tab without a session");
+                rlog!("extension.inventory.released", tabId = tab, reason = "agent tab browse has no record of");
                 self.ext_best_effort(tab, "debugger.detach", json!({ "release": true }));
                 self.ext_best_effort(tab, "pageStatus.clear", json!({}));
                 self.ext_best_effort(tab, "action.setAttached", json!({ "attached": false }));
                 self.remove_tab(tab, Release::default(), "released");
             } else {
                 self.ext_best_effort(tab, "tabs.remove", json!({}));
-                self.remove_tab(tab, Release { gone: true, ..Release::default() }, "session-deleted");
+                self.remove_tab(tab, Release { gone: true, ..Release::default() }, "orphaned");
             }
         }
         let lost: Vec<(String, KnownOwner)> = {
@@ -559,7 +545,6 @@ impl Relay {
                 .filter(|(target, known)| {
                     known.browser == link.key
                         && !announced.contains(&known.tab)
-                        && st.sessions.contains_key(&known.session)
                         && !st.tabs.values().any(|t| &t.target_id == *target)
                         && st.owner_key(known.tab) == Some(link.key.as_str())
                 })
@@ -570,20 +555,28 @@ impl Relay {
             let mut st = self.st();
             st.tombstones.retain(|_, key| key != &link.key && !key.is_empty());
             st.reconnect_owners.retain(|_, known| known.browser != link.key);
+            // Registry tabs this browser didn't announce again are gone (the browser restarted since).
+            if still_pending.is_empty() {
+                st.restorable.retain(|_, held| held.browser_key != link.key);
+            }
             st.last_connected = Some(Instant::now());
         }
         link.mark_ready();
-        // Tabs a session held that the browser didn't announce again (its debugger went with the connection):
-        // attach them again, for the same session.
+        // Tabs the browser didn't announce again (its debugger went with the connection): attach them again, as
+        // they were.
         for (target, known) in lost {
             let relay = self.clone();
             tokio::spawn(async move {
                 let tab = known.tab;
-                let mut attach = Attach::new(tab, known.owner, Some(known.session.clone()));
+                let mut attach = Attach::new(tab, known.owner);
+                attach.options = known.options;
+                attach.opener = known.opener;
+                attach.state = Some(known.state);
+                attach.created_at = Some(known.created_at);
                 attach.expect_target = Some(target.clone());
                 match relay.setup_tab(attach).await {
-                    Ok(_) => rlog!("extension.reconnect.reattached", tabId = tab, session = known.session),
-                    Err(error) => rlog!("extension.reconnect.lost", tabId = tab, target = target, session = known.session, error = error.to_string()),
+                    Ok(_) => rlog!("extension.reconnect.reattached", tabId = tab),
+                    Err(error) => rlog!("extension.reconnect.lost", tabId = tab, target = target, error = error.to_string()),
                 }
             });
         }
@@ -594,16 +587,7 @@ impl Relay {
         for tab in own {
             self.refresh_presentation(tab, true);
         }
-        let sweep = self.st().swept.insert(link.key.clone());
-        if sweep {
-            let stale: Vec<i64> = {
-                let st = self.st();
-                st.tabs.values().filter(|t| t.link_key == link.key && t.owner == Owner::Relay && t.session.as_ref().is_some_and(|s| !st.sessions.contains_key(s))).map(|t| t.id).collect()
-            };
-            for tab in stale {
-                let _ = self.close_or_release(tab).await;
-            }
-        }
+        self.schedule_persist();
         rlog!("browsers", connected = self.st().links.iter().map(|l| l.id.clone()).collect::<Vec<_>>().join(", "));
         self.browsers_changed();
     }
@@ -618,14 +602,28 @@ impl Relay {
             if st.links.len() == before {
                 return;
             }
-            let mine: Vec<(i64, String, Option<String>, Owner)> =
-                st.tabs.values().filter(|t| t.link_key == link.key).map(|t| (t.id, t.target_id.clone(), t.session.clone(), t.owner)).collect();
-            for (tab, target, session, owner) in &mine {
-                if let Some(session) = session {
-                    st.reconnect_owners.insert(target.clone(), KnownOwner { tab: *tab, session: session.clone(), owner: *owner, browser: link.key.clone() });
-                }
+            let mine: Vec<(String, KnownOwner)> = st
+                .tabs
+                .values()
+                .filter(|t| t.link_key == link.key && !t.closing)
+                .map(|t| {
+                    let known = KnownOwner {
+                        tab: t.id,
+                        owner: t.owner,
+                        browser: link.key.clone(),
+                        options: t.options.clone(),
+                        opener: t.opener,
+                        state: t.state.clone(),
+                        created_at: t.created_at.clone(),
+                    };
+                    (t.target_id.clone(), known)
+                })
+                .collect();
+            let ids: Vec<i64> = st.tabs.values().filter(|t| t.link_key == link.key).map(|t| t.id).collect();
+            for (target, known) in mine {
+                st.reconnect_owners.insert(target, known);
             }
-            mine.into_iter().map(|(id, ..)| id).collect()
+            ids
         };
         for tab in tabs {
             self.remove_tab(tab, Release::default(), "extension-disconnected");
@@ -651,14 +649,10 @@ impl Relay {
         match reason {
             "target_closed" => {
                 let renewed = params.get("reattached") == Some(&Value::Bool(true));
-                let (owner, session) = {
-                    let st = self.st();
-                    let Some(entry) = st.tabs.get(&tab) else { return };
-                    (entry.owner, entry.session.clone())
-                };
+                let Some(again) = self.st().tabs.get(&tab).map(Attach::again) else { return };
                 if renewed {
                     rlog!("debugger.renewed", tabId = tab);
-                    let mut attach = Attach::new(tab, owner, session);
+                    let mut attach = again;
                     attach.already_attached = true;
                     if self.setup_tab(attach).await.is_err() {
                         self.remove_tab(tab, Release { update_extension: true, ..Release::default() }, "renew-failed");
@@ -680,15 +674,12 @@ impl Relay {
                         Err(_) => {}
                     }
                 }
-                let mut attach = Attach::new(tab, owner, session);
+                let mut attach = again;
                 attach.expect_target = self.st().tabs.get(&tab).map(|t| t.target_id.clone());
                 self.reattach(attach).await;
             }
             "canceled_by_user" => {
-                let session = self.st().tabs.get(&tab).and_then(|t| t.session.clone());
-                if let Some(session) = session {
-                    self.stop_calls(&session, "The user dismissed the browser's debugging bar, which detached browse from their tabs, so this was stopped. Ask the user how to continue.");
-                }
+                self.stop_calls(tab, "The user dismissed the browser's debugging bar, which detached browse from their tabs, so this was stopped. Ask the user how to continue.");
                 self.remove_tab(tab, Release { update_extension: true, released_by_user: true, ..Release::default() }, "released-by-user");
             }
             _ => self.remove_tab(tab, Release { update_extension: true, gone: true, ..Release::default() }, "debugger-detached"),
@@ -850,34 +841,29 @@ impl Relay {
         }
         return_follow_up(self, tab, follow_up);
         if crashed {
-            let (link, sessions) = {
+            let link = {
                 let mut st = self.st();
-                let sessions: Vec<String> = st.handoffs.iter().filter(|(_, h)| h.tab == tab).map(|(s, _)| s.clone()).collect();
-                for session in &sessions {
-                    if let Some(mut handoff) = st.handoffs.remove(session) {
-                        handoff.done.take().map(|d| d.send("closed"));
-                    }
+                if let Some(mut handoff) = st.handoffs.remove(&tab) {
+                    handoff.done.take().map(|d| d.send("closed"));
                 }
-                (st.browser_tab(tab), sessions)
+                st.browser_tab(tab)
             };
             if let Some((link, local)) = link {
                 link.reject_tab(local, &format!("Target crashed: tab {tab}"));
             }
-            for session in sessions {
-                self.refresh_session_presentation(&session);
-            }
+            self.refresh_presentation(tab, false);
         }
         if source.is_none() {
             self.observe_navigation(tab, &method, &event_params, committed);
         }
     }
 
-    /// The session allowlist on a tab's own navigations (cli/src/session-manager/navigation-guard.ts).
+    /// The tab's allowlist on its own navigations (cli/src/session-manager/navigation-guard.ts).
     fn observe_navigation(self: &Arc<Self>, tab: i64, method: &str, params: &Value, committed: Option<String>) {
         if !matches!(method, "Page.frameNavigated" | "Page.frameRequestedNavigation" | "Page.frameStartedNavigating" | "Network.responseReceived") {
             return;
         }
-        let Some((session, rules, main_frame)) = self.enforced(tab) else { return };
+        let Some((rules, main_frame)) = self.enforced(tab) else { return };
         match method {
             "Page.frameNavigated" => {
                 if let Some(url) = committed {
@@ -891,7 +877,7 @@ impl Relay {
                 let response = &params["response"];
                 let (Some(address), Some(url)) = (response.get("remoteIPAddress").and_then(Value::as_str), response.get("url").and_then(Value::as_str)) else { return };
                 if domain::is_private_address(address) && !domain::explicitly_allows_host(&rules, url) {
-                    self.allowlist_violation(tab, &session, url, &format!("its document came from the private address {address} (name it exactly in the allowlist to allow it)"));
+                    self.allowlist_violation(tab, url, &format!("its document came from the private address {address} (name it exactly in the allowlist to allow it)"));
                 }
             }
             _ => {
@@ -901,35 +887,27 @@ impl Relay {
                 let Some(url) = params.get("url").and_then(Value::as_str) else { return };
                 if let domain::UrlDecision::Refused(reason) = domain::check_url(url, &rules, false) {
                     self.debugger_best_effort(tab, None, "Page.stopLoading", json!({}));
-                    if let Some(entry) = self.st().sessions.get_mut(&session) {
+                    if let Some(entry) = self.st().tabs.get_mut(&tab) {
                         entry.add_warning(format!(
-                            "Domain allowlist: a tab of session {session} started to navigate to {}, but {reason}; browse stopped it. Ask the user before widening the allowlist.",
+                            "Domain allowlist: tab {tab} started to navigate to {}, but {reason}; browse stopped it. Ask the user before going elsewhere.",
                             short_url(url)
                         ));
                     }
-                    rlog!("allowlist.stopped", tabId = tab, session = session, method = method, reason = reason);
+                    rlog!("allowlist.stopped", tabId = tab, method = method, reason = reason);
                 }
             }
         }
     }
 
-    /// The session, its rules and the main frame, when the tab's allowlist applies now (a lent tab only while its
-    /// session is busy).
-    fn enforced(&self, tab: i64) -> Option<(String, Vec<domain::OriginRule>, String)> {
-        let (session, owner, main_frame) = {
-            let st = self.st();
-            let entry = st.tabs.get(&tab)?;
-            (entry.session.clone()?, entry.owner, entry.main_frame.clone().unwrap_or_else(|| entry.target_id.clone()))
-        };
-        let rules = self.session_rules(Some(&session))?;
-        if owner == Owner::User && !self.st().sessions.get(&session).is_some_and(|s| s.busy()) {
-            return None;
-        }
-        Some((session, rules, main_frame))
+    /// The tab's rules and main frame, when it has an allowlist.
+    fn enforced(&self, tab: i64) -> Option<(Vec<domain::OriginRule>, String)> {
+        let st = self.st();
+        let entry = st.tabs.get(&tab)?;
+        Some((rules(&entry.options)?, entry.main_frame.clone().unwrap_or_else(|| entry.target_id.clone())))
     }
 
     pub fn check_committed_url(self: &Arc<Self>, tab: i64, url: &str) -> bool {
-        let Some((session, rules, _)) = self.enforced(tab) else { return true };
+        let Some((rules, _)) = self.enforced(tab) else { return true };
         match domain::check_url(url, &rules, false) {
             domain::UrlDecision::Allowed { .. } => {
                 if !url.starts_with("about:")
@@ -939,28 +917,32 @@ impl Relay {
                 true
             }
             domain::UrlDecision::Refused(reason) => {
-                self.allowlist_violation(tab, &session, url, &reason);
+                self.allowlist_violation(tab, url, &reason);
                 false
             }
         }
     }
 
-    fn allowlist_violation(self: &Arc<Self>, tab: i64, session: &str, url: &str, reason: &str) {
+    fn allowlist_violation(self: &Arc<Self>, tab: i64, url: &str, reason: &str) {
         let popup = {
             let mut st = self.st();
             let Some(entry) = st.tabs.get_mut(&tab) else { return };
             let popup = entry.fresh_popup && entry.owner == Owner::Relay;
             entry.fresh_popup = false;
+            let action = if popup { "closed the popup" } else { "sent the tab back to about:blank" };
+            let warning = format!("Domain allowlist: tab {tab} went to {}, but {reason}; browse {action}. Ask the user before going elsewhere.", short_url(url));
+            // A closed popup can't carry the news: its opener does.
+            match entry.opener.filter(|_| popup) {
+                Some(opener) => {
+                    if let Some(opener) = st.tabs.get_mut(&opener) {
+                        opener.add_warning(warning);
+                    }
+                }
+                None => entry.add_warning(warning),
+            }
             popup
         };
-        let action = if popup { "closed the popup" } else { "sent the tab back to about:blank" };
-        if let Some(entry) = self.st().sessions.get_mut(session) {
-            entry.add_warning(format!(
-                "Domain allowlist: a tab of session {session} went to {}, but {reason}; browse {action}. Ask the user before widening the allowlist.",
-                short_url(url)
-            ));
-        }
-        rlog!("allowlist.violation", tabId = tab, session = session, url = short_url(url), popup = popup);
+        rlog!("allowlist.violation", tabId = tab, url = short_url(url), popup = popup);
         let relay = self.clone();
         tokio::spawn(async move {
             if popup {
@@ -970,6 +952,18 @@ impl Relay {
             let _ = relay.debugger(tab, None, "Page.stopLoading", json!({}), Some(Duration::from_secs(3))).await;
             let _ = relay.debugger(tab, None, "Page.navigate", json!({ "url": "about:blank" }), Some(Duration::from_secs(10))).await;
         });
+    }
+}
+
+/// The tab's allowlist rules, when it has one.
+pub fn rules(options: &TabOptions) -> Option<Vec<domain::OriginRule>> {
+    domain::parse_origin_patterns(options.allowed_origins.as_ref()?).ok().filter(|r| !r.is_empty())
+}
+
+pub fn url_allowed(options: &TabOptions, url: &str) -> bool {
+    match rules(options) {
+        Some(rules) => domain::check_url(url, &rules, false).allowed(),
+        None => true,
     }
 }
 
@@ -1033,13 +1027,17 @@ fn observe_protected_frame(tab: i64, entry: &mut Tab, method: &str, params: &Val
 
 fn lost_reason(reason: &str) -> &'static str {
     match reason {
-        "tab-closed" => "the tab was closed",
+        "tab-closed" => "the tab was closed in the browser",
+        "target-closed" => "it was closed with the tabs tool",
+        "released" => "it was given back to the user",
+        "attach-failed" => "browse couldn't attach to it",
+        "closed-while-away" | "orphaned" => "it was closed while its browser was away",
+        "inventory-missing" => "its browser no longer has it",
         "released-by-user" => "the user dismissed the browser's debugging bar",
         "taken-back-by-user" => "the user took it back with the browse toolbar button",
         "target-missing" => "Chrome no longer has it",
         "debugger-detached" | "renew-failed" => "Chrome detached browse from it",
-        "session-deleted" => "its session was deleted",
-        "idle" => "it was idle",
+        "idle" => "it was idle, so browse closed it",
         _ => "browse lost it",
     }
 }

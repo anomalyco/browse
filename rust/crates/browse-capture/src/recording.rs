@@ -263,14 +263,14 @@ async fn start(ctx: &ToolContext, args: &Value) -> anyhow::Result<ToolOutput> {
     let frame_rate = arg_int(args, "frameRate", 1, 60)?.map_or(DEFAULT_FRAME_RATE, |n| n as u32);
     let quality = arg_int(args, "quality", 1, 100)?.map_or(DEFAULT_QUALITY, |n| n as u32);
     let max_duration = arg_int(args, "maxDurationMs", 1_000, 4 * 60 * 60_000)?.unwrap_or(DEFAULT_MAX_DURATION_MS);
-    let tab = target_tab(ctx, args).await?;
+    let tab = target_tab(args)?;
     screencast::check_encoder(container).await?;
-    let capture = state::get(ctx).await;
+    let capture = state::get(ctx, tab).await?;
     let mut recording_state = capture.recording.lock().await;
     if recording_state.active.is_some() {
-        bail_user!("a recording is already running in this session; stop or cancel it first");
+        bail_user!("a recording is already running in tab {tab}; stop or cancel it first");
     }
-    let cdp = ctx.browser.cdp(&ctx.session, tab).await?;
+    let cdp = ctx.browser.cdp(tab).await?;
     let viewport = crate::page::viewport(cdp.as_ref()).await?;
     let size = screencast::recording_size(&viewport);
     let created = files::prepare(&ctx.file_roots, &path, operation)?;
@@ -349,7 +349,7 @@ async fn start(ctx: &ToolContext, args: &Value) -> anyhow::Result<ToolOutput> {
         sink,
         writer,
         timer: TaskGuard::new(timer.abort_handle()),
-        _busy: BusyGuard::new(ctx, "recording"),
+        _busy: BusyGuard::new(ctx, tab, "recording"),
     };
     let result = json!({
         "recording": true,
@@ -373,7 +373,7 @@ impl Tool for RecordingTool {
         ToolSpec {
             name: "recording".into(),
             description: "Record a tab to a video file through the CDP screencast (nothing is shown in or added to the \
-                page; the tab doesn't need focus). One recording per session. start begins recording to path: .mkv \
+                page; the tab doesn't need focus). One recording per tab. start begins recording to path: .mkv \
                 writes MJPEG Matroska directly at device resolution (no ffmpeg needed; plays in VLC/mpv/ffmpeg, not \
                 browsers), .webm (VP8) or .mp4 (H.264) are transcoded with ffmpeg at CSS viewport size when it stops. \
                 status reports duration and frame counters; stop finishes the file and returns {path, bytes, \
@@ -390,7 +390,7 @@ impl Tool for RecordingTool {
                     "quality": { "type": "integer", "minimum": 1, "maximum": 100, "description": "start: JPEG quality of captured frames (default 90)." },
                     "maxDurationMs": { "type": "integer", "minimum": 1000, "maximum": 14_400_000, "description": "start: stop automatically after this long (default 900000)." }
                 },
-                "required": ["action"],
+                "required": ["tab", "action"],
                 "additionalProperties": false
             }),
         }
@@ -402,7 +402,7 @@ impl Tool for RecordingTool {
                 match arg_action(&args, &["start", "status", "stop", "cancel"])? {
                     "start" => start(&ctx, &args).await,
                     "status" => {
-                        let capture = state::get(&ctx).await;
+                        let capture = state::get(&ctx, target_tab(&args)?).await?;
                         let state = capture.recording.lock().await;
                         match (&state.active, &state.ended) {
                             (Some(recording), _) => json_output(&status(recording)),
@@ -411,21 +411,21 @@ impl Tool for RecordingTool {
                         }
                     }
                     "stop" => {
-                        let capture = state::get(&ctx).await;
+                        let capture = state::get(&ctx, target_tab(&args)?).await?;
                         let recording = {
                             let mut state = capture.recording.lock().await;
                             match state.active.take() {
                                 Some(recording) => recording,
                                 None => match state.ended.take() {
                                     Some(ended) => return json_output(&ended),
-                                    None => bail_user!("no recording is running in this session"),
+                                    None => bail_user!("no recording is running in this tab"),
                                 },
                             }
                         };
                         json_output(&finish(recording).await?)
                     }
                     _ => {
-                        let capture = state::get(&ctx).await;
+                        let capture = state::get(&ctx, target_tab(&args)?).await?;
                         let recording = {
                             let mut state = capture.recording.lock().await;
                             state.ended = None;

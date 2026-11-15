@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow, bail};
 use serde_json::Value;
 
 use crate::page::{Element, ElementOr, TabPage, v};
-use crate::state::PageSession;
+use crate::state::PageTab;
 
 /// How long an action waits for a ref that no longer matches its element before failing: long enough for a brief
 /// "Saving…" label or a re-mount, far shorter than the action timeout.
@@ -151,25 +151,25 @@ fn selector_error(selector: &str, status: &str) -> Option<anyhow::Error> {
 }
 
 /// Resolves a ref or selector, waiting for it to appear.
-pub async fn resolve(page: &Arc<TabPage>, session: &PageSession, spec: &Spec, options: ResolveOptions) -> Result<Resolved> {
+pub async fn resolve(page: &Arc<TabPage>, tab_state: &PageTab, spec: &Spec, options: ResolveOptions) -> Result<Resolved> {
     let element = match spec {
-        Spec::Ref(id) => resolve_ref(page, session, id, options).await?,
+        Spec::Ref(id) => resolve_ref(page, tab_state, id, options).await?,
         Spec::Selector(selector) => resolve_selector(page, selector, options).await?,
     };
     let label = page.call_element(&element, "describe", vec![], false).await.ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
     Ok(Resolved { element, label })
 }
 
-async fn resolve_ref(page: &Arc<TabPage>, session: &PageSession, id: &str, options: ResolveOptions) -> Result<Element> {
+async fn resolve_ref(page: &Arc<TabPage>, tab_state: &PageTab, id: &str, options: ResolveOptions) -> Result<Element> {
     let normalized = id.strip_prefix('@').unwrap_or(id).to_string();
     if let Some((seq, playwright_ref)) = parse_aria_ref(&normalized) {
-        return resolve_aria_ref(page, session, &normalized, seq, &playwright_ref, options).await;
+        return resolve_aria_ref(page, tab_state, &normalized, seq, &playwright_ref, options).await;
     }
     if !is_compact_ref(&normalized) {
         bail!("Unknown snapshot ref: {id}; refs look like e12 (snapshot) or a12 / f1a3 (aria snapshot). Pass CSS or Playwright selectors as `selector`.");
     }
     let target = {
-        let refs = session.refs.lock().unwrap();
+        let refs = tab_state.refs.lock().unwrap();
         if refs.tab != Some(page.tab()) {
             if let Some(tab) = refs.tab {
                 bail!("Snapshot ref {id} belongs to tab {tab}; call snapshot on this tab, or pass tab: {tab}");
@@ -243,9 +243,9 @@ async fn resolve_ref(page: &Arc<TabPage>, session: &PageSession, id: &str, optio
     }
 }
 
-async fn resolve_aria_ref(page: &Arc<TabPage>, session: &PageSession, id: &str, seq: u32, playwright_ref: &str, options: ResolveOptions) -> Result<Element> {
+async fn resolve_aria_ref(page: &Arc<TabPage>, tab_state: &PageTab, id: &str, seq: u32, playwright_ref: &str, options: ResolveOptions) -> Result<Element> {
     {
-        let refs = session.refs.lock().unwrap();
+        let refs = tab_state.refs.lock().unwrap();
         let aria = refs.aria.as_ref().ok_or_else(|| anyhow!("Unknown aria snapshot ref: {id}; call snapshot with mode \"aria\" first"))?;
         if aria.tab != page.tab() {
             bail!("Aria ref {id} belongs to tab {}; call snapshot on this tab", aria.tab);

@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use browse_core::{Browser, Cdp, CdpError, CdpEvent, HandoffResult, SessionId, SessionState, TabId, TabInfo, ToolContext, ToolOutput};
+use browse_core::{Browser, Cdp, CdpError, CdpEvent, HandoffResult, TabId, TabInfo, TabOptions, TabState, ToolContext, ToolOutput};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -225,35 +225,34 @@ impl Cdp for TabCdp {
     }
 }
 
+/// One Chromium tab as the browser: tab 1.
 pub struct FakeBrowser {
     pub tab: Arc<TabCdp>,
     pub human: bool,
+    pub state: Arc<TabState>,
 }
 
 #[async_trait]
 impl Browser for FakeBrowser {
-    async fn tabs(&self, _session: &SessionId) -> anyhow::Result<Vec<TabInfo>> {
-        Ok(vec![TabInfo { tab_id: 1, url: String::new(), title: String::new(), active: true }])
-    }
-    async fn current_tab(&self, _session: &SessionId) -> anyhow::Result<TabInfo> {
-        Ok(TabInfo { tab_id: 1, url: String::new(), title: String::new(), active: true })
-    }
-    async fn open_tab(&self, _session: &SessionId, _url: Option<&str>) -> anyhow::Result<TabInfo> {
+    async fn open_tab(&self, _url: Option<&str>, _options: &TabOptions) -> anyhow::Result<TabInfo> {
         anyhow::bail!("not in tests")
     }
-    async fn select_tab(&self, _session: &SessionId, _tab: TabId) -> anyhow::Result<()> {
+    async fn tabs(&self) -> anyhow::Result<Vec<TabInfo>> {
+        Ok(vec![TabInfo { tab: 1, url: String::new(), title: String::new(), lent: false, opener: None, options: TabOptions::default() }])
+    }
+    async fn close_tab(&self, _tab: TabId) -> anyhow::Result<()> {
         Ok(())
     }
-    async fn close_tab(&self, _session: &SessionId, _tab: TabId) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn cdp(&self, _session: &SessionId, _tab: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
+    async fn cdp(&self, _tab: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
         Ok(self.tab.clone())
     }
-    async fn handoff(&self, _session: &SessionId, _tab: TabId, _message: &str) -> anyhow::Result<HandoffResult> {
+    async fn state(&self, _tab: TabId) -> anyhow::Result<Arc<TabState>> {
+        Ok(self.state.clone())
+    }
+    async fn handoff(&self, _tab: TabId, _message: &str) -> anyhow::Result<HandoffResult> {
         anyhow::bail!("not in tests")
     }
-    async fn human_input(&self, _session: &SessionId, _tab: TabId) -> bool {
+    async fn human_input(&self, _tab: TabId) -> bool {
         self.human
     }
 }
@@ -263,6 +262,8 @@ pub struct Harness {
     pub tab: Arc<TabCdp>,
     pub ctx: ToolContext,
     pub tools: Vec<Arc<dyn browse_core::Tool>>,
+    /// The tab's state, which the tools share.
+    pub state: Arc<TabState>,
     pub server: Server,
     pub files: TempDir,
 }
@@ -273,18 +274,26 @@ impl Harness {
         let connection = Connection::connect(&chrome.ws).await;
         let tab = TabCdp::open(&connection).await;
         let files = TempDir::new("files");
-        let ctx = ToolContext {
-            session: "test".into(),
-            browser: Arc::new(FakeBrowser { tab: tab.clone(), human }),
-            state: Arc::new(SessionState::default()),
-            file_roots: vec![files.0.clone()],
-        };
+        let state = Arc::new(TabState::default());
+        let ctx = ToolContext { browser: Arc::new(FakeBrowser { tab: tab.clone(), human, state: state.clone() }), file_roots: vec![files.0.clone()] };
         let server = Server::start().await;
-        Some(Harness { chrome, tab, ctx, tools: browse_page::tools(), server, files })
+        Some(Harness { chrome, tab, ctx, tools: browse_page::tools(), state, server, files })
     }
 
-    pub async fn call(&self, name: &str, args: Value) -> ToolOutput {
+    /// Calls a tool in the harness's tab (`tab` 1 unless the arguments name one; `"tab": null` leaves it out).
+    pub async fn call(&self, name: &str, mut args: Value) -> ToolOutput {
         let tool = self.tools.iter().find(|t| t.spec().name == name).unwrap_or_else(|| panic!("no tool {name}"));
+        if let Some(map) = args.as_object_mut() {
+            match map.get("tab") {
+                None => {
+                    map.insert("tab".into(), json!(1));
+                }
+                Some(Value::Null) => {
+                    map.remove("tab");
+                }
+                Some(_) => {}
+            }
+        }
         tool.call(self.ctx.clone(), args).await.unwrap()
     }
 

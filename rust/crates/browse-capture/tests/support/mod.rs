@@ -11,8 +11,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::Engine;
 use browse_core::{
-    Browser, Cdp, CdpError, CdpEvent, Content, HandoffResult, SessionId, SessionState, TabId, TabInfo, Tool,
-    ToolContext, ToolOutput,
+    Browser, Cdp, CdpError, CdpEvent, Content, HandoffResult, TabId, TabInfo, TabOptions, TabState, Tool, ToolContext,
+    ToolOutput,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -188,42 +188,48 @@ pub async fn launch_with(extra: &[&str]) -> Option<(Chrome, Arc<WsCdp>)> {
     Some((chrome, cdp))
 }
 
+/// Unique within the test run (tests in parallel can read the same clock).
 pub fn rand_suffix() -> u32 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos()
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos().wrapping_add(NEXT.fetch_add(1, Ordering::Relaxed) as u32 * 7919)
 }
 
-pub struct TestBrowser(pub Arc<WsCdp>, pub Arc<Mutex<HashMap<String, bool>>>);
+/// The one live tab (id 1) as a browser: its CDP, its state, and the busy flags tools report.
+pub struct TestBrowser(pub Arc<WsCdp>, pub Arc<Mutex<HashMap<String, bool>>>, pub Arc<TabState>);
 
 #[async_trait]
 impl Browser for TestBrowser {
-    async fn tabs(&self, _: &SessionId) -> anyhow::Result<Vec<TabInfo>> {
+    async fn open_tab(&self, _: Option<&str>, _: &TabOptions) -> anyhow::Result<TabInfo> {
+        anyhow::bail!("not in tests")
+    }
+    async fn tabs(&self) -> anyhow::Result<Vec<TabInfo>> {
         Ok(vec![tab()])
     }
-    async fn current_tab(&self, _: &SessionId) -> anyhow::Result<TabInfo> {
-        Ok(tab())
-    }
-    async fn open_tab(&self, _: &SessionId, _: Option<&str>) -> anyhow::Result<TabInfo> {
-        anyhow::bail!("not in tests")
-    }
-    async fn select_tab(&self, _: &SessionId, _: TabId) -> anyhow::Result<()> {
+    async fn close_tab(&self, _: TabId) -> anyhow::Result<()> {
         Ok(())
     }
-    async fn close_tab(&self, _: &SessionId, _: TabId) -> anyhow::Result<()> {
-        Ok(())
-    }
-    async fn cdp(&self, _: &SessionId, _: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
+    async fn cdp(&self, _: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
         Ok(self.0.clone())
     }
-    async fn handoff(&self, _: &SessionId, _: TabId, _: &str) -> anyhow::Result<HandoffResult> {
+    async fn state(&self, _: TabId) -> anyhow::Result<Arc<TabState>> {
+        Ok(self.2.clone())
+    }
+    async fn handoff(&self, _: TabId, _: &str) -> anyhow::Result<HandoffResult> {
         anyhow::bail!("not in tests")
     }
-    fn set_busy(&self, _: &SessionId, key: &str, busy: bool) {
+    fn set_busy(&self, _: TabId, key: &str, busy: bool) {
         self.1.lock().unwrap().insert(key.to_string(), busy);
     }
 }
 
 pub fn tab() -> TabInfo {
-    TabInfo { tab_id: 1, url: String::new(), title: String::new(), active: true }
+    TabInfo { tab: 1, url: String::new(), title: String::new(), lent: false, opener: None, options: TabOptions::default() }
+}
+
+/// Arguments in the live tab (`tab` 1).
+pub fn in_tab(mut args: Value) -> Value {
+    args["tab"] = json!(1);
+    args
 }
 
 pub const PAGE: &str = r#"<!doctype html><html><head><title>t</title><style>body{margin:0;font:16px sans-serif} #box{position:absolute;left:100px;top:120px;width:200px;height:50px;background:#36c} @keyframes spin{to{transform:rotate(360deg)}} #spin{position:absolute;left:400px;top:300px;width:80px;height:80px;background:#c33;animation:spin 1s linear infinite}</style></head>
@@ -296,6 +302,7 @@ pub fn tool(name: &str) -> Arc<dyn Tool> {
 }
 
 pub async fn call(ctx: &ToolContext, name: &str, args: Value) -> ToolOutput {
+    let args = in_tab(args);
     let output = tool(name).call(ctx.clone(), args.clone()).await.unwrap();
     assert!(!output.is_error, "{name} {args} failed: {:?}", output.content);
     output
@@ -361,12 +368,7 @@ pub fn context(cdp: &Arc<WsCdp>) -> (ToolContext, PathBuf, Arc<Mutex<HashMap<Str
     }
     let root = std::fs::canonicalize(&root).unwrap();
     let busy: Arc<Mutex<HashMap<String, bool>>> = Arc::default();
-    let ctx = ToolContext {
-        session: "test".into(),
-        browser: Arc::new(TestBrowser(cdp.clone(), busy.clone())),
-        state: Arc::new(SessionState::default()),
-        file_roots: vec![root.clone()],
-    };
+    let ctx = ToolContext { browser: Arc::new(TestBrowser(cdp.clone(), busy.clone(), Arc::new(TabState::default()))), file_roots: vec![root.clone()] };
     (ctx, root, busy)
 }
 

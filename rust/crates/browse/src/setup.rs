@@ -83,7 +83,7 @@ pub enum McpEdit {
 }
 
 /// Writes (or updates) the browse MCP server so it runs `entry`, keeping settings the user added. One pooled server
-/// with a fixed cwd serves every OpenCode session; browse keys each agent's session on OpenCode's session id.
+/// with a fixed cwd serves every OpenCode session; each agent works in the tabs it opens, by their ids.
 pub fn configure_opencode(file: &Path, entry: &Path) -> anyhow::Result<McpEdit> {
     let (mut text, servers) = mcp_servers(file)?;
     let existing = servers.get(MCP_NAME);
@@ -431,12 +431,12 @@ pub fn status(args: &[String]) -> anyhow::Result<i32> {
     let settings = settings();
     let entry = settings.get("entry").and_then(Value::as_str);
     if json {
-        // The relay's `status` tool output (relay, browsers, currentSession, sessions, tabs, autoUpdate) plus this
+        // The relay's `status` tool output (relay, browsers, tabs, autoUpdate) plus this
         // install's setup. A relay that isn't running isn't started.
         let mut status = match relay::probe() {
             relay::Probe::Running(_) => {
-                let request = browse_core::ToolCallRequest { name: "status".into(), arguments: json!({}), session: session::for_cli() };
-                let output = relay::call(&request)?;
+                let request = browse_core::ToolCallRequest { name: "status".into(), arguments: json!({}) };
+                let output = relay::call(&request, None)?;
                 output
                     .content
                     .iter()
@@ -490,9 +490,8 @@ pub fn status(args: &[String]) -> anyhow::Result<i32> {
                 let text = |k: &str| browser.get(k).and_then(Value::as_str).unwrap_or("?").to_owned();
                 println!("Browser:   {} ({}){}", text("name"), text("id"), if browser["default"] == true { ", default" } else { "" });
             }
-            let sessions = status.get("sessions").and_then(Value::as_array).map_or(0, Vec::len);
             let tabs = status.get("targets").and_then(Value::as_array).map_or(0, Vec::len);
-            println!("Sessions:  {sessions}, tabs: {tabs} (`browse status --json` for details)");
+            println!("Tabs:      {tabs} (`browse status --json` or `browse tabs` for details)");
         }
         None => println!("Relay:     not running at {} (it starts when an agent uses browse)", relay_api::endpoint()),
     }

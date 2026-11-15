@@ -35,25 +35,24 @@ use std::time::Duration;
 use browse_core::{TabId, ToolContext};
 
 /// For other crates (screenshots with ref labels, element screenshots): the tab page and an element for a snapshot
-/// ref or selector, resolved exactly as the page tools resolve it.
-pub async fn resolve_element(ctx: &ToolContext, tab: Option<TabId>, reference: Option<&str>, selector: Option<&str>, timeout: Duration) -> anyhow::Result<(Arc<TabPage>, Element, String)> {
-    let session = state::session(ctx).await;
-    let tab = tab.or_else(|| reference.and_then(|_| session.ref_tab()));
-    let page = session.page(ctx, tab).await?;
+/// ref (of the tab's latest snapshot) or selector, resolved exactly as the page tools resolve it.
+pub async fn resolve_element(ctx: &ToolContext, tab: TabId, reference: Option<&str>, selector: Option<&str>, timeout: Duration) -> anyhow::Result<(Arc<TabPage>, Element, String)> {
+    let tab_state = state::tab(ctx, tab).await?;
+    let page = tab_state.page(ctx).await?;
     let spec = match (reference, selector) {
         (Some(r), _) => target::Spec::Ref(r.to_string()),
         (None, Some(s)) => target::Spec::Selector(s.to_string()),
         (None, None) => anyhow::bail!("pass a ref or a selector"),
     };
-    let resolved = target::resolve(&page, &session, &spec, target::ResolveOptions { timeout, act: false }).await?;
+    let resolved = target::resolve(&page, &tab_state, &spec, target::ResolveOptions { timeout, act: false }).await?;
     Ok((page, resolved.element, resolved.label))
 }
 
-/// The refs of the latest compact snapshot of the session: id, role and accessible name, with the tab they belong to.
-pub async fn snapshot_refs(ctx: &ToolContext) -> (Option<TabId>, Vec<(String, String, Option<String>)>) {
-    let session = state::session(ctx).await;
-    let refs = session.refs.lock().unwrap();
+/// The refs of the tab's latest compact snapshot: id, role and accessible name.
+pub async fn snapshot_refs(ctx: &ToolContext, tab: TabId) -> anyhow::Result<Vec<(String, String, Option<String>)>> {
+    let tab_state = state::tab(ctx, tab).await?;
+    let refs = tab_state.refs.lock().unwrap();
     let mut list: Vec<(String, String, Option<String>)> = refs.selectors.iter().map(|(id, t)| (id.clone(), t.role.clone(), t.name.clone())).collect();
     list.sort_by_key(|(id, _, _)| id.trim_start_matches('e').parse::<u64>().unwrap_or(0));
-    (refs.tab, list)
+    Ok(list)
 }

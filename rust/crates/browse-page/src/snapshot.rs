@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::page::{Element, ElementOr, TabPage, is_context_lost, v};
-use crate::state::{AriaRefs, Baseline, PageSession, RefTarget};
+use crate::state::{AriaRefs, Baseline, PageTab, RefTarget};
 use crate::target;
 
 pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
@@ -455,7 +455,7 @@ struct Scope {
     ref_root: Option<String>,
 }
 
-async fn resolve_scope(page: &Arc<TabPage>, session: &PageSession, options: &Options) -> Result<Scope> {
+async fn resolve_scope(page: &Arc<TabPage>, tab_state: &PageTab, options: &Options) -> Result<Scope> {
     let main = page.main_frame();
     let main_generation = page.frame(&main).map(|f| f.generation).unwrap_or(0);
     let Some(within) = options.within.as_ref().map(|w| w.trim().to_string()).filter(|w| !w.is_empty()) else {
@@ -463,7 +463,7 @@ async fn resolve_scope(page: &Arc<TabPage>, session: &PageSession, options: &Opt
     };
     if target::is_compact_ref(&within) {
         let id = within.strip_prefix('@').unwrap_or(&within).to_string();
-        let refs = session.refs.lock().unwrap();
+        let refs = tab_state.refs.lock().unwrap();
         if refs.tab != Some(page.tab()) || refs.document != Some(main_generation) {
             bail!("Snapshot refs are stale after a page change; call snapshot again");
         }
@@ -603,16 +603,16 @@ async fn settle_recent_navigation(page: &Arc<TabPage>, deadline: Instant) {
     }
 }
 
-/// The compact snapshot; registers refs in the session.
-pub async fn snapshot(page: &Arc<TabPage>, session: &PageSession, options: &Options) -> Result<String> {
+/// The compact snapshot; registers refs in the tab's state.
+pub async fn snapshot(page: &Arc<TabPage>, tab_state: &PageTab, options: &Options) -> Result<String> {
     if options.aria {
-        return aria_snapshot(page, session, options).await;
+        return aria_snapshot(page, tab_state, options).await;
     }
     page.ensure_no_dialog()?;
     if options.diff && options.delta {
         bail!("snapshot accepts either diff or delta, not both");
     }
-    let scope = resolve_scope(page, session, options).await?;
+    let scope = resolve_scope(page, tab_state, options).await?;
     let max_items = options.max_items;
     let deadline = Instant::now() + Duration::from_millis(options.timeout_ms);
     let (root_selector, root_role, root_name) = match &scope.settings_root {
@@ -641,7 +641,7 @@ pub async fn snapshot(page: &Arc<TabPage>, session: &PageSession, options: &Opti
     .to_string();
     let document = page.frame(&page.main_frame()).map(|f| f.generation).unwrap_or(0);
     {
-        let refs = session.refs.lock().unwrap();
+        let refs = tab_state.refs.lock().unwrap();
         if options.diff {
             match refs.previous.as_ref() {
                 None => bail!("snapshot with diff: true needs an earlier snapshot of this page to compare with; call snapshot without diff first"),
@@ -677,7 +677,7 @@ pub async fn snapshot(page: &Arc<TabPage>, session: &PageSession, options: &Opti
         && matches!(tokio::time::timeout(Duration::from_secs(1), page.call_value(&main_frame, "frameInfo", vec![], false)).await, Ok(Ok(info)) if info["contentType"] == "application/pdf");
     // The registry lock never lives across an await.
     let (rendered, compatible_previous, use_diff, remember) = {
-        let mut refs_guard = session.refs.lock().unwrap();
+        let mut refs_guard = tab_state.refs.lock().unwrap();
         let refs = &mut *refs_guard;
         let mut entries: Vec<RenderedEntry> = Vec::new();
         let mut frame_objects: HashMap<String, (String, u64)> = HashMap::new();
@@ -844,7 +844,7 @@ pub async fn snapshot(page: &Arc<TabPage>, session: &PageSession, options: &Opti
 
 /// Playwright's AI-mode aria snapshot with refs, iframe documents merged under their iframe nodes. Refs are shown
 /// as `a<n>` (`f<frame>a<n>` inside iframes) so they never collide with compact snapshot refs.
-async fn aria_snapshot(page: &Arc<TabPage>, session: &PageSession, options: &Options) -> Result<String> {
+async fn aria_snapshot(page: &Arc<TabPage>, tab_state: &PageTab, options: &Options) -> Result<String> {
     page.ensure_no_dialog()?;
     if options.diff || options.delta {
         bail!("diff and delta work with the compact snapshot only; leave mode unset");
@@ -894,7 +894,7 @@ async fn aria_snapshot(page: &Arc<TabPage>, session: &PageSession, options: &Opt
         rewritten.push_str(&frame_skip_note(frames.skipped_deadline, "snapshot deadline reached"));
     }
     {
-        let mut refs = session.refs.lock().unwrap();
+        let mut refs = tab_state.refs.lock().unwrap();
         refs.aria = Some(AriaRefs { tab: page.tab(), main_generation: page.frame(&main).map(|f| f.generation).unwrap_or(0), ids: aria_ref_ids(&rewritten) });
     }
     let lines: Vec<String> = rewritten.lines().map(str::to_string).collect();

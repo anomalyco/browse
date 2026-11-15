@@ -20,14 +20,24 @@ macro_rules! harness {
 }
 
 impl Harness {
+    /// Runs code in the tab the last execute ended in (none at first: `page.goto` opens one), as an agent would.
     async fn run(&self, code: &str) -> (String, browse_core::ToolOutput) {
-        let output = self.call("execute", json!({ "code": code, "timeoutMs": 60000 })).await;
-        (text_of(&output), output)
+        let tab = *self.current.lock().unwrap();
+        let output = self.call("execute", json!({ "code": code, "timeoutMs": 60000, "tab": tab })).await;
+        let text = text_of(&output);
+        if let Some(tab) = text.strip_prefix("tab: ").and_then(|rest| rest.split([' ', '\n']).next()).and_then(|id| id.parse().ok()) {
+            *self.current.lock().unwrap() = Some(tab);
+        }
+        (text, output)
     }
+    /// The result without its leading `tab: <id>` line.
     async fn script(&self, code: &str) -> String {
         let (text, output) = self.run(code).await;
         assert!(!output.is_error, "execute failed:\n{text}\n--- code:\n{code}");
-        text
+        match text.split_once("\n\n") {
+            Some((head, rest)) if head.starts_with("tab: ") => rest.to_string(),
+            _ => text,
+        }
     }
     async fn value(&self, code: &str) -> Value {
         let text = self.script(code).await;
@@ -160,7 +170,8 @@ return { out: await page.locator("#out").textContent(), found: (await snapshot({
     assert_eq!(result["found"], true);
 
     // A screenshot returned is attached; one written to a file isn't.
-    let output = h.call("execute", json!({ "code": "return await page.screenshot()" })).await;
+    let tab = *h.current.lock().unwrap();
+    let output = h.call("execute", json!({ "code": "return await page.screenshot()", "tab": tab })).await;
     assert!(!output.is_error, "{}", text_of(&output));
     assert!(matches!(output.content.get(1), Some(Content::Image { mime_type, .. }) if mime_type == "image/png"), "{}", text_of(&output));
     let saved = h.value(r###"const r = await page.screenshot({ path: "shots/a.png" }); return { path: r.path, exists: (await files.read("shots/a.png", "base64")).length > 100 }"###).await;
@@ -176,7 +187,7 @@ return { out: await page.locator("#out").textContent(), found: (await snapshot({
     let (text, output) = h.run(r###"await files.write("/etc/x", "no")"###).await;
     assert!(output.is_error && text.contains("outside the file roots"), "{text}");
 
-    // context.newPage() leaves `page` on its tab; pages() lists both.
+    // context.newPage() leaves `page` on its tab; pages() lists both (and not the harness's other tab).
     let other = h.server.page("/other", "<!doctype html><title>Other</title><p>other tab</p>");
     let tabs = h
         .value(&format!(

@@ -34,9 +34,9 @@ async fn live_capture_tools() {
     assert_eq!(&pixels.data[..3], &[0x33, 0x66, 0xcc], "the clip is the blue box");
     // Element screenshots by snapshot ref (inside an iframe too) and by selector, resolved by browse-page.
     let page_tool = browse_page::tools().into_iter().find(|tool| tool.spec().name == "snapshot").unwrap();
-    let snapshot = page_tool.call(ctx.clone(), json!({})).await.unwrap();
+    let snapshot = page_tool.call(ctx.clone(), in_tab(json!({}))).await.unwrap();
     assert!(!snapshot.is_error, "{:?}", snapshot.content);
-    let (_, refs) = browse_page::snapshot_refs(&ctx).await;
+    let refs = browse_page::snapshot_refs(&ctx, 1).await.unwrap();
     let inner = refs.iter().find(|(_, role, name)| role == "button" && name.as_deref() == Some("Inner")).expect("iframe button ref");
     let by_ref = call(&ctx, "screenshot", json!({ "ref": inner.0 })).await;
     assert_eq!(png_size(&image(&by_ref)), (120, 40));
@@ -66,7 +66,7 @@ async fn live_capture_tools() {
     let changed = call(&ctx, "screenshot_diff", json!({ "baseline": "shots/base.png" })).await;
     assert_eq!(text(&changed)["matches"], json!(false));
     assert!(text(&changed)["changedPixels"].as_u64().unwrap() >= 200 * 50);
-    let outside = tool("screenshot").call(ctx.clone(), json!({ "path": "/etc/shot.png" })).await.unwrap();
+    let outside = tool("screenshot").call(ctx.clone(), in_tab(json!({ "path": "/etc/shot.png" }))).await.unwrap();
     assert!(outside.is_error);
     #[cfg(unix)]
     {
@@ -75,7 +75,7 @@ async fn live_capture_tools() {
         assert_eq!(std::fs::metadata(root.join("shots")).unwrap().mode() & 0o777, 0o700);
     }
     call(&ctx, "screenshot", json!({ "format": "jpeg", "path": "shots/photo.jpg" })).await;
-    let not_png = tool("screenshot_diff").call(ctx.clone(), json!({ "baseline": "shots/photo.jpg" })).await.unwrap();
+    let not_png = tool("screenshot_diff").call(ctx.clone(), in_tab(json!({ "baseline": "shots/photo.jpg" }))).await.unwrap();
     assert!(not_png.is_error && format!("{:?}", not_png.content).contains("must be a PNG"), "{:?}", not_png.content);
 
     // Network capture with redaction, inline and as HAR.

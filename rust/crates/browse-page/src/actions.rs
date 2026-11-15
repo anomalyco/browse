@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use crate::human::{self, Point};
 use crate::input::Input;
 use crate::page::{Element, TabPage, v};
-use crate::state::PageSession;
+use crate::state::PageTab;
 use crate::target::{self, Resolved, ResolveOptions, Spec};
 
 const RETRY: Duration = Duration::from_millis(100);
@@ -45,11 +45,11 @@ impl From<anyhow::Error> for Prepare {
 }
 
 /// Resolves the target and returns it with the page point to send input to.
-pub async fn locate(page: &Arc<TabPage>, session: &PageSession, input: &mut Input<'_>, spec: &Spec, options: PointerOptions) -> Result<(Resolved, Point)> {
+pub async fn locate(page: &Arc<TabPage>, tab_state: &PageTab, input: &mut Input<'_>, spec: &Spec, options: PointerOptions) -> Result<(Resolved, Point)> {
     let deadline = Instant::now() + options.timeout;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(100));
-        let resolved = target::resolve(page, session, spec, ResolveOptions { timeout: remaining, act: true }).await?;
+        let resolved = target::resolve(page, tab_state, spec, ResolveOptions { timeout: remaining, act: true }).await?;
         match prepare(page, input, &resolved, deadline, options).await {
             Ok(point) => return Ok((resolved, point)),
             Err(Prepare::Detached) if Instant::now() < deadline => {

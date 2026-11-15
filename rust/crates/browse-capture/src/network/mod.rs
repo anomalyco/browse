@@ -1,4 +1,4 @@
-//! Session network capture over the CDP Network domain (port of cli/src/network-capture.ts).
+//! A tab's network capture over the CDP Network domain (port of cli/src/network-capture.ts).
 
 mod model;
 
@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use base64::Engine;
-use browse_core::{Cdp, CdpEvent, SessionState, TabId, Tool, ToolContext, ToolOutput, ToolSpec};
+use browse_core::{Cdp, CdpEvent, TabId, TabState, Tool, ToolContext, ToolOutput, ToolSpec};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::{Semaphore, broadcast};
@@ -44,7 +44,7 @@ struct Active {
     _events: TaskGuard,
     _expiry: TaskGuard,
     _busy: BusyGuard,
-    state: Arc<SessionState>,
+    state: Arc<TabState>,
 }
 
 /// Shared with browse-page: it keeps the Network domain on while a capture runs, and capture leaves it on while
@@ -52,7 +52,7 @@ struct Active {
 const CAPTURE_KEY: &str = "browse.network.capture";
 const OFFLINE_KEY: &str = "browse.network.offline";
 
-async fn set_capture_flag(state: &SessionState, on: bool) {
+async fn set_capture_flag(state: &TabState, on: bool) {
     state.inner().lock().await.insert(CAPTURE_KEY.into(), Box::new(on));
 }
 
@@ -608,7 +608,7 @@ fn network_enable_params() -> Value {
 }
 
 async fn start(ctx: &ToolContext, args: &Value) -> anyhow::Result<ToolOutput> {
-    let tab = target_tab(ctx, args).await?;
+    let tab = target_tab(args)?;
     let strings = |name: &str| -> anyhow::Result<Vec<String>> {
         match args.get(name) {
             None | Some(Value::Null) => Ok(Vec::new()),
@@ -626,12 +626,13 @@ async fn start(ctx: &ToolContext, args: &Value) -> anyhow::Result<ToolOutput> {
         bodies: arg_bool(args, "bodies")?.unwrap_or(true),
     };
     let max_duration = arg_int(args, "maxDurationMs", 1_000, 24 * 60 * 60_000)?.unwrap_or(DEFAULT_MAX_DURATION_MS);
-    let capture = state::get(ctx).await;
+    let tab_state = ctx.state(tab).await?;
+    let capture = state::get(ctx, tab).await?;
     let mut network = capture.network.lock().await;
     if network.active.is_some() {
-        bail_user!("network capture is already active for this session; stop or cancel it first");
+        bail_user!("network capture is already active in tab {tab}; stop or cancel it first");
     }
-    let cdp = ctx.browser.cdp(&ctx.session, tab).await?;
+    let cdp = ctx.browser.cdp(tab).await?;
     let mut events = cdp.events();
     cdp.send("Network.enable", network_enable_params(), None).await?;
     let shared = Arc::new(Shared {
@@ -691,10 +692,10 @@ async fn start(ctx: &ToolContext, args: &Value) -> anyhow::Result<ToolOutput> {
         shared,
         _events: TaskGuard::new(task.abort_handle()),
         _expiry: TaskGuard::new(expiry.abort_handle()),
-        _busy: BusyGuard::new(ctx, "network"),
-        state: ctx.state.clone(),
+        _busy: BusyGuard::new(ctx, tab, "network"),
+        state: tab_state.clone(),
     });
-    set_capture_flag(&ctx.state, true).await;
+    set_capture_flag(&tab_state, true).await;
     json_output(&status_of(&network))
 }
 
@@ -737,8 +738,8 @@ fn stop_result(active: &Active, entries: &[CapturedEntry]) -> Value {
     result
 }
 
-async fn stop(ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
-    let capture = state::get(ctx).await;
+async fn stop(ctx: &ToolContext, args: &Value) -> anyhow::Result<ToolOutput> {
+    let capture = state::get(ctx, target_tab(args)?).await?;
     let mut network = capture.network.lock().await;
     let Some(active) = network.active.take() else {
         if let Some(result) = network.ended_result.take() {
@@ -747,7 +748,7 @@ async fn stop(ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
         }
         match network.ended.take() {
             Some(reason) => bail_user!("network capture is not active: it ended because {reason}. Start a new one."),
-            None => bail_user!("network capture is not active for this session"),
+            None => bail_user!("network capture is not active in this tab"),
         }
     };
     let mut active = active;
@@ -763,7 +764,7 @@ impl Tool for NetworkTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "network".into(),
-            description: "Capture a tab's network traffic. One capture per session, bound to the tab it started on. \
+            description: "Capture a tab's network traffic. One capture per tab. \
                 start begins capturing (filters optional); status returns counters only; stop ends it and returns every \
                 exchange (method, url, headers, status, bodies; 1000 requests max); cancel discards it. JSON, form \
                 and multipart bodies are returned as text (≤1 MB each, 25 MB per capture); other bodies (HTML, \
@@ -784,7 +785,7 @@ impl Tool for NetworkTool {
                     "bodies": { "type": "boolean", "description": "start: capture request and response bodies (default true)." },
                     "maxDurationMs": { "type": "integer", "minimum": 1000, "maximum": 86_400_000, "description": "start: end and discard the capture after this long (default 1800000)." }
                 },
-                "required": ["action"],
+                "required": ["tab", "action"],
                 "additionalProperties": false
             }),
         }
@@ -795,14 +796,14 @@ impl Tool for NetworkTool {
             async {
                 match arg_action(&args, &["start", "status", "stop", "cancel"])? {
                     "start" => start(&ctx, &args).await,
-                    "stop" => stop(&ctx).await,
+                    "stop" => stop(&ctx, &args).await,
                     "status" => {
-                        let capture = state::get(&ctx).await;
+                        let capture = state::get(&ctx, target_tab(&args)?).await?;
                         let network = capture.network.lock().await;
                         json_output(&status_of(&network))
                     }
                     _ => {
-                        let capture = state::get(&ctx).await;
+                        let capture = state::get(&ctx, target_tab(&args)?).await?;
                         let mut network = capture.network.lock().await;
                         let cancelled = network.active.take().is_some() || network.ended_result.take().is_some();
                         network.ended = None;

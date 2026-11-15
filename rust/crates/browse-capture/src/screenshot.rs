@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use browse_page::{Element, TabPage};
 
-use crate::{arg_bool, arg_f64, arg_int, arg_str, arg_tab, bail_user, files, labels, respond, state, tab_schema, target_tab};
+use crate::{arg_bool, arg_f64, arg_int, arg_str, bail_user, files, labels, respond, state, tab_schema, target_tab};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Format {
@@ -171,7 +171,7 @@ async fn resolve(ctx: &ToolContext, args: &Value, region: Region) -> anyhow::Res
         Region::Element { reference, selector } => {
             let timeout = Duration::from_millis(arg_int(args, "timeoutMs", 0, 60_000)?.unwrap_or(5_000) as u64);
             let (page, element, _) =
-                browse_page::resolve_element(ctx, arg_tab(args)?, reference.as_deref(), selector.as_deref(), timeout).await?;
+                browse_page::resolve_element(ctx, target_tab(args)?, reference.as_deref(), selector.as_deref(), timeout).await?;
             let mut rect = element_rect(&page, &element).await?;
             let viewport = page::viewport(page.cdp().as_ref()).await?;
             if outside(&viewport, rect) && rect.2 <= viewport.width && rect.3 <= viewport.height {
@@ -186,8 +186,8 @@ async fn resolve(ctx: &ToolContext, args: &Value, region: Region) -> anyhow::Res
             Ok((page.tab(), page.cdp().clone(), Region::Clip(x, y, w, h)))
         }
         region => {
-            let tab = target_tab(ctx, args).await?;
-            Ok((tab, ctx.browser.cdp(&ctx.session, tab).await?, region))
+            let tab = target_tab(args)?;
+            Ok((tab, ctx.browser.cdp(tab).await?, region))
         }
     }
 }
@@ -331,7 +331,7 @@ impl Tool for ScreenshotTool {
                     "format": { "type": "string", "enum": ["png", "jpeg", "webp"], "description": "Image format (default png; jpeg/webp are much smaller)." },
                     "quality": { "type": "integer", "minimum": 0, "maximum": 100, "description": "jpeg/webp quality (default 80)." },
                     "fullPage": { "type": "boolean", "description": "Capture the whole scrollable page instead of the viewport." },
-                    "ref": { "type": "string", "description": "Snapshot ref of the element to capture (e.g. \"e12\" or an iframe ref \"f1e3\"); its tab is used unless tab is given." },
+                    "ref": { "type": "string", "description": "Snapshot ref of the element to capture (e.g. \"e12\" or an iframe ref \"f1e3\"); from the tab's latest snapshot." },
                     "selector": { "type": "string", "description": "Selector of the element to capture, as the page tools accept it." },
                     "timeoutMs": { "type": "integer", "minimum": 0, "maximum": 60000, "description": "How long to wait for the ref/selector element (default 5000)." },
                     "clip": {
@@ -345,6 +345,7 @@ impl Tool for ScreenshotTool {
                     "maxLabels": { "type": "integer", "minimum": 1, "maximum": 300, "description": "Most elements to label (default 80)." },
                     "path": { "type": "string", "description": "Save here instead of returning the image: absolute inside the file roots (in a private folder you own, not directly in a shared temp folder), or relative (saved in a private folder in the first root). Replaces an existing file." }
                 },
+                "required": ["tab"],
                 "additionalProperties": false
             }),
         }
@@ -353,6 +354,7 @@ impl Tool for ScreenshotTool {
     async fn call(&self, ctx: ToolContext, args: Value) -> anyhow::Result<ToolOutput> {
         respond(
             async {
+                target_tab(&args)?;
                 let region = region(&args)?;
                 let with_labels = arg_bool(&args, "labels")?.unwrap_or(false);
                 let format = match arg_str(&args, "format")? {
@@ -375,7 +377,7 @@ impl Tool for ScreenshotTool {
                 let mut found = None;
                 if with_labels {
                     let max = arg_int(&args, "maxLabels", 1, 300)?.unwrap_or(80) as u32;
-                    let capture_state = state::get(&ctx).await;
+                    let capture_state = state::get(&ctx, tab).await?;
                     let mut worlds = capture_state.worlds.lock().await;
                     let value = page::evaluate(cdp.as_ref(), &mut worlds, tab, &labels::script(max)).await?;
                     found = Some(serde_json::from_value::<labels::Found>(value)?.labels);
@@ -458,7 +460,7 @@ impl Tool for ScreenshotDiffTool {
                     "diffPath": { "type": "string", "description": "Save the diff PNG here instead of returning it." },
                     "currentPath": { "type": "string", "description": "Also save the fresh screenshot here (e.g. as the next baseline)." }
                 },
-                "required": ["baseline"],
+                "required": ["tab", "baseline"],
                 "additionalProperties": false
             }),
         }
@@ -467,6 +469,7 @@ impl Tool for ScreenshotDiffTool {
     async fn call(&self, ctx: ToolContext, args: Value) -> anyhow::Result<ToolOutput> {
         respond(
             async {
+                target_tab(&args)?;
                 let Some(baseline) = arg_str(&args, "baseline")? else { bail_user!("baseline is required") };
                 let operation = "screenshot_diff baseline";
                 let bytes = files::read(&ctx.file_roots, baseline, operation, pixeldiff::MAX_IMAGE_BYTES)

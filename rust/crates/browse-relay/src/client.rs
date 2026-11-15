@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
-use browse_core::{SessionId, ToolCallRequest, ToolOutput, ToolSpec};
+use browse_core::{ToolCallRequest, ToolOutput, ToolSpec};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -130,11 +130,11 @@ pub async fn list_tools(endpoint: &Endpoint) -> anyhow::Result<Vec<ToolSpec>> {
     Ok(serde_json::from_slice(&response.body)?)
 }
 
-/// Calls a tool as `caller` (see `caller_session_id`). Long calls (handoffs wait for the user) get no deadline.
-pub async fn call_tool(endpoint: &Endpoint, caller: &SessionId, name: &str, arguments: Value) -> anyhow::Result<ToolOutput> {
+/// Calls a tool. Long calls (handoffs wait for the user) get no deadline.
+pub async fn call_tool(endpoint: &Endpoint, name: &str, arguments: Value) -> anyhow::Result<ToolOutput> {
     let auth = format!("Bearer {}", endpoint.token);
     let pid = std::process::id().to_string();
-    let body = serde_json::to_vec(&ToolCallRequest { name: name.into(), arguments, session: caller.clone() })?;
+    let body = serde_json::to_vec(&ToolCallRequest { name: name.into(), arguments })?;
     let headers = [("Authorization", auth.as_str()), ("OpenCode-Browser-Client-Pid", pid.as_str())];
     let response = request(endpoint.port, "POST", "/tools/call", &headers, Some(&body), Duration::from_secs(24 * 3600)).await?;
     if response.status != 200 {
@@ -142,33 +142,4 @@ pub async fn call_tool(endpoint: &Endpoint, caller: &SessionId, name: &str, argu
         bail!("{message}");
     }
     Ok(serde_json::from_slice(&response.body)?)
-}
-
-/// A browse session id for an agent the client names (an OpenCode session id), valid for the relay: `oc-` and the
-/// id in lowercase, with a short hash when lowercasing or replacing characters changed it.
-pub fn caller_session_id(raw: &str) -> SessionId {
-    let cleaned: String = raw.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c.to_ascii_lowercase() } else { '-' }).collect();
-    let mut id = if cleaned.starts_with("oc-") { cleaned.clone() } else { format!("oc-{cleaned}") };
-    if cleaned != raw {
-        use sha2::Digest;
-        let digest = sha2::Sha256::digest(raw.as_bytes());
-        id.truncate(54);
-        id.push('-');
-        id.push_str(&digest[..4].iter().map(|b| format!("{b:02x}")).collect::<String>());
-    }
-    id.truncate(63);
-    id
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn caller_ids_are_valid_session_ids() {
-        for raw in ["ses_7b9cQx", "oc-ses-abc", "ses abc/def"] {
-            let id = super::caller_session_id(raw);
-            assert!(crate::sessions::valid_session_id(&id), "{id}");
-        }
-        assert_eq!(super::caller_session_id("ses-abc"), "oc-ses-abc");
-        assert_ne!(super::caller_session_id("ses_A"), super::caller_session_id("ses_a"));
-    }
 }

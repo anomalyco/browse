@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
-use browse_core::{Tool, ToolContext, ToolOutput, ToolSpec};
+use browse_core::{TabOptions, TabState, Tool, ToolContext, ToolOutput, ToolSpec};
 use serde_json::{Map, Value, json};
 
 use crate::actions::{self, PointerOptions};
@@ -18,7 +18,7 @@ use crate::eval;
 use crate::navigation::{self, NavResult, WaitUntil};
 use crate::page::{Arg, DialogPolicy, ElementOr, TabPage, truncate, v};
 use crate::snapshot;
-use crate::state::{self, PageSession};
+use crate::state::{self, PageTab};
 use crate::target::{self, ResolveOptions, Spec};
 
 type Future_<'a> = Pin<Box<dyn Future<Output = Result<ToolOutput>> + Send + 'a>>;
@@ -98,10 +98,6 @@ fn overall_limit(name: &str, args: &Value) -> Duration {
     Duration::from_millis(ms.min(600_000) + 10_000)
 }
 
-fn tab_arg(args: &Value) -> Option<i64> {
-    args.get("tab").and_then(Value::as_i64)
-}
-
 fn timeout_arg(args: &Value, default_ms: u64) -> Duration {
     Duration::from_millis(args.get("timeout").and_then(Value::as_u64).unwrap_or(default_ms).clamp(0, 300_000))
 }
@@ -118,25 +114,28 @@ const ACTION_TIMEOUT_MS: u64 = 10_000;
 
 struct Ctx {
     ctx: ToolContext,
-    session: Arc<PageSession>,
+    /// The tab's state, and browse-page's part of it (refs).
+    state: Arc<TabState>,
+    tab_state: Arc<PageTab>,
     page: Arc<TabPage>,
 }
 
-/// The session state and the tab to act on: `tab`, else the tab a ref belongs to, else the current tab.
+/// The tab a call names (`tab` is required) and its page.
 async fn open(ctx: &ToolContext, args: &Value) -> Result<Ctx> {
-    let session = state::session(ctx).await;
-    let mut tab = tab_arg(args);
-    if tab.is_none() && args.get("ref").and_then(Value::as_str).is_some() {
-        tab = session.ref_tab();
-    }
-    let page = session.page(ctx, tab).await?;
-    Ok(Ctx { ctx: ctx.clone(), session, page })
+    open_tab(ctx, browse_core::require_tab(args)?).await
+}
+
+async fn open_tab(ctx: &ToolContext, tab: i64) -> Result<Ctx> {
+    let state = ctx.state(tab).await?;
+    let tab_state = state::tab(ctx, tab).await?;
+    let page = tab_state.page(ctx).await?;
+    Ok(Ctx { ctx: ctx.clone(), state, tab_state, page })
 }
 
 async fn human_enabled(ctx: &ToolContext, page: &TabPage) -> bool {
     match crate::human::override_from_env() {
         Some(value) => value,
-        None => ctx.browser.human_input(&ctx.session, page.tab()).await,
+        None => ctx.browser.human_input(page.tab()).await,
     }
 }
 
@@ -206,11 +205,56 @@ fn target_label(spec: &Spec, label: &str) -> Value {
 
 // navigate
 
+/// navigate with `tab` goes there in that tab; without, it opens a new agent tab for the URL and says its id.
 async fn navigate(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
-    let c = open(&ctx, &args).await?;
-    let action = str_arg(&args, "action").unwrap_or(if args.get("url").is_some() { "goto" } else { "" });
-    let wait = WaitUntil::parse(str_arg(&args, "waitUntil"))?;
-    let timeout = timeout_arg(&args, 30_000);
+    if args.get("tab").is_some_and(|tab| !tab.is_null()) {
+        let given = TabOptions::given(&args);
+        if !given.is_empty() {
+            bail!("{} only apply when navigate opens a tab (without tab); this tab keeps the options it was opened with", given.join(", "));
+        }
+        let c = open(&ctx, &args).await?;
+        return navigate_in(&c, &args).await;
+    }
+    let action = str_arg(&args, "action").unwrap_or("goto");
+    if action != "goto" {
+        bail!("navigate {action} needs the tab to act on (`tab`); without tab, navigate opens a new tab at `url`");
+    }
+    let url = navigation::normalize_url(str_arg(&args, "url").ok_or_else(|| anyhow!("navigate needs a url (and `tab` to navigate an open tab; without it, it opens a new one)"))?)?;
+    let options = TabOptions::from_args(&args)?;
+    if options.read_only {
+        // A read-only tab refuses navigations, so it opens straight at the URL.
+        let info = ctx.browser.open_tab(Some(&url), &options).await?;
+        let c = open_tab(&ctx, info.tab).await?;
+        let mut out = Map::new();
+        out.insert("tab".into(), json!(info.tab));
+        out.insert("url".into(), json!(c.page.main_url()));
+        let main = c.page.main_frame();
+        if let Ok(Ok(info)) = tokio::time::timeout(Duration::from_secs(2), c.page.call_value(&main, "frameInfo", vec![], false)).await {
+            out.insert("title".into(), info["title"].clone());
+        }
+        c.page.release().await;
+        return Ok(json_output(Value::Object(out)));
+    }
+    let info = ctx.browser.open_tab(None, &options).await?;
+    let opened = async {
+        let c = open_tab(&ctx, info.tab).await?;
+        navigate_in(&c, &args).await
+    }
+    .await;
+    match opened {
+        Ok(output) => Ok(output),
+        Err(error) => {
+            // Nothing to keep: the tab only ever showed about:blank.
+            let _ = ctx.browser.close_tab(info.tab).await;
+            Err(error)
+        }
+    }
+}
+
+async fn navigate_in(c: &Ctx, args: &Value) -> Result<ToolOutput> {
+    let action = str_arg(args, "action").unwrap_or(if args.get("url").is_some() { "goto" } else { "" });
+    let wait = WaitUntil::parse(str_arg(args, "waitUntil"))?;
+    let timeout = timeout_arg(args, 30_000);
     // A beforeunload dialog (or one under an auto policy) is being answered in the background: let it finish.
     if c.page.dialog().is_some() && c.page.blocking_dialog().is_none() {
         c.page.wait_until(Duration::from_secs(3), Duration::from_millis(50), |page| page.dialog().is_none()).await;
@@ -220,9 +264,9 @@ async fn navigate(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     let mut out = Map::new();
     let nav = match action {
         "goto" => {
-            let url = str_arg(&args, "url").ok_or_else(|| anyhow!("navigate needs a url"))?;
+            let url = str_arg(args, "url").ok_or_else(|| anyhow!("navigate needs a url"))?;
             let url = navigation::normalize_url(url)?;
-            Some(navigation::goto(&c.page, &url, wait, timeout, str_arg(&args, "referrer")).await?)
+            Some(navigation::goto(&c.page, &url, wait, timeout, str_arg(args, "referrer")).await?)
         }
         "back" | "forward" => {
             let nav = navigation::history(&c.page, if action == "back" { -1 } else { 1 }, wait, timeout).await?;
@@ -231,7 +275,7 @@ async fn navigate(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
             }
             nav
         }
-        "reload" => Some(navigation::reload(&c.page, wait, timeout, bool_arg(&args, "ignoreCache")).await?),
+        "reload" => Some(navigation::reload(&c.page, wait, timeout, bool_arg(args, "ignoreCache")).await?),
         "" => bail!("navigate needs a url, or action back, forward or reload"),
         other => bail!("action must be goto, back, forward or reload; got {other:?}"),
     };
@@ -261,6 +305,7 @@ async fn navigate(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
         extra.entry("warning").or_insert(warning);
     }
     out.extend(extra);
+    out.insert("tab".into(), json!(c.page.tab()));
     c.page.release().await;
     Ok(json_output(Value::Object(out)))
 }
@@ -270,7 +315,7 @@ async fn navigate(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
 async fn snapshot_tool(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     let c = open(&ctx, &args).await?;
     let options = snapshot::Options::from_args(&args);
-    let output = snapshot::snapshot(&c.page, &c.session, &options).await;
+    let output = snapshot::snapshot(&c.page, &c.tab_state, &options).await;
     c.page.release().await;
     let text = output?;
     Ok(ToolOutput::text(if text.is_empty() { "(the page has nothing to show)".to_string() } else { text }))
@@ -297,7 +342,7 @@ async fn click(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
             let mut out = Map::new();
             let at = match (&spec, point) {
                 (Some(spec), _) => {
-                    let (resolved, at) = actions::locate(&c.page, &c.session, input, spec, options).await?;
+                    let (resolved, at) = actions::locate(&c.page, &c.tab_state, input, spec, options).await?;
                     out.insert("clicked".into(), target_label(spec, &resolved.label));
                     at
                 }
@@ -333,7 +378,7 @@ async fn hover(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
             let mut out = Map::new();
             let at = match (&spec, point) {
                 (Some(spec), _) => {
-                    let (resolved, at) = actions::locate(&c.page, &c.session, input, spec, options).await?;
+                    let (resolved, at) = actions::locate(&c.page, &c.tab_state, input, spec, options).await?;
                     out.insert("hovered".into(), target_label(spec, &resolved.label));
                     at
                 }
@@ -412,7 +457,7 @@ async fn fill(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
 }
 
 async fn fill_one(c: &Ctx, input: &mut Input<'_>, field: &Field, timeout: Duration, force: bool) -> Result<Value> {
-    let resolved = target::resolve(&c.page, &c.session, &field.spec, ResolveOptions { timeout, act: true }).await?;
+    let resolved = target::resolve(&c.page, &c.tab_state, &field.spec, ResolveOptions { timeout, act: true }).await?;
     let label = target_label(&field.spec, &resolved.label);
     let kind = c.page.call_element(&resolved.element, "kind", vec![], false).await?;
     let kind = kind.as_str().unwrap_or("other").to_string();
@@ -428,7 +473,7 @@ async fn fill_one(c: &Ctx, input: &mut Input<'_>, field: &Field, timeout: Durati
                 if kind == "radio" && !desired {
                     bail!("{} is a radio button; check another option instead of unchecking it", label);
                 }
-                let (_, at) = actions::locate(&c.page, &c.session, input, &field.spec, PointerOptions { timeout, force, position: None, hit_test: true, enabled: true }).await?;
+                let (_, at) = actions::locate(&c.page, &c.tab_state, input, &field.spec, PointerOptions { timeout, force, position: None, hit_test: true, enabled: true }).await?;
                 input.click(at, "left", 1).await?;
                 let now = c.page.call_element(&resolved.element, "isChecked", vec![], true).await.ok().and_then(|v| v.as_bool());
                 if now == Some(current) {
@@ -481,11 +526,11 @@ async fn focus_target(c: &Ctx, input: &mut Input<'_>, args: &Value) -> Result<Op
     let timeout = timeout_arg(args, ACTION_TIMEOUT_MS);
     if input.human() {
         // A person clicks into the field before typing, unless it already has focus.
-        let resolved = target::resolve(&c.page, &c.session, &spec, ResolveOptions { timeout, act: true }).await?;
+        let resolved = target::resolve(&c.page, &c.tab_state, &spec, ResolveOptions { timeout, act: true }).await?;
         if c.page.call_element(&resolved.element, "isFocused", vec![], false).await?.as_bool() == Some(true) {
             return Ok(Some(target_label(&spec, &resolved.label)));
         }
-        let (resolved, at) = actions::locate(&c.page, &c.session, input, &spec, pointer_options(args, true)).await?;
+        let (resolved, at) = actions::locate(&c.page, &c.tab_state, input, &spec, pointer_options(args, true)).await?;
         let was_focused = c.page.call_element(&resolved.element, "isFocused", vec![], false).await?.as_bool() == Some(true);
         input.click(at, "left", 1).await?;
         let label = target_label(&spec, &resolved.label);
@@ -502,7 +547,7 @@ async fn focus_target(c: &Ctx, input: &mut Input<'_>, args: &Value) -> Result<Op
         }
         return Ok(Some(label));
     }
-    let resolved = target::resolve(&c.page, &c.session, &spec, ResolveOptions { timeout, act: true }).await?;
+    let resolved = target::resolve(&c.page, &c.tab_state, &spec, ResolveOptions { timeout, act: true }).await?;
     let label = target_label(&spec, &resolved.label);
     let focused = c.page.call_element(&resolved.element, "focusForTyping", vec![], true).await?;
     if focused.as_str() == Some("error:notconnected") {
@@ -618,7 +663,7 @@ async fn select(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     let timeout = timeout_arg(&args, ACTION_TIMEOUT_MS);
     run_action(&c, AfterOptions::default(), move |c, _input| {
         Box::pin(async move {
-            let resolved = target::resolve(&c.page, &c.session, &spec, ResolveOptions { timeout, act: true }).await?;
+            let resolved = target::resolve(&c.page, &c.tab_state, &spec, ResolveOptions { timeout, act: true }).await?;
             let selected = select_options(c, &resolved.element, &options, timeout).await?;
             let mut out = Map::new();
             out.insert("target".into(), target_label(&spec, &resolved.label));
@@ -655,7 +700,7 @@ async fn drag(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
             let mut out = Map::new();
             let from = match &from_spec {
                 Some(spec) => {
-                    let (resolved, at) = actions::locate(&c.page, &c.session, input, spec, options).await?;
+                    let (resolved, at) = actions::locate(&c.page, &c.tab_state, input, spec, options).await?;
                     out.insert("from".into(), target_label(spec, &resolved.label));
                     at
                 }
@@ -667,7 +712,7 @@ async fn drag(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
             input.down("left", 1).await?;
             let to = match &to_spec {
                 Some(spec) => {
-                    let (resolved, at) = actions::locate(&c.page, &c.session, input, spec, PointerOptions { hit_test: false, ..options }).await?;
+                    let (resolved, at) = actions::locate(&c.page, &c.tab_state, input, spec, PointerOptions { hit_test: false, ..options }).await?;
                     out.insert("to".into(), target_label(spec, &resolved.label));
                     at
                 }
@@ -713,7 +758,7 @@ async fn scroll(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
             let mut out = Map::new();
             let main = c.page.main_frame();
             let element = match &spec {
-                Some(spec) => Some(target::resolve(&c.page, &c.session, spec, ResolveOptions { timeout, act: true }).await?),
+                Some(spec) => Some(target::resolve(&c.page, &c.tab_state, spec, ResolveOptions { timeout, act: true }).await?),
                 None => None,
             };
             if let Some(resolved) = &element {
@@ -744,7 +789,7 @@ async fn scroll(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
             } else if dx != 0.0 || dy != 0.0 {
                 let at = match &spec {
                     Some(spec) => {
-                        let (_, at) = actions::locate(&c.page, &c.session, input, spec, PointerOptions { timeout, force: false, position: None, hit_test: false, enabled: false }).await?;
+                        let (_, at) = actions::locate(&c.page, &c.tab_state, input, spec, PointerOptions { timeout, force: false, position: None, hit_test: false, enabled: false }).await?;
                         at
                     }
                     None => {
@@ -841,13 +886,13 @@ async fn eval(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     let spec = Spec::from_args(&args);
     let arg = args.get("arg").cloned();
     let element = match &spec {
-        Some(spec) => Some(target::resolve(&c.page, &c.session, spec, ResolveOptions { timeout: timeout.min(Duration::from_millis(ACTION_TIMEOUT_MS)), act: false }).await?),
+        Some(spec) => Some(target::resolve(&c.page, &c.tab_state, spec, ResolveOptions { timeout: timeout.min(Duration::from_millis(ACTION_TIMEOUT_MS)), act: false }).await?),
         None => None,
     };
     let frame = match (&element, str_arg(&args, "frame")) {
         (Some(resolved), _) => resolved.element.frame.clone(),
         (None, Some(selector)) => {
-            let found = target::resolve(&c.page, &c.session, &Spec::Selector(selector.into()), ResolveOptions { timeout: Duration::from_millis(ACTION_TIMEOUT_MS), act: false }).await?;
+            let found = target::resolve(&c.page, &c.tab_state, &Spec::Selector(selector.into()), ResolveOptions { timeout: Duration::from_millis(ACTION_TIMEOUT_MS), act: false }).await?;
             c.page.content_frame(&found.element, Duration::from_secs(5)).await?
         }
         (None, None) => c.page.main_frame(),
@@ -941,7 +986,7 @@ async fn wait_for(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     }
     let timeout = timeout_arg(&args, ACTION_TIMEOUT_MS);
     let started = std::time::Instant::now();
-    let waited = navigation::wait_for(&c.page, &c.session, &conditions, timeout).await;
+    let waited = navigation::wait_for(&c.page, &c.tab_state, &conditions, timeout).await;
     c.page.release().await;
     let waited = waited?;
     let mut out = Map::new();
@@ -1012,7 +1057,7 @@ async fn upload(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     let timeout = timeout_arg(&args, ACTION_TIMEOUT_MS);
     run_action(&c, AfterOptions { expect_navigation: false, ..AfterOptions::default() }, move |c, _input| {
         Box::pin(async move {
-            let resolved = target::resolve(&c.page, &c.session, &spec, ResolveOptions { timeout, act: true }).await?;
+            let resolved = target::resolve(&c.page, &c.tab_state, &spec, ResolveOptions { timeout, act: true }).await?;
             let input = match c.page.call_element_result(&resolved.element.frame, "fileInput", vec![Arg::Element(resolved.element.clone())], true).await? {
                 ElementOr::Element(element) => element,
                 ElementOr::Status(_) => bail!("{} is not a file input (input[type=file]) or its label", target_label(&spec, &resolved.label)),
@@ -1295,13 +1340,13 @@ async fn emulate(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
             }
             .await;
             if result.is_ok() {
-                state::set_offline(&c.ctx, &c.session, page.tab(), true).await;
+                state::set_offline(&c.state, true).await;
             }
             result
         } else {
             let _ = page.send("Network.emulateNetworkConditions", conditions, None).await;
-            state::set_offline(&c.ctx, &c.session, page.tab(), false).await;
-            if !state::network_capture_active(&c.ctx).await {
+            state::set_offline(&c.state, false).await;
+            if !state::network_capture_active(&c.state).await {
                 let _ = page.send("Network.disable", json!({}), None).await;
             }
             Ok(Value::Null)
@@ -1444,7 +1489,7 @@ async fn webmcp_main_world(page: &Arc<TabPage>, frame: &str, method: &str, args:
 const TARGET_DOC: &str = "Address elements by `ref` from the latest snapshot (\"e12\"; \"a5\" / \"f1a5\" from an aria snapshot) or by `selector`: CSS, or Playwright selectors such as `role=button[name=\"Save\"]`, `text=Sign in`, `label=Email`, `placeholder=Search`, `testid=submit`, chained with `>>` (`form >> role=button`, `>> nth=0`). Enter an iframe with `iframe[title=\"Pay\"] >> frame >> role=button[name=\"Pay\"]`.";
 
 fn tab_prop() -> Value {
-    json!({ "type": "integer", "description": "Tab id. Defaults to the tab of `ref`, else the session's current tab." })
+    browse_core::tab_schema()
 }
 
 fn target_props(mut props: Map<String, Value>) -> Map<String, Value> {
@@ -1454,7 +1499,12 @@ fn target_props(mut props: Map<String, Value>) -> Map<String, Value> {
     props
 }
 
+/// A tool's input schema; every page tool but navigate needs `tab`.
 fn object(props: Map<String, Value>, required: &[&str]) -> Value {
+    let mut required: Vec<&str> = required.to_vec();
+    if props.contains_key("tab") && !required.contains(&"tab") {
+        required.insert(0, "tab");
+    }
     json!({ "type": "object", "properties": props, "required": required, "additionalProperties": false })
 }
 
@@ -1462,21 +1512,20 @@ fn props(value: Value) -> Map<String, Value> {
     map(value)
 }
 
-const NAVIGATE: &str = "Go to a URL, or back/forward/reload, and wait for the page. Returns JSON: url, title, status (the HTTP status, when known), navigated, from, and when relevant redirects, pending (a navigation still loading when the timeout hit; url is what the tab shows meanwhile), dialog, newTabs, challenge (a bot check or block page was detected; follow its warning, usually handoff) and warning. An HTTP error status is a result, not a failure. A bare host gets https:// (\":3000\" means http://localhost:3000); http(s), about:blank, data:, blob:, file: and view-source: URLs are used as given; javascript: (use eval) and app schemes such as mailto: or tel: are refused. Navigations outside a session's domain allowlist are refused.";
+const NAVIGATE: &str = "Open a page. Without `tab` it opens a new background tab at `url` and returns its id as `tab`: keep it and pass it to every other tool (the options group, allowedOrigins, readOnly, keepVisible and browser apply to the new tab and the popups it opens). With `tab` it goes to `url` in that tab, or back/forward/reload, and waits for the page. Returns JSON: tab, url, title, status (the HTTP status, when known), navigated, from, and when relevant redirects, pending (a navigation still loading when the timeout hit; url is what the tab shows meanwhile), dialog, newTabs, challenge (a bot check or block page was detected; follow its warning, usually handoff) and warning. An HTTP error status is a result, not a failure. A bare host gets https:// (\":3000\" means http://localhost:3000); http(s), about:blank, data:, blob:, file: and view-source: URLs are used as given; javascript: (use eval) and app schemes such as mailto: or tel: are refused. Navigations outside the tab's domain allowlist are refused.";
 
 fn navigate_schema() -> Value {
-    object(
-        props(json!({
+    let mut p = TabOptions::schema();
+    p.extend(props(json!({
             "url": { "type": "string", "description": "Where to go. Required for goto." },
             "action": { "type": "string", "enum": ["goto", "back", "forward", "reload"], "description": "Default goto when url is given." },
             "waitUntil": { "type": "string", "enum": ["load", "domcontentloaded", "settle", "commit", "none"], "description": "load (default); settle also waits for the network and DOM to go quiet (good before a snapshot of an app); commit returns once the new document starts." },
             "timeout": { "type": "integer", "description": "Milliseconds the whole navigation may take, including a slow server (default 30000). Timing out is a warning, not an error." },
             "referrer": { "type": "string" },
             "ignoreCache": { "type": "boolean", "description": "reload only." },
-            "tab": tab_prop(),
-        })),
-        &[],
-    )
+            "tab": { "type": "integer", "description": "The tab to navigate (from an earlier navigate or tabs). Leave it out to open a new tab." },
+    })));
+    json!({ "type": "object", "properties": p, "required": [], "additionalProperties": false })
 }
 
 const SNAPSHOT: &str = "A compact outline of the page for deciding what to do next: headings, landmarks, lists, tables, dialogs and every interactive element with a ref, e.g. `- button \"Save\" [ref=e12]`. Refs stay the same across snapshots while the element does, and are valid until the page navigates; pass them to click/fill/etc. Iframe content is nested under its iframe line and its refs work too. Auto-scopes to the open modal dialog, or to <main> (plus header controls) when there is one. Use find to grep (with context lines), diff/delta to see only what changed since the last snapshot, interactive to list only controls, within to scope to a ref or selector. mode \"aria\" returns Playwright's full ARIA tree instead (refs like a5).";

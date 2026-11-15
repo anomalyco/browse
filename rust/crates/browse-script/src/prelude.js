@@ -88,9 +88,22 @@
   }
   const sleep = (ms) => hostAsync("sleep", { ms: Math.max(0, Number(ms) || 0) })
 
+  // browse.<tool>() acts in `page`'s tab unless the call names one; browse.navigate() without a tab opens one for
+  // `page` like page.goto().
+  const tabless = new Set(["tabs", "status", "settings"])
   const browse = {}
   for (const name of config.tools) {
-    browse[name] = (args) => tool(name, args)
+    browse[name] = async (args) => {
+      const own = args && args.tab !== undefined && args.tab !== null
+      if (own || tabless.has(name) || !defaultPage) return tool(name, args)
+      if (defaultPage._hasTab()) return tool(name, { ...(args || {}), tab: defaultPage._tab })
+      const result = await tool(name, args)
+      if (name === "navigate" && result && typeof result.tab === "number") {
+        defaultPage._tab = result.tab
+        pages.set(result.tab, defaultPage)
+      }
+      return result
+    }
     const camel = name.replace(/_([a-z])/g, (_, c) => c.toUpperCase())
     if (camel !== name) browse[camel] = browse[name]
   }
@@ -378,6 +391,7 @@
 
   const pages = new Map()
   let defaultPage
+  const noTab = "page has no tab yet: call await page.goto(url) first (it opens a new tab), or pass `tab` to execute to work in a tab you already have"
   class Page {
     constructor(tab) {
       this._tab = tab
@@ -387,28 +401,39 @@
       this.mouse = new Mouse(this)
       this.touchscreen = { tap: (x, y) => this.mouse.click(x, y) }
     }
-    _args(args) { return this._tab === undefined || this._tab === null ? clean(args) : clean({ ...args, tab: this._tab }) }
-    _query(selector, fn, arg) { return hostAsync("query", { selector, function: fn, arg: arg ?? {}, tab: this._tab ?? undefined }) }
-    toString() { return `Page(${this._tab ?? "current tab"})` }
+    _hasTab() { return this._tab !== undefined && this._tab !== null }
+    _args(args) {
+      if (!this._hasTab()) throw makeError(noTab)
+      return clean({ ...args, tab: this._tab })
+    }
+    _query(selector, fn, arg) { return hostAsync("query", { selector, function: fn, arg: arg ?? {}, tab: this._args({}).tab }) }
+    toString() { return `Page(${this._hasTab() ? `tab ${this._tab}` : "no tab yet"})` }
 
     context() { return contextObject }
     mainFrame() { return this }
     frames() { return [this] }
     isClosed() {
-      if (this._tab === undefined || this._tab === null) return false
-      try { return !toolSync("tabs", {}).tabs.some((t) => t.tab_id === this._tab) } catch { return false }
+      if (!this._hasTab()) return this._closed === true
+      try { return !toolSync("tabs", {}).tabs.some((t) => t.tab === this._tab) } catch { return false }
     }
     setDefaultTimeout(ms) { this._timeout = ms }
     setDefaultNavigationTimeout(ms) { this._navigationTimeout = ms }
 
     async goto(url, options = {}) {
-      const result = await tool("navigate", this._args({ url: String(url), waitUntil: waitUntil(options.waitUntil), timeout: options.timeout ?? this._navigationTimeout, referrer: options.referer }))
+      const args = { url: String(url), waitUntil: waitUntil(options.waitUntil), timeout: options.timeout ?? this._navigationTimeout, referrer: options.referer }
+      // A page without a tab opens one on its first navigation.
+      const result = await tool("navigate", this._hasTab() ? this._args(args) : clean(args))
+      if (!this._hasTab() && result && typeof result.tab === "number") {
+        this._closed = false
+        this._tab = result.tab
+        pages.set(result.tab, this)
+      }
       return new Response(result)
     }
     async reload(options = {}) { return new Response(await tool("navigate", this._args({ action: "reload", waitUntil: waitUntil(options.waitUntil), timeout: options.timeout }))) }
     async goBack(options = {}) { return new Response(await tool("navigate", this._args({ action: "back", waitUntil: waitUntil(options.waitUntil), timeout: options.timeout }))) }
     async goForward(options = {}) { return new Response(await tool("navigate", this._args({ action: "forward", waitUntil: waitUntil(options.waitUntil), timeout: options.timeout }))) }
-    url() { return hostSync("url", { tab: this._tab ?? undefined }) }
+    url() { return this._hasTab() ? hostSync("url", { tab: this._tab }) : "about:blank" }
     title() { return this.evaluate("document.title") }
     content() { return this.evaluate("(document.doctype ? new XMLSerializer().serializeToString(document.doctype) : '') + document.documentElement.outerHTML") }
     async evaluate(fn, arg, isolated) {
@@ -537,11 +562,14 @@
     async emulateMedia(options = {}) {
       await tool("emulate", this._args({ colorScheme: options.colorScheme ?? undefined, reducedMotion: options.reducedMotion ?? undefined, forcedColors: options.forcedColors ?? undefined, media: options.media === null ? "reset" : options.media }))
     }
-    async bringToFront() { if (this._tab != null) await tool("tabs", { action: "select", tabId: this._tab }) }
+    async bringToFront() { warn("page.bringToFront() does nothing: browse's tabs never take focus from the user") }
     async close() {
-      const tab = this._tab ?? (await tool("tabs", {})).tabs.find((t) => t.active)?.tab_id
-      if (tab !== undefined) await tool("tabs", { action: "close", tabId: tab })
-      pages.delete(tab)
+      if (!this._hasTab()) return
+      await tool("tabs", { action: "close", tab: this._tab })
+      pages.delete(this._tab)
+      // A closed page has no tab; a later goto opens a new one.
+      this._tab = undefined
+      this._closed = true
     }
     async pause() { warn("page.pause() does nothing in execute; use handoff() to let the user act") }
     pdf() { unsupported("page.pdf()", "take page.screenshot({ fullPage: true }) instead") }
@@ -588,26 +616,17 @@
   }
   defaultPage = config.tab === null || config.tab === undefined ? new Page(undefined) : pageFor(config.tab)
 
-  /** Pins `page` to the tab it stands for before another tab becomes the session's current one. */
-  async function pinDefault() {
-    if (defaultPage._tab !== undefined) return
-    const list = await tool("tabs", {})
-    const active = (list.tabs || []).find((t) => t.active)
-    if (active) {
-      defaultPage._tab = active.tab_id
-      pages.set(active.tab_id, defaultPage)
-    }
-  }
-
   const contextObject = {
     async newPage() {
-      await pinDefault()
       const opened = await tool("tabs", { action: "new" })
-      return pageFor(opened.tab.tab_id)
+      return pageFor(opened.tab)
     },
+    /** The tabs this execute works in, and the popups they opened. */
     pages() {
       const list = toolSync("tabs", {}).tabs || []
-      return list.map((t) => (defaultPage._tab === undefined && t.active ? defaultPage : pageFor(t.tab_id)))
+      const known = (t) => pages.has(t.tab) || (t.opener !== undefined && pages.has(t.opener))
+      const found = list.filter(known).map((t) => pageFor(t.tab))
+      return defaultPage._hasTab() ? found : [defaultPage, ...found]
     },
     browser() { return browserObject },
     async close() { warn("context.close() does nothing: the browser is the user's. Close tabs you opened with page.close()") },
@@ -616,8 +635,8 @@
     clearCookies() { unsupported("context.clearCookies()", "cookies stay in the user's browser") },
     storageState() { unsupported("context.storageState()", "cookies and storage stay in the user's browser") },
     grantPermissions() { unsupported("context.grantPermissions()", "permissions can't be granted; ask the user with handoff()") },
-    setGeolocation(geolocation) { return tool("emulate", { geolocation }) },
-    setOffline(offline) { return tool("emulate", { offline: !!offline }) },
+    setGeolocation(geolocation) { return tool("emulate", defaultPage._args({ geolocation })) },
+    setOffline(offline) { return tool("emulate", defaultPage._args({ offline: !!offline })) },
     route() { unsupported("context.route()", "requests can't be intercepted; use network.start() to observe them") },
     on(event) { unsupported(`context.on(${JSON.stringify(event)})`, "events aren't available; list tabs with context.pages()") },
     waitForEvent(event) { unsupported(`context.waitForEvent(${JSON.stringify(event)})`, "poll context.pages() instead") },
@@ -628,7 +647,7 @@
   const browserObject = {
     contexts() { return [contextObject] },
     newPage() { return contextObject.newPage() },
-    newContext() { unsupported("browser.newContext()", "there is one context, the user's browser; open tabs with context.newPage(), or a separate session with browse.session({ action: 'new' }) between calls") },
+    newContext() { unsupported("browser.newContext()", "there is one context, the user's browser; open tabs with context.newPage()") },
     async close() { warn("browser.close() does nothing: the browser is the user's") },
     isConnected() { return true },
     version() { return "chromium" },
@@ -652,7 +671,7 @@
   async function handoff(message, options = {}) {
     const page = options.page instanceof Page ? options.page : defaultPage
     const timeoutSeconds = options.timeoutMs === undefined ? undefined : Math.max(1, Math.ceil(options.timeoutMs / 1000))
-    const args = clean({ message: String(message || "Finish this step in the browser, then click Continue"), timeoutSeconds, tabId: page._tab ?? undefined })
+    const args = page._args({ message: String(message || "Finish this step in the browser, then click Continue"), timeoutSeconds })
     const waiting = tool("handoff", args)
     if (typeof options.start === "function") {
       waiting.catch(() => {})
@@ -670,7 +689,7 @@
   async function demonstrate(message, options = {}) {
     const page = options.page instanceof Page ? options.page : defaultPage
     const timeoutSeconds = options.timeoutMs === undefined ? undefined : Math.max(1, Math.ceil(options.timeoutMs / 1000))
-    return tool("demonstrate", clean({ message: String(message || "Demonstrate the browser flow, then click Continue"), timeoutSeconds, tabId: page._tab ?? undefined }))
+    return tool("demonstrate", page._args({ message: String(message || "Demonstrate the browser flow, then click Continue"), timeoutSeconds }))
   }
   async function screenshotWithLabels(options = {}) {
     const result = await tool("screenshot", pageArgs({ ...options, labels: true }))
@@ -679,16 +698,16 @@
     return { image, screenshot: image, path: result && result.path, labels: labels || [], labelCount: (labels || []).length, size: image ? image.size : 0 }
   }
   const screenshotDiff = (options) => tool("screenshot_diff", pageArgs(options))
+  const target = (page) => (page instanceof Page ? page._args({}) : defaultPage._args({}))
   const network = {
     start: (options) => tool("network", pageArgs({ ...(options || {}), action: "start" })),
-    status: () => toolSync("network", { action: "status" }),
-    stop: () => tool("network", { action: "stop" }),
-    cancel: () => tool("network", { action: "cancel" }),
+    status: (page) => toolSync("network", { ...target(page), action: "status" }),
+    stop: (page) => tool("network", { ...target(page), action: "stop" }),
+    cancel: (page) => tool("network", { ...target(page), action: "cancel" }),
   }
-  const target = (page) => (page instanceof Page ? page._args({}) : defaultPage._args({}))
   const pageConsole = {
     start: (page) => tool("console", { ...target(page), action: "start" }),
-    read: (options) => tool("console", { ...(options || {}), action: "read" }),
+    read: (options) => tool("console", pageArgs({ ...(options || {}), action: "read" })),
     stop: (page) => tool("console", { ...target(page), action: "stop" }),
   }
   const webmcp = {
@@ -799,6 +818,9 @@
 
   function finish(report) {
     report.warnings = warnings
+    // The tab `page` ended on, and every tab this execute worked in, so the next execute can continue there.
+    if (defaultPage._hasTab()) report.tab = defaultPage._tab
+    report.tabs = [...pages.keys()]
     host.finish(JSON.stringify(report))
   }
 

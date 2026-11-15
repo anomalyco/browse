@@ -1,19 +1,19 @@
-//! Per-session state kept in `ToolContext::state`: the tab pages and the snapshot ref registry.
+//! What browse-page keeps in a tab's state (`ToolContext::state`): its page model and its snapshot refs.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use browse_core::{TabId, ToolContext};
+use browse_core::{TabId, TabState, ToolContext};
 
 use crate::page::TabPage;
 use crate::snapshot::RenderedEntry;
 
 const STATE_KEY: &str = "browse-page";
-/// Shared with browse-capture: a `bool`, true while offline emulation is on in any tab of the session. Network
-/// emulation only works while the Network domain is enabled, so capture must not send `Network.disable` then.
+/// Shared with browse-capture: a `bool` in the tab's state, true while offline emulation is on. Network emulation only
+/// works while the Network domain is enabled, so capture must not send `Network.disable` then.
 pub const NETWORK_OFFLINE_KEY: &str = "browse.network.offline";
-/// Read from browse-capture: a `bool`, true while a network capture runs in the session and needs the Network domain.
+/// Read from browse-capture: a `bool` in the tab's state, true while a network capture needs the Network domain.
 pub const NETWORK_CAPTURE_KEY: &str = "browse.network.capture";
 
 /// Where a snapshot ref lives.
@@ -85,69 +85,51 @@ struct Slot {
     page: tokio::sync::OnceCell<Arc<TabPage>>,
 }
 
-#[derive(Default)]
-pub struct PageSession {
-    tabs: Mutex<HashMap<TabId, Arc<Slot>>>,
+/// browse-page's part of a tab's state.
+pub struct PageTab {
+    tab: TabId,
+    slot: Mutex<Option<Arc<Slot>>>,
     pub refs: Mutex<RefRegistry>,
-    /// Tabs with offline emulation on.
-    pub offline_tabs: Mutex<std::collections::HashSet<TabId>>,
 }
 
-/// Records whether offline emulation is on for `tab` and publishes the session-wide flag under NETWORK_OFFLINE_KEY.
-pub async fn set_offline(ctx: &ToolContext, session: &PageSession, tab: TabId, offline: bool) {
-    let any = {
-        let mut tabs = session.offline_tabs.lock().unwrap();
-        if offline {
-            tabs.insert(tab);
-        } else {
-            tabs.remove(&tab);
-        }
-        !tabs.is_empty()
-    };
-    ctx.state.inner().lock().await.insert(NETWORK_OFFLINE_KEY.to_string(), Box::new(any));
+/// Records whether offline emulation is on in the tab, for browse-capture (NETWORK_OFFLINE_KEY).
+pub async fn set_offline(state: &TabState, offline: bool) {
+    state.inner().lock().await.insert(NETWORK_OFFLINE_KEY.to_string(), Box::new(offline));
 }
 
-/// Whether browse-capture says a network capture needs the Network domain (NETWORK_CAPTURE_KEY).
-pub async fn network_capture_active(ctx: &ToolContext) -> bool {
-    ctx.state.inner().lock().await.get(NETWORK_CAPTURE_KEY).and_then(|v| v.downcast_ref::<bool>()).copied().unwrap_or(false)
+/// Whether browse-capture says a network capture needs the Network domain in the tab (NETWORK_CAPTURE_KEY).
+pub async fn network_capture_active(state: &TabState) -> bool {
+    state.inner().lock().await.get(NETWORK_CAPTURE_KEY).and_then(|v| v.downcast_ref::<bool>()).copied().unwrap_or(false)
 }
 
-pub async fn session(ctx: &ToolContext) -> Arc<PageSession> {
-    let mut map = ctx.state.inner().lock().await;
-    let entry = map.entry(STATE_KEY.to_string()).or_insert_with(|| Box::new(Arc::new(PageSession::default())));
-    match entry.downcast_ref::<Arc<PageSession>>() {
-        Some(session) => session.clone(),
-        None => {
-            let session = Arc::new(PageSession::default());
-            *entry = Box::new(session.clone());
-            session
-        }
-    }
+/// browse-page's state of the tab.
+pub async fn tab(ctx: &ToolContext, tab: TabId) -> Result<Arc<PageTab>> {
+    let state = ctx.state(tab).await?;
+    Ok(state.get_or_insert(STATE_KEY, || Arc::new(PageTab { tab, slot: Mutex::new(None), refs: Mutex::new(RefRegistry::default()) })).await)
 }
 
 fn same_cdp(a: &Arc<dyn browse_core::Cdp>, b: &Arc<dyn browse_core::Cdp>) -> bool {
     Arc::as_ptr(a) as *const () == Arc::as_ptr(b) as *const ()
 }
 
-impl PageSession {
-    /// The page model of a tab (the session's current tab when `tab` is None), attached on first use.
-    pub async fn page(&self, ctx: &ToolContext, tab: Option<TabId>) -> Result<Arc<TabPage>> {
-        let tab = match tab {
-            Some(tab) => tab,
-            None => ctx.browser.current_tab(&ctx.session).await?.tab_id,
-        };
-        let cdp = ctx.browser.cdp(&ctx.session, tab).await?;
-        // The map lock is held only to pick the slot, never across the attach: other tabs never wait on it, and
-        // concurrent callers for this tab await the same attach.
+impl PageTab {
+    pub fn id(&self) -> TabId {
+        self.tab
+    }
+
+    /// The tab's page model, attached on first use (and again when the debugger attachment changed).
+    pub async fn page(&self, ctx: &ToolContext) -> Result<Arc<TabPage>> {
+        let tab = self.tab;
+        let cdp = ctx.browser.cdp(tab).await?;
+        // The lock is held only to pick the slot, never across the attach: concurrent callers await the same attach.
         let slot = {
-            let mut tabs = self.tabs.lock().unwrap();
-            tabs.retain(|_, slot| slot.page.get().map(|page| page.alive()).unwrap_or(true));
-            let current = tabs.get(&tab).filter(|slot| same_cdp(&slot.cdp, &cdp) && slot.page.get().map(|page| page.alive()).unwrap_or(true)).cloned();
-            match current {
+            let mut current = self.slot.lock().unwrap();
+            let usable = current.as_ref().filter(|slot| same_cdp(&slot.cdp, &cdp) && slot.page.get().map(|page| page.alive()).unwrap_or(true)).cloned();
+            match usable {
                 Some(slot) => slot,
                 None => {
                     let slot = Arc::new(Slot { cdp: cdp.clone(), page: tokio::sync::OnceCell::new() });
-                    tabs.insert(tab, slot.clone());
+                    *current = Some(slot.clone());
                     slot
                 }
             }
@@ -167,11 +149,5 @@ impl PageSession {
             })
             .await?;
         Ok(page.clone())
-    }
-
-    /// The tab the registry's refs belong to.
-    pub fn ref_tab(&self) -> Option<TabId> {
-        let refs = self.refs.lock().unwrap();
-        refs.tab.or(refs.aria.as_ref().map(|a| a.tab))
     }
 }

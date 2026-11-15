@@ -3,7 +3,7 @@
 //! link's edge (cli/src/relay/browser-links.ts).
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::panic::Location;
 use std::path::PathBuf;
@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::{Duration, Instant};
 
-use browse_core::{CdpEvent, Tool};
+use browse_core::{CdpEvent, TabOptions, TabState, Tool};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{Notify, broadcast, oneshot};
@@ -19,7 +19,7 @@ use tokio::sync::{Notify, broadcast, oneshot};
 use crate::link::{Link, RpcError, Timeouts};
 use crate::paths::Paths;
 use crate::protocol::NOT_CONNECTED;
-use crate::sessions::Session;
+use crate::registry::{PersistedTab, RunningCall};
 
 pub type AutoUpdateStatus = Arc<dyn Fn() -> Value + Send + Sync>;
 
@@ -52,7 +52,20 @@ pub struct Tab {
     pub url: String,
     pub title: String,
     pub owner: Owner,
-    pub session: Option<String>,
+    /// How an agent tab was opened (normalized allowlist; `browser` unset: `link_key` says which); default for a lent
+    /// tab.
+    pub options: TabOptions,
+    /// The tab whose page opened this one.
+    pub opener: Option<i64>,
+    /// What tools keep for the tab (refs, captures, emulation); it follows the tab across reattaches and reconnects.
+    pub state: Arc<TabState>,
+    /// Background work tools reported (`Browser::set_busy`: "network", "recording").
+    pub busy_keys: HashSet<String>,
+    /// News for the next call that uses the tab (an allowlist stop, a replaced tab), shown as warnings.
+    pub warnings: Vec<String>,
+    /// Bumped when the tab's last call ends, so a later call cancels the pending "idle" presentation.
+    pub idle_epoch: u64,
+    pub created_at: String,
     pub events: broadcast::Sender<CdpEvent>,
     pub children: HashMap<String, Child>,
     pub suppressed: HashSet<String>,
@@ -69,26 +82,48 @@ pub struct Tab {
     pub protected_frames: HashSet<String>,
     /// Chrome won't let the debugger into the tab ("Cannot attach to this target": a blocked load's error page).
     pub unattachable: bool,
-    /// browse is closing it (the agent asked, its session ended): its going away is no news to the agent.
+    /// browse is closing it (an agent asked): its going away is no news to the agent.
     pub closing: bool,
     /// Child frames seen attaching (with a parent), so a navigation intent can be told apart from the main frame's.
     pub child_frames: HashSet<String>,
-    /// The one CDP handle tools get for this attachment, with the session it was made for.
-    pub cdp: Option<(String, Arc<crate::cdp::TabCdp>)>,
+    /// The one CDP handle tools get for this attachment.
+    pub cdp: Option<Arc<crate::cdp::TabCdp>>,
 }
 
-#[derive(Debug, Clone)]
+impl Tab {
+    pub fn add_warning(&mut self, warning: String) {
+        if !self.warnings.contains(&warning) && self.warnings.len() < 10 {
+            self.warnings.push(warning);
+        }
+    }
+}
+
+/// A tab browse remembers while its browser reconnects: who owned it and what its tools kept.
+#[derive(Clone)]
 pub struct KnownOwner {
     /// The relay's id for the tab, so a reconnecting browser that doesn't announce it again can get it back.
     pub tab: i64,
-    pub session: String,
     pub owner: Owner,
     pub browser: String,
+    pub options: TabOptions,
+    pub opener: Option<i64>,
+    pub state: Arc<TabState>,
+    pub created_at: String,
 }
+
+/// A tab that went away, kept a little while: calls naming it hear why, and a capture that ended with it can still
+/// be collected from its state.
+pub struct GoneTab {
+    pub tab: i64,
+    pub why: String,
+    pub state: Arc<TabState>,
+}
+
+/// How many gone tabs are remembered.
+const GONE_KEPT: usize = 64;
 
 pub struct Handoff {
     pub id: String,
-    pub session: String,
     pub tab: i64,
     pub target_id: String,
     pub message: String,
@@ -129,17 +164,24 @@ pub struct State {
     next_tab_id: i64,
     pub known: BTreeMap<String, KnownBrowser>,
     pub tabs: HashMap<i64, Tab>,
-    pub sessions: BTreeMap<String, Session>,
-    pub callers: HashMap<String, String>,
-    pub handoffs: HashMap<String, Handoff>,
+    /// Tool calls running, by call id.
+    pub calls: HashMap<u64, RunningCall>,
+    /// Why running calls were stopped (the toolbar button, their client exiting), by call id.
+    pub stopped: HashMap<u64, String>,
+    /// Every client process that has called (OpenCode-Browser-Client-Pid), while it lives.
+    pub clients: HashSet<u32>,
+    /// One handoff per tab.
+    pub handoffs: HashMap<i64, Handoff>,
+    /// Tabs of a browser that disconnected, by target id, until it reconnects.
     pub reconnect_owners: HashMap<String, KnownOwner>,
+    /// Agent tabs from the registry of the relay before this one, by target id, until their browser announces them.
+    pub restorable: HashMap<String, PersistedTab>,
+    pub gone: VecDeque<GoneTab>,
     pub tombstones: HashMap<String, String>,
-    pub swept: HashSet<String>,
     pub handshake: HandshakeStats,
     pub presented: HashMap<i64, Presented>,
     pub last_activity: Instant,
     pub last_connected: Option<Instant>,
-    pub client_gone_since: HashMap<String, Instant>,
     /// A newer browse the extension's pages mention (`update.notice`): summary and command.
     pub update_notice: Option<(String, String)>,
     /// `install` is polling for a browser to pair; the extension's probe hears `installWaiting` until then.
@@ -210,14 +252,30 @@ impl State {
         (id, name.to_string())
     }
 
-    pub fn session_tabs(&self, session: &str) -> Vec<i64> {
-        let mut tabs: Vec<i64> = self.tabs.values().filter(|t| t.session.as_deref() == Some(session)).map(|t| t.id).collect();
-        tabs.sort();
-        tabs
+    pub fn handoff_for_tab(&self, tab: i64) -> Option<&Handoff> {
+        self.handoffs.get(&tab)
     }
 
-    pub fn handoff_for_tab(&self, tab: i64) -> Option<&Handoff> {
-        self.handoffs.values().find(|h| h.tab == tab)
+    /// A call is running in the tab, or a capture or recording.
+    pub fn tab_busy(&self, tab: i64) -> bool {
+        self.tabs.get(&tab).is_some_and(|t| !t.busy_keys.is_empty()) || self.calls.values().any(|c| c.tabs.contains(&tab))
+    }
+
+    pub fn busy(&self) -> bool {
+        !self.calls.is_empty() || self.tabs.values().any(|t| !t.busy_keys.is_empty())
+    }
+
+    /// Remembers a tab that went away, and why.
+    pub fn remember_gone(&mut self, tab: i64, why: String, state: Arc<TabState>) {
+        self.gone.retain(|g| g.tab != tab);
+        self.gone.push_back(GoneTab { tab, why, state });
+        while self.gone.len() > GONE_KEPT {
+            self.gone.pop_front();
+        }
+    }
+
+    pub fn gone_tab(&self, tab: i64) -> Option<&GoneTab> {
+        self.gone.iter().rev().find(|g| g.tab == tab)
     }
 }
 
@@ -270,7 +328,7 @@ impl Drop for StateGuard<'_> {
 #[derive(Debug, Clone)]
 pub struct InFlight {
     pub tool: String,
-    pub session: String,
+    pub tab: Option<i64>,
     pub since: Instant,
 }
 
@@ -320,8 +378,6 @@ pub struct Relay {
     pub heartbeat: AtomicU64,
     /// The relay's tasks ended (it closed, or its runtime is gone): the watchdog stops watching.
     pub finished: AtomicBool,
-    /// One tab opening at a time per session, so concurrent first calls share the tab.
-    pub tab_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 pub struct RelayConfig {
@@ -373,17 +429,18 @@ impl Relay {
                 next_tab_id: 1_000_000_000,
                 known,
                 tabs: HashMap::new(),
-                sessions: BTreeMap::new(),
-                callers: HashMap::new(),
+                calls: HashMap::new(),
+                stopped: HashMap::new(),
+                clients: HashSet::new(),
                 handoffs: HashMap::new(),
                 reconnect_owners: HashMap::new(),
+                restorable: HashMap::new(),
+                gone: VecDeque::new(),
                 tombstones: HashMap::new(),
-                swept: HashSet::new(),
                 handshake: HandshakeStats::default(),
                 presented: HashMap::new(),
                 last_activity: Instant::now(),
                 last_connected: None,
-                client_gone_since: HashMap::new(),
                 update_notice: None,
                 install_waiting_until: None,
             }),
@@ -399,7 +456,6 @@ impl Relay {
             inflight: Mutex::new(HashMap::new()),
             heartbeat: AtomicU64::new(0),
             finished: AtomicBool::new(false),
-            tab_locks: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -423,11 +479,6 @@ impl Relay {
         *self.holder.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Holder { at, since: Instant::now(), thread: std::thread::current().id() });
         HELD.with(|held| held.borrow_mut().push((me, at)));
         StateGuard { guard, relay: self }
-    }
-
-    /// The session's tab-opening lock.
-    pub fn tab_lock(&self, session: &str) -> Arc<tokio::sync::Mutex<()>> {
-        self.tab_locks.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).entry(session.to_string()).or_default().clone()
     }
 
     pub fn browsers_changed(&self) {
@@ -551,22 +602,32 @@ impl Relay {
         self.persist.notify_one();
     }
 
-    /// Writes the session catalog now.
+    /// Writes the tab registry now: the agent tabs attached, those of a browser that is reconnecting, and those of
+    /// the previous relay not announced again yet.
     pub fn persist_now(&self) {
-        let entries: Vec<_> = {
+        let entries: Vec<PersistedTab> = {
             let st = self.st();
-            st.sessions
+            let mut entries: Vec<PersistedTab> = st
+                .tabs
                 .values()
-                .map(|session| {
-                    let live: Vec<String> =
-                        st.tabs.values().filter(|t| t.owner == Owner::Relay && t.session.as_deref() == Some(&session.id)).map(|t| t.target_id.clone()).collect();
-                    let current = session.current.and_then(|tab| st.tabs.get(&tab)).map(|tab| crate::sessions::PersistedTarget { id: tab.target_id.clone(), owner: tab.owner.name().into() });
-                    session.persisted(&live, current)
-                })
-                .collect()
+                .filter(|t| t.owner == Owner::Relay && !t.closing)
+                .map(|t| PersistedTab { tab: t.id, target_id: t.target_id.clone(), browser_key: t.link_key.clone(), opener: t.opener, options: t.options.clone(), created_at: t.created_at.clone() })
+                .collect();
+            entries.extend(st.reconnect_owners.iter().filter(|(_, k)| k.owner == Owner::Relay).map(|(target, k)| PersistedTab {
+                tab: k.tab,
+                target_id: target.clone(),
+                browser_key: k.browser.clone(),
+                opener: k.opener,
+                options: k.options.clone(),
+                created_at: k.created_at.clone(),
+            }));
+            entries.extend(st.restorable.values().cloned());
+            entries.sort_by_key(|e| e.tab);
+            entries.dedup_by(|a, b| a.target_id == b.target_id);
+            entries
         };
-        if let Err(error) = crate::sessions::save_catalog(&self.paths.session_catalog(self.configured_port), &entries) {
-            crate::rlog!("session.catalog.write_failed", error = error.to_string());
+        if let Err(error) = crate::registry::save(&self.paths.tab_registry(self.configured_port), &entries) {
+            crate::rlog!("tabs.registry.write_failed", error = error.to_string());
         }
     }
 
@@ -599,7 +660,7 @@ pub fn unattachable_error(message: &str) -> bool {
 pub fn unattachable_message(tab: i64, url: &str) -> String {
     let page = if url.is_empty() { String::new() } else { format!(" ({})", crate::util::short_url(url)) };
     format!(
-        "Tab {tab} is stuck on a Chrome error page{page}: its last load failed (blocked by the browser or another extension), and Chrome doesn't let browse into that page. Call navigate without tabId to load another page (browse replaces an agent's tab), or close it with the tabs tool. A tab the user lent has to be navigated by the user."
+        "Tab {tab} is stuck on a Chrome error page{page}: its last load failed (blocked by the browser or another extension), and Chrome doesn't let browse into that page. Close it with the tabs tool and open another with navigate (without tab). A tab the user lent has to be navigated by the user."
     )
 }
 

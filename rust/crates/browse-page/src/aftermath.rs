@@ -23,8 +23,13 @@ fn generation(page: &TabPage) -> Option<u64> {
     page.frame(&page.main_frame()).map(|f| f.generation)
 }
 
+/// The tabs this tab's page opened (its popups), which become agent tabs too.
+async fn popups_of(ctx: &ToolContext, tab: TabId) -> anyhow::Result<Vec<browse_core::TabInfo>> {
+    Ok(ctx.browser.tabs().await?.into_iter().filter(|t| t.opener == Some(tab)).collect())
+}
+
 pub async fn before(ctx: &ToolContext, page: &Arc<TabPage>) -> Before {
-    let tabs = ctx.browser.tabs(&ctx.session).await.map(|tabs| tabs.into_iter().map(|t| t.tab_id).collect()).unwrap_or_default();
+    let tabs = popups_of(ctx, page.tab()).await.map(|tabs| tabs.into_iter().map(|t| t.tab).collect()).unwrap_or_default();
     Before { seq: page.event_seq(), url: page.main_url(), tabs, started: Instant::now(), generation: generation(page) }
 }
 
@@ -147,15 +152,15 @@ pub async fn describe(ctx: &ToolContext, page: &Arc<TabPage>, before: &Before, o
     if popups > 0 {
         let until = Instant::now() + Duration::from_millis(1_500);
         while Instant::now() < until {
-            match ctx.browser.tabs(&ctx.session).await {
-                Ok(tabs) if tabs.iter().filter(|t| !before.tabs.contains(&t.tab_id)).count() >= popups => break,
+            match popups_of(ctx, page.tab()).await {
+                Ok(tabs) if tabs.iter().filter(|t| !before.tabs.contains(&t.tab)).count() >= popups => break,
                 Ok(_) => tokio::time::sleep(Duration::from_millis(100)).await,
                 Err(_) => break,
             }
         }
     }
-    if let Ok(tabs) = ctx.browser.tabs(&ctx.session).await {
-        let new: Vec<Value> = tabs.iter().filter(|t| !before.tabs.contains(&t.tab_id)).map(|t| json!({ "tab": t.tab_id, "url": t.url })).collect();
+    if let Ok(tabs) = popups_of(ctx, page.tab()).await {
+        let new: Vec<Value> = tabs.iter().filter(|t| !before.tabs.contains(&t.tab)).map(|t| json!({ "tab": t.tab, "url": t.url })).collect();
         if !new.is_empty() {
             out.insert("newTabs".into(), json!(new));
         }

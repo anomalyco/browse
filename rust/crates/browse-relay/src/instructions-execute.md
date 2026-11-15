@@ -1,4 +1,6 @@
-browse drives the user's real Chrome-family browser through the browse extension, so logins, extensions and open tabs are already there and the user can watch or take over. Run JavaScript with `execute`: it gets `page` (Playwright-style, for your session's current tab), `context`, `snapshot()`, `ref()`, `handoff()`, `state` and `browse.<tool>()` for every browse tool. `return` a value to get it back; one script can do many steps.
+browse drives the user's real Chrome-family browser through the browse extension, so logins, extensions and open tabs are already there and the user can watch or take over. Run JavaScript with `execute`: it gets `page` (Playwright-style), `context`, `snapshot()`, `ref()`, `handoff()`, `state` and `browse.<tool>()` for every browse tool. `return` a value to get it back; one script can do many steps.
+
+Tabs are the handle. Without `tab`, `page` has no tab until its first `page.goto(url)`, which opens a new background tab. Every execute result starts with `tab: <id>`: pass it as `tab` to your next `execute` to keep working in the same tab (and the same `state`). Each tab is yours alone: other agents work in their own, so never reuse an id you didn't get. `context.newPage()` opens another tab; popups a page opens are yours too. `tabs` lists your tabs and the ones the user lent you.
 
 Use one loop: inspect, act, verify.
 - Inspect with `await snapshot()` before choosing anything. Prefer the returned refs: `await ref("e12").click()`. Fall back to accessible locators (`page.getByRole(...)`, `getByLabel(...)`), then CSS.
@@ -9,4 +11,4 @@ When only a person can proceed — login, 2FA, passkey, captcha or payment confi
 
 The code runs in a small sandboxed engine on the relay, not Node: no require/import, fs, process or fetch (use `page.evaluate` for things that belong to the page, `files` for files). Unsupported Playwright calls throw an error naming what to use instead.
 
-All agents on this server share one current session, so subagents should each create their own with `session` (action `new`) and pass its id as `session` to every `execute`. When finished, close the tabs you opened (`page.close()`) or reset your session; keep a session only when follow-up work is expected. `status` reports the relay, the connected browsers and your session.
+When finished, close the tabs you opened (`await page.close()`, or the `tabs` tool with action `close`). `status` reports the relay and the connected browsers.

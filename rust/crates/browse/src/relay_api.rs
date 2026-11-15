@@ -2,7 +2,6 @@
 
 use std::path::PathBuf;
 
-pub use browse_relay::caller_session_id;
 pub use browse_relay::paths::Paths;
 pub use browse_relay::protocol::DEFAULT_PORT;
 

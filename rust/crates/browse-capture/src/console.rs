@@ -229,8 +229,8 @@ fn tab_gone_reason(event: &CdpEvent) -> Option<String> {
 }
 
 async fn start(ctx: &ToolContext, args: &Value) -> anyhow::Result<ToolOutput> {
-    let tab = target_tab(ctx, args).await?;
-    let capture = state::get(ctx).await;
+    let tab = target_tab(args)?;
+    let capture = state::get(ctx, tab).await?;
     let mut console = capture.console.lock().await;
     if let Some(active) = &console.active {
         let ended = active.buffer.lock().unwrap().ended.is_some();
@@ -242,7 +242,7 @@ async fn start(ctx: &ToolContext, args: &Value) -> anyhow::Result<ToolOutput> {
         }
         console.active = None;
     }
-    let cdp = ctx.browser.cdp(&ctx.session, tab).await?;
+    let cdp = ctx.browser.cdp(tab).await?;
     let mut events = cdp.events();
     let mut tracker = Tracker::default();
     enable(cdp.as_ref(), None).await?;
@@ -356,8 +356,7 @@ impl Tool for ConsoleTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "console".into(),
-            description: "Opt-in capture of the page's own console messages and uncaught errors for one tab per \
-                session. Off by default because it enables the CDP Runtime domain, which pages (and bot checks) can \
+            description: "Opt-in capture of a tab's own console messages and uncaught errors. Off by default because it enables the CDP Runtime domain, which pages (and bot checks) can \
                 detect; stop it when done. Includes out-of-process iframes and workers, and browser log entries such as \
                 CSP violations and failed resource loads (with a source); browse's own scripts are left out. start \
                 begins capturing (earlier messages are not included); read returns buffered entries {seq, type, \
@@ -376,7 +375,7 @@ impl Tool for ConsoleTool {
                     "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "read: newest entries to return (default 200)." },
                     "clear": { "type": "boolean", "description": "read: remove the returned entries from the buffer (default true)." }
                 },
-                "required": ["action"],
+                "required": ["tab", "action"],
                 "additionalProperties": false
             }),
         }
@@ -388,12 +387,12 @@ impl Tool for ConsoleTool {
                 match arg_action(&args, &["start", "read", "stop"])? {
                     "start" => start(&ctx, &args).await,
                     "read" => {
-                        let capture = state::get(&ctx).await;
+                        let capture = state::get(&ctx, target_tab(&args)?).await?;
                         let console = capture.console.lock().await;
                         read(&console, &args)
                     }
                     _ => {
-                        let capture = state::get(&ctx).await;
+                        let capture = state::get(&ctx, target_tab(&args)?).await?;
                         let mut console = capture.console.lock().await;
                         let Some(active) = console.active.take() else {
                             return json_output(&json!({ "capturing": false }));

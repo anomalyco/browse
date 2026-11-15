@@ -97,7 +97,7 @@ fn watch(weak: Weak<Relay>, limit: Duration) {
 fn fatal(relay: &Relay, event: &str, reason: &str, code: i32) -> ! {
     let inflight: Vec<String> = match relay.inflight.try_lock() {
         Ok(calls) => {
-            let mut calls: Vec<_> = calls.iter().map(|(id, c)| format!("#{id} {} session={} for {} ms", c.tool, c.session, c.since.elapsed().as_millis())).collect();
+            let mut calls: Vec<_> = calls.iter().map(|(id, c)| format!("#{id} {} tab={} for {} ms", c.tool, c.tab.map(|t| t.to_string()).unwrap_or_else(|| "-".into()), c.since.elapsed().as_millis())).collect();
             calls.sort();
             calls
         }

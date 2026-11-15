@@ -11,13 +11,13 @@ use serde_json::{Map, Value};
 use crate::{relay, session};
 
 /// Flags the CLI handles itself, for every tool. They may also come before the tool name.
-pub const GLOBAL_FLAGS: &[&str] = &["json", "session", "output"];
+pub const GLOBAL_FLAGS: &[&str] = &["json", "tab", "output"];
 
 /// Options a positional argument fills when no required option is open, in order of preference.
 const PRIMARY: &[&str] = &["url", "text", "value", "expression", "key", "values", "files", "message", "action", "to", "within", "selector"];
 
 pub fn list() -> i32 {
-    for spec in relay::specs() {
+    for spec in relay::specs(None) {
         let first = spec.description.lines().next().unwrap_or_default();
         let summary = first.split_once(". ").map_or(first, |(sentence, _)| sentence);
         println!("  {:<18} {summary}", spec.name);
@@ -100,8 +100,7 @@ fn help(spec: &ToolSpec) {
     if !usage.is_empty() {
         println!("\n  Positional values fill {usage} in order (a ref like e12 goes to --ref).");
     }
-    let session = if spec.name == "session" { "the session to act on (same as --id)" } else { "run in this existing session" };
-    println!("\n  --json '<object>'   all arguments as one JSON object\n  --session <id>      {session}\n  --output <path>     where to save images");
+    println!("\n  --json '<object>'   all arguments as one JSON object\n  --output <path>     where to save images");
 }
 
 fn variants(schema: &Value) -> Vec<&Value> {
@@ -184,7 +183,7 @@ fn check(name: &str, properties: &Map<String, Value>, arguments: &Map<String, Va
     Ok(())
 }
 
-/// Moves global flags given before the tool name (`browse --session x navigate ...`) after it.
+/// Moves global flags given before the tool name (`browse --tab 12 snapshot`) after it.
 pub fn split_globals(args: &[String]) -> (Vec<String>, Vec<String>) {
     let mut globals = Vec::new();
     let mut i = 0;
@@ -206,7 +205,7 @@ pub fn split_globals(args: &[String]) -> (Vec<String>, Vec<String>) {
 }
 
 pub fn call(name: &str, args: &[String]) -> anyhow::Result<i32> {
-    let specs = relay::specs();
+    let specs = relay::specs(None);
     let Some(spec) = specs.iter().find(|s| s.name == name).or_else(|| specs.iter().find(|s| s.name == name.replace('-', "_"))) else {
         eprintln!("Unknown command or tool: {name}. Run `browse --help`.");
         return Ok(2);
@@ -220,7 +219,7 @@ pub fn call(name: &str, args: &[String]) -> anyhow::Result<i32> {
             .with_context(|| format!("{name} has no option --{flag}; see `browse {name} --help`"))
     };
     let mut arguments = Map::new();
-    let (mut session, mut output, mut positional) = (None, None, Vec::new());
+    let (mut tab, mut output, mut positional) = (None, None, Vec::new());
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -258,14 +257,14 @@ pub fn call(name: &str, args: &[String]) -> anyhow::Result<i32> {
                 };
                 arguments.insert("code".into(), Value::String(code));
             }
-            "json" | "session" | "output" => {
+            "json" | "tab" | "output" => {
                 let value = inline.or_else(|| take(&mut i)).with_context(|| format!("--{flag} needs a value"))?;
                 match flag {
                     "json" => match serde_json::from_str(&value).context("--json must be a JSON object")? {
                         Value::Object(map) => arguments.extend(map),
                         _ => bail!("--json must be a JSON object"),
                     },
-                    "session" => session = Some(value),
+                    "tab" => tab = Some(value.parse::<i64>().map_err(|_| anyhow::anyhow!("--tab takes a tab id (a number from `browse navigate` or `browse tabs`), not {value:?}"))?),
                     _ => output = Some(PathBuf::from(value)),
                 }
             }
@@ -293,23 +292,18 @@ pub fn call(name: &str, args: &[String]) -> anyhow::Result<i32> {
         let parsed = coerce(&key, &properties[&key], value)?;
         arguments.insert(key, parsed);
     }
-    // `--session` never creates a session: for the session tool it names the session to act on; any other call runs
-    // in that session when the relay has it.
-    if let Some(id) = session {
-        let key = if name == "session" { "id" } else { "session" };
-        match arguments.get(key).and_then(Value::as_str) {
-            Some(other) if other != id => bail!("--session {id} conflicts with --{key} {other}"),
-            _ => {
-                arguments.insert(key.into(), Value::String(id));
-            }
+    if let Some(tab) = tab {
+        if !properties.contains_key("tab") {
+            bail!("{name} doesn't act on a tab; leave out --tab");
         }
+        arguments.insert("tab".into(), Value::from(tab));
     }
     check(name, &properties, &arguments)?;
     if let Some(dir) = output.as_ref().and_then(|p| p.parent()).filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).with_context(|| format!("can't create {} for --output", dir.display()))?;
     }
-    let request = ToolCallRequest { name: name.into(), arguments: Value::Object(arguments), session: session::for_cli() };
-    let result = match relay::call(&request) {
+    let request = ToolCallRequest { name: name.into(), arguments: Value::Object(arguments) };
+    let result = match relay::call(&request, None) {
         Ok(result) => result,
         Err(error) => {
             eprintln!("browse: {error:#}");
@@ -359,8 +353,8 @@ mod tests {
         assert_eq!(slot(&fill, &args, "e12").as_deref(), Some("ref"));
         args.insert("ref".into(), json!("e12"));
         assert_eq!(slot(&fill, &args, "hello").as_deref(), Some("value"));
-        let session = spec(json!({ "properties": { "action": {}, "id": {} }, "required": ["action"] }));
-        assert_eq!(slot(&session, &Map::new(), "list").as_deref(), Some("action"));
+        let tabs = spec(json!({ "properties": { "action": { "enum": ["list", "new", "close"] }, "url": {} }, "required": [] }));
+        assert_eq!(slot(&tabs, &Map::new(), "close").as_deref(), Some("action"));
         assert!(looks_like_ref("f1a5") && looks_like_ref("e3") && !looks_like_ref("example") && !looks_like_ref("e"));
     }
 
@@ -381,9 +375,9 @@ mod tests {
 
     #[test]
     fn globals_before_the_tool() {
-        let args: Vec<String> = ["--session", "x", "--output=a.png", "navigate", "u"].map(String::from).to_vec();
+        let args: Vec<String> = ["--tab", "12", "--output=a.png", "screenshot"].map(String::from).to_vec();
         let (globals, rest) = split_globals(&args);
-        assert_eq!(globals, ["--session", "x", "--output=a.png"]);
-        assert_eq!(rest, ["navigate", "u"]);
+        assert_eq!(globals, ["--tab", "12", "--output=a.png"]);
+        assert_eq!(rest, ["screenshot"]);
     }
 }

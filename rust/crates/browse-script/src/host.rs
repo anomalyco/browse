@@ -1,4 +1,4 @@
-//! The async side of an execute: runs the engine's browse calls with the execute's own `ToolContext` (same session,
+//! The async side of an execute: runs the engine's browse calls with the execute's own `ToolContext` (same browser,
 //! file roots and checks as a direct call, inside the same task so the relay's per-call context carries over),
 //! keeps the overall timeout (paused while a handoff waits on the user), and collects logs, images and what happened
 //! to the page.
@@ -65,9 +65,9 @@ pub struct Host {
 impl Host {
     pub async fn run(&self, job: Job) -> Outcome {
         let timeout_ms = job.timeout_ms;
+        let job_tab = job.tab;
         let mut outcome = Outcome { finished: None, timed_out: None, logs: Vec::new(), dropped_logs: 0, warnings: Vec::new(), images: Vec::new(), aftermath: Aftermath::default() };
         outcome.aftermath.start_url = self.current_url(job.tab).await;
-        let default_tab = job.tab;
         let (to_host, mut from_engine) = tokio::sync::mpsc::unbounded_channel::<ToHost>();
         let (to_engine, settles) = std::sync::mpsc::channel::<Settle>();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -98,7 +98,7 @@ impl Host {
                         inflight.push(Box::pin(async move { (id, run_async(ctx, tools, &op, payload).await, user) }));
                     }
                     Some(ToHost::Sync { op, payload, reply }) => {
-                        let result = self.run_sync(&op, payload, &mut outcome, default_tab).await;
+                        let result = self.run_sync(&op, payload, &mut outcome).await;
                         let _ = reply.send(result);
                     }
                     Some(ToHost::Log { level, text }) => self.log(&mut outcome, level, text),
@@ -149,7 +149,15 @@ impl Host {
                 outcome.finished = Some(Finished { report: None, stopped: None, state: finished.state });
             }
         }
-        outcome.aftermath.end_url = self.current_url(default_tab).await;
+        let ended_on = match outcome.finished.as_ref().and_then(|f| f.report.as_ref()) {
+            Some(report) => report["tab"].as_i64(),
+            None => job_tab,
+        };
+        outcome.aftermath.end_url = self.current_url(ended_on).await;
+        // A page that opened its tab during the run started on nothing.
+        if job_tab.is_none() {
+            outcome.aftermath.start_url = None;
+        }
         outcome
     }
 
@@ -219,13 +227,12 @@ impl Host {
         Value::Object(map)
     }
 
-    async fn run_sync(&self, op: &str, payload: Value, outcome: &mut Outcome, default_tab: Option<TabId>) -> Result<Value, String> {
+    async fn run_sync(&self, op: &str, payload: Value, outcome: &mut Outcome) -> Result<Value, String> {
         match op {
             "tool" => run_async(self.ctx.clone(), self.tools.clone(), op, payload).await.map(|value| self.absorb(value, outcome)),
             "url" => {
-                let tab = payload["tab"].as_i64().or(default_tab);
-                let session = browse_page::state::session(&self.ctx).await;
-                let page = session.page(&self.ctx, tab).await.map_err(|e| format!("{e:#}"))?;
+                let tab = browse_core::require_tab(&payload).map_err(|e| e.to_string())?;
+                let page = async { browse_page::state::tab(&self.ctx, tab).await?.page(&self.ctx).await }.await.map_err(|e| format!("{e:#}"))?;
                 Ok(Value::String(page.main_url()))
             }
             "image" => {
@@ -237,14 +244,10 @@ impl Host {
         }
     }
 
-    /// The URL of the tab `page` stands for, without opening or attaching anything.
+    /// The URL of the tab `page` stands for, without attaching anything.
     async fn current_url(&self, tab: Option<TabId>) -> Option<String> {
-        let tabs = self.ctx.browser.tabs(&self.ctx.session).await.ok()?;
-        let tab = match tab {
-            Some(id) => tabs.into_iter().find(|t| t.tab_id == id),
-            None => tabs.into_iter().find(|t| t.active),
-        }?;
-        Some(tab.url)
+        let tab = tab?;
+        Some(self.ctx.browser.tabs().await.ok()?.into_iter().find(|t| t.tab == tab)?.url)
     }
 }
 
@@ -258,9 +261,6 @@ async fn run_async(ctx: ToolContext, tools: Arc<HashMap<String, Arc<dyn Tool>>>,
             let name = payload["name"].as_str().unwrap_or_default();
             let Some(tool) = tools.get(name).cloned() else { return Err(format!("browse has no tool named {name}")) };
             let mut args = payload.get("args").cloned().filter(Value::is_object).unwrap_or_else(|| json!({}));
-            if name != "session" && args.get("session").is_some() {
-                return Err("Calls inside execute run in the execute's session; pass `session` to execute itself instead.".into());
-            }
             if let Some(map) = args.as_object_mut() {
                 map.retain(|_, v| !v.is_null());
             }

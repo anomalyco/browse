@@ -1,7 +1,7 @@
-//! Where browse keeps its files, the same layout as the TypeScript CLI (cli/src/paths.ts), so pairings, tokens and
-//! sessions carry over:
+//! Where browse keeps its files, the same layout as the TypeScript CLI (cli/src/paths.ts), so pairings and tokens
+//! carry over:
 //!   config  $XDG_CONFIG_HOME/browse   config.json, settings.json
-//!   data    $XDG_DATA_HOME/browse     relay-token, browser-tokens.json, browsers.json, relays/<port>/sessions.json
+//!   data    $XDG_DATA_HOME/browse     relay-token, browser-tokens.json, browsers.json, relays/<port>/tabs.json
 //!   state   $XDG_STATE_HOME/browse    logs/relay.log, pairing-codes.json, relays/<port>/relay.json
 //!   cache   $XDG_CACHE_HOME/browse
 //! OPENCODE_BROWSER_HOME overrides all four (isolated test relays).
@@ -55,7 +55,12 @@ impl Paths {
     pub fn browsers(&self) -> PathBuf {
         self.data.join("browsers.json")
     }
-    pub fn session_catalog(&self, configured_port: u16) -> PathBuf {
+    /// The agent tabs a restarted relay gives back.
+    pub fn tab_registry(&self, configured_port: u16) -> PathBuf {
+        self.data.join("relays").join(configured_port.to_string()).join("tabs.json")
+    }
+    /// The session catalog of browse before tabs were the handle; removed on startup.
+    pub fn legacy_session_catalog(&self, configured_port: u16) -> PathBuf {
         self.data.join("relays").join(configured_port.to_string()).join("sessions.json")
     }
     pub fn pairing_codes(&self) -> PathBuf {

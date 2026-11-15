@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use browse_core::{Browser, Cdp, CdpError, CdpEvent, HandoffResult, SessionId, SessionState, TabId, TabInfo, ToolContext, ToolOutput};
+use browse_core::{Browser, Cdp, CdpError, CdpEvent, HandoffResult, TabId, TabInfo, TabOptions, TabState, ToolContext, ToolOutput};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -225,11 +225,13 @@ impl Cdp for TabCdp {
     }
 }
 
-/// Several tabs over one Chromium, as a session's tabs; `tabs` is the fake of the relay's tabs tool.
+/// A tab of the fake browser: its id, CDP and state.
+type FakeTab = (TabId, Arc<TabCdp>, Arc<TabState>);
+
+/// Several tabs over one Chromium, as the relay's agent tabs; `tabs` is the fake of the relay's tabs tool.
 pub struct FakeBrowser {
     pub connection: Arc<Connection>,
-    pub tabs: Mutex<Vec<(TabId, Arc<TabCdp>)>>,
-    pub current: Mutex<TabId>,
+    pub tabs: Mutex<Vec<FakeTab>>,
     pub next: AtomicI64,
     pub human: bool,
 }
@@ -239,69 +241,58 @@ impl FakeBrowser {
         let targets = self.connection.send("Target.getTargetInfo", json!({ "targetId": tab.target }), None).await.unwrap_or_default();
         let url = targets["targetInfo"]["url"].as_str().unwrap_or_default().to_string();
         let title = targets["targetInfo"]["title"].as_str().unwrap_or_default().to_string();
-        TabInfo { tab_id: id, url, title, active: *self.current.lock().unwrap() == id }
+        TabInfo { tab: id, url, title, lent: false, opener: None, options: TabOptions::default() }
+    }
+
+    fn find(&self, tab: TabId) -> anyhow::Result<(Arc<TabCdp>, Arc<TabState>)> {
+        match self.tabs.lock().unwrap().iter().find(|(id, ..)| *id == tab) {
+            Some((_, cdp, state)) => Ok((cdp.clone(), state.clone())),
+            None => anyhow::bail!("Tab {tab} isn't a browse tab"),
+        }
     }
 }
 
 #[async_trait]
 impl Browser for FakeBrowser {
-    async fn tabs(&self, _session: &SessionId) -> anyhow::Result<Vec<TabInfo>> {
-        let tabs = self.tabs.lock().unwrap().clone();
-        let mut out = Vec::new();
-        for (id, tab) in &tabs {
-            out.push(self.info(*id, tab).await);
-        }
-        Ok(out)
-    }
-    async fn current_tab(&self, _session: &SessionId) -> anyhow::Result<TabInfo> {
-        let current = *self.current.lock().unwrap();
-        let tab = self.tabs.lock().unwrap().iter().find(|(id, _)| *id == current).cloned();
-        match tab {
-            Some((id, tab)) => Ok(self.info(id, &tab).await),
-            None => self.open_tab(_session, None).await,
-        }
-    }
-    async fn open_tab(&self, _session: &SessionId, url: Option<&str>) -> anyhow::Result<TabInfo> {
+    async fn open_tab(&self, url: Option<&str>, _options: &TabOptions) -> anyhow::Result<TabInfo> {
         let tab = TabCdp::open(&self.connection).await;
         if let Some(url) = url {
             let _ = tab.send("Page.navigate", json!({ "url": url }), None).await;
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         }
         let id = self.next.fetch_add(1, Ordering::Relaxed);
-        self.tabs.lock().unwrap().push((id, tab.clone()));
-        *self.current.lock().unwrap() = id;
+        self.tabs.lock().unwrap().push((id, tab.clone(), Arc::new(TabState::default())));
         Ok(self.info(id, &tab).await)
     }
-    async fn select_tab(&self, _session: &SessionId, tab: TabId) -> anyhow::Result<()> {
-        *self.current.lock().unwrap() = tab;
-        Ok(())
+    async fn tabs(&self) -> anyhow::Result<Vec<TabInfo>> {
+        let tabs = self.tabs.lock().unwrap().clone();
+        let mut out = Vec::new();
+        for (id, tab, _) in &tabs {
+            out.push(self.info(*id, tab).await);
+        }
+        Ok(out)
     }
-    async fn close_tab(&self, _session: &SessionId, tab: TabId) -> anyhow::Result<()> {
+    async fn close_tab(&self, tab: TabId) -> anyhow::Result<()> {
         let removed = {
             let mut tabs = self.tabs.lock().unwrap();
-            let index = tabs.iter().position(|(id, _)| *id == tab);
+            let index = tabs.iter().position(|(id, ..)| *id == tab);
             index.map(|i| tabs.remove(i))
         };
-        if let Some((_, cdp)) = removed {
+        if let Some((_, cdp, _)) = removed {
             let _ = self.connection.send("Target.closeTarget", json!({ "targetId": cdp.target }), None).await;
-        }
-        let first = self.tabs.lock().unwrap().first().map(|(id, _)| *id);
-        if *self.current.lock().unwrap() == tab {
-            *self.current.lock().unwrap() = first.unwrap_or(0);
         }
         Ok(())
     }
-    async fn cdp(&self, _session: &SessionId, tab: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
-        let found = self.tabs.lock().unwrap().iter().find(|(id, _)| *id == tab).map(|(_, t)| t.clone());
-        match found {
-            Some(tab) => Ok(tab),
-            None => anyhow::bail!("No tab {tab}"),
-        }
+    async fn cdp(&self, tab: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
+        Ok(self.find(tab)?.0)
     }
-    async fn handoff(&self, _session: &SessionId, _tab: TabId, _message: &str) -> anyhow::Result<HandoffResult> {
+    async fn state(&self, tab: TabId) -> anyhow::Result<Arc<TabState>> {
+        Ok(self.find(tab)?.1)
+    }
+    async fn handoff(&self, _tab: TabId, _message: &str) -> anyhow::Result<HandoffResult> {
         anyhow::bail!("not in tests")
     }
-    async fn human_input(&self, _session: &SessionId, _tab: TabId) -> bool {
+    async fn human_input(&self, _tab: TabId) -> bool {
         self.human
     }
 }
@@ -315,18 +306,13 @@ impl browse_core::Tool for TabsTool {
         browse_core::ToolSpec { name: "tabs".into(), description: String::new(), input_schema: json!({ "type": "object" }) }
     }
     async fn call(&self, ctx: ToolContext, args: Value) -> anyhow::Result<ToolOutput> {
-        let tab = args.get("tabId").and_then(Value::as_i64);
         let out = match args.get("action").and_then(Value::as_str).unwrap_or("list") {
-            "list" => json!({ "session": ctx.session, "tabs": ctx.browser.tabs(&ctx.session).await?, "lent": [] }),
-            "new" => json!({ "session": ctx.session, "tab": ctx.browser.open_tab(&ctx.session, args.get("url").and_then(Value::as_str)).await? }),
-            "select" => {
-                ctx.browser.select_tab(&ctx.session, tab.unwrap()).await?;
-                json!({ "currentTab": tab })
-            }
+            "list" => json!({ "tabs": ctx.browser.tabs().await? }),
+            "new" => serde_json::to_value(ctx.browser.open_tab(args.get("url").and_then(Value::as_str), &TabOptions::from_args(&args)?).await?)?,
             "close" => {
-                let tab = match tab { Some(tab) => tab, None => ctx.browser.current_tab(&ctx.session).await?.tab_id };
-                ctx.browser.close_tab(&ctx.session, tab).await?;
-                json!({ "tabId": tab, "outcome": "closed" })
+                let tab = browse_core::require_tab(&args)?;
+                ctx.browser.close_tab(tab).await?;
+                json!({ "closed": [tab] })
             }
             other => anyhow::bail!("unknown action {other}"),
         };
@@ -341,6 +327,8 @@ pub struct Harness {
     pub tools: Vec<Arc<dyn browse_core::Tool>>,
     pub server: Server,
     pub files: TempDir,
+    /// The tab executes continue in: the one the last execute said it ended in.
+    pub current: Mutex<Option<TabId>>,
 }
 
 impl Harness {
@@ -354,20 +342,15 @@ impl Harness {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&files.0, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        let browser = FakeBrowser { connection: connection.clone(), tabs: Mutex::new(vec![(1, tab.clone())]), current: Mutex::new(1), next: AtomicI64::new(2), human };
-        let ctx = ToolContext {
-            session: "test".into(),
-            browser: Arc::new(browser),
-            state: Arc::new(SessionState::default()),
-            file_roots: vec![std::fs::canonicalize(&files.0).unwrap()],
-        };
+        let browser = FakeBrowser { connection: connection.clone(), tabs: Mutex::new(vec![(1, tab.clone(), Arc::new(TabState::default()))]), next: AtomicI64::new(2), human };
+        let ctx = ToolContext { browser: Arc::new(browser), file_roots: vec![std::fs::canonicalize(&files.0).unwrap()] };
         let server = Server::start().await;
         let mut tools: Vec<Arc<dyn browse_core::Tool>> = browse_page::tools();
         tools.extend(browse_capture::tools());
         tools.push(Arc::new(TabsTool));
         let execute = browse_script::tools(&tools);
         tools.extend(execute);
-        Some(Harness { chrome, tab, ctx, tools, server, files })
+        Some(Harness { chrome, tab, ctx, tools, server, files, current: Mutex::new(None) })
     }
 
     pub async fn call(&self, name: &str, args: Value) -> ToolOutput {

@@ -1,5 +1,5 @@
-//! Per-session domain allowlists (cli/src/auth/domain-policy.ts). With a list, agent navigations to other hosts are
-//! refused, and session tabs that end up elsewhere anyway are sent back to about:blank (or a fresh popup closed).
+//! Per-tab domain allowlists (cli/src/auth/domain-policy.ts). With a list, agent navigations to other hosts are
+//! refused, and agent tabs that end up elsewhere anyway are sent back to about:blank (or a fresh popup closed).
 //! Private and loopback addresses need a pattern naming that exact host, even when a wildcard would match.
 
 use std::net::{IpAddr, Ipv4Addr};
@@ -188,7 +188,7 @@ pub fn check_url(raw: &str, rules: &[OriginRule], https_only_without_scheme: boo
         return UrlDecision::Allowed { host: None, explicit: false };
     }
     if url.scheme() != "http" && url.scheme() != "https" {
-        return UrlDecision::Refused(format!("{}: URLs are not allowed for this session", url.scheme()));
+        return UrlDecision::Refused(format!("{}: URLs are not allowed for this tab", url.scheme()));
     }
     let host = unbracket(url.host_str().unwrap_or("")).to_lowercase();
     let display = match url.port() {

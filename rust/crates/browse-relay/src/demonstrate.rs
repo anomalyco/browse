@@ -202,9 +202,9 @@ impl Recorder {
 }
 
 /// Asks the user to show a flow in the tab, recording their clicks, fills and navigations until they continue.
-pub async fn demonstrate(relay: &Arc<Relay>, session: &str, tab: i64, message: &str, timeout: Duration) -> anyhow::Result<Value> {
+pub async fn demonstrate(relay: &Arc<Relay>, tab: i64, message: &str, timeout: Duration) -> anyhow::Result<Value> {
     let browser = RelayBrowser(relay.clone());
-    let cdp = browser.cdp(&session.to_string(), tab).await?;
+    let cdp = browser.cdp(tab).await?;
     let started_url = relay.st().tabs.get(&tab).map(|t| t.url.clone()).unwrap_or_default();
     let recorder = Arc::new(Recorder {
         cdp: cdp.clone(),
@@ -240,7 +240,7 @@ pub async fn demonstrate(relay: &Arc<Relay>, session: &str, tab: i64, message: &
         })
     };
     let message = if message.trim().is_empty() { "Demonstrate the browser flow, then click Continue" } else { message };
-    let outcome = relay.run_handoff(session, tab, message, timeout).await;
+    let outcome = relay.run_handoff(tab, message, timeout).await;
     watcher.abort();
     recorder.stop().await;
     let outcome = outcome?;

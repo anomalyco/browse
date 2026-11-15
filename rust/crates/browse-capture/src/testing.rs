@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use browse_core::{Browser, Cdp, CdpError, CdpEvent, HandoffResult, SessionId, SessionState, TabId, TabInfo, ToolContext};
+use browse_core::{Browser, Cdp, CdpError, CdpEvent, HandoffResult, TabId, TabInfo, TabOptions, TabState, ToolContext};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
@@ -61,47 +61,54 @@ impl Cdp for FakeCdp {
     }
 }
 
-pub(crate) struct FakeBrowser(pub Arc<FakeCdp>);
+pub(crate) struct FakeBrowser {
+    cdp: Arc<FakeCdp>,
+    state: Arc<TabState>,
+}
 
 #[async_trait]
 impl Browser for FakeBrowser {
-    async fn tabs(&self, _: &SessionId) -> anyhow::Result<Vec<TabInfo>> {
-        Ok(vec![tab()])
-    }
-    async fn current_tab(&self, _: &SessionId) -> anyhow::Result<TabInfo> {
-        Ok(tab())
-    }
-    async fn open_tab(&self, _: &SessionId, _: Option<&str>) -> anyhow::Result<TabInfo> {
+    async fn open_tab(&self, _: Option<&str>, _: &TabOptions) -> anyhow::Result<TabInfo> {
         anyhow::bail!("not in tests")
     }
-    async fn select_tab(&self, _: &SessionId, _: TabId) -> anyhow::Result<()> {
+    async fn tabs(&self) -> anyhow::Result<Vec<TabInfo>> {
+        Ok(vec![tab()])
+    }
+    async fn close_tab(&self, _: TabId) -> anyhow::Result<()> {
         Ok(())
     }
-    async fn close_tab(&self, _: &SessionId, _: TabId) -> anyhow::Result<()> {
-        Ok(())
+    async fn cdp(&self, _: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
+        Ok(self.cdp.clone())
     }
-    async fn cdp(&self, _: &SessionId, _: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
-        Ok(self.0.clone())
+    async fn state(&self, _: TabId) -> anyhow::Result<Arc<TabState>> {
+        Ok(self.state.clone())
     }
-    async fn handoff(&self, _: &SessionId, _: TabId, _: &str) -> anyhow::Result<HandoffResult> {
+    async fn handoff(&self, _: TabId, _: &str) -> anyhow::Result<HandoffResult> {
         anyhow::bail!("not in tests")
     }
 }
 
 fn tab() -> TabInfo {
-    TabInfo { tab_id: 1, url: String::new(), title: String::new(), active: true }
+    TabInfo { tab: 1, url: String::new(), title: String::new(), lent: false, opener: None, options: TabOptions::default() }
 }
 
 pub(crate) fn context(cdp: Arc<FakeCdp>, roots: Vec<std::path::PathBuf>) -> ToolContext {
-    ToolContext {
-        session: "test".into(),
-        browser: Arc::new(FakeBrowser(cdp)),
-        state: Arc::new(SessionState::default()),
-        file_roots: roots,
-    }
+    ToolContext { browser: Arc::new(FakeBrowser { cdp, state: Arc::new(TabState::default()) }), file_roots: roots }
 }
 
-pub(crate) async fn call(ctx: &ToolContext, tool: &dyn browse_core::Tool, args: Value) -> (bool, Value) {
+/// Calls a tool in the fake's one tab (`tab` 1 unless the arguments name one; `"tab": null` leaves it out).
+pub(crate) async fn call(ctx: &ToolContext, tool: &dyn browse_core::Tool, mut args: Value) -> (bool, Value) {
+    if let Some(map) = args.as_object_mut() {
+        match map.get("tab") {
+            None => {
+                map.insert("tab".into(), json!(1));
+            }
+            Some(Value::Null) => {
+                map.remove("tab");
+            }
+            Some(_) => {}
+        }
+    }
     let output = tool.call(ctx.clone(), args).await.unwrap();
     let text = output
         .content

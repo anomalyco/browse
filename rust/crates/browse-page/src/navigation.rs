@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow, bail};
 use serde_json::{Value, json};
 
 use crate::page::{TabEvent, TabPage, v};
-use crate::state::PageSession;
+use crate::state::PageTab;
 use crate::target::{self, ResolveOptions, Spec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -338,8 +338,8 @@ pub struct WaitFor {
     pub ms: Option<u64>,
 }
 
-async fn element_state(page: &Arc<TabPage>, session: &PageSession, spec: &Spec, state: &str) -> Result<bool> {
-    let resolved = target::resolve(page, session, spec, ResolveOptions { timeout: Duration::ZERO, act: false }).await;
+async fn element_state(page: &Arc<TabPage>, tab_state: &PageTab, spec: &Spec, state: &str) -> Result<bool> {
+    let resolved = target::resolve(page, tab_state, spec, ResolveOptions { timeout: Duration::ZERO, act: false }).await;
     let resolved = match resolved {
         Ok(resolved) => resolved,
         Err(error) => {
@@ -361,7 +361,7 @@ async fn element_state(page: &Arc<TabPage>, session: &PageSession, spec: &Spec, 
 }
 
 /// Waits until every given condition holds. Returns a description of what was waited for.
-pub async fn wait_for(page: &Arc<TabPage>, session: &PageSession, conditions: &WaitFor, timeout: Duration) -> Result<String> {
+pub async fn wait_for(page: &Arc<TabPage>, tab_state: &PageTab, conditions: &WaitFor, timeout: Duration) -> Result<String> {
     if let Some(ms) = conditions.ms {
         tokio::time::sleep(Duration::from_millis(ms.min(120_000))).await;
     }
@@ -421,7 +421,7 @@ pub async fn wait_for(page: &Arc<TabPage>, session: &PageSession, conditions: &W
             }
         if ok
             && let Some(spec) = &conditions.spec {
-                ok = element_state(page, session, spec, &conditions.state).await?;
+                ok = element_state(page, tab_state, spec, &conditions.state).await?;
             }
         if ok {
             return Ok(waiting_for.join(", "));

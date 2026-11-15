@@ -13,7 +13,7 @@ pub struct Spec {
 pub fn spec(key: &str) -> Option<Spec> {
     Some(match key {
         "window" => Spec { label: "Where agents open their tabs (current: the user's window; separate: an unfocused window of their own)", values: &["current", "separate"] },
-        "grouping" => Spec { label: "How agent tabs are grouped (one shared group, one group per session, or none)", values: &["shared", "session", "none"] },
+        "grouping" => Spec { label: "How agent tabs are grouped (one shared group, one group per agent group label, or none)", values: &["shared", "session", "none"] },
         "idleMinutes" => Spec { label: "Close agent tabs untouched for this many minutes", values: &["10", "30", "60", "never"] },
         "humanInput" => Spec { label: "Human-like input (off is faster, but easier for sites to flag)", values: &["on", "off"] },
         "handoffNotifications" => Spec { label: "System notification on a handoff (only while recorded, or every handoff)", values: &["recording", "always"] },

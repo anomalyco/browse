@@ -1,6 +1,6 @@
 //! What the extension shows for an agent tab (cli/src/relay/tab-presentation.ts): the page status card, the toolbar
-//! badge and the tab group, kept current one tab at a time (the latest state wins); focus emulation while a session
-//! works; and handoffs, where the agent waits for the user to finish something in the tab.
+//! badge and the tab group, kept current one tab at a time (the latest state wins); focus emulation while a call
+//! works in a tab; and handoffs, where the agent waits for the user to finish something in the tab.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,26 +17,28 @@ use crate::rlog;
 pub const DEFAULT_HANDOFF_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const IDLE_AFTER_CALL: Duration = Duration::from_millis(1500);
 
+/// The page status, badge and group the extension should show. An agent tab is grouped by its `group` label (the
+/// extension's Grouping setting decides whether that is a group of its own, the shared agent group or none); a lent
+/// tab stays where the user has it. The status names the group as `sessionId`, which the extension shows as the
+/// agent's name.
 fn desired(st: &State, tab: i64) -> Option<(Value, Value, Value)> {
     let entry = st.tabs.get(&tab)?;
-    let owner = if entry.owner == Owner::User { "user" } else { "session" };
+    let agent = entry.owner == Owner::Relay;
     let handoff = st.handoff_for_tab(tab);
-    let session_id = handoff.map(|h| h.session.clone()).or_else(|| entry.session.clone());
-    let session = session_id.as_ref().and_then(|id| st.sessions.get(id));
-    let read_only = session.is_some_and(|s| s.read_only);
+    let read_only = entry.options.read_only;
     let state = if handoff.is_some() {
         "waiting"
-    } else if session.is_some_and(|s| s.busy()) {
+    } else if st.tab_busy(tab) {
         "running"
     } else {
         "attached"
     };
-    let mut status = json!({ "state": state, "owner": owner });
-    if let Some(id) = &session_id {
-        status["sessionId"] = id.clone().into();
-        if read_only {
-            status["readOnly"] = true.into();
-        }
+    let mut status = json!({ "state": state, "owner": if agent { "session" } else { "user" } });
+    if let Some(group) = entry.options.group.as_ref().filter(|_| agent) {
+        status["sessionId"] = group.clone().into();
+    }
+    if read_only {
+        status["readOnly"] = true.into();
     }
     if let Some(handoff) = handoff {
         status["message"] = handoff.message.clone().into();
@@ -47,16 +49,16 @@ fn desired(st: &State, tab: i64) -> Option<(Value, Value, Value)> {
         ("running", _) if !read_only => json!({ "text": "RUN", "color": "#f59e0b", "title": "browse is working in this tab. Click to stop it and take this tab back." }),
         _ => json!({ "text": "ON", "color": "#7c3aed", "title": "Detach from browse" }),
     };
-    let group = match &entry.session {
-        Some(session) => json!({ "method": "tabs.group", "params": { "sessionId": session } }),
-        None => json!({ "method": "tabs.ungroup", "params": {} }),
+    let group = match (agent, &entry.options.group) {
+        (true, Some(group)) => json!({ "method": "tabs.group", "params": { "sessionId": group } }),
+        (true, None) => json!({ "method": "tabs.group", "params": {} }),
+        (false, _) => json!({ "method": "tabs.ungroup", "params": {} }),
     };
     Some((status, badge, group))
 }
 
 struct PendingHandoff {
     relay: Arc<Relay>,
-    session: String,
     id: String,
     tab: i64,
     armed: bool,
@@ -73,10 +75,10 @@ impl Drop for PendingHandoff {
         if !self.armed {
             return;
         }
-        if self.relay.st().handoffs.get(&self.session).is_some_and(|h| h.id == self.id) {
-            rlog!("handoff.finished", tabId = self.tab, session = self.session.clone(), outcome = "cancelled", reason = "call stopped");
+        if self.relay.st().handoffs.get(&self.tab).is_some_and(|h| h.id == self.id) {
+            rlog!("handoff.finished", tabId = self.tab, outcome = "cancelled", reason = "call stopped");
         }
-        self.relay.finish_handoff_id(&self.session, &self.id, "cancelled");
+        self.relay.finish_handoff_id(self.tab, &self.id, "cancelled");
         if tokio::runtime::Handle::try_current().is_ok() {
             self.relay.refresh_presentation(self.tab, false);
         }
@@ -142,83 +144,75 @@ impl Relay {
         });
     }
 
-    pub fn refresh_session_presentation(self: &Arc<Self>, session: &str) {
-        let tabs = self.st().session_tabs(session);
-        for tab in tabs {
-            self.refresh_presentation(tab, false);
-        }
-    }
-
-    pub fn call_started(self: &Arc<Self>, session: &str, id: u64, abort: tokio::task::AbortHandle, pid: Option<u32>) {
-        let first = {
-            let mut st = self.st();
-            let Some(entry) = st.sessions.get_mut(session) else { return };
-            entry.touch();
-            entry.calls.insert(id, crate::sessions::RunningCall { abort, pid });
-            entry.calls.len() == 1
-        };
-        if first {
-            self.refresh_session_presentation(session);
-        }
-    }
-
-    pub fn call_finished(self: &Arc<Self>, session: &str, id: u64) {
-        let epoch = {
-            let mut st = self.st();
-            let Some(entry) = st.sessions.get_mut(session) else { return };
-            entry.calls.remove(&id);
-            entry.last_used = std::time::Instant::now();
-            if !entry.calls.is_empty() {
-                return;
-            }
-            entry.idle_epoch += 1;
-            entry.idle_epoch
-        };
-        let relay = self.clone();
-        let session = session.to_string();
-        tokio::spawn(async move {
-            tokio::time::sleep(IDLE_AFTER_CALL).await;
-            let idle = relay.st().sessions.get(&session).is_some_and(|s| s.calls.is_empty() && s.idle_epoch == epoch);
-            if idle {
-                relay.release_focus(&session, false);
-                relay.refresh_session_presentation(&session);
-            }
-        });
-    }
-
-    /// Ends the session's running calls; their callers get `message`.
-    pub fn stop_calls(&self, session: &str, message: &str) {
+    pub fn call_started(self: &Arc<Self>, id: u64, abort: tokio::task::AbortHandle, pid: Option<u32>) {
         let mut st = self.st();
-        let Some(entry) = st.sessions.get_mut(session) else { return };
-        if entry.calls.is_empty() {
-            return;
+        st.calls.insert(id, crate::registry::RunningCall { abort, pid, tabs: std::collections::HashSet::new() });
+        if let Some(pid) = pid {
+            st.clients.insert(pid);
         }
+    }
+
+    /// The call ended: returns the tabs it used. A tab with nothing left running goes idle shortly (focus released,
+    /// the extension shows it attached again), unless another call starts in it first.
+    pub fn call_finished(self: &Arc<Self>, id: u64) -> Vec<i64> {
+        let (tabs, idle): (Vec<i64>, Vec<(i64, u64)>) = {
+            let mut st = self.st();
+            st.stopped.remove(&id);
+            let Some(call) = st.calls.remove(&id) else { return Vec::new() };
+            let mut tabs: Vec<i64> = call.tabs.into_iter().collect();
+            tabs.sort();
+            let quiet: Vec<i64> = tabs.iter().copied().filter(|tab| !st.tab_busy(*tab)).collect();
+            let mut idle = Vec::new();
+            for tab in quiet {
+                if let Some(entry) = st.tabs.get_mut(&tab) {
+                    entry.last_used = std::time::Instant::now();
+                    entry.idle_epoch += 1;
+                    idle.push((tab, entry.idle_epoch));
+                }
+            }
+            (tabs, idle)
+        };
+        if !idle.is_empty() {
+            let relay = self.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(IDLE_AFTER_CALL).await;
+                for (tab, epoch) in idle {
+                    let still = {
+                        let st = relay.st();
+                        st.tabs.get(&tab).is_some_and(|t| t.idle_epoch == epoch) && !st.tab_busy(tab)
+                    };
+                    if still {
+                        relay.release_focus(tab, false);
+                        relay.refresh_presentation(tab, false);
+                    }
+                }
+            });
+        }
+        tabs
+    }
+
+    /// Ends the running calls that use the tab (except the one asking); their callers get `message`.
+    pub fn stop_calls(&self, tab: i64, message: &str) -> usize {
+        self.stop_calls_where(message, |call| call.tabs.contains(&tab))
+    }
+
+    /// Ends the running calls `which` picks (never the one asking); their callers get `message`.
+    pub fn stop_calls_where(&self, message: &str, which: impl Fn(&crate::registry::RunningCall) -> bool) -> usize {
         let own = crate::serve::CALL.try_with(|id| *id).ok();
-        for (id, call) in &entry.calls {
-            if Some(*id) != own {
-                entry.stopped.insert(*id, message.to_string());
-                call.abort.abort();
-            }
-        }
-    }
-
-    /// Ends the calls one process made in a session (it exited); the session's other callers carry on.
-    pub fn stop_client_calls(&self, session: &str, pid: u32, message: &str) -> usize {
         let mut st = self.st();
-        let Some(entry) = st.sessions.get_mut(session) else { return 0 };
-        let mine: Vec<u64> = entry.calls.iter().filter(|(_, call)| call.pid == Some(pid)).map(|(id, _)| *id).collect();
-        for id in &mine {
-            entry.stopped.insert(*id, message.to_string());
-            entry.calls[id].abort.abort();
+        let picked: Vec<u64> = st.calls.iter().filter(|(id, call)| Some(**id) != own && which(call)).map(|(id, _)| *id).collect();
+        for id in &picked {
+            st.stopped.insert(*id, message.to_string());
+            st.calls[id].abort.abort();
         }
-        mine.len()
+        picked.len()
     }
 
-    /// While a session works in a tab, the page sees it focused, so background tabs aren't throttled.
-    pub async fn focus_for_call(&self, tab: i64, session: &str) {
+    /// While a call works in a tab, the page sees it focused, so background tabs aren't throttled.
+    pub async fn focus_for_call(&self, tab: i64) {
         let needed = {
             let mut st = self.st();
-            let busy = st.sessions.get(session).is_some_and(|s| s.busy());
+            let busy = st.tab_busy(tab);
             match st.tabs.get_mut(&tab) {
                 Some(entry) if busy && !entry.focused => {
                     entry.focused = true;
@@ -232,29 +226,27 @@ impl Relay {
         }
     }
 
-    /// Drops the focus a session's work held; a keepVisible session keeps it on its own tabs unless `all`.
-    pub fn release_focus(&self, session: &str, all: bool) {
-        let tabs: Vec<i64> = {
+    /// Drops the focus a call held; a keepVisible agent tab keeps it unless `all`.
+    pub fn release_focus(&self, tab: i64, all: bool) {
+        let release = {
             let mut st = self.st();
-            let keep = !all && st.sessions.get(session).is_some_and(|s| s.keep_visible);
-            st.tabs
-                .values_mut()
-                .filter(|t| t.focused && t.session.as_deref() == Some(session) && !(keep && t.owner == Owner::Relay))
-                .map(|t| {
+            match st.tabs.get_mut(&tab) {
+                Some(t) if t.focused && (all || !(t.options.keep_visible && t.owner == Owner::Relay)) => {
                     t.focused = false;
                     t.last_used = std::time::Instant::now();
-                    t.id
-                })
-                .collect()
+                    true
+                }
+                _ => false,
+            }
         };
-        for tab in tabs {
+        if release {
             self.debugger_best_effort(tab, None, "Emulation.setFocusEmulationEnabled", json!({ "enabled": false }));
         }
     }
 
     /// Shows the user a card in the tab and waits until they click Continue (or the toolbar button), the time runs
-    /// out, the tab goes away, or the session is stopped.
-    pub async fn run_handoff(self: &Arc<Self>, session: &str, tab: i64, message: &str, timeout: Duration) -> anyhow::Result<HandoffResult> {
+    /// out, the tab goes away, or the call is stopped.
+    pub async fn run_handoff(self: &Arc<Self>, tab: i64, message: &str, timeout: Duration) -> anyhow::Result<HandoffResult> {
         let message = message.trim();
         let message = if message.is_empty() { "Finish this step in the tab, then click Continue" } else { message };
         let (done, outcome) = oneshot::channel();
@@ -262,18 +254,14 @@ impl Relay {
         let status = {
             let mut st = self.st();
             let Some(entry) = st.tabs.get(&tab) else { bail!("Tab {tab} isn't attached") };
-            if entry.session.as_deref().is_some_and(|s| s != session) {
-                bail!("Tab {tab} belongs to another session");
-            }
             let target_id = entry.target_id.clone();
-            if let Some(mut previous) = st.handoffs.remove(session) {
+            if let Some(mut previous) = st.handoffs.remove(&tab) {
                 previous.done.take().map(|d| d.send("cancelled"));
             }
             st.handoffs.insert(
-                session.to_string(),
+                tab,
                 Handoff {
                     id: id.clone(),
-                    session: session.to_string(),
                     tab,
                     target_id,
                     message: message.to_string(),
@@ -289,9 +277,9 @@ impl Relay {
             self.ext_best_effort(tab, "action.setBadge", badge);
             status
         };
-        rlog!("handoff.started", tabId = tab, session = session);
+        rlog!("handoff.started", tabId = tab);
         // A call stopped while it waits (its client went away, the toolbar button) takes its card down with it.
-        let mut pending = PendingHandoff { relay: self.clone(), session: session.to_string(), id: id.clone(), tab, armed: true };
+        let mut pending = PendingHandoff { relay: self.clone(), id: id.clone(), tab, armed: true };
         if let Err(error) = self.ext_tab(tab, "pageStatus.set", json!({ "status": status })).await {
             drop(pending);
             bail!("Couldn't show the handoff in tab {tab}: {error}");
@@ -302,45 +290,44 @@ impl Relay {
             Err(_) => "timeout",
         };
         pending.done();
-        self.finish_handoff_id(session, &id, outcome);
-        rlog!("handoff.finished", tabId = tab, session = session, outcome = outcome);
+        self.finish_handoff_id(tab, &id, outcome);
+        rlog!("handoff.finished", tabId = tab, outcome = outcome);
         self.refresh_presentation(tab, false);
         Ok(HandoffResult { outcome: outcome.to_string(), note: None })
     }
 
-    fn finish_handoff_id(&self, session: &str, id: &str, outcome: &'static str) {
+    fn finish_handoff_id(&self, tab: i64, id: &str, outcome: &'static str) {
         let mut st = self.st();
-        if st.handoffs.get(session).is_some_and(|h| h.id == id)
-            && let Some(mut handoff) = st.handoffs.remove(session) {
+        if st.handoffs.get(&tab).is_some_and(|h| h.id == id)
+            && let Some(mut handoff) = st.handoffs.remove(&tab) {
                 handoff.done.take().map(|d| d.send(outcome));
             }
     }
 
-    /// Cancels the session's handoff if the process waiting for it is `pid`.
-    pub fn finish_client_handoff(self: &Arc<Self>, session: &str, pid: u32) {
-        let waiting = self.st().handoffs.get(session).is_some_and(|h| h.pid == Some(pid));
-        if waiting {
-            rlog!("handoff.finished", session = session, outcome = "cancelled", reason = "client exited", pid = pid);
-            self.finish_handoff(session, "cancelled");
+    /// Cancels the handoffs process `pid` waits for (it exited).
+    pub fn finish_client_handoffs(self: &Arc<Self>, pid: u32) {
+        let tabs: Vec<i64> = self.st().handoffs.values().filter(|h| h.pid == Some(pid)).map(|h| h.tab).collect();
+        for tab in tabs {
+            rlog!("handoff.finished", tabId = tab, outcome = "cancelled", reason = "client exited", pid = pid);
+            self.finish_handoff(tab, "cancelled");
         }
     }
 
-    pub fn finish_handoff(self: &Arc<Self>, session: &str, outcome: &'static str) {
-        let tab = {
+    pub fn finish_handoff(self: &Arc<Self>, tab: i64, outcome: &'static str) {
+        {
             let mut st = self.st();
-            let Some(mut handoff) = st.handoffs.remove(session) else { return };
+            let Some(mut handoff) = st.handoffs.remove(&tab) else { return };
             handoff.done.take().map(|d| d.send(outcome));
-            handoff.tab
-        };
+        }
         self.refresh_presentation(tab, false);
     }
 
     /// The page's Continue button (`handoff.completed`): only the waiter named by its id and tab.
     pub fn complete_handoff(self: &Arc<Self>, tab: i64, id: &str) {
-        let session = self.st().handoffs.values().find(|h| h.id == id && h.tab == tab).map(|h| h.session.clone());
-        if let Some(session) = session {
+        let waiting = self.st().handoffs.get(&tab).is_some_and(|h| h.id == id);
+        if waiting {
             rlog!("handoff.completed", tabId = tab, from = "page");
-            self.finish_handoff(&session, "continued");
+            self.finish_handoff(tab, "continued");
         }
     }
 

@@ -228,11 +228,11 @@ async fn fill_uploads_keys_scroll_and_waits() {
     let fetch = "fetch(location.href).then(() => 'online', () => 'offline')";
     h.ok("emulate", json!({ "offline": true })).await;
     assert_eq!(h.ok("eval", json!({ "expression": fetch })).await, "\"offline\"");
-    let flag = h.ctx.state.inner().lock().await.get("browse.network.offline").and_then(|v| v.downcast_ref::<bool>()).copied();
+    let flag = h.state.inner().lock().await.get("browse.network.offline").and_then(|v| v.downcast_ref::<bool>()).copied();
     assert_eq!(flag, Some(true));
     h.ok("emulate", json!({ "offline": false })).await;
     assert_eq!(h.ok("eval", json!({ "expression": fetch })).await, "\"online\"");
-    let flag = h.ctx.state.inner().lock().await.get("browse.network.offline").and_then(|v| v.downcast_ref::<bool>()).copied();
+    let flag = h.state.inner().lock().await.get("browse.network.offline").and_then(|v| v.downcast_ref::<bool>()).copied();
     assert_eq!(flag, Some(false));
 }
 
@@ -439,4 +439,23 @@ async fn eval_scoping_serialization_errors_and_timeouts() {
     assert!(h.err("emulate", json!({ "timezone": "Europe/Paris" })).await.contains("timezone"));
     assert!(h.err("emulate", json!({ "viewport": { "width": 0, "height": 10 } })).await.contains("1 to 10000"));
     assert!(h.err("emulate", json!({ "viewport": { "width": 100000, "height": 10 } })).await.contains("1 to 10000"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn page_tools_need_a_tab() {
+    let h = harness!(false);
+    for tool in &h.tools {
+        let name = tool.spec().name;
+        let required = tool.spec().input_schema["required"].clone();
+        assert_eq!(required.as_array().is_some_and(|r| r.contains(&json!("tab"))), name != "navigate", "{name}: {required}");
+        if name == "navigate" {
+            continue;
+        }
+        let output = h.call(&name, json!({ "tab": null, "text": "x", "key": "x", "values": "x", "expression": "1", "files": "x", "from": "a", "to": "b" })).await;
+        assert!(output.is_error, "{name}");
+        assert!(support::text_of(&output).contains("Pass `tab`"), "{name}: {}", support::text_of(&output));
+    }
+    // Options for a new tab don't apply to an open one.
+    let output = h.call("navigate", json!({ "url": "about:blank", "group": "x" })).await;
+    assert!(output.is_error && support::text_of(&output).contains("only apply when navigate opens a tab"), "{}", support::text_of(&output));
 }

@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-use browse_core::ToolContext;
+use browse_core::{TabId, ToolContext};
 use tokio::sync::Mutex;
 
 use crate::{console, network, page, recording};
 
 const KEY: &str = "browse-capture";
 
-/// Everything browse-capture keeps for one session. Dropping it (the session ends) stops its background tasks.
+/// Everything browse-capture keeps for one tab. Dropping it (the tab is long gone) stops its background tasks.
 #[derive(Default)]
 pub(crate) struct CaptureState {
     pub network: Mutex<network::NetworkState>,
@@ -16,20 +16,12 @@ pub(crate) struct CaptureState {
     pub worlds: Mutex<page::Worlds>,
 }
 
-pub(crate) async fn get(ctx: &ToolContext) -> Arc<CaptureState> {
-    let mut map = ctx.state.inner().lock().await;
-    let entry = map.entry(KEY.to_string()).or_insert_with(|| Box::new(Arc::new(CaptureState::default())));
-    match entry.downcast_ref::<Arc<CaptureState>>() {
-        Some(state) => state.clone(),
-        None => {
-            let state = Arc::new(CaptureState::default());
-            *entry = Box::new(state.clone());
-            state
-        }
-    }
+/// browse-capture's state of the tab.
+pub(crate) async fn get(ctx: &ToolContext, tab: TabId) -> anyhow::Result<Arc<CaptureState>> {
+    Ok(ctx.state(tab).await?.get_or_insert(KEY, || Arc::new(CaptureState::default())).await)
 }
 
-/// Aborts a background task when dropped, so a session that goes away takes its captures with it.
+/// Aborts a background task when dropped, so a tab's state that goes away takes its captures with it.
 pub(crate) struct TaskGuard(Option<tokio::task::AbortHandle>);
 
 impl TaskGuard {
@@ -57,22 +49,22 @@ impl Drop for TaskGuard {
     }
 }
 
-/// Marks a background activity of the session busy for the relay while it lives (`Browser::set_busy`).
+/// Marks a background activity in a tab busy for the relay while it lives (`Browser::set_busy`).
 pub(crate) struct BusyGuard {
     browser: Arc<dyn browse_core::Browser>,
-    session: browse_core::SessionId,
+    tab: TabId,
     key: &'static str,
 }
 
 impl BusyGuard {
-    pub fn new(ctx: &ToolContext, key: &'static str) -> Self {
-        ctx.browser.set_busy(&ctx.session, key, true);
-        Self { browser: ctx.browser.clone(), session: ctx.session.clone(), key }
+    pub fn new(ctx: &ToolContext, tab: TabId, key: &'static str) -> Self {
+        ctx.browser.set_busy(tab, key, true);
+        Self { browser: ctx.browser.clone(), tab, key }
     }
 }
 
 impl Drop for BusyGuard {
     fn drop(&mut self) {
-        self.browser.set_busy(&self.session, self.key, false);
+        self.browser.set_busy(self.tab, self.key, false);
     }
 }

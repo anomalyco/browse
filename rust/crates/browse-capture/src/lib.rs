@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use browse_core::{Tool, ToolContext, ToolOutput};
+use browse_core::{Tool, ToolOutput};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -109,28 +109,13 @@ pub(crate) fn arg_action<'a>(args: &'a Value, actions: &[&str]) -> anyhow::Resul
     }
 }
 
-/// The tab a call targets: `tab` when given, else the session's current tab.
-pub(crate) async fn target_tab(ctx: &ToolContext, args: &Value) -> anyhow::Result<browse_core::TabId> {
-    match arg_tab(args)? {
-        Some(tab) => Ok(tab),
-        None => Ok(ctx.browser.current_tab(&ctx.session).await?.tab_id),
-    }
-}
-
-/// The `tab` argument when one was given.
-pub(crate) fn arg_tab(args: &Value) -> anyhow::Result<Option<browse_core::TabId>> {
-    match args.get("tab") {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(number)) => match number.as_i64() {
-            Some(tab) => Ok(Some(tab)),
-            None => bail_user!("tab must be an integer tab id"),
-        },
-        Some(_) => bail_user!("tab must be an integer tab id"),
-    }
+/// The tab a call targets (`tab` is required).
+pub(crate) fn target_tab(args: &Value) -> anyhow::Result<browse_core::TabId> {
+    browse_core::require_tab(args).map_err(|error| anyhow::Error::new(UserError(error.to_string())))
 }
 
 pub(crate) fn tab_schema() -> Value {
-    serde_json::json!({ "type": "integer", "description": "Tab id. Defaults to the session's current tab." })
+    browse_core::tab_schema()
 }
 
 pub(crate) fn now_iso() -> String {
