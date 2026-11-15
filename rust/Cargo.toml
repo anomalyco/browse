@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.17"
 edition = "2024"
 license = "MIT"
 
@@ -20,6 +20,7 @@ browse-core = { path = "crates/browse-core" }
 browse-relay = { path = "crates/browse-relay" }
 browse-page = { path = "crates/browse-page" }
 browse-capture = { path = "crates/browse-capture" }
+browse-script = { path = "crates/browse-script" }
 
 [profile.release]
 opt-level = "z"

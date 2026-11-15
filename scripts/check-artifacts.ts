@@ -3,10 +3,11 @@
 //   extension zip  no `update_url`, no relay-pairing.json, no source maps, no test-only hooks, the default relay port,
 //                  the release version, and exactly the capabilities in store/permissions.json; the store zip (stable)
 //                  has no manifest `key`, the dev zip (loaded unpacked) has the checkout's key and a build.json
-//   npm tarball    @opencode/browse at the release version, only dist/ and package metadata (no extension: npm
-//                  installs get it from the store or, for a dev build, the release service), no install scripts, no
-//                  source maps, and it installs with npm and starts its relay and MCP server
-//   bun scripts/check-artifacts.ts --version 0.1.0 --zip release/browse-extension-0.1.0.zip --tarball release/opencode-browse-0.1.0.tgz
+//   npm tarball    @opencode/browse at the release version: the launcher dist/cli.mjs and package metadata, an optional
+//                  dependency on each platform package, no install scripts; with --platform-tarball, it installs with
+//                  npm next to that platform package and starts its relay and MCP server
+//   bun scripts/check-artifacts.ts --version 0.1.0 --zip release/browse-extension-0.1.0.zip --tarball release/opencode-browse-0.1.0.tgz \
+//     [--platform-tarball opencode-browse-linux-x64-0.1.0.tgz]
 import { $ } from "bun"
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import net from "node:net"
@@ -152,63 +153,64 @@ export async function checkStoreZip(zip: string, version: string, allowlist?: Al
   })
 }
 
-/** `extensionSha256`: a dev build's CLI must carry the sha256 of the extension zip published with it. */
-export async function checkPackageTarball(tarball: string, version: string, extensionSha256?: string): Promise<string[]> {
+/**
+ * @opencode/browse (scripts/npm-package.ts): only the launcher dist/cli.mjs and package metadata, the bins the
+ * TypeScript package had (agent configs it wrote run `node .../dist/cli.mjs mcp`), an exact optional dependency on
+ * every platform package, no other dependencies and no install scripts.
+ */
+export async function checkPackageTarball(tarball: string, version: string): Promise<string[]> {
   const label = path.basename(tarball)
   return extracted("browse-tgz-", async (directory) => void (await $`tar -xzf ${tarball} -C ${directory}`.quiet()), async (directory) => {
     const packageDir = path.join(directory, "package")
     const structure = await structureProblems(directory, label)
-    if (structure.some((problem) => !problem.includes("source map"))) return structure
+    if (structure.length) return structure
     const names = await files(packageDir)
-    const problems: string[] = [...structure]
-    const allowedFile = (name: string) => /^dist\//.test(name) || ["package.json", "LICENSE", "README.md"].includes(name)
-    for (const name of names) if (!allowedFile(name)) problems.push(`${label}: unexpected file ${name}`)
-    for (const name of names) if (/(^|\/)\.env/.test(name) || /\.(pem|key|p12)$/.test(name)) problems.push(`${label}: looks like a secret: ${name}`)
+    const problems: string[] = []
+    const allowed = ["dist/cli.mjs", "package.json", "LICENSE", "README.md"]
+    for (const name of names) if (!allowed.includes(name)) problems.push(`${label}: unexpected file ${name}`)
     const pkg = JSON.parse(await readFile(path.join(packageDir, "package.json"), "utf8")) as {
       name?: string
       version?: string
       bin?: Record<string, string>
       scripts?: Record<string, string>
+      dependencies?: Record<string, string>
+      optionalDependencies?: Record<string, string>
+      publishConfig?: Record<string, unknown>
     }
     if (pkg.name !== PACKAGE_NAME) problems.push(`${label}: package name ${String(pkg.name)} should be ${PACKAGE_NAME}`)
     if (pkg.version !== version) problems.push(`${label}: package version ${String(pkg.version)} should be ${version}`)
-    for (const hook of ["preinstall", "install", "postinstall", "prepare"])
-      if (pkg.scripts?.[hook]) problems.push(`${label}: has a ${hook} script; installs must not run code`)
-    for (const bin of ["browse", "opencode-browser"]) if (pkg.bin?.[bin] !== "dist/cli.mjs") problems.push(`${label}: bin ${bin} should be dist/cli.mjs`)
-    // Every script in dist/, not just the entry.
-    const distTexts: string[] = []
-    for (const name of names.filter((file) => file.startsWith("dist/") && /\.[mc]?js$/.test(file))) {
-      const text = await readFile(path.join(packageDir, name), "utf8")
-      distTexts.push(text)
-      for (const marker of TEST_ONLY_MARKERS) if (text.includes(marker)) problems.push(`${label}: ${name} contains the development/test marker ${JSON.stringify(marker)}`)
-    }
+    if (pkg.scripts && Object.keys(pkg.scripts).length) problems.push(`${label}: has scripts; installs must not run code`)
+    if (pkg.dependencies && Object.keys(pkg.dependencies).length) problems.push(`${label}: has dependencies; the launcher needs only Node`)
+    if (Object.keys(pkg.publishConfig ?? {}).some((key) => key !== "access")) problems.push(`${label}: sets publishConfig beyond access`)
+    for (const bin of ["browse", "opencode-browser", "opencode-browser-cli"]) if (pkg.bin?.[bin] !== "dist/cli.mjs") problems.push(`${label}: bin ${bin} should be dist/cli.mjs`)
+    const { LAUNCHER_TARGETS } = await import("./npm-package.ts")
+    const expected = Object.fromEntries(LAUNCHER_TARGETS.map((item) => [`@opencode/browse-${item.name}`, version]))
+    if (JSON.stringify(pkg.optionalDependencies ?? {}) !== JSON.stringify(expected))
+      problems.push(`${label}: optionalDependencies are ${JSON.stringify(pkg.optionalDependencies ?? {})}, expected ${JSON.stringify(expected)}`)
     if (!names.includes("dist/cli.mjs")) problems.push(`${label}: missing dist/cli.mjs`)
     else {
       const cli = await readFile(path.join(packageDir, "dist", "cli.mjs"), "utf8")
       if (!cli.startsWith("#!/usr/bin/env node")) problems.push(`${label}: dist/cli.mjs has no node shebang`)
-      if (!cli.includes(JSON.stringify(version))) problems.push(`${label}: dist/cli.mjs doesn't carry version ${version}`)
-      if (cli.includes("sourceMappingURL")) problems.push(`${label}: dist/cli.mjs references a source map`)
-      if (extensionSha256 && !distTexts.some((text) => text.includes(extensionSha256))) {
-        problems.push(`${label}: dist/ doesn't carry the dev extension zip's sha256 ${extensionSha256}`)
-      }
+      for (const marker of TEST_ONLY_MARKERS) if (cli.includes(marker)) problems.push(`${label}: dist/cli.mjs contains the development/test marker ${JSON.stringify(marker)}`)
     }
     return problems
   })
 }
 
 /**
- * The tarball installed the way users get it (`npm install`, resolving dependency ranges fresh, no lockfile), then its
- * relay started on a free port with a throwaway home and its MCP server asked for its tools, as the binaries are in
- * the release workflow. Catches a dependency that resolves to a version the build doesn't work with, which the file
- * checks above can't see.
+ * @opencode/browse installed the way users get it (`npm install`, no lockfile) together with this machine's platform
+ * package from the same build (`platformTarball`: npm doesn't have it yet), then through the launcher: `--version`, the
+ * relay started on a free port with a throwaway home, and its MCP server asked for its tools.
  */
-export async function checkPackageInstall(tarball: string, version: string): Promise<string[]> {
+export async function checkPackageInstall(tarball: string, version: string, platformTarball: string): Promise<string[]> {
   const file = path.resolve(tarball)
   const label = path.basename(file)
   const directory = await mkdtemp(path.join(os.tmpdir(), "browse-install-"))
   try {
     await writeFile(path.join(directory, "package.json"), JSON.stringify({ private: true }))
-    const install = await $`npm install --ignore-scripts --no-audit --no-fund --no-package-lock file:${file}`.cwd(directory).quiet().nothrow()
+    // npm resolves every optional dependency, and the other platforms' packages of an unreleased version aren't on npm
+    // yet: --omit=optional with the platform package as an explicit dependency checks exactly what would install here.
+    const install = await $`npm install --ignore-scripts --no-audit --no-fund --no-package-lock --omit=optional file:${file} file:${path.resolve(platformTarball)}`.cwd(directory).quiet().nothrow()
     if (install.exitCode !== 0) return [`${label}: npm install failed:\n${tail(install.stderr.toString())}`]
     const cli = path.join(directory, "node_modules", PACKAGE_NAME, "dist", "cli.mjs")
     const port = await freePort()
@@ -219,19 +221,22 @@ export async function checkPackageInstall(tarball: string, version: string): Pro
       OPENCODE_BROWSER_UPDATE_CHECK: "0",
       TMPDIR: directory,
     }
+    const reported = await $`node ${cli} --version`.cwd(directory).env(env).quiet().nothrow()
+    if (reported.exitCode !== 0) return [`${label}: \`browse --version\` through the launcher failed:\n${tail(reported.stderr.toString())}`]
+    if (reported.stdout.toString().trim() !== version) return [`${label}: the launcher's binary reports version ${reported.stdout.toString().trim()}, expected ${version}`]
     const relay = Bun.spawn(["node", cli, "serve"], { cwd: directory, env, stdout: "ignore", stderr: "pipe" })
     const relayErrors = new Response(relay.stderr).text()
     try {
       const running = await relayVersion(port, relay)
       if (running === undefined) {
-        relay.kill("SIGKILL")
+        relay.kill("SIGTERM")
         return [`${label}: after npm install, \`browse serve\` didn't start:\n${tail(await relayErrors)}`]
       }
       if (running !== version) return [`${label}: the installed relay reports version ${running}, expected ${version}`]
       const tools = await mcpTools(cli, directory, env)
       return typeof tools === "number" && tools > 0 ? [] : [`${label}: after npm install, \`browse mcp\` listed no tools:\n${tail(String(tools))}`]
     } finally {
-      relay.kill("SIGKILL")
+      relay.kill("SIGTERM")
       await relay.exited
     }
   } finally {
@@ -288,11 +293,11 @@ async function mcpTools(cli: string, cwd: string, env: Record<string, string | u
       timeout.promise,
     ])
     if (listed !== undefined) return listed
-    mcp.kill("SIGKILL")
+    mcp.kill("SIGTERM")
     return `${output}\n${await errors}`
   } finally {
     clearTimeout(timer)
-    mcp.kill("SIGKILL")
+    mcp.kill("SIGTERM")
     await mcp.exited
   }
 }
@@ -308,7 +313,7 @@ function freePort() {
 }
 
 /**
- * A platform package (cli/script/pack.ts): @opencode/browse-<target> at the release version with exactly
+ * A platform package (scripts/npm-package.ts): @opencode/browse-<target> at the release version with exactly
  * package/bin/browse (browse.exe on Windows, mode 755), package.json and LICENSE, the os/cpu/libc npm installs by, and
  * no install scripts. The install script (../install) downloads it from npm and runs package/bin/browse.
  */
@@ -348,15 +353,15 @@ export async function checkBinaryTarball(tarball: string, version: string, targe
 }
 
 if (import.meta.main) {
-  const { values } = parseArgs({ options: { version: { type: "string" }, zip: { type: "string" }, tarball: { type: "string" } } })
+  const { values } = parseArgs({ options: { version: { type: "string" }, zip: { type: "string" }, tarball: { type: "string" }, "platform-tarball": { type: "string" } } })
   if (!values.version || (!values.zip && !values.tarball)) {
-    console.error("usage: bun scripts/check-artifacts.ts --version <version> [--zip <file>] [--tarball <file>]")
+    console.error("usage: bun scripts/check-artifacts.ts --version <version> [--zip <file>] [--tarball <file> [--platform-tarball <file>]]")
     process.exit(2)
   }
   const problems = [
     ...(values.zip ? await checkStoreZip(values.zip, values.version, undefined, values.version.includes("-dev.")) : []),
     ...(values.tarball ? await checkPackageTarball(values.tarball, values.version) : []),
-    ...(values.tarball ? await checkPackageInstall(values.tarball, values.version) : []),
+    ...(values.tarball && values["platform-tarball"] ? await checkPackageInstall(values.tarball, values.version, values["platform-tarball"]) : []),
   ]
   for (const problem of problems) console.error(`✗ ${problem}`)
   if (problems.length) process.exit(1)

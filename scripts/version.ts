@@ -1,10 +1,11 @@
-// The one release version: cli/package.json, the root package.json and the extension manifest move together.
+// The one release version: cli/package.json, the root package.json, the extension manifest and the Rust workspace
+// (rust/Cargo.toml and its lockfile; the browse binary also gets it as BROWSE_VERSION at build time) move together.
 // npm takes the version as is (0.1.0, or 0.1.1-dev.42 for a dev build). Chrome's manifest `version` must be one to four
 // dot-separated integers of at most 65535, so a dev build becomes 0.1.1.42 with `version_name` "0.1.1-dev.42" for
 // display. Dev builds never go to the Chrome Web Store (they're loaded unpacked from the release service), so a dev
 // build's four-part version never has to sort below the stable release that follows it.
 //
-//   bun scripts/version.ts set <version>    writes the version into the three files (the Release workflow's build job
+//   bun scripts/version.ts set <version>    writes the version into those files (the Release workflow's build jobs
 //                                           stamps a dev build's version, which its plan job computes, this way)
 import { readFile, writeFile } from "node:fs/promises"
 import path from "node:path"
@@ -52,7 +53,7 @@ export function applyManifestVersion(manifest: Record<string, unknown>, version:
 }
 
 const root = path.resolve(import.meta.dir, "..")
-export const VERSION_FILES = ["cli/package.json", "package.json", "public/manifest.json"] as const
+export const VERSION_FILES = ["cli/package.json", "package.json", "public/manifest.json", "rust/Cargo.toml", "rust/Cargo.lock"] as const
 
 async function updateJson(file: string, update: (data: Record<string, unknown>) => void) {
   const full = path.join(root, file)
@@ -61,11 +62,44 @@ async function updateJson(file: string, update: (data: Record<string, unknown>) 
   await writeFile(full, JSON.stringify(data, null, 2) + "\n")
 }
 
-/** Writes one version into cli/package.json, package.json and public/manifest.json. */
+const WORKSPACE_VERSION = /^(\[workspace\.package\]\n(?:(?!\[)[^\n]*\n)*?version = ")([^"]+)(")/m
+
+/** The Rust workspace version (rust/Cargo.toml `[workspace.package] version`), which every crate inherits. */
+export function cargoWorkspaceVersion(toml: string) {
+  return WORKSPACE_VERSION.exec(toml)?.[2]
+}
+
+/** The versions Cargo.lock records for the workspace's own crates (the packages without a `source`). */
+export function cargoLockMemberVersions(lock: string) {
+  return lock
+    .split(/\n(?=\[\[package\]\])/)
+    .filter((block) => block.startsWith("[[package]]") && !/^source = /m.test(block))
+    .map((block) => ({ name: /^name = "([^"]+)"/m.exec(block)?.[1] ?? "?", version: /^version = "([^"]+)"/m.exec(block)?.[1] ?? "?" }))
+}
+
+/**
+ * The Rust workspace takes the release version too, so `cargo build --locked` builds it as is: rust/Cargo.toml's
+ * workspace version and, in rust/Cargo.lock, every workspace crate (the packages without a `source`).
+ */
+async function setCargoVersion(version: string) {
+  const toml = path.join(root, "rust", "Cargo.toml")
+  const text = await readFile(toml, "utf8")
+  if (!cargoWorkspaceVersion(text)) throw new Error("rust/Cargo.toml has no [workspace.package] version")
+  await writeFile(toml, text.replace(WORKSPACE_VERSION, (_, head: string, _old: string, tail: string) => `${head}${version}${tail}`))
+  const lock = path.join(root, "rust", "Cargo.lock")
+  const blocks = (await readFile(lock, "utf8")).split(/\n(?=\[\[package\]\])/)
+  const updated = blocks.map((block) =>
+    block.startsWith("[[package]]") && !/^source = /m.test(block) ? block.replace(/^version = "[^"]+"/m, `version = "${version}"`) : block,
+  )
+  await writeFile(lock, updated.join("\n"))
+}
+
+/** Writes one version into cli/package.json, package.json, public/manifest.json and the Rust workspace. */
 export async function setVersion(version: string) {
   await updateJson("cli/package.json", (data) => void (data.version = version))
   await updateJson("package.json", (data) => void (data.version = version))
   await updateJson("public/manifest.json", (data) => void applyManifestVersion(data, version))
+  await setCargoVersion(version)
 }
 
 if (import.meta.main) {

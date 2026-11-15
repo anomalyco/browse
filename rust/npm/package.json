@@ -1,0 +1,25 @@
+{
+  "name": "@opencode/browse",
+  "description": "browse: connect the browse extension to OpenCode and drive your browser from your agent.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "browse": "dist/cli.mjs",
+    "opencode-browser": "dist/cli.mjs",
+    "opencode-browser-cli": "dist/cli.mjs"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anomalyco/browse.git",
+    "directory": "rust"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

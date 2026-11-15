@@ -5,8 +5,10 @@ the Rust relay must speak its exact protocol, so the store extension keeps worki
 
 ## Decisions
 
-- **No `execute` tool and no Playwright.** OpenCode has code mode, so browse exposes plain, typed tools and OpenCode
-  composes them. No embedded JS engine on the host.
+- **No Playwright; plain tools for OpenCode.** OpenCode has code mode, so it gets plain, typed tools and composes
+  them itself. Other MCP clients get one `execute` tool instead: JavaScript run in an embedded QuickJS
+  (`browse-script`) that calls the same tools in-process, with a Playwright-style `page` shim on top. The MCP proxy
+  picks by `clientInfo.name` (`OPENCODE_BROWSER_TOOLS=plain|execute|all` overrides).
 - **Talk CDP directly** through the extension's chrome.debugger relay. Inject Playwright's in-page script
   (`injectedScriptSource`, Apache-2.0, from `cli/node_modules/patchright-core`) into an isolated world for selectors,
   `getByRole`-style lookups and `ariaSnapshot`, so snapshot quality matches today.
@@ -22,11 +24,12 @@ the Rust relay must speak its exact protocol, so the store extension keeps worki
 
 | Crate | Owns |
 |---|---|
-| `browse-core` | Shared contracts: `Cdp`, `Browser`, `Secrets`, `Tool`, `ToolContext`, `ToolOutput`, wire types. Change only with care; other crates depend on it. |
-| `browse-relay` | Relay server: extension WebSocket protocol and handshake, pairing and browser tokens, CDP routing per tab (incl. child targets), sessions, tab groups and cleanup, handoff, site secrets, settings sync, the HTTP API (`/version`, `/tools`, `/tools/call`), data paths (XDG), relay logging. Implements `Browser`, `Cdp`, `Secrets`. Tools: sessions, tabs, handoff, demonstrate, secrets, status, settings, tabs_cleanup. |
+| `browse-core` | Shared contracts: `Cdp`, `Browser`, `Tool`, `ToolContext`, `ToolOutput`, wire types. Change only with care; other crates depend on it. |
+| `browse-relay` | Relay server: extension WebSocket protocol and handshake, pairing and browser tokens, CDP routing per tab (incl. child targets), sessions, tab groups and cleanup, handoff, settings sync, the HTTP API (`/version`, `/tools`, `/tools/call`), data paths (XDG), relay logging. Implements `Browser`, `Cdp`. Tools: sessions, tabs, handoff, demonstrate, status, settings, tabs_cleanup. |
 | `browse-page` | Page interaction over CDP: isolated worlds, frames, injected script, refs, snapshots, actionability, human-like input, stealth. Tools: navigate, snapshot, click, fill, type, press, select, hover, drag, scroll, eval, wait_for, dialog, upload, emulate, webmcp. |
 | `browse-capture` | Screenshots (labels, ref, full page, diff), network capture (start/status/stop/cancel, redacted exchanges), page console capture, screen recording (MJPEG → Matroska). |
-| `browse` | The binary: CLI commands (`serve`, `mcp`, `install`, `pair`, `update`, `doctor`, `status`, `extension`, and `browse <tool> --arg ...` for any tool), the MCP stdio proxy, starting the relay on demand, OpenCode setup, self-update from the release service. |
+| `browse-script` | The `execute` tool for non-OpenCode clients: QuickJS on its own thread per run, `browse.<tool>()` bindings, a Playwright-style `page`/`locator` shim, TS-compatible helpers (`snapshot`, `ref`, `handoff`, `files`, `state`, ...), CPU/memory/time limits. |
+| `browse` | The binary: CLI commands (`serve`, `mcp`, `execute`, `install`, `pair`, `update`, `status`, `extension`, and `browse <tool> --arg ...` for any tool), the MCP stdio proxy (plain tools for OpenCode, `execute` for other clients), starting the relay on demand, OpenCode setup, self-update from the release service. |
 
 Each crate exposes `pub fn tools() -> Vec<Arc<dyn browse_core::Tool>>`. The binary concatenates them and passes the
 registry to the relay.

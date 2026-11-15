@@ -16,6 +16,29 @@ for file in cli/package.json package.json public/manifest.json; do
   jq -e 'has("version_name") | not' "$file" > /dev/null || die "Couldn't remove version_name from $file"
 done
 
+# The Rust workspace: rust/Cargo.toml's [workspace.package] version, and in rust/Cargo.lock every workspace crate (the
+# packages without a source), as scripts/version.ts writes them.
+sed -i -E '/^\[workspace\.package\]$/,/^\[/ s/^version = "[^"]+"$/version = "'"$BROWSE_VERSION"'"/' rust/Cargo.toml
+grep -qxF "version = \"$BROWSE_VERSION\"" rust/Cargo.toml || die "Couldn't set the version in rust/Cargo.toml"
+lock=$(mktemp)
+awk -v version="$BROWSE_VERSION" '
+  function flush(  i, member) {
+    member = 1
+    for (i = 1; i <= n; i++) if (block[i] ~ /^source = /) member = 0
+    for (i = 1; i <= n; i++) {
+      if (member && block[i] ~ /^version = "/) block[i] = "version = \"" version "\""
+      print block[i]
+    }
+    n = 0
+  }
+  /^\[\[package\]\]$/ { flush(); package = 1 }
+  package { block[++n] = $0; if ($0 == "") { flush(); package = 0 }; next }
+  { print }
+  END { flush() }
+' rust/Cargo.lock > "$lock"
+cat "$lock" > rust/Cargo.lock
+rm -f "$lock"
+
 changelog="changelog/$BROWSE_VERSION.md"
 if [ ! -e "$changelog" ]; then
   mkdir -p changelog
@@ -29,8 +52,8 @@ if [ ! -e "$changelog" ]; then
   git add "$changelog"
 fi
 
-if git diff --cached --name-only HEAD | grep -vxE "cli/package\.json|package\.json|public/manifest\.json|changelog/$BROWSE_VERSION\.md" ||
-  git diff --name-only | grep -vxE 'cli/package\.json|package\.json|public/manifest\.json'; then
+if git diff --cached --name-only HEAD | grep -vxE "cli/package\.json|package\.json|public/manifest\.json|rust/Cargo\.(toml|lock)|changelog/$BROWSE_VERSION\.md" ||
+  git diff --name-only | grep -vxE 'cli/package\.json|package\.json|public/manifest\.json|rust/Cargo\.(toml|lock)'; then
   die "The release commit may only change versions and the changelog"
 fi
 

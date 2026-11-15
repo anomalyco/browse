@@ -8,7 +8,7 @@
 . "$(dirname "$0")/lib.sh"
 
 build_dir=$1 binaries_dir=$2 signed_dir=${3:-}
-# The install script's targets (install); keep in step with cli/script/compile.ts.
+# The install script's targets (install); keep in step with scripts/npm-package.ts.
 targets="linux-x64 linux-x64-baseline linux-arm64 linux-x64-musl linux-x64-baseline-musl linux-arm64-musl darwin-arm64 darwin-x64 darwin-x64-baseline windows-x64 windows-x64-baseline"
 
 check_package() { # <file> <name> [<os> <cpu> <libc or "">]

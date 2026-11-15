@@ -246,6 +246,18 @@ pub fn call(name: &str, args: &[String]) -> anyhow::Result<i32> {
                 help(spec);
                 return Ok(0);
             }
+            // `browse execute --file script.js` (or `-` for stdin).
+            "file" if name == "execute" && !properties.contains_key("file") => {
+                let path = inline.or_else(|| take(&mut i)).context("--file needs a path")?;
+                let code = if path == "-" {
+                    let mut code = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut code).context("can't read the code from stdin")?;
+                    code
+                } else {
+                    std::fs::read_to_string(&path).with_context(|| format!("can't read {path}"))?
+                };
+                arguments.insert("code".into(), Value::String(code));
+            }
             "json" | "session" | "output" => {
                 let value = inline.or_else(|| take(&mut i)).with_context(|| format!("--{flag} needs a value"))?;
                 match flag {

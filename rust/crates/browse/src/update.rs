@@ -1,5 +1,6 @@
 //! Updates for a binary install (cli/src/update/**): the release service's manifest for this build's channel, the
-//! protocol's client rules, a size- and SHA-256-checked download that replaces the executable in place, and the
+//! protocol's client rules, a size- and SHA-256-checked download of the install script's tarball whose executable
+//! replaces this one in place, and the
 //! relay's background loop that installs updates and restarts itself with them once nothing is using the browser.
 
 use std::path::{Path, PathBuf};
@@ -228,19 +229,55 @@ pub fn check() -> anyhow::Result<Check> {
     Ok(Check::Available(Release { version, url, size, sha256: sha256.to_lowercase() }))
 }
 
-/// Downloads `release` beside `binary`, checks its size and SHA-256, and swaps it in. A running relay keeps its old
-/// executable until it restarts.
+/// A manifest's file URL: the service gives a path on its own origin (`/release/files/...`), like the install script reads it.
+fn file_url(url: &str) -> anyhow::Result<String> {
+    if url.starts_with("https://") {
+        return Ok(url.to_owned());
+    }
+    let service = service();
+    let origin = service.strip_suffix("/release").context("OPENCODE_BROWSER_RELEASE_SERVICE must end in /release")?;
+    if !url.starts_with('/') {
+        bail!("unexpected download URL {url}");
+    }
+    Ok(format!("{origin}{url}"))
+}
+
+/// The tar that reads the release tarballs: Windows 10 and later ship bsdtar as System32\tar.exe (another tar on PATH,
+/// like Git's, can't read C:\ paths).
+fn tar() -> PathBuf {
+    if cfg!(windows)
+        && let Some(root) = std::env::var_os("SystemRoot")
+    {
+        let system = PathBuf::from(root).join("System32").join("tar.exe");
+        if system.is_file() {
+            return system;
+        }
+    }
+    PathBuf::from("tar")
+}
+
+/// Downloads `release` (the install script's tarball, `package/bin/browse[.exe]`) beside `binary`, checks its size and
+/// SHA-256, and swaps the executable in. A running relay keeps its old executable until it restarts.
 pub fn install(release: &Release, binary: &Path) -> anyhow::Result<()> {
     let dir = binary.parent().context("no parent folder")?;
+    let work = dir.join(format!(".browse.{}.update", std::process::id()));
+    let archive = work.join("browse.tgz");
     let staged = dir.join(format!(".browse.{}.new", std::process::id()));
-    let staged_text = staged.to_string_lossy().into_owned();
     let result = (|| {
-        curl(&["--max-time", "900", "-o", &staged_text, &release.url])?;
-        let bytes = std::fs::read(&staged)?;
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work)?;
+        curl(&["--max-time", "900", "-o", &archive.to_string_lossy(), &file_url(&release.url)?])?;
+        let bytes = std::fs::read(&archive)?;
         if bytes.len() as u64 != release.size || session::hex(&Sha256::digest(&bytes)) != release.sha256 {
             bail!("the download of browse {} didn't match its checksum; nothing was installed", release.version);
         }
         drop(bytes);
+        let entry = format!("package/bin/{}", if cfg!(windows) { "browse.exe" } else { "browse" });
+        let output = Command::new(tar()).arg("-xzf").arg(&archive).arg("-C").arg(&work).arg(&entry).output().context("tar is needed to unpack updates")?;
+        if !output.status.success() {
+            bail!("couldn't unpack browse {}: {}", release.version, String::from_utf8_lossy(&output.stderr).trim());
+        }
+        std::fs::rename(work.join(&entry), &staged).with_context(|| format!("browse {}'s download has no {entry}", release.version))?;
         set_mode_bits(&staged, 0o755);
         if cfg!(windows) && binary.exists() {
             // A running .exe can be renamed but not replaced.
@@ -255,6 +292,7 @@ pub fn install(release: &Release, binary: &Path) -> anyhow::Result<()> {
         Ok(())
     })();
     let _ = std::fs::remove_file(&staged);
+    let _ = std::fs::remove_dir_all(&work);
     result
 }
 

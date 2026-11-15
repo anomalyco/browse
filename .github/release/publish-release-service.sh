@@ -32,7 +32,7 @@ extension="browse-extension-$BROWSE_VERSION.zip"
 [[ "$BROWSE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || die "Not a release version: $BROWSE_VERSION"
 if [ "$channel" = stable ]; then stable_version "$BROWSE_VERSION" || die "Not a stable version: $BROWSE_VERSION"; fi
 
-# The install script's targets (install); keep in step with cli/script/compile.ts and publish-npm.sh.
+# The install script's targets (install); keep in step with scripts/npm-package.ts and publish-npm.sh.
 targets="linux-x64 linux-x64-baseline linux-arm64 linux-x64-musl linux-x64-baseline-musl linux-arm64-musl darwin-arm64 darwin-x64 darwin-x64-baseline windows-x64 windows-x64-baseline"
 
 service_target() {

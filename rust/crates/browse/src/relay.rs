@@ -34,6 +34,8 @@ pub fn probe() -> Probe {
 /// The running relay's /version, starting one when none is listening.
 pub fn ensure() -> anyhow::Result<Value> {
     match probe() {
+        // A relay of the TypeScript browse can't serve this build: hand over to this one.
+        Probe::Running(version) if crate::legacy::is_legacy(&version) => crate::legacy::stop(&version, false)?,
         Probe::Running(version) => return Ok(version),
         Probe::Foreign(message) => bail!(message),
         Probe::Absent => {}
@@ -165,6 +167,8 @@ pub fn local_tools() -> Vec<std::sync::Arc<dyn browse_core::Tool>> {
     let mut tools = browse_relay::tools();
     tools.extend(browse_page::tools());
     tools.extend(browse_capture::tools());
+    let execute = browse_script::tools(&tools);
+    tools.extend(execute);
     tools
 }
 

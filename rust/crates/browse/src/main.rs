@@ -2,6 +2,7 @@ mod browsers;
 mod cli;
 mod http;
 mod jsonc;
+mod legacy;
 mod mcp;
 mod relay;
 mod relay_api;
@@ -45,6 +46,8 @@ RUNNING
                               calls use your current session (OPENCODE_BROWSER_SESSION, the OpenCode session, or \"cli\")
     --output <path>           Where to save images (default: a temp file, printed)
   <tool> --help               The tool's options
+  execute --file <script.js>  Run a JavaScript file (Playwright-style `page`, snapshot(), ref(), handoff(), browse.*);
+                              --code '<js>' or a positional value runs inline code, --file - reads stdin
 ";
 
 fn main() {
@@ -85,6 +88,8 @@ fn main() {
         "extension" => Ok(setup::extension()),
         "update" => update::command(rest).map(|_| 0),
         "status" => setup::status(rest),
+        // Run by the TypeScript browse's updater once it installed this build (legacy.rs).
+        "runtime-switch" => legacy::runtime_switch(rest),
         "tools" => Ok(cli::list()),
         tool if !tool.starts_with('-') => cli::call(tool, rest),
         other => {

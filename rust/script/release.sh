@@ -1,9 +1,10 @@
 #!/bin/sh
-# Builds the browse binary for every platform the install script picks from (cli/script/compile.ts), into
-# rust/dist/browse-<target>/browse[.exe], and prints each file's size and SHA-256 for the release manifest.
+# Builds the browse binary for every platform the install script picks from, into rust/dist/<target>/browse[.exe]
+# (the layout `bun scripts/npm-package.ts platforms --binaries rust/dist` packs), and prints each file's size and SHA-256.
 #   BROWSE_VERSION=0.1.0 script/release.sh [target...]     e.g. linux-x64 darwin-arm64; no target: all
-# Linux and macOS targets cross-compile with cargo-zigbuild, Windows with cargo-xwin; on a matching host plain cargo
-# is used. Install them with `cargo install cargo-zigbuild cargo-xwin` and add the rustup targets.
+# Linux targets build with cargo-zigbuild (the gnu ones against glibc 2.17, as the release does), macOS ones too unless
+# this is a Mac, and Windows with cargo-xwin unless this is Windows. Install them with
+# `cargo install cargo-zigbuild cargo-xwin` and add the rustup targets. The release workflow builds the same way.
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -27,14 +28,20 @@ host=$(rustc -vV | sed -n 's/^host: //p')
 mkdir -p dist
 for name in $all; do
     target=$(triple "$name")
-    if [ "$target" = "$host" ]; then build="cargo build"
-    elif [ "$name" = windows-x64 ]; then build="cargo xwin build"
-    else build="cargo zigbuild"; fi
-    $build --release --locked -p browse --target "$target"
+    build_target=$target
+    case "$target" in
+        *-linux-gnu) build="cargo zigbuild" build_target="$target.2.17" ;;
+        *-linux-musl) build="cargo zigbuild" ;;
+        *-pc-windows-msvc)
+            if [ "$target" = "$host" ]; then build="cargo build"; else build="cargo xwin build"; fi
+            export CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS="-C target-feature=+crt-static" ;;
+        *) if [ "$target" = "$host" ] || [ "$(uname -s)" = Darwin ]; then build="cargo build"; else build="cargo zigbuild"; fi ;;
+    esac
+    $build --release --locked -p browse --target "$build_target"
     exe=browse; [ "$name" = windows-x64 ] && exe=browse.exe
-    mkdir -p "dist/browse-$name"
-    cp "target/$target/release/$exe" "dist/browse-$name/$exe"
-    file="dist/browse-$name/$exe"
+    mkdir -p "dist/$name"
+    cp "target/$target/release/$exe" "dist/$name/$exe"
+    file="dist/$name/$exe"
     size=$(wc -c <"$file" | tr -d ' ')
     sum=$( (sha256sum "$file" 2>/dev/null || shasum -a 256 "$file") | cut -d' ' -f1)
     echo "$name $size $sum"
