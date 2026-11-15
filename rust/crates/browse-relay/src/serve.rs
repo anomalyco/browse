@@ -414,7 +414,7 @@ async fn route(relay: Arc<Relay>, peer: SocketAddr, request: Request<Incoming>) 
 
 /// What a client of the TypeScript browse (0.0.17 and earlier) gets from this relay: an MCP server OpenCode started
 /// before the update keeps running the old build until it is restarted.
-pub const LEGACY_CLIENT: &str = "browse was updated to a new version, and this browse MCP server is still the old one, so it can't use the browser anymore. Restart OpenCode (or run /mcps to reconnect browse) to use the new version.";
+pub const LEGACY_CLIENT: &str = "browse was updated to a new version, but this browse MCP server is the old one still running, so it can't use the browser anymore. Reconnect it yourself, then retry: run `opencode api post /api/experimental/mcp/browse/disconnect` and then `opencode api post /api/experimental/mcp/browse/connect` from this project's directory (if the server is named opencode-browser in the user's config, use that name instead). Your browse tools are replaced by the new version's after that. If those commands fail, tell the user browse was updated and to restart OpenCode.";
 
 const LEGACY_TOKEN_PARAM: &str = "opencodeBrowserToken";
 
