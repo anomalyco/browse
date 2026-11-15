@@ -164,6 +164,23 @@ export function createExtensionEventHandler(options: {
     })
   }
 
+  /**
+   * The allowlist decision for a freshly attached popup. Chrome reports no URL for a popup that has not navigated yet,
+   * and a commit that lands while the tab is still being registered is dropped as an event, so the stored URL can stay
+   * "". The tab is registered when this runs: ask Chrome where it is now, then judge that. A later commit reaches the
+   * guard as a normal event.
+   */
+  const decideOpenedPopup = async (popup: ConnectedTarget): Promise<boolean> => {
+    if (popup.targetInfo.url !== "") return navigationGuard.popupAttached(popup)
+    const result = await Effect.runPromise(sendDebuggerCommand({ tabId: popup.tabId, method: "Target.getTargetInfo", params: {} }))
+    const targetInfo = getTargetInfo(result.targetInfo)
+    if (!targetInfo || targetInfo.targetId !== popup.targetInfo.targetId) {
+      throw new Error(`Target.getTargetInfo changed while checking opened tab ${popup.tabId}`)
+    }
+    const updated = registry.updateConnectedTargetInfo({ tabId: popup.tabId, targetInfo })
+    return navigationGuard.popupAttached(updated?.kind === "root" ? updated.target : popup)
+  }
+
   function adoptOpenedTab(tabId: number, openerTabId: number): void {
     const opener = registry.tabTargets.get(openerTabId)
     const sessionId = opener?.opencodeBrowserSessionId
@@ -197,11 +214,12 @@ export function createExtensionEventHandler(options: {
       }
       return await attach()
     }
-    attachWithRetry().then(() => {
+    attachWithRetry().then(async () => {
       const popup = registry.tabTargets.get(tabId)
       if (!popup) return
-      const allowed = navigationGuard.popupAttached(popup)
-      if (allowed && popup.opencodeBrowserSessionId) sessions.noteTargetHeld(popup.targetInfo.targetId, popup.opencodeBrowserSessionId)
+      const allowed = await decideOpenedPopup(popup)
+      const current = registry.tabTargets.get(tabId)
+      if (allowed && current?.opencodeBrowserSessionId) sessions.noteTargetHeld(current.targetInfo.targetId, current.opencodeBrowserSessionId)
     }).catch((error: unknown) => {
       relayLog("tab.opened.error", { tabId, error: error instanceof Error ? error.message : String(error) })
     })
