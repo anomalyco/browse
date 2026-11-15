@@ -429,8 +429,14 @@ export class RootTargetLifecycle {
     // Stage before auto-attach: synchronous child events must route to this generation.
     yield* this.command(transition, "Target.setAutoAttach", autoAttachParams ?? { autoAttach: true, waitForDebuggerOnStart: false, flatten: true })
     const result = yield* this.command(transition, "Target.getTargetInfo")
-    if (getTargetInfo(result.targetInfo)?.targetId !== target.targetInfo.targetId) {
+    const finishedTargetInfo = getTargetInfo(result.targetInfo)
+    if (finishedTargetInfo?.targetId !== target.targetInfo.targetId) {
       return yield* Effect.fail(new Error(`Root target changed while preparing ${target.targetInfo.targetId}`))
+    }
+    // A popup can commit its first navigation after the staging query reported no URL. This answer is later, and the
+    // staged target receives events from the staging point on, so take the URL here and keep the synthesized openerId.
+    if (target.targetInfo.url === "" && finishedTargetInfo.url !== "") {
+      registry.updateTargetUrl(target.tabId, finishedTargetInfo.url)
     }
     const change = registry.commitStagedRootTarget(target.tabId, target.sessionId)
     if (!change) return yield* Effect.fail(new Error(`Staged root target changed before commit: ${target.targetInfo.targetId}`))

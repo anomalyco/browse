@@ -65,6 +65,43 @@ describe("SessionNavigationGuard popups", () => {
     expect(guard.drainWarnings(session)).toEqual([])
   })
 
+  test("an off-list navigation starting in a fresh popup closes it instead of stopping a blank tab", async () => {
+    const { guard, closed, sent, logged } = scene()
+    const target = popup(12, "")
+
+    expect(guard.popupAttached(target)).toBe(true)
+    guard.observeEvent(target, "Page.frameStartedNavigating", { frameId: "TARGET-12", url: "https://evil.test/" })
+    await settle()
+
+    expect(closed).toEqual([12])
+    expect(sent.map((command) => command.method)).not.toContain("Page.stopLoading")
+    expect(logged).toContainEqual({
+      event: "allowlist.violation",
+      details: { tabId: 12, session, url: "https://evil.test/", popup: true },
+    })
+    expect(guard.drainWarnings(session)[0]).toContain("closed the popup")
+  })
+
+  test("a popup marked fresh before attach is closed by an off-list navigation during attach", async () => {
+    const { guard, closed, logged, sent } = scene()
+    const target = popup(13, "")
+
+    guard.popupOpening(13)
+    guard.observeEvent(target, "Page.frameRequestedNavigation", { frameId: "TARGET-13", url: "https://evil.test/" })
+    await settle()
+
+    expect(closed).toEqual([13])
+    expect(guard.drainWarnings(session)).toHaveLength(1)
+
+    // An attach that fails forgets the mark: the next violation blanks the tab instead of closing it.
+    guard.forgetTab(13)
+    guard.observeEvent(target, "Page.frameRequestedNavigation", { frameId: "TARGET-13", url: "https://evil.test/" })
+    await settle()
+    expect(closed).toEqual([13])
+    expect(logged.filter((entry) => entry.event === "allowlist.violation")).toHaveLength(1)
+    expect(sent.some((command) => command.method === "Page.stopLoading")).toBe(true)
+  })
+
   test("an empty URL at attach does not stop an off-list first navigation from closing the popup", async () => {
     const { guard, closed, sent, logged } = scene()
     const target = popup(8, "")

@@ -6,9 +6,9 @@ import path from "node:path"
 import WebSocket from "ws"
 import { cdpCall, connectCdp, FakeExtension, startRelay, stopRelay, until } from "./relay-harness.ts"
 
-// A popup whose first navigation commits while it is being registered: Chrome reports no URL at attach, the commit's
-// Page.frameNavigated is dropped (the tab is not registered yet), and the stored URL stays "". The guard re-queries
-// Chrome once the tab is registered, so its decision still uses the real URL.
+// A popup whose first navigation commits before it is staged: Chrome reports no URL to the staging query and the
+// commit's Page.frameNavigated is dropped (no routing target yet). Events reach the guard from stageRootTarget on, so
+// attach's second Target.getTargetInfo refreshes the staged URL before the popup is published and judged.
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-allowlist-popup-"))
 let port = 0
@@ -58,9 +58,9 @@ function logLine(event: string, tabId: number) {
 }
 
 /**
- * A session with a registered opener tab, plus a popup that reports no URL until it is registered. The live URL is
- * what Chrome answers to the guard's post-registration re-query. Without `allowedOrigins` the session has no allowlist,
- * and the guard must not ask Chrome at all.
+ * A session with a registered opener tab, plus a popup whose staging query reports no URL. The live URL is what
+ * Chrome answers to the attach's second query, once the popup has committed its first navigation. Without
+ * `allowedOrigins` the session has no allowlist.
  */
 async function popupScene(options: {
   readonly id: string
@@ -68,12 +68,12 @@ async function popupScene(options: {
   readonly popupTabId: number
   readonly liveUrl: string
   readonly allowedOrigins?: readonly string[]
-  readonly recheckFails?: boolean
+  /** Emit an off-list navigation start while the tab is staged, before the attach's second query answers. */
+  readonly startDuringAttach?: string
 }) {
   const openerTargetId = `TARGET-${options.openerTabId}`
   const popupTargetId = `TARGET-${options.popupTabId}`
   const state = {
-    registered: false,
     popupQueries: [] as string[],
     removed: false,
   }
@@ -82,15 +82,17 @@ async function popupScene(options: {
     .on("Target.getTargetInfo", (command) => {
       const tabId = Number(command.params?.tabId)
       if (tabId !== options.popupTabId) return { targetInfo: targetInfo(openerTargetId, "https://127.0.0.1:8443/start") }
-      // Before action.setAttached the tab is still being staged: Chrome has no URL for the popup yet.
-      const url = state.registered ? options.liveUrl : ""
+      // The staging query sees no URL; the commit lands before the attach's second query answers.
+      const url = state.popupQueries.length === 0 ? "" : options.liveUrl
       state.popupQueries.push(url)
-      if (state.registered && options.recheckFails) throw new Error(`No tab with id: ${options.popupTabId}.`)
+      if (state.popupQueries.length === 2 && options.startDuringAttach) {
+        extension.emit("debugger.event", {
+          tabId: options.popupTabId,
+          method: "Page.frameStartedNavigating",
+          params: { frameId: popupTargetId, url: options.startDuringAttach },
+        })
+      }
       return { targetInfo: targetInfo(popupTargetId, url) }
-    })
-    .on("action.setAttached", (command) => {
-      if (Number(command.params?.tabId) === options.popupTabId) state.registered = true
-      return {}
     })
     .on("tabs.remove", (command) => {
       if (Number(command.params?.tabId) === options.popupTabId) state.removed = true
@@ -134,13 +136,13 @@ async function waitForTarget(socket: WebSocket, targetId: string, url: string, t
 
 const allowedOrigins = ["https://127.0.0.1:8443"]
 
-test("an off-list URL found by the post-attach re-query closes the popup", async () => {
+test("an off-list URL found by the attach refresh closes the popup", async () => {
   const scene = await popupScene({ id: "popup-empty-off-list", openerTabId: 301, popupTabId: 302, liveUrl: "https://evil.test/", allowedOrigins })
   try {
     scene.open()
     expect(await until(() => scene.state.removed)).toBe(true)
-    // The attach saw no URL twice; the guard's third query got the committed one.
-    expect(scene.state.popupQueries).toEqual(["", "", "https://evil.test/"])
+    // Staging saw no URL; the attach's second query got the committed one.
+    expect(scene.state.popupQueries).toEqual(["", "https://evil.test/"])
     expect(logLine("allowlist.violation", 302)).toContain("popup=true")
     expect(logLine("allowlist.violation", 302)).toContain("url=https://evil.test/")
     expect((await getTargets(scene.socket, 2)).some((target) => target.targetId === scene.popupTargetId)).toBe(false)
@@ -149,7 +151,7 @@ test("an off-list URL found by the post-attach re-query closes the popup", async
   }
 }, 20_000)
 
-test("an allowed URL found by the post-attach re-query keeps the popup and its opener", async () => {
+test("an allowed URL found by the attach refresh keeps the popup and its opener", async () => {
   const liveUrl = "https://127.0.0.1:8443/app"
   const scene = await popupScene({ id: "popup-empty-allowed", openerTabId: 311, popupTabId: 312, liveUrl, allowedOrigins })
   try {
@@ -159,33 +161,42 @@ test("an allowed URL found by the post-attach re-query keeps the popup and its o
     expect(target?.url).toBe(liveUrl)
     expect(target?.openerId).toBe("TARGET-311")
     expect(scene.state.removed).toBe(false)
-    expect(scene.state.popupQueries).toEqual(["", "", liveUrl])
+    expect(scene.state.popupQueries).toEqual(["", liveUrl])
     expect(logLine("allowlist.violation", 312)).toBeUndefined()
   } finally {
     scene.close()
   }
 }, 20_000)
 
-test("a popup whose re-query fails is closed instead of left unchecked", async () => {
-  const scene = await popupScene({ id: "popup-empty-recheck-fails", openerTabId: 321, popupTabId: 322, liveUrl: "https://127.0.0.1:8443/app", allowedOrigins, recheckFails: true })
+test("an off-list navigation seen while the popup is staged closes it", async () => {
+  const scene = await popupScene({
+    id: "popup-start-during-attach",
+    openerTabId: 321,
+    popupTabId: 322,
+    liveUrl: "https://127.0.0.1:8443/app",
+    allowedOrigins,
+    startDuringAttach: "https://evil.test/",
+  })
   try {
     scene.open()
     expect(await until(() => scene.state.removed)).toBe(true)
-    expect(scene.state.popupQueries).toEqual(["", "", "https://127.0.0.1:8443/app"])
-    expect(logLine("allowlist.close-unverified", 322)).toContain("No tab with id: 322.")
+    expect(scene.state.popupQueries).toEqual(["", "https://127.0.0.1:8443/app"])
+    expect(logLine("allowlist.violation", 322)).toContain("popup=true")
+    expect(logLine("allowlist.violation", 322)).toContain("url=https://evil.test/")
     expect((await getTargets(scene.socket, 2)).some((target) => target.targetId === scene.popupTargetId)).toBe(false)
   } finally {
     scene.close()
   }
 }, 20_000)
 
-test("a session without an allowlist never re-queries or closes the popup", async () => {
-  const scene = await popupScene({ id: "popup-no-allowlist", openerTabId: 331, popupTabId: 332, liveUrl: "https://127.0.0.1:8443/app" })
+test("a session without an allowlist keeps an empty-then-live popup open", async () => {
+  const liveUrl = "https://127.0.0.1:8443/app"
+  const scene = await popupScene({ id: "popup-no-allowlist", openerTabId: 331, popupTabId: 332, liveUrl })
   try {
     scene.open()
-    const target = await waitForTarget(scene.socket, scene.popupTargetId, "")
+    const target = await waitForTarget(scene.socket, scene.popupTargetId, liveUrl)
     expect(target?.targetId).toBe(scene.popupTargetId)
-    expect(scene.state.popupQueries).toEqual(["", ""])
+    expect(scene.state.popupQueries).toEqual(["", liveUrl])
     expect(scene.state.removed).toBe(false)
   } finally {
     scene.close()

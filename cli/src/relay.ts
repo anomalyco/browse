@@ -417,7 +417,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     mainFrameId: (tabId) => mainFrameIdsByTab.get(tabId),
     send: (tabId, method, params) => Effect.runPromise(sendDebuggerCommand({ tabId, method, params })),
     closeTab: (tabId) => Effect.runPromise(Effect.gen(function* () {
-      const target = registry.tabTargets.get(tabId)
+      // A popup can violate while it is still staged: routingRootTarget finds it, and detachRootTargetState drops the
+      // staged entry so a half-finished attach cannot publish a closed tab.
+      const target = registry.routingRootTarget(tabId)
       if (target?.owner === "user") return
       relayLog("allowlist.close", { tabId, registered: target !== undefined })
       yield* sendToExtension({ method: "tabs.remove", params: { tabId } })

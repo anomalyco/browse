@@ -91,6 +91,11 @@ export class SessionNavigationGuard {
     return `browse blocked ${options.method}: session ${options.sessionId} has a domain allowlist and ${decision.reason}. Ask the user before widening it (session_allowlist / \`session allow\`).`
   }
 
+  /** Mark a popup fresh before its attach starts, so a violation during attach closes it instead of blanking it. */
+  popupOpening(tabId: number): void {
+    this.freshPopups.add(tabId)
+  }
+
   /** Apply the session's allowlist to a popup the relay just attached; false when it was closed or blanked. */
   popupAttached(target: NavigationGuardTarget): boolean {
     if (!this.enforced(target)) return true
@@ -147,6 +152,11 @@ export class SessionNavigationGuard {
     if (url === undefined) return
     const decision = checkUrl(url, rules)
     if (decision.allowed) return
+    // A fresh popup that starts off-list has no allowed page to go back to: close it rather than leave a blank one.
+    if (this.freshPopups.has(target.tabId) && target.owner === "relay") {
+      this.violation(target, url, decision.reason, "start")
+      return
+    }
     this.dependencies.send(target.tabId, "Page.stopLoading", {}).catch(() => {})
     this.addWarning(sessionId, `Domain allowlist: a tab of session ${sessionId} started to navigate to ${shortUrl(url)}, but ${decision.reason}; browse stopped it. Ask the user before widening the allowlist.`)
     this.dependencies.log("allowlist.stopped", { tabId: target.tabId, session: sessionId, method, reason: decision.reason })
@@ -170,7 +180,7 @@ export class SessionNavigationGuard {
     return false
   }
 
-  private violation(target: NavigationGuardTarget, url: string, reason: string, _stage: "commit"): void {
+  private violation(target: NavigationGuardTarget, url: string, reason: string, _stage: "commit" | "start"): void {
     const sessionId = target.opencodeBrowserSessionId!
     const shownUrl = shortUrl(url)
     const popup = this.freshPopups.has(target.tabId) && target.owner === "relay"

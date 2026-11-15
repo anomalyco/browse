@@ -443,8 +443,37 @@ impl Relay {
                 popup.fresh_popup = true;
                 popup.url.clone()
             };
+            let url = if url.is_empty() {
+                // A popup that had not navigated at attach: its first commit could have landed before registration,
+                // where events are dropped. It is registered now, so one query decides it; later commits are events.
+                match relay.popup_url_after_attach(tab).await {
+                    Ok(url) => url,
+                    Err(error) => {
+                        rlog!("allowlist.close-unverified", tabId = tab, error = error.to_string());
+                        let _ = relay.close_or_release(tab).await;
+                        return;
+                    }
+                }
+            } else {
+                url
+            };
             relay.check_committed_url(tab, &url);
         });
+    }
+
+    /// Re-read a popup's URL after registration when Chrome reported none at attach.
+    async fn popup_url_after_attach(self: &Arc<Self>, tab: i64) -> anyhow::Result<String> {
+        let target_id = self.st().tabs.get(&tab).context("That tab isn't attached")?.target_id.clone();
+        let info = self.debugger(tab, None, "Target.getTargetInfo", json!({}), Some(Duration::from_secs(5))).await?;
+        let (reported_id, _, url, title) = target_info(&info).context("Target.getTargetInfo did not return targetInfo")?;
+        if reported_id != target_id {
+            bail!("Target.getTargetInfo changed while checking opened tab {tab}");
+        }
+        if let Some(entry) = self.st().tabs.get_mut(&tab) {
+            entry.url = url.clone();
+            entry.title = title;
+        }
+        Ok(url)
     }
 
     /// The extension re-announced an attached tab (after pairing): set it up, restoring who owned it.
@@ -908,6 +937,11 @@ impl Relay {
 
     pub fn check_committed_url(self: &Arc<Self>, tab: i64, url: &str) -> bool {
         let Some((rules, _)) = self.enforced(tab) else { return true };
+        // No URL yet is not a destination: a popup that has not navigated. Its first commit is checked when it
+        // arrives, and a tab that is still blank stays fresh for that check.
+        if url.is_empty() {
+            return true;
+        }
         match domain::check_url(url, &rules, false) {
             domain::UrlDecision::Allowed { .. } => {
                 if !url.starts_with("about:")

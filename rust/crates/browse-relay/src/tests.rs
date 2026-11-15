@@ -147,7 +147,24 @@ fn fake_extension(socket: Socket, next_tab: i64) -> (Arc<Seen>, mpsc::UnboundedS
                 "debugger.sendCommand" => match params["method"].as_str().unwrap_or("") {
                     "Target.getTargetInfo" => {
                         let tab = params["tabId"].as_i64().unwrap();
-                        json!({ "targetInfo": { "targetId": format!("T{tab}"), "type": "page", "url": "about:blank", "title": "", "attached": true } })
+                        // 97-99 are popups that report no URL at attach: 97 never navigates, 98 commits off-list,
+                        // 99 commits to an allowed page before the post-attach query.
+                        let live = match tab {
+                            97 => Some(""),
+                            98 => Some("https://evil.test/"),
+                            99 => Some("https://example.com/app"),
+                            _ => None,
+                        };
+                        let url = match live {
+                            Some(live) => {
+                                let queries = record.0.lock().unwrap().iter().filter(|c| {
+                                    c["method"] == "debugger.sendCommand" && c["params"]["method"] == "Target.getTargetInfo" && c["params"]["tabId"].as_i64() == Some(tab)
+                                }).count();
+                                if queries <= 1 { "" } else { live }
+                            }
+                            None => "about:blank",
+                        };
+                        json!({ "targetInfo": { "targetId": format!("T{tab}"), "type": "page", "url": url, "title": "", "attached": true } })
                     }
                     "Runtime.evaluate" => json!({ "result": { "type": "number", "value": 42 } }),
                     "Network.getCookies" => json!({ "cookies": [{ "domain": "example.com" }, { "domain": "bank.com" }] }),
@@ -729,6 +746,37 @@ async fn popups_inherit_their_openers_options() {
     events.send(json!({ "method": "tabs.opened", "params": { "tabId": 97, "openerTabId": 96 } })).unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!relay.st().tabs.contains_key(&97));
+}
+
+/// A popup that reported no URL at attach is judged by the URL Chrome reports after registration.
+#[tokio::test]
+async fn a_popup_that_had_not_navigated_is_judged_after_attach() {
+    let h = harness().await;
+    let relay = h.handle.relay.clone();
+    let socket = pair_with_token(h.handle.port(), &h.paths, "profile-popup-allowlist").await;
+    let (seen, events) = fake_extension(socket, 200);
+    events.send(json!({ "method": "ready" })).unwrap();
+    eventually("the browser", || relay.st().connected()).await;
+    let browser = h.handle.browser();
+    let strict = TabOptions { allowed_origins: Some(vec!["example.com".into()]), ..TabOptions::default() };
+    let opener = browser.open_tab(None, &strict).await.unwrap().tab;
+
+    // Empty at attach, then an allowed first navigation: it stays, with the URL the guard judged.
+    events.send(json!({ "method": "tabs.opened", "params": { "tabId": 99, "openerTabId": opener } })).unwrap();
+    eventually("the allowed popup", || relay.st().tabs.contains_key(&99)).await;
+    assert_eq!(relay.st().tabs[&99].url, "https://example.com/app");
+    assert!(!seen.commands("tabs.remove").iter().any(|c| c["params"]["tabId"] == 99), "an allowed popup survives");
+
+    // Empty after the re-query: not a destination yet, so it stays open for its first real commit.
+    events.send(json!({ "method": "tabs.opened", "params": { "tabId": 97, "openerTabId": opener } })).unwrap();
+    eventually("the un-navigated popup", || relay.st().tabs.contains_key(&97)).await;
+    assert_eq!(relay.st().tabs[&97].url, "");
+    assert!(!seen.commands("tabs.remove").iter().any(|c| c["params"]["tabId"] == 97), "no URL is not a violation");
+
+    // Empty at attach, then an off-list first navigation: the popup is closed.
+    events.send(json!({ "method": "tabs.opened", "params": { "tabId": 98, "openerTabId": opener } })).unwrap();
+    eventually("the off-list popup to close", || seen.commands("tabs.remove").iter().any(|c| c["params"]["tabId"] == 98)).await;
+    assert!(!relay.st().tabs.contains_key(&98));
 }
 
 /// A tab the user lends (the toolbar button) is usable by its id from tabs list, and closing it gives it back.
