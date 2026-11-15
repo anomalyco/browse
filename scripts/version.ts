@@ -62,7 +62,8 @@ async function updateJson(file: string, update: (data: Record<string, unknown>) 
   await writeFile(full, JSON.stringify(data, null, 2) + "\n")
 }
 
-const WORKSPACE_VERSION = /^(\[workspace\.package\]\n(?:(?!\[)[^\n]*\n)*?version = ")([^"]+)(")/m
+// Line endings may be CRLF (a Windows checkout with core.autocrlf).
+const WORKSPACE_VERSION = /^(\[workspace\.package\]\r?\n(?:(?!\[)[^\r\n]*\r?\n)*?version = ")([^"]+)(")/m
 
 /** The Rust workspace version (rust/Cargo.toml `[workspace.package] version`), which every crate inherits. */
 export function cargoWorkspaceVersion(toml: string) {
