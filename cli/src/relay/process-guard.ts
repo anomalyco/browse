@@ -4,7 +4,7 @@ import { Effect } from "effect"
 import type { RawData } from "ws"
 import { handleExecuteRealmException, handleExecuteRealmRejection } from "../execute-realm.ts"
 import { relayLog } from "./log.ts"
-import { handleRelayProcessFault } from "./process-faults.ts"
+import { handleRelayProcessFault, isBenignClosedSessionRejection } from "./process-faults.ts"
 import type { ChildTarget, ConnectedTarget } from "./types.ts"
 import { boundedToken } from "../update/runtime-diagnostics.ts"
 import type { TargetRegistry } from "../cdp/target-registry.ts"
@@ -24,7 +24,7 @@ export const installRelayProcessGuard = Effect.acquireRelease(
       handleRelayProcessFault("uncaughtException", error, { origin })
     }
     const onUnhandledRejection = (reason: unknown, promise: Promise<unknown>) => {
-      if (handleExecuteRealmRejection(promise, reason)) {
+      if (handleExecuteRealmRejection(promise, reason, { isBenignRejection: isBenignClosedSessionRejection })) {
         // No message: the reason may be a sandbox value and may contain page data. The agent result carries the
         // warning through its usual redaction; this line just records that the relay contained a rejection.
         relayLog("process.executeRejection")

@@ -232,9 +232,16 @@ function bunRejectionOwner(promise: Promise<unknown>): ExecuteRejectionOwner | u
 }
 
 /** Contain a rejection created by execute code (a sandbox realm, or a full-Node execute scope). */
-export function handleExecuteRealmRejection(promise: Promise<unknown>, reason?: unknown): boolean {
+export function handleExecuteRealmRejection(
+  promise: Promise<unknown>,
+  reason?: unknown,
+  options: { readonly isBenignRejection?: (cause: unknown) => boolean } = {},
+): boolean {
   const byPrototype = process.versions.bun ? realmsByPromisePrototype.get(Object.getPrototypeOf(promise) as object) : undefined
   const exact = promiseOwners.get(promise) ?? byPrototype
+  // The recent-owner window is only a guess. A known benign teardown rejection (a tab closed under an unawaited
+  // Playwright command) must not reset a realm that never created it; the process guard counts it as benign instead.
+  if (exact === undefined && options.isBenignRejection?.(reason)) return false
   const owner = exact ?? (process.versions.bun ? bunRejectionOwner(promise) : undefined)
   if (!owner) return false
   // Only a promise tag proves the owner. A recent-owner match is a guess, so it gets a warning without the message.

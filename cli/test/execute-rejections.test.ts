@@ -21,6 +21,17 @@ function runNodeScope(script: string): Record<string, any> {
   return JSON.parse(child.stdout.trim().split("\n").at(-1) ?? "{}") as Record<string, any>
 }
 
+/** The Bun fallback attribution path under Bun, where there is no promise hook. */
+function runBunScope(script: string): Record<string, any> {
+  const child = spawnSync(process.execPath, ["--input-type=module", "--no-warnings", "-e", script], {
+    encoding: "utf8",
+    timeout: 20_000,
+    env: { ...process.env, OPENCODE_BROWSER_HOME: home },
+  })
+  if (child.status !== 0) throw new Error(`bun failed: ${child.stderr}`)
+  return JSON.parse(child.stdout.trim().split("\n").at(-1) ?? "{}") as Record<string, any>
+}
+
 describe("full-Node rejection scope", () => {
   test("tags a synchronous call and inherits the owner through await continuations", () => {
     const outcome = runNodeScope(`
@@ -191,4 +202,49 @@ describe("full-Node rejection scope", () => {
     expect(safeErrorMessage("x".repeat(400))).toHaveLength(300)
     expect(safeErrorMessage({})).toBe("reason not shown")
   })
+})
+
+describe("Bun fallback attribution", () => {
+  test.skipIf(!process.versions.bun)("a guessed owner does not claim a benign closed-session rejection, but exact tags still do", () => {
+    const outcome = runBunScope(`
+      const { ExecuteRealm, handleExecuteRealmRejection } = await import(${JSON.stringify(path.join(import.meta.dir, "../src/execute-realm.ts"))})
+      const { isBenignClosedSessionRejection } = await import(${JSON.stringify(path.join(import.meta.dir, "../src/relay/process-faults.ts"))})
+      // Patchright's ProtocolError classification needs the coreBundle frame, as in the process-faults tests.
+      const benign = new Function('return new Error("Protocol error (Network.setCacheDisabled): session closed.")\\n//# sourceURL=/x/node_modules/patchright-core/lib/coreBundle.js')()
+      const other = new Error("host promise failed")
+      const options = { isBenignRejection: isBenignClosedSessionRejection }
+
+      // A host promise only ever gets the recent-owner guess: a benign teardown rejection must not stop the realm.
+      const guessedRealm = new ExecuteRealm()
+      await guessedRealm.run({ source: "(async () => 1)", filename: "test.js", args: [] })
+      const guessedBenign = Promise.reject(benign)
+      void guessedBenign.catch(() => {})
+      const benignAttributed = handleExecuteRealmRejection(guessedBenign, benign, options)
+      const benignStopped = guessedRealm.stopped?.message
+      const guessedOther = Promise.reject(other)
+      void guessedOther.catch(() => {})
+      const otherAttributed = handleExecuteRealmRejection(guessedOther, other, options)
+      const otherStopped = guessedRealm.stopped?.message
+
+      // A sandbox promise carries the exact tag, so even a benign-looking reason stops its own realm.
+      const exactRealm = new ExecuteRealm()
+      const exact = Object.create(exactRealm.SandboxPromise.prototype)
+      const exactAttributed = handleExecuteRealmRejection(exact, benign, options)
+      const exactStopped = exactRealm.stopped?.message
+
+      console.log(JSON.stringify({
+        guessed: { attributed: benignAttributed, stopped: benignStopped ?? null },
+        other: { attributed: otherAttributed, stopped: otherStopped ?? null },
+        exact: { attributed: exactAttributed, stopped: exactStopped ?? null },
+      }))
+    `)
+    expect(outcome.guessed).toEqual({ attributed: false, stopped: null })
+    expect(outcome.other.attributed).toBe(true)
+    // A guessed owner reports without the message (it may belong to someone else); the exact tag keeps it.
+    expect(outcome.other.stopped).toContain("Unhandled execute rejection: a rejected promise")
+    expect(outcome.exact).toEqual({
+      attributed: true,
+      stopped: expect.stringContaining("Unhandled execute rejection: Protocol error (Network.setCacheDisabled): session closed."),
+    })
+  }, 30_000)
 })
