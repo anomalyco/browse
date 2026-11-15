@@ -3,6 +3,8 @@
   <img src="assets/banner-light.png" alt="browse: let your AI agents use your real browser. An isometric desk computer whose screen shows a web browser with an agent's tab group, cabled to a small relay box.">
 </picture>
 
+<a href="https://opencode.ai"><picture><source media="(prefers-color-scheme: dark)" srcset="https://opencode.ai/brand/badges/opencode-built-with-g-dark-20.svg"><img alt="Built with OpenCode" src="https://opencode.ai/brand/badges/opencode-built-with-g-light-20.svg" height="20" /></picture></a>
+
 Let your AI agents use your real browser: your tabs, your logins, your extensions. An MCP server and a Chromium
 extension, for [opencode](https://opencode.ai) and any other MCP client.
 
