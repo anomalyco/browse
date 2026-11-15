@@ -95,6 +95,10 @@ export class SessionNavigationGuard {
   popupAttached(target: NavigationGuardTarget): boolean {
     if (!this.enforced(target)) return true
     this.freshPopups.add(target.tabId)
+    // Chrome reports no URL for a popup that hasn't navigated yet. That is not a destination to judge: the popup
+    // stays fresh, and its first real navigation is checked when it commits. (about:blank is neutral in
+    // domain-policy.ts and also keeps it fresh.)
+    if (target.targetInfo.url === "") return true
     return this.observeCommittedUrl(target, target.targetInfo.url)
   }
 
