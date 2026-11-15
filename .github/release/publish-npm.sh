@@ -59,7 +59,9 @@ cd "$(mktemp -d)" || exit
 flags=(--tag "$BROWSE_NPM_TAG" --access public --ignore-scripts)
 if dry_run; then flags+=(--dry-run); else flags+=(--provenance); fi
 while IFS=$'\t' read -r name file; do
-  if ! dry_run && [ "$(npm view "$name@$BROWSE_VERSION" version 2> /dev/null)" = "$BROWSE_VERSION" ]; then
+  if [ "$(npm view "$name@$BROWSE_VERSION" version 2> /dev/null)" = "$BROWSE_VERSION" ]; then
+    # A dry run of an already published version (a check run of the current release) still checks the tarball.
+    if dry_run; then npm pack "$file" --dry-run > /dev/null; fi
     summary "$name@$BROWSE_VERSION is already on npm; nothing to publish."
     continue
   fi
