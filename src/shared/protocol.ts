@@ -75,13 +75,51 @@ export type ProtocolSkew = "update-cli" | "update-extension"
 
 export type AutoUpdateMode = "on" | "notify" | "off"
 export const autoUpdateMode = (value: unknown): AutoUpdateMode | undefined => (value === "on" || value === "notify" || value === "off" ? value : undefined)
-/** How this CLI was installed; only binary and npm global installs update themselves. Older relays send only npm, checkout or other. */
+/**
+ * How this CLI was installed, as kinds extensions have always known: binary and npm global installs update themselves.
+ * Older relays send only npm, checkout or other. A bun, pnpm, yarn or volta global install reads as binary (it updates
+ * itself, and `browse update` updates it), a bunx, pnpm dlx or yarn dlx run as npx; `method` names it exactly.
+ */
 export type RelayInstall = "binary" | "npm" | "npx" | "checkout" | "other"
+/** The exact install method a newer relay reports beside `install`. */
+export type RelayInstallMethod =
+  | "binary"
+  | "npm"
+  | "bun"
+  | "pnpm"
+  | "yarn"
+  | "volta"
+  | "npx"
+  | "bunx"
+  | "pnpm-dlx"
+  | "yarn-dlx"
+  | "checkout"
+  | "other"
+export const relayInstallMethods: readonly RelayInstallMethod[] = [
+  "binary",
+  "npm",
+  "bun",
+  "pnpm",
+  "yarn",
+  "volta",
+  "npx",
+  "bunx",
+  "pnpm-dlx",
+  "yarn-dlx",
+  "checkout",
+  "other",
+]
+/** Global installs that a package manager updates, whose update mode the options page offers. */
+export const packageManagerInstall = (update: Pick<RelayAutoUpdate, "install" | "method"> | undefined): boolean =>
+  update?.install === "npm" || update?.method === "bun" || update?.method === "pnpm" || update?.method === "yarn" || update?.method === "volta"
 /** The last installer attempt that failed, which version it was for, and when. */
 export type RelayUpdateFailure = { message: string; at: string; version?: string; attempts?: number }
 /** The relay's update state: an npm install updates itself; a checkout updates with `update`. */
 export type RelayAutoUpdate = {
   install: RelayInstall
+  method?: RelayInstallMethod
+  /** The command that updates this install in a terminal (or switches one that can't update to one that can). */
+  updateCommand?: string
   /** The command that runs the relay's CLI in a terminal: `browse` for a binary install, `npx @opencode/browse` for npm. */
   cli?: string
   mode: AutoUpdateMode
@@ -111,8 +149,12 @@ export type CliUpdateNotice = {
   command: string
 }
 
-/** The command that updates a CLI install: binary and checkout update in place, npm global and npx install the latest package. */
-export function cliUpdateCommand(update: Pick<RelayAutoUpdate, "install" | "cli">): string {
+/**
+ * The command that updates a CLI install: the relay's own when it names one; else binary and checkout update in place,
+ * npm global and npx install the latest package.
+ */
+export function cliUpdateCommand(update: Pick<RelayAutoUpdate, "install" | "cli" | "updateCommand">): string {
+  if (update.updateCommand?.trim()) return update.updateCommand.trim()
   if (update.install === "npm") return "npm install -g @opencode/browse@latest"
   if (update.install === "npx") return "npx @opencode/browse@latest install"
   return `${update.cli?.trim() || "browse"} update`

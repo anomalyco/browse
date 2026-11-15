@@ -1,5 +1,5 @@
 import { isJsonObject, type JsonObject } from "../../agent-relay/protocol"
-import { autoUpdateMode, BROWSER_NAME_KEY, type RelayAutoUpdate, type RelayUpdateFailure } from "../../shared/protocol"
+import { autoUpdateMode, BROWSER_NAME_KEY, relayInstallMethods, type RelayAutoUpdate, type RelayUpdateFailure } from "../../shared/protocol"
 import type { createAgentRelayLog } from "./log"
 import type { ecdhKeyPair, PairingCode } from "../pairing"
 
@@ -200,8 +200,11 @@ export function relayAutoUpdate(input: unknown): RelayAutoUpdate | undefined {
   const mode = autoUpdateMode(input.mode)
   const effective = autoUpdateMode(input.effective)
   if (!mode || !effective) return undefined
-  const short = (value: unknown) => (typeof value === "string" && value.length <= 100 ? value : undefined)
+  const short = (value: unknown, max = 100) => (typeof value === "string" && value.length <= max ? value : undefined)
+  const method = relayInstallMethods.find((known) => known === input.method)
   const optional = {
+    method,
+    updateCommand: short(input.updateCommand, 500),
     cli: short(input.cli),
     overriddenBy: short(input.overriddenBy),
     version: short(input.version),

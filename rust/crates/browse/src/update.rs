@@ -1,9 +1,11 @@
-//! Updates (cli/src/update/**), by how browse was installed:
+//! Updates (cli/src/update/**), by how browse was installed (method.rs):
 //!   binary      the release service's manifest for this build's channel, the protocol's client rules, a size- and
 //!               SHA-256-checked download of the install script's tarball whose executable replaces this one in place
-//!   npm global  the channel's npm dist-tag, then `npm install -g @opencode/browse@<version>` into the same prefix,
-//!               with the npm of the node that runs the launcher (npm/browse.mjs)
-//!   npx, a checkout build, anything else: no updates
+//!   global      the channel's npm dist-tag (latest, dev, beta) from the registry the user's configuration names, then
+//!               the package manager that installed it: `npm install -g`, `bun add -g`, `pnpm add -g`,
+//!               `yarn global add` or `volta install` of @opencode/browse@<version> into the same folder
+//!   runner      npx, bunx, pnpm dlx and yarn dlx resolve the package themselves: a newer release is only told
+//!   a checkout build, anything else: no updates
 //! The relay's background loop installs updates and restarts itself with the new executable once nothing is using the
 //! browser.
 
@@ -18,145 +20,14 @@ use anyhow::{Context, bail};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::relay_api::{bin_root, paths};
+pub use crate::method::{Global, Install, Launcher, Manager, dist_tag, install};
+use crate::method::{PACKAGE, npm_command};
+use crate::relay_api::paths;
 use crate::{VERSION, session};
 
 const RELEASE_SERVICE: &str = "https://anoma.ly/release";
 const NPM_REGISTRY: &str = "https://registry.npmjs.org";
-const PACKAGE: &str = "@opencode/browse";
 const HOUR: Duration = Duration::from_secs(3600);
-const EXECUTABLE: &str = if cfg!(windows) { "browse.exe" } else { "browse" };
-
-/// How this browse was installed, which decides how it updates (cli/src/update/auto-update.ts `InstallKind`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Install {
-    /// The executable the install script or `browse install` put in the bin folder.
-    Binary(PathBuf),
-    /// `npm install -g @opencode/browse`: the launcher runs its platform package's binary, which is this one.
-    Npm(Npm),
-    /// A temporary npx install, which npx resolves itself.
-    Npx,
-    /// A build in a checkout's cargo target folder.
-    Checkout,
-    Other,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Npm {
-    /// The @opencode/browse package folder in npm's global node_modules.
-    pub package: PathBuf,
-    /// The global prefix it's installed under, which updates install into (`npm install -g --prefix`).
-    pub prefix: PathBuf,
-    /// The node that ran the launcher: its npm installs updates.
-    pub node: Option<PathBuf>,
-    /// The platform package this binary came from (`browse-linux-x64`), preferred after an update.
-    pub platform: String,
-}
-
-impl Install {
-    pub fn name(&self) -> &'static str {
-        match self {
-            Install::Binary(_) => "binary",
-            Install::Npm(_) => "npm",
-            Install::Npx => "npx",
-            Install::Checkout => "checkout",
-            Install::Other => "other",
-        }
-    }
-
-    pub fn updates_itself(&self) -> bool {
-        matches!(self, Install::Binary(_) | Install::Npm(_))
-    }
-
-    /// The executable a relay of this install starts from now: an npm update may have replaced the platform package.
-    pub fn executable(&self) -> Option<PathBuf> {
-        match self {
-            Install::Binary(binary) => Some(binary.clone()),
-            Install::Npm(npm) => npm.binary(),
-            _ => None,
-        }
-    }
-}
-
-impl Npm {
-    /// The binary the launcher would run now: this platform package (or the other libc's, as the launcher falls back),
-    /// nested in the package as `npm install -g` lays it out, or beside it.
-    pub fn binary(&self) -> Option<PathBuf> {
-        let mut names = vec![self.platform.clone()];
-        if cfg!(target_os = "linux") {
-            names.push(self.platform.strip_suffix("-musl").map_or_else(|| format!("{}-musl", self.platform), str::to_owned));
-        }
-        let scopes = [self.package.join("node_modules").join("@opencode"), self.package.parent()?.to_path_buf()];
-        names.iter().flat_map(|name| scopes.iter().map(move |scope| scope.join(name).join("bin").join(EXECUTABLE))).find(|file| file.is_file())
-    }
-
-    /// The version of @opencode/browse installed now.
-    pub fn version(&self) -> Option<String> {
-        let manifest: Value = serde_json::from_slice(&std::fs::read(self.package.join("package.json")).ok()?).ok()?;
-        manifest["version"].as_str().map(str::to_owned)
-    }
-}
-
-fn canonical(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
-fn named(path: Option<&Path>, name: &str) -> bool {
-    path.and_then(Path::file_name).is_some_and(|n| n == name)
-}
-
-/// What kind of install the executable `exe` belongs to. `launcher` and `node` are what the npm launcher passes
-/// (OPENCODE_BROWSER_NPM_LAUNCHER, OPENCODE_BROWSER_NPM_NODE); `installed` is the bin folder's executable.
-pub fn detect(exe: &Path, launcher: Option<&Path>, node: Option<PathBuf>, installed: &Path) -> Install {
-    let exe = canonical(exe);
-    if installed.is_file() && canonical(installed) == exe {
-        return Install::Binary(installed.to_path_buf());
-    }
-    if let Some(install) = npm_layout(&exe, launcher, node) {
-        return install;
-    }
-    let checkout = exe.ancestors().any(|dir| dir.file_name().is_some_and(|n| n == "target") && dir.parent().is_some_and(|p| p.join("Cargo.toml").is_file()));
-    if checkout { Install::Checkout } else { Install::Other }
-}
-
-/// An npm install of @opencode/browse whose platform package holds `exe`: `node_modules/@opencode/browse-<target>/bin/`,
-/// nested in the launcher's package or beside it.
-fn npm_layout(exe: &Path, launcher: Option<&Path>, node: Option<PathBuf>) -> Option<Install> {
-    let bin = exe.parent().filter(|b| named(Some(b), "bin"))?;
-    let platform_dir = bin.parent()?;
-    let platform = platform_dir.file_name()?.to_str().filter(|n| n.starts_with("browse-"))?.to_owned();
-    let scope = platform_dir.parent().filter(|s| named(Some(s), "@opencode"))?;
-    let modules = scope.parent().filter(|m| named(Some(m), "node_modules"))?;
-    // The launcher that ran this (its dist/cli.mjs), else the package an older launcher, which doesn't say, runs from.
-    let given = launcher.and_then(|l| canonical(l).parent()?.parent().map(Path::to_path_buf));
-    let candidates = [given, modules.parent().map(Path::to_path_buf), Some(scope.join("browse"))];
-    let package = candidates.into_iter().flatten().find(|package| {
-        let runs_this = package.join("node_modules").join("@opencode") == scope || package.parent() == Some(scope);
-        named(Some(package), "browse") && named(package.parent(), "@opencode") && runs_this && package.join("dist").join("cli.mjs").is_file()
-    })?;
-    if package.components().any(|c| c.as_os_str() == "_npx") {
-        return Some(Install::Npx);
-    }
-    // A global install: <prefix>/lib/node_modules (<prefix>/node_modules on Windows) with the bin links npm made. A
-    // project's own node_modules has no global prefix to update.
-    let global = package.parent()?.parent().filter(|g| named(Some(g), "node_modules"))?;
-    let prefix = if cfg!(windows) { global.parent()? } else { global.parent().filter(|lib| named(Some(lib), "lib"))?.parent()? };
-    let linked = ["browse", "opencode-browser"].iter().any(|name| {
-        if cfg!(windows) { prefix.join(format!("{name}.cmd")).is_file() } else { std::fs::symlink_metadata(prefix.join("bin").join(name)).is_ok() }
-    });
-    if !linked {
-        return Some(Install::Other);
-    }
-    Some(Install::Npm(Npm { package: package.clone(), prefix: prefix.to_path_buf(), node, platform }))
-}
-
-/// This process's install.
-pub fn install() -> Install {
-    let Ok(exe) = crate::relay::current_exe() else { return Install::Other };
-    let launcher = std::env::var_os("OPENCODE_BROWSER_NPM_LAUNCHER").filter(|v| !v.is_empty()).map(PathBuf::from);
-    let node = std::env::var_os("OPENCODE_BROWSER_NPM_NODE").filter(|v| !v.is_empty()).map(PathBuf::from);
-    detect(&exe, launcher.as_deref(), node, &bin_root().join(EXECUTABLE))
-}
 
 /// The release service's name for this build's platform.
 pub fn target() -> String {
@@ -429,17 +300,6 @@ pub fn install_binary(release: &Release, binary: &Path) -> anyhow::Result<()> {
     result
 }
 
-/// The npm dist-tag a build follows: `latest` for a release, `dev` or `beta` for those builds.
-pub fn dist_tag(version: &str) -> &'static str {
-    if version.contains("-dev.") {
-        "dev"
-    } else if version.contains("-beta.") {
-        "beta"
-    } else {
-        "latest"
-    }
-}
-
 /// Whether npm's `latest` (the channel's dist-tag) is an update for a relay running `running` while `on_disk` is
 /// installed: newer than both, so it never downgrades and doesn't install what is already there.
 pub fn npm_wanted(latest: &str, running: &str, on_disk: Option<&str>) -> bool {
@@ -480,54 +340,62 @@ fn run(mut command: Command, timeout: Duration) -> anyhow::Result<std::process::
     Ok(std::process::Output { status, stdout: stdout.join().unwrap_or_default(), stderr: stderr.join().unwrap_or_default() })
 }
 
-/// npm, as the node that runs the launcher has it (npm's own CLI beside it, with that node first on PATH), else the
-/// npm on PATH.
-fn npm_command(npm: &Npm) -> Command {
-    if let Some(node) = npm.node.as_ref().filter(|n| n.is_file())
-        && let Some(dir) = node.parent()
-    {
-        let candidates = [dir.join("node_modules/npm/bin/npm-cli.js"), dir.join("../lib/node_modules/npm/bin/npm-cli.js")];
-        if let Some(cli) = candidates.into_iter().find(|c| c.is_file()) {
-            let mut command = Command::new(node);
-            command.arg(cli);
-            let path = std::env::var_os("PATH").unwrap_or_default();
-            if let Ok(joined) = std::env::join_paths(std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(&path))) {
-                command.env("PATH", joined);
-            }
-            return command;
-        }
-    }
-    // Rust runs (and quotes the arguments of) a .cmd through cmd.exe itself.
-    Command::new(if cfg!(windows) { "npm.cmd" } else { "npm" })
-}
-
 fn registry_override() -> Option<String> {
     std::env::var("OPENCODE_BROWSER_NPM_REGISTRY").ok().map(|r| r.trim().trim_end_matches('/').to_owned()).filter(|r| !r.is_empty())
 }
 
-/// The registry npm installs @opencode/browse from: OPENCODE_BROWSER_NPM_REGISTRY, else npm's configuration (the
-/// @opencode scope's registry, else the default one), else npmjs.org.
-fn registry(npm: &Npm) -> String {
+fn registry_url(value: &str) -> Option<String> {
+    let value = value.trim().trim_matches('"').trim().trim_end_matches('/');
+    (value.starts_with("https://") || value.starts_with("http://")).then(|| value.to_owned())
+}
+
+/// bun's own registry setting: BUN_CONFIG_REGISTRY, else `registry = "<url>"` in a bunfig.toml of the user's.
+fn bun_registry() -> Option<String> {
+    if let Some(registry) = std::env::var("BUN_CONFIG_REGISTRY").ok().and_then(|r| registry_url(&r)) {
+        return Some(registry);
+    }
+    let home = crate::setup::home();
+    let xdg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home.join(".config"));
+    [xdg.join(".bunfig.toml"), home.join(".bunfig.toml")].iter().filter_map(|file| std::fs::read_to_string(file).ok()).find_map(|text| {
+        text.lines().find_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            (key.trim() == "registry").then(|| registry_url(value)).flatten()
+        })
+    })
+}
+
+/// The registry @opencode/browse installs from: OPENCODE_BROWSER_NPM_REGISTRY, else bun's own setting for bun, else
+/// npm's configuration (the @opencode scope's registry, else the default one; pnpm, yarn and volta read the same
+/// .npmrc), else npmjs.org.
+fn registry(manager: Option<&Manager>, launcher: &Launcher) -> String {
     if let Some(registry) = registry_override() {
         return registry;
     }
+    if (matches!(manager, Some(Manager::Bun { .. })) || launcher.bun.is_some())
+        && let Some(registry) = bun_registry()
+    {
+        return registry;
+    }
     let configured = |key: &str| {
-        let mut command = npm_command(npm);
+        let mut command = npm_command(launcher.node.as_deref());
         command.args(["config", "get", key]);
         let output = run(command, Duration::from_secs(20)).ok().filter(|o| o.status.success())?;
-        let value = String::from_utf8_lossy(&output.stdout).trim().trim_end_matches('/').to_owned();
-        (value.starts_with("https://") || value.starts_with("http://")).then_some(value)
+        registry_url(&String::from_utf8_lossy(&output.stdout))
     };
     configured("@opencode:registry").or_else(|| configured("registry")).unwrap_or_else(|| NPM_REGISTRY.into())
 }
 
-/// The version this build's dist-tag points at.
-pub fn npm_latest(npm: &Npm) -> anyhow::Result<String> {
+/// The version this build's dist-tag points at in `registry`.
+pub fn registry_latest(registry: &str) -> anyhow::Result<String> {
     let tag = dist_tag(VERSION);
-    let url = format!("{}/{}", registry(npm), PACKAGE.replace('/', "%2f"));
+    let url = format!("{registry}/{}", PACKAGE.replace('/', "%2f"));
     let body = curl(&["--max-time", "30", "-H", "accept: application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8", &url])?;
     let packument: Value = serde_json::from_slice(&body).with_context(|| format!("{url} isn't a package's JSON"))?;
     packument["dist-tags"][tag].as_str().map(str::to_owned).with_context(|| format!("{PACKAGE} has no {tag} dist-tag"))
+}
+
+pub fn package_latest(global: &Global) -> anyhow::Result<String> {
+    registry_latest(&registry(Some(&global.manager), &global.launcher))
 }
 
 /// The version an executable reports (`--version`).
@@ -539,16 +407,13 @@ fn executable_version(file: &Path) -> Option<String> {
     (!version.is_empty()).then_some(version)
 }
 
-/// `npm install -g @opencode/browse@<version>` into this install's prefix. Returns the version its binary reports.
-pub fn npm_install(npm: &Npm, version: &str) -> anyhow::Result<String> {
-    let spec = format!("{PACKAGE}@{version}");
-    let mut command = npm_command(npm);
-    command.args(["install", "--global", "--prefix"]).arg(&npm.prefix).args(["--no-fund", "--no-audit", "--no-update-notifier", &spec]);
-    if let Some(registry) = registry_override() {
-        command.arg(format!("--registry={registry}")).arg(format!("--@opencode:registry={registry}"));
-    }
-    let stashed = stash_running(npm);
-    let output = run(command, Duration::from_secs(600)).map_err(|error| anyhow::anyhow!("npm install -g {spec} couldn't run: {error}"));
+/// Installs @opencode/browse@<version> into this global install with its package manager. Returns the version its
+/// binary reports.
+pub fn package_install(global: &Global, version: &str) -> anyhow::Result<String> {
+    let words = global.manager.words(version);
+    let command = global.command(version, registry_override().as_deref());
+    let stashed = stash_running(global);
+    let output = run(command, Duration::from_secs(600)).map_err(|error| anyhow::anyhow!("{words} couldn't run: {error}"));
     let output = match output {
         Ok(output) if output.status.success() => output,
         failed => {
@@ -558,26 +423,32 @@ pub fn npm_install(npm: &Npm, version: &str) -> anyhow::Result<String> {
             let output = failed?;
             let text = if output.stderr.iter().any(|b| !b.is_ascii_whitespace()) { &output.stderr } else { &output.stdout };
             let text = String::from_utf8_lossy(text);
-            let mut message = format!("npm install -g {spec} failed: {}", npm_error(&text));
+            let gist = match global.manager {
+                Manager::Npm { .. } | Manager::Pnpm { .. } => npm_error(&text),
+                _ => tool_error(&text),
+            };
+            let mut message = format!("{words} failed: {gist}");
             if text.contains("EACCES") || text.contains("EPERM") {
                 message.push_str(&format!(
-                    " (npm can't write to {}: run `npm install -g {PACKAGE}@latest` yourself, or `browse install` to switch to the self-updating binary)",
-                    npm.prefix.display()
+                    " ({} can't write to {}: run `{}` yourself, or `browse install` to switch to the self-updating binary)",
+                    global.manager.name(),
+                    global.manager.folder().display(),
+                    global.manager.words(dist_tag(VERSION)),
                 ));
             }
             bail!(message);
         }
     };
     drop(output);
-    let binary = npm.binary().with_context(|| format!("npm install -g {spec} ran, but {} has no browse binary for this computer", npm.package.display()))?;
-    let installed = executable_version(&binary).with_context(|| format!("npm install -g {spec} ran, but {} doesn't run", binary.display()))?;
+    let binary = global.binary().with_context(|| format!("{words} ran, but {} has no browse binary for this computer", global.package.display()))?;
+    let installed = executable_version(&binary).with_context(|| format!("{words} ran, but {} doesn't run", binary.display()))?;
     if newer(version, &installed) {
-        bail!("npm install -g {spec} left {installed}, not the requested {version}");
+        bail!("{words} left {installed}, not the requested {version}");
     }
     Ok(installed)
 }
 
-/// The gist of npm's error output: its error code and the first line that explains it.
+/// The gist of npm's (or pnpm's) error output: its error code and the first line that explains it.
 fn npm_error(text: &str) -> String {
     let lines: Vec<&str> = text
         .lines()
@@ -593,13 +464,20 @@ fn npm_error(text: &str) -> String {
     }
 }
 
-/// Windows can't delete a running executable, which npm must do to replace the package: move it out of the way first
-/// (renaming a running .exe works). Returns where it went, to put it back if npm fails.
-fn stash_running(npm: &Npm) -> Option<(PathBuf, PathBuf)> {
+/// The gist of bun's, yarn's or volta's error output: its first `error:` line, else its last line.
+fn tool_error(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let error = lines.iter().find_map(|l| l.strip_prefix("error:").or_else(|| l.strip_prefix("error "))).map(str::trim);
+    error.or(lines.last().copied()).map_or_else(|| "it printed nothing".into(), str::to_owned)
+}
+
+/// Windows can't delete a running executable, which the package manager must do to replace the package: move it out
+/// of the way first (renaming a running .exe works). Returns where it went, to put it back if the install fails.
+fn stash_running(global: &Global) -> Option<(PathBuf, PathBuf)> {
     if !cfg!(windows) {
         return None;
     }
-    let running = npm.binary()?;
+    let running = global.binary()?;
     let dir = paths().state.join("npm-old");
     if let Ok(entries) = std::fs::read_dir(&dir) {
         // Earlier ones that no process runs anymore.
@@ -613,16 +491,16 @@ fn stash_running(npm: &Npm) -> Option<(PathBuf, PathBuf)> {
     Some((running, to))
 }
 
-/// `browse update` for an npm install: the channel's dist-tag, then npm.
-fn npm_command_update(npm: &Npm, check_only: bool) -> anyhow::Result<()> {
+/// `browse update` for a global install: the channel's dist-tag, then its package manager.
+fn package_command_update(global: &Global, check_only: bool) -> anyhow::Result<()> {
     let tag = dist_tag(VERSION);
-    let latest = npm_latest(npm)?;
+    let latest = package_latest(global)?;
     update_state(|s| {
         s["checkedAt"] = json!(now_ms());
         s["latest"] = json!(latest);
         s.as_object_mut().map(|o| o.remove("failed"));
     })?;
-    let on_disk = npm.version();
+    let on_disk = global.version();
     if !newer(&latest, VERSION) {
         println!("browse {VERSION} is up to date ({PACKAGE}@{tag} is {latest}).");
     } else if !npm_wanted(&latest, VERSION, on_disk.as_deref()) {
@@ -630,8 +508,8 @@ fn npm_command_update(npm: &Npm, check_only: bool) -> anyhow::Result<()> {
     } else if check_only {
         println!("browse {latest} is available (running {VERSION}). Run `browse update`.");
     } else {
-        println!("Installing browse {latest} with npm…");
-        let installed = npm_install(npm, &latest)?;
+        println!("Installing browse {latest} with {}…", global.manager.name());
+        let installed = package_install(global, &latest)?;
         record_install(&installed)?;
         println!("✓ Updated browse {VERSION} → {installed}");
         if matches!(crate::relay::probe(), crate::relay::Probe::Running(_)) {
@@ -639,6 +517,13 @@ fn npm_command_update(npm: &Npm, check_only: bool) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// How to switch an install that doesn't update itself to one that does.
+fn switch_hint(exe: &Path) -> String {
+    let tag = dist_tag(VERSION);
+    let globals = ["npm install -g", "bun add -g", "pnpm add -g", "yarn global add", "volta install"].map(|c| format!("`{c} {PACKAGE}@{tag}`")).join(", ");
+    format!("run `{} install` for the self-updating binary, or install it globally with one of {globals}", exe.display())
 }
 
 /// `browse update [--check]`.
@@ -655,14 +540,26 @@ pub fn command(args: &[String]) -> anyhow::Result<()> {
         return Ok(());
     }
     let binary = match install() {
-        Install::Npm(npm) => return npm_command_update(&npm, check_only),
-        Install::Npx => {
-            println!("This is an npx run: npx resolves {PACKAGE} itself, so there is nothing to update here.");
-            println!("Run `npx {PACKAGE}@{} install` once to get the self-updating binary.", dist_tag(VERSION));
+        Install::Global(global) => return package_command_update(&global, check_only),
+        Install::Runner(runner) => {
+            let tag = dist_tag(VERSION);
+            println!("This is a {} run: it resolves {PACKAGE} itself, so there is nothing to update here.", runner.name().replace('-', " "));
+            match registry_latest(&registry(None, &Launcher::from_env())) {
+                Ok(latest) if newer(&latest, VERSION) => println!("browse {latest} is out (running {VERSION}); `{}` runs it.", runner.run(tag)),
+                Ok(_) => println!("browse {VERSION} is up to date."),
+                Err(error) => println!("! couldn't check for a newer release: {error:#}"),
+            }
+            println!("For automatic updates run `{} install` once (the self-updating binary), or install it globally: `{}`.", runner.run(tag), runner.global_words(tag));
+            return Ok(());
+        }
+        Install::Other => {
+            let exe = crate::relay::current_exe()?;
+            println!("{} wasn't installed in a way browse can update.", exe.display());
+            println!("For automatic updates, {}.", switch_hint(&exe));
             return Ok(());
         }
         Install::Binary(binary) => Some(binary),
-        Install::Checkout | Install::Other => None,
+        Install::Checkout => None,
     };
     match check()? {
         Check::UpToDate(version) if version == VERSION => println!("browse {VERSION} is up to date ({} channel).", channel()),
@@ -672,7 +569,7 @@ pub fn command(args: &[String]) -> anyhow::Result<()> {
         Check::Available(release) => {
             let binary = match binary {
                 Some(binary) => binary,
-                None => bail!("this browse isn't an installed binary ({}); run `browse install` first", crate::relay::current_exe()?.display()),
+                None => bail!("this browse is a checkout build ({}); rebuild it, or run `browse install` for the self-updating binary", crate::relay::current_exe()?.display()),
             };
             println!("Downloading browse {}…", release.version);
             install_binary(&release, &binary)?;
@@ -697,29 +594,36 @@ fn record_install(version: &str) -> anyhow::Result<()> {
     })
 }
 
-/// A newer release this install hasn't taken, when updates are notify-only: `(summary, command)`.
+/// A newer release this install hasn't taken: `(summary, command)`. A self-updating install tells it when updates
+/// are notify-only; a package runner, which can't update, whenever updates aren't off.
 pub fn pending_notice() -> Option<(String, String)> {
-    if effective_mode() != Mode::Notify || !install().updates_itself() {
-        return None;
-    }
+    let mode = effective_mode();
+    let command = match install() {
+        Install::Binary(_) | Install::Global(_) if mode == Mode::Notify => "browse update".to_owned(),
+        Install::Runner(runner) if mode != Mode::Off => format!("{} install", runner.run(dist_tag(VERSION))),
+        _ => return None,
+    };
     let latest = state().get("latest")?.as_str()?.to_owned();
-    newer(&latest, VERSION).then(|| (format!("browse {latest} is available (running {VERSION})"), "browse update".to_owned()))
+    newer(&latest, VERSION).then(|| (format!("browse {latest} is available (running {VERSION})"), command))
 }
 
 /// What the extension's options page shows about updates (cli/src/update/auto-update.ts `AutoUpdateStatus`).
+/// `install` is the closest kind extensions before `method` know; `updateCommand` is this install's exact command.
 pub fn status_json() -> Value {
     let state = state();
     let install = install();
     let stored = stored_mode();
+    let exe = crate::relay::current_exe().unwrap_or_else(|_| "browse".into());
     // The command that runs this install's CLI in a terminal (cli/src/paths.ts `cliPrefix`).
     let cli = match &install {
-        Install::Npx if dist_tag(VERSION) == "latest" => format!("npx {PACKAGE}"),
-        Install::Npx => format!("npx {PACKAGE}@{}", dist_tag(VERSION)),
-        Install::Checkout => crate::relay::current_exe().map(|exe| exe.display().to_string()).unwrap_or_else(|_| "browse".into()),
+        Install::Runner(runner) => runner.run(dist_tag(VERSION)),
+        Install::Checkout => exe.display().to_string(),
         _ => "browse".into(),
     };
     let mut status = json!({
-        "install": install.name(),
+        "install": install.compatible_name(),
+        "method": install.name(),
+        "updateCommand": install.update_command(VERSION, &exe),
         "cli": cli,
         "mode": stored.name(),
         "effective": if install.updates_itself() { effective_mode().name() } else { "off" },
@@ -771,17 +675,28 @@ pub fn describe_mode(mode: Mode) -> &'static str {
 
 pub fn describe() -> String {
     let install = install();
-    match install {
-        Install::Npx => return format!("npx resolves {PACKAGE} itself; run `browse install` for automatic updates"),
-        Install::Checkout => return "a build from a checkout; it doesn't update itself".into(),
-        Install::Other => return "not an installed binary; run `browse install`".into(),
-        Install::Binary(_) | Install::Npm(_) => {}
-    }
-    let mode = effective_mode();
     let state = state();
-    let source = if matches!(install, Install::Npm(_)) { format!("npm {PACKAGE}@{}", dist_tag(VERSION)) } else { format!("{} channel", channel()) };
-    let mut line = format!("{} ({source})", describe_mode(mode));
-    if let Some(latest) = state.get("latest").and_then(Value::as_str).filter(|l| newer(l, VERSION)) {
+    let latest = state.get("latest").and_then(Value::as_str).filter(|l| newer(l, VERSION));
+    let tag = dist_tag(VERSION);
+    let source = match &install {
+        Install::Runner(runner) => {
+            let mut line = format!("{} resolves {PACKAGE} itself, so it doesn't update", runner.name().replace('-', " "));
+            if let Some(latest) = latest {
+                line.push_str(&format!(" ({latest} is out)"));
+            }
+            line.push_str(&format!("; for automatic updates run `{} install` or `{}`", runner.run(tag), runner.global_words(tag)));
+            return line;
+        }
+        Install::Checkout => return "a build from a checkout; it doesn't update itself".into(),
+        Install::Other => {
+            let exe = crate::relay::current_exe().unwrap_or_else(|_| "browse".into());
+            return format!("not installed in a way that updates; {}", switch_hint(&exe));
+        }
+        Install::Global(global) => format!("{} {PACKAGE}@{tag}", global.manager.name()),
+        Install::Binary(_) => format!("{} channel", channel()),
+    };
+    let mut line = format!("{} ({source})", describe_mode(effective_mode()));
+    if let Some(latest) = latest {
         line.push_str(&format!(", {latest} available"));
     }
     if let Some(error) = state.get("lastError").and_then(|e| e.get("message")).and_then(Value::as_str) {
@@ -796,9 +711,10 @@ fn fingerprint(file: &Path) -> Option<(u64, SystemTime)> {
 }
 
 /// The relay's updater: checks this install's channel at launch and at most hourly in its own thread, and in "on"
-/// mode installs what it finds (an npm install only while nothing is using the browser, as npm replaces the package
-/// in steps). `replacement` says when the executable on disk is no longer the one this relay runs (this updater's
-/// install, `browse update`, or npm run by hand) and can take over.
+/// mode installs what it finds (a package manager's install only while nothing is using the browser, as they replace
+/// the package in steps). `replacement` says when the executable on disk is no longer the one this relay runs (this
+/// updater's install, `browse update`, or a package manager run by hand) and can take over. A package runner's relay
+/// only checks, for the notice.
 pub struct Updater {
     install: Install,
     started: Option<(u64, SystemTime)>,
@@ -810,14 +726,18 @@ pub struct Updater {
 /// What a check found to install.
 enum Found {
     Binary(Release),
-    Npm(String),
+    Package(String),
 }
 
 impl Updater {
     /// `idle` says whether nothing is using the browser.
     pub fn spawn(idle: Arc<dyn Fn() -> bool + Send + Sync>) -> Option<Updater> {
         let install = install();
-        let started = fingerprint(&install.executable()?);
+        let started = match &install {
+            Install::Binary(_) | Install::Global(_) => Some(fingerprint(&install.executable()?)),
+            Install::Runner(_) => None,
+            Install::Checkout | Install::Other => return None,
+        };
         let interval = std::env::var("OPENCODE_BROWSER_AUTO_UPDATE_INTERVAL_MS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -827,7 +747,7 @@ impl Updater {
         let installing = Arc::new(AtomicBool::new(false));
         let worker = Worker { install: install.clone(), interval, idle, installing: installing.clone(), checked: None, failed: None };
         std::thread::spawn(move || worker.run());
-        Some(Updater { install, started, seen: None, installing })
+        Some(Updater { install, started: started.flatten(), seen: None, installing })
     }
 
     /// The executable to restart the relay with, once a different, working build replaced this relay's on disk.
@@ -853,13 +773,13 @@ struct Worker {
     idle: Arc<dyn Fn() -> bool + Send + Sync>,
     installing: Arc<AtomicBool>,
     checked: Option<Instant>,
-    /// When the last npm install failed, to back off before trying the same version again.
+    /// When the last package manager install failed, to back off before trying the same version again.
     failed: Option<Instant>,
 }
 
 impl Worker {
     fn run(mut self) {
-        // npm installs wait for an idle moment, so look more often than the channel is checked.
+        // Package manager installs wait for an idle moment, so look more often than the channel is checked.
         let tick = self.interval.min(Duration::from_secs(300));
         std::thread::sleep(Duration::from_secs(60).min(self.interval));
         loop {
@@ -881,12 +801,13 @@ impl Worker {
                     Check::Available(release) => Some(Found::Binary(release)),
                     _ => None,
                 },
-                Install::Npm(npm) => Some(npm_latest(npm)?).filter(|latest| newer(latest, VERSION)).map(Found::Npm),
+                Install::Global(global) => Some(package_latest(global)?).filter(|latest| newer(latest, VERSION)).map(Found::Package),
+                Install::Runner(_) => Some(registry_latest(&registry(None, &Launcher::from_env()))?).filter(|latest| newer(latest, VERSION)).map(Found::Package),
                 _ => None,
             };
             record_check(found.as_ref().map(|f| match f {
                 Found::Binary(release) => release.version.as_str(),
-                Found::Npm(version) => version.as_str(),
+                Found::Package(version) => version.as_str(),
             }))?;
             if mode == Mode::On
                 && let (Some(Found::Binary(release)), Install::Binary(binary)) = (&found, &self.install)
@@ -896,17 +817,17 @@ impl Worker {
             }
         }
         if mode == Mode::On
-            && let Install::Npm(npm) = self.install.clone()
+            && let Install::Global(global) = self.install.clone()
         {
-            self.npm_tick(&npm)?;
+            self.package_tick(&global)?;
         }
         Ok(())
     }
 
-    /// Installs the npm release a check found, once nothing is using the browser.
-    fn npm_tick(&mut self, npm: &Npm) -> anyhow::Result<()> {
+    /// Installs the release a check found with the package manager, once nothing is using the browser.
+    fn package_tick(&mut self, global: &Global) -> anyhow::Result<()> {
         let state = state();
-        let Some(latest) = state.get("latest").and_then(Value::as_str).filter(|l| npm_wanted(l, VERSION, npm.version().as_deref())) else {
+        let Some(latest) = state.get("latest").and_then(Value::as_str).filter(|l| npm_wanted(l, VERSION, global.version().as_deref())) else {
             return Ok(());
         };
         if state.pointer("/lastError/version").and_then(Value::as_str) == Some(latest) {
@@ -920,7 +841,7 @@ impl Worker {
             return Ok(());
         }
         self.installing.store(true, Ordering::SeqCst);
-        let result = npm_install(npm, latest);
+        let result = package_install(global, latest);
         self.installing.store(false, Ordering::SeqCst);
         match result {
             Ok(installed) => record_install(&installed),
@@ -966,12 +887,10 @@ fn record_failure(version: &str, error: &anyhow::Error) {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
-
-    use super::{EXECUTABLE, Install, Npm, detect, dist_tag, newer, npm_wanted};
+    use super::{dist_tag, newer, npm_wanted};
 
     #[test]
-    fn npm_follows_its_dist_tag_and_never_downgrades() {
+    fn packages_follow_their_dist_tag_and_never_downgrade() {
         assert_eq!(dist_tag("0.1.0"), "latest");
         assert_eq!(dist_tag("0.1.1-dev.57"), "dev");
         assert_eq!(dist_tag("0.1.1-beta.2"), "beta");
@@ -994,100 +913,21 @@ mod tests {
         assert_eq!(super::npm_error(""), "it printed nothing");
     }
 
-    struct Dir(PathBuf);
-
-    impl Dir {
-        fn new(name: &str) -> Dir {
-            let dir = std::env::temp_dir().join(format!("browse-update-test-{name}-{}", crate::session::random_u64()));
-            std::fs::create_dir_all(&dir).unwrap();
-            Dir(std::fs::canonicalize(dir).unwrap())
-        }
-        fn file(&self, path: &str) -> PathBuf {
-            let file = self.0.join(path);
-            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-            std::fs::write(&file, "{\"version\":\"0.1.0\"}").unwrap();
-            file
-        }
-    }
-
-    impl Drop for Dir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    /// A global npm install under `<prefix>/lib/node_modules`, with its platform package nested or hoisted. Returns
-    /// (launcher, binary).
-    #[cfg(unix)]
-    fn npm_global(dir: &Dir, prefix: &str, hoisted: bool) -> (PathBuf, PathBuf) {
-        let package = format!("{prefix}/lib/node_modules/@opencode/browse");
-        let launcher = dir.file(&format!("{package}/dist/cli.mjs"));
-        dir.file(&format!("{package}/package.json"));
-        let platform = if hoisted { format!("{prefix}/lib/node_modules/@opencode/browse-linux-x64") } else { format!("{package}/node_modules/@opencode/browse-linux-x64") };
-        let binary = dir.file(&format!("{platform}/bin/{EXECUTABLE}"));
-        std::os::unix::fs::symlink(&launcher, dir.file(&format!("{prefix}/bin/.keep")).with_file_name("browse")).unwrap();
-        (launcher, binary)
-    }
-
-    #[cfg(unix)]
     #[test]
-    fn detects_a_global_npm_install() {
-        let dir = Dir::new("npm");
-        let installed = dir.0.join("home/.local/bin/browse");
-        let (launcher, binary) = npm_global(&dir, "prefix", false);
-        let expected = Install::Npm(Npm {
-            package: dir.0.join("prefix/lib/node_modules/@opencode/browse"),
-            prefix: dir.0.join("prefix"),
-            node: Some("/usr/bin/node".into()),
-            platform: "browse-linux-x64".into(),
-        });
-        assert_eq!(detect(&binary, Some(&launcher), Some("/usr/bin/node".into()), &installed), expected);
-        let Install::Npm(npm) = &expected else { unreachable!() };
-        assert_eq!(npm.binary(), Some(binary.clone()));
-        assert_eq!(npm.version().as_deref(), Some("0.1.0"));
-        // An older launcher doesn't say where it is; the package is found around the binary.
-        let Install::Npm(found) = detect(&binary, None, None, &installed) else { panic!("not npm") };
-        assert_eq!(found.package, npm.package);
-        // A launcher that isn't the one running this binary (an inherited variable) doesn't make it npm's.
-        let other = Dir::new("other");
-        assert_eq!(detect(&other.file("browse"), Some(&launcher), None, &installed), Install::Other);
-
-        let hoisted = Dir::new("hoisted");
-        let (launcher, binary) = npm_global(&hoisted, "usr", true);
-        let Install::Npm(npm) = detect(&binary, Some(&launcher), None, &installed) else { panic!("not npm") };
-        assert_eq!((npm.binary(), npm.prefix), (Some(binary), hoisted.0.join("usr")));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_platform_package_after_an_update() {
-        let dir = Dir::new("moved");
-        let (launcher, binary) = npm_global(&dir, "prefix", false);
-        let Install::Npm(npm) = detect(&binary, Some(&launcher), None, Path::new("/nonexistent/browse")) else { panic!("not npm") };
-        // npm picked the other libc's package this time.
-        std::fs::remove_dir_all(binary.parent().unwrap().parent().unwrap()).unwrap();
-        assert_eq!(npm.binary(), None);
-        let musl = dir.file(&format!("prefix/lib/node_modules/@opencode/browse/node_modules/@opencode/browse-linux-x64-musl/bin/{EXECUTABLE}"));
-        assert_eq!(npm.binary(), cfg!(target_os = "linux").then_some(musl));
+    fn other_tools_errors_keep_the_gist() {
+        let bun = "bun add v1.4.4 (abc)\n  🔍 Resolving [1/1]\nerror: No version matching \"9.9.9\" found for specifier \"@opencode/browse\" (but package exists)\nerror: @opencode/browse@9.9.9 failed to resolve\n";
+        assert_eq!(super::tool_error(bun), "No version matching \"9.9.9\" found for specifier \"@opencode/browse\" (but package exists)");
+        let yarn = "yarn global v1.22.22\n[1/4] Resolving packages...\nerror Couldn't find any versions for \"@opencode/browse\" that matches \"9.9.9\"\ninfo Visit https://yarnpkg.com/en/docs/cli/global for documentation about this command.\n";
+        assert_eq!(super::tool_error(yarn), "Couldn't find any versions for \"@opencode/browse\" that matches \"9.9.9\"");
+        assert_eq!(super::tool_error("something odd\nlast line\n"), "last line");
+        assert_eq!(super::tool_error(" \n"), "it printed nothing");
     }
 
     #[test]
-    fn detects_the_other_installs() {
-        let dir = Dir::new("kinds");
-        let installed = dir.file("home/.local/bin/browse");
-        assert_eq!(detect(&installed, None, None, &installed), Install::Binary(installed.clone()));
-        // npx: a package in npm's temporary cache.
-        let launcher = dir.file("home/.npm/_npx/4d2a/node_modules/@opencode/browse/dist/cli.mjs");
-        let binary = dir.file(&format!("home/.npm/_npx/4d2a/node_modules/@opencode/browse-linux-x64/bin/{EXECUTABLE}"));
-        assert_eq!(detect(&binary, Some(&launcher), None, &installed), Install::Npx);
-        // A project's own node_modules: no global prefix to update.
-        let launcher = dir.file("project/node_modules/@opencode/browse/dist/cli.mjs");
-        let binary = dir.file(&format!("project/node_modules/@opencode/browse-linux-x64/bin/{EXECUTABLE}"));
-        assert_eq!(detect(&binary, Some(&launcher), None, &installed), Install::Other);
-        dir.file("checkout/rust/Cargo.toml");
-        assert_eq!(detect(&dir.file("checkout/rust/target/debug/browse"), None, None, &installed), Install::Checkout);
-        assert_eq!(detect(&dir.file("checkout/rust/target/x86_64-unknown-linux-musl/release/browse"), None, None, &installed), Install::Checkout);
-        assert_eq!(detect(&dir.file("Downloads/browse"), None, None, &installed), Install::Other);
+    fn registry_settings_read_as_urls() {
+        assert_eq!(super::registry_url(" \"https://npm.example.com/\" ").as_deref(), Some("https://npm.example.com"));
+        assert_eq!(super::registry_url("http://127.0.0.1:4873/\n").as_deref(), Some("http://127.0.0.1:4873"));
+        assert_eq!(super::registry_url("undefined"), None);
     }
 
     #[test]

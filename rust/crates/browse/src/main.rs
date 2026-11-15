@@ -4,6 +4,7 @@ mod http;
 mod jsonc;
 mod legacy;
 mod mcp;
+mod method;
 mod relay;
 mod relay_api;
 mod serve;

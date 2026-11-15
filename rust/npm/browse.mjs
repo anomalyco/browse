@@ -47,9 +47,18 @@ if (!file) {
   process.exit(1)
 }
 
-// The binary updates this npm install with `npm install -g` (crates/browse/src/update.rs): it needs this package's
-// launcher, which tells it where the install lives, and the node running it, whose npm it uses.
-const env = { ...process.env, OPENCODE_BROWSER_NPM_LAUNCHER: fileURLToPath(import.meta.url), OPENCODE_BROWSER_NPM_NODE: process.execPath }
+// The binary updates this install with the package manager that installed it (crates/browse/src/method.rs): it needs
+// this package's launcher, which tells it where the install lives, the node (whose npm, or corepack's pnpm or yarn,
+// it uses) or bun running it, and the package manager that ran it, if one did.
+const bun = process.versions.bun !== undefined
+const env = {
+  ...process.env,
+  OPENCODE_BROWSER_NPM_LAUNCHER: fileURLToPath(import.meta.url),
+  OPENCODE_BROWSER_NPM_NODE: bun ? "" : process.execPath,
+  OPENCODE_BROWSER_NPM_BUN: bun ? process.execPath : "",
+  OPENCODE_BROWSER_NPM_USER_AGENT: process.env.npm_config_user_agent ?? "",
+  OPENCODE_BROWSER_NPM_EXECPATH: process.env.npm_execpath ?? "",
+}
 const child = spawn(file, process.argv.slice(2), { stdio: "inherit", windowsHide: true, env })
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.on(signal, () => {
