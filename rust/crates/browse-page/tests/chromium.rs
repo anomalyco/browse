@@ -413,6 +413,15 @@ async fn eval_scoping_serialization_errors_and_timeouts() {
     assert!(error.contains("must be a function"), "{error}");
     let error = h.err("eval", json!({ "expression": "document.title", "selector": "#a" })).await;
     assert!(error.contains("must be a function"), "{error}");
+    // A function literal with no ref/selector/arg is called, like the Playwright-style `() => ...` agents write; a
+    // function the code only refers to (a built-in, a variable) is never called.
+    assert_eq!(h.ok("eval", json!({ "expression": "() => document.title" })).await, "\"Eval\"");
+    assert_eq!(h.ok("eval", json!({ "expression": "  async () => { await new Promise((r) => setTimeout(r, 5)); return 7 };  " })).await, "7");
+    assert_eq!(h.ok("eval", json!({ "expression": "function () { return document.getElementById('a').textContent }", "world": "main" })).await, "\"hi\"");
+    for expression in ["window.close", "document.querySelector", "const f = () => 1; f", "[() => 1][0]"] {
+        let error = h.err("eval", json!({ "expression": expression })).await;
+        assert!(error.contains("evaluated to a function"), "{expression}: {error}");
+    }
     let pairs = h.json("eval", json!({ "expression": "new Map([[{ k: 1 }, 'v']])" })).await;
     assert_eq!(pairs, json!([[{ "k": 1 }, "v"]]), "{pairs}");
 

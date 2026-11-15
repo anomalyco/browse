@@ -95,10 +95,13 @@ const PREFIX_LINES: i64 = 3;
 /// from the user's code) inside its own function, so declarations never leak into the page's global scope. `this`
 /// is the global object, as for top-level code. It returns `{ value }`, `{ undefined: true }`, `{ function: true }`
 /// (a function result it may not call) or `{ notFunction: true }` (a ref/selector/arg was given but the code isn't a
-/// function), the value serialized by [SERIALIZE].
-pub fn declaration(body: &str, callable: bool) -> String {
+/// function), the value serialized by [SERIALIZE]. Without a ref/selector/arg, a function whose source is the whole
+/// `source` (the code is a function literal, like `() => document.title`) is called with no arguments; any other
+/// function (`window.close`, a page's own function) is never called.
+pub fn declaration(body: &str, callable: bool, source: &str) -> String {
+    let source = serde_json::to_string(source.trim()).unwrap_or_else(|_| "null".into());
     format!(
-        "async function (__element, __argJson) {{\nconst __arg = __argJson === undefined ? undefined : JSON.parse(__argJson);\nlet __value = await (async function () {{ {body} }}).call(globalThis);\nif (typeof __value === \"function\") {{ if (!{callable}) return {{ function: true }}; __value = await __value(__element, __arg) }} else if ({callable}) return {{ notFunction: true }};\nreturn __value === undefined ? {{ undefined: true }} : {{ value: ({SERIALIZE})(__value) }};\n}}"
+        "async function (__element, __argJson) {{\nconst __arg = __argJson === undefined ? undefined : JSON.parse(__argJson);\nlet __value = await (async function () {{ {body} }}).call(globalThis);\nif (typeof __value === \"function\") {{ if ({callable}) __value = await __value(__element, __arg); else if (Function.prototype.toString.call(__value).trim() === {source}) __value = await __value(); else return {{ function: true }} }} else if ({callable}) return {{ notFunction: true }};\nreturn __value === undefined ? {{ undefined: true }} : {{ value: ({SERIALIZE})(__value) }};\n}}"
     )
 }
 
@@ -229,7 +232,7 @@ pub async fn run(page: &Arc<TabPage>, target: &Target, compile: Option<String>, 
     };
     let element = matches!(target, Target::Element { .. });
     loop {
-        let result = page.send("Runtime.callFunctionOn", params(target, declaration(&body, callable), arg), target.session()).await?;
+        let result = page.send("Runtime.callFunctionOn", params(target, declaration(&body, callable, expression), arg), target.session()).await?;
         if let Some(details) = result.get("exceptionDetails") {
             // Without a syntax check, a SyntaxError means the code is statements; only then is a retry safe, since
             // a compile error runs nothing.
@@ -246,7 +249,7 @@ pub async fn run(page: &Arc<TabPage>, target: &Target, compile: Option<String>, 
         }
         let value = &result["result"]["value"];
         if value["function"] == true {
-            bail!("The expression evaluated to a function; pass arg (or a ref/selector) to call it, or call it yourself: (fn)()");
+            bail!("The expression evaluated to a function it doesn't define, which browse never calls on its own; call it yourself: (fn)(), or pass arg (or a ref/selector) to call it with them");
         }
         if value["notFunction"] == true {
             bail!("With {}, expression must be a function, called as (element, arg) => …; e.g. \"(el) => el.textContent\"", if element { "ref or selector" } else { "arg" });
