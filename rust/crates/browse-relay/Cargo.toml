@@ -29,5 +29,8 @@ url = "2"
 [target.'cfg(unix)'.dependencies]
 signal-hook-registry = "1"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
 [dev-dependencies]
 tokio-tungstenite = { version = "0.27", default-features = false, features = ["handshake", "connect"] }

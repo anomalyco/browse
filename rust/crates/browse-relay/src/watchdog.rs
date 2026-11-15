@@ -3,7 +3,7 @@
 //! OS thread, so a runtime whose workers are all blocked can't stop it.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Once, Weak};
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use crate::relay::Relay;
@@ -11,7 +11,8 @@ use crate::rlog;
 
 /// A SIGTERM or SIGINT arrived.
 static SIGNALLED: AtomicBool = AtomicBool::new(false);
-static SIGNALS: Once = Once::new();
+#[cfg(unix)]
+static SIGNALS: std::sync::Once = std::sync::Once::new();
 
 /// How long a shutdown signal may take before the process exits anyway.
 const SIGNAL_GRACE: Duration = Duration::from_secs(5);

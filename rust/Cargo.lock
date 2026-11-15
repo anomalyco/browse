@@ -171,6 +171,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.27.0",
  "url",
+ "windows-sys",
 ]
 
 [[package]]
