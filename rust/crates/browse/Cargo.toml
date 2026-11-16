@@ -23,5 +23,9 @@ toml_edit = { version = "0.25", default-features = false, features = ["parse", "
 serde_yaml = "0.9"
 crossterm = { version = "0.29", default-features = false, features = ["events", "windows"] }
 
+[dev-dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tokio-tungstenite = { version = "0.27", default-features = false, features = ["handshake", "connect"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

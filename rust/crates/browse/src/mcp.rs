@@ -1,6 +1,12 @@
 //! `browse mcp`: a stdio MCP server (newline-delimited JSON-RPC 2.0) that forwards to the relay and nothing more. It
-//! passes the client's `clientInfo.name` along (browse_core::CLIENT_HEADER), and the relay decides the tools and
-//! instructions that client gets. Calls carry no caller identity: every browser call names its tab.
+//! speaks both protocol eras: a pre-2026 client opens with `initialize` (the newest revision it offers), and a
+//! 2026-07-28 client skips the handshake, probes with `server/discover` and then sends the per-request `_meta` envelope
+//! on every call. It passes the client's `clientInfo.name` along (browse_core::CLIENT_HEADER), and the relay decides
+//! the tools and instructions that client gets.
+//!
+//! A pooled server serves every agent session of a client at once, so each call also carries the agent it belongs to
+//! (the client's per-request session id, hashed into an owner id; browse-relay's OWNER_HEADER). The relay gives that
+//! agent its tabs alone; a client that names no agent gets one owner id per server process, so its tabs stay its own.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -13,7 +19,17 @@ use serde_json::{Value, json};
 
 use crate::{VERSION, relay, update};
 
+/// The revision that needs no `initialize`: requests carry their own `_meta` envelope, and every result says
+/// `resultType`. A client probes it with `server/discover`; failing that it falls back to `initialize`.
+const MODERN: &str = "2026-07-28";
+/// What an `initialize` may negotiate (the newest first). A 2026-07-28 client never initializes.
 const PROTOCOLS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+/// The per-request `_meta` keys of protocol revision 2026-07-28.
+const META_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
+const META_CLIENT: &str = "io.modelcontextprotocol/clientInfo";
+const META_SERVER: &str = "io.modelcontextprotocol/serverInfo";
+/// OpenCode sets this on every `tools/call` to the id of the agent session making it.
+const OPENCODE_SESSION: &str = "ai.opencode/sessionID";
 
 #[derive(Default)]
 struct Running {
@@ -34,7 +50,11 @@ pub fn run() -> anyhow::Result<()> {
     let out = Arc::new(Mutex::new(std::io::stdout()));
     let running = Arc::new(Running::default());
     let noted = Arc::new(AtomicBool::new(false));
+    // The owner id of calls that name no agent: this server process, so a client that never sends a session id still
+    // gets tabs no other process can see, rather than the free-for-all of no owner at all.
+    let connection = format!("mcp-{:016x}{:016x}", crate::session::random_u64(), crate::session::random_u64());
     let mut client = String::new();
+    let mut modern = false;
     let mut line = String::new();
     let mut stdin = std::io::stdin().lock();
     loop {
@@ -59,8 +79,21 @@ pub fn run() -> anyhow::Result<()> {
         };
         let method = message.get("method").and_then(Value::as_str).unwrap_or_default();
         let params = message.get("params").cloned().unwrap_or(Value::Null);
+        // A 2026-07-28 request carries its identity with it: the client's name and the revision it speaks. Learning
+        // them from any request keeps a pooled connection's tools and owner ids right after `server/discover`.
+        if let Some(meta) = params.get("_meta") {
+            if let Some(name) = meta.get(META_CLIENT).and_then(|info| info.get("name")).and_then(Value::as_str) {
+                client = name.to_string();
+            }
+            if meta.get(META_VERSION).and_then(Value::as_str) == Some(MODERN) || method == "server/discover" {
+                modern = true;
+            }
+        }
         match method {
             "initialize" => {
+                // The handshake is the older era's: whatever probe came before, this connection's results keep the
+                // initialize shape from here on.
+                modern = false;
                 let asked = params.get("protocolVersion").and_then(Value::as_str).unwrap_or_default();
                 let version = PROTOCOLS.iter().find(|v| **v == asked).unwrap_or(&PROTOCOLS[0]);
                 client = params.pointer("/clientInfo/name").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -71,15 +104,33 @@ pub fn run() -> anyhow::Result<()> {
                     "instructions": relay::instructions(&client),
                 }));
             }
-            "ping" => reply(&out, id, json!({})),
-            "tools/list" => reply(&out, id, json!({ "tools": relay::specs(Some(&client)) })),
+            // The 2026-07-28 probe: this is what tells a client the server speaks the modern era, and what it lists
+            // as the tools, instructions and capabilities a pooled connection gets.
+            "server/discover" => {
+                modern = true;
+                reply(&out, id, json!({
+                    "resultType": "complete",
+                    "supportedVersions": [MODERN, PROTOCOLS[0], PROTOCOLS[1], PROTOCOLS[2], PROTOCOLS[3]],
+                    "capabilities": {"tools": {}},
+                    "instructions": relay::instructions(&client),
+                    "ttlMs": 0,
+                    "cacheScope": "private",
+                    "_meta": { META_SERVER: {"name": "browse", "version": VERSION} },
+                }));
+            }
+            "ping" => reply(&out, id, if modern { json!({ "resultType": "complete" }) } else { json!({}) }),
+            "tools/list" => {
+                let tools = relay::specs(Some(&client));
+                reply(&out, id, if modern { listed(json!({ "tools": tools })) } else { json!({ "tools": tools }) });
+            }
             "tools/call" => {
                 let (out, running, noted, client) = (out.clone(), running.clone(), noted.clone(), client.clone());
+                let owner = owner_for(&params, &connection);
                 *running.count.lock().unwrap() += 1;
                 let key = format!("{:016x}{:016x}", crate::session::random_u64(), crate::session::random_u64());
                 running.calls.lock().unwrap().insert(id.to_string(), Pending { key: key.clone(), cancelled: false });
                 std::thread::spawn(move || {
-                    let mut result = call(&params, &client, &key);
+                    let mut result = call(&params, &client, &key, &owner);
                     let cancelled = running.calls.lock().unwrap().remove(&id.to_string()).is_some_and(|p| p.cancelled);
                     // Once per process: a notify-only install tells the agent about an update to pass on.
                     if let Some((summary, command)) = update::pending_notice()
@@ -92,15 +143,19 @@ pub fn run() -> anyhow::Result<()> {
                     }
                     // A cancelled request gets no response (MCP cancellation).
                     if !cancelled {
-                        reply(&out, id, serde_json::to_value(result).unwrap_or(Value::Null));
+                        let mut value = serde_json::to_value(result).unwrap_or(Value::Null);
+                        if modern && let Value::Object(object) = &mut value {
+                            object.insert("resultType".into(), json!("complete"));
+                        }
+                        reply(&out, id, value);
                     }
                     let mut count = running.count.lock().unwrap();
                     *count -= 1;
                     running.idle.notify_all();
                 });
             }
-            "resources/list" => reply(&out, id, json!({ "resources": [] })),
-            "prompts/list" => reply(&out, id, json!({ "prompts": [] })),
+            "resources/list" => reply(&out, id, if modern { listed(json!({ "resources": [] })) } else { json!({ "resources": [] }) }),
+            "prompts/list" => reply(&out, id, if modern { listed(json!({ "prompts": [] })) } else { json!({ "prompts": [] }) }),
             _ => write(&out, &json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": format!("Method not found: {method}")}})),
         }
     }
@@ -109,6 +164,37 @@ pub fn run() -> anyhow::Result<()> {
     let count = running.count.lock().unwrap();
     let _ = running.idle.wait_timeout_while(count, Duration::from_secs(2), |n| *n > 0);
     Ok(())
+}
+
+/// A 2026-07-28 list result: the era's `resultType` plus the cache hints its schema requires.
+fn listed(mut value: Value) -> Value {
+    if let Value::Object(object) = &mut value {
+        object.insert("resultType".into(), json!("complete"));
+        object.insert("ttlMs".into(), json!(0));
+        object.insert("cacheScope".into(), json!("private"));
+    }
+    value
+}
+
+/// The agent a call belongs to: the client's per-request session id hashed into a stable owner id, else this
+/// connection's own id.
+fn owner_for(params: &Value, connection: &str) -> String {
+    params
+        .get("_meta")
+        .and_then(|meta| meta.get(OPENCODE_SESSION))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(session_owner)
+        .unwrap_or_else(|| connection.to_string())
+}
+
+/// The same id OpenCode's former Node server gave an agent session (`mcp-` and the first 8 hex digits of its SHA-256),
+/// so an agent keeps its tabs across a change of server build.
+fn session_owner(session: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(session.as_bytes());
+    format!("mcp-{}", crate::session::hex(&digest[..4]))
 }
 
 /// Stops the call the client cancelled, in the background: the relay ends it (and a handoff it waits on), and its
@@ -125,10 +211,11 @@ fn cancel(running: &Running, request: &Value) {
     });
 }
 
-fn call(params: &Value, client: &str, key: &str) -> ToolOutput {
+fn call(params: &Value, client: &str, key: &str, owner: &str) -> ToolOutput {
     let name = params.get("name").and_then(Value::as_str).unwrap_or_default().to_owned();
     let arguments = params.get("arguments").cloned().filter(Value::is_object).unwrap_or_else(|| json!({}));
-    relay::call_keyed(&ToolCallRequest { name: name.clone(), arguments }, Some(client), Some(key)).unwrap_or_else(|error| ToolOutput::error(format!("{name} failed: {error:#}")))
+    relay::call_owned(&ToolCallRequest { name: name.clone(), arguments }, Some(client), Some(key), Some(owner))
+        .unwrap_or_else(|error| ToolOutput::error(format!("{name} failed: {error:#}")))
 }
 
 fn reply(out: &Mutex<std::io::Stdout>, id: Value, result: Value) {
@@ -140,4 +227,33 @@ fn write(out: &Mutex<std::io::Stdout>, message: &Value) {
     text.push('\n');
     let mut out = out.lock().unwrap();
     let _ = out.write_all(text.as_bytes()).and_then(|_| out.flush());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_session_id_hashes_to_a_stable_owner_and_distinct_sessions_stay_apart() {
+        assert_eq!(session_owner("ses_abc"), session_owner("ses_abc"));
+        assert_ne!(session_owner("ses_abc"), session_owner("ses_def"));
+        assert!(session_owner("ses_abc").starts_with("mcp-"));
+        assert_eq!(session_owner("ses_abc").len(), 12);
+    }
+
+    #[test]
+    fn a_call_names_its_agent_by_meta_and_falls_back_to_the_connection() {
+        let meta = json!({ "_meta": { OPENCODE_SESSION: "ses_a" } });
+        assert_eq!(owner_for(&meta, "mcp-connection"), session_owner("ses_a"));
+        assert_eq!(owner_for(&json!({ "arguments": {} }), "mcp-connection"), "mcp-connection");
+        assert_eq!(owner_for(&json!({ "_meta": { OPENCODE_SESSION: "  " } }), "mcp-connection"), "mcp-connection");
+    }
+
+    #[test]
+    fn modern_lists_carry_the_era_fields() {
+        let value = listed(json!({ "tools": [] }));
+        assert_eq!(value["resultType"], "complete");
+        assert_eq!(value["ttlMs"], 0);
+        assert_eq!(value["cacheScope"], "private");
+    }
 }
