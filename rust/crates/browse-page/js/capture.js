@@ -861,28 +861,27 @@ return ((rootOrSettings, locatorSettings, naming) => {
       const navigation = closestDeep(element, "nav, [role='navigation'], aside, [role='complementary'], [data-slot='sidebar'], [data-sidebar='sidebar']");
       if (navigation && collapsedNavigation.has(navigation))
         continue;
-      if (navigation && navigation !== root && !navigation.contains?.(root) && !nonCollapsibleNavigation.has(navigation)) {
-        if (!isVisible(navigation)) {
+      if (navigation && navigation !== root && !navigation.contains?.(root) && !nonCollapsibleNavigation.has(navigation))
+        if (!isVisible(navigation))
           nonCollapsibleNavigation.add(navigation);
-          continue;
+        else {
+          const controls = querySelectorAllDeep(navigation, ["a[href]", "[contenteditable]", ...interactiveTags, ...Array.from(interactiveRoles, (role) => `[role='${role}']`)].join(", ")).filter(isVisible);
+          if (controls.length > 0 && controls.every(isLinkElement) && (navigation.matches("nav, [role='navigation']") || controls.length >= 8 && !navigation.querySelector?.("h1, main, [role='main'], input, textarea, select"))) {
+            collapsedNavigation.add(navigation);
+            const parentKeys = structuralParentKeys(navigation), baseDepth = headingDepth(navigation), count = controls.length;
+            add({
+              depth: baseDepth + parentKeys.length,
+              baseDepth,
+              ...parentKeys.length > 0 ? { parentKeys } : {},
+              role: "navigation",
+              name: truncate(labelledName(navigation), 100) || "Navigation",
+              details: `${count} ${count === 1 ? "link" : "links"}, collapsed`,
+              priority: 0
+            });
+            continue;
+          }
+          nonCollapsibleNavigation.add(navigation);
         }
-        const controls = querySelectorAllDeep(navigation, ["a[href]", "[contenteditable]", ...interactiveTags, ...Array.from(interactiveRoles, (role) => `[role='${role}']`)].join(", ")).filter(isVisible);
-        if (controls.length > 0 && controls.every(isLinkElement) && (navigation.matches("nav, [role='navigation']") || controls.length >= 8 && !navigation.querySelector?.("h1, main, [role='main'], input, textarea, select"))) {
-          collapsedNavigation.add(navigation);
-          const parentKeys = structuralParentKeys(navigation), baseDepth = headingDepth(navigation), count = controls.length;
-          add({
-            depth: baseDepth + parentKeys.length,
-            baseDepth,
-            ...parentKeys.length > 0 ? { parentKeys } : {},
-            role: "navigation",
-            name: truncate(labelledName(navigation), 100) || "Navigation",
-            details: `${count} ${count === 1 ? "link" : "links"}, collapsed`,
-            priority: 0
-          });
-          continue;
-        }
-        nonCollapsibleNavigation.add(navigation);
-      }
     }
     if (!isVisible(element))
       continue;

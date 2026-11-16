@@ -380,7 +380,10 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
     }
 
     const useDiff = options.diff === true || (options.delta === true && compatiblePrevious !== undefined)
-    registry.previousSnapshot = { page, signature, entries: rendered }
+    // A find snapshot renders extra nav controls; it can update refs but must not become the diff baseline.
+    if (settings.expandNavigation !== true) {
+      registry.previousSnapshot = { page, signature, entries: rendered }
+    }
     if (!useDiff) {
       const lines = [...(result.notes ?? []), ...rendered.map((entry) => formatSnapshotLine(entry, entry.refId))]
       return options.find === undefined

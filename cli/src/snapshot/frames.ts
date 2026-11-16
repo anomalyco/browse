@@ -177,6 +177,7 @@ function childSettings(settings: SnapshotCaptureSettings, iframeDepth: number): 
   const { rootSelector: _selector, rootRole: _role, rootName: _name, reportRootFallback: _fallback, ...inherited } = settings
   return {
     ...inherited,
+    ...(settings.expandNavigation === undefined ? {} : { expandNavigation: settings.expandNavigation }),
     depth: Math.max(1, inherited.depth - iframeDepth - 1),
     maxCandidates: Math.max(200, inherited.maxItems * 20),
     rootSelector: undefined,

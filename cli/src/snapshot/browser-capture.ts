@@ -1,8 +1,6 @@
 import { snapshotNamingInBrowser, type SnapshotNaming } from "./naming.ts"
 import type { SnapshotCaptureResult, SnapshotCaptureSettings, SnapshotEntry } from "./types.ts"
 
-type CaptureSettings = SnapshotCaptureSettings & { readonly expandNavigation?: boolean }
-
 // Self-contained browser evaluation script: serialized via Function.prototype.toString() into page.evaluate().
 // Do not reference module-level runtime imports inside captureSnapshotInBrowser; browserCapture passes `naming`.
 const captureSnapshotInBrowser = (
@@ -11,7 +9,7 @@ const captureSnapshotInBrowser = (
   naming: SnapshotNaming,
 ): SnapshotCaptureResult => {
   type BrowserEntry = SnapshotEntry
-  const settings = (locatorSettings ?? rootOrSettings) as CaptureSettings
+  const settings = locatorSettings ?? rootOrSettings as SnapshotCaptureSettings
 
   const truncate = (value: string, maxLength: number): string => {
     if (value.length <= maxLength) return value
@@ -678,39 +676,41 @@ const captureSnapshotInBrowser = (
       }
       if (navigation && navigation !== root && !navigation.contains?.(root) && !nonCollapsibleNavigation.has(navigation)) {
         if (!isVisible(navigation)) {
+          // isVisible doesn't inherit, so an invisible landmark can still have visible positioned children:
+          // skip the summary but let the current element go through normal processing.
           nonCollapsibleNavigation.add(navigation)
-          continue
+        } else {
+          // Only visible controls decide: a display:none mobile menu button does not keep the whole nav open.
+          const controls = querySelectorAllDeep(
+            navigation,
+            ["a[href]", "[contenteditable]", ...interactiveTags, ...Array.from(interactiveRoles, (role) => `[role='${role}']`)].join(", "),
+          ).filter(isVisible)
+          // Only a pure link list is a landmark worth summarising. A nav of buttons (a conversation list, a
+          // toolbar) is content: collapsing it would hide every control, and the summary carries no ref.
+          const isLinkList = controls.length > 0 && controls.every(isLinkElement)
+          const isCollapsibleNav = isLinkList && (
+            navigation.matches("nav, [role='navigation']") ||
+            (controls.length >= 8 && !navigation.querySelector?.("h1, main, [role='main'], input, textarea, select"))
+          )
+          if (isCollapsibleNav) {
+            collapsedNavigation.add(navigation)
+            // Keep the heading-based depth its expanded children would have, plus any structural parents.
+            const parentKeys = structuralParentKeys(navigation)
+            const baseDepth = headingDepth(navigation)
+            const count = controls.length
+            add({
+              depth: baseDepth + parentKeys.length,
+              baseDepth,
+              ...(parentKeys.length > 0 ? { parentKeys } : {}),
+              role: "navigation",
+              name: truncate(labelledName(navigation), 100) || "Navigation",
+              details: `${count} ${count === 1 ? "link" : "links"}, collapsed`,
+              priority: 0,
+            })
+            continue
+          }
+          nonCollapsibleNavigation.add(navigation)
         }
-        // Only visible controls decide: a display:none mobile menu button does not keep the whole nav open.
-        const controls = querySelectorAllDeep(
-          navigation,
-          ["a[href]", "[contenteditable]", ...interactiveTags, ...Array.from(interactiveRoles, (role) => `[role='${role}']`)].join(", "),
-        ).filter(isVisible)
-        // Only a pure link list is a landmark worth summarising. A nav of buttons (a conversation list, a
-        // toolbar) is content: collapsing it would hide every control, and the summary carries no ref.
-        const isLinkList = controls.length > 0 && controls.every(isLinkElement)
-        const isCollapsibleNav = isLinkList && (
-          navigation.matches("nav, [role='navigation']") ||
-          (controls.length >= 8 && !navigation.querySelector?.("h1, main, [role='main'], input, textarea, select"))
-        )
-        if (isCollapsibleNav) {
-          collapsedNavigation.add(navigation)
-          // Keep the heading-based depth its expanded children would have, plus any structural parents.
-          const parentKeys = structuralParentKeys(navigation)
-          const baseDepth = headingDepth(navigation)
-          const count = controls.length
-          add({
-            depth: baseDepth + parentKeys.length,
-            baseDepth,
-            ...(parentKeys.length > 0 ? { parentKeys } : {}),
-            role: "navigation",
-            name: truncate(labelledName(navigation), 100) || "Navigation",
-            details: `${count} ${count === 1 ? "link" : "links"}, collapsed`,
-            priority: 0,
-          })
-          continue
-        }
-        nonCollapsibleNavigation.add(navigation)
       }
     }
     if (!isVisible(element)) continue

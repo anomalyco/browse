@@ -807,7 +807,10 @@ pub async fn snapshot(page: &Arc<TabPage>, tab_state: &PageTab, options: &Option
         refs.document = Some(document);
         refs.aria = None;
         let use_diff = options.diff || (options.delta && compatible_previous.is_some());
-        refs.previous = Some(Baseline { tab: page.tab(), document, signature, entries: rendered.clone() });
+        // A find snapshot renders extra nav controls; it can update refs but must not become the diff baseline.
+        if !settings.expand_navigation {
+            refs.previous = Some(Baseline { tab: page.tab(), document, signature, entries: rendered.clone() });
+        }
         (rendered, compatible_previous, use_diff, remember)
     };
     for (frame, list) in remember {

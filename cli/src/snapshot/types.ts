@@ -103,6 +103,8 @@ export type SnapshotBaseline = {
 
 export type SnapshotCaptureSettings = {
   readonly compact: boolean
+  /** Render navigation expanded so `find` can see its controls; `compact` and the diff signature are unchanged. */
+  readonly expandNavigation?: boolean
   readonly depth: number
   readonly interactive: boolean
   readonly maxCandidates: number

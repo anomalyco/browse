@@ -112,6 +112,7 @@ async fn snapshot_navigation_controls_stay_visible() {
   <a href="/s5">S5</a><a href="/s6">S6</a><a href="/s7">S7</a><a href="/s8">S8</a></aside>
 <nav aria-label="Mobile"><a href="/m">Mobile</a><button style="display:none">Menu</button></nav>
 <nav aria-label="Action nav"><a href="/action" role="button">Action</a></nav>
+<aside style="height:0"><button style="position:absolute">First</button><button style="position:absolute">Second</button></aside>
 <input aria-placeholder="Message only">"#,
     );
     h.ok("navigate", json!({ "url": page })).await;
@@ -130,6 +131,11 @@ async fn snapshot_navigation_controls_stay_visible() {
     // A link whose computed role is button is a control, so its nav stays expanded with a ref.
     let action = ref_of(&snapshot, "button \"Action\"");
     assert!(action.starts_with('e'), "the action keeps a ref ({action}):\n{snapshot}");
+    // isVisible doesn't inherit: an invisible aside with visible positioned children still shows them.
+    let first = ref_of(&snapshot, "button \"First\"");
+    let second = ref_of(&snapshot, "button \"Second\"");
+    assert!(first.starts_with('e'), "First keeps a ref ({first}):\n{snapshot}");
+    assert!(second.starts_with('e'), "Second keeps a ref ({second}):\n{snapshot}");
     // aria-placeholder names a control that has no label, title or placeholder of its own.
     assert!(snapshot.contains("- textbox \"Message only\" [ref="), "{snapshot}");
     let found = h.ok("snapshot", json!({ "find": "carol" })).await;
@@ -137,10 +143,13 @@ async fn snapshot_navigation_controls_stay_visible() {
     // find greps the rendered lines, so a collapsed link list has to be expanded for the match.
     let found_link = h.ok("snapshot", json!({ "find": "Alpha" })).await;
     assert!(found_link.contains("link \"Alpha\""), "{found_link}");
-    // find must not change the comparison signature: a diff after a find still uses the same options.
+    // A find snapshot must not replace the diff baseline: the page did not change since the first snapshot.
     let diff = h.ok("snapshot", json!({ "diff": true })).await;
-    assert!(diff.contains("additions"), "{diff}");
-    assert!(!diff.contains("same snapshot options"), "{diff}");
+    assert_eq!(
+        diff,
+        format!("0 additions, 0 removals, {} unchanged", snapshot.lines().count()),
+        "{diff}"
+    );
 
     // interactive asks for controls, so the summary would hide exactly what was asked for.
     let interactive = h.ok("snapshot", json!({ "interactive": true })).await;
