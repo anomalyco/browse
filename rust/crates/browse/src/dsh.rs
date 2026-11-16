@@ -26,16 +26,24 @@ pub(crate) fn location(home: PathBuf) -> Location {
     Location { name: "dsh", file, installed }
 }
 
+/// A patch file's rows, or None when YAML has no list at all (a comment-only or `--- # c` file).
+fn sequence(text: &str) -> anyhow::Result<Option<Vec<serde_yaml::Value>>> {
+    let value: serde_yaml::Value = serde_yaml::from_str(text.strip_prefix('\u{feff}').unwrap_or(text))?;
+    match value {
+        serde_yaml::Value::Null => Ok(None),
+        serde_yaml::Value::Sequence(rows) if rows.iter().all(serde_yaml::Value::is_mapping) => Ok(Some(rows)),
+        _ => bail!("not a top-level YAML list of patch entries"),
+    }
+}
+
 /// A dsh patch file's rows: a top-level YAML list of patch entries, where an empty, BOM-only or comment-only file is
 /// an empty list.
 fn patch_list(text: &str) -> anyhow::Result<Vec<serde_yaml::Value>> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let value: serde_yaml::Value = if text.trim().is_empty() { serde_yaml::Value::Null } else { serde_yaml::from_str(text)? };
-    match value {
-        serde_yaml::Value::Null => Ok(Vec::new()),
-        serde_yaml::Value::Sequence(rows) if rows.iter().all(serde_yaml::Value::is_mapping) => Ok(rows),
-        _ => bail!("not a top-level YAML list of patch entries"),
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
     }
+    Ok(sequence(text)?.unwrap_or_default())
 }
 
 /// Whether an inserted dsh row is named browse: our id, or the `serverName` its tools are named after.
@@ -207,18 +215,9 @@ fn append(before: &str, block: &[String], empty: bool) -> String {
     join_lines(&out, newline, true, bom)
 }
 
-/// A line with a value, not just a BOM, comment or YAML document marker.
-fn is_content(line: &str) -> bool {
-    let line = line.strip_prefix('\u{feff}').unwrap_or(line).trim();
-    content(line) && line != "---" && line != "..." && !line.starts_with('%')
-}
-
-/// dsh only boots when its patch layer is a list: comments left after removing the last patch get an empty `[]` list.
+/// dsh only boots when its patch layer is a list: a file that only has comments or a `--- # c` header gets an empty
+/// `[]` list.
 fn valid_empty(text: String, newline: &str) -> String {
-    let body = text.strip_prefix('\u{feff}').unwrap_or(&text);
-    if body.trim().is_empty() {
-        return String::new();
-    }
     let mut out = text;
     if !out.ends_with('\n') {
         out.push_str(newline);
@@ -260,16 +259,14 @@ fn config_line(lines: &[&str], start: usize, end: usize) -> Option<usize> {
 
 /// Whether a value has a `#` that YAML would read as the start of a comment.
 fn has_comment(value: &str) -> bool {
-    let mut quote = None;
+    if let Some(quote @ ('\'' | '"')) = value.chars().next() {
+        let Some(end) = value.rfind(quote) else { return false };
+        return value[end + quote.len_utf8()..].contains('#');
+    }
     let mut previous = ' ';
     for character in value.chars() {
-        match quote {
-            Some(end) => quote = (character != end).then_some(end),
-            None => match character {
-                '\'' | '"' => quote = Some(character),
-                '#' if previous.is_whitespace() => return true,
-                _ => {}
-            },
+        if character == '#' && previous.is_whitespace() {
+            return true;
         }
         previous = character;
     }
@@ -403,8 +400,23 @@ pub(crate) fn write(before: &str, expected: &Value, remove: bool) -> anyhow::Res
         block.extend(row_lines(expected, 4));
         append(before, &block, patches.is_empty())
     };
-    let after = if wanted.is_empty() && !after.lines().any(is_content) { valid_empty(after, newline) } else { after };
-    if patch_list(&after).map_err(|_| invalid())? != wanted {
+    let after = if wanted.is_empty() {
+        let body = after.strip_prefix('\u{feff}').unwrap_or(&after);
+        if body.trim().is_empty() {
+            String::new()
+        } else if sequence(&after).map_err(|_| invalid())?.is_none() {
+            valid_empty(after, newline)
+        } else {
+            after
+        }
+    } else {
+        after
+    };
+    if after.trim().is_empty() {
+        if !wanted.is_empty() {
+            return Err(invalid());
+        }
+    } else if sequence(&after).map_err(|_| invalid())?.as_deref() != Some(wanted.as_slice()) {
         return Err(invalid());
     }
     Ok((Some(after), outcome))
@@ -544,6 +556,31 @@ mod tests {
     }
 
     #[test]
+    fn document_header() {
+        let dir = temp("dsh-header");
+        // `--- # c` plus an empty list round-trips exactly.
+        let listed = dir.join("listed/cordis.patch.yml");
+        std::fs::create_dir_all(listed.parent().unwrap()).unwrap();
+        let original = "--- # c\n[]\n";
+        std::fs::write(&listed, original).unwrap();
+        let dsh = loc("dsh", listed.clone());
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Added);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(std::fs::read_to_string(&listed).unwrap(), original);
+        assert_eq!(patch_list(&std::fs::read_to_string(&listed).unwrap()).unwrap().len(), 0);
+        // `--- # c` plus our row uninstalls to a loadable empty list.
+        let named = dir.join("row/cordis.patch.yml");
+        std::fs::create_dir_all(named.parent().unwrap()).unwrap();
+        std::fs::write(&named, format!("--- # c\n{}", row("/bin/browse"))).unwrap();
+        let dsh = loc("dsh", named.clone());
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Removed);
+        let text = std::fs::read_to_string(&named).unwrap();
+        assert_eq!(text, "--- # c\n[]\n");
+        assert_eq!(sequence(&text).unwrap().map(|rows| rows.len()), Some(0));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn bom_files() {
         let dir = temp("dsh-bom");
         // A BOM survives, and a comment-only file still gets an empty list.
@@ -624,6 +661,8 @@ mod tests {
             ("block", "- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command:\n          - x\n        args: [mcp]\n"),
             // A trailing comment on the line we would replace.
             ("comment", "- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: /bin/browse # old\n        args: [mcp]\n"),
+            // An apostrophe in a plain path must not hide a following comment.
+            ("apostrophe", "- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: /home/o'b/browse # mine\n        args: [mcp]\n"),
             // A value that continues on a deeper line.
             ("continuation", "- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: /bin/\n          browse\n        args: [mcp]\n"),
         ];
