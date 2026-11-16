@@ -26,9 +26,6 @@ pub struct PersistedTab {
     pub browser_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opener: Option<i64>,
-    /// The agent whose call opened the tab (OWNER_HEADER), so a restarted relay can give it back as theirs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub caller: Option<String>,
     #[serde(flatten)]
     pub options: TabOptions,
     #[serde(default)]
@@ -78,7 +75,6 @@ mod tests {
             target_id: "T7".into(),
             browser_key: "k1".into(),
             opener: Some(3),
-            caller: Some("mcp-01234567".into()),
             options: TabOptions { group: Some("orw-x".into()), allowed_origins: Some(vec!["example.com".into()]), read_only: true, keep_visible: false, browser: None },
             created_at: "now".into(),
         };

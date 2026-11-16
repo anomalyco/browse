@@ -53,15 +53,10 @@ impl Relay {
         Some(TabInfo { tab, url: entry.url.clone(), title: entry.title.clone(), lent: entry.owner == Owner::User, opener: entry.opener, options })
     }
 
-    /// Every tab agents can use (theirs and the lent ones), by id, as this call's agent may see them.
+    /// Every tab agents can use (the agent-opened ones and the lent ones), by id.
     pub fn tab_infos(&self) -> Vec<TabInfo> {
-        self.tab_infos_for(crate::relay::caller().as_deref())
-    }
-
-    /// The tabs a call by `caller` may see: the lent ones, those no agent claims, and its own.
-    pub fn tab_infos_for(&self, caller: Option<&str>) -> Vec<TabInfo> {
         let st = self.st();
-        let mut ids: Vec<i64> = st.tabs.values().filter(|t| !t.closing && t.visible_to(caller)).map(|t| t.id).collect();
+        let mut ids: Vec<i64> = st.tabs.values().filter(|t| !t.closing).map(|t| t.id).collect();
         ids.sort();
         ids.into_iter().filter_map(|tab| self.tab_info(&st, tab)).collect()
     }
@@ -86,18 +81,14 @@ impl Relay {
         }
     }
 
-    /// Whether calls can use the tab, or why not. A call only sees the tabs of the agent that made it (plus the lent
-    /// ones and tabs no agent claims).
+    /// Whether calls can use the tab, or why not. A tab the user didn't lend is not attached at all, so it is not a
+    /// browse tab here.
     pub fn usable_tab(&self, tab: i64) -> anyhow::Result<()> {
-        let caller = crate::relay::caller();
         let st = self.st();
-        if let Some(entry) = st.tabs.get(&tab).filter(|t| !t.closing) {
-            if entry.visible_to(caller.as_deref()) {
-                return Ok(());
-            }
-            bail!("Tab {tab} isn't a browse tab you can use: browse didn't open it for you and the user didn't lend it.");
+        if st.tabs.get(&tab).is_some_and(|t| !t.closing) {
+            return Ok(());
         }
-        if st.tabs.get(&tab).is_some_and(|t| t.visible_to(caller.as_deref())) {
+        if st.tabs.contains_key(&tab) {
             bail!("Tab {tab} is closing.");
         }
         if let Some(gone) = st.gone_tab(tab) {
@@ -197,13 +188,8 @@ impl Relay {
     }
 
     pub fn tab_summaries(&self) -> Vec<Value> {
-        self.tab_summaries_for(crate::relay::caller().as_deref())
-    }
-
-    /// The tabs a call by `caller` may see, as `status` reports them.
-    pub fn tab_summaries_for(&self, caller: Option<&str>) -> Vec<Value> {
         let st = self.st();
-        let mut tabs: Vec<&crate::relay::Tab> = st.tabs.values().filter(|t| t.visible_to(caller)).collect();
+        let mut tabs: Vec<&crate::relay::Tab> = st.tabs.values().collect();
         tabs.sort_by_key(|t| t.id);
         tabs.iter()
             .map(|t| {

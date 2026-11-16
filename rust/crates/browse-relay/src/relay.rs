@@ -23,17 +23,7 @@ use crate::registry::{PersistedTab, RunningCall};
 
 pub type AutoUpdateStatus = Arc<dyn Fn() -> Value + Send + Sync>;
 
-tokio::task_local! {
-    /// The agent a running call belongs to: the caller id it sent (OWNER_HEADER), when it sent one. Calls without
-    /// one (the CLI, an older MCP client) belong to no agent and see every tab, as they always have.
-    pub static CALLER: Option<Arc<str>>;
-}
-
-/// The caller id of the running call, when it has one.
-pub fn caller() -> Option<Arc<str>> {
-    CALLER.try_with(Clone::clone).ok().flatten()
-}
-
+/// Who a tab belongs to: browse opened it for agents (Relay), or the user lent it (User) and gets it back on close.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Owner {
     Relay,
@@ -63,9 +53,6 @@ pub struct Tab {
     pub url: String,
     pub title: String,
     pub owner: Owner,
-    /// The caller id of the agent whose call opened the tab (OWNER_HEADER). None: nobody claims it, so every call can
-    /// use it (the CLI's tabs, and tabs opened by a client that doesn't name its agents).
-    pub caller: Option<String>,
     /// How an agent tab was opened (normalized allowlist; `browser` unset: `link_key` says which); default for a lent
     /// tab.
     pub options: TabOptions,
@@ -110,18 +97,6 @@ impl Tab {
             self.warnings.push(warning);
         }
     }
-
-    /// Whether a call by `caller` may see and use the tab. The user's lent tabs and tabs no agent claims are
-    /// everyone's; another agent's own tab is not. A call with no caller (the CLI) sees every tab.
-    pub fn visible_to(&self, caller: Option<&str>) -> bool {
-        if self.owner == Owner::User {
-            return true;
-        }
-        match (&self.caller, caller) {
-            (None, _) | (_, None) => true,
-            (Some(owner), Some(caller)) => owner == caller,
-        }
-    }
 }
 
 /// A tab browse remembers while its browser reconnects: who owned it and what its tools kept.
@@ -130,8 +105,6 @@ pub struct KnownOwner {
     /// The relay's id for the tab, so a reconnecting browser that doesn't announce it again can get it back.
     pub tab: i64,
     pub owner: Owner,
-    /// The agent whose call opened it (see `Tab::caller`).
-    pub caller: Option<String>,
     pub browser: String,
     pub options: TabOptions,
     pub opener: Option<i64>,
@@ -647,14 +620,13 @@ impl Relay {
                 .tabs
                 .values()
                 .filter(|t| t.owner == Owner::Relay && !t.closing)
-                .map(|t| PersistedTab { tab: t.id, target_id: t.target_id.clone(), browser_key: t.link_key.clone(), opener: t.opener, caller: t.caller.clone(), options: t.options.clone(), created_at: t.created_at.clone() })
+                .map(|t| PersistedTab { tab: t.id, target_id: t.target_id.clone(), browser_key: t.link_key.clone(), opener: t.opener, options: t.options.clone(), created_at: t.created_at.clone() })
                 .collect();
             entries.extend(st.reconnect_owners.iter().filter(|(_, k)| k.owner == Owner::Relay).map(|(target, k)| PersistedTab {
                 tab: k.tab,
                 target_id: target.clone(),
                 browser_key: k.browser.clone(),
                 opener: k.opener,
-                caller: k.caller.clone(),
                 options: k.options.clone(),
                 created_at: k.created_at.clone(),
             }));

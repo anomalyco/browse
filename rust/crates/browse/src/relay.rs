@@ -207,19 +207,10 @@ pub fn call(request: &ToolCallRequest, client: Option<&str>) -> anyhow::Result<T
 
 /// [call], with a key for the call (browse_core::CALL_HEADER) that [cancel] can stop it by.
 pub fn call_keyed(request: &ToolCallRequest, client: Option<&str>, key: Option<&str>) -> anyhow::Result<ToolOutput> {
-    call_owned(request, client, key, None)
-}
-
-/// [call_keyed], with the agent the call is for (browse-relay's OWNER_HEADER): the tabs it opens belong to that agent
-/// alone on a relay shared with other agents.
-pub fn call_owned(request: &ToolCallRequest, client: Option<&str>, key: Option<&str>, owner: Option<&str>) -> anyhow::Result<ToolOutput> {
     let body = serde_json::to_vec(request)?;
     let mut headers = client_header(client);
     if let Some(key) = key {
         headers.push((browse_core::CALL_HEADER, key));
-    }
-    if let Some(owner) = owner {
-        headers.push((browse_relay::protocol::OWNER_HEADER, owner));
     }
     Ok(serde_json::from_value(authorized("POST", "/tools/call", &headers, Some(&body), None)?)?)
 }

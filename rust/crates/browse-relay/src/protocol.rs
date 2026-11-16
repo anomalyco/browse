@@ -7,10 +7,6 @@ pub const MIN_EXTENSION_PROTOCOL_VERSION: i64 = 3;
 pub const CAPABILITY_TAB_RELEASE: &str = "tab-release";
 pub const PAIRING_SCHEME: &str = "opencode-browser-pairing-v3";
 
-/// The agent a pooled MCP server makes a POST /tools/call for: a stable id per calling agent (the client's
-/// per-request session id), so tabs it opens belong to it alone. Absent: the call belongs to no agent and sees every
-/// tab, as the CLI does.
-pub const OWNER_HEADER: &str = "OpenCode-Browser-Owner";
 pub const UNPACKED_EXTENSION_ID: &str = "afeafocngkodbmaipcngoamamfmekgfo";
 pub const PUBLIC_STORE_ID: &str = "mfnicocicmmlkpjnaffgihfjhdgjkdjg";
 pub const DEFAULT_PORT: u16 = 19988;

@@ -4,9 +4,8 @@
 //! on every call. It passes the client's `clientInfo.name` along (browse_core::CLIENT_HEADER), and the relay decides
 //! the tools and instructions that client gets.
 //!
-//! A pooled server serves every agent session of a client at once, so each call also carries the agent it belongs to
-//! (the client's per-request session id, hashed into an owner id; browse-relay's OWNER_HEADER). The relay gives that
-//! agent its tabs alone; a client that names no agent gets one owner id per server process, so its tabs stay its own.
+//! A pooled server can serve several agent sessions of a client at once. Tabs are addressed by the ids the relay hands
+//! out, so a call works with any tab id or group label it was given.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -28,8 +27,6 @@ const PROTOCOLS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-
 const META_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
 const META_CLIENT: &str = "io.modelcontextprotocol/clientInfo";
 const META_SERVER: &str = "io.modelcontextprotocol/serverInfo";
-/// OpenCode sets this on every `tools/call` to the id of the agent session making it.
-const OPENCODE_SESSION: &str = "ai.opencode/sessionID";
 
 #[derive(Default)]
 struct Running {
@@ -50,9 +47,6 @@ pub fn run() -> anyhow::Result<()> {
     let out = Arc::new(Mutex::new(std::io::stdout()));
     let running = Arc::new(Running::default());
     let noted = Arc::new(AtomicBool::new(false));
-    // The owner id of calls that name no agent: this server process, so a client that never sends a session id still
-    // gets tabs no other process can see, rather than the free-for-all of no owner at all.
-    let connection = format!("mcp-{:016x}{:016x}", crate::session::random_u64(), crate::session::random_u64());
     let mut client = String::new();
     let mut modern = false;
     let mut line = String::new();
@@ -80,7 +74,7 @@ pub fn run() -> anyhow::Result<()> {
         let method = message.get("method").and_then(Value::as_str).unwrap_or_default();
         let params = message.get("params").cloned().unwrap_or(Value::Null);
         // A 2026-07-28 request carries its identity with it: the client's name and the revision it speaks. Learning
-        // them from any request keeps a pooled connection's tools and owner ids right after `server/discover`.
+        // them from any request keeps a pooled connection's tools right after `server/discover`.
         if let Some(meta) = params.get("_meta") {
             if let Some(name) = meta.get(META_CLIENT).and_then(|info| info.get("name")).and_then(Value::as_str) {
                 client = name.to_string();
@@ -125,12 +119,11 @@ pub fn run() -> anyhow::Result<()> {
             }
             "tools/call" => {
                 let (out, running, noted, client) = (out.clone(), running.clone(), noted.clone(), client.clone());
-                let owner = owner_for(&params, &connection);
                 *running.count.lock().unwrap() += 1;
                 let key = format!("{:016x}{:016x}", crate::session::random_u64(), crate::session::random_u64());
                 running.calls.lock().unwrap().insert(id.to_string(), Pending { key: key.clone(), cancelled: false });
                 std::thread::spawn(move || {
-                    let mut result = call(&params, &client, &key, &owner);
+                    let mut result = call(&params, &client, &key);
                     let cancelled = running.calls.lock().unwrap().remove(&id.to_string()).is_some_and(|p| p.cancelled);
                     // Once per process: a notify-only install tells the agent about an update to pass on.
                     if let Some((summary, command)) = update::pending_notice()
@@ -176,27 +169,6 @@ fn listed(mut value: Value) -> Value {
     value
 }
 
-/// The agent a call belongs to: the client's per-request session id hashed into a stable owner id, else this
-/// connection's own id.
-fn owner_for(params: &Value, connection: &str) -> String {
-    params
-        .get("_meta")
-        .and_then(|meta| meta.get(OPENCODE_SESSION))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .map(session_owner)
-        .unwrap_or_else(|| connection.to_string())
-}
-
-/// The same id OpenCode's former Node server gave an agent session (`mcp-` and the first 8 hex digits of its SHA-256),
-/// so an agent keeps its tabs across a change of server build.
-fn session_owner(session: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(session.as_bytes());
-    format!("mcp-{}", crate::session::hex(&digest[..4]))
-}
-
 /// Stops the call the client cancelled, in the background: the relay ends it (and a handoff it waits on), and its
 /// answer is dropped.
 fn cancel(running: &Running, request: &Value) {
@@ -211,10 +183,10 @@ fn cancel(running: &Running, request: &Value) {
     });
 }
 
-fn call(params: &Value, client: &str, key: &str, owner: &str) -> ToolOutput {
+fn call(params: &Value, client: &str, key: &str) -> ToolOutput {
     let name = params.get("name").and_then(Value::as_str).unwrap_or_default().to_owned();
     let arguments = params.get("arguments").cloned().filter(Value::is_object).unwrap_or_else(|| json!({}));
-    relay::call_owned(&ToolCallRequest { name: name.clone(), arguments }, Some(client), Some(key), Some(owner))
+    relay::call_keyed(&ToolCallRequest { name: name.clone(), arguments }, Some(client), Some(key))
         .unwrap_or_else(|error| ToolOutput::error(format!("{name} failed: {error:#}")))
 }
 
@@ -232,22 +204,6 @@ fn write(out: &Mutex<std::io::Stdout>, message: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_session_id_hashes_to_a_stable_owner_and_distinct_sessions_stay_apart() {
-        assert_eq!(session_owner("ses_abc"), session_owner("ses_abc"));
-        assert_ne!(session_owner("ses_abc"), session_owner("ses_def"));
-        assert!(session_owner("ses_abc").starts_with("mcp-"));
-        assert_eq!(session_owner("ses_abc").len(), 12);
-    }
-
-    #[test]
-    fn a_call_names_its_agent_by_meta_and_falls_back_to_the_connection() {
-        let meta = json!({ "_meta": { OPENCODE_SESSION: "ses_a" } });
-        assert_eq!(owner_for(&meta, "mcp-connection"), session_owner("ses_a"));
-        assert_eq!(owner_for(&json!({ "arguments": {} }), "mcp-connection"), "mcp-connection");
-        assert_eq!(owner_for(&json!({ "_meta": { OPENCODE_SESSION: "  " } }), "mcp-connection"), "mcp-connection");
-    }
 
     #[test]
     fn modern_lists_carry_the_era_fields() {
