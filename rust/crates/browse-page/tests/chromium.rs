@@ -182,6 +182,13 @@ async fn snapshot_main_scope_note() {
     let whole = h.ok("snapshot", json!({ "within": "body" })).await;
     assert!(whole.contains("button \"Thread one\""), "{whole}");
     assert!(!whole.contains("scoped to <main>"), "{whole}");
+    // find never filters the note out, even when no entry matches.
+    let no_match = h.ok("snapshot", json!({ "find": "nothing on this page" })).await;
+    assert_eq!(
+        no_match,
+        "scoped to <main>; 1 landmark and 2 controls outside it are not shown (within: \"body\" to include them)\nNo snapshot lines matched \"nothing on this page\".",
+        "{no_match}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -827,11 +827,12 @@ pub async fn snapshot(page: &Arc<TabPage>, tab_state: &PageTab, options: &Option
         if is_pdf {
             notes.push("- ... this tab shows Chrome's PDF viewer: the document's text is not in the page and can't be snapshotted. Use a screenshot to read it, or fetch the PDF and extract its text another way.".into());
         }
-        let lines: Vec<String> = notes.into_iter().chain(rendered.iter().map(|e| format_line(e, e.ref_id.as_deref()))).collect();
-        return match &options.find {
-            Some(query) => find_lines(&lines, query, options.context),
-            None => Ok(lines.join("\n")),
+        let lines: Vec<String> = rendered.iter().map(|e| format_line(e, e.ref_id.as_deref())).collect();
+        let found = match &options.find {
+            Some(query) => find_lines(&lines, query, options.context)?,
+            None => lines.join("\n"),
         };
+        return Ok(if notes.is_empty() { found } else { format!("{}\n{}", notes.join("\n"), found) });
     }
     let previous_entries = compatible_previous.map(|p| p.entries).unwrap_or_default();
     let mut lines: Vec<String> = capture.notes.clone();

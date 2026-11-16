@@ -227,6 +227,42 @@ try {
   assert.match(headerReached, /button "Open menu"/, headerReached)
   assert.doesNotMatch(headerReached, /scoped to <main>/, headerReached)
 
+  // Controls in main's own shadow DOM are inside main, even though contains() cannot see them.
+  await page.setContent(`<main><p>x</p><my-panel></my-panel></main>`)
+  await page.evaluate(() => {
+    const shadow = document.querySelector("my-panel")!.attachShadow({ mode: "open" })
+    shadow.innerHTML = "<button>Shadow one</button><button>Shadow two</button>"
+  })
+  const shadowed = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.doesNotMatch(shadowed, /scoped to <main>/, shadowed)
+  assert.match(shadowed, /button "Shadow one"/, shadowed)
+  assert.match(shadowed, /button "Shadow two"/, shadowed)
+
+  // An invisible control outside main is not shown, so it is not worth reporting either.
+  await page.setContent(`<main><p>x</p><button>Send message</button></main><button style="display:none">Hidden action</button>`)
+  const hiddenOutside = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.doesNotMatch(hiddenOutside, /scoped to <main>/, hiddenOutside)
+
+  // A landmark wrapping main is the page itself, not something outside main.
+  await page.setContent(`<div role="region" aria-label="App"><button>Wrap action</button><main><p>x</p></main></div>`)
+  const wrappedMain = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.equal(
+    wrappedMain.split("\n")[0],
+    'scoped to <main>; 1 control outside it is not shown (within: "body" to include them)',
+    wrappedMain,
+  )
+  assert.doesNotMatch(wrappedMain, /landmark/, wrappedMain)
+
+  // A skip link to main is navigation back into the scope, not content outside it.
+  await page.setContent(`<a href="#main">Skip to content</a><main id="main"><p>x</p><button>Send message</button></main>`)
+  const skipLink = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.doesNotMatch(skipLink, /scoped to <main>/, skipLink)
+
+  // find narrows the entries, never the notes; a miss still says what was scoped out.
+  await page.setContent(scopedPage)
+  const noMatch = await createSnapshotHelpers(page, registry()).snapshot({ find: "nothing on this page" })
+  assert.equal(noMatch, `${scopedNote}\nNo snapshot lines matched "nothing on this page".`, noMatch)
+
   // A ref root stays strict: the forgiving fallback is only for a `within` selector string.
   const refButton = async (): Promise<{ helpers: ReturnType<typeof createSnapshotHelpers>; refId: string }> => {
     await page.setContent(`<main><button id="dup">Duplicate me</button></main>`)
@@ -591,6 +627,11 @@ try {
     loneControlNote: "PASS",
     withinBodyScope: "PASS",
     headerReached: "PASS",
+    shadowMainScope: "PASS",
+    hiddenOutside: "PASS",
+    wrappedMainLandmark: "PASS",
+    skipLinkScope: "PASS",
+    findNoMatchNote: "PASS",
     refStrict: "PASS",
     readonlyValues: "PASS",
     frames: "PASS",

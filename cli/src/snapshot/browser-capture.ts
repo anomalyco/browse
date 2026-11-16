@@ -439,6 +439,7 @@ const captureSnapshotInBrowser = (
     "combobox", "searchbox", "textbox",
     "slider", "spinbutton", "treeitem",
   ])
+  const controlSelector = ["a[href]", "[contenteditable]", ...interactiveTags, ...Array.from(interactiveRoles, (role) => `[role='${role}']`)].join(", ")
   const extraCandidateTags = new Set(["h1", "h2", "h3", "h4", "h5", "h6", "nav", "p"])
   const extraCandidateRoles = new Set(["heading", "navigation", "alert", "status"])
   const isStructuralElement = (element: Element): boolean => {
@@ -649,35 +650,65 @@ const captureSnapshotInBrowser = (
   const nonCollapsibleNavigation = new WeakSet<Element>()
   let reservedLists = 0
   const scopeNote = (() => {
-    if (!autoScopedMain) return undefined
+    // A frame document's notes are discarded, and `within: "body"` would not mean that frame anyway.
+    if (!autoScopedMain || window.top !== window) return undefined
     const scope = (document.body ?? document.documentElement) as Element | null
     if (!scope) return undefined
-    const controlSelector = [
-      "a[href]",
-      "[contenteditable]",
-      ...interactiveTags,
-      ...Array.from(interactiveRoles, (role) => `[role='${role}']`),
-    ].join(", ")
-    const controls = querySelectorAllDeep(scope, controlSelector).filter((element) =>
-      !root.contains?.(element) && !headerCandidateSet.has(element) && isVisible(element)
-    )
-    if (controls.length === 0) return undefined
-    const landmarkSelector = "nav, [role='navigation'], aside, [role='complementary'], [role='search'], [role='region'], form, [role='form']"
+    const landmarkSelector = "nav, [role='navigation'], aside, [role='complementary'], [role='search'], [role='region'], form, [role='form'], footer, [role='contentinfo'], search, header, [role='banner']"
+    const maxScopeControls = 200
     const landmarks = new Set<Element>()
-    for (const control of controls) {
-      for (let node = parentElementOrHost(control); node; node = parentElementOrHost(node)) {
-        if (node === root || root.contains?.(node) || !node.matches(landmarkSelector)) continue
+    let controls = 0
+    let capped = false
+    const skipsToMain = (element: Element): boolean => {
+      if (element.localName !== "a") return false
+      const href = element.getAttribute("href") ?? ""
+      if (!href.startsWith("#") || href.length === 1) return false
+      let id = href.slice(1)
+      try {
+        id = decodeURIComponent(id)
+      } catch {
+        return false
+      }
+      const target = document.getElementById(id)
+      return target !== null && (target === root || root.contains?.(target))
+    }
+    const countControl = (element: Element): boolean => {
+      if (headerCandidateSet.has(element) || skipsToMain(element) || !isVisible(element)) return true
+      controls++
+      for (let node = parentElementOrHost(element); node; node = parentElementOrHost(node)) {
+        if (node === root) break
+        if (root.contains?.(node)) continue
+        // A landmark that wraps main is the page, not something outside it.
+        if (node.contains?.(root)) break
+        if (!node.matches(landmarkSelector)) continue
         // A form is a landmark only when it has a name; unnamed forms are just boxes.
         if ((node.localName === "form" || node.getAttribute("role") === "form") && !labelledName(node)) continue
-        if (isVisible(node)) landmarks.add(node)
+        if (!isVisible(node)) continue
+        landmarks.add(node)
         break
       }
+      if (controls < maxScopeControls) return true
+      capped = true
+      return false
     }
+    const walk = (node: Element | ShadowRoot | Document): boolean => {
+      for (let child = node.firstElementChild; child; child = child.nextElementSibling) {
+        if (child === root) continue
+        if (child.matches(controlSelector) && !countControl(child)) return false
+        if (child.shadowRoot && !walk(child.shadowRoot)) return false
+        if (child.firstElementChild && !walk(child)) return false
+      }
+      return true
+    }
+    if (scope.shadowRoot) walk(scope.shadowRoot)
+    if (!capped) walk(scope)
+    if (controls === 0) return undefined
+    const count = capped ? `${controls}+` : String(controls)
     const landmarkPart = landmarks.size > 0
       ? `${landmarks.size} ${landmarks.size === 1 ? "landmark" : "landmarks"} and `
       : ""
-    const omitted = landmarks.size + controls.length
-    return `scoped to <main>; ${landmarkPart}${controls.length} ${controls.length === 1 ? "control" : "controls"} outside it ${omitted === 1 ? "is" : "are"} not shown (within: "body" to include them)`
+    const omitted = landmarks.size + controls
+    return `scoped to <main>; ${landmarkPart}${count} ${controls === 1 && !capped ? "control" : "controls"} outside it ${omitted === 1 && !capped ? "is" : "are"} not shown (within: "body" to include them)`
   })()
 
   function* iterateCandidates(scope: Element): Generator<Element> {
@@ -712,10 +743,7 @@ const captureSnapshotInBrowser = (
           nonCollapsibleNavigation.add(navigation)
         } else {
           // Only visible controls decide: a display:none mobile menu button does not keep the whole nav open.
-          const controls = querySelectorAllDeep(
-            navigation,
-            ["a[href]", "[contenteditable]", ...interactiveTags, ...Array.from(interactiveRoles, (role) => `[role='${role}']`)].join(", "),
-          ).filter(isVisible)
+          const controls = querySelectorAllDeep(navigation, controlSelector).filter(isVisible)
           // Only a pure link list is a landmark worth summarising. A nav of buttons (a conversation list, a
           // toolbar) is content: collapsing it would hide every control, and the summary carries no ref.
           const isLinkList = controls.length > 0 && controls.every(isLinkElement)
