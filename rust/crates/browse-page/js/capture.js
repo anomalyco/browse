@@ -837,7 +837,15 @@ return ((rootOrSettings, locatorSettings, naming) => {
     const scope = document.body ?? document.documentElement;
     if (!scope)
       return;
-    const landmarkSelector = "nav, [role='navigation'], aside, [role='complementary'], [role='search'], [role='region'], form, [role='form'], footer, [role='contentinfo'], search, header, [role='banner']", maxScopeControls = 200, landmarks = new Set;
+    const landmarkSelector = "nav, [role='navigation'], aside, [role='complementary'], [role='search'], [role='region'], form, [role='form'], footer, [role='contentinfo'], search, header, [role='banner']", maxScopeControls = 200, headerLandmarks = new Set;
+    for (const candidate of headerCandidateSet)
+      for (let node = parentElementOrHost(candidate);node; node = parentElementOrHost(node)) {
+        if (node === root || node.contains?.(root))
+          break;
+        if (node.matches(landmarkSelector))
+          headerLandmarks.add(node);
+      }
+    const landmarks = new Set;
     let controls = 0, capped = !1;
     const skipsToMain = (element) => {
       if (element.localName !== "a")
@@ -852,20 +860,24 @@ return ((rootOrSettings, locatorSettings, naming) => {
         return !1;
       }
       const target = document.getElementById(id);
-      return target !== null && (target === root || root.contains?.(target));
+      return target !== null && (target === root || root.contains?.(target) || target.contains?.(root));
     }, countControl = (element) => {
-      if (headerCandidateSet.has(element) || skipsToMain(element) || !isVisible(element))
+      if (headerCandidateSet.has(element) || skipsToMain(element) || element.contains?.(root) || !isVisible(element))
         return !0;
+      if (controls >= maxScopeControls) {
+        capped = !0;
+        return !1;
+      }
       controls++;
       for (let node = parentElementOrHost(element);node; node = parentElementOrHost(node)) {
         if (node === root)
           break;
-        if (root.contains?.(node))
-          continue;
         if (node.contains?.(root))
           break;
         if (!node.matches(landmarkSelector))
           continue;
+        if (headerLandmarks.has(node))
+          break;
         if ((node.localName === "form" || node.getAttribute("role") === "form") && !labelledName(node))
           continue;
         if (!isVisible(node))
@@ -873,10 +885,7 @@ return ((rootOrSettings, locatorSettings, naming) => {
         landmarks.add(node);
         break;
       }
-      if (controls < maxScopeControls)
-        return !0;
-      capped = !0;
-      return !1;
+      return !0;
     }, walk = (node) => {
       for (let child = node.firstElementChild;child; child = child.nextElementSibling) {
         if (child === root)
@@ -896,7 +905,7 @@ return ((rootOrSettings, locatorSettings, naming) => {
       walk(scope);
     if (controls === 0)
       return;
-    const count = capped ? `${controls}+` : String(controls), landmarkPart = landmarks.size > 0 ? `${landmarks.size} ${landmarks.size === 1 ? "landmark" : "landmarks"} and ` : "", omitted = landmarks.size + controls;
+    const count = capped ? `${controls}+` : String(controls), landmarkCount = capped ? `${landmarks.size}+` : String(landmarks.size), landmarkPart = landmarks.size > 0 ? `${landmarkCount} ${landmarks.size === 1 ? "landmark" : "landmarks"} and ` : "", omitted = landmarks.size + controls;
     return `scoped to <main>; ${landmarkPart}${count} ${controls === 1 && !capped ? "control" : "controls"} outside it ${omitted === 1 && !capped ? "is" : "are"} not shown (within: "body" to include them)`;
   })();
   function* iterateCandidates(scope) {

@@ -656,6 +656,13 @@ const captureSnapshotInBrowser = (
     if (!scope) return undefined
     const landmarkSelector = "nav, [role='navigation'], aside, [role='complementary'], [role='search'], [role='region'], form, [role='form'], footer, [role='contentinfo'], search, header, [role='banner']"
     const maxScopeControls = 200
+    const headerLandmarks = new Set<Element>()
+    for (const candidate of headerCandidateSet) {
+      for (let node = parentElementOrHost(candidate); node; node = parentElementOrHost(node)) {
+        if (node === root || node.contains?.(root)) break
+        if (node.matches(landmarkSelector)) headerLandmarks.add(node)
+      }
+    }
     const landmarks = new Set<Element>()
     let controls = 0
     let capped = false
@@ -670,26 +677,28 @@ const captureSnapshotInBrowser = (
         return false
       }
       const target = document.getElementById(id)
-      return target !== null && (target === root || root.contains?.(target))
+      return target !== null && (target === root || root.contains?.(target) || target.contains?.(root))
     }
     const countControl = (element: Element): boolean => {
-      if (headerCandidateSet.has(element) || skipsToMain(element) || !isVisible(element)) return true
+      if (headerCandidateSet.has(element) || skipsToMain(element) || element.contains?.(root) || !isVisible(element)) return true
+      if (controls >= maxScopeControls) {
+        capped = true
+        return false
+      }
       controls++
       for (let node = parentElementOrHost(element); node; node = parentElementOrHost(node)) {
         if (node === root) break
-        if (root.contains?.(node)) continue
         // A landmark that wraps main is the page, not something outside it.
         if (node.contains?.(root)) break
         if (!node.matches(landmarkSelector)) continue
+        if (headerLandmarks.has(node)) break
         // A form is a landmark only when it has a name; unnamed forms are just boxes.
         if ((node.localName === "form" || node.getAttribute("role") === "form") && !labelledName(node)) continue
         if (!isVisible(node)) continue
         landmarks.add(node)
         break
       }
-      if (controls < maxScopeControls) return true
-      capped = true
-      return false
+      return true
     }
     const walk = (node: Element | ShadowRoot | Document): boolean => {
       for (let child = node.firstElementChild; child; child = child.nextElementSibling) {
@@ -704,8 +713,9 @@ const captureSnapshotInBrowser = (
     if (!capped) walk(scope)
     if (controls === 0) return undefined
     const count = capped ? `${controls}+` : String(controls)
+    const landmarkCount = capped ? `${landmarks.size}+` : String(landmarks.size)
     const landmarkPart = landmarks.size > 0
-      ? `${landmarks.size} ${landmarks.size === 1 ? "landmark" : "landmarks"} and `
+      ? `${landmarkCount} ${landmarks.size === 1 ? "landmark" : "landmarks"} and `
       : ""
     const omitted = landmarks.size + controls
     return `scoped to <main>; ${landmarkPart}${count} ${controls === 1 && !capped ? "control" : "controls"} outside it ${omitted === 1 && !capped ? "is" : "are"} not shown (within: "body" to include them)`

@@ -258,6 +258,44 @@ try {
   const skipLink = await createSnapshotHelpers(page, registry()).snapshot()
   assert.doesNotMatch(skipLink, /scoped to <main>/, skipLink)
 
+  // A skip link to a wrapper that contains main is still a jump back into the scope.
+  await page.setContent(`<div id="content"><a href="#content">Skip to content</a><main><p>x</p><button>Send message</button></main></div>`)
+  const skipWrapper = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.doesNotMatch(skipWrapper, /scoped to <main>/, skipWrapper)
+
+  // 200 controls is the complete count; only a 201st countable control makes it "200+".
+  const outsideControls = (count: number): string => `
+    <main><p>x</p><button>Send message</button></main>
+    <div>${Array.from({ length: count }, (_, index) => `<div role="button" tabindex="0">Action ${index}</div>`).join("")}</div>
+  `
+  await page.setContent(outsideControls(200))
+  const exactly200 = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.equal(
+    exactly200.split("\n")[0],
+    'scoped to <main>; 200 controls outside it are not shown (within: "body" to include them)',
+    exactly200,
+  )
+  await page.setContent(outsideControls(201))
+  const over200 = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.equal(
+    over200.split("\n")[0],
+    'scoped to <main>; 200+ controls outside it are not shown (within: "body" to include them)',
+    over200,
+  )
+
+  // A header with a re-admitted button is already partly shown, so it is not counted as a landmark.
+  await page.setContent(`
+    <header><button>Open menu</button><a href="/help">Help</a></header>
+    <main><p>x</p><button>Send message</button></main>
+  `)
+  const partialHeader = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.equal(
+    partialHeader.split("\n")[0],
+    'scoped to <main>; 1 control outside it is not shown (within: "body" to include them)',
+    partialHeader,
+  )
+  assert.doesNotMatch(partialHeader, /landmark/, partialHeader)
+
   // find narrows the entries, never the notes; a miss still says what was scoped out.
   await page.setContent(scopedPage)
   const noMatch = await createSnapshotHelpers(page, registry()).snapshot({ find: "nothing on this page" })
@@ -631,6 +669,10 @@ try {
     hiddenOutside: "PASS",
     wrappedMainLandmark: "PASS",
     skipLinkScope: "PASS",
+    skipWrapperScope: "PASS",
+    exactly200: "PASS",
+    over200: "PASS",
+    partialHeader: "PASS",
     findNoMatchNote: "PASS",
     refStrict: "PASS",
     readonlyValues: "PASS",
