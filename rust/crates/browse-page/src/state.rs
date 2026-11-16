@@ -51,7 +51,10 @@ pub struct RefRegistry {
     /// The main document generation the refs were captured from.
     pub document: Option<u64>,
     pub selectors: HashMap<String, RefTarget>,
-    pub previous: Option<Baseline>,
+    /// Rendered entries from the latest snapshot, find included, for ref-ID reuse.
+    pub latest: Option<Baseline>,
+    /// Rendered entries from the latest non-find snapshot, for diff and delta.
+    pub baseline: Option<Baseline>,
     pub next_ref: u64,
     pub frame_keys: HashMap<String, String>,
     pub next_frame_key: u64,
@@ -64,7 +67,8 @@ impl RefRegistry {
         self.selectors.clear();
         self.tab = None;
         self.document = None;
-        self.previous = None;
+        self.latest = None;
+        self.baseline = None;
     }
 
     pub fn frame_key(&mut self, frame: &str) -> String {

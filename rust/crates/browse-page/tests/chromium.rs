@@ -159,6 +159,29 @@ async fn snapshot_navigation_controls_stay_visible() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn refs_carry_through_find_snapshots() {
+    let h = harness!(false);
+    let url = h.server.page("/refs-find", "<!doctype html><button>Start</button>");
+    h.ok("navigate", json!({ "url": url })).await;
+    h.ok("snapshot", json!({})).await;
+    h.ok(
+        "eval",
+        json!({ "expression": "(() => { const button = document.createElement('button'); button.textContent = 'Submit'; document.body.append(button) })()" }),
+    )
+    .await;
+
+    let first = h.ok("snapshot", json!({ "find": "Submit" })).await;
+    let first_ref = ref_of(&first, "button \"Submit\"");
+    // A find snapshot is now the latest snapshot, so the next find reuses the same ref.
+    let second = h.ok("snapshot", json!({ "find": "Submit" })).await;
+    let second_ref = ref_of(&second, "button \"Submit\"");
+    assert_eq!(first_ref, second_ref, "{first}\n---\n{second}");
+    let normal = h.ok("snapshot", json!({})).await;
+    assert_eq!(ref_of(&normal, "button \"Submit\""), first_ref, "{normal}");
+    h.ok("click", json!({ "ref": first_ref })).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stealth_isolated_world_and_main_world() {
     let h = harness!(false);
     let url = h.server.page("/s", "<!doctype html><script>window.pageSecret = 42; window.baseline = new Set(Object.getOwnPropertyNames(window).concat(['baseline']))</script><button>Go</button>");
