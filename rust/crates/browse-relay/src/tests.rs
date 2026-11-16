@@ -10,6 +10,7 @@ use futures_util::{SinkExt, StreamExt};
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
+use tokio::sync::Notify;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -113,9 +114,16 @@ impl Seen {
     }
 }
 
-/// What `Target.getTargetInfo` answers for a tab, per call: a queued URL is taken first ("" for a popup whose first
-/// navigation hasn't committed, "!error" to answer with an error), then about:blank.
-type TargetUrls = Arc<Mutex<HashMap<i64, VecDeque<String>>>>;
+/// What the fake extension answers for `Target.getTargetInfo` for a tab, per call: a queued URL is taken first ("" for
+/// a popup whose first navigation hasn't committed, "!error" for an error, "!hold:<url>" waits for the tab's `held`
+/// `Notify` and then answers `<url>`), then about:blank.
+#[derive(Default)]
+struct TargetAnswers {
+    queued: HashMap<i64, VecDeque<String>>,
+    held: HashMap<i64, Arc<Notify>>,
+}
+
+type TargetUrls = Arc<Mutex<TargetAnswers>>;
 
 /// Answers the relay's commands like the extension, records them, and sends whatever is pushed to `events`.
 fn fake_extension(socket: Socket, next_tab: i64) -> (Arc<Seen>, mpsc::UnboundedSender<Value>) {
@@ -156,7 +164,16 @@ fn fake_extension_with_urls(socket: Socket, next_tab: i64, urls: TargetUrls) -> 
                 "debugger.sendCommand" => match params["method"].as_str().unwrap_or("") {
                     "Target.getTargetInfo" => {
                         let tab = params["tabId"].as_i64().unwrap();
-                        let url = urls.lock().unwrap().get_mut(&tab).and_then(VecDeque::pop_front).unwrap_or_else(|| "about:blank".into());
+                        let (url, hold) = {
+                            let mut answers = urls.lock().unwrap();
+                            let url = answers.queued.get_mut(&tab).and_then(VecDeque::pop_front).unwrap_or_else(|| "about:blank".into());
+                            let hold = url.strip_prefix("!hold:").and_then(|_| answers.held.remove(&tab));
+                            (url, hold)
+                        };
+                        if let Some(hold) = hold {
+                            hold.notified().await;
+                        }
+                        let url = url.strip_prefix("!hold:").unwrap_or(&url).to_string();
                         if url == "!error" {
                             let _ = replies.send(json!({ "id": id, "error": "Target.getTargetInfo failed" }));
                             continue;
@@ -755,7 +772,7 @@ async fn popups_inherit_their_openers_options() {
 #[tokio::test]
 async fn a_popup_without_a_committed_document_stays_open() {
     let urls = TargetUrls::default();
-    urls.lock().unwrap().insert(101, VecDeque::from(["".to_string(), "".to_string()]));
+    urls.lock().unwrap().queued.insert(101, VecDeque::from(["".to_string(), "".to_string()]));
     let (h, seen, events) = connected_with_urls("profile-popup-blank", 100, urls).await;
     let relay = h.handle.relay.clone();
     let browser = h.handle.browser();
@@ -782,7 +799,7 @@ async fn a_popup_without_a_committed_document_stays_open() {
 #[tokio::test]
 async fn a_popups_first_document_must_be_allowed() {
     let urls = TargetUrls::default();
-    urls.lock().unwrap().insert(106, VecDeque::from(["".to_string()]));
+    urls.lock().unwrap().queued.insert(106, VecDeque::from(["".to_string()]));
     let (h, seen, events) = connected_with_urls("profile-popup-refused", 105, urls).await;
     let relay = h.handle.relay.clone();
     let browser = h.handle.browser();
@@ -801,7 +818,7 @@ async fn a_popups_first_document_must_be_allowed() {
 #[tokio::test]
 async fn a_commit_before_the_popup_is_routed_still_closes_it() {
     let urls = TargetUrls::default();
-    urls.lock().unwrap().insert(111, VecDeque::from(["".to_string(), "https://evil.test/".to_string()]));
+    urls.lock().unwrap().queued.insert(111, VecDeque::from(["".to_string(), "https://evil.test/".to_string()]));
     let (h, seen, events) = connected_with_urls("profile-popup-gap", 110, urls).await;
     let relay = h.handle.relay.clone();
     let browser = h.handle.browser();
@@ -817,7 +834,7 @@ async fn a_commit_before_the_popup_is_routed_still_closes_it() {
 #[tokio::test]
 async fn a_fresh_popup_is_closed_when_its_url_cannot_be_checked() {
     let urls = TargetUrls::default();
-    urls.lock().unwrap().insert(116, VecDeque::from(["".to_string(), "!error".to_string()]));
+    urls.lock().unwrap().queued.insert(116, VecDeque::from(["".to_string(), "!error".to_string()]));
     let (h, seen, events) = connected_with_urls("profile-popup-unverified", 115, urls).await;
     let relay = h.handle.relay.clone();
     let browser = h.handle.browser();
@@ -833,7 +850,7 @@ async fn a_fresh_popup_is_closed_when_its_url_cannot_be_checked() {
 #[tokio::test]
 async fn a_popup_without_an_allowlist_stays_open_when_its_url_cannot_be_checked() {
     let urls = TargetUrls::default();
-    urls.lock().unwrap().insert(121, VecDeque::from(["".to_string(), "!error".to_string()]));
+    urls.lock().unwrap().queued.insert(121, VecDeque::from(["".to_string(), "!error".to_string()]));
     let (h, seen, events) = connected_with_urls("profile-popup-unverified-open", 120, urls).await;
     let relay = h.handle.relay.clone();
     let browser = h.handle.browser();
@@ -843,6 +860,60 @@ async fn a_popup_without_an_allowlist_stays_open_when_its_url_cannot_be_checked(
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(relay.st().tabs.contains_key(&121));
     assert!(seen.commands("tabs.remove").iter().all(|c| c["params"]["tabId"] != 121));
+}
+
+/// An event during the re-query can set the stored URL without it being checked, so a changed URL doesn't mean the
+/// popup was decided: the reply still has to check it.
+#[tokio::test]
+async fn a_document_described_during_the_recheck_is_still_checked() {
+    let urls = TargetUrls::default();
+    let release = Arc::new(Notify::new());
+    {
+        let mut answers = urls.lock().unwrap();
+        answers.queued.insert(126, VecDeque::from(["".to_string(), "!hold:https://evil.test/".to_string()]));
+        answers.held.insert(126, release.clone());
+    }
+    let (h, seen, events) = connected_with_urls("profile-popup-changed", 125, urls).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let options = TabOptions { allowed_origins: Some(vec!["example.com".into()]), ..TabOptions::default() };
+    let opener = browser.open_tab(None, &options).await.unwrap().tab;
+    events.send(json!({ "method": "tabs.opened", "params": { "tabId": 126, "openerTabId": opener } })).unwrap();
+    let asked = |see: &Seen| see.cdp("Target.getTargetInfo").iter().filter(|c| c["params"]["tabId"] == 126).count();
+    eventually("the popup's url asked again", || asked(&seen) >= 2).await;
+    events.send(json!({ "method": "debugger.event", "params": { "tabId": 126, "method": "Target.targetInfoChanged", "params": { "targetInfo": { "targetId": "T126", "url": "https://evil.test/", "title": "" } } } })).unwrap();
+    eventually("the url the event carried", || relay.st().tabs.get(&126).is_some_and(|t| t.url == "https://evil.test/")).await;
+    release.notify_one();
+    eventually("the popup to close", || seen.commands("tabs.remove").iter().any(|c| c["params"]["tabId"] == 126)).await;
+    eventually("the popup to leave the tabs list", || !relay.st().tabs.contains_key(&126)).await;
+    assert!(relay.st().tabs[&opener].warnings.iter().any(|w| w.contains("Domain allowlist")), "the opener carries the news");
+}
+
+/// The same with a failed reply: an event that set a URL without checking it still leaves a fresh popup that has to be
+/// closed.
+#[tokio::test]
+async fn a_failed_recheck_closes_a_popup_whose_url_an_event_set() {
+    let urls = TargetUrls::default();
+    let release = Arc::new(Notify::new());
+    {
+        let mut answers = urls.lock().unwrap();
+        answers.queued.insert(131, VecDeque::from(["".to_string(), "!hold:!error".to_string()]));
+        answers.held.insert(131, release.clone());
+    }
+    let (h, seen, events) = connected_with_urls("profile-popup-changed-unverified", 130, urls).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let options = TabOptions { allowed_origins: Some(vec!["example.com".into()]), ..TabOptions::default() };
+    let opener = browser.open_tab(None, &options).await.unwrap().tab;
+    events.send(json!({ "method": "tabs.opened", "params": { "tabId": 131, "openerTabId": opener } })).unwrap();
+    let asked = |see: &Seen| see.cdp("Target.getTargetInfo").iter().filter(|c| c["params"]["tabId"] == 131).count();
+    eventually("the popup's url asked again", || asked(&seen) >= 2).await;
+    events.send(json!({ "method": "debugger.event", "params": { "tabId": 131, "method": "Page.navigatedWithinDocument", "params": { "url": "https://evil.test/" } } })).unwrap();
+    eventually("the url the event carried", || relay.st().tabs.get(&131).is_some_and(|t| t.url == "https://evil.test/")).await;
+    release.notify_one();
+    eventually("the popup to close", || seen.commands("tabs.remove").iter().any(|c| c["params"]["tabId"] == 131)).await;
+    eventually("the popup to leave the tabs list", || !relay.st().tabs.contains_key(&131)).await;
+    assert!(relay.st().tabs[&opener].warnings.iter().any(|w| w.contains("could not confirm")), "the opener carries the news");
 }
 
 /// A tab the user lends (the toolbar button) is usable by its id from tabs list, and closing it gives it back.

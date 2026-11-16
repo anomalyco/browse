@@ -105,6 +105,11 @@ fn target_info(result: &Value) -> Option<(String, String, String, String)> {
     ))
 }
 
+/// A URL that is a real document: not empty (nothing navigated yet) and not an about: page.
+fn real_url(url: &str) -> bool {
+    !url.is_empty() && !url.starts_with("about:")
+}
+
 impl Relay {
     /// Attaches the debugger (unless it already is), sets the tab up and publishes it.
     pub async fn setup_tab(self: &Arc<Self>, attach: Attach) -> anyhow::Result<i64> {
@@ -457,29 +462,33 @@ impl Relay {
             let info = relay.debugger(tab, None, "Target.getTargetInfo", json!({}), Some(ATTACH_TIMEOUT)).await;
             match info {
                 Ok(info) => {
-                    if let Some((_, _, current, _)) = target_info(&info)
-                        && !current.is_empty()
-                        && current != url
+                    let current = target_info(&info).map(|(_, _, url, _)| url).unwrap_or_default();
+                    let mut documents: Vec<String> = Vec::new();
                     {
-                        // Only while nothing arrived during the query: a newer URL here is a document already checked.
-                        let applied = {
-                            let mut st = relay.st();
-                            match st.tabs.get_mut(&tab) {
-                                Some(entry) if entry.fresh_popup && !entry.closing && entry.url == url => {
-                                    entry.url = current.clone();
-                                    true
-                                }
-                                _ => false,
-                            }
-                        };
-                        if applied {
-                            relay.check_committed_url(tab, &current);
+                        let mut st = relay.st();
+                        let Some(entry) = st.tabs.get_mut(&tab) else { return };
+                        if !entry.fresh_popup || entry.closing {
+                            return;
                         }
+                        // An event during the query can set the stored URL (a title change, a history.replaceState)
+                        // without it ever being checked, so it is a document too: check both when they differ.
+                        if real_url(&current) && (entry.url == url || !real_url(&entry.url)) {
+                            entry.url = current.clone();
+                        }
+                        if real_url(&entry.url) {
+                            documents.push(entry.url.clone());
+                        }
+                        if real_url(&current) && current != entry.url {
+                            documents.push(current);
+                        }
+                    }
+                    for document in documents {
+                        relay.check_committed_url(tab, &document);
                     }
                 }
                 Err(error) => {
                     if relay.enforced(tab).is_some() {
-                        relay.close_unverified_popup(tab, &url, &error.to_string());
+                        relay.close_unverified_popup(tab, &error.to_string());
                     }
                 }
             }
@@ -946,13 +955,14 @@ impl Relay {
     }
 
     pub fn check_committed_url(self: &Arc<Self>, tab: i64, url: &str) -> bool {
-        let Some((rules, _)) = self.enforced(tab) else { return true };
+        let Some((rules, _)) = self.enforced(tab) else {
+            // No allowlist to judge it, but a real document still ends the popup's fresh state.
+            self.document_checked(tab, url);
+            return true;
+        };
         match domain::check_url(url, &rules, false) {
             domain::UrlDecision::Allowed { .. } => {
-                if !url.starts_with("about:")
-                    && let Some(entry) = self.st().tabs.get_mut(&tab) {
-                        entry.fresh_popup = false;
-                    }
+                self.document_checked(tab, url);
                 true
             }
             domain::UrlDecision::Refused(reason) => {
@@ -960,6 +970,14 @@ impl Relay {
                 false
             }
         }
+    }
+
+    /// A real document was checked: the popup no longer waits for its first one.
+    fn document_checked(&self, tab: i64, url: &str) {
+        if real_url(url)
+            && let Some(entry) = self.st().tabs.get_mut(&tab) {
+                entry.fresh_popup = false;
+            }
     }
 
     fn allowlist_violation(self: &Arc<Self>, tab: i64, url: &str, reason: &str) {
@@ -994,12 +1012,13 @@ impl Relay {
     }
 
     /// A fresh popup whose URL couldn't be asked again is unverified: close it, leaving the news with its opener the
-    /// way `allowlist_violation` does. Only a popup still undecided since `snapshot` is acted on.
-    fn close_unverified_popup(self: &Arc<Self>, tab: i64, snapshot: &str, error: &str) {
+    /// way `allowlist_violation` does. Fresh and still open means no document of it passed a check, whatever its
+    /// stored URL says.
+    fn close_unverified_popup(self: &Arc<Self>, tab: i64, error: &str) {
         {
             let mut st = self.st();
             let Some(entry) = st.tabs.get_mut(&tab) else { return };
-            if !entry.fresh_popup || entry.closing || entry.url != snapshot || entry.owner != Owner::Relay {
+            if !entry.fresh_popup || entry.closing || entry.owner != Owner::Relay {
                 return;
             }
             entry.fresh_popup = false;
