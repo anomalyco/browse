@@ -12,6 +12,8 @@ use tokio::task::AbortHandle;
 pub struct RunningCall {
     pub abort: AbortHandle,
     pub pid: Option<u32>,
+    /// The caller's key for the call (CALL_HEADER), which POST /tools/cancel names.
+    pub key: Option<String>,
     pub tabs: HashSet<i64>,
 }
 

@@ -341,6 +341,7 @@ async fn route(relay: Arc<Relay>, peer: SocketAddr, request: Request<Incoming>) 
     let waiting = header(&request, "x-browse-install") == Some("waiting");
     let client_pid = header(&request, "opencode-browser-client-pid").and_then(|v| v.parse::<u32>().ok()).filter(|p| *p > 0);
     let client = header(&request, &browse_core::CLIENT_HEADER.to_ascii_lowercase()).map(str::to_string);
+    let call_key = header(&request, &browse_core::CALL_HEADER.to_ascii_lowercase()).filter(|k| !k.is_empty() && k.len() <= 128).map(str::to_string);
     // The TypeScript client's HTTP client (Effect's) sends trace headers on every request; this build's never does.
     let typescript_client = header(&request, "b3").is_some();
     let body = if method == hyper::Method::POST {
@@ -370,10 +371,19 @@ async fn route(relay: Arc<Relay>, peer: SocketAddr, request: Request<Incoming>) 
                 Ok(Err(error)) => return json_response(StatusCode::BAD_REQUEST, &json!({ "error": format!("Invalid tool call: {error}"), "code": "invalid-request" })),
                 Err(response) => return *response,
             };
-            match call_tool(&relay, request, client_pid).await {
+            match call_tool_keyed(&relay, request, client_pid, call_key).await {
                 Ok(output) => json_response(StatusCode::OK, &serde_json::to_value(output).unwrap_or_default()),
                 Err((status, message)) => json_response(status, &json!({ "error": message })),
             }
+        }
+        ("POST", "/tools/cancel") => {
+            let Ok(body) = parsed() else { return json_response(StatusCode::BAD_REQUEST, &json!({ "error": "Invalid JSON body" })) };
+            let Some(key) = body["call"].as_str().filter(|k| !k.is_empty()) else {
+                return json_response(StatusCode::BAD_REQUEST, &json!({ "error": "call is required", "code": "invalid-request" }));
+            };
+            let stopped = relay.cancel_call(key);
+            rlog!("tool.cancel", stopped = stopped);
+            json_response(StatusCode::OK, &json!({ "stopped": stopped }))
         }
         // An old MCP server checks the extension before each browser call, and this relay's answer doesn't decode there.
         ("GET", "/extension/status") if typescript_client => json_response(StatusCode::GONE, &json!({ "error": LEGACY_CLIENT })),
@@ -465,6 +475,11 @@ tokio::task_local! {
 /// Runs one tool call. The tabs it uses (named in its arguments, or opened by it) count as busy until it ends, and
 /// their news comes back as warnings.
 pub async fn call_tool(relay: &Arc<Relay>, request: ToolCallRequest, client_pid: Option<u32>) -> Result<ToolOutput, (StatusCode, String)> {
+    call_tool_keyed(relay, request, client_pid, None).await
+}
+
+/// [call_tool], with the caller's key for the call (CALL_HEADER) so POST /tools/cancel can stop it.
+pub async fn call_tool_keyed(relay: &Arc<Relay>, request: ToolCallRequest, client_pid: Option<u32>, key: Option<String>) -> Result<ToolOutput, (StatusCode, String)> {
     let tool = relay.tools.read().unwrap_or_else(|poisoned| poisoned.into_inner()).iter().find(|t| t.spec().name == request.name).cloned();
     let Some(tool) = tool else { return Err((StatusCode::NOT_FOUND, format!("Unknown tool: {}", request.name))) };
     relay.note_activity();
@@ -476,7 +491,7 @@ pub async fn call_tool(relay: &Arc<Relay>, request: ToolCallRequest, client_pid:
     let started = Instant::now();
     relay.inflight.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(id, InFlight { tool: name.clone(), tab, since: started });
     let task = tokio::spawn(RELAY.scope(relay.clone(), CALL.scope(id, TOOL.scope(name.clone(), CLIENT.scope(client_pid, async move { tool.call(context, arguments).await })))));
-    relay.call_started(id, task.abort_handle(), client_pid);
+    relay.call_started(id, task.abort_handle(), client_pid, key);
     let outcome = task.await;
     let stopped = relay.st().stopped.remove(&id);
     let used = relay.call_finished(id);
