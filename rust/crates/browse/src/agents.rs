@@ -68,6 +68,14 @@ pub fn label(name: &str) -> &'static str {
     AGENTS.iter().find(|(n, _)| *n == name).map_or("this agent", |(_, l)| l)
 }
 
+/// The dsh harness home: `DSH_HOME` when it is absolute or `~/...`, else `~/.dsh`. Blank is unset, and other relative
+/// values are ignored, as with GOOSE_PATH_ROOT.
+fn dsh_home(home: &Path, value: Option<&str>) -> PathBuf {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else { return home.join(".dsh") };
+    let expanded = value.strip_prefix("~/").map_or_else(|| PathBuf::from(value), |rest| home.join(rest));
+    if expanded.is_absolute() { expanded } else { home.join(".dsh") }
+}
+
 /// An agent's name from what a user typed (`claude`, `claude-code`, `Claude-Code`).
 pub fn agent_name(id: &str) -> Option<&'static str> {
     let id = id.trim().to_lowercase();
@@ -162,8 +170,10 @@ pub fn locations(opencode_config: &Path, opencode_binary: Option<&Path>) -> Vec<
         None => config.join("goose"),
     };
     let codex = env("CODEX_HOME").unwrap_or_else(|| at(".codex"));
-    // dsh's home holds the machine-wide patch layer every profile applies; like GOOSE_PATH_ROOT, an override is used only when it is absolute.
-    let dsh = env("DSH_HOME").filter(|p| p.is_absolute()).unwrap_or_else(|| at(".dsh"));
+    // dsh's home holds the machine-wide patch layer every profile applies; blank is unset, `~/` expands, and other
+    // relative values fall back to `~/.dsh`.
+    let dsh_value = env("DSH_HOME").map(|path| path.to_string_lossy().into_owned());
+    let dsh = dsh_home(&home, dsh_value.as_deref());
     let cascade = if cfg!(windows) { &support } else { &config }.join("devin/mcp_config.json");
     // Windsurf uses .codeium; its renamed Cascade client moved mcp_config.json to the Devin config folder.
     let windsurf = at(".codeium/windsurf/mcp_config.json");
@@ -331,7 +341,7 @@ fn kind(name: &str) -> &'static str {
 }
 
 /// The entry with browse's fields set over what's there.
-fn merged(current: Option<&Value>, expected: &Value) -> Value {
+pub(crate) fn merged(current: Option<&Value>, expected: &Value) -> Value {
     let mut server = current.filter(|c| c.is_object()).cloned().unwrap_or_else(|| json!({}));
     for (key, value) in expected.as_object().into_iter().flatten() {
         server[key] = value.clone();
@@ -666,6 +676,16 @@ mod tests {
         assert_eq!(label("dsh"), "DeepSeek Harness");
         assert_eq!(agent_name("nope"), None);
         assert_eq!(AGENTS[0].0, "opencode");
+    }
+
+    #[test]
+    fn dsh_home_expands_tilde_and_ignores_blank_or_relative_values() {
+        let home = Path::new("/home/u");
+        assert_eq!(dsh_home(home, None), home.join(".dsh"));
+        assert_eq!(dsh_home(home, Some("   ")), home.join(".dsh"));
+        assert_eq!(dsh_home(home, Some("dsh")), home.join(".dsh"));
+        assert_eq!(dsh_home(home, Some("~/dsh")), home.join("dsh"));
+        assert_eq!(dsh_home(home, Some("/opt/dsh")), PathBuf::from("/opt/dsh"));
     }
 
     #[test]

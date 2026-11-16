@@ -56,6 +56,11 @@ export function agentLocations(home: string, config: string, onPath: (name: stri
   const zed = platform === "win32" ? path.join(support, "Zed") : platform === "darwin" ? at(".config/zed") : path.join(env.FLATPAK_XDG_CONFIG_HOME ?? config, "zed")
   const goose = env.GOOSE_PATH_ROOT && path.isAbsolute(env.GOOSE_PATH_ROOT) ? path.join(env.GOOSE_PATH_ROOT, "config") : platform === "win32" ? path.join(support, "Block/goose/config") : path.join(config, "goose")
   const codex = env.CODEX_HOME ?? at(".codex")
+  // dsh's home holds the machine-wide patch layer every profile applies. Blank is unset, `~/` expands, and other
+  // relative values fall back to `~/.dsh`, as in the Rust CLI.
+  const dshValue = env.DSH_HOME?.trim()
+  const dshExpanded = dshValue ? (dshValue.startsWith("~/") ? path.join(home, dshValue.slice(2)) : dshValue) : ""
+  const dsh = dshExpanded && path.isAbsolute(dshExpanded) ? dshExpanded : at(".dsh")
   const cascade = path.join(process.platform === "win32" ? support : config, "devin/mcp_config.json")
   // Windsurf uses .codeium; its renamed Cascade client moved mcp_config.json to the Devin config directory.
   const windsurf = at(".codeium/windsurf/mcp_config.json")
@@ -92,7 +97,7 @@ export function agentLocations(home: string, config: string, onPath: (name: stri
     loc("vibe", path.join(env.VIBE_HOME ?? at(".vibe"), "config.toml"), "vibe"),
     loc("qoder", at(".qoder/settings.json"), "qoder", "Qoder"),
     loc("pi", path.join(env.PI_CODING_AGENT_DIR ?? at(".pi/agent"), "mcp.json"), "pi"),
-    loc("dsh", path.join(env.DSH_HOME ?? at(".dsh"), "cordis.patch.yml"), "dsh"),
+    loc("dsh", path.join(dsh, "cordis.patch.yml"), "dsh"),
   ]
 }
 
@@ -101,6 +106,8 @@ type EditResult = "added" | "unchanged" | "removed" | "conflict"
 /** Parse YAML without rounding integers beyond 2^53: install only adds its entry. */
 const yamlOptions = { merge: true, intAsBigInt: true } as const
 const dshServer = "@deepseek-ai/dsh-mcp-client"
+/** Our row's id, named like dsh's own `mcp-github` examples. */
+const dshRowId = "mcp-browse"
 /** dsh takes MCP servers as rows of a Cordis patch layer: a top-level YAML sequence. */
 const isDsh = (name: AgentName) => name === "dsh"
 
@@ -165,7 +172,7 @@ export function browseServerCommand(name: AgentName, file: string): string[] | u
 
 function serverDefinition(name: AgentReceipt["name"], command: string, args: string[]) {
   if (name === "dsh")
-    return { id: "browse", name: dshServer, config: { serverName: "browse", transport: "stdio", command, args } }
+    return { id: dshRowId, name: dshServer, config: { serverName: "browse", transport: "stdio", command, args } }
   if (name === "kilo") return { type: "local", command: [command, ...args] }
   if (name === "goose") return { type: "stdio", name: "browse", enabled: true, cmd: command, args }
   if (name === "copilot") return { type: "local", command, args, tools: ["*"] }
@@ -218,9 +225,12 @@ function editDshConfig(receipt: AgentReceipt, remove: boolean): EditResult {
     const insert = patch.get("insert", true)
     if (!isSeq(insert)) continue
     for (const [rowIndex, row] of insert.items.entries()) {
-      if (!isMap(row) || row.get("name") !== dshServer) continue
+      if (!isMap(row)) continue
       const config = row.get("config", true)
-      if (!isMap(config) || config.get("serverName") !== "browse") continue
+      const ours = row.get("name") === dshServer && isMap(config) && config.get("serverName") === "browse"
+      // Another row already holds our id; inserting a second one would break dsh's patch tree.
+      if (row.get("id") === dshRowId && !ours) return "conflict"
+      if (!ours) continue
       owners.push({ patch: patchIndex, insert, row: rowIndex, node: row })
     }
   }

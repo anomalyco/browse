@@ -75,7 +75,7 @@ describe("migration from the old layouts", () => {
     }))
     // dsh keeps MCP servers as rows of a Cordis patch layer; migration reaches them through the same read-back.
     const dsh = path.join(home, ".dsh", "cordis.patch.yml")
-    write(dsh, `- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: ${JSON.stringify(oldBinary)}\n        args:\n          - mcp\n`)
+    write(dsh, `- insert:\n    - id: mcp-browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: ${JSON.stringify(oldBinary)}\n        args:\n          - mcp\n`)
     const previousHome = process.env.OPENCODE_BROWSER_HOME
     delete process.env.OPENCODE_BROWSER_HOME
     try {
@@ -107,7 +107,7 @@ describe("migration from the old layouts", () => {
       expect(JSON.parse(fs.readFileSync(claude, "utf8")).mcpServers.browse).toEqual({ type: "stdio", command: newBinary, args: ["mcp"] })
       expect(JSON.parse(fs.readFileSync(opencode, "utf8")).mcp.servers.browse.command).toEqual(["browse", "mcp"])
       expect(Bun.YAML.parse(fs.readFileSync(dsh, "utf8"))).toEqual([{
-        insert: [{ id: "browse", name: "@deepseek-ai/dsh-mcp-client", config: { serverName: "browse", transport: "stdio", command: newBinary, args: ["mcp"] } }],
+        insert: [{ id: "mcp-browse", name: "@deepseek-ai/dsh-mcp-client", config: { serverName: "browse", transport: "stdio", command: newBinary, args: ["mcp"] } }],
       }])
 
       // A second run finds nothing to move or rewrite.

@@ -189,7 +189,7 @@ test.each(["hermes", "goose"] as const)("%s keeps large integers and long scalar
   } finally { fs.rmSync(home, { recursive: true, force: true }) }
 })
 
-test("dsh keeps comments, anchors and !!js tags byte-for-byte across install and uninstall, and refuses a changed row", () => {
+test("dsh keeps comments, anchors and !!js tags across install and uninstall (values preserved)", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-dsh-"))
   try {
     const file = path.join(home, ".dsh", "cordis.patch.yml")
@@ -199,11 +199,11 @@ test("dsh keeps comments, anchors and !!js tags byte-for-byte across install and
     const receipt = { name: "dsh" as const, file, node: "/a path/node", entry: "/a path/browse.mjs" }
     expect(editAgentConfig(receipt)).toBe("added")
     const added = fs.readFileSync(file, "utf8")
-    // Everything before our patch comes back byte-for-byte, including the tag dsh evaluates itself.
+    // This fixture is already in yaml's own style, so it happens to come back unchanged up to our appended patch.
     expect(added.startsWith(before)).toBe(true)
     expect(browseServerCommand("dsh", file)).toEqual([receipt.node, receipt.entry, "mcp"])
     expect((Bun.YAML.parse(added) as unknown[]).at(-1)).toEqual({
-      insert: [{ id: "browse", name: "@deepseek-ai/dsh-mcp-client", config: { serverName: "browse", transport: "stdio", command: receipt.node, args: [receipt.entry, "mcp"] } }],
+      insert: [{ id: "mcp-browse", name: "@deepseek-ai/dsh-mcp-client", config: { serverName: "browse", transport: "stdio", command: receipt.node, args: [receipt.entry, "mcp"] } }],
     })
     expect(editAgentConfig(receipt)).toBe("unchanged")
     expect(fs.readFileSync(file, "utf8")).toBe(added)
@@ -217,6 +217,44 @@ test("dsh keeps comments, anchors and !!js tags byte-for-byte across install and
   } finally { fs.rmSync(home, { recursive: true, force: true }) }
 })
 
+test("dsh rewrites the YAML in yaml's style: values and tags stay, CRLF and the user's indentation do not", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-dsh-style-"))
+  try {
+    const file = path.join(home, ".dsh", "cordis.patch.yml")
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    const before = "# my dsh patches\r\n- insert:\r\n    - id: other\r\n      name: '@example/other'\r\n      config:\r\n          list:\r\n              - a\r\n              - b\r\n          expr: !!js process.env.OTHER\r\n# after\r\n"
+    fs.writeFileSync(file, before)
+    const receipt = { name: "dsh" as const, file, node: "/a path/node", entry: "/a path/browse.mjs" }
+    expect(editAgentConfig(receipt)).toBe("added")
+    const added = fs.readFileSync(file, "utf8")
+    // Documented behavior: the TS writer serializes the whole document, so CRLF and wide indentation are normalized.
+    expect(added).not.toContain("\r\n")
+    expect(added).toContain("# my dsh patches")
+    expect(added).toContain("# after")
+    expect(added).toContain("!!js process.env.OTHER")
+    expect(editAgentConfig(receipt, true)).toBe("removed")
+    const removed = fs.readFileSync(file, "utf8")
+    expect(removed).not.toBe(before)
+    expect(removed).toContain("# my dsh patches")
+    expect(removed).toContain("!!js process.env.OTHER")
+    // Every parsed value is still there after both edits.
+    expect(Bun.YAML.parse(removed)).toEqual(Bun.YAML.parse(before))
+  } finally { fs.rmSync(home, { recursive: true, force: true }) }
+})
+
+test("dsh refuses a foreign row holding its id", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-dsh-id-"))
+  try {
+    const file = path.join(home, ".dsh", "cordis.patch.yml")
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    const receipt = { name: "dsh" as const, file, entry: "/home/me/.local/bin/browse" }
+    fs.writeFileSync(file, "- insert:\n    - id: mcp-browse\n      name: '@example/other'\n")
+    expect(editAgentConfig(receipt)).toBe("conflict")
+    fs.writeFileSync(file, "- insert:\n    - id: mcp-browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: other\n")
+    expect(editAgentConfig(receipt)).toBe("conflict")
+  } finally { fs.rmSync(home, { recursive: true, force: true }) }
+})
+
 test("dsh creates a missing patch layer, removes only its own row, and reads the row back", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-dsh-new-"))
   try {
@@ -224,7 +262,7 @@ test("dsh creates a missing patch layer, removes only its own row, and reads the
     const binary = { name: "dsh" as const, file, entry: "/home/me/.local/bin/browse" }
     expect(editAgentConfig(binary)).toBe("added")
     expect(Bun.YAML.parse(fs.readFileSync(file, "utf8"))).toEqual([{
-      insert: [{ id: "browse", name: "@deepseek-ai/dsh-mcp-client", config: { serverName: "browse", transport: "stdio", command: binary.entry, args: ["mcp"] } }],
+      insert: [{ id: "mcp-browse", name: "@deepseek-ai/dsh-mcp-client", config: { serverName: "browse", transport: "stdio", command: binary.entry, args: ["mcp"] } }],
     }])
     expect(browseServerCommand("dsh", file)).toEqual([binary.entry, "mcp"])
     // The row an npm install wrote is read back as node plus the entry script.
@@ -234,11 +272,11 @@ test("dsh creates a missing patch layer, removes only its own row, and reads the
     expect(browseServerCommand("dsh", file)).toEqual([npm.node, npm.entry, "mcp"])
     // Someone else's row in the same patch list stays when ours goes.
     const other = { name: "@example/other", config: { url: "https://other" } }
-    fs.writeFileSync(file, `- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: ${JSON.stringify(npm.node)}\n        args:\n          - ${JSON.stringify(npm.entry)}\n          - mcp\n    - id: other\n      name: ${JSON.stringify(other.name)}\n      config:\n        url: ${other.config.url}\n`)
+    fs.writeFileSync(file, `- insert:\n    - id: mcp-browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: ${JSON.stringify(npm.node)}\n        args:\n          - ${JSON.stringify(npm.entry)}\n          - mcp\n    - id: other\n      name: ${JSON.stringify(other.name)}\n      config:\n        url: ${other.config.url}\n`)
     expect(editAgentConfig(npm, true)).toBe("removed")
     expect(Bun.YAML.parse(fs.readFileSync(file, "utf8"))).toEqual([{ insert: [{ id: "other", name: other.name, config: other.config }] }])
     // With no patch left, the layer is a valid empty list rather than an empty file dsh refuses to boot.
-    fs.writeFileSync(file, `- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: ${JSON.stringify(npm.node)}\n        args:\n          - ${JSON.stringify(npm.entry)}\n          - mcp\n`)
+    fs.writeFileSync(file, `- insert:\n    - id: mcp-browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: ${JSON.stringify(npm.node)}\n        args:\n          - ${JSON.stringify(npm.entry)}\n          - mcp\n`)
     expect(editAgentConfig(npm, true)).toBe("removed")
     expect(fs.readFileSync(file, "utf8")).toBe("[]\n")
   } finally { fs.rmSync(home, { recursive: true, force: true }) }
@@ -272,8 +310,30 @@ test("every picker choice has one user-scoped destination; config dirs and binar
   } finally { fs.rmSync(home, { recursive: true, force: true }) }
 })
 
-/** Runs locateExtension with recording effects: nothing real is opened, revealed or copied. */
-function run(overrides: Partial<LocateOptions> = {}, results: { open?: boolean } = {}) {
+test("dsh's DSH_HOME is unset when blank, expands ~/, and ignores other relative values", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-dsh-home-"))
+  const previous = process.env.DSH_HOME
+  try {
+    const config = path.join(home, ".config")
+    const file = () => agentLocations(home, config, () => undefined, path.join(config, "opencode/opencode.json")).find(a => a.name === "dsh")?.file
+    delete process.env.DSH_HOME
+    expect(file()).toBe(path.join(home, ".dsh/cordis.patch.yml"))
+    process.env.DSH_HOME = "   "
+    expect(file()).toBe(path.join(home, ".dsh/cordis.patch.yml"))
+    process.env.DSH_HOME = "relative/dsh"
+    expect(file()).toBe(path.join(home, ".dsh/cordis.patch.yml"))
+    process.env.DSH_HOME = "~/custom-dsh"
+    expect(file()).toBe(path.join(home, "custom-dsh/cordis.patch.yml"))
+    process.env.DSH_HOME = path.join(home, "absolute-dsh")
+    expect(file()).toBe(path.join(home, "absolute-dsh/cordis.patch.yml"))
+  } finally {
+    if (previous === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previous
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+})
+
+/** Runs locateExtension with recording effects: nothing real is opened, revealed or copied. */function run(overrides: Partial<LocateOptions> = {}, results: { open?: boolean } = {}) {
   const calls: { open: [string, string][]; reveal: string[]; copy: string[] } = { open: [], reveal: [], copy: [] }
   const lines: string[] = []
   const options: LocateOptions = {
