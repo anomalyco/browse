@@ -300,6 +300,10 @@ async fn refuses_a_wrong_token() {
     let closed = next(&mut socket).await;
     assert_eq!(closed["close"], 4006);
     assert_eq!(h.handle.relay.st().handshake.pairing_failures, 1);
+    // A refusal outranks the fresh relay's pairing: it is not reported as a reconnect.
+    let status = h.handle.relay.extension_status();
+    assert_eq!(status["pairingState"], "refused");
+    assert_eq!(status["reconnecting"], false);
 }
 
 #[tokio::test]

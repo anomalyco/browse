@@ -231,7 +231,6 @@ impl Relay {
         let unpaired = st.handshake.last_unpaired.is_some_and(|at| now - at < crate::handshake::UNPAIRED_PRESENCE_TTL);
         let mismatch = if default.is_none() { st.handshake.mismatch.clone() } else { None };
         let paired = !crate::pairing::read_browser_pairings(&self.paths).is_empty();
-        let reconnecting = !st.connected() && paired && self.age() < COLD_START_WAIT;
         let state = if st.connected() {
             "connected"
         } else if mismatch.is_some() {
@@ -245,6 +244,7 @@ impl Relay {
         } else {
             "not-seen"
         };
+        let reconnecting = state == "paired-offline" && self.age() < COLD_START_WAIT;
         let next = match state {
             "connected" => None,
             _ if default.as_ref().is_some_and(|l| l.unresponsive()) => Some(protocol::BROWSER_UNRESPONSIVE.to_string()),
