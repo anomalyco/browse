@@ -17,7 +17,7 @@ pub fn bin_root() -> PathBuf {
     std::env::var_os("XDG_BIN_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| crate::setup::home().join(".local/bin"))
+        .unwrap_or_else(|| crate::setup::home().join(".local").join("bin"))
 }
 
 /// The port the running relay listens on (a pinned port, else a live relay.json's, else 19988).

@@ -3,6 +3,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { parse } from "jsonc-parser"
+import { home as userHome } from "../src/setup/environment.ts"
 import { legacyRootsLeft, legacyRuntime } from "../src/setup/legacy.ts"
 import { adoptLegacyRuntime } from "../src/setup/legacy-runtime.ts"
 import { migrateLegacy } from "../src/setup/migrate.ts"
@@ -199,7 +200,7 @@ describe("migration after the old self-managed runtime was taken over", () => {
     for (const file of [jsonc, project]) {
       const server = parse(fs.readFileSync(file, "utf8")).mcp.servers.browse
       expect(server.command).toEqual(["browse", "mcp"])
-      expect(server).toMatchObject({ cwd: "~", pool: true })
+      expect(server).toMatchObject({ cwd: userHome, pool: true })
     }
     expect(fs.readFileSync(jsonc, "utf8")).toContain("// mine")
     expect(fs.existsSync(oldData)).toBe(false)

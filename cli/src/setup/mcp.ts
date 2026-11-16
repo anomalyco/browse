@@ -13,6 +13,7 @@ import {
   fail,
   files,
   fromSource,
+  home,
   LEGACY_HOST_NAME,
   LEGACY_MCP_NAME,
   LEGACY_REGISTRY_ROOTS,
@@ -128,7 +129,8 @@ function ownedMcp(server: Servers[string] | undefined, entry: string | undefined
  * The browse MCP server entry: the existing one with its command and runtime fingerprint updated, so environment
  * variables and other settings the user added (`disabled`, `timeout`) stay. OpenCode shares one local server across
  * every directory only when `pool` is true and `cwd` is fixed: browse speaks MCP 2026-07-28 and keys per-agent current
- * sessions on OpenCode's session id, so one server is safe. Other agents keep their own schema through `editAgentConfig`.
+ * sessions on OpenCode's session id, so one server is safe. `cwd` is the absolute home directory because older
+ * OpenCode versions don't expand `~` (it fails on Windows). Other agents keep their own schema through `editAgentConfig`.
  */
 function mergedMcpServer(existing: Servers[string] | undefined, command: string[], runtime: string) {
   const environment =
@@ -139,7 +141,7 @@ function mergedMcpServer(existing: Servers[string] | undefined, command: string[
     ...existing,
     type: "local",
     command,
-    cwd: "~",
+    cwd: home,
     pool: true,
     environment: { ...environment, OPENCODE_BROWSER_RUNTIME: runtime },
   }

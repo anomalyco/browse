@@ -101,6 +101,16 @@ pub enum McpEdit {
     Conflict,
 }
 
+/// The `cwd` an OpenCode server entry runs in: the absolute home directory. OpenCode only pools one server across
+/// directories when `cwd` is fixed, and older OpenCode versions don't expand `~` (it fails on Windows), so a literal
+/// one there makes the server fail to start. Rewriting it on install also repairs entries an older install wrote with
+/// `~`.
+fn mcp_cwd() -> String {
+    let home = home();
+    // An empty cwd silently turns pooling off, so fall back to the old literal when there's no home directory.
+    if home.as_os_str().is_empty() { "~".to_owned() } else { home.display().to_string() }
+}
+
 /// Writes (or updates) the browse MCP server so it runs `entry`, keeping settings the user added. One pooled server
 /// with a fixed cwd serves every OpenCode session; each agent works in the tabs it opens, by their ids.
 pub fn configure_opencode(file: &Path, entry: &Path) -> anyhow::Result<McpEdit> {
@@ -116,7 +126,7 @@ pub fn configure_opencode(file: &Path, entry: &Path) -> anyhow::Result<McpEdit> 
     let environment = server.get("environment").cloned().filter(Value::is_object).unwrap_or_else(|| json!({}));
     server["type"] = json!("local");
     server["command"] = json!([entry.to_string_lossy(), "mcp"]);
-    server["cwd"] = json!("~");
+    server["cwd"] = json!(mcp_cwd());
     server["pool"] = json!(true);
     server["environment"] = environment;
     server["environment"]["OPENCODE_BROWSER_RUNTIME"] = json!("auto-update");
@@ -577,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_gets_one_pooled_server_with_a_fixed_cwd() {
+    fn opencode_gets_one_pooled_server_with_an_absolute_home_cwd() {
         let dir = scratch("pool");
         let file = dir.join("opencode.json");
         assert!(matches!(configure_opencode(&file, Path::new("/usr/bin/browse")).unwrap(), McpEdit::Added));
@@ -585,9 +595,33 @@ mod tests {
         let server = &config["mcp"]["servers"]["browse"];
         assert_eq!(server["type"], "local");
         assert_eq!(server["command"], json!(["/usr/bin/browse", "mcp"]));
-        // One server serves every directory: OpenCode only pools an entry with a fixed cwd and `pool`.
-        assert_eq!(server["cwd"], "~");
+        // One server serves every directory: OpenCode only pools an entry with a fixed cwd and `pool`. The cwd is the
+        // absolute home directory, not `~`, because older OpenCode versions don't expand `~` (it fails on Windows).
+        assert_eq!(server["cwd"], home().display().to_string());
+        let cwd = server["cwd"].as_str().unwrap();
+        assert!(cwd != "~" && Path::new(cwd).is_absolute(), "cwd should be an absolute path: {cwd}");
         assert_eq!(server["pool"], true);
+        assert!(matches!(configure_opencode(&file, Path::new("/usr/bin/browse")).unwrap(), McpEdit::UpToDate));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_opencode_entry_with_the_old_tilde_cwd_is_repaired_on_install() {
+        let dir = scratch("repair-cwd");
+        let file = dir.join("opencode.json");
+        let stale = json!({ "mcp": { "servers": { "browse": {
+            "type": "local",
+            "command": ["/usr/bin/browse", "mcp"],
+            "cwd": "~",
+            "pool": true,
+            "environment": { "OPENCODE_BROWSER_RUNTIME": "auto-update" },
+        } } } });
+        std::fs::write(&file, serde_json::to_string_pretty(&stale).unwrap()).unwrap();
+        assert!(matches!(configure_opencode(&file, Path::new("/usr/bin/browse")).unwrap(), McpEdit::Updated));
+        let config = jsonc::parse(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let cwd = config["mcp"]["servers"]["browse"]["cwd"].as_str().unwrap();
+        assert!(cwd != "~" && Path::new(cwd).is_absolute(), "the stale ~ is rewritten to the home directory: {cwd}");
+        assert_eq!(cwd, home().display().to_string());
         assert!(matches!(configure_opencode(&file, Path::new("/usr/bin/browse")).unwrap(), McpEdit::UpToDate));
         std::fs::remove_dir_all(dir).unwrap();
     }
