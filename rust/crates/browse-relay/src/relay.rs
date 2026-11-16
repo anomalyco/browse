@@ -164,6 +164,8 @@ pub struct State {
     next_tab_id: i64,
     pub known: BTreeMap<String, KnownBrowser>,
     pub tabs: HashMap<i64, Tab>,
+    /// Popups whose attach is in flight: marked before setup so an off-list event seen after registration closes them.
+    pub opening_popups: HashSet<i64>,
     /// Tool calls running, by call id.
     pub calls: HashMap<u64, RunningCall>,
     /// Why running calls were stopped (the toolbar button, their client exiting), by call id.
@@ -429,6 +431,7 @@ impl Relay {
                 next_tab_id: 1_000_000_000,
                 known,
                 tabs: HashMap::new(),
+                opening_popups: HashSet::new(),
                 calls: HashMap::new(),
                 stopped: HashMap::new(),
                 clients: HashSet::new(),

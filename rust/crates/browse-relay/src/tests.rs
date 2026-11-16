@@ -147,9 +147,19 @@ fn fake_extension(socket: Socket, next_tab: i64) -> (Arc<Seen>, mpsc::UnboundedS
                 "debugger.sendCommand" => match params["method"].as_str().unwrap_or("") {
                     "Target.getTargetInfo" => {
                         let tab = params["tabId"].as_i64().unwrap();
-                        // 97-99 are popups that report no URL at attach: 97 never navigates, 98 commits off-list,
-                        // 99 commits to an allowed page before the post-attach query.
+                        // 95-99 are popups that report no URL at attach: 95 has no allowlist, 97 never navigates,
+                        // 98 commits off-list, 99 commits to an allowed page before the post-attach query. 96 answers
+                        // late so its opening mark can be seen before registration.
+                        if tab == 96 {
+                            let replies = replies.clone();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(Duration::from_millis(200)).await;
+                                let _ = replies.send(json!({ "id": id, "result": { "targetInfo": { "targetId": "T96", "type": "page", "url": "about:blank", "title": "", "attached": true } } }));
+                            });
+                            continue;
+                        }
                         let live = match tab {
+                            95 => Some("https://example.com/app"),
                             97 => Some(""),
                             98 => Some("https://evil.test/"),
                             99 => Some("https://example.com/app"),
@@ -777,6 +787,53 @@ async fn a_popup_that_had_not_navigated_is_judged_after_attach() {
     events.send(json!({ "method": "tabs.opened", "params": { "tabId": 98, "openerTabId": opener } })).unwrap();
     eventually("the off-list popup to close", || seen.commands("tabs.remove").iter().any(|c| c["params"]["tabId"] == 98)).await;
     assert!(!relay.st().tabs.contains_key(&98));
+}
+
+/// A popup is marked before its attach starts, and an off-list navigation seen while it opens closes it rather than
+/// leaving a blank popup. A plain tab with an allowlist is still only stopped.
+#[tokio::test]
+async fn an_off_list_navigation_start_closes_an_opening_popup() {
+    let (h, seen, events) = connected("profile-popup-opening", 210).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let strict = TabOptions { allowed_origins: Some(vec!["example.com".into()]), ..TabOptions::default() };
+    let opener = browser.open_tab(None, &strict).await.unwrap().tab;
+
+    // The attach query for 96 is slow on purpose: the opening mark must exist before the tab is registered.
+    events.send(json!({ "method": "tabs.opened", "params": { "tabId": 96, "openerTabId": opener } })).unwrap();
+    eventually("the opening mark", || relay.st().opening_popups.contains(&96)).await;
+    assert!(!relay.st().tabs.contains_key(&96), "a popup is marked before it is registered");
+    eventually("the popup to attach", || relay.st().tabs.contains_key(&96)).await;
+    assert!(!relay.st().opening_popups.contains(&96), "adoption drops the opening mark");
+
+    // A normal allowed tab that starts off-list is stopped, not closed.
+    let plain = browser.open_tab(Some("https://example.com/"), &strict).await.unwrap().tab;
+    events.send(json!({ "method": "debugger.event", "params": { "tabId": plain, "method": "Page.frameStartedNavigating", "params": { "frameId": format!("T{plain}"), "url": "https://evil.test/" } } })).unwrap();
+    eventually("the tab to be stopped", || seen.cdp("Page.stopLoading").iter().any(|c| c["params"]["tabId"] == plain)).await;
+    assert!(relay.st().tabs.contains_key(&plain));
+
+    // An opening popup that starts off-list is closed.
+    relay.st().opening_popups.insert(plain);
+    events.send(json!({ "method": "debugger.event", "params": { "tabId": plain, "method": "Page.frameStartedNavigating", "params": { "frameId": format!("T{plain}"), "url": "https://evil.test/" } } })).unwrap();
+    eventually("the opening popup to close", || seen.commands("tabs.remove").iter().any(|c| c["params"]["tabId"] == plain)).await;
+    assert!(!relay.st().tabs.contains_key(&plain));
+    assert!(!relay.st().opening_popups.contains(&plain));
+}
+
+/// A popup whose session has no allowlist is not re-queried and cannot take the fail-closed path.
+#[tokio::test]
+async fn a_popup_without_an_allowlist_is_not_re_queried() {
+    let (h, seen, events) = connected("profile-popup-no-allowlist", 220).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let opener = browser.open_tab(None, &TabOptions::default()).await.unwrap().tab;
+    events.send(json!({ "method": "tabs.opened", "params": { "tabId": 95, "openerTabId": opener } })).unwrap();
+    eventually("the popup", || relay.st().tabs.contains_key(&95)).await;
+    assert_eq!(relay.st().tabs[&95].url, "", "the empty URL is kept without an allowlist");
+    assert!(!relay.st().opening_popups.contains(&95));
+    assert!(!seen.commands("tabs.remove").iter().any(|c| c["params"]["tabId"] == 95));
+    let queries = seen.cdp("Target.getTargetInfo").iter().filter(|c| c["params"]["tabId"].as_i64() == Some(95)).count();
+    assert_eq!(queries, 1, "one attach query, no allowlist re-query");
 }
 
 /// A tab the user lends (the toolbar button) is usable by its id from tabs list, and closing it gives it back.

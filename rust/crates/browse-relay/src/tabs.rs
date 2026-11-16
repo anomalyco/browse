@@ -211,6 +211,7 @@ impl Relay {
         let removed = {
             let mut st = self.st();
             let removed = st.tabs.remove(&tab);
+            st.opening_popups.remove(&tab);
             st.presented.remove(&tab);
             if let Some(mut handoff) = st.handoffs.remove(&tab) {
                 handoff.done.take().map(|done| done.send("closed"));
@@ -414,6 +415,12 @@ impl Relay {
             opener_tab.options.clone()
         };
         rlog!("tab.opened", tabId = tab, openerTabId = opener, group = options.group.clone());
+        // Mark it before the attach: an off-list event the guard sees between registration and adoption closes the
+        // popup instead of blanking a tab that was never published. Without an allowlist there is nothing to judge.
+        let allowlisted = rules(&options).is_some();
+        if allowlisted {
+            self.st().opening_popups.insert(tab);
+        }
         let relay = self.clone();
         tokio::spawn(async move {
             let link = relay.st().browser_tab(tab);
@@ -430,6 +437,7 @@ impl Relay {
                         let message = error.to_string();
                         let retry = message.contains("already attached") || message.contains("another debugger");
                         if !retry || delay == 0 || relay.st().tabs.contains_key(&tab) {
+                            relay.st().opening_popups.remove(&tab);
                             rlog!("tab.opened.error", tabId = tab, error = message);
                             return;
                         }
@@ -439,11 +447,12 @@ impl Relay {
             }
             let url = {
                 let mut st = relay.st();
+                st.opening_popups.remove(&tab);
                 let Some(popup) = st.tabs.get_mut(&tab) else { return };
                 popup.fresh_popup = true;
                 popup.url.clone()
             };
-            let url = if url.is_empty() {
+            let url = if allowlisted && url.is_empty() {
                 // A popup that had not navigated at attach: its first commit could have landed before registration,
                 // where events are dropped. It is registered now, so one query decides it; later commits are events.
                 match relay.popup_url_after_attach(tab).await {
@@ -915,6 +924,11 @@ impl Relay {
                 }
                 let Some(url) = params.get("url").and_then(Value::as_str) else { return };
                 if let domain::UrlDecision::Refused(reason) = domain::check_url(url, &rules, false) {
+                    // A fresh popup has no allowed page to go back to: close it rather than leave a blank one.
+                    if self.is_fresh_popup(tab) {
+                        self.allowlist_violation(tab, url, &reason);
+                        return;
+                    }
                     self.debugger_best_effort(tab, None, "Page.stopLoading", json!({}));
                     if let Some(entry) = self.st().tabs.get_mut(&tab) {
                         entry.add_warning(format!(
@@ -926,6 +940,12 @@ impl Relay {
                 }
             }
         }
+    }
+
+    /// A relay-owned popup that has not shown an allowed document yet: fresh, or still opening.
+    fn is_fresh_popup(&self, tab: i64) -> bool {
+        let st = self.st();
+        st.tabs.get(&tab).is_some_and(|entry| (entry.fresh_popup || st.opening_popups.contains(&tab)) && entry.owner == Owner::Relay)
     }
 
     /// The tab's rules and main frame, when it has an allowlist.
@@ -944,10 +964,13 @@ impl Relay {
         }
         match domain::check_url(url, &rules, false) {
             domain::UrlDecision::Allowed { .. } => {
-                if !url.starts_with("about:")
-                    && let Some(entry) = self.st().tabs.get_mut(&tab) {
+                if !url.starts_with("about:") {
+                    let mut st = self.st();
+                    st.opening_popups.remove(&tab);
+                    if let Some(entry) = st.tabs.get_mut(&tab) {
                         entry.fresh_popup = false;
                     }
+                }
                 true
             }
             domain::UrlDecision::Refused(reason) => {
@@ -960,8 +983,9 @@ impl Relay {
     fn allowlist_violation(self: &Arc<Self>, tab: i64, url: &str, reason: &str) {
         let popup = {
             let mut st = self.st();
+            let opening = st.opening_popups.remove(&tab);
             let Some(entry) = st.tabs.get_mut(&tab) else { return };
-            let popup = entry.fresh_popup && entry.owner == Owner::Relay;
+            let popup = (entry.fresh_popup || opening) && entry.owner == Owner::Relay;
             entry.fresh_popup = false;
             let action = if popup { "closed the popup" } else { "sent the tab back to about:blank" };
             let warning = format!("Domain allowlist: tab {tab} went to {}, but {reason}; browse {action}. Ask the user before going elsewhere.", short_url(url));
