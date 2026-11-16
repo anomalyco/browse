@@ -124,6 +124,16 @@ impl Cdp for TabCdp {
                 let outcome = self.relay.close_or_release(tab).await.map_err(|e| CdpError::Protocol(e.to_string()))?;
                 return Ok(json!({ "success": true, "released": outcome == "released" }));
             }
+            "Page.close" => {
+                // Playwright sends this for page.close({ runBeforeUnload: true }). Forwarded to the debugger it would
+                // close the tab directly, so close-or-release the tab the way Target.closeTarget does. None is the
+                // tab's own page session; a child frame or worker session can't close the page.
+                if let Some(session) = session_id {
+                    return Err(CdpError::Protocol(format!("Page.close needs the tab's own page session, not child session {session}")));
+                }
+                self.relay.close_or_release(self.tab).await.map_err(|e| CdpError::Protocol(e.to_string()))?;
+                return Ok(json!({}));
+            }
             "Page.navigate" if session_id.is_none() => {
                 if let Some(refusal) = self.relay.navigation_refusal(&options, Some(self.tab), method, &url).await {
                     return Err(CdpError::Protocol(refusal));
