@@ -1,6 +1,7 @@
 mod agents;
 mod browsers;
 mod cli;
+mod dsh;
 mod http;
 mod install;
 mod jsonc;
