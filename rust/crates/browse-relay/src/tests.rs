@@ -1128,6 +1128,50 @@ async fn one_client_exiting_stops_only_its_own_calls() {
     eventually("the tab to go idle", || !relay.st().tab_busy(tab)).await;
 }
 
+/// POST /tools/cancel stops the call its caller keyed (an MCP client's `notifications/cancelled`): the handoff card
+/// comes down and the tab is free. A cancel that arrives before its call stops the call as it starts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_call_stops() {
+    let (h, _seen, _events) = connected("profile-cancel", 180).await;
+    let relay = h.handle.relay.clone();
+    let port = h.handle.port();
+    let token = h.handle.token().to_string();
+    let tab = h.handle.browser().open_tab(None, &TabOptions::default()).await.unwrap().tab;
+    let request = |name: &str, arguments: Value| browse_core::ToolCallRequest { name: name.into(), arguments };
+    let text = |output: &browse_core::ToolOutput| match &output.content[0] {
+        browse_core::Content::Text { text } => text.clone(),
+        _ => String::new(),
+    };
+
+    let waiting = {
+        let relay = relay.clone();
+        let call = request("handoff", json!({ "message": "wait", "tab": tab, "timeoutSeconds": 30 }));
+        tokio::spawn(async move { crate::serve::call_tool_keyed(&relay, call, None, Some("key-1".into())).await })
+    };
+    eventually("the handoff", || relay.st().handoffs.contains_key(&tab)).await;
+    let (_, other) = http(port, "POST", "/tools/cancel", Some(&token), Some(json!({ "call": "key-other" }))).await;
+    assert_eq!(other["stopped"], false, "another key stops nothing");
+    assert!(!waiting.is_finished());
+    let (status, cancelled) = http(port, "POST", "/tools/cancel", Some(&token), Some(json!({ "call": "key-1" }))).await;
+    assert_eq!((status, &cancelled["stopped"]), (200, &json!(true)), "{cancelled}");
+    let stopped = tokio::time::timeout(Duration::from_secs(5), waiting).await.unwrap().unwrap().unwrap();
+    assert!(stopped.is_error && text(&stopped).contains("cancelled"), "{}", text(&stopped));
+    eventually("the card to come down", || !relay.st().handoffs.contains_key(&tab)).await;
+    eventually("the tab to go idle", || !relay.st().tab_busy(tab)).await;
+
+    // The cancel won the race: the call stops as soon as it starts, and its key is used up.
+    let (_, early) = http(port, "POST", "/tools/cancel", Some(&token), Some(json!({ "call": "key-2" }))).await;
+    assert_eq!(early["stopped"], false);
+    let call = request("handoff", json!({ "message": "wait", "tab": tab, "timeoutSeconds": 30 }));
+    let output = tokio::time::timeout(Duration::from_secs(5), crate::serve::call_tool_keyed(&relay, call, None, Some("key-2".into()))).await.unwrap().unwrap();
+    assert!(output.is_error && text(&output).contains("cancelled"), "{}", text(&output));
+    assert!(!relay.st().cancelled_calls.contains_key("key-2"));
+    assert!(!relay.st().handoffs.contains_key(&tab));
+    let (status, _) = http(port, "POST", "/tools/cancel", Some(&token), Some(json!({}))).await;
+    assert_eq!(status, 400);
+    assert_eq!(http(port, "POST", "/tools/cancel", None, Some(json!({ "call": "key-1" }))).await.0, 401);
+}
+
 #[tokio::test]
 async fn close_takes_idle_tabs_and_whole_groups() {
     let (h, seen, _events) = connected("profile-cleanup", 120).await;

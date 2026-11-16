@@ -202,8 +202,24 @@ pub fn tools(client: Option<&str>) -> anyhow::Result<Vec<ToolSpec>> {
 }
 
 pub fn call(request: &ToolCallRequest, client: Option<&str>) -> anyhow::Result<ToolOutput> {
+    call_keyed(request, client, None)
+}
+
+/// [call], with a key for the call (browse_core::CALL_HEADER) that [cancel] can stop it by.
+pub fn call_keyed(request: &ToolCallRequest, client: Option<&str>, key: Option<&str>) -> anyhow::Result<ToolOutput> {
     let body = serde_json::to_vec(request)?;
-    Ok(serde_json::from_value(authorized("POST", "/tools/call", &client_header(client), Some(&body), None)?)?)
+    let mut headers = client_header(client);
+    if let Some(key) = key {
+        headers.push((browse_core::CALL_HEADER, key));
+    }
+    Ok(serde_json::from_value(authorized("POST", "/tools/call", &headers, Some(&body), None)?)?)
+}
+
+/// Stops the call [call_keyed] started with `key`, or the call when it starts, if it hasn't yet.
+pub fn cancel(key: &str) -> anyhow::Result<()> {
+    let body = serde_json::to_vec(&serde_json::json!({ "call": key }))?;
+    authorized("POST", "/tools/cancel", &[], Some(&body), Some(Duration::from_secs(10)))?;
+    Ok(())
 }
 
 /// The MCP instructions for `client`: the running relay's, else this build's, without starting a relay.

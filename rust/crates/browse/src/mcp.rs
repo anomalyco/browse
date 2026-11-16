@@ -2,6 +2,7 @@
 //! passes the client's `clientInfo.name` along (browse_core::CLIENT_HEADER), and the relay decides the tools and
 //! instructions that client gets. Calls carry no caller identity: every browser call names its tab.
 
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -18,6 +19,15 @@ const PROTOCOLS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-
 struct Running {
     count: Mutex<usize>,
     idle: Condvar,
+    /// Tool calls in flight, by their JSON-RPC id (as JSON text).
+    calls: Mutex<HashMap<String, Pending>>,
+}
+
+struct Pending {
+    /// The key the relay knows the call by (browse_core::CALL_HEADER).
+    key: String,
+    /// The client sent `notifications/cancelled` for it, so it gets no answer.
+    cancelled: bool,
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -38,7 +48,15 @@ pub fn run() -> anyhow::Result<()> {
             }
             continue;
         };
-        let Some(id) = message.get("id").cloned() else { continue }; // notifications need no answer
+        let Some(id) = message.get("id").cloned() else {
+            // Notifications need no answer; a cancelled call is stopped in the relay.
+            if message.get("method").and_then(Value::as_str) == Some("notifications/cancelled")
+                && let Some(request) = message.pointer("/params/requestId")
+            {
+                cancel(&running, request);
+            }
+            continue;
+        };
         let method = message.get("method").and_then(Value::as_str).unwrap_or_default();
         let params = message.get("params").cloned().unwrap_or(Value::Null);
         match method {
@@ -58,8 +76,11 @@ pub fn run() -> anyhow::Result<()> {
             "tools/call" => {
                 let (out, running, noted, client) = (out.clone(), running.clone(), noted.clone(), client.clone());
                 *running.count.lock().unwrap() += 1;
+                let key = format!("{:016x}{:016x}", crate::session::random_u64(), crate::session::random_u64());
+                running.calls.lock().unwrap().insert(id.to_string(), Pending { key: key.clone(), cancelled: false });
                 std::thread::spawn(move || {
-                    let mut result = call(&params, &client);
+                    let mut result = call(&params, &client, &key);
+                    let cancelled = running.calls.lock().unwrap().remove(&id.to_string()).is_some_and(|p| p.cancelled);
                     // Once per process: a notify-only install tells the agent about an update to pass on.
                     if let Some((summary, command)) = update::pending_notice()
                         && params.get("name").and_then(Value::as_str) != Some("status")
@@ -69,7 +90,10 @@ pub fn run() -> anyhow::Result<()> {
                             text: format!("Note: browse has an update: {summary}. Tell the user they can run `{command}`, or ask you to run it for them."),
                         });
                     }
-                    reply(&out, id, serde_json::to_value(result).unwrap_or(Value::Null));
+                    // A cancelled request gets no response (MCP cancellation).
+                    if !cancelled {
+                        reply(&out, id, serde_json::to_value(result).unwrap_or(Value::Null));
+                    }
                     let mut count = running.count.lock().unwrap();
                     *count -= 1;
                     running.idle.notify_all();
@@ -87,10 +111,24 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn call(params: &Value, client: &str) -> ToolOutput {
+/// Stops the call the client cancelled, in the background: the relay ends it (and a handoff it waits on), and its
+/// answer is dropped.
+fn cancel(running: &Running, request: &Value) {
+    let key = {
+        let mut calls = running.calls.lock().unwrap();
+        let Some(pending) = calls.get_mut(&request.to_string()) else { return };
+        pending.cancelled = true;
+        pending.key.clone()
+    };
+    std::thread::spawn(move || {
+        let _ = relay::cancel(&key);
+    });
+}
+
+fn call(params: &Value, client: &str, key: &str) -> ToolOutput {
     let name = params.get("name").and_then(Value::as_str).unwrap_or_default().to_owned();
     let arguments = params.get("arguments").cloned().filter(Value::is_object).unwrap_or_else(|| json!({}));
-    relay::call(&ToolCallRequest { name: name.clone(), arguments }, Some(client)).unwrap_or_else(|error| ToolOutput::error(format!("{name} failed: {error:#}")))
+    relay::call_keyed(&ToolCallRequest { name: name.clone(), arguments }, Some(client), Some(key)).unwrap_or_else(|error| ToolOutput::error(format!("{name} failed: {error:#}")))
 }
 
 fn reply(out: &Mutex<std::io::Stdout>, id: Value, result: Value) {

@@ -252,3 +252,7 @@ pub struct ToolCallRequest {
 
 /// The header naming the MCP client (its `clientInfo.name`) on /tools, /instructions and /tools/call.
 pub const CLIENT_HEADER: &str = "OpenCode-Browser-Client";
+
+/// A key the caller picks for one POST /tools/call, so POST /tools/cancel can stop that call (an MCP client's
+/// `notifications/cancelled`).
+pub const CALL_HEADER: &str = "OpenCode-Browser-Call";

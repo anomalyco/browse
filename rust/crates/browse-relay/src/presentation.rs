@@ -15,6 +15,10 @@ use crate::relay::{Handoff, Owner, Relay, State};
 use crate::rlog;
 
 pub const DEFAULT_HANDOFF_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// What a call its client cancelled answers (the client doesn't wait for it).
+const CANCELLED: &str = "The call was cancelled by its client.";
+/// How long a cancel that arrived before its call is remembered.
+const CANCELLED_KEY_TTL: Duration = Duration::from_secs(60);
 const IDLE_AFTER_CALL: Duration = Duration::from_millis(1500);
 
 /// The page status, badge and group the extension should show. An agent tab is grouped by its `group` label (the
@@ -144,9 +148,13 @@ impl Relay {
         });
     }
 
-    pub fn call_started(self: &Arc<Self>, id: u64, abort: tokio::task::AbortHandle, pid: Option<u32>) {
+    pub fn call_started(self: &Arc<Self>, id: u64, abort: tokio::task::AbortHandle, pid: Option<u32>, key: Option<String>) {
         let mut st = self.st();
-        st.calls.insert(id, crate::registry::RunningCall { abort, pid, tabs: std::collections::HashSet::new() });
+        if key.as_ref().is_some_and(|key| st.cancelled_calls.remove(key).is_some()) {
+            st.stopped.insert(id, CANCELLED.into());
+            abort.abort();
+        }
+        st.calls.insert(id, crate::registry::RunningCall { abort, pid, key, tabs: std::collections::HashSet::new() });
         if let Some(pid) = pid {
             st.clients.insert(pid);
         }
@@ -189,6 +197,22 @@ impl Relay {
             });
         }
         tabs
+    }
+
+    /// Stops the call its caller keyed `key` (CALL_HEADER). A call that hasn't started yet is stopped as it starts.
+    pub fn cancel_call(&self, key: &str) -> bool {
+        let mut st = self.st();
+        let picked: Vec<u64> = st.calls.iter().filter(|(_, call)| call.key.as_deref() == Some(key)).map(|(id, _)| *id).collect();
+        for id in &picked {
+            st.stopped.insert(*id, CANCELLED.into());
+            st.calls[id].abort.abort();
+        }
+        if picked.is_empty() {
+            let now = std::time::Instant::now();
+            st.cancelled_calls.retain(|_, at| now.duration_since(*at) < CANCELLED_KEY_TTL);
+            st.cancelled_calls.insert(key.to_string(), now);
+        }
+        !picked.is_empty()
     }
 
     /// Ends the running calls that use the tab (except the one asking); their callers get `message`.
