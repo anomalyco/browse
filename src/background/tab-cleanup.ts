@@ -87,7 +87,8 @@ export async function idleMinutes() {
 /**
  * Closes an agent's tab. A tab in an agent group is ungrouped first: Chrome keeps a saved group when its last tab is
  * the window's last tab (closing the window keeps its groups saved), while emptying a group by ungrouping always
- * deletes it.
+ * deletes it. A tab that is the last one of the last normal window gets a plain new tab first: closing it would close
+ * the window, and with it the browser on Windows and Linux.
  */
 export async function closeAgentTab(tabId: number): Promise<void> {
   const tab = await chrome.tabs.get(tabId).catch(() => undefined)
@@ -101,6 +102,7 @@ export async function closeAgentTab(tabId: number): Promise<void> {
     }
   }
   try {
+    if (tab && (await lastTabOfLastWindow(tab))) await chrome.tabs.create({ windowId: tab.windowId })
     await chrome.tabs.remove(tabId)
   } catch (error) {
     if (groupId !== undefined) {
@@ -109,6 +111,23 @@ export async function closeAgentTab(tabId: number): Promise<void> {
     }
     throw error
   }
+}
+
+/**
+ * Whether closing `tab` would empty its window while no other normal window is open. An uncertain Chrome call counts
+ * as yes: a spare new tab is better than a browser that quits.
+ */
+async function lastTabOfLastWindow(tab: chrome.tabs.Tab): Promise<boolean> {
+  if (tab.id === undefined) return false
+  const tabs = await withTimeout(chrome.tabs.query({ windowId: tab.windowId }), RESTORE_QUERY_MS)
+    .catch((): typeof TIMED_OUT => TIMED_OUT)
+  if (tabs !== TIMED_OUT && (tabs.length !== 1 || tabs[0]?.id !== tab.id)) return false
+  const windows = await withTimeout(
+    chrome.windows.getAll({ windowTypes: ["normal"] }),
+    RESTORE_QUERY_MS,
+  ).catch((): typeof TIMED_OUT => TIMED_OUT)
+  if (windows === TIMED_OUT) return true
+  return !windows.some((window) => window.id !== undefined && window.id !== tab.windowId)
 }
 
 /**

@@ -136,6 +136,65 @@ describe("closing a tab in an agent group", () => {
   })
 })
 
+describe("closing the last tab of the last window", () => {
+  /** An agent tab left as its window's only tab. */
+  async function onlyTabInWindow(minutesAgo: number) {
+    const tabId = await agentTab(minutesAgo)
+    for (const tab of await stub.chrome.tabs.query({ windowId: window }))
+      if (tab.id !== tabId) await stub.chrome.tabs.remove(tab.id!)
+    return tabId
+  }
+
+  test("opens a plain new tab in the window before closing it", async () => {
+    const tabId = await onlyTabInWindow(0)
+    const created: Array<{ windowId?: number; url?: string }> = []
+    const order: string[] = []
+    const create = stub.chrome.tabs.create
+    const remove = stub.chrome.tabs.remove
+    stub.chrome.tabs.create = async (options) => {
+      order.push("create")
+      created.push(options)
+      return create(options)
+    }
+    stub.chrome.tabs.remove = async (ids) => {
+      order.push("remove")
+      return remove(ids)
+    }
+    try {
+      await TabCleanup.cleanup({ minutes: 0 })
+      expect(order).toEqual(["create", "remove"])
+      // No url: the browser's new-tab page, not another agent page.
+      expect(created).toEqual([{ windowId: window }])
+      expect(open(tabId)).toBe(false)
+      const [replacement] = await stub.chrome.tabs.query({ windowId: window })
+      expect(replacement!.groupId).toBe(-1)
+      expect(await TabCleanup.isTracked(replacement!.id!)).toBe(false)
+    } finally {
+      stub.chrome.tabs.create = create
+      stub.chrome.tabs.remove = remove
+    }
+  })
+
+  test("with another normal window open, closes it without a new tab", async () => {
+    const tabId = await onlyTabInWindow(0)
+    await stub.chrome.windows.create({ url: "https://other.example/", focused: true })
+    const created: Array<{ windowId?: number; url?: string }> = []
+    const create = stub.chrome.tabs.create
+    stub.chrome.tabs.create = async (options) => {
+      created.push(options)
+      return create(options)
+    }
+    try {
+      await TabCleanup.cleanup({ minutes: 0 })
+      expect(created).toEqual([])
+      expect(open(tabId)).toBe(false)
+      expect(await stub.chrome.tabs.query({ windowId: window })).toEqual([])
+    } finally {
+      stub.chrome.tabs.create = create
+    }
+  })
+})
+
 describe("a tab the relay ungroups itself", () => {
   test("keeps idle tracking, unlike a tab the user drags out of the agent group", async () => {
     const byRelay = await agentTab(0)
