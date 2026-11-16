@@ -39,6 +39,7 @@ pub const AGENTS: &[(&str, &str)] = &[
     ("junie", "Junie"),
     ("codebuddy", "CodeBuddy Code"),
     ("cortex", "Cortex Code"),
+    ("dsh", "DeepSeek Harness"),
     ("hermes", "Hermes Agent"),
     ("grok", "Grok Build"),
     ("vibe", "Mistral Vibe"),
@@ -206,6 +207,7 @@ pub fn locations(opencode_config: &Path, opencode_binary: Option<&Path>) -> Vec<
         loc("junie", at(".junie/mcp/mcp.json"), Some("junie"), None, Some(vec![at(".junie")])),
         loc("codebuddy", first(vec![at(".codebuddy/.mcp.json"), at(".codebuddy/mcp.json")]), Some("codebuddy"), None, None),
         loc("cortex", at(".snowflake/cortex/mcp.json"), Some("cortex"), None, None),
+        crate::dsh::location(crate::dsh::home(std::env::var_os("DSH_HOME"), &home)),
         loc("hermes", env("HERMES_HOME").unwrap_or_else(|| at(".hermes")).join("config.yaml"), Some("hermes"), None, None),
         loc("grok", env("GROK_HOME").unwrap_or_else(|| at(".grok")).join("config.toml"), Some("grok"), None, None),
         loc("vibe", env("VIBE_HOME").unwrap_or_else(|| at(".vibe")).join("config.toml"), Some("vibe"), None, None),
@@ -223,12 +225,15 @@ enum Format {
     TomlList,
     /// YAML, the servers under this top-level key.
     Yaml(&'static str),
+    /// YAML, dsh's Cordis patch layer: a top-level list of patch rows.
+    Dsh,
 }
 
 fn format(name: &str) -> Format {
     match name {
         "codex" | "grok" => Format::Toml,
         "vibe" => Format::TomlList,
+        "dsh" => Format::Dsh,
         "goose" => Format::Yaml("extensions"),
         "hermes" => Format::Yaml("mcp_servers"),
         "vscode" => Format::Json("servers"),
@@ -246,6 +251,7 @@ pub fn definition(name: &str, command: &str, args: &[String]) -> Value {
         "goose" => json!({ "type": "stdio", "name": "browse", "enabled": true, "cmd": command, "args": args }),
         "copilot" => json!({ "type": "local", "command": command, "args": args, "tools": ["*"] }),
         "vibe" => json!({ "name": "browse", "transport": "stdio", "command": command, "args": args }),
+        "dsh" => json!({ "serverName": "browse", "transport": "stdio", "command": command, "args": args }),
         "claude" | "vscode" | "cortex" | "droid" | "codebuddy" => json!({ "type": "stdio", "command": command, "args": args }),
         _ => json!({ "command": command, "args": args }),
     }
@@ -301,12 +307,17 @@ pub fn edit(location: &Location, command: &[String], remove: bool) -> anyhow::Re
         Format::Toml => edit_toml(&before, &expected, remove, false).map_err(|_| invalid())?,
         Format::TomlList => edit_toml(&before, &expected, remove, true).map_err(|_| invalid())?,
         Format::Yaml(key) => edit_yaml(&before, key, &expected, remove)?,
+        Format::Dsh => crate::dsh::write(&before, &expected, remove)?,
     };
     if let Some(after) = after {
         if exists && std::fs::read_to_string(file).ok().as_deref() != Some(before.as_str()) {
             bail!("{} changed while browse was editing it; try again", file.display());
         }
-        crate::setup::write_keeping_mode(file, after.as_bytes())?;
+        if location.name == "dsh" && after.is_empty() {
+            std::fs::remove_file(file).with_context(|| format!("can't remove {}", file.display()))?;
+        } else {
+            crate::setup::write_keeping_mode(file, after.as_bytes())?;
+        }
     }
     Ok(outcome)
 }
@@ -315,7 +326,7 @@ fn kind(name: &str) -> &'static str {
     match format(name) {
         Format::Json(_) => "JSON",
         Format::Toml | Format::TomlList => "TOML",
-        Format::Yaml(_) => "YAML",
+        Format::Yaml(_) | Format::Dsh => "YAML",
     }
 }
 
@@ -335,7 +346,7 @@ fn merged(current: Option<&Value>, expected: &Value) -> Value {
 }
 
 /// What an add or remove does to an entry that's there, and the new entry (None to remove it, or to leave it).
-fn decide(current: Option<&Value>, expected: &Value, remove: bool) -> (Edit, Option<Option<Value>>) {
+pub(crate) fn decide(current: Option<&Value>, expected: &Value, remove: bool) -> (Edit, Option<Option<Value>>) {
     match (current, remove) {
         (None, true) => (Edit::Unchanged, None),
         (Some(c), _) if !owned(c) => (Edit::Conflict, None),
@@ -482,18 +493,18 @@ fn yaml_value(text: &str) -> anyhow::Result<serde_yaml::Value> {
     })
 }
 
-fn indent_of(line: &str) -> usize {
+pub(crate) fn indent_of(line: &str) -> usize {
     line.len() - line.trim_start_matches(' ').len()
 }
 
 /// Whether a line carries content (not blank, not only a comment).
-fn content(line: &str) -> bool {
+pub(crate) fn content(line: &str) -> bool {
     let trimmed = line.trim();
     !trimmed.is_empty() && !trimmed.starts_with('#')
 }
 
 /// The lines after `start` that belong to the block at indentation `indent` (more deeply indented, or blank).
-fn block_end(lines: &[&str], start: usize, indent: usize) -> usize {
+pub(crate) fn block_end(lines: &[&str], start: usize, indent: usize) -> usize {
     let mut end = start + 1;
     for (i, line) in lines.iter().enumerate().skip(start + 1) {
         if content(line) && indent_of(line) <= indent {
@@ -618,6 +629,7 @@ pub fn current(location: &Location) -> Option<Value> {
             list.iter().find(|t| t.get("name").and_then(toml_edit::Item::as_str) == Some("browse")).map(|t| toml_to_json(&toml_edit::Item::Table(t.clone())))
         }
         Format::Yaml(key) => serde_json::to_value(yaml_value(&text).ok()?.get(key)?.get("browse")?).ok(),
+        Format::Dsh => crate::dsh::read(&text),
     }
 }
 
