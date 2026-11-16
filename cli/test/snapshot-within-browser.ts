@@ -181,6 +181,52 @@ try {
   assert.match(single, /button "Only button"/)
   assert.doesNotMatch(single, /within "main"/)
 
+  // Auto-scoping to a single <main> says what it left outside: a nav of controls is one landmark with two controls.
+  const scopedPage = `
+    <nav aria-label="Thread list">
+      <div role="button" tabindex="0">Thread one</div>
+      <div role="button" tabindex="0">Thread two</div>
+    </nav>
+    <main><p>x</p><button>Send message</button></main>
+  `
+  const scopedNote = 'scoped to <main>; 1 landmark and 2 controls outside it are not shown (within: "body" to include them)'
+  await page.setContent(scopedPage)
+  const scoped = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.equal(scoped.split("\n")[0], scopedNote, scoped)
+  assert.match(scoped, /button "Send message"/)
+  assert.doesNotMatch(scoped, /Thread one/)
+
+  // Nothing interactive outside main: there is nothing to report.
+  await page.setContent(`<main><p>x</p><button>Send message</button></main>`)
+  const nothingOutside = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.doesNotMatch(nothingOutside, /scoped to <main>/, nothingOutside)
+  assert.match(nothingOutside, /button "Send message"/)
+
+  // A lone control outside main has no landmark: only the control is worth mentioning, in the singular.
+  await page.setContent(`<main><p>x</p></main><div role="button" tabindex="0">Loose action</div>`)
+  const loneControl = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.equal(
+    loneControl.split("\n")[0],
+    'scoped to <main>; 1 control outside it is not shown (within: "body" to include them)',
+    loneControl,
+  )
+
+  // An explicit within disables auto main scoping, so the whole page, nav rows included, is captured.
+  await page.setContent(scopedPage)
+  const wholePage = await createSnapshotHelpers(page, registry()).snapshot({ within: "body" })
+  assert.match(wholePage, /button "Thread one"/, wholePage)
+  assert.match(wholePage, /button "Thread two"/, wholePage)
+  assert.doesNotMatch(wholePage, /scoped to <main>/, wholePage)
+
+  // Header controls outside main are re-admitted already, so they are neither omitted nor a landmark.
+  await page.setContent(`
+    <header><button>Open menu</button></header>
+    <main><p>x</p><button>Send message</button></main>
+  `)
+  const headerReached = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.match(headerReached, /button "Open menu"/, headerReached)
+  assert.doesNotMatch(headerReached, /scoped to <main>/, headerReached)
+
   // A ref root stays strict: the forgiving fallback is only for a `within` selector string.
   const refButton = async (): Promise<{ helpers: ReturnType<typeof createSnapshotHelpers>; refId: string }> => {
     await page.setContent(`<main><button id="dup">Duplicate me</button></main>`)
@@ -540,6 +586,11 @@ try {
     hidden: "PASS",
     missing: "PASS",
     single: "PASS",
+    mainScopeNote: "PASS",
+    noMainScopeNote: "PASS",
+    loneControlNote: "PASS",
+    withinBodyScope: "PASS",
+    headerReached: "PASS",
     refStrict: "PASS",
     readonlyValues: "PASS",
     frames: "PASS",

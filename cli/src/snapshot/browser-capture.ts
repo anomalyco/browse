@@ -648,6 +648,37 @@ const captureSnapshotInBrowser = (
   const collapsedNavigation = new Set<Element>()
   const nonCollapsibleNavigation = new WeakSet<Element>()
   let reservedLists = 0
+  const scopeNote = (() => {
+    if (!autoScopedMain) return undefined
+    const scope = (document.body ?? document.documentElement) as Element | null
+    if (!scope) return undefined
+    const controlSelector = [
+      "a[href]",
+      "[contenteditable]",
+      ...interactiveTags,
+      ...Array.from(interactiveRoles, (role) => `[role='${role}']`),
+    ].join(", ")
+    const controls = querySelectorAllDeep(scope, controlSelector).filter((element) =>
+      !root.contains?.(element) && !headerCandidateSet.has(element) && isVisible(element)
+    )
+    if (controls.length === 0) return undefined
+    const landmarkSelector = "nav, [role='navigation'], aside, [role='complementary'], [role='search'], [role='region'], form, [role='form']"
+    const landmarks = new Set<Element>()
+    for (const control of controls) {
+      for (let node = parentElementOrHost(control); node; node = parentElementOrHost(node)) {
+        if (node === root || root.contains?.(node) || !node.matches(landmarkSelector)) continue
+        // A form is a landmark only when it has a name; unnamed forms are just boxes.
+        if ((node.localName === "form" || node.getAttribute("role") === "form") && !labelledName(node)) continue
+        if (isVisible(node)) landmarks.add(node)
+        break
+      }
+    }
+    const landmarkPart = landmarks.size > 0
+      ? `${landmarks.size} ${landmarks.size === 1 ? "landmark" : "landmarks"} and `
+      : ""
+    const omitted = landmarks.size + controls.length
+    return `scoped to <main>; ${landmarkPart}${controls.length} ${controls.length === 1 ? "control" : "controls"} outside it ${omitted === 1 ? "is" : "are"} not shown (within: "body" to include them)`
+  })()
 
   function* iterateCandidates(scope: Element): Generator<Element> {
     for (const headerEl of headerCandidateSet) yield headerEl
@@ -853,11 +884,12 @@ const captureSnapshotInBrowser = (
       (!selected.some((entry) => Boolean(entry.selector)) && typeof performance !== "undefined" && performance.now() < 2_500)
     ),
   )
+  const notes = [...(rootNote ? [rootNote] : []), ...(scopeNote ? [scopeNote] : [])]
   return {
     entries: selected,
     truncated: truncated || selected.length < entries.length,
     ...(needsSettle ? { needsSettle: true } : {}),
-    ...(rootNote ? { notes: [rootNote] } : {}),
+    ...(notes.length > 0 ? { notes } : {}),
   }
 }
 

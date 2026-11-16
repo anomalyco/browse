@@ -123,7 +123,10 @@ export type SnapshotCaptureResult = {
   readonly entries: readonly SnapshotEntry[]
   readonly truncated: boolean
   readonly needsSettle?: boolean
-  /** Plain sentences describing how a `within` scope resolved, shown above the snapshot lines. */
+  /**
+   * Plain sentences describing how the capture scoped itself, shown above the snapshot lines: how a `within` scope
+   * resolved, and what auto-scoping to `<main>` left outside it.
+   */
   readonly notes?: readonly string[]
 }
 

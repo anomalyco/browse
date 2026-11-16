@@ -207,7 +207,7 @@ OpenCode, which composes tools in code mode, gets the plain tools. Every other M
 | Tool | What it does |
 | --- | --- |
 | `navigate` | Open a page: without `tab`, in a new background tab whose id it returns |
-| `snapshot` | A compact outline of the page with refs (`e12`) for the other tools, iframes included |
+| `snapshot` | A compact outline of the page with refs (`e12`) for the other tools, iframes included; focuses on `<main>` when the page has one and says what it left out |
 | `click`, `fill`, `type`, `press`, `select`, `hover`, `drag`, `scroll` | Act on a ref, selector or point, with human-like input |
 | `wait_for`, `dialog`, `upload`, `eval` | Wait for text, a URL or an element; answer dialogs; set files; run JavaScript in the page |
 | `screenshot`, `screenshot_diff` | The viewport, full page, an element or a rectangle; compare with a baseline |

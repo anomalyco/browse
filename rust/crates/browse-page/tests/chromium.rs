@@ -159,6 +159,32 @@ async fn snapshot_navigation_controls_stay_visible() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn snapshot_main_scope_note() {
+    let h = harness!(false);
+    let page = h.server.page(
+        "/main-scope-note",
+        r#"<!doctype html><nav aria-label="Thread list">
+  <div role="button" tabindex="0">Thread one</div>
+  <div role="button" tabindex="0">Thread two</div></nav>
+<main><p>x</p><button>Send message</button></main>"#,
+    );
+    h.ok("navigate", json!({ "url": page })).await;
+    let snapshot = h.ok("snapshot", json!({})).await;
+    assert!(
+        snapshot.starts_with(
+            "scoped to <main>; 1 landmark and 2 controls outside it are not shown (within: \"body\" to include them)\n"
+        ),
+        "{snapshot}"
+    );
+    assert!(snapshot.contains("button \"Send message\""), "{snapshot}");
+    assert!(!snapshot.contains("Thread one"), "{snapshot}");
+    // An explicit within disables main scoping, so the nav rows are captured instead of noted.
+    let whole = h.ok("snapshot", json!({ "within": "body" })).await;
+    assert!(whole.contains("button \"Thread one\""), "{whole}");
+    assert!(!whole.contains("scoped to <main>"), "{whole}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn refs_carry_through_find_snapshots() {
     let h = harness!(false);
     let url = h.server.page("/refs-find", "<!doctype html><button>Start</button>");

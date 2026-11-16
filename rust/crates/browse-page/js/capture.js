@@ -831,6 +831,34 @@ return ((rootOrSettings, locatorSettings, naming) => {
     entries.push(entry);
   }, headerSelector = "input, textarea, select, button, [role='searchbox'], [role='combobox'], [role='button'], a[href][aria-label]", headerRoots = autoScopedMain && typeof document.querySelectorAll === "function" ? Array.from(document.querySelectorAll("header, [role='banner']")).filter((h) => isVisible(h) && !root.contains?.(h)) : [], headerCandidateSet = new Set(headerRoots.flatMap((h) => querySelectorAllDeep(h, headerSelector).filter((el) => !el.closest?.("nav, [role='navigation']")))), collapsedNavigation = new Set, nonCollapsibleNavigation = new WeakSet;
   let reservedLists = 0;
+  const scopeNote = (() => {
+    if (!autoScopedMain)
+      return;
+    const scope = document.body ?? document.documentElement;
+    if (!scope)
+      return;
+    const controlSelector = [
+      "a[href]",
+      "[contenteditable]",
+      ...interactiveTags,
+      ...Array.from(interactiveRoles, (role) => `[role='${role}']`)
+    ].join(", "), controls = querySelectorAllDeep(scope, controlSelector).filter((element) => !root.contains?.(element) && !headerCandidateSet.has(element) && isVisible(element));
+    if (controls.length === 0)
+      return;
+    const landmarkSelector = "nav, [role='navigation'], aside, [role='complementary'], [role='search'], [role='region'], form, [role='form']", landmarks = new Set;
+    for (const control of controls)
+      for (let node = parentElementOrHost(control);node; node = parentElementOrHost(node)) {
+        if (node === root || root.contains?.(node) || !node.matches(landmarkSelector))
+          continue;
+        if ((node.localName === "form" || node.getAttribute("role") === "form") && !labelledName(node))
+          continue;
+        if (isVisible(node))
+          landmarks.add(node);
+        break;
+      }
+    const landmarkPart = landmarks.size > 0 ? `${landmarks.size} ${landmarks.size === 1 ? "landmark" : "landmarks"} and ` : "", omitted = landmarks.size + controls.length;
+    return `scoped to <main>; ${landmarkPart}${controls.length} ${controls.length === 1 ? "control" : "controls"} outside it ${omitted === 1 ? "is" : "are"} not shown (within: "body" to include them)`;
+  })();
   function* iterateCandidates(scope) {
     for (const headerEl of headerCandidateSet)
       yield headerEl;
@@ -963,12 +991,12 @@ return ((rootOrSettings, locatorSettings, naming) => {
   const selected = entries.map((entry, index) => ({ entry, index })).sort((left, right) => left.entry.priority - right.entry.priority || left.index - right.index).slice(0, settings.maxItems).sort((left, right) => left.index - right.index).map(({ entry: { interactiveElement, frameElement, ...rest } }) => ({
     ...rest,
     ...interactiveElement ? { selector: cssPath(interactiveElement) } : frameElement ? { selector: frameSelector(frameElement), iframe: !0 } : {}
-  })), needsSettle = Boolean(!settings.rootSelector && typeof MutationObserver < "u" && document.body && (Boolean(document.querySelector?.("[aria-busy='true'], .skeleton:not(.no-skeleton)")) || !selected.some((entry) => Boolean(entry.selector)) && typeof performance < "u" && performance.now() < 2500));
+  })), needsSettle = Boolean(!settings.rootSelector && typeof MutationObserver < "u" && document.body && (Boolean(document.querySelector?.("[aria-busy='true'], .skeleton:not(.no-skeleton)")) || !selected.some((entry) => Boolean(entry.selector)) && typeof performance < "u" && performance.now() < 2500)), notes = [...rootNote ? [rootNote] : [], ...scopeNote ? [scopeNote] : []];
   return {
     entries: selected,
     truncated: truncated || selected.length < entries.length,
     ...needsSettle ? { needsSettle: !0 } : {},
-    ...rootNote ? { notes: [rootNote] } : {}
+    ...notes.length > 0 ? { notes } : {}
   };
 })(rootOrSettings, locatorSettings, naming)
 }
