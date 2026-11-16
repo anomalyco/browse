@@ -381,6 +381,9 @@ pub struct Relay {
     pub instance_id: String,
     pub started_at: String,
     pub started: Instant,
+    /// Test-only: extra age added to `started`, so tests can leave the cold-start window without sleeping through it.
+    #[cfg(test)]
+    pub(crate) started_ago: AtomicU64,
     pub version: String,
     pub build_id: String,
     pub token: String,
@@ -442,6 +445,8 @@ impl Relay {
             instance_id: crate::util::random_hex(16),
             started_at: crate::util::now_iso(),
             started: Instant::now(),
+            #[cfg(test)]
+            started_ago: AtomicU64::new(0),
             version: config.version,
             build_id: config.build_id,
             token,

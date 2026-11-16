@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import type { AgentRelayState } from "../src/shared/protocol"
+import { BACKOFF_BASE, BACKOFF_CAP, BACKOFF_CAP_UNOPENED, retryDelay } from "../src/background/agent-relay/wire"
 import { installChrome, settle, type StubEvent } from "./chrome-stub"
 
 // The bundled pairing file (relay-pairing.json, the one-time code `install` writes into an unpacked build) is looked
@@ -78,19 +79,29 @@ test("a pairing file written later (bun run setup) is found on the next attempt,
   expect(FakeWebSocket.made.at(-1)!.url).toBe("ws://127.0.0.1:19925/extension")
 })
 
-test("a found file is cached between attempts, and read again on Reconnect", async () => {
+test("a found file is cached between attempts, the alarm dials through a backoff, and Reconnect re-reads it", async () => {
   // The relay isn't there: the attempt closes and backs off.
   FakeWebSocket.made.at(-1)!.close()
   await settle()
   const before = reads.length
+  const attempts = FakeWebSocket.made.length
   alarm()
-  await settle()
-  // A retry is scheduled, so the alarm leaves it alone; either way nothing re-reads a found file.
+  // The alarm doesn't wait for the pending backoff, but a found file stays cached.
+  await until(() => FakeWebSocket.made.length === attempts + 1)
   expect(reads.length).toBe(before)
+  // That attempt found nothing either; close it as a failed connection would and reconnect by hand.
+  FakeWebSocket.made.at(-1)!.close()
+  await settle()
   bundled = OTHER
   relay.reconnect()
-  await until(() => FakeWebSocket.made.length === 3)
+  await until(() => FakeWebSocket.made.length === attempts + 2)
   expect(reads.length).toBe(before + 1)
+})
+
+test("a socket that never opened backs off sooner than one that did", () => {
+  expect(retryDelay(8, false, 0.5)).toBe(BACKOFF_CAP_UNOPENED)
+  expect(retryDelay(8, true, 0.5)).toBe(BACKOFF_CAP)
+  expect(retryDelay(0, false, 0.5)).toBe(BACKOFF_BASE)
 })
 
 test("a pairing change re-reads the file", async () => {

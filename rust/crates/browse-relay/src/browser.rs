@@ -14,10 +14,38 @@ use crate::relay::{Owner, Relay, State};
 
 /// How long a call waits for a browser that is reconnecting (a worker or relay restart) before failing.
 const RECONNECT_WAIT: Duration = Duration::from_secs(12);
+/// How long a just-started relay waits for the paired browser to dial back after a restart. A suspended service worker
+/// wakes on the extension's reconnect alarm, every 30 s (`extensionReconnectAlarmPeriodMs`, src/agent-relay/protocol.ts),
+/// so this covers one alarm plus margin.
+const COLD_START_WAIT: Duration = Duration::from_secs(35);
+/// A browser that connected this recently is expected back after a relay or worker restart.
+const RECENT_CONNECTION: Duration = Duration::from_secs(120);
+/// How long a call waits when no browser was ever paired: opening one is the user's move, not a reconnect.
+const FIRST_CONNECTION_WAIT: Duration = Duration::from_millis(1500);
 /// How long a call naming a tab waits for it to come back with a reconnecting browser.
 const TAB_WAIT: Duration = Duration::from_secs(10);
 
 impl Relay {
+    /// How long ago this relay started. Tests add an offset here instead of sleeping through the cold-start window.
+    fn age(&self) -> Duration {
+        #[cfg(test)]
+        let extra = Duration::from_millis(self.started_ago.load(std::sync::atomic::Ordering::SeqCst));
+        #[cfg(not(test))]
+        let extra = Duration::ZERO;
+        self.started.elapsed() + extra
+    }
+
+    /// Test-only: make this relay look `age` old, for the windows around a restart.
+    #[cfg(test)]
+    pub fn set_age_for_test(&self, age: Duration) {
+        self.started_ago.store(age.as_millis() as u64, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The rest of the cold-start window, never shorter than the first-connection wait.
+    fn cold_start_wait(&self) -> Duration {
+        COLD_START_WAIT.saturating_sub(self.age()).max(FIRST_CONNECTION_WAIT)
+    }
+
     pub fn tab_info(&self, st: &State, tab: i64) -> Option<TabInfo> {
         let entry = st.tabs.get(&tab)?;
         let mut options = entry.options.clone();
@@ -114,13 +142,24 @@ impl Relay {
     /// The browser to open a tab in: the one named (waiting briefly while it reconnects), else the first connected.
     pub async fn link_for(self: &Arc<Self>, browser: Option<&str>) -> anyhow::Result<Arc<Link>> {
         if let Some(name) = browser.map(str::trim).filter(|n| !n.is_empty()) {
-            // Only a browser browse knows can be reconnecting; any other name fails at once.
-            let known = {
-                let st = self.st();
-                let wanted = name.to_lowercase();
-                st.known.values().any(|k| k.id == wanted || k.name.to_lowercase() == wanted)
-            };
-            let found = known && self.wait_until(RECONNECT_WAIT, |st| st.link_by_name(name).is_some_and(|l| l.connected())).await;
+            // A connected browser is answered without reading the token file.
+            if let Some(link) = self.st().link_by_name(name).filter(|l| l.connected()) {
+                return Ok(link);
+            }
+            // Only a browser browse knows (installed, or paired before) can be reconnecting; any other name fails at once.
+            let pairings = crate::pairing::read_browser_pairings(&self.paths);
+            let wanted = name.to_lowercase();
+            let paired = pairings.values().any(|p| {
+                p.id.as_deref().is_some_and(|id| id.to_lowercase() == wanted) || p.name.as_deref().is_some_and(|n| n.to_lowercase() == wanted)
+            });
+            let known = paired
+                || {
+                    let st = self.st();
+                    st.known.values().any(|k| k.id == wanted || k.name.to_lowercase() == wanted)
+                };
+            let wait = if paired && self.age() < COLD_START_WAIT { self.cold_start_wait() } else { RECONNECT_WAIT };
+            let found = known && self.wait_until(wait, |st| st.link_by_name(name).is_some_and(|l| l.connected())).await;
+
             let st = self.st();
             return match st.link_by_name(name) {
                 Some(link) if found => Ok(link),
@@ -132,11 +171,17 @@ impl Relay {
                 }
             };
         }
-        let recently = {
+        let paired = !crate::pairing::read_browser_pairings(&self.paths).is_empty();
+        let wait = {
             let st = self.st();
-            st.last_connected.is_some_and(|at| at.elapsed() < Duration::from_secs(120)) || !st.links.is_empty()
+            if paired && !st.connected() && self.age() < COLD_START_WAIT {
+                self.cold_start_wait()
+            } else if !st.links.is_empty() || st.last_connected.is_some_and(|at| at.elapsed() < RECENT_CONNECTION) {
+                RECONNECT_WAIT
+            } else {
+                FIRST_CONNECTION_WAIT
+            }
         };
-        let wait = if recently { RECONNECT_WAIT } else { Duration::from_millis(1500) };
         self.wait_until(wait, State::connected).await;
         let link = self.st().links.iter().find(|l| l.connected()).cloned();
         link.ok_or_else(|| anyhow!("{}", self.not_connected_advice()))
@@ -185,7 +230,8 @@ impl Relay {
         let refused = st.handshake.last_refused.is_some_and(|at| now - at < Duration::from_secs(65));
         let unpaired = st.handshake.last_unpaired.is_some_and(|at| now - at < crate::handshake::UNPAIRED_PRESENCE_TTL);
         let mismatch = if default.is_none() { st.handshake.mismatch.clone() } else { None };
-        let paired_before = !crate::pairing::read_browser_pairings(&self.paths).is_empty();
+        let paired = !crate::pairing::read_browser_pairings(&self.paths).is_empty();
+        let reconnecting = !st.connected() && paired && self.age() < COLD_START_WAIT;
         let state = if st.connected() {
             "connected"
         } else if mismatch.is_some() {
@@ -194,7 +240,7 @@ impl Relay {
             "refused"
         } else if unpaired {
             "unpaired"
-        } else if paired_before {
+        } else if paired {
             "paired-offline"
         } else {
             "not-seen"
@@ -215,6 +261,9 @@ impl Relay {
                 "{}. Run `browse install` again: it pairs the browser when it can open it, or prints a code to enter in browse's Options (`browse pair` prints one too).",
                 if state == "refused" { "browse refused the pairing attempt" } else { "browse is installed but not paired" }
             )),
+            "paired-offline" if reconnecting => {
+                Some("The paired browser is reconnecting; try again in a few seconds.".into())
+            }
             "paired-offline" => Some("The paired browser isn't connected right now: open it (the profile with browse) and check that the extension is turned on. It reconnects by itself.".into()),
             _ => Some(format!(
                 "No browser has connected to browse yet. Add the browse extension from https://chromewebstore.google.com/detail/{} (if it's already added, open that browser), then run `browse install` to pair it, or `browse pair` for a code to enter in the extension.",
@@ -248,6 +297,7 @@ impl Relay {
             "protocolVersion": default.as_ref().and_then(|l| l.protocol.version).or(mismatch.as_ref().and_then(|m| m.0)),
             "protocolCompatible": default.as_ref().map(|l| l.protocol.compatible).or(mismatch.as_ref().map(|_| false)),
             "protocolLegacy": default.as_ref().map(|l| l.protocol.legacy),
+            "reconnecting": reconnecting,
             "browsers": browsers,
             "pairingFailures": st.handshake.pairing_failures,
             "activeTargets": st.tabs.len(),

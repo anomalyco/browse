@@ -32,12 +32,11 @@ import { createRelayGrouping } from "./agent-relay/grouping"
 import { createRelayHandshake } from "./agent-relay/handshake"
 import {
   ALARM,
-  BACKOFF_BASE,
-  BACKOFF_CAP,
   CLOSE_CODES,
   CONNECT_TIMEOUT,
   KEEPALIVE,
   PORT_KEY,
+  retryDelay,
   serialize,
   STABLE_AFTER,
   text,
@@ -397,11 +396,11 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     return starting
   }
 
-  /** Capped exponential backoff with jitter; the alarm keeps trying while the worker sleeps. */
-  const schedule = (quiet = false) => {
+  /** Capped exponential backoff with jitter; the alarm keeps trying while the worker sleeps. A socket that never opened
+   * costs nothing to retry, so that backoff stays short; one that opened then failed keeps the longer cap. */
+  const schedule = (quiet = false, opened = true) => {
     clearTimeout(retry)
-    const base = Math.min(BACKOFF_CAP, BACKOFF_BASE * 2 ** attempts)
-    const delay = Math.round(base * (0.75 + Math.random() * 0.5))
+    const delay = retryDelay(attempts, opened)
     attempts = Math.min(attempts + 1, 16)
     if (!quiet) log.add("retry", { ms: delay, attempt: attempts })
     retry = setTimeout(() => {
@@ -527,10 +526,10 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       else setStatus(openedAt === undefined ? "offline" : "connecting")
       handshake.settle(mine)
       // One rate-limited scan may find a relay that moved to a fallback port (cli/src/relay/port.ts).
-      const missed = presenceOnly ? () => undefined : () => schedule(quiet && openedAt === undefined)
+      const missed = presenceOnly ? () => undefined : () => schedule(quiet && openedAt === undefined, openedAt !== undefined)
       if (discovery.afterClose({ trusted: handshake.trusted.has(current), deliberate: isDeliberateClose(event.code, event.reason), code: event.code }, missed))
         return
-      if (!presenceOnly) schedule(quiet && openedAt === undefined)
+      if (!presenceOnly) schedule(quiet && openedAt === undefined, openedAt !== undefined)
     }
   }
 
@@ -597,7 +596,9 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   // the relay would otherwise keep as a target that answers "No tab with given id".
   chrome.tabs.onReplaced.addListener((_addedTabId, removedTabId) => tabRemoved(removedTabId))
   chrome.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === ALARM && !retry) void connect("alarm")
+    // A suspended worker restarts with no pending timer, so this only helps a live worker skip a backoff timer still
+    // waiting. connect() reuses a socket that's still connecting or open, so this can't stack connections.
+    if (alarm.name === ALARM) void connect("alarm")
   })
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && HUMAN_INPUT_KEY in changes) void sendSettings()

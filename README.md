@@ -301,6 +301,8 @@ when it starts: it stops after 30 minutes without use, or run `browse restart` f
 - `browse status` shows the install, the agents browse is set up in, updates, the relay, the extension and agent tabs,
   and says what to do when the extension is missing, unpaired, closed or out of date. Agents get the same from the
   `status` tool.
+- After the relay restarts, the extension reconnects by itself within about half a minute; calls made in the meantime
+  wait for it.
 - An agent says browse's tools are missing: restart the agent (or reload its MCP servers) after `browse install`.
 - "The browser isn't answering" while the computer is very busy: raise `OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS` and
   `OPENCODE_BROWSER_PING_TIMEOUT_MS`.
