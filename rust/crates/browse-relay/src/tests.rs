@@ -370,7 +370,7 @@ async fn reclaims_tabs_and_releases_orphans_after_reconnect() {
     let h = harness().await;
     let port = h.handle.port();
     let relay = h.handle.relay.clone();
-    let held = crate::registry::PersistedTab { tab: 21, target_id: "T21".into(), browser_key: "profile-d".into(), opener: None, options: grouped("keeper"), created_at: String::new() };
+    let held = crate::registry::PersistedTab { tab: 21, target_id: "T21".into(), browser_key: "profile-d".into(), opener: None, caller: None, options: grouped("keeper"), created_at: String::new() };
     relay.st().restorable.insert("T21".into(), held);
     let socket = pair_with_token(port, &h.paths, "profile-d").await;
     let (seen, events) = fake_extension(socket, 30);
@@ -1179,7 +1179,7 @@ async fn a_cancelled_call_stops() {
     let waiting = {
         let relay = relay.clone();
         let call = request("handoff", json!({ "message": "wait", "tab": tab, "timeoutSeconds": 30 }));
-        tokio::spawn(async move { crate::serve::call_tool_keyed(&relay, call, None, Some("key-1".into())).await })
+        tokio::spawn(async move { crate::serve::call_tool_keyed(&relay, call, None, Some("key-1".into()), None).await })
     };
     eventually("the handoff", || relay.st().handoffs.contains_key(&tab)).await;
     let (_, other) = http(port, "POST", "/tools/cancel", Some(&token), Some(json!({ "call": "key-other" }))).await;
@@ -1196,7 +1196,7 @@ async fn a_cancelled_call_stops() {
     let (_, early) = http(port, "POST", "/tools/cancel", Some(&token), Some(json!({ "call": "key-2" }))).await;
     assert_eq!(early["stopped"], false);
     let call = request("handoff", json!({ "message": "wait", "tab": tab, "timeoutSeconds": 30 }));
-    let output = tokio::time::timeout(Duration::from_secs(5), crate::serve::call_tool_keyed(&relay, call, None, Some("key-2".into()))).await.unwrap().unwrap();
+    let output = tokio::time::timeout(Duration::from_secs(5), crate::serve::call_tool_keyed(&relay, call, None, Some("key-2".into()), None)).await.unwrap().unwrap();
     assert!(output.is_error && text(&output).contains("cancelled"), "{}", text(&output));
     assert!(!relay.st().cancelled_calls.contains_key("key-2"));
     assert!(!relay.st().handoffs.contains_key(&tab));
@@ -1243,7 +1243,7 @@ async fn closing_a_tab_yourself_warns_nothing() {
 async fn a_call_naming_a_tab_waits_for_the_reconnecting_browser() {
     let h = harness().await;
     let relay = h.handle.relay.clone();
-    let held = crate::registry::PersistedTab { tab: 41, target_id: "T41".into(), browser_key: "profile-restart".into(), opener: None, options: TabOptions::default(), created_at: String::new() };
+    let held = crate::registry::PersistedTab { tab: 41, target_id: "T41".into(), browser_key: "profile-restart".into(), opener: None, caller: None, options: TabOptions::default(), created_at: String::new() };
     relay.st().restorable.insert("T41".into(), held);
     let browser = h.handle.browser();
     let call = {
@@ -1256,4 +1256,52 @@ async fn a_call_naming_a_tab_waits_for_the_reconnecting_browser() {
     events.send(json!({ "method": "debugger.attached", "params": { "tabId": 41, "agent": true } })).unwrap();
     events.send(json!({ "method": "ready" })).unwrap();
     tokio::time::timeout(Duration::from_secs(10), call).await.unwrap().unwrap().expect("the tab came back with the inventory");
+}
+
+/// One relay, one browser, several agents: each agent's tabs are its own, the lent ones are everyone's, and a call
+/// with no agent (the CLI) still sees everything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agents_sharing_a_relay_get_their_own_tabs() {
+    let (h, _seen, events) = connected("profile-owners", 60).await;
+    let relay = h.handle.relay.clone();
+    let port = h.handle.port();
+    let token = h.handle.token().to_string();
+    let call = |owner: Option<&'static str>, name: &'static str, arguments: Value| {
+        let token = token.clone();
+        async move {
+            let auth = format!("Bearer {token}");
+            let mut headers = vec![("Authorization", auth.as_str())];
+            if let Some(owner) = owner {
+                headers.push((crate::protocol::OWNER_HEADER, owner));
+            }
+            let body = json!({ "name": name, "arguments": arguments }).to_string();
+            let response = crate::client::request(port, "POST", "/tools/call", &headers, Some(body.as_bytes()), Duration::from_secs(5)).await.unwrap();
+            assert_eq!(response.status, 200, "{:?}", response.json());
+            text(&response.json().unwrap())
+        }
+    };
+
+    let opened = call(Some("mcp-alpha"), "tabs", json!({ "action": "new", "group": "alpha" })).await;
+    let tab = opened["tab"].as_i64().expect("a tab id");
+    assert_eq!(call(Some("mcp-alpha"), "tabs", json!({})).await["tabs"].as_array().unwrap().len(), 1);
+    // Another agent sees none of it: not in tabs, not in status, and it can't close it.
+    assert_eq!(call(Some("mcp-beta"), "tabs", json!({})).await["tabs"], json!([]));
+    assert_eq!(call(Some("mcp-beta"), "status", json!({})).await["tabs"], json!([]));
+    let denied = call(Some("mcp-beta"), "tabs", json!({ "action": "close", "tab": tab })).await;
+    assert_eq!(denied["failed"][0]["tab"], tab, "{denied}");
+    assert!(relay.st().tabs.contains_key(&tab), "another agent's close leaves the tab");
+    // A tab with no owning agent (the CLI's) is everyone's, as before.
+    assert_eq!(call(None, "tabs", json!({})).await["tabs"].as_array().unwrap().len(), 1);
+
+    // A tab the user lends is visible to every agent.
+    events.send(json!({ "method": "debugger.attached", "params": { "tabId": 61 } })).unwrap();
+    events.send(json!({ "method": "ready" })).unwrap();
+    eventually("the lent tab", || relay.st().tabs.get(&61).is_some_and(|t| t.owner == crate::relay::Owner::User)).await;
+    let beta = call(Some("mcp-beta"), "tabs", json!({})).await;
+    let lent: Vec<&Value> = beta["tabs"].as_array().unwrap().iter().filter(|t| t["tab"] == 61).collect();
+    assert_eq!(lent.len(), 1, "{beta}");
+    assert_eq!(lent[0]["lent"], true, "{beta}");
+
+    // Its own agent closes its own tab.
+    assert_eq!(call(Some("mcp-alpha"), "tabs", json!({ "action": "close", "tab": tab })).await["closed"], json!([tab]));
 }

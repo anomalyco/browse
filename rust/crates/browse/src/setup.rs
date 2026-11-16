@@ -576,6 +576,22 @@ mod tests {
     }
 
     #[test]
+    fn opencode_gets_one_pooled_server_with_a_fixed_cwd() {
+        let dir = scratch("pool");
+        let file = dir.join("opencode.json");
+        assert!(matches!(configure_opencode(&file, Path::new("/usr/bin/browse")).unwrap(), McpEdit::Added));
+        let config = jsonc::parse(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let server = &config["mcp"]["servers"]["browse"];
+        assert_eq!(server["type"], "local");
+        assert_eq!(server["command"], json!(["/usr/bin/browse", "mcp"]));
+        // One server serves every directory: OpenCode only pools an entry with a fixed cwd and `pool`.
+        assert_eq!(server["cwd"], "~");
+        assert_eq!(server["pool"], true);
+        assert!(matches!(configure_opencode(&file, Path::new("/usr/bin/browse")).unwrap(), McpEdit::UpToDate));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn an_opencode_config_with_a_byte_order_mark_is_updated_in_place() {
         let dir = scratch("bom");
         let file = dir.join("opencode.json");

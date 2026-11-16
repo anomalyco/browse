@@ -23,6 +23,11 @@ fn string(args: &Value, key: &str) -> Option<String> {
     args.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
 }
 
+/// Whether a tab claimed by `owner` is the business of a call by `caller` (the rule `Tab::visible_to` applies).
+fn visible(caller: Option<&str>, owner: Option<&str>) -> bool {
+    caller.is_none() || owner.is_none() || caller == owner
+}
+
 fn object(properties: Value, required: &[&str]) -> Value {
     json!({ "type": "object", "properties": properties, "required": required, "additionalProperties": false })
 }
@@ -41,7 +46,7 @@ impl Tool for TabsTool {
         properties.insert("idleMinutes".into(), json!({ "type": "number", "minimum": 0, "description": "close: only tabs no call used for this long. Alone it closes every agent tab idle that long." }));
         ToolSpec {
             name: "tabs".into(),
-            description: "List, open or close tabs. Tabs are the handle every other tool takes as `tab`. `list` returns the tabs browse opened for agents (tab id, url, title, group and options) and the tabs the user lent (lent: true; the user clicks the browse toolbar button on a tab to lend it, and any agent can use it by its id). `new` opens a background tab (at `url`, else about:blank), waits for it to load and returns its `tab` id; `navigate` without `tab` does the same. `close` closes `tab`, `tabs` or a whole `group`; a lent tab is given back to the user instead of closed. Tabs open in the background and never take focus from the user; close the ones you opened when you're done.".into(),
+            description: "List, open or close tabs. Tabs are the handle every other tool takes as `tab`. `list` returns the tabs browse opened for you (tab id, url, title, group and options) and the tabs the user lent (lent: true; the user clicks the browse toolbar button on a tab to lend it, and any agent can use it by its id). Another agent's tabs aren't listed and can't be used. `new` opens a background tab (at `url`, else about:blank), waits for it to load and returns its `tab` id; `navigate` without `tab` does the same. `close` closes `tab`, `tabs` or a whole `group`; a lent tab is given back to the user instead of closed. Tabs open in the background and never take focus from the user; close the ones you opened when you're done.".into(),
             input_schema: object(Value::Object(properties), &[]),
         }
     }
@@ -107,19 +112,26 @@ async fn close_tabs(relay: &Arc<Relay>, args: &Value) -> anyhow::Result<ToolOutp
         bail!("Say which tabs to close: tab, tabs or group (or idleMinutes for every agent tab idle that long).");
     }
     let mut forgotten = Vec::new();
+    let caller = crate::relay::caller();
     {
         let mut st = relay.st();
         if let Some(group) = &group {
-            let mut members: Vec<i64> = st.tabs.values().filter(|t| t.owner == Owner::Relay && t.options.group.as_ref() == Some(group)).map(|t| t.id).collect();
+            let mut members: Vec<i64> =
+                st.tabs.values().filter(|t| t.owner == Owner::Relay && t.visible_to(caller.as_deref()) && t.options.group.as_ref() == Some(group)).map(|t| t.id).collect();
             members.sort();
             picked.extend(members);
             // Tabs of the group whose browser is away close when it comes back.
             let away: Vec<(String, String, i64)> = st
                 .reconnect_owners
                 .iter()
-                .filter(|(_, k)| k.owner == Owner::Relay && k.options.group.as_ref() == Some(group))
+                .filter(|(_, k)| k.owner == Owner::Relay && visible(caller.as_deref(), k.caller.as_deref()) && k.options.group.as_ref() == Some(group))
                 .map(|(target, k)| (target.clone(), k.browser.clone(), k.tab))
-                .chain(st.restorable.iter().filter(|(_, r)| r.options.group.as_ref() == Some(group)).map(|(target, r)| (target.clone(), r.browser_key.clone(), r.tab)))
+                .chain(
+                    st.restorable
+                        .iter()
+                        .filter(|(_, r)| visible(caller.as_deref(), r.caller.as_deref()) && r.options.group.as_ref() == Some(group))
+                        .map(|(target, r)| (target.clone(), r.browser_key.clone(), r.tab)),
+                )
                 .collect();
             for (target, browser, tab) in away {
                 st.reconnect_owners.remove(&target);
@@ -128,7 +140,7 @@ async fn close_tabs(relay: &Arc<Relay>, args: &Value) -> anyhow::Result<ToolOutp
                 forgotten.push(tab);
             }
         } else if picked.is_empty() {
-            picked.extend(st.tabs.values().filter(|t| t.owner == Owner::Relay).map(|t| t.id));
+            picked.extend(st.tabs.values().filter(|t| t.owner == Owner::Relay && t.visible_to(caller.as_deref())).map(|t| t.id));
             picked.sort();
         }
         if let Some(minutes) = idle {
@@ -249,7 +261,7 @@ impl Tool for StatusTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "status".into(),
-            description: "Report the relay, the connected browsers (ids to pass as `browser` when opening a tab), pairing state and what to do when no browser is connected (`nextStep`), and every attached tab.".into(),
+            description: "Report the relay, the connected browsers (ids to pass as `browser` when opening a tab), pairing state and what to do when no browser is connected (`nextStep`), and the tabs you can use.".into(),
             input_schema: object(json!({}), &[]),
         }
     }

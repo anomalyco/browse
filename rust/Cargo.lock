@@ -91,11 +91,13 @@ dependencies = [
  "browse-relay",
  "browse-script",
  "crossterm",
+ "futures-util",
  "libc",
  "serde_json",
  "serde_yaml",
  "sha2",
  "tokio",
+ "tokio-tungstenite 0.27.0",
  "toml_edit",
 ]
 
