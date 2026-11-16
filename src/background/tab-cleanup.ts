@@ -31,6 +31,8 @@ let browserSession: Promise<boolean> | undefined
 const TOUCH_SAVE_MS = 2_000
 /** How long restore() waits for the tab and group lists; Dia's tab-group API can never settle. */
 const RESTORE_QUERY_MS = 2_000
+/** A close makes several Chrome calls, any of which can hang; fail it rather than wedge every later close. */
+const CLOSE_TIMEOUT_MS = RESTORE_QUERY_MS * 3
 /** Tabs that must stay open whatever their age, for example while a handoff waits for the user or a recording runs. */
 const guards: ((tabId: number) => boolean)[] = []
 
@@ -91,28 +93,36 @@ const closeSerially = serialQueue()
 let platform: Promise<boolean> | undefined
 
 /**
- * Closes an agent's tab. A tab in an agent group is ungrouped first: Chrome keeps a saved group when its last tab is
- * the window's last tab (closing the window keeps its groups saved), while emptying a group by ungrouping always
- * deletes it. A tab that is the last one of the last window leaves a plain tab (or a normal window, when its own is a
- * popup) behind first: closing it would close the window, and with it the browser on Windows and Linux.
+ * Closes an agent's tab. The last tab of the last window leaves a plain tab (or a normal window, when its own is a
+ * popup) behind first: closing it would close the window, and with it the browser on Windows and Linux. It does that
+ * before ungrouping, so a failed replacement leaves the tab and its group alone. A tab in an agent group is ungrouped
+ * before closing: Chrome keeps a saved group when its last tab is the window's last tab (closing the window keeps its
+ * groups saved), while emptying a group by ungrouping always deletes it.
  */
 export function closeAgentTab(tabId: number): Promise<void> {
-  return closeSerially(() => closeAgentTabNow(tabId))
+  return closeSerially(async () => {
+    const work = closeAgentTabNow(tabId)
+    // The timeout may win; don't leave a late rejection from the work it gave up on unhandled.
+    void work.catch(() => undefined)
+    const result = await withTimeout(work, CLOSE_TIMEOUT_MS)
+    if (result === TIMED_OUT) throw new Error(`closing tab ${tabId} timed out`)
+    return result
+  })
 }
 
 async function closeAgentTabNow(tabId: number): Promise<void> {
   const tab = await chrome.tabs.get(tabId).catch(() => undefined)
   let groupId: number | undefined
-  if (tab && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
-    const group = await chrome.tabGroups.get(tab.groupId).catch(() => undefined)
-    if (group && ownedGroup(group.title)) {
-      groupId = tab.groupId
-      closing.add(tabId)
-      await chrome.tabs.ungroup(tabId).catch(() => undefined)
-    }
-  }
   try {
     if (tab) await leaveLastWindowOpen(tab)
+    if (tab && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
+      const group = await chrome.tabGroups.get(tab.groupId).catch(() => undefined)
+      if (group && ownedGroup(group.title)) {
+        groupId = tab.groupId
+        closing.add(tabId)
+        await chrome.tabs.ungroup(tabId).catch(() => undefined)
+      }
+    }
     await chrome.tabs.remove(tabId)
   } catch (error) {
     if (groupId !== undefined) {
@@ -155,7 +165,7 @@ async function lastTabReplacement(tab: chrome.tabs.Tab): Promise<LastTab> {
     return windows.some((window) => window.id === tab.windowId) ? "tab" : "window"
   }
   const own = await withTimeout(chrome.windows.get(tab.windowId), RESTORE_QUERY_MS).catch((): typeof TIMED_OUT => TIMED_OUT)
-  return own !== TIMED_OUT && own.type === "normal" ? "tab" : "window"
+  return own === TIMED_OUT || own.type === "normal" ? "tab" : "window"
 }
 
 function macos(): Promise<boolean> {

@@ -41,10 +41,10 @@ async function scene() {
   const agent = await stub.chrome.windows.create({ url: "https://agent.example/", focused: false })
   await stub.chrome.storage.session.set({ agentWindowId: agent.id })
   const agentTab = agent.tabs[0]!.id
-  await stub.chrome.tabs.group({ tabIds: [agentTab], groupId: 7 })
+  const groupId = await stub.chrome.tabs.group({ tabIds: [agentTab] })
   expect((await command("debugger.attach", { tabId: agentTab })).error).toBeUndefined()
   TabCleanup.track(agentTab)
-  return { user, userTab, agent, agentTab }
+  return { user, userTab, agent, agentTab, groupId }
 }
 
 /** The user's focused window with their active tab, and the agent's background tab in it (grouped), attached and tracked. */
@@ -53,10 +53,10 @@ async function sharedScene() {
   const userTab = user.tabs[0]!.id
   event("tabs.onActivated").emit({ tabId: userTab, windowId: user.id })
   const agentTab = (await stub.chrome.tabs.create({ windowId: user.id, url: "https://agent.example/", active: false })).id
-  await stub.chrome.tabs.group({ tabIds: [agentTab], groupId: 8 })
+  const groupId = await stub.chrome.tabs.group({ tabIds: [agentTab] })
   expect((await command("debugger.attach", { tabId: agentTab })).error).toBeUndefined()
   TabCleanup.track(agentTab)
-  return { user, userTab, agentTab }
+  return { user, userTab, agentTab, groupId }
 }
 
 /** Neither a window focused nor a tab activated other than giving the user back `userTab`. */
@@ -127,14 +127,14 @@ describe("tabs.create", () => {
 
 describe("adoptOpened, agent tabs in the user's window", () => {
   test("a popup that took over the user's window stays there, gives the user their tab back and joins the group", async () => {
-    const { user, userTab, agentTab } = await sharedScene()
+    const { user, userTab, agentTab, groupId } = await sharedScene()
     const popup = await stub.chrome.tabs.create({ windowId: user.id, url: "https://popup.example/", active: true })
     event("tabs.onActivated").emit({ tabId: popup.id, windowId: user.id })
     event("webNavigation.onCreatedNavigationTarget").emit({ sourceTabId: agentTab, tabId: popup.id })
     await until(() => opened().length === 1)
     const adopted = stub.state.tabs.get(popup.id)!
     expect(adopted.windowId).toBe(user.id)
-    expect(adopted.groupId).toBe(8)
+    expect(adopted.groupId).toBe(groupId)
     expect(adopted.active).toBe(false)
     expect(stub.state.tabs.get(userTab)!.active).toBe(true)
     expect(stub.state.focusedWindowId).toBe(user.id)
@@ -144,11 +144,11 @@ describe("adoptOpened, agent tabs in the user's window", () => {
   })
 
   test("a background popup stays where it opened and joins the group, activating nothing", async () => {
-    const { user, userTab, agentTab } = await sharedScene()
+    const { user, userTab, agentTab, groupId } = await sharedScene()
     const popup = await stub.chrome.tabs.create({ windowId: user.id, url: "https://popup.example/", active: false })
     event("webNavigation.onCreatedNavigationTarget").emit({ sourceTabId: agentTab, tabId: popup.id })
     await until(() => opened().length === 1)
-    expect(stub.state.tabs.get(popup.id)).toMatchObject({ windowId: user.id, groupId: 8, active: false })
+    expect(stub.state.tabs.get(popup.id)).toMatchObject({ windowId: user.id, groupId, active: false })
     expect(stub.state.tabs.get(userTab)!.active).toBe(true)
     nothingActivated()
   })
@@ -164,28 +164,28 @@ describe("adoptOpened, agent tabs in the user's window", () => {
   })
 
   test("with an agent window open from the separate setting, a popup from a tab in the user's window still stays", async () => {
-    const { user, agentTab } = await sharedScene()
+    const { user, agentTab, groupId } = await sharedScene()
     const agent = await stub.chrome.windows.create({ url: "https://other-agent.example/", focused: false })
     await stub.chrome.storage.session.set({ agentWindowId: agent.id })
     await stub.chrome.storage.local.set({ agentTabsWindow: "separate" })
     const popup = await stub.chrome.tabs.create({ windowId: user.id, url: "https://popup.example/", active: false })
     event("webNavigation.onCreatedNavigationTarget").emit({ sourceTabId: agentTab, tabId: popup.id })
     await until(() => opened().length === 1)
-    expect(stub.state.tabs.get(popup.id)).toMatchObject({ windowId: user.id, groupId: 8 })
+    expect(stub.state.tabs.get(popup.id)).toMatchObject({ windowId: user.id, groupId })
   })
 })
 
 describe("adoptOpened, agent tabs in a separate window", () => {
   test("a tab that took over the user's window moves to the agent window, gives the user their tab back and joins the group", async () => {
     await stub.chrome.storage.local.set({ agentTabsWindow: "separate" })
-    const { user, userTab, agent, agentTab } = await scene()
+    const { user, userTab, agent, agentTab, groupId } = await scene()
     const popup = await stub.chrome.tabs.create({ windowId: user.id, url: "https://popup.example/", active: true })
     event("tabs.onActivated").emit({ tabId: popup.id, windowId: user.id })
     event("webNavigation.onCreatedNavigationTarget").emit({ sourceTabId: agentTab, tabId: popup.id })
     await until(() => opened().length === 1)
     const moved = stub.state.tabs.get(popup.id)!
     expect(moved.windowId).toBe(agent.id)
-    expect(moved.groupId).toBe(7)
+    expect(moved.groupId).toBe(groupId)
     expect(stub.state.tabs.get(userTab)!.active).toBe(true)
     expect(await TabCleanup.isTracked(popup.id)).toBe(true)
     // Only once it's in place does the relay hear of it.

@@ -229,6 +229,7 @@ export function createChrome() {
       },
       async group({ tabIds, groupId }: { tabIds: number | number[]; groupId?: number }) {
         const ids = Array.isArray(tabIds) ? tabIds : [tabIds]
+        if (groupId !== undefined && !groups.has(groupId)) throw new Error(`No group with id: ${groupId}`)
         const id = groupId ?? nextId++
         for (const tabId of ids) {
           const tab = tabs.get(tabId)

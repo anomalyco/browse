@@ -243,11 +243,32 @@ describe("closing the last tab of the last window", () => {
       await expect(TabCleanup.closeAgentTab(tabId)).rejects.toThrow("cannot create a tab")
       expect(open(tabId)).toBe(true)
       expect(stub.state.tabs.get(tabId)!.groupId).toBe(groupId)
+      expect(stub.state.groups.get(groupId)?.title).toBe(`github${MARKER}`)
       expect(await TabCleanup.isTracked(tabId)).toBe(true)
     } finally {
       stub.chrome.tabs.create = create
     }
   })
+
+  test("a hung Chrome call fails its close and the queue moves on", async () => {
+    usePlatform("linux")
+    const [hung, other] = await onlyTabsInWindow(2)
+    const get = stub.chrome.tabs.get
+    stub.chrome.tabs.get = async (id) => {
+      if (id === hung) return new Promise<never>(() => {})
+      return get(id)
+    }
+    try {
+      const first = TabCleanup.closeAgentTab(hung)
+      const second = TabCleanup.closeAgentTab(other)
+      await expect(first).rejects.toThrow(`closing tab ${hung} timed out`)
+      await second
+      expect(open(hung)).toBe(true)
+      expect(open(other)).toBe(false)
+    } finally {
+      stub.chrome.tabs.get = get
+    }
+  }, 15_000)
 
   test("a window lookup that hangs counts as the last window, so a new tab is created", async () => {
     usePlatform("linux")
