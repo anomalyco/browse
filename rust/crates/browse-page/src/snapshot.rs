@@ -620,7 +620,8 @@ pub async fn snapshot(page: &Arc<TabPage>, tab_state: &PageTab, options: &Option
         None => (None, None, None),
     };
     let settings = Settings {
-        compact: options.compact,
+        // find greps the rendered lines, so navigation has to be expanded for controls inside it to match.
+        compact: options.compact && options.find.is_none(),
         depth: options.depth,
         interactive: options.interactive,
         max_candidates: (max_items * 20).max(1_000),

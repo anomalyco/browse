@@ -463,6 +463,8 @@ const captureSnapshotInBrowser = (
     const role = element.getAttribute("role")
     return role !== null && (extraCandidateRoles.has(role) || structuralRoles.has(role) || interactiveRoles.has(role))
   }
+  const isLinkElement = (element: Element): boolean =>
+    (element.localName === "a" && element.hasAttribute("href")) || element.getAttribute("role") === "link"
   const structuralKeys = new WeakMap<Element, string>()
   let nextStructuralKey = 1
   const structuralKey = (element: Element): string => {
@@ -668,20 +670,39 @@ const captureSnapshotInBrowser = (
       truncated = true
       break
     }
-    if (settings.compact && !headerCandidateSet.has(element)) {
+    if (settings.compact && !settings.interactive && !headerCandidateSet.has(element)) {
       const navigation = closestDeep(element, "nav, [role='navigation'], aside, [role='complementary'], [data-slot='sidebar'], [data-sidebar='sidebar']")
       if (navigation && collapsedNavigation.has(navigation)) {
         continue
       }
       if (navigation && navigation !== root && !navigation.contains?.(root) && !nonCollapsibleNavigation.has(navigation)) {
-        const isCollapsibleNav = isVisible(navigation) && (
+        // Every interactive descendant, so a control hidden by CSS still keeps the landmark expanded.
+        const controls = querySelectorAllDeep(
+          navigation,
+          ["a[href]", "[contenteditable]", ...interactiveTags, ...Array.from(interactiveRoles, (role) => `[role='${role}']`)].join(", "),
+        ).filter(isInteractiveElement)
+        // Only a pure link list is a landmark worth summarising. A nav of buttons (a conversation list, a
+        // toolbar) is content: collapsing it would hide every control, and the summary carries no ref.
+        const isLinkList = controls.length > 0 && controls.every(isLinkElement)
+        const isCollapsibleNav = isVisible(navigation) && isLinkList && (
           navigation.matches("nav, [role='navigation']") ||
-          (querySelectorAllDeep(navigation, "a[href]").length >= 8 && !navigation.querySelector?.("h1, main, [role='main'], input, textarea, select"))
+          (controls.length >= 8 && !navigation.querySelector?.("h1, main, [role='main'], input, textarea, select"))
         )
         if (isCollapsibleNav) {
           collapsedNavigation.add(navigation)
-          const count = querySelectorAllDeep(navigation, "a[href], button").length
-          add({ depth: headingDepth(navigation), role: "navigation", name: truncate(labelledName(navigation), 100) || "Navigation", details: `${count} controls`, priority: 0 })
+          // A landmark sits at the depth of the heading it follows, not under it; structural parents still nest it.
+          const parentKeys = structuralParentKeys(navigation)
+          const baseDepth = Math.max(0, headingDepth(navigation) - 1)
+          const count = controls.length
+          add({
+            depth: baseDepth + parentKeys.length,
+            baseDepth,
+            ...(parentKeys.length > 0 ? { parentKeys } : {}),
+            role: "navigation",
+            name: truncate(labelledName(navigation), 100) || "Navigation",
+            details: `${count} ${count === 1 ? "link" : "links"}, collapsed`,
+            priority: 0,
+          })
           continue
         }
         nonCollapsibleNavigation.add(navigation)

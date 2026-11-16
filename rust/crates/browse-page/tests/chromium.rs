@@ -96,6 +96,46 @@ async fn snapshot_click_fill_and_refs() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn snapshot_navigation_controls_stay_visible() {
+    let h = harness!(false);
+    // A nav of role=button items is content, not a link list: collapsing it would hide every control.
+    let page = h.server.page(
+        "/nav-controls",
+        r#"<!doctype html><div id="a"><h2>A plain div</h2>
+  <div role="button" tabindex="0"><div><span>alice</span><span>hi</span></div></div></div>
+<section id="b"><h2>B section</h2>
+  <div role="button" tabindex="0">bob direct text</div></section>
+<nav aria-label="C nav"><h2>C nav</h2>
+  <div role="button" tabindex="0"><div><span>carol</span></div></div></nav>
+<nav aria-label="Sections"><a href="/a">Alpha</a><a href="/b">Beta</a><a href="/c">Gamma</a></nav>
+<input aria-placeholder="Message only">"#,
+    );
+    h.ok("navigate", json!({ "url": page })).await;
+    let snapshot = h.ok("snapshot", json!({})).await;
+    let carol = ref_of(&snapshot, "button \"carol\"");
+    assert!(carol.starts_with('e'), "carol keeps a compact ref ({carol}):\n{snapshot}");
+    // A pure link list still collapses, and the line sits with the headings rather than under one.
+    assert!(
+        snapshot.lines().any(|line| line == "- navigation \"Sections\" [3 links, collapsed]"),
+        "{snapshot}"
+    );
+    assert!(!snapshot.contains("link \"Alpha\""), "{snapshot}");
+    // aria-placeholder names a control that has no label, title or placeholder of its own.
+    assert!(snapshot.contains("- textbox \"Message only\" [ref="), "{snapshot}");
+    let found = h.ok("snapshot", json!({ "find": "carol" })).await;
+    assert!(found.starts_with("1 matching snapshot line"), "{found}");
+    // find greps the rendered lines, so a collapsed link list has to be expanded for the match.
+    let found_link = h.ok("snapshot", json!({ "find": "Alpha" })).await;
+    assert!(found_link.contains("link \"Alpha\""), "{found_link}");
+
+    // interactive asks for controls, so the summary would hide exactly what was asked for.
+    let interactive = h.ok("snapshot", json!({ "interactive": true })).await;
+    assert!(!interactive.contains("navigation \"Sections\""), "{interactive}");
+    let alpha = ref_of(&interactive, "link \"Alpha\"");
+    assert!(alpha.starts_with('e'), "the link keeps a ref ({alpha}):\n{interactive}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stealth_isolated_world_and_main_world() {
     let h = harness!(false);
     let url = h.server.page("/s", "<!doctype html><script>window.pageSecret = 42; window.baseline = new Set(Object.getOwnPropertyNames(window).concat(['baseline']))</script><button>Go</button>");

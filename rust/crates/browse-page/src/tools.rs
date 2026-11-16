@@ -1535,7 +1535,7 @@ fn snapshot_schema() -> Value {
         props(json!({
             "within": { "type": "string", "description": "A ref (\"e12\") or selector to snapshot only that part. A selector with several matches uses the first visible one, with no match the whole page; either adds a note." },
             "interactive": { "type": "boolean", "description": "Only controls (and alerts), no headings or paragraphs." },
-            "compact": { "type": "boolean", "description": "Collapse navigation, layout tables and redundant headings (default true)." },
+            "compact": { "type": "boolean", "description": "Collapse link-only navigation, layout tables and redundant headings (default true)." },
             "find": { "type": "string", "description": "Only lines containing this text (case-insensitive), or matching /regex/flags, with context lines around them." },
             "context": { "type": "integer", "description": "Context lines around find matches (0-10, default 2)." },
             "diff": { "type": "boolean", "description": "Only +added / -removed lines versus the previous snapshot (same tab and options required)." },

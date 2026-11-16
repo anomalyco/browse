@@ -141,6 +141,9 @@
     const placeholder = element.getAttribute("placeholder");
     if (placeholder)
       return normalize(placeholder);
+    const ariaPlaceholder = element.getAttribute("aria-placeholder");
+    if (ariaPlaceholder)
+      return normalize(ariaPlaceholder);
     return "";
   }, accessibleNameCache = new WeakMap, accessibleName = (element) => {
     const cached = accessibleNameCache.get(element);

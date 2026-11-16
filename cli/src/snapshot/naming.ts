@@ -155,6 +155,8 @@ export const snapshotNamingInBrowser = () => {
     if (title) return title
     const placeholder = element.getAttribute("placeholder")
     if (placeholder) return normalize(placeholder)
+    const ariaPlaceholder = element.getAttribute("aria-placeholder")
+    if (ariaPlaceholder) return normalize(ariaPlaceholder)
     return ""
   }
   const accessibleNameCache = new WeakMap<Element, string>()
