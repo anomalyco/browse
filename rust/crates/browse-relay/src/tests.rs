@@ -946,6 +946,39 @@ async fn lent_tabs_are_used_by_id_and_given_back() {
     assert!(text(&serde_json::to_value(&output).unwrap())["outcome"] == "continued", "the toolbar button continues a handoff first");
 }
 
+/// Page.close on a lent tab gives it back, like Target.closeTarget: the user keeps it.
+#[tokio::test]
+async fn page_close_releases_a_lent_tab() {
+    let (h, seen, events) = connected("profile-page-close-lent", 500).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    events.send(json!({ "method": "toolbar.clicked", "params": { "tabId": 55 } })).unwrap();
+    eventually("the lent tab", || relay.st().tabs.contains_key(&55)).await;
+    let cdp = browser.cdp(55).await.unwrap();
+    assert_eq!(cdp.send("Page.close", json!({}), None).await.unwrap(), json!({}));
+    assert!(!relay.st().tabs.contains_key(&55), "a lent tab is released, not closed");
+    assert!(seen.commands("debugger.detach").iter().any(|c| c["params"]["tabId"] == 55));
+    assert!(seen.commands("tabs.remove").iter().all(|c| c["params"]["tabId"] != 55), "a lent tab is never closed");
+    assert!(seen.cdp("Page.close").is_empty(), "Page.close is not forwarded to the debugger");
+}
+
+/// Page.close closes an agent's tab through the relay, and a child session can't close the page it belongs to.
+#[tokio::test]
+async fn page_close_closes_an_agent_tab_and_refuses_child_sessions() {
+    let (h, seen, _events) = connected("profile-page-close-agent", 500).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let tab = browser.open_tab(None, &TabOptions::default()).await.unwrap().tab;
+    let cdp = browser.cdp(tab).await.unwrap();
+    let refused = cdp.send("Page.close", json!({}), Some("CHILD")).await.unwrap_err();
+    assert!(matches!(refused, CdpError::Protocol(ref message) if message.contains("Page.close needs the tab's own page session")), "{refused:?}");
+    assert!(relay.st().tabs.contains_key(&tab), "a child session can't close the tab");
+    assert_eq!(cdp.send("Page.close", json!({}), None).await.unwrap(), json!({}));
+    assert!(!relay.st().tabs.contains_key(&tab));
+    assert!(seen.commands("tabs.remove").iter().any(|c| c["params"]["tabId"] == tab));
+    assert!(seen.cdp("Page.close").is_empty(), "Page.close is not forwarded to the debugger");
+}
+
 /// Agent tabs, with their ids, options and group, survive a relay restart; the old session catalog is removed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_tabs_survive_a_relay_restart() {

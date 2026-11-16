@@ -181,7 +181,8 @@ extension from your browser to finish.
   `allowedOrigins`, `readOnly`, `keepVisible` and `browser`. Popups a page opens become the agent's tabs too.
 - **Agents open their own tabs** in the background of the window you last used, grouped together and collapsed unless
   you're looking at one. Agents can't switch you to their tabs or bring a window to the front. Tabs nobody touches for
-  10 minutes close by themselves (never while something runs on them).
+  10 minutes close by themselves (never while something runs on them). Closing agent tabs never quits the browser: on
+  Windows and Linux, browse leaves a new tab (or window) behind when it would close the last one.
 - **Relay restarts keep agent tabs.** The relay saves the tabs agents opened and their options, and takes them back
   when it starts again (after an update, say).
 - **Hand an agent one of your tabs** by clicking the toolbar button on it. The badge shows **ON**; click again to take
@@ -265,8 +266,9 @@ to steer it, and that other programs on your computer may try to use the relay.
   Treat code an agent runs as code running as you. The relay starts with an allowlisted environment, so your API keys
   aren't in it.
 - **CDP guardrails.** Clearing cookies, cache or site data, closing the browser and changing site permissions are
-  refused. Cookie and storage access is limited to the hosts of the tab's own pages. Agents can't open browser-internal
-  pages, other extensions or local files, or raise windows over your work.
+  refused. Closing a page is handled like closing a target: a tab you lent is released, not closed. Cookie and storage
+  access is limited to the hosts of the tab's own pages. Agents can't open browser-internal pages, other extensions or
+  local files, or raise windows over your work.
 - **Allowed sites (opt-in).** A tab opened with `allowedOrigins` can only go to those sites; read-only tabs only
   inspect.
 - **Bot challenges.** After a navigation browse reports Cloudflare, captcha walls and "access denied" pages and tells

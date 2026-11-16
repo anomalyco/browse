@@ -1,6 +1,7 @@
 export * as TabCleanup from "./tab-cleanup"
 import { DEFAULT_IDLE_MINUTES, IDLE_MINUTES_KEY, idleMinutesSetting } from "../shared/protocol"
 import { ownedGroup, TIMED_OUT, withTimeout } from "./agent-relay/wire"
+import { serialQueue } from "./serial"
 
 // Closes tabs agents opened once nobody has touched them for a while, so agent work doesn't leave a trail of
 // tabs behind. Only tabs an agent created are tracked (the relay's
@@ -30,6 +31,8 @@ let browserSession: Promise<boolean> | undefined
 const TOUCH_SAVE_MS = 2_000
 /** How long restore() waits for the tab and group lists; Dia's tab-group API can never settle. */
 const RESTORE_QUERY_MS = 2_000
+/** A close makes several Chrome calls, any of which can hang; fail it rather than wedge every later close. */
+const CLOSE_TIMEOUT_MS = RESTORE_QUERY_MS * 5
 /** Tabs that must stay open whatever their age, for example while a handoff waits for the user or a recording runs. */
 const guards: ((tabId: number) => boolean)[] = []
 
@@ -84,23 +87,42 @@ export async function idleMinutes() {
   return idleMinutesSetting((await chrome.storage.local.get(IDLE_MINUTES_KEY))[IDLE_MINUTES_KEY])
 }
 
+/** Agent tabs close one at a time: two closes must not each see the other's tab and leave their window empty. */
+const closeSerially = serialQueue()
+/** Whether this is macOS, where closing the last window doesn't quit the browser. Cached for this browser session. */
+let platform: Promise<boolean> | undefined
+
 /**
- * Closes an agent's tab. A tab in an agent group is ungrouped first: Chrome keeps a saved group when its last tab is
- * the window's last tab (closing the window keeps its groups saved), while emptying a group by ungrouping always
- * deletes it.
+ * Closes an agent's tab. The last tab of the last window leaves a plain tab (or a normal window, when its own is a
+ * popup) behind first: closing it would close the window, and with it the browser on Windows and Linux. It does that
+ * before ungrouping, so a failed replacement leaves the tab and its group alone. A tab in an agent group is ungrouped
+ * before closing: Chrome keeps a saved group when its last tab is the window's last tab (closing the window keeps its
+ * groups saved), while emptying a group by ungrouping always deletes it.
  */
-export async function closeAgentTab(tabId: number): Promise<void> {
+export function closeAgentTab(tabId: number): Promise<void> {
+  return closeSerially(async () => {
+    const work = closeAgentTabNow(tabId)
+    // The timeout may win; don't leave a late rejection from the work it gave up on unhandled.
+    void work.catch(() => undefined)
+    const result = await withTimeout(work, CLOSE_TIMEOUT_MS)
+    if (result === TIMED_OUT) throw new Error(`closing tab ${tabId} timed out`)
+    return result
+  })
+}
+
+async function closeAgentTabNow(tabId: number): Promise<void> {
   const tab = await chrome.tabs.get(tabId).catch(() => undefined)
   let groupId: number | undefined
-  if (tab && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
-    const group = await chrome.tabGroups.get(tab.groupId).catch(() => undefined)
-    if (group && ownedGroup(group.title)) {
-      groupId = tab.groupId
-      closing.add(tabId)
-      await chrome.tabs.ungroup(tabId).catch(() => undefined)
-    }
-  }
   try {
+    if (tab) await leaveLastWindowOpen(tab)
+    if (tab && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
+      const group = await chrome.tabGroups.get(tab.groupId).catch(() => undefined)
+      if (group && ownedGroup(group.title)) {
+        groupId = tab.groupId
+        closing.add(tabId)
+        await chrome.tabs.ungroup(tabId).catch(() => undefined)
+      }
+    }
     await chrome.tabs.remove(tabId)
   } catch (error) {
     if (groupId !== undefined) {
@@ -109,6 +131,46 @@ export async function closeAgentTab(tabId: number): Promise<void> {
     }
     throw error
   }
+}
+
+/** What closing a last tab needs to keep the browser open: nothing, a plain tab, or a normal window. */
+type LastTab = "none" | "tab" | "window"
+
+/**
+ * Leaves the browser something open if closing `tab` would quit it: a plain tab in its own normal window, or a new
+ * normal window when its own is a popup, where Chrome doesn't reliably open a tab.
+ */
+async function leaveLastWindowOpen(tab: chrome.tabs.Tab): Promise<void> {
+  const replacement = await lastTabReplacement(tab)
+  if (replacement === "none" || (await macos())) return
+  if (replacement === "tab") await chrome.tabs.create({ windowId: tab.windowId })
+  else await chrome.windows.create({ focused: false, type: "normal" })
+}
+
+/**
+ * Whether closing `tab` would empty the last window, and what to leave behind. An uncertain Chrome call counts as
+ * last: a spare tab or window is better than a browser that quits.
+ */
+async function lastTabReplacement(tab: chrome.tabs.Tab): Promise<LastTab> {
+  if (tab.id === undefined) return "none"
+  const tabs = await withTimeout(chrome.tabs.query({ windowId: tab.windowId }), RESTORE_QUERY_MS)
+    .catch((): typeof TIMED_OUT => TIMED_OUT)
+  if (tabs !== TIMED_OUT && (tabs.length !== 1 || tabs[0]?.id !== tab.id)) return "none"
+  const windows = await withTimeout(
+    chrome.windows.getAll({ windowTypes: ["normal"] }),
+    RESTORE_QUERY_MS,
+  ).catch((): typeof TIMED_OUT => TIMED_OUT)
+  if (windows !== TIMED_OUT) {
+    if (windows.some((window) => window.id !== undefined && window.id !== tab.windowId)) return "none"
+    return windows.some((window) => window.id === tab.windowId) ? "tab" : "window"
+  }
+  const own = await withTimeout(chrome.windows.get(tab.windowId), RESTORE_QUERY_MS).catch((): typeof TIMED_OUT => TIMED_OUT)
+  return own === TIMED_OUT || own.type === "normal" ? "tab" : "window"
+}
+
+function macos(): Promise<boolean> {
+  platform ??= chrome.runtime.getPlatformInfo().then((info) => info.os === "mac", () => false)
+  return platform
 }
 
 /**
@@ -341,6 +403,7 @@ chrome.runtime.onStartup.addListener(() => {
   tracked.clear()
   closing.clear()
   relayUngrouping.clear()
+  platform = undefined
   void chrome.storage.local.remove([STORAGE_KEY, CREATING_KEY])
 })
 chrome.tabs.onActivated.addListener(({ tabId }) => touch(tabId))

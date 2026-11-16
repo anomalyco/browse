@@ -252,6 +252,24 @@ export function createCdpDispatcher(options: {
       yield* closeTargetByTargetId(targetId)
       return { success: true }
     }
+    if (message.method === "Page.close") {
+      // Playwright sends Page.close for page.close({ runBeforeUnload: true }), and a raw session can send it too.
+      // Forwarding it to chrome.debugger would close the tab directly, bypassing the ownership and last-window checks
+      // Target.closeTarget gets. Close the page's target the same way instead.
+      const target = message.sessionId === undefined
+        ? undefined
+        : cdpRouter.targetInfo(socket, { sessionId: message.sessionId })
+      if (!target || !("owner" in target)) {
+        return yield* Effect.fail(new Error(`Page.close needs a page's CDP session: ${message.sessionId ?? "no session"} is unknown, a frame or a worker`))
+      }
+      if (target.owner === "user") {
+        yield* detachTab(target.tabId)
+        relayLog("target.released", { tabId: target.tabId, reason: "Page.close on a user tab" })
+        return {}
+      }
+      yield* closeTargetByTargetId(target.targetInfo.targetId)
+      return {}
+    }
     if (message.method === "Target.detachFromTarget") {
       const childSessionId = getString(message.params, "sessionId")
       if (childSessionId) cdpClients.detach(socket, childSessionId)
