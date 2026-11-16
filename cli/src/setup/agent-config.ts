@@ -4,7 +4,7 @@ import path from "node:path"
 import { isDeepStrictEqual } from "node:util"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
 import { parse as parseToml } from "smol-toml"
-import { isMap, parseDocument } from "yaml"
+import { isMap, isSeq, parseDocument, type YAMLMap, type YAMLSeq } from "yaml"
 import { agentLabels, agentNames, type AgentName } from "./agents.ts"
 
 export { agentLabels, agentNames, type AgentName }
@@ -16,6 +16,7 @@ const aliases: Record<string, AgentName> = {
   "claude-code": "claude", "gemini-cli": "gemini", "roo-code": "roo", "kilo-code": "kilo", "kiro-cli": "kiro",
   "factory-droid": "droid", "github-copilot": "copilot", "copilot-cli": "copilot", lmstudio: "lm-studio",
   "kimi-code-cli": "kimi", "hermes-agent": "hermes", "mistral-vibe": "vibe", "antigravity-cli": "antigravity",
+  "deepseek-harness": "dsh",
 }
 export function agentName(id: string): AgentName | undefined {
   return agentNames.find(n => n === id) ?? (Object.hasOwn(aliases, id) ? aliases[id] : undefined)
@@ -91,6 +92,7 @@ export function agentLocations(home: string, config: string, onPath: (name: stri
     loc("vibe", path.join(env.VIBE_HOME ?? at(".vibe"), "config.toml"), "vibe"),
     loc("qoder", at(".qoder/settings.json"), "qoder", "Qoder"),
     loc("pi", path.join(env.PI_CODING_AGENT_DIR ?? at(".pi/agent"), "mcp.json"), "pi"),
+    loc("dsh", path.join(env.DSH_HOME ?? at(".dsh"), "cordis.patch.yml"), "dsh"),
   ]
 }
 
@@ -98,19 +100,39 @@ const object = (value: unknown): value is Record<string, unknown> => !!value && 
 type EditResult = "added" | "unchanged" | "removed" | "conflict"
 /** Parse YAML without rounding integers beyond 2^53: install only adds its entry. */
 const yamlOptions = { merge: true, intAsBigInt: true } as const
+const dshServer = "@deepseek-ai/dsh-mcp-client"
+/** dsh takes MCP servers as rows of a Cordis patch layer: a top-level YAML sequence. */
+const isDsh = (name: AgentName) => name === "dsh"
+
+/** The `config` of the browse mcp-client row in a dsh patch layer, if it has one. */
+function dshBrowseConfig(config: unknown): Record<string, unknown> | undefined {
+  if (!Array.isArray(config)) return undefined
+  for (const patch of config) {
+    if (!object(patch) || !Array.isArray(patch.insert)) continue
+    for (const entry of patch.insert) {
+      if (!object(entry) || entry.name !== dshServer || !object(entry.config) || entry.config.serverName !== "browse") continue
+      return entry.config
+    }
+  }
+  return undefined
+}
 
 /** The command array of the browse server in an agent config, if it has one (for migration). */
 export function browseServerCommand(name: AgentName, file: string): string[] | undefined {
   if (!fs.existsSync(file)) return undefined
   const before = fs.readFileSync(file, "utf8")
   const toml = name === "codex" || name === "grok" || name === "vibe"
-  const yaml = name === "goose" || name === "hermes"
+  const yaml = name === "goose" || name === "hermes" || isDsh(name)
   try {
     let current: unknown
     if (yaml) {
-      const config = parseDocument(before, yamlOptions).toJS() as Record<string, unknown>
-      const key = name === "goose" ? "extensions" : "mcp_servers"
-      current = object(config[key]) ? (config[key] as Record<string, unknown>).browse : undefined
+      const config = parseDocument(before, yamlOptions).toJS()
+      if (isDsh(name)) {
+        current = dshBrowseConfig(config)
+      } else {
+        const key = name === "goose" ? "extensions" : "mcp_servers"
+        current = object(config) && object(config[key]) ? (config[key] as Record<string, unknown>).browse : undefined
+      }
     } else if (toml) {
       const config = parseToml(before) as Record<string, unknown>
       if (name === "vibe") {
@@ -142,6 +164,8 @@ export function browseServerCommand(name: AgentName, file: string): string[] | u
 }
 
 function serverDefinition(name: AgentReceipt["name"], command: string, args: string[]) {
+  if (name === "dsh")
+    return { id: "browse", name: dshServer, config: { serverName: "browse", transport: "stdio", command, args } }
   if (name === "kilo") return { type: "local", command: [command, ...args] }
   if (name === "goose") return { type: "stdio", name: "browse", enabled: true, cmd: command, args }
   if (name === "copilot") return { type: "local", command, args, tools: ["*"] }
@@ -152,10 +176,91 @@ function serverDefinition(name: AgentReceipt["name"], command: string, args: str
 
 const serverKeys: Partial<Record<AgentName, string>> = { vscode: "servers", zed: "context_servers", kilo: "mcp", amp: "amp.mcpServers", goose: "extensions", hermes: "mcp_servers" }
 
+/** Write beside the target and rename: a crash never leaves a half-written agent config, and the existing file's mode
+ * stays as it was (0600 for a new one). */
+function writeConfigAtomic(file: string, before: string, after: string, exists: boolean) {
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  if (exists && fs.readFileSync(file, "utf8") !== before) throw new Error(`${file} changed during setup; try again`)
+  const mode = exists ? fs.statSync(file).mode & 0o777 : 0o600
+  const temporary = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${randomUUID()}.tmp`)
+  try {
+    fs.writeFileSync(temporary, after, { mode, flag: "wx" })
+    fs.chmodSync(temporary, mode)
+    fs.renameSync(temporary, file)
+  } finally {
+    fs.rmSync(temporary, { force: true })
+  }
+}
+
+/**
+ * dsh's patch layer is a top-level YAML sequence; browse is one `insert` patch holding a single mcp-client row. Edit the
+ * document's AST so comments, anchors and custom tags such as `!!js` survive, then reparse and compare what changed.
+ */
+function editDshConfig(receipt: AgentReceipt, remove: boolean): EditResult {
+  const { file, node, entry } = receipt
+  const expected = serverDefinition("dsh", node ?? entry, node ? [entry, "mcp"] : ["mcp"])
+  const exists = fs.existsSync(file)
+  if (!exists && remove) return "unchanged"
+  const before = exists ? fs.readFileSync(file, "utf8") : ""
+  const invalid = () => new Error(`Invalid ${file}; left unchanged`)
+  // An absent or empty file starts as an empty patch list; a present one must already be a top-level sequence.
+  const blank = !before.trim()
+  const doc = parseDocument(blank ? "[]\n" : before, yamlOptions)
+  // dsh evaluates `!!js` tags itself, so their unresolved-tag warning is expected; any other warning is not.
+  const warnings = (parsed: typeof doc) => parsed.warnings.some(w => !w.message.startsWith("Unresolved tag:"))
+  if (doc.errors.length || warnings(doc)) throw invalid()
+  if (!isSeq(doc.contents)) throw invalid()
+  const patches = doc.contents
+  if (blank) patches.flow = false // A new file gets the block style every dsh example uses.
+  const owners: { patch: number; insert: YAMLSeq; row: number; node: YAMLMap }[] = []
+  for (const [patchIndex, patch] of patches.items.entries()) {
+    if (!isMap(patch)) continue
+    const insert = patch.get("insert", true)
+    if (!isSeq(insert)) continue
+    for (const [rowIndex, row] of insert.items.entries()) {
+      if (!isMap(row) || row.get("name") !== dshServer) continue
+      const config = row.get("config", true)
+      if (!isMap(config) || config.get("serverName") !== "browse") continue
+      owners.push({ patch: patchIndex, insert, row: rowIndex, node: row })
+    }
+  }
+  if (owners.length > 1) return "conflict"
+  const ours = owners[0]
+  if (ours && !isDeepStrictEqual(ours.node.toJS(doc), expected)) return "conflict"
+  if (remove ? !ours : !!ours) return "unchanged"
+  const prior = patches.items.map(item => item.toJS(doc))
+  let remaining: unknown[] | undefined
+  if (ours) {
+    // The whole patch exists only for our insert, so removing it too leaves no empty `insert: []` behind.
+    const whole = (patches.items[ours.patch] as YAMLMap).items.length === 1 && ours.insert.items.length === 1
+    remaining = whole
+      ? prior.filter((_, index) => index !== ours.patch)
+      : prior.map((item, index) =>
+          index === ours.patch
+            ? { ...(item as Record<string, unknown>), insert: (item as { insert: unknown[] }).insert.filter((_, i) => i !== ours.row) }
+            : item)
+    ours.insert.items.splice(ours.row, 1)
+    if (whole) patches.items.splice(ours.patch, 1)
+  } else {
+    doc.add({ insert: [expected] })
+  }
+  const after = doc.toString({ lineWidth: 0 }) // Keep long strings on one line.
+  const check = parseDocument(after, yamlOptions)
+  if (check.errors.length || warnings(check) || !isSeq(check.contents)) return "conflict"
+  const result = check.contents.items.map(item => item.toJS(check))
+  const verified = remaining
+    ? isDeepStrictEqual(result, remaining)
+    : result.length === prior.length + 1 && isDeepStrictEqual(result.slice(0, -1), prior) && isDeepStrictEqual(result.at(-1), { insert: [expected] })
+  if (!verified) return "conflict"
+  writeConfigAtomic(file, before, after, exists)
+  return remove ? "removed" : "added"
+}
+
 /** Preserve unrelated settings and comments. Refuse conflicting names, invalid
  * configs and edits made since install. Only the installer that created an entry gets a removal receipt. */
 export function editAgentConfig(receipt: AgentReceipt, remove = false): EditResult {
   const { name, file, node, entry } = receipt
+  if (isDsh(name)) return editDshConfig(receipt, remove)
   const toml = name === "codex" || name === "grok" || name === "vibe"
   const yaml = name === "goose" || name === "hermes"
   const exists = fs.existsSync(file)
@@ -206,18 +311,6 @@ export function editAgentConfig(receipt: AgentReceipt, remove = false): EditResu
   } else {
     after = applyEdits(before, modify(before, [key, "browse"], remove ? undefined : expected, { formattingOptions: { insertSpaces: true, tabSize: 2 } }))
   }
-  fs.mkdirSync(path.dirname(file), { recursive: true })
-  if (exists && fs.readFileSync(file, "utf8") !== before) throw new Error(`${file} changed during setup; try again`)
-  // Write beside the target and rename: a crash never leaves a half-written agent config, and the existing file's mode
-  // stays as it was (0600 for a new one).
-  const mode = exists ? fs.statSync(file).mode & 0o777 : 0o600
-  const temporary = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${randomUUID()}.tmp`)
-  try {
-    fs.writeFileSync(temporary, after, { mode, flag: "wx" })
-    fs.chmodSync(temporary, mode)
-    fs.renameSync(temporary, file)
-  } finally {
-    fs.rmSync(temporary, { force: true })
-  }
+  writeConfigAtomic(file, before, after, exists)
   return remove ? "removed" : "added"
 }

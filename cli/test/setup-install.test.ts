@@ -3,7 +3,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { parse } from "jsonc-parser"
-import { agentLocations, agentNames, callingAgent, editAgentConfig } from "../src/setup/agent-config.ts"
+import { agentLocations, agentNames, browseServerCommand, callingAgent, editAgentConfig } from "../src/setup/agent-config.ts"
 import { agentFlags, agentPlan } from "../src/setup/agent-picker.ts"
 import { manualPair, STORE_URL } from "../src/setup/environment.ts"
 import { configureMcp, installedExtensionVersion, installedRuntime, installWaitTimeout, locateExtension, manualMcpEntry, pairStoreExtension, relayNotRestarted, remoteRelayAddresses, remoteRelayLines, removeMcp, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
@@ -138,18 +138,22 @@ test.each(agentNames.filter(n => n !== "opencode"))("%s user config: preserve un
     const key = name === "vscode" ? "servers" : name === "zed" ? "context_servers" : name === "amp" ? "amp.mcpServers" : name === "kilo" ? "mcp" : "mcpServers"
     const toml = ["codex", "grok", "vibe"].includes(name)
     const yaml = name === "goose" || name === "hermes"
+    // dsh has no server map: its MCP servers are rows of a Cordis patch layer, a top-level YAML sequence.
+    const patch = name === "dsh"
     const yamlKey = name === "goose" ? "extensions" : "mcp_servers"
-    const file = path.join(home, toml ? "config.toml" : yaml ? "config.yaml" : "mcp.json")
-    const before = toml ? `# my config\nmodel="test"\n${name === "vibe" ? '[[mcp_servers]]\nname="other"' : '[mcp_servers.other]'}\nurl="https://other"\n` : yaml ? `# my config\ncustom: &original [a, b]\ncopy: *original\n${yamlKey}:\n  other: { url: https://other } # keep this server\n` : `{\n// my config\n"unrelated":true, "${key}":{"other":{"url":"https://other"}},\n}`
-    const config = () => { const text = fs.readFileSync(file, "utf8"); return yaml ? Bun.YAML.parse(text) : toml ? Bun.TOML.parse(text) : parse(text) }
+    const file = path.join(home, toml ? "config.toml" : patch ? "cordis.patch.yml" : yaml ? "config.yaml" : "mcp.json")
+    const before = toml ? `# my config\nmodel="test"\n${name === "vibe" ? '[[mcp_servers]]\nname="other"' : '[mcp_servers.other]'}\nurl="https://other"\n` : patch ? `# my config\n- insert:\n    - id: other\n      name: '@example/other'\n      config:\n        url: https://other # keep this server\n` : yaml ? `# my config\ncustom: &original [a, b]\ncopy: *original\n${yamlKey}:\n  other: { url: https://other } # keep this server\n` : `{\n// my config\n"unrelated":true, "${key}":{"other":{"url":"https://other"}},\n}`
+    const config = () => { const text = fs.readFileSync(file, "utf8"); return yaml || patch ? Bun.YAML.parse(text) : toml ? Bun.TOML.parse(text) : parse(text) }
     fs.writeFileSync(file, before)
     const original = config()
     const receipt = { name, file, node: "/a path/node", entry: "/a path/browse.mjs" }
     expect(editAgentConfig(receipt)).toBe("added")
     const args = [receipt.entry, "mcp"]
     const standard = { command: receipt.node, args }
-    const server = name === "vibe" ? config().mcp_servers.find((s: { name: string }) => s.name === "browse") : config()[toml ? "mcp_servers" : yaml ? yamlKey : key].browse
-    expect(server).toEqual(name === "kilo" ? { type: "local", command: [receipt.node, ...args] } : name === "copilot" ? { type: "local", ...standard, tools: ["*"] } : name === "goose" ? { type: "stdio", name: "browse", cmd: receipt.node, args, enabled: true } : name === "vibe" ? { name: "browse", transport: "stdio", ...standard } : ["vscode", "claude", "codebuddy", "droid", "cortex"].includes(name) ? { type: "stdio", ...standard } : standard)
+    const server = patch
+      ? config().find((p: { insert?: { config?: { serverName?: string } }[] }) => p.insert?.some((e) => e.config?.serverName === "browse"))?.insert?.find((e: { config?: { serverName?: string } }) => e.config?.serverName === "browse")?.config
+      : name === "vibe" ? config().mcp_servers.find((s: { name: string }) => s.name === "browse") : config()[toml ? "mcp_servers" : yaml ? yamlKey : key].browse
+    expect(server).toEqual(patch ? { serverName: "browse", transport: "stdio", ...standard } : name === "kilo" ? { type: "local", command: [receipt.node, ...args] } : name === "copilot" ? { type: "local", ...standard, tools: ["*"] } : name === "goose" ? { type: "stdio", name: "browse", cmd: receipt.node, args, enabled: true } : name === "vibe" ? { name: "browse", transport: "stdio", ...standard } : ["vscode", "claude", "codebuddy", "droid", "cortex"].includes(name) ? { type: "stdio", ...standard } : standard)
     const once = fs.readFileSync(file, "utf8")
     expect(editAgentConfig(receipt)).toBe("unchanged")
     expect(fs.readFileSync(file, "utf8")).toBe(once)
@@ -182,6 +186,61 @@ test.each(["hermes", "goose"] as const)("%s keeps large integers and long scalar
     expect(after).toContain("account: 1234567890123456789")
     expect(after).toContain(`note: '${long}'`)
     expect((Bun.YAML.parse(after) as Record<string, { browse?: unknown }>)[key]?.browse).toMatchObject(name === "goose" ? { cmd: "/a path/node", args: ["/a path/browse.mjs", "mcp"] } : { command: "/a path/node", args: ["/a path/browse.mjs", "mcp"] })
+  } finally { fs.rmSync(home, { recursive: true, force: true }) }
+})
+
+test("dsh keeps comments, anchors and !!js tags byte-for-byte across install and uninstall, and refuses a changed row", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-dsh-"))
+  try {
+    const file = path.join(home, ".dsh", "cordis.patch.yml")
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    const before = `# my dsh patches\n- insert:\n    - id: other\n      name: '@example/other'\n      config:\n        shared: &shared\n          keep: true\n        copy: *shared\n        expr: !!js process.env.OTHER\n`
+    fs.writeFileSync(file, before)
+    const receipt = { name: "dsh" as const, file, node: "/a path/node", entry: "/a path/browse.mjs" }
+    expect(editAgentConfig(receipt)).toBe("added")
+    const added = fs.readFileSync(file, "utf8")
+    // Everything before our patch comes back byte-for-byte, including the tag dsh evaluates itself.
+    expect(added.startsWith(before)).toBe(true)
+    expect(browseServerCommand("dsh", file)).toEqual([receipt.node, receipt.entry, "mcp"])
+    expect((Bun.YAML.parse(added) as unknown[]).at(-1)).toEqual({
+      insert: [{ id: "browse", name: "@deepseek-ai/dsh-mcp-client", config: { serverName: "browse", transport: "stdio", command: receipt.node, args: [receipt.entry, "mcp"] } }],
+    })
+    expect(editAgentConfig(receipt)).toBe("unchanged")
+    expect(fs.readFileSync(file, "utf8")).toBe(added)
+    // A row whose command someone changed is theirs: neither install nor uninstall overwrites or removes it.
+    fs.writeFileSync(file, added.replace("/a path/node", "/usr/bin/node"))
+    expect(editAgentConfig(receipt)).toBe("conflict")
+    expect(editAgentConfig(receipt, true)).toBe("conflict")
+    fs.writeFileSync(file, added)
+    expect(editAgentConfig(receipt, true)).toBe("removed")
+    expect(fs.readFileSync(file, "utf8")).toBe(before)
+  } finally { fs.rmSync(home, { recursive: true, force: true }) }
+})
+
+test("dsh creates a missing patch layer, removes only its own row, and reads the row back", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-dsh-new-"))
+  try {
+    const file = path.join(home, ".dsh", "cordis.patch.yml")
+    const binary = { name: "dsh" as const, file, entry: "/home/me/.local/bin/browse" }
+    expect(editAgentConfig(binary)).toBe("added")
+    expect(Bun.YAML.parse(fs.readFileSync(file, "utf8"))).toEqual([{
+      insert: [{ id: "browse", name: "@deepseek-ai/dsh-mcp-client", config: { serverName: "browse", transport: "stdio", command: binary.entry, args: ["mcp"] } }],
+    }])
+    expect(browseServerCommand("dsh", file)).toEqual([binary.entry, "mcp"])
+    // The row an npm install wrote is read back as node plus the entry script.
+    fs.rmSync(file)
+    const npm = { ...binary, node: "/a path/node", entry: "/a path/browse.mjs" }
+    expect(editAgentConfig(npm)).toBe("added")
+    expect(browseServerCommand("dsh", file)).toEqual([npm.node, npm.entry, "mcp"])
+    // Someone else's row in the same patch list stays when ours goes.
+    const other = { name: "@example/other", config: { url: "https://other" } }
+    fs.writeFileSync(file, `- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: ${JSON.stringify(npm.node)}\n        args:\n          - ${JSON.stringify(npm.entry)}\n          - mcp\n    - id: other\n      name: ${JSON.stringify(other.name)}\n      config:\n        url: ${other.config.url}\n`)
+    expect(editAgentConfig(npm, true)).toBe("removed")
+    expect(Bun.YAML.parse(fs.readFileSync(file, "utf8"))).toEqual([{ insert: [{ id: "other", name: other.name, config: other.config }] }])
+    // With no patch left, the layer is a valid empty list rather than an empty file dsh refuses to boot.
+    fs.writeFileSync(file, `- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: ${JSON.stringify(npm.node)}\n        args:\n          - ${JSON.stringify(npm.entry)}\n          - mcp\n`)
+    expect(editAgentConfig(npm, true)).toBe("removed")
+    expect(fs.readFileSync(file, "utf8")).toBe("[]\n")
   } finally { fs.rmSync(home, { recursive: true, force: true }) }
 })
 
