@@ -36,6 +36,12 @@ pub struct Attach {
     /// What tools kept for the tab, when it is attached again (a reconnect).
     pub state: Option<Arc<TabState>>,
     pub created_at: Option<String>,
+    /// The extension's stable id for the tab (`chrome.sessions`), when it reported one.
+    pub browse_id: Option<String>,
+    /// The caller-chosen id the tab is being opened with.
+    pub chosen: Option<String>,
+    /// Who owned the tab before, found through its stable id (a browser restart): no target lookup needed.
+    pub restored: Option<Restored>,
     pub already_attached: bool,
     /// An inventory tab the extension says an agent opened: it may be reclaimed from the tab registry.
     pub reclaim_held: bool,
@@ -57,6 +63,9 @@ impl Attach {
             opener: None,
             state: None,
             created_at: None,
+            browse_id: None,
+            chosen: None,
+            restored: None,
             already_attached: false,
             reclaim_held: false,
             restore: false,
@@ -73,18 +82,23 @@ impl Attach {
         attach.opener = tab.opener;
         attach.state = Some(tab.state.clone());
         attach.created_at = Some(tab.created_at.clone());
+        attach.browse_id = tab.browse_id.clone();
+        attach.chosen = tab.chosen.clone();
         attach.fresh_popup = tab.fresh_popup;
         attach
     }
 }
 
 /// Who owned a tab before it was announced again.
-struct Restored {
+#[derive(Clone)]
+pub struct Restored {
     owner: Owner,
     options: TabOptions,
     opener: Option<i64>,
     state: Option<Arc<TabState>>,
     created_at: String,
+    browse_id: Option<String>,
+    chosen: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -112,12 +126,16 @@ fn real_url(url: &str) -> bool {
 
 impl Relay {
     /// Attaches the debugger (unless it already is), sets the tab up and publishes it.
-    pub async fn setup_tab(self: &Arc<Self>, attach: Attach) -> anyhow::Result<i64> {
+    pub async fn setup_tab(self: &Arc<Self>, mut attach: Attach) -> anyhow::Result<i64> {
         let tab = attach.tab;
         let link = self.st().browser_tab(tab).map(|(link, _)| link).ok_or_else(|| anyhow!(crate::protocol::NOT_CONNECTED))?;
         let limit = Some(attach.timeout);
         if !attach.already_attached {
-            self.ext_tab(tab, "debugger.attach", json!({})).await?;
+            let answer = self.ext_tab(tab, "debugger.attach", json!({})).await?;
+            // A newer extension keeps the tab's stable id in chrome.sessions and reports it here.
+            if attach.browse_id.is_none() {
+                attach.browse_id = answer.get("browseId").and_then(Value::as_str).map(str::to_string);
+            }
         }
         self.debugger(tab, None, "Page.enable", json!({}), limit).await?;
         if let Err(RpcError::Timeout(message)) = self.debugger(tab, None, "Emulation.setFocusEmulationEnabled", json!({ "enabled": false }), limit).await {
@@ -131,14 +149,20 @@ impl Relay {
             }
             bail!("Tab {tab} shows another page now");
         }
-        let restored = if attach.restore { self.restored_owner(&link, &target_id, attach.reclaim_held) } else { None };
+        let restored = if attach.restore {
+            attach.restored.clone().or_else(|| self.restored_owner(&link, &target_id, attach.reclaim_held))
+        } else {
+            None
+        };
         let reclaimed = restored.is_some();
-        let Restored { mut owner, mut options, opener, state, created_at } = restored.unwrap_or_else(|| Restored {
+        let Restored { mut owner, mut options, opener, state, created_at, browse_id, chosen } = restored.unwrap_or_else(|| Restored {
             owner: attach.owner,
             options: attach.options.clone(),
             opener: attach.opener,
             state: attach.state.clone(),
             created_at: attach.created_at.clone().unwrap_or_else(crate::util::now_iso),
+            browse_id: None,
+            chosen: None,
         });
         if reclaimed && owner == Owner::Relay && !url_allowed(&options, &url) {
             rlog!("allowlist.reclaim-refused", tabId = tab);
@@ -156,6 +180,7 @@ impl Relay {
             {
                 handoff.done.take().map(|done| done.send("closed"));
             }
+            let (kept_browse_id, kept_chosen) = previous.as_ref().map(|t| (t.browse_id.clone(), t.chosen.clone())).unwrap_or_default();
             // The same page attached again (a renewed debugger) keeps its event stream, CDP handle and state.
             let (events, cdp, state, busy_keys, warnings) = match previous.filter(|p| p.target_id == target_id) {
                 Some(previous) => (previous.events, previous.cdp, previous.state, previous.busy_keys, previous.warnings),
@@ -170,6 +195,8 @@ impl Relay {
                     url,
                     title,
                     owner,
+                    browse_id: kept_browse_id.or(browse_id).or(attach.browse_id.clone()),
+                    chosen: kept_chosen.or(chosen).or(attach.chosen.clone()),
                     options,
                     opener,
                     state,
@@ -183,6 +210,7 @@ impl Relay {
                     crashed: false,
                     main_frame: Some(target_id.clone()),
                     last_used: Instant::now(),
+                    last_used_at: crate::util::now_iso(),
                     focused: false,
                     fresh_popup: attach.fresh_popup,
                     blanking: 0,
@@ -209,10 +237,102 @@ impl Relay {
     fn restored_owner(&self, link: &Link, target_id: &str, reclaim_held: bool) -> Option<Restored> {
         let st = self.st();
         if let Some(known) = st.reconnect_owners.get(target_id).filter(|k| k.browser == link.key) {
-            return Some(Restored { owner: known.owner, options: known.options.clone(), opener: known.opener, state: Some(known.state.clone()), created_at: known.created_at.clone() });
+            return Some(Restored {
+                owner: known.owner,
+                options: known.options.clone(),
+                opener: known.opener,
+                state: Some(known.state.clone()),
+                created_at: known.created_at.clone(),
+                browse_id: known.browse_id.clone(),
+                chosen: known.chosen.clone(),
+            });
         }
-        let held = st.restorable.get(target_id).filter(|r| reclaim_held && r.browser_key == link.key)?;
-        Some(Restored { owner: Owner::Relay, options: held.options.clone(), opener: held.opener, state: None, created_at: held.created_at.clone() })
+        let held = st.restorable.get(target_id).filter(|r| reclaim_held && !r.lent && r.browser_key == link.key)?;
+        Some(Restored {
+            owner: Owner::Relay,
+            options: held.options.clone(),
+            opener: held.opener,
+            state: None,
+            created_at: held.created_at.clone(),
+            browse_id: held.browse_id.clone(),
+            chosen: held.chosen.clone(),
+        })
+    }
+
+    /// The relay id a browser tab's inventory announcement belongs to, and who owned it. A tab that comes back with
+    /// its stable id after a browser restart (a new local id, a new target) keeps the relay id agents know it by.
+    pub fn inventory_tab(&self, link: &Link, local: i64, browse_id: Option<&str>, agent: bool) -> (i64, Option<Restored>) {
+        let mut st = self.st();
+        if let Some(id) = st.relay_id_for(&link.key, local) {
+            return (id, None);
+        }
+        if let Some(browse_id) = browse_id.filter(|id| !id.is_empty()) {
+            let held = st
+                .restorable
+                .iter()
+                .find(|(_, r)| r.browser_key == link.key && r.browse_id.as_deref() == Some(browse_id))
+                .map(|(target, r)| (target.clone(), r.clone()));
+            if let Some((target, held)) = held {
+                let tab = st.adopt_relay_tab(&link.key, local, held.tab);
+                st.restorable.remove(&target);
+                // A tab the extension no longer counts as an agent's is the user's; it keeps its id but no options.
+                let restored = if agent {
+                    Restored {
+                        owner: Owner::Relay,
+                        options: held.options,
+                        opener: held.opener,
+                        state: None,
+                        created_at: held.created_at,
+                        browse_id: Some(browse_id.to_string()),
+                        chosen: held.chosen,
+                    }
+                } else {
+                    Restored {
+                        owner: Owner::User,
+                        options: TabOptions::default(),
+                        opener: None,
+                        state: None,
+                        created_at: held.created_at,
+                        browse_id: Some(browse_id.to_string()),
+                        chosen: None,
+                    }
+                };
+                return (tab, Some(restored));
+            }
+            let known = st
+                .reconnect_owners
+                .iter()
+                .find(|(_, k)| k.browser == link.key && k.browse_id.as_deref() == Some(browse_id))
+                .map(|(target, k)| (target.clone(), k.clone()));
+            if let Some((target, known)) = known {
+                let tab = st.adopt_relay_tab(&link.key, local, known.tab);
+                st.reconnect_owners.remove(&target);
+                let restored = if agent {
+                    Restored {
+                        owner: known.owner,
+                        options: known.options,
+                        opener: known.opener,
+                        state: Some(known.state),
+                        created_at: known.created_at,
+                        browse_id: Some(browse_id.to_string()),
+                        chosen: known.chosen,
+                    }
+                } else {
+                    Restored {
+                        owner: Owner::User,
+                        options: TabOptions::default(),
+                        opener: None,
+                        state: None,
+                        created_at: known.created_at,
+                        browse_id: Some(browse_id.to_string()),
+                        chosen: None,
+                    }
+                };
+                return (tab, Some(restored));
+            }
+        }
+        let tab = st.relay_tab_id(&link.key, local);
+        (tab, None)
     }
 
     /// Forgets a tab: its events end, handoffs on it are cancelled, and the extension (when told) clears what it shows.
@@ -269,8 +389,9 @@ impl Relay {
     }
 
     /// Opens a background agent tab, attaches it blank, then navigates (so the allowlist sees the real load). A tab
-    /// an agent's page opens (`opener`) goes in the opener's browser.
-    pub async fn create_tab(self: &Arc<Self>, url: Option<&str>, options: &TabOptions, opener: Option<i64>) -> anyhow::Result<i64> {
+    /// an agent's page opens (`opener`) goes in the opener's browser. A `chosen` id is kept for the tab and the
+    /// extension, which must never idle-close it.
+    pub async fn create_tab(self: &Arc<Self>, url: Option<&str>, options: &TabOptions, opener: Option<i64>, chosen: Option<&str>) -> anyhow::Result<i64> {
         let url = url.filter(|u| !u.is_empty()).unwrap_or("about:blank");
         let mut options = Self::normalize_options(options)?;
         if let Some(refusal) = crate::guardrails::guard("Target.createTarget", &json!({ "url": url }), false, &Vec::new) {
@@ -285,6 +406,9 @@ impl Relay {
         };
         options.browser = None;
         let mut params = json!({ "url": "about:blank", "active": false });
+        if let Some(chosen) = chosen {
+            params["id"] = chosen.into();
+        }
         if let Some(window) = crate::settings::agent_window_override() {
             params["window"] = window.into();
         }
@@ -294,6 +418,8 @@ impl Relay {
         let mut attach = Attach::new(tab, Owner::Relay);
         attach.options = options.clone();
         attach.opener = opener;
+        attach.chosen = chosen.map(str::to_string);
+        attach.browse_id = created.get("browseId").and_then(Value::as_str).map(str::to_string);
         if let Err(error) = self.setup_tab(attach).await {
             rlog!("create.attach-failed", tabId = tab, error = error.to_string());
             self.ext_best_effort(tab, "tabs.remove", json!({}));
@@ -413,7 +539,7 @@ impl Relay {
 
     /// A tab an agent's page opened (target=_blank, window.open) is an agent tab too, with the opener's options
     /// (group, allowlist, read-only). A lent tab's popups count only while an agent works in it.
-    pub fn adopt_opened_tab(self: &Arc<Self>, tab: i64, opener: i64) {
+    pub fn adopt_opened_tab(self: &Arc<Self>, tab: i64, opener: i64, browse_id: Option<String>) {
         let options = {
             let st = self.st();
             let Some(opener_tab) = st.tabs.get(&opener) else { return };
@@ -434,6 +560,7 @@ impl Relay {
                 attach.options = options.clone();
                 attach.opener = Some(opener);
                 attach.fresh_popup = true;
+                attach.browse_id = browse_id.clone();
                 match relay.setup_tab(attach).await {
                     Ok(_) => break,
                     Err(error) => {
@@ -496,7 +623,7 @@ impl Relay {
     }
 
     /// The extension re-announced an attached tab (after pairing): set it up, restoring who owned it.
-    pub fn queue_inventory(self: &Arc<Self>, link: &Arc<Link>, tab: i64, agent: bool) {
+    pub fn queue_inventory(self: &Arc<Self>, link: &Arc<Link>, tab: i64, agent: bool, browse_id: Option<String>, restored: Option<Restored>) {
         link.announced.lock().unwrap().insert(tab);
         if agent {
             link.announced_agent.lock().unwrap().insert(tab);
@@ -510,6 +637,8 @@ impl Relay {
             attach.already_attached = true;
             attach.reclaim_held = agent;
             attach.restore = true;
+            attach.browse_id = browse_id;
+            attach.restored = restored;
             attach.timeout = INVENTORY_TIMEOUT;
             for attempt in 0..3 {
                 match relay.setup_tab(attach.clone()).await {
@@ -621,6 +750,8 @@ impl Relay {
                 attach.opener = known.opener;
                 attach.state = Some(known.state);
                 attach.created_at = Some(known.created_at);
+                attach.browse_id = known.browse_id;
+                attach.chosen = known.chosen;
                 attach.expect_target = Some(target.clone());
                 match relay.setup_tab(attach).await {
                     Ok(_) => rlog!("extension.reconnect.reattached", tabId = tab),
@@ -663,6 +794,8 @@ impl Relay {
                         opener: t.opener,
                         state: t.state.clone(),
                         created_at: t.created_at.clone(),
+                        browse_id: t.browse_id.clone(),
+                        chosen: t.chosen.clone(),
                     };
                     (t.target_id.clone(), known)
                 })

@@ -22,6 +22,7 @@ import {
   type PairingCode,
 } from "../pairing"
 import { TabCleanup } from "../tab-cleanup"
+import { TabIdentity } from "../tab-identity"
 import { codePort, relayTarget } from "./discovery"
 import { discoveredRelay, shownRelayPort } from "./discovered"
 import {
@@ -396,11 +397,17 @@ export function createRelayHandshake(deps: {
     deps.log.add("pairing.ok", { source: using.kind })
     // Tabs an agent opened say so: a relay that can't match one to a session after a restart releases it rather
     // than closing it, and a released tab stays tracked so the user's idle-cleanup setting decides when it goes.
+    // The tab's stable id travels with it, so a restored tab keeps the id agents know it by.
     for (const tabId of Array.from(deps.relayTabs)) {
-      const agent = await TabCleanup.isTracked(tabId)
+      // The marker survives a browser restart; within a session the cleanup tracking is the same answer.
+      const agent = (await TabIdentity.isAgent(tabId)) ?? (await TabCleanup.isTracked(tabId))
+      const browseId = await TabIdentity.ensure(tabId, { agent })
       if (deps.currentSocket() !== current) return
       current.send(
-        JSON.stringify({ method: "debugger.attached", params: { tabId, ...(agent ? { agent: true } : {}) } }),
+        JSON.stringify({
+          method: "debugger.attached",
+          params: { tabId, ...(agent ? { agent: true } : {}), ...(browseId ? { browseId } : {}) },
+        }),
       )
     }
     current.send(JSON.stringify({ method: "ready" }))

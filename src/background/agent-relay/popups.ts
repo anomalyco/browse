@@ -1,6 +1,7 @@
 import type { JsonObject } from "../../agent-relay/protocol"
 import { AgentWindow } from "./window"
 import { TabCleanup } from "../tab-cleanup"
+import { TabIdentity } from "../tab-identity"
 import { text, type AgentRelayLog } from "./wire"
 
 export function installPopupAdoption(deps: {
@@ -87,8 +88,10 @@ export function installPopupAdoption(deps: {
       .catch((error: unknown) => deps.log.add("tab.opened.error", { error: text(error) }))
       // Once it's moved and grouped: the relay attaches it as a page of the opener's session, so the agent's
       // Playwright sees it (page.waitForEvent("popup"), context.pages()).
-      .finally(() => {
-        if (deps.relayTabs.has(sourceTabId)) deps.send({ method: "tabs.opened", params: { tabId, openerTabId: sourceTabId } })
+      .finally(async () => {
+        if (!deps.relayTabs.has(sourceTabId)) return
+        const browseId = await TabIdentity.ensure(tabId, { agent: true })
+        deps.send({ method: "tabs.opened", params: { tabId, openerTabId: sourceTabId, ...(browseId ? { browseId } : {}) } })
       })
   })
 }

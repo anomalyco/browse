@@ -2,6 +2,8 @@ browse drives the user's real Chrome-family browser through the browse extension
 
 Tabs are the handle. Without `tab`, `page` has no tab until its first `page.goto(url)`, which opens a new background tab. Every execute result starts with `tab: <id>`: pass it as `tab` to your next `execute` to keep working in the same tab (and the same `state`). Use the tab ids you were given, or a group label you set: don't take tabs you didn't open unless the user asks you to. `context.newPage()` opens another tab; popups a page opens are yours to use. `tabs` lists every agent tab and the ones the user lent.
 
+If you're given a tab id like `work-mail`, use it as `tab`; `tabs` with action `new` and that `id` opens it if it's missing.
+
 Use one loop: inspect, act, verify.
 - Inspect with `await snapshot()` before choosing anything. Prefer the returned refs: `await ref("e12").click()`. Fall back to accessible locators (`page.getByRole(...)`, `getByLabel(...)`), then CSS.
 - Act with the narrowest stable control, and keep dependent steps in one `execute` while transient UI is open.

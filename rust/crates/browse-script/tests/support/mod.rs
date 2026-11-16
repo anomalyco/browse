@@ -241,7 +241,7 @@ impl FakeBrowser {
         let targets = self.connection.send("Target.getTargetInfo", json!({ "targetId": tab.target }), None).await.unwrap_or_default();
         let url = targets["targetInfo"]["url"].as_str().unwrap_or_default().to_string();
         let title = targets["targetInfo"]["title"].as_str().unwrap_or_default().to_string();
-        TabInfo { tab: id, url, title, lent: false, opener: None, options: TabOptions::default() }
+        TabInfo { tab: id, url, title, lent: false, opener: None, chosen: None, last_used: None, busy: false, options: TabOptions::default() }
     }
 
     fn find(&self, tab: TabId) -> anyhow::Result<(Arc<TabCdp>, Arc<TabState>)> {

@@ -38,7 +38,7 @@ pub async fn run(ctx: &ToolContext, payload: &Value) -> Result<Value> {
     let function = payload["function"].as_str().unwrap_or("(els) => els.length");
     let arg = payload.get("arg").cloned().unwrap_or(Value::Null);
     let timeout = Duration::from_millis(payload["timeout"].as_u64().unwrap_or(5_000));
-    let tab = browse_core::require_tab(payload)?;
+    let tab = crate::host::tab_argument(ctx, payload)?;
     let page = browse_page::state::tab(ctx, tab).await?.page(ctx).await?;
     let (frame, rest) = browse_page::target::selector_frame(&page, selector, timeout).await?;
     let rest = browse_page::target::normalize_selector(if rest.trim().is_empty() { ":root" } else { rest.trim() });

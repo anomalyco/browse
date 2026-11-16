@@ -231,7 +231,7 @@ impl Host {
         match op {
             "tool" => run_async(self.ctx.clone(), self.tools.clone(), op, payload).await.map(|value| self.absorb(value, outcome)),
             "url" => {
-                let tab = browse_core::require_tab(&payload).map_err(|e| e.to_string())?;
+                let tab = tab_argument(&self.ctx, &payload).map_err(|e| format!("{e:#}"))?;
                 let page = async { browse_page::state::tab(&self.ctx, tab).await?.page(&self.ctx).await }.await.map_err(|e| format!("{e:#}"))?;
                 Ok(Value::String(page.main_url()))
             }
@@ -255,6 +255,14 @@ fn is_handoff(op: &str, payload: &Value) -> bool {
     op == "tool" && matches!(payload["name"].as_str(), Some("handoff" | "demonstrate"))
 }
 
+/// The tab a tool payload names, a chosen id like `work-mail` included.
+pub(crate) fn tab_argument(ctx: &ToolContext, payload: &Value) -> anyhow::Result<TabId> {
+    match payload.get("tab") {
+        None | Some(Value::Null) => anyhow::bail!(browse_core::MISSING_TAB),
+        Some(value) => ctx.browser.resolve_tab(value),
+    }
+}
+
 async fn run_async(ctx: ToolContext, tools: Arc<HashMap<String, Arc<dyn Tool>>>, op: &str, payload: Value) -> Result<Value, String> {
     match op {
         "tool" => {
@@ -263,6 +271,16 @@ async fn run_async(ctx: ToolContext, tools: Arc<HashMap<String, Arc<dyn Tool>>>,
             let mut args = payload.get("args").cloned().filter(Value::is_object).unwrap_or_else(|| json!({}));
             if let Some(map) = args.as_object_mut() {
                 map.retain(|_, v| !v.is_null());
+                if let Some(value) = map.get_mut("tab").filter(|v| v.is_string()) {
+                    let tab = ctx.browser.resolve_tab(value).map_err(|e| format!("{e:#}"))?;
+                    *value = json!(tab);
+                }
+                if let Some(Value::Array(list)) = map.get_mut("tabs") {
+                    for value in list.iter_mut().filter(|v| v.is_string()) {
+                        let tab = ctx.browser.resolve_tab(value).map_err(|e| format!("{e:#}"))?;
+                        *value = json!(tab);
+                    }
+                }
             }
             let output = tool.call(ctx, args).await.map_err(|e| format!("{e:#}"))?;
             let text = output.content.iter().filter_map(|c| if let Content::Text { text } = c { Some(text.as_str()) } else { None }).collect::<Vec<_>>().join("\n");

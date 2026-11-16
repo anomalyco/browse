@@ -50,7 +50,17 @@ impl Relay {
         let entry = st.tabs.get(&tab)?;
         let mut options = entry.options.clone();
         options.browser = st.link(&entry.link_key).map(|l| l.id.clone());
-        Some(TabInfo { tab, url: entry.url.clone(), title: entry.title.clone(), lent: entry.owner == Owner::User, opener: entry.opener, options })
+        Some(TabInfo {
+            tab,
+            url: entry.url.clone(),
+            title: entry.title.clone(),
+            lent: entry.owner == Owner::User,
+            chosen: entry.chosen.clone(),
+            opener: entry.opener,
+            last_used: Some(entry.last_used_at.clone()),
+            busy: st.tab_busy(tab),
+            options,
+        })
     }
 
     /// Every tab agents can use (the agent-opened ones and the lent ones), by id.
@@ -108,7 +118,7 @@ impl Relay {
             let mut st = self.st();
             let was = st.tab_busy(tab);
             if let Some(entry) = st.tabs.get_mut(&tab) {
-                entry.last_used = Instant::now();
+                entry.touch();
             }
             match st.calls.get_mut(&id) {
                 Some(call) => call.tabs.insert(tab) && !was,
@@ -194,18 +204,39 @@ impl Relay {
         tabs.iter()
             .map(|t| {
                 let browser = st.link(&t.link_key).map(|l| l.id.clone());
-                let mut value = json!({ "tab": t.id, "targetId": t.target_id, "url": t.url, "title": t.title, "owner": t.owner.name(), "browser": browser });
+                let mut value = json!({
+                    "tab": t.id,
+                    "targetId": t.target_id,
+                    "url": t.url,
+                    "title": t.title,
+                    "owner": t.owner.name(),
+                    "lent": t.owner == Owner::User,
+                    "browser": browser,
+                    "lastUsed": t.last_used_at,
+                    "busy": st.tab_busy(t.id),
+                });
+                if let Some(chosen) = &t.chosen {
+                    value["id"] = chosen.clone().into();
+                }
                 if let Some(group) = &t.options.group {
                     value["group"] = group.clone().into();
                 }
                 if t.crashed {
                     value["crashed"] = true.into();
                 }
-                if st.tab_busy(t.id) {
-                    value["busy"] = true.into();
-                }
                 value
             })
+            .collect()
+    }
+
+    /// Tabs idle cleanup may close: no call used them for `ttl`. A caller-chosen id keeps a tab open, and so does a
+    /// call, a handoff, a capture or a recording on it.
+    pub fn idle_tabs(&self, ttl: Duration) -> Vec<(i64, Owner)> {
+        let st = self.st();
+        st.tabs
+            .values()
+            .filter(|t| t.chosen.is_none() && !t.closing && !t.focused && t.last_used.elapsed() >= ttl && st.handoff_for_tab(t.id).is_none() && !st.tab_busy(t.id))
+            .map(|t| (t.id, t.owner))
             .collect()
     }
 
@@ -302,7 +333,7 @@ pub struct RelayBrowser(pub Arc<Relay>);
 #[async_trait]
 impl Browser for RelayBrowser {
     async fn open_tab(&self, url: Option<&str>, options: &TabOptions) -> anyhow::Result<TabInfo> {
-        let tab = self.0.create_tab(url, options, None).await?;
+        let tab = self.0.create_tab(url, options, None, None).await?;
         self.0.note_call_tab(tab);
         let st = self.0.st();
         self.0.tab_info(&st, tab).context("The tab went away")
@@ -369,7 +400,7 @@ impl Browser for RelayBrowser {
             } else {
                 entry.busy_keys.remove(key);
             }
-            entry.last_used = Instant::now();
+            entry.touch();
             was != st.tab_busy(tab)
         };
         if changed {
@@ -383,5 +414,33 @@ impl Browser for RelayBrowser {
             Some(link) => self.0.human_input_for_link(&link),
             None => crate::settings::human_input_override().unwrap_or(true),
         }
+    }
+
+    /// A numeric tab id, or a caller-chosen id like `work-mail`.
+    fn resolve_tab(&self, value: &Value) -> anyhow::Result<TabId> {
+        if let Some(tab) = value.as_i64() {
+            return Ok(tab);
+        }
+        let Some(chosen) = value.as_str().map(str::trim).filter(|id| !id.is_empty()) else {
+            bail!("tab must be an integer tab id or a chosen id like `work-mail`, not {value}");
+        };
+        self.0.resolve_chosen_tab(chosen)
+    }
+}
+
+impl Relay {
+    /// The tab a caller-chosen id like `work-mail` stands for, or why it can't be used.
+    pub fn resolve_chosen_tab(&self, chosen: &str) -> anyhow::Result<TabId> {
+        if !browse_core::valid_chosen_id(chosen) {
+            bail!("tab ids you choose are lowercase slugs like `work-mail` (letters, digits and dashes, starting with a letter), not {chosen:?}");
+        }
+        let st = self.st();
+        if let Some(tab) = st.tab_by_chosen(chosen) {
+            return Ok(tab);
+        }
+        if st.away_tab_by_chosen(chosen).is_some() {
+            bail!("`{chosen}` is in a browser that isn't connected right now. Open that browser and try again; browse gives the tab back when it reconnects.");
+        }
+        bail!("No tab has the id `{chosen}`. Open it with tabs {{ action: \"new\", id: \"{chosen}\", url }}; tabs lists the tabs you can use.")
     }
 }

@@ -478,6 +478,37 @@ pub async fn call_tool(relay: &Arc<Relay>, request: ToolCallRequest, client_pid:
     call_tool_keyed(relay, request, client_pid, None).await
 }
 
+/// Rewrites `tab` (and every entry of `tabs`) from a caller-chosen id like `work-mail` to the relay's numeric id, and
+/// says which chosen id `tab` named. Arguments every tool shares pass through here once.
+fn resolve_tab_arguments(relay: &Arc<Relay>, arguments: &mut Value) -> Result<Option<String>, String> {
+    let Some(map) = arguments.as_object_mut() else { return Ok(None) };
+    let mut chosen = None;
+    if let Some(value) = map.get_mut("tab") {
+        match value {
+            Value::String(name) => {
+                let name = name.trim().to_string();
+                let tab = relay.resolve_chosen_tab(&name).map_err(|error| format!("{error:#}"))?;
+                *value = json!(tab);
+                chosen = Some(name);
+            }
+            Value::Null => {}
+            other if other.as_i64().is_some() => {}
+            other => return Err(format!("tab must be an integer tab id or a chosen id like `work-mail`, not {other}")),
+        }
+    }
+    if let Some(Value::Array(list)) = map.get_mut("tabs") {
+        for value in list.iter_mut() {
+            if let Value::String(name) = value {
+                let tab = relay.resolve_chosen_tab(name.trim()).map_err(|error| format!("{error:#}"))?;
+                *value = json!(tab);
+            } else if !value.is_null() && value.as_i64().is_none() {
+                return Err(format!("tabs must be integer tab ids or chosen ids like `work-mail`, not {value}"));
+            }
+        }
+    }
+    Ok(chosen)
+}
+
 /// [call_tool], with the caller's key for the call (CALL_HEADER) so POST /tools/cancel can stop it.
 pub async fn call_tool_keyed(relay: &Arc<Relay>, request: ToolCallRequest, client_pid: Option<u32>, key: Option<String>) -> Result<ToolOutput, (StatusCode, String)> {
     let tool = relay.tools.read().unwrap_or_else(|poisoned| poisoned.into_inner()).iter().find(|t| t.spec().name == request.name).cloned();
@@ -485,7 +516,27 @@ pub async fn call_tool_keyed(relay: &Arc<Relay>, request: ToolCallRequest, clien
     relay.note_activity();
     let context = ToolContext { browser: Arc::new(RelayBrowser(relay.clone())), file_roots: relay.file_roots.clone() };
     let id = relay.next_call.fetch_add(1, Ordering::SeqCst);
-    let arguments = if request.arguments.is_null() { json!({}) } else { request.arguments };
+    let mut arguments = if request.arguments.is_null() { json!({}) } else { request.arguments };
+    // `tab` takes a numeric id or a chosen id (`work-mail`); tools below this line see the numeric one.
+    let chosen = match resolve_tab_arguments(relay, &mut arguments) {
+        Ok(chosen) => chosen,
+        Err(message) => return Ok(ToolOutput::error(message)),
+    };
+    if let Some(chosen) = &chosen {
+        let tab = arguments["tab"].as_i64().unwrap_or_default();
+        // A second call on a chosen-id tab gets a clear error instead of interleaving with the one running there.
+        let busy = {
+            let mut st = relay.st();
+            let busy = st.tab_busy(tab) || st.chosen_reserved(chosen);
+            if !busy {
+                st.chosen_calls.insert(id, tab);
+            }
+            busy
+        };
+        if busy {
+            return Ok(ToolOutput::error(format!("{chosen} is busy: another call is running in that tab. Wait for it to finish, then try again.")));
+        }
+    }
     let tab = arguments.get("tab").and_then(Value::as_i64);
     let name = request.name.clone();
     let started = Instant::now();
@@ -619,15 +670,9 @@ async fn housekeeping(relay: Arc<Relay>) {
         }
         if let Some(ttl) = relay.idle_tab_ttl.filter(|_| now - last_reap >= Duration::from_secs(60)) {
             last_reap = now;
-            // Tabs no call used for the idle TTL: an agent's closes, a lent one goes back to the user.
-            let idle: Vec<(i64, crate::relay::Owner)> = {
-                let st = relay.st();
-                st.tabs
-                    .values()
-                    .filter(|t| !t.closing && !t.focused && t.last_used.elapsed() >= ttl && st.handoff_for_tab(t.id).is_none() && !st.tab_busy(t.id))
-                    .map(|t| (t.id, t.owner))
-                    .collect()
-            };
+            // Tabs no call used for the idle TTL: an agent's closes, a lent one goes back to the user. A tab with a
+            // caller-chosen id stays until it is closed explicitly or by the user.
+            let idle: Vec<(i64, crate::relay::Owner)> = relay.idle_tabs(ttl);
             for (tab, owner) in idle {
                 rlog!("tab.reaped", tabId = tab, owner = owner.name());
                 if owner == crate::relay::Owner::User {

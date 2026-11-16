@@ -110,7 +110,7 @@ impl Cdp for TabCdp {
         let url = params.get("url").and_then(Value::as_str).unwrap_or("about:blank").to_string();
         match method {
             "Target.createTarget" => {
-                let tab = self.relay.create_tab(Some(&url), &options, Some(self.tab)).await.map_err(|e| CdpError::Protocol(e.to_string()))?;
+                let tab = self.relay.create_tab(Some(&url), &options, Some(self.tab), None).await.map_err(|e| CdpError::Protocol(e.to_string()))?;
                 let target = self.relay.st().tabs.get(&tab).map(|t| t.target_id.clone()).unwrap_or_default();
                 return Ok(json!({ "targetId": target, "tabId": tab }));
             }
@@ -142,7 +142,7 @@ impl Cdp for TabCdp {
             _ => {}
         }
         if let Some(tab) = self.relay.st().tabs.get_mut(&self.tab) {
-            tab.last_used = std::time::Instant::now();
+            tab.touch();
         }
         if session_id.is_none() {
             self.relay.focus_for_call(self.tab).await;

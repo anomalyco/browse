@@ -180,6 +180,11 @@ extension from your browser to finish.
   passes that `tab`. Agents use the tab ids they opened or were given, and leave other tabs alone unless you ask.
   Tabs can be opened with options that stick: `group` (the tab group's title, and a handle to close them together),
   `allowedOrigins`, `readOnly`, `keepVisible` and `browser`. Popups a page opens become agent tabs too.
+- **Tabs keep their ids, and an agent can name one.** `tabs` with `action: "new"` and an `id` like `work-mail` opens
+  that tab once: asking again returns the same tab without navigating it, and every tool takes `work-mail` as `tab`.
+  The id stays with the tab when the browser restarts (the extension keeps it on the tab), and a tab opened this way
+  is never closed as idle: only an agent or you close it. `tabs` lists each tab's id, url, title, group, last use and
+  whether a call is running in it.
 - **Agents open their own tabs** in the background of the window you last used, grouped together and collapsed unless
   you're looking at one. Agents can't switch you to their tabs or bring a window to the front. Tabs nobody touches for
   10 minutes close by themselves (never while something runs on them). Closing agent tabs never quits the browser: on
@@ -214,7 +219,7 @@ OpenCode, which composes tools in code mode, gets the plain tools. Every other M
 | `network`, `console` | Capture a tab's traffic (credentials redacted) or its console messages and errors |
 | `recording` | Record a tab to a video file |
 | `emulate`, `webmcp` | Viewport, color scheme, user agent, geolocation and more; tools a page offers through WebMCP |
-| `tabs` | List, open or close tabs (`group` closes a whole group) |
+| `tabs` | List, open or close tabs (`group` closes a whole group; an `id` names a tab for good, and opens it if it's missing) |
 | `handoff`, `demonstrate` | Ask you to do something only a person can do; ask you to show a flow while it records your steps |
 | `settings`, `status` | Read or change your settings when you ask; the relay, browsers, pairing state and what to do next |
 | `execute` | For other clients: JavaScript with a Playwright-style `page`, `snapshot()`, `ref()`, `handoff()`, `state` and `browse.<tool>()`. Each result starts with the tab it ended in, to pass back as `tab` |
@@ -244,9 +249,10 @@ the relay over a WebSocket and runs its commands in your browser through `chrome
   *Human-like input* off for full speed). This makes an agent hard to spot, not impossible: the browser shows its
   "started debugging" bar while the debugger is attached.
 
-Permissions: `debugger`, `tabs`, `tabGroups`, `storage`, `alarms`, `scripting` (to add the handoff card only to tabs
-agents use), `webNavigation` (to keep popups agents open with their other tabs), `notifications` (to tell you an agent
-needs you while it records a tab), and access to all sites so agents can work wherever you ask. Nothing leaves your
+Permissions: `debugger`, `tabs`, `tabGroups`, `storage`, `sessions` (to keep an agent tab's id on the tab, so it
+survives a browser restart), `alarms`, `scripting` (to add the handoff card only to tabs agents use), `webNavigation`
+(to keep popups agents open with their other tabs), `notifications` (to tell you an agent needs you while it records
+a tab), and access to all sites so agents can work wherever you ask. Nothing leaves your
 computer except what your agent sends to its model provider; see the [privacy policy](store/privacy-policy.md).
 
 ## Security

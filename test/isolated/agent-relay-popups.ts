@@ -139,7 +139,7 @@ describe("adoptOpened, agent tabs in the user's window", () => {
     expect(stub.state.tabs.get(userTab)!.active).toBe(true)
     expect(stub.state.focusedWindowId).toBe(user.id)
     expect(await TabCleanup.isTracked(popup.id)).toBe(true)
-    expect(opened()).toEqual([{ tabId: popup.id, openerTabId: agentTab }])
+    expect(opened()).toMatchObject([{ tabId: popup.id, openerTabId: agentTab }])
     nothingActivated(userTab)
   })
 
@@ -189,7 +189,7 @@ describe("adoptOpened, agent tabs in a separate window", () => {
     expect(stub.state.tabs.get(userTab)!.active).toBe(true)
     expect(await TabCleanup.isTracked(popup.id)).toBe(true)
     // Only once it's in place does the relay hear of it.
-    expect(opened()).toEqual([{ tabId: popup.id, openerTabId: agentTab }])
+    expect(opened()).toMatchObject([{ tabId: popup.id, openerTabId: agentTab }])
   })
 
   test("a popup window gives up focus but stays where it is", async () => {
@@ -200,7 +200,7 @@ describe("adoptOpened, agent tabs in a separate window", () => {
     await until(() => opened().length === 1)
     expect(stub.state.windows.get(window.id)!.focused).toBe(false)
     expect(stub.state.tabs.get(popup)!.windowId).toBe(window.id)
-    expect(opened()).toEqual([{ tabId: popup, openerTabId: agentTab }])
+    expect(opened()).toMatchObject([{ tabId: popup, openerTabId: agentTab }])
   })
 
   test("a tab opened from a lent tab stays the user's, and the relay still hears of it", async () => {
@@ -211,7 +211,7 @@ describe("adoptOpened, agent tabs in a separate window", () => {
     await until(() => opened().length === 1)
     expect(stub.state.tabs.get(popup.id)!.windowId).toBe(user.id)
     expect(await TabCleanup.isTracked(popup.id)).toBe(false)
-    expect(opened()).toEqual([{ tabId: popup.id, openerTabId: userTab }])
+    expect(opened()).toMatchObject([{ tabId: popup.id, openerTabId: userTab }])
   })
 
   test("a tab opened from a tab the relay doesn't drive is left alone and not reported", async () => {
