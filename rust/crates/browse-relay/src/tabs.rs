@@ -41,6 +41,8 @@ pub struct Attach {
     pub reclaim_held: bool,
     /// Look up who owned the tab before (a reconnect, a relay restart). A user's lend restores nothing.
     pub restore: bool,
+    /// Register the tab fresh (an opened popup): a disallowed first document closes it rather than blanking it.
+    pub fresh_popup: bool,
     /// Only this page: a tab id that now shows another page (the browser restarted) is let go again.
     pub expect_target: Option<String>,
     pub timeout: Duration,
@@ -58,6 +60,7 @@ impl Attach {
             already_attached: false,
             reclaim_held: false,
             restore: false,
+            fresh_popup: false,
             expect_target: None,
             timeout: ATTACH_TIMEOUT,
         }
@@ -70,6 +73,7 @@ impl Attach {
         attach.opener = tab.opener;
         attach.state = Some(tab.state.clone());
         attach.created_at = Some(tab.created_at.clone());
+        attach.fresh_popup = tab.fresh_popup;
         attach
     }
 }
@@ -99,6 +103,11 @@ fn target_info(result: &Value) -> Option<(String, String, String, String)> {
         info.get("url").and_then(Value::as_str).unwrap_or("").to_string(),
         info.get("title").and_then(Value::as_str).unwrap_or("").to_string(),
     ))
+}
+
+/// A URL that is a real document: not empty (nothing navigated yet) and not an about: page.
+fn real_url(url: &str) -> bool {
+    !url.is_empty() && !url.starts_with("about:")
 }
 
 impl Relay {
@@ -175,7 +184,7 @@ impl Relay {
                     main_frame: Some(target_id.clone()),
                     last_used: Instant::now(),
                     focused: false,
-                    fresh_popup: false,
+                    fresh_popup: attach.fresh_popup,
                     blanking: 0,
                     protected_ui: false,
                     unattachable: false,
@@ -424,6 +433,7 @@ impl Relay {
                 let mut attach = Attach::new(tab, Owner::Relay);
                 attach.options = options.clone();
                 attach.opener = Some(opener);
+                attach.fresh_popup = true;
                 match relay.setup_tab(attach).await {
                     Ok(_) => break,
                     Err(error) => {
@@ -438,12 +448,50 @@ impl Relay {
                 }
             }
             let url = {
-                let mut st = relay.st();
-                let Some(popup) = st.tabs.get_mut(&tab) else { return };
-                popup.fresh_popup = true;
+                let st = relay.st();
+                // An event may already have decided (the popup's first document was checked), or closed it.
+                let Some(popup) = st.tabs.get(&tab).filter(|popup| popup.fresh_popup) else { return };
                 popup.url.clone()
             };
-            relay.check_committed_url(tab, &url);
+            if !url.is_empty() && !url.starts_with("about:") {
+                relay.check_committed_url(tab, &url);
+                return;
+            }
+            // A popup attaches before its first navigation commits. A disallowed commit in the gap between setup_tab's
+            // snapshot and the tab being in st.tabs never reached observe_navigation, so ask again now that it would.
+            let info = relay.debugger(tab, None, "Target.getTargetInfo", json!({}), Some(ATTACH_TIMEOUT)).await;
+            match info {
+                Ok(info) => {
+                    let current = target_info(&info).map(|(_, _, url, _)| url).unwrap_or_default();
+                    let mut documents: Vec<String> = Vec::new();
+                    {
+                        let mut st = relay.st();
+                        let Some(entry) = st.tabs.get_mut(&tab) else { return };
+                        if !entry.fresh_popup || entry.closing {
+                            return;
+                        }
+                        // An event during the query can set the stored URL (a title change, a history.replaceState)
+                        // without it ever being checked, so it is a document too: check both when they differ.
+                        if real_url(&current) && (entry.url == url || !real_url(&entry.url)) {
+                            entry.url = current.clone();
+                        }
+                        if real_url(&entry.url) {
+                            documents.push(entry.url.clone());
+                        }
+                        if real_url(&current) && current != entry.url {
+                            documents.push(current);
+                        }
+                    }
+                    for document in documents {
+                        relay.check_committed_url(tab, &document);
+                    }
+                }
+                Err(error) => {
+                    if relay.enforced(tab).is_some() {
+                        relay.close_unverified_popup(tab, &error.to_string());
+                    }
+                }
+            }
         });
     }
 
@@ -907,13 +955,14 @@ impl Relay {
     }
 
     pub fn check_committed_url(self: &Arc<Self>, tab: i64, url: &str) -> bool {
-        let Some((rules, _)) = self.enforced(tab) else { return true };
+        let Some((rules, _)) = self.enforced(tab) else {
+            // No allowlist to judge it, but a real document still ends the popup's fresh state.
+            self.document_checked(tab, url);
+            return true;
+        };
         match domain::check_url(url, &rules, false) {
             domain::UrlDecision::Allowed { .. } => {
-                if !url.starts_with("about:")
-                    && let Some(entry) = self.st().tabs.get_mut(&tab) {
-                        entry.fresh_popup = false;
-                    }
+                self.document_checked(tab, url);
                 true
             }
             domain::UrlDecision::Refused(reason) => {
@@ -921,6 +970,14 @@ impl Relay {
                 false
             }
         }
+    }
+
+    /// A real document was checked: the popup no longer waits for its first one.
+    fn document_checked(&self, tab: i64, url: &str) {
+        if real_url(url)
+            && let Some(entry) = self.st().tabs.get_mut(&tab) {
+                entry.fresh_popup = false;
+            }
     }
 
     fn allowlist_violation(self: &Arc<Self>, tab: i64, url: &str, reason: &str) {
@@ -951,6 +1008,35 @@ impl Relay {
             }
             let _ = relay.debugger(tab, None, "Page.stopLoading", json!({}), Some(Duration::from_secs(3))).await;
             let _ = relay.debugger(tab, None, "Page.navigate", json!({ "url": "about:blank" }), Some(Duration::from_secs(10))).await;
+        });
+    }
+
+    /// A fresh popup whose URL couldn't be asked again is unverified: close it, leaving the news with its opener the
+    /// way `allowlist_violation` does. Fresh and still open means no document of it passed a check, whatever its
+    /// stored URL says.
+    fn close_unverified_popup(self: &Arc<Self>, tab: i64, error: &str) {
+        {
+            let mut st = self.st();
+            let Some(entry) = st.tabs.get_mut(&tab) else { return };
+            if !entry.fresh_popup || entry.closing || entry.owner != Owner::Relay {
+                return;
+            }
+            entry.fresh_popup = false;
+            let warning = format!("Domain allowlist: browse could not confirm tab {tab}'s first document, so it closed the popup. Ask the user before going elsewhere.");
+            // A closed popup can't carry the news: its opener does.
+            match entry.opener {
+                Some(opener) => {
+                    if let Some(opener) = st.tabs.get_mut(&opener) {
+                        opener.add_warning(warning);
+                    }
+                }
+                None => entry.add_warning(warning),
+            }
+        }
+        rlog!("allowlist.popup-unverified", tabId = tab, error = error);
+        let relay = self.clone();
+        tokio::spawn(async move {
+            let _ = relay.close_or_release(tab).await;
         });
     }
 }
