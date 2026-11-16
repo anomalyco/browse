@@ -218,7 +218,8 @@ function editDshConfig(receipt: AgentReceipt, remove: boolean): EditResult {
   if (doc.errors.length || warnings(doc)) throw invalid()
   if (!isSeq(doc.contents)) throw invalid()
   const patches = doc.contents
-  if (blank) patches.flow = false // A new file gets the block style every dsh example uses.
+  // A new file, and dsh's `# comment\n[]` template, get the block style every dsh example uses.
+  if (patches.items.length === 0) patches.flow = false
   const owners: { patch: number; insert: YAMLSeq; row: number; node: YAMLMap }[] = []
   for (const [patchIndex, patch] of patches.items.entries()) {
     if (!isMap(patch)) continue
@@ -238,6 +239,8 @@ function editDshConfig(receipt: AgentReceipt, remove: boolean): EditResult {
   const ours = owners[0]
   if (ours && !isDeepStrictEqual(ours.node.toJS(doc), expected)) return "conflict"
   if (remove ? !ours : !!ours) return "unchanged"
+  // Removing our row would leave a shape browse can't verify (an empty insert beside the user's keys); Rust refuses too.
+  if (ours && remove && (patches.items[ours.patch] as YAMLMap).items.length > 1 && ours.insert.items.length === 1) return "conflict"
   const prior = patches.items.map(item => item.toJS(doc))
   let remaining: unknown[] | undefined
   if (ours) {
@@ -249,8 +252,19 @@ function editDshConfig(receipt: AgentReceipt, remove: boolean): EditResult {
           index === ours.patch
             ? { ...(item as Record<string, unknown>), insert: (item as { insert: unknown[] }).insert.filter((_, i) => i !== ours.row) }
             : item)
-    ours.insert.items.splice(ours.row, 1)
-    if (whole) patches.items.splice(ours.patch, 1)
+    if (whole) {
+      // The comment above our patch belongs to the file, not to the node the splice would drop.
+      const removed = patches.items[ours.patch] as YAMLMap
+      const comment = removed.commentBefore
+      if (comment) {
+        const next = patches.items[ours.patch + 1]
+        if (next) next.commentBefore = next.commentBefore ? `${comment}\n${next.commentBefore}` : comment
+        else doc.commentBefore = doc.commentBefore ? `${doc.commentBefore}\n${comment}` : comment
+      }
+      patches.items.splice(ours.patch, 1)
+    } else {
+      ours.insert.items.splice(ours.row, 1)
+    }
   } else {
     doc.add({ insert: [expected] })
   }

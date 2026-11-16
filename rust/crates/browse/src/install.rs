@@ -376,6 +376,10 @@ pub fn install(args: &[String]) -> anyhow::Result<i32> {
                 println!("! {label} already has a different server named browse in {file}; left it unchanged.");
                 status = 1;
             }
+            Ok(Edit::IdTaken) => {
+                println!("! {label} already has another row using browse's id ({}) in {file}; left it unchanged.", crate::dsh::ROW_ID);
+                status = 1;
+            }
             Err(error) => {
                 println!("! Couldn't add browse to {label}: {error:#}. Fix the file, then run `browse install --agent {}`.", location.name);
                 status = 1;
@@ -472,6 +476,7 @@ pub fn uninstall(args: &[String]) -> anyhow::Result<i32> {
         match agents::edit(location, &placeholder, true) {
             Ok(Edit::Removed) => println!("✓ Removed browse from {label} ({})", tilde(&location.file)),
             Ok(Edit::Conflict) => println!("! {} has a server named browse that browse didn't write; left it unchanged.", tilde(&location.file)),
+            Ok(Edit::IdTaken) => println!("! {} has another row using browse's id ({}); left it unchanged.", tilde(&location.file), crate::dsh::ROW_ID),
             Ok(_) => {}
             Err(error) => {
                 println!("! Couldn't remove browse from {label}: {error:#}");

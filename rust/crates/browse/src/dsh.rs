@@ -8,12 +8,14 @@
 
 use serde_json::Value;
 
-use crate::agents::{Edit, merged, owned};
+use crate::agents::{Edit, owned};
 
 /// The dsh plugin package that carries MCP client rows.
 const CLIENT: &str = "@deepseek-ai/dsh-mcp-client";
 /// Our row's stable id inside the patch tree, named like dsh's own `mcp-github` examples.
-const ROW_ID: &str = "mcp-browse";
+pub(crate) const ROW_ID: &str = "mcp-browse";
+/// The fields browse owns inside the row's `config`; everything else there is the user's.
+const FIELDS: [&str; 4] = ["serverName", "transport", "command", "args"];
 
 /// A row found in the patch layer, its place, and whether its top-level item exists only for it.
 struct Owner<'a> {
@@ -21,7 +23,7 @@ struct Owner<'a> {
     row: usize,
     whole: bool,
     node: &'a serde_yaml::Mapping,
-    config: &'a serde_yaml::Value,
+    config: &'a serde_yaml::Mapping,
 }
 
 fn patches(value: &serde_yaml::Value) -> Option<&Vec<serde_yaml::Value>> {
@@ -42,11 +44,11 @@ fn owners(items: &[serde_yaml::Value]) -> Vec<Owner<'_>> {
             if node.get("name").and_then(serde_yaml::Value::as_str) != Some(CLIENT) {
                 continue;
             }
-            let Some(config @ serde_yaml::Value::Mapping(config_map)) = node.get("config") else { continue };
+            let Some(serde_yaml::Value::Mapping(config_map)) = node.get("config") else { continue };
             if config_map.get("serverName").and_then(serde_yaml::Value::as_str) != Some("browse") {
                 continue;
             }
-            found.push(Owner { item, row, whole: map.len() == 1 && rows.len() == 1, node, config });
+            found.push(Owner { item, row, whole: map.len() == 1 && rows.len() == 1, node, config: config_map });
         }
     }
     found
@@ -84,30 +86,187 @@ fn row(config: &Value) -> anyhow::Result<serde_yaml::Value> {
     Ok(serde_yaml::Value::Mapping(row))
 }
 
-/// Our row with the new config, keeping every other row key the user set (`disabled`, an id they renamed, ...).
-fn updated_row(node: &serde_yaml::Mapping, config: &Value) -> anyhow::Result<serde_yaml::Value> {
-    let mut row = node.clone();
-    row.insert("name".into(), CLIENT.into());
-    row.insert("config".into(), serde_yaml::to_value(config)?);
-    Ok(serde_yaml::Value::Mapping(row))
+/// Whether browse's own config fields already match; everything else in the user's config is left alone.
+fn same_fields(current: &serde_yaml::Mapping, expected: &serde_yaml::Mapping) -> bool {
+    FIELDS.iter().all(|key| current.get(*key) == expected.get(*key))
 }
 
-/// The item as block text at column 0, so it can replace or follow a file's lines without touching a byte before it.
-fn render(row: serde_yaml::Value, crlf: bool) -> anyhow::Result<String> {
-    let text = serde_yaml::to_string(&patch(row)?)?;
+/// The user's config with only browse's fields set. YAML values stay as they are, so `!!js` tags survive.
+fn merged_config(current: &serde_yaml::Mapping, expected: &serde_yaml::Mapping) -> serde_yaml::Mapping {
+    let mut config = current.clone();
+    for key in FIELDS {
+        if let Some(value) = expected.get(key) {
+            config.insert(key.into(), value.clone());
+        }
+    }
+    config
+}
+
+/// A line's content and its original ending.
+type Line = (String, String);
+/// A line range and the lines that replace it.
+type LineEdit = (usize, usize, Vec<Line>);
+
+/// One line split into its content and its original ending.
+fn split_line(line: &str) -> (&str, &str) {
+    if let Some(content) = line.strip_suffix("\r\n") {
+        (content, "\r\n")
+    } else if let Some(content) = line.strip_suffix('\n') {
+        (content, "\n")
+    } else {
+        (line, "")
+    }
+}
+
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start_matches(' ').len()
+}
+
+fn render_scalar(value: &serde_yaml::Value) -> Option<String> {
+    serde_yaml::to_string(value).ok().map(|text| text.trim_end_matches(['\r', '\n']).to_owned())
+}
+
+/// The line of `field:` at `indent`, if it appears exactly once.
+fn field_line(lines: &[Line], field: &str, indent: usize) -> Option<usize> {
+    let mut found = None;
+    for (index, (content, _)) in lines.iter().enumerate() {
+        let trimmed = content.trim_start();
+        if indent_of(content) == indent && trimmed.strip_prefix(field).is_some_and(|rest| rest.starts_with(':')) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(index);
+        }
+    }
+    found
+}
+
+/// The lines after an `args:` key that belong to it.
+fn args_end(lines: &[Line], at: usize, indent: usize) -> usize {
+    let mut end = at + 1;
+    while end < lines.len() {
+        let (content, _) = &lines[end];
+        let trimmed = content.trim_start();
+        let depth = indent_of(content);
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            break;
+        }
+        if depth > indent || (depth == indent && trimmed.starts_with("- ")) {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    end
+}
+
+/// Sets browse's config fields by editing only their lines, so tags (`!!js`), merge keys and comments elsewhere keep
+/// their bytes. Returns None when the text is not the block shape browse writes.
+fn rewrite_config(block: &str, current: &serde_yaml::Mapping, expected: &serde_yaml::Mapping, newline: &str) -> Option<String> {
+    let mut lines: Vec<Line> = block
+        .split_inclusive('\n')
+        .map(|line| {
+            let (content, ending) = split_line(line);
+            (content.to_owned(), ending.to_owned())
+        })
+        .collect();
+    let configs: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, (content, _))| {
+            let trimmed = content.trim_start();
+            indent_of(content) > 0 && (trimmed == "config:" || trimmed.starts_with("config: #"))
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let config_at = *configs.first().filter(|_| configs.len() == 1)?;
+    let config_indent = indent_of(&lines[config_at].0);
+    let field_indent = lines
+        .iter()
+        .skip(config_at + 1)
+        .filter(|(content, _)| !content.trim().is_empty() && !content.trim_start().starts_with('#'))
+        .map(|(content, _)| indent_of(content))
+        .filter(|indent| *indent > config_indent)
+        .min()
+        .unwrap_or(config_indent + 2);
+    let pad = " ".repeat(field_indent);
+    let args_value = |want: &serde_yaml::Value, ending: &str| -> Option<Vec<Line>> {
+        match want {
+            serde_yaml::Value::Sequence(items) if !items.is_empty() => {
+                let text = serde_yaml::to_string(want).ok()?;
+                let mut rendered = vec![(format!("{pad}args:"), ending.to_owned())];
+                rendered.extend(text.lines().map(|line| (format!("{pad}{line}"), newline.to_owned())));
+                Some(rendered)
+            }
+            _ => Some(vec![(format!("{pad}args: {}", render_scalar(want)?), ending.to_owned())]),
+        }
+    };
+    let mut edits: Vec<LineEdit> = Vec::new();
+    let mut missing: Vec<Line> = Vec::new();
+    for field in FIELDS {
+        let Some(want) = expected.get(field) else { continue };
+        if current.get(field) == Some(want) {
+            continue;
+        }
+        let Some(at) = field_line(&lines, field, field_indent) else {
+            if field == "args" {
+                missing.extend(args_value(want, newline)?);
+            } else {
+                missing.push((format!("{pad}{field}: {}", render_scalar(want)?), newline.to_owned()));
+            }
+            continue;
+        };
+        let ending = if lines[at].1.is_empty() { newline.to_owned() } else { lines[at].1.clone() };
+        if field == "args" {
+            edits.push((at, args_end(&lines, at, field_indent), args_value(want, &ending)?));
+        } else {
+            let value = lines[at].0.trim_start().strip_prefix(field)?.strip_prefix(':')?.trim();
+            if value.is_empty() || value.starts_with('#') {
+                return None;
+            }
+            edits.push((at, at + 1, vec![(format!("{pad}{field}: {}", render_scalar(want)?), ending)]));
+        }
+    }
+    if !missing.is_empty() {
+        edits.push((config_at + 1, config_at + 1, missing));
+    }
+    edits.sort_by_key(|(start, end, _)| (*start, *end));
+    for (start, end, replacement) in edits.into_iter().rev() {
+        lines.splice(start..end, replacement);
+    }
+    Some(lines.into_iter().map(|(content, ending)| content + &ending).collect())
+}
+
+/// Our row with the merged config, keeping every other row key (`disabled`, an id the user renamed, ...).
+fn updated_row(node: &serde_yaml::Mapping, config: serde_yaml::Mapping) -> serde_yaml::Value {
+    let mut row = node.clone();
+    row.insert("name".into(), CLIENT.into());
+    row.insert("config".into(), serde_yaml::Value::Mapping(config));
+    serde_yaml::Value::Mapping(row)
+}
+
+/// A value as block text at `indent` columns, so it can replace or follow a file's lines without touching earlier ones.
+fn render_at(value: &serde_yaml::Value, indent: usize, crlf: bool) -> anyhow::Result<String> {
+    let text = serde_yaml::to_string(value)?;
     let newline = if crlf { "\r\n" } else { "\n" };
     let mut out = String::new();
     for (index, line) in text.lines().enumerate() {
         if index == 0 {
+            out.push_str(&" ".repeat(indent));
             out.push_str("- ");
         } else {
             out.push_str(newline);
-            out.push_str("  ");
+            out.push_str(&" ".repeat(indent + 2));
         }
         out.push_str(line);
     }
     out.push_str(newline);
     Ok(out)
+}
+
+/// The item as block text at column 0.
+fn render(row: serde_yaml::Value, crlf: bool) -> anyhow::Result<String> {
+    render_at(&patch(row)?, 0, crlf)
 }
 
 /// Whether a line carries content (not blank, not only a comment).
@@ -172,11 +331,17 @@ fn row_lines(spans: &[(usize, usize, &str)], start: usize, limit: usize) -> Vec<
     rows
 }
 
-/// The single `[]` line of dsh's empty patch template, which may be surrounded by comments.
+/// Whether a line holds only an empty layer value: `[]`, or a YAML null (`~`, `null`), with an optional inline comment.
+fn empty_value(line: &str) -> bool {
+    let value = line.split('#').next().unwrap_or_default().trim();
+    value == "[]" || value == "~" || value == "null"
+}
+
+/// The single line of dsh's empty patch template, which may be surrounded by comments and a leading `---`.
 fn empty_layer(text: &str) -> Option<(usize, usize)> {
-    let mut lines = line_spans(text).into_iter().filter(|(_, _, line)| content(line));
+    let mut lines = line_spans(text).into_iter().filter(|(_, _, line)| content(line) && line.trim() != "---");
     let only = lines.next()?;
-    if only.2.trim() != "[]" || lines.next().is_some() {
+    if !empty_value(only.2) || lines.next().is_some() {
         return None;
     }
     Some((only.0, only.1))
@@ -196,14 +361,18 @@ pub fn edit(before: &str, expected: &Value, remove: bool) -> anyhow::Result<(Opt
         return Err(invalid());
     }
     let parsed = if blank || empty_at.is_some() { serde_yaml::Value::Sequence(Vec::new()) } else { serde_yaml::from_str(before).map_err(|_| invalid())? };
-    let items = patches(&parsed).ok_or_else(invalid)?;
-    if id_taken(items) {
-        return Ok((None, Edit::Conflict));
+    // A comments-only or `---`-only file has no document value; the first item is appended after those lines.
+    let null = matches!(parsed, serde_yaml::Value::Null);
+    let items: Vec<serde_yaml::Value> = if null { Vec::new() } else { patches(&parsed).ok_or_else(invalid)?.clone() };
+    if id_taken(&items) {
+        return Ok((None, Edit::IdTaken));
     }
-    let found = owners(items);
+    let found = owners(&items);
     if found.len() > 1 {
         return Ok((None, Edit::Conflict));
     }
+    let expected_yaml = serde_yaml::to_value(expected)?;
+    let expected_map = expected_yaml.as_mapping().ok_or_else(invalid)?;
     let crlf = before.contains("\r\n");
     let newline = if crlf { "\r\n" } else { "\n" };
     let Some(owner) = found.first() else {
@@ -214,7 +383,10 @@ pub fn edit(before: &str, expected: &Value, remove: bool) -> anyhow::Result<(Opt
         let after = if blank {
             render(fresh.clone(), crlf)?
         } else if let Some((start, end)) = empty_at {
-            format!("{}{}{}", &before[..start], render(fresh.clone(), crlf)?, &before[end..])
+            // Keep an inline comment on the replaced line, on a line of its own.
+            let line = before[start..end].trim_end_matches(['\r', '\n']);
+            let comment = line.find('#').map(|at| format!("{}{}{}", &line[..line.len() - line.trim_start().len()], &line[at..], newline));
+            format!("{}{}{}{}", &before[..start], comment.unwrap_or_default(), render(fresh.clone(), crlf)?, &before[end..])
         } else if before.ends_with('\n') {
             format!("{before}{}", render(fresh.clone(), crlf)?)
         } else {
@@ -231,9 +403,8 @@ pub fn edit(before: &str, expected: &Value, remove: bool) -> anyhow::Result<(Opt
     if !current.is_object() || !owned(&current) {
         return Ok((None, Edit::Conflict));
     }
-    // The row keeps the user's extra config (`env`, `toolCallTimeoutMs`, ...) and only browse's fields are compared.
-    let server = merged(Some(&current), expected);
-    if !remove && server == current {
+    // Browse's own fields decide whether there is anything to do; the user's other config keys are never compared.
+    if !remove && same_fields(owner.config, expected_map) {
         return Ok((None, Edit::Unchanged));
     }
     let spans = line_spans(before);
@@ -276,13 +447,36 @@ pub fn edit(before: &str, expected: &Value, remove: bool) -> anyhow::Result<(Opt
         }
         return Ok((Some(after), Edit::Removed));
     }
-    if !owner.whole {
-        return Ok((None, Edit::Conflict));
-    }
-    let updated = updated_row(owner.node, &server)?;
-    let after = format!("{}{}{}", &before[..spans[item_line].0], render(updated.clone(), crlf)?, &before[item_stop..]);
+    let updated = updated_row(owner.node, merged_config(owner.config, expected_map));
     let mut wanted = items.clone();
-    wanted[owner.item] = patch(updated)?;
+    let after = if owner.whole {
+        wanted[owner.item] = patch(updated)?;
+        let start = spans[item_line].0;
+        let Some(rewritten) = rewrite_config(&before[start..item_stop], owner.config, expected_map, newline) else {
+            return Ok((None, Edit::Conflict));
+        };
+        format!("{}{}{}", &before[..start], rewritten, &before[item_stop..])
+    } else {
+        // The user's patch stays; replace just our row's field lines inside their insert list.
+        let Some(serde_yaml::Value::Mapping(map)) = items.get(owner.item) else { return Ok((None, Edit::Conflict)) };
+        let Some(serde_yaml::Value::Sequence(rows)) = map.get("insert") else { return Ok((None, Edit::Conflict)) };
+        if map.len() != 1 || rows.len() <= 1 {
+            return Ok((None, Edit::Conflict));
+        }
+        let cuts = row_lines(&spans, item_line, next_line);
+        if cuts.len() != rows.len() {
+            return Ok((None, Edit::Conflict));
+        }
+        let start = spans[cuts[owner.row]].0;
+        let end = item_end(&spans, cuts[owner.row], cuts.get(owner.row + 1).copied().unwrap_or(next_line));
+        let Some(rewritten) = rewrite_config(&before[start..end], owner.config, expected_map, newline) else {
+            return Ok((None, Edit::Conflict));
+        };
+        if let Some(serde_yaml::Value::Sequence(rows)) = wanted[owner.item].get_mut("insert") {
+            rows[owner.row] = updated;
+        }
+        format!("{}{}{}", &before[..start], rewritten, &before[end..])
+    };
     if !verify(&after, &serde_yaml::Value::Sequence(wanted)) {
         return Err(invalid());
     }
@@ -354,9 +548,18 @@ mod tests {
     }
 
     #[test]
-    fn a_row_in_a_user_patch_is_removed_but_not_updated() {
-        let before = "- insert:\n  - id: other\n    name: other\n  - id: mcp-browse\n    name: '@deepseek-ai/dsh-mcp-client'\n    config:\n      serverName: browse\n      transport: stdio\n      command: /bin/browse\n      args:\n      - mcp\n";
-        assert_eq!(edit(before, &config("/usr/bin/browse"), false).unwrap().1, Edit::Conflict);
+    fn a_row_in_a_user_patch_is_updated_and_removed() {
+        let before = "- insert:\n  - id: other\n    name: other\n  - id: mcp-browse\n    name: '@deepseek-ai/dsh-mcp-client'\n    config:\n      serverName: browse\n      transport: stdio\n      command: /bin/browse\n      args:\n      - mcp\n      env:\n        A: '1'\n";
+        // A changed command updates just our row inside the user's insert, keeping their row and our extras.
+        let (updated, outcome) = edit(before, &config("/usr/bin/browse"), false).unwrap();
+        assert_eq!(outcome, Edit::Updated);
+        let updated = updated.unwrap();
+        let items = rows(&updated);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["insert"].as_sequence().unwrap().len(), 2);
+        assert_eq!(items[0]["insert"][0]["id"].as_str(), Some("other"));
+        assert_eq!(items[0]["insert"][1]["config"]["command"].as_str(), Some("/usr/bin/browse"));
+        assert_eq!(items[0]["insert"][1]["config"]["env"]["A"].as_str(), Some("1"));
         let (after, outcome) = edit(before, &config("/bin/browse"), true).unwrap();
         assert_eq!(outcome, Edit::Removed);
         assert_eq!(rows(&after.unwrap()), rows("- insert:\n  - id: other\n    name: other\n"));
@@ -370,6 +573,45 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert_eq!(items[0], rows("- insert:\n  - id: other\n    name: other\n")[0]);
         assert_eq!(items[1]["insert"][0]["id"].as_str(), Some("last"));
+    }
+
+    #[test]
+    fn a_patch_with_other_keys_is_left_alone() {
+        // The insert holds only our row but the patch has another key: removing the row would leave a shape browse
+        // cannot verify, so it stays.
+        let before = "- insert:\n  - id: mcp-browse\n    name: '@deepseek-ai/dsh-mcp-client'\n    config:\n      serverName: browse\n      transport: stdio\n      command: /bin/browse\n      args:\n      - mcp\n  when: x\n";
+        assert_eq!(edit(before, &config("/bin/browse"), true).unwrap(), (None, Edit::Conflict));
+        assert_eq!(edit(before, &config("/usr/bin/browse"), false).unwrap(), (None, Edit::Conflict));
+    }
+
+    #[test]
+    fn an_update_keeps_js_tags_in_the_config() {
+        let before = "- insert:\n  - id: mcp-browse\n    name: '@deepseek-ai/dsh-mcp-client'\n    config:\n      serverName: browse\n      transport: stdio\n      command: /bin/browse\n      args:\n      - mcp\n      env:\n        TOKEN: !!js process.env.TOKEN\n";
+        let (after, outcome) = edit(before, &config("/usr/bin/browse"), false).unwrap();
+        assert_eq!(outcome, Edit::Updated);
+        let after = after.unwrap();
+        // serde_yaml flattens standard tags, so the tag can only be checked in the text; the value it wraps is unchanged.
+        assert!(after.contains("TOKEN: !!js process.env.TOKEN"), "{after}");
+        let item = &rows(&after)[0]["insert"][0];
+        assert_eq!(item["config"]["env"]["TOKEN"].as_str(), Some("process.env.TOKEN"));
+        assert_eq!(item["config"]["command"].as_str(), Some("/usr/bin/browse"));
+    }
+
+    #[test]
+    fn an_update_keeps_a_merge_key() {
+        let before = "- insert:\n  - id: other\n    name: other\n    config:\n      base: &b\n        TOKEN: x\n- insert:\n  - id: mcp-browse\n    name: '@deepseek-ai/dsh-mcp-client'\n    config:\n      serverName: browse\n      transport: stdio\n      command: /bin/browse\n      args:\n      - mcp\n      env:\n        <<: *b\n";
+        assert_eq!(edit(before, &config("/bin/browse"), false).unwrap(), (None, Edit::Unchanged));
+        let (after, outcome) = edit(before, &config("/usr/bin/browse"), false).unwrap();
+        assert_eq!(outcome, Edit::Updated);
+        let after = after.unwrap();
+        assert!(after.contains("<<: *b"), "{after}");
+        let items = rows(&after);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[1]["insert"][0]["config"]["env"]["<<"]
+            .as_mapping()
+            .and_then(|map| map.get("TOKEN"))
+            .and_then(serde_yaml::Value::as_str), Some("x"));
+        assert_eq!(items[1]["insert"][0]["config"]["command"].as_str(), Some("/usr/bin/browse"));
     }
 
     #[test]
@@ -432,9 +674,37 @@ mod tests {
     #[test]
     fn the_row_id_is_ours_or_a_conflict() {
         let other = "- insert:\n  - id: mcp-browse\n    name: other\n";
-        assert_eq!(edit(other, &config("/bin/browse"), false).unwrap(), (None, Edit::Conflict));
+        assert_eq!(edit(other, &config("/bin/browse"), false).unwrap(), (None, Edit::IdTaken));
         let wrong_server = "- insert:\n  - id: mcp-browse\n    name: '@deepseek-ai/dsh-mcp-client'\n    config:\n      serverName: other\n";
-        assert_eq!(edit(wrong_server, &config("/bin/browse"), false).unwrap(), (None, Edit::Conflict));
+        assert_eq!(edit(wrong_server, &config("/bin/browse"), false).unwrap(), (None, Edit::IdTaken));
+    }
+
+    #[test]
+    fn empty_templates_and_null_documents_are_accepted() {
+        let before = "# dsh\n# template\n[] # the empty layer\n# end\n";
+        let (added, outcome) = edit(before, &config("/bin/browse"), false).unwrap();
+        assert_eq!(outcome, Edit::Added);
+        let added = added.unwrap();
+        assert!(added.starts_with("# dsh\n# template\n# the empty layer\n- insert:"), "{added}");
+        assert!(added.ends_with("# end\n"), "{added}");
+        let (removed, outcome) = edit(&added, &config("/bin/browse"), true).unwrap();
+        assert_eq!(outcome, Edit::Removed);
+        assert_eq!(removed.unwrap(), "# dsh\n# template\n# the empty layer\n[]\n# end\n");
+
+        // A leading `---` and a null value are accepted too.
+        let document = "---\n# mine\n~\n";
+        let (added, outcome) = edit(document, &config("/bin/browse"), false).unwrap();
+        assert_eq!(outcome, Edit::Added);
+        assert!(added.unwrap().starts_with("---\n# mine\n- insert:"));
+
+        // Comments-only and `---`-only files get the item appended after their lines.
+        for text in ["# only comments\n", "---\n"] {
+            let (added, outcome) = edit(text, &config("/bin/browse"), false).unwrap();
+            assert_eq!(outcome, Edit::Added);
+            let added = added.unwrap();
+            assert!(added.starts_with(text), "{added:?} did not start with {text:?}");
+            assert_eq!(rows(&added).len(), 1);
+        }
     }
 
     #[test]

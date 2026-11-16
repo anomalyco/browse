@@ -301,6 +301,8 @@ pub enum Edit {
     Removed,
     /// A server named browse that isn't one browse wrote: left as it is.
     Conflict,
+    /// Another row already holds the id browse writes: left as it is.
+    IdTaken,
 }
 
 /// Adds browse (running `command`) to the agent's config, updates an entry an earlier install wrote, or with `remove`

@@ -282,6 +282,41 @@ test("dsh creates a missing patch layer, removes only its own row, and reads the
   } finally { fs.rmSync(home, { recursive: true, force: true }) }
 })
 
+test("dsh keeps the comment above its patch and writes the [] template as a block layer", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-dsh-comment-"))
+  try {
+    const file = path.join(home, ".dsh", "cordis.patch.yml")
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    const receipt = { name: "dsh" as const, file, entry: "/home/me/.local/bin/browse" }
+    const row = `- insert:\n    - id: mcp-browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: ${JSON.stringify(receipt.entry)}\n        args:\n          - mcp\n`
+    fs.writeFileSync(file, `# before\n${row}# after\n`)
+    expect(editAgentConfig(receipt, true)).toBe("removed")
+    const removed = fs.readFileSync(file, "utf8")
+    expect(removed).toContain("# before")
+    expect(removed).toContain("# after")
+    expect(Bun.YAML.parse(removed)).toEqual([])
+    // dsh's own template is comments then `[]`; adding there stays block style, not one-line flow.
+    fs.writeFileSync(file, "# dsh profile patches\n# add rows below\n[]\n")
+    expect(editAgentConfig(receipt)).toBe("added")
+    const added = fs.readFileSync(file, "utf8")
+    expect(added.startsWith("# dsh profile patches\n# add rows below\n- insert:\n")).toBe(true)
+    expect(added).not.toContain("[ { insert:")
+  } finally { fs.rmSync(home, { recursive: true, force: true }) }
+})
+
+test("dsh leaves a patch with other keys alone when its insert holds only our row", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-dsh-when-"))
+  try {
+    const file = path.join(home, ".dsh", "cordis.patch.yml")
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    const receipt = { name: "dsh" as const, file, entry: "/home/me/.local/bin/browse" }
+    const before = `- insert:\n    - id: mcp-browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: ${JSON.stringify(receipt.entry)}\n        args:\n          - mcp\n  when: x\n`
+    fs.writeFileSync(file, before)
+    expect(editAgentConfig(receipt, true)).toBe("conflict")
+    expect(fs.readFileSync(file, "utf8")).toBe(before)
+  } finally { fs.rmSync(home, { recursive: true, force: true }) }
+})
+
 test("an agent config write is atomic and keeps the file's mode", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "browse-atomic-"))
   try {
@@ -333,7 +368,8 @@ test("dsh's DSH_HOME is unset when blank, expands ~/, and ignores other relative
   }
 })
 
-/** Runs locateExtension with recording effects: nothing real is opened, revealed or copied. */function run(overrides: Partial<LocateOptions> = {}, results: { open?: boolean } = {}) {
+/** Runs locateExtension with recording effects: nothing real is opened, revealed or copied. */
+function run(overrides: Partial<LocateOptions> = {}, results: { open?: boolean } = {}) {
   const calls: { open: [string, string][]; reveal: string[]; copy: string[] } = { open: [], reveal: [], copy: [] }
   const lines: string[] = []
   const options: LocateOptions = {
