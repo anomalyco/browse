@@ -39,6 +39,7 @@ pub const AGENTS: &[(&str, &str)] = &[
     ("junie", "Junie"),
     ("codebuddy", "CodeBuddy Code"),
     ("cortex", "Cortex Code"),
+    ("dsh", "DeepSeek Harness"),
     ("hermes", "Hermes Agent"),
     ("grok", "Grok Build"),
     ("vibe", "Mistral Vibe"),
@@ -160,6 +161,8 @@ pub fn locations(opencode_config: &Path, opencode_binary: Option<&Path>) -> Vec<
         None => config.join("goose"),
     };
     let codex = env("CODEX_HOME").unwrap_or_else(|| at(".codex"));
+    // dsh's home: $DSH_HOME when set to something other than blank, else ~/.dsh (dsh-home-paths).
+    let dsh = env("DSH_HOME").filter(|home| !home.to_string_lossy().trim().is_empty()).unwrap_or_else(|| at(".dsh"));
     let cascade = if cfg!(windows) { &support } else { &config }.join("devin/mcp_config.json");
     // Windsurf uses .codeium; its renamed Cascade client moved mcp_config.json to the Devin config folder.
     let windsurf = at(".codeium/windsurf/mcp_config.json");
@@ -206,6 +209,7 @@ pub fn locations(opencode_config: &Path, opencode_binary: Option<&Path>) -> Vec<
         loc("junie", at(".junie/mcp/mcp.json"), Some("junie"), None, Some(vec![at(".junie")])),
         loc("codebuddy", first(vec![at(".codebuddy/.mcp.json"), at(".codebuddy/mcp.json")]), Some("codebuddy"), None, None),
         loc("cortex", at(".snowflake/cortex/mcp.json"), Some("cortex"), None, None),
+        loc("dsh", dsh.join("cordis.patch.yml"), Some("dsh"), None, Some(vec![dsh.clone()])),
         loc("hermes", env("HERMES_HOME").unwrap_or_else(|| at(".hermes")).join("config.yaml"), Some("hermes"), None, None),
         loc("grok", env("GROK_HOME").unwrap_or_else(|| at(".grok")).join("config.toml"), Some("grok"), None, None),
         loc("vibe", env("VIBE_HOME").unwrap_or_else(|| at(".vibe")).join("config.toml"), Some("vibe"), None, None),
@@ -223,12 +227,15 @@ enum Format {
     TomlList,
     /// YAML, the servers under this top-level key.
     Yaml(&'static str),
+    /// YAML, dsh's Cordis patch layer: a top-level list of patch rows.
+    Dsh,
 }
 
 fn format(name: &str) -> Format {
     match name {
         "codex" | "grok" => Format::Toml,
         "vibe" => Format::TomlList,
+        "dsh" => Format::Dsh,
         "goose" => Format::Yaml("extensions"),
         "hermes" => Format::Yaml("mcp_servers"),
         "vscode" => Format::Json("servers"),
@@ -246,6 +253,7 @@ pub fn definition(name: &str, command: &str, args: &[String]) -> Value {
         "goose" => json!({ "type": "stdio", "name": "browse", "enabled": true, "cmd": command, "args": args }),
         "copilot" => json!({ "type": "local", "command": command, "args": args, "tools": ["*"] }),
         "vibe" => json!({ "name": "browse", "transport": "stdio", "command": command, "args": args }),
+        "dsh" => json!({ "serverName": "browse", "transport": "stdio", "command": command, "args": args }),
         "claude" | "vscode" | "cortex" | "droid" | "codebuddy" => json!({ "type": "stdio", "command": command, "args": args }),
         _ => json!({ "command": command, "args": args }),
     }
@@ -301,6 +309,7 @@ pub fn edit(location: &Location, command: &[String], remove: bool) -> anyhow::Re
         Format::Toml => edit_toml(&before, &expected, remove, false).map_err(|_| invalid())?,
         Format::TomlList => edit_toml(&before, &expected, remove, true).map_err(|_| invalid())?,
         Format::Yaml(key) => edit_yaml(&before, key, &expected, remove)?,
+        Format::Dsh => edit_dsh(&before, &expected, remove)?,
     };
     if let Some(after) = after {
         if exists && std::fs::read_to_string(file).ok().as_deref() != Some(before.as_str()) {
@@ -316,6 +325,7 @@ fn kind(name: &str) -> &'static str {
         Format::Json(_) => "JSON",
         Format::Toml | Format::TomlList => "TOML",
         Format::Yaml(_) => "YAML",
+        Format::Dsh => "YAML",
     }
 }
 
@@ -603,6 +613,252 @@ fn edit_yaml(before: &str, key: &str, expected: &Value, remove: bool) -> anyhow:
     Ok((Some(after), outcome))
 }
 
+/// The dsh MCP plugin, and the row id browse uses in dsh's Cordis patch files.
+const DSH_CLIENT: &str = "@deepseek-ai/dsh-mcp-client";
+
+/// A dsh patch file's rows: a top-level YAML list of patch entries, where an empty or comment-only file is an empty list.
+fn dsh_patches(text: &str) -> anyhow::Result<Vec<serde_yaml::Value>> {
+    let value: serde_yaml::Value = if text.trim().is_empty() { serde_yaml::Value::Null } else { serde_yaml::from_str(text)? };
+    match value {
+        serde_yaml::Value::Null => Ok(Vec::new()),
+        serde_yaml::Value::Sequence(rows) if rows.iter().all(serde_yaml::Value::is_mapping) => Ok(rows),
+        _ => bail!("not a top-level YAML list of patch entries"),
+    }
+}
+
+/// Whether an inserted dsh row is the browse server: our id, or the `serverName` its tools are named after.
+fn dsh_named(row: &serde_yaml::Value) -> bool {
+    row.get("id").and_then(serde_yaml::Value::as_str) == Some("browse")
+        || row.get("config").and_then(|config| config.get("serverName")).and_then(serde_yaml::Value::as_str) == Some("browse")
+}
+
+/// Whether the row's own text contains a YAML tag such as `!!js`, which the YAML value API drops and a rewrite would
+/// lose. Tags elsewhere in the file are safe: browse only splices lines, it never re-serializes the file.
+fn yaml_tagged_text(text: &str) -> bool {
+    text.lines().any(|line| {
+        let mut quote = None;
+        let mut previous = ' ';
+        for character in line.chars() {
+            match quote {
+                Some(end) => quote = (character != end).then_some(end),
+                None => match character {
+                    '\'' | '"' => quote = Some(character),
+                    '#' if previous.is_whitespace() => break,
+                    '!' if previous.is_whitespace() || previous == '[' || previous == ',' => return true,
+                    _ => {}
+                },
+            }
+            previous = character;
+        }
+        false
+    })
+}
+
+/// The patch and inserted row that configure browse, if the file has one.
+fn dsh_find(patches: &[serde_yaml::Value]) -> anyhow::Result<Option<(usize, usize)>> {
+    let mut found = None;
+    for (patch, entry) in patches.iter().enumerate() {
+        for (row, inserted) in entry.get("insert").and_then(serde_yaml::Value::as_sequence).into_iter().flatten().enumerate() {
+            if dsh_named(inserted) {
+                if found.is_some() {
+                    bail!("has more than one browse server");
+                }
+                found = Some((patch, row));
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// The lines of the inserted browse row: a nested `- ` item under an `insert:` patch, which is how dsh's own examples
+/// and dsh's config tools write them.
+fn dsh_span(lines: &[&str]) -> anyhow::Result<(usize, usize)> {
+    let mut found = Vec::new();
+    for (start, line) in lines.iter().enumerate() {
+        let indent = indent_of(line);
+        if indent == 0 || !line.trim_start().starts_with("- ") {
+            continue;
+        }
+        let end = block_end(lines, start, indent);
+        let block: Vec<&str> = lines[start..end].iter().map(|line| line.get(indent..).unwrap_or_default()).collect();
+        if let Ok(serde_yaml::Value::Sequence(rows)) = serde_yaml::from_str::<serde_yaml::Value>(&block.join("\n"))
+            && rows.len() == 1
+            && dsh_named(&rows[0])
+        {
+            found.push((start, end));
+        }
+    }
+    match found.as_slice() {
+        [span] => Ok(*span),
+        [] => bail!("has no browse row browse can find"),
+        _ => bail!("has more than one browse row"),
+    }
+}
+
+/// The lines of the top-level `- insert:` patch that holds a nested row.
+fn dsh_parent(lines: &[&str], start: usize) -> anyhow::Result<(usize, usize)> {
+    let indent = indent_of(lines[start]);
+    for at in (0..start).rev() {
+        if !content(lines[at]) || indent_of(lines[at]) >= indent {
+            continue;
+        }
+        if lines[at].trim_start().strip_prefix('-').is_some_and(|rest| rest.trim_start().starts_with("insert:")) {
+            return Ok((at, block_end(lines, at, indent_of(lines[at]))));
+        }
+        break;
+    }
+    bail!("can't find the insert patch around the browse row")
+}
+
+/// browse's config as a dsh mcp-client row mapping: the fields dsh needs, in a readable order, then anything else the
+/// user added to our row.
+fn dsh_config(server: &Value) -> anyhow::Result<serde_yaml::Mapping> {
+    let known = ["serverName", "transport", "command", "args"];
+    let mut config = serde_yaml::Mapping::new();
+    for key in known {
+        if let Some(value) = server.get(key) {
+            config.insert(key.into(), serde_yaml::to_value(value)?);
+        }
+    }
+    for (key, value) in server.as_object().into_iter().flatten() {
+        if !known.contains(&key.as_str()) {
+            config.insert(key.as_str().into(), serde_yaml::to_value(value)?);
+        }
+    }
+    Ok(config)
+}
+
+fn dsh_row(server: &Value) -> anyhow::Result<serde_yaml::Value> {
+    let mut row = serde_yaml::Mapping::new();
+    row.insert("id".into(), "browse".into());
+    row.insert("name".into(), DSH_CLIENT.into());
+    row.insert("config".into(), serde_yaml::Value::Mapping(dsh_config(server)?));
+    Ok(serde_yaml::Value::Mapping(row))
+}
+
+/// One YAML value on one line, for a scalar or a flow list.
+fn yaml_scalar(value: &serde_yaml::Value) -> String {
+    let text = serde_yaml::to_string(value).unwrap_or_default();
+    let text = text.trim_end_matches('\n');
+    if text.contains('\n') {
+        return match value {
+            serde_yaml::Value::String(text) => serde_json::to_string(text).unwrap_or_default(),
+            _ => "null".to_owned(),
+        };
+    }
+    text.to_owned()
+}
+
+/// The browse row's lines at `indent`, in dsh's MCP example shape.
+fn dsh_lines(server: &Value, indent: usize) -> anyhow::Result<Vec<String>> {
+    let pad = " ".repeat(indent);
+    let name = yaml_scalar(&serde_yaml::Value::String(DSH_CLIENT.to_owned()));
+    let mut lines = vec![format!("{pad}- id: browse"), format!("{pad}  name: {name}"), format!("{pad}  config:")];
+    for (key, value) in &dsh_config(server)? {
+        let key = key.as_str().unwrap_or_default();
+        match value {
+            serde_yaml::Value::Sequence(items)
+                if items.iter().all(|item| !matches!(item, serde_yaml::Value::Sequence(_) | serde_yaml::Value::Mapping(_) | serde_yaml::Value::Tagged(_))) =>
+            {
+                let items: Vec<String> = items.iter().map(yaml_scalar).collect();
+                lines.push(format!("{pad}    {key}: [{}]", items.join(", ")));
+            }
+            serde_yaml::Value::Sequence(_) | serde_yaml::Value::Mapping(_) => {
+                lines.push(format!("{pad}    {key}:"));
+                let block = serde_yaml::to_string(value)?;
+                lines.extend(block.trim_end_matches('\n').lines().map(|line| format!("{pad}      {line}")));
+            }
+            value => lines.push(format!("{pad}    {key}: {}", yaml_scalar(value))),
+        }
+    }
+    Ok(lines)
+}
+
+/// Appends a patch row as text, so the rest of the file stays byte-for-byte as the user wrote it. An explicit `[]` can't
+/// be followed by block items, so that empty list is replaced by the new patch.
+fn dsh_append(before: &str, block: &[String], empty: bool) -> String {
+    let block = block.join("\n");
+    let lines: Vec<&str> = before.lines().collect();
+    if empty && let Some(at) = lines.iter().position(|line| line.trim() == "[]" && indent_of(line) == 0) {
+        let mut out: Vec<String> = lines.iter().map(|line| (*line).to_owned()).collect();
+        out.splice(at..=at, block.lines().map(str::to_owned));
+        return out.join("\n") + "\n";
+    }
+    let mut after = before.to_owned();
+    if !after.is_empty() {
+        if !after.ends_with('\n') {
+            after.push('\n');
+        }
+        after.push('\n');
+    }
+    after.push_str(&block);
+    after.push('\n');
+    after
+}
+
+/// Adds, replaces or removes browse's row in a dsh Cordis patch layer by splicing lines, then checks that the result
+/// parses to exactly the old list with that one row changed.
+fn edit_dsh(before: &str, expected: &Value, remove: bool) -> anyhow::Result<(Option<String>, Edit)> {
+    let invalid = || anyhow::anyhow!("isn't a dsh patch file browse can edit safely; add the browse entry by hand");
+    let patches = dsh_patches(before).map_err(|_| invalid())?;
+    let found = dsh_find(&patches).map_err(|_| invalid())?;
+    let current = found.map(|(patch, row)| {
+        serde_json::to_value(&patches[patch]["insert"][row]["config"]).unwrap_or(Value::Null)
+    });
+    let (outcome, change) = decide(current.as_ref(), expected, remove);
+    let Some(server) = change else { return Ok((None, outcome)) };
+    let lines: Vec<&str> = before.lines().collect();
+    let span = match found {
+        Some(_) => Some(dsh_span(&lines).map_err(|_| invalid())?),
+        None => None,
+    };
+    if let Some((start, end)) = span && yaml_tagged_text(&lines[start..end].join("\n")) {
+        return Ok((None, Edit::Conflict));
+    }
+    let (start, end) = span.unwrap_or((0, 0));
+    let mut wanted = patches.clone();
+    let after = match (found, &server, remove) {
+        (None, Some(server), false) => {
+            let mut patch = serde_yaml::Mapping::new();
+            patch.insert("insert".into(), serde_yaml::Value::Sequence(vec![dsh_row(server)?]));
+            wanted.push(serde_yaml::Value::Mapping(patch));
+            let mut block = vec!["- insert:".to_owned()];
+            block.extend(dsh_lines(server, 4)?);
+            dsh_append(before, &block, patches.is_empty())
+        }
+        (Some((patch, _)), None, true) if patches[patch]["insert"].as_sequence().is_some_and(|insert| insert.len() == 1) => {
+            let (parent, parent_end) = dsh_parent(&lines, start).map_err(|_| invalid())?;
+            let mut out: Vec<String> = lines.iter().map(|line| (*line).to_owned()).collect();
+            let from = if parent > 0 && out[parent - 1].trim().is_empty() { parent - 1 } else { parent };
+            out.drain(from..parent_end);
+            wanted.remove(patch);
+            if out.is_empty() { String::new() } else { out.join("\n") + "\n" }
+        }
+        (Some((patch, row)), None, true) => {
+            let mut out: Vec<String> = lines.iter().map(|line| (*line).to_owned()).collect();
+            out.drain(start..end);
+            if let Some(insert) = wanted[patch]["insert"].as_sequence_mut() {
+                insert.remove(row);
+            }
+            out.join("\n") + "\n"
+        }
+        (Some((patch, row)), Some(server), false) => {
+            let replacement = dsh_row(server)?;
+            let mut out: Vec<String> = lines.iter().map(|line| (*line).to_owned()).collect();
+            out.splice(start..end, dsh_lines(server, indent_of(lines[start]))?);
+            if let Some(insert) = wanted[patch]["insert"].as_sequence_mut() {
+                insert[row] = replacement;
+            }
+            out.join("\n") + "\n"
+        }
+        _ => return Err(invalid()),
+    };
+    if dsh_patches(&after).map_err(|_| invalid())? != wanted {
+        return Err(invalid());
+    }
+    Ok((Some(after), outcome))
+}
+
 /// The browse server in an agent's config (not OpenCode's), if it has one.
 pub fn current(location: &Location) -> Option<Value> {
     let text = std::fs::read_to_string(&location.file).ok()?;
@@ -618,6 +874,11 @@ pub fn current(location: &Location) -> Option<Value> {
             list.iter().find(|t| t.get("name").and_then(toml_edit::Item::as_str) == Some("browse")).map(|t| toml_to_json(&toml_edit::Item::Table(t.clone())))
         }
         Format::Yaml(key) => serde_json::to_value(yaml_value(&text).ok()?.get(key)?.get("browse")?).ok(),
+        Format::Dsh => {
+            let patches = dsh_patches(&text).ok()?;
+            let (patch, row) = dsh_find(&patches).ok()??;
+            serde_json::to_value(patches[patch]["insert"][row].get("config")?).ok()
+        }
     }
 }
 
@@ -747,6 +1008,143 @@ mod tests {
         assert_eq!(edit(&fresh, &command("/bin/browse"), false).unwrap(), Edit::Added);
         let parsed: serde_yaml::Value = serde_yaml::from_str(&std::fs::read_to_string(&fresh.file).unwrap()).unwrap();
         assert_eq!(parsed["mcp_servers"]["browse"]["args"][0].as_str(), Some("mcp"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dsh_patch_file() {
+        let dir = temp("dsh");
+        let dsh = loc("dsh", dir.join("dsh/cordis.patch.yml"));
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Added);
+        assert_eq!(
+            std::fs::read_to_string(&dsh.file).unwrap(),
+            "- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: /bin/browse\n        args: [mcp]\n"
+        );
+        let text = std::fs::read_to_string(&dsh.file).unwrap();
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Unchanged);
+        assert_eq!(std::fs::read_to_string(&dsh.file).unwrap(), text);
+        assert_eq!(current(&dsh).unwrap()["serverName"], "browse");
+        assert!(owned(&current(&dsh).unwrap()));
+        assert_eq!(edit(&dsh, &command("/usr/bin/browse"), false).unwrap(), Edit::Updated);
+        assert_eq!(current(&dsh).unwrap()["command"], "/usr/bin/browse");
+        // Settings the user added to our row stay across an update.
+        let with_env = std::fs::read_to_string(&dsh.file).unwrap().replace("        args: [mcp]\n", "        args: [mcp]\n        env:\n          KEEP: '1'\n");
+        std::fs::write(&dsh.file, with_env).unwrap();
+        assert_eq!(edit(&dsh, &command("/opt/browse"), false).unwrap(), Edit::Updated);
+        let parsed = current(&dsh).unwrap();
+        assert_eq!(parsed["command"], "/opt/browse");
+        assert_eq!(parsed["env"]["KEEP"], "1");
+        // A file that only had our row goes back to nothing.
+        assert_eq!(edit(&dsh, &command("/opt/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(std::fs::read_to_string(&dsh.file).unwrap(), "");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dsh_keeps_comments_and_tags() {
+        let dir = temp("dsh-comments");
+        let file = dir.join("cordis.patch.yml");
+        let original = "# my dsh patches\n# keep every byte of this one\n- insert:\n    - id: memory\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: memory\n        transport: stdio\n        command: engram\n        args: [mcp]\n        cwd: !!js process.cwd()\n";
+        std::fs::write(&file, original).unwrap();
+        assert_eq!(dsh_patches(original).unwrap().len(), 1);
+        let dsh = loc("dsh", file.clone());
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Added);
+        let text = std::fs::read_to_string(&file).unwrap();
+        let expected = "\n- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: /bin/browse\n        args: [mcp]\n";
+        assert_eq!(text.strip_prefix(original).unwrap(), expected);
+        assert!(text.contains("        cwd: !!js process.cwd()\n"), "{text}");
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Unchanged);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dsh_empty_files() {
+        let dir = temp("dsh-empty");
+        let comment = dir.join("comment/cordis.patch.yml");
+        std::fs::create_dir_all(comment.parent().unwrap()).unwrap();
+        std::fs::write(&comment, "# only comments\n").unwrap();
+        let dsh = loc("dsh", comment.clone());
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Added);
+        assert!(current(&dsh).is_some());
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(std::fs::read_to_string(&comment).unwrap(), "# only comments\n");
+        // An explicit empty list can't be followed by block rows, so the row takes its place.
+        let list = dir.join("list/cordis.patch.yml");
+        std::fs::create_dir_all(list.parent().unwrap()).unwrap();
+        std::fs::write(&list, "# mine\n[]\n").unwrap();
+        let dsh = loc("dsh", list.clone());
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Added);
+        let text = std::fs::read_to_string(&list).unwrap();
+        assert!(text.starts_with("# mine\n- insert:\n"), "{text}");
+        assert!(owned(&current(&dsh).unwrap()));
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(std::fs::read_to_string(&list).unwrap(), "# mine\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dsh_leaves_foreign_rows() {
+        let dir = temp("dsh-foreign");
+        let file = dir.join("cordis.patch.yml");
+        let original = "- insert:\n    - id: browse\n      name: '@deepseek-ai/some-other-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: other-tool\n        args: [serve]\n";
+        std::fs::write(&file, original).unwrap();
+        let dsh = loc("dsh", file.clone());
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Conflict);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Conflict);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
+        // Our id and plugin, but someone else's command: not ours to change.
+        let second = dir.join("ours-other-command.yml");
+        std::fs::write(&second, "- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: other-tool\n        args: [serve]\n").unwrap();
+        let dsh = loc("dsh", second.clone());
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Conflict);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Conflict);
+        // A hand-written expression in our row isn't ours to rewrite either.
+        let tagged = dir.join("tagged.yml");
+        let original = "- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: /bin/browse\n        args: [mcp]\n        cwd: !!js process.cwd()\n";
+        std::fs::write(&tagged, original).unwrap();
+        let dsh = loc("dsh", tagged.clone());
+        assert_eq!(edit(&dsh, &command("/usr/bin/browse"), false).unwrap(), Edit::Conflict);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Conflict);
+        assert_eq!(std::fs::read_to_string(&tagged).unwrap(), original);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dsh_rows_between_others() {
+        let dir = temp("dsh-middle");
+        let file = dir.join("cordis.patch.yml");
+        let other = "- insert:\n    - id: memory\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: memory\n        transport: stdio\n        command: engram\n        args: [mcp]\n";
+        let ours = "- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: /bin/browse\n        args: [mcp]\n";
+        std::fs::write(&file, format!("{ours}{other}")).unwrap();
+        let dsh = loc("dsh", file.clone());
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), other);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Added);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), format!("{other}\n{ours}"));
+        // Our row can share an insert list with another plugin's row.
+        let shared = dir.join("shared.yml");
+        let memory = "    - id: memory\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: memory\n        transport: stdio\n        command: engram\n        args: [mcp]\n";
+        let ours = ours.strip_prefix("- insert:\n").unwrap();
+        std::fs::write(&shared, format!("- insert:\n{memory}{ours}")).unwrap();
+        let dsh = loc("dsh", shared.clone());
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Unchanged);
+        assert_eq!(edit(&dsh, &command("/usr/bin/browse"), false).unwrap(), Edit::Updated);
+        assert_eq!(edit(&dsh, &command("/usr/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(std::fs::read_to_string(&shared).unwrap(), format!("- insert:\n{memory}"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn dsh_home_override() {
+        let dir = temp("dsh-home");
+        // SAFETY: DSH_HOME is read by locations() and this is the only test that sets it.
+        unsafe { std::env::set_var("DSH_HOME", &dir) };
+        let dsh = locations(Path::new("/nonexistent/opencode.json"), None).into_iter().find(|location| location.name == "dsh").unwrap();
+        unsafe { std::env::remove_var("DSH_HOME") };
+        assert_eq!(dsh.file, dir.join("cordis.patch.yml"));
+        assert!(dsh.installed);
         let _ = std::fs::remove_dir_all(dir);
     }
 
