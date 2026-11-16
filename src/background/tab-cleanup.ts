@@ -32,7 +32,7 @@ const TOUCH_SAVE_MS = 2_000
 /** How long restore() waits for the tab and group lists; Dia's tab-group API can never settle. */
 const RESTORE_QUERY_MS = 2_000
 /** A close makes several Chrome calls, any of which can hang; fail it rather than wedge every later close. */
-const CLOSE_TIMEOUT_MS = RESTORE_QUERY_MS * 3
+const CLOSE_TIMEOUT_MS = RESTORE_QUERY_MS * 5
 /** Tabs that must stay open whatever their age, for example while a handoff waits for the user or a recording runs. */
 const guards: ((tabId: number) => boolean)[] = []
 

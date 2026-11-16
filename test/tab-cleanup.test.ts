@@ -268,7 +268,7 @@ describe("closing the last tab of the last window", () => {
     } finally {
       stub.chrome.tabs.get = get
     }
-  }, 15_000)
+  }, 20_000)
 
   test("a window lookup that hangs counts as the last window, so a new tab is created", async () => {
     usePlatform("linux")
