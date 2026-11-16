@@ -132,6 +132,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
     const deadline = Date.now() + timeoutMs
     const settings = {
       compact: options.compact ?? true,
+      expandNavigation: options.find !== undefined,
       depth,
       interactive: options.interactive ?? false,
       maxCandidates: Math.max(1_000, maxItems * 20),
@@ -157,14 +158,15 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         ? { kind: "locator", scope: locatorScope }
         : { kind: "page" },
     })
-    const previousSnapshot = registry.previousSnapshot
+    const latestSnapshot = registry.latestSnapshot
+    const baselineSnapshot = registry.baselineSnapshot
     if (options.diff && options.delta) {
       throw new Error("snapshot() accepts either diff or delta, not both")
     }
-    if (options.diff && !previousSnapshot) {
+    if (options.diff && !baselineSnapshot) {
       throw new Error("snapshot({ diff: true }) requires a previous snapshot() baseline in this session")
     }
-    if (options.diff && (previousSnapshot?.page !== page || previousSnapshot.signature !== signature)) {
+    if (options.diff && (baselineSnapshot?.page !== page || baselineSnapshot.signature !== signature)) {
       throw new Error("snapshot({ diff: true }) must use the same page and snapshot options as the previous snapshot")
     }
 
@@ -336,8 +338,8 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
     if (frameBudget.skipped.deadline > 0) entries.push({ prefix: frameSkipNote(frameBudget.skipped.deadline, "snapshot deadline reached") })
     if (omittedFrames > 0) entries.push({ prefix: frameSkipNote(omittedFrames, "maxItems reached") })
 
-    const samePagePrevious = previousSnapshot?.page === page ? previousSnapshot : undefined
-    const compatiblePrevious = samePagePrevious?.signature === signature ? samePagePrevious : undefined
+    const samePagePrevious = latestSnapshot?.page === page ? latestSnapshot : undefined
+    const compatiblePrevious = baselineSnapshot?.page === page && baselineSnapshot.signature === signature ? baselineSnapshot : undefined
     let nextRef = registry.nextRef ?? 1
     // Ids carry over from the previous snapshot of this page even if its options differed, e.g. snapshot({ maxItems }).
     const reusableRefs = new Map<string, string[]>()
@@ -379,7 +381,11 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
     }
 
     const useDiff = options.diff === true || (options.delta === true && compatiblePrevious !== undefined)
-    registry.previousSnapshot = { page, signature, entries: rendered }
+    // Every snapshot feeds ref reuse; only non-find snapshots become the diff/delta baseline.
+    registry.latestSnapshot = { page, signature, entries: rendered }
+    if (settings.expandNavigation !== true) {
+      registry.baselineSnapshot = { page, signature, entries: rendered }
+    }
     if (!useDiff) {
       const lines = [...(result.notes ?? []), ...rendered.map((entry) => formatSnapshotLine(entry, entry.refId))]
       return options.find === undefined

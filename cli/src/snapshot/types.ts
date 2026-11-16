@@ -72,7 +72,10 @@ export type SnapshotRefRegistry = {
   page?: Page
   url?: string
   selectors: Map<string, SnapshotRefTarget>
-  previousSnapshot?: SnapshotBaseline
+  /** Rendered entries from the latest snapshot, find included, for ref-ID reuse. */
+  latestSnapshot?: SnapshotBaseline
+  /** Rendered entries from the latest non-find snapshot, for diff and delta. */
+  baselineSnapshot?: SnapshotBaseline
   nextRef?: number
   locatorScopes?: WeakMap<object, number>
   nextLocatorScope?: number
@@ -103,6 +106,8 @@ export type SnapshotBaseline = {
 
 export type SnapshotCaptureSettings = {
   readonly compact: boolean
+  /** Render navigation expanded so `find` can see its controls; `compact` and the diff signature are unchanged. */
+  readonly expandNavigation?: boolean
   readonly depth: number
   readonly interactive: boolean
   readonly maxCandidates: number
@@ -183,5 +188,6 @@ export function invalidateSnapshotDocument(registry: SnapshotRefRegistry): void 
   registry.selectors.clear()
   delete registry.page
   delete registry.url
-  delete registry.previousSnapshot
+  delete registry.latestSnapshot
+  delete registry.baselineSnapshot
 }

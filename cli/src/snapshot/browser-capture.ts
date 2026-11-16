@@ -463,6 +463,7 @@ const captureSnapshotInBrowser = (
     const role = element.getAttribute("role")
     return role !== null && (extraCandidateRoles.has(role) || structuralRoles.has(role) || interactiveRoles.has(role))
   }
+  const isLinkElement = (element: Element): boolean => roleFor(element) === "link"
   const structuralKeys = new WeakMap<Element, string>()
   let nextStructuralKey = 1
   const structuralKey = (element: Element): string => {
@@ -668,23 +669,48 @@ const captureSnapshotInBrowser = (
       truncated = true
       break
     }
-    if (settings.compact && !headerCandidateSet.has(element)) {
+    if (settings.compact && settings.expandNavigation !== true && !settings.interactive && !headerCandidateSet.has(element)) {
       const navigation = closestDeep(element, "nav, [role='navigation'], aside, [role='complementary'], [data-slot='sidebar'], [data-sidebar='sidebar']")
       if (navigation && collapsedNavigation.has(navigation)) {
         continue
       }
       if (navigation && navigation !== root && !navigation.contains?.(root) && !nonCollapsibleNavigation.has(navigation)) {
-        const isCollapsibleNav = isVisible(navigation) && (
-          navigation.matches("nav, [role='navigation']") ||
-          (querySelectorAllDeep(navigation, "a[href]").length >= 8 && !navigation.querySelector?.("h1, main, [role='main'], input, textarea, select"))
-        )
-        if (isCollapsibleNav) {
-          collapsedNavigation.add(navigation)
-          const count = querySelectorAllDeep(navigation, "a[href], button").length
-          add({ depth: headingDepth(navigation), role: "navigation", name: truncate(labelledName(navigation), 100) || "Navigation", details: `${count} controls`, priority: 0 })
-          continue
+        if (!isVisible(navigation)) {
+          // isVisible doesn't inherit, so an invisible landmark can still have visible positioned children:
+          // skip the summary but let the current element go through normal processing.
+          nonCollapsibleNavigation.add(navigation)
+        } else {
+          // Only visible controls decide: a display:none mobile menu button does not keep the whole nav open.
+          const controls = querySelectorAllDeep(
+            navigation,
+            ["a[href]", "[contenteditable]", ...interactiveTags, ...Array.from(interactiveRoles, (role) => `[role='${role}']`)].join(", "),
+          ).filter(isVisible)
+          // Only a pure link list is a landmark worth summarising. A nav of buttons (a conversation list, a
+          // toolbar) is content: collapsing it would hide every control, and the summary carries no ref.
+          const isLinkList = controls.length > 0 && controls.every(isLinkElement)
+          const isCollapsibleNav = isLinkList && (
+            navigation.matches("nav, [role='navigation']") ||
+            (controls.length >= 8 && !navigation.querySelector?.("h1, main, [role='main'], input, textarea, select"))
+          )
+          if (isCollapsibleNav) {
+            collapsedNavigation.add(navigation)
+            // Keep the heading-based depth its expanded children would have, plus any structural parents.
+            const parentKeys = structuralParentKeys(navigation)
+            const baseDepth = headingDepth(navigation)
+            const count = controls.length
+            add({
+              depth: baseDepth + parentKeys.length,
+              baseDepth,
+              ...(parentKeys.length > 0 ? { parentKeys } : {}),
+              role: "navigation",
+              name: truncate(labelledName(navigation), 100) || "Navigation",
+              details: `${count} ${count === 1 ? "link" : "links"}, collapsed`,
+              priority: 0,
+            })
+            continue
+          }
+          nonCollapsibleNavigation.add(navigation)
         }
-        nonCollapsibleNavigation.add(navigation)
       }
     }
     if (!isVisible(element)) continue

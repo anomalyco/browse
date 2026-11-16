@@ -104,6 +104,7 @@ impl Options {
 #[derive(Debug, Clone)]
 struct Settings {
     compact: bool,
+    expand_navigation: bool,
     depth: i64,
     interactive: bool,
     max_candidates: i64,
@@ -118,6 +119,7 @@ impl Settings {
     fn to_json(&self) -> Value {
         let mut value = json!({
             "compact": self.compact,
+            "expandNavigation": self.expand_navigation,
             "depth": self.depth,
             "interactive": self.interactive,
             "maxCandidates": self.max_candidates,
@@ -136,6 +138,7 @@ impl Settings {
     fn child(&self, iframe_depth: i64) -> Settings {
         Settings {
             compact: self.compact,
+            expand_navigation: self.expand_navigation,
             depth: (self.depth - iframe_depth - 1).max(1),
             interactive: self.interactive,
             max_candidates: (self.max_items * 20).max(200),
@@ -621,6 +624,8 @@ pub async fn snapshot(page: &Arc<TabPage>, tab_state: &PageTab, options: &Option
     };
     let settings = Settings {
         compact: options.compact,
+        // find greps the rendered lines, so navigation has to be expanded for controls inside it to match.
+        expand_navigation: options.find.is_some(),
         depth: options.depth,
         interactive: options.interactive,
         max_candidates: (max_items * 20).max(1_000),
@@ -643,7 +648,7 @@ pub async fn snapshot(page: &Arc<TabPage>, tab_state: &PageTab, options: &Option
     {
         let refs = tab_state.refs.lock().unwrap();
         if options.diff {
-            match refs.previous.as_ref() {
+            match refs.baseline.as_ref() {
                 None => bail!("snapshot with diff: true needs an earlier snapshot of this page to compare with; call snapshot without diff first"),
                 Some(previous) if previous.tab != page.tab() => {
                     bail!("snapshot with diff: true compares with the previous snapshot, which was of another tab; call snapshot without diff on this tab first")
@@ -757,12 +762,14 @@ pub async fn snapshot(page: &Arc<TabPage>, tab_state: &PageTab, options: &Option
             entries.push(RenderedEntry { prefix: frame_skip_note(omitted, "maxItems reached"), ..Default::default() });
         }
 
-        // Refs carry over from the previous snapshot of this tab even if its options differed.
-        let same_tab_previous = refs.previous.as_ref().filter(|p| p.tab == page.tab() && p.document == document).cloned();
-        let compatible_previous = same_tab_previous.as_ref().filter(|p| p.signature == signature).cloned();
+        // Refs carry over from the latest snapshot of this tab even if its options differed; diffing uses the
+        // separate baseline, which find snapshots do not replace.
+        let latest_previous = refs.latest.as_ref().filter(|p| p.tab == page.tab() && p.document == document).cloned();
+        let baseline_previous = refs.baseline.as_ref().filter(|p| p.tab == page.tab() && p.document == document).cloned();
+        let compatible_previous = baseline_previous.filter(|p| p.signature == signature);
         let mut next_ref = refs.next_ref.max(1);
         let mut reusable: HashMap<String, VecDeque<String>> = HashMap::new();
-        for entry in same_tab_previous.as_ref().map(|p| p.entries.as_slice()).unwrap_or(&[]) {
+        for entry in latest_previous.as_ref().map(|p| p.entries.as_slice()).unwrap_or(&[]) {
             if let (Some(id), Some(key)) = (&entry.ref_id, ref_identity(entry)) {
                 reusable.entry(key).or_default().push_back(id.clone());
             }
@@ -802,7 +809,12 @@ pub async fn snapshot(page: &Arc<TabPage>, tab_state: &PageTab, options: &Option
         refs.document = Some(document);
         refs.aria = None;
         let use_diff = options.diff || (options.delta && compatible_previous.is_some());
-        refs.previous = Some(Baseline { tab: page.tab(), document, signature, entries: rendered.clone() });
+        // Every snapshot feeds ref reuse; only non-find snapshots become the diff/delta baseline.
+        let latest = Baseline { tab: page.tab(), document, signature, entries: rendered.clone() };
+        refs.latest = Some(latest.clone());
+        if !settings.expand_navigation {
+            refs.baseline = Some(latest);
+        }
         (rendered, compatible_previous, use_diff, remember)
     };
     for (frame, list) in remember {

@@ -96,6 +96,92 @@ async fn snapshot_click_fill_and_refs() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn snapshot_navigation_controls_stay_visible() {
+    let h = harness!(false);
+    // A nav of role=button items is content, not a link list: collapsing it would hide every control.
+    let page = h.server.page(
+        "/nav-controls",
+        r#"<!doctype html><div id="a"><h2>A plain div</h2>
+  <div role="button" tabindex="0"><div><span>alice</span><span>hi</span></div></div></div>
+<section id="b"><h2>B section</h2>
+  <div role="button" tabindex="0">bob direct text</div></section>
+<nav aria-label="C nav"><h2>C nav</h2>
+  <div role="button" tabindex="0"><div><span>carol</span></div></div></nav>
+<nav aria-label="Sections"><a href="/a">Alpha</a><a href="/b">Beta</a><a href="/c">Gamma</a></nav>
+<aside aria-label="Aside links"><a href="/s1">S1</a><a href="/s2">S2</a><a href="/s3">S3</a><a href="/s4">S4</a>
+  <a href="/s5">S5</a><a href="/s6">S6</a><a href="/s7">S7</a><a href="/s8">S8</a></aside>
+<nav aria-label="Mobile"><a href="/m">Mobile</a><button style="display:none">Menu</button></nav>
+<nav aria-label="Action nav"><a href="/action" role="button">Action</a></nav>
+<aside style="height:0"><button style="position:absolute">First</button><button style="position:absolute">Second</button></aside>
+<input aria-placeholder="Message only">"#,
+    );
+    h.ok("navigate", json!({ "url": page })).await;
+    let snapshot = h.ok("snapshot", json!({})).await;
+    let carol = ref_of(&snapshot, "button \"carol\"");
+    assert!(carol.starts_with('e'), "carol keeps a compact ref ({carol}):\n{snapshot}");
+    // A pure link list still collapses at its expanded children's heading depth, under the C nav heading.
+    assert!(
+        snapshot.lines().any(|line| line == "  - navigation \"Sections\" [3 links, collapsed]"),
+        "{snapshot}"
+    );
+    assert!(!snapshot.contains("link \"Alpha\""), "{snapshot}");
+    // An aside with enough links still collapses; a hidden button does not keep a link nav open.
+    assert!(snapshot.contains("- navigation \"Aside links\" [8 links, collapsed]"), "{snapshot}");
+    assert!(snapshot.contains("- navigation \"Mobile\" [1 link, collapsed]"), "{snapshot}");
+    // A link whose computed role is button is a control, so its nav stays expanded with a ref.
+    let action = ref_of(&snapshot, "button \"Action\"");
+    assert!(action.starts_with('e'), "the action keeps a ref ({action}):\n{snapshot}");
+    // isVisible doesn't inherit: an invisible aside with visible positioned children still shows them.
+    let first = ref_of(&snapshot, "button \"First\"");
+    let second = ref_of(&snapshot, "button \"Second\"");
+    assert!(first.starts_with('e'), "First keeps a ref ({first}):\n{snapshot}");
+    assert!(second.starts_with('e'), "Second keeps a ref ({second}):\n{snapshot}");
+    // aria-placeholder names a control that has no label, title or placeholder of its own.
+    assert!(snapshot.contains("- textbox \"Message only\" [ref="), "{snapshot}");
+    let found = h.ok("snapshot", json!({ "find": "carol" })).await;
+    assert!(found.starts_with("1 matching snapshot line"), "{found}");
+    // find greps the rendered lines, so a collapsed link list has to be expanded for the match.
+    let found_link = h.ok("snapshot", json!({ "find": "Alpha" })).await;
+    assert!(found_link.contains("link \"Alpha\""), "{found_link}");
+    // A find snapshot must not replace the diff baseline: the page did not change since the first snapshot.
+    let diff = h.ok("snapshot", json!({ "diff": true })).await;
+    assert_eq!(
+        diff,
+        format!("0 additions, 0 removals, {} unchanged", snapshot.lines().count()),
+        "{diff}"
+    );
+
+    // interactive asks for controls, so the summary would hide exactly what was asked for.
+    let interactive = h.ok("snapshot", json!({ "interactive": true })).await;
+    assert!(!interactive.contains("navigation \"Sections\""), "{interactive}");
+    let alpha = ref_of(&interactive, "link \"Alpha\"");
+    assert!(alpha.starts_with('e'), "the link keeps a ref ({alpha}):\n{interactive}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn refs_carry_through_find_snapshots() {
+    let h = harness!(false);
+    let url = h.server.page("/refs-find", "<!doctype html><button>Start</button>");
+    h.ok("navigate", json!({ "url": url })).await;
+    h.ok("snapshot", json!({})).await;
+    h.ok(
+        "eval",
+        json!({ "expression": "(() => { const button = document.createElement('button'); button.textContent = 'Submit'; document.body.append(button) })()" }),
+    )
+    .await;
+
+    let first = h.ok("snapshot", json!({ "find": "Submit" })).await;
+    let first_ref = ref_of(&first, "button \"Submit\"");
+    // A find snapshot is now the latest snapshot, so the next find reuses the same ref.
+    let second = h.ok("snapshot", json!({ "find": "Submit" })).await;
+    let second_ref = ref_of(&second, "button \"Submit\"");
+    assert_eq!(first_ref, second_ref, "{first}\n---\n{second}");
+    let normal = h.ok("snapshot", json!({})).await;
+    assert_eq!(ref_of(&normal, "button \"Submit\""), first_ref, "{normal}");
+    h.ok("click", json!({ "ref": first_ref })).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stealth_isolated_world_and_main_world() {
     let h = harness!(false);
     let url = h.server.page("/s", "<!doctype html><script>window.pageSecret = 42; window.baseline = new Set(Object.getOwnPropertyNames(window).concat(['baseline']))</script><button>Go</button>");
