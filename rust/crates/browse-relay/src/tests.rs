@@ -94,7 +94,7 @@ async fn pair_with_token(port: u16, paths: &Paths, profile: &str) -> Socket {
     let nonce = b64url(&random_bytes::<32>());
     send(&mut socket, hello(profile, "token", &nonce, None)).await;
     let challenge = next(&mut socket).await;
-    assert_eq!(challenge["method"], "auth.challenge");
+    assert_eq!(challenge["method"], "auth.challenge", "{challenge}");
     let relay_nonce = challenge["params"]["nonce"].as_str().unwrap().to_string();
     assert_eq!(challenge["params"]["proof"], pairing::pairing_proof(&token, "relay", port, &relay_nonce, &nonce));
     assert_eq!(challenge["params"]["protocol"], json!({ "version": 3, "min": 3 }));
@@ -1522,6 +1522,9 @@ async fn chosen_ids_are_unique_across_two_browsers_and_new_takes_the_browser_opt
     let first_socket = pair_with_token(port, &h.paths, "profile-one").await;
     let (first_seen, first_events) = fake_extension(first_socket, 500);
     first_events.send(json!({ "method": "ready" })).unwrap();
+    // Finish the first pairing before issuing the second browser's token: accepting it records the pairing on disk,
+    // and pairing two browsers at once could lose one (the pairings file is read and written again).
+    assert!(relay.wait_until(Duration::from_secs(5), |st| st.links.iter().any(|l| l.connected())).await);
     let second_socket = pair_with_token(port, &h.paths, "profile-two").await;
     let (second_seen, second_events) = fake_extension(second_socket, 600);
     second_events.send(json!({ "method": "ready" })).unwrap();
