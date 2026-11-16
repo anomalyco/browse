@@ -512,6 +512,7 @@ pub fn status(args: &[String]) -> anyhow::Result<i32> {
                 "not-seen" => "not connected yet",
                 "unpaired" => "in a browser, but not paired",
                 "refused" => "refused: its pairing isn't valid here",
+                "paired-offline" if status.get("reconnecting").and_then(Value::as_bool) == Some(true) => "paired, reconnecting",
                 "paired-offline" => "paired, but the browser isn't connected",
                 "incompatible" => "doesn't match this browse version",
                 _ => "unknown",

@@ -300,6 +300,10 @@ async fn refuses_a_wrong_token() {
     let closed = next(&mut socket).await;
     assert_eq!(closed["close"], 4006);
     assert_eq!(h.handle.relay.st().handshake.pairing_failures, 1);
+    // A refusal outranks the fresh relay's pairing: it is not reported as a reconnect.
+    let status = h.handle.relay.extension_status();
+    assert_eq!(status["pairingState"], "refused");
+    assert_eq!(status["reconnecting"], false);
 }
 
 #[tokio::test]
@@ -1043,7 +1047,58 @@ async fn tool_arguments_are_checked() {
 async fn opening_a_tab_waits_for_a_browser_without_deadlocking() {
     let h = harness().await;
     // No browser connected yet: this once took the state lock twice in one expression.
+    let started = std::time::Instant::now();
     assert!(h.handle.relay.link_for(None).await.is_err());
+    assert!(started.elapsed() < Duration::from_secs(5), "a browser that was never paired fails fast");
+}
+
+#[tokio::test]
+async fn a_paired_browser_reconnecting_after_a_relay_restart_is_waited_for() {
+    // The harness relay is as fresh as a restarted one, and the token file is what a restarted relay finds on disk.
+    let h = harness().await;
+    pairing::issue_browser_token(&h.paths, "profile-restart-wait", None, None).unwrap();
+    let relay = h.handle.relay.clone();
+    let call = tokio::spawn(async move { relay.link_for(None).await.map(|link| link.id.clone()) });
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(!call.is_finished(), "the call waits for the reconnect instead of failing after 1.5 s");
+    let socket = pair_with_token(h.handle.port(), &h.paths, "profile-restart-wait").await;
+    let (_seen, events) = fake_extension(socket, 200);
+    events.send(json!({ "method": "ready" })).unwrap();
+    let id = tokio::time::timeout(Duration::from_secs(10), call).await.unwrap().unwrap().unwrap();
+    assert_eq!(id, "test-chrome");
+}
+
+#[tokio::test]
+async fn a_fresh_relay_says_a_paired_browser_is_reconnecting() {
+    let h = harness().await;
+    // No browser ever connected: a fresh relay that finds a pairing on disk is the reconnecting case.
+    pairing::issue_browser_token(&h.paths, "profile-restart-status", None, None).unwrap();
+    let status = h.handle.relay.extension_status();
+    assert_eq!(status["pairingState"], "paired-offline");
+    assert_eq!(status["reconnecting"], true);
+    let next = status["nextStep"].as_str().unwrap();
+    assert!(next.contains("reconnecting") && next.contains("try again in a few seconds"), "{next}");
+    assert!(!next.contains("open it") && !next.contains("check") && !next.contains("restart"), "{next}");
+}
+
+#[tokio::test]
+async fn after_the_cold_start_window_a_paired_offline_browser_says_to_open_it() {
+    let h = harness().await;
+    pairing::issue_browser_token(&h.paths, "profile-restart-old", None, None).unwrap();
+    // Age the relay past the cold-start window instead of sleeping through it.
+    h.handle.relay.set_age_for_test(Duration::from_secs(36));
+    let status = h.handle.relay.extension_status();
+    assert_eq!(status["pairingState"], "paired-offline");
+    assert_eq!(status["reconnecting"], false);
+    let next = status["nextStep"].as_str().unwrap();
+    assert!(next.contains("open it") && next.contains("check"), "{next}");
+    let started = std::time::Instant::now();
+    let error = match h.handle.relay.link_for(None).await {
+        Ok(_) => panic!("no browser was there to open a tab in"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("open it") && error.contains("check"), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(5), "an expired cold start keeps the fast paired-offline failure");
 }
 
 #[tokio::test]
