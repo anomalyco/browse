@@ -5,7 +5,7 @@ import path from "node:path"
 import { parse } from "jsonc-parser"
 import { agentLocations, agentNames, callingAgent, editAgentConfig } from "../src/setup/agent-config.ts"
 import { agentFlags, agentPlan } from "../src/setup/agent-picker.ts"
-import { manualPair, STORE_URL } from "../src/setup/environment.ts"
+import { home as userHome, manualPair, STORE_URL } from "../src/setup/environment.ts"
 import { configureMcp, installedExtensionVersion, installedRuntime, installWaitTimeout, locateExtension, manualMcpEntry, pairStoreExtension, relayNotRestarted, remoteRelayAddresses, remoteRelayLines, removeMcp, waitForExtension, type Browser, type Detection, type LocateOptions } from "../src/setup.ts"
 
 const browser = (name: string): Browser => ({ name, userData: `/data/${name}`, manifests: [], defaultIDs: [], executables: [] })
@@ -43,7 +43,7 @@ test("OpenCode JSONC keeps comments and other servers across install, reinstall 
     fs.writeFileSync(file, before)
     expect(configureMcp(file, entry)).toContain("added")
     const once = fs.readFileSync(file, "utf8")
-    expect(parse(once).mcp.servers.browse).toMatchObject({ type: "local", command: ["node", entry, "mcp"], cwd: "~", pool: true })
+    expect(parse(once).mcp.servers.browse).toMatchObject({ type: "local", command: ["node", entry, "mcp"], cwd: userHome, pool: true })
     expect(configureMcp(file, entry, entry)).toContain("up to date")
     expect(fs.readFileSync(file, "utf8")).toBe(once)
     expect(removeMcp("browse", entry, file)).toBe(true)
@@ -51,6 +51,27 @@ test("OpenCode JSONC keeps comments and other servers across install, reinstall 
     expect(parse(after)).toEqual(parse(before))
     expect(after).toContain("// keep this")
   } finally { fs.rmSync(home, { recursive: true, force: true }) }
+})
+
+test("OpenCode's cwd is the absolute home directory: older OpenCode versions don't expand ~", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "browse-opencode-cwd-"))
+  try {
+    const file = path.join(dir, "opencode.json")
+    // An earlier install wrote `~`, which older OpenCode versions don't expand (it fails on Windows), so the server
+    // failed to start. Everything else matches what install would write, so cwd is the only difference.
+    fs.writeFileSync(file, JSON.stringify({ mcp: { servers: { browse: {
+      type: "local",
+      command: ["browse", "mcp"],
+      cwd: "~",
+      pool: true,
+      environment: { OPENCODE_BROWSER_RUNTIME: "auto-update" },
+    } } } }))
+    expect(configureMcp(file, "browse", "browse")).toContain("updated")
+    const cwd = parse(fs.readFileSync(file, "utf8")).mcp.servers.browse.cwd
+    expect(path.isAbsolute(cwd)).toBe(true)
+    expect(cwd).toBe(userHome)
+    expect(cwd).not.toBe("~")
+  } finally { fs.rmSync(dir, { recursive: true, force: true }) }
 })
 
 test("OpenCode shares one browse server: browse's older entries gain pool and a fixed cwd, user entries stay", () => {
@@ -71,7 +92,7 @@ test("OpenCode shares one browse server: browse's older entries gain pool and a 
     expect(config.mcp.servers.browse).toEqual({
       type: "local",
       command: ["browse", "mcp"],
-      cwd: "~",
+      cwd: userHome,
       pool: true,
       environment: { OPENCODE_BROWSER_RUNTIME: "auto-update", KEEP: "1" },
     })
@@ -89,7 +110,7 @@ test("a binary install's entry runs the executable itself, in OpenCode, other ag
     const binary = path.join(home, ".local", "bin", "browse")
     const opencode = path.join(home, "opencode.json")
     expect(configureMcp(opencode, binary)).toContain("added")
-    expect(parse(fs.readFileSync(opencode, "utf8")).mcp.servers.browse).toMatchObject({ command: [binary, "mcp"], cwd: "~", pool: true, environment: { OPENCODE_BROWSER_RUNTIME: "auto-update" } })
+    expect(parse(fs.readFileSync(opencode, "utf8")).mcp.servers.browse).toMatchObject({ command: [binary, "mcp"], cwd: userHome, pool: true, environment: { OPENCODE_BROWSER_RUNTIME: "auto-update" } })
     expect(configureMcp(opencode, binary, binary)).toContain("up to date")
     expect(removeMcp("browse", binary, opencode)).toBe(true)
 
