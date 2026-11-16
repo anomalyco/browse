@@ -1,7 +1,7 @@
 //! Setting browse up for OpenCode (cli/src/setup.ts, setup/**): install the executable, add the browse MCP server to
 //! OpenCode's config, and connect the extension. `pair`, `extension`, and `status` live here too.
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -46,7 +46,11 @@ pub fn opencode_config() -> PathBuf {
 }
 
 fn mcp_servers(file: &Path) -> anyhow::Result<(String, serde_json::Map<String, Value>)> {
-    let text = std::fs::read_to_string(file).unwrap_or_default();
+    // Only a missing file starts empty: one that can't be read or isn't UTF-8 is never rewritten.
+    let text = match std::fs::read_to_string(file) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        read => read.with_context(|| format!("Can't read {}; left unchanged", file.display()))?,
+    };
     let invalid = || format!("Invalid {}; left unchanged", file.display());
     let config = jsonc::parse(&text).with_context(invalid)?;
     let mut servers = serde_json::Map::new();
@@ -188,14 +192,31 @@ pub fn add_to_path(dir: &Path) -> Option<String> {
     }
     let (candidates, line) = path_line(dir);
     let file = candidates.iter().find(|f| f.exists()).unwrap_or(&candidates[0]);
-    let text = std::fs::read_to_string(file).unwrap_or_default();
-    if text.lines().any(|l| l == line) {
-        return None;
+    append_path_line(file, &line).then(|| tilde(file))
+}
+
+/// Appends browse's PATH line to a shell startup file unless it's there. Bytes, not text: a file with bytes that
+/// aren't UTF-8 is still the user's, so it's only ever appended to, and one that can't be read is left alone.
+fn append_path_line(file: &Path, line: &str) -> bool {
+    let bytes = match std::fs::read(file) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => return false,
+    };
+    if bytes.split(|b| *b == b'\n').any(|l| l == line.as_bytes()) {
+        return false;
     }
-    let sep = if text.is_empty() || text.ends_with('\n') { "" } else { "\n" };
-    std::fs::create_dir_all(file.parent()?).ok()?;
-    std::fs::write(file, format!("{text}{sep}\n# browse\n{line}\n")).ok()?;
-    Some(tilde(file))
+    let sep = if bytes.is_empty() || bytes.ends_with(b"\n") { "" } else { "\n" };
+    let Some(parent) = file.parent() else { return false };
+    if std::fs::create_dir_all(parent).is_err() {
+        return false;
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file)
+        .and_then(|mut out| out.write_all(format!("{sep}\n# browse\n{line}\n").as_bytes()))
+        .is_ok()
 }
 
 pub fn settings_path() -> PathBuf {
@@ -511,3 +532,59 @@ pub fn status(args: &[String]) -> anyhow::Result<i32> {
     Ok(0)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("browse-setup-{name}-{}", crate::session::random_u64()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn path_line_is_appended_to_a_startup_file_that_isnt_utf8() {
+        let dir = scratch("rc");
+        let rc = dir.join(".zshrc");
+        let original = b"alias ll='ls -l'\n# caf\xe9 (Latin-1)\nexport EDITOR=vim".to_vec();
+        std::fs::write(&rc, &original).unwrap();
+        let line = "export PATH='/home/me/.local/bin':\"$PATH\"";
+        assert!(append_path_line(&rc, line));
+        let after = std::fs::read(&rc).unwrap();
+        assert!(after.starts_with(&original), "the user's bytes are kept: {:?}", String::from_utf8_lossy(&after));
+        assert!(after.ends_with(format!("\n\n# browse\n{line}\n").as_bytes()));
+        assert!(!append_path_line(&rc, line), "added once");
+        assert_eq!(std::fs::read(&rc).unwrap(), after);
+        let fresh = dir.join("new/.profile");
+        assert!(append_path_line(&fresh, line));
+        assert_eq!(std::fs::read_to_string(&fresh).unwrap(), format!("\n# browse\n{line}\n"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_or_non_utf8_opencode_config_is_left_alone() {
+        let dir = scratch("oc");
+        let file = dir.join("opencode.json");
+        let original = b"{ \"theme\": \"caf\xe9\" }".to_vec();
+        std::fs::write(&file, &original).unwrap();
+        let error = configure_opencode(&file, Path::new("/usr/bin/browse")).err().expect("a file that isn't UTF-8 is refused");
+        assert!(error.to_string().contains("left unchanged"), "{error}");
+        assert_eq!(std::fs::read(&file).unwrap(), original);
+        let missing = dir.join("missing/opencode.json");
+        assert!(matches!(configure_opencode(&missing, Path::new("/usr/bin/browse")).unwrap(), McpEdit::Added));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_opencode_config_with_a_byte_order_mark_is_updated_in_place() {
+        let dir = scratch("bom");
+        let file = dir.join("opencode.json");
+        std::fs::write(&file, "\u{feff}{\n  // mine\n  \"theme\": \"x\"\n}\n").unwrap();
+        assert!(matches!(configure_opencode(&file, Path::new("/usr/bin/browse")).unwrap(), McpEdit::Added));
+        let after = std::fs::read_to_string(&file).unwrap();
+        assert!(after.starts_with('\u{feff}') && after.contains("// mine"), "{after}");
+        assert_eq!(jsonc::parse(&after).unwrap()["mcp"]["servers"]["browse"]["command"][0], "/usr/bin/browse");
+        assert_eq!(jsonc::parse(&after).unwrap()["theme"], "x");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
