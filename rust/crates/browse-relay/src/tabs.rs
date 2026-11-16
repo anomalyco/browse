@@ -31,8 +31,6 @@ const INVENTORY_GRACE: Duration = Duration::from_millis(1500);
 pub struct Attach {
     pub tab: i64,
     pub owner: Owner,
-    /// The agent whose call is attaching the tab (OWNER_HEADER), when one is.
-    pub caller: Option<String>,
     pub options: TabOptions,
     pub opener: Option<i64>,
     /// What tools kept for the tab, when it is attached again (a reconnect).
@@ -55,7 +53,6 @@ impl Attach {
         Self {
             tab,
             owner,
-            caller: crate::relay::caller().map(|c| c.to_string()),
             options: TabOptions::default(),
             opener: None,
             state: None,
@@ -72,7 +69,6 @@ impl Attach {
     /// The same tab again, as it is now (a renewed or lost debugger).
     fn again(tab: &Tab) -> Self {
         let mut attach = Self::new(tab.id, tab.owner);
-        attach.caller = tab.caller.clone();
         attach.options = tab.options.clone();
         attach.opener = tab.opener;
         attach.state = Some(tab.state.clone());
@@ -85,7 +81,6 @@ impl Attach {
 /// Who owned a tab before it was announced again.
 struct Restored {
     owner: Owner,
-    caller: Option<String>,
     options: TabOptions,
     opener: Option<i64>,
     state: Option<Arc<TabState>>,
@@ -138,9 +133,8 @@ impl Relay {
         }
         let restored = if attach.restore { self.restored_owner(&link, &target_id, attach.reclaim_held) } else { None };
         let reclaimed = restored.is_some();
-        let Restored { mut owner, caller, mut options, opener, state, created_at } = restored.unwrap_or_else(|| Restored {
+        let Restored { mut owner, mut options, opener, state, created_at } = restored.unwrap_or_else(|| Restored {
             owner: attach.owner,
-            caller: attach.caller.clone(),
             options: attach.options.clone(),
             opener: attach.opener,
             state: attach.state.clone(),
@@ -176,7 +170,6 @@ impl Relay {
                     url,
                     title,
                     owner,
-                    caller,
                     options,
                     opener,
                     state,
@@ -216,10 +209,10 @@ impl Relay {
     fn restored_owner(&self, link: &Link, target_id: &str, reclaim_held: bool) -> Option<Restored> {
         let st = self.st();
         if let Some(known) = st.reconnect_owners.get(target_id).filter(|k| k.browser == link.key) {
-            return Some(Restored { owner: known.owner, caller: known.caller.clone(), options: known.options.clone(), opener: known.opener, state: Some(known.state.clone()), created_at: known.created_at.clone() });
+            return Some(Restored { owner: known.owner, options: known.options.clone(), opener: known.opener, state: Some(known.state.clone()), created_at: known.created_at.clone() });
         }
         let held = st.restorable.get(target_id).filter(|r| reclaim_held && r.browser_key == link.key)?;
-        Some(Restored { owner: Owner::Relay, caller: held.caller.clone(), options: held.options.clone(), opener: held.opener, state: None, created_at: held.created_at.clone() })
+        Some(Restored { owner: Owner::Relay, options: held.options.clone(), opener: held.opener, state: None, created_at: held.created_at.clone() })
     }
 
     /// Forgets a tab: its events end, handoffs on it are cancelled, and the extension (when told) clears what it shows.
@@ -421,13 +414,13 @@ impl Relay {
     /// A tab an agent's page opened (target=_blank, window.open) is an agent tab too, with the opener's options
     /// (group, allowlist, read-only). A lent tab's popups count only while an agent works in it.
     pub fn adopt_opened_tab(self: &Arc<Self>, tab: i64, opener: i64) {
-        let (options, caller) = {
+        let options = {
             let st = self.st();
             let Some(opener_tab) = st.tabs.get(&opener) else { return };
             if st.tabs.contains_key(&tab) || (opener_tab.owner == Owner::User && !st.tab_busy(opener)) {
                 return;
             }
-            (opener_tab.options.clone(), opener_tab.caller.clone())
+            opener_tab.options.clone()
         };
         rlog!("tab.opened", tabId = tab, openerTabId = opener, group = options.group.clone());
         let relay = self.clone();
@@ -438,7 +431,6 @@ impl Relay {
             }
             for delay in [100u64, 250, 500, 1000, 0] {
                 let mut attach = Attach::new(tab, Owner::Relay);
-                attach.caller = caller.clone();
                 attach.options = options.clone();
                 attach.opener = Some(opener);
                 attach.fresh_popup = true;
@@ -625,7 +617,6 @@ impl Relay {
             tokio::spawn(async move {
                 let tab = known.tab;
                 let mut attach = Attach::new(tab, known.owner);
-                attach.caller = known.caller;
                 attach.options = known.options;
                 attach.opener = known.opener;
                 attach.state = Some(known.state);
@@ -667,7 +658,6 @@ impl Relay {
                     let known = KnownOwner {
                         tab: t.id,
                         owner: t.owner,
-                        caller: t.caller.clone(),
                         browser: link.key.clone(),
                         options: t.options.clone(),
                         opener: t.opener,

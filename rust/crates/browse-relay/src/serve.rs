@@ -28,7 +28,7 @@ use crate::browser::RelayBrowser;
 use crate::paths::Paths;
 use crate::port::{self, RelayState};
 use crate::protocol::{EXTENSION_PROTOCOL_VERSION, MIN_EXTENSION_PROTOCOL_VERSION, PAIRING_SCHEME};
-use crate::relay::{AutoUpdateStatus, CALLER, InFlight, Relay, RelayConfig};
+use crate::relay::{AutoUpdateStatus, InFlight, Relay, RelayConfig};
 use crate::rlog;
 use crate::util::secrets_equal;
 
@@ -342,9 +342,6 @@ async fn route(relay: Arc<Relay>, peer: SocketAddr, request: Request<Incoming>) 
     let client_pid = header(&request, "opencode-browser-client-pid").and_then(|v| v.parse::<u32>().ok()).filter(|p| *p > 0);
     let client = header(&request, &browse_core::CLIENT_HEADER.to_ascii_lowercase()).map(str::to_string);
     let call_key = header(&request, &browse_core::CALL_HEADER.to_ascii_lowercase()).filter(|k| !k.is_empty() && k.len() <= 128).map(str::to_string);
-    // The agent a pooled MCP server makes this call for (the client's per-request session id, hashed). Tabs it opens
-    // are its own: other agents on the same relay can't see or use them.
-    let caller = header(&request, &crate::protocol::OWNER_HEADER.to_ascii_lowercase()).filter(|k| !k.is_empty() && k.len() <= 128).map(str::to_string);
     // The TypeScript client's HTTP client (Effect's) sends trace headers on every request; this build's never does.
     let typescript_client = header(&request, "b3").is_some();
     let body = if method == hyper::Method::POST {
@@ -374,7 +371,7 @@ async fn route(relay: Arc<Relay>, peer: SocketAddr, request: Request<Incoming>) 
                 Ok(Err(error)) => return json_response(StatusCode::BAD_REQUEST, &json!({ "error": format!("Invalid tool call: {error}"), "code": "invalid-request" })),
                 Err(response) => return *response,
             };
-            match call_tool_keyed(&relay, request, client_pid, call_key, caller).await {
+            match call_tool_keyed(&relay, request, client_pid, call_key).await {
                 Ok(output) => json_response(StatusCode::OK, &serde_json::to_value(output).unwrap_or_default()),
                 Err((status, message)) => json_response(status, &json!({ "error": message })),
             }
@@ -478,12 +475,11 @@ tokio::task_local! {
 /// Runs one tool call. The tabs it uses (named in its arguments, or opened by it) count as busy until it ends, and
 /// their news comes back as warnings.
 pub async fn call_tool(relay: &Arc<Relay>, request: ToolCallRequest, client_pid: Option<u32>) -> Result<ToolOutput, (StatusCode, String)> {
-    call_tool_keyed(relay, request, client_pid, None, None).await
+    call_tool_keyed(relay, request, client_pid, None).await
 }
 
-/// [call_tool], with the caller's key for the call (CALL_HEADER) so POST /tools/cancel can stop it, and the agent the
-/// call is for (OWNER_HEADER): the tabs it opens are that agent's alone.
-pub async fn call_tool_keyed(relay: &Arc<Relay>, request: ToolCallRequest, client_pid: Option<u32>, key: Option<String>, caller: Option<String>) -> Result<ToolOutput, (StatusCode, String)> {
+/// [call_tool], with the caller's key for the call (CALL_HEADER) so POST /tools/cancel can stop it.
+pub async fn call_tool_keyed(relay: &Arc<Relay>, request: ToolCallRequest, client_pid: Option<u32>, key: Option<String>) -> Result<ToolOutput, (StatusCode, String)> {
     let tool = relay.tools.read().unwrap_or_else(|poisoned| poisoned.into_inner()).iter().find(|t| t.spec().name == request.name).cloned();
     let Some(tool) = tool else { return Err((StatusCode::NOT_FOUND, format!("Unknown tool: {}", request.name))) };
     relay.note_activity();
@@ -494,8 +490,7 @@ pub async fn call_tool_keyed(relay: &Arc<Relay>, request: ToolCallRequest, clien
     let name = request.name.clone();
     let started = Instant::now();
     relay.inflight.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(id, InFlight { tool: name.clone(), tab, since: started });
-    let caller = caller.map(Arc::from);
-    let task = tokio::spawn(CALLER.scope(caller, RELAY.scope(relay.clone(), CALL.scope(id, TOOL.scope(name.clone(), CLIENT.scope(client_pid, async move { tool.call(context, arguments).await }))))));
+    let task = tokio::spawn(RELAY.scope(relay.clone(), CALL.scope(id, TOOL.scope(name.clone(), CLIENT.scope(client_pid, async move { tool.call(context, arguments).await })))));
     relay.call_started(id, task.abort_handle(), client_pid, key);
     let outcome = task.await;
     let stopped = relay.st().stopped.remove(&id);

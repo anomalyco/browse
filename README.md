@@ -177,9 +177,9 @@ extension from your browser to finish.
 ## Using it
 
 - **Tabs are the handle.** `navigate` without a `tab` opens a new background tab and returns its id; every other call
-  passes that `tab`. Each agent works only in tabs it opened (and tabs you lend it), so several agents never collide.
+  passes that `tab`. Agents use the tab ids they opened or were given, and leave other tabs alone unless you ask.
   Tabs can be opened with options that stick: `group` (the tab group's title, and a handle to close them together),
-  `allowedOrigins`, `readOnly`, `keepVisible` and `browser`. Popups a page opens become the agent's tabs too.
+  `allowedOrigins`, `readOnly`, `keepVisible` and `browser`. Popups a page opens become agent tabs too.
 - **Agents open their own tabs** in the background of the window you last used, grouped together and collapsed unless
   you're looking at one. Agents can't switch you to their tabs or bring a window to the front. Tabs nobody touches for
   10 minutes close by themselves (never while something runs on them). Closing agent tabs never quits the browser: on
