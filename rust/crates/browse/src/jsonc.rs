@@ -3,8 +3,11 @@
 use anyhow::{Context, bail};
 use serde_json::Value;
 
+const BOM: char = '\u{feff}';
+
 /// Parses JSONC (comments, trailing commas) into a value.
 pub fn parse(text: &str) -> anyhow::Result<Value> {
+    let text = text.strip_prefix(BOM).unwrap_or(text);
     if text.trim().is_empty() {
         return Ok(Value::Object(Default::default()));
     }
@@ -139,6 +142,10 @@ fn render(value: &Value, indent: &str) -> String {
 
 /// Sets (or with `None`, removes) the value at `path`, creating missing objects on the way.
 pub fn modify(text: &str, path: &[&str], value: Option<&Value>) -> anyhow::Result<String> {
+    // A byte order mark (some Windows editors write one) stays where it was.
+    if let Some(rest) = text.strip_prefix(BOM) {
+        return Ok(format!("{BOM}{}", modify(rest, path, value)?));
+    }
     let source = if text.trim().is_empty() { "{}" } else { text };
     let bytes = source.as_bytes();
     let mut current = node(bytes, 0)?;
