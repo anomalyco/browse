@@ -259,9 +259,26 @@ fn config_line(lines: &[&str], start: usize, end: usize) -> Option<usize> {
 
 /// Whether a value has a `#` that YAML would read as the start of a comment.
 fn has_comment(value: &str) -> bool {
-    if let Some(quote @ ('\'' | '"')) = value.chars().next() {
-        let Some(end) = value.rfind(quote) else { return false };
-        return value[end + quote.len_utf8()..].contains('#');
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else { return false };
+    if first == '\'' || first == '"' {
+        let mut chars = chars.peekable();
+        while let Some(character) = chars.next() {
+            if first == '\'' {
+                if character == '\'' {
+                    if chars.peek() == Some(&'\'') {
+                        chars.next();
+                        continue;
+                    }
+                    return chars.any(|character| !character.is_whitespace());
+                }
+            } else if character == '\\' {
+                chars.next();
+            } else if character == '"' {
+                return chars.any(|character| !character.is_whitespace());
+            }
+        }
+        return true;
     }
     let mut previous = ' ';
     for character in value.chars() {
@@ -644,6 +661,18 @@ mod tests {
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(text.contains("command: \"/tmp/with#hash/browse2\"\n") || text.contains("command: /tmp/with#hash/browse2\n"), "{text}");
         assert_eq!(current(&dsh).unwrap()["command"], "/tmp/with#hash/browse2");
+        // An apostrophe in a plain path is not a quote.
+        let plain = dir.join("plain.yml");
+        std::fs::write(&plain, row("/home/o'b/browse")).unwrap();
+        let dsh = loc("dsh", plain.clone());
+        assert_eq!(edit(&dsh, &command("/home/o'b/browse2"), false).unwrap(), Edit::Updated);
+        assert_eq!(current(&dsh).unwrap()["command"], "/home/o'b/browse2");
+        // A quoted path may contain an escaped quote.
+        let quoted = dir.join("quoted.yml");
+        std::fs::write(&quoted, row("'/bin/o''b/browse'")).unwrap();
+        let dsh = loc("dsh", quoted.clone());
+        assert_eq!(edit(&dsh, &command("/usr/bin/browse"), false).unwrap(), Edit::Updated);
+        assert_eq!(current(&dsh).unwrap()["command"], "/usr/bin/browse");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -663,6 +692,12 @@ mod tests {
             ("comment", "- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: /bin/browse # old\n        args: [mcp]\n"),
             // An apostrophe in a plain path must not hide a following comment.
             ("apostrophe", "- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: /home/o'b/browse # mine\n        args: [mcp]\n"),
+            // A quote in the comment must not be mistaken for the value's closing quote.
+            ("single-quote-comment", "- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: '/bin/browse' # don't touch\n        args: [mcp]\n"),
+            ("double-quote-comment", "- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: \"/bin/browse\" # see \"docs\"\n        args: [mcp]\n"),
+            // Escaped quotes inside a quoted value, with a comment after it.
+            ("escaped-single", "- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: '/bin/o''b/browse' # c\n        args: [mcp]\n"),
+            ("escaped-double", "- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: \"/bin/br\\\"owse/browse\" # c\n        args: [mcp]\n"),
             // A value that continues on a deeper line.
             ("continuation", "- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: /bin/\n          browse\n        args: [mcp]\n"),
         ];
