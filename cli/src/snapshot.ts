@@ -387,10 +387,11 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       registry.baselineSnapshot = { page, signature, entries: rendered }
     }
     if (!useDiff) {
-      const lines = [...(result.notes ?? []), ...rendered.map((entry) => formatSnapshotLine(entry, entry.refId))]
+      const notes = result.notes ?? []
+      const lines = rendered.map((entry) => formatSnapshotLine(entry, entry.refId))
       return options.find === undefined
-        ? lines.join("\n")
-        : findSnapshotLines(lines, options.find, options.context)
+        ? [...notes, ...lines].join("\n")
+        : [...notes, findSnapshotLines(lines, options.find, options.context)].join("\n")
     }
 
     const operations = diffSnapshotEntries(compatiblePrevious?.entries ?? [], rendered)

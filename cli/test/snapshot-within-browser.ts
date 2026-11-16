@@ -181,6 +181,126 @@ try {
   assert.match(single, /button "Only button"/)
   assert.doesNotMatch(single, /within "main"/)
 
+  // Auto-scoping to a single <main> says what it left outside: a nav of controls is one landmark with two controls.
+  const scopedPage = `
+    <nav aria-label="Thread list">
+      <div role="button" tabindex="0">Thread one</div>
+      <div role="button" tabindex="0">Thread two</div>
+    </nav>
+    <main><p>x</p><button>Send message</button></main>
+  `
+  const scopedNote = 'scoped to <main>; 1 landmark and 2 controls outside it are not shown (within: "body" to include them)'
+  await page.setContent(scopedPage)
+  const scoped = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.equal(scoped.split("\n")[0], scopedNote, scoped)
+  assert.match(scoped, /button "Send message"/)
+  assert.doesNotMatch(scoped, /Thread one/)
+
+  // Nothing interactive outside main: there is nothing to report.
+  await page.setContent(`<main><p>x</p><button>Send message</button></main>`)
+  const nothingOutside = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.doesNotMatch(nothingOutside, /scoped to <main>/, nothingOutside)
+  assert.match(nothingOutside, /button "Send message"/)
+
+  // A lone control outside main has no landmark: only the control is worth mentioning, in the singular.
+  await page.setContent(`<main><p>x</p></main><div role="button" tabindex="0">Loose action</div>`)
+  const loneControl = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.equal(
+    loneControl.split("\n")[0],
+    'scoped to <main>; 1 control outside it is not shown (within: "body" to include them)',
+    loneControl,
+  )
+
+  // An explicit within disables auto main scoping, so the whole page, nav rows included, is captured.
+  await page.setContent(scopedPage)
+  const wholePage = await createSnapshotHelpers(page, registry()).snapshot({ within: "body" })
+  assert.match(wholePage, /button "Thread one"/, wholePage)
+  assert.match(wholePage, /button "Thread two"/, wholePage)
+  assert.doesNotMatch(wholePage, /scoped to <main>/, wholePage)
+
+  // Header controls outside main are re-admitted already, so they are neither omitted nor a landmark.
+  await page.setContent(`
+    <header><button>Open menu</button></header>
+    <main><p>x</p><button>Send message</button></main>
+  `)
+  const headerReached = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.match(headerReached, /button "Open menu"/, headerReached)
+  assert.doesNotMatch(headerReached, /scoped to <main>/, headerReached)
+
+  // Controls in main's own shadow DOM are inside main, even though contains() cannot see them.
+  await page.setContent(`<main><p>x</p><my-panel></my-panel></main>`)
+  await page.evaluate(() => {
+    const shadow = document.querySelector("my-panel")!.attachShadow({ mode: "open" })
+    shadow.innerHTML = "<button>Shadow one</button><button>Shadow two</button>"
+  })
+  const shadowed = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.doesNotMatch(shadowed, /scoped to <main>/, shadowed)
+  assert.match(shadowed, /button "Shadow one"/, shadowed)
+  assert.match(shadowed, /button "Shadow two"/, shadowed)
+
+  // An invisible control outside main is not shown, so it is not worth reporting either.
+  await page.setContent(`<main><p>x</p><button>Send message</button></main><button style="display:none">Hidden action</button>`)
+  const hiddenOutside = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.doesNotMatch(hiddenOutside, /scoped to <main>/, hiddenOutside)
+
+  // A landmark wrapping main is the page itself, not something outside main.
+  await page.setContent(`<div role="region" aria-label="App"><button>Wrap action</button><main><p>x</p></main></div>`)
+  const wrappedMain = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.equal(
+    wrappedMain.split("\n")[0],
+    'scoped to <main>; 1 control outside it is not shown (within: "body" to include them)',
+    wrappedMain,
+  )
+  assert.doesNotMatch(wrappedMain, /landmark/, wrappedMain)
+
+  // A skip link to main is navigation back into the scope, not content outside it.
+  await page.setContent(`<a href="#main">Skip to content</a><main id="main"><p>x</p><button>Send message</button></main>`)
+  const skipLink = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.doesNotMatch(skipLink, /scoped to <main>/, skipLink)
+
+  // A skip link to a wrapper that contains main is still a jump back into the scope.
+  await page.setContent(`<div id="content"><a href="#content">Skip to content</a><main><p>x</p><button>Send message</button></main></div>`)
+  const skipWrapper = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.doesNotMatch(skipWrapper, /scoped to <main>/, skipWrapper)
+
+  // 200 controls is the complete count; only a 201st countable control makes it "200+".
+  const outsideControls = (count: number): string => `
+    <main><p>x</p><button>Send message</button></main>
+    <div>${Array.from({ length: count }, (_, index) => `<div role="button" tabindex="0">Action ${index}</div>`).join("")}</div>
+  `
+  await page.setContent(outsideControls(200))
+  const exactly200 = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.equal(
+    exactly200.split("\n")[0],
+    'scoped to <main>; 200 controls outside it are not shown (within: "body" to include them)',
+    exactly200,
+  )
+  await page.setContent(outsideControls(201))
+  const over200 = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.equal(
+    over200.split("\n")[0],
+    'scoped to <main>; 200+ controls outside it are not shown (within: "body" to include them)',
+    over200,
+  )
+
+  // A header with a re-admitted button is already partly shown, so it is not counted as a landmark.
+  await page.setContent(`
+    <header><button>Open menu</button><a href="/help">Help</a></header>
+    <main><p>x</p><button>Send message</button></main>
+  `)
+  const partialHeader = await createSnapshotHelpers(page, registry()).snapshot()
+  assert.equal(
+    partialHeader.split("\n")[0],
+    'scoped to <main>; 1 control outside it is not shown (within: "body" to include them)',
+    partialHeader,
+  )
+  assert.doesNotMatch(partialHeader, /landmark/, partialHeader)
+
+  // find narrows the entries, never the notes; a miss still says what was scoped out.
+  await page.setContent(scopedPage)
+  const noMatch = await createSnapshotHelpers(page, registry()).snapshot({ find: "nothing on this page" })
+  assert.equal(noMatch, `${scopedNote}\nNo snapshot lines matched "nothing on this page".`, noMatch)
+
   // A ref root stays strict: the forgiving fallback is only for a `within` selector string.
   const refButton = async (): Promise<{ helpers: ReturnType<typeof createSnapshotHelpers>; refId: string }> => {
     await page.setContent(`<main><button id="dup">Duplicate me</button></main>`)
@@ -540,6 +660,20 @@ try {
     hidden: "PASS",
     missing: "PASS",
     single: "PASS",
+    mainScopeNote: "PASS",
+    noMainScopeNote: "PASS",
+    loneControlNote: "PASS",
+    withinBodyScope: "PASS",
+    headerReached: "PASS",
+    shadowMainScope: "PASS",
+    hiddenOutside: "PASS",
+    wrappedMainLandmark: "PASS",
+    skipLinkScope: "PASS",
+    skipWrapperScope: "PASS",
+    exactly200: "PASS",
+    over200: "PASS",
+    partialHeader: "PASS",
+    findNoMatchNote: "PASS",
     refStrict: "PASS",
     readonlyValues: "PASS",
     frames: "PASS",

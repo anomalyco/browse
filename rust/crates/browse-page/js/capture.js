@@ -649,7 +649,7 @@ return ((rootOrSettings, locatorSettings, naming) => {
     "slider",
     "spinbutton",
     "treeitem"
-  ]), extraCandidateTags = new Set(["h1", "h2", "h3", "h4", "h5", "h6", "nav", "p"]), extraCandidateRoles = new Set(["heading", "navigation", "alert", "status"]), isStructuralElement = (element) => {
+  ]), controlSelector = ["a[href]", "[contenteditable]", ...interactiveTags, ...Array.from(interactiveRoles, (role) => `[role='${role}']`)].join(", "), extraCandidateTags = new Set(["h1", "h2", "h3", "h4", "h5", "h6", "nav", "p"]), extraCandidateRoles = new Set(["heading", "navigation", "alert", "status"]), isStructuralElement = (element) => {
     if (structuralTags.has(element.localName))
       return !0;
     const role = element.getAttribute("role");
@@ -831,6 +831,83 @@ return ((rootOrSettings, locatorSettings, naming) => {
     entries.push(entry);
   }, headerSelector = "input, textarea, select, button, [role='searchbox'], [role='combobox'], [role='button'], a[href][aria-label]", headerRoots = autoScopedMain && typeof document.querySelectorAll === "function" ? Array.from(document.querySelectorAll("header, [role='banner']")).filter((h) => isVisible(h) && !root.contains?.(h)) : [], headerCandidateSet = new Set(headerRoots.flatMap((h) => querySelectorAllDeep(h, headerSelector).filter((el) => !el.closest?.("nav, [role='navigation']")))), collapsedNavigation = new Set, nonCollapsibleNavigation = new WeakSet;
   let reservedLists = 0;
+  const scopeNote = (() => {
+    if (!autoScopedMain || window.top !== window)
+      return;
+    const scope = document.body ?? document.documentElement;
+    if (!scope)
+      return;
+    const landmarkSelector = "nav, [role='navigation'], aside, [role='complementary'], [role='search'], [role='region'], form, [role='form'], footer, [role='contentinfo'], search, header, [role='banner']", maxScopeControls = 200, headerLandmarks = new Set;
+    for (const candidate of headerCandidateSet)
+      for (let node = parentElementOrHost(candidate);node; node = parentElementOrHost(node)) {
+        if (node === root || node.contains?.(root))
+          break;
+        if (node.matches(landmarkSelector))
+          headerLandmarks.add(node);
+      }
+    const landmarks = new Set;
+    let controls = 0, capped = !1;
+    const skipsToMain = (element) => {
+      if (element.localName !== "a")
+        return !1;
+      const href = element.getAttribute("href") ?? "";
+      if (!href.startsWith("#") || href.length === 1)
+        return !1;
+      let id = href.slice(1);
+      try {
+        id = decodeURIComponent(id);
+      } catch {
+        return !1;
+      }
+      const target = document.getElementById(id);
+      return target !== null && (target === root || root.contains?.(target) || target.contains?.(root));
+    }, countControl = (element) => {
+      if (headerCandidateSet.has(element) || skipsToMain(element) || element.contains?.(root) || !isVisible(element))
+        return !0;
+      if (controls >= maxScopeControls) {
+        capped = !0;
+        return !1;
+      }
+      controls++;
+      for (let node = parentElementOrHost(element);node; node = parentElementOrHost(node)) {
+        if (node === root)
+          break;
+        if (node.contains?.(root))
+          break;
+        if (!node.matches(landmarkSelector))
+          continue;
+        if (headerLandmarks.has(node))
+          break;
+        if ((node.localName === "form" || node.getAttribute("role") === "form") && !labelledName(node))
+          continue;
+        if (!isVisible(node))
+          continue;
+        landmarks.add(node);
+        break;
+      }
+      return !0;
+    }, walk = (node) => {
+      for (let child = node.firstElementChild;child; child = child.nextElementSibling) {
+        if (child === root)
+          continue;
+        if (child.matches(controlSelector) && !countControl(child))
+          return !1;
+        if (child.shadowRoot && !walk(child.shadowRoot))
+          return !1;
+        if (child.firstElementChild && !walk(child))
+          return !1;
+      }
+      return !0;
+    };
+    if (scope.shadowRoot)
+      walk(scope.shadowRoot);
+    if (!capped)
+      walk(scope);
+    if (controls === 0)
+      return;
+    const count = capped ? `${controls}+` : String(controls), landmarkCount = capped ? `${landmarks.size}+` : String(landmarks.size), landmarkPart = landmarks.size > 0 ? `${landmarkCount} ${landmarks.size === 1 ? "landmark" : "landmarks"} and ` : "", omitted = landmarks.size + controls;
+    return `scoped to <main>; ${landmarkPart}${count} ${controls === 1 && !capped ? "control" : "controls"} outside it ${omitted === 1 && !capped ? "is" : "are"} not shown (within: "body" to include them)`;
+  })();
   function* iterateCandidates(scope) {
     for (const headerEl of headerCandidateSet)
       yield headerEl;
@@ -865,7 +942,7 @@ return ((rootOrSettings, locatorSettings, naming) => {
         if (!isVisible(navigation))
           nonCollapsibleNavigation.add(navigation);
         else {
-          const controls = querySelectorAllDeep(navigation, ["a[href]", "[contenteditable]", ...interactiveTags, ...Array.from(interactiveRoles, (role) => `[role='${role}']`)].join(", ")).filter(isVisible);
+          const controls = querySelectorAllDeep(navigation, controlSelector).filter(isVisible);
           if (controls.length > 0 && controls.every(isLinkElement) && (navigation.matches("nav, [role='navigation']") || controls.length >= 8 && !navigation.querySelector?.("h1, main, [role='main'], input, textarea, select"))) {
             collapsedNavigation.add(navigation);
             const parentKeys = structuralParentKeys(navigation), baseDepth = headingDepth(navigation), count = controls.length;
@@ -963,12 +1040,12 @@ return ((rootOrSettings, locatorSettings, naming) => {
   const selected = entries.map((entry, index) => ({ entry, index })).sort((left, right) => left.entry.priority - right.entry.priority || left.index - right.index).slice(0, settings.maxItems).sort((left, right) => left.index - right.index).map(({ entry: { interactiveElement, frameElement, ...rest } }) => ({
     ...rest,
     ...interactiveElement ? { selector: cssPath(interactiveElement) } : frameElement ? { selector: frameSelector(frameElement), iframe: !0 } : {}
-  })), needsSettle = Boolean(!settings.rootSelector && typeof MutationObserver < "u" && document.body && (Boolean(document.querySelector?.("[aria-busy='true'], .skeleton:not(.no-skeleton)")) || !selected.some((entry) => Boolean(entry.selector)) && typeof performance < "u" && performance.now() < 2500));
+  })), needsSettle = Boolean(!settings.rootSelector && typeof MutationObserver < "u" && document.body && (Boolean(document.querySelector?.("[aria-busy='true'], .skeleton:not(.no-skeleton)")) || !selected.some((entry) => Boolean(entry.selector)) && typeof performance < "u" && performance.now() < 2500)), notes = [...rootNote ? [rootNote] : [], ...scopeNote ? [scopeNote] : []];
   return {
     entries: selected,
     truncated: truncated || selected.length < entries.length,
     ...needsSettle ? { needsSettle: !0 } : {},
-    ...rootNote ? { notes: [rootNote] } : {}
+    ...notes.length > 0 ? { notes } : {}
   };
 })(rootOrSettings, locatorSettings, naming)
 }
