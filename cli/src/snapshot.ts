@@ -132,6 +132,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
     const deadline = Date.now() + timeoutMs
     const settings = {
       compact: options.compact ?? true,
+      expandNavigation: options.find !== undefined,
       depth,
       interactive: options.interactive ?? false,
       maxCandidates: Math.max(1_000, maxItems * 20),

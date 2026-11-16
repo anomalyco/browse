@@ -108,18 +108,28 @@ async fn snapshot_navigation_controls_stay_visible() {
 <nav aria-label="C nav"><h2>C nav</h2>
   <div role="button" tabindex="0"><div><span>carol</span></div></div></nav>
 <nav aria-label="Sections"><a href="/a">Alpha</a><a href="/b">Beta</a><a href="/c">Gamma</a></nav>
+<aside aria-label="Aside links"><a href="/s1">S1</a><a href="/s2">S2</a><a href="/s3">S3</a><a href="/s4">S4</a>
+  <a href="/s5">S5</a><a href="/s6">S6</a><a href="/s7">S7</a><a href="/s8">S8</a></aside>
+<nav aria-label="Mobile"><a href="/m">Mobile</a><button style="display:none">Menu</button></nav>
+<nav aria-label="Action nav"><a href="/action" role="button">Action</a></nav>
 <input aria-placeholder="Message only">"#,
     );
     h.ok("navigate", json!({ "url": page })).await;
     let snapshot = h.ok("snapshot", json!({})).await;
     let carol = ref_of(&snapshot, "button \"carol\"");
     assert!(carol.starts_with('e'), "carol keeps a compact ref ({carol}):\n{snapshot}");
-    // A pure link list still collapses, and the line sits with the headings rather than under one.
+    // A pure link list still collapses at its expanded children's heading depth, under the C nav heading.
     assert!(
-        snapshot.lines().any(|line| line == "- navigation \"Sections\" [3 links, collapsed]"),
+        snapshot.lines().any(|line| line == "  - navigation \"Sections\" [3 links, collapsed]"),
         "{snapshot}"
     );
     assert!(!snapshot.contains("link \"Alpha\""), "{snapshot}");
+    // An aside with enough links still collapses; a hidden button does not keep a link nav open.
+    assert!(snapshot.contains("- navigation \"Aside links\" [8 links, collapsed]"), "{snapshot}");
+    assert!(snapshot.contains("- navigation \"Mobile\" [1 link, collapsed]"), "{snapshot}");
+    // A link whose computed role is button is a control, so its nav stays expanded with a ref.
+    let action = ref_of(&snapshot, "button \"Action\"");
+    assert!(action.starts_with('e'), "the action keeps a ref ({action}):\n{snapshot}");
     // aria-placeholder names a control that has no label, title or placeholder of its own.
     assert!(snapshot.contains("- textbox \"Message only\" [ref="), "{snapshot}");
     let found = h.ok("snapshot", json!({ "find": "carol" })).await;
@@ -127,6 +137,10 @@ async fn snapshot_navigation_controls_stay_visible() {
     // find greps the rendered lines, so a collapsed link list has to be expanded for the match.
     let found_link = h.ok("snapshot", json!({ "find": "Alpha" })).await;
     assert!(found_link.contains("link \"Alpha\""), "{found_link}");
+    // find must not change the comparison signature: a diff after a find still uses the same options.
+    let diff = h.ok("snapshot", json!({ "diff": true })).await;
+    assert!(diff.contains("additions"), "{diff}");
+    assert!(!diff.contains("same snapshot options"), "{diff}");
 
     // interactive asks for controls, so the summary would hide exactly what was asked for.
     let interactive = h.ok("snapshot", json!({ "interactive": true })).await;

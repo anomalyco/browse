@@ -104,6 +104,7 @@ impl Options {
 #[derive(Debug, Clone)]
 struct Settings {
     compact: bool,
+    expand_navigation: bool,
     depth: i64,
     interactive: bool,
     max_candidates: i64,
@@ -118,6 +119,7 @@ impl Settings {
     fn to_json(&self) -> Value {
         let mut value = json!({
             "compact": self.compact,
+            "expandNavigation": self.expand_navigation,
             "depth": self.depth,
             "interactive": self.interactive,
             "maxCandidates": self.max_candidates,
@@ -136,6 +138,7 @@ impl Settings {
     fn child(&self, iframe_depth: i64) -> Settings {
         Settings {
             compact: self.compact,
+            expand_navigation: self.expand_navigation,
             depth: (self.depth - iframe_depth - 1).max(1),
             interactive: self.interactive,
             max_candidates: (self.max_items * 20).max(200),
@@ -620,8 +623,9 @@ pub async fn snapshot(page: &Arc<TabPage>, tab_state: &PageTab, options: &Option
         None => (None, None, None),
     };
     let settings = Settings {
+        compact: options.compact,
         // find greps the rendered lines, so navigation has to be expanded for controls inside it to match.
-        compact: options.compact && options.find.is_none(),
+        expand_navigation: options.find.is_some(),
         depth: options.depth,
         interactive: options.interactive,
         max_candidates: (max_items * 20).max(1_000),

@@ -676,7 +676,7 @@ return ((rootOrSettings, locatorSettings, naming) => {
       return !0;
     const role = element.getAttribute("role");
     return role !== null && (extraCandidateRoles.has(role) || structuralRoles.has(role) || interactiveRoles.has(role));
-  }, isLinkElement = (element) => element.localName === "a" && element.hasAttribute("href") || element.getAttribute("role") === "link", structuralKeys = new WeakMap;
+  }, isLinkElement = (element) => roleFor(element) === "link", structuralKeys = new WeakMap;
   let nextStructuralKey = 1;
   const structuralKey = (element) => {
     const existing = structuralKeys.get(element);
@@ -857,15 +857,19 @@ return ((rootOrSettings, locatorSettings, naming) => {
       truncated = !0;
       break;
     }
-    if (settings.compact && !settings.interactive && !headerCandidateSet.has(element)) {
+    if (settings.compact && settings.expandNavigation !== !0 && !settings.interactive && !headerCandidateSet.has(element)) {
       const navigation = closestDeep(element, "nav, [role='navigation'], aside, [role='complementary'], [data-slot='sidebar'], [data-sidebar='sidebar']");
       if (navigation && collapsedNavigation.has(navigation))
         continue;
       if (navigation && navigation !== root && !navigation.contains?.(root) && !nonCollapsibleNavigation.has(navigation)) {
-        const controls = querySelectorAllDeep(navigation, ["a[href]", "[contenteditable]", ...interactiveTags, ...Array.from(interactiveRoles, (role) => `[role='${role}']`)].join(", ")).filter(isInteractiveElement), isLinkList = controls.length > 0 && controls.every(isLinkElement);
-        if (isVisible(navigation) && isLinkList && (navigation.matches("nav, [role='navigation']") || controls.length >= 8 && !navigation.querySelector?.("h1, main, [role='main'], input, textarea, select"))) {
+        if (!isVisible(navigation)) {
+          nonCollapsibleNavigation.add(navigation);
+          continue;
+        }
+        const controls = querySelectorAllDeep(navigation, ["a[href]", "[contenteditable]", ...interactiveTags, ...Array.from(interactiveRoles, (role) => `[role='${role}']`)].join(", ")).filter(isVisible);
+        if (controls.length > 0 && controls.every(isLinkElement) && (navigation.matches("nav, [role='navigation']") || controls.length >= 8 && !navigation.querySelector?.("h1, main, [role='main'], input, textarea, select"))) {
           collapsedNavigation.add(navigation);
-          const parentKeys = structuralParentKeys(navigation), baseDepth = Math.max(0, headingDepth(navigation) - 1), count = controls.length;
+          const parentKeys = structuralParentKeys(navigation), baseDepth = headingDepth(navigation), count = controls.length;
           add({
             depth: baseDepth + parentKeys.length,
             baseDepth,

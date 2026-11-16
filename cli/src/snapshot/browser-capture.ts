@@ -1,6 +1,8 @@
 import { snapshotNamingInBrowser, type SnapshotNaming } from "./naming.ts"
 import type { SnapshotCaptureResult, SnapshotCaptureSettings, SnapshotEntry } from "./types.ts"
 
+type CaptureSettings = SnapshotCaptureSettings & { readonly expandNavigation?: boolean }
+
 // Self-contained browser evaluation script: serialized via Function.prototype.toString() into page.evaluate().
 // Do not reference module-level runtime imports inside captureSnapshotInBrowser; browserCapture passes `naming`.
 const captureSnapshotInBrowser = (
@@ -9,7 +11,7 @@ const captureSnapshotInBrowser = (
   naming: SnapshotNaming,
 ): SnapshotCaptureResult => {
   type BrowserEntry = SnapshotEntry
-  const settings = locatorSettings ?? rootOrSettings as SnapshotCaptureSettings
+  const settings = (locatorSettings ?? rootOrSettings) as CaptureSettings
 
   const truncate = (value: string, maxLength: number): string => {
     if (value.length <= maxLength) return value
@@ -463,8 +465,7 @@ const captureSnapshotInBrowser = (
     const role = element.getAttribute("role")
     return role !== null && (extraCandidateRoles.has(role) || structuralRoles.has(role) || interactiveRoles.has(role))
   }
-  const isLinkElement = (element: Element): boolean =>
-    (element.localName === "a" && element.hasAttribute("href")) || element.getAttribute("role") === "link"
+  const isLinkElement = (element: Element): boolean => roleFor(element) === "link"
   const structuralKeys = new WeakMap<Element, string>()
   let nextStructuralKey = 1
   const structuralKey = (element: Element): string => {
@@ -670,29 +671,33 @@ const captureSnapshotInBrowser = (
       truncated = true
       break
     }
-    if (settings.compact && !settings.interactive && !headerCandidateSet.has(element)) {
+    if (settings.compact && settings.expandNavigation !== true && !settings.interactive && !headerCandidateSet.has(element)) {
       const navigation = closestDeep(element, "nav, [role='navigation'], aside, [role='complementary'], [data-slot='sidebar'], [data-sidebar='sidebar']")
       if (navigation && collapsedNavigation.has(navigation)) {
         continue
       }
       if (navigation && navigation !== root && !navigation.contains?.(root) && !nonCollapsibleNavigation.has(navigation)) {
-        // Every interactive descendant, so a control hidden by CSS still keeps the landmark expanded.
+        if (!isVisible(navigation)) {
+          nonCollapsibleNavigation.add(navigation)
+          continue
+        }
+        // Only visible controls decide: a display:none mobile menu button does not keep the whole nav open.
         const controls = querySelectorAllDeep(
           navigation,
           ["a[href]", "[contenteditable]", ...interactiveTags, ...Array.from(interactiveRoles, (role) => `[role='${role}']`)].join(", "),
-        ).filter(isInteractiveElement)
+        ).filter(isVisible)
         // Only a pure link list is a landmark worth summarising. A nav of buttons (a conversation list, a
         // toolbar) is content: collapsing it would hide every control, and the summary carries no ref.
         const isLinkList = controls.length > 0 && controls.every(isLinkElement)
-        const isCollapsibleNav = isVisible(navigation) && isLinkList && (
+        const isCollapsibleNav = isLinkList && (
           navigation.matches("nav, [role='navigation']") ||
           (controls.length >= 8 && !navigation.querySelector?.("h1, main, [role='main'], input, textarea, select"))
         )
         if (isCollapsibleNav) {
           collapsedNavigation.add(navigation)
-          // A landmark sits at the depth of the heading it follows, not under it; structural parents still nest it.
+          // Keep the heading-based depth its expanded children would have, plus any structural parents.
           const parentKeys = structuralParentKeys(navigation)
-          const baseDepth = Math.max(0, headingDepth(navigation) - 1)
+          const baseDepth = headingDepth(navigation)
           const count = controls.length
           add({
             depth: baseDepth + parentKeys.length,
