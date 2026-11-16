@@ -153,11 +153,16 @@ export const snapshotNamingInBrowser = () => {
     }
     const title = titleName(element)
     if (title) return title
-    const placeholder = element.getAttribute("placeholder")
-    if (placeholder) return normalize(placeholder)
-    const ariaPlaceholder = element.getAttribute("aria-placeholder")
-    if (ariaPlaceholder) return normalize(ariaPlaceholder)
+    const placeholder = normalize(element.getAttribute("placeholder") || element.getAttribute("aria-placeholder") || "")
+    if (placeholder) return placeholder
     return ""
+  }
+  // A text entry host that isn't a native input or textarea (a contenteditable composer, say) names itself from its
+  // placeholder, the HTML fallback the browser exposes for text controls.
+  const placeholderName = (element: Element): string => {
+    const role = element.getAttribute("role")
+    if (!element.hasAttribute("contenteditable") && role !== "textbox" && role !== "searchbox") return ""
+    return normalize(element.getAttribute("placeholder") || element.getAttribute("aria-placeholder") || "")
   }
   const accessibleNameCache = new WeakMap<Element, string>()
   const accessibleName = (element: Element): string => {
@@ -171,7 +176,7 @@ export const snapshotNamingInBrowser = () => {
       result = authorAccessibleName(element)
     } else {
       const alt = element.getAttribute("alt")
-      const raw = alt || safeText(element) || titleName(element) ||
+      const raw = alt || safeText(element) || titleName(element) || placeholderName(element) ||
         element.querySelector?.("[aria-label]")?.getAttribute("aria-label") ||
         element.querySelector?.("svg title")?.textContent ||
         ""

@@ -132,7 +132,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
     const deadline = Date.now() + timeoutMs
     const settings = {
       compact: options.compact ?? true,
-      expandNavigation: options.find !== undefined,
+      expandNavigation: options.find !== undefined && options.diff !== true && options.delta !== true,
       depth,
       interactive: options.interactive ?? false,
       maxCandidates: Math.max(1_000, maxItems * 20),
@@ -142,6 +142,8 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       rootName: refRoot?.name,
       ...(withinSelector === undefined ? {} : { reportRootFallback: true }),
     }
+    // find has to see every candidate the capture kept, or a big expanded menu can push a match past the limit.
+    const itemBudget = settings.expandNavigation ? settings.maxCandidates : maxItems
     const signature = JSON.stringify({
       compact: settings.compact,
       depth: settings.depth,
@@ -158,15 +160,14 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         ? { kind: "locator", scope: locatorScope }
         : { kind: "page" },
     })
-    const latestSnapshot = registry.latestSnapshot
-    const baselineSnapshot = registry.baselineSnapshot
+    const previousSnapshot = registry.previousSnapshot
     if (options.diff && options.delta) {
       throw new Error("snapshot() accepts either diff or delta, not both")
     }
-    if (options.diff && !baselineSnapshot) {
+    if (options.diff && !previousSnapshot) {
       throw new Error("snapshot({ diff: true }) requires a previous snapshot() baseline in this session")
     }
-    if (options.diff && (baselineSnapshot?.page !== page || baselineSnapshot.signature !== signature)) {
+    if (options.diff && (previousSnapshot?.page !== page || previousSnapshot.signature !== signature)) {
       throw new Error("snapshot({ diff: true }) must use the same page and snapshot options as the previous snapshot")
     }
 
@@ -264,7 +265,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
     const main = renderSnapshotCapture(result)
     const frameBudget: SnapshotFrameBudget = {
       frames: maxSnapshotFrames,
-      items: Math.max(0, maxItems - main.entries.length),
+      items: Math.max(0, itemBudget - main.entries.length),
       skipped: { budget: 0, deadline: 0, items: 0 },
     }
     const frameNodes: ReadonlyMap<number, SnapshotFrame> = includeFrames && result.entries.some((entry) => entry.iframe)
@@ -279,8 +280,8 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         })
       : new Map()
 
-    // Merge frame documents under their iframe lines. The main capture already spent part of maxItems; frame
-    // content and its nested frames share what is left, so the whole snapshot stays within one budget.
+    // Merge frame documents under their iframe lines. The main capture already spent part of the item budget;
+    // frame content and its nested frames share what is left, so the whole snapshot stays within one budget.
     const entries: SnapshotRenderedEntry[] = []
     const frameObjects = new Map<string, { readonly frame: Frame; readonly generation: number }>()
     const frameIds = registry.frameIds ??= new WeakMap()
@@ -292,7 +293,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       frameIds.set(frame, key)
       return key
     }
-    let remainingItems = Math.max(0, maxItems - main.entries.length)
+    let remainingItems = Math.max(0, itemBudget - main.entries.length)
     let omittedFrames = 0
     const frameCount = (node: SnapshotFrame): number => 1 + [...node.children.values()].reduce((sum, child) => sum + frameCount(child), 0)
     const emitFrame = (node: SnapshotFrame, indent: number): void => {
@@ -324,7 +325,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         if (nested) emitFrame(nested, indent + child.depths[index]! + 1)
       }
       if (node.capture.truncated && remainingItems > 0) {
-        entries.push({ prefix: `${indentation}- ... frame content truncated after ${maxItems} items` })
+        entries.push({ prefix: `${indentation}- ... frame content truncated after ${itemBudget} items` })
       }
     }
     for (const [index, entry] of main.entries.entries()) {
@@ -332,18 +333,19 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       const node = frameNodes.get(index)
       if (node) emitFrame(node, main.depths[index]! + 1)
     }
-    if (result.truncated) entries.push({ prefix: `- ... truncated after ${maxItems} items` })
+    if (result.truncated) entries.push({ prefix: `- ... truncated after ${itemBudget} items` })
     if (frameBudget.skipped.items > 0) entries.push({ prefix: frameSkipNote(frameBudget.skipped.items, "maxItems reached") })
     if (frameBudget.skipped.budget > 0) entries.push({ prefix: frameSkipNote(frameBudget.skipped.budget, `${maxSnapshotFrames} iframes at most per snapshot`) })
     if (frameBudget.skipped.deadline > 0) entries.push({ prefix: frameSkipNote(frameBudget.skipped.deadline, "snapshot deadline reached") })
     if (omittedFrames > 0) entries.push({ prefix: frameSkipNote(omittedFrames, "maxItems reached") })
 
-    const samePagePrevious = latestSnapshot?.page === page ? latestSnapshot : undefined
-    const compatiblePrevious = baselineSnapshot?.page === page && baselineSnapshot.signature === signature ? baselineSnapshot : undefined
+    const samePagePrevious = previousSnapshot?.page === page ? previousSnapshot : undefined
+    const compatiblePrevious = samePagePrevious?.signature === signature ? samePagePrevious : undefined
+    const lastRefSource = registry.lastEntries?.page === page ? registry.lastEntries : undefined
     let nextRef = registry.nextRef ?? 1
-    // Ids carry over from the previous snapshot of this page even if its options differed, e.g. snapshot({ maxItems }).
+    // Ids carry over from the last snapshot of this page even if its options differed or it was a find capture.
     const reusableRefs = new Map<string, string[]>()
-    for (const entry of samePagePrevious?.entries ?? []) {
+    for (const entry of lastRefSource?.entries ?? []) {
       if (!entry.refId) continue
       const key = snapshotRefIdentity(entry)
       if (!key) continue
@@ -381,11 +383,9 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
     }
 
     const useDiff = options.diff === true || (options.delta === true && compatiblePrevious !== undefined)
-    // Every snapshot feeds ref reuse; only non-find snapshots become the diff/delta baseline.
-    registry.latestSnapshot = { page, signature, entries: rendered }
-    if (settings.expandNavigation !== true) {
-      registry.baselineSnapshot = { page, signature, entries: rendered }
-    }
+    // Refs are reused from every capture; only a comparable snapshot replaces the diff baseline.
+    registry.lastEntries = { page, entries: rendered }
+    if (!settings.expandNavigation) registry.previousSnapshot = { page, signature, entries: rendered }
     if (!useDiff) {
       const lines = [...(result.notes ?? []), ...rendered.map((entry) => formatSnapshotLine(entry, entry.refId))]
       return options.find === undefined

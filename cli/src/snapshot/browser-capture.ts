@@ -454,6 +454,13 @@ const captureSnapshotInBrowser = (
     const role = element.getAttribute("role")
     return role !== null && interactiveRoles.has(role)
   }
+  // Every element isInteractiveElement can accept, so a collapse count sees the same controls the tree would.
+  const controlSelector = "a[href], button, input, textarea, select, summary, [contenteditable], [role]"
+  const visibleControlsIn = (scope: Element): Element[] =>
+    querySelectorAllDeep(scope, controlSelector).filter((element) => isInteractiveElement(element) && isVisible(element))
+  // A plain link or button is a menu item; so is a disclosure or menu control. A div[role=button] row without
+  // aria-expanded, a tab, an option or a text field is page content, not a menu.
+  const menuControlSelector = "a[href], button, summary, [role='button'][aria-expanded], [role^='menuitem']"
   const isCandidateElement = (element: Element): boolean => {
     const local = element.localName
     if (frameTags.has(local)) return true
@@ -463,7 +470,6 @@ const captureSnapshotInBrowser = (
     const role = element.getAttribute("role")
     return role !== null && (extraCandidateRoles.has(role) || structuralRoles.has(role) || interactiveRoles.has(role))
   }
-  const isLinkElement = (element: Element): boolean => roleFor(element) === "link"
   const structuralKeys = new WeakMap<Element, string>()
   let nextStructuralKey = 1
   const structuralKey = (element: Element): string => {
@@ -669,48 +675,38 @@ const captureSnapshotInBrowser = (
       truncated = true
       break
     }
-    if (settings.compact && settings.expandNavigation !== true && !settings.interactive && !headerCandidateSet.has(element)) {
+    if (settings.compact && !settings.interactive && !settings.expandNavigation && !headerCandidateSet.has(element)) {
       const navigation = closestDeep(element, "nav, [role='navigation'], aside, [role='complementary'], [data-slot='sidebar'], [data-sidebar='sidebar']")
       if (navigation && collapsedNavigation.has(navigation)) {
         continue
       }
       if (navigation && navigation !== root && !navigation.contains?.(root) && !nonCollapsibleNavigation.has(navigation)) {
-        if (!isVisible(navigation)) {
-          // isVisible doesn't inherit, so an invisible landmark can still have visible positioned children:
-          // skip the summary but let the current element go through normal processing.
-          nonCollapsibleNavigation.add(navigation)
-        } else {
-          // Only visible controls decide: a display:none mobile menu button does not keep the whole nav open.
-          const controls = querySelectorAllDeep(
-            navigation,
-            ["a[href]", "[contenteditable]", ...interactiveTags, ...Array.from(interactiveRoles, (role) => `[role='${role}']`)].join(", "),
-          ).filter(isVisible)
-          // Only a pure link list is a landmark worth summarising. A nav of buttons (a conversation list, a
-          // toolbar) is content: collapsing it would hide every control, and the summary carries no ref.
-          const isLinkList = controls.length > 0 && controls.every(isLinkElement)
-          const isCollapsibleNav = isLinkList && (
-            navigation.matches("nav, [role='navigation']") ||
-            (controls.length >= 8 && !navigation.querySelector?.("h1, main, [role='main'], input, textarea, select"))
-          )
-          if (isCollapsibleNav) {
-            collapsedNavigation.add(navigation)
-            // Keep the heading-based depth its expanded children would have, plus any structural parents.
-            const parentKeys = structuralParentKeys(navigation)
-            const baseDepth = headingDepth(navigation)
-            const count = controls.length
-            add({
-              depth: baseDepth + parentKeys.length,
-              baseDepth,
-              ...(parentKeys.length > 0 ? { parentKeys } : {}),
-              role: "navigation",
-              name: truncate(labelledName(navigation), 100) || "Navigation",
-              details: `${count} ${count === 1 ? "link" : "links"}, collapsed`,
-              priority: 0,
-            })
-            continue
-          }
-          nonCollapsibleNavigation.add(navigation)
+        const controls = isVisible(navigation) ? visibleControlsIn(navigation) : []
+        // A landmark holding a text field, tabs or rows of div[role='button'] is app content, not a menu: a count
+        // would hide controls an agent needs to see and click, and the summary carries no ref. Only a menu whose
+        // visible controls are all links, buttons, disclosures or menu items collapses.
+        const isMenu = controls.length > 0 && controls.every((control) => control.matches(menuControlSelector))
+        const isCollapsibleNav = isMenu && (
+          navigation.matches("nav, [role='navigation']") ||
+          (controls.filter((control) => control.localName === "a" && control.hasAttribute("href")).length >= 8 && !navigation.querySelector?.("h1, main, [role='main'], input, textarea, select"))
+        )
+        if (isCollapsibleNav) {
+          collapsedNavigation.add(navigation)
+          // A landmark sits at the depth of its expanded children, and structural parents still nest it.
+          const parentKeys = structuralParentKeys(navigation)
+          const baseDepth = headingDepth(navigation)
+          add({
+            depth: baseDepth + parentKeys.length,
+            baseDepth,
+            ...(parentKeys.length > 0 ? { parentKeys } : {}),
+            role: "navigation",
+            name: truncate(labelledName(navigation), 100) || "Navigation",
+            details: `${controls.length} controls`,
+            priority: 0,
+          })
+          continue
         }
+        nonCollapsibleNavigation.add(navigation)
       }
     }
     if (!isVisible(element)) continue
@@ -834,7 +830,7 @@ const captureSnapshotInBrowser = (
   const selected: BrowserEntry[] = entries
     .map((entry, index) => ({ entry, index }))
     .sort((left, right) => left.entry.priority - right.entry.priority || left.index - right.index)
-    .slice(0, settings.maxItems)
+    .slice(0, settings.expandNavigation ? settings.maxCandidates : settings.maxItems)
     .sort((left, right) => left.index - right.index)
     .map(({ entry: { interactiveElement, frameElement, ...rest } }) => ({
       ...rest,

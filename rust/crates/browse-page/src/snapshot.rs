@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::page::{Element, ElementOr, TabPage, is_context_lost, v};
-use crate::state::{AriaRefs, Baseline, PageTab, RefTarget};
+use crate::state::{AriaRefs, Baseline, PageTab, RefSource, RefTarget};
 use crate::target;
 
 pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
@@ -617,6 +617,7 @@ pub async fn snapshot(page: &Arc<TabPage>, tab_state: &PageTab, options: &Option
     }
     let scope = resolve_scope(page, tab_state, options).await?;
     let max_items = options.max_items;
+    let max_candidates = (max_items * 20).max(1_000);
     let deadline = Instant::now() + Duration::from_millis(options.timeout_ms);
     let (root_selector, root_role, root_name) = match &scope.settings_root {
         Some((selector, role, name)) => (Some(selector.clone()), role.clone(), name.clone()),
@@ -624,17 +625,19 @@ pub async fn snapshot(page: &Arc<TabPage>, tab_state: &PageTab, options: &Option
     };
     let settings = Settings {
         compact: options.compact,
-        // find greps the rendered lines, so navigation has to be expanded for controls inside it to match.
-        expand_navigation: options.find.is_some(),
+        expand_navigation: options.find.is_some() && !options.diff && !options.delta,
         depth: options.depth,
         interactive: options.interactive,
-        max_candidates: (max_items * 20).max(1_000),
+        max_candidates,
         max_items,
         root_selector,
         root_role,
         root_name,
         report_root_fallback: scope.report_fallback,
     };
+    // find filters the rendered lines, so it must see every candidate the capture kept: a big expanded menu must
+    // not push a match past maxItems before the filter runs. Normal snapshots keep the user's maxItems trim.
+    let item_budget = if settings.expand_navigation { max_candidates } else { max_items };
     let signature = json!({
         "compact": settings.compact,
         "depth": settings.depth,
@@ -648,7 +651,7 @@ pub async fn snapshot(page: &Arc<TabPage>, tab_state: &PageTab, options: &Option
     {
         let refs = tab_state.refs.lock().unwrap();
         if options.diff {
-            match refs.baseline.as_ref() {
+            match refs.previous.as_ref() {
                 None => bail!("snapshot with diff: true needs an earlier snapshot of this page to compare with; call snapshot without diff first"),
                 Some(previous) if previous.tab != page.tab() => {
                     bail!("snapshot with diff: true compares with the previous snapshot, which was of another tab; call snapshot without diff on this tab first")
@@ -670,7 +673,7 @@ pub async fn snapshot(page: &Arc<TabPage>, tab_state: &PageTab, options: &Option
     let capture = capture_main(page, &scope, &settings, deadline, options.diff).await?;
 
     let main = render_capture(&capture);
-    let mut budget = Budget { frames: MAX_FRAMES, items: (max_items - main.entries.len() as i64).max(0), skipped_budget: 0, skipped_deadline: 0, skipped_items: 0 };
+    let mut budget = Budget { frames: MAX_FRAMES, items: (item_budget - main.entries.len() as i64).max(0), skipped_budget: 0, skipped_deadline: 0, skipped_items: 0 };
     let frame_nodes = if options.frames && capture.entries.iter().any(|e| e.iframe) {
         capture_frames(page, &scope.frame, &capture.entries, &settings, deadline, &mut budget, 1).await
     } else {
@@ -686,7 +689,7 @@ pub async fn snapshot(page: &Arc<TabPage>, tab_state: &PageTab, options: &Option
         let refs = &mut *refs_guard;
         let mut entries: Vec<RenderedEntry> = Vec::new();
         let mut frame_objects: HashMap<String, (String, u64)> = HashMap::new();
-        let mut remaining = (max_items - main.entries.len() as i64).max(0);
+        let mut remaining = (item_budget - main.entries.len() as i64).max(0);
         let mut omitted = 0usize;
 
         #[allow(clippy::too_many_arguments)]
@@ -698,7 +701,7 @@ pub async fn snapshot(page: &Arc<TabPage>, tab_state: &PageTab, options: &Option
             remaining: &mut i64,
             omitted: &mut usize,
             refs: &mut crate::state::RefRegistry,
-            max_items: i64,
+            item_budget: i64,
         ) {
             let indentation = "  ".repeat(indent);
             if let Some(note) = &node.note {
@@ -726,11 +729,11 @@ pub async fn snapshot(page: &Arc<TabPage>, tab_state: &PageTab, options: &Option
                 entries.push(RenderedEntry { prefix: format!("{indentation}{}", entry.prefix), frame_key: Some(key.clone()), ..entry.clone() });
                 *remaining -= 1;
                 if let Some(nested) = node.children.get(&index) {
-                    emit(nested, indent + child.depths[index] as usize + 1, entries, frame_objects, remaining, omitted, refs, max_items);
+                    emit(nested, indent + child.depths[index] as usize + 1, entries, frame_objects, remaining, omitted, refs, item_budget);
                 }
             }
             if node.capture.truncated && *remaining > 0 {
-                entries.push(RenderedEntry { prefix: format!("{indentation}- ... frame content truncated after {max_items} items"), ..Default::default() });
+                entries.push(RenderedEntry { prefix: format!("{indentation}- ... frame content truncated after {item_budget} items"), ..Default::default() });
             }
         }
 
@@ -743,11 +746,11 @@ pub async fn snapshot(page: &Arc<TabPage>, tab_state: &PageTab, options: &Option
         for (index, entry) in main.entries.iter().enumerate() {
             entries.push(RenderedEntry { frame_key: root_key.clone(), ..entry.clone() });
             if let Some(node) = frame_nodes.get(&index) {
-                emit(node, main.depths[index] as usize + 1, &mut entries, &mut frame_objects, &mut remaining, &mut omitted, refs, max_items);
+                emit(node, main.depths[index] as usize + 1, &mut entries, &mut frame_objects, &mut remaining, &mut omitted, refs, item_budget);
             }
         }
         if capture.truncated {
-            entries.push(RenderedEntry { prefix: format!("- ... truncated after {max_items} items"), ..Default::default() });
+            entries.push(RenderedEntry { prefix: format!("- ... truncated after {item_budget} items"), ..Default::default() });
         }
         if budget.skipped_items > 0 {
             entries.push(RenderedEntry { prefix: frame_skip_note(budget.skipped_items, "maxItems reached"), ..Default::default() });
@@ -762,14 +765,13 @@ pub async fn snapshot(page: &Arc<TabPage>, tab_state: &PageTab, options: &Option
             entries.push(RenderedEntry { prefix: frame_skip_note(omitted, "maxItems reached"), ..Default::default() });
         }
 
-        // Refs carry over from the latest snapshot of this tab even if its options differed; diffing uses the
-        // separate baseline, which find snapshots do not replace.
-        let latest_previous = refs.latest.as_ref().filter(|p| p.tab == page.tab() && p.document == document).cloned();
-        let baseline_previous = refs.baseline.as_ref().filter(|p| p.tab == page.tab() && p.document == document).cloned();
-        let compatible_previous = baseline_previous.filter(|p| p.signature == signature);
+        // Refs carry over from the last snapshot of this tab even if its options differed or it was a find capture.
+        let same_tab_previous = refs.previous.as_ref().filter(|p| p.tab == page.tab() && p.document == document).cloned();
+        let compatible_previous = same_tab_previous.as_ref().filter(|p| p.signature == signature).cloned();
+        let same_tab_last = refs.last_entries.as_ref().filter(|p| p.tab == page.tab() && p.document == document).cloned();
         let mut next_ref = refs.next_ref.max(1);
         let mut reusable: HashMap<String, VecDeque<String>> = HashMap::new();
-        for entry in latest_previous.as_ref().map(|p| p.entries.as_slice()).unwrap_or(&[]) {
+        for entry in same_tab_last.as_ref().map(|p| p.entries.as_slice()).unwrap_or(&[]) {
             if let (Some(id), Some(key)) = (&entry.ref_id, ref_identity(entry)) {
                 reusable.entry(key).or_default().push_back(id.clone());
             }
@@ -809,11 +811,10 @@ pub async fn snapshot(page: &Arc<TabPage>, tab_state: &PageTab, options: &Option
         refs.document = Some(document);
         refs.aria = None;
         let use_diff = options.diff || (options.delta && compatible_previous.is_some());
-        // Every snapshot feeds ref reuse; only non-find snapshots become the diff/delta baseline.
-        let latest = Baseline { tab: page.tab(), document, signature, entries: rendered.clone() };
-        refs.latest = Some(latest.clone());
+        // Refs are reused from every capture; only a comparable snapshot replaces the diff baseline.
+        refs.last_entries = Some(RefSource { tab: page.tab(), document, entries: rendered.clone() });
         if !settings.expand_navigation {
-            refs.baseline = Some(latest);
+            refs.previous = Some(Baseline { tab: page.tab(), document, signature, entries: rendered.clone() });
         }
         (rendered, compatible_previous, use_diff, remember)
     };

@@ -36,6 +36,15 @@ pub struct Baseline {
     pub entries: Vec<RenderedEntry>,
 }
 
+/// The entries refs are reused from: the last snapshot of any kind, including a `find` capture that is expanded and
+/// untrimmed and so cannot be a diff baseline.
+#[derive(Debug, Clone)]
+pub struct RefSource {
+    pub tab: TabId,
+    pub document: u64,
+    pub entries: Vec<RenderedEntry>,
+}
+
 /// Refs of the last aria-mode snapshot; they resolve through Playwright's aria-ref engine in each frame.
 #[derive(Debug, Clone)]
 pub struct AriaRefs {
@@ -51,10 +60,9 @@ pub struct RefRegistry {
     /// The main document generation the refs were captured from.
     pub document: Option<u64>,
     pub selectors: HashMap<String, RefTarget>,
-    /// Rendered entries from the latest snapshot, find included, for ref-ID reuse.
-    pub latest: Option<Baseline>,
-    /// Rendered entries from the latest non-find snapshot, for diff and delta.
-    pub baseline: Option<Baseline>,
+    pub previous: Option<Baseline>,
+    /// Last rendered entries, whatever the snapshot options: refs are reused from this even when `previous` is kept.
+    pub last_entries: Option<RefSource>,
     pub next_ref: u64,
     pub frame_keys: HashMap<String, String>,
     pub next_frame_key: u64,
@@ -67,8 +75,8 @@ impl RefRegistry {
         self.selectors.clear();
         self.tab = None;
         self.document = None;
-        self.latest = None;
-        self.baseline = None;
+        self.previous = None;
+        self.last_entries = None;
     }
 
     pub fn frame_key(&mut self, frame: &str) -> String {

@@ -72,10 +72,9 @@ export type SnapshotRefRegistry = {
   page?: Page
   url?: string
   selectors: Map<string, SnapshotRefTarget>
-  /** Rendered entries from the latest snapshot, find included, for ref-ID reuse. */
-  latestSnapshot?: SnapshotBaseline
-  /** Rendered entries from the latest non-find snapshot, for diff and delta. */
-  baselineSnapshot?: SnapshotBaseline
+  previousSnapshot?: SnapshotBaseline
+  /** Last rendered entries, whatever the snapshot options: refs are reused from this even when previousSnapshot is kept. */
+  lastEntries?: SnapshotRefSource
   nextRef?: number
   locatorScopes?: WeakMap<object, number>
   nextLocatorScope?: number
@@ -104,9 +103,18 @@ export type SnapshotBaseline = {
   readonly entries: readonly SnapshotRenderedEntry[]
 }
 
+/** The entries refs are reused from: the last snapshot of any kind, including an expanded `find` capture. */
+export type SnapshotRefSource = {
+  readonly page: Page
+  readonly entries: readonly SnapshotRenderedEntry[]
+}
+
 export type SnapshotCaptureSettings = {
   readonly compact: boolean
-  /** Render navigation expanded so `find` can see its controls; `compact` and the diff signature are unchanged. */
+  /**
+   * `find` lists navigation in full and keeps every candidate, instead of trimming to maxItems, so a match inside
+   * an expanded menu cannot be dropped before the find filter runs. It leaves the other compact rules alone.
+   */
   readonly expandNavigation?: boolean
   readonly depth: number
   readonly interactive: boolean
@@ -188,6 +196,6 @@ export function invalidateSnapshotDocument(registry: SnapshotRefRegistry): void 
   registry.selectors.clear()
   delete registry.page
   delete registry.url
-  delete registry.latestSnapshot
-  delete registry.baselineSnapshot
+  delete registry.previousSnapshot
+  delete registry.lastEntries
 }

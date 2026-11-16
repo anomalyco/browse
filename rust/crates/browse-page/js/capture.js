@@ -141,13 +141,15 @@ const naming = (() => {
     const title = titleName(element);
     if (title)
       return title;
-    const placeholder = element.getAttribute("placeholder");
+    const placeholder = normalize(element.getAttribute("placeholder") || element.getAttribute("aria-placeholder") || "");
     if (placeholder)
-      return normalize(placeholder);
-    const ariaPlaceholder = element.getAttribute("aria-placeholder");
-    if (ariaPlaceholder)
-      return normalize(ariaPlaceholder);
+      return placeholder;
     return "";
+  }, placeholderName = (element) => {
+    const role = element.getAttribute("role");
+    if (!element.hasAttribute("contenteditable") && role !== "textbox" && role !== "searchbox")
+      return "";
+    return normalize(element.getAttribute("placeholder") || element.getAttribute("aria-placeholder") || "");
   }, accessibleNameCache = new WeakMap, accessibleName = (element) => {
     const cached = accessibleNameCache.get(element);
     if (cached !== void 0)
@@ -159,7 +161,7 @@ const naming = (() => {
     else if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement)
       result = authorAccessibleName(element);
     else {
-      const raw = element.getAttribute("alt") || safeText(element) || titleName(element) || element.querySelector?.("[aria-label]")?.getAttribute("aria-label") || element.querySelector?.("svg title")?.textContent || "";
+      const raw = element.getAttribute("alt") || safeText(element) || titleName(element) || placeholderName(element) || element.querySelector?.("[aria-label]")?.getAttribute("aria-label") || element.querySelector?.("svg title")?.textContent || "";
       result = normalize(raw);
     }
     accessibleNameCache.set(element, result);
@@ -664,7 +666,7 @@ return ((rootOrSettings, locatorSettings, naming) => {
       return !0;
     const role = element.getAttribute("role");
     return role !== null && interactiveRoles.has(role);
-  }, isCandidateElement = (element) => {
+  }, controlSelector = "a[href], button, input, textarea, select, summary, [contenteditable], [role]", visibleControlsIn = (scope) => querySelectorAllDeep(scope, controlSelector).filter((element) => isInteractiveElement(element) && isVisible(element)), menuControlSelector = "a[href], button, summary, [role='button'][aria-expanded], [role^='menuitem']", isCandidateElement = (element) => {
     const local = element.localName;
     if (frameTags.has(local))
       return !0;
@@ -676,7 +678,7 @@ return ((rootOrSettings, locatorSettings, naming) => {
       return !0;
     const role = element.getAttribute("role");
     return role !== null && (extraCandidateRoles.has(role) || structuralRoles.has(role) || interactiveRoles.has(role));
-  }, isLinkElement = (element) => roleFor(element) === "link", structuralKeys = new WeakMap;
+  }, structuralKeys = new WeakMap;
   let nextStructuralKey = 1;
   const structuralKey = (element) => {
     const existing = structuralKeys.get(element);
@@ -857,31 +859,28 @@ return ((rootOrSettings, locatorSettings, naming) => {
       truncated = !0;
       break;
     }
-    if (settings.compact && settings.expandNavigation !== !0 && !settings.interactive && !headerCandidateSet.has(element)) {
+    if (settings.compact && !settings.interactive && !settings.expandNavigation && !headerCandidateSet.has(element)) {
       const navigation = closestDeep(element, "nav, [role='navigation'], aside, [role='complementary'], [data-slot='sidebar'], [data-sidebar='sidebar']");
       if (navigation && collapsedNavigation.has(navigation))
         continue;
-      if (navigation && navigation !== root && !navigation.contains?.(root) && !nonCollapsibleNavigation.has(navigation))
-        if (!isVisible(navigation))
-          nonCollapsibleNavigation.add(navigation);
-        else {
-          const controls = querySelectorAllDeep(navigation, ["a[href]", "[contenteditable]", ...interactiveTags, ...Array.from(interactiveRoles, (role) => `[role='${role}']`)].join(", ")).filter(isVisible);
-          if (controls.length > 0 && controls.every(isLinkElement) && (navigation.matches("nav, [role='navigation']") || controls.length >= 8 && !navigation.querySelector?.("h1, main, [role='main'], input, textarea, select"))) {
-            collapsedNavigation.add(navigation);
-            const parentKeys = structuralParentKeys(navigation), baseDepth = headingDepth(navigation), count = controls.length;
-            add({
-              depth: baseDepth + parentKeys.length,
-              baseDepth,
-              ...parentKeys.length > 0 ? { parentKeys } : {},
-              role: "navigation",
-              name: truncate(labelledName(navigation), 100) || "Navigation",
-              details: `${count} ${count === 1 ? "link" : "links"}, collapsed`,
-              priority: 0
-            });
-            continue;
-          }
-          nonCollapsibleNavigation.add(navigation);
+      if (navigation && navigation !== root && !navigation.contains?.(root) && !nonCollapsibleNavigation.has(navigation)) {
+        const controls = isVisible(navigation) ? visibleControlsIn(navigation) : [];
+        if (controls.length > 0 && controls.every((control) => control.matches(menuControlSelector)) && (navigation.matches("nav, [role='navigation']") || controls.filter((control) => control.localName === "a" && control.hasAttribute("href")).length >= 8 && !navigation.querySelector?.("h1, main, [role='main'], input, textarea, select"))) {
+          collapsedNavigation.add(navigation);
+          const parentKeys = structuralParentKeys(navigation), baseDepth = headingDepth(navigation);
+          add({
+            depth: baseDepth + parentKeys.length,
+            baseDepth,
+            ...parentKeys.length > 0 ? { parentKeys } : {},
+            role: "navigation",
+            name: truncate(labelledName(navigation), 100) || "Navigation",
+            details: `${controls.length} controls`,
+            priority: 0
+          });
+          continue;
         }
+        nonCollapsibleNavigation.add(navigation);
+      }
     }
     if (!isVisible(element))
       continue;
@@ -960,7 +959,7 @@ return ((rootOrSettings, locatorSettings, naming) => {
       })
     });
   }
-  const selected = entries.map((entry, index) => ({ entry, index })).sort((left, right) => left.entry.priority - right.entry.priority || left.index - right.index).slice(0, settings.maxItems).sort((left, right) => left.index - right.index).map(({ entry: { interactiveElement, frameElement, ...rest } }) => ({
+  const selected = entries.map((entry, index) => ({ entry, index })).sort((left, right) => left.entry.priority - right.entry.priority || left.index - right.index).slice(0, settings.expandNavigation ? settings.maxCandidates : settings.maxItems).sort((left, right) => left.index - right.index).map(({ entry: { interactiveElement, frameElement, ...rest } }) => ({
     ...rest,
     ...interactiveElement ? { selector: cssPath(interactiveElement) } : frameElement ? { selector: frameSelector(frameElement), iframe: !0 } : {}
   })), needsSettle = Boolean(!settings.rootSelector && typeof MutationObserver < "u" && document.body && (Boolean(document.querySelector?.("[aria-busy='true'], .skeleton:not(.no-skeleton)")) || !selected.some((entry) => Boolean(entry.selector)) && typeof performance < "u" && performance.now() < 2500));

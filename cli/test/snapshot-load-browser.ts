@@ -98,7 +98,7 @@ try {
     return { out, rowOut, diff, hash: await page.evaluate(() => location.hash) };
   `)
   assert.equal(dataTableCheck.isError, false, dataTableCheck.text)
-  assert.match(dataTableCheck.value.out, /- navigation "Primary" \[10 links, collapsed\]/)
+  assert.match(dataTableCheck.value.out, /- navigation "Primary" \[10 controls\]/)
   assert.match(dataTableCheck.value.out, /- table "Table" \[5001 rows\]/)
   assert.match(dataTableCheck.value.out, /- link "link 0"/)
   assert.match(dataTableCheck.value.rowOut, /- row "Row: Row 2 \| Link: link 2 \| Action: Act 2"/)

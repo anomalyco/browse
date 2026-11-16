@@ -96,92 +96,6 @@ async fn snapshot_click_fill_and_refs() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn snapshot_navigation_controls_stay_visible() {
-    let h = harness!(false);
-    // A nav of role=button items is content, not a link list: collapsing it would hide every control.
-    let page = h.server.page(
-        "/nav-controls",
-        r#"<!doctype html><div id="a"><h2>A plain div</h2>
-  <div role="button" tabindex="0"><div><span>alice</span><span>hi</span></div></div></div>
-<section id="b"><h2>B section</h2>
-  <div role="button" tabindex="0">bob direct text</div></section>
-<nav aria-label="C nav"><h2>C nav</h2>
-  <div role="button" tabindex="0"><div><span>carol</span></div></div></nav>
-<nav aria-label="Sections"><a href="/a">Alpha</a><a href="/b">Beta</a><a href="/c">Gamma</a></nav>
-<aside aria-label="Aside links"><a href="/s1">S1</a><a href="/s2">S2</a><a href="/s3">S3</a><a href="/s4">S4</a>
-  <a href="/s5">S5</a><a href="/s6">S6</a><a href="/s7">S7</a><a href="/s8">S8</a></aside>
-<nav aria-label="Mobile"><a href="/m">Mobile</a><button style="display:none">Menu</button></nav>
-<nav aria-label="Action nav"><a href="/action" role="button">Action</a></nav>
-<aside style="height:0"><button style="position:absolute">First</button><button style="position:absolute">Second</button></aside>
-<input aria-placeholder="Message only">"#,
-    );
-    h.ok("navigate", json!({ "url": page })).await;
-    let snapshot = h.ok("snapshot", json!({})).await;
-    let carol = ref_of(&snapshot, "button \"carol\"");
-    assert!(carol.starts_with('e'), "carol keeps a compact ref ({carol}):\n{snapshot}");
-    // A pure link list still collapses at its expanded children's heading depth, under the C nav heading.
-    assert!(
-        snapshot.lines().any(|line| line == "  - navigation \"Sections\" [3 links, collapsed]"),
-        "{snapshot}"
-    );
-    assert!(!snapshot.contains("link \"Alpha\""), "{snapshot}");
-    // An aside with enough links still collapses; a hidden button does not keep a link nav open.
-    assert!(snapshot.contains("- navigation \"Aside links\" [8 links, collapsed]"), "{snapshot}");
-    assert!(snapshot.contains("- navigation \"Mobile\" [1 link, collapsed]"), "{snapshot}");
-    // A link whose computed role is button is a control, so its nav stays expanded with a ref.
-    let action = ref_of(&snapshot, "button \"Action\"");
-    assert!(action.starts_with('e'), "the action keeps a ref ({action}):\n{snapshot}");
-    // isVisible doesn't inherit: an invisible aside with visible positioned children still shows them.
-    let first = ref_of(&snapshot, "button \"First\"");
-    let second = ref_of(&snapshot, "button \"Second\"");
-    assert!(first.starts_with('e'), "First keeps a ref ({first}):\n{snapshot}");
-    assert!(second.starts_with('e'), "Second keeps a ref ({second}):\n{snapshot}");
-    // aria-placeholder names a control that has no label, title or placeholder of its own.
-    assert!(snapshot.contains("- textbox \"Message only\" [ref="), "{snapshot}");
-    let found = h.ok("snapshot", json!({ "find": "carol" })).await;
-    assert!(found.starts_with("1 matching snapshot line"), "{found}");
-    // find greps the rendered lines, so a collapsed link list has to be expanded for the match.
-    let found_link = h.ok("snapshot", json!({ "find": "Alpha" })).await;
-    assert!(found_link.contains("link \"Alpha\""), "{found_link}");
-    // A find snapshot must not replace the diff baseline: the page did not change since the first snapshot.
-    let diff = h.ok("snapshot", json!({ "diff": true })).await;
-    assert_eq!(
-        diff,
-        format!("0 additions, 0 removals, {} unchanged", snapshot.lines().count()),
-        "{diff}"
-    );
-
-    // interactive asks for controls, so the summary would hide exactly what was asked for.
-    let interactive = h.ok("snapshot", json!({ "interactive": true })).await;
-    assert!(!interactive.contains("navigation \"Sections\""), "{interactive}");
-    let alpha = ref_of(&interactive, "link \"Alpha\"");
-    assert!(alpha.starts_with('e'), "the link keeps a ref ({alpha}):\n{interactive}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn refs_carry_through_find_snapshots() {
-    let h = harness!(false);
-    let url = h.server.page("/refs-find", "<!doctype html><button>Start</button>");
-    h.ok("navigate", json!({ "url": url })).await;
-    h.ok("snapshot", json!({})).await;
-    h.ok(
-        "eval",
-        json!({ "expression": "(() => { const button = document.createElement('button'); button.textContent = 'Submit'; document.body.append(button) })()" }),
-    )
-    .await;
-
-    let first = h.ok("snapshot", json!({ "find": "Submit" })).await;
-    let first_ref = ref_of(&first, "button \"Submit\"");
-    // A find snapshot is now the latest snapshot, so the next find reuses the same ref.
-    let second = h.ok("snapshot", json!({ "find": "Submit" })).await;
-    let second_ref = ref_of(&second, "button \"Submit\"");
-    assert_eq!(first_ref, second_ref, "{first}\n---\n{second}");
-    let normal = h.ok("snapshot", json!({})).await;
-    assert_eq!(ref_of(&normal, "button \"Submit\""), first_ref, "{normal}");
-    h.ok("click", json!({ "ref": first_ref })).await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stealth_isolated_world_and_main_world() {
     let h = harness!(false);
     let url = h.server.page("/s", "<!doctype html><script>window.pageSecret = 42; window.baseline = new Set(Object.getOwnPropertyNames(window).concat(['baseline']))</script><button>Go</button>");
@@ -553,4 +467,244 @@ async fn page_tools_need_a_tab() {
     // Options for a new tab don't apply to an open one.
     let output = h.call("navigate", json!({ "url": "about:blank", "group": "x" })).await;
     assert!(output.is_error && support::text_of(&output).contains("only apply when navigate opens a tab"), "{}", support::text_of(&output));
+}
+
+// A chat app's thread list: the nav's rows are div[role=button], not links or buttons.
+const NAV_ROWS: &str = r#"<!doctype html><html><head><title>Threads</title></head><body><main>
+<nav aria-label="Thread list"><h2>Your messages</h2>
+<div role="button" tabindex="0"><div><span>alice</span></div></div>
+<div role="button" tabindex="0"><div><span>bob</span></div></div>
+</nav>
+<p>content</p><button>Send message</button>
+</main></body></html>"#;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn navigation_rows_which_are_not_links_or_buttons_stay_in_the_snapshot() {
+    let h = harness!(false);
+    let url = h.server.page("/nav-rows", NAV_ROWS);
+    h.json("navigate", json!({ "url": url })).await;
+
+    // Collapsing this nav to "[0 controls]" hid both rows and their clickable refs.
+    for options in [json!({}), json!({ "compact": false }), json!({ "interactive": true })] {
+        let snapshot = h.ok("snapshot", options.clone()).await;
+        assert!(!snapshot.contains("- navigation"), "{options}: {snapshot}");
+        assert!(!snapshot.contains("[0 controls]"), "{options}: {snapshot}");
+        let alice = ref_of(&snapshot, "button \"alice\"");
+        ref_of(&snapshot, "button \"bob\"");
+        if options["interactive"].is_null() {
+            assert!(snapshot.contains("- heading \"Your messages\" [level=2]"), "{snapshot}");
+        }
+        if options == json!({ "interactive": true }) {
+            assert!(snapshot.contains("- button \"Send message\""), "{snapshot}");
+        }
+        // A ref on a row is a working ref, not decoration.
+        if options == json!({}) {
+            let clicked = h.json("click", json!({ "ref": alice })).await;
+            assert!(clicked["clicked"].as_str().unwrap().contains("alice"), "{clicked}");
+        }
+    }
+
+    // find greps the snapshot, so a hidden row could not be found either.
+    let found = h.ok("snapshot", json!({ "find": "alice" })).await;
+    assert!(found.starts_with("1 matching snapshot line"), "{found}");
+    assert!(found.contains("- button \"alice\""), "{found}");
+}
+
+// An ordinary menu: links and buttons, with one hidden link that must not be counted.
+const NAV_MENU: &str = r#"<!doctype html><html><head><title>Menu</title></head><body><main>
+<nav aria-label="Primary"><a href="/one">one</a><a href="/two">two</a><a href="/three">three</a><a href="/hidden" style="display:none">hidden</a></nav>
+<nav aria-label="Search"><a href="/s">Settings</a><input placeholder="Filter"></nav>
+<h1>Page</h1>
+</main></body></html>"#;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn navigation_menus_still_collapse_with_a_visible_control_count() {
+    let h = harness!(false);
+    let url = h.server.page("/nav-menu", NAV_MENU);
+    h.json("navigate", json!({ "url": url })).await;
+
+    let snapshot = h.ok("snapshot", json!({})).await;
+    assert!(snapshot.contains("- navigation \"Primary\" [3 controls]"), "{snapshot}");
+    assert!(!snapshot.contains("link \"one\""), "{snapshot}");
+    assert!(!snapshot.contains("hidden"), "{snapshot}");
+    // A menu that also holds a text field is not hidden behind a count: the field and the link stay visible.
+    assert!(!snapshot.contains("- navigation \"Search\""), "{snapshot}");
+    ref_of(&snapshot, "textbox \"Filter\"");
+    ref_of(&snapshot, "link \"Settings\"");
+
+    // find greps the rendered lines, so a collapsed menu is expanded to match a link in it.
+    let found = h.ok("snapshot", json!({ "find": "Settings" })).await;
+    assert!(found.starts_with("1 matching snapshot line"), "{found}");
+    assert!(found.contains("- link \"Settings\""), "{found}");
+    let found = h.ok("snapshot", json!({ "find": "three" })).await;
+    assert!(found.starts_with("1 matching snapshot line"), "{found}");
+    assert!(found.contains("- link \"three\""), "{found}");
+
+    // A find capture is expanded and untrimmed, so it must not become the diff baseline.
+    let diff = h.ok("snapshot", json!({ "diff": true })).await;
+    assert!(diff.ends_with("0 additions, 0 removals, 4 unchanged"), "{diff}");
+    let _ = h.ok("snapshot", json!({ "find": "three" })).await;
+    let delta = h.ok("snapshot", json!({ "delta": true })).await;
+    assert!(delta.ends_with("0 additions, 0 removals, 4 unchanged"), "{delta}");
+
+    // find is ignored under diff and delta, so navigation must not expand there either.
+    let find_diff = h.ok("snapshot", json!({ "find": "three", "diff": true })).await;
+    assert!(find_diff.ends_with("0 additions, 0 removals, 4 unchanged"), "{find_diff}");
+    let find_delta = h.ok("snapshot", json!({ "find": "three", "delta": true })).await;
+    assert!(find_delta.ends_with("0 additions, 0 removals, 4 unchanged"), "{find_delta}");
+
+    // interactive lists the controls themselves instead of summarizing them.
+    let interactive = h.ok("snapshot", json!({ "interactive": true })).await;
+    assert!(!interactive.contains("- navigation"), "{interactive}");
+    for control in ["one", "two", "three", "Settings", "Filter"] {
+        assert!(interactive.contains(&format!("\"{control}\"")), "{control}: {interactive}");
+    }
+}
+
+// A sidebar that is link-heavy still collapses, unless one of its controls is not a link or button.
+const ASIDE_SIDEBAR: &str = r#"<!doctype html><html><head><title>Aside</title></head><body><main>
+<aside aria-label="Sidebar">
+<a href="/a">a</a><a href="/b">b</a><a href="/c">c</a><a href="/d">d</a>
+<a href="/e">e</a><a href="/f">f</a><a href="/g">g</a><a href="/h">h</a>
+<div role="button" tabindex="0">Compose</div>
+</aside>
+<h1>Page</h1>
+</main></body></html>"#;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn link_heavy_aside_with_an_app_row_stays_expanded() {
+    let h = harness!(false);
+    let url = h.server.page("/aside", ASIDE_SIDEBAR);
+    h.json("navigate", json!({ "url": url })).await;
+    let snapshot = h.ok("snapshot", json!({})).await;
+    assert!(!snapshot.contains("- navigation \"Sidebar\""), "{snapshot}");
+    ref_of(&snapshot, "button \"Compose\"");
+    ref_of(&snapshot, "link \"a\"");
+}
+
+// The no-main repro: nothing here may be lost, with or without compact.
+const NO_MAIN: &str = r#"<!doctype html><html><head><title>No main</title></head><body><div><h2>A</h2><div role="button" tabindex="0"><span>alice</span></div></div><section><h2>B</h2><div role="button" tabindex="0">bob</div></section><nav aria-label="C nav"><h2>C nav</h2><div role="button" tabindex="0"><div><span>carol</span></div></div></nav></body></html>"#;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn page_without_main_keeps_every_row() {
+    let h = harness!(false);
+    let url = h.server.page("/no-main", NO_MAIN);
+    h.json("navigate", json!({ "url": url })).await;
+    for options in [json!({}), json!({ "compact": false }), json!({ "interactive": true })] {
+        let snapshot = h.ok("snapshot", options.clone()).await;
+        ref_of(&snapshot, "button \"alice\"");
+        ref_of(&snapshot, "button \"bob\"");
+        ref_of(&snapshot, "button \"carol\"");
+        assert!(!snapshot.contains("[0 controls]"), "{options}: {snapshot}");
+    }
+}
+
+// A sidebar of <details> groups: summaries are disclosure controls, so the nav is still a menu.
+const DETAILS_SIDEBAR: &str = r#"<!doctype html><html><head><title>Docs</title></head><body><main>
+<nav aria-label="Docs">
+<details open><summary>Getting started</summary><a href="/install">Install</a><a href="/run">Run</a></details>
+<details open><summary>Guides</summary><a href="/deploy">Deploy</a></details>
+<div role="button" aria-expanded="false" tabindex="0">More</div>
+<div role="menuitem" tabindex="0">Item</div>
+</nav>
+<h1>Page</h1>
+</main></body></html>"#;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn details_summary_sidebar_still_collapses() {
+    let h = harness!(false);
+    let url = h.server.page("/details", DETAILS_SIDEBAR);
+    h.json("navigate", json!({ "url": url })).await;
+    let snapshot = h.ok("snapshot", json!({})).await;
+    assert!(snapshot.contains("- navigation \"Docs\" [7 controls]"), "{snapshot}");
+    assert!(!snapshot.contains("Install"), "{snapshot}");
+}
+
+// 120 menu buttons and 60 body links: expanding the menu for find used to spend maxItems before the body links.
+fn big_menu_html() -> String {
+    let buttons: String = (0..120).map(|i| format!("<button>Menu {i}</button>")).collect();
+    let links: String = (0..60).map(|i| format!("<a href=\"/body-{i}\">Body link {i}</a>")).collect();
+    format!("<!doctype html><html><head><title>Big menu</title></head><body><main><nav aria-label=\"Menu\">{buttons}</nav><h1>Page</h1>{links}</main></body></html>")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn find_still_matches_content_after_a_big_collapsed_menu() {
+    let h = harness!(false);
+    let url = h.server.page("/big-menu", &big_menu_html());
+    h.json("navigate", json!({ "url": url })).await;
+
+    let default = h.ok("snapshot", json!({})).await;
+    assert!(default.contains("- navigation \"Menu\" [120 controls]"), "{default}");
+    assert!(default.contains("- link \"Body link 50\""), "{default}");
+    let found = h.ok("snapshot", json!({ "find": "Body link 50" })).await;
+    assert!(found.starts_with("1 matching snapshot line"), "{found}");
+    assert!(found.contains("- link \"Body link 50\""), "{found}");
+    // The find capture is expanded and untrimmed, so it must not become the diff baseline.
+    let diff = h.ok("snapshot", json!({ "diff": true })).await;
+    assert!(diff.ends_with("0 additions, 0 removals, 62 unchanged"), "{diff}");
+    let _ = h.ok("snapshot", json!({ "find": "Body link 50" })).await;
+    let delta = h.ok("snapshot", json!({ "delta": true })).await;
+    assert!(delta.ends_with("0 additions, 0 removals, 62 unchanged"), "{delta}");
+}
+
+// A ref from a find capture must survive as the same ref in the next snapshot, and click then.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn find_refs_are_reused_by_the_next_snapshot() {
+    let h = harness!(false);
+    let url = h.server.page("/big-menu-refs", &big_menu_html());
+    h.json("navigate", json!({ "url": url })).await;
+    let found = h.ok("snapshot", json!({ "find": "Body link 50" })).await;
+    let found_ref = ref_of(&found, "link \"Body link 50\"");
+    let next = h.ok("snapshot", json!({})).await;
+    assert_eq!(ref_of(&next, "link \"Body link 50\""), found_ref, "{next}");
+    h.ok("click", json!({ "ref": found_ref })).await;
+}
+
+// A ref find showed from a collapsed menu is reused when the next snapshot lists that item too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn find_menu_item_refs_are_reused_by_an_interactive_snapshot() {
+    let h = harness!(false);
+    let url = h.server.page("/menu-refs", NAV_MENU);
+    h.json("navigate", json!({ "url": url })).await;
+    let found = h.ok("snapshot", json!({ "find": "three" })).await;
+    let found_ref = ref_of(&found, "link \"three\"");
+    let interactive = h.ok("snapshot", json!({ "interactive": true })).await;
+    assert_eq!(ref_of(&interactive, "link \"three\""), found_ref, "{interactive}");
+    h.ok("click", json!({ "ref": found_ref })).await;
+}
+
+// There is no normal snapshot to diff against, so find must not silently become the baseline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn diff_after_find_on_a_fresh_tab_needs_an_earlier_snapshot() {
+    let h = harness!(false);
+    let url = h.server.page("/big-menu-fresh", &big_menu_html());
+    h.json("navigate", json!({ "url": url })).await;
+    h.ok("snapshot", json!({ "find": "Body link 50" })).await;
+    let error = h.err("snapshot", json!({ "diff": true })).await;
+    assert!(error.contains("needs an earlier snapshot"), "{error}");
+}
+
+const TEXT_CONTROLS: &str = r#"<!doctype html><html><head><title>Boxes</title></head><body><main>
+<input placeholder="Search messages">
+<textarea placeholder="Write a message"></textarea>
+<input aria-placeholder="Aria placeholder only">
+<input placeholder="" aria-placeholder="Empty placeholder fallback">
+<div role="textbox" contenteditable="true" aria-placeholder="Editable message"></div>
+<div role="textbox" contenteditable="true" placeholder="Div placeholder"></div>
+<input placeholder="Composer" aria-label="Message">
+</main></body></html>"#;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn text_controls_fall_back_to_their_placeholder_for_a_name() {
+    let h = harness!(false);
+    let url = h.server.page("/text-controls", TEXT_CONTROLS);
+    h.json("navigate", json!({ "url": url })).await;
+    let snapshot = h.ok("snapshot", json!({})).await;
+    for name in ["Search messages", "Write a message", "Aria placeholder only", "Empty placeholder fallback", "Editable message", "Div placeholder"] {
+        assert!(snapshot.contains(&format!("\"{name}\"")), "{name}: {snapshot}");
+    }
+    assert!(!snapshot.contains("\"textbox\""), "{snapshot}");
+    // aria-label is a real name and still wins over a placeholder.
+    assert!(snapshot.contains("textbox \"Message\""), "{snapshot}");
+    assert!(!snapshot.contains("\"Composer\""), "{snapshot}");
 }

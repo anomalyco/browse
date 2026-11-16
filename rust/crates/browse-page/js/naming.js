@@ -138,13 +138,15 @@
     const title = titleName(element);
     if (title)
       return title;
-    const placeholder = element.getAttribute("placeholder");
+    const placeholder = normalize(element.getAttribute("placeholder") || element.getAttribute("aria-placeholder") || "");
     if (placeholder)
-      return normalize(placeholder);
-    const ariaPlaceholder = element.getAttribute("aria-placeholder");
-    if (ariaPlaceholder)
-      return normalize(ariaPlaceholder);
+      return placeholder;
     return "";
+  }, placeholderName = (element) => {
+    const role = element.getAttribute("role");
+    if (!element.hasAttribute("contenteditable") && role !== "textbox" && role !== "searchbox")
+      return "";
+    return normalize(element.getAttribute("placeholder") || element.getAttribute("aria-placeholder") || "");
   }, accessibleNameCache = new WeakMap, accessibleName = (element) => {
     const cached = accessibleNameCache.get(element);
     if (cached !== void 0)
@@ -156,7 +158,7 @@
     else if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement)
       result = authorAccessibleName(element);
     else {
-      const raw = element.getAttribute("alt") || safeText(element) || titleName(element) || element.querySelector?.("[aria-label]")?.getAttribute("aria-label") || element.querySelector?.("svg title")?.textContent || "";
+      const raw = element.getAttribute("alt") || safeText(element) || titleName(element) || placeholderName(element) || element.querySelector?.("[aria-label]")?.getAttribute("aria-label") || element.querySelector?.("svg title")?.textContent || "";
       result = normalize(raw);
     }
     accessibleNameCache.set(element, result);
