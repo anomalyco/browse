@@ -59,7 +59,8 @@ pub fn ensure() -> anyhow::Result<Value> {
     }
 }
 
-/// Stops a running relay and waits until it's gone. Agent tabs stay open and the next relay takes them back.
+/// Stops a running relay and waits until it's done: the tab registry and shutdown log are written before relay.json
+/// goes. Agent tabs stay open and the next relay takes them back.
 pub fn stop() -> anyhow::Result<bool> {
     let version = match probe() {
         Probe::Running(version) => version,
@@ -70,17 +71,30 @@ pub fn stop() -> anyhow::Result<bool> {
         return Ok(true);
     }
     let instance = version.get("instanceId").and_then(Value::as_str).unwrap_or_default().to_owned();
+    let pid = version.get("pid").and_then(Value::as_u64).and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 0 && *pid != std::process::id());
+    let paths = relay_api::paths();
+    let configured = browse_relay::port::configured_port();
+    // The relay removes relay.json after its final tab write and shutdown log (serve.rs). While it still names this
+    // instance, the files it writes as it exits may still come, so uninstall can't delete browse's folders yet.
+    let recorded = browse_relay::port::read_relay_state(&paths, configured).is_some_and(|state| state.instance_id == instance);
     match send("POST", "/shutdown", &[], Some(b"{}"), Some(Duration::from_secs(10))) {
         Ok(response) if (200..300).contains(&response.status) => {}
-        Err(http::Error::Unreachable(_)) => return Ok(true),
+        // It stopped before answering: wait for it to finish with its files below.
+        Err(http::Error::Unreachable(_)) => {}
         Ok(response) => bail!("the browse relay didn't stop: {}", String::from_utf8_lossy(&response.body).trim()),
         Err(error) => bail!("the browse relay didn't stop: {error}"),
     }
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        match probe() {
-            Probe::Running(v) if v.get("instanceId").and_then(Value::as_str) == Some(instance.as_str()) => {}
-            _ => return Ok(true),
+        let answering = matches!(probe(), Probe::Running(v) if v.get("instanceId").and_then(Value::as_str) == Some(instance.as_str()));
+        // relay.json is the relay's last write (serve.rs), so while it still names this instance the relay may still be
+        // writing the tab registry and shutdown log. Without one, only its process going tells us it's done. A pid
+        // reused by another process can hold the wait up, but only until the deadline below.
+        let writing = recorded && browse_relay::port::read_relay_state(&paths, configured).is_some_and(|state| state.instance_id == instance);
+        let alive = pid.is_some_and(browse_relay::process_alive);
+        let waiting = if recorded { writing && (pid.is_none() || alive) } else { alive };
+        if !answering && !waiting {
+            return Ok(true);
         }
         if Instant::now() > deadline {
             bail!("the browse relay accepted the shutdown but is still running");

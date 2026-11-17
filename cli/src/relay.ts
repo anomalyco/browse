@@ -891,14 +891,17 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     for (const socket of cdpClients) socket.close()
     for (const link of browsers.list()) link.rpc.close()
     yield* closeWebSocketServer(websocketServer).pipe(logCloseError("Failed to close websocket server"))
-    // Removed only once this relay stops answering: until closeHttpServer completes, relay.json must keep clients on this
-    // instance instead of sending them to whatever holds the configured port (relay/port.ts). ensuring covers a close
-    // that fails, where the listener may still be gone.
+    // Removed only once this relay stops answering (until closeHttpServer completes, relay.json must keep clients on
+    // this instance instead of sending them to whatever holds the configured port, relay/port.ts) and after its last
+    // line, so uninstall and a restart that wait for the file know it is done with browse's files. ensuring covers a
+    // close that fails, where the listener may still be gone.
     yield* closeHttpServer(httpServer).pipe(
       logCloseError("Failed to close http server"),
-      Effect.ensuring(Effect.sync(() => removeRelayState(browserId, stateRoot(), configuredPort))),
+      Effect.ensuring(Effect.sync(() => {
+        relayLog("relay.shutdown.closed", { managed, pid: process.pid })
+        removeRelayState(browserId, stateRoot(), configuredPort)
+      })),
     )
-    relayLog("relay.shutdown.closed", { managed, pid: process.pid })
   })
 
   const close = cleanup()

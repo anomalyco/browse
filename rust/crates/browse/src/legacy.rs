@@ -62,6 +62,20 @@ pub fn stop(version: &Value, force: bool) -> anyhow::Result<()> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+    // The relay removes relay.json after its last write (cli/src/relay.ts cleanup): waiting for it to go means an
+    // uninstall that follows doesn't delete browse's folders under a relay that is still writing them.
+    let pid = version.get("pid").and_then(Value::as_u64).and_then(|pid| u32::try_from(pid).ok());
+    let paths = relay_api::paths();
+    let configured = browse_relay::port::configured_port();
+    while browse_relay::port::read_relay_state(&paths, configured).is_some_and(|state| state.instance_id == instance) {
+        if pid.is_some_and(|pid| !browse_relay::process_alive(pid)) {
+            break;
+        }
+        if Instant::now() > deadline {
+            bail!("the older browse relay ({running}) accepted the shutdown but is still running");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
     Ok(())
 }
 

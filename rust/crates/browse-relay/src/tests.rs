@@ -686,6 +686,33 @@ async fn version_reports_a_managed_relay() {
     let _ = std::fs::remove_dir_all(&paths.data);
 }
 
+/// The shutdown's final registry write closes the file for good: a persist still queued behind it (a blocking task
+/// outliving the aborted persister) must not recreate the registry after relay.json goes.
+#[test]
+fn a_persist_queued_after_the_final_one_does_nothing() {
+    let paths = Paths::rooted(std::env::temp_dir().join(format!("browse-relay-final-persist-{}", crate::util::random_hex(6))));
+    let relay = crate::relay::Relay::new(crate::relay::RelayConfig {
+        paths: paths.clone(),
+        configured_port: 0,
+        port: 0,
+        host: "127.0.0.1".into(),
+        version: "0".into(),
+        build_id: String::new(),
+        auto_update: None,
+        idle_shutdown: None,
+        managed: false,
+    })
+    .unwrap();
+    relay.persist_now();
+    assert!(paths.tab_registry(0).is_file(), "a normal persist writes");
+    relay.persist_final();
+    std::fs::remove_file(paths.tab_registry(0)).unwrap();
+    relay.persist_now();
+    relay.persist_final();
+    assert!(!paths.tab_registry(0).exists(), "a persist queued after the final one must not recreate the registry");
+    let _ = std::fs::remove_dir_all(&paths.data);
+}
+
 #[tokio::test]
 async fn another_extensions_popup_blocks_the_tab_without_dropping_it() {
     let (h, _seen, events) = connected("profile-protected", 50).await;

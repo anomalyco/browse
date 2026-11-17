@@ -59,12 +59,18 @@ pub fn run() -> anyhow::Result<i32> {
         let stop = signalled();
         tokio::pin!(stop);
         loop {
-            tokio::select! {
-                _ = &mut stop => break,
-                _ = tick.tick() => {}
-            }
+            // POST /shutdown (a client's stop, an update) ends the relay task; exit with it instead of waiting for the
+            // next tick, so the process is gone as soon as `browse uninstall` or `browse restart` sees it closed.
+            let stopped = handle.relay.stopped.notified();
+            tokio::pin!(stopped);
+            stopped.as_mut().enable();
             if handle.relay.is_stopping() {
                 break;
+            }
+            tokio::select! {
+                _ = &mut stop => break,
+                _ = &mut stopped => break,
+                _ = tick.tick() => {}
             }
             let Some(updater) = &mut updater else { continue };
             let pending = update::pending_notice();
