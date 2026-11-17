@@ -678,9 +678,9 @@ async fn tells_a_typescript_client_to_restart() {
     }
 }
 
-/// A GET can announce a body, though HTTP gives it no meaning. The relay reads it before it answers: a connection
-/// closed with body bytes still unread resets, as macOS's kernel does, and the client would see the reset instead of
-/// the relay's answer.
+/// A GET can announce a body, though HTTP gives it no meaning. The relay reads it before it answers: closing with
+/// body bytes still unread makes the kernel send a reset instead of a clean close, and a macOS client then loses the
+/// answer it hasn't read yet.
 #[tokio::test]
 async fn reads_a_body_announced_on_a_get() {
     let h = harness().await;
