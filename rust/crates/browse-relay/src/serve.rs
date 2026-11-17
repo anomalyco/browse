@@ -362,14 +362,14 @@ async fn route(relay: Arc<Relay>, peer: SocketAddr, request: Request<Incoming>) 
     let call_key = header(&request, &browse_core::CALL_HEADER.to_ascii_lowercase()).filter(|k| !k.is_empty() && k.len() <= 128).map(str::to_string);
     // The TypeScript client's HTTP client (Effect's) sends trace headers on every request; this build's never does.
     let typescript_client = header(&request, "b3").is_some();
-    let body = if method == hyper::Method::POST {
-        match Limited::new(request.into_body(), MAX_BODY).collect().await {
-            Ok(collected) => collected.to_bytes(),
-            Err(_) => return json_response(StatusCode::PAYLOAD_TOO_LARGE, &json!({ "error": format!("Request body exceeds {MAX_BODY} bytes"), "code": "invalid-request" })),
-        }
-    } else {
-        Bytes::new()
+    // Read the body whatever the method: closing a connection with body bytes still unread makes our kernel send a
+    // reset instead of a clean close, and a macOS client then loses the answer it hasn't read yet. Only POST's body is
+    // used; every other method's is drained and dropped, under the same size limit.
+    let sent = match Limited::new(request.into_body(), MAX_BODY).collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => return json_response(StatusCode::PAYLOAD_TOO_LARGE, &json!({ "error": format!("Request body exceeds {MAX_BODY} bytes"), "code": "invalid-request" })),
     };
+    let body = if method == hyper::Method::POST { sent } else { Bytes::new() };
     let parsed = || -> Result<Value, Box<Response<Full<Bytes>>>> {
         if body.is_empty() {
             return Ok(json!({}));

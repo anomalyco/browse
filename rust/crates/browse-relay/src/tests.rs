@@ -9,6 +9,7 @@ use browse_core::{Browser, CdpError, TabOptions};
 use futures_util::{SinkExt, StreamExt};
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
@@ -648,7 +649,9 @@ async fn tells_a_typescript_client_to_restart() {
     let token = h.handle.token().to_string();
     for (method, path) in [("GET", "/cli/sessions"), ("POST", "/v1/sessions/ensure"), ("POST", "/cli/execute"), ("GET", "/json/version"), ("GET", "/json/list"), ("POST", "/network/start"), ("GET", "/recording/status"), ("POST", "/tabs/cleanup"), ("GET", "/settings")] {
         assert_eq!(http(port, method, path, None, None).await.0, 401, "{path} still needs the token");
-        let (status, body) = http(port, method, path, Some(&token), Some(json!({}))).await;
+        // Only the POSTs carry a body, as their client did: a GET body has no meaning here.
+        let sent = (method == "POST").then(|| json!({}));
+        let (status, body) = http(port, method, path, Some(&token), sent).await;
         assert_eq!(status, 410, "{path}");
         assert_eq!(body, json!({ "error": crate::serve::LEGACY_CLIENT }), "{path}: an envelope the old client shows as is");
     }
@@ -673,6 +676,28 @@ async fn tells_a_typescript_client_to_restart() {
         Err(tokio_tungstenite::tungstenite::Error::Http(response)) => assert_eq!(response.status(), 401),
         other => panic!("expected 401, got {:?}", other.map(|(_, response)| response.status())),
     }
+}
+
+/// A GET can announce a body, though HTTP gives it no meaning. The relay reads it before it answers: closing with
+/// body bytes still unread makes the kernel send a reset instead of a clean close, and a macOS client then loses the
+/// answer it hasn't read yet.
+#[tokio::test]
+async fn reads_a_body_announced_on_a_get() {
+    let h = harness().await;
+    let port = h.handle.port();
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let head = format!(
+        "GET /cli/sessions HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n",
+        h.handle.token()
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    let mut first = [0u8; 64];
+    assert!(tokio::time::timeout(Duration::from_millis(250), stream.read(&mut first)).await.is_err(), "the relay answered before the body it was promised");
+    stream.write_all(b"{}").await.unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.unwrap();
+    let raw = String::from_utf8_lossy(&raw);
+    assert!(raw.starts_with("HTTP/1.1 410"), "{raw}");
 }
 
 #[tokio::test]
