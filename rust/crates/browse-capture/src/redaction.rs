@@ -62,6 +62,9 @@ pub fn is_secret_name(name: &str) -> bool {
 #[derive(Default)]
 pub struct SecretRedactor {
     known: HashSet<String>,
+    // Values from secret-named URL query and fragment fields: credentials by name, so body strings replace them at the
+    // same floor URLs and headers use.
+    named_fields: HashSet<String>,
     // Passwords and one-time codes are replaced at any length, unlike short reusable captures.
     always: HashSet<String>,
 }
@@ -132,7 +135,7 @@ impl SecretRedactor {
             return Some(restore(&serde_json::to_string(&protected).ok()?));
         }
         if kind.contains("application/x-www-form-urlencoded") {
-            return Some(restore(&self.protect_query(body)));
+            return Some(restore(&self.protect_pairs(body, false)));
         }
         if kind.contains("multipart/form-data") {
             return self.protect_multipart(body, content_type.unwrap_or("")).map(|text| restore(&text));
@@ -148,9 +151,23 @@ impl SecretRedactor {
     }
 
     pub fn redact_known_substrings(&self, text: &str, minimum: usize) -> String {
+        self.redact_known(text, |value| value.chars().count() >= minimum || self.always.contains(value))
+    }
+
+    /// The body-string pass. Values from a secret-named URL query or fragment field are credentials by name, so they
+    /// are replaced at the ordinary floor even where body strings use a higher one.
+    pub fn redact_known_body_substrings(&self, text: &str, minimum: usize) -> String {
+        self.redact_known(text, |value| {
+            value.chars().count() >= minimum
+                || value.chars().count() >= MINIMUM_KNOWN_SUBSTRING_LENGTH && self.named_fields.contains(value)
+                || self.always.contains(value)
+        })
+    }
+
+    fn redact_known(&self, text: &str, include: impl Fn(&str) -> bool) -> String {
         let mut entries: Vec<String> = Vec::new();
         for value in &self.known {
-            if value.chars().count() < minimum && !self.always.contains(value) {
+            if !include(value) {
                 continue;
             }
             entries.push(value.clone());
@@ -198,6 +215,14 @@ impl SecretRedactor {
         SENTINEL.to_string()
     }
 
+    /// A secret-named URL query or fragment field value, remembered for the body-string pass too.
+    fn scrub_url_field(&mut self, value: &str, field: &str) -> String {
+        if !value.is_empty() {
+            self.named_fields.insert(value.to_string());
+        }
+        self.scrub(value, field)
+    }
+
     fn protect_path(&mut self, path: &str) -> String {
         path.split('/')
             .map(|segment| {
@@ -209,10 +234,22 @@ impl SecretRedactor {
     }
 
     fn protect_query(&mut self, query: &str) -> String {
-        let pairs = parse_form(query)
+        self.protect_pairs(query, true)
+    }
+
+    /// `from_url` marks values from a URL query or fragment, whose names make them credentials for the body-string
+    /// pass; a form body's values are remembered like any other captured value.
+    fn protect_pairs(&mut self, text: &str, from_url: bool) -> String {
+        let pairs = parse_form(text)
             .into_iter()
             .map(|(name, value)| {
-                let value = if !value.is_empty() && is_secret_name(&name) { self.scrub(&value, &name) } else { value };
+                let value = if value.is_empty() || !is_secret_name(&name) {
+                    value
+                } else if from_url {
+                    self.scrub_url_field(&value, &name)
+                } else {
+                    self.scrub(&value, &name)
+                };
                 (name, value)
             })
             .collect::<Vec<_>>();
@@ -229,7 +266,7 @@ impl SecretRedactor {
                 if !plain || !is_secret_name(&name) || value.is_empty() {
                     return part.to_string();
                 }
-                format!("{}{}", &part[..separator + 1], self.scrub(&value, &name))
+                format!("{}{}", &part[..separator + 1], self.scrub_url_field(&value, &name))
             })
             .collect::<Vec<_>>()
             .join("&")

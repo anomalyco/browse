@@ -8,8 +8,9 @@ use crate::redaction::{Header, MINIMUM_KNOWN_SUBSTRING_LENGTH, SecretRedactor};
 pub const MAX_BODY_BYTES: usize = 1_000_000;
 pub const MAX_TOTAL_BODY_BYTES: usize = 25_000_000;
 pub const MAX_ENTRIES: usize = 1_000;
-// Inside JSON string values only longer known values are replaced: ordinary text rarely contains 16 characters of a
-// credential.
+// Inside JSON string values only longer known values are replaced, since ordinary text rarely contains 16 characters
+// of a credential. Values from a secret-named URL query or fragment field are credentials by name and are replaced from
+// 8.
 const MINIMUM_KNOWN_BODY_SUBSTRING_LENGTH: usize = 16;
 
 #[derive(Debug, Clone, Serialize)]
@@ -246,7 +247,7 @@ fn redact_known_scalars(value: Value, redactor: &SecretRedactor) -> Value {
         Value::Object(map) => {
             Value::Object(map.into_iter().map(|(key, item)| (key, redact_known_scalars(item, redactor))).collect())
         }
-        Value::String(text) => Value::String(redactor.redact_known_substrings(&text, MINIMUM_KNOWN_BODY_SUBSTRING_LENGTH)),
+        Value::String(text) => Value::String(redactor.redact_known_body_substrings(&text, MINIMUM_KNOWN_BODY_SUBSTRING_LENGTH)),
         other => redactor.redact_scalar(&other),
     }
 }
@@ -322,6 +323,49 @@ mod tests {
         assert_eq!(first["response"]["body"]["text"], r#"{"access_token":"[redacted]","echo":"your token is [redacted]","id":7}"#);
         assert_eq!(first["response"]["headers"][0]["value"], "sid=[redacted]; Path=/; HttpOnly");
         assert_eq!(value[1]["request"]["url"], "https://api.test/next?cursor=[redacted]");
+    }
+
+    #[test]
+    fn short_secrets_from_url_fields_are_redacted_in_body_strings() {
+        let entries = vec![entry(
+            "https://api.test/echo?api_key=k1234567890#signature=f1234567890",
+            vec![],
+            None,
+            Some(r#"{"url":"https://x/y?api_key=k1234567890","note":"signed f1234567890"}"#),
+        )];
+        let (redacted, _) = finish(&entries);
+        let value = serde_json::to_value(&redacted[0]).unwrap();
+        assert_eq!(value["request"]["url"], "https://api.test/echo?api_key=[redacted]#signature=[redacted]");
+        assert_eq!(value["response"]["body"]["text"], r#"{"url":"https://x/y?api_key=[redacted]","note":"signed [redacted]"}"#);
+    }
+
+    #[test]
+    fn short_values_from_other_sources_stay_in_body_strings() {
+        let entries = vec![entry(
+            "https://api.test/x",
+            vec![Header { name: "Cookie".into(), value: "sid=abcdef1234".into() }],
+            None,
+            Some(r#"{"note":"sid=abcdef1234"}"#),
+        )];
+        let (redacted, _) = finish(&entries);
+        let value = serde_json::to_value(&redacted[0]).unwrap();
+        assert_eq!(value["request"]["headers"][0]["value"], "sid=[redacted]");
+        assert_eq!(value["response"]["body"]["text"], r#"{"note":"sid=abcdef1234"}"#);
+    }
+
+    #[test]
+    fn short_secret_named_form_values_stay_in_body_strings() {
+        let mut exchange = entry(
+            "https://api.test/x",
+            vec![],
+            Some("api_key=k1234567890"),
+            Some(r#"{"url":"https://x/y?api_key=k1234567890"}"#),
+        );
+        exchange.request.body.as_mut().unwrap().mime_type = "application/x-www-form-urlencoded".into();
+        let (redacted, _) = finish(&[exchange]);
+        let value = serde_json::to_value(&redacted[0]).unwrap();
+        assert_eq!(value["request"]["body"]["text"], "api_key=[redacted]");
+        assert_eq!(value["response"]["body"]["text"], r#"{"url":"https://x/y?api_key=k1234567890"}"#);
     }
 
     #[test]

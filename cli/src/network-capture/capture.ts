@@ -111,8 +111,9 @@ function protectCapturedBody(
     : { ...body, text }
 }
 
-// Inside JSON string values (a "next" link carrying an access token, an echoed path token) only longer known values
-// are replaced: ordinary text rarely contains 16 characters of a credential.
+// Inside JSON string values only longer known values are replaced, since ordinary text rarely contains 16 characters
+// of a credential. Values from a secret-named URL query or fragment field are credentials by name and are replaced
+// from 8.
 const minimumKnownBodySubstringLength = 16
 
 function redactEntryKnownValues(entry: CapturedEntry, redactor: SecretRedactor): CapturedEntry {
@@ -151,7 +152,7 @@ function redactKnownScalars(value: unknown, redactor: SecretRedactor): unknown {
   if (Predicate.isObject(value)) {
     return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactKnownScalars(item, redactor)]))
   }
-  if (Predicate.isString(value)) return redactor.redactKnownSubstrings(value, minimumKnownBodySubstringLength)
+  if (Predicate.isString(value)) return redactor.redactKnownBodySubstrings(value, minimumKnownBodySubstringLength)
   return redactor.redactValue(value)
 }
 
