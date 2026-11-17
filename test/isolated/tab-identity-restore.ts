@@ -194,3 +194,65 @@ test("a timed-out session check writes nothing and retries", async () => {
   }
   expect(await restarted.browseId(tab.id!)).toBe(browseId!)
 }, 15_000)
+
+test("a startup during a check installs the wipe and the next write isn't checked again", async () => {
+  const old = await stub.chrome.tabs.create({ windowId: user.id, url: "https://old-start.example/", active: false })
+  await TabIdentity.ensure(old.id!, { agent: true, chosen: "old-start" })
+  const session = await stub.chrome.storage.session.get(null)
+  await stub.chrome.storage.session.remove(Object.keys(session))
+  const specifier = "../../src/background/tab-identity?startup-race"
+  const restarted = (await import(specifier)) as typeof TabIdentity
+
+  // Hold the tab query so the session check is in flight when the browser starts.
+  const realQuery = stub.chrome.tabs.query
+  const realSessionGet = stub.chrome.storage.session.get
+  let release!: () => void
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let block = true
+  stub.chrome.tabs.query = async (query) => {
+    if (block) {
+      block = false
+      await held
+    }
+    return realQuery(query)
+  }
+  try {
+    const reading = restarted.browseId(old.id!)
+    await settle()
+    expect(block).toBe(false)
+    ;(stub.chrome.runtime as unknown as { onStartup: StubEvent }).onStartup.emit()
+    await settle()
+    release()
+    expect(await reading).toBe(restarted.UNKNOWN)
+    await settle()
+    await settle()
+
+    // The wipe is still what prepare() returns: a write after it must not run the session check again.
+    let checks = 0
+    let queries = 0
+    stub.chrome.storage.session.get = async (keys) => {
+      checks++
+      return realSessionGet(keys)
+    }
+    stub.chrome.tabs.query = async (query) => {
+      queries++
+      return realQuery(query)
+    }
+    const fresh = await stub.chrome.tabs.create({ windowId: user.id, url: "https://fresh-start.example/", active: false })
+    const browseId = await restarted.ensure(fresh.id!, { agent: true, chosen: "after-start" })
+    expect(typeof browseId).toBe("string")
+    expect(checks).toBe(0)
+    expect(queries).toBe(0)
+
+    // A fresh worker in this session trusts the marker, so the ungrouped tab written after the wipe keeps its id.
+    const afterSpecifier = "../../src/background/tab-identity?after-start"
+    const after = (await import(afterSpecifier)) as typeof TabIdentity
+    expect(await after.browseId(fresh.id!)).toBe(browseId as string)
+    expect(await after.chosen(fresh.id!)).toBe("after-start")
+  } finally {
+    stub.chrome.tabs.query = realQuery
+    stub.chrome.storage.session.get = realSessionGet
+  }
+}, 15_000)

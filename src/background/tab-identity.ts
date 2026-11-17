@@ -4,9 +4,9 @@ import { serialQueue } from "./serial"
 
 // A tab's stable browse id while the browser runs, kept in chrome.storage.local by tab id. Chrome has no values per
 // tab (chrome.sessions is Firefox's tab-values API), and local storage outlives an extension update or reload along
-// with the tab ids, so an agent keeps the id it knows a tab by across them. A browser restart gives every tab a new
-// id: onStartup drops the lot, and the session check below drops it when that event never came (the extension was
-// disabled at the last shutdown).
+// with the tab ids. Without a session marker only ids on tabs in browse's groups survive that, so an agent tab with
+// grouping on keeps its id but a lent or ungrouped tab does not. A browser restart gives every tab a new id: onStartup
+// drops the lot, and the session check below does when that event never came (the extension was disabled at shutdown).
 //
 // Values written here:
 // - browseId: an opaque id, made the first time browse attaches or opens the tab.
@@ -27,8 +27,6 @@ const STORAGE_KEY = "tabIdentity"
 const SESSION_KEY = "tabIdentitySession"
 /** A browser call that never settles must not hold the queue or a reconnect. */
 const TIMEOUT_MS = 2_000
-/** How long a missing marker waits for the update event that explains it: onInstalled can land just after a read. */
-const UPDATE_WAIT_MS = 1_000
 
 type Values = Record<string, string | undefined>
 type Stored = Record<string, Values>
@@ -37,18 +35,6 @@ type Stored = Record<string, Values>
 let generation = 0
 let prepared: Promise<boolean> | undefined
 let session: Promise<boolean | undefined> | undefined
-
-/** Set by the update or unpacked reload event: the browser session is the same, so the stored values are trusted. */
-let updated = false
-let noteUpdate: () => void = () => {}
-const updateEvent = new Promise<void>((resolve) => {
-  noteUpdate = resolve
-})
-chrome.runtime.onInstalled.addListener((details) => {
-  if (details.reason !== "update") return
-  updated = true
-  noteUpdate()
-})
 
 /** One at a time: every change reads the stored map, so one mustn't write over a change to another tab. */
 const writes = serialQueue()
@@ -96,8 +82,8 @@ function sessionMarker() {
 
 /**
  * Once per worker: drops values from an older browser session. Session storage is cleared by a browser restart and
- * an extension reload alike. An update or reload says the session is the same, so only ids whose tab is gone are
- * dropped; without that event, only ids still on tabs in browse's groups survive, the rule tab-cleanup uses.
+ * an extension reload or update alike, so without the marker only ids still on unpinned tabs in browse's groups
+ * survive; that is the rule tab-cleanup uses, and it keeps grouping-on agent tabs but not lent or ungrouped ones.
  * Answers false when a read timed out, so the caller retries instead of trusting an unknown map.
  */
 async function reconcile(): Promise<boolean> {
@@ -107,30 +93,22 @@ async function reconcile(): Promise<boolean> {
   if (known) return true
   const all = await stored()
   if (!all || mine !== generation) return false
-  // Nothing stored to lose: no need to tell an update from a restart, and the next tab event shouldn't wait for one.
+  // Nothing stored to lose: mark this session and let the next tab event go without waiting for a check.
   if (!Object.keys(all).length) {
     session = undefined
     await finished(chrome.storage.session.set({ [SESSION_KEY]: true }))
     return true
   }
-  // onInstalled can arrive just after an early read: wait for it before deciding, but never indefinitely.
-  if (!updated) await withTimeout(updateEvent, UPDATE_WAIT_MS)
-  if (mine !== generation) return false
-  const upgrade = updated
   const tabs = await within(chrome.tabs.query({}).catch(() => [] as chrome.tabs.Tab[]))
   if (!tabs || mine !== generation) return false
+  const groups = await within(chrome.tabGroups.query({}).catch(() => [] as chrome.tabGroups.TabGroup[]))
+  if (!groups || mine !== generation) return false
   const open = new Map(tabs.filter((tab) => tab.id !== undefined).map((tab) => [tab.id!, tab]))
-  let owned: Set<number> | undefined
-  if (!upgrade) {
-    const groups = await within(chrome.tabGroups.query({}).catch(() => [] as chrome.tabGroups.TabGroup[]))
-    if (!groups || mine !== generation) return false
-    owned = new Set(groups.filter((group) => ownedGroup(group.title)).map((group) => group.id))
-  }
+  const owned = new Set(groups.filter((group) => ownedGroup(group.title)).map((group) => group.id))
   const kept: Stored = {}
   for (const [tabId, values] of Object.entries(all)) {
     const tab = open.get(Number(tabId))
-    if (!tab) continue
-    if (owned && (tab.pinned || !owned.has(tab.groupId))) continue
+    if (!tab || tab.pinned || !owned.has(tab.groupId)) continue
     kept[tabId] = values
   }
   const wrote = Object.keys(kept).length ? await save(kept) : await clearStored()
@@ -142,11 +120,15 @@ async function reconcile(): Promise<boolean> {
 
 /** Runs the session check once; a check that couldn't decide is forgotten so the next call tries again. */
 function prepare(): Promise<boolean> {
-  prepared ??= writes(reconcile).then((settled) => {
-    if (!settled) prepared = undefined
+  if (prepared) return prepared
+  let running: Promise<boolean> | undefined
+  running = writes(reconcile).then((settled) => {
+    // A check that couldn't decide is retried, unless a browser start already replaced it with the wipe.
+    if (!settled && prepared === running) prepared = undefined
     return settled
   })
-  return prepared
+  prepared = running
+  return running
 }
 
 const ABORT = Symbol("abort")
