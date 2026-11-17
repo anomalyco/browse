@@ -253,13 +253,22 @@ async fn run(relay: Arc<Relay>, listener: TcpListener) {
     tokio::time::sleep(Duration::from_millis(100)).await;
     persister.abort();
     housekeeping.abort();
-    relay.persist_now();
+    if let Some(delay) = test_shutdown_delay() {
+        tokio::time::sleep(delay).await;
+    }
+    relay.persist_final();
     rlog!("relay.shutdown.closed", pid = std::process::id());
     // Last, so a client that waits for it to go (relay::stop, before uninstall deletes browse's folders) knows every
     // write is done: relay.json is the relay's "finished with my files" marker while it stops answering.
     port::remove_relay_state(&relay.paths, relay.configured_port, &relay.instance_id);
     heartbeat.abort();
     relay.finished.store(true, Ordering::SeqCst);
+}
+
+/// Test-only: holds open the window between the listener closing and the shutdown's final registry write, so the
+/// uninstall test sees the writes a client that only waits for /version would miss.
+fn test_shutdown_delay() -> Option<Duration> {
+    std::env::var("OPENCODE_BROWSER_TEST_SHUTDOWN_DELAY_MS").ok()?.trim().parse::<u64>().ok().filter(|ms| *ms > 0).map(Duration::from_millis)
 }
 
 async fn persist_loop(relay: Arc<Relay>) {

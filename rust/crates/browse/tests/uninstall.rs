@@ -69,7 +69,17 @@ fn uninstall_leaves_no_browse_files_behind_the_relay() {
     let paths = Paths::rooted(home.join("browse-home"));
     let port = free_port();
 
-    let mut relay = Guard(browse(&home, port).arg("serve").stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("browse serve starts"));
+    // The relay holds the post-listener window open for a second before its final registry write, so a stop that only
+    // waits for /version can't get away with deleting the root before that write lands.
+    let mut relay = Guard(
+        browse(&home, port)
+            .env("OPENCODE_BROWSER_TEST_SHUTDOWN_DELAY_MS", "1000")
+            .arg("serve")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("browse serve starts"),
+    );
     wait_for("the relay", Duration::from_secs(15), || paths.relay_state(port).is_file());
 
     let output = browse(&home, port).arg("uninstall").output().expect("browse uninstall runs");
