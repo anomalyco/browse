@@ -2,8 +2,9 @@
 # plan-release.sh: decides the mode, version and npm dist-tag from the event, ref and dispatch inputs (INPUT_BUMP,
 # INPUT_VERSION, INPUT_RELEASE_NOTES), and writes them to $GITHUB_OUTPUT. A version counts from the newest of
 # cli/package.json at the triggering commit and the newest v* tag: the tag job runs before any publish, so a version
-# whose tag exists has shipped even when a publish job failed and its release commit never reached dev. It reads both
-# through the API, as data; nothing here runs repository code.
+# whose tag exists has shipped even when a publish job failed and its release commit never reached dev. A stable
+# dispatch must be from a commit that contains the newest tag's commit, so a rerun of an older commit can't ship old
+# code as a new version. It reads all of this through the API, as data; nothing here runs repository code.
 #
 #   push to dev                          dev     <next patch>-dev.<run>[.<attempt>]  npm tag dev, release service
 #   dispatch on dev with bump/version    stable  x.y.z                               npm latest, Chrome Web Store,
@@ -50,16 +51,25 @@ stable_tags=$(while IFS= read -r ref; do
 done <<< "$tag_refs")
 newest_tag=$(printf '%s\n' "$stable_tags" | sort -V | tail -n 1)
 base=$(printf '%s\n%s\n' "$current" "$newest_tag" | sort -V | tail -n 1)
-# A rerun of a dispatch that already tagged its release: tag-release.sh makes its release commit on $GITHUB_SHA and
-# reuses v<version> when that commit's tree matches. Leave that tag out only when this dispatch plans that same version
-# without it; a fresh dispatch, or one planning past it, keeps counting it, so it never plans below a shipped version.
-if [ "$mode" = stable ] && [ "${GITHUB_RUN_ATTEMPT:-1}" != 1 ] && [ -n "$newest_tag" ]; then
+base_tag=$newest_tag
+# A stable dispatch must be from a commit that contains the newest tag's release commit: a rerun keeps its original
+# $GITHUB_SHA, which a later release may have moved past, and would ship old code as the newest version.
+if [ "$mode" = stable ] && [ -n "$newest_tag" ]; then
   tag_parent=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/v$newest_tag" --jq '.parents[0].sha') ||
     die "Couldn't read the commit of tag v$newest_tag"
-  if [ "$tag_parent" = "$GITHUB_SHA" ]; then
+  status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$tag_parent...$GITHUB_SHA" --jq .status) ||
+    die "Couldn't compare $GITHUB_SHA with the commit of tag v$newest_tag"
+  case "$status" in
+    ahead | identical) ;;
+    *) die "v$newest_tag was released from $tag_parent, which $GITHUB_SHA doesn't contain; dispatch a new release on dev instead of rerunning this one" ;;
+  esac
+  # tag-release.sh reuses v<version> when its release commit on $GITHUB_SHA has the same tree, so a tag this dispatch
+  # made sits one commit above it. On a rerun, leave that tag out only when this dispatch plans that same version
+  # without it; otherwise it counts, so the rerun never plans below a shipped version.
+  if [ "${GITHUB_RUN_ATTEMPT:-1}" != 1 ] && [ "$tag_parent" = "$GITHUB_SHA" ]; then
     older_tag=$(printf '%s\n' "$stable_tags" | grep -vxF "$newest_tag" | sort -V | tail -n 1 || true)
     older_base=$(printf '%s\n%s\n' "$current" "$older_tag" | sort -V | tail -n 1)
-    if [ "$(next_version "$older_base")" = "$newest_tag" ]; then base=$older_base; fi
+    if [ "$(next_version "$older_base")" = "$newest_tag" ]; then base=$older_base base_tag=$older_tag; fi
   fi
 fi
 IFS=. read -r major minor patch <<< "$base"
@@ -89,7 +99,7 @@ if [ "$mode" = stable ]; then
   version=$(next_version "$base")
   stable_version "$version" || die "Invalid release version $version (x.y.z, each part at most 65535)"
   [ "$(printf '%s\n%s\n' "$base" "$version" | sort -V | tail -n 1)" = "$version" ] && [ "$version" != "$base" ] ||
-    die "$version must be newer than cli/package.json ($current) and the newest tag (${newest_tag:-none})"
+    die "$version must be newer than cli/package.json ($current) and the newest tag (${base_tag:-none})"
   status=$(curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/@opencode%2fbrowse/$version")
   [ "$status" != 200 ] || die "@opencode/browse@$version is already published"
   channel=latest npm_tag=latest dry_run=false

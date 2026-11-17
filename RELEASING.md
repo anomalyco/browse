@@ -46,7 +46,8 @@ opencode and Hex; releases still come from `dev`.
 
 ```
 plan    version from the newest of cli/package.json and the newest v* tag, + bump (the tag exists before any publish,
-        so a release commit that missed dev still counts); actor is admin or maintain; notes well-formed; not on npm yet
+        so a release commit that missed dev still counts), on a commit that contains the newest tag's commit; actor is
+        admin or maintain; notes well-formed; not on npm yet
 tag     commits the versions (cli/package.json, package.json, public/manifest.json, rust/Cargo.toml, rust/Cargo.lock)
         and changelog/<version>.md from the notes on the dispatched commit, pushes only the tag v<version> (deploy key);
         git, sed, awk and jq only
