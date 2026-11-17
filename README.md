@@ -187,9 +187,9 @@ extension from your browser to finish.
   starts over. A tab opened this way is never closed as idle: only an agent or you close it. `tabs` lists each tab's
   id, url, title, group, last use and whether a call is running in it.
 - **Agents open their own tabs** in the background of the window you last used, grouped together and collapsed unless
-  you're looking at one. Agents can't switch you to their tabs or bring a window to the front. Tabs nobody touches for
-  10 minutes close by themselves (never while something runs on them). Closing agent tabs never quits the browser: on
-  Windows and Linux, browse leaves a new tab (or window) behind when it would close the last one.
+  you're looking at one (you can turn that off). Agents can't switch you to their tabs or bring a window to the front.
+  Tabs nobody touches for 10 minutes close by themselves (never while something runs on them). Closing agent tabs never
+  quits the browser: on Windows and Linux, browse leaves a new tab (or window) behind when it would close the last one.
 - **Relay restarts keep agent tabs.** The relay saves the tabs agents opened and their options, and takes them back
   when it starts again (after an update, say).
 - **Hand an agent one of your tabs** by clicking the toolbar button on it. The badge shows **ON**; click again to take
@@ -201,8 +201,10 @@ extension from your browser to finish.
 - **Several browsers at once.** Each connected browser has an id (like `chrome-macbook`); `status` lists them, and new
   tabs open in the default browser unless `browser` names another.
 - **Settings** (the extension's options page, applied right away): where agent tabs open (your window or their own),
-  grouping (one shared group, one per task, or none), when idle tabs close (10, 30, 60 minutes or never), human-like
-  input, and handoff notifications. Agents can read and change these with the `settings` tool when you ask them to.
+  grouping (one shared group, one per task, or none), whether browse collapses agent groups by itself or leaves them
+  as you set them (a handoff still opens its group so you can find the tab), when idle tabs close (10, 30, 60 minutes
+  or never), human-like input, and handoff notifications. Agents can read and change these with the `settings` tool
+  when you ask them to.
 
 ## Tools
 
@@ -244,7 +246,7 @@ the relay over a WebSocket and runs its commands in your browser through `chrome
   Chrome DevTools Protocol to each tab, and runs `execute` scripts in an embedded JavaScript engine (QuickJS). It
   exits when nothing uses it.
 - **The extension** (`src/`) runs the relay's commands through `chrome.debugger`, keeps agent tabs in collapsed groups
-  (or their own window), closes idle ones, and shows the toolbar badge and the handoff card.
+  by default (or their own window), closes idle ones, and shows the toolbar badge and the handoff card.
 - **Quiet in the page.** browse doesn't enable the CDP domains pages can detect, runs its own code in isolated worlds
   and leaves no globals behind. Input moves like a person: curved mouse paths, paced typing, gliding scroll (turn
   *Human-like input* off for full speed). This makes an agent hard to spot, not impossible: the browser shows its

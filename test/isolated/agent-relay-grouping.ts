@@ -97,7 +97,7 @@ beforeEach(async () => {
   stub.state.activations.length = 0
   stub.state.focusedWindowId = undefined
   socket().received.length = 0
-  await stub.chrome.storage.local.remove(["agentTabsWindow", "agentTabsGrouping", "humanInput", "tabCleanupIdleMinutes", "handoffNotifications"])
+  await stub.chrome.storage.local.remove(["agentTabsWindow", "agentTabsGrouping", "agentTabsGroupCollapse", "humanInput", "tabCleanupIdleMinutes", "handoffNotifications"])
   await stub.chrome.storage.session.remove("agentWindowId")
 })
 
@@ -413,6 +413,53 @@ describe("grouping: one shared group for all agents (default)", () => {
   })
 })
 
+describe("group collapse: never (off)", () => {
+  beforeEach(() => stub.chrome.storage.local.set({ agentTabsGroupCollapse: "off" }))
+
+  /** Switches the user to another of their tabs, as Chrome's tabs.onActivated does. */
+  async function switchToAnotherTab(windowId: number) {
+    const tab = await stub.chrome.tabs.create({ windowId, url: "https://other.example/", active: true })
+    event("tabs.onActivated").emit({ tabId: tab.id, windowId })
+    await settle()
+    return tab
+  }
+
+  test("a new group stays open, and switching tabs neither folds nor opens it", async () => {
+    const { user } = await userWindow()
+    const agent = await agentTab("github")
+    expect(group(agent.groupId)!.collapsed).toBe(false)
+    await switchToAnotherTab(user.id)
+    expect(group(agent.groupId)!.collapsed).toBe(false)
+    // The user folds it: browse leaves it folded too.
+    await stub.chrome.tabGroups.update(agent.groupId, { collapsed: true })
+    await switchToAnotherTab(user.id)
+    expect(group(agent.groupId)!.collapsed).toBe(true)
+  })
+
+  test("a handoff still opens the group, and it stays open afterwards", async () => {
+    await userWindow()
+    const agent = await agentTab("github")
+    await stub.chrome.tabGroups.update(agent.groupId, { collapsed: true })
+    await command("pageStatus.set", { tabId: agent.tabId, status: { state: "waiting", owner: "session", sessionId: "github", handoffId: "h1", message: "Sign in" } })
+    await until(() => group(agent.groupId)!.collapsed === false)
+    await command("pageStatus.set", { tabId: agent.tabId, status: { state: "attached", owner: "session", sessionId: "github" } })
+    await settle()
+    expect(group(agent.groupId)!.collapsed).toBe(false)
+  })
+
+  test("switching back to auto folds groups from the next tab switch", async () => {
+    const { user } = await userWindow()
+    const agent = await agentTab("github")
+    expect(group(agent.groupId)!.collapsed).toBe(false)
+    await stub.chrome.storage.local.set({ agentTabsGroupCollapse: "auto" })
+    await settle()
+    // Changing the setting doesn't touch groups that already exist.
+    expect(group(agent.groupId)!.collapsed).toBe(false)
+    await switchToAnotherTab(user.id)
+    await until(() => group(agent.groupId)!.collapsed === true)
+  })
+})
+
 describe("grouping: none", () => {
   test("tabs and their popups stay ungrouped in the background of the user's window", async () => {
     await stub.chrome.storage.local.set({ agentTabsGrouping: "none" })
@@ -589,18 +636,18 @@ describe("the relay's settings tool", () => {
 
   test("settings.get reads every setting, defaults for what was never set", async () => {
     expect(await command("settings.get", {})).toEqual({
-      settings: { window: "current", grouping: "shared", idleMinutes: 10, humanInput: "on", handoffNotifications: "recording" },
+      settings: { window: "current", grouping: "shared", groupCollapse: "auto", idleMinutes: 10, humanInput: "on", handoffNotifications: "recording" },
     })
   })
 
   test("settings.set writes storage, which the page and the relay follow, and new tabs use it", async () => {
     pageSaw.length = 0
-    const result = await command("settings.set", { values: { grouping: "shared", idleMinutes: 0, humanInput: "off", handoffNotifications: "always" } })
-    expect(result.settings).toEqual({ window: "current", grouping: "shared", idleMinutes: 0, humanInput: "off", handoffNotifications: "always" })
-    expect(await stub.chrome.storage.local.get(["agentTabsGrouping", "humanInput", "tabCleanupIdleMinutes", "handoffNotifications"])).toEqual({
-      agentTabsGrouping: "shared", humanInput: "off", tabCleanupIdleMinutes: 0, handoffNotifications: "always",
+    const result = await command("settings.set", { values: { grouping: "shared", groupCollapse: "off", idleMinutes: 0, humanInput: "off", handoffNotifications: "always" } })
+    expect(result.settings).toEqual({ window: "current", grouping: "shared", groupCollapse: "off", idleMinutes: 0, humanInput: "off", handoffNotifications: "always" })
+    expect(await stub.chrome.storage.local.get(["agentTabsGrouping", "agentTabsGroupCollapse", "humanInput", "tabCleanupIdleMinutes", "handoffNotifications"])).toEqual({
+      agentTabsGrouping: "shared", agentTabsGroupCollapse: "off", humanInput: "off", tabCleanupIdleMinutes: 0, handoffNotifications: "always",
     })
-    expect(pageSaw).toEqual([{ agentTabsGrouping: "shared", humanInput: "off", tabCleanupIdleMinutes: 0, handoffNotifications: "always" }])
+    expect(pageSaw).toEqual([{ agentTabsGrouping: "shared", agentTabsGroupCollapse: "off", humanInput: "off", tabCleanupIdleMinutes: 0, handoffNotifications: "always" }])
     await until(() => settings().length === 1)
     expect(settings()[0]).toEqual({ humanInput: "off" })
     await userWindow()
@@ -610,7 +657,7 @@ describe("the relay's settings tool", () => {
 
   test("settings.set refuses an unknown setting or value and writes nothing", async () => {
     pageSaw.length = 0
-    for (const values of [{ grouping: "Shared" }, { idleMinutes: 45 }, { grouping: "none", allowNode: true }]) {
+    for (const values of [{ grouping: "Shared" }, { groupCollapse: "sometimes" }, { idleMinutes: 45 }, { grouping: "none", allowNode: true }]) {
       const id = nextCommand++
       socket().deliver({ id, method: "settings.set", params: { values } })
       await until(() => socket().received.some((message) => message.id === id))
