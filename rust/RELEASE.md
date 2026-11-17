@@ -35,9 +35,12 @@ release publishes the same binary under the baseline names, which the install sc
 Each target ships as `opencode-browse-<target>-<version>.tgz` holding `package/bin/browse[.exe]`, `package.json` and
 `LICENSE`: the npm package `@opencode/browse-<target>` and the release service file are the same tarball. Its size and
 SHA-256 go into the channel manifest's `release.targets` at `https://anoma.ly/release/browse/cli/<channel>.json`.
-Installed binaries poll it hourly (unless updates are `off`), download their target's tarball with curl, check size
-and SHA-256, unpack it with tar and replace `~/.local/bin/browse` in place. The relay restarts on the new file once no
-agent is using the browser; `browse mcp` proxies reconnect to it on their own.
+Every relay polls it at launch and hourly, in every mode (`off` checks and installs nothing). Versions are only tested
+for equality (the release protocol's client rules, `crates/browse/src/protocol.rs`, checked against the release repo's test vectors
+in `crates/browse/tests/fixtures/release`): when the channel's release isn't the running one, installed binaries
+download their target's tarball in-process (ureq, rustls), check size and SHA-256, unpack it with tar and replace
+`~/.local/bin/browse` in place. A relay browse started restarts on the new file once no agent is using the browser (a
+foreground `browse serve` doesn't); `browse mcp` proxies reconnect to it on their own.
 
 `@opencode/browse` (npm) is `npm/browse.mjs`, shipped as `dist/cli.mjs`: it runs the binary of whichever
 `@opencode/browse-<target>` npm installed, passing its own path and node's (`OPENCODE_BROWSER_NPM_LAUNCHER`,

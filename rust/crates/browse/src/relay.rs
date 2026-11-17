@@ -148,6 +148,7 @@ pub fn start_from(executable: &std::path::Path) -> anyhow::Result<()> {
             command.env(name, value);
         }
     }
+    // Started by browse, not a person in a terminal: it may restart itself onto an update (serve.rs).
     command.env("OPENCODE_BROWSER_MANAGED_RELAY", "1");
     detach(&mut command);
     spawn(&mut command).context("failed to start the browse relay")?;

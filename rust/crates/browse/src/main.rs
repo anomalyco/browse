@@ -9,6 +9,7 @@ mod legacy;
 mod mcp;
 mod method;
 mod picker;
+mod protocol;
 mod relay;
 mod relay_api;
 mod remote;

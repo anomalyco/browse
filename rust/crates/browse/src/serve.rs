@@ -1,5 +1,6 @@
-//! `browse serve`: the relay in the foreground, with every tool this build links in. A relay started on demand
-//! (OPENCODE_BROWSER_MANAGED_RELAY=1) also keeps itself updated and restarts on a new executable once idle.
+//! `browse serve`: the relay in the foreground, with every tool this build links in. It runs until it is stopped and
+//! checks for updates at launch and hourly. One browse started itself (OPENCODE_BROWSER_MANAGED_RELAY=1) also restarts
+//! on a new executable once idle; one a person runs in a terminal keeps running the old one until they restart it.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,7 +38,7 @@ fn quiet() -> Duration {
 }
 
 pub fn run() -> anyhow::Result<i32> {
-    let managed = std::env::var("OPENCODE_BROWSER_MANAGED_RELAY").as_deref() == Ok("1");
+    let spawned = std::env::var("OPENCODE_BROWSER_MANAGED_RELAY").as_deref() == Ok("1");
     let quiet = quiet();
     let options = ServeOptions {
         version: VERSION.into(),
@@ -48,11 +49,11 @@ pub fn run() -> anyhow::Result<i32> {
     let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
     let restart = runtime.block_on(async move {
         let handle = browse_relay::start(options, relay::local_tools()).await?;
-        if !managed {
+        if !spawned {
             eprintln!("browse relay listening at http://127.0.0.1:{}", handle.port());
         }
         let relay = handle.relay.clone();
-        let mut updater = if managed { update::Updater::spawn(Arc::new(move || relay.idle(quiet))) } else { None };
+        let mut updater = update::Updater::spawn(Arc::new(move || relay.idle(quiet)));
         let mut notice = None;
         let mut restart = None;
         let mut tick = tokio::time::interval(Duration::from_secs(5));
@@ -78,7 +79,8 @@ pub fn run() -> anyhow::Result<i32> {
                 notice = pending;
                 handle.update_notice(notice.clone());
             }
-            if handle.idle(quiet)
+            if spawned
+                && handle.idle(quiet)
                 && let Some(next) = updater.replacement()
             {
                 restart = Some(next);

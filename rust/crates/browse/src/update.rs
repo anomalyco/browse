@@ -5,7 +5,7 @@
 //!               `npm install -g`, `bun add -g`, `pnpm add -g`, `yarn global add` or `volta install` of
 //!               @opencode/browse@<the manifest's version> into the same folder; npm can lag the service by a few
 //!               minutes, and a version its registry doesn't have yet is simply tried again later
-//!   runner      npx, bunx, pnpm dlx and yarn dlx resolve the package themselves: the manifest only says a newer release
+//!   runner      npx, bunx, pnpm dlx and yarn dlx resolve the package themselves: the manifest only says another release
 //!               is out
 //!   a checkout build, anything else: no updates
 //! Every check sends `browse/<channel>/<version>/cli/<install kind>` as its User-Agent: the protocol allows segments
@@ -27,6 +27,7 @@ use sha2::{Digest, Sha256};
 pub use crate::method::{Global, Install, Manager, dist_tag, install};
 use crate::method::{PACKAGE, Runner};
 use crate::relay_api::paths;
+use crate::protocol::{self, Decision};
 use crate::{VERSION, session};
 
 const RELEASE_SERVICE: &str = "https://anoma.ly/release";
@@ -122,40 +123,6 @@ fn set_mode_bits(_file: &Path, _mode: u32) {
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(_file, std::fs::Permissions::from_mode(_mode));
-    }
-}
-
-/// Orders versions as semver does for the shapes releases use: dev below beta below the release, then by run.
-fn version_order(value: &str) -> Option<[u64; 6]> {
-    let (core, pre) = value.split_once('-').map_or((value, None), |(c, p)| (c, Some(p)));
-    let core: Vec<u64> = core.split('.').map(|n| n.parse().ok()).collect::<Option<_>>()?;
-    let [major, minor, patch] = core[..] else { return None };
-    let (stage, run, build) = match pre {
-        None => (2, 0, 0),
-        Some(pre) => {
-            let mut parts = pre.split('.');
-            let stage = match parts.next()? {
-                "dev" => 0,
-                "beta" => 1,
-                _ => return None,
-            };
-            let run = parts.next()?.parse().ok()?;
-            let build = parts.next().map(str::parse::<u64>).transpose().ok()?.unwrap_or(0);
-            if parts.next().is_some() {
-                return None;
-            }
-            (stage, run, build)
-        }
-    };
-    Some([major, minor, patch, stage, run, build])
-}
-
-/// Whether `latest` is strictly newer than `current` (src/shared/protocol.ts `newerCliVersion`). Unlike there, an
-/// unknown version shape is never newer: an update must not downgrade.
-pub fn newer(latest: &str, current: &str) -> bool {
-    match (version_order(latest), version_order(current)) {
-        (Some(a), Some(b)) => a > b,
-        _ => false,
     }
 }
 
@@ -260,55 +227,40 @@ fn service() -> String {
     std::env::var("OPENCODE_BROWSER_RELEASE_SERVICE").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| RELEASE_SERVICE.into()).trim_end_matches('/').to_owned()
 }
 
-fn curl(kind: Kind, args: &[&str]) -> anyhow::Result<Vec<u8>> {
-    let output = Command::new("curl")
-        .args(["-fsSL", "--proto", "=https,http", "-H", &format!("user-agent: {}", kind.user_agent())])
-        .args(args)
-        .output()
-        .context("curl is needed to download updates")?;
-    if !output.status.success() {
-        bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
-    }
-    Ok(output.stdout)
+/// GETs `url` with this install's User-Agent, failing on an error status, a body over `limit` bytes or `timeout`.
+fn get(kind: Kind, url: &str, timeout: Duration, limit: u64) -> anyhow::Result<Vec<u8>> {
+    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(timeout)).user_agent(kind.user_agent()).build().into();
+    let mut response = agent.get(url).call().with_context(|| format!("couldn't get {url}"))?;
+    Ok(response.body_mut().with_config().limit(limit).read_to_vec()?)
 }
 
-/// The channel's manifest, through the release protocol's client rules (cli/src/update/release-service.ts `decide`).
+/// The channel's manifest, through the release protocol's client rules (protocol.rs). A binary install takes the
+/// manifest's file for this platform; a package install or runner takes the release's version (the package manager is
+/// asked for it), so it checks as `unknown`.
 pub fn check(install: &Install) -> anyhow::Result<Check> {
     let kind = Kind::of(install).context("this install doesn't check for updates")?;
     let channel = channel();
-    let body = curl(kind, &["--max-time", "30", &format!("{}/browse/cli/{channel}.json", service())])?;
-    let manifest: Value = serde_json::from_slice(&body).context("the release manifest isn't JSON")?;
-    let field = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
-    if manifest["schema"] != 1 || field(&manifest, "app").as_deref() != Some("browse") || field(&manifest, "artifact").as_deref() != Some("cli") {
-        bail!("the release manifest is malformed");
-    }
-    if field(&manifest, "channel").as_deref() != Some(channel) {
-        bail!("the release manifest is for another channel");
-    }
-    let release = &manifest["release"];
-    let version = field(release, "version").context("the release manifest has no version")?;
-    if !newer(&version, VERSION) {
-        return Ok(Check::UpToDate(version));
-    }
-    // A binary install runs the manifest's file for this platform; a package install asks npm for the same version, so
-    // it needs no target of its own.
-    let mut file = None;
-    if kind == Kind::Binary {
-        let target_name = target();
-        let Some(target) = release["targets"].get(&target_name) else { return Ok(Check::Deferred(version)) };
-        let (Some(url), Some(size), Some(sha256)) = (field(target, "url"), target["size"].as_u64(), field(target, "sha256")) else {
-            bail!("the release manifest's {target_name} target is malformed");
-        };
-        if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-            bail!("the release manifest's {target_name} checksum is malformed");
-        }
-        file = Some(ReleaseFile { url, size, sha256: sha256.to_lowercase() });
-    }
-    let rollout = release["rollout_percent"].as_u64().unwrap_or(0);
-    if release["required"] != true && rollout_bucket() >= rollout {
-        return Ok(Check::Deferred(version));
-    }
-    Ok(Check::Available(Release { version, file }))
+    let body = get(kind, &format!("{}/browse/cli/{channel}.json", service()), Duration::from_secs(30), 1024 * 1024)?;
+    let body = String::from_utf8(body).context("the release manifest isn't text")?;
+    let target = target();
+    let running = protocol::Running {
+        version: VERSION,
+        target: &target,
+        distribution: if kind == Kind::Binary { "direct" } else { "unknown" },
+        bucket: rollout_bucket(),
+        sha256: None,
+        channel: None,
+    };
+    let version = || serde_json::from_str::<Value>(&body).ok().and_then(|m| m["release"]["version"].as_str().map(str::to_owned)).unwrap_or_default();
+    Ok(match protocol::decide("browse", "cli", channel, &body, &running) {
+        Decision::Reject("malformed") => bail!("the release manifest is malformed"),
+        Decision::Reject("wrong_channel") => bail!("the release manifest is for another channel"),
+        Decision::Reject(reason) => bail!("the release manifest doesn't fit this install ({reason})"),
+        Decision::None("up_to_date") => Check::UpToDate(version()),
+        Decision::None(_) => Check::Deferred(version()),
+        Decision::Install { version, target, .. } => Check::Available(Release { version, file: Some(ReleaseFile { url: target.url, size: target.size, sha256: target.sha256 }) }),
+        Decision::Notify { version, .. } => Check::Available(Release { version, file: None }),
+    })
 }
 
 /// A manifest's file URL: the service gives a path on its own origin (`/release/files/...`), like the install script reads it.
@@ -349,8 +301,8 @@ pub fn install_binary(release: &Release, binary: &Path) -> anyhow::Result<()> {
     let result = (|| {
         let _ = std::fs::remove_dir_all(&work);
         std::fs::create_dir_all(&work)?;
-        curl(Kind::Binary, &["--max-time", "900", "-o", &archive.to_string_lossy(), &file_url(&file.url)?])?;
-        let bytes = std::fs::read(&archive)?;
+        let bytes = get(Kind::Binary, &file_url(&file.url)?, Duration::from_secs(900), file.size + 1)?;
+        std::fs::write(&archive, &bytes)?;
         if bytes.len() as u64 != file.size || session::hex(&Sha256::digest(&bytes)) != file.sha256 {
             bail!("the download of browse {} didn't match its checksum; nothing was installed", release.version);
         }
@@ -379,10 +331,10 @@ pub fn install_binary(release: &Release, binary: &Path) -> anyhow::Result<()> {
     result
 }
 
-/// Whether a release the service's manifest names is an update for a relay running `running` while `on_disk` is
-/// installed: newer than both, so it never downgrades and doesn't install what is already there.
+/// Whether the channel's release is an update for a relay running `running` while `on_disk` is installed: neither is
+/// it (versions are only tested for equality, so a rollback is an update too).
 pub fn package_wanted(latest: &str, running: &str, on_disk: Option<&str>) -> bool {
-    newer(latest, running) && on_disk.is_none_or(|disk| newer(latest, disk))
+    latest != running && on_disk != Some(latest)
 }
 
 /// Runs `command` with no stdin, collecting its output, and kills it after `timeout`.
@@ -483,7 +435,7 @@ pub fn package_install(global: &Global, version: &str) -> anyhow::Result<Install
     drop(output);
     let binary = global.binary().with_context(|| format!("{words} ran, but {} has no browse binary for this computer", global.package.display()))?;
     let installed = executable_version(&binary).with_context(|| format!("{words} ran, but {} doesn't run", binary.display()))?;
-    if newer(version, &installed) {
+    if installed != version {
         bail!("{words} left {installed}, not the requested {version}");
     }
     Ok(Installed::Version(installed))
@@ -607,7 +559,7 @@ pub fn command(args: &[String]) -> anyhow::Result<()> {
                 Ok(Check::Available(release)) => println!("browse {} is out (running {VERSION}); `{}` runs it.", release.version, runner.run(tag)),
                 Ok(Check::Deferred(version)) => println!("browse {version} is out, but not for everyone yet. Running {VERSION}."),
                 Ok(Check::UpToDate(_)) => println!("browse {VERSION} is up to date."),
-                Err(error) => println!("! couldn't check for a newer release: {error:#}"),
+                Err(error) => println!("! couldn't check for a release: {error:#}"),
             }
             println!("For automatic updates run `{} install` once (the self-updating binary), or install it globally: `{}`.", runner.run(tag), runner.global_words(tag));
             return Ok(());
@@ -654,7 +606,7 @@ fn record_install(version: &str) -> anyhow::Result<()> {
     })
 }
 
-/// A newer release this install hasn't taken: `(summary, command)`. A self-updating install tells it when updates
+/// The channel's release, when this install hasn't taken it: `(summary, command)`. A self-updating install tells it when updates
 /// are notify-only; a package runner, which can't update, whenever updates aren't off.
 pub fn pending_notice() -> Option<(String, String)> {
     let mode = effective_mode();
@@ -664,7 +616,7 @@ pub fn pending_notice() -> Option<(String, String)> {
         _ => return None,
     };
     let latest = state().get("latest")?.as_str()?.to_owned();
-    newer(&latest, VERSION).then(|| (format!("browse {latest} is available (running {VERSION})"), command))
+    (latest != VERSION).then(|| (format!("browse {latest} is available (running {VERSION})"), command))
 }
 
 /// What the extension's options page shows about updates (cli/src/update/auto-update.ts `AutoUpdateStatus`).
@@ -694,7 +646,7 @@ pub fn status_json() -> Value {
         let by = if std::env::var_os("OPENCODE_BROWSER_AUTO_UPDATE").is_some() { "OPENCODE_BROWSER_AUTO_UPDATE" } else { "OPENCODE_BROWSER_UPDATE_CHECK" };
         status["overriddenBy"] = json!(by);
     }
-    if let Some(latest) = state.get("latest").and_then(Value::as_str).filter(|l| newer(l, VERSION)) {
+    if let Some(latest) = state.get("latest").and_then(Value::as_str).filter(|l| *l != VERSION) {
         status["latest"] = json!(latest);
     }
     for key in ["latestAt", "checkedAt"] {
@@ -736,7 +688,7 @@ pub fn describe_mode(mode: Mode) -> &'static str {
 pub fn describe() -> String {
     let install = install();
     let state = state();
-    let latest = state.get("latest").and_then(Value::as_str).filter(|l| newer(l, VERSION));
+    let latest = state.get("latest").and_then(Value::as_str).filter(|l| *l != VERSION);
     let tag = dist_tag(VERSION);
     let source = match &install {
         Install::Runner(runner) => {
@@ -770,8 +722,8 @@ fn fingerprint(file: &Path) -> Option<(u64, SystemTime)> {
     Some((meta.len(), meta.modified().ok()?))
 }
 
-/// The relay's updater: checks this install's channel at launch and at most hourly in its own thread, and in "on"
-/// mode installs what it finds (a package manager's install only while nothing is using the browser, as they replace
+/// The relay's updater: checks this install's channel at launch and hourly in its own thread, in every mode, and in
+/// "on" mode installs what it finds (a package manager's install only while nothing is using the browser, as they replace
 /// the package in steps). `replacement` says when the executable on disk is no longer the one this relay runs (this
 /// updater's install, `browse update`, or a package manager run by hand) and can take over. A package runner's relay
 /// only checks, for the notice.
@@ -796,6 +748,7 @@ impl Updater {
         let started = match &install {
             Install::Binary(_) | Install::Global(_) => Some(fingerprint(&install.executable()?)),
             Install::Runner(_) => None,
+            // A checkout build doesn't check; an unrecognized install has no User-Agent kind to check with.
             Install::Checkout | Install::Other => return None,
         };
         let interval = std::env::var("OPENCODE_BROWSER_AUTO_UPDATE_INTERVAL_MS")
@@ -841,12 +794,8 @@ impl Worker {
     fn run(mut self) {
         // Package manager installs wait for an idle moment, so look more often than the channel is checked.
         let tick = self.interval.min(Duration::from_secs(300));
-        std::thread::sleep(Duration::from_secs(60).min(self.interval));
         loop {
-            let mode = effective_mode();
-            if mode != Mode::Off
-                && let Err(error) = self.tick(mode)
-            {
+            if let Err(error) = self.tick(effective_mode()) {
                 let _ = update_state(|s| s["failed"] = json!(error.to_string()));
             }
             std::thread::sleep(tick);
@@ -855,8 +804,10 @@ impl Worker {
 
     fn tick(&mut self, mode: Mode) -> anyhow::Result<()> {
         if self.checked.is_none_or(|at| at.elapsed() >= self.interval) {
+            // A failed check (no network yet) is tried again on the next tick, not an hour later.
+            let checked = check(&self.install)?;
             self.checked = Some(Instant::now());
-            let found = match check(&self.install)? {
+            let found = match checked {
                 Check::Available(release) if matches!(&self.install, Install::Binary(_)) => Some(Found::Binary(release)),
                 Check::Available(release) => Some(Found::Package(release.version)),
                 Check::UpToDate(_) | Check::Deferred(_) => None,
@@ -972,7 +923,7 @@ fn record_failure(version: &str, error: &anyhow::Error) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Global, Install, Kind, Manager, Runner, dist_tag, newer, package_wanted};
+    use super::{Global, Install, Kind, Manager, Runner, dist_tag, package_wanted};
 
     #[test]
     fn checks_name_the_install_kind_in_the_user_agent() {
@@ -1002,18 +953,16 @@ mod tests {
     }
 
     #[test]
-    fn packages_follow_their_dist_tag_and_never_downgrade() {
+    fn packages_follow_their_dist_tag_by_equality() {
         assert_eq!(dist_tag("0.1.0"), "latest");
         assert_eq!(dist_tag("0.1.1-dev.57"), "dev");
         assert_eq!(dist_tag("0.1.1-beta.2"), "beta");
         assert!(package_wanted("0.1.1", "0.1.0", Some("0.1.0")));
         assert!(package_wanted("0.1.1-dev.58", "0.1.1-dev.57", None));
         assert!(!package_wanted("0.1.0", "0.1.0", Some("0.1.0")), "the same version");
-        assert!(!package_wanted("0.0.17", "0.1.0", Some("0.1.0")), "a dist-tag moved back");
+        assert!(package_wanted("0.0.17", "0.1.0", Some("0.1.0")), "a rollback is an update");
         assert!(!package_wanted("0.1.1", "0.1.0", Some("0.1.1")), "already installed, waiting for the relay to switch");
-        assert!(!package_wanted("0.1.1", "0.1.0", Some("0.1.2")), "something newer is installed");
-        assert!(!package_wanted("0.1.1-dev.3", "0.1.1", None), "a dev build is older than its release");
-        assert!(!package_wanted("latest", "0.1.0", None));
+        assert!(package_wanted("0.1.1", "0.1.0", Some("0.1.2")), "the channel's release replaces any other");
     }
 
     #[test]
@@ -1046,17 +995,5 @@ mod tests {
         let yarn = "error Couldn't find any versions for \"@opencode/browse\" that matches \"99.0.0\"\n";
         assert!(super::not_published(yarn));
         assert!(!super::not_published("npm error code EACCES\nnpm error Error: EACCES: permission denied\n"));
-    }
-
-    #[test]
-    fn only_newer_versions() {
-        assert!(!newer("0.0.17", "0.1.0"));
-        assert!(!newer("0.1.0", "0.1.0"));
-        assert!(newer("0.1.1", "0.1.0"));
-        assert!(newer("0.1.0", "0.1.0-beta.3"));
-        assert!(newer("0.1.0-beta.1", "0.1.0-dev.9"));
-        assert!(newer("0.1.0-dev.2.1", "0.1.0-dev.2"));
-        assert!(!newer("garbage", "0.1.0"));
-        assert!(!newer("0.2.0", "local"));
     }
 }

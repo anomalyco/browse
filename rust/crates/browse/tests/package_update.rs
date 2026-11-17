@@ -3,7 +3,8 @@
 //! global install runs the package manager that installed it (a stub that records its arguments and replaces the
 //! package as that manager would) for the manifest's version, and restarts on the new binary once idle. A package
 //! manager that doesn't have the version yet (npm lags the service) is retried quietly. One test per kind: binary,
-//! npm, bun, and an npx run, plus npm's ETARGET.
+//! npm, bun, and an npx run, plus npm's ETARGET. Every relay checks at launch with no special environment, in every
+//! mode, without curl, and stays up with no client; only a relay browse started restarts itself onto an update.
 #![cfg(target_os = "linux")]
 
 use std::io::{BufRead, BufReader, Write};
@@ -13,6 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use sha2::{Digest, Sha256};
 
 const NEXT: &str = "99.0.0";
 const PLATFORM: &str = "browse-linux-x64";
@@ -60,6 +63,15 @@ struct Request {
 /// A release service that answers every request with the cli manifest for the binary's channel, `NEXT` as its only
 /// release, and records what each request asked for.
 fn release_service() -> (String, Arc<Mutex<Vec<Request>>>) {
+    release_service_with(None)
+}
+
+/// [release_service], with `tarball` as the linux-x64 target's file, served at its URL.
+fn release_service_with(tarball: Option<Vec<u8>>) -> (String, Arc<Mutex<Vec<Request>>>) {
+    let (size, sha256) = match &tarball {
+        Some(bytes) => (bytes.len(), Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()),
+        None => (1, "a".repeat(64)),
+    };
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/release", listener.local_addr().unwrap());
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -80,11 +92,16 @@ fn release_service() -> (String, Arc<Mutex<Vec<Request>>>) {
                 }
                 header.clear();
             }
+            if let Some(tarball) = tarball.as_ref().filter(|_| path == "/release/files/x") {
+                seen.lock().unwrap().push(Request { path, user_agent });
+                let _ = write!(reader.get_mut(), "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", tarball.len());
+                let _ = reader.get_mut().write_all(tarball);
+                continue;
+            }
             seen.lock().unwrap().push(Request { path, user_agent });
             let body = format!(
-                r#"{{"schema":1,"app":"browse","artifact":"cli","channel":"{}","sequence":1,"published_at":"2026-01-01T00:00:00Z","release":{{"version":"{NEXT}","rollout_percent":100,"targets":{{"linux-x64":{{"url":"/release/files/x","size":1,"sha256":"{}"}}}},"distributions":[{{"kind":"direct"}}]}}}}"#,
+                r#"{{"schema":1,"app":"browse","artifact":"cli","channel":"{}","sequence":1,"published_at":"2026-01-01T00:00:00Z","release":{{"version":"{NEXT}","rollout_percent":100,"targets":{{"linux-x64":{{"url":"/release/files/x","size":{size},"sha256":"{sha256}"}}}},"distributions":[{{"kind":"direct"}}]}}}}"#,
                 channel(),
-                "a".repeat(64)
             );
             let _ = write!(reader.get_mut(), "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
         }
@@ -152,7 +169,7 @@ impl Scene {
 
     /// The new release's binary as a shell script: answers --version, and records how it was started.
     fn next_binary(&self) -> String {
-        format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo {NEXT}; exit 0; fi\necho \"$* $OPENCODE_BROWSER_MANAGED_RELAY\" > '{}'\n", self.started.display())
+        format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo {NEXT}; exit 0; fi\necho \"$*\" > '{}'\n", self.started.display())
     }
 
     /// A shell snippet that installs the new release's binary at `binary` and `package`'s package.json, as a package
@@ -208,7 +225,7 @@ impl Scene {
     }
 
     /// Runs the scenario: a global install at `binary` launched by `launcher`, with `stubs` first on PATH. Checks
-    /// status and `update --check`, then that a managed relay updates to the manifest's version with `manager` and
+    /// status and `update --check`, then that a relay browse started updates to the manifest's version with `manager` and
     /// restarts on the new binary. `expected` is the stub's recorded call.
     fn run(&self, manager: &str, binary: &Path, launcher: &Path, stubs: Option<&Path>, expected: impl Fn(&str) -> String) {
         let (service, requests) = release_service();
@@ -243,7 +260,7 @@ impl Scene {
         let mut relay = serve.spawn().unwrap();
         wait_for("the relay to restart on the new binary", Duration::from_secs(60), || self.started.exists() && relay.try_wait().unwrap().is_some());
         assert!(relay.wait().unwrap().success());
-        assert_eq!(std::fs::read_to_string(&self.started).unwrap().trim(), "serve 1");
+        assert_eq!(std::fs::read_to_string(&self.started).unwrap().trim(), "serve");
         assert_eq!(std::fs::read_to_string(&self.calls).unwrap().trim(), expected(REGISTRY));
         self.requests_are(&requests, manager);
         let state: serde_json::Value = serde_json::from_slice(&std::fs::read(self.home.join(".browse/auto-update.json")).unwrap()).unwrap();
@@ -398,4 +415,117 @@ fn yarn_global_install() {
     scene.run("yarn", &binary, &launcher, Some(&stubs), |registry| {
         format!("global add @opencode/browse@{NEXT} --global-folder {} --non-interactive --no-progress --registry {registry}", folder.display())
     });
+}
+
+impl Scene {
+    /// A binary install of this build: the install script's `~/.browse/bin/browse`.
+    fn binary(&self) -> PathBuf {
+        let binary = self.home.join(".browse/bin/browse");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::hard_link(env!("CARGO_BIN_EXE_browse"), &binary).unwrap();
+        binary
+    }
+
+    /// The release's tarball, as the install script downloads it: `package/bin/browse` is [Scene::next_binary].
+    fn tarball(&self) -> Vec<u8> {
+        let dir = self.root.join("tarball");
+        write_executable(&dir.join("package/bin/browse"), &self.next_binary());
+        let archive = self.root.join("browse.tgz");
+        assert!(Command::new("tar").arg("-czf").arg(&archive).arg("-C").arg(&dir).arg("package/bin/browse").status().unwrap().success());
+        std::fs::read(archive).unwrap()
+    }
+
+    /// `browse serve` from `binary` with this scene's environment and nothing else.
+    fn serve(&self, binary: &Path, service: &str, port: u16) -> Command {
+        let mut serve = Command::new(binary);
+        self.isolate(&mut serve, service, port);
+        serve.arg("serve").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        serve
+    }
+
+    fn state(&self) -> serde_json::Value {
+        std::fs::read(self.home.join(".browse/auto-update.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    }
+}
+
+fn manifest_requests(requests: &Arc<Mutex<Vec<Request>>>, kind: &str) -> usize {
+    let manifest = format!("/release/browse/cli/{}.json", channel());
+    requests.lock().unwrap().iter().filter(|r| r.path == manifest && r.user_agent == user_agent(kind)).count()
+}
+
+fn answers_version(port: u16) -> bool {
+    let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) else { return false };
+    let _ = write!(stream, "GET /version HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    let mut response = String::new();
+    let _ = std::io::Read::read_to_string(&mut stream, &mut response);
+    response.starts_with("HTTP/1.1 200")
+}
+
+/// No client, no OPENCODE_BROWSER_* settings of its own (a person's `browse serve`): the relay checks the release
+/// service at launch, installs the release, and keeps running on the old executable with nobody connected (even with
+/// the old idle-shutdown setting): it doesn't restart itself.
+#[test]
+fn a_relay_with_no_special_environment_checks_at_launch_and_stays_up() {
+    let scene = Scene::new("launch");
+    let binary = scene.binary();
+    let (service, requests) = release_service_with(Some(scene.tarball()));
+    let port = free_port();
+    let mut relay = scene.serve(&binary, &service, port).env("OPENCODE_BROWSER_IDLE_SHUTDOWN_MS", "1").env("OPENCODE_BROWSER_AUTO_UPDATE_QUIET_MS", "0").spawn().unwrap();
+    wait_for("the check at launch", Duration::from_secs(20), || manifest_requests(&requests, "binary") > 0);
+    wait_for("the install", Duration::from_secs(20), || scene.state()["lastUpdate"]["to"] == NEXT);
+    std::thread::sleep(Duration::from_secs(4));
+    let running = relay.try_wait().unwrap().is_none();
+    let answered = answers_version(port);
+    let _ = relay.kill();
+    let _ = relay.wait();
+    assert!(running, "the relay exited with no client, or restarted itself");
+    assert!(answered, "the relay stopped answering");
+    assert!(!scene.started.exists(), "a foreground relay doesn't start the new executable");
+}
+
+/// Updates off: the relay still checks the manifest, with the same User-Agent, and downloads and installs nothing.
+#[test]
+fn updates_off_still_checks_and_installs_nothing() {
+    let scene = Scene::new("off");
+    let binary = scene.binary();
+    let (service, requests) = release_service_with(Some(scene.tarball()));
+    let port = free_port();
+    let mut off = Command::new(&binary);
+    off.args(["update", "--mode", "off"]);
+    scene.isolate(&mut off, &service, port);
+    assert!(run_output(&mut off).status.success());
+    let mut relay = scene.serve(&binary, &service, port).spawn().unwrap();
+    wait_for("the check", Duration::from_secs(20), || scene.state().get("checkedAt").is_some());
+    std::thread::sleep(Duration::from_secs(2));
+    let running = relay.try_wait().unwrap().is_none();
+    let _ = relay.kill();
+    let _ = relay.wait();
+    assert!(running);
+    scene.requests_are(&requests, "binary");
+    assert_eq!(scene.state()["latest"], NEXT);
+    assert!(scene.state().get("lastUpdate").is_none());
+    assert_eq!(std::fs::read(&binary).unwrap(), std::fs::read(env!("CARGO_BIN_EXE_browse")).unwrap(), "nothing installed");
+}
+
+/// No curl anywhere on PATH: a relay browse started checks, downloads and verifies the release itself, and restarts on
+/// it.
+#[test]
+fn a_relay_updates_without_curl() {
+    let scene = Scene::new("no-curl");
+    let binary = scene.binary();
+    let (service, requests) = release_service_with(Some(scene.tarball()));
+    let port = free_port();
+    // Only what unpacking needs.
+    let bin = scene.root.join("path");
+    std::fs::create_dir_all(&bin).unwrap();
+    for tool in ["tar", "gzip"] {
+        let found = std::env::split_paths(&std::env::var_os("PATH").unwrap()).map(|d| d.join(tool)).find(|f| f.is_file()).unwrap();
+        symlink(found, bin.join(tool)).unwrap();
+    }
+    let mut relay = scene.serve(&binary, &service, port).env("PATH", &bin).env("OPENCODE_BROWSER_MANAGED_RELAY", "1").env("OPENCODE_BROWSER_AUTO_UPDATE_QUIET_MS", "0").spawn().unwrap();
+    wait_for("the relay to restart on the new binary", Duration::from_secs(60), || scene.started.exists() && relay.try_wait().unwrap().is_some());
+    assert!(relay.wait().unwrap().success());
+    assert_eq!(std::fs::read_to_string(&scene.started).unwrap().trim(), "serve");
+    assert!(manifest_requests(&requests, "binary") > 0);
+    assert!(requests.lock().unwrap().iter().any(|r| r.path == "/release/files/x" && r.user_agent == user_agent("binary")));
 }

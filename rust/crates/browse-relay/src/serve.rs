@@ -42,34 +42,19 @@ pub struct ServeOptions {
     pub paths: Paths,
     pub version: String,
     pub build_id: String,
-    /// Stop after this long with no tool calls, no live client and nothing waiting on the user.
-    /// OPENCODE_BROWSER_IDLE_SHUTDOWN_MS (0: never), else `MANAGED_IDLE_SHUTDOWN` for a managed relay.
-    pub idle_shutdown: Option<Duration>,
-    /// Started on demand by a client (OPENCODE_BROWSER_MANAGED_RELAY=1), as `/version` reports.
-    pub managed: bool,
     /// Replaces the `autoUpdate` status the extension's pages show (the binary's update state).
     pub auto_update: Option<AutoUpdateStatus>,
     /// Test-only: the ports an unpinned relay tries.
     pub port_candidates: Option<Vec<u16>>,
 }
 
-/// How long a relay started on demand waits with nothing to do before it exits; the next call starts it again.
-pub const MANAGED_IDLE_SHUTDOWN: Duration = Duration::from_secs(30 * 60);
-
 impl Default for ServeOptions {
     fn default() -> Self {
-        let managed = std::env::var("OPENCODE_BROWSER_MANAGED_RELAY").as_deref() == Ok("1");
-        let idle_shutdown = match std::env::var("OPENCODE_BROWSER_IDLE_SHUTDOWN_MS").ok().and_then(|v| v.trim().parse::<u64>().ok()) {
-            Some(ms) => (ms > 0).then(|| Duration::from_millis(ms)),
-            None => managed.then_some(MANAGED_IDLE_SHUTDOWN),
-        };
         Self {
             port: None,
             paths: Paths::from_env(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             build_id: String::new(),
-            idle_shutdown,
-            managed,
             auto_update: None,
             port_candidates: None,
         }
@@ -110,7 +95,7 @@ impl RelayHandle {
         self.relay.idle(quiet)
     }
 
-    /// Runs until the relay stops (`stop`, POST /shutdown, idle shutdown).
+    /// Runs until the relay stops (`stop`, POST /shutdown).
     pub async fn wait(self) {
         let _ = self.task.await;
     }
@@ -124,19 +109,9 @@ impl Relay {
         let st = self.st();
         !st.busy() && st.handoffs.is_empty() && st.last_activity.elapsed() >= quiet
     }
-
-    /// [idle], and no client that called is still running: a managed relay can exit (the next call starts it again).
-    /// An MCP server that is connected but quiet keeps its relay up; only a dead agent lets it go.
-    pub fn unused(&self, quiet: Duration) -> bool {
-        let live = {
-            let st = self.st();
-            st.clients.iter().any(|pid| crate::util::process_alive(*pid))
-        };
-        !live && self.idle(quiet)
-    }
 }
 
-/// Runs the relay until it stops (SIGINT, SIGTERM, POST /shutdown, idle shutdown). `tools` are every crate's tools;
+/// Runs the relay until it stops (SIGINT, SIGTERM, POST /shutdown). `tools` are every crate's tools;
 /// the relay's own come from `browse_relay::tools()`.
 pub async fn serve(options: ServeOptions, tools: Vec<Arc<dyn Tool>>) -> anyhow::Result<()> {
     serve_until(options, tools, async {
@@ -196,8 +171,6 @@ pub async fn start(options: ServeOptions, tools: Vec<Arc<dyn Tool>>) -> anyhow::
         version: options.version.clone(),
         build_id: options.build_id.clone(),
         auto_update: options.auto_update.clone(),
-        idle_shutdown: options.idle_shutdown,
-        managed: options.managed,
     })?;
     *relay.tools.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = tools;
     let state = RelayState { port: addr.port(), configured_port: configured, pid: std::process::id(), instance_id: relay.instance_id.clone(), started_at: relay.started_at.clone() };
@@ -219,8 +192,6 @@ pub async fn start(options: ServeOptions, tools: Vec<Arc<dyn Tool>>) -> anyhow::
         url = format!("http://127.0.0.1:{}", addr.port()),
         version = relay.version.clone(),
         pid = std::process::id(),
-        managed = relay.managed,
-        idleShutdownMs = relay.idle_shutdown.map(|d| d.as_millis() as u64),
     );
     crate::watchdog::spawn(&relay);
     let task = tokio::spawn(run(relay.clone(), listener));
@@ -346,7 +317,8 @@ async fn route(relay: Arc<Relay>, peer: SocketAddr, request: Request<Incoming>) 
             "instanceId": relay.instance_id,
             "startedAt": relay.started_at,
             "pid": std::process::id(),
-            "managed": relay.managed,
+            // Every relay stops on POST /shutdown; clients before this field went away check it first.
+            "managed": true,
             "shutdownProtocol": 2,
             "runtime": "rust",
         });
@@ -673,7 +645,7 @@ pub(crate) async fn sweep_clients(relay: &Arc<Relay>) {
     }
 }
 
-/// Keepalive pings, idle tabs, calls whose client exited, and idle shutdown.
+/// Keepalive pings, idle tabs and calls whose client exited.
 async fn housekeeping(relay: Arc<Relay>) {
     let keepalive = std::env::var("OPENCODE_BROWSER_KEEPALIVE_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(20_000);
     let started = Instant::now();
@@ -725,14 +697,6 @@ async fn housekeeping(relay: Arc<Relay>) {
             if let Some(bytes) = crate::util::resident_bytes().filter(|b| *b >= 256 * 1024 * 1024) {
                 let tabs = relay.st().tabs.len();
                 rlog!("relay.memory", rssMb = bytes / (1024 * 1024), tabs = tabs);
-            }
-        }
-        if let Some(idle) = relay.idle_shutdown {
-            let unused = relay.unused(idle);
-            if unused {
-                rlog!("relay.idle_shutdown", idleMs = idle.as_millis() as u64);
-                relay.stop();
-                return;
             }
         }
     }
