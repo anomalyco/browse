@@ -401,12 +401,13 @@ export function createRelayHandshake(deps: {
     for (const tabId of Array.from(deps.relayTabs)) {
       // The stored marker wins; the cleanup tracking says who opened the tab when it has none. Both the read and the
       // write run in TabIdentity's queue, so a lend or clear that lands meanwhile isn't undone by a stale answer.
-      const { browseId, agent } = await TabIdentity.ensureOwned(tabId, () => TabCleanup.isTracked(tabId))
-      if (deps.currentSocket() !== current) return
+      const owned = await TabIdentity.ensureOwned(tabId, () => TabCleanup.isTracked(tabId))
+      // Nothing comes back when the browser started under this connection (stale ids) or storage timed out.
+      if (!owned || deps.currentSocket() !== current) return
       current.send(
         JSON.stringify({
           method: "debugger.attached",
-          params: { tabId, ...(agent ? { agent: true } : {}), browseId },
+          params: { tabId, ...(owned.agent ? { agent: true } : {}), browseId: owned.browseId },
         }),
       )
     }
