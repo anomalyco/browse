@@ -81,7 +81,9 @@ holds the same tree.
 A `publish-cws` 400 from `:publish` saying the submission "does not meet the requirements to be published in the
 store" means a dashboard field needs fixing, not the build: correct it in the
 [developer dashboard](https://chrome.google.com/webstore/devconsole) (most often a new manifest permission's
-justification under **Privacy practices**, worded from [store/listing.md](store/listing.md)), then rerun the failed job.
+justification under **Privacy practices**, worded from [store/listing.md](store/listing.md)), click **Submit for
+review** there, then rerun the failed job. The rerun sees the version in review and skips the store step, letting the
+GitHub release and the release commit to dev go ahead.
 
 ## The security boundary
 

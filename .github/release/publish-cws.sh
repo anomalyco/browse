@@ -6,10 +6,8 @@
 # CWS_REFRESH_TOKEN (read from AWS Secrets Manager by the release workflow), GH_TOKEN and GITHUB_REPOSITORY (to read the
 # previous release's zip).
 # Idempotent: when the item already has this version published, in review, or staged, nothing is uploaded again; it
-# reports the state. A package that was uploaded but never submitted (a publish the store refused, or a cancelled
-# review) is a draft, not a submission: a rerun submits it with publish instead of skipping it. It also uploads nothing
-# when the zip is the extension the store already has, unchanged apart from the manifest version (and version_name):
-# the store keeps that version and the release goes on without another review.
+# reports the state. It also uploads nothing when the zip is the extension the store already has, unchanged apart from
+# the manifest version (and version_name): the store keeps that version and the release goes on without another review.
 # Publishing uses the item's visibility in the dashboard and submits for review; it doesn't wait for review.
 # The store refuses a new package while a submission is under review, so an older version still pending review is
 # cancelled first and this build is the one that gets reviewed.
@@ -157,15 +155,17 @@ fi
 if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::add-mask::$token"; fi
 printf 'Authorization: Bearer %s\n' "$token" > "$work/auth"
 
-# error_detail <file>: the API's error on one line: status, message, and details (where Google puts the field-level
-# reasons) when it sends any. Only the response body is read; the access token lives in its own header file and is
-# never printed.
+# error_detail <file>: the API's error on one line: status and message (or the code when those are absent), plus the
+# details (where Google puts the field-level reasons) when it sends any. Only the response body is read; the access
+# token lives in its own header file and is never printed.
 error_detail() {
   local detail
   detail=$(jq -r '(.error // empty) as $e
     | if ($e | type) == "object" then
-        ([$e.status, $e.message] | map(select(. != null and . != "")) | join(": "))
-        + (if ($e.details // []) | length > 0 then " details: \($e.details | tojson)" else "" end)
+        ([$e.status, $e.message] | map(select(. != null and . != "")) | join(": ")) as $head
+        | (if $head != "" then $head elif $e.code != null then ($e.code | tostring) else "" end) as $head
+        | [$head, (if ($e.details // []) | length > 0 then "details: \($e.details | tojson)" else empty end)]
+        | map(select(. != "")) | join(": ")
       else $e end' "$1" 2> /dev/null) || detail=""
   [ -n "$detail" ] || detail=$(head -c 500 "$1")
   printf '%s' "$detail"
@@ -187,25 +187,22 @@ if [ "$(jq -r '.takenDown // false' <<< "$before")" = true ]; then
   die "Item $item is taken down for a policy violation; resolve it in the developer dashboard first."
 fi
 if [ "$(jq -r '.warned // false' <<< "$before")" = true ]; then
-  die "Item $item is warned for a policy violation and will be taken down if it isn't resolved; fix it in the developer dashboard first."
+  echo "::warning::Item $item is warned for a policy violation and will be taken down if it isn't resolved; fix it in the developer dashboard."
+  summary "The Chrome Web Store item is warned for a policy violation and will be taken down if it isn't resolved; fix it in the developer dashboard."
 fi
-# Only an explicit state is a reason to skip. An uploaded package that was never submitted (a publish the store
-# refused) or whose submission was cancelled or rejected carries this version too, and skipping on that would report
-# success with nothing in the store's review queue.
+# Only an explicit active state is a reason to skip. CANCELLED, REJECTED, or a missing state is not a submission in
+# the store's review queue, and treating it as one would report success without submitting this build.
 published=$(jq -r --arg v "$BROWSE_VERSION" '.publishedItemRevisionStatus | select(.state == "PUBLISHED" or .state == "PUBLISHED_TO_TESTERS") | select(any(.distributionChannels[]?; .crxVersion == $v)) | .state' <<< "$before")
 submitted=$(jq -r --arg v "$BROWSE_VERSION" '.submittedItemRevisionStatus | select(.state == "PENDING_REVIEW" or .state == "STAGED") | select(any(.distributionChannels[]?; .crxVersion == $v)) | .state' <<< "$before")
 if [ -n "$published" ] || [ -n "$submitted" ]; then
   summary "### Chrome Web Store" "$BROWSE_VERSION is already $([ -n "$published" ] && echo "published" || echo "submitted") on $item: ${published:-$submitted}. Nothing uploaded."
   exit 0
 fi
-# The same version can still sit in the item as a draft, with a state that isn't a submission: CANCELLED after a
-# cancelled review, REJECTED, or none at all after a publish the store refused (the upload succeeded, the submission
-# didn't). publish submits whatever was uploaded last, so this goes straight to publish; uploading it again would be
-# refused because the package isn't newer than that draft.
-draft=false
-if jq -e --arg v "$BROWSE_VERSION" '.submittedItemRevisionStatus | select(.) | any(.distributionChannels[]?; .crxVersion == $v)' > /dev/null <<< "$before"; then
-  draft=true
-  draft_state=$(jq -r '.submittedItemRevisionStatus.state // empty' <<< "$before")
+# A rejected submission is not retried automatically: the store has passed on that package, so the fix needs a new
+# version.
+rejected=$(jq -r --arg v "$BROWSE_VERSION" '.submittedItemRevisionStatus | select(.state == "REJECTED") | select(any(.distributionChannels[]?; .crxVersion == $v)) | .state' <<< "$before")
+if [ -n "$rejected" ]; then
+  die "$BROWSE_VERSION was rejected by the Chrome Web Store; fix the issue in the developer dashboard and bump the version before releasing again."
 fi
 # The revision waiting in review (or approved and about to publish), if any.
 pending_state=$(jq -r '.submittedItemRevisionStatus | select(.state == "PENDING_REVIEW" or .state == "STAGED") | .state' <<< "$before")
@@ -233,49 +230,40 @@ if [ "$unchanged" = true ]; then
   fi
   exit 0
 fi
-# The store refuses a new package while a submission is under review, so a pending one is cancelled before the upload
-# below. One of this release's version returned above, so this is a different build: an older one is cancelled below,
-# so the newest build is the one reviewed. A newer one belongs to a later release, so this job stops instead of
-# replacing it.
+# The store refuses a new package while a submission is under review, so the cancel below comes before the upload.
+# One of this release's version returned above, so this is a different build: an older submission is cancelled so the
+# newest build is reviewed, while a newer one belongs to a later release and this job stops instead of replacing it.
 if [ -n "$pending_state" ] && { [ -z "$pending" ] || ! older_version "$pending" "$BROWSE_VERSION"; }; then
   die "${pending:-A submission} is still $pending_state on $item, so $BROWSE_VERSION can't be submitted; finish that release, or cancel it in the developer dashboard and rerun this job."
 fi
 
 if dry_run; then
   summary "### Chrome Web Store (dry run)"
-  if [ "$draft" = true ]; then
-    summary "Would submit the $BROWSE_VERSION package the store already has as a draft (state ${draft_state:-unknown}), without uploading it again."
-  else
-    [ -z "$pending" ] || summary "Would cancel the pending review of $pending so $BROWSE_VERSION gets reviewed instead"
-    summary "Would upload $(basename "$zip") ($BROWSE_VERSION) to $item and submit it; the store has $(jq -r '.publishedItemRevisionStatus.distributionChannels[0].crxVersion // "no published version"' <<< "$before")."
-  fi
+  [ -z "$pending" ] || summary "Would cancel the pending review of $pending so $BROWSE_VERSION gets reviewed instead"
+  summary "Would upload $(basename "$zip") ($BROWSE_VERSION) to $item and submit it; the store has $(jq -r '.publishedItemRevisionStatus.distributionChannels[0].crxVersion // "no published version"' <<< "$before")."
   [ -z "$note" ] || summary "$note"
   exit 0
 fi
 [ -z "$note" ] || summary "$note"
-if [ "$draft" = true ]; then
-  summary "The store already has $BROWSE_VERSION as a draft (state ${draft_state:-unknown}); submitting it without another upload"
-else
-  if [ -n "$pending" ]; then
-    call POST "$api/v2/$item:cancelSubmission" > /dev/null
-    summary "Cancelled the pending review of $pending so $BROWSE_VERSION gets reviewed instead"
-  fi
-
-  uploaded=$(call POST "$api/upload/v2/$item:upload" -H "Content-Type: application/zip" --data-binary "@$zip")
-  state=$(jq -r '.uploadState // empty' <<< "$uploaded")
-  version=$(jq -r '.crxVersion // empty' <<< "$uploaded")
-  # Large packages finish processing asynchronously; poll for up to five minutes.
-  for _ in $(seq 60); do
-    [ "$state" = IN_PROGRESS ] || break
-    sleep "$poll"
-    current=$(fetch_status)
-    state=$(jq -r '.lastAsyncUploadState // empty' <<< "$current")
-    version=$(jq -r --arg v "$version" '.submittedItemRevisionStatus.distributionChannels[0].crxVersion // $v' <<< "$current")
-  done
-  [ "$state" = SUCCEEDED ] || die "Upload ended in state ${state:-unknown}; see the developer dashboard for the reason."
-  [ -z "$version" ] || [ "$version" = "$BROWSE_VERSION" ] || die "The store read version $version from the upload, expected $BROWSE_VERSION."
-  echo "Uploaded $BROWSE_VERSION"
+if [ -n "$pending" ]; then
+  call POST "$api/v2/$item:cancelSubmission" > /dev/null
+  summary "Cancelled the pending review of $pending so $BROWSE_VERSION gets reviewed instead"
 fi
+
+uploaded=$(call POST "$api/upload/v2/$item:upload" -H "Content-Type: application/zip" --data-binary "@$zip")
+state=$(jq -r '.uploadState // empty' <<< "$uploaded")
+version=$(jq -r '.crxVersion // empty' <<< "$uploaded")
+# Large packages finish processing asynchronously; poll for up to five minutes. The version comes from the upload
+# response: submittedItemRevisionStatus is the last submission, not this upload.
+for _ in $(seq 60); do
+  [ "$state" = IN_PROGRESS ] || break
+  sleep "$poll"
+  current=$(fetch_status)
+  state=$(jq -r '.lastAsyncUploadState // empty' <<< "$current")
+done
+[ "$state" = SUCCEEDED ] || die "Upload ended in state ${state:-unknown}; see the developer dashboard for the reason."
+[ -z "$version" ] || [ "$version" = "$BROWSE_VERSION" ] || die "The store read version $version from the upload, expected $BROWSE_VERSION."
+echo "Uploaded $BROWSE_VERSION"
 
 result=$(call POST "$api/v2/$item:publish" -H "Content-Type: application/json" --data '{"publishType":"DEFAULT_PUBLISH"}')
 jq -r '.warningInfo.warnings[]? | "::warning::\(.reason // "warning"): \(.description // "")"' <<< "$result"
