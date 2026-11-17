@@ -40,6 +40,16 @@ describe("DebuggingBarNotice", () => {
     expect(stub.state.notificationCreates).toBe(2)
   })
 
+  test("a clock that went backward doesn't silence the next cancel", async () => {
+    const now = Date.now()
+    await DebuggingBarNotice.canceled()
+    expect(stub.state.notificationCreates).toBe(1)
+    // Time moved back past the notice: that is not a burst still in progress.
+    setSystemTime(now - 60_000)
+    await DebuggingBarNotice.canceled()
+    expect(stub.state.notificationCreates).toBe(2)
+  })
+
   test("with notifications turned off, nothing is shown and nothing throws", async () => {
     stub.state.permissionLevel = "denied"
     await DebuggingBarNotice.canceled()

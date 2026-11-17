@@ -20,7 +20,11 @@ let creating: Promise<void> | undefined
 /** Tells the user the debugging bar's button disconnected browse from every tab; one notice covers the whole burst. */
 export function canceled(): Promise<void> {
   if (creating !== undefined) return creating
-  if (shownAt !== undefined && Date.now() - shownAt < BURST_MS) return Promise.resolve()
+  // A clock that went backward reads as no time having passed, which would silence every later notice.
+  if (shownAt !== undefined) {
+    const elapsed = Date.now() - shownAt
+    if (elapsed >= 0 && elapsed < BURST_MS) return Promise.resolve()
+  }
   // Never rejects: a browser without notifications has nothing to show and nothing to report.
   const attempt = show().catch(() => undefined)
   creating = attempt
