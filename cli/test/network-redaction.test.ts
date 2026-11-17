@@ -210,6 +210,33 @@ describe("SecretRedactor", () => {
     expect(url).toBe(`https://example.com/cb?state=${redacted}`)
   })
 
+  test("finds a short secret-named URL value in an ordinary body string", () => {
+    const base = capturedEntry("echo", { url: "https://x.example.com/y?api_key=k1234567890", note: "signed f1234567890" })
+    const { exchanges } = finishCapture(activeCapture([
+      {
+        ...base,
+        request: { ...base.request, url: "https://docs.example.com/echo?api_key=k1234567890#signature=f1234567890" },
+      },
+    ]))
+    const echo = exchanges[0]
+    expect(echo?.request.url).toBe(`https://docs.example.com/echo?api_key=${redacted}#signature=${redacted}`)
+    expect(JSON.parse(echo?.response?.body?.text ?? "{}"))
+      .toEqual({ url: `https://x.example.com/y?api_key=${redacted}`, note: `signed ${redacted}` })
+  })
+
+  test("leaves short values from other sources alone in body strings", () => {
+    const base = capturedEntry("note", { note: "sid=abcdef1234" })
+    const { exchanges } = finishCapture(activeCapture([
+      {
+        ...base,
+        request: { ...base.request, headers: [{ name: "cookie", value: "sid=abcdef1234" }] },
+      },
+    ]))
+    const note = exchanges[0]
+    expect(note?.request.headers).toContainEqual({ name: "cookie", value: `sid=${redacted}` })
+    expect(JSON.parse(note?.response?.body?.text ?? "{}")).toEqual({ note: "sid=abcdef1234" })
+  })
+
   test("finds a percent-encoded known secret", () => {
     const redactor = new SecretRedactor()
     redactor.protectUrl("https://example.com/?token=a%2Fb%2Bc1234567890")

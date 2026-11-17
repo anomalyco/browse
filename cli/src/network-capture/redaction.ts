@@ -50,6 +50,9 @@ const nonSecretHeaders = new Set([
  */
 export class SecretRedactor {
   private readonly knownValues = new Set<string>()
+  // Values from secret-named URL query and fragment fields: credentials by name, so body strings replace them at the
+  // same floor URLs and headers use.
+  private readonly namedFields = new Set<string>()
   // Passwords and one-time codes are replaced at any length, unlike short reusable captures.
   private readonly alwaysRedacted = new Set<string>()
 
@@ -60,7 +63,7 @@ export class SecretRedactor {
   protectUrl(rawUrl: string): string {
     const fragmentStart = rawUrl.indexOf("#")
     const base = fragmentStart < 0 ? rawUrl : rawUrl.slice(0, fragmentStart)
-    const protectQuery = (name: string, value: string) => value ? this.scrub(value, name) : value
+    const protectQuery = (name: string, value: string) => value ? this.scrubUrlField(value, name) : value
     const protectPath = (pathname: string) => protectPathSegments(pathname, (segment) => this.scrub(segment))
     let protectedUrl: string
     try {
@@ -74,7 +77,7 @@ export class SecretRedactor {
     protectedUrl = restoreRedactionPlaceholders(protectedUrl)
     if (fragmentStart < 0) return protectedUrl
     const fragment = restoreRedactionPlaceholders(protectFragment(rawUrl.slice(fragmentStart + 1), (name, value) =>
-      value ? this.scrub(value, name) : value))
+      value ? this.scrubUrlField(value, name) : value))
     return `${protectedUrl}#${fragment}`
   }
 
@@ -133,6 +136,17 @@ export class SecretRedactor {
     return this.redactKnown(text, (value) => value.length >= minimumLength || this.alwaysRedacted.has(value))
   }
 
+  /**
+   * The body-string pass. Values from a secret-named URL query or fragment field are credentials
+   * by name, so they are replaced at the ordinary floor even where body strings use a higher one.
+   */
+  redactKnownBodySubstrings(text: string, minimumLength: number): string {
+    return this.redactKnown(text, (value) =>
+      value.length >= minimumLength
+      || value.length >= minimumKnownSubstringLength && this.namedFields.has(value)
+      || this.alwaysRedacted.has(value))
+  }
+
   /** Remember `value` for redaction everywhere; nothing is stored on disk. */
   addRedactionOnly(value: string): void {
     if (value) {
@@ -160,6 +174,12 @@ export class SecretRedactor {
     this.knownValues.add(value)
     if (oneTimeFieldPattern.test(fieldName)) this.alwaysRedacted.add(value)
     return redactionSentinel
+  }
+
+  /** A secret-named URL query or fragment field value, remembered for the body-string pass too. */
+  private scrubUrlField(value: string, fieldName: string): string {
+    this.namedFields.add(value)
+    return this.scrub(value, fieldName)
   }
 
   private protectHeader(name: string, value: string): string {
