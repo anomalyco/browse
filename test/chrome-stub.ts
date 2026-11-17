@@ -88,15 +88,11 @@ export function createChrome() {
   const windows = new Map<number, Window>()
   const tabs = new Map<number, Tab>()
   const groups = new Map<number, Group>()
-  /** chrome.sessions tab values, by tab id (Chrome keeps them with a restored tab and drops them with a closed one). */
-  const tabValues = new Map<number, Map<string, unknown>>()
   const onChanged = new StubEvent()
   const state = {
     windows,
     tabs,
     groups,
-    /** chrome.sessions tab values, by tab id. */
-    tabValues,
     /** Every chrome.windows.update({ focused: true }) and chrome.tabs.update({ active: true }), in order. */
     activations: [] as ({ windowId: number } | { tabId: number })[],
     /** Tab calls that change groups, in order, so tests can check ungroup comes before remove. */
@@ -163,11 +159,7 @@ export function createChrome() {
     },
     async remove(id: number) {
       if (!windows.delete(id)) throw new Error(`No window with id: ${id}.`)
-      for (const tab of tabs.values())
-        if (tab.windowId === id) {
-          tabs.delete(tab.id)
-          tabValues.delete(tab.id)
-        }
+      for (const tab of tabs.values()) if (tab.windowId === id) tabs.delete(tab.id)
       windowsApi.onRemoved.emit(id)
       dropEmptyGroups()
     },
@@ -258,7 +250,6 @@ export function createChrome() {
           if (!tab) throw new Error(`No tab with id: ${tabId}.`)
           state.calls.push(`remove:${tabId}`)
           tabs.delete(tabId)
-          tabValues.delete(tabId)
           ;((chrome.tabs as unknown as { onRemoved: StubEvent }).onRemoved).emit(tabId, { windowId: tab.windowId, isWindowClosing: false })
         }
         dropEmptyGroups()
@@ -304,20 +295,20 @@ export function createChrome() {
       local: storageArea("local", onChanged),
       session: storageArea("session", onChanged),
     }),
-    sessions: lenient({
-      async getTabValue(tabId: number, key: string) {
-        return tabValues.get(tabId)?.get(key)
+    // Chrome's chrome.sessions has no per-tab values (that is Firefox's tab-values API): only recently closed tabs,
+    // restore and devices.
+    sessions: {
+      onChanged: new StubEvent(),
+      async getRecentlyClosed() {
+        return []
       },
-      async setTabValue(tabId: number, key: string, value: unknown) {
-        if (!tabs.has(tabId)) throw new Error(`No tab with id: ${tabId}.`)
-        const values = tabValues.get(tabId) ?? new Map<string, unknown>()
-        values.set(key, structuredClone(value))
-        tabValues.set(tabId, values)
+      async restore() {
+        return undefined
       },
-      async removeTabValue(tabId: number, key: string) {
-        tabValues.get(tabId)?.delete(key)
+      async getDevices() {
+        return []
       },
-    }),
+    },
     notifications: lenient({
       async getPermissionLevel() {
         return state.permissionLevel

@@ -137,8 +137,8 @@ export function createRelayCommands(deps: {
         if (clicked) void ToolbarNotice.clear(tabId)
         deps.relayTabs.add(tabId)
         deps.notify()
-        // The tab's stable id, so the relay gets the same tab back after a browser restart. A lent tab is not an agent
-        // tab: idle cleanup never closes it.
+        // The tab's stable id, so a relay that reconnects keeps the same tab. A lent tab is not an agent tab: idle
+        // cleanup never closes it.
         const browseId = await TabIdentity.ensure(tabId, { agent: await TabCleanup.isTracked(tabId) })
         return browseId ? { browseId } : {}
       }
@@ -184,8 +184,8 @@ export function createRelayCommands(deps: {
           normalWindows: opened.normalWindows,
         })
         TabCleanup.track(tab.id)
-        // A caller-chosen id (`work-mail`) is kept on the tab: the relay never idle-closes such a tab, and the id
-        // survives a browser restart with the rest of the tab's identity.
+        // A caller-chosen id (`work-mail`) is kept with the tab's identity: the relay never idle-closes such a tab. It
+        // survives service-worker restarts; an extension update or reload keeps it only for tabs in browse's group.
         const chosen = typeof params?.id === "string" && /^[a-z][a-z0-9-]{0,63}$/.test(params.id) ? params.id : undefined
         // A discarded tab loses the debugger and the agent's page. Issued now but not awaited: the answer must not
         // wait on it.
@@ -193,8 +193,12 @@ export function createRelayCommands(deps: {
         // The tab is tracked in memory; clearing the creation marker must not hold the answer past the budget.
         await withTimeout(TabCleanup.endCreate(creating), deadline - Date.now())
         if (url === "about:blank") await waitUntilLoaded(tab.id, deps.log, deadline)
-        const browseId = await TabIdentity.ensure(tab.id, { agent: true, ...(chosen ? { chosen } : {}) })
-        return { tabId: tab.id, ...(browseId ? { browseId } : {}) }
+        // The id shares the command's budget: a storage write that never lands must not hold the answer.
+        const browseId = await withTimeout(
+          TabIdentity.ensure(tab.id, { agent: true, ...(chosen ? { chosen } : {}) }),
+          deadline - Date.now(),
+        )
+        return { tabId: tab.id, ...(typeof browseId === "string" ? { browseId } : {}) }
       }
       case "tabs.remove":
         await TabCleanup.closeAgentTab(number(params, "tabId"))
