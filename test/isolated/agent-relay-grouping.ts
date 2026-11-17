@@ -4,9 +4,9 @@ import { installFakeRelaySocket } from "../relay-stub"
 
 // The status page's Grouping setting (agent-relay.ts group, agent-groups.ts): one shared "Agents · N" group for every
 // agent (the default), one group per session, or none; with popups, handoffs, the toolbar's kill switch (the relay
-// detaching a tab) and both window modes. Also the relay-side settings the extension sends (human input) and
-// the environment overrides the relay reports back, and the relay's settings tool reading and writing them
-// (settings.get / settings.set). Run by ../isolated.test.ts in a process of its own.
+// detaching a tab), both window modes, and the notice a debugging-bar cancel shows. Also the relay-side settings the
+// extension sends (human input) and the environment overrides the relay reports back, and the relay's settings tool
+// reading and writing them (settings.get / settings.set). Run by ../isolated.test.ts in a process of its own.
 
 const stub = installChrome()
 ;(globalThis as { __OPENCODE_BROWSER_BUILD__?: string }).__OPENCODE_BROWSER_BUILD__ = "test"
@@ -99,6 +99,9 @@ beforeEach(async () => {
   socket().received.length = 0
   await stub.chrome.storage.local.remove(["agentTabsWindow", "agentTabsGrouping", "agentTabsGroupCollapse", "humanInput", "tabCleanupIdleMinutes", "handoffNotifications"])
   await stub.chrome.storage.session.remove("agentWindowId")
+  stub.state.notifications.clear()
+  stub.state.permissionLevel = "granted"
+  stub.state.notificationsFail = false
 })
 
 await until(() => relay.state().status === "connected")
@@ -329,6 +332,26 @@ describe("grouping: one shared group for all agents (default)", () => {
     const closed = await TabCleanup.cleanup({ minutes: 0 })
     expect(closed.map((tab) => tab.tabId).sort()).toEqual([first.tabId, second.tabId].sort())
     expect(stub.state.tabs.has(userTab)).toBe(true)
+  })
+
+  test("a debugging bar cancel notifies the user once for the whole burst, and other detaches don't", async () => {
+    await stub.chrome.storage.local.set({ agentTabsGrouping: "shared" })
+    const { userTab } = await userWindow()
+    const first = await agentTab("github")
+    const second = await agentTab("linear")
+    await command("debugger.attach", { tabId: userTab })
+    // Chrome reports a foreign frame taking over as target_closed, which browse reattaches: the user hears nothing.
+    event("debugger.onDetach").emit({ tabId: first.tabId }, "target_closed")
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    expect(stub.state.notifications.size).toBe(0)
+    // Chromium detaches every tab at once when the bar's button is clicked.
+    const canceled = [first.tabId, second.tabId, userTab]
+    for (const tabId of canceled) event("debugger.onDetach").emit({ tabId }, "canceled_by_user")
+    await canceledAtOnce(canceled)
+    await until(() => stub.state.notifications.size === 1)
+    expect([...stub.state.notifications.entries()]).toEqual([
+      ["opencode-browser-debugging-bar", expect.objectContaining({ title: "browse stopped using your tabs" })],
+    ])
   })
 
   test("a debugging bar cancel leaves a lent tab in one of the user's own groups where it is", async () => {

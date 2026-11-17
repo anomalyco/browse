@@ -308,7 +308,10 @@ function Settings() {
         </details>
       </section>
 
-      <footer class="settings-foot">Agents open their own tabs. To share one of yours, click the browse button on it.</footer>
+      <footer class="settings-foot">
+        Agents open their own tabs. To share one of yours, click the browse button on it. The debugging bar's button
+        (Cancel or OK) disconnects browse from every tab; click the browse button on a tab to lend it again.
+      </footer>
       <Toast.Region />
     </main>
   )
