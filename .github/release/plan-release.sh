@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # plan-release.sh: decides the mode, version and npm dist-tag from the event, ref and dispatch inputs (INPUT_BUMP,
-# INPUT_VERSION, INPUT_RELEASE_NOTES), and writes them to $GITHUB_OUTPUT. It reads cli/package.json of the triggering
-# commit through the API, as data; nothing here runs repository code.
+# INPUT_VERSION, INPUT_RELEASE_NOTES), and writes them to $GITHUB_OUTPUT. A version counts from the newest of
+# cli/package.json at the triggering commit and the newest v* tag: the tag job runs before any publish, so a version
+# whose tag exists has shipped even when a publish job failed and its release commit never reached dev. A stable
+# dispatch must be from a commit that contains the newest tag's commit, so a rerun of an older commit can't ship old
+# code as a new version. It reads all of this through the API, as data; nothing here runs repository code.
 #
 #   push to dev                          dev     <next patch>-dev.<run>[.<attempt>]  npm tag dev, release service
 #   dispatch on dev with bump/version    stable  x.y.z                               npm latest, Chrome Web Store,
@@ -21,9 +24,55 @@ case "$GITHUB_EVENT_NAME:$GITHUB_REF:$versioned" in
   *) die "$GITHUB_EVENT_NAME on $GITHUB_REF cannot release (bump or version given: $versioned); stable releases are dispatched on dev" ;;
 esac
 
+# The version a stable release plans from <base>: INPUT_VERSION, or the bump applied to it.
+if [ -z "${INPUT_VERSION:-}" ] && [ -n "${INPUT_BUMP:-}" ]; then
+  case "$INPUT_BUMP" in major | minor | patch) ;; *) die "Unknown bump $INPUT_BUMP" ;; esac
+fi
+next_version() {
+  if [ -n "${INPUT_VERSION:-}" ]; then printf '%s\n' "$INPUT_VERSION"; return 0; fi
+  local major minor patch
+  IFS=. read -r major minor patch <<< "$1"
+  case "$INPUT_BUMP" in
+    major) printf '%s\n' "$((major + 1)).0.0" ;;
+    minor) printf '%s\n' "$major.$((minor + 1)).0" ;;
+    patch) printf '%s\n' "$major.$minor.$((patch + 1))" ;;
+  esac
+}
+
 current=$(gh api -H "Accept: application/vnd.github.raw" "repos/$GITHUB_REPOSITORY/contents/cli/package.json?ref=$GITHUB_SHA" | jq -r .version)
 stable_version "$current" || die "cli/package.json at $GITHUB_SHA has version $current, not a stable x.y.z"
-IFS=. read -r major minor patch <<< "$current"
+# The tag job runs before any publish, so a version whose tag exists is consumed even when a publish job failed and its
+# release commit never reached dev. Count from the newest of cli/package.json and the newest stable v* tag.
+tag_refs=$(gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" --jq '.[].ref') ||
+  die "Couldn't read the repository's v* tags"
+stable_tags=$(while IFS= read -r ref; do
+  candidate=${ref#refs/tags/v}
+  if stable_version "$candidate"; then printf '%s\n' "$candidate"; fi
+done <<< "$tag_refs")
+newest_tag=$(printf '%s\n' "$stable_tags" | sort -V | tail -n 1)
+base=$(printf '%s\n%s\n' "$current" "$newest_tag" | sort -V | tail -n 1)
+base_tag=$newest_tag
+# A stable dispatch must be from a commit that contains the newest tag's release commit: a rerun keeps its original
+# $GITHUB_SHA, which a later release may have moved past, and would ship old code as the newest version.
+if [ "$mode" = stable ] && [ -n "$newest_tag" ]; then
+  tag_parent=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/v$newest_tag" --jq '.parents[0].sha') ||
+    die "Couldn't read the commit of tag v$newest_tag"
+  status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$tag_parent...$GITHUB_SHA" --jq .status) ||
+    die "Couldn't compare $GITHUB_SHA with the commit of tag v$newest_tag"
+  case "$status" in
+    ahead | identical) ;;
+    *) die "v$newest_tag was released from $tag_parent, which $GITHUB_SHA doesn't contain; dispatch a new release on dev instead of rerunning this one" ;;
+  esac
+  # tag-release.sh reuses v<version> when its release commit on $GITHUB_SHA has the same tree, so a tag this dispatch
+  # made sits one commit above it. On a rerun, leave that tag out only when this dispatch plans that same version
+  # without it; otherwise it counts, so the rerun never plans below a shipped version.
+  if [ "${GITHUB_RUN_ATTEMPT:-1}" != 1 ] && [ "$tag_parent" = "$GITHUB_SHA" ]; then
+    older_tag=$(printf '%s\n' "$stable_tags" | grep -vxF "$newest_tag" | sort -V | tail -n 1 || true)
+    older_base=$(printf '%s\n%s\n' "$current" "$older_tag" | sort -V | tail -n 1)
+    if [ "$(next_version "$older_base")" = "$newest_tag" ]; then base=$older_base base_tag=$older_tag; fi
+  fi
+fi
+IFS=. read -r major minor patch <<< "$base"
 
 if [ "$mode" = stable ]; then
   actor=${GITHUB_TRIGGERING_ACTOR:-${GITHUB_ACTOR:-}}
@@ -47,19 +96,10 @@ if [ "$mode" = stable ]; then
   fi
   if printf '%s\n' "$notes" | grep -qF TODO; then die "release_notes still have TODO placeholders"; fi
 
-  if [ -n "${INPUT_VERSION:-}" ]; then
-    version=$INPUT_VERSION
-  else
-    case "$INPUT_BUMP" in
-      major) version="$((major + 1)).0.0" ;;
-      minor) version="$major.$((minor + 1)).0" ;;
-      patch) version="$major.$minor.$((patch + 1))" ;;
-      *) die "Unknown bump $INPUT_BUMP" ;;
-    esac
-  fi
+  version=$(next_version "$base")
   stable_version "$version" || die "Invalid release version $version (x.y.z, each part at most 65535)"
-  [ "$(printf '%s\n%s\n' "$current" "$version" | sort -V | head -n 1)" = "$current" ] ||
-    die "$version is older than the version in cli/package.json ($current)"
+  [ "$(printf '%s\n%s\n' "$base" "$version" | sort -V | tail -n 1)" = "$version" ] && [ "$version" != "$base" ] ||
+    die "$version must be newer than cli/package.json ($current) and the newest tag (${base_tag:-none})"
   status=$(curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/@opencode%2fbrowse/$version")
   [ "$status" != 200 ] || die "@opencode/browse@$version is already published"
   channel=latest npm_tag=latest dry_run=false

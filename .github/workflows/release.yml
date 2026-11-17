@@ -97,7 +97,7 @@ jobs:
         name: Plan
         run: bash .github/release/plan-release.sh
         env:
-          GH_TOKEN: ${{ github.token }} # reads cli/package.json and the triggering actor's repository role
+          GH_TOKEN: ${{ github.token }} # reads cli/package.json, the v* tags and the triggering actor's repository role
           INPUT_BUMP: ${{ inputs.bump }}
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_RELEASE_NOTES: ${{ inputs.release_notes }}
