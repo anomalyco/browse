@@ -41,7 +41,7 @@ async fn harness() -> Harness {
 }
 
 async fn harness_at(paths: Paths) -> Harness {
-    let options = ServeOptions { port: Some(0), paths: paths.clone(), version: "0.0.0-test".into(), idle_shutdown: None, ..ServeOptions::default() };
+    let options = ServeOptions { port: Some(0), paths: paths.clone(), version: "0.0.0-test".into(), ..ServeOptions::default() };
     let handle = start(options, crate::tools()).await.unwrap();
     Harness { handle, paths }
 }
@@ -499,7 +499,7 @@ async fn background_work_keeps_a_tab_busy() {
 }
 
 /// An agent's `browse mcp` server lives as long as the agent, so connected clients can't hold an update back: only
-/// calls, handoffs and recent activity do. A managed relay still stays up while a client that called is alive.
+/// calls, handoffs and recent activity do.
 #[tokio::test]
 async fn a_quiet_connected_client_does_not_keep_the_relay_from_going_idle() {
     let (h, _seen, _events) = connected("profile-quiet-client", 240).await;
@@ -511,7 +511,6 @@ async fn a_quiet_connected_client_does_not_keep_the_relay_from_going_idle() {
     relay.call_finished(1);
     assert!(relay.st().clients.contains(&std::process::id()), "the client that called is still alive");
     assert!(relay.idle(Duration::ZERO), "a quiet connected client doesn't hold an update back");
-    assert!(!relay.unused(Duration::ZERO), "a managed relay still waits for its clients to go");
     task.abort();
 }
 
@@ -596,8 +595,6 @@ fn retaking_the_state_lock_panics_instead_of_deadlocking() {
         version: "0".into(),
         build_id: String::new(),
         auto_update: None,
-        idle_shutdown: None,
-        managed: false,
     })
     .unwrap();
     let held = relay.st();
@@ -618,8 +615,6 @@ fn the_state_lock_can_be_taken_again_once_released() {
         version: "0".into(),
         build_id: String::new(),
         auto_update: None,
-        idle_shutdown: None,
-        managed: false,
     };
     let one = crate::relay::Relay::new(config(paths.clone())).unwrap();
     let two = crate::relay::Relay::new(config(paths.clone())).unwrap();
@@ -646,8 +641,6 @@ fn an_address_never_replaces_a_known_browser_name() {
         version: "0".into(),
         build_id: String::new(),
         auto_update: None,
-        idle_shutdown: None,
-        managed: false,
     })
     .unwrap();
     let mut st = relay.st();
@@ -717,9 +710,9 @@ async fn reads_a_body_announced_on_a_get() {
 }
 
 #[tokio::test]
-async fn version_reports_a_managed_relay() {
+async fn version_reports_every_relay_as_managed() {
     let paths = Paths::rooted(std::env::temp_dir().join(format!("browse-relay-test-{}", crate::util::random_hex(6))));
-    let options = ServeOptions { port: Some(0), paths: paths.clone(), managed: true, idle_shutdown: None, ..ServeOptions::default() };
+    let options = ServeOptions { port: Some(0), paths: paths.clone(), ..ServeOptions::default() };
     let handle = start(options, crate::tools()).await.unwrap();
     let (_, version) = http(handle.port(), "GET", "/version", None, None).await;
     assert_eq!(version["managed"], true);
@@ -740,8 +733,6 @@ fn a_persist_queued_after_the_final_one_does_nothing() {
         version: "0".into(),
         build_id: String::new(),
         auto_update: None,
-        idle_shutdown: None,
-        managed: false,
     })
     .unwrap();
     relay.persist_now();

@@ -74,8 +74,8 @@ The store review takes hours to a few days (the job summary shows `PENDING_REVIE
 earlier version still in review, so the newest build is the one reviewed. When the zip is the extension the store
 already has, with only the manifest `version`/`version_name` changed (a CLI or packaging release), it uploads and
 submits nothing, says so in the job summary, and the release goes on: the store keeps the version it has, and the
-GitHub release and the release commit to dev still run. Binary installs follow the release service at launch and at
-least hourly, and switch when no agent is using the browser; npm installs check once an hour and switch the same way;
+GitHub release and the release commit to dev still run. Every running relay checks the release service at launch and
+hourly, in every update mode; binary and npm installs switch when no agent is using the browser;
 the Chrome Web Store updates the extension.
 
 **If a job fails**, fix it and rerun the failed jobs. Publishing is idempotent: a version that's already on npm,
@@ -129,9 +129,9 @@ checks the token against `registry/browse.json` there ([scripts/release-registry
 | `cli` | `windows-x64`, `windows-x64-baseline` | `opencode-browse-windows-<arch>-<version>.tgz` | https://anoma.ly/release/browse/cli/stable/windows-x64 |
 
 Every target has a `.../<target>/info` with its version, size and SHA-256. `install` reads the manifest, checks the
-file's size and SHA-256 and installs it; every install that checks for updates polls `cli/<stable|dev>.json` at launch
-and at least hourly with `If-None-Match` and User-Agent `browse/<channel>/<version>/cli/<kind>` (`binary`, `npm`, `bun`,
-`pnpm`, `yarn`, `volta`, `npx`, `bunx`, `pnpm-dlx`, `yarn-dlx`), which the protocol allows after its artifact segment
+file's size and SHA-256 and installs it; every relay (except a checkout build) polls `cli/<stable|dev>.json` at launch
+and hourly, even with updates off, with User-Agent `browse/<channel>/<version>/cli/<kind>` (`binary`, `npm`, `bun`,
+`pnpm`, `yarn`, `volta`, `npx`, `bunx`, `pnpm-dlx`, `yarn-dlx`, `other` for an install browse didn't make, which only checks), which the protocol allows after its artifact segment
 and lets analytics split installs by kind. A binary install downloads the manifest's file; a global install runs its
 package manager for `@opencode/browse@<the manifest's version>`, and retries quietly while npm doesn't have that version
 yet. `--version` stays on npm because the protocol has one current release per channel and no version lookup.

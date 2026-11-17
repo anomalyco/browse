@@ -423,7 +423,6 @@ pub struct Relay {
     pub origins: HashSet<String>,
     pub file_roots: Vec<PathBuf>,
     pub auto_update: Option<AutoUpdateStatus>,
-    pub idle_shutdown: Option<Duration>,
     pub idle_tab_ttl: Option<Duration>,
     pub state: Mutex<State>,
     pub changed: Notify,
@@ -435,8 +434,6 @@ pub struct Relay {
     pub tools: RwLock<Vec<Arc<dyn Tool>>>,
     pub next_call: AtomicU64,
     pub ready: AtomicBool,
-    /// Started on demand by a client (OPENCODE_BROWSER_MANAGED_RELAY=1).
-    pub managed: bool,
     /// Who holds `state`, for the watchdog.
     pub holder: Mutex<Option<Holder>>,
     /// Tool calls in flight by call id, for the log.
@@ -455,8 +452,6 @@ pub struct RelayConfig {
     pub version: String,
     pub build_id: String,
     pub auto_update: Option<AutoUpdateStatus>,
-    pub idle_shutdown: Option<Duration>,
-    pub managed: bool,
 }
 
 fn env_ms(variable: &str, fallback: u64) -> Option<Duration> {
@@ -488,7 +483,6 @@ impl Relay {
             origins: crate::origins::allowed_extension_origins(),
             file_roots,
             auto_update: config.auto_update,
-            idle_shutdown: config.idle_shutdown,
             idle_tab_ttl: env_ms("OPENCODE_BROWSER_IDLE_TAB_TTL_MS", 15 * 60_000),
             state: Mutex::new(State {
                 links: Vec::new(),
@@ -524,7 +518,6 @@ impl Relay {
             tools: RwLock::new(Vec::new()),
             next_call: AtomicU64::new(1),
             ready: AtomicBool::new(false),
-            managed: config.managed,
             holder: Mutex::new(None),
             inflight: Mutex::new(HashMap::new()),
             heartbeat: AtomicU64::new(0),

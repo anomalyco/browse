@@ -143,8 +143,8 @@ The connection isn't encrypted by browse; use a network that is (Tailscale or Wi
 
 ### Updates
 
-**Updates are automatic.** The relay checks once at start and then hourly, and installs a new version when no agent
-is using the browser:
+**Updates are automatic.** Every relay checks at launch and then hourly, whatever the update setting, and installs the
+channel's release when it isn't the one running (a rollback reaches everyone too):
 
 - every install reads its channel's manifest from the release service (`stable`, or `dev`/`beta` for those builds),
   with `browse/<channel>/<version>/cli/<install kind>` as the User-Agent;
@@ -154,13 +154,15 @@ is using the browser:
   `yarn global add`, `volta install`) to install `@opencode/browse@<the manifest's version>` into the same place. A
   release reaches the service a few minutes before npm, so a package manager that doesn't have the version yet is
   retried quietly;
-- `npx`, `bunx`, `pnpm dlx` and `yarn dlx` runs resolve the package themselves: they only tell you a newer release is
+- `npx`, `bunx`, `pnpm dlx` and `yarn dlx` runs resolve the package themselves: they only tell you another release is
   out.
 
-The relay restarts on the new version when it's idle; agent tabs stay open and come back. A running MCP server keeps
+A relay browse started restarts on the new version when it's idle (one you run with `browse serve` in a terminal keeps
+running until you restart it); agent tabs stay open and come back. A running MCP server keeps
 working with the newer relay until the agent restarts it. `browse update` updates now and `browse update --check` only
 looks. Choose **Tell me** or **Off** under **updates** on the extension's options page, or run `browse update --mode
-notify|off` (`OPENCODE_BROWSER_AUTO_UPDATE=off` in the environment overrides both). To go back, rerun the install
+notify|off` (`OPENCODE_BROWSER_AUTO_UPDATE=off` in the environment overrides both). Off still checks hourly, and
+installs nothing. To go back, rerun the install
 script with `--channel <channel>` or `--version <version>`, or install `@opencode/browse@<version>` with your package
 manager. The Chrome Web Store updates the extension.
 
@@ -253,7 +255,7 @@ the relay over a WebSocket and runs its commands in your browser through `chrome
 
 - **The relay** (`browse serve`, in `rust/`) keeps agent tabs, handoffs, recordings and network captures, talks the
   Chrome DevTools Protocol to each tab, and runs `execute` scripts in an embedded JavaScript engine (QuickJS). It
-  exits when nothing uses it.
+  runs until it's stopped (`browse restart`, `browse uninstall`, a signal) or restarts onto an update.
 - **The extension** (`src/`) runs the relay's commands through `chrome.debugger`, keeps agent tabs in collapsed groups
   by default (or their own window), closes idle ones, and shows the toolbar badge and the handoff card.
 - **Quiet in the page.** browse doesn't enable the CDP domains pages can detect, runs its own code in isolated worlds
@@ -318,7 +320,7 @@ when it starts: it stops after 30 minutes without use, or run `browse restart` f
 | `OPENCODE_BROWSER_FILE_ROOTS` | More folders tools may read and write (path-list separated) |
 | `OPENCODE_BROWSER_AGENT_WINDOW=separate` | Open agent tabs in a separate window (`current`: in yours), overriding the options page |
 | `OPENCODE_BROWSER_HUMAN_INPUT=0` | Send input at full speed; overrides the options page |
-| `OPENCODE_BROWSER_AUTO_UPDATE=notify` | Only tell about new versions (`off`: don't check; `on`: install them, the default) |
+| `OPENCODE_BROWSER_AUTO_UPDATE=notify` | Only tell about new versions (`off`: check, but never install or tell; `on`: install them, the default) |
 | `OPENCODE_BROWSER_CHALLENGE_WAIT_MS=15000` | How long to wait for a bot check the browser clears by itself |
 | `OPENCODE_BROWSER_EXTENSION_TIMEOUT_MS=30000` | How long the relay waits for the extension to answer a command |
 | `OPENCODE_BROWSER_PING_TIMEOUT_MS=10000` | How long a ping may go unanswered before the browser counts as asleep |
