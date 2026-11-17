@@ -1486,6 +1486,21 @@ async fn a_second_call_on_a_chosen_tab_says_it_is_busy() {
     assert!(!after.is_error, "{}", tool_text(&after));
 }
 
+/// A capture or recording in a chosen-id tab is background work: a call by that id still goes through.
+#[tokio::test]
+async fn background_work_does_not_make_a_chosen_tab_refuse_calls() {
+    let (h, _seen, _events) = connected("profile-chosen-background", 415).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let tab = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "new", "id": "work-mail" })).await).unwrap())["tab"].as_i64().unwrap();
+    browser.set_busy(tab, "network", true);
+    assert!(relay.st().tab_busy(tab), "the tab is busy with the capture");
+    let closed = tool(&relay, "tabs", json!({ "action": "close", "tab": "work-mail" })).await;
+    assert!(!closed.is_error, "{}", tool_text(&closed));
+    assert_eq!(text(&serde_json::to_value(&closed).unwrap())["closed"], json!([tab]));
+    assert!(!relay.st().tabs.contains_key(&tab), "the call ran instead of being refused");
+}
+
 #[tokio::test]
 async fn closing_a_chosen_tab_frees_its_id() {
     let (h, seen, _events) = connected("profile-chosen-close", 420).await;
