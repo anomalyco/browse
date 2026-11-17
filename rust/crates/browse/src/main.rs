@@ -23,6 +23,30 @@ pub const VERSION: &str = match option_env!("BROWSE_VERSION") {
     None => env!("CARGO_PKG_VERSION"),
 };
 
+/// Commands main dispatches itself, after its own argument handling; tools are not here because `browse <tool>
+/// --help` is the tool parser's own. A help flag anywhere in one of these commands' arguments prints usage instead.
+const COMMANDS: &[&str] = &[
+    "version",
+    "serve",
+    "mcp",
+    "install",
+    "uninstall",
+    "set",
+    "restart",
+    "pair",
+    "extension",
+    "update",
+    "status",
+    "runtime-switch",
+    "tools",
+];
+
+/// Whether `command`'s arguments ask for help. A setup command or update would otherwise act on the flag, and
+/// everything after `--` belongs to another program, so it is not a help request for browse.
+fn asked_for_help(command: &str, args: &[String]) -> bool {
+    COMMANDS.contains(&command) && args.iter().take_while(|arg| arg.as_str() != "--").any(|arg| arg == "--help" || arg == "-h")
+}
+
 const HELP: &str = "browse lets your AI agents use your real Chrome-family browser through the browse extension.
 
 SETUP
@@ -95,6 +119,12 @@ fn main() {
             print!("{HELP}");
             Ok(0)
         }
+        // `browse update --help` and the like print usage instead of acting. Tool commands parse `--help` themselves
+        // (cli.rs), so they are not in COMMANDS.
+        command if asked_for_help(command, rest) => {
+            print!("{HELP}");
+            Ok(0)
+        }
         "--version" | "-v" | "version" => {
             println!("{VERSION}");
             Ok(0)
@@ -126,4 +156,36 @@ fn main() {
         1
     });
     std::process::exit(code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{COMMANDS, asked_for_help};
+
+    fn args(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    /// Every command main dispatches itself stops at a help flag, wherever it appears, before acting.
+    #[test]
+    fn a_help_flag_short_circuits_every_command() {
+        for command in COMMANDS {
+            for words in [&["--help"][..], &["-h"][..], &["--check", "--help"][..], &["--help", "--check"][..]] {
+                assert!(asked_for_help(command, &args(words)), "browse {command} {}", words.join(" "));
+            }
+        }
+    }
+
+    /// Tools parse `--help` themselves (cli.rs), and arguments after `--` belong to another program.
+    #[test]
+    fn tools_keep_their_own_help_and_a_separator_ends_the_scan() {
+        for tool in ["navigate", "snapshot", "tabs", "execute", "settings"] {
+            assert!(!COMMANDS.contains(&tool), "{tool} is a tool, not a command");
+            assert!(!asked_for_help(tool, &args(&["--help"])), "{tool} parses its own --help");
+        }
+        assert!(!asked_for_help("update", &args(&["--", "--help"])));
+        assert!(!asked_for_help("update", &args(&["--check"])));
+        assert!(!asked_for_help("install", &args(&["--wait-seconds", "10"])));
+        assert!(!asked_for_help("set", &args(&["hostname", "0.0.0.0"])));
+    }
 }
