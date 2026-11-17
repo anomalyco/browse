@@ -1,5 +1,5 @@
 export * as AgentGroups from "./groups"
-import { AGENT_GROUPING_KEY, agentGrouping, type AgentGrouping } from "../../shared/protocol"
+import { AGENT_GROUPING_KEY, AGENT_GROUP_COLLAPSE_KEY, agentGroupCollapse, agentGrouping, type AgentGrouping } from "../../shared/protocol"
 
 // Agent tab groups stay out of the way: at the start of the tab strip, right after pinned tabs (the top of a
 // vertical strip), and
@@ -12,6 +12,11 @@ import { AGENT_GROUPING_KEY, agentGrouping, type AgentGrouping } from "../../sha
 // Which groups agents get is the status page's "Grouping" setting (`mode`): one shared group for every agent's tabs
 // (the default), one per agent session, or none. agent-relay.ts makes and names the groups; this module only keeps
 // them out of the way.
+//
+// The status page's "Collapse agent groups" setting (`collapseMode`) turns the folding off: with "off" browse never
+// collapses or re-expands a group by itself, and each group keeps whatever collapsed state the user gave it. A handoff
+// still opens the group holding its tab so the user can find it; afterwards the group stays as it is. Placement,
+// titles, colours and membership don't change.
 
 const STORAGE_KEY = "agentGroups"
 const groups = new Set<number>()
@@ -22,6 +27,11 @@ const keepers: ((tabId: number) => boolean)[] = []
 /** The setting: "shared" (one group for every agent, the default), "session" (one per agent session) or "none". */
 export async function mode(): Promise<AgentGrouping> {
   return agentGrouping((await chrome.storage.local.get(AGENT_GROUPING_KEY))[AGENT_GROUPING_KEY])
+}
+
+/** The setting: "auto" (browse folds groups away, the default) or "off" (leave each group as the user set it). */
+async function collapseMode() {
+  return agentGroupCollapse((await chrome.storage.local.get(AGENT_GROUP_COLLAPSE_KEY))[AGENT_GROUP_COLLAPSE_KEY])
 }
 
 export function keepOpenWhile(check: (tabId: number) => boolean) {
@@ -79,7 +89,8 @@ function scheduleKeepFirst(windowId: number) {
   )
 }
 
-/** Opens a group so the user sees its tabs, for example when an agent waits for them on one. */
+/** Opens a group so the user sees its tabs, for example when an agent waits for them on one. The Collapse agent
+ * groups setting doesn't turn this off: a handoff has to show the tab it needs the user on. */
 async function expand(groupId: number) {
   await chrome.tabGroups.update(groupId, { collapsed: false }).catch(() => undefined)
 }
@@ -97,6 +108,8 @@ export async function settleTab(tabId: number) {
 }
 
 async function collapseUnlessActive(groupId: number) {
+  // "off": the user decides when a group is folded, and browse doesn't touch it.
+  if ((await collapseMode()) === "off") return
   const group = await chrome.tabGroups.get(groupId).catch(() => undefined)
   if (!group) {
     forget(groupId)
@@ -123,9 +136,11 @@ function save() {
   void chrome.storage.local.set({ [STORAGE_KEY]: Array.from(groups) }).catch(() => undefined)
 }
 
-// The user moved to another tab: fold away every agent group in that window that doesn't hold it.
+// The user moved to another tab: fold away every agent group in that window that doesn't hold it. With collapsing
+// off, nothing changes: the groups stay however the user left them.
 chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
   void restore().then(async () => {
+    if ((await collapseMode()) === "off") return
     const tab = await chrome.tabs.get(tabId).catch(() => undefined)
     for (const groupId of groups) {
       if (tab?.groupId === groupId) continue

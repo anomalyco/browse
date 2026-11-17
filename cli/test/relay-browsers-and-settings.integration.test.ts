@@ -395,7 +395,7 @@ describe("settings from the extension", () => {
 
 /** A fake extension holding settings the way the real one does (settings.get / settings.set over its storage). */
 function settingsExtension(code: string, relayPort = port) {
-  const stored: Record<string, unknown> = { window: "current", grouping: "session", idleMinutes: 10, humanInput: "on", handoffNotifications: "recording" }
+  const stored: Record<string, unknown> = { window: "current", grouping: "session", groupCollapse: "auto", idleMinutes: 10, humanInput: "on", handoffNotifications: "recording" }
   const extension = new FakeExtension(code, relayPort)
     .on("settings.get", () => ({ settings: { ...stored } }))
     .on("settings.set", (command) => {
@@ -421,6 +421,7 @@ describe("the settings tool's relay API", () => {
     const got = await settingsRequest(base, token)
     expect(got.status).toBe(200)
     expect(got.body.settings.grouping).toMatchObject({ value: "session", effective: "session", allowed: ["shared", "session", "none"] })
+    expect(got.body.settings.groupCollapse).toMatchObject({ value: "auto", effective: "auto", allowed: ["auto", "off"] })
     expect(got.body.note).toContain("OPENCODE_BROWSER_ALLOW_NODE")
 
     const set = await settingsRequest(base, token, { grouping: "shared", idleMinutes: "never", humanInput: "on" })
@@ -435,9 +436,16 @@ describe("the settings tool's relay API", () => {
     expect(set.body.message).toContain("Tell the user what you changed")
     expect((await settingsRequest(base, token)).body.settings.idleMinutes.value).toBe("never")
 
+    const collapse = await settingsRequest(base, token, { groupCollapse: "off" })
+    expect(collapse.status).toBe(200)
+    expect(collapse.body.changed).toEqual([{ key: "groupCollapse", from: "auto", to: "off" }])
+    expect(sets()).toEqual([{ grouping: "shared", idleMinutes: 0, humanInput: "on" }, { groupCollapse: "off" }])
+    expect(stored.groupCollapse).toBe("off")
+
     // Invalid values, unknown keys and security switches are refused before anything reaches the extension.
     for (const [request, expected] of [
       [{ grouping: "Shared" }, "grouping must be one of shared, session, none"],
+      [{ groupCollapse: "sometimes" }, "groupCollapse must be one of auto, off"],
       [{ idleMinutes: 45 }, "idleMinutes must be one of 10, 30, 60, never"],
       [{ colour: "blue" }, "Unknown setting \"colour\""],
       [{ OPENCODE_BROWSER_ALLOW_NODE: "1" }, "security switches"],
@@ -448,8 +456,19 @@ describe("the settings tool's relay API", () => {
       expect(refused.status).toBe(400)
       expect(String(refused.body.error)).toContain(expected)
     }
-    expect(sets()).toHaveLength(1)
+    expect(sets()).toHaveLength(2)
     extension.close()
+    await Bun.sleep(200)
+  }, 20_000)
+
+  test("an extension that predates groupCollapse reads as auto", async () => {
+    const older = new FakeExtension(home, port)
+      .on("settings.get", () => ({ settings: { window: "current", grouping: "shared", idleMinutes: 10, humanInput: "on", handoffNotifications: "recording" } }))
+    expect(await older.pair()).toBe(true)
+    const got = await settingsRequest(base, token)
+    expect(got.status).toBe(200)
+    expect(got.body.settings.groupCollapse).toMatchObject({ value: "auto", effective: "auto", allowed: ["auto", "off"] })
+    older.close()
     await Bun.sleep(200)
   }, 20_000)
 

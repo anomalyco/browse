@@ -139,6 +139,10 @@
   width: 288px;
 }
 
+.row-control > .seg-collapse {
+  width: 248px;
+}
+
 .row-control > .seg-idle {
   width: 272px;
 }

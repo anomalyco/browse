@@ -1,6 +1,6 @@
 // The settings page (settings.html, the extension's options page). One card: the connection's state at the top, then a
-// row per setting (this browser's name, where agent tabs open and how they're grouped and closed, human-like
-// input and handoff notifications, updates), then an Advanced section for the relay's address and pairing
+// row per setting (this browser's name, where agent tabs open and how they're grouped and collapsed and closed,
+// human-like input and handoff notifications, updates), then an Advanced section for the relay's address and pairing
 // code, reconnect and diagnostics. Each row is a chrome.storage.local key the background reads when it needs it (or
 // sends to the relay, for input); a setting the relay's environment fixes is shown as such.
 import { createSignal, Show, type JSX } from "solid-js"
@@ -14,11 +14,13 @@ import { showToast, Toast } from "@opencode/ui/toast"
 import {
   AGENT_DIAGNOSTICS,
   AGENT_GROUPING_KEY,
+  AGENT_GROUP_COLLAPSE_KEY,
   AGENT_WINDOW_KEY,
   BROWSER_NAME_KEY,
   HANDOFF_NOTIFICATIONS_KEY,
   HUMAN_INPUT_KEY,
   IDLE_MINUTES_KEY,
+  agentGroupCollapse,
   agentGrouping,
   agentWindowPlacement,
   cliUpdateNotice,
@@ -26,6 +28,7 @@ import {
   humanInput,
   idleMinutesSetting,
   selfUpdatingInstall,
+  type AgentGroupCollapse,
   type AgentGrouping,
   type AgentRelayState,
   type AgentWindowPlacement,
@@ -46,6 +49,7 @@ function Settings() {
 
   const [agentWindow, setAgentWindow] = createStored(AGENT_WINDOW_KEY, agentWindowPlacement)
   const [grouping, setGrouping] = createStored(AGENT_GROUPING_KEY, agentGrouping)
+  const [collapse, setCollapse] = createStored(AGENT_GROUP_COLLAPSE_KEY, agentGroupCollapse)
   const [idle, setIdle] = createStored(IDLE_MINUTES_KEY, idleMinutesSetting)
   const [human, setHuman] = createStored(HUMAN_INPUT_KEY, humanInput)
   const [notifications, setNotifications] = createStored(HANDOFF_NOTIFICATIONS_KEY, handoffNotifications)
@@ -178,6 +182,19 @@ function Settings() {
               <SegmentedControlItem value="shared">All agents</SegmentedControlItem>
               <SegmentedControlItem value="session">Per task</SegmentedControlItem>
               <SegmentedControlItem value="none">None</SegmentedControlItem>
+            </SegmentedControl>
+          </Row>
+          <Row
+            label="Collapse agent groups"
+            description="Folded away unless you're on one of their tabs (automatically), or left as you set them in the tab strip (never)."
+          >
+            <SegmentedControl
+              class="seg-collapse"
+              value={collapse()}
+              onChange={(value) => value && setCollapse(value as AgentGroupCollapse)}
+            >
+              <SegmentedControlItem value="auto">Automatically</SegmentedControlItem>
+              <SegmentedControlItem value="off">Never</SegmentedControlItem>
             </SegmentedControl>
           </Row>
           <Row
