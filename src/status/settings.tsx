@@ -186,7 +186,7 @@ function Settings() {
           </Row>
           <Row
             label="Collapse agent groups"
-            description="Folded away unless you're on one of their tabs (automatically), or left as you set them in the tab strip (never)."
+            description="Folded away unless you're on one of their tabs (automatically), or left as you set them in the tab strip (never). A handoff still opens its group so you can find the tab."
           >
             <SegmentedControl
               class="seg-collapse"

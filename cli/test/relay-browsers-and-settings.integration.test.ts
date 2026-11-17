@@ -483,6 +483,16 @@ describe("the settings tool's relay API", () => {
     expect(String(tooOld.body.error)).toContain("too old to read or change settings")
     older.close()
     await Bun.sleep(200)
+
+    // An older extension's strict settings validator refuses the key it doesn't know.
+    const unknown = new FakeExtension(home, port)
+      .on("settings.get", () => ({ settings: { window: "current", grouping: "shared", idleMinutes: 10, humanInput: "on", handoffNotifications: "recording" } }))
+      .on("settings.set", () => { throw new Error("Unknown setting: groupCollapse") })
+    expect(await unknown.pair()).toBe(true)
+    const refused = await settingsRequest(base, token, { groupCollapse: "off" })
+    expect(String(refused.body.error)).toContain("too old to read or change settings")
+    unknown.close()
+    await Bun.sleep(200)
   }, 20_000)
 
   test("a setting an environment variable fixes is reported, and not written", async () => {

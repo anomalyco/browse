@@ -20,7 +20,7 @@ export type SettingOverrides = Partial<Record<SettingKey, { readonly variable: s
 export const settingSpecs: Record<SettingKey, { readonly label: string; readonly values: readonly SettingValue[]; readonly variable?: string }> = {
   window: { label: "Where agents open their tabs (current: the user's window; separate: an unfocused window of their own)", values: ["current", "separate"], variable: "OPENCODE_BROWSER_AGENT_WINDOW" },
   grouping: { label: "How agent tabs are grouped (one shared group, one group per session, or none)", values: ["shared", "session", "none"] },
-  groupCollapse: { label: "Collapse agent groups by itself (auto: fold them away unless the user is on one; off: leave each group as the user set it)", values: ["auto", "off"] },
+  groupCollapse: { label: "Whether browse collapses agent groups by itself (auto: fold them away unless the user is on one; off: leave each group as the user set it)", values: ["auto", "off"] },
   idleMinutes: { label: "Close agent tabs untouched for this many minutes", values: [10, 30, 60, "never"] },
   humanInput: { label: "Human-like input (off is faster, but easier for sites to flag)", values: ["on", "off"], variable: "OPENCODE_BROWSER_HUMAN_INPUT" },
   handoffNotifications: { label: "System notification on a handoff (only while recorded, or every handoff)", values: ["recording", "always"] },
