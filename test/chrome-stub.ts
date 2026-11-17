@@ -108,6 +108,8 @@ export function createChrome() {
     getAllHangs: false,
     created: [] as CreateWindow[],
     permissionLevel: "granted" as "granted" | "denied",
+    /** Makes getPermissionLevel wait, so a test can clear the notice while a notification is being prepared. */
+    permissionGate: undefined as Promise<void> | undefined,
     /** The extension's "Allow access to file URLs" setting. */
     fileAccess: false,
     notificationsFail: false,
@@ -316,6 +318,7 @@ export function createChrome() {
     },
     notifications: lenient({
       async getPermissionLevel() {
+        await state.permissionGate
         return state.permissionLevel
       },
       async create(id: string, options: unknown) {

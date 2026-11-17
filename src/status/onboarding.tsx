@@ -297,7 +297,7 @@ function Onboarding() {
               Open settings
             </Button>
             <span class="sep" aria-hidden="true" />
-            <span class="muted">You're set. When an agent needs you for a login, the page shows a card. While an agent works, the browser shows a "started debugging" bar; leave it open, because its Cancel or OK button disconnects browse from every tab.</span>
+            <span class="muted">You're set. When an agent needs you for a login, the page shows a card. While browse uses a tab, the browser shows a "started debugging" bar; leave it open, because its Cancel or OK button disconnects browse from every tab.</span>
           </footer>
         </Show>
       </section>

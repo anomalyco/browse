@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "bun:test"
+import { afterAll, beforeEach, describe, expect, setSystemTime, test } from "bun:test"
 import { installChrome, settle, type StubEvent } from "../chrome-stub"
 import { installFakeRelaySocket } from "../relay-stub"
 
@@ -597,16 +597,19 @@ describe("toolbar clicks that can't attach", () => {
 })
 
 describe("the debugging bar notice", () => {
-  const notice = () => stub.state.notifications.get("browse-debugging-bar") as
-    | { title: string; message: string; requireInteraction?: boolean }
-    | undefined
+  const ID = "opencode-browser-debugging-bar"
+  const notice = () => stub.state.notifications.get(ID) as { title: string; message: string } | undefined
 
   beforeEach(async () => {
     // The module's flag outlives a test; start each one as if browse had just been attached.
     relay.dismissDebuggingBar()
     stub.state.notifications.clear()
     stub.state.optionsOpened = 0
+    stub.state.permissionGate = undefined
+    // A press starts a burst; move past it so cross-test presses aren't taken for the previous test's leftovers.
+    setSystemTime(new Date(Date.now() + 5_000))
   })
+  afterAll(() => setSystemTime())
 
   test("one press detaching several tabs shows exactly one notification and marks the status page", async () => {
     const { userTab } = await userWindow()
@@ -631,17 +634,17 @@ describe("the debugging bar notice", () => {
         message:
           "The browser's debugging bar was closed, which disconnects browse from every tab. Tabs you lent are yours again. To lend one again, click the browse toolbar button on it.",
       })
-      expect(notice()?.requireInteraction).toBeUndefined()
-      // Clicking the notification clears it and opens the options page, where the note says how to lend a tab again.
-      event("notifications.onClicked").emit("browse-debugging-bar")
+      // Clicking the notification dismisses the notice and opens the options page, where the way to lend a tab lives.
+      event("notifications.onClicked").emit(ID)
       await until(() => stub.state.optionsOpened === 1)
       expect(stub.state.notifications.size).toBe(0)
+      expect(relay.state().debuggingBarClosed).toBeUndefined()
     } finally {
       stub.chrome.notifications.create = original
     }
   })
 
-  test("lending a tab again clears the flag and the notification", async () => {
+  test("a lend clears the flag and notification only once the lent tab actually attaches", async () => {
     const { userTab } = await userWindow()
     const agent = await agentTab("github")
     await command("debugger.attach", { tabId: userTab })
@@ -651,20 +654,102 @@ describe("the debugging bar notice", () => {
     await until(() => relay.state().debuggingBarClosed === true && stub.state.notifications.size === 1)
     await relay.attachTab(userTab)
     await toolbarClicked(userTab)
+    // The click alone isn't the lend: the relay's attach is what makes it real.
+    expect(relay.state().debuggingBarClosed).toBe(true)
+    expect(stub.state.notifications.size).toBe(1)
+    await command("debugger.attach", { tabId: userTab })
     expect(relay.state().debuggingBarClosed).toBeUndefined()
     await until(() => stub.state.notifications.size === 0)
   })
 
-  test("an agent attaching any tab again clears the flag and the notification", async () => {
+  test("a lend whose attach fails leaves the flag and notification", async () => {
+    const { userTab } = await userWindow()
+    await command("debugger.attach", { tabId: userTab })
+    event("debugger.onDetach").emit({ tabId: userTab }, "canceled_by_user")
+    await canceledAtOnce([userTab])
+    await until(() => relay.state().debuggingBarClosed === true && stub.state.notifications.has(ID))
+    await relay.attachTab(userTab)
+    await toolbarClicked(userTab)
+    const original = stub.chrome.debugger.attach
+    stub.chrome.debugger.attach = async () => {
+      throw new Error("Cannot access a chrome:// URL")
+    }
+    try {
+      const id = nextCommand++
+      socket().deliver({ id, method: "debugger.attach", params: { tabId: userTab } })
+      await until(() => socket().received.some((entry) => entry.id === id))
+      expect(socket().received.find((entry) => entry.id === id)!.error).toContain("Cannot access a chrome:// URL")
+    } finally {
+      stub.chrome.debugger.attach = original
+    }
+    expect(relay.state().debuggingBarClosed).toBe(true)
+    expect(stub.state.notifications.has(ID)).toBe(true)
+  })
+
+  test("an agent's own new tab attaching leaves the flag and notification", async () => {
+    await userWindow()
+    const agent = await agentTab("github")
+    event("debugger.onDetach").emit({ tabId: agent.tabId }, "canceled_by_user")
+    await canceledAtOnce([agent.tabId])
+    await until(() => relay.state().debuggingBarClosed === true && stub.state.notifications.has(ID))
+    const { tabId } = (await command("tabs.create", { url: "https://example.com/", active: false })) as { tabId: number }
+    await command("debugger.attach", { tabId })
+    expect(relay.state().debuggingBarClosed).toBe(true)
+    expect(stub.state.notifications.has(ID)).toBe(true)
+  })
+
+  test("a second press after a clear shows a notification again", async () => {
     await userWindow()
     const agent = await agentTab("github")
     event("debugger.onDetach").emit({ tabId: agent.tabId }, "canceled_by_user")
     await canceledAtOnce([agent.tabId])
     await until(() => relay.state().debuggingBarClosed === true && stub.state.notifications.size === 1)
-    const { tabId } = (await command("tabs.create", { url: "https://example.com/", active: false })) as { tabId: number }
-    await command("debugger.attach", { tabId })
-    expect(relay.state().debuggingBarClosed).toBeUndefined()
-    await until(() => stub.state.notifications.size === 0)
+    relay.dismissDebuggingBar()
+    await until(() => relay.state().debuggingBarClosed === undefined && stub.state.notifications.size === 0)
+    // A press needs a tab attached again, and its own burst window.
+    setSystemTime(new Date(Date.now() + 5_000))
+    await command("debugger.attach", { tabId: agent.tabId })
+    event("debugger.onDetach").emit({ tabId: agent.tabId }, "canceled_by_user")
+    await canceledAtOnce([agent.tabId])
+    await until(() => relay.state().debuggingBarClosed === true && stub.state.notifications.size === 1)
+  })
+
+  test("a clear while the notification is being prepared leaves none", async () => {
+    const { userTab } = await userWindow()
+    await command("debugger.attach", { tabId: userTab })
+    let release!: () => void
+    stub.state.permissionGate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    try {
+      event("debugger.onDetach").emit({ tabId: userTab }, "canceled_by_user")
+      await until(() => relay.state().debuggingBarClosed === true)
+      relay.dismissDebuggingBar()
+      expect(relay.state().debuggingBarClosed).toBeUndefined()
+      release()
+      await settle()
+      await settle()
+      expect(stub.state.notifications.size).toBe(0)
+    } finally {
+      stub.state.permissionGate = undefined
+      release()
+    }
+    await canceledAtOnce([userTab])
+  })
+
+  test("the flag is saved in session storage and restored by a new worker", async () => {
+    await userWindow()
+    const agent = await agentTab("github")
+    event("debugger.onDetach").emit({ tabId: agent.tabId }, "canceled_by_user")
+    await canceledAtOnce([agent.tabId])
+    await until(() => relay.state().debuggingBarClosed === true)
+    await until(async () => (await stub.chrome.storage.session.get("debuggingBarClosed")).debuggingBarClosed === true)
+    relay.dismissDebuggingBar()
+    await until(async () => (await stub.chrome.storage.session.get("debuggingBarClosed")).debuggingBarClosed === undefined)
+    await stub.chrome.storage.session.set({ debuggingBarClosed: true })
+    const { DebuggingBarNotice } = await import("../../src/background/debugging-bar-notice")
+    expect(await DebuggingBarNotice.restore()).toBe(true)
+    await until(() => relay.state().debuggingBarClosed === true)
   })
 
   test("the status page's dismiss message clears the flag and the notification", async () => {
