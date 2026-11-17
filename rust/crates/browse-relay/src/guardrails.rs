@@ -39,6 +39,7 @@ const READ_ONLY_ALLOWED: &[&str] = &[
     "Runtime.releaseObject",
     "Runtime.releaseObjectGroup",
     "Runtime.runIfWaitingForDebugger",
+    "Runtime.terminateExecution",
     "Accessibility.getAXNodeAndAncestors",
     "Accessibility.getFullAXTree",
     "Accessibility.getPartialAXTree",
@@ -168,9 +169,7 @@ pub fn guard(method: &str, params: &Value, read_only: bool, page_urls: &dyn Fn()
         ));
     }
     if read_only && !read_only_allowed(method) {
-        return Some(format!(
-            "browse blocked {method}: this tab is read-only. Read-only tabs can take snapshots and screenshots, read page information and subscribe to events. Open a tab without readOnly to interact with pages."
-        ));
+        return Some(browse_core::read_only_refusal(method));
     }
     if method == "Page.bringToFront" && !env_on("OPENCODE_BROWSER_ALLOW_FOREGROUND") {
         return Some("browse blocked Page.bringToFront: it raises the user's browser window over their work. Use the handoff tool when the user needs to act in the tab, or set OPENCODE_BROWSER_ALLOW_FOREGROUND=1 on the relay to allow it.".into());
@@ -272,6 +271,7 @@ mod tests {
         assert!(guard("Browser.close", &json!({}), false, &urls).is_some());
         assert!(guard("Input.dispatchMouseEvent", &json!({}), true, &urls).is_some());
         assert!(guard("Runtime.evaluate", &json!({}), true, &urls).is_none());
+        assert!(guard("Runtime.terminateExecution", &json!({}), true, &urls).is_none());
         assert!(guard("Page.enable", &json!({}), true, &urls).is_none());
         assert!(guard("Page.navigate", &json!({"url": "chrome://settings"}), false, &urls).is_some());
         assert!(guard("Page.navigate", &json!({"url": "https://x.com"}), false, &urls).is_none());

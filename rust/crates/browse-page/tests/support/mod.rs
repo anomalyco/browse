@@ -229,6 +229,7 @@ impl Cdp for TabCdp {
 pub struct FakeBrowser {
     pub tab: Arc<TabCdp>,
     pub human: bool,
+    pub read_only: bool,
     pub state: Arc<TabState>,
 }
 
@@ -238,7 +239,17 @@ impl Browser for FakeBrowser {
         anyhow::bail!("not in tests")
     }
     async fn tabs(&self) -> anyhow::Result<Vec<TabInfo>> {
-        Ok(vec![TabInfo { tab: 1, url: String::new(), title: String::new(), lent: false, opener: None, chosen: None, last_used: None, busy: false, options: TabOptions::default() }])
+        Ok(vec![TabInfo {
+            tab: 1,
+            url: String::new(),
+            title: String::new(),
+            lent: false,
+            opener: None,
+            chosen: None,
+            last_used: None,
+            busy: false,
+            options: TabOptions { read_only: self.read_only, ..TabOptions::default() },
+        }])
     }
     async fn close_tab(&self, _tab: TabId) -> anyhow::Result<()> {
         Ok(())
@@ -255,6 +266,9 @@ impl Browser for FakeBrowser {
     async fn human_input(&self, _tab: TabId) -> bool {
         self.human
     }
+    async fn read_only(&self, _tab: TabId) -> bool {
+        self.read_only
+    }
 }
 
 pub struct Harness {
@@ -270,12 +284,21 @@ pub struct Harness {
 
 impl Harness {
     pub async fn start(human: bool) -> Option<Harness> {
+        Self::start_with(human, false).await
+    }
+
+    /// A harness whose tab reports `readOnly` to the tools.
+    pub async fn start_read_only(human: bool) -> Option<Harness> {
+        Self::start_with(human, true).await
+    }
+
+    async fn start_with(human: bool, read_only: bool) -> Option<Harness> {
         let chrome = launch().await?;
         let connection = Connection::connect(&chrome.ws).await;
         let tab = TabCdp::open(&connection).await;
         let files = TempDir::new("files");
         let state = Arc::new(TabState::default());
-        let ctx = ToolContext { browser: Arc::new(FakeBrowser { tab: tab.clone(), human, state: state.clone() }), file_roots: vec![files.0.clone()] };
+        let ctx = ToolContext { browser: Arc::new(FakeBrowser { tab: tab.clone(), human, read_only, state: state.clone() }), file_roots: vec![files.0.clone()] };
         let server = Server::start().await;
         Some(Harness { chrome, tab, ctx, tools: browse_page::tools(), state, server, files })
     }

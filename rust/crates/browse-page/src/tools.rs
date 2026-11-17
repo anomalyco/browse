@@ -31,6 +31,11 @@ struct PageTool {
     handler: Handler,
 }
 
+/// The tools that act on the page like a person. A read-only tab refuses them before any CDP work: some of them
+/// (`select`, `fill` on selects and date-like inputs, `upload`) would otherwise succeed through Runtime JavaScript,
+/// which read-only tabs allow because snapshots need it.
+const INPUT_TOOLS: &[&str] = &["click", "fill", "type", "press", "select", "hover", "drag", "upload"];
+
 #[async_trait]
 impl Tool for PageTool {
     fn spec(&self) -> ToolSpec {
@@ -42,7 +47,20 @@ impl Tool for PageTool {
         // Every call is bounded as a whole, so a browser or relay that stops answering can't hold it past its
         // timeout (each tool's own waits finish well inside this).
         let limit = overall_limit(self.name, &args);
-        match tokio::time::timeout(limit, (self.handler)(ctx, args)).await {
+        match tokio::time::timeout(limit, async {
+            // Input tools are refused before any CDP work. `read_only` waits for a tab that is still reconnecting
+            // or being restored, so its wait is inside the same timeout as the call.
+            if INPUT_TOOLS.contains(&self.name)
+                && let Some(tab) = args.get("tab")
+                && let Ok(tab) = ctx.browser.resolve_tab(tab)
+                && ctx.browser.read_only(tab).await
+            {
+                return Ok(ToolOutput::error(browse_core::read_only_refusal(self.name)));
+            }
+            (self.handler)(ctx, args).await
+        })
+        .await
+        {
             Ok(Ok(output)) => Ok(output),
             Ok(Err(error)) => Ok(ToolOutput::error(error.to_string())),
             Err(_) => Ok(ToolOutput::error(format!(
@@ -123,6 +141,17 @@ struct Ctx {
 /// The tab a call names (`tab` is required) and its page.
 async fn open(ctx: &ToolContext, args: &Value) -> Result<Ctx> {
     open_tab(ctx, browse_core::require_tab(args)?).await
+}
+
+/// [open] for an input tool, refused when the tab turns out to be read-only. The check in [PageTool::call] can't
+/// know a tab that is still reconnecting or being restored; by the time the page is attached its options are known,
+/// so checking again here means no input tool runs page JavaScript on a read-only tab.
+async fn open_input(ctx: &ToolContext, args: &Value, name: &str) -> Result<Ctx> {
+    let c = open(ctx, args).await?;
+    if ctx.browser.read_only(c.page.tab()).await {
+        return Err(anyhow!(browse_core::read_only_refusal(name)));
+    }
+    Ok(c)
 }
 
 async fn open_tab(ctx: &ToolContext, tab: i64) -> Result<Ctx> {
@@ -324,7 +353,7 @@ async fn snapshot_tool(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
 // click / hover
 
 async fn click(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
-    let c = open(&ctx, &args).await?;
+    let c = open_input(&ctx, &args, "click").await?;
     let spec = Spec::from_args(&args);
     let point = actions::point_arg(&args);
     if spec.is_none() && point.is_none() {
@@ -366,7 +395,7 @@ async fn click(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
 }
 
 async fn hover(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
-    let c = open(&ctx, &args).await?;
+    let c = open_input(&ctx, &args, "hover").await?;
     let spec = Spec::from_args(&args);
     let point = actions::point_arg(&args);
     if spec.is_none() && point.is_none() {
@@ -417,7 +446,7 @@ fn parse_field(value: &Value) -> Result<Field> {
 }
 
 async fn fill(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
-    let c = open(&ctx, &args).await?;
+    let c = open_input(&ctx, &args, "fill").await?;
     let fields: Vec<Field> = match args.get("fields").and_then(Value::as_array) {
         Some(fields) => fields.iter().map(parse_field).collect::<Result<_>>()?,
         None => vec![parse_field(&args)?],
@@ -561,7 +590,7 @@ async fn focus_target(c: &Ctx, input: &mut Input<'_>, args: &Value) -> Result<Op
 }
 
 async fn type_tool(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
-    let c = open(&ctx, &args).await?;
+    let c = open_input(&ctx, &args, "type").await?;
     let text = str_arg(&args, "text").ok_or_else(|| anyhow!("type needs text"))?.to_string();
     let delay = args.get("delay").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 2_000.0);
     let submit = bool_arg(&args, "submit");
@@ -583,7 +612,7 @@ async fn type_tool(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
 }
 
 async fn press(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
-    let c = open(&ctx, &args).await?;
+    let c = open_input(&ctx, &args, "press").await?;
     let keys: Vec<String> = match args.get("key") {
         Some(Value::String(key)) => vec![key.clone()],
         Some(Value::Array(keys)) => keys.iter().filter_map(|k| k.as_str().map(str::to_string)).collect(),
@@ -642,7 +671,7 @@ async fn select_options(c: &Ctx, element: &crate::page::Element, options: &[Valu
 }
 
 async fn select(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
-    let c = open(&ctx, &args).await?;
+    let c = open_input(&ctx, &args, "select").await?;
     let spec = Spec::from_args(&args).ok_or_else(|| anyhow!("select needs a ref or a selector"))?;
     let values: Vec<Value> = match args.get("values").or_else(|| args.get("value")) {
         Some(Value::String(value)) => vec![json!(value)],
@@ -690,7 +719,7 @@ fn endpoint(value: Option<&Value>, name: &str) -> Result<(Option<Spec>, Option<P
 }
 
 async fn drag(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
-    let c = open(&ctx, &args).await?;
+    let c = open_input(&ctx, &args, "drag").await?;
     let (from_spec, from_point) = endpoint(args.get("from"), "from")?;
     let (to_spec, to_point) = endpoint(args.get("to"), "to")?;
     let steps = args.get("steps").and_then(Value::as_u64).unwrap_or(10).clamp(1, 100) as usize;
@@ -1046,7 +1075,7 @@ async fn dialog(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
 // upload
 
 async fn upload(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
-    let c = open(&ctx, &args).await?;
+    let c = open_input(&ctx, &args, "upload").await?;
     let spec = Spec::from_args(&args).ok_or_else(|| anyhow!("upload needs a ref or selector for the file input (or its label)"))?;
     let files: Vec<String> = match args.get("files") {
         Some(Value::String(file)) => vec![file.clone()],
@@ -1774,4 +1803,86 @@ fn webmcp_schema() -> Value {
         })),
         &[],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use browse_core::{Browser, Cdp, HandoffResult, TabId, TabInfo};
+
+    /// A browser whose only tab is read-only; CDP work is counted, so a refusal can be shown to come before it.
+    #[derive(Default)]
+    struct ReadOnlyBrowser {
+        cdp_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Browser for ReadOnlyBrowser {
+        async fn open_tab(&self, _url: Option<&str>, _options: &TabOptions) -> anyhow::Result<TabInfo> {
+            unreachable!("a refused call never opens a tab")
+        }
+        async fn tabs(&self) -> anyhow::Result<Vec<TabInfo>> {
+            Ok(Vec::new())
+        }
+        async fn close_tab(&self, _tab: TabId) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn cdp(&self, _tab: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
+            self.cdp_calls.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("CDP was used")
+        }
+        async fn state(&self, _tab: TabId) -> anyhow::Result<Arc<TabState>> {
+            self.cdp_calls.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("CDP was used")
+        }
+        async fn handoff(&self, _tab: TabId, _message: &str) -> anyhow::Result<HandoffResult> {
+            unreachable!("a refused call never hands off")
+        }
+        async fn read_only(&self, _tab: TabId) -> bool {
+            true
+        }
+    }
+
+    fn text_of(output: &ToolOutput) -> String {
+        output
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                browse_core::Content::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Every input tool is refused on a read-only tab before any CDP work, and inspection tools keep working.
+    #[tokio::test]
+    async fn input_tools_refuse_a_read_only_tab_before_cdp() {
+        let browser = Arc::new(ReadOnlyBrowser::default());
+        let ctx = ToolContext { browser: browser.clone(), file_roots: Vec::new() };
+        let list = tools();
+        for tool in &list {
+            let name = tool.spec().name;
+            if !INPUT_TOOLS.contains(&name.as_str()) {
+                continue;
+            }
+            let args = json!({ "tab": 1, "ref": "e1", "selector": "#x", "value": "x", "text": "x", "files": ["/tmp/x"] });
+            let output = tool.call(ctx.clone(), args).await.unwrap();
+            assert!(output.is_error, "{name} should be refused");
+            let text = text_of(&output);
+            assert!(text.contains("read-only"), "{name}: {text}");
+            assert!(text.contains(&format!("browse blocked {name}")), "{name}: {text}");
+        }
+        assert_eq!(browser.cdp_calls.load(Ordering::SeqCst), 0, "input tools must not touch CDP on a read-only tab");
+
+        // Read-only tabs keep what they need to inspect pages: eval reaches the page (and here, the fake's CDP).
+        let eval = list.iter().find(|tool| tool.spec().name == "eval").unwrap();
+        let output = eval.call(ctx, json!({ "tab": 1, "expression": "1" })).await.unwrap();
+        assert!(output.is_error);
+        let text = text_of(&output);
+        assert!(text.contains("CDP was used") && !text.contains("read-only"), "{text}");
+        assert_eq!(browser.cdp_calls.load(Ordering::SeqCst), 1);
+    }
 }

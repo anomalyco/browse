@@ -326,6 +326,16 @@ impl Relay {
     }
 }
 
+/// The read-only flag the relay knows for a tab, whether it is attached, remembered for a reconnecting browser
+/// (`reconnect_owners`), or held across a relay restart (`restorable`). None when nothing knows the tab.
+fn tab_read_only(st: &crate::relay::State, tab: TabId) -> Option<bool> {
+    st.tabs
+        .get(&tab)
+        .map(|entry| entry.options.read_only)
+        .or_else(|| st.reconnect_owners.values().find(|known| known.tab == tab).map(|known| known.options.read_only))
+        .or_else(|| st.restorable.values().find(|held| held.tab == tab).map(|held| held.options.read_only))
+}
+
 /// The relay as `browse_core::Browser`, handed to every tool.
 #[derive(Clone)]
 pub struct RelayBrowser(pub Arc<Relay>);
@@ -414,6 +424,16 @@ impl Browser for RelayBrowser {
             Some(link) => self.0.human_input_for_link(&link),
             None => crate::settings::human_input_override().unwrap_or(true),
         }
+    }
+
+    async fn read_only(&self, tab: TabId) -> bool {
+        if tab_read_only(&self.0.st(), tab) == Some(true) {
+            return true;
+        }
+        if !self.0.st().tabs.contains_key(&tab) {
+            self.0.await_tab(tab).await;
+        }
+        tab_read_only(&self.0.st(), tab).unwrap_or(false)
     }
 
     /// A numeric tab id, or a caller-chosen id like `work-mail`.

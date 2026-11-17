@@ -138,6 +138,14 @@ pub struct HandoffResult {
     pub note: Option<String>,
 }
 
+/// Why an action is refused on a tab opened with `readOnly`, shared by the CDP guardrails and the page tools.
+/// `command` is the CDP method or the tool name that was refused.
+pub fn read_only_refusal(command: &str) -> String {
+    format!(
+        "browse blocked {command}: this tab is read-only. Read-only tabs can take snapshots and screenshots, read page information and subscribe to events. Open a tab without readOnly to interact with pages."
+    )
+}
+
 /// What the relay offers tools: the tabs agents opened or the user lent, and the user-facing pieces only the
 /// extension can do. Every tab is addressed by its id; there is no current tab.
 #[async_trait]
@@ -158,6 +166,11 @@ pub trait Browser: Send + Sync {
     async fn human_input(&self, _tab: TabId) -> bool {
         true
     }
+    /// Whether the tab was opened with `readOnly`. The page tools refuse input on such a tab before any CDP work
+    /// (the CDP methods they'd use go through Runtime, which read-only tabs allow for snapshots). An implementation
+    /// that can't see the tab right now (a browser reconnecting, a relay restart) waits for it and then answers;
+    /// false when nothing knows the tab.
+    async fn read_only(&self, tab: TabId) -> bool;
     /// A background activity in the tab started (`busy`) or ended: a network capture ("network") or a recording
     /// ("recording"), keyed per kind. While any key is busy the tab counts as busy, so idle shutdown, idle tab cleanup
     /// and relay restarts wait for it. Called again with `false` when the activity ends for any reason.

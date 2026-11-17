@@ -33,6 +33,9 @@ impl Browser for FakeBrowser {
     async fn handoff(&self, _: TabId, _: &str) -> anyhow::Result<HandoffResult> {
         anyhow::bail!("no handoff here")
     }
+    async fn read_only(&self, _: TabId) -> bool {
+        false
+    }
 }
 
 /// `echo` returns its arguments, `fail` fails with `message`, `picture` returns an image, `handoff` waits `ms`.

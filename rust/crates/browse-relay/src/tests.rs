@@ -5,7 +5,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use browse_core::{Browser, CdpError, TabOptions};
+use browse_core::{Browser, CdpError, TabOptions, ToolContext};
 use futures_util::{SinkExt, StreamExt};
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use serde_json::{Value, json};
@@ -817,6 +817,8 @@ async fn popups_inherit_their_openers_options() {
     assert_eq!(popup.options.group.as_deref(), Some("shop"));
     assert_eq!(popup.options.allowed_origins, Some(vec!["example.com".to_string()]));
     assert!(popup.options.read_only);
+    assert!(browser.read_only(opener).await);
+    assert!(browser.read_only(popup.tab).await);
     let blocked = browser.cdp(95).await.unwrap().send("Input.dispatchKeyEvent", json!({}), None).await.unwrap_err();
     assert!(blocked.to_string().contains("read-only"), "{blocked}");
     // A lent tab's popups don't count while no agent works in it.
@@ -1579,6 +1581,32 @@ async fn a_chosen_id_whose_browser_is_disconnected_says_so() {
     assert!(again.is_error, "{}", tool_text(&again));
     assert!(tool_text(&again).contains("isn't connected"), "{}", tool_text(&again));
     assert_eq!(seen.commands("tabs.create").len(), 1, "no duplicate tab behind the disconnected one");
+}
+
+/// A read-only tab stays read-only while it isn't attached: a reconnecting browser keeps its options, so an input
+/// tool refuses the tab before the browser comes back (and a page tool can't run its JavaScript).
+#[tokio::test]
+async fn a_read_only_tab_away_from_its_browser_still_refuses_input() {
+    let (h, _seen, _events) = connected("profile-read-only-away", 90).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let options = TabOptions { read_only: true, ..TabOptions::default() };
+    let tab = browser.open_tab(None, &options).await.unwrap().tab;
+    let link = relay.st().links[0].clone();
+    relay.link_closed(&link, "test");
+    eventually("the tab to be remembered", || !relay.st().tabs.contains_key(&tab) && relay.st().reconnect_owners.values().any(|known| known.tab == tab)).await;
+    assert!(browser.read_only(tab).await, "a reconnecting tab keeps its read-only options");
+
+    let select = browse_page::tools().into_iter().find(|tool| tool.spec().name == "select").unwrap();
+    let ctx = ToolContext { browser: Arc::new(browser), file_roots: Vec::new() };
+    let output = select.call(ctx, json!({ "tab": tab, "selector": "#plan", "values": ["pro"] })).await.unwrap();
+    let refused = tool_text(&output);
+    assert!(output.is_error && refused.contains("browse blocked select") && refused.contains("read-only"), "{refused}");
+
+    // A tab held across a relay restart keeps its options too, before its browser reconnects.
+    let held = crate::registry::PersistedTab { tab: 91, target_id: "T91".into(), browser_key: "profile-held".into(), opener: None, options, created_at: String::new(), browse_id: None, chosen: None, lent: false };
+    relay.st().restorable.insert("T91".into(), held);
+    assert!(h.handle.browser().read_only(91).await, "a held tab keeps its read-only options");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

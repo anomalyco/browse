@@ -278,8 +278,9 @@ to steer it, and that other programs on your computer may try to use the relay.
   local files, or raise windows over your work.
 - **Guardrails, not a data boundary.** `allowedOrigins` limits navigations, top-level documents and the tabs and popups
   an agent opens; requests a page makes itself (fetch, XHR, images, scripts, iframes) are not filtered. `readOnly`
-  refuses clicks, typing and navigation commands after the tab opens, but `eval` and `webmcp` still run JavaScript in
-  the page: they can read everything the page can, make requests as the page, and change it (click, submit, navigate).
+  refuses clicks, hover, drag, typing, key presses, filling, selecting, uploads and navigation commands after the tab
+  opens. Scrolling to an element or to the page's edges still works. `eval` and `webmcp` still run JavaScript in the
+  page: they can read everything the page can, make requests as the page, and change it (click, submit, navigate).
   Snapshots, screenshots and the cookies the page itself can see stay readable. These keep an agent from wandering: for
   pages you don't want an agent to read, don't open them in browse.
 - **What output is masked.** `fill` hides values only for password and one-time-code fields. Snapshots leave out what's

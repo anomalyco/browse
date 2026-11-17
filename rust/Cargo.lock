@@ -159,6 +159,7 @@ dependencies = [
  "async-trait",
  "base64",
  "browse-core",
+ "browse-page",
  "bytes",
  "futures-util",
  "getrandom 0.3.4",
