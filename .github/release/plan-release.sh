@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # plan-release.sh: decides the mode, version and npm dist-tag from the event, ref and dispatch inputs (INPUT_BUMP,
-# INPUT_VERSION, INPUT_RELEASE_NOTES), and writes them to $GITHUB_OUTPUT. It reads cli/package.json of the triggering
-# commit through the API, as data; nothing here runs repository code.
+# INPUT_VERSION, INPUT_RELEASE_NOTES), and writes them to $GITHUB_OUTPUT. A version counts from the newest of
+# cli/package.json at the triggering commit and the newest v* tag: the tag job runs before any publish, so a version
+# whose tag exists has shipped even when a publish job failed and its release commit never reached dev. It reads both
+# through the API, as data; nothing here runs repository code.
 #
 #   push to dev                          dev     <next patch>-dev.<run>[.<attempt>]  npm tag dev, release service
 #   dispatch on dev with bump/version    stable  x.y.z                               npm latest, Chrome Web Store,
@@ -23,7 +25,13 @@ esac
 
 current=$(gh api -H "Accept: application/vnd.github.raw" "repos/$GITHUB_REPOSITORY/contents/cli/package.json?ref=$GITHUB_SHA" | jq -r .version)
 stable_version "$current" || die "cli/package.json at $GITHUB_SHA has version $current, not a stable x.y.z"
-IFS=. read -r major minor patch <<< "$current"
+# The tag job runs before any publish, so a version whose tag exists is consumed even when a publish job failed and its
+# release commit never reached dev. Count from the newest of cli/package.json and the newest stable v* tag.
+tag_refs=$(gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" --jq '.[].ref') ||
+  die "Couldn't read the repository's v* tags"
+newest_tag=$(printf '%s\n' "$tag_refs" | sed 's#^refs/tags/v##' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+base=$(printf '%s\n%s\n' "$current" "$newest_tag" | sort -V | tail -n 1)
+IFS=. read -r major minor patch <<< "$base"
 
 if [ "$mode" = stable ]; then
   actor=${GITHUB_TRIGGERING_ACTOR:-${GITHUB_ACTOR:-}}
@@ -58,8 +66,8 @@ if [ "$mode" = stable ]; then
     esac
   fi
   stable_version "$version" || die "Invalid release version $version (x.y.z, each part at most 65535)"
-  [ "$(printf '%s\n%s\n' "$current" "$version" | sort -V | head -n 1)" = "$current" ] ||
-    die "$version is older than the version in cli/package.json ($current)"
+  [ "$(printf '%s\n%s\n' "$base" "$version" | sort -V | tail -n 1)" = "$version" ] && [ "$version" != "$base" ] ||
+    die "$version must be newer than cli/package.json ($current) and the newest tag (${newest_tag:-none})"
   status=$(curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/@opencode%2fbrowse/$version")
   [ "$status" != 200 ] || die "@opencode/browse@$version is already published"
   channel=latest npm_tag=latest dry_run=false
