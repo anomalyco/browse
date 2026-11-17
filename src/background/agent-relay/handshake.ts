@@ -39,12 +39,16 @@ import {
   PROVEN_PORT_KEY,
   SPENT_KEY,
   TOKENS_KEY,
+  withTimeout,
   type AgentRelayLog,
   type Credential,
   type Handshake,
 } from "./wire"
 
 declare const __OPENCODE_BROWSER_BUILD__: string
+
+/** A tab's ownership lookup must not hold `ready` on a hung storage read. */
+const OWNER_TIMEOUT_MS = 2_000
 
 type PairingFile = { readonly code?: PairingCode; readonly port?: number }
 
@@ -402,8 +406,15 @@ export function createRelayHandshake(deps: {
       // The stored marker wins; the cleanup tracking says who opened the tab when it has none. Both the read and the
       // write run in TabIdentity's queue, so a lend or clear that lands meanwhile isn't undone by a stale answer.
       const owned = await TabIdentity.ensureOwned(tabId, () => TabCleanup.isTracked(tabId))
-      // Nothing comes back when the browser started under this connection (stale ids) or storage timed out.
-      if (!owned || deps.currentSocket() !== current) return
+      if (deps.currentSocket() !== current) return
+      if (!owned) {
+        // No id (the browser started under this connection, or storage timed out): announce the tab anyway, without a
+        // browse id, so the relay can match or release it and this connection still reaches ready.
+        const agent = (await withTimeout(TabCleanup.isTracked(tabId), OWNER_TIMEOUT_MS)) === true
+        if (deps.currentSocket() !== current) return
+        current.send(JSON.stringify({ method: "debugger.attached", params: { tabId, ...(agent ? { agent: true } : {}) } }))
+        continue
+      }
       current.send(
         JSON.stringify({
           method: "debugger.attached",

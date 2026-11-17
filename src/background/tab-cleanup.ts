@@ -205,7 +205,8 @@ export async function cleanup(options: { minutes?: number; own?: { tabIds: reado
       tracked.delete(tabId)
       continue
     }
-    // A tab with a caller-chosen id (`work-mail`) closes only when an agent or the user closes it.
+    // A tab with a caller-chosen id (`work-mail`) closes only when an agent or the user closes it; an id that couldn't
+    // be read counts as chosen.
     if (await TabIdentity.chosen(tabId)) continue
     if (tab.active && tab.windowId === focused?.id && focused?.focused) continue
     if (tab.audible || guards.some((check) => check(tabId))) continue
@@ -364,7 +365,7 @@ export async function reconcileCreates(attached: (tabId: number) => boolean): Pr
         !attached(candidate.id),
     )
     if (tab?.id === undefined) continue
-    // A tab with a caller-chosen id was made to be kept: never clean it up as an orphan.
+    // A tab with a caller-chosen id was made to be kept: never clean it up as an orphan; an unreadable id counts too.
     if (await TabIdentity.chosen(tab.id)) continue
     taken.add(tab.id)
     if (await closeAgentTab(tab.id).then(() => true, () => false)) closed.push({ tabId: tab.id, title: tab.title || tab.url || "Untitled", idleMinutes: 0 })
@@ -383,7 +384,8 @@ export async function closeUnattached(attached: (tabId: number) => boolean): Pro
   const closed: Closed[] = []
   for (const tabId of Array.from(tracked.keys())) {
     if (attached(tabId)) continue
-    // A chosen-id tab is never closed by cleanup, whatever happened to the worker that opened it.
+    // A chosen-id tab is never closed by cleanup, whatever happened to the worker that opened it; an unreadable id
+    // counts as chosen.
     if (await TabIdentity.chosen(tabId)) continue
     const tab = await chrome.tabs.get(tabId).catch(() => undefined)
     tracked.delete(tabId)
