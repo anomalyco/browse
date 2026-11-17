@@ -588,8 +588,20 @@ async fn page_tools_need_a_tab() {
     assert!(output.is_error && support::text_of(&output).contains("only apply when navigate opens a tab"), "{}", support::text_of(&output));
 }
 
+const READONLY_FORM: &str = r#"<!doctype html><html><head><title>Read-only form</title></head><body>
+<main>
+<h1>Sign up</h1>
+<label>Email <input id="email" name="email"></label>
+<label>Start <input id="start" type="date" name="start"></label>
+<label>Plan <select id="plan"><option value="free">Free</option><option value="pro">Pro plan</option></select></label>
+<label>Attachment <input id="file" type="file" name="file"></label>
+<button id="save" onclick="document.getElementById('out').textContent = 'saved'">Save</button>
+<p id="out">nothing yet</p>
+</main>
+</body></html>"#;
+
 /// A tab opened with readOnly refuses input tools before any CDP work, including the ones that would otherwise
-/// succeed through Runtime JavaScript (select, fill on a select, upload).
+/// succeed through Runtime JavaScript (select, fill on a select or date input, upload).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn read_only_tabs_refuse_input_tools() {
     let h = match Harness::start_read_only(false).await {
@@ -599,18 +611,24 @@ async fn read_only_tabs_refuse_input_tools() {
             return;
         }
     };
-    let url = h.server.page("/readonly-form", FORM);
+    let url = h.server.page("/readonly-form", READONLY_FORM);
     h.json("navigate", json!({ "url": url })).await;
 
-    let refused = h.err("select", json!({ "selector": "#plan", "value": "Pro plan" })).await;
+    let refused = h.err("select", json!({ "selector": "#plan", "values": ["Pro plan"] })).await;
     assert!(refused.contains("browse blocked select") && refused.contains("read-only"), "{refused}");
     let refused = h.err("fill", json!({ "selector": "#plan", "value": "Pro plan" })).await;
     assert!(refused.contains("browse blocked fill") && refused.contains("read-only"), "{refused}");
+    let refused = h.err("fill", json!({ "selector": "#start", "value": "2026-01-02" })).await;
+    assert!(refused.contains("browse blocked fill") && refused.contains("read-only"), "{refused}");
+    let refused = h.err("upload", json!({ "selector": "#file", "files": ["/tmp/browse-read-only-upload.png"] })).await;
+    assert!(refused.contains("browse blocked upload") && refused.contains("read-only"), "{refused}");
     let refused = h.err("click", json!({ "selector": "#save" })).await;
     assert!(refused.contains("browse blocked click") && refused.contains("read-only"), "{refused}");
 
     // Nothing changed, and reading the page still works.
     assert_eq!(h.ok("eval", json!({ "expression": "document.getElementById('plan').value" })).await, "\"free\"");
+    assert_eq!(h.ok("eval", json!({ "expression": "document.getElementById('start').value" })).await, "\"\"");
+    assert_eq!(h.ok("eval", json!({ "expression": "document.getElementById('file').files.length" })).await, "0");
     assert_eq!(h.ok("eval", json!({ "expression": "document.getElementById('out').textContent" })).await, "\"nothing yet\"");
     assert!(h.ok("snapshot", json!({})).await.contains("Sign up"));
 }

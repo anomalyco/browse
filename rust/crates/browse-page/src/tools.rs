@@ -44,17 +44,23 @@ impl Tool for PageTool {
 
     async fn call(&self, ctx: ToolContext, args: Value) -> Result<ToolOutput> {
         let args = if args.is_null() { json!({}) } else { args };
-        if INPUT_TOOLS.contains(&self.name)
-            && let Some(tab) = args.get("tab")
-            && let Ok(tab) = ctx.browser.resolve_tab(tab)
-            && ctx.browser.read_only(tab).await
-        {
-            return Ok(ToolOutput::error(browse_core::read_only_refusal(self.name)));
-        }
         // Every call is bounded as a whole, so a browser or relay that stops answering can't hold it past its
         // timeout (each tool's own waits finish well inside this).
         let limit = overall_limit(self.name, &args);
-        match tokio::time::timeout(limit, (self.handler)(ctx, args)).await {
+        match tokio::time::timeout(limit, async {
+            // Input tools are refused before any CDP work. `read_only` waits for a tab that is still reconnecting
+            // or being restored, so its wait is inside the same timeout as the call.
+            if INPUT_TOOLS.contains(&self.name)
+                && let Some(tab) = args.get("tab")
+                && let Ok(tab) = ctx.browser.resolve_tab(tab)
+                && ctx.browser.read_only(tab).await
+            {
+                return Ok(ToolOutput::error(browse_core::read_only_refusal(self.name)));
+            }
+            (self.handler)(ctx, args).await
+        })
+        .await
+        {
             Ok(Ok(output)) => Ok(output),
             Ok(Err(error)) => Ok(ToolOutput::error(error.to_string())),
             Err(_) => Ok(ToolOutput::error(format!(
@@ -135,6 +141,17 @@ struct Ctx {
 /// The tab a call names (`tab` is required) and its page.
 async fn open(ctx: &ToolContext, args: &Value) -> Result<Ctx> {
     open_tab(ctx, browse_core::require_tab(args)?).await
+}
+
+/// [open] for an input tool, refused when the tab turns out to be read-only. The check in [PageTool::call] can't
+/// know a tab that is still reconnecting or being restored; by the time the page is attached its options are known,
+/// so checking again here means no input tool runs page JavaScript on a read-only tab.
+async fn open_input(ctx: &ToolContext, args: &Value, name: &str) -> Result<Ctx> {
+    let c = open(ctx, args).await?;
+    if ctx.browser.read_only(c.page.tab()).await {
+        return Err(anyhow!(browse_core::read_only_refusal(name)));
+    }
+    Ok(c)
 }
 
 async fn open_tab(ctx: &ToolContext, tab: i64) -> Result<Ctx> {
@@ -336,7 +353,7 @@ async fn snapshot_tool(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
 // click / hover
 
 async fn click(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
-    let c = open(&ctx, &args).await?;
+    let c = open_input(&ctx, &args, "click").await?;
     let spec = Spec::from_args(&args);
     let point = actions::point_arg(&args);
     if spec.is_none() && point.is_none() {
@@ -378,7 +395,7 @@ async fn click(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
 }
 
 async fn hover(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
-    let c = open(&ctx, &args).await?;
+    let c = open_input(&ctx, &args, "hover").await?;
     let spec = Spec::from_args(&args);
     let point = actions::point_arg(&args);
     if spec.is_none() && point.is_none() {
@@ -429,7 +446,7 @@ fn parse_field(value: &Value) -> Result<Field> {
 }
 
 async fn fill(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
-    let c = open(&ctx, &args).await?;
+    let c = open_input(&ctx, &args, "fill").await?;
     let fields: Vec<Field> = match args.get("fields").and_then(Value::as_array) {
         Some(fields) => fields.iter().map(parse_field).collect::<Result<_>>()?,
         None => vec![parse_field(&args)?],
@@ -573,7 +590,7 @@ async fn focus_target(c: &Ctx, input: &mut Input<'_>, args: &Value) -> Result<Op
 }
 
 async fn type_tool(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
-    let c = open(&ctx, &args).await?;
+    let c = open_input(&ctx, &args, "type").await?;
     let text = str_arg(&args, "text").ok_or_else(|| anyhow!("type needs text"))?.to_string();
     let delay = args.get("delay").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 2_000.0);
     let submit = bool_arg(&args, "submit");
@@ -595,7 +612,7 @@ async fn type_tool(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
 }
 
 async fn press(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
-    let c = open(&ctx, &args).await?;
+    let c = open_input(&ctx, &args, "press").await?;
     let keys: Vec<String> = match args.get("key") {
         Some(Value::String(key)) => vec![key.clone()],
         Some(Value::Array(keys)) => keys.iter().filter_map(|k| k.as_str().map(str::to_string)).collect(),
@@ -654,7 +671,7 @@ async fn select_options(c: &Ctx, element: &crate::page::Element, options: &[Valu
 }
 
 async fn select(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
-    let c = open(&ctx, &args).await?;
+    let c = open_input(&ctx, &args, "select").await?;
     let spec = Spec::from_args(&args).ok_or_else(|| anyhow!("select needs a ref or a selector"))?;
     let values: Vec<Value> = match args.get("values").or_else(|| args.get("value")) {
         Some(Value::String(value)) => vec![json!(value)],
@@ -702,7 +719,7 @@ fn endpoint(value: Option<&Value>, name: &str) -> Result<(Option<Spec>, Option<P
 }
 
 async fn drag(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
-    let c = open(&ctx, &args).await?;
+    let c = open_input(&ctx, &args, "drag").await?;
     let (from_spec, from_point) = endpoint(args.get("from"), "from")?;
     let (to_spec, to_point) = endpoint(args.get("to"), "to")?;
     let steps = args.get("steps").and_then(Value::as_u64).unwrap_or(10).clamp(1, 100) as usize;
@@ -1058,7 +1075,7 @@ async fn dialog(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
 // upload
 
 async fn upload(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
-    let c = open(&ctx, &args).await?;
+    let c = open_input(&ctx, &args, "upload").await?;
     let spec = Spec::from_args(&args).ok_or_else(|| anyhow!("upload needs a ref or selector for the file input (or its label)"))?;
     let files: Vec<String> = match args.get("files") {
         Some(Value::String(file)) => vec![file.clone()],
@@ -1829,7 +1846,15 @@ mod tests {
     }
 
     fn text_of(output: &ToolOutput) -> String {
-        output.content.iter().filter_map(|content| match content { browse_core::Content::Text { text } => Some(text.as_str()), _ => None }).collect::<Vec<_>>().join("\n")
+        output
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                browse_core::Content::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Every input tool is refused on a read-only tab before any CDP work, and inspection tools keep working.

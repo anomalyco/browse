@@ -292,6 +292,9 @@ impl Browser for FakeBrowser {
     async fn handoff(&self, _tab: TabId, _message: &str) -> anyhow::Result<HandoffResult> {
         anyhow::bail!("not in tests")
     }
+    async fn read_only(&self, _tab: TabId) -> bool {
+        false
+    }
     async fn human_input(&self, _tab: TabId) -> bool {
         self.human
     }

@@ -86,6 +86,9 @@ impl Browser for FakeBrowser {
     async fn handoff(&self, _: TabId, _: &str) -> anyhow::Result<HandoffResult> {
         anyhow::bail!("not in tests")
     }
+    async fn read_only(&self, _: TabId) -> bool {
+        false
+    }
 }
 
 fn tab() -> TabInfo {

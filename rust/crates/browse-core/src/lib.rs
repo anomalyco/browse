@@ -167,10 +167,10 @@ pub trait Browser: Send + Sync {
         true
     }
     /// Whether the tab was opened with `readOnly`. The page tools refuse input on such a tab before any CDP work
-    /// (the CDP methods they'd use go through Runtime, which read-only tabs allow for snapshots).
-    async fn read_only(&self, _tab: TabId) -> bool {
-        false
-    }
+    /// (the CDP methods they'd use go through Runtime, which read-only tabs allow for snapshots). An implementation
+    /// that can't see the tab right now (a browser reconnecting, a relay restart) waits for it and then answers;
+    /// false when nothing knows the tab.
+    async fn read_only(&self, tab: TabId) -> bool;
     /// A background activity in the tab started (`busy`) or ended: a network capture ("network") or a recording
     /// ("recording"), keyed per kind. While any key is busy the tab counts as busy, so idle shutdown, idle tab cleanup
     /// and relay restarts wait for it. Called again with `false` when the activity ends for any reason.
