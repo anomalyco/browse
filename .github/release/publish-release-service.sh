@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# publish-release-service.sh <build dir> <binaries dir> [<signed dir>]: publishes this run to Anomaly's release service,
-# https://anoma.ly/release (github.com/anomalyco/release, docs/publishing.md), through its shared client: a one-hour
-# publish session from the job's GitHub OIDC token (no secrets), content-addressed uploads, retries, and a check of
-# every published file. The service admits this workflow on refs/heads/dev in environment release
+# publish-release-service.sh <build dir> <binaries dir> [<macOS signed dir>] [<Windows signed dir>]: publishes this run
+# to Anomaly's release service, https://anoma.ly/release (github.com/anomalyco/release, docs/publishing.md), through its
+# shared client: a one-hour publish session from the job's GitHub OIDC token (no secrets), content-addressed uploads,
+# retries, and a check of every published file. The service admits this workflow on refs/heads/dev in environment release
 # (scripts/release-registry.json, registered there as registry/browse.json).
 #
 # Every channel publishes both artifacts:
@@ -12,9 +12,9 @@
 #   cli        one target per binary (the same eleven targets as @opencode/browse-<target>), npm's darwin is the
 #              service's macos: opencode-browse-<target>-<version>.tgz
 #
-# A signed macOS tarball (sign-macos.sh) replaces the unsigned one of the same name. Publishing the version the channel
-# already has succeeds only when the service has exactly these files, so a rerun is safe. A dry run prints the
-# artifact/channel/target/file list and publishes nothing.
+# A signed macOS or Windows tarball (sign-macos.sh, repack-windows.sh) replaces the unsigned one of the same name.
+# Publishing the version the channel already has succeeds only when the service has exactly these files, so a rerun is
+# safe. A dry run prints the artifact/channel/target/file list and publishes nothing.
 . "$(dirname "$0")/lib.sh"
 
 release=${BROWSE_RELEASE_SERVICE:-https://anoma.ly/release}
@@ -22,6 +22,7 @@ release=${release%/}
 build_dir=$1
 binaries_dir=$2
 signed_dir=${3:-}
+signed_windows_dir=${4:-}
 : "${NOTES_URL:?Set NOTES_URL}"
 case "$BROWSE_CHANNEL" in
   dev) channel=dev ;;
@@ -42,14 +43,16 @@ service_target() {
   esac
 }
 
-# target_file <npm target>: the tarball this run would publish, preferring the signed one.
+# target_file <npm target>: the tarball this run would publish, preferring a signed one.
 target_file() {
-  local name="opencode-browse-$1-$BROWSE_VERSION.tgz"
-  if [ -n "$signed_dir" ] && [ -f "$signed_dir/$name" ]; then
-    printf '%s' "$signed_dir/$name"
-  else
-    printf '%s' "$binaries_dir/$name"
-  fi
+  local name="opencode-browse-$1-$BROWSE_VERSION.tgz" dir
+  for dir in "$signed_dir" "$signed_windows_dir"; do
+    if [ -n "$dir" ] && [ -f "$dir/$name" ]; then
+      printf '%s' "$dir/$name"
+      return
+    fi
+  done
+  printf '%s' "$binaries_dir/$name"
 }
 
 files=""

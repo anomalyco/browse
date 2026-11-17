@@ -18,12 +18,14 @@ run-name: "${{ github.event_name == 'workflow_dispatch' && format('Release {0} {
 # - build, build-binary and build-binaries run repository code (bun install, typecheck, tests, scripts/release-check.ts,
 #   cargo, scripts/npm-package.ts) with no environment, secrets or id-token, and upload the artifacts with a SHA256SUMS
 #   whose digest they output (build-binary's per-target executables are only build-binaries' input).
-# - sign-macos (optional, off until the repository variable MACOS_SIGNING is true) runs only .github/release/ scripts.
+# - sign-macos and sign-windows (optional, off until the repository variables MACOS_SIGNING and WINDOWS_SIGNING are
+#   true) run only .github/release/ scripts. sign-windows signs through Azure Trusted Signing over OIDC, with the Azure
+#   ids as repository variables (there is no Azure secret).
 # - tag runs only .github/release/tag-release.sh (git and jq) with the release deploy key.
 # - attest and every publish job check out only .github/release/, verify each artifact against the digest of the job
 #   that made it (and the attestation), and run those scripts on the artifacts as data. They never execute repository
 #   code. Jobs that hold a secret or publish run in environment release, which admits only dev.
-# - the jobs that need a secret (tag, sign-macos, publish-cws, push-release-to-dev) assume
+# - the jobs that need an AWS secret (tag, sign-macos, publish-cws, push-release-to-dev) assume
 #   arn:aws:iam::604439173067:role/github/browse-release over GitHub OIDC in environment release and read only the
 #   secrets they use from AWS Secrets Manager; the Chrome Web Store ids are repository variables.
 # .github/ (CODEOWNERS) is the security boundary for releases.
@@ -535,17 +537,92 @@ jobs:
           rm -f "$RUNNER_TEMP/cert.p12"
           security delete-keychain build.keychain || true
 
+  # OPTIONAL, off by default: Authenticode-signs the Windows binaries through Azure Trusted Signing once the repository
+  # variable WINDOWS_SIGNING is true. An unsigned browse.exe is blocked by Windows Smart App Control, so install fails.
+  # The Azure ids are repository variables (AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID and the
+  # AZURE_TRUSTED_SIGNING_* names below); Azure trusts this workflow's environment release over OIDC, so there is no
+  # secret. Until then this job is skipped and the Windows packages ship unsigned.
+  sign-windows:
+    name: Sign the Windows binaries (optional)
+    needs: [plan, build-binaries]
+    if: ${{ !cancelled() && needs.build-binaries.result == 'success' && vars.WINDOWS_SIGNING == 'true' }}
+    runs-on: windows-2025
+    timeout-minutes: 20
+    environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      digest: ${{ steps.upload.outputs.digest }}
+    steps:
+      - name: Check out release scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: /.github/release/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Download
+        uses: ./.github/release/download
+        with:
+          pattern: binaries
+          digests: binaries=${{ needs.build-binaries.outputs.digest }}
+      - name: Unpack
+        run: bash .github/release/unpack-windows.sh "$RUNNER_TEMP/in/binaries" "$RUNNER_TEMP/work"
+        env:
+          BROWSE_VERSION: ${{ needs.plan.outputs.version }}
+      - name: Log in to Azure
+        if: needs.plan.outputs.dry_run != 'true'
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign
+        if: needs.plan.outputs.dry_run != 'true'
+        uses: azure/artifact-signing-action@b443cf8ea4124818d2ea9f043cba29fc3ec47b16 # v1.2.0
+        with:
+          cache-dependencies: false
+          endpoint: ${{ vars.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ vars.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE }}
+          files-folder: ${{ runner.temp }}\work
+          files-folder-filter: exe
+          files-folder-recurse: true
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+      - name: Verify and repack
+        run: bash .github/release/repack-windows.sh "$RUNNER_TEMP/work" "$RUNNER_TEMP/signed"
+        env:
+          BROWSE_VERSION: ${{ needs.plan.outputs.version }}
+          BROWSE_DRY_RUN: ${{ needs.plan.outputs.dry_run }}
+      - id: upload
+        name: Upload
+        uses: ./.github/release/upload
+        with:
+          name: binaries-windows-signed
+          path: ${{ runner.temp }}/signed
+
   # ---- Attest and publish: only .github/release/ is checked out; artifacts are data ---------------------------------
 
-  # Build provenance for the zip and every tarball (the signed macOS ones too, when sign-macos ran). No secrets; id-token
-  # only for Sigstore.
+  # Build provenance for the zip and every tarball (the signed macOS and Windows ones too, when those jobs ran). No
+  # secrets; id-token only for Sigstore.
   attest:
     name: Attest build provenance
-    needs: [plan, build, build-binaries, sign-macos]
+    needs: [plan, build, build-binaries, sign-macos, sign-windows]
     # Explicit: on dev runs tag is skipped, and the implicit success() would skip everything downstream of it.
     if: >-
       ${{ !cancelled() && needs.build.result == 'success' && needs.build-binaries.result == 'success'
-      && (needs.sign-macos.result == 'success' || needs.sign-macos.result == 'skipped') }}
+      && (needs.sign-macos.result == 'success' || needs.sign-macos.result == 'skipped')
+      && (needs.sign-windows.result == 'success' || needs.sign-windows.result == 'skipped') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -565,16 +642,17 @@ jobs:
       - name: Download
         uses: ./.github/release/download
         with:
-          pattern: "{build,binaries,binaries-signed}"
+          pattern: "{build,binaries,binaries-signed,binaries-windows-signed}"
           digests: >-
             build=${{ needs.build.outputs.digest }} binaries=${{ needs.build-binaries.outputs.digest }}
             binaries-signed=${{ needs.sign-macos.outputs.digest }}
-      # Every file the artifacts list, by the checksums verify-artifacts.sh just checked; a signed macOS tarball replaces
-      # the unsigned one of the same name, which is never published.
+            binaries-windows-signed=${{ needs.sign-windows.outputs.digest }}
+      # Every file the artifacts list, by the checksums verify-artifacts.sh just checked; a signed macOS or Windows
+      # tarball replaces the unsigned one of the same name, which is never published.
       - name: Subjects
         run: |
           sums=()
-          for name in binaries-signed binaries build; do
+          for name in binaries-signed binaries-windows-signed binaries build; do
             if [ -f "$RUNNER_TEMP/in/$name/SHA256SUMS" ]; then sums+=("$RUNNER_TEMP/in/$name/SHA256SUMS"); fi
           done
           awk '!seen[substr($0, 67)]++' "${sums[@]}" > "$RUNNER_TEMP/subjects.txt"
@@ -599,10 +677,11 @@ jobs:
   # only credential; the service checks it against registry/browse.json (workflow, refs/heads/dev, environment release).
   publish-release-service:
     name: Publish to the release service
-    needs: [plan, build, build-binaries, sign-macos, attest]
+    needs: [plan, build, build-binaries, sign-macos, sign-windows, attest]
     if: >-
       ${{ !cancelled() && needs.attest.result == 'success'
-      && (needs.sign-macos.result == 'success' || needs.sign-macos.result == 'skipped') }}
+      && (needs.sign-macos.result == 'success' || needs.sign-macos.result == 'skipped')
+      && (needs.sign-windows.result == 'success' || needs.sign-windows.result == 'skipped') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
@@ -621,17 +700,20 @@ jobs:
       - name: Download
         uses: ./.github/release/download
         with:
-          pattern: "{build,binaries,binaries-signed}"
+          pattern: "{build,binaries,binaries-signed,binaries-windows-signed}"
           digests: >-
             build=${{ needs.build.outputs.digest }} binaries=${{ needs.build-binaries.outputs.digest }}
             binaries-signed=${{ needs.sign-macos.outputs.digest }}
+            binaries-windows-signed=${{ needs.sign-windows.outputs.digest }}
       - name: Publish
         run: |
-          signed=()
-          if [ "$SIGN_MACOS" = success ]; then signed=("$RUNNER_TEMP/in/binaries-signed"); fi
-          bash .github/release/publish-release-service.sh "$RUNNER_TEMP/in/build" "$RUNNER_TEMP/in/binaries" "${signed[@]}"
+          macos= windows=
+          if [ "$SIGN_MACOS" = success ]; then macos="$RUNNER_TEMP/in/binaries-signed"; fi
+          if [ "$SIGN_WINDOWS" = success ]; then windows="$RUNNER_TEMP/in/binaries-windows-signed"; fi
+          bash .github/release/publish-release-service.sh "$RUNNER_TEMP/in/build" "$RUNNER_TEMP/in/binaries" "$macos" "$windows"
         env:
           SIGN_MACOS: ${{ needs.sign-macos.result }}
+          SIGN_WINDOWS: ${{ needs.sign-windows.result }}
           GH_TOKEN: ${{ github.token }}
           BROWSE_VERSION: ${{ needs.plan.outputs.version }}
           BROWSE_CHANNEL: ${{ needs.plan.outputs.channel }}
@@ -642,7 +724,7 @@ jobs:
   # no environment. The platform packages @opencode/browse-<target> first, then @opencode/browse.
   publish-npm:
     name: Publish to npm
-    needs: [plan, build, build-binaries, sign-macos, attest, publish-release-service]
+    needs: [plan, build, build-binaries, sign-macos, sign-windows, attest, publish-release-service]
     if: >-
       ${{ !cancelled() && needs.attest.result == 'success'
       && needs.publish-release-service.result == 'success' }}
@@ -668,17 +750,20 @@ jobs:
       - name: Download
         uses: ./.github/release/download
         with:
-          pattern: "{build,binaries,binaries-signed}"
+          pattern: "{build,binaries,binaries-signed,binaries-windows-signed}"
           digests: >-
             build=${{ needs.build.outputs.digest }} binaries=${{ needs.build-binaries.outputs.digest }}
             binaries-signed=${{ needs.sign-macos.outputs.digest }}
+            binaries-windows-signed=${{ needs.sign-windows.outputs.digest }}
       - name: Publish
         run: |
-          signed=()
-          if [ "$SIGN_MACOS" = success ]; then signed=("$RUNNER_TEMP/in/binaries-signed"); fi
-          bash .github/release/publish-npm.sh "$RUNNER_TEMP/in/build" "$RUNNER_TEMP/in/binaries" "${signed[@]}"
+          macos= windows=
+          if [ "$SIGN_MACOS" = success ]; then macos="$RUNNER_TEMP/in/binaries-signed"; fi
+          if [ "$SIGN_WINDOWS" = success ]; then windows="$RUNNER_TEMP/in/binaries-windows-signed"; fi
+          bash .github/release/publish-npm.sh "$RUNNER_TEMP/in/build" "$RUNNER_TEMP/in/binaries" "$macos" "$windows"
         env:
           SIGN_MACOS: ${{ needs.sign-macos.result }}
+          SIGN_WINDOWS: ${{ needs.sign-windows.result }}
           GH_TOKEN: ${{ github.token }}
           BROWSE_VERSION: ${{ needs.plan.outputs.version }}
           BROWSE_NPM_TAG: ${{ needs.plan.outputs.npm_tag }}
