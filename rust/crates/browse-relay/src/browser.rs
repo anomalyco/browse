@@ -416,6 +416,10 @@ impl Browser for RelayBrowser {
         }
     }
 
+    async fn read_only(&self, tab: TabId) -> bool {
+        self.0.st().tabs.get(&tab).is_some_and(|entry| entry.options.read_only)
+    }
+
     /// A numeric tab id, or a caller-chosen id like `work-mail`.
     fn resolve_tab(&self, value: &Value) -> anyhow::Result<TabId> {
         if let Some(tab) = value.as_i64() {

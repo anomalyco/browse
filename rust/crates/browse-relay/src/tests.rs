@@ -817,6 +817,8 @@ async fn popups_inherit_their_openers_options() {
     assert_eq!(popup.options.group.as_deref(), Some("shop"));
     assert_eq!(popup.options.allowed_origins, Some(vec!["example.com".to_string()]));
     assert!(popup.options.read_only);
+    assert!(browser.read_only(opener).await);
+    assert!(browser.read_only(popup.tab).await);
     let blocked = browser.cdp(95).await.unwrap().send("Input.dispatchKeyEvent", json!({}), None).await.unwrap_err();
     assert!(blocked.to_string().contains("read-only"), "{blocked}");
     // A lent tab's popups don't count while no agent works in it.

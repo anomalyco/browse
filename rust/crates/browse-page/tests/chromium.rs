@@ -587,3 +587,30 @@ async fn page_tools_need_a_tab() {
     let output = h.call("navigate", json!({ "url": "about:blank", "group": "x" })).await;
     assert!(output.is_error && support::text_of(&output).contains("only apply when navigate opens a tab"), "{}", support::text_of(&output));
 }
+
+/// A tab opened with readOnly refuses input tools before any CDP work, including the ones that would otherwise
+/// succeed through Runtime JavaScript (select, fill on a select, upload).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn read_only_tabs_refuse_input_tools() {
+    let h = match Harness::start_read_only(false).await {
+        Some(h) => h,
+        None => {
+            eprintln!("no Chromium found; skipping");
+            return;
+        }
+    };
+    let url = h.server.page("/readonly-form", FORM);
+    h.json("navigate", json!({ "url": url })).await;
+
+    let refused = h.err("select", json!({ "selector": "#plan", "value": "Pro plan" })).await;
+    assert!(refused.contains("browse blocked select") && refused.contains("read-only"), "{refused}");
+    let refused = h.err("fill", json!({ "selector": "#plan", "value": "Pro plan" })).await;
+    assert!(refused.contains("browse blocked fill") && refused.contains("read-only"), "{refused}");
+    let refused = h.err("click", json!({ "selector": "#save" })).await;
+    assert!(refused.contains("browse blocked click") && refused.contains("read-only"), "{refused}");
+
+    // Nothing changed, and reading the page still works.
+    assert_eq!(h.ok("eval", json!({ "expression": "document.getElementById('plan').value" })).await, "\"free\"");
+    assert_eq!(h.ok("eval", json!({ "expression": "document.getElementById('out').textContent" })).await, "\"nothing yet\"");
+    assert!(h.ok("snapshot", json!({})).await.contains("Sign up"));
+}

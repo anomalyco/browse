@@ -31,6 +31,11 @@ struct PageTool {
     handler: Handler,
 }
 
+/// The tools that act on the page like a person. A read-only tab refuses them before any CDP work: some of them
+/// (`select`, `fill` on selects and date-like inputs, `upload`) would otherwise succeed through Runtime JavaScript,
+/// which read-only tabs allow because snapshots need it.
+const INPUT_TOOLS: &[&str] = &["click", "fill", "type", "press", "select", "hover", "drag", "upload"];
+
 #[async_trait]
 impl Tool for PageTool {
     fn spec(&self) -> ToolSpec {
@@ -39,6 +44,13 @@ impl Tool for PageTool {
 
     async fn call(&self, ctx: ToolContext, args: Value) -> Result<ToolOutput> {
         let args = if args.is_null() { json!({}) } else { args };
+        if INPUT_TOOLS.contains(&self.name)
+            && let Some(tab) = args.get("tab")
+            && let Ok(tab) = ctx.browser.resolve_tab(tab)
+            && ctx.browser.read_only(tab).await
+        {
+            return Ok(ToolOutput::error(browse_core::read_only_refusal(self.name)));
+        }
         // Every call is bounded as a whole, so a browser or relay that stops answering can't hold it past its
         // timeout (each tool's own waits finish well inside this).
         let limit = overall_limit(self.name, &args);
@@ -1774,4 +1786,78 @@ fn webmcp_schema() -> Value {
         })),
         &[],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use browse_core::{Browser, Cdp, HandoffResult, TabId, TabInfo};
+
+    /// A browser whose only tab is read-only; CDP work is counted, so a refusal can be shown to come before it.
+    #[derive(Default)]
+    struct ReadOnlyBrowser {
+        cdp_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Browser for ReadOnlyBrowser {
+        async fn open_tab(&self, _url: Option<&str>, _options: &TabOptions) -> anyhow::Result<TabInfo> {
+            unreachable!("a refused call never opens a tab")
+        }
+        async fn tabs(&self) -> anyhow::Result<Vec<TabInfo>> {
+            Ok(Vec::new())
+        }
+        async fn close_tab(&self, _tab: TabId) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn cdp(&self, _tab: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
+            self.cdp_calls.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("CDP was used")
+        }
+        async fn state(&self, _tab: TabId) -> anyhow::Result<Arc<TabState>> {
+            self.cdp_calls.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("CDP was used")
+        }
+        async fn handoff(&self, _tab: TabId, _message: &str) -> anyhow::Result<HandoffResult> {
+            unreachable!("a refused call never hands off")
+        }
+        async fn read_only(&self, _tab: TabId) -> bool {
+            true
+        }
+    }
+
+    fn text_of(output: &ToolOutput) -> String {
+        output.content.iter().filter_map(|content| match content { browse_core::Content::Text { text } => Some(text.as_str()), _ => None }).collect::<Vec<_>>().join("\n")
+    }
+
+    /// Every input tool is refused on a read-only tab before any CDP work, and inspection tools keep working.
+    #[tokio::test]
+    async fn input_tools_refuse_a_read_only_tab_before_cdp() {
+        let browser = Arc::new(ReadOnlyBrowser::default());
+        let ctx = ToolContext { browser: browser.clone(), file_roots: Vec::new() };
+        let list = tools();
+        for tool in &list {
+            let name = tool.spec().name;
+            if !INPUT_TOOLS.contains(&name.as_str()) {
+                continue;
+            }
+            let args = json!({ "tab": 1, "ref": "e1", "selector": "#x", "value": "x", "text": "x", "files": ["/tmp/x"] });
+            let output = tool.call(ctx.clone(), args).await.unwrap();
+            assert!(output.is_error, "{name} should be refused");
+            let text = text_of(&output);
+            assert!(text.contains("read-only"), "{name}: {text}");
+            assert!(text.contains(&format!("browse blocked {name}")), "{name}: {text}");
+        }
+        assert_eq!(browser.cdp_calls.load(Ordering::SeqCst), 0, "input tools must not touch CDP on a read-only tab");
+
+        // Read-only tabs keep what they need to inspect pages: eval reaches the page (and here, the fake's CDP).
+        let eval = list.iter().find(|tool| tool.spec().name == "eval").unwrap();
+        let output = eval.call(ctx, json!({ "tab": 1, "expression": "1" })).await.unwrap();
+        assert!(output.is_error);
+        let text = text_of(&output);
+        assert!(text.contains("CDP was used") && !text.contains("read-only"), "{text}");
+        assert_eq!(browser.cdp_calls.load(Ordering::SeqCst), 1);
+    }
 }
