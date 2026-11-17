@@ -57,7 +57,8 @@ RUNNING
                               (\"tab\"); pass it to the rest: `browse snapshot --tab 12`, `browse click e12 --tab 12`,
                               `browse fill e5 hello --tab 12`, `browse tabs close --tab 12`.
                               Values fill the tool's main options (see `browse <tool> --help`)
-    --tab <id>                The tab to act on (from navigate or `browse tabs`)
+    --tab <id>                The tab to act on: a tab id from navigate or `browse tabs`, or a chosen id like
+                              `work-mail` from `tabs new`
     --json '<object>'         Arguments as one JSON object
     --output <path>           Where to save images (default: a temp file, printed)
   <tool> --help               The tool's options

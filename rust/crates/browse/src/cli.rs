@@ -152,6 +152,14 @@ fn matches(schema: &Value, value: &Value) -> bool {
     })
 }
 
+/// A `--tab` value: a numeric tab id stays a number, anything else is a chosen id like `work-mail`.
+fn tab_id(value: &str) -> anyhow::Result<Value> {
+    if value.is_empty() {
+        bail!("--tab takes a tab id (a number from `browse navigate` or `browse tabs`) or a chosen id like `work-mail`, not {value:?}");
+    }
+    Ok(value.parse::<i64>().map_or_else(|_| Value::String(value.to_owned()), Value::from))
+}
+
 /// A command-line value for an option with `schema`: JSON when that fits the schema, else the raw string when a
 /// string fits, else an error naming what the option takes.
 fn coerce(key: &str, schema: &Value, raw: String) -> anyhow::Result<Value> {
@@ -264,7 +272,7 @@ pub fn call(name: &str, args: &[String]) -> anyhow::Result<i32> {
                         Value::Object(map) => arguments.extend(map),
                         _ => bail!("--json must be a JSON object"),
                     },
-                    "tab" => tab = Some(value.parse::<i64>().map_err(|_| anyhow::anyhow!("--tab takes a tab id (a number from `browse navigate` or `browse tabs`), not {value:?}"))?),
+                    "tab" => tab = Some(tab_id(&value)?),
                     _ => output = Some(PathBuf::from(value)),
                 }
             }
@@ -296,7 +304,7 @@ pub fn call(name: &str, args: &[String]) -> anyhow::Result<i32> {
         if !properties.contains_key("tab") {
             bail!("{name} doesn't act on a tab; leave out --tab");
         }
-        arguments.insert("tab".into(), Value::from(tab));
+        arguments.insert("tab".into(), tab);
     }
     check(name, &properties, &arguments)?;
     if let Some(dir) = output.as_ref().and_then(|p| p.parent()).filter(|d| !d.as_os_str().is_empty()) {
@@ -371,6 +379,13 @@ mod tests {
         let choice = json!({ "type": "string", "enum": ["load", "settle"] });
         assert!(coerce("waitUntil", &choice, "soon".into()).is_err());
         assert!(coerce("flag", &json!({ "type": "boolean" }), "maybe".into()).is_err());
+    }
+
+    #[test]
+    fn tab_flag_keeps_numbers_and_passes_chosen_ids() {
+        assert_eq!(tab_id("12").unwrap(), json!(12));
+        assert_eq!(tab_id("work-mail").unwrap(), json!("work-mail"));
+        assert!(tab_id("").is_err());
     }
 
     #[test]
