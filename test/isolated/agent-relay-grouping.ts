@@ -596,6 +596,89 @@ describe("toolbar clicks that can't attach", () => {
   })
 })
 
+describe("the debugging bar notice", () => {
+  const notice = () => stub.state.notifications.get("browse-debugging-bar") as
+    | { title: string; message: string; requireInteraction?: boolean }
+    | undefined
+
+  beforeEach(async () => {
+    // The module's flag outlives a test; start each one as if browse had just been attached.
+    relay.dismissDebuggingBar()
+    stub.state.notifications.clear()
+    stub.state.optionsOpened = 0
+  })
+
+  test("one press detaching several tabs shows exactly one notification and marks the status page", async () => {
+    const { userTab } = await userWindow()
+    const first = await agentTab("github")
+    const second = await agentTab("linear")
+    await command("debugger.attach", { tabId: userTab })
+    const canceled = [first.tabId, second.tabId, userTab]
+    let creates = 0
+    const original = stub.chrome.notifications.create
+    stub.chrome.notifications.create = (async (id: string, options: unknown) => {
+      creates++
+      return original(id, options)
+    }) as typeof stub.chrome.notifications.create
+    try {
+      for (const tabId of canceled) event("debugger.onDetach").emit({ tabId }, "canceled_by_user")
+      await canceledAtOnce(canceled)
+      await until(() => stub.state.notifications.size === 1)
+      expect(creates).toBe(1)
+      expect(relay.state().debuggingBarClosed).toBe(true)
+      expect(notice()).toMatchObject({
+        title: "browse",
+        message:
+          "The browser's debugging bar was closed, which disconnects browse from every tab. Tabs you lent are yours again. To lend one again, click the browse toolbar button on it.",
+      })
+      expect(notice()?.requireInteraction).toBeUndefined()
+      // Clicking the notification clears it and opens the options page, where the note says how to lend a tab again.
+      event("notifications.onClicked").emit("browse-debugging-bar")
+      await until(() => stub.state.optionsOpened === 1)
+      expect(stub.state.notifications.size).toBe(0)
+    } finally {
+      stub.chrome.notifications.create = original
+    }
+  })
+
+  test("lending a tab again clears the flag and the notification", async () => {
+    const { userTab } = await userWindow()
+    const agent = await agentTab("github")
+    await command("debugger.attach", { tabId: userTab })
+    const canceled = [agent.tabId, userTab]
+    for (const tabId of canceled) event("debugger.onDetach").emit({ tabId }, "canceled_by_user")
+    await canceledAtOnce(canceled)
+    await until(() => relay.state().debuggingBarClosed === true && stub.state.notifications.size === 1)
+    await relay.attachTab(userTab)
+    await toolbarClicked(userTab)
+    expect(relay.state().debuggingBarClosed).toBeUndefined()
+    await until(() => stub.state.notifications.size === 0)
+  })
+
+  test("an agent attaching any tab again clears the flag and the notification", async () => {
+    await userWindow()
+    const agent = await agentTab("github")
+    event("debugger.onDetach").emit({ tabId: agent.tabId }, "canceled_by_user")
+    await canceledAtOnce([agent.tabId])
+    await until(() => relay.state().debuggingBarClosed === true && stub.state.notifications.size === 1)
+    const { tabId } = (await command("tabs.create", { url: "https://example.com/", active: false })) as { tabId: number }
+    await command("debugger.attach", { tabId })
+    expect(relay.state().debuggingBarClosed).toBeUndefined()
+    await until(() => stub.state.notifications.size === 0)
+  })
+
+  test("the status page's dismiss message clears the flag and the notification", async () => {
+    await userWindow()
+    const agent = await agentTab("github")
+    event("debugger.onDetach").emit({ tabId: agent.tabId }, "canceled_by_user")
+    await canceledAtOnce([agent.tabId])
+    await until(() => relay.state().debuggingBarClosed === true && stub.state.notifications.size === 1)
+    relay.dismissDebuggingBar()
+    expect(relay.state().debuggingBarClosed).toBeUndefined()
+    await until(() => stub.state.notifications.size === 0)
+  })
+})
+
 describe("relay settings", () => {
   test("the extension sends the input setting, again when it changes, and never invalid values", async () => {
     // The first connection's settings went out with pairing (beforeEach cleared the log); ask again.

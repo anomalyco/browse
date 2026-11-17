@@ -79,6 +79,8 @@ export function createRelayCommands(deps: {
   readonly ungroup: (tabId: number, options?: { finished?: boolean; released?: boolean }) => Promise<void>
   /** True for the first `tabs.ungroup` after a debugging-bar cancel of a tab an agent opened: it must stay as it is. */
   readonly consumeCanceledUngroup: (tabId: number) => boolean
+  /** browse is attached to a tab again: the debugging-bar notice has done its job. */
+  readonly onAttached: () => void
 }) {
   /** Each tab's page status deliveries, in order (see deliverPageStatus). */
   const pageDeliveries = new Map<number, Promise<void>>()
@@ -136,6 +138,7 @@ export function createRelayCommands(deps: {
         }
         if (clicked) void ToolbarNotice.clear(tabId)
         deps.relayTabs.add(tabId)
+        deps.onAttached()
         deps.notify()
         // The tab's stable id, so a relay that reconnects keeps the same tab. A lent tab is not an agent tab: idle
         // cleanup never closes it.

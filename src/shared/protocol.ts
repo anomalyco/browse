@@ -38,6 +38,11 @@ export type AgentRelayState = {
   codeRejected?: boolean
   /** Install wrote a code into this unpacked build, so it pairs with this computer's relay by itself. */
   unpacked?: boolean
+  /**
+   * The browser's debugging bar button was pressed (Cancel in Chrome, OK in some browsers), which detaches the debugger
+   * from every tab. Tabs the user lent are theirs again; lending one, attaching any tab, or dismissing the notice clears it.
+   */
+  debuggingBarClosed?: boolean
   /** Where the extension connects, `localhost:port` or `host:port`, and whether that's another computer. */
   relay: { address: string; remote: boolean }
   /** What the connected relay calls this browser; agents pass `id` to use it when several are connected. */
@@ -255,6 +260,8 @@ export type FromStatusPage =
   | { type: "relay.connect"; address: string; code: string }
   | { type: "agents.reconnect" }
   | { type: "tabs.cleanup" }
+  /** The settings page's notice about the browser's debugging bar was dismissed. */
+  | { type: "debuggingBar.dismiss" }
   /** A one-time code from install's link (welcome.html#code=…), and the relay port when it isn't 19988. */
   | { type: "pairing.link"; code: string; port?: number }
   | { type: "autoUpdate.set"; mode: AutoUpdateMode }

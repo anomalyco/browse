@@ -44,6 +44,7 @@ import {
 } from "./agent-relay/wire"
 import { installPopupAdoption } from "./agent-relay/popups"
 import { DebuggerHub } from "./debugger-hub"
+import { DebuggingBarNotice } from "./debugging-bar-notice"
 import { HandoffNotice } from "./handoff-notice"
 import { TabCleanup } from "./tab-cleanup"
 import { TabIdentity } from "./tab-identity"
@@ -200,6 +201,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       ...(skew && status === "incompatible" ? { skew } : {}),
       ...(codeRejected ? { codeRejected: true } : {}),
       ...(unpacked ? { unpacked: true } : {}),
+      ...(DebuggingBarNotice.isClosed() ? { debuggingBarClosed: true } : {}),
       ...(browser && status === "connected" ? { browser } : {}),
       relay: { address: `${host === "127.0.0.1" ? "localhost" : host}:${shownPort}`, remote: host !== "127.0.0.1" },
     }
@@ -262,6 +264,7 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
    * open, grouped and tracked, so idle cleanup closes it on the usual timer.
    */
   const releaseCanceledTab = async (tabId: number) => {
+    if (DebuggingBarNotice.dismissed()) notify()
     // A previous worker may have stored the tracking, so restore it before deciding who opened the tab. If that
     // fails, treat it as agent-opened: leaving it open is safer than letting idle cleanup close a tab the user lent.
     const agentOpened = await TabCleanup.isTracked(tabId).catch(() => true)
@@ -294,6 +297,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     await TabCleanup.isTracked(tabId).catch(() => undefined)
     TabCleanup.forget(tabId)
     canceledAgentTabs.delete(tabId)
+    // A lend after the debugging bar closed is browse working again: the notice and its explanation can go.
+    if (DebuggingBarNotice.clear()) notify()
     // It is the user's now: idle cleanup never closes a lent tab, and reconnect must not count it as an agent's.
     void TabIdentity.setAgent(tabId, false)
   }
@@ -392,6 +397,10 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     group: grouping.group,
     ungroup: grouping.ungroup,
     consumeCanceledUngroup,
+    // Any tab attached again (an agent's or a lent one) means browse is working: the bar notice is history.
+    onAttached: () => {
+      if (DebuggingBarNotice.clear()) notify()
+    },
   })
 
   const connect = (reason: string) => {
@@ -720,6 +729,10 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       if (!open()) return
       log.add("settings", { autoUpdate: mode })
       send({ method: "settings", params: { autoUpdate: mode } })
+    },
+    /** The settings page dismissed the debugging-bar notice: clears that and the system notification. */
+    dismissDebuggingBar() {
+      if (DebuggingBarNotice.clear()) notify()
     },
     /**
      * A one-time code from install's link (welcome.html#code=…). Ignored while this extension works with the relay, so

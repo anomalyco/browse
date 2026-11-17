@@ -55,6 +55,10 @@
   margin: 0;
 }
 
+.head-notice .notice-action {
+  margin-top: 8px;
+}
+
 .dot {
   flex: none;
   width: 6px;

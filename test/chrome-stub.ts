@@ -95,6 +95,8 @@ export function createChrome() {
     groups,
     /** Every chrome.windows.update({ focused: true }) and chrome.tabs.update({ active: true }), in order. */
     activations: [] as ({ windowId: number } | { tabId: number })[],
+    /** Times chrome.runtime.openOptionsPage() was called. */
+    optionsOpened: 0,
     /** Tab calls that change groups, in order, so tests can check ungroup comes before remove. */
     calls: [] as string[],
     /** The displays chrome.windows.create bounds are checked against. */
@@ -189,6 +191,9 @@ export function createChrome() {
       getManifest: () => ({ version: "0.0.0-test" }),
       getPlatformInfo: async () => ({ os: "mac", arch: "arm64", nacl_arch: "arm64" }),
       sendMessage: async () => undefined,
+      async openOptionsPage() {
+        state.optionsOpened++
+      },
     }),
     windows: windowsApi,
     tabs: lenient({

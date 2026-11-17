@@ -44,6 +44,7 @@ chrome.runtime.onConnect.addListener((port) => {
     if (typeof message !== "object" || message === null) return
     if (message.type === "agents.reconnect") agents.reconnect()
     if (message.type === "tabs.cleanup") void TabCleanup.cleanup({ minutes: 0 })
+    if (message.type === "debuggingBar.dismiss") agents.dismissDebuggingBar()
     if (message.type === "autoUpdate.set") agents.setAutoUpdate(message.mode)
     if (message.type === "pairing.link")
       void agents.pairLink(message.code, message.port).then((ok) => post(port, { type: "pairing.link.result", ok }))

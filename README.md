@@ -194,8 +194,10 @@ extension from your browser to finish.
   when it starts again (after an update, say).
 - **Hand an agent one of your tabs** by clicking the toolbar button on it. The badge shows **ON**; click again to take
   it back. While an agent works the badge reads **RUN**, and **WAIT** when it needs you. The button always works: a
-  click while an agent runs takes the tab back. The browser's debugging bar (**Cancel**) disconnects browse from every
-  tab. Chrome's own pages, the Web Store included, can't be lent.
+  click while an agent runs takes the tab back. While browse uses a tab the browser shows a "started debugging" bar;
+  leave it open, because its button (**Cancel** in Chrome, **OK** in some browsers like Dia) disconnects browse from
+  every tab. When that happens browse shows a notification and a note on its settings page saying so, and clicking the
+  toolbar button on a tab lends it again. Chrome's own pages, the Web Store included, can't be lent.
 - **Handoffs:** the page shows a small card with the site's origin. Do the human part, then click **Continue** on the
   card or the toolbar button. While a tab is recorded you get a system notification instead of the card.
 - **Several browsers at once.** Each connected browser has an id (like `chrome-macbook`); `status` lists them, and new

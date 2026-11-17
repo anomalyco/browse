@@ -130,6 +130,17 @@ function Settings() {
           )}
         </Show>
 
+        <Show when={state()?.debuggingBarClosed}>
+          <div class="head-notice">
+            <Note tone="warn">
+              <Rich text="You closed the browser's debugging bar (Cancel in Chrome, OK in some browsers), which disconnects browse from every tab. Tabs you lent are yours again. To lend one again, click the browse toolbar button on it." />
+            </Note>
+            <Button class="notice-action" size="small" variant="neutral" onClick={() => relay.send({ type: "debuggingBar.dismiss" })}>
+              Got it
+            </Button>
+          </div>
+        </Show>
+
         <Show when={state()?.update}>
           {(update) => (
             <Section title="update available">
@@ -308,7 +319,7 @@ function Settings() {
         </details>
       </section>
 
-      <footer class="settings-foot">Agents open their own tabs. To share one of yours, click the browse button on it.</footer>
+      <footer class="settings-foot">Agents open their own tabs. To share one of yours, click the browse button on it. While browse uses a tab, the browser shows a "started debugging" bar; leave it open, because its Cancel or OK button disconnects browse from every tab.</footer>
       <Toast.Region />
     </main>
   )
