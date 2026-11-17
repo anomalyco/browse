@@ -223,7 +223,7 @@ impl Browser for TestBrowser {
 }
 
 pub fn tab() -> TabInfo {
-    TabInfo { tab: 1, url: String::new(), title: String::new(), lent: false, opener: None, options: TabOptions::default() }
+    TabInfo { tab: 1, url: String::new(), title: String::new(), lent: false, opener: None, chosen: None, last_used: None, busy: false, options: TabOptions::default() }
 }
 
 /// Arguments in the live tab (`tab` 1).

@@ -2,6 +2,7 @@ export * as TabCleanup from "./tab-cleanup"
 import { DEFAULT_IDLE_MINUTES, IDLE_MINUTES_KEY, idleMinutesSetting } from "../shared/protocol"
 import { ownedGroup, TIMED_OUT, withTimeout } from "./agent-relay/wire"
 import { serialQueue } from "./serial"
+import { TabIdentity } from "./tab-identity"
 
 // Closes tabs agents opened once nobody has touched them for a while, so agent work doesn't leave a trail of
 // tabs behind. Only tabs an agent created are tracked (the relay's
@@ -204,6 +205,8 @@ export async function cleanup(options: { minutes?: number; own?: { tabIds: reado
       tracked.delete(tabId)
       continue
     }
+    // A tab with a caller-chosen id (`work-mail`) closes only when an agent or the user closes it.
+    if (await TabIdentity.chosen(tabId)) continue
     if (tab.active && tab.windowId === focused?.id && focused?.focused) continue
     if (tab.audible || guards.some((check) => check(tabId))) continue
     const removed = await closeAgentTab(tabId).then(
@@ -349,17 +352,20 @@ export async function reconcileCreates(attached: (tabId: number) => boolean): Pr
   const closed: Closed[] = []
   const taken = new Set<number>()
   for (const entry of pending) {
-    const tab = tabs.find((candidate) =>
-      candidate.id !== undefined &&
-      candidate.id > entry.after &&
-      !taken.has(candidate.id) &&
-      !candidate.active &&
-      candidate.openerTabId === undefined &&
-      [candidate.url, candidate.pendingUrl].includes(entry.url) &&
-      !tracked.has(candidate.id) &&
-      !attached(candidate.id),
+    const tab = tabs.find(
+      (candidate) =>
+        candidate.id !== undefined &&
+        candidate.id > entry.after &&
+        !taken.has(candidate.id) &&
+        !candidate.active &&
+        candidate.openerTabId === undefined &&
+        [candidate.url, candidate.pendingUrl].includes(entry.url) &&
+        !tracked.has(candidate.id) &&
+        !attached(candidate.id),
     )
     if (tab?.id === undefined) continue
+    // A tab with a caller-chosen id was made to be kept: never clean it up as an orphan.
+    if (await TabIdentity.chosen(tab.id)) continue
     taken.add(tab.id)
     if (await closeAgentTab(tab.id).then(() => true, () => false)) closed.push({ tabId: tab.id, title: tab.title || tab.url || "Untitled", idleMinutes: 0 })
   }
@@ -377,6 +383,8 @@ export async function closeUnattached(attached: (tabId: number) => boolean): Pro
   const closed: Closed[] = []
   for (const tabId of Array.from(tracked.keys())) {
     if (attached(tabId)) continue
+    // A chosen-id tab is never closed by cleanup, whatever happened to the worker that opened it.
+    if (await TabIdentity.chosen(tabId)) continue
     const tab = await chrome.tabs.get(tabId).catch(() => undefined)
     tracked.delete(tabId)
     if (!tab || tab.pinned) continue
@@ -418,7 +426,11 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
     // The relay's own ungroups keep tracking (it may be about to close the tab or keep using it); a tab the user
     // moves out of the agent group is theirs now.
     const byRelay = relayUngrouping.delete(tabId)
-    if (!byRelay && tracked.has(tabId) && !closing.has(tabId)) forget(tabId)
+    if (!byRelay && tracked.has(tabId) && !closing.has(tabId)) {
+      forget(tabId)
+      // It is the user's now, not lent: a browser restart must not hand it back to an agent.
+      void TabIdentity.clear(tabId)
+    }
   }
 })
 chrome.alarms.onAlarm.addListener((alarm) => {

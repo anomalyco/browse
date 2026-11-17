@@ -1523,7 +1523,7 @@ fn navigate_schema() -> Value {
             "timeout": { "type": "integer", "description": "Milliseconds the whole navigation may take, including a slow server (default 30000). Timing out is a warning, not an error." },
             "referrer": { "type": "string" },
             "ignoreCache": { "type": "boolean", "description": "reload only." },
-            "tab": { "type": "integer", "description": "The tab to navigate (from an earlier navigate or tabs). Leave it out to open a new tab." },
+            "tab": { "type": ["integer", "string"], "description": "The tab to navigate: its id (from an earlier navigate or tabs) or a chosen id like `work-mail`. Leave it out to open a new tab." },
     })));
     json!({ "type": "object", "properties": p, "required": [], "additionalProperties": false })
 }

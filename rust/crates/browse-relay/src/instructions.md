@@ -2,6 +2,8 @@ browse drives the user's real Chrome-family browser through the browse extension
 
 Tabs are the handle. `navigate` with a `url` and no `tab` opens a new background tab and returns its id as `tab`; keep it and pass `tab` to every other call (snapshot, click, fill, screenshot, ...). `navigate` with `tab` goes to a URL in that tab. Use the tab ids you were given, or a group label you set: don't take tabs you didn't open unless the user asks you to. Popups a page opens show up as `newTabs` in a result and are yours to use. `tabs` lists every agent tab and the ones the user lent (they click the browse toolbar button on a tab; use it by its id).
 
+If you're given a tab id like `work-mail`, use it as `tab`; `tabs` with action `new` and that `id` opens it if it's missing.
+
 Use one loop: inspect, act, verify.
 - Inspect with `snapshot` before choosing anything. It returns an accessibility tree with refs like `e12`; pass a ref (with the same `tab`) to `click`, `fill`, `type`, `select`, `hover` or `drag`. Refs go stale after the page changes: snapshot again.
 - Act with the narrowest stable control. Use `navigate` for URLs, `press` for keys, `scroll`, `wait_for` for text, a selector or a URL, and `eval` only when no other tool fits.

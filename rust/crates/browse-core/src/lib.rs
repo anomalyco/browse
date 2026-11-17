@@ -113,11 +113,20 @@ pub struct TabInfo {
     pub url: String,
     pub title: String,
     /// A tab the user lent browse (the toolbar button), rather than one browse opened.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default)]
     pub lent: bool,
+    /// The caller-chosen id (`work-mail`), when the tab was opened with `tabs new` and an `id`.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "id")]
+    pub chosen: Option<String>,
     /// The tab whose page opened this one (a popup, target=_blank).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opener: Option<TabId>,
+    /// When an agent command last used the tab, ISO 8601.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "lastUsed")]
+    pub last_used: Option<String>,
+    /// A call is running in the tab (or it is being opened for one).
+    #[serde(default)]
+    pub busy: bool,
     #[serde(flatten)]
     pub options: TabOptions,
 }
@@ -153,6 +162,12 @@ pub trait Browser: Send + Sync {
     /// ("recording"), keyed per kind. While any key is busy the tab counts as busy, so idle shutdown, idle tab cleanup
     /// and relay restarts wait for it. Called again with `false` when the activity ends for any reason.
     fn set_busy(&self, _tab: TabId, _key: &str, _busy: bool) {}
+
+    /// The tab a tool argument names: a numeric id, or (in a relay that supports them) a caller-chosen id like
+    /// `work-mail`. Browsers without chosen ids accept integers only.
+    fn resolve_tab(&self, value: &Value) -> anyhow::Result<TabId> {
+        tab_arg(value)
+    }
 }
 
 /// Per-tab state tools keep between calls (snapshot refs, network capture, ...), keyed by a crate-chosen string.
@@ -190,19 +205,37 @@ impl ToolContext {
 }
 
 /// What a tool says when a call needs a tab and names none.
-pub const MISSING_TAB: &str = "Pass `tab`: the id navigate (or tabs new) returned. To open a tab, call navigate with a url; tabs lists the tabs you can use.";
+pub const MISSING_TAB: &str = "Pass `tab`: the id navigate (or tabs new) returned, or a chosen id like `work-mail`. To open a tab, call navigate with a url; tabs lists the tabs you can use.";
 
 /// The `tab` argument a tool needs, or the error telling the agent where to get one.
 pub fn require_tab(args: &Value) -> anyhow::Result<TabId> {
     match args.get("tab") {
         None | Some(Value::Null) => anyhow::bail!(MISSING_TAB),
-        Some(value) => value.as_i64().ok_or_else(|| anyhow::anyhow!("tab must be an integer tab id (from navigate or tabs), not {value}")),
+        Some(value) => tab_arg(value),
     }
+}
+
+/// A numeric tab id argument. A chosen id is resolved against the relay before tools run
+/// (`Browser::resolve_tab`), and by the `tabs` tool itself.
+pub fn tab_arg(value: &Value) -> anyhow::Result<TabId> {
+    value.as_i64().ok_or_else(|| anyhow::anyhow!("tab must be an integer tab id (from navigate or tabs) or a chosen id like `work-mail`, not {value}"))
+}
+
+/// A caller-chosen tab id: a lowercase slug, `^[a-z][a-z0-9-]{0,63}$`, so it can never be mistaken for a number.
+pub fn valid_chosen_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let Some(first) = bytes.first() else { return false };
+    bytes.len() <= 64
+        && first.is_ascii_lowercase()
+        && bytes[1..].iter().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
 }
 
 /// The schema of a required `tab` argument.
 pub fn tab_schema() -> Value {
-    serde_json::json!({ "type": "integer", "description": "The tab to act on: the id navigate or tabs new returned (or a lent tab's id from tabs list)." })
+    serde_json::json!({
+        "type": ["integer", "string"],
+        "description": "The tab to act on: the id navigate or tabs new returned (or a lent tab's id from tabs list), or a chosen id like `work-mail` given to tabs new."
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

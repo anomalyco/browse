@@ -166,6 +166,7 @@ impl Relay {
         let (tabs, idle): (Vec<i64>, Vec<(i64, u64)>) = {
             let mut st = self.st();
             st.stopped.remove(&id);
+            st.chosen_calls.remove(&id);
             let Some(call) = st.calls.remove(&id) else { return Vec::new() };
             let mut tabs: Vec<i64> = call.tabs.into_iter().collect();
             tabs.sort();
@@ -173,7 +174,7 @@ impl Relay {
             let mut idle = Vec::new();
             for tab in quiet {
                 if let Some(entry) = st.tabs.get_mut(&tab) {
-                    entry.last_used = std::time::Instant::now();
+                    entry.touch();
                     entry.idle_epoch += 1;
                     idle.push((tab, entry.idle_epoch));
                 }
@@ -257,7 +258,7 @@ impl Relay {
             match st.tabs.get_mut(&tab) {
                 Some(t) if t.focused && (all || !(t.options.keep_visible && t.owner == Owner::Relay)) => {
                     t.focused = false;
-                    t.last_used = std::time::Instant::now();
+                    t.touch();
                     true
                 }
                 _ => false,

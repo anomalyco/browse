@@ -13,6 +13,7 @@ import { DebuggerHub } from "../debugger-hub"
 import { HandoffNotice } from "../handoff-notice"
 import { PageScripts } from "../page-scripts"
 import { TabCleanup } from "../tab-cleanup"
+import { TabIdentity } from "../tab-identity"
 import { ToolbarNotice } from "../toolbar-notice"
 import { UserSettings } from "../user-settings"
 import {
@@ -136,12 +137,16 @@ export function createRelayCommands(deps: {
         if (clicked) void ToolbarNotice.clear(tabId)
         deps.relayTabs.add(tabId)
         deps.notify()
-        return {}
+        // The tab's stable id, so the relay gets the same tab back after a browser restart. A lent tab is not an agent
+        // tab: idle cleanup never closes it.
+        const browseId = await TabIdentity.ensure(tabId, { agent: await TabCleanup.isTracked(tabId) })
+        return browseId ? { browseId } : {}
       }
       case "debugger.detach": {
         const tabId = number(params, "tabId")
         deps.forget(tabId)
         await DebuggerHub.detach(tabId)
+        await TabIdentity.clear(tabId)
         // A released agent tab stays as it is: grouped and tracked, so the idle-cleanup setting (never, or a
         // number of minutes) decides when it closes. Any other detach finishes with the tab.
         if (params?.release !== true) await deps.ungroup(tabId, { finished: true })
@@ -179,13 +184,17 @@ export function createRelayCommands(deps: {
           normalWindows: opened.normalWindows,
         })
         TabCleanup.track(tab.id)
+        // A caller-chosen id (`work-mail`) is kept on the tab: the relay never idle-closes such a tab, and the id
+        // survives a browser restart with the rest of the tab's identity.
+        const chosen = typeof params?.id === "string" && /^[a-z][a-z0-9-]{0,63}$/.test(params.id) ? params.id : undefined
         // A discarded tab loses the debugger and the agent's page. Issued now but not awaited: the answer must not
         // wait on it.
         void chrome.tabs.update(tab.id, { autoDiscardable: false }).catch(() => undefined)
         // The tab is tracked in memory; clearing the creation marker must not hold the answer past the budget.
         await withTimeout(TabCleanup.endCreate(creating), deadline - Date.now())
         if (url === "about:blank") await waitUntilLoaded(tab.id, deps.log, deadline)
-        return { tabId: tab.id }
+        const browseId = await TabIdentity.ensure(tab.id, { agent: true, ...(chosen ? { chosen } : {}) })
+        return { tabId: tab.id, ...(browseId ? { browseId } : {}) }
       }
       case "tabs.remove":
         await TabCleanup.closeAgentTab(number(params, "tabId"))

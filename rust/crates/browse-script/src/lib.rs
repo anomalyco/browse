@@ -77,7 +77,7 @@ impl Tool for ExecuteTool {
                 "properties": {
                     "code": { "type": "string", "description": CODE_DESCRIPTION },
                     "timeoutMs": { "type": "integer", "minimum": 0, "description": "Overall timeout in milliseconds (paused while handoff waits on the user); default 60000, 0 for none. Includes waiting behind another execute in the same tab." },
-                    "tab": { "type": "integer", "description": "The tab `page` stands for: the `tab` an earlier execute (or navigate, tabs) returned. Leave it out to start without a tab; page.goto(url) then opens one." },
+                    "tab": { "type": ["integer", "string"], "description": "The tab `page` stands for: the `tab` an earlier execute (or navigate, tabs) returned, or a chosen id like `work-mail` given to tabs new. Leave it out to start without a tab; page.goto(url) then opens one." },
                 },
                 "required": ["code"],
                 "additionalProperties": false,
@@ -90,7 +90,13 @@ impl Tool for ExecuteTool {
             return Ok(ToolOutput::error("execute needs code"));
         };
         let timeout_ms = args.get("timeoutMs").and_then(Value::as_u64).unwrap_or(DEFAULT_TIMEOUT_MS);
-        let tab = args.get("tab").and_then(Value::as_i64);
+        let tab = match args.get("tab").filter(|value| !value.is_null()) {
+            None => None,
+            Some(value) => match ctx.browser.resolve_tab(value) {
+                Ok(tab) => Some(tab),
+                Err(error) => return Ok(ToolOutput::error(format!("{error:#}"))),
+            },
+        };
         let started = std::time::Instant::now();
         // One execute at a time per tab: they share its `page` and `state`.
         let slot = match tab {

@@ -30,6 +30,15 @@ pub struct PersistedTab {
     pub options: TabOptions,
     #[serde(default)]
     pub created_at: String,
+    /// The extension's stable id for the tab: a new local tab id after a browser restart still finds this entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browse_id: Option<String>,
+    /// A caller-chosen id (`work-mail`), which agents use as `tab`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen: Option<String>,
+    /// A tab the user lent, kept for its id alone: it is not an agent tab.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lent: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -77,6 +86,9 @@ mod tests {
             opener: Some(3),
             options: TabOptions { group: Some("orw-x".into()), allowed_origins: Some(vec!["example.com".into()]), read_only: true, keep_visible: false, browser: None },
             created_at: "now".into(),
+            browse_id: Some("b7".into()),
+            chosen: Some("work-mail".into()),
+            lent: false,
         };
         save(&path, std::slice::from_ref(&entry)).unwrap();
         let written: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();

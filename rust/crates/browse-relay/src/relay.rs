@@ -53,6 +53,10 @@ pub struct Tab {
     pub url: String,
     pub title: String,
     pub owner: Owner,
+    /// The extension's stable id for the tab (`chrome.sessions` tab value), which survives a browser restart.
+    pub browse_id: Option<String>,
+    /// The caller-chosen id (`work-mail`), when `tabs new` was given one. Such a tab is never idle-closed.
+    pub chosen: Option<String>,
     /// How an agent tab was opened (normalized allowlist; `browser` unset: `link_key` says which); default for a lent
     /// tab.
     pub options: TabOptions,
@@ -73,6 +77,8 @@ pub struct Tab {
     pub crashed: bool,
     pub main_frame: Option<String>,
     pub last_used: Instant,
+    /// `last_used` as ISO 8601, for the `tabs` list.
+    pub last_used_at: String,
     pub focused: bool,
     pub fresh_popup: bool,
     pub blanking: u32,
@@ -97,6 +103,12 @@ impl Tab {
             self.warnings.push(warning);
         }
     }
+
+    /// An agent command used the tab: idle cleanup and the `tabs` list both read this.
+    pub fn touch(&mut self) {
+        self.last_used = Instant::now();
+        self.last_used_at = crate::util::now_iso();
+    }
 }
 
 /// A tab browse remembers while its browser reconnects: who owned it and what its tools kept.
@@ -110,6 +122,10 @@ pub struct KnownOwner {
     pub opener: Option<i64>,
     pub state: Arc<TabState>,
     pub created_at: String,
+    /// The extension's stable id for the tab, if it reported one.
+    pub browse_id: Option<String>,
+    /// The caller-chosen id, if the tab has one.
+    pub chosen: Option<String>,
 }
 
 /// A tab that went away, kept a little while: calls naming it hear why, and a capture that ended with it can still
@@ -179,6 +195,10 @@ pub struct State {
     pub reconnect_owners: HashMap<String, KnownOwner>,
     /// Agent tabs from the registry of the relay before this one, by target id, until their browser announces them.
     pub restorable: HashMap<String, PersistedTab>,
+    /// Chosen ids (`work-mail`) a `tabs new` is opening right now, so two calls can't open two tabs for one id.
+    pub reserved_chosen: HashMap<String, Instant>,
+    /// The chosen-id tabs running calls hold, by call id: a second call on one gets a busy error instead of interleaving.
+    pub chosen_calls: HashMap<u64, i64>,
     pub gone: VecDeque<GoneTab>,
     pub tombstones: HashMap<String, String>,
     pub handshake: HandshakeStats,
@@ -229,6 +249,64 @@ impl State {
         self.from_relay.get(&tab).map(|(key, _)| key.as_str())
     }
 
+    /// The relay id already assigned to a browser's own tab id, if any.
+    pub fn relay_id_for(&self, key: &str, local: i64) -> Option<i64> {
+        self.to_relay.get(&(key.to_string(), local)).copied()
+    }
+
+    /// Registers a relay id chosen by the caller (a tab restored by its stable browse id) for a browser's tab.
+    /// Returns the id in use: `wanted`, or a fresh one if another tab already holds it.
+    pub fn adopt_relay_tab(&mut self, key: &str, local: i64, wanted: i64) -> i64 {
+        if let Some(id) = self.to_relay.get(&(key.to_string(), local)) {
+            return *id;
+        }
+        let id = if self.from_relay.get(&wanted).is_some_and(|(other_key, other_local)| other_key != key || *other_local != local) {
+            let mut id = self.next_tab_id;
+            while self.from_relay.contains_key(&id) {
+                id += 1;
+            }
+            self.next_tab_id = id + 1;
+            id
+        } else {
+            wanted
+        };
+        self.to_relay.insert((key.to_string(), local), id);
+        self.from_relay.insert(id, (key.to_string(), local));
+        id
+    }
+
+    /// The attached tab with this caller-chosen id.
+    pub fn tab_by_chosen(&self, chosen: &str) -> Option<i64> {
+        self.tabs.values().find(|t| !t.closing && t.chosen.as_deref() == Some(chosen)).map(|t| t.id)
+    }
+
+    /// A tab with this caller-chosen id whose browser is away (disconnected, or between relays).
+    pub fn away_tab_by_chosen(&self, chosen: &str) -> Option<i64> {
+        self.reconnect_owners
+            .values()
+            .find(|k| k.chosen.as_deref() == Some(chosen))
+            .map(|k| k.tab)
+            .or_else(|| self.restorable.values().find(|r| r.chosen.as_deref() == Some(chosen)).map(|r| r.tab))
+    }
+
+    /// Marks a chosen id as being opened, unless another call is doing that (or it is attached already).
+    pub fn reserve_chosen(&mut self, chosen: &str) -> bool {
+        self.reserved_chosen.retain(|_, at| at.elapsed() < Duration::from_secs(120));
+        if self.tab_by_chosen(chosen).is_some() {
+            return false;
+        }
+        self.reserved_chosen.insert(chosen.to_string(), Instant::now()).is_none()
+    }
+
+    pub fn release_chosen(&mut self, chosen: &str) {
+        self.reserved_chosen.remove(chosen);
+    }
+
+    /// A chosen id is opening (a `tabs new` is between its check and its tab being attached).
+    pub fn chosen_reserved(&self, chosen: &str) -> bool {
+        self.reserved_chosen.get(chosen).is_some_and(|at| at.elapsed() < Duration::from_secs(120))
+    }
+
     /// The connected browser a relay tab id belongs to, and the tab's id there.
     pub fn browser_tab(&self, tab: i64) -> Option<(Arc<Link>, i64)> {
         let (key, local) = self.from_relay.get(&tab)?;
@@ -261,7 +339,7 @@ impl State {
 
     /// A call is running in the tab, or a capture or recording.
     pub fn tab_busy(&self, tab: i64) -> bool {
-        self.tabs.get(&tab).is_some_and(|t| !t.busy_keys.is_empty()) || self.calls.values().any(|c| c.tabs.contains(&tab))
+        self.tabs.get(&tab).is_some_and(|t| !t.busy_keys.is_empty()) || self.calls.values().any(|c| c.tabs.contains(&tab)) || self.chosen_calls.values().any(|held| *held == tab)
     }
 
     pub fn busy(&self) -> bool {
@@ -444,6 +522,8 @@ impl Relay {
                 handoffs: HashMap::new(),
                 reconnect_owners: HashMap::new(),
                 restorable: HashMap::new(),
+                reserved_chosen: HashMap::new(),
+                chosen_calls: HashMap::new(),
                 gone: VecDeque::new(),
                 tombstones: HashMap::new(),
                 handshake: HandshakeStats::default(),
@@ -611,24 +691,38 @@ impl Relay {
         self.persist.notify_one();
     }
 
-    /// Writes the tab registry now: the agent tabs attached, those of a browser that is reconnecting, and those of
-    /// the previous relay not announced again yet.
+    /// Writes the tab registry now: the tabs attached (agent and lent), those of a browser that is reconnecting, and
+    /// those of the previous relay not announced again yet. Their stable ids travel with them, so a tab keeps its id
+    /// when its browser restarts.
     pub fn persist_now(&self) {
         let entries: Vec<PersistedTab> = {
             let st = self.st();
             let mut entries: Vec<PersistedTab> = st
                 .tabs
                 .values()
-                .filter(|t| t.owner == Owner::Relay && !t.closing)
-                .map(|t| PersistedTab { tab: t.id, target_id: t.target_id.clone(), browser_key: t.link_key.clone(), opener: t.opener, options: t.options.clone(), created_at: t.created_at.clone() })
+                .filter(|t| !t.closing)
+                .map(|t| PersistedTab {
+                    tab: t.id,
+                    target_id: t.target_id.clone(),
+                    browser_key: t.link_key.clone(),
+                    opener: t.opener,
+                    options: t.options.clone(),
+                    created_at: t.created_at.clone(),
+                    browse_id: t.browse_id.clone(),
+                    chosen: t.chosen.clone(),
+                    lent: t.owner == Owner::User,
+                })
                 .collect();
-            entries.extend(st.reconnect_owners.iter().filter(|(_, k)| k.owner == Owner::Relay).map(|(target, k)| PersistedTab {
+            entries.extend(st.reconnect_owners.iter().map(|(target, k)| PersistedTab {
                 tab: k.tab,
                 target_id: target.clone(),
                 browser_key: k.browser.clone(),
                 opener: k.opener,
                 options: k.options.clone(),
                 created_at: k.created_at.clone(),
+                browse_id: k.browse_id.clone(),
+                chosen: k.chosen.clone(),
+                lent: k.owner == Owner::User,
             }));
             entries.extend(st.restorable.values().cloned());
             entries.sort_by_key(|e| e.tab);
