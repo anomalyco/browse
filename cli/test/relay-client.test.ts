@@ -21,7 +21,7 @@ afterAll(() => {
   fs.rmSync(home, { recursive: true, force: true })
 })
 
-const version = { version: "0.0.15", buildId: "2026-11-06T00:00:00Z", instanceId: "relay-instance" }
+const version = { version: "0.0.15", buildId: "2026-11-06T00:00:00Z", instanceId: "relay-instance", startedAt: "2026-11-06T00:00:00Z", shutdownProtocol: 2 }
 
 /** A relay whose nth /version answer arrives after `versionDelays[n]` test-clock seconds, and POSTs after `postSeconds`. */
 function fakeRelay(options: { readonly versionDelays: readonly (number | "never")[]; readonly postSeconds?: number }) {

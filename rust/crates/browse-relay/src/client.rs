@@ -78,11 +78,20 @@ fn dechunk(mut data: &[u8]) -> anyhow::Result<Vec<u8>> {
     }
 }
 
+/// Whether a `/version` answer is a browse relay's. Every browse relay has sent `buildId` and `startedAt` beside
+/// `version`, `instanceId` and a numeric `shutdownProtocol`, the TypeScript builds (v0.0.6 onward) and this Rust one
+/// alike. Another product's relay on the port (Playwriter 0.12.0 answers `version`, `pid`, `instanceId`,
+/// `activeExecutes`) sends none of the first two, and must read as foreign so an unpinned relay can take a fallback port.
+pub fn is_relay_version(body: &Value) -> bool {
+    ["version", "instanceId", "buildId", "startedAt"].iter().all(|field| body.get(*field).is_some_and(Value::is_string))
+        && body.get("shutdownProtocol").is_some_and(Value::is_number)
+}
+
 /// The relay's open /version answer, when a browse relay holds `port`.
 pub async fn version(port: u16, timeout: Duration) -> Option<Value> {
     let response = request(port, "GET", "/version", &[], None, timeout).await.ok()?;
     let body = response.json()?;
-    (response.status == 200 && body.get("version").is_some_and(Value::is_string) && body.get("instanceId").is_some_and(Value::is_string)).then_some(body)
+    (response.status == 200 && is_relay_version(&body)).then_some(body)
 }
 
 /// Where the running relay is and how to authenticate with it.
