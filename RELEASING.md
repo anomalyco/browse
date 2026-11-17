@@ -127,9 +127,12 @@ checks the token against `registry/browse.json` there ([scripts/release-registry
 | `cli` | `windows-x64`, `windows-x64-baseline` | `opencode-browse-windows-<arch>-<version>.tgz` | https://anoma.ly/release/browse/cli/stable/windows-x64 |
 
 Every target has a `.../<target>/info` with its version, size and SHA-256. `install` reads the manifest, checks the
-file's size and SHA-256 and installs it; a binary install's updater polls `cli/<stable|dev>.json` at launch and at
-least hourly with `If-None-Match` and User-Agent `browse/<channel>/<version>/cli`. `--version` stays on npm because the
-protocol has one current release per channel and no version lookup. npm global installs keep reading npm's dist-tag.
+file's size and SHA-256 and installs it; every install that checks for updates polls `cli/<stable|dev>.json` at launch
+and at least hourly with `If-None-Match` and User-Agent `browse/<channel>/<version>/cli/<kind>` (`binary`, `npm`, `bun`,
+`pnpm`, `yarn`, `volta`, `npx`, `bunx`, `pnpm-dlx`, `yarn-dlx`), which the protocol allows after its artifact segment
+and lets analytics split installs by kind. A binary install downloads the manifest's file; a global install runs its
+package manager for `@opencode/browse@<the manifest's version>`, and retries quietly while npm doesn't have that version
+yet. `--version` stays on npm because the protocol has one current release per channel and no version lookup.
 
 A TypeScript binary install's updater (0.0.17 and earlier) runs the install script baked into the binary it is running,
 so those releases keep reading future channel manifests with their own installer: the cli tarballs keep the layout
