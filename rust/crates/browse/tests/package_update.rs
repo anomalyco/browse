@@ -529,3 +529,38 @@ fn a_relay_updates_without_curl() {
     assert!(manifest_requests(&requests, "binary") > 0);
     assert!(requests.lock().unwrap().iter().any(|r| r.path == "/release/files/x" && r.user_agent == user_agent("binary")));
 }
+
+/// A browse that wasn't installed in a way it can update (a binary in Downloads) still checks in, with kind `other`,
+/// and installs nothing.
+#[test]
+fn an_unrecognized_install_checks_in_and_installs_nothing() {
+    let scene = Scene::new("other");
+    // Outside the target folder, which would make it a checkout build.
+    let outside = PathBuf::from(std::env::var_os("HOME").unwrap()).join(format!(".cache/oc-tmp/browse-other-{}", std::process::id()));
+    let binary = outside.join("Downloads/browse");
+    std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_browse"), &binary).unwrap();
+    let (service, requests) = release_service_with(Some(scene.tarball()));
+    let port = free_port();
+    let mut serve = scene.serve(&binary, &service, port);
+    serve.env("OPENCODE_BROWSER_MANAGED_RELAY", "1").env("OPENCODE_BROWSER_AUTO_UPDATE_QUIET_MS", "0");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut relay = loop {
+        match serve.spawn() {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            result => break result.unwrap(),
+        }
+    };
+    wait_for("the check", Duration::from_secs(20), || scene.state().get("checkedAt").is_some());
+    std::thread::sleep(Duration::from_secs(2));
+    let running = relay.try_wait().unwrap().is_none();
+    let _ = relay.kill();
+    let _ = relay.wait();
+    let unchanged = std::fs::read(&binary).unwrap() == std::fs::read(env!("CARGO_BIN_EXE_browse")).unwrap();
+    let _ = std::fs::remove_dir_all(&outside);
+    assert!(running);
+    assert!(unchanged, "nothing installed");
+    scene.requests_are(&requests, "other");
+    assert!(scene.state().get("lastUpdate").is_none());
+    assert!(!scene.started.exists());
+}

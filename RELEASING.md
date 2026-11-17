@@ -131,7 +131,7 @@ checks the token against `registry/browse.json` there ([scripts/release-registry
 Every target has a `.../<target>/info` with its version, size and SHA-256. `install` reads the manifest, checks the
 file's size and SHA-256 and installs it; every relay (except a checkout build) polls `cli/<stable|dev>.json` at launch
 and hourly, even with updates off, with User-Agent `browse/<channel>/<version>/cli/<kind>` (`binary`, `npm`, `bun`,
-`pnpm`, `yarn`, `volta`, `npx`, `bunx`, `pnpm-dlx`, `yarn-dlx`), which the protocol allows after its artifact segment
+`pnpm`, `yarn`, `volta`, `npx`, `bunx`, `pnpm-dlx`, `yarn-dlx`, `other` for an install browse didn't make, which only checks), which the protocol allows after its artifact segment
 and lets analytics split installs by kind. A binary install downloads the manifest's file; a global install runs its
 package manager for `@opencode/browse@<the manifest's version>`, and retries quietly while npm doesn't have that version
 yet. `--version` stays on npm because the protocol has one current release per channel and no version lookup.

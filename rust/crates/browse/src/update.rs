@@ -156,12 +156,13 @@ pub enum Kind {
     YarnDlx,
     /// A build from a checkout: it doesn't update, but `browse update` still checks the channel for it, with no kind.
     Checkout,
+    /// An install browse didn't make: its relay checks in, and never installs.
+    Other,
 }
 
 impl Kind {
-    /// `None` for an install browse didn't make, which `browse update` doesn't check for.
-    fn of(install: &Install) -> Option<Kind> {
-        Some(match install {
+    fn of(install: &Install) -> Kind {
+        match install {
             Install::Binary(_) => Kind::Binary,
             Install::Global(Global { manager: Manager::Npm { .. }, .. }) => Kind::Npm,
             Install::Global(Global { manager: Manager::Bun { .. }, .. }) => Kind::Bun,
@@ -173,8 +174,8 @@ impl Kind {
             Install::Runner(Runner::PnpmDlx) => Kind::PnpmDlx,
             Install::Runner(Runner::YarnDlx) => Kind::YarnDlx,
             Install::Checkout => Kind::Checkout,
-            Install::Other => return None,
-        })
+            Install::Other => Kind::Other,
+        }
     }
 
     /// The last User-Agent segment. The protocol's fourth segment names the tool (`cli`); kinds follow it, and a
@@ -191,6 +192,7 @@ impl Kind {
             Kind::Bunx => Some("bunx"),
             Kind::PnpmDlx => Some("pnpm-dlx"),
             Kind::YarnDlx => Some("yarn-dlx"),
+            Kind::Other => Some("other"),
             Kind::Checkout => None,
         }
     }
@@ -238,7 +240,7 @@ fn get(kind: Kind, url: &str, timeout: Duration, limit: u64) -> anyhow::Result<V
 /// manifest's file for this platform; a package install or runner takes the release's version (the package manager is
 /// asked for it), so it checks as `unknown`.
 pub fn check(install: &Install) -> anyhow::Result<Check> {
-    let kind = Kind::of(install).context("this install doesn't check for updates")?;
+    let kind = Kind::of(install);
     let channel = channel();
     let body = get(kind, &format!("{}/browse/cli/{channel}.json", service()), Duration::from_secs(30), 1024 * 1024)?;
     let body = String::from_utf8(body).context("the release manifest isn't text")?;
@@ -729,6 +731,8 @@ fn fingerprint(file: &Path) -> Option<(u64, SystemTime)> {
 /// only checks, for the notice.
 pub struct Updater {
     install: Install,
+    /// Whether this relay can install and restart: a self-updating install whose executable resolved at launch.
+    updates: bool,
     started: Option<(u64, SystemTime)>,
     /// The last changed file asked its version, and whether it can replace this relay.
     seen: Option<((u64, SystemTime), bool)>,
@@ -742,15 +746,21 @@ enum Found {
 }
 
 impl Updater {
-    /// `idle` says whether nothing is using the browser.
+    /// `idle` says whether nothing is using the browser. Every relay but a checkout build's checks in.
     pub fn spawn(idle: Arc<dyn Fn() -> bool + Send + Sync>) -> Option<Updater> {
-        let install = install();
-        let started = match &install {
-            Install::Binary(_) | Install::Global(_) => Some(fingerprint(&install.executable()?)),
-            Install::Runner(_) => None,
-            // A checkout build doesn't check; an unrecognized install has no User-Agent kind to check with.
-            Install::Checkout | Install::Other => return None,
-        };
+        let (updater, worker) = Updater::new(install(), idle)?;
+        std::thread::spawn(move || worker.run());
+        Some(updater)
+    }
+
+    fn new(install: Install, idle: Arc<dyn Fn() -> bool + Send + Sync>) -> Option<(Updater, Worker)> {
+        if install == Install::Checkout {
+            return None;
+        }
+        // An install whose executable can't be found still checks in; it just doesn't install or restart.
+        let executable = install.executable();
+        let updates = matches!(install, Install::Binary(_) | Install::Global(_)) && executable.is_some();
+        let started = executable.as_deref().and_then(fingerprint);
         let interval = std::env::var("OPENCODE_BROWSER_AUTO_UPDATE_INTERVAL_MS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -758,14 +768,13 @@ impl Updater {
             .unwrap_or(HOUR)
             .min(HOUR);
         let installing = Arc::new(AtomicBool::new(false));
-        let worker = Worker { install: install.clone(), interval, idle, installing: installing.clone(), checked: None, failed: None };
-        std::thread::spawn(move || worker.run());
-        Some(Updater { install, started: started.flatten(), seen: None, installing })
+        let worker = Worker { install: install.clone(), updates, interval, idle, installing: installing.clone(), checked: None, failed: None };
+        Some((Updater { install, updates, started, seen: None, installing }, worker))
     }
 
     /// The executable to restart the relay with, once a different, working build replaced this relay's on disk.
     pub fn replacement(&mut self) -> Option<PathBuf> {
-        if self.installing.load(Ordering::SeqCst) {
+        if !self.updates || self.installing.load(Ordering::SeqCst) {
             return None;
         }
         let file = self.install.executable()?;
@@ -782,6 +791,7 @@ impl Updater {
 
 struct Worker {
     install: Install,
+    updates: bool,
     interval: Duration,
     idle: Arc<dyn Fn() -> bool + Send + Sync>,
     installing: Arc<AtomicBool>,
@@ -817,6 +827,7 @@ impl Worker {
                 Found::Package(version) => version.as_str(),
             }))?;
             if mode == Mode::On
+                && self.updates
                 && let (Some(Found::Binary(release)), Install::Binary(binary)) = (&found, &self.install)
             {
                 install_binary(release, binary).inspect_err(|error| record_failure(&release.version, error))?;
@@ -824,6 +835,7 @@ impl Worker {
             }
         }
         if mode == Mode::On
+            && self.updates
             && let Install::Global(global) = self.install.clone()
         {
             self.package_tick(&global)?;
@@ -939,6 +951,7 @@ mod tests {
             (Install::Runner(Runner::Bunx), "bunx"),
             (Install::Runner(Runner::PnpmDlx), "pnpm-dlx"),
             (Install::Runner(Runner::YarnDlx), "yarn-dlx"),
+            (Install::Other, "other"),
             (Install::Checkout, "cli"),
         ];
         for (install, kind) in table {
@@ -948,8 +961,23 @@ mod tests {
             } else {
                 format!("browse/{channel}/{}/cli/{kind}", super::VERSION)
             };
-            assert_eq!(Kind::of(&install).unwrap().user_agent(), expected, "{}", install.name());
+            assert_eq!(Kind::of(&install).user_agent(), expected, "{}", install.name());
         }
+    }
+
+    /// Only a checkout build skips the updater; a global install whose binary can't be found still checks in, and
+    /// never installs or restarts.
+    #[test]
+    fn every_install_but_a_checkout_checks_in() {
+        let idle = || std::sync::Arc::new(|| true) as std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
+        assert!(super::Updater::new(Install::Checkout, idle()).is_none());
+        let (mut other, worker) = super::Updater::new(Install::Other, idle()).unwrap();
+        assert!(!worker.updates && other.replacement().is_none());
+        let lost = Install::Global(Global { package: "/nowhere/@opencode/browse".into(), platform: "browse-linux-x64".into(), manager: Manager::Npm { prefix: "/nowhere".into() }, launcher: crate::method::Launcher::default() });
+        assert!(lost.executable().is_none());
+        let (mut updater, worker) = super::Updater::new(lost, idle()).unwrap();
+        assert!(!worker.updates, "no executable: check only");
+        assert!(updater.replacement().is_none());
     }
 
     #[test]
