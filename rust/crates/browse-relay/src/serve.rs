@@ -267,8 +267,15 @@ async fn run(relay: Arc<Relay>, listener: TcpListener) {
 
 /// Test-only: holds open the window between the listener closing and the shutdown's final registry write, so the
 /// uninstall test sees the writes a client that only waits for /version would miss.
+#[cfg(debug_assertions)]
 fn test_shutdown_delay() -> Option<Duration> {
     std::env::var("OPENCODE_BROWSER_TEST_SHUTDOWN_DELAY_MS").ok()?.trim().parse::<u64>().ok().filter(|ms| *ms > 0).map(Duration::from_millis)
+}
+
+/// Release builds never delay shutdown for tests.
+#[cfg(not(debug_assertions))]
+fn test_shutdown_delay() -> Option<Duration> {
+    None
 }
 
 async fn persist_loop(relay: Arc<Relay>) {
