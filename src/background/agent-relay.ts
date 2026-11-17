@@ -44,6 +44,7 @@ import {
 } from "./agent-relay/wire"
 import { installPopupAdoption } from "./agent-relay/popups"
 import { DebuggerHub } from "./debugger-hub"
+import { DebuggingBarNotice } from "./debugging-bar-notice"
 import { HandoffNotice } from "./handoff-notice"
 import { TabCleanup } from "./tab-cleanup"
 import { TabIdentity } from "./tab-identity"
@@ -259,9 +260,10 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   /**
    * The user dismissed the browser's debugging bar, which detaches the debugger from every tab at once. A tab the user
    * lent goes back to them: untracked by idle cleanup and out of the agent group, but open. A tab an agent opened stays
-   * open, grouped and tracked, so idle cleanup closes it on the usual timer.
+   * open, grouped and tracked, so idle cleanup closes it on the usual timer. The user hears about it once, not per tab.
    */
   const releaseCanceledTab = async (tabId: number) => {
+    void DebuggingBarNotice.canceled()
     // A previous worker may have stored the tracking, so restore it before deciding who opened the tab. If that
     // fails, treat it as agent-opened: leaving it open is safer than letting idle cleanup close a tab the user lent.
     const agentOpened = await TabCleanup.isTracked(tabId).catch(() => true)

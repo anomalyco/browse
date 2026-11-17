@@ -297,7 +297,10 @@ function Onboarding() {
               Open settings
             </Button>
             <span class="sep" aria-hidden="true" />
-            <span class="muted">You're set. When an agent needs you for a login, the page shows a card.</span>
+            <span class="muted">
+              You're set. When an agent needs you for a login, the page shows a card. The debugging bar's button (Cancel
+              or OK) disconnects browse from every tab; click the browse button on a tab to lend it again.
+            </span>
           </footer>
         </Show>
       </section>
