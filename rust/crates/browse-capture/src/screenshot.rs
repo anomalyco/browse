@@ -164,6 +164,23 @@ fn outside(viewport: &page::Viewport, (x, y, width, height): (f64, f64, f64, f64
     x < -SLACK || y < -SLACK || x + width > viewport.width + SLACK || y + height > viewport.height + SLACK
 }
 
+/// Whole-pixel clip bounds, rounded rather than snapped outward so a clip's size doesn't depend on where a fractional
+/// scroll puts the page: some Chromium builds (Dia) refuse fractional clip coordinates with "Unable to encode
+/// screenshot".
+fn whole_clip((x, y, width, height): (f64, f64, f64, f64)) -> (f64, f64, f64, f64) {
+    (x.round(), y.round(), width.round().max(1.0), height.round().max(1.0))
+}
+
+/// Keeps a whole-pixel clip inside the rounded viewport, in page coordinates, moving it rather than shrinking it where
+/// possible. A clip that doesn't reach beyond the viewport is captured with captureBeyondViewport off, so an overhang
+/// would come back unpainted.
+fn clamp_clip((x, y, width, height): (f64, f64, f64, f64), (vx, vy, vw, vh): (f64, f64, f64, f64)) -> (f64, f64, f64, f64) {
+    let (width, height) = (width.min(vw), height.min(vh));
+    let left = x.clamp(vx, vx + vw - width);
+    let top = y.clamp(vy, vy + vh - height);
+    (left, top, width, height)
+}
+
 /// The tab and CDP connection a capture uses; element regions are resolved here into viewport clips. An element
 /// outside the viewport that would fit is scrolled into view first, so capturing it doesn't resize the page.
 async fn resolve(ctx: &ToolContext, args: &Value, region: Region) -> anyhow::Result<(TabId, Arc<dyn Cdp>, Region)> {
@@ -213,14 +230,25 @@ async fn capture(
     let viewport = page::viewport(cdp).await?;
     let dpr = viewport.device_pixel_ratio;
     let mut clip_scale = if css_scale { 1.0 / dpr } else { 1.0 };
+    // The viewport's own clip keeps its size, so screenshot_diff baselines of the same viewport still match.
+    let viewport_rect = (viewport.page_x.round(), viewport.page_y.round(), viewport.width.round(), viewport.height.round());
     let (x, y, width, height, beyond) = match region {
-        Region::Viewport => (viewport.page_x, viewport.page_y, viewport.width, viewport.height, false),
+        Region::Viewport => (viewport_rect.0, viewport_rect.1, viewport_rect.2, viewport_rect.3, false),
         Region::FullPage => {
             let (width, height) = (viewport.content_width.max(1.0), viewport.content_height.max(1.0));
             (0.0, 0.0, width, height, outside(&viewport, (-viewport.page_x, -viewport.page_y, width, height)))
         }
         Region::Clip(x, y, w, h) => (viewport.page_x + x, viewport.page_y + y, *w, *h, outside(&viewport, (*x, *y, *w, *h))),
         Region::Element { .. } => bail_user!("resolve the element first"),
+    };
+    let (x, y, width, height) = whole_clip((x, y, width, height));
+    let (x, y, width, height) = if beyond {
+        (x, y, width, height)
+    } else {
+        if viewport_rect.2 < 1.0 || viewport_rect.3 < 1.0 {
+            bail_user!("the tab has no visible area to capture");
+        }
+        clamp_clip((x, y, width, height), viewport_rect)
     };
     let mut note = None;
     let longest = width.max(height) * clip_scale * dpr;
@@ -281,9 +309,10 @@ async fn tiles(cdp: &dyn Cdp, (x, y, width, height): (f64, f64, f64, f64), clip_
     let mut offset = 0.0;
     while offset < height {
         let part = strip.min(height - offset);
+        let (left, top, tile_width, tile_height) = whole_clip((x, y + offset, width, part));
         let params = json!({
             "format": "png",
-            "clip": { "x": x, "y": y + offset, "width": width, "height": part, "scale": clip_scale },
+            "clip": { "x": left, "y": top, "width": tile_width, "height": tile_height, "scale": clip_scale },
             "captureBeyondViewport": true,
             "fromSurface": true,
         });
@@ -336,7 +365,7 @@ impl Tool for ScreenshotTool {
                     "timeoutMs": { "type": "integer", "minimum": 0, "maximum": 60000, "description": "How long to wait for the ref/selector element (default 5000)." },
                     "clip": {
                         "type": "object",
-                        "description": "Rectangle to capture, in viewport CSS pixels (as from getBoundingClientRect).",
+                        "description": "Rectangle to capture, in viewport CSS pixels (as from getBoundingClientRect); rounded to whole pixels.",
                         "properties": { "x": { "type": "number" }, "y": { "type": "number" }, "width": { "type": "number" }, "height": { "type": "number" } },
                         "required": ["x", "y", "width", "height"]
                     },
@@ -452,6 +481,7 @@ impl Tool for ScreenshotDiffTool {
                     "timeoutMs": { "type": "integer", "minimum": 0, "maximum": 60000 },
                     "clip": {
                         "type": "object",
+                        "description": "Rectangle to compare, in viewport CSS pixels; rounded to whole pixels.",
                         "properties": { "x": { "type": "number" }, "y": { "type": "number" }, "width": { "type": "number" }, "height": { "type": "number" } },
                         "required": ["x", "y", "width", "height"]
                     },
@@ -534,5 +564,190 @@ impl Tool for ScreenshotDiffTool {
             .await,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::FakeCdp;
+    use base64::Engine;
+
+    fn fake() -> std::sync::Arc<FakeCdp> {
+        let cdp = FakeCdp::new();
+        let image = crate::pixeldiff::Rgba { width: 1, height: 1, data: vec![0, 0, 0, 255] };
+        cdp.reply(
+            "Page.captureScreenshot",
+            json!({ "data": base64::engine::general_purpose::STANDARD.encode(crate::pixeldiff::encode_png(&image).unwrap()) }),
+        );
+        cdp
+    }
+
+    fn layout(cdp: &FakeCdp, page_x: f64, page_y: f64, width: f64, height: f64, content_width: f64, content_height: f64) {
+        cdp.reply(
+            "Page.getLayoutMetrics",
+            json!({
+                "cssVisualViewport": { "pageX": page_x, "pageY": page_y, "clientWidth": width, "clientHeight": height, "zoom": 1.0 },
+                "visualViewport": { "clientWidth": width },
+                "cssContentSize": { "width": content_width, "height": content_height },
+            }),
+        );
+    }
+
+    fn clip_of(params: &Value) -> (f64, f64, f64, f64) {
+        let clip = &params["clip"];
+        let field = |name: &str| clip[name].as_f64().unwrap();
+        (field("x"), field("y"), field("width"), field("height"))
+    }
+
+    fn assert_whole(params: &Value) {
+        let clip = clip_of(params);
+        assert_eq!([clip.0, clip.1, clip.2, clip.3].map(f64::fract), [0.0; 4], "{params}");
+    }
+
+    fn last_clip(cdp: &FakeCdp) -> (Value, (f64, f64, f64, f64)) {
+        let calls = cdp.calls("Page.captureScreenshot");
+        let params = calls.last().expect("a capture").0.clone();
+        let clip = clip_of(&params);
+        (params, clip)
+    }
+
+    #[test]
+    fn clips_round_to_whole_pixels() {
+        assert_eq!(whole_clip((10.5, 20.25, 100.0, 50.0)), (11.0, 20.0, 100.0, 50.0));
+        assert_eq!(whole_clip((0.0, 0.0, 1280.0, 720.0)), (0.0, 0.0, 1280.0, 720.0));
+        assert_eq!(whole_clip((99.6, 100.4, 719.6, 0.4)), (100.0, 100.0, 720.0, 1.0));
+        // A box smaller than a pixel still covers one.
+        assert_eq!(whole_clip((5.0, 5.0, 1e-20, 1e-20)), (5.0, 5.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn clamp_keeps_a_one_pixel_viewport_inside() {
+        assert_eq!(clamp_clip((10.0, 10.0, 20.0, 20.0), (5.0, 5.0, 1.0, 1.0)), (5.0, 5.0, 1.0, 1.0));
+    }
+
+    #[tokio::test]
+    async fn captures_send_whole_pixel_clips_inside_the_viewport() {
+        let cdp = fake();
+        layout(&cdp, 10.3, 100.5, 800.0, 600.0, 1600.4, 2400.6);
+
+        let shot = capture(cdp.as_ref(), &Region::Viewport, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+        assert_eq!((shot.width, shot.height), (1, 1));
+        for region in [Region::Clip(50.4, 30.6, 100.2, 50.3), Region::Clip(700.4, 550.0, 100.0, 50.0)] {
+            capture(cdp.as_ref(), &region, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+        }
+
+        let calls = cdp.calls("Page.captureScreenshot");
+        assert_eq!(calls.len(), 3, "{calls:?}");
+        for (params, _) in &calls {
+            assert_whole(params);
+            assert_eq!(params["captureBeyondViewport"], json!(false), "{params}");
+        }
+        assert_eq!(clip_of(&calls[0].0), (10.0, 101.0, 800.0, 600.0));
+        assert_eq!(clip_of(&calls[1].0), (61.0, 131.0, 100.0, 50.0));
+        // Near the edge the clip is shifted inside the viewport, not shrunk.
+        assert_eq!(clip_of(&calls[2].0), (710.0, 651.0, 100.0, 50.0));
+    }
+
+    #[tokio::test]
+    async fn clip_size_does_not_depend_on_the_scroll_offset() {
+        let cdp = fake();
+        let region = Region::Clip(40.0, 30.0, 100.0, 50.0);
+        for page_y in [100.0, 100.5] {
+            layout(&cdp, 10.3, page_y, 800.0, 600.0, 1600.4, 2400.6);
+            capture(cdp.as_ref(), &region, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+        }
+
+        let calls = cdp.calls("Page.captureScreenshot");
+        let sizes: Vec<(f64, f64)> = calls.iter().map(|(params, _)| { let (_, _, width, height) = clip_of(params); (width, height) }).collect();
+        assert_eq!(sizes, [(100.0, 50.0), (100.0, 50.0)], "{calls:?}");
+        // The scroll offset still moves the clip's origin.
+        assert_eq!(clip_of(&calls[0].0).1, 130.0);
+        assert_eq!(clip_of(&calls[1].0).1, 131.0);
+        for (params, _) in &calls {
+            assert_whole(params);
+        }
+    }
+
+    #[tokio::test]
+    async fn full_page_inside_the_viewport_keeps_its_size() {
+        let cdp = fake();
+        layout(&cdp, 0.0, 0.0, 1280.0, 720.0, 1280.4, 720.3);
+        capture(cdp.as_ref(), &Region::FullPage, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+
+        let (params, clip) = last_clip(&cdp);
+        assert_eq!(clip, (0.0, 0.0, 1280.0, 720.0));
+        assert_eq!(params["captureBeyondViewport"], json!(false), "{params}");
+    }
+
+    #[tokio::test]
+    async fn full_page_beyond_the_viewport_is_taken_whole() {
+        let cdp = fake();
+        layout(&cdp, 0.0, 0.0, 1280.0, 720.0, 1280.4, 2400.7);
+        capture(cdp.as_ref(), &Region::FullPage, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+
+        let (params, clip) = last_clip(&cdp);
+        assert_eq!(clip, (0.0, 0.0, 1280.0, 2401.0));
+        assert_eq!(params["captureBeyondViewport"], json!(true), "{params}");
+    }
+
+    #[tokio::test]
+    async fn a_zero_width_viewport_still_captures_beyond_it() {
+        let cdp = fake();
+        layout(&cdp, 0.0, 0.0, 0.4, 720.0, 1280.4, 2400.7);
+        capture(cdp.as_ref(), &Region::FullPage, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+
+        let (params, clip) = last_clip(&cdp);
+        assert_eq!(clip, (0.0, 0.0, 1280.0, 2401.0));
+        assert_eq!(params["captureBeyondViewport"], json!(true), "{params}");
+    }
+
+    #[tokio::test]
+    async fn a_clip_above_the_viewport_is_clamped_to_its_origin() {
+        let cdp = fake();
+        layout(&cdp, 10.3, 100.5, 800.0, 600.0, 1600.4, 2400.6);
+        capture(cdp.as_ref(), &Region::Clip(-0.3, -0.2, 100.0, 50.0), Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+
+        let (params, clip) = last_clip(&cdp);
+        assert_eq!(clip, (10.0, 101.0, 100.0, 50.0));
+        assert_eq!(params["captureBeyondViewport"], json!(false), "{params}");
+    }
+
+    #[tokio::test]
+    async fn an_edge_clip_keeps_its_size_at_any_scroll_offset() {
+        let cdp = fake();
+        let region = Region::Clip(0.0, 0.4, 100.0, 600.0);
+        for page_y in [100.4, 100.6] {
+            layout(&cdp, 10.0, page_y, 800.0, 600.0, 1600.0, 2400.0);
+            capture(cdp.as_ref(), &region, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+        }
+
+        let calls = cdp.calls("Page.captureScreenshot");
+        let sizes: Vec<(f64, f64)> = calls.iter().map(|(params, _)| { let (_, _, width, height) = clip_of(params); (width, height) }).collect();
+        assert_eq!(sizes, [(100.0, 600.0), (100.0, 600.0)], "{calls:?}");
+        // The clip moves with the rounded viewport origin instead of losing a row.
+        assert_eq!(clip_of(&calls[0].0).1, 100.0);
+        assert_eq!(clip_of(&calls[1].0).1, 101.0);
+    }
+
+    #[tokio::test]
+    async fn scaling_down_keeps_the_clip_whole() {
+        let cdp = fake();
+        layout(&cdp, 10.0, 100.0, 800.0, 600.0, 800.0, 600.0);
+        capture(cdp.as_ref(), &Region::Clip(20.2, 30.7, 100.0, 50.0), Format::Png, None, true, 50.0).await.unwrap();
+
+        let (params, clip) = last_clip(&cdp);
+        assert_eq!(clip, (30.0, 131.0, 100.0, 50.0));
+        assert_whole(&params);
+        assert_eq!(params["clip"]["scale"], json!(0.5), "{params}");
+    }
+
+    #[tokio::test]
+    async fn a_viewport_without_a_visible_area_is_a_user_error() {
+        let cdp = fake();
+        layout(&cdp, 0.0, 0.0, 0.4, 720.0, 1280.0, 720.0);
+        let error = capture(cdp.as_ref(), &Region::Viewport, Format::Png, None, true, MAX_SAVED_SIDE).await.err().expect("the capture must fail");
+        assert!(error.to_string().contains("no visible area"), "{error}");
+        assert!(cdp.calls("Page.captureScreenshot").is_empty());
     }
 }
