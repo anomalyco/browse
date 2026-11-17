@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Mutex;
 
 use hmac::{Hmac, Mac};
 use p256::elliptic_curve::sec1::ToEncodedPoint;
@@ -23,6 +24,16 @@ pub const PAIRING_CODE_TTL_MS: u64 = 10 * 60_000;
 pub const BUNDLED_PAIRING_CODE_TTL_MS: u64 = 60 * 60_000;
 pub const MAX_PAIRING_FAILURES: u32 = 5;
 const MAX_PENDING_CODES: usize = 5;
+
+/// The pairing files are one JSON map (or list) each, changed by reading it, editing it and writing it back. Two
+/// changes at once (a second browser pairing while the first is being recorded, an extension spending a code while
+/// another is minted) would otherwise each write a map missing the other's change: the lost browser is then refused
+/// on its next connection. All changes take this lock, and this one covers both files.
+static PAIRING_WRITES: Mutex<()> = Mutex::new(());
+
+fn pairing_writes() -> std::sync::MutexGuard<'static, ()> {
+    PAIRING_WRITES.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -96,6 +107,7 @@ fn write_pending(paths: &Paths, pending: &PendingCodes) -> std::io::Result<()> {
 
 /// A new single-use code, valid for `ttl_ms`; only its slow hash is stored. The oldest pending codes go past five.
 pub fn mint_pairing_code(paths: &Paths, ttl_ms: u64, receipt: Option<&str>) -> std::io::Result<String> {
+    let _writes = pairing_writes();
     let now = now_ms();
     let code: String = random_bytes::<CODE_LENGTH>().iter().map(|b| CROCKFORD[(b & 31) as usize] as char).collect();
     let mut pending = read_pending(paths, now);
@@ -112,6 +124,7 @@ pub fn pending_code_keys(paths: &Paths) -> Vec<String> {
 
 /// Uses up a code an extension proved; the failure count starts over. Returns its receipt.
 pub fn consume_pairing_code(paths: &Paths, key: &str) -> Option<String> {
+    let _writes = pairing_writes();
     let pending = read_pending(paths, now_ms());
     let receipt = pending.codes.iter().find(|entry| entry.key == key).and_then(|entry| entry.receipt.clone());
     let codes = pending.codes.into_iter().filter(|entry| entry.key != key).collect();
@@ -121,6 +134,7 @@ pub fn consume_pairing_code(paths: &Paths, key: &str) -> Option<String> {
 
 /// Counts a wrong code; at the limit every pending code is thrown away. Returns whether that happened.
 pub fn record_pairing_failure(paths: &Paths) -> bool {
+    let _writes = pairing_writes();
     let pending = read_pending(paths, now_ms());
     let failures = pending.failures + 1;
     let exhausted = failures >= MAX_PAIRING_FAILURES;
@@ -182,6 +196,7 @@ pub fn new_browser_token() -> String {
 
 /// A token for the browser with this profile key (the given one, or a new one), replacing any it had.
 pub fn issue_browser_token(paths: &Paths, key: &str, token: Option<String>, receipt: Option<String>) -> std::io::Result<String> {
+    let _writes = pairing_writes();
     let token = token.unwrap_or_else(new_browser_token);
     let mut pairings = read_browser_pairings(paths);
     pairings.insert(key.to_string(), BrowserPairing { token: token.clone(), paired_at: now_ms(), receipt, last_seen: None, id: None, name: None });
@@ -190,6 +205,7 @@ pub fn issue_browser_token(paths: &Paths, key: &str, token: Option<String>, rece
 }
 
 pub fn touch_browser_pairing(paths: &Paths, key: &str, id: &str, name: &str) {
+    let _writes = pairing_writes();
     let mut pairings = read_browser_pairings(paths);
     if let Some(entry) = pairings.get_mut(key) {
         entry.last_seen = Some(now_ms());
@@ -201,6 +217,7 @@ pub fn touch_browser_pairing(paths: &Paths, key: &str, id: &str, name: &str) {
 
 /// Deletes a browser's token; true when it had one.
 pub fn revoke_browser_token(paths: &Paths, key: &str) -> std::io::Result<bool> {
+    let _writes = pairing_writes();
     let mut pairings = read_browser_pairings(paths);
     if pairings.remove(key).is_none() {
         return Ok(false);
@@ -344,5 +361,33 @@ mod tests {
         let key = [7u8; 32];
         let token = new_browser_token();
         assert_eq!(unwrap_token(&key, &wrap_token(&key, &token)), Some(token));
+    }
+
+    /// The relay records the first browser (last seen, id, name) while another browser's token is being issued.
+    /// Both changes read and write the whole pairings file, so one must not write back a map missing the other's.
+    #[test]
+    fn pairing_two_browsers_at_once_keeps_both_tokens() {
+        let paths = temp_paths();
+        let first = issue_browser_token(&paths, "first", None, None).unwrap();
+        let recording = {
+            let paths = paths.clone();
+            std::thread::spawn(move || {
+                for _ in 0..300 {
+                    touch_browser_pairing(&paths, "first", "chrome", "Chrome");
+                }
+            })
+        };
+        let mut second = Vec::new();
+        for n in 0..20 {
+            let key = format!("second-{n}");
+            second.push((key.clone(), issue_browser_token(&paths, &key, None, None).unwrap()));
+        }
+        recording.join().unwrap();
+        let pairings = read_browser_pairings(&paths);
+        assert_eq!(pairings.get("first").map(|p| p.token.as_str()), Some(first.as_str()));
+        for (key, token) in second {
+            assert_eq!(pairings.get(&key).map(|p| p.token.as_str()), Some(token.as_str()), "{key} was lost");
+        }
+        let _ = std::fs::remove_dir_all(&paths.data);
     }
 }
