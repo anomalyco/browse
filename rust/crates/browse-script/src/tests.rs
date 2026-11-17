@@ -228,7 +228,7 @@ async fn bring_to_front_sends_cdp_and_reports_refusal_as_a_warning() {
     assert!(!output.is_error, "a refusal is a warning, not a script error: {text}");
     assert!(text.contains("completed"), "{text}");
     assert!(
-        text.contains("Warnings:") && text.contains("browse blocked Page.bringToFront") && text.contains("OPENCODE_BROWSER_ALLOW_FOREGROUND=1"),
+        text.contains("Warnings:") && text.contains("page.bringToFront(): browse blocked Page.bringToFront") && text.contains("OPENCODE_BROWSER_ALLOW_FOREGROUND=1"),
         "{text}"
     );
     assert_eq!(recorder.sends.lock().unwrap().len(), 2, "the refused call was still attempted");

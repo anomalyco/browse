@@ -565,7 +565,7 @@
     async bringToFront() {
       if (!this._hasTab()) return
       try { await hostAsync("foreground", { tab: this._tab }) }
-      catch (error) { warn(error.message) }
+      catch (error) { warn(`page.bringToFront(): ${error.message}`) }
     }
     async close() {
       if (!this._hasTab()) return
