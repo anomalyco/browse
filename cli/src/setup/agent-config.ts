@@ -91,6 +91,8 @@ export function agentLocations(home: string, config: string, onPath: (name: stri
     loc("vibe", path.join(env.VIBE_HOME ?? at(".vibe"), "config.toml"), "vibe"),
     loc("qoder", at(".qoder/settings.json"), "qoder", "Qoder"),
     loc("pi", path.join(env.PI_CODING_AGENT_DIR ?? at(".pi/agent"), "mcp.json"), "pi"),
+    loc("workbuddy", at(".workbuddy/mcp.json")),
+    loc("trae-cn", path.join(support, "Trae CN/User/mcp.json"), undefined, "Trae CN"),
   ]
 }
 

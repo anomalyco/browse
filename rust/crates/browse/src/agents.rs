@@ -45,6 +45,8 @@ pub const AGENTS: &[(&str, &str)] = &[
     ("vibe", "Mistral Vibe"),
     ("qoder", "Qoder CLI"),
     ("pi", "Pi"),
+    ("workbuddy", "WorkBuddy"),
+    ("trae-cn", "Trae CN"),
 ];
 
 const ALIASES: &[(&str, &str)] = &[
@@ -213,6 +215,8 @@ pub fn locations(opencode_config: &Path, opencode_binary: Option<&Path>) -> Vec<
         loc("vibe", env("VIBE_HOME").unwrap_or_else(|| at(".vibe")).join("config.toml"), Some("vibe"), None, None),
         loc("qoder", at(".qoder/settings.json"), Some("qoder"), Some("Qoder"), None),
         loc("pi", env("PI_CODING_AGENT_DIR").unwrap_or_else(|| at(".pi/agent")).join("mcp.json"), Some("pi"), None, None),
+        loc("workbuddy", at(".workbuddy/mcp.json"), None, None, None),
+        loc("trae-cn", support.join("Trae CN/User/mcp.json"), None, Some("Trae CN"), None),
     ]
 }
 
@@ -760,6 +764,35 @@ mod tests {
         let parsed: serde_yaml::Value = serde_yaml::from_str(&std::fs::read_to_string(&fresh.file).unwrap()).unwrap();
         assert_eq!(parsed["mcp_servers"]["browse"]["args"][0].as_str(), Some("mcp"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn workbuddy_and_trae_cn_use_plain_mcp_servers() {
+        let dir = temp("plain-mcp-agents");
+        let file = dir.join("mcp.json");
+        std::fs::write(&file, "{\n  \"mcpServers\": {\n    \"other\": { \"command\": \"x\", \"disabled\": true }\n  }\n}\n").unwrap();
+        for name in ["workbuddy", "trae-cn"] {
+            let agent = loc(name, file.clone());
+            assert_eq!(edit(&agent, &command("/bin/browse"), false).unwrap(), Edit::Added, "{name}");
+            let parsed = jsonc::parse(&std::fs::read_to_string(&file).unwrap()).unwrap();
+            assert_eq!(parsed["mcpServers"]["browse"], json!({ "command": "/bin/browse", "args": ["mcp"] }), "{name}");
+            assert_eq!(parsed["mcpServers"]["other"], json!({ "command": "x", "disabled": true }), "{name}");
+            assert_eq!(edit(&agent, &command("/bin/browse"), true).unwrap(), Edit::Removed, "{name}");
+            let parsed = jsonc::parse(&std::fs::read_to_string(&file).unwrap()).unwrap();
+            assert!(parsed["mcpServers"].get("browse").is_none(), "{name}");
+            assert_eq!(parsed["mcpServers"]["other"], json!({ "command": "x", "disabled": true }), "{name}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn workbuddy_and_trae_cn_config_paths() {
+        let locations = locations(&PathBuf::from("/tmp/opencode.json"), None);
+        let file = |name: &str| locations.iter().find(|l| l.name == name).map(|l| l.file.clone()).unwrap();
+        assert!(file("workbuddy").ends_with(".workbuddy/mcp.json"), "{:?}", file("workbuddy"));
+        assert!(file("trae-cn").ends_with("Trae CN/User/mcp.json"), "{:?}", file("trae-cn"));
+        assert_eq!(agent_name("workbuddy"), Some("workbuddy"));
+        assert_eq!(agent_name("trae-cn"), Some("trae-cn"));
     }
 
     #[test]
