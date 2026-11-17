@@ -577,7 +577,11 @@
     async emulateMedia(options = {}) {
       await tool("emulate", this._args({ colorScheme: options.colorScheme ?? undefined, reducedMotion: options.reducedMotion ?? undefined, forcedColors: options.forcedColors ?? undefined, media: options.media === null ? "reset" : options.media }))
     }
-    async bringToFront() { warn("page.bringToFront() does nothing: browse's tabs never take focus from the user") }
+    async bringToFront() {
+      if (!this._hasTab()) return
+      try { await hostAsync("foreground", { tab: this._tab }) }
+      catch (error) { warn(error.message) }
+    }
     async close() {
       if (!this._hasTab()) return
       await tool("tabs", { action: "close", tab: this._tab })
