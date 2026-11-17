@@ -57,6 +57,8 @@ build-binaries  packs and checks the @opencode/browse-<target> tarballs (every t
         the linux-x64 ones: the install script against a local release service, relay + MCP, npm install of
         @opencode/browse with its platform package
 sign-macos      optional (repository variable MACOS_SIGNING=true): Developer ID signs the macOS binaries; skipped now
+sign-windows    optional (repository variable WINDOWS_SIGNING=true): Authenticode signs the Windows binaries (Azure
+        Trusted Signing; Smart App Control blocks an unsigned browse.exe); skipped now
 attest  build provenance for the zip and every tarball (Sigstore)
 publish-release-service       the extension and every CLI binary target to the release service (channel dev or
         stable); a check run prints the list and publishes nothing
@@ -190,6 +192,18 @@ older installers: relative `url`s, flat target objects, and `release.version` be
     the certificate is `shared/APPLE_SIGNING_CERTIFICATE` in AWS (a Developer ID Application certificate exported
     without a password, base64 encoded, shared with every Anomaly app); then `gh variable set MACOS_SIGNING --body true`
     and the sign-macos job runs, with publish-npm taking the macOS packages only from it.
+11. **Windows signing (optional).** Without it `browse.exe` is unsigned and Windows Smart App Control blocks it, so
+    install fails there. To sign with Azure Trusted Signing (now Artifact Signing): a signing account and certificate
+    profile; an Azure identity with the **Artifact Signing Certificate Profile Signer** role (formerly Trusted Signing
+    Certificate Profile Signer) on the account or profile and read access to the subscription; and a federated
+    credential on that identity for this repository's `release` environment (issuer
+    `https://token.actions.githubusercontent.com`, subject `repo:anomalyco/browse:environment:release`, audience
+    `api://AzureADTokenExchange`). Then the six repository variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
+    `AZURE_SUBSCRIPTION_ID`, `AZURE_TRUSTED_SIGNING_ENDPOINT`, `AZURE_TRUSTED_SIGNING_ACCOUNT_NAME` and
+    `AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE`, and `gh variable set WINDOWS_SIGNING --body true`: the sign-windows
+    job signs every `browse.exe` in the Windows tarballs over OIDC (no secret), checks each signature and repacks them,
+    and publish-npm and the release service take the Windows packages only from it. macOS and Windows signing are
+    independent; either, both or neither can be on.
 
 ## Secrets
 
@@ -206,7 +220,8 @@ publishing).
 | `browse/release/CWS_CLIENT_SECRET`, `browse/release/CWS_REFRESH_TOKEN`, var `CWS_CLIENT_ID` | the Chrome Web Store API (`publish-cws`) |
 | `shared/APPLE_SIGNING_CERTIFICATE` | `sign-macos`, when the repository variable `MACOS_SIGNING` is true |
 
-The Chrome Web Store ids are repository variables, not secrets: `CWS_CLIENT_ID`, `CWS_PUBLISHER_ID` and `CWS_ITEM_ID`.
+The Chrome Web Store ids are repository variables, not secrets: `CWS_CLIENT_ID`, `CWS_PUBLISHER_ID` and `CWS_ITEM_ID`, as
+are the signing switches (`MACOS_SIGNING`, `WINDOWS_SIGNING`) and the Azure ids the Windows signer logs in with.
 
 ## Undoing a bad release
 
