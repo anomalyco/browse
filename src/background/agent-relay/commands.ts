@@ -184,8 +184,8 @@ export function createRelayCommands(deps: {
           normalWindows: opened.normalWindows,
         })
         TabCleanup.track(tab.id)
-        // A caller-chosen id (`work-mail`) is kept with the tab's identity: the relay never idle-closes such a tab, and
-        // the id outlives service worker restarts and extension updates like the rest of it.
+        // A caller-chosen id (`work-mail`) is kept with the tab's identity: the relay never idle-closes such a tab. It
+        // survives service-worker restarts; an extension update or reload keeps it only for tabs in browse's group.
         const chosen = typeof params?.id === "string" && /^[a-z][a-z0-9-]{0,63}$/.test(params.id) ? params.id : undefined
         // A discarded tab loses the debugger and the agent's page. Issued now but not awaited: the answer must not
         // wait on it.
