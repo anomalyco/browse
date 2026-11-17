@@ -36,11 +36,11 @@ pub struct Attach {
     /// What tools kept for the tab, when it is attached again (a reconnect).
     pub state: Option<Arc<TabState>>,
     pub created_at: Option<String>,
-    /// The extension's stable id for the tab (`chrome.sessions`), when it reported one.
+    /// The extension's stable id for the tab (kept in its session storage), when it reported one.
     pub browse_id: Option<String>,
     /// The caller-chosen id the tab is being opened with.
     pub chosen: Option<String>,
-    /// Who owned the tab before, found through its stable id (a browser restart): no target lookup needed.
+    /// Who owned the tab before, found through its stable id (a relay or worker restart): no target lookup needed.
     pub restored: Option<Restored>,
     pub already_attached: bool,
     /// An inventory tab the extension says an agent opened: it may be reclaimed from the tab registry.
@@ -132,7 +132,7 @@ impl Relay {
         let limit = Some(attach.timeout);
         if !attach.already_attached {
             let answer = self.ext_tab(tab, "debugger.attach", json!({})).await?;
-            // A newer extension keeps the tab's stable id in chrome.sessions and reports it here.
+            // A newer extension keeps the tab's stable id in session storage and reports it here.
             if attach.browse_id.is_none() {
                 attach.browse_id = answer.get("browseId").and_then(Value::as_str).map(str::to_string);
             }
@@ -260,7 +260,7 @@ impl Relay {
     }
 
     /// The relay id a browser tab's inventory announcement belongs to, and who owned it. A tab that comes back with
-    /// its stable id after a browser restart (a new local id, a new target) keeps the relay id agents know it by.
+    /// its stable id after a reconnect keeps the relay id agents know it by.
     pub fn inventory_tab(&self, link: &Link, local: i64, browse_id: Option<&str>, agent: bool) -> (i64, Option<Restored>) {
         let mut st = self.st();
         if let Some(id) = st.relay_id_for(&link.key, local) {

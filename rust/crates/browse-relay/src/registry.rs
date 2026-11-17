@@ -30,7 +30,7 @@ pub struct PersistedTab {
     pub options: TabOptions,
     #[serde(default)]
     pub created_at: String,
-    /// The extension's stable id for the tab: a new local tab id after a browser restart still finds this entry.
+    /// The extension's stable id for the tab: a tab announced again under it finds this entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browse_id: Option<String>,
     /// A caller-chosen id (`work-mail`), which agents use as `tab`.

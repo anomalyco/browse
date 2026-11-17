@@ -1,8 +1,10 @@
 export * as TabIdentity from "./tab-identity"
+import { serialQueue } from "./serial"
 
-// A tab's stable browse id, kept on the tab itself with chrome.sessions: Chrome restores it with the tab after a
-// browser restart, when the tab's numeric id and CDP target are both new. The id is what lets the relay give a
-// restored tab back under the id agents already know it by (`work-mail`, or the tab id from `tabs new`).
+// A tab's stable browse id for this browser session, kept in chrome.storage.session by tab id. Chrome has no values
+// per tab (chrome.sessions is Firefox's tab-values API), and session storage outlives a service worker restart, so a
+// tab keeps the id agents know it by while the browser runs. A browser restart (or an extension reload) clears it
+// along with the tab ids: nothing can be reclaimed then.
 //
 // Values written here:
 // - browseId: an opaque id, made the first time browse attaches or opens the tab.
@@ -13,44 +15,38 @@ export const BROWSE_ID_KEY = "browseId"
 export const BROWSE_AGENT_KEY = "browseAgent"
 export const BROWSE_CHOSEN_KEY = "browseChosen"
 
-/** The tab values API (chrome.sessions), which @types/chrome doesn't declare yet. */
-type TabValues = {
-  getTabValue(tabId: number, key: string): Promise<unknown>
-  setTabValue(tabId: number, key: string, value: unknown): Promise<void>
-  removeTabValue(tabId: number, key: string): Promise<void>
-}
-
 export type RestoredTab = { readonly tabId: number; readonly browseId: string; readonly agent: boolean; readonly chosen?: string }
 
-const values = () => (chrome as unknown as { sessions?: Partial<TabValues> }).sessions
+const PREFIX = "tabIdentity:"
+const storageKey = (tabId: number, key: string) => `${PREFIX}${tabId}:${key}`
 
 export async function read(tabId: number, key: string): Promise<string | undefined> {
-  try {
-    const value = await values()?.getTabValue?.(tabId, key)
-    return typeof value === "string" && value ? value : undefined
-  } catch {
-    return undefined
-  }
+  const name = storageKey(tabId, key)
+  const stored = await chrome.storage.session.get(name).catch(() => ({}) as Record<string, unknown>)
+  const value = stored[name]
+  return typeof value === "string" && value ? value : undefined
 }
 
 async function write(tabId: number, key: string, value: string) {
-  try {
-    await values()?.setTabValue?.(tabId, key, value)
-  } catch {
-    // A browser without session tab values still works within this browser session.
-  }
+  // The browser may be shutting down, which drops session storage anyway.
+  await chrome.storage.session.set({ [storageKey(tabId, key)]: value }).catch(() => undefined)
 }
 
-/** The tab's stable browse id, made and stored on the tab the first time. */
-export async function ensure(tabId: number, options: { agent?: boolean; chosen?: string } = {}): Promise<string | undefined> {
-  let browseId = await read(tabId, BROWSE_ID_KEY)
-  if (!browseId) {
-    browseId = crypto.randomUUID()
-    await write(tabId, BROWSE_ID_KEY, browseId)
-  }
-  if (options.agent !== undefined) await write(tabId, BROWSE_AGENT_KEY, options.agent ? "1" : "0")
-  if (options.chosen) await write(tabId, BROWSE_CHOSEN_KEY, options.chosen)
-  return browseId
+/** One at a time, so two callers can't read no id and each make one for the same tab. */
+const ensureQueue = serialQueue()
+
+/** The tab's stable browse id, made and stored the first time. */
+export function ensure(tabId: number, options: { agent?: boolean; chosen?: string } = {}): Promise<string | undefined> {
+  return ensureQueue(async () => {
+    let browseId = await read(tabId, BROWSE_ID_KEY)
+    if (!browseId) {
+      browseId = crypto.randomUUID()
+      await write(tabId, BROWSE_ID_KEY, browseId)
+    }
+    if (options.agent !== undefined) await write(tabId, BROWSE_AGENT_KEY, options.agent ? "1" : "0")
+    if (options.chosen) await write(tabId, BROWSE_CHOSEN_KEY, options.chosen)
+    return browseId
+  })
 }
 
 export async function browseId(tabId: number) {
@@ -70,33 +66,16 @@ export async function setAgent(tabId: number, agent: boolean) {
   await write(tabId, BROWSE_AGENT_KEY, agent ? "1" : "0")
 }
 
-/** Forgets the tab's id: it is no longer an agent's (or lent) tab. */
+/** Forgets the tab's id: it is no longer an agent's (or lent) tab, or it has closed. */
 export async function clear(tabId: number) {
-  const api = values()
-  if (!api?.removeTabValue) return
-  for (const key of [BROWSE_ID_KEY, BROWSE_AGENT_KEY, BROWSE_CHOSEN_KEY]) {
-    try {
-      await api.removeTabValue(tabId, key)
-    } catch {
-      // The tab is already gone, or the browser doesn't keep tab values.
-    }
-  }
+  const keys = [BROWSE_ID_KEY, BROWSE_AGENT_KEY, BROWSE_CHOSEN_KEY].map((key) => storageKey(tabId, key))
+  await chrome.storage.session.remove(keys).catch(() => undefined)
 }
 
 /**
- * Tabs Chrome restored with a browse id on them (a browser restart, or a worker that started later): the relay can
- * claim them under their old ids. `agent` says whether idle cleanup may close the tab.
+ * Tabs a browser restart brought back with a browse id on them. Chrome keeps no values on a tab and clears session
+ * storage with the browser session, so a restored tab has no id to bring back: this finds none.
  */
 export async function restored(): Promise<RestoredTab[]> {
-  const tabs = await chrome.tabs.query({}).catch(() => [] as chrome.tabs.Tab[])
-  const found: RestoredTab[] = []
-  for (const tab of tabs) {
-    if (tab.id === undefined) continue
-    const id = await browseId(tab.id)
-    if (!id) continue
-    const agent = (await isAgent(tab.id)) !== false
-    const name = await chosen(tab.id)
-    found.push({ tabId: tab.id, browseId: id, agent, ...(name ? { chosen: name } : {}) })
-  }
-  return found
+  return []
 }

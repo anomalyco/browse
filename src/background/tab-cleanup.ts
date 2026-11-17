@@ -419,6 +419,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   closing.delete(tabId)
   relayUngrouping.delete(tabId)
   forget(tabId)
+  void TabIdentity.clear(tabId)
 })
 chrome.tabs.onUpdated.addListener((tabId, change) => {
   if (change.pinned) forget(tabId)
@@ -428,7 +429,7 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
     const byRelay = relayUngrouping.delete(tabId)
     if (!byRelay && tracked.has(tabId) && !closing.has(tabId)) {
       forget(tabId)
-      // It is the user's now, not lent: a browser restart must not hand it back to an agent.
+      // It is the user's now, not lent: forget the browse id that went with it.
       void TabIdentity.clear(tabId)
     }
   }

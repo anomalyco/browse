@@ -1420,8 +1420,8 @@ async fn tab_ids_survive_a_simulated_browser_restart() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     std::mem::forget(first);
 
-    // Chrome starts again: the tabs have new numeric ids and new targets, and the extension reports the ids it kept on
-    // them with chrome.sessions.
+    // Chrome starts again: the tabs have new numeric ids and new targets, and the extension reports the stable ids it
+    // kept for them.
     let second = harness_at(paths.clone()).await;
     let socket = pair_with_token(second.handle.port(), &paths, "profile-stable").await;
     let (seen, events) = fake_extension(socket, 360);

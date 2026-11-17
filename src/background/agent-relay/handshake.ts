@@ -397,9 +397,9 @@ export function createRelayHandshake(deps: {
     deps.log.add("pairing.ok", { source: using.kind })
     // Tabs an agent opened say so: a relay that can't match one to a session after a restart releases it rather
     // than closing it, and a released tab stays tracked so the user's idle-cleanup setting decides when it goes.
-    // The tab's stable id travels with it, so a restored tab keeps the id agents know it by.
+    // The tab's stable id travels with it, so a relay that comes back keeps the id agents know it by.
     for (const tabId of Array.from(deps.relayTabs)) {
-      // The marker survives a browser restart; within a session the cleanup tracking is the same answer.
+      // The marker outlives a service worker restart; within a session the cleanup tracking is the same answer.
       const agent = (await TabIdentity.isAgent(tabId)) ?? (await TabCleanup.isTracked(tabId))
       const browseId = await TabIdentity.ensure(tabId, { agent })
       if (deps.currentSocket() !== current) return

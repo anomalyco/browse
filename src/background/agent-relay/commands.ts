@@ -137,8 +137,8 @@ export function createRelayCommands(deps: {
         if (clicked) void ToolbarNotice.clear(tabId)
         deps.relayTabs.add(tabId)
         deps.notify()
-        // The tab's stable id, so the relay gets the same tab back after a browser restart. A lent tab is not an agent
-        // tab: idle cleanup never closes it.
+        // The tab's stable id, so a relay that reconnects keeps the same tab. A lent tab is not an agent tab: idle
+        // cleanup never closes it.
         const browseId = await TabIdentity.ensure(tabId, { agent: await TabCleanup.isTracked(tabId) })
         return browseId ? { browseId } : {}
       }
@@ -184,8 +184,8 @@ export function createRelayCommands(deps: {
           normalWindows: opened.normalWindows,
         })
         TabCleanup.track(tab.id)
-        // A caller-chosen id (`work-mail`) is kept on the tab: the relay never idle-closes such a tab, and the id
-        // survives a browser restart with the rest of the tab's identity.
+        // A caller-chosen id (`work-mail`) is kept with the tab's identity for this browser session: the relay never
+        // idle-closes such a tab, and the id outlives a service worker restart like the rest of it.
         const chosen = typeof params?.id === "string" && /^[a-z][a-z0-9-]{0,63}$/.test(params.id) ? params.id : undefined
         // A discarded tab loses the debugger and the agent's page. Issued now but not awaited: the answer must not
         // wait on it.

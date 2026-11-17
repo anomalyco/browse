@@ -26,7 +26,7 @@ pub fn handle(relay: &Arc<Relay>, link: &Arc<Link>, text: &str) {
     let mut params = message.get_mut("params").map(Value::take).unwrap_or_else(|| Value::Object(Default::default()));
     let mut restored = None;
     let tab = if method == "debugger.attached" {
-        // A tab coming back with its stable id (a browser restart) keeps the relay id and chosen id agents know it by.
+        // A tab coming back with its stable id (a relay or worker restart) keeps the relay id and chosen id agents know it by.
         let local = params.get("tabId").and_then(Value::as_i64);
         local.map(|local| {
             let browse_id = params.get("browseId").and_then(Value::as_str).map(str::to_string);

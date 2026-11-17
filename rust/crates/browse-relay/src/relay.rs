@@ -53,7 +53,7 @@ pub struct Tab {
     pub url: String,
     pub title: String,
     pub owner: Owner,
-    /// The extension's stable id for the tab (`chrome.sessions` tab value), which survives a browser restart.
+    /// The extension's stable id for the tab (kept in its session storage), which lasts for the browser session.
     pub browse_id: Option<String>,
     /// The caller-chosen id (`work-mail`), when `tabs new` was given one. Such a tab is never idle-closed.
     pub chosen: Option<String>,
@@ -700,8 +700,8 @@ impl Relay {
     }
 
     /// Writes the tab registry now: the tabs attached (agent and lent), those of a browser that is reconnecting, and
-    /// those of the previous relay not announced again yet. Their stable ids travel with them, so a tab keeps its id
-    /// when its browser restarts.
+    /// those of the previous relay not announced again yet. Their stable ids travel with them, so a reconnecting
+    /// browser's tabs keep their ids.
     pub fn persist_now(&self) {
         self.persist(false);
     }

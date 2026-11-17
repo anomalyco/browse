@@ -182,9 +182,9 @@ extension from your browser to finish.
   `allowedOrigins`, `readOnly`, `keepVisible` and `browser`. Popups a page opens become agent tabs too.
 - **Tabs keep their ids, and an agent can name one.** `tabs` with `action: "new"` and an `id` like `work-mail` opens
   that tab once: asking again returns the same tab without navigating it, and every tool takes `work-mail` as `tab`.
-  The id stays with the tab when the browser restarts (the extension keeps it on the tab), and a tab opened this way
-  is never closed as idle: only an agent or you close it. `tabs` lists each tab's id, url, title, group, last use and
-  whether a call is running in it.
+  The id stays with the tab while the browser runs, even when browse's service worker restarts; a browser restart
+  starts over. A tab opened this way is never closed as idle: only an agent or you close it. `tabs` lists each tab's
+  id, url, title, group, last use and whether a call is running in it.
 - **Agents open their own tabs** in the background of the window you last used, grouped together and collapsed unless
   you're looking at one. Agents can't switch you to their tabs or bring a window to the front. Tabs nobody touches for
   10 minutes close by themselves (never while something runs on them). Closing agent tabs never quits the browser: on
@@ -249,10 +249,9 @@ the relay over a WebSocket and runs its commands in your browser through `chrome
   *Human-like input* off for full speed). This makes an agent hard to spot, not impossible: the browser shows its
   "started debugging" bar while the debugger is attached.
 
-Permissions: `debugger`, `tabs`, `tabGroups`, `storage`, `sessions` (to keep an agent tab's id on the tab, so it
-survives a browser restart), `alarms`, `scripting` (to add the handoff card only to tabs agents use), `webNavigation`
-(to keep popups agents open with their other tabs), `notifications` (to tell you an agent needs you while it records
-a tab), and access to all sites so agents can work wherever you ask. Nothing leaves your
+Permissions: `debugger`, `tabs`, `tabGroups`, `storage`, `alarms`, `scripting` (to add the handoff card only to tabs
+agents use), `webNavigation` (to keep popups agents open with their other tabs), `notifications` (to tell you an agent
+needs you while it records a tab), and access to all sites so agents can work wherever you ask. Nothing leaves your
 computer except what your agent sends to its model provider; see the [privacy policy](store/privacy-policy.md).
 
 ## Security
