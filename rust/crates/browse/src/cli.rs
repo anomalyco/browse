@@ -71,7 +71,10 @@ fn slot(spec: &ToolSpec, arguments: &Map<String, Value>, value: &str) -> Option<
     if let Some(key) = properties.iter().find(|(key, schema)| open(key) && schema["enum"].as_array().is_some_and(|values| values.iter().any(|v| v == value))).map(|(key, _)| key.clone()) {
         return Some(key);
     }
-    required(spec).into_iter().find(|key| open(key)).or_else(|| PRIMARY.iter().find(|key| open(key)).map(|key| (*key).to_owned()))
+    // Only a plain option takes a free-form word: an enum above only matches its own values, so anything else
+    // there is a stray argument rather than a value to reject later as `--action is one of ...`.
+    let fillable = |key: &str| open(key) && properties.get(key).is_some_and(|schema| schema.get("enum").is_none());
+    required(spec).into_iter().find(|key| fillable(key)).or_else(|| PRIMARY.iter().find(|key| fillable(key)).map(|key| (*key).to_owned()))
 }
 
 /// What `browse <tool> --help` shows as the positional form.
@@ -93,14 +96,25 @@ fn help(spec: &ToolSpec) {
     let usage = usage(spec);
     println!("browse {}{}{} [options]\n\n{}\n", spec.name, if usage.is_empty() { "" } else { " " }, usage, spec.description);
     let required = required(spec);
+    let mut boolean = false;
     for (name, schema) in properties(spec) {
         let mark = if required.contains(&name) { " (required)" } else { "" };
-        println!("  --{name} <{}>{mark}\n      {}", kinds(&schema).join("|"), schema.get("description").and_then(Value::as_str).unwrap_or_default());
+        let kinds = kinds(&schema);
+        let placeholder = if kinds == ["boolean"] {
+            boolean = true;
+            String::new()
+        } else {
+            format!(" <{}>", kinds.join("|"))
+        };
+        println!("  --{name}{placeholder}{mark}\n      {}", schema.get("description").and_then(Value::as_str).unwrap_or_default());
     }
     if !usage.is_empty() {
         println!("\n  Positional values fill {usage} in order (a ref like e12 goes to --ref).");
     }
     println!("\n  --json '<object>'   all arguments as one JSON object\n  --output <path>     where to save images");
+    if boolean {
+        println!("\n  Boolean options take no value; `--name false` turns one off.");
+    }
 }
 
 fn variants(schema: &Value) -> Vec<&Value> {
@@ -212,12 +226,19 @@ pub fn split_globals(args: &[String]) -> (Vec<String>, Vec<String>) {
     (globals, args[i..].to_vec())
 }
 
-pub fn call(name: &str, args: &[String]) -> anyhow::Result<i32> {
-    let specs = relay::specs(None);
-    let Some(spec) = specs.iter().find(|s| s.name == name).or_else(|| specs.iter().find(|s| s.name == name.replace('-', "_"))) else {
-        eprintln!("Unknown command or tool: {name}. Run `browse --help`.");
-        return Ok(2);
-    };
+/// A parsed tool call: its arguments, and where images go (`--output`).
+struct ParsedCall {
+    arguments: Map<String, Value>,
+    output: Option<PathBuf>,
+}
+
+enum ParseResult {
+    Help,
+    Call(ParsedCall),
+}
+
+/// Turns a tool's argv into its arguments. `--help` asks for the help text instead of a call.
+fn parse(spec: &ToolSpec, args: &[String]) -> anyhow::Result<ParseResult> {
     let name = spec.name.as_str();
     let properties = properties(spec);
     let resolve = |flag: &str| -> anyhow::Result<String> {
@@ -250,8 +271,7 @@ pub fn call(name: &str, args: &[String]) -> anyhow::Result<i32> {
         };
         match flag {
             "help" | "h" => {
-                help(spec);
-                return Ok(0);
+                return Ok(ParseResult::Help);
             }
             // `browse execute --file script.js` (or `-` for stdin).
             "file" if name == "execute" && !properties.contains_key("file") => {
@@ -286,27 +306,57 @@ pub fn call(name: &str, args: &[String]) -> anyhow::Result<i32> {
                 let key = resolve(flag)?;
                 let schema = &properties[&key];
                 let boolean = kinds(schema) == ["boolean"];
-                let value = match inline.or_else(|| if boolean { None } else { take(&mut i) }) {
-                    None if boolean => Value::Bool(true),
-                    None => bail!("--{flag} needs a value; see `browse {name} --help`"),
+                // A boolean takes no value, but people write `--keepVisible true`: take a literal word as its value.
+                let literal = if boolean && inline.is_none() {
+                    args.get(i).filter(|next| matches!(next.as_str(), "true" | "false")).cloned()
+                } else {
+                    None
+                };
+                let value = match inline {
                     Some(raw) => coerce(flag, schema, raw)?,
+                    None if boolean => match literal {
+                        Some(raw) => {
+                            i += 1;
+                            Value::Bool(raw == "true")
+                        }
+                        None => Value::Bool(true),
+                    },
+                    None => bail!("--{flag} needs a value; see `browse {name} --help`"),
                 };
                 arguments.insert(key, value);
             }
         }
+    }
+    if let Some(tab) = tab {
+        if !properties.contains_key("tab") {
+            bail!("{name} doesn't act on a tab; leave out --tab");
+        }
+        // Before the positionals, so a stray word can't fill `tab` only to be overwritten by --tab below.
+        arguments.insert("tab".into(), tab);
     }
     for value in positional {
         let key = slot(spec, &arguments, &value).with_context(|| format!("unexpected argument {value:?}; see `browse {name} --help`"))?;
         let parsed = coerce(&key, &properties[&key], value)?;
         arguments.insert(key, parsed);
     }
-    if let Some(tab) = tab {
-        if !properties.contains_key("tab") {
-            bail!("{name} doesn't act on a tab; leave out --tab");
+    Ok(ParseResult::Call(ParsedCall { arguments, output }))
+}
+
+pub fn call(name: &str, args: &[String]) -> anyhow::Result<i32> {
+    let specs = relay::specs(None);
+    let Some(spec) = specs.iter().find(|s| s.name == name).or_else(|| specs.iter().find(|s| s.name == name.replace('-', "_"))) else {
+        eprintln!("Unknown command or tool: {name}. Run `browse --help`.");
+        return Ok(2);
+    };
+    let name = spec.name.as_str();
+    let (arguments, output) = match parse(spec, args)? {
+        ParseResult::Help => {
+            help(spec);
+            return Ok(0);
         }
-        arguments.insert("tab".into(), tab);
-    }
-    check(name, &properties, &arguments)?;
+        ParseResult::Call(parsed) => (parsed.arguments, parsed.output),
+    };
+    check(name, &properties(spec), &arguments)?;
     if let Some(dir) = output.as_ref().and_then(|p| p.parent()).filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).with_context(|| format!("can't create {} for --output", dir.display()))?;
     }
@@ -352,6 +402,63 @@ mod tests {
         ToolSpec { name: "t".into(), description: String::new(), input_schema: schema }
     }
 
+    fn named(name: &str, schema: Value) -> ToolSpec {
+        ToolSpec { name: name.into(), description: String::new(), input_schema: schema }
+    }
+
+    fn parse_arguments(spec: &ToolSpec, words: &[&str]) -> anyhow::Result<Map<String, Value>> {
+        let args: Vec<String> = words.iter().map(|word| (*word).to_owned()).collect();
+        match parse(spec, &args)? {
+            ParseResult::Call(parsed) => Ok(parsed.arguments),
+            ParseResult::Help => unreachable!("the arguments ask for help"),
+        }
+    }
+
+    fn navigate() -> ToolSpec {
+        named(
+            "navigate",
+            json!({
+                "properties": {
+                    "url": { "type": "string" },
+                    "action": { "type": "string", "enum": ["goto", "back", "forward", "reload"] },
+                    "readOnly": { "type": "boolean" },
+                    "keepVisible": { "type": "boolean" },
+                    "tab": { "type": ["integer", "string"] }
+                },
+                "required": []
+            }),
+        )
+    }
+
+    fn snapshot() -> ToolSpec {
+        named(
+            "snapshot",
+            json!({
+                "properties": {
+                    "within": { "type": "string" },
+                    "interactive": { "type": "boolean" },
+                    "tab": { "type": ["integer", "string"] }
+                },
+                "required": ["tab"]
+            }),
+        )
+    }
+
+    fn tabs() -> ToolSpec {
+        named(
+            "tabs",
+            json!({
+                "properties": {
+                    "action": { "type": "string", "enum": ["list", "new", "close"] },
+                    "url": { "type": "string" },
+                    "readOnly": { "type": "boolean" },
+                    "tab": { "type": ["integer", "string"] }
+                },
+                "required": []
+            }),
+        )
+    }
+
     #[test]
     fn positionals() {
         let navigate = spec(json!({ "properties": { "url": { "type": "string" }, "action": { "type": "string" } }, "required": [] }));
@@ -364,6 +471,78 @@ mod tests {
         let tabs = spec(json!({ "properties": { "action": { "enum": ["list", "new", "close"] }, "url": {} }, "required": [] }));
         assert_eq!(slot(&tabs, &Map::new(), "close").as_deref(), Some("action"));
         assert!(looks_like_ref("f1a5") && looks_like_ref("e3") && !looks_like_ref("example") && !looks_like_ref("e"));
+    }
+
+    #[test]
+    fn boolean_flags_take_a_following_true_or_false() {
+        let navigate = navigate();
+        let parsed = parse_arguments(&navigate, &["https://example.com", "--keepVisible", "true"]).unwrap();
+        assert_eq!(parsed.get("keepVisible"), Some(&json!(true)));
+        assert!(!parsed.contains_key("action"));
+
+        let parsed = parse_arguments(&navigate, &["https://example.com", "--keepVisible", "false"]).unwrap();
+        assert_eq!(parsed.get("keepVisible"), Some(&json!(false)));
+
+        // A boolean with no literal after it still takes no value: the next word is the URL.
+        let parsed = parse_arguments(&navigate, &["--readOnly", "https://example.com"]).unwrap();
+        assert_eq!(parsed.get("readOnly"), Some(&json!(true)));
+        assert_eq!(parsed.get("url"), Some(&json!("https://example.com")));
+    }
+
+    #[test]
+    fn stray_positionals_are_unexpected_arguments() {
+        let navigate = navigate();
+        let error = parse_arguments(&navigate, &["https://example.com", "extra"]).unwrap_err().to_string();
+        assert!(error.contains("unexpected argument \"extra\""), "{error}");
+        assert!(!error.contains("--action"), "{error}");
+    }
+
+    #[test]
+    fn positional_enum_values_and_tabs_still_fill() {
+        let navigate = navigate();
+        let parsed = parse_arguments(&navigate, &["https://example.com", "back"]).unwrap();
+        assert_eq!(parsed.get("url"), Some(&json!("https://example.com")));
+        assert_eq!(parsed.get("action"), Some(&json!("back")));
+
+        let parsed = parse_arguments(&navigate, &["--tab", "12", "back"]).unwrap();
+        assert_eq!(parsed.get("tab"), Some(&json!(12)));
+        assert_eq!(parsed.get("action"), Some(&json!("back")));
+
+        let tabs = tabs();
+        let parsed = parse_arguments(&tabs, &["close", "--tab", "12"]).unwrap();
+        assert_eq!(parsed.get("action"), Some(&json!("close")));
+        assert_eq!(parsed.get("tab"), Some(&json!(12)));
+
+        let snapshot = snapshot();
+        let parsed = parse_arguments(&snapshot, &["12"]).unwrap();
+        assert_eq!(parsed.get("tab"), Some(&json!(12)));
+    }
+
+    #[test]
+    fn a_given_tab_is_never_filled_by_a_positional() {
+        let snapshot = snapshot();
+        // `main` can't take `tab` when --tab is already there; it lands in the next positional slot, `within`.
+        let parsed = parse_arguments(&snapshot, &["--tab", "12", "main"]).unwrap();
+        assert_eq!(parsed.get("tab"), Some(&json!(12)));
+        assert_eq!(parsed.get("within"), Some(&json!("main")));
+
+        let parsed = parse_arguments(&snapshot, &["--tab", "12", "--interactive", "true"]).unwrap();
+        assert_eq!(parsed.get("interactive"), Some(&json!(true)));
+        assert_eq!(parsed.get("tab"), Some(&json!(12)));
+        assert!(!parsed.contains_key("within"));
+
+        let parsed = parse_arguments(&snapshot, &["12", "--interactive", "true"]).unwrap();
+        assert_eq!(parsed.get("interactive"), Some(&json!(true)));
+        assert_eq!(parsed.get("tab"), Some(&json!(12)));
+        assert!(!parsed.contains_key("within"));
+    }
+
+    #[test]
+    fn tabs_new_takes_a_boolean_after_its_url() {
+        let parsed = parse_arguments(&tabs(), &["new", "https://example.com", "--readOnly", "true"]).unwrap();
+        assert_eq!(parsed.get("action"), Some(&json!("new")));
+        assert_eq!(parsed.get("url"), Some(&json!("https://example.com")));
+        assert_eq!(parsed.get("readOnly"), Some(&json!(true)));
     }
 
     #[test]
