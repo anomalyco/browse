@@ -144,11 +144,16 @@ The connection isn't encrypted by browse; use a network that is (Tailscale or Wi
 **Updates are automatic.** The relay checks once at start and then hourly, and installs a new version when no agent
 is using the browser:
 
-- the install script's binary (and npx/bunx copies) read the channel's manifest from the release service and replace
-  `~/.local/bin/browse` after checking its size and SHA-256;
-- global installs read npm's dist-tag (`latest`, or `dev`/`beta` for those builds) and run the package manager that
-  installed them (`npm install -g`, `bun add -g`, `pnpm add -g`, `yarn global add`, `volta install`) into the same
-  place.
+- every install reads its channel's manifest from the release service (`stable`, or `dev`/`beta` for those builds),
+  with `browse/<channel>/<version>/cli/<install kind>` as the User-Agent;
+- the install script's binary replaces `~/.local/bin/browse` with the manifest's tarball after checking its size and
+  SHA-256;
+- global installs run the package manager that installed them (`npm install -g`, `bun add -g`, `pnpm add -g`,
+  `yarn global add`, `volta install`) to install `@opencode/browse@<the manifest's version>` into the same place. A
+  release reaches the service a few minutes before npm, so a package manager that doesn't have the version yet is
+  retried quietly;
+- `npx`, `bunx`, `pnpm dlx` and `yarn dlx` runs resolve the package themselves: they only tell you a newer release is
+  out.
 
 The relay restarts on the new version when it's idle; agent tabs stay open and come back. A running MCP server keeps
 working with the newer relay until the agent restarts it. `browse update` updates now and `browse update --check` only
