@@ -276,8 +276,18 @@ to steer it, and that other programs on your computer may try to use the relay.
   refused. Closing a page is handled like closing a target: a tab you lent is released, not closed. Cookie and storage
   access is limited to the hosts of the tab's own pages. Agents can't open browser-internal pages, other extensions or
   local files, or raise windows over your work.
-- **Allowed sites (opt-in).** A tab opened with `allowedOrigins` can only go to those sites; read-only tabs only
-  inspect.
+- **Guardrails, not a data boundary.** `allowedOrigins` limits navigations, top-level documents and the tabs and popups
+  an agent opens; requests a page makes itself (fetch, XHR, images, scripts) are not filtered. `readOnly` refuses input
+  and navigation after the tab opens, but `eval` still runs JavaScript in the page, which can read everything the page
+  can and make requests as the page, and the tab's own sites' cookies, snapshots and screenshots stay readable. These
+  keep an agent from wandering: for pages you don't want an agent to read, don't open them in browse.
+- **What output is masked.** `fill` hides values only for password and one-time-code fields. Network capture redacts
+  credentials by name and shape (auth and API-key headers, cookie values, secret-named fields, token-like path
+  segments), so a value under an ordinary name can still come through. `eval` results, console messages, snapshots and
+  page text are returned as they are.
+- **WebMCP tools come from the page.** Their names, descriptions, schemas, annotations and results are whatever a page
+  supplies; browse doesn't verify them, and an annotation like `readOnly` is only the page's word. Treat them like any
+  other page text, not as instructions from the user.
 - **Bot challenges.** After a navigation browse reports Cloudflare, captcha walls and "access denied" pages and tells
   the agent to hand interactive ones to you. It never solves them.
 - **Your tabs stay yours.** Agents use only tabs they opened or you lent them. Only a real click on the card or the
