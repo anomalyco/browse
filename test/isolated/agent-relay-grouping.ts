@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "bun:test"
+import { beforeEach, describe, expect, setSystemTime, test } from "bun:test"
 import { installChrome, settle, type StubEvent } from "../chrome-stub"
 import { installFakeRelaySocket } from "../relay-stub"
 
@@ -100,6 +100,7 @@ beforeEach(async () => {
   await stub.chrome.storage.local.remove(["agentTabsWindow", "agentTabsGrouping", "agentTabsGroupCollapse", "humanInput", "tabCleanupIdleMinutes", "handoffNotifications"])
   await stub.chrome.storage.session.remove("agentWindowId")
   stub.state.notifications.clear()
+  stub.state.notificationCreates = 0
   stub.state.permissionLevel = "granted"
   stub.state.notificationsFail = false
 })
@@ -335,23 +336,30 @@ describe("grouping: one shared group for all agents (default)", () => {
   })
 
   test("a debugging bar cancel notifies the user once for the whole burst, and other detaches don't", async () => {
-    await stub.chrome.storage.local.set({ agentTabsGrouping: "shared" })
-    const { userTab } = await userWindow()
-    const first = await agentTab("github")
-    const second = await agentTab("linear")
-    await command("debugger.attach", { tabId: userTab })
-    // Chrome reports a foreign frame taking over as target_closed, which browse reattaches: the user hears nothing.
-    event("debugger.onDetach").emit({ tabId: first.tabId }, "target_closed")
-    await new Promise((resolve) => setTimeout(resolve, 60))
-    expect(stub.state.notifications.size).toBe(0)
-    // Chromium detaches every tab at once when the bar's button is clicked.
-    const canceled = [first.tabId, second.tabId, userTab]
-    for (const tabId of canceled) event("debugger.onDetach").emit({ tabId }, "canceled_by_user")
-    await canceledAtOnce(canceled)
-    await until(() => stub.state.notifications.size === 1)
-    expect([...stub.state.notifications.entries()]).toEqual([
-      ["opencode-browser-debugging-bar", expect.objectContaining({ title: "browse stopped using your tabs" })],
-    ])
+    // Past the notice an earlier cancel in this file showed, so this burst creates one of its own.
+    setSystemTime(Date.now() + 60_000)
+    try {
+      await stub.chrome.storage.local.set({ agentTabsGrouping: "shared" })
+      const { userTab } = await userWindow()
+      const first = await agentTab("github")
+      const second = await agentTab("linear")
+      await command("debugger.attach", { tabId: userTab })
+      // Chrome reports a foreign frame taking over as target_closed, which browse reattaches: the user hears nothing.
+      event("debugger.onDetach").emit({ tabId: first.tabId }, "target_closed")
+      await new Promise((resolve) => setTimeout(resolve, 60))
+      expect(stub.state.notificationCreates).toBe(0)
+      // Chromium detaches every tab at once when the bar's button is clicked: one create for the three of them.
+      const canceled = [first.tabId, second.tabId, userTab]
+      for (const tabId of canceled) event("debugger.onDetach").emit({ tabId }, "canceled_by_user")
+      await canceledAtOnce(canceled)
+      await until(() => stub.state.notifications.size === 1)
+      expect(stub.state.notificationCreates).toBe(1)
+      expect([...stub.state.notifications.entries()]).toEqual([
+        ["opencode-browser-debugging-bar", expect.objectContaining({ title: "browse stopped using your tabs" })],
+      ])
+    } finally {
+      setSystemTime()
+    }
   })
 
   test("a debugging bar cancel leaves a lent tab in one of the user's own groups where it is", async () => {

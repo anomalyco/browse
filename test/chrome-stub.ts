@@ -110,6 +110,8 @@ export function createChrome() {
     fileAccess: false,
     notificationsFail: false,
     notifications: new Map<string, unknown>(),
+    /** Every chrome.notifications.create call, so tests can see a burst coalesce (the map only keeps the last). */
+    notificationCreates: 0,
   }
   const tabsOf = (windowId: number) => [...tabs.values()].filter((tab) => tab.windowId === windowId).map((tab) => ({ ...tab }))
   const windowsApi = lenient({
@@ -314,6 +316,7 @@ export function createChrome() {
         return state.permissionLevel
       },
       async create(id: string, options: unknown) {
+        state.notificationCreates++
         if (state.notificationsFail) throw new Error("Notifications are blocked")
         state.notifications.set(id, options)
         return id
