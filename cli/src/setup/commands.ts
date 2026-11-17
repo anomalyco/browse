@@ -21,7 +21,7 @@ import { runCommand } from "../update/auto-update.ts"
 import { unpackedExtensionId } from "../protocol.ts"
 import { parseHostname, readRelayConfig, writeRelayConfig } from "../relay/config.ts"
 import { defaultPort } from "../relay/helpers.ts"
-import { configuredRelayPort, endpointForPort, liveRelayPort, probeRelayPort, resolveRelayPort, verifiedRelay, verifiedRelayEndpoint } from "../relay/port.ts"
+import { configuredRelayPort, endpointForPort, liveRelayPort, processAlive, probeRelayPort, readRelayState, resolveRelayPort, verifiedRelay, verifiedRelayEndpoint } from "../relay/port.ts"
 import { relayAuthorization } from "../relay/secrets.ts"
 import { opencodeBrowserBuildId } from "../version.ts"
 import { isInstallerBinary, removeBinaryInstall, samePath } from "./binary.ts"
@@ -401,6 +401,12 @@ async function stopInstalledRelay() {
   })
   if (!ours) return
   if (relay.shutdownProtocol !== 2) throw new Error("Stop the legacy relay manually, then run uninstall again.")
+  // relay.json still names this relay while it writes its last lines as it stops (relay.ts cleanup): it is the marker
+  // that everything is on disk, so uninstall waits for it to go before deleting browse's folders.
+  const stillRecorded = () => {
+    const state = readRelayState()
+    return state !== undefined && state.instanceId === relay.instanceId && processAlive(state.pid)
+  }
   // The token only goes to the endpoint and instance the probe above confirmed, and only while relay.json still agrees.
   const verified = await verifiedRelay()
   if (verified === undefined || verified.endpoint !== base || verified.instanceId !== relay.instanceId)
@@ -419,8 +425,10 @@ async function stopInstalledRelay() {
       throw error
     })
     if (current !== "stopping") {
-      if (!current) return
-      if (current.instanceId !== relay.instanceId) throw new Error("Another relay started during uninstall; no files were removed.")
+      if (!current) {
+        // It stopped answering but may still be writing: keep polling until relay.json goes or its process is gone.
+        if (!stillRecorded()) return
+      } else if (current.instanceId !== relay.instanceId) throw new Error("Another relay started during uninstall; no files were removed.")
     }
     await new Promise(resolve => setTimeout(resolve, 50))
   }

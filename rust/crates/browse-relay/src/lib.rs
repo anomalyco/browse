@@ -37,6 +37,7 @@ pub use client::Endpoint;
 pub use relay::{AutoUpdateStatus, Relay};
 pub use serve::{RelayHandle, ServeOptions, call_tool, serve, serve_until, start};
 pub use tools::tools;
+pub use util::process_alive;
 
 #[cfg(test)]
 mod tests;

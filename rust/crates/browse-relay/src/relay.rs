@@ -452,6 +452,8 @@ pub struct Relay {
     pub state: Mutex<State>,
     pub changed: Notify,
     pub persist: Notify,
+    /// Serializes tab registry writes, so a shutdown's final write waits for one still running in a blocking task.
+    pub persist_lock: Mutex<()>,
     pub stopping: AtomicBool,
     pub stopped: Notify,
     pub tools: RwLock<Vec<Arc<dyn Tool>>>,
@@ -540,6 +542,7 @@ impl Relay {
             }),
             changed: Notify::new(),
             persist: Notify::new(),
+            persist_lock: Mutex::new(()),
             stopping: AtomicBool::new(false),
             stopped: Notify::new(),
             tools: RwLock::new(Vec::new()),
@@ -700,6 +703,9 @@ impl Relay {
     /// those of the previous relay not announced again yet. Their stable ids travel with them, so a tab keeps its id
     /// when its browser restarts.
     pub fn persist_now(&self) {
+        // A persister task's blocking write can outlive the task's abort; a shutdown's final write must come after it,
+        // because relay.json goes right after that final write and clients treat it as "done with my files".
+        let _writing = self.persist_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let entries: Vec<PersistedTab> = {
             let st = self.st();
             let mut entries: Vec<PersistedTab> = st

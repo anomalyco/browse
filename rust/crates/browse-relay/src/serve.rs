@@ -254,8 +254,10 @@ async fn run(relay: Arc<Relay>, listener: TcpListener) {
     persister.abort();
     housekeeping.abort();
     relay.persist_now();
-    port::remove_relay_state(&relay.paths, relay.configured_port, &relay.instance_id);
     rlog!("relay.shutdown.closed", pid = std::process::id());
+    // Last, so a client that waits for it to go (relay::stop, before uninstall deletes browse's folders) knows every
+    // write is done: relay.json is the relay's "finished with my files" marker while it stops answering.
+    port::remove_relay_state(&relay.paths, relay.configured_port, &relay.instance_id);
     heartbeat.abort();
     relay.finished.store(true, Ordering::SeqCst);
 }
