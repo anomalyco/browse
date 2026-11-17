@@ -23,6 +23,21 @@ case "$GITHUB_EVENT_NAME:$GITHUB_REF:$versioned" in
   *) die "$GITHUB_EVENT_NAME on $GITHUB_REF cannot release (bump or version given: $versioned); stable releases are dispatched on dev" ;;
 esac
 
+# The version a stable release plans from <base>: INPUT_VERSION, or the bump applied to it.
+if [ -z "${INPUT_VERSION:-}" ] && [ -n "${INPUT_BUMP:-}" ]; then
+  case "$INPUT_BUMP" in major | minor | patch) ;; *) die "Unknown bump $INPUT_BUMP" ;; esac
+fi
+next_version() {
+  if [ -n "${INPUT_VERSION:-}" ]; then printf '%s\n' "$INPUT_VERSION"; return 0; fi
+  local major minor patch
+  IFS=. read -r major minor patch <<< "$1"
+  case "$INPUT_BUMP" in
+    major) printf '%s\n' "$((major + 1)).0.0" ;;
+    minor) printf '%s\n' "$major.$((minor + 1)).0" ;;
+    patch) printf '%s\n' "$major.$minor.$((patch + 1))" ;;
+  esac
+}
+
 current=$(gh api -H "Accept: application/vnd.github.raw" "repos/$GITHUB_REPOSITORY/contents/cli/package.json?ref=$GITHUB_SHA" | jq -r .version)
 stable_version "$current" || die "cli/package.json at $GITHUB_SHA has version $current, not a stable x.y.z"
 # The tag job runs before any publish, so a version whose tag exists is consumed even when a publish job failed and its
@@ -34,17 +49,19 @@ stable_tags=$(while IFS= read -r ref; do
   if stable_version "$candidate"; then printf '%s\n' "$candidate"; fi
 done <<< "$tag_refs")
 newest_tag=$(printf '%s\n' "$stable_tags" | sort -V | tail -n 1)
-# A rerun of the same dispatch: tag-release.sh makes its release commit on $GITHUB_SHA and reuses v<version> when that
-# commit's tree matches, so the tag it pushes sits one commit above $GITHUB_SHA. Leave that tag out of base and rerun the
-# same version.
-if [ "$mode" = stable ] && [ -n "$newest_tag" ]; then
-  tag_parent=$(gh api "repos/$GITHUB_REPOSITORY/commits/v$newest_tag" --jq '.parents[0].sha') ||
+base=$(printf '%s\n%s\n' "$current" "$newest_tag" | sort -V | tail -n 1)
+# A rerun of a dispatch that already tagged its release: tag-release.sh makes its release commit on $GITHUB_SHA and
+# reuses v<version> when that commit's tree matches. Leave that tag out only when this dispatch plans that same version
+# without it; a fresh dispatch, or one planning past it, keeps counting it, so it never plans below a shipped version.
+if [ "$mode" = stable ] && [ "${GITHUB_RUN_ATTEMPT:-1}" != 1 ] && [ -n "$newest_tag" ]; then
+  tag_parent=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/v$newest_tag" --jq '.parents[0].sha') ||
     die "Couldn't read the commit of tag v$newest_tag"
   if [ "$tag_parent" = "$GITHUB_SHA" ]; then
-    newest_tag=$(printf '%s\n' "$stable_tags" | grep -vxF "$newest_tag" | sort -V | tail -n 1 || true)
+    older_tag=$(printf '%s\n' "$stable_tags" | grep -vxF "$newest_tag" | sort -V | tail -n 1 || true)
+    older_base=$(printf '%s\n%s\n' "$current" "$older_tag" | sort -V | tail -n 1)
+    if [ "$(next_version "$older_base")" = "$newest_tag" ]; then base=$older_base; fi
   fi
 fi
-base=$(printf '%s\n%s\n' "$current" "$newest_tag" | sort -V | tail -n 1)
 IFS=. read -r major minor patch <<< "$base"
 
 if [ "$mode" = stable ]; then
@@ -69,16 +86,7 @@ if [ "$mode" = stable ]; then
   fi
   if printf '%s\n' "$notes" | grep -qF TODO; then die "release_notes still have TODO placeholders"; fi
 
-  if [ -n "${INPUT_VERSION:-}" ]; then
-    version=$INPUT_VERSION
-  else
-    case "$INPUT_BUMP" in
-      major) version="$((major + 1)).0.0" ;;
-      minor) version="$major.$((minor + 1)).0" ;;
-      patch) version="$major.$minor.$((patch + 1))" ;;
-      *) die "Unknown bump $INPUT_BUMP" ;;
-    esac
-  fi
+  version=$(next_version "$base")
   stable_version "$version" || die "Invalid release version $version (x.y.z, each part at most 65535)"
   [ "$(printf '%s\n%s\n' "$base" "$version" | sort -V | tail -n 1)" = "$version" ] && [ "$version" != "$base" ] ||
     die "$version must be newer than cli/package.json ($current) and the newest tag (${newest_tag:-none})"
