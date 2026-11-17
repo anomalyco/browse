@@ -337,9 +337,14 @@ impl State {
         self.handoffs.get(&tab)
     }
 
+    /// A call is running in the tab.
+    pub fn tab_call_busy(&self, tab: i64) -> bool {
+        self.calls.values().any(|c| c.tabs.contains(&tab)) || self.chosen_calls.values().any(|held| *held == tab)
+    }
+
     /// A call is running in the tab, or a capture or recording.
     pub fn tab_busy(&self, tab: i64) -> bool {
-        self.tabs.get(&tab).is_some_and(|t| !t.busy_keys.is_empty()) || self.calls.values().any(|c| c.tabs.contains(&tab)) || self.chosen_calls.values().any(|held| *held == tab)
+        self.tabs.get(&tab).is_some_and(|t| !t.busy_keys.is_empty()) || self.tab_call_busy(tab)
     }
 
     pub fn busy(&self) -> bool {

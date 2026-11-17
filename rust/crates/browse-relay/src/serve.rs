@@ -525,9 +525,10 @@ pub async fn call_tool_keyed(relay: &Arc<Relay>, request: ToolCallRequest, clien
     if let Some(chosen) = &chosen {
         let tab = arguments["tab"].as_i64().unwrap_or_default();
         // A second call on a chosen-id tab gets a clear error instead of interleaving with the one running there.
+        // A capture or recording is background work, not a call, so it doesn't refuse calls by the chosen id.
         let busy = {
             let mut st = relay.st();
-            let busy = st.tab_busy(tab) || st.chosen_reserved(chosen);
+            let busy = st.tab_call_busy(tab) || st.chosen_reserved(chosen);
             if !busy {
                 st.chosen_calls.insert(id, tab);
             }
