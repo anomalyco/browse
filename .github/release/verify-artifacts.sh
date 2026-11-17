@@ -4,8 +4,9 @@
 # (BROWSE_DIGESTS="name=digest ..."), so an artifact replaced after that job finished is rejected.
 . "$(dirname "$0")/lib.sh"
 
+root=$(posix "$1")
 found=false
-for dir in "$1"/*/; do
+for dir in "$root"/*/; do
   found=true
   name=$(basename "$dir")
   digest=""
@@ -22,4 +23,4 @@ for dir in "$1"/*/; do
   )
   echo "verified $name ($digest)"
 done
-[ "$found" = true ] || die "No artifacts in $1"
+[ "$found" = true ] || die "No artifacts in $root"

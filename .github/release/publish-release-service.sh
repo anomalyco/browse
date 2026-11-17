@@ -12,9 +12,10 @@
 #   cli        one target per binary (the same eleven targets as @opencode/browse-<target>), npm's darwin is the
 #              service's macos: opencode-browse-<target>-<version>.tgz
 #
-# A signed macOS or Windows tarball (sign-macos.sh, repack-windows.sh) replaces the unsigned one of the same name.
-# Publishing the version the channel already has succeeds only when the service has exactly these files, so a rerun is
-# safe. A dry run prints the artifact/channel/target/file list and publishes nothing.
+# A signed macOS or Windows tarball (sign-macos.sh, repack-windows.sh) replaces the unsigned one of the same name: the
+# macOS targets then come only from <macOS signed dir> and the Windows ones only from <Windows signed dir>, as
+# publish-npm.sh routes them. Publishing the version the channel already has succeeds only when the service has exactly
+# these files, so a rerun is safe. A dry run prints the artifact/channel/target/file list and publishes nothing.
 . "$(dirname "$0")/lib.sh"
 
 release=${BROWSE_RELEASE_SERVICE:-https://anoma.ly/release}
@@ -43,16 +44,20 @@ service_target() {
   esac
 }
 
-# target_file <npm target>: the tarball this run would publish, preferring a signed one.
+# target_file <npm target>: the tarball this run publishes. A signed platform's targets must come from its signed dir,
+# the way publish-npm.sh routes them (the caller dies if one is missing); without a signed dir they come from
+# <binaries dir>.
 target_file() {
-  local name="opencode-browse-$1-$BROWSE_VERSION.tgz" dir
-  for dir in "$signed_dir" "$signed_windows_dir"; do
-    if [ -n "$dir" ] && [ -f "$dir/$name" ]; then
-      printf '%s' "$dir/$name"
-      return
-    fi
-  done
-  printf '%s' "$binaries_dir/$name"
+  local name="opencode-browse-$1-$BROWSE_VERSION.tgz" dir=""
+  case "$1" in
+    darwin-*) dir=$signed_dir ;;
+    windows-*) dir=$signed_windows_dir ;;
+  esac
+  if [ -n "$dir" ]; then
+    printf '%s' "$dir/$name"
+  else
+    printf '%s' "$binaries_dir/$name"
+  fi
 }
 
 files=""

@@ -3,7 +3,7 @@
 # Every artifact carries this manifest; jobs pass the digest on through job outputs.
 . "$(dirname "$0")/lib.sh"
 
-cd "$1" || exit
+cd "$(posix "$1")" || exit
 manifest=$(mktemp)
 find . -type f ! -name SHA256SUMS | sed 's|^\./||' | LC_ALL=C sort | while IFS= read -r file; do sha256 "$file"; done > "$manifest"
 mv "$manifest" SHA256SUMS

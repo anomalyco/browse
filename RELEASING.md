@@ -193,8 +193,10 @@ older installers: relative `url`s, flat target objects, and `release.version` be
     without a password, base64 encoded, shared with every Anomaly app); then `gh variable set MACOS_SIGNING --body true`
     and the sign-macos job runs, with publish-npm taking the macOS packages only from it.
 11. **Windows signing (optional).** Without it `browse.exe` is unsigned and Windows Smart App Control blocks it, so
-    install fails there. To sign with Azure Trusted Signing: a Trusted Signing account and certificate profile, and an
-    Azure identity with a federated credential for this repository's `release` environment (issuer
+    install fails there. To sign with Azure Trusted Signing (now Artifact Signing): a signing account and certificate
+    profile; an Azure identity with the **Artifact Signing Certificate Profile Signer** role (formerly Trusted Signing
+    Certificate Profile Signer) on the account or profile and read access to the subscription; and a federated
+    credential on that identity for this repository's `release` environment (issuer
     `https://token.actions.githubusercontent.com`, subject `repo:anomalyco/browse:environment:release`, audience
     `api://AzureADTokenExchange`). Then the six repository variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
     `AZURE_SUBSCRIPTION_ID`, `AZURE_TRUSTED_SIGNING_ENDPOINT`, `AZURE_TRUSTED_SIGNING_ACCOUNT_NAME` and

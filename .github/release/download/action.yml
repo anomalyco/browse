@@ -18,14 +18,16 @@ runs:
     # into in/<name> like the rest, so verify-artifacts.sh sees one directory per artifact.
     - shell: bash
       run: |
-        if [[ "$PATTERN" != *[\*\?\[\{]* ]] && [ ! -d "$RUNNER_TEMP/in/$PATTERN" ]; then
-          mkdir "$RUNNER_TEMP/in.$PATTERN"
-          find "$RUNNER_TEMP/in" -mindepth 1 -maxdepth 1 -exec mv -t "$RUNNER_TEMP/in.$PATTERN" {} +
-          mv "$RUNNER_TEMP/in.$PATTERN" "$RUNNER_TEMP/in/$PATTERN"
+        . "${GITHUB_ACTION_PATH//\\//}/../lib.sh"
+        root=$(posix "$RUNNER_TEMP/in")
+        if [[ "$PATTERN" != *[\*\?\[\{]* ]] && [ ! -d "$root/$PATTERN" ]; then
+          mkdir "$root.$PATTERN"
+          find "$root" -mindepth 1 -maxdepth 1 -exec mv {} "$root.$PATTERN" \;
+          mv "$root.$PATTERN" "$root/$PATTERN"
         fi
       env:
         PATTERN: ${{ inputs.pattern }}
     - shell: bash
-      run: bash "$GITHUB_ACTION_PATH/../verify-artifacts.sh" "$RUNNER_TEMP/in"
+      run: bash "${GITHUB_ACTION_PATH//\\//}/../verify-artifacts.sh" "$RUNNER_TEMP/in"
       env:
         BROWSE_DIGESTS: ${{ inputs.digests }}

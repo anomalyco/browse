@@ -5,7 +5,7 @@
 # WINDOWS_SIGNING is true.
 . "$(dirname "$0")/lib.sh"
 
-in=$1 work=$2
+in=$(posix "$1") work=$(posix "$2")
 mkdir -p "$work"
 for target in windows-x64 windows-x64-baseline; do
   file="opencode-browse-$target-$BROWSE_VERSION.tgz"

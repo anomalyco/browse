@@ -24,6 +24,11 @@ sha256() {
   sha256sum "$@"
 }
 
+# Windows runners pass D:\a\_temp style paths; Git Bash tools want /d/a/_temp. Elsewhere this is the identity.
+posix() {
+  if command -v cygpath > /dev/null; then cygpath -u "$1"; else printf '%s' "$1"; fi
+}
+
 summary() {
   printf '%s\n' "$@"
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then printf '%s\n' "$@" >> "$GITHUB_STEP_SUMMARY"; fi
