@@ -399,14 +399,14 @@ export function createRelayHandshake(deps: {
     // than closing it, and a released tab stays tracked so the user's idle-cleanup setting decides when it goes.
     // The tab's stable id travels with it, so a relay that comes back keeps the id agents know it by.
     for (const tabId of Array.from(deps.relayTabs)) {
-      // The marker outlives a service worker restart; within a session the cleanup tracking is the same answer.
-      const agent = (await TabIdentity.isAgent(tabId)) ?? (await TabCleanup.isTracked(tabId))
-      const browseId = await TabIdentity.ensure(tabId, { agent })
+      // The stored marker wins; the cleanup tracking says who opened the tab when it has none. Both the read and the
+      // write run in TabIdentity's queue, so a lend or clear that lands meanwhile isn't undone by a stale answer.
+      const { browseId, agent } = await TabIdentity.ensureOwned(tabId, () => TabCleanup.isTracked(tabId))
       if (deps.currentSocket() !== current) return
       current.send(
         JSON.stringify({
           method: "debugger.attached",
-          params: { tabId, ...(agent ? { agent: true } : {}), ...(browseId ? { browseId } : {}) },
+          params: { tabId, ...(agent ? { agent: true } : {}), browseId },
         }),
       )
     }

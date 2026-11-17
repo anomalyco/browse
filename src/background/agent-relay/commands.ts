@@ -184,8 +184,8 @@ export function createRelayCommands(deps: {
           normalWindows: opened.normalWindows,
         })
         TabCleanup.track(tab.id)
-        // A caller-chosen id (`work-mail`) is kept with the tab's identity for this browser session: the relay never
-        // idle-closes such a tab, and the id outlives a service worker restart like the rest of it.
+        // A caller-chosen id (`work-mail`) is kept with the tab's identity: the relay never idle-closes such a tab, and
+        // the id outlives service worker restarts and extension updates like the rest of it.
         const chosen = typeof params?.id === "string" && /^[a-z][a-z0-9-]{0,63}$/.test(params.id) ? params.id : undefined
         // A discarded tab loses the debugger and the agent's page. Issued now but not awaited: the answer must not
         // wait on it.
@@ -193,8 +193,12 @@ export function createRelayCommands(deps: {
         // The tab is tracked in memory; clearing the creation marker must not hold the answer past the budget.
         await withTimeout(TabCleanup.endCreate(creating), deadline - Date.now())
         if (url === "about:blank") await waitUntilLoaded(tab.id, deps.log, deadline)
-        const browseId = await TabIdentity.ensure(tab.id, { agent: true, ...(chosen ? { chosen } : {}) })
-        return { tabId: tab.id, ...(browseId ? { browseId } : {}) }
+        // The id shares the command's budget: a storage write that never lands must not hold the answer.
+        const browseId = await withTimeout(
+          TabIdentity.ensure(tab.id, { agent: true, ...(chosen ? { chosen } : {}) }),
+          deadline - Date.now(),
+        )
+        return { tabId: tab.id, ...(typeof browseId === "string" ? { browseId } : {}) }
       }
       case "tabs.remove":
         await TabCleanup.closeAgentTab(number(params, "tabId"))

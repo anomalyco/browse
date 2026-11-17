@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test"
-import { installChrome, settle } from "../chrome-stub"
+import { installChrome, settle, type StubEvent } from "../chrome-stub"
 
-// A tab's browse id lives in chrome.storage.session by tab id, so it outlives a service worker restart within a
-// browser session. A browser restart clears session storage along with the tab ids. Run by ../isolated.test.ts in a
-// process of its own.
+// A tab's browse id lives in chrome.storage.local by tab id, so it outlives a service worker restart, an extension
+// reload or an update, which all keep the tab ids. A browser restart gives every tab a new id and drops them. Run by
+// ../isolated.test.ts in a process of its own.
 
 const stub = installChrome()
 const { TabIdentity } = await import("../../src/background/tab-identity")
@@ -15,7 +15,7 @@ const plain = await stub.chrome.tabs.create({ windowId: user.id, url: "https://p
 const namedId = named.id!
 const plainId = plain.id!
 
-test("a tab's id is made once and kept for the browser session", async () => {
+test("a tab's id is made once and kept while the browser runs", async () => {
   const browseId = await TabIdentity.ensure(namedId, { agent: true, chosen: "work-mail" })
   expect(typeof browseId).toBe("string")
   expect(await TabIdentity.browseId(namedId)).toBe(browseId)
@@ -26,7 +26,7 @@ test("a tab's id is made once and kept for the browser session", async () => {
 
 test("a service worker restart keeps the id, the chosen id and whether it is an agent tab", async () => {
   const before = await TabIdentity.browseId(namedId)
-  // A fresh module instance reads the same chrome.storage.session, as the worker that starts after this one stops.
+  // A fresh module instance reads the same chrome.storage.local, as the worker that starts after this one stops.
   const specifier = "../../src/background/tab-identity?restarted"
   const restarted = (await import(specifier)) as typeof TabIdentity
   expect(await restarted.browseId(namedId)).toBe(before!)
@@ -35,8 +35,25 @@ test("a service worker restart keeps the id, the chosen id and whether it is an 
   expect(await restarted.ensure(namedId, { agent: true })).toBe(before!)
 })
 
-test("a browser restart has no restored ids: session storage goes with the session", async () => {
-  expect(await TabIdentity.restored()).toEqual([])
+test("a lend lands whichever way it races an ensure", async () => {
+  const first = await stub.chrome.tabs.create({ windowId: user.id, url: "https://race-one.example/", active: false })
+  await Promise.all([TabIdentity.ensure(first.id!, { agent: true }), TabIdentity.setAgent(first.id!, false)])
+  expect(await TabIdentity.isAgent(first.id!)).toBe(false)
+  const second = await stub.chrome.tabs.create({ windowId: user.id, url: "https://race-two.example/", active: false })
+  await Promise.all([TabIdentity.setAgent(second.id!, false), TabIdentity.ensure(second.id!, { agent: true })])
+  expect(await TabIdentity.isAgent(second.id!)).toBe(false)
+})
+
+test("a reconnecting relay keeps a lend and takes the tracked answer only when there is none", async () => {
+  const lent = await stub.chrome.tabs.create({ windowId: user.id, url: "https://lent.example/", active: false })
+  await TabIdentity.setAgent(lent.id!, false)
+  expect((await TabIdentity.ensureOwned(lent.id!, () => true)).agent).toBe(false)
+  expect(await TabIdentity.isAgent(lent.id!)).toBe(false)
+  const fresh = await stub.chrome.tabs.create({ windowId: user.id, url: "https://fresh.example/", active: false })
+  const owned = await TabIdentity.ensureOwned(fresh.id!, () => true)
+  expect(owned.agent).toBe(true)
+  expect(typeof owned.browseId).toBe("string")
+  expect(await TabIdentity.browseId(fresh.id!)).toBe(owned.browseId)
 })
 
 test("idle cleanup never closes a chosen-id tab, and still closes the others", async () => {
@@ -63,4 +80,16 @@ test("clearing the values frees the tab for a new id", async () => {
   expect(await TabIdentity.browseId(tab.id!)).toBeUndefined()
   expect(await TabIdentity.chosen(tab.id!)).toBeUndefined()
   expect(await TabIdentity.ensure(tab.id!, { agent: true })).not.toBe(before)
+})
+
+test("a browser start drops the stored ids", async () => {
+  const tab = await stub.chrome.tabs.create({ windowId: user.id, url: "https://start.example/", active: false })
+  expect(typeof (await TabIdentity.ensure(tab.id!, { agent: true, chosen: "start" }))).toBe("string")
+  ;(stub.chrome.runtime as unknown as { onStartup: StubEvent }).onStartup.emit()
+  await settle()
+  await settle()
+  expect(await TabIdentity.browseId(tab.id!)).toBeUndefined()
+  expect(await TabIdentity.chosen(tab.id!)).toBeUndefined()
+  expect(await TabIdentity.isAgent(tab.id!)).toBeUndefined()
+  expect((await stub.chrome.storage.local.get("tabIdentity")).tabIdentity).toBeUndefined()
 })

@@ -40,7 +40,7 @@ pub struct Attach {
     pub browse_id: Option<String>,
     /// The caller-chosen id the tab is being opened with.
     pub chosen: Option<String>,
-    /// Who owned the tab before, found through its stable id (a relay or worker restart): no target lookup needed.
+    /// Who owned the tab before, found through its stable id (a relay restart): no target lookup needed.
     pub restored: Option<Restored>,
     pub already_attached: bool,
     /// An inventory tab the extension says an agent opened: it may be reclaimed from the tab registry.

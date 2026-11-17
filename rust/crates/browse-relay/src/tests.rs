@@ -1399,7 +1399,7 @@ async fn a_chosen_id_is_get_or_create_and_listed_with_the_callers_id() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tab_ids_survive_a_simulated_browser_restart() {
+async fn tab_ids_survive_a_relay_restart() {
     let paths = Paths::rooted(std::env::temp_dir().join(format!("browse-relay-stable-{}", crate::util::random_hex(6))));
     let first = harness_at(paths.clone()).await;
     let socket = pair_with_token(first.handle.port(), &paths, "profile-stable").await;
@@ -1420,8 +1420,8 @@ async fn tab_ids_survive_a_simulated_browser_restart() {
     tokio::time::sleep(Duration::from_millis(300)).await;
     std::mem::forget(first);
 
-    // Chrome starts again: the tabs have new numeric ids and new targets, and the extension reports the stable ids it
-    // kept for them.
+    // The relay starts again. Its registry comes back from disk, and the browser announces the tabs by the stable ids
+    // it kept: a tab reported under a different local id still finds the relay id agents know it by.
     let second = harness_at(paths.clone()).await;
     let socket = pair_with_token(second.handle.port(), &paths, "profile-stable").await;
     let (seen, events) = fake_extension(socket, 360);
@@ -1440,7 +1440,7 @@ async fn tab_ids_survive_a_simulated_browser_restart() {
 }
 
 #[tokio::test]
-async fn a_lent_tab_keeps_its_id_across_a_simulated_browser_restart() {
+async fn a_lent_tab_keeps_its_id_across_a_relay_restart() {
     let paths = Paths::rooted(std::env::temp_dir().join(format!("browse-relay-lent-stable-{}", crate::util::random_hex(6))));
     let first = harness_at(paths.clone()).await;
     let socket = pair_with_token(first.handle.port(), &paths, "profile-lent-stable").await;

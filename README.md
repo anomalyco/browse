@@ -182,7 +182,7 @@ extension from your browser to finish.
   `allowedOrigins`, `readOnly`, `keepVisible` and `browser`. Popups a page opens become agent tabs too.
 - **Tabs keep their ids, and an agent can name one.** `tabs` with `action: "new"` and an `id` like `work-mail` opens
   that tab once: asking again returns the same tab without navigating it, and every tool takes `work-mail` as `tab`.
-  The id stays with the tab while the browser runs, even when browse's service worker restarts; a browser restart
+  The id lasts while the browser runs, through service-worker restarts and extension updates; a browser restart
   starts over. A tab opened this way is never closed as idle: only an agent or you close it. `tabs` lists each tab's
   id, url, title, group, last use and whether a call is running in it.
 - **Agents open their own tabs** in the background of the window you last used, grouped together and collapsed unless
