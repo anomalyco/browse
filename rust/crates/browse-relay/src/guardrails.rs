@@ -1,6 +1,6 @@
 //! CDP guardrails (cli/src/cdp/guardrails.ts): methods that would destroy the user's real browser state are refused,
-//! read-only tabs only inspect, cookies and site storage are scoped to the tab's page hosts, and
-//! browser-internal or local documents can't be opened.
+//! read-only tabs refuse input and navigation commands, cookies and site storage are scoped to the tab's page hosts,
+//! and browser-internal or local documents can't be opened.
 
 use serde_json::Value;
 
