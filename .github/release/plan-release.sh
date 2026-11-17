@@ -29,7 +29,21 @@ stable_version "$current" || die "cli/package.json at $GITHUB_SHA has version $c
 # release commit never reached dev. Count from the newest of cli/package.json and the newest stable v* tag.
 tag_refs=$(gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" --jq '.[].ref') ||
   die "Couldn't read the repository's v* tags"
-newest_tag=$(printf '%s\n' "$tag_refs" | sed 's#^refs/tags/v##' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+stable_tags=$(while IFS= read -r ref; do
+  candidate=${ref#refs/tags/v}
+  if stable_version "$candidate"; then printf '%s\n' "$candidate"; fi
+done <<< "$tag_refs")
+newest_tag=$(printf '%s\n' "$stable_tags" | sort -V | tail -n 1)
+# A rerun of the same dispatch: tag-release.sh makes its release commit on $GITHUB_SHA and reuses v<version> when that
+# commit's tree matches, so the tag it pushes sits one commit above $GITHUB_SHA. Leave that tag out of base and rerun the
+# same version.
+if [ "$mode" = stable ] && [ -n "$newest_tag" ]; then
+  tag_parent=$(gh api "repos/$GITHUB_REPOSITORY/commits/v$newest_tag" --jq '.parents[0].sha') ||
+    die "Couldn't read the commit of tag v$newest_tag"
+  if [ "$tag_parent" = "$GITHUB_SHA" ]; then
+    newest_tag=$(printf '%s\n' "$stable_tags" | grep -vxF "$newest_tag" | sort -V | tail -n 1 || true)
+  fi
+fi
 base=$(printf '%s\n%s\n' "$current" "$newest_tag" | sort -V | tail -n 1)
 IFS=. read -r major minor patch <<< "$base"
 
