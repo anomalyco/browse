@@ -150,7 +150,7 @@ pub fn start_from(executable: &std::path::Path) -> anyhow::Result<()> {
     }
     command.env("OPENCODE_BROWSER_MANAGED_RELAY", "1");
     detach(&mut command);
-    command.spawn().context("failed to start the browse relay")?;
+    spawn(&mut command).context("failed to start the browse relay")?;
     Ok(())
 }
 
@@ -161,14 +161,43 @@ fn detach(command: &mut Command) {
     command.process_group(0);
 }
 
+#[cfg(unix)]
+fn spawn(command: &mut Command) -> std::io::Result<std::process::Child> {
+    command.spawn()
+}
+
 #[cfg(windows)]
 fn detach(command: &mut Command) {
+    detach_flags(command, true);
+}
+
+/// Leave the caller's job when it allows it, otherwise stay inside it: a job that forbids breakaway refuses the spawn
+/// with ERROR_ACCESS_DENIED, and a relay that outlives its caller only until that caller's job ends beats no relay.
+/// Retries on any error, like cli/src/relay/windows-launch.ts; the retry's error is the one reported.
+#[cfg(windows)]
+fn spawn(command: &mut Command) -> std::io::Result<std::process::Child> {
+    match command.spawn() {
+        Ok(child) => Ok(child),
+        Err(_) => {
+            detach_flags(command, false);
+            command.spawn()
+        }
+    }
+}
+
+#[cfg(windows)]
+fn detach_flags(command: &mut Command, breakaway: bool) {
     use std::os::windows::process::CommandExt;
     const DETACHED_PROCESS: u32 = 0x8;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x200;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
-    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB);
+    let mut flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
+    if breakaway {
+        flags |= CREATE_BREAKAWAY_FROM_JOB;
+    }
+    // Calling this again overwrites the flags, so the retry drops only breakaway.
+    command.creation_flags(flags);
 }
 
 fn send(method: &str, path: &str, extra: &[(&str, &str)], body: Option<&[u8]>, timeout: Option<Duration>) -> Result<http::Response, http::Error> {
