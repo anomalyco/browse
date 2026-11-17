@@ -71,10 +71,10 @@ fn slot(spec: &ToolSpec, arguments: &Map<String, Value>, value: &str) -> Option<
     if let Some(key) = properties.iter().find(|(key, schema)| open(key) && schema["enum"].as_array().is_some_and(|values| values.iter().any(|v| v == value))).map(|(key, _)| key.clone()) {
         return Some(key);
     }
-    // Only a plain option takes a free-form word: an enum above only matches its own values, so anything else
-    // there is a stray argument rather than a value to reject later as `--action is one of ...`.
-    let fillable = |key: &str| open(key) && properties.get(key).is_some_and(|schema| schema.get("enum").is_none());
-    required(spec).into_iter().find(|key| fillable(key)).or_else(|| PRIMARY.iter().find(|key| fillable(key)).map(|key| (*key).to_owned()))
+    // A required enum takes a free word so its own error says what it accepts (`console 12 strat`). The PRIMARY
+    // fallback only takes plain options: navigate's action is not required, so `navigate <url> extra` is stray.
+    let plain = |key: &str| open(key) && properties.get(key).is_some_and(|schema| schema.get("enum").is_none());
+    required(spec).into_iter().find(|key| open(key)).or_else(|| PRIMARY.iter().find(|key| plain(key)).map(|key| (*key).to_owned()))
 }
 
 /// What `browse <tool> --help` shows as the positional form.
@@ -113,7 +113,7 @@ fn help(spec: &ToolSpec) {
     }
     println!("\n  --json '<object>'   all arguments as one JSON object\n  --output <path>     where to save images");
     if boolean {
-        println!("\n  Boolean options take no value; `--name false` turns one off.");
+        println!("\n  Boolean options need no value: `--name` turns one on, `--name false` or `--no-name` off.");
     }
 }
 
@@ -459,6 +459,32 @@ mod tests {
         )
     }
 
+    fn type_tool() -> ToolSpec {
+        named(
+            "type",
+            json!({
+                "properties": {
+                    "text": { "type": "string" },
+                    "tab": { "type": ["integer", "string"] }
+                },
+                "required": ["tab", "text"]
+            }),
+        )
+    }
+
+    fn console() -> ToolSpec {
+        named(
+            "console",
+            json!({
+                "properties": {
+                    "action": { "type": "string", "enum": ["start", "read", "stop"] },
+                    "tab": { "type": ["integer", "string"] }
+                },
+                "required": ["tab", "action"]
+            }),
+        )
+    }
+
     #[test]
     fn positionals() {
         let navigate = spec(json!({ "properties": { "url": { "type": "string" }, "action": { "type": "string" } }, "required": [] }));
@@ -535,6 +561,22 @@ mod tests {
         assert_eq!(parsed.get("interactive"), Some(&json!(true)));
         assert_eq!(parsed.get("tab"), Some(&json!(12)));
         assert!(!parsed.contains_key("within"));
+    }
+
+    #[test]
+    fn required_options_take_free_words_even_for_enums() {
+        let type_tool = type_tool();
+        let parsed = parse_arguments(&type_tool, &["--tab", "12", "hello"]).unwrap();
+        assert_eq!(parsed.get("tab"), Some(&json!(12)));
+        assert_eq!(parsed.get("text"), Some(&json!("hello")));
+
+        let console = console();
+        let error = parse_arguments(&console, &["12", "strat"]).unwrap_err().to_string();
+        assert!(error.contains("--action is one of"), "{error}");
+
+        let parsed = parse_arguments(&console, &["12", "start"]).unwrap();
+        assert_eq!(parsed.get("tab"), Some(&json!(12)));
+        assert_eq!(parsed.get("action"), Some(&json!("start")));
     }
 
     #[test]
