@@ -297,20 +297,6 @@ export function createChrome() {
       local: storageArea("local", onChanged),
       session: storageArea("session", onChanged),
     }),
-    // Chrome's chrome.sessions has no per-tab values (that is Firefox's tab-values API): only recently closed tabs,
-    // restore and devices.
-    sessions: {
-      onChanged: new StubEvent(),
-      async getRecentlyClosed() {
-        return []
-      },
-      async restore() {
-        return undefined
-      },
-      async getDevices() {
-        return []
-      },
-    },
     notifications: lenient({
       async getPermissionLevel() {
         return state.permissionLevel

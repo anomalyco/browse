@@ -49,15 +49,15 @@ impl Tool for TabsTool {
     fn spec(&self) -> ToolSpec {
         let mut properties = TabOptions::schema();
         properties.insert("action".into(), json!({ "type": "string", "enum": ["list", "new", "close"], "description": "What to do. Defaults to list." }));
-        properties.insert("id".into(), json!({ "type": "string", "description": "new: an id you choose for the tab, like `work-mail` (lowercase letters, digits and dashes). Every tool takes it as `tab`. Opening with an id that already exists returns that tab without navigating it; the tab keeps the id while the browser runs, through service-worker restarts. An extension update or reload keeps it only for agent tabs in browse's tab group (grouping on); a lent or ungrouped tab gets a new id then, and a browser restart starts over. It is never closed as idle." }));
+        properties.insert("id".into(), json!({ "type": "string", "description": "new: an id you choose for the tab, like `work-mail` (lowercase letters, digits and dashes). Every tool takes it as `tab`. Opening with an id that already exists returns that tab without navigating it; the tab keeps the id while it stays open (a relay restart or extension reload keeps it, a browser restart loses it and the next open is a fresh tab). It closes when idle like every other agent tab unless opened with keepOpen." }));
         properties.insert("url".into(), json!({ "type": "string", "description": "new: the URL to open (else about:blank)." }));
         properties.insert("tab".into(), json!({ "type": ["integer", "string"], "description": "close: the tab to close: its numeric id, or a chosen id like `work-mail`." }));
         properties.insert("tabs".into(), json!({ "type": "array", "items": { "type": ["integer", "string"] }, "description": "close: several tabs to close, by numeric or chosen id." }));
         properties.insert("group".into(), json!({ "type": "string", "description": "new: the new tab's group label. list: only that group's tabs. close: close every tab opened with that group (and their popups)." }));
-        properties.insert("idleMinutes".into(), json!({ "type": "number", "minimum": 0, "description": "close: only tabs no call used for this long. It narrows tab, tabs or group; it doesn't pick tabs on its own, and never a tab with a chosen id." }));
+        properties.insert("idleMinutes".into(), json!({ "type": "number", "minimum": 0, "description": "close: only tabs no call used for this long. It narrows tab, tabs or group; it doesn't pick tabs on its own." }));
         ToolSpec {
             name: "tabs".into(),
-            description: "List, open or close tabs. Tabs are the handle every other tool takes as `tab`. `list` returns every agent tab and every tab the user lent (tab id, id when one was chosen, url, title, group, options, lent, lastUsed, busy and browser). An id or group from that list tells you which tabs you opened; use only those unless the user asks you to touch another. `new` opens a background tab (at `url`, else about:blank), waits for it to load and returns its `tab` id; `navigate` without `tab` does the same. Give it an `id` like `work-mail` to name the tab yourself: opening that id again returns the tab it already names, without navigating it, and the id lasts while the browser runs, through service-worker restarts: an extension update or reload keeps it only for agent tabs in browse's tab group (grouping on), a lent or ungrouped tab gets a new id then, and a browser restart starts over (use it as `tab` in every tool). `close` needs explicit tabs: `tab`, `tabs` or a whole `group`; a lent tab is given back to the user instead of closed. Tabs open in the background and never take focus from the user; close the ones you opened when you're done.".into(),
+            description: "List, open or close tabs. Tabs are the handle every other tool takes as `tab`. `list` returns every agent tab and every tab the user lent (tab id, id when one was chosen, url, title, group, options, lent, lastUsed, busy and browser). An id or group from that list tells you which tabs you opened; use only those unless the user asks you to touch another. `new` opens a background tab (at `url`, else about:blank), waits for it to load and returns its `tab` id; `navigate` without `tab` does the same. Give it an `id` like `work-mail` to name the tab yourself: opening that id again returns the tab it already names, without navigating it, and the id lasts while the tab is open (a relay restart or extension reload keeps it; a browser restart loses it, and opening the id again is a fresh tab). Use it as `tab` in every tool. `keepOpen: true` keeps the tab until an agent or the user closes it, instead of idle cleanup. `close` needs explicit tabs: `tab`, `tabs` or a whole `group`; a lent tab is given back to the user instead of closed. Tabs open in the background and never take focus from the user; close the ones you opened when you're done.".into(),
             input_schema: object(Value::Object(properties), &[]),
         }
     }
@@ -74,14 +74,21 @@ impl Tool for TabsTool {
             }
             "new" => {
                 let chosen = chosen_id(&args)?;
+                let options = TabOptions::from_args(&args)?;
                 if let Some(id) = &chosen {
                     let existing = relay.st().tab_by_chosen(id);
                     if let Some(tab) = existing {
+                        let changed = args.get("keepOpen").is_some_and(|v| !v.is_null()) && relay.set_keep_open(tab, options.keep_open);
                         let st = relay.st();
                         let info = relay.tab_info(&st, tab).context("The tab went away")?;
                         let mut value = serde_json::to_value(info)?;
                         value["existed"] = true.into();
-                        value["note"] = format!("Tab {id} already existed, so browse didn't navigate it.").into();
+                        let note = if changed {
+                            format!("Tab {id} already existed, so browse didn't navigate it; keepOpen is now {}.", if options.keep_open { "on" } else { "off" })
+                        } else {
+                            format!("Tab {id} already existed, so browse didn't navigate it.")
+                        };
+                        value["note"] = note.into();
                         return Ok(json_output(value));
                     }
                     if relay.st().away_tab_by_chosen(id).is_some() {
@@ -91,7 +98,7 @@ impl Tool for TabsTool {
                         bail!("{id} is being opened by another call. Try again in a moment.");
                     }
                 }
-                let opened = relay.create_tab(string(&args, "url").as_deref(), &TabOptions::from_args(&args)?, None, chosen.as_deref()).await;
+                let opened = relay.create_tab(string(&args, "url").as_deref(), &options, None, chosen.as_deref()).await;
                 if let Some(id) = &chosen {
                     relay.st().release_chosen(id);
                 }
@@ -188,9 +195,8 @@ async fn close_tabs(relay: &Arc<Relay>, args: &Value) -> anyhow::Result<ToolOutp
         }
         if let Some(minutes) = idle {
             let limit = Duration::from_secs_f64(minutes * 60.0);
-            // A chosen id keeps its tab open: idle cleanup never closes one.
             picked.retain(|tab| {
-                st.tabs.get(tab).is_some_and(|t| t.chosen.is_none() && t.last_used.elapsed() >= limit) && st.handoff_for_tab(*tab).is_none() && !st.tab_busy(*tab)
+                st.tabs.get(tab).is_some_and(|t| !t.options.keep_open && t.last_used.elapsed() >= limit) && st.handoff_for_tab(*tab).is_none() && !st.tab_work_busy(*tab)
             });
         }
     }

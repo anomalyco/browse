@@ -24,20 +24,7 @@ pub fn handle(relay: &Arc<Relay>, link: &Arc<Link>, text: &str) {
     }
     link.note_reply();
     let mut params = message.get_mut("params").map(Value::take).unwrap_or_else(|| Value::Object(Default::default()));
-    let mut restored = None;
-    let tab = if method == "debugger.attached" {
-        // A tab coming back with its stable id after a relay restart (a worker restart keeps the local tab id) keeps the
-        // relay id and chosen id agents know it by.
-        let local = params.get("tabId").and_then(Value::as_i64);
-        local.map(|local| {
-            let browse_id = params.get("browseId").and_then(Value::as_str).map(str::to_string);
-            let agent = params.get("agent") == Some(&Value::Bool(true));
-            let (tab, known) = relay.inventory_tab(link, local, browse_id.as_deref(), agent);
-            restored = known;
-            params["tabId"] = tab.into();
-            tab
-        })
-    } else {
+    let tab = {
         let mut st = relay.st();
         let tab = params.get("tabId").and_then(Value::as_i64).map(|local| st.relay_tab_id(&link.key, local));
         if let Some(tab) = tab {
@@ -62,8 +49,7 @@ pub fn handle(relay: &Arc<Relay>, link: &Arc<Link>, text: &str) {
         }
         "debugger.attached" => {
             if let Some(tab) = tab {
-                let browse_id = params.get("browseId").and_then(Value::as_str).map(str::to_string);
-                relay.queue_inventory(link, tab, params.get("agent") == Some(&Value::Bool(true)), browse_id, restored);
+                relay.queue_inventory(link, tab, params.get("agent") == Some(&Value::Bool(true)));
             }
         }
         "toolbar.clicked" => {
@@ -94,8 +80,7 @@ pub fn handle(relay: &Arc<Relay>, link: &Arc<Link>, text: &str) {
         }
         "tabs.opened" => {
             if let (Some(tab), Some(opener)) = (tab, params.get("openerTabId").and_then(Value::as_i64)) {
-                let browse_id = params.get("browseId").and_then(Value::as_str).map(str::to_string);
-                relay.adopt_opened_tab(tab, opener, browse_id);
+                relay.adopt_opened_tab(tab, opener);
             }
         }
         "tabs.removed" => {

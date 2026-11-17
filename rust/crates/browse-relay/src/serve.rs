@@ -42,7 +42,7 @@ pub struct ServeOptions {
     pub paths: Paths,
     pub version: String,
     pub build_id: String,
-    /// Stop after this long with no tool calls, no live clients and nothing waiting on the user.
+    /// Stop after this long with no tool calls, no live client and nothing waiting on the user.
     /// OPENCODE_BROWSER_IDLE_SHUTDOWN_MS (0: never), else `MANAGED_IDLE_SHUTDOWN` for a managed relay.
     pub idle_shutdown: Option<Duration>,
     /// Started on demand by a client (OPENCODE_BROWSER_MANAGED_RELAY=1), as `/version` reports.
@@ -118,11 +118,21 @@ impl RelayHandle {
 
 impl Relay {
     /// Nothing would be interrupted by a restart (an update): no call running, no handoff waiting, and no agent
-    /// activity for `quiet`.
+    /// activity for `quiet`. Connected client processes don't count: an agent's `browse mcp` server stays running for
+    /// as long as the agent does, and its calls are what actually use the browser.
     pub fn idle(&self, quiet: Duration) -> bool {
         let st = self.st();
-        let clients = st.clients.iter().any(|pid| crate::util::process_alive(*pid));
-        !clients && !st.busy() && st.handoffs.is_empty() && st.last_activity.elapsed() >= quiet
+        !st.busy() && st.handoffs.is_empty() && st.last_activity.elapsed() >= quiet
+    }
+
+    /// [idle], and no client that called is still running: a managed relay can exit (the next call starts it again).
+    /// An MCP server that is connected but quiet keeps its relay up; only a dead agent lets it go.
+    pub fn unused(&self, quiet: Duration) -> bool {
+        let live = {
+            let st = self.st();
+            st.clients.iter().any(|pid| crate::util::process_alive(*pid))
+        };
+        !live && self.idle(quiet)
     }
 }
 
@@ -346,6 +356,11 @@ async fn route(relay: Arc<Relay>, peer: SocketAddr, request: Request<Incoming>) 
             body["installWaiting"] = true.into();
         }
         return json_response(StatusCode::OK, &body);
+    }
+    // A relay that is stopping for an update must not start new work: answer before the tool would wait on a browser
+    // that is already going away. The client retries this (the request never ran) once a restarted relay answers.
+    if relay.is_stopping() {
+        return json_response(StatusCode::SERVICE_UNAVAILABLE, &json!({ "error": "browse relay is restarting; try again in a moment", "code": "relay-restarting" }));
     }
     let mut authorized = header(&request, "authorization").and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer "))).map(str::trim).map(str::to_string);
     // The TypeScript relay's /json/version handed connectOverCDP clients a WebSocket URL with the token in its query.
@@ -689,8 +704,7 @@ async fn housekeeping(relay: Arc<Relay>) {
         }
         if let Some(ttl) = relay.idle_tab_ttl.filter(|_| now - last_reap >= Duration::from_secs(60)) {
             last_reap = now;
-            // Tabs no call used for the idle TTL: an agent's closes, a lent one goes back to the user. A tab with a
-            // caller-chosen id stays until it is closed explicitly or by the user.
+            // Tabs no call used for the idle TTL: an agent's closes, a lent one goes back to the user.
             let idle: Vec<(i64, crate::relay::Owner)> = relay.idle_tabs(ttl);
             for (tab, owner) in idle {
                 rlog!("tab.reaped", tabId = tab, owner = owner.name());
@@ -714,8 +728,8 @@ async fn housekeeping(relay: Arc<Relay>) {
             }
         }
         if let Some(idle) = relay.idle_shutdown {
-            let quiet = relay.idle(idle);
-            if quiet {
+            let unused = relay.unused(idle);
+            if unused {
                 rlog!("relay.idle_shutdown", idleMs = idle.as_millis() as u64);
                 relay.stop();
                 return;

@@ -47,7 +47,6 @@ import { DebuggerHub } from "./debugger-hub"
 import { DebuggingBarNotice } from "./debugging-bar-notice"
 import { HandoffNotice } from "./handoff-notice"
 import { TabCleanup } from "./tab-cleanup"
-import { TabIdentity } from "./tab-identity"
 import { ToolbarNotice } from "./toolbar-notice"
 
 export type { AgentBadge }
@@ -274,8 +273,6 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
       setTimeout(() => canceledAgentTabs.delete(tabId), canceledAgentTabTtlMs)
     } else {
       TabCleanup.forget(tabId)
-      // The tab is the user's again, not lent: forget the browse id that went with it.
-      void TabIdentity.clear(tabId)
       await grouping.ungroup(tabId, { released: true }).catch((error: unknown) => {
         log.add("debugger.release.error", { tabId, error: text(error) })
       })
@@ -296,8 +293,6 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
     await TabCleanup.isTracked(tabId).catch(() => undefined)
     TabCleanup.forget(tabId)
     canceledAgentTabs.delete(tabId)
-    // It is the user's now: idle cleanup never closes a lent tab, and reconnect must not count it as an agent's.
-    void TabIdentity.setAgent(tabId, false)
   }
 
   // The relay-side settings apply as soon as they change; the relay answers with what its environment fixes.

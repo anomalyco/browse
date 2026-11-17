@@ -55,6 +55,9 @@ pub struct TabOptions {
     /// Keep the page focused between calls, for apps that pause while hidden.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keep_visible: bool,
+    /// Never close the tab as idle: it stays until an agent closes it or the user does.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_open: bool,
     /// The connected browser to open the tab in (an id or name `status` lists); the first connected one by default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser: Option<String>,
@@ -84,12 +87,12 @@ impl TabOptions {
             ),
             Some(_) => anyhow::bail!("allowedOrigins must be an array of strings"),
         };
-        Ok(Self { group: text("group")?, allowed_origins, read_only: flag("readOnly")?, keep_visible: flag("keepVisible")?, browser: text("browser")? })
+        Ok(Self { group: text("group")?, allowed_origins, read_only: flag("readOnly")?, keep_visible: flag("keepVisible")?, keep_open: flag("keepOpen")?, browser: text("browser")? })
     }
 
     /// The option arguments `from_args` reads that the call gave, to refuse them where they don't apply.
     pub fn given(args: &Value) -> Vec<&'static str> {
-        ["group", "allowedOrigins", "readOnly", "keepVisible", "browser"].into_iter().filter(|key| args.get(*key).is_some_and(|v| !v.is_null())).collect()
+        ["group", "allowedOrigins", "readOnly", "keepVisible", "keepOpen", "browser"].into_iter().filter(|key| args.get(*key).is_some_and(|v| !v.is_null())).collect()
     }
 
     /// The JSON schema properties of the options for opening a tab.
@@ -99,6 +102,7 @@ impl TabOptions {
             "allowedOrigins": { "type": "array", "items": { "type": "string" }, "description": "When opening a tab: hosts or origins it may load (example.com, *.example.com, https://app.example.com, http://localhost:3000). Navigations elsewhere are refused or sent back to about:blank; private and loopback addresses need an exact entry. Popups inherit it. It limits top-level navigations, not iframes or the requests a page makes." },
             "readOnly": { "type": "boolean", "description": "When opening a tab: only read it (snapshots, screenshots, page state); input and later navigation commands are refused, but `eval` and `webmcp` still run page JavaScript that can read, change and navigate the page, so it is not a data boundary." },
             "keepVisible": { "type": "boolean", "description": "When opening a tab: keep it focused to the page between calls, for apps that pause while hidden. Pages can notice." },
+            "keepOpen": { "type": "boolean", "description": "When opening a tab: never close it as idle; it stays open until an agent closes it or the user does. Off by default." },
             "browser": { "type": "string", "description": "When opening a tab: which connected browser, by the id or name `status` lists. Defaults to the first connected one." },
         }) else {
             unreachable!()

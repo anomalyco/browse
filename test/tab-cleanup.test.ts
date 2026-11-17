@@ -115,6 +115,16 @@ describe("idle tab cleanup", () => {
     await stub.chrome.storage.local.set({ tabCleanupIdleMinutes: -5 })
     expect(await TabCleanup.idleMinutes()).toBe(10)
   })
+
+  test("keepOpen keeps a tab past the time (and turns off again); a normal tab still closes", async () => {
+    const kept = await agentTab(60)
+    const normal = await agentTab(60)
+    TabCleanup.keepOpen(kept, true)
+    expect((await TabCleanup.cleanup({ minutes: 0 })).map((tab) => tab.tabId)).toEqual([normal])
+    expect(open(kept)).toBe(true)
+    TabCleanup.keepOpen(kept, false)
+    expect((await TabCleanup.cleanup({ minutes: 0 })).map((tab) => tab.tabId)).toEqual([kept])
+  })
 })
 
 describe("closing a tab in an agent group", () => {

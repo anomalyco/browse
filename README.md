@@ -179,13 +179,14 @@ extension from your browser to finish.
 - **Tabs are the handle.** `navigate` without a `tab` opens a new background tab and returns its id; every other call
   passes that `tab`. Agents use the tab ids they opened or were given, and leave other tabs alone unless you ask.
   Tabs can be opened with options that stick: `group` (the tab group's title, and a handle to close them together),
-  `allowedOrigins`, `readOnly`, `keepVisible` and `browser`. Popups a page opens become agent tabs too.
+  `allowedOrigins`, `readOnly`, `keepVisible`, `keepOpen` (never close it as idle) and `browser`. Popups a page opens
+  become agent tabs too.
 - **Tabs keep their ids, and an agent can name one.** `tabs` with `action: "new"` and an `id` like `work-mail` opens
   that tab once: asking again returns the same tab without navigating it, and every tool takes `work-mail` as `tab`.
-  The id lasts while the browser runs, through service-worker restarts. An extension update or reload keeps it only
-  for tabs in browse's agent group (grouping on); lent and ungrouped tabs get a new id then, and a browser restart
-  starts over. A tab opened this way is never closed as idle: only an agent or you close it. `tabs` lists each tab's
-  id, url, title, group, last use and whether a call is running in it.
+  The id lasts while the tab stays open: a relay restart or extension reload keeps it, and a browser restart loses it
+  (opening that id again is a fresh tab). `tabs` lists each tab's id, url, title, group, last use and whether a call is
+  running in it. A tab opened with `keepOpen: true` stays until an agent or you close it; every other tab closes when
+  idle like the rest.
 - **Agents open their own tabs** in the background of the window you last used, grouped together and collapsed unless
   you're looking at one (you can turn that off). Agents can't switch you to their tabs or bring a window to the front.
   Tabs nobody touches for 10 minutes close by themselves (never while something runs on them). Closing agent tabs never

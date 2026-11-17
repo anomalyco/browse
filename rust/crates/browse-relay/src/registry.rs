@@ -30,9 +30,6 @@ pub struct PersistedTab {
     pub options: TabOptions,
     #[serde(default)]
     pub created_at: String,
-    /// The extension's stable id for the tab: a tab announced again under it finds this entry.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub browse_id: Option<String>,
     /// A caller-chosen id (`work-mail`), which agents use as `tab`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen: Option<String>,
@@ -84,9 +81,8 @@ mod tests {
             target_id: "T7".into(),
             browser_key: "k1".into(),
             opener: Some(3),
-            options: TabOptions { group: Some("orw-x".into()), allowed_origins: Some(vec!["example.com".into()]), read_only: true, keep_visible: false, browser: None },
+            options: TabOptions { group: Some("orw-x".into()), allowed_origins: Some(vec!["example.com".into()]), read_only: true, keep_visible: false, keep_open: false, browser: None },
             created_at: "now".into(),
-            browse_id: Some("b7".into()),
             chosen: Some("work-mail".into()),
             lent: false,
         };

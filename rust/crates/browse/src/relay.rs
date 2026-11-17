@@ -210,28 +210,41 @@ fn send(method: &str, path: &str, extra: &[(&str, &str)], body: Option<&[u8]>, t
 }
 
 /// An authorized request to the relay. A relay that is gone (restarted for an update, crashed) is started again and
-/// the request retried once; a request that may have reached the relay is never repeated.
+/// the request retried once; a request that may have reached the relay is never repeated. A relay still starting or
+/// stopping for an update answers 503 before running anything, so that answer is retried until the new one is up.
 fn authorized(method: &str, path: &str, extra: &[(&str, &str)], body: Option<&[u8]>, timeout: Option<Duration>) -> anyhow::Result<Value> {
     ensure()?;
-    let response = match send(method, path, extra, body, timeout) {
-        Err(http::Error::Unreachable(_)) => {
-            ensure()?;
-            send(method, path, extra, body, timeout)
+    let mut unreachable = false;
+    let mut restarting = 0;
+    loop {
+        let response = match send(method, path, extra, body, timeout) {
+            Err(http::Error::Unreachable(_)) if !unreachable => {
+                unreachable = true;
+                ensure()?;
+                continue;
+            }
+            other => other,
         }
-        other => other,
+        .map_err(|error| anyhow!("the browse relay at {} failed: {error}", relay_api::endpoint()))?;
+        let value: Value = serde_json::from_slice(&response.body).unwrap_or(Value::Null);
+        let waiting = response.status == 503 && matches!(value["code"].as_str(), Some("relay-starting" | "relay-restarting"));
+        if waiting && restarting < 30 {
+            restarting += 1;
+            std::thread::sleep(Duration::from_millis(100));
+            ensure()?;
+            continue;
+        }
+        if !(200..300).contains(&response.status) {
+            let message = value
+                .get("error")
+                .and_then(|e| e.get("message").or(Some(e)))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| String::from_utf8_lossy(&response.body).into_owned());
+            bail!("relay answered {}: {}", response.status, message.trim());
+        }
+        return Ok(value);
     }
-    .map_err(|error| anyhow!("the browse relay at {} failed: {error}", relay_api::endpoint()))?;
-    let value: Value = serde_json::from_slice(&response.body).unwrap_or(Value::Null);
-    if !(200..300).contains(&response.status) {
-        let message = value
-            .get("error")
-            .and_then(|e| e.get("message").or(Some(e)))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .unwrap_or_else(|| String::from_utf8_lossy(&response.body).into_owned());
-        bail!("relay answered {}: {}", response.status, message.trim());
-    }
-    Ok(value)
 }
 
 /// The header naming the MCP client, when there is one: the relay decides its tools and instructions by it.
