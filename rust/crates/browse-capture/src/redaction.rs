@@ -216,7 +216,7 @@ impl SecretRedactor {
     }
 
     /// A secret-named URL query or fragment field value, remembered for the body-string pass too.
-    fn scrub_named_field(&mut self, value: &str, field: &str) -> String {
+    fn scrub_url_field(&mut self, value: &str, field: &str) -> String {
         if !value.is_empty() {
             self.named_fields.insert(value.to_string());
         }
@@ -237,16 +237,16 @@ impl SecretRedactor {
         self.protect_pairs(query, true)
     }
 
-    /// `named_fields` marks values from a URL, whose names make them credentials for the body-string pass; a form
-    /// body's values are remembered like any other captured value.
-    fn protect_pairs(&mut self, text: &str, named_fields: bool) -> String {
+    /// `from_url` marks values from a URL query or fragment, whose names make them credentials for the body-string
+    /// pass; a form body's values are remembered like any other captured value.
+    fn protect_pairs(&mut self, text: &str, from_url: bool) -> String {
         let pairs = parse_form(text)
             .into_iter()
             .map(|(name, value)| {
                 let value = if value.is_empty() || !is_secret_name(&name) {
                     value
-                } else if named_fields {
-                    self.scrub_named_field(&value, &name)
+                } else if from_url {
+                    self.scrub_url_field(&value, &name)
                 } else {
                     self.scrub(&value, &name)
                 };
@@ -266,7 +266,7 @@ impl SecretRedactor {
                 if !plain || !is_secret_name(&name) || value.is_empty() {
                     return part.to_string();
                 }
-                format!("{}{}", &part[..separator + 1], self.scrub_named_field(&value, &name))
+                format!("{}{}", &part[..separator + 1], self.scrub_url_field(&value, &name))
             })
             .collect::<Vec<_>>()
             .join("&")

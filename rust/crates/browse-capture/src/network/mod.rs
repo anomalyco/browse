@@ -772,8 +772,9 @@ impl Tool for NetworkTool {
                 can't be checked for credentials. If the tab closes the capture ends and the next stop still returns \
                 what it captured, with endedBecause. Credentials are always replaced with [redacted]: authorization and API-key headers, all \
                 cookie values, secret-named query/fragment/JSON/form fields, token-like path segments, and known values \
-                wherever they reappear, though inside JSON bodies values under 16 characters are matched only when \
-                they came from a secret-named URL field (and are at least 8). A capture ends itself after maxDurationMs."
+                where they reappear in URLs, headers and JSON bodies (inside JSON bodies a value under 16 characters is \
+                matched only if it came from a password or one-time-code field, or from a secret-named URL query or \
+                fragment field and is at least 8 characters). A capture ends itself after maxDurationMs."
                 .into(),
             input_schema: json!({
                 "type": "object",

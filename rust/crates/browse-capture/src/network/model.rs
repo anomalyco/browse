@@ -8,8 +8,9 @@ use crate::redaction::{Header, MINIMUM_KNOWN_SUBSTRING_LENGTH, SecretRedactor};
 pub const MAX_BODY_BYTES: usize = 1_000_000;
 pub const MAX_TOTAL_BODY_BYTES: usize = 25_000_000;
 pub const MAX_ENTRIES: usize = 1_000;
-// Inside JSON string values only longer known values are replaced, except values from a secret-named URL query or
-// fragment field: ordinary text rarely contains 16 characters of a credential.
+// Inside JSON string values only longer known values are replaced, since ordinary text rarely contains 16 characters
+// of a credential. Values from a secret-named URL query or fragment field are credentials by name and are replaced from
+// 8.
 const MINIMUM_KNOWN_BODY_SUBSTRING_LENGTH: usize = 16;
 
 #[derive(Debug, Clone, Serialize)]
@@ -350,6 +351,21 @@ mod tests {
         let value = serde_json::to_value(&redacted[0]).unwrap();
         assert_eq!(value["request"]["headers"][0]["value"], "sid=[redacted]");
         assert_eq!(value["response"]["body"]["text"], r#"{"note":"sid=abcdef1234"}"#);
+    }
+
+    #[test]
+    fn short_secret_named_form_values_stay_in_body_strings() {
+        let mut exchange = entry(
+            "https://api.test/x",
+            vec![],
+            Some("api_key=k1234567890"),
+            Some(r#"{"url":"https://x/y?api_key=k1234567890"}"#),
+        );
+        exchange.request.body.as_mut().unwrap().mime_type = "application/x-www-form-urlencoded".into();
+        let (redacted, _) = finish(&[exchange]);
+        let value = serde_json::to_value(&redacted[0]).unwrap();
+        assert_eq!(value["request"]["body"]["text"], "api_key=[redacted]");
+        assert_eq!(value["response"]["body"]["text"], r#"{"url":"https://x/y?api_key=k1234567890"}"#);
     }
 
     #[test]

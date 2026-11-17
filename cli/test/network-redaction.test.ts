@@ -237,6 +237,26 @@ describe("SecretRedactor", () => {
     expect(JSON.parse(note?.response?.body?.text ?? "{}")).toEqual({ note: "sid=abcdef1234" })
   })
 
+  test("leaves short secret-named form values alone in body strings", () => {
+    const base = capturedEntry("form", { url: "https://x.example.com/y?api_key=k1234567890" })
+    const form = "api_key=k1234567890"
+    const { exchanges } = finishCapture(activeCapture([
+      {
+        ...base,
+        request: {
+          ...base.request,
+          method: "POST",
+          headers: [{ name: "content-type", value: "application/x-www-form-urlencoded" }],
+          body: { size: form.length, mimeType: "application/x-www-form-urlencoded", text: form, truncated: false },
+        },
+      },
+    ]))
+    const exchange = exchanges[0]
+    expect(exchange?.request.body?.text).toBe(`api_key=${redacted}`)
+    expect(JSON.parse(exchange?.response?.body?.text ?? "{}"))
+      .toEqual({ url: "https://x.example.com/y?api_key=k1234567890" })
+  })
+
   test("finds a percent-encoded known secret", () => {
     const redactor = new SecretRedactor()
     redactor.protectUrl("https://example.com/?token=a%2Fb%2Bc1234567890")
