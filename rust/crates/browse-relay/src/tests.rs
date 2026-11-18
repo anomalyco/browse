@@ -311,7 +311,8 @@ async fn pairs_with_a_token_and_routes_cdp_per_tab_and_child_session() {
     assert_eq!(seen.commands("tabs.create")[0]["params"], json!({ "url": "about:blank", "active": false }));
     assert_eq!(seen.commands("debugger.attach")[0]["params"]["tabId"], 7);
     settled(&seen, 7).await;
-    assert!(seen.commands("tabs.keepOpen").is_empty(), "a normal tab needs no keepOpen: {:?}", seen.commands("tabs.keepOpen"));
+    eventually("the cleared keepOpen", || seen.commands("tabs.keepOpen").len() == 1).await;
+    assert_eq!(seen.commands("tabs.keepOpen")[0]["params"], json!({ "tabId": 7, "keepOpen": false }), "a default tab clears any stale flag: {:?}", seen.commands("tabs.keepOpen"));
     assert_eq!(seen.cdp("Target.setAutoAttach")[0]["params"]["params"], json!({ "autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true }));
     assert!(seen.cdp("Runtime.enable").is_empty(), "the relay never enables Runtime on its own");
 
@@ -2040,11 +2041,11 @@ async fn keep_open_tabs_survive_idle_cleanup() {
     assert!(!tool_text(&opened).contains("can't keep tabs open"), "a capable extension needs no warning: {}", tool_text(&opened));
     let normal = h.handle.browser().open_tab(None, &TabOptions::default()).await.unwrap().tab;
     assert!(seen.commands("tabs.create")[0]["params"]["keepOpen"].as_bool().unwrap(), "the extension is told, so its own cleanup keeps it");
-    // The extension hears about it once, for the kept tab, and not for a default one.
-    eventually("the keepOpen command", || seen.commands("tabs.keepOpen").len() == 1).await;
-    assert_eq!(seen.commands("tabs.keepOpen")[0]["params"], json!({ "tabId": kept, "keepOpen": true }));
-    settled(&seen, normal).await;
-    assert_eq!(seen.commands("tabs.keepOpen").len(), 1, "a normal tab sends none: {:?}", seen.commands("tabs.keepOpen"));
+    // The extension always hears the current value: true for the kept tab, false for a default one.
+    eventually("the keepOpen commands", || seen.commands("tabs.keepOpen").len() == 2).await;
+    let keep_open_commands = seen.commands("tabs.keepOpen");
+    assert_eq!(keep_open_commands[0]["params"], json!({ "tabId": kept, "keepOpen": true }));
+    assert_eq!(keep_open_commands[1]["params"], json!({ "tabId": normal, "keepOpen": false }), "a default tab clears any stale flag: {keep_open_commands:?}");
     let listed = text(&serde_json::to_value(tool(&relay, "tabs", json!({})).await).unwrap());
     let entry = listed["tabs"].as_array().unwrap().iter().find(|t| t["tab"] == kept).unwrap();
     assert_eq!(entry["keepOpen"], true, "tabs list shows the option: {entry}");
@@ -2065,8 +2066,8 @@ async fn keep_open_tabs_survive_idle_cleanup() {
     let updated = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "new", "id": "keep-me", "keepOpen": false })).await).unwrap());
     assert_eq!(updated["existed"], true);
     assert!(updated["note"].as_str().unwrap().contains("keepOpen is now off"), "{updated}");
-    eventually("the keepOpen off command", || seen.commands("tabs.keepOpen").len() == 2).await;
-    assert_eq!(seen.commands("tabs.keepOpen")[1]["params"], json!({ "tabId": kept, "keepOpen": false }));
+    eventually("the keepOpen off command", || seen.commands("tabs.keepOpen").len() == 3).await;
+    assert_eq!(seen.commands("tabs.keepOpen")[2]["params"], json!({ "tabId": kept, "keepOpen": false }));
     let closed = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "close", "tab": "keep-me", "idleMinutes": 0 })).await).unwrap());
     assert_eq!(closed["closed"], json!([kept]), "with keepOpen off, idle cleanup closes it again: {closed}");
 }
@@ -2103,6 +2104,32 @@ async fn keep_open_on_an_older_extension_warns_and_keeps_the_tab() {
     assert!(relay.st().tabs.get(&later).is_some_and(|t| t.options.keep_open), "the relay keeps it anyway");
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(seen.commands("tabs.keepOpen").is_empty(), "the toggle sends nothing to an old extension: {:?}", seen.commands("tabs.keepOpen"));
+}
+
+/// The extension keeps keepOpen per tracked tab, and a tab it released stays tracked. A tab reclaimed with default
+/// options must be told the flag is off, or a stale true would never be cleared.
+#[tokio::test]
+async fn a_reclaimed_tab_with_default_options_clears_a_stale_keep_open() {
+    let h = harness().await;
+    let port = h.handle.port();
+    let relay = h.handle.relay.clone();
+    let held = crate::registry::PersistedTab {
+        tab: 451,
+        target_id: "T451".into(),
+        browser_key: "profile-keep-open-reclaim".into(),
+        opener: None,
+        options: TabOptions::default(),
+        created_at: String::new(),
+        chosen: None,
+        lent: false,
+    };
+    relay.st().restorable.insert("T451".into(), held);
+    let socket = pair_with_token(port, &h.paths, "profile-keep-open-reclaim").await;
+    let (seen, events) = fake_extension(socket, 460);
+    events.send(json!({ "method": "debugger.attached", "params": { "tabId": 451, "agent": true } })).unwrap();
+    events.send(json!({ "method": "ready" })).unwrap();
+    eventually("the reclaimed tab", || relay.st().tabs.get(&451).is_some_and(|t| !t.options.keep_open)).await;
+    eventually("the cleared keepOpen", || seen.commands("tabs.keepOpen").iter().any(|c| c["params"] == json!({ "tabId": 451, "keepOpen": false }))).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
