@@ -165,7 +165,7 @@ fn fake_extension_with_urls(socket: Socket, next_tab: i64, urls: TargetUrls) -> 
                 "debugger.attach" => {
                     json!({})
                 }
-                "settings.get" | "settings.set" => json!({ "settings": { "window": "current", "grouping": "shared", "idleMinutes": 10, "humanInput": "on", "handoffNotifications": "recording" } }),
+                "settings.get" | "settings.set" => json!({ "settings": { "window": "current", "grouping": "shared", "groupCollapse": "auto", "idleMinutes": 10, "humanInput": "on", "muteTabs": "off", "handoffNotifications": "recording" } }),
                 "debugger.sendCommand" => match params["method"].as_str().unwrap_or("") {
                     "Target.getTargetInfo" => {
                         let tab = params["tabId"].as_i64().unwrap();

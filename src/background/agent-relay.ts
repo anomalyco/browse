@@ -12,7 +12,9 @@ import {
 } from "../agent-relay/protocol"
 import {
   HUMAN_INPUT_KEY,
+  MUTE_TABS_KEY,
   humanInput,
+  muteTabs,
   RELAY_ADDRESS_KEY,
   type AgentRelayState,
   type AgentRelayStatus,
@@ -604,6 +606,8 @@ export function createAgentRelay(input: { changed: (state: AgentRelayState) => v
   })
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && HUMAN_INPUT_KEY in changes) void sendSettings()
+    if (area === "local" && MUTE_TABS_KEY in changes)
+      void TabCleanup.setMuted(muteTabs(changes[MUTE_TABS_KEY]?.newValue) === "on").catch(() => undefined)
   })
   // A code entered on the status page, a new relay address or a new name takes effect on a fresh connection.
   chrome.storage.onChanged.addListener(handshake.onPairingStorageChanged)

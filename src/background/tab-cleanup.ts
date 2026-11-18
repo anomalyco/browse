@@ -91,6 +91,12 @@ export async function isTracked(tabId: number) {
   return tracked.has(tabId)
 }
 
+/** Mutes every tab agents opened (the mute agent tabs setting turned on), or unmutes them. */
+export async function setMuted(muted: boolean) {
+  await restore()
+  for (const tabId of tracked.keys()) void chrome.tabs.update(tabId, { muted }).catch(() => undefined)
+}
+
 /** Registers a check that keeps a tab open while it returns true. */
 export function guard(check: (tabId: number) => boolean) {
   guards.push(check)

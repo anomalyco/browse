@@ -23,7 +23,7 @@ export class StubEvent {
 
 type Bounds = { left: number; top: number; width: number; height: number }
 type Window = Bounds & { id: number; type: string; state: string; focused: boolean }
-type Tab = { id: number; windowId: number; url: string; pendingUrl?: string; active: boolean; index: number; groupId: number; pinned: boolean; lastAccessed: number }
+type Tab = { id: number; windowId: number; url: string; pendingUrl?: string; active: boolean; index: number; groupId: number; pinned: boolean; muted: boolean; lastAccessed: number }
 type Group = { id: number; windowId: number; title: string; color: string; collapsed: boolean }
 type CreateWindow = Partial<Bounds> & { url?: string; focused?: boolean; state?: string; type?: string }
 
@@ -168,7 +168,7 @@ export function createChrome() {
   })
   const addTab = (windowId: number, url: string, active: boolean, lastAccessed = Date.now()) => {
     if (active) for (const other of tabs.values()) if (other.windowId === windowId) other.active = false
-    const tab: Tab = { id: nextId++, windowId, url, active, index: [...tabs.values()].filter((tab) => tab.windowId === windowId).length, groupId: -1, pinned: false, lastAccessed }
+    const tab: Tab = { id: nextId++, windowId, url, active, index: [...tabs.values()].filter((tab) => tab.windowId === windowId).length, groupId: -1, pinned: false, muted: false, lastAccessed }
     tabs.set(tab.id, tab)
     return tab
   }

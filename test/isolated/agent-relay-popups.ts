@@ -71,7 +71,7 @@ beforeEach(async () => {
   stub.state.activations.length = 0
   stub.state.focusedWindowId = undefined
   socket().received.length = 0
-  await stub.chrome.storage.local.remove("agentTabsWindow")
+  await stub.chrome.storage.local.remove(["agentTabsWindow", "muteTabs"])
   await stub.chrome.storage.local.set({ agentTabsGrouping: "session" })
   await stub.chrome.storage.session.remove("agentWindowId")
 })
@@ -97,6 +97,18 @@ describe("tabs.create", () => {
     expect(stub.state.focusedWindowId).toBe(user.id)
     expect(await TabCleanup.isTracked(tabId)).toBe(true)
     nothingActivated()
+  })
+
+  test("the mute agent tabs setting decides whether the new tab is muted", async () => {
+    await stub.chrome.windows.create({ url: "https://user.example/", focused: true })
+    const off = await command("tabs.create", { url: "https://example.com/", active: false })
+    const offId = (off.result as { tabId: number }).tabId
+    await settle()
+    expect(stub.state.tabs.get(offId)!.muted).toBe(false)
+    await stub.chrome.storage.local.set({ muteTabs: "on" })
+    const on = await command("tabs.create", { url: "https://example.com/", active: false })
+    const onId = (on.result as { tabId: number }).tabId
+    await until(() => stub.state.tabs.get(onId)!.muted === true)
   })
 
   test("with the separate setting opens it in the agent window, unfocused", async () => {
@@ -136,6 +148,7 @@ describe("adoptOpened, agent tabs in the user's window", () => {
     expect(adopted.windowId).toBe(user.id)
     expect(adopted.groupId).toBe(groupId)
     expect(adopted.active).toBe(false)
+    expect(adopted.muted).toBe(false)
     expect(stub.state.tabs.get(userTab)!.active).toBe(true)
     expect(stub.state.focusedWindowId).toBe(user.id)
     expect(await TabCleanup.isTracked(popup.id)).toBe(true)
@@ -151,6 +164,15 @@ describe("adoptOpened, agent tabs in the user's window", () => {
     expect(stub.state.tabs.get(popup.id)).toMatchObject({ windowId: user.id, groupId, active: false })
     expect(stub.state.tabs.get(userTab)!.active).toBe(true)
     nothingActivated()
+  })
+
+  test("with mute agent tabs on, an adopted popup is muted", async () => {
+    await stub.chrome.storage.local.set({ muteTabs: "on" })
+    const { user, agentTab } = await sharedScene()
+    const popup = await stub.chrome.tabs.create({ windowId: user.id, url: "https://popup.example/", active: false })
+    event("webNavigation.onCreatedNavigationTarget").emit({ sourceTabId: agentTab, tabId: popup.id })
+    await until(() => opened().length === 1)
+    expect(stub.state.tabs.get(popup.id)!.muted).toBe(true)
   })
 
   test("a popup window gives up focus and stays where it is", async () => {
@@ -204,12 +226,14 @@ describe("adoptOpened, agent tabs in a separate window", () => {
   })
 
   test("a tab opened from a lent tab stays the user's, and the relay still hears of it", async () => {
+    await stub.chrome.storage.local.set({ muteTabs: "on" })
     const { user, userTab } = await scene()
     expect((await command("debugger.attach", { tabId: userTab })).error).toBeUndefined()
     const popup = await stub.chrome.tabs.create({ windowId: user.id, url: "https://popup.example/", active: true })
     event("webNavigation.onCreatedNavigationTarget").emit({ sourceTabId: userTab, tabId: popup.id })
     await until(() => opened().length === 1)
     expect(stub.state.tabs.get(popup.id)!.windowId).toBe(user.id)
+    expect(stub.state.tabs.get(popup.id)!.muted).toBe(false)
     expect(await TabCleanup.isTracked(popup.id)).toBe(false)
     expect(opened()).toMatchObject([{ tabId: popup.id, openerTabId: userTab }])
   })

@@ -3,7 +3,7 @@
 
 use serde_json::{Map, Value, json};
 
-pub const AGENT_KEYS: [&str; 5] = ["window", "grouping", "idleMinutes", "humanInput", "handoffNotifications"];
+pub const AGENT_KEYS: [&str; 7] = ["window", "grouping", "groupCollapse", "idleMinutes", "humanInput", "muteTabs", "handoffNotifications"];
 
 pub struct Spec {
     pub label: &'static str,
@@ -14,8 +14,10 @@ pub fn spec(key: &str) -> Option<Spec> {
     Some(match key {
         "window" => Spec { label: "Where agents open their tabs (current: the user's window; separate: an unfocused window of their own)", values: &["current", "separate"] },
         "grouping" => Spec { label: "How agent tabs are grouped (one shared group, one group per agent group label, or none)", values: &["shared", "session", "none"] },
+        "groupCollapse" => Spec { label: "Whether browse collapses agent groups by itself (auto: fold them away unless the user is on one; off: leave each group as the user set it)", values: &["auto", "off"] },
         "idleMinutes" => Spec { label: "Close agent tabs untouched for this many minutes", values: &["10", "30", "60", "never"] },
         "humanInput" => Spec { label: "Human-like input (off is faster, but easier for sites to flag)", values: &["on", "off"] },
+        "muteTabs" => Spec { label: "Mute the tabs agents open (on keeps them quiet)", values: &["on", "off"] },
         "handoffNotifications" => Spec { label: "System notification on a handoff (only while recorded, or every handoff)", values: &["recording", "always"] },
         _ => return None,
     })
@@ -123,6 +125,8 @@ pub fn from_extension(answer: &Value) -> Result<Vec<(String, String)>, String> {
                 ("idleMinutes", Some(Value::Number(n))) => n.to_string(),
                 ("idleMinutes", _) => "10".to_string(),
                 (_, Some(Value::String(s))) => s.clone(),
+                // Older extensions don't send muteTabs; its default is off, not its first listed value.
+                ("muteTabs", _) => "off".to_string(),
                 _ => spec(key).unwrap().values[0].to_string(),
             };
             (key.to_string(), text)
@@ -204,5 +208,42 @@ mod tests {
         assert!(parse_changes(&json!({ "grouping": "x" })).is_err());
         assert!(parse_changes(&json!({ "allowCookies": true })).unwrap_err().contains("security"));
         assert_eq!(to_extension(&changes), json!({ "grouping": "session", "idleMinutes": 0 }));
+        let toggles = parse_changes(&json!({ "groupCollapse": "auto", "muteTabs": "on" })).unwrap();
+        assert_eq!(toggles, vec![("groupCollapse".to_string(), "auto".to_string()), ("muteTabs".to_string(), "on".to_string())]);
+        assert_eq!(to_extension(&toggles), json!({ "groupCollapse": "auto", "muteTabs": "on" }));
+        assert!(parse_changes(&json!({ "groupCollapse": "on" })).unwrap_err().contains("auto, off"));
+        assert!(parse_changes(&json!({ "muteTabs": "sometimes" })).unwrap_err().contains("on, off"));
+    }
+
+    #[test]
+    fn round_trips_every_setting() {
+        let answer = json!({ "settings": { "window": "separate", "grouping": "session", "groupCollapse": "off", "idleMinutes": 0, "humanInput": "off", "muteTabs": "on", "handoffNotifications": "always" } });
+        let stored = from_extension(&answer).unwrap();
+        assert_eq!(
+            stored,
+            vec![
+                ("window".to_string(), "separate".to_string()),
+                ("grouping".to_string(), "session".to_string()),
+                ("groupCollapse".to_string(), "off".to_string()),
+                ("idleMinutes".to_string(), "never".to_string()),
+                ("humanInput".to_string(), "off".to_string()),
+                ("muteTabs".to_string(), "on".to_string()),
+                ("handoffNotifications".to_string(), "always".to_string()),
+            ]
+        );
+        assert_eq!(to_extension(&stored), answer["settings"]);
+        let reported = report(&stored);
+        for (key, value) in &stored {
+            assert_eq!(reported[key]["value"], shown(key, value), "{key} reports its value");
+        }
+        assert_eq!(reported["groupCollapse"]["allowed"], json!(["auto", "off"]));
+        assert_eq!(reported["muteTabs"]["allowed"], json!(["on", "off"]));
+    }
+
+    #[test]
+    fn defaults_what_an_older_extension_does_not_send() {
+        let stored = from_extension(&json!({ "settings": { "window": "current", "grouping": "shared", "idleMinutes": 10, "humanInput": "on", "handoffNotifications": "recording" } })).unwrap();
+        assert_eq!(lookup(&stored, "groupCollapse"), "auto");
+        assert_eq!(lookup(&stored, "muteTabs"), "off", "muteTabs defaults off, though on is listed first");
     }
 }

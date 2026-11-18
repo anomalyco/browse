@@ -232,6 +232,11 @@ export const HUMAN_INPUT_KEY = "humanInput"
 export type HumanInput = "on" | "off"
 export const humanInput = (value: unknown): HumanInput => (value === "off" ? "off" : "on")
 
+/** Whether tabs agents open are muted: "on", or "off" (default). */
+export const MUTE_TABS_KEY = "muteTabs"
+export type MuteTabs = "on" | "off"
+export const muteTabs = (value: unknown): MuteTabs => (value === "on" ? "on" : "off")
+
 /** When a handoff shows a system notification: only on a recorded tab (default), or on every handoff. */
 export const HANDOFF_NOTIFICATIONS_KEY = "handoffNotifications"
 export type HandoffNotifications = "recording" | "always"

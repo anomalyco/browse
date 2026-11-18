@@ -1,4 +1,5 @@
 import type { JsonObject } from "../../agent-relay/protocol"
+import { MUTE_TABS_KEY, muteTabs } from "../../shared/protocol"
 import { AgentWindow } from "./window"
 import { TabCleanup } from "../tab-cleanup"
 import { text, type AgentRelayLog } from "./wire"
@@ -39,7 +40,8 @@ export function installPopupAdoption(deps: {
     if (!(await TabCleanup.isTracked(opener))) return
     const tab = await chrome.tabs.get(tabId).catch(() => undefined)
     if (!tab) return
-    void chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => undefined)
+    const muted = muteTabs((await chrome.storage.local.get(MUTE_TABS_KEY))[MUTE_TABS_KEY]) === "on"
+    void chrome.tabs.update(tabId, { autoDiscardable: false, ...(muted ? { muted: true } : {}) }).catch(() => undefined)
     const [agentWindow, openerWindow] = await Promise.all([
       AgentWindow.id(),
       chrome.tabs.get(opener).then((openerTab) => openerTab.windowId, () => undefined),
