@@ -371,7 +371,7 @@ pub fn context(cdp: &Arc<WsCdp>) -> (ToolContext, PathBuf, Arc<Mutex<HashMap<Str
     }
     let root = std::fs::canonicalize(&root).unwrap();
     let busy: Arc<Mutex<HashMap<String, bool>>> = Arc::default();
-    let ctx = ToolContext { browser: Arc::new(TestBrowser(cdp.clone(), busy.clone(), Arc::new(TabState::default()))), file_roots: vec![root.clone()] };
+    let ctx = ToolContext { browser: Arc::new(TestBrowser(cdp.clone(), busy.clone(), Arc::new(TabState::default()))), file_roots: vec![root.clone()], in_script: false };
     (ctx, root, busy)
 }
 

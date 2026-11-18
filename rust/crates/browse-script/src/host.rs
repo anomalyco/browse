@@ -66,6 +66,9 @@ impl Host {
     pub async fn run(&self, job: Job) -> Outcome {
         let timeout_ms = job.timeout_ms;
         let job_tab = job.tab;
+        // A tool's result goes to the script, which can keep it or write it to a file, not into an agent's context.
+        let mut ctx = self.ctx.clone();
+        ctx.in_script = true;
         let mut outcome = Outcome { finished: None, timed_out: None, logs: Vec::new(), dropped_logs: 0, warnings: Vec::new(), images: Vec::new(), aftermath: Aftermath::default() };
         outcome.aftermath.start_url = self.current_url(job.tab).await;
         let (to_host, mut from_engine) = tokio::sync::mpsc::unbounded_channel::<ToHost>();
@@ -92,13 +95,13 @@ impl Host {
                             waiting_on_user += 1;
                             paused_at.get_or_insert_with(Instant::now);
                         }
-                        let ctx = self.ctx.clone();
+                        let ctx = ctx.clone();
                         let tools = self.tools.clone();
                         let user = is_handoff(&op, &payload);
                         inflight.push(Box::pin(async move { (id, run_async(ctx, tools, &op, payload).await, user) }));
                     }
                     Some(ToHost::Sync { op, payload, reply }) => {
-                        let result = self.run_sync(&op, payload, &mut outcome).await;
+                        let result = self.run_sync(&ctx, &op, payload, &mut outcome).await;
                         let _ = reply.send(result);
                     }
                     Some(ToHost::Log { level, text }) => self.log(&mut outcome, level, text),
@@ -227,19 +230,19 @@ impl Host {
         Value::Object(map)
     }
 
-    async fn run_sync(&self, op: &str, payload: Value, outcome: &mut Outcome) -> Result<Value, String> {
+    async fn run_sync(&self, ctx: &ToolContext, op: &str, payload: Value, outcome: &mut Outcome) -> Result<Value, String> {
         match op {
-            "tool" => run_async(self.ctx.clone(), self.tools.clone(), op, payload).await.map(|value| self.absorb(value, outcome)),
+            "tool" => run_async(ctx.clone(), self.tools.clone(), op, payload).await.map(|value| self.absorb(value, outcome)),
             "url" => {
-                let tab = tab_argument(&self.ctx, &payload).map_err(|e| format!("{e:#}"))?;
-                let page = async { browse_page::state::tab(&self.ctx, tab).await?.page(&self.ctx).await }.await.map_err(|e| format!("{e:#}"))?;
+                let tab = tab_argument(ctx, &payload).map_err(|e| format!("{e:#}"))?;
+                let page = async { browse_page::state::tab(ctx, tab).await?.page(ctx).await }.await.map_err(|e| format!("{e:#}"))?;
                 Ok(Value::String(page.main_url()))
             }
             "image" => {
                 let id = payload["id"].as_u64().unwrap_or(u64::MAX) as usize;
                 outcome.images.get(id).map(|image| Value::String(image.data.clone())).ok_or_else(|| "no such image".into())
             }
-            "files" => files::run(&self.ctx.file_roots, &payload).map_err(|e| format!("{e:#}")),
+            "files" => files::run(&ctx.file_roots, &payload).map_err(|e| format!("{e:#}")),
             other => Err(format!("unknown operation {other}")),
         }
     }

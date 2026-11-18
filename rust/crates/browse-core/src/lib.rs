@@ -213,6 +213,10 @@ pub struct ToolContext {
     pub browser: Arc<dyn Browser>,
     /// Folders tools may read or write files in (uploads, screenshots, downloads, HAR files).
     pub file_roots: Vec<std::path::PathBuf>,
+    /// The call is a step inside `execute`: its result goes to the script (which can keep it, write it to a file or
+    /// return part of it), not straight into an agent's context, so tools that cap what they return to an agent
+    /// return the whole value.
+    pub in_script: bool,
 }
 
 impl ToolContext {

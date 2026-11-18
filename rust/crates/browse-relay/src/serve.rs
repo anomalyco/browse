@@ -614,7 +614,7 @@ pub async fn call_tool_keyed(relay: &Arc<Relay>, request: ToolCallRequest, clien
     let tool = relay.tools.read().unwrap_or_else(|poisoned| poisoned.into_inner()).iter().find(|t| t.spec().name == request.name).cloned();
     let Some(tool) = tool else { return Err((StatusCode::NOT_FOUND, format!("Unknown tool: {}", request.name))) };
     relay.note_activity();
-    let context = ToolContext { browser: Arc::new(RelayBrowser(relay.clone())), file_roots: relay.file_roots.clone() };
+    let context = ToolContext { browser: Arc::new(RelayBrowser(relay.clone())), file_roots: relay.file_roots.clone(), in_script: false };
     let id = relay.next_call.fetch_add(1, Ordering::SeqCst);
     let mut arguments = if request.arguments.is_null() { json!({}) } else { request.arguments };
     // `tab` takes a numeric id or a chosen id (`work-mail`); tools below this line see the numeric one.

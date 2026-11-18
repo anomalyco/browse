@@ -215,6 +215,47 @@ return r
     assert!(output.is_error && text.contains("not supported") && text.contains("cookies"), "{text}");
 }
 
+/// page.evaluate and page.content are not cut at the 100k an agent-facing eval returns: the script gets the whole
+/// value, which is what makes `files.write(path, await page.content())` work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn values_over_the_eval_cap_reach_the_script_whole() {
+    let h = harness!();
+    let html = format!("<!doctype html><html><head><title>Big</title></head><body><main id=big>{}</main></body></html>", "y".repeat(150_000));
+    let url = h.server.page("/big", &html);
+    h.script(&format!("await page.goto({url:?})")).await;
+
+    let result = h
+        .value(
+            r###"
+const text = await page.evaluate(() => "x".repeat(150000));
+const body = await page.evaluate(() => document.getElementById("big").textContent);
+const raw = await browse.eval({ expression: "'z'.repeat(120000)" });
+const content = await page.content();
+const inner = await page.innerHTML("#big");
+const path = await files.write("big/page.html", content);
+return {
+  text: text.length,
+  body: body.length,
+  raw: raw.length,
+  content: content.length,
+  inner: inner.length,
+  starts: content.startsWith("<!DOCTYPE html>"),
+  cut: [text, body, raw, content, inner].some((value) => value.includes("truncated")),
+  same: (await files.read(path, "utf8")) === content,
+}
+"###,
+        )
+        .await;
+    assert_eq!(result["text"], 150_000, "{result}");
+    assert_eq!(result["body"], 150_000, "{result}");
+    assert_eq!(result["raw"], 120_000, "{result}");
+    assert!(result["content"].as_u64().unwrap() > 150_000, "{result}");
+    assert_eq!(result["inner"], 150_000, "{result}");
+    assert_eq!(result["starts"], true, "{result}");
+    assert_eq!(result["cut"], false, "{result}");
+    assert_eq!(result["same"], true, "{result}");
+}
+
 const COUNTER: &str = r###"<!doctype html><html><body><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="315" height="100">
 <defs><image id="0" href="data:,"/><image id="2" href="data:,"/><image id="6" href="data:,"/></defs>
 <use x="270" xlink:href="#6"/><use x="0" xlink:href="#0"/><use x="45" xlink:href="#0"/><use x="90" xlink:href="#0"/><use x="135" xlink:href="#0"/><use x="180" xlink:href="#2"/><use x="225" xlink:href="#2"/>

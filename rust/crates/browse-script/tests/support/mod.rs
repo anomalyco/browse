@@ -346,7 +346,7 @@ impl Harness {
             std::fs::set_permissions(&files.0, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
         let browser = FakeBrowser { connection: connection.clone(), tabs: Mutex::new(vec![(1, tab.clone(), Arc::new(TabState::default()))]), next: AtomicI64::new(2), human };
-        let ctx = ToolContext { browser: Arc::new(browser), file_roots: vec![std::fs::canonicalize(&files.0).unwrap()] };
+        let ctx = ToolContext { browser: Arc::new(browser), file_roots: vec![std::fs::canonicalize(&files.0).unwrap()], in_script: false };
         let server = Server::start().await;
         let mut tools: Vec<Arc<dyn browse_core::Tool>> = browse_page::tools();
         tools.extend(browse_capture::tools());

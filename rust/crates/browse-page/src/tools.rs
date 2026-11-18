@@ -997,8 +997,10 @@ async fn eval(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
         return Ok(json_output(json!({ "result": null, "hint": hint })));
     }
     let text = serde_json::to_string(&value).unwrap_or_else(|_| "null".into());
+    // The cap keeps a direct call from filling an agent's context. In a script the value belongs to the script: it
+    // may write it to a file or return part of it, and a cut value is not JSON anymore, so it gets all of it.
     let chars = text.chars().count();
-    if chars > MAX_EVAL_CHARS {
+    if chars > MAX_EVAL_CHARS && !ctx.in_script {
         let cut: String = text.chars().take(MAX_EVAL_CHARS).collect();
         return Ok(ToolOutput::text(format!("{cut}\n… [truncated: the result is {chars} characters; return less, or pick the fields you need]", )));
     }
@@ -1861,7 +1863,7 @@ mod tests {
     #[tokio::test]
     async fn input_tools_refuse_a_read_only_tab_before_cdp() {
         let browser = Arc::new(ReadOnlyBrowser::default());
-        let ctx = ToolContext { browser: browser.clone(), file_roots: Vec::new() };
+        let ctx = ToolContext { browser: browser.clone(), file_roots: Vec::new(), in_script: false };
         let list = tools();
         for tool in &list {
             let name = tool.spec().name;
