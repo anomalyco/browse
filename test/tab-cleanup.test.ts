@@ -456,13 +456,18 @@ describe("a tab the worker was opening when it stopped", () => {
 })
 
 describe("tracked tabs the relay doesn't have after a worker restart", () => {
-  test("are closed; attached ones stay", async () => {
+  test("are closed; attached and pinned ones stay, and a pinned one comes back with its sound", async () => {
     const kept = await agentTab(0)
     const lost = await agentTab(0)
+    const pinned = await agentTab(0)
+    await stub.chrome.tabs.update(pinned, { pinned: true, muted: true })
     const closed = await TabCleanup.closeUnattached((tabId) => tabId === kept)
     expect(closed.map((tab) => tab.tabId)).toEqual([lost])
     expect(open(kept)).toBe(true)
     expect(await TabCleanup.isTracked(lost)).toBe(false)
+    // The pinned tab stays open, so the mute browse set is undone.
+    for (let i = 0; i < 20; i++) await settle()
+    expect(stub.state.tabs.get(pinned)!.muted).toBe(false)
   })
 })
 

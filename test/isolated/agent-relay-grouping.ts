@@ -717,4 +717,39 @@ describe("the relay's settings tool", () => {
     expect(tab(second.tabId).muted).toBe(true)
     expect(tab(userTab).muted).toBe(false)
   })
+
+  test("turning muteTabs on and straight back off leaves every agent tab unmuted", async () => {
+    await userWindow()
+    const first = await agentTab("github")
+    const second = await agentTab("linear")
+    const updates: string[] = []
+    const update = stub.chrome.tabs.update
+    stub.chrome.tabs.update = async (id, change) => {
+      if (change.muted !== undefined) updates.push(`${id}:${change.muted}`)
+      return update(id, change)
+    }
+    try {
+      // No waiting between the two: the toggles run one at a time, so the off undoes the on it follows.
+      await stub.chrome.storage.local.set({ muteTabs: "on" })
+      await stub.chrome.storage.local.set({ muteTabs: "off" })
+      // Both mutes happened, then both unmutes: the off ran after the on, not alongside it.
+      await until(() => updates.filter((entry) => entry.endsWith(":false")).length === 2)
+    } finally {
+      stub.chrome.tabs.update = update
+    }
+    for (const tabId of [first.tabId, second.tabId]) {
+      expect(updates).toContain(`${tabId}:true`)
+      expect(tab(tabId).mutedInfo).toEqual({ muted: false })
+    }
+  })
+
+  test("turning muteTabs on leaves a tab the user muted as theirs", async () => {
+    await userWindow()
+    const { tabId } = await agentTab("github")
+    // The user muted this tab themselves before the setting went on.
+    Object.assign(tab(tabId), { muted: true, mutedInfo: { muted: true, reason: "user" } })
+    await stub.chrome.storage.local.set({ muteTabs: "on" })
+    for (let i = 0; i < 20; i++) await settle()
+    expect(tab(tabId)).toMatchObject({ muted: true, mutedInfo: { muted: true, reason: "user" } })
+  })
 })
