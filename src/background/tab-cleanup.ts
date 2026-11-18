@@ -319,11 +319,13 @@ function restore() {
     const open = new Map(tabs.filter((tab) => tab.id !== undefined).map((tab) => [tab.id!, tab]))
     const ownedGroups = new Set(groups.filter((group) => ownedGroup(group.title)).map((group) => group.id))
     const kept: Record<string, Tracked> = {}
+    /** Stored tabs that are still open but no longer tracked: the sound browse muted them with comes back. */
+    const dropped: number[] = []
     for (const [tabId, entry] of Object.entries(saved)) {
       const tab = open.get(Number(tabId))
       if (!tab || tab.pinned || !ownedGroups.has(tab.groupId)) {
-        // An open tab browse stops tracking comes back with its sound; a closed one needs nothing.
-        if (tab) void unmuteIfOurs(Number(tabId))
+        // A closed tab needs nothing.
+        if (tab) dropped.push(Number(tabId))
         continue
       }
       kept[tabId] = entry
@@ -338,6 +340,7 @@ function restore() {
     }
     for (const [tabId, entry] of Object.entries(kept))
       if (!tracked.has(Number(tabId))) tracked.set(Number(tabId), entry)
+    for (const tabId of dropped) void unmuteIfOurs(tabId)
   })()
   return restored
 }

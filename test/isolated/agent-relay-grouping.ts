@@ -723,10 +723,20 @@ describe("the relay's settings tool", () => {
     const first = await agentTab("github")
     const second = await agentTab("linear")
     const updates: string[] = []
+    const get = stub.chrome.tabs.get
     const update = stub.chrome.tabs.update
+    // Real Chrome calls are round trips; instant ones hide the mute still in flight when the off reads the tab.
+    // Only the two tabs under test pay for it: every other id is one earlier tests left behind and no longer exists.
+    const slow = new Set([first.tabId, second.tabId])
+    stub.chrome.tabs.get = async (id) => {
+      if (slow.has(id)) await Bun.sleep(5)
+      return get(id)
+    }
     stub.chrome.tabs.update = async (id, change) => {
+      if (slow.has(id)) await Bun.sleep(5)
+      const result = await update(id, change)
       if (change.muted !== undefined) updates.push(`${id}:${change.muted}`)
-      return update(id, change)
+      return result
     }
     try {
       // No waiting between the two: the toggles run one at a time, so the off undoes the on it follows.
@@ -735,6 +745,7 @@ describe("the relay's settings tool", () => {
       // Both mutes happened, then both unmutes: the off ran after the on, not alongside it.
       await until(() => updates.filter((entry) => entry.endsWith(":false")).length === 2)
     } finally {
+      stub.chrome.tabs.get = get
       stub.chrome.tabs.update = update
     }
     for (const tabId of [first.tabId, second.tabId]) {
