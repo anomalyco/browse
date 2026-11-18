@@ -217,14 +217,14 @@ impl Relay {
         }
         self.schedule_persist();
         self.ext_best_effort(tab, "action.setAttached", json!({ "attached": true }));
-        // The extension runs its own idle cleanup, so it needs the same exemption the relay has. An extension that
-        // doesn't know how to hold a tab gets a warning instead: the tab still opens, and only the relay keeps it.
-        if keep_open {
-            if link.supports(CAPABILITY_KEEP_OPEN) {
-                self.ext_best_effort(tab, "tabs.keepOpen", json!({ "keepOpen": true }));
-            } else {
-                self.warn_keep_open_unavailable(tab, &link);
-            }
+        // The extension runs its own idle cleanup, so it needs the same exemption the relay has. Always send the
+        // current value to an extension that knows keep-open: it keeps the flag per tracked tab, and a tab it released
+        // stays tracked, so a stale true would otherwise never be cleared (sending false is harmless when untracked).
+        // An extension that can't hold a tab gets a warning instead: the tab still opens, and only the relay keeps it.
+        if link.supports(CAPABILITY_KEEP_OPEN) {
+            self.ext_best_effort(tab, "tabs.keepOpen", json!({ "keepOpen": keep_open }));
+        } else if keep_open {
+            self.warn_keep_open_unavailable(tab, &link);
         }
         self.refresh_presentation(tab, true);
         rlog!("target.attached", tabId = tab, owner = owner.name());
