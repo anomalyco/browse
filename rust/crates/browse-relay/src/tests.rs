@@ -709,6 +709,61 @@ async fn reads_a_body_announced_on_a_get() {
     assert!(raw.starts_with("HTTP/1.1 410"), "{raw}");
 }
 
+/// A request the relay turns away (this one without a token) still gets its body read before the answer: closing with
+/// body bytes still unread makes the kernel send a reset instead of a clean close, and a macOS client then loses the
+/// 401 it hasn't read yet.
+#[tokio::test]
+async fn reads_a_body_before_turning_a_request_away() {
+    let h = harness().await;
+    let port = h.handle.port();
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let head = format!("POST /tools/cancel HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n");
+    stream.write_all(head.as_bytes()).await.unwrap();
+    let mut first = [0u8; 64];
+    assert!(tokio::time::timeout(Duration::from_millis(250), stream.read(&mut first)).await.is_err(), "the relay answered before the body it was promised");
+    stream.write_all(b"{}").await.unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.unwrap();
+    let raw = String::from_utf8_lossy(&raw);
+    assert!(raw.starts_with("HTTP/1.1 401"), "{raw}");
+}
+
+/// A client announcing `Expect: 100-continue` hasn't sent its body: the relay answers without polling it (a poll
+/// would send `100 Continue` and invite an upload to a request it is turning away) and closes the connection.
+#[tokio::test]
+async fn a_continue_expectation_gets_no_continue() {
+    let h = harness().await;
+    let port = h.handle.port();
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let head = format!("POST /tools/cancel HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nExpect: 100-continue\r\n\r\n");
+    stream.write_all(head.as_bytes()).await.unwrap();
+    let mut raw = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut raw)).await.expect("the relay answers without the body").unwrap();
+    let raw = String::from_utf8_lossy(&raw);
+    assert!(raw.starts_with("HTTP/1.1 401"), "{raw}");
+    assert!(!raw.contains("100 Continue"), "{raw}");
+    assert!(raw.to_ascii_lowercase().contains("connection: close"), "{raw}");
+}
+
+/// A body announced over MAX_BODY is refused from its size alone: no byte of it is read, so the relay answers promptly
+/// and closes the connection.
+#[tokio::test]
+async fn an_announced_body_over_the_limit_is_refused_unread() {
+    let h = harness().await;
+    let port = h.handle.port();
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let head = format!(
+        "POST /tools/cancel HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        h.handle.token(),
+        crate::serve::MAX_BODY + 1
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    let mut raw = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut raw)).await.expect("the relay refuses the announced size without the body").unwrap();
+    let raw = String::from_utf8_lossy(&raw);
+    assert!(raw.starts_with("HTTP/1.1 413"), "{raw}");
+}
+
 #[tokio::test]
 async fn version_reports_every_relay_as_managed() {
     let paths = Paths::rooted(std::env::temp_dir().join(format!("browse-relay-test-{}", crate::util::random_hex(6))));
