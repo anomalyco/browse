@@ -221,11 +221,12 @@ impl Relay {
         self.stop_calls_where(message, |call| call.tabs.contains(&tab))
     }
 
-    /// Ends the running calls `which` picks (never the one asking); their callers get `message`.
+    /// Ends the running calls `which` picks (never the one asking, nor one already stopped); their callers get
+    /// `message`. Returns how many it stopped.
     pub fn stop_calls_where(&self, message: &str, which: impl Fn(&crate::registry::RunningCall) -> bool) -> usize {
         let own = crate::serve::CALL.try_with(|id| *id).ok();
         let mut st = self.st();
-        let picked: Vec<u64> = st.calls.iter().filter(|(id, call)| Some(**id) != own && which(call)).map(|(id, _)| *id).collect();
+        let picked: Vec<u64> = st.calls.iter().filter(|(id, call)| Some(**id) != own && !st.stopped.contains_key(id) && which(call)).map(|(id, _)| *id).collect();
         for id in &picked {
             st.stopped.insert(*id, message.to_string());
             st.calls[id].abort.abort();
@@ -329,13 +330,14 @@ impl Relay {
             }
     }
 
-    /// Cancels the handoffs process `pid` waits for (it exited).
-    pub fn finish_client_handoffs(self: &Arc<Self>, pid: u32) {
+    /// Cancels the handoffs process `pid` waits for (it exited). Returns how many.
+    pub fn finish_client_handoffs(self: &Arc<Self>, pid: u32) -> usize {
         let tabs: Vec<i64> = self.st().handoffs.values().filter(|h| h.pid == Some(pid)).map(|h| h.tab).collect();
-        for tab in tabs {
-            rlog!("handoff.finished", tabId = tab, outcome = "cancelled", reason = "client exited", pid = pid);
-            self.finish_handoff(tab, "cancelled");
+        for tab in &tabs {
+            rlog!("handoff.finished", tabId = *tab, outcome = "cancelled", reason = "client exited", pid = pid);
+            self.finish_handoff(*tab, "cancelled");
         }
+        tabs.len()
     }
 
     pub fn finish_handoff(self: &Arc<Self>, tab: i64, outcome: &'static str) {

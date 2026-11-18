@@ -181,6 +181,8 @@ pub struct State {
     pub calls: HashMap<u64, RunningCall>,
     /// Why running calls were stopped (the toolbar button, their client exiting), by call id.
     pub stopped: HashMap<u64, String>,
+    /// Calls whose task had already ended at the last client sweep but were still listed; the next sweep forgets them.
+    pub lingering: HashSet<u64>,
     /// Keys of calls cancelled before they reached the relay (POST /tools/cancel won the race), and when.
     pub cancelled_calls: HashMap<String, std::time::Instant>,
     /// Every client process that has called (OpenCode-Browser-Client-Pid), while it lives.
@@ -500,6 +502,7 @@ impl Relay {
                 tabs: HashMap::new(),
                 calls: HashMap::new(),
                 stopped: HashMap::new(),
+                lingering: HashSet::new(),
                 cancelled_calls: HashMap::new(),
                 clients: HashSet::new(),
                 handoffs: HashMap::new(),

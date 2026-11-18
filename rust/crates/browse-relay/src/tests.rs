@@ -1291,6 +1291,70 @@ async fn one_client_exiting_stops_only_its_own_calls() {
     eventually("the tab to go idle", || !relay.st().tab_busy(tab)).await;
 }
 
+/// A client that exits mid-call closes its HTTP connection, so hyper drops the request's future while the call still
+/// runs. The call must still be stopped and forgotten once its process is gone, or the relay counts as busy forever
+/// (no idle, no update restart) and logs `client.gone` for that process on every sweep.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_whose_client_hung_up_and_exited_is_forgotten() {
+    let (h, _seen, _events) = connected("profile-hung-up", 190).await;
+    let relay = h.handle.relay.clone();
+    let port = h.handle.port();
+    let tab = h.handle.browser().open_tab(None, &TabOptions::default()).await.unwrap().tab;
+    let dead = exited_pid();
+
+    // Over HTTP: the client sends the call, then its process goes and the connection closes.
+    let body = json!({ "name": "handoff", "arguments": { "message": "wait", "tab": tab, "timeoutSeconds": 600 } }).to_string();
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let head = format!(
+        "POST /tools/call HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {}\r\nOpenCode-Browser-Client-Pid: {dead}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        h.handle.token(),
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    stream.write_all(body.as_bytes()).await.unwrap();
+    eventually("the handoff", || relay.st().handoffs.contains_key(&tab)).await;
+    drop(stream);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // And a call whose future was dropped some other way.
+    let other = h.handle.browser().open_tab(None, &TabOptions::default()).await.unwrap().tab;
+    let dropped = {
+        let relay = relay.clone();
+        let call = browse_core::ToolCallRequest { name: "handoff".into(), arguments: json!({ "message": "wait", "tab": other, "timeoutSeconds": 600 }) };
+        tokio::spawn(async move { crate::serve::call_tool(&relay, call, Some(dead)).await })
+    };
+    eventually("the second handoff", || relay.st().handoffs.contains_key(&other)).await;
+    dropped.abort();
+    let _ = dropped.await;
+
+    crate::serve::sweep_clients(&relay).await;
+    eventually("the calls to be forgotten", || relay.st().calls.is_empty()).await;
+    eventually("the handoffs to come down", || relay.st().handoffs.is_empty()).await;
+    {
+        let st = relay.st();
+        assert!(st.stopped.is_empty() && st.chosen_calls.is_empty(), "nothing is left behind");
+    }
+    assert!(relay.inflight.lock().unwrap().is_empty(), "the watchdog's list is empty too");
+    eventually("the tabs to go idle", || !relay.st().tab_busy(tab) && !relay.st().tab_busy(other)).await;
+    relay.st().last_activity = std::time::Instant::now() - Duration::from_secs(60);
+    assert!(relay.idle(Duration::ZERO), "a dead client's call doesn't hold the relay busy");
+    // Nothing of that client is left for the next sweep to find.
+    crate::serve::sweep_clients(&relay).await;
+    assert!(relay.st().calls.is_empty());
+
+    // A call listed after its task ended, whatever left it there, is forgotten by the sweep after the one that saw it.
+    let ended = tokio::spawn(async {});
+    let abort = ended.abort_handle();
+    ended.await.unwrap();
+    relay.call_started(9_999, abort, Some(dead), None);
+    crate::serve::sweep_clients(&relay).await;
+    assert_eq!(relay.stop_calls_where("again", |call| call.pid == Some(dead)), 0, "a stopped call isn't stopped (and logged) again");
+    assert!(relay.st().calls.contains_key(&9_999), "one sweep may race the call's own cleanup");
+    crate::serve::sweep_clients(&relay).await;
+    assert!(relay.st().calls.is_empty() && relay.st().stopped.is_empty() && relay.st().lingering.is_empty());
+    assert!(relay.idle(Duration::ZERO));
+}
+
 /// POST /tools/cancel stops the call its caller keyed (an MCP client's `notifications/cancelled`): the handoff card
 /// comes down and the tab is free. A cancel that arrives before its call stops the call as it starts.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

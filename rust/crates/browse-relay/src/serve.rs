@@ -577,10 +577,9 @@ pub async fn call_tool_keyed(relay: &Arc<Relay>, request: ToolCallRequest, clien
     relay.inflight.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(id, InFlight { tool: name.clone(), tab, since: started });
     let task = tokio::spawn(RELAY.scope(relay.clone(), CALL.scope(id, TOOL.scope(name.clone(), CLIENT.scope(client_pid, async move { tool.call(context, arguments).await })))));
     relay.call_started(id, task.abort_handle(), client_pid, key);
-    let outcome = task.await;
-    let stopped = relay.st().stopped.remove(&id);
-    let used = relay.call_finished(id);
-    relay.inflight.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&id);
+    let mut call = RunningCallGuard { relay: relay.clone(), id, task: Some(task) };
+    let outcome = call.wait().await;
+    let (stopped, used) = call.finish();
     let ms = started.elapsed().as_millis() as u64;
     let mut output = match outcome {
         Ok(Ok(output)) => output,
@@ -636,6 +635,56 @@ pub async fn call_tool_keyed(relay: &Arc<Relay>, request: ToolCallRequest, clien
     Ok(output)
 }
 
+/// A running call's bookkeeping (`calls`, `stopped`, `chosen_calls`, `inflight`), ended exactly once. The request
+/// that waits on the call can be dropped before the call ends: a client that exits closes its connection, and hyper
+/// then drops the request's future. Nobody can get the answer then, so the call is stopped and forgotten once its task
+/// is gone, instead of counting as running (the relay never idle, so never updated) for as long as the relay runs.
+struct RunningCallGuard {
+    relay: Arc<Relay>,
+    id: u64,
+    task: Option<tokio::task::JoinHandle<anyhow::Result<ToolOutput>>>,
+}
+
+impl RunningCallGuard {
+    async fn wait(&mut self) -> Result<anyhow::Result<ToolOutput>, tokio::task::JoinError> {
+        self.task.as_mut().expect("the call is still running").await
+    }
+
+    /// The call ended: why it was stopped, if it was, and the tabs it used.
+    fn finish(&mut self) -> (Option<String>, Vec<i64>) {
+        self.task = None;
+        forget_call(&self.relay, self.id)
+    }
+}
+
+fn forget_call(relay: &Arc<Relay>, id: u64) -> (Option<String>, Vec<i64>) {
+    let stopped = relay.st().stopped.remove(&id);
+    let used = relay.call_finished(id);
+    relay.inflight.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&id);
+    (stopped, used)
+}
+
+impl Drop for RunningCallGuard {
+    fn drop(&mut self) {
+        let Some(task) = self.task.take() else { return };
+        task.abort();
+        rlog!("tool.abandoned", id = self.id);
+        let (relay, id) = (self.relay.clone(), self.id);
+        match tokio::runtime::Handle::try_current() {
+            // After the task is gone, so what its drop does (a handoff card coming down) happens first.
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    let _ = task.await;
+                    forget_call(&relay, id);
+                });
+            }
+            Err(_) => {
+                forget_call(&relay, id);
+            }
+        }
+    }
+}
+
 /// An output this big (a large eval result, a full-page screenshot) leaves freed memory worth handing back.
 const LARGE_OUTPUT: usize = 1024 * 1024;
 
@@ -653,23 +702,35 @@ fn release_memory_soon() {
     });
 }
 
-/// Calls and handoffs whose own process exited are stopped; every other client's carry on.
+/// Calls and handoffs whose own process exited are stopped; every other client's carry on. A call whose task ended
+/// but that is still listed a sweep later is forgotten, so nothing can keep the relay busy for good.
 pub(crate) async fn sweep_clients(relay: &Arc<Relay>) {
-    let dead: Vec<u32> = {
+    let (dead, stale) = {
         let mut st = relay.st();
         let mut alive = HashMap::new();
         let mut alive = |pid: u32| *alive.entry(pid).or_insert_with(|| crate::util::process_alive(pid));
-        let mut dead: Vec<u32> = st.calls.values().filter_map(|c| c.pid).chain(st.handoffs.values().filter_map(|h| h.pid)).filter(|pid| !alive(*pid)).collect();
+        let calls = st.calls.iter().filter(|(id, _)| !st.stopped.contains_key(id)).filter_map(|(_, c)| c.pid);
+        let mut dead: Vec<u32> = calls.chain(st.handoffs.values().filter_map(|h| h.pid)).filter(|pid| !alive(*pid)).collect();
         dead.sort();
         dead.dedup();
         st.clients.retain(|pid| alive(*pid));
-        dead
+        let ended: std::collections::HashSet<u64> = st.calls.iter().filter(|(_, call)| call.abort.is_finished()).map(|(id, _)| *id).collect();
+        let stale: Vec<u64> = ended.intersection(&st.lingering).copied().collect();
+        st.lingering = ended.into_iter().filter(|id| !stale.contains(id)).collect();
+        (dead, stale)
     };
+    for id in stale {
+        let pid = relay.st().calls.get(&id).and_then(|call| call.pid);
+        rlog!("call.forgotten", id = id, pid = pid);
+        forget_call(relay, id);
+    }
     for pid in dead {
         let message = format!("The client that called this (process {pid}) exited, so it was stopped.");
         let stopped = relay.stop_calls_where(&message, |call| call.pid == Some(pid));
-        rlog!("client.gone", pid = pid, calls = stopped);
-        relay.finish_client_handoffs(pid);
+        let handoffs = relay.finish_client_handoffs(pid);
+        if stopped > 0 || handoffs > 0 {
+            rlog!("client.gone", pid = pid, calls = stopped, handoffs = handoffs);
+        }
     }
 }
 

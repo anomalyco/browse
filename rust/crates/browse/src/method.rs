@@ -396,7 +396,7 @@ pub fn detect(exe: &Path, launcher: &Launcher, installed: &Path) -> Install {
     if installed.is_file() && canonical(installed) == exe {
         return Install::Binary(installed.to_path_buf());
     }
-    if let Some(install) = package_install(&exe, launcher) {
+    if let Some(install) = package_install(&exe, launcher).or_else(|| replaced_package(&exe, launcher)) {
         return install;
     }
     let checkout = exe.ancestors().any(|dir| dir.file_name().is_some_and(|n| n == "target") && dir.parent().is_some_and(|p| p.join("Cargo.toml").is_file()));
@@ -429,6 +429,52 @@ fn package_install(exe: &Path, launcher: &Launcher) -> Option<Install> {
                 Some(Install::Global(Global { package: entry, platform: platform.clone(), manager: Manager::Pnpm { home }, launcher: launcher.clone() }))
             })
         }),
+    }
+}
+
+/// The platform package of this build (npm/browse.mjs): `browse-<os>-<arch>[-musl]`.
+fn own_platform() -> String {
+    let os = if cfg!(target_os = "macos") { "darwin" } else if cfg!(windows) { "windows" } else { "linux" };
+    let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
+    format!("browse-{os}-{arch}{}", if cfg!(target_env = "musl") { "-musl" } else { "" })
+}
+
+/// A package folder a package manager's update moved aside before deleting it, which a running binary's path keeps
+/// naming: bun renames `node_modules/@opencode/browse-linux-x64` to `node_modules/.old-<hex>`, npm renames a package
+/// to `.<name>-<random>` beside it (`@opencode/.browse-linux-x64-4Vb0GwU6`, or `@opencode/.browse-<random>` with the
+/// platform package nested in it).
+fn moved_aside(exe: &Path) -> bool {
+    exe.ancestors().any(|dir| {
+        let Some(name) = dir.file_name().map(|n| n.to_string_lossy()) else { return false };
+        let bun = named(dir.parent(), "node_modules") && name.strip_prefix(".old-").is_some_and(|hex| !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit()));
+        let npm = named(dir.parent(), "@opencode") && name.starts_with(".browse");
+        bun || npm
+    })
+}
+
+/// The global install a package manager updated under this running binary. Its update moved the platform package
+/// this binary ran from aside ([moved_aside]) or left it behind (pnpm's previous version in its store, which the
+/// install's link no longer points at), so the path no longer leads to the install; the launcher that ran this
+/// binary (OPENCODE_BROWSER_NPM_LAUNCHER, a stable path) names the live package.
+fn replaced_package(exe: &Path, launcher: &Launcher) -> Option<Install> {
+    if !named(exe.parent(), "bin") || !(moved_aside(exe) || pnpm_store_home(exe).is_some()) {
+        return None;
+    }
+    let package = canonical(launcher.file.as_deref()?).parent()?.parent()?.to_path_buf();
+    if !is_package(&package) {
+        return None;
+    }
+    // bun's rename loses the platform package's name: it is this build's.
+    let platform = exe
+        .ancestors()
+        .filter(|dir| named(dir.parent(), "@opencode"))
+        .filter_map(|dir| dir.file_name()?.to_str())
+        .find(|name| name.starts_with("browse-"))
+        .map_or_else(own_platform, str::to_owned);
+    platform_binary(&package, &platform)?;
+    match classify(&package, platform, launcher) {
+        Install::Global(global) => Some(Install::Global(global)),
+        _ => None,
     }
 }
 
@@ -539,10 +585,16 @@ fn pnpm_globals(home: &Path) -> Vec<PathBuf> {
     found.into_iter().map(|(_, path)| path).collect()
 }
 
-/// This process's install.
+/// This process's install, as found the first time it's asked. It can't change while the process runs, but its path
+/// can stop showing it: a package manager's update moves or leaves behind the files a long-running relay runs from.
 pub fn install() -> Install {
-    let Ok(exe) = crate::relay::current_exe() else { return Install::Other };
-    detect(&exe, &Launcher::from_env(), &crate::relay_api::bin_root().join(EXECUTABLE))
+    static FOUND: std::sync::OnceLock<Install> = std::sync::OnceLock::new();
+    FOUND
+        .get_or_init(|| {
+            let Ok(exe) = crate::relay::current_exe() else { return Install::Other };
+            detect(&exe, &Launcher::from_env(), &crate::relay_api::bin_root().join(EXECUTABLE))
+        })
+        .clone()
 }
 
 #[cfg(test)]
@@ -763,6 +815,58 @@ mod tests {
         assert_eq!(npm.binary(), None);
         let musl = tree.platform(&format!("prefix/lib/node_modules/@opencode/browse/node_modules/@opencode/{P}-musl"));
         assert_eq!(npm.binary(), cfg!(target_os = "linux").then_some(musl));
+    }
+
+    /// A running relay's own path after its package manager updated the install under it, as each one leaves it (bun
+    /// and npm move the old folder aside and delete it; pnpm 11 points its link at the new version and leaves the old
+    /// one in its store). The launcher's path still names the install, and its binary is the new one.
+    #[cfg(unix)]
+    #[test]
+    fn finds_the_install_after_an_update_moved_the_running_binary() {
+        let tree = Tree::new("moved-aside");
+        let native = super::own_platform();
+
+        // bun: node_modules/@opencode/<platform> → node_modules/.old-<HEX>, as `bun add -g` did on romulus.
+        let global = "home/.bun/install/global";
+        tree.file(&format!("{global}/package.json"), "{}");
+        let launcher = tree.package(&format!("{global}/node_modules/@opencode/browse"));
+        let fresh = tree.platform(&format!("{global}/node_modules/@opencode/{native}"));
+        let old = tree.platform(&format!("{global}/node_modules/.old-7F238787734E9E6A"));
+        let mut cases = vec![("bun", old, launcher, fresh, "bun", tree.path(&format!("{global}/node_modules/@opencode/browse")))];
+
+        // npm, hoisted: lib/node_modules/@opencode/.<platform>-<random>.
+        let (launcher, fresh, _) = npm(&tree, "hoisted", true);
+        let old = tree.platform(&format!("hoisted/lib/node_modules/@opencode/.{P}-4Vb0GwU6"));
+        cases.push(("npm, hoisted", old, launcher, fresh, "npm", tree.path("hoisted/lib/node_modules/@opencode/browse")));
+        // npm, nested: the whole package moved to @opencode/.browse-<random>, its platform package inside.
+        let (launcher, fresh, _) = npm(&tree, "nested", false);
+        let old = tree.platform(&format!("nested/lib/node_modules/@opencode/.browse-Zx81kQpA/node_modules/@opencode/{P}"));
+        cases.push(("npm, nested", old, launcher, fresh, "npm", tree.path("nested/lib/node_modules/@opencode/browse")));
+
+        // pnpm 11: the install's link moved to 0.2.0; 0.1.0 stays in the store.
+        let links = "pnpm11/store/v11/links/@opencode";
+        let old = tree.platform(&format!("{links}/{P}/{V}/bbb/node_modules/@opencode/{P}"));
+        let package = format!("{links}/browse/0.2.0/ddd/node_modules/@opencode/browse");
+        tree.package(&package);
+        let fresh = tree.platform(&format!("{links}/{P}/0.2.0/eee/node_modules/@opencode/{P}"));
+        tree.link(&format!("{links}/browse/0.2.0/ddd/node_modules/@opencode/{P}"), &format!("../../../../../{P}/0.2.0/eee/node_modules/@opencode/{P}"));
+        tree.link("pnpm11/global/v11/4ab/node_modules/@opencode/browse", "../../../../../store/v11/links/@opencode/browse/0.2.0/ddd/node_modules/@opencode/browse");
+        let launcher = tree.path("pnpm11/global/v11/4ab/node_modules/@opencode/browse/dist/cli.mjs");
+        cases.push(("pnpm 11", old, launcher, fresh, "pnpm", tree.path("pnpm11/global/v11/4ab/node_modules/@opencode/browse")));
+
+        let installed = tree.path("home/.local/bin/browse");
+        for (case, old, launcher, fresh, method, package) in cases {
+            let install = detect(&old, &launched(&launcher), &installed);
+            assert_eq!((install.name(), install.executable().map(|b| std::fs::canonicalize(b).unwrap())), (method, Some(fresh)), "{case}");
+            let Install::Global(global) = &install else { panic!("{case}") };
+            assert_eq!(global.package, package, "{case}");
+            assert!(install.updates_itself(), "{case}");
+            // Without the launcher's word, a moved binary is no install browse can update.
+            assert_eq!(detect(&old, &Launcher::default(), &installed), Install::Other, "{case}");
+        }
+        // A launcher inherited by an unrelated binary still doesn't make it a package's.
+        let (launcher, _, _) = npm(&tree, "other", false);
+        assert_eq!(detect(&tree.file("Downloads/.old-ABCDEF/bin/browse", ""), &launched(&launcher), &installed), Install::Other);
     }
 
     fn args(command: &std::process::Command) -> Vec<String> {

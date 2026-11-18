@@ -383,6 +383,94 @@ fn bun_global_install() {
     scene.run("bun", &binary, &launcher, None, |registry| format!("{} add --global --no-progress @opencode/browse@{NEXT} --registry={registry}", root.display()));
 }
 
+/// `curl` against the relay's tool API with its token; extra arguments go first.
+fn relay_call(scene: &Scene, port: u16, body: &str, extra: &[&str]) -> Command {
+    let token = std::fs::read_to_string(scene.home.join(".browse/relay-token")).unwrap();
+    let mut curl = Command::new("curl");
+    curl.args(extra)
+        .args(["-s", "-X", "POST", "-H", &format!("Authorization: Bearer {}", token.trim()), "-H", "Content-Type: application/json", "--data", body])
+        .arg(format!("http://127.0.0.1:{port}/tools/call"));
+    curl
+}
+
+/// What bun really does on `bun add -g` (as on romulus): the running relay's platform package is renamed to
+/// `node_modules/.old-<HEX>` and deleted, so the relay's own path no longer leads to its install. And a client that
+/// exited mid-call left a call behind, which used to hold the relay busy forever. The relay still installs the update
+/// once idle, reports the bun install while it does, and restarts on the new binary.
+#[test]
+fn bun_update_moves_the_running_binary_aside_after_a_client_died_mid_call() {
+    let scene = Scene::new("bun-moved");
+    let root = scene.home.join(".bun");
+    let global = root.join("install/global");
+    write(&global.join("package.json"), r#"{"dependencies":{"@opencode/browse":"dev"}}"#);
+    let package = global.join("node_modules/@opencode/browse");
+    let launcher = scene.package(&package);
+    let platform = global.join(format!("node_modules/@opencode/{PLATFORM}"));
+    let binary = scene.platform(&platform);
+    let (swapped, go) = (scene.root.join("swapped"), scene.root.join("go"));
+    let aside = global.join("node_modules/.old-7F238787734E9E6A");
+    write_executable(
+        &root.join("bin/bun"),
+        &format!(
+            "#!/bin/sh\necho \"$BUN_INSTALL $*\" >> '{calls}'\nmv '{platform}' '{aside}'\n{swap}rm -rf '{aside}'\n: > '{swapped}'\ni=0\nwhile [ ! -f '{go}' ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done\n",
+            calls = scene.calls.display(),
+            platform = platform.display(),
+            aside = aside.display(),
+            swap = scene.swap(&package, &binary),
+            swapped = swapped.display(),
+            go = go.display(),
+        ),
+    );
+    // A paired browser that hasn't connected: a call that needs it waits for it to start.
+    let token = "a".repeat(43);
+    write(&scene.home.join(".browse/browser-tokens.json"), &format!(r#"{{"profile":{{"token":"{token}","pairedAt":1}}}}"#));
+
+    let (service, _requests) = release_service();
+    let port = free_port();
+    let mut serve = Command::new(&binary);
+    scene.isolate(&mut serve, &service, port);
+    serve
+        .arg("serve")
+        .env("OPENCODE_BROWSER_MANAGED_RELAY", "1")
+        // The first check comes after the dead client's call is in.
+        .env("OPENCODE_BROWSER_AUTO_UPDATE_INTERVAL_MS", "4000")
+        .env("OPENCODE_BROWSER_AUTO_UPDATE_QUIET_MS", "0")
+        .env("OPENCODE_BROWSER_NPM_LAUNCHER", &launcher)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut relay = serve.spawn().unwrap();
+    wait_for("the relay", Duration::from_secs(10), || scene.home.join(".browse/relay-token").exists() && std::net::TcpStream::connect(("127.0.0.1", port)).is_ok());
+
+    // The client process makes a call that waits for the browser, then exits without an answer.
+    let body = r#"{"name":"tabs","arguments":{"action":"new"}}"#;
+    let call = relay_call(&scene, port, body, &[]);
+    let args: Vec<String> = call.get_args().map(|a| format!("'{}'", a.to_string_lossy())).collect();
+    let mut client = Command::new("sh").arg("-c").arg(format!("exec curl -H \"OpenCode-Browser-Client-Pid: $$\" {}", args.join(" "))).stdout(Stdio::null()).spawn().unwrap();
+    std::thread::sleep(Duration::from_millis(700));
+    assert!(client.try_wait().unwrap().is_none(), "the call is waiting for the browser");
+    client.kill().unwrap();
+    client.wait().unwrap();
+
+    wait_for("bun to run", Duration::from_secs(30), || swapped.exists());
+    assert!(!aside.exists() && relay.try_wait().unwrap().is_none());
+    // What the extension's pages show while the relay still runs from the deleted folder.
+    let status = run_output(&mut relay_call(&scene, port, r#"{"name":"status","arguments":{}}"#, &[]));
+    let output: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap_or_else(|_| panic!("{status:?}"));
+    let status: serde_json::Value = serde_json::from_str(output["content"][0]["text"].as_str().unwrap()).unwrap();
+    let auto = &status["autoUpdate"];
+    assert_eq!((auto["method"].as_str(), auto["effective"].as_str()), (Some("bun"), Some("on")), "{auto}");
+    assert!(auto["updateCommand"].as_str().unwrap().starts_with("bun add -g @opencode/browse@"), "{auto}");
+    write(&go, "");
+
+    wait_for("the relay to restart on the new binary", Duration::from_secs(30), || scene.started.exists() && relay.try_wait().unwrap().is_some());
+    assert!(relay.wait().unwrap().success());
+    assert_eq!(std::fs::read_to_string(&scene.started).unwrap().trim(), "serve 1");
+    assert!(std::fs::read_to_string(&scene.calls).unwrap().contains(&format!("add --global --no-progress @opencode/browse@{NEXT}")));
+    let log = std::fs::read_to_string(scene.home.join(".browse/logs/relay.log")).unwrap_or_default();
+    assert!(log.matches("client.gone").count() <= 1, "{log}");
+}
+
 #[test]
 fn yarn_global_install() {
     let scene = Scene::new("yarn");
