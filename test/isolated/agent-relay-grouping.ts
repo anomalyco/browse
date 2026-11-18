@@ -698,7 +698,7 @@ describe("the relay's settings tool", () => {
     expect((await command("settings.get", {})).settings).toMatchObject({ grouping: "shared" })
   })
 
-  test("turning muteTabs on mutes the tabs agents already have open, and off unmutes them", async () => {
+  test("turning muteTabs on mutes the tabs agents already have open; off unmutes only the ones browse muted", async () => {
     const { userTab } = await userWindow()
     const first = await agentTab("github")
     const second = await agentTab("linear")
@@ -708,8 +708,13 @@ describe("the relay's settings tool", () => {
     await until(() => tab(first.tabId).muted && tab(second.tabId).muted)
     // The user's own tab isn't an agent tab and stays as it was.
     expect(tab(userTab).muted).toBe(false)
+    // The user muted this tab themselves: that mute is theirs to undo, not the setting's.
+    tab(second.tabId).mutedInfo = { muted: true, reason: "user" }
     await stub.chrome.storage.local.set({ muteTabs: "off" })
-    await until(() => !tab(first.tabId).muted && !tab(second.tabId).muted)
+    await until(() => !tab(first.tabId).muted)
+    // The setting unmutes tab by tab; let it reach the user-muted one before checking it was left alone.
+    for (let i = 0; i < 20; i++) await settle()
+    expect(tab(second.tabId).muted).toBe(true)
     expect(tab(userTab).muted).toBe(false)
   })
 })

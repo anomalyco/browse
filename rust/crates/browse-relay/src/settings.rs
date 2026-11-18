@@ -124,9 +124,11 @@ pub fn from_extension(answer: &Value) -> Result<Vec<(String, String)>, String> {
                 ("idleMinutes", Some(Value::Number(n))) if n.as_u64() == Some(0) => "never".to_string(),
                 ("idleMinutes", Some(Value::Number(n))) => n.to_string(),
                 ("idleMinutes", _) => "10".to_string(),
-                (_, Some(Value::String(s))) => s.clone(),
-                // Older extensions don't send muteTabs; its default is off, not its first listed value.
+                // Only exactly "on" mutes. An older extension doesn't send muteTabs at all, and its default is off,
+                // not its first listed value; the same goes for a value this relay doesn't know.
+                ("muteTabs", Some(Value::String(s))) if s == "on" => "on".to_string(),
                 ("muteTabs", _) => "off".to_string(),
+                (_, Some(Value::String(s))) => s.clone(),
                 _ => spec(key).unwrap().values[0].to_string(),
             };
             (key.to_string(), text)
@@ -245,5 +247,8 @@ mod tests {
         let stored = from_extension(&json!({ "settings": { "window": "current", "grouping": "shared", "idleMinutes": 10, "humanInput": "on", "handoffNotifications": "recording" } })).unwrap();
         assert_eq!(lookup(&stored, "groupCollapse"), "auto");
         assert_eq!(lookup(&stored, "muteTabs"), "off", "muteTabs defaults off, though on is listed first");
+        // Only exactly "on" mutes; any other value the extension might send reads as off, as in the extension.
+        let odd = from_extension(&json!({ "settings": { "muteTabs": "sometimes" } })).unwrap();
+        assert_eq!(lookup(&odd, "muteTabs"), "off", "only on is on");
     }
 }

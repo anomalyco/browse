@@ -469,7 +469,7 @@ describe("the settings tool's relay API", () => {
     await Bun.sleep(200)
   }, 20_000)
 
-  test("an extension that predates groupCollapse reads as auto", async () => {
+  test("an extension that predates groupCollapse and muteTabs reads their defaults", async () => {
     const older = new FakeExtension(home, port)
       .on("settings.get", () => ({ settings: { window: "current", grouping: "shared", idleMinutes: 10, humanInput: "on", handoffNotifications: "recording" } }))
     expect(await older.pair()).toBe(true)

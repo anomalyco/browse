@@ -111,6 +111,16 @@ describe("tabs.create", () => {
     await until(() => stub.state.tabs.get(onId)!.muted === true)
   })
 
+  test("with the separate setting and mute agent tabs on, the tab opens muted", async () => {
+    await stub.chrome.storage.local.set({ agentTabsWindow: "separate", muteTabs: "on" })
+    const user = await stub.chrome.windows.create({ url: "https://user.example/", focused: true })
+    const created = await command("tabs.create", { url: "https://example.com/", active: false })
+    const tabId = (created.result as { tabId: number }).tabId
+    await until(() => stub.state.tabs.get(tabId)!.muted === true)
+    // In the agents' own window, not the user's.
+    expect(stub.state.tabs.get(tabId)!.windowId).not.toBe(user.id)
+  })
+
   test("with the separate setting opens it in the agent window, unfocused", async () => {
     await stub.chrome.storage.local.set({ agentTabsWindow: "separate" })
     const user = await stub.chrome.windows.create({ url: "https://user.example/", focused: true })
