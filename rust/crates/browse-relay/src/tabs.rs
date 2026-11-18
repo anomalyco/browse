@@ -15,7 +15,7 @@ use tokio::sync::broadcast;
 use crate::domain;
 use crate::guardrails::is_restricted_url;
 use crate::link::{Link, RpcError};
-use crate::protocol::{CAPABILITY_TAB_RELEASE, CAPABILITY_TAB_WINDOWS};
+use crate::protocol::{CAPABILITY_KEEP_OPEN, CAPABILITY_TAB_RELEASE, CAPABILITY_TAB_WINDOWS};
 
 /// Why newWindow and windowOf don't work in a directly driven browser.
 const DIRECT_WINDOWS: &str = "newWindow and windowOf work in browsers browse reaches through its extension, not in a directly driven one (Firefox); open the tab without them.";
@@ -245,8 +245,15 @@ impl Relay {
         }
         self.schedule_persist();
         self.ext_best_effort(tab, "action.setAttached", json!({ "attached": true }));
-        // The extension runs its own idle cleanup, so it needs the same exemption the relay has.
-        self.ext_best_effort(tab, "tabs.keepOpen", json!({ "keepOpen": keep_open }));
+        // The extension runs its own idle cleanup, so it needs the same exemption the relay has. An extension that
+        // doesn't know how to hold a tab gets a warning instead: the tab still opens, and only the relay keeps it.
+        if keep_open {
+            if link.supports(CAPABILITY_KEEP_OPEN) {
+                self.ext_best_effort(tab, "tabs.keepOpen", json!({ "keepOpen": true }));
+            } else {
+                self.warn_keep_open_unavailable(tab, &link);
+            }
+        }
         self.refresh_presentation(tab, true);
         rlog!("target.attached", tabId = tab, owner = owner.name());
         Ok(tab)
@@ -448,7 +455,7 @@ impl Relay {
             bail!("The browse extension in {} is too old to choose a tab's window (newWindow, windowOf). Update it (chrome://extensions, Update), then try again; or open the tab without them.", link.name);
         }
         let mut params = json!({ "url": "about:blank", "active": false });
-        if options.keep_open {
+        if options.keep_open && link.supports(CAPABILITY_KEEP_OPEN) {
             params["keepOpen"] = true.into();
         }
         let override_window = crate::settings::agent_window_override();

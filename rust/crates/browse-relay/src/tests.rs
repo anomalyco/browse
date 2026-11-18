@@ -76,7 +76,14 @@ async fn next(socket: &mut Socket) -> Value {
     }
 }
 
+/// What the fake extension announces in its hello. A store extension that predates both (0.0.17) sends none.
+const CAPABILITIES: &[&str] = &["tab-release", "keep-open"];
+
 fn hello(profile: &str, mode: &str, nonce: &str, ecdh: Option<&str>) -> Value {
+    hello_with_capabilities(profile, mode, nonce, ecdh, CAPABILITIES)
+}
+
+fn hello_with_capabilities(profile: &str, mode: &str, nonce: &str, ecdh: Option<&str>, capabilities: &[&str]) -> Value {
     let mut pairing = json!({ "nonce": nonce, "mode": mode });
     if let Some(key) = ecdh {
         pairing["ecdh"] = key.into();
@@ -95,11 +102,15 @@ fn origin() -> String {
 
 /// Pairs with an issued token, the way the extension does on every connection.
 async fn pair_with_token(port: u16, paths: &Paths, profile: &str) -> Socket {
+    pair_with_capabilities(port, paths, profile, CAPABILITIES).await
+}
+
+async fn pair_with_capabilities(port: u16, paths: &Paths, profile: &str, capabilities: &[&str]) -> Socket {
     let token = pairing::issue_browser_token(paths, profile, None, None).unwrap();
     let mut socket = connect(port, &origin()).await.unwrap();
     send(&mut socket, json!({ "method": "protocol", "params": { "protocolVersion": 3 } })).await;
     let nonce = b64url(&random_bytes::<32>());
-    send(&mut socket, hello(profile, "token", &nonce, None)).await;
+    send(&mut socket, hello_with_capabilities(profile, "token", &nonce, None, capabilities)).await;
     let challenge = next(&mut socket).await;
     assert_eq!(challenge["method"], "auth.challenge", "{challenge}");
     let relay_nonce = challenge["params"]["nonce"].as_str().unwrap().to_string();
@@ -269,6 +280,13 @@ async fn eventually_within(what: &str, limit: Duration, check: impl Fn() -> bool
     panic!("timed out waiting for {what}");
 }
 
+/// Waits for the tab's attached badge, then gives the best-effort commands sent beside it (`tabs.keepOpen` is
+/// spawned, not awaited) time to arrive, so "it never sends one" means something.
+async fn settled(seen: &Seen, tab: i64) {
+    eventually("the tab's attached badge", || seen.commands("action.setAttached").iter().any(|c| c["params"]["tabId"] == tab)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
 #[tokio::test]
 async fn pairs_with_a_token_and_routes_cdp_per_tab_and_child_session() {
     let h = harness().await;
@@ -282,6 +300,7 @@ async fn pairs_with_a_token_and_routes_cdp_per_tab_and_child_session() {
         let st = relay.st();
         assert_eq!(st.links[0].id, "test-chrome");
         assert!(st.links[0].supports("tab-release"));
+        assert!(st.links[0].supports("keep-open"));
     }
 
     let browser = h.handle.browser();
@@ -291,6 +310,8 @@ async fn pairs_with_a_token_and_routes_cdp_per_tab_and_child_session() {
     assert_eq!(tab.options.browser.as_deref(), Some("test-chrome"));
     assert_eq!(seen.commands("tabs.create")[0]["params"], json!({ "url": "about:blank", "active": false }));
     assert_eq!(seen.commands("debugger.attach")[0]["params"]["tabId"], 7);
+    settled(&seen, 7).await;
+    assert!(seen.commands("tabs.keepOpen").is_empty(), "a normal tab needs no keepOpen: {:?}", seen.commands("tabs.keepOpen"));
     assert_eq!(seen.cdp("Target.setAutoAttach")[0]["params"]["params"], json!({ "autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true }));
     assert!(seen.cdp("Runtime.enable").is_empty(), "the relay never enables Runtime on its own");
 
@@ -601,12 +622,20 @@ async fn a_quiet_connected_client_does_not_keep_the_relay_from_going_idle() {
 }
 
 async fn connected(profile: &str, next_tab: i64) -> (Harness, Arc<Seen>, mpsc::UnboundedSender<Value>) {
-    connected_with_urls(profile, next_tab, TargetUrls::default()).await
+    connected_with_capabilities(profile, next_tab, CAPABILITIES).await
+}
+
+async fn connected_with_capabilities(profile: &str, next_tab: i64, capabilities: &[&str]) -> (Harness, Arc<Seen>, mpsc::UnboundedSender<Value>) {
+    connected_with_urls_and_capabilities(profile, next_tab, TargetUrls::default(), capabilities).await
 }
 
 async fn connected_with_urls(profile: &str, next_tab: i64, urls: TargetUrls) -> (Harness, Arc<Seen>, mpsc::UnboundedSender<Value>) {
+    connected_with_urls_and_capabilities(profile, next_tab, urls, CAPABILITIES).await
+}
+
+async fn connected_with_urls_and_capabilities(profile: &str, next_tab: i64, urls: TargetUrls, capabilities: &[&str]) -> (Harness, Arc<Seen>, mpsc::UnboundedSender<Value>) {
     let h = harness().await;
-    let socket = pair_with_token(h.handle.port(), &h.paths, profile).await;
+    let socket = pair_with_capabilities(h.handle.port(), &h.paths, profile, capabilities).await;
     let (seen, events) = fake_extension_with_urls(socket, next_tab, urls);
     events.send(json!({ "method": "ready" })).unwrap();
     let relay = h.handle.relay.clone();
@@ -2006,9 +2035,16 @@ async fn environment_idle_time_covers_tabs_without_a_setting_only() {
 async fn keep_open_tabs_survive_idle_cleanup() {
     let (h, seen, _events) = connected("profile-keep-open", 405).await;
     let relay = h.handle.relay.clone();
-    let kept = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "new", "id": "keep-me", "keepOpen": true })).await).unwrap())["tab"].as_i64().unwrap();
+    let opened = tool(&relay, "tabs", json!({ "action": "new", "id": "keep-me", "keepOpen": true })).await;
+    let kept = text(&serde_json::to_value(&opened).unwrap())["tab"].as_i64().unwrap();
+    assert!(!tool_text(&opened).contains("can't keep tabs open"), "a capable extension needs no warning: {}", tool_text(&opened));
     let normal = h.handle.browser().open_tab(None, &TabOptions::default()).await.unwrap().tab;
     assert!(seen.commands("tabs.create")[0]["params"]["keepOpen"].as_bool().unwrap(), "the extension is told, so its own cleanup keeps it");
+    // The extension hears about it once, for the kept tab, and not for a default one.
+    eventually("the keepOpen command", || seen.commands("tabs.keepOpen").len() == 1).await;
+    assert_eq!(seen.commands("tabs.keepOpen")[0]["params"], json!({ "tabId": kept, "keepOpen": true }));
+    settled(&seen, normal).await;
+    assert_eq!(seen.commands("tabs.keepOpen").len(), 1, "a normal tab sends none: {:?}", seen.commands("tabs.keepOpen"));
     let listed = text(&serde_json::to_value(tool(&relay, "tabs", json!({})).await).unwrap());
     let entry = listed["tabs"].as_array().unwrap().iter().find(|t| t["tab"] == kept).unwrap();
     assert_eq!(entry["keepOpen"], true, "tabs list shows the option: {entry}");
@@ -2025,12 +2061,48 @@ async fn keep_open_tabs_survive_idle_cleanup() {
     let closed = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "close", "tab": "keep-me", "idleMinutes": 0 })).await).unwrap());
     assert_eq!(closed["closed"], json!([]), "{closed}");
 
-    // Asking again with a different keepOpen updates the stored option and says so.
+    // Asking again with a different keepOpen updates the stored option, says so, and tells the extension.
     let updated = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "new", "id": "keep-me", "keepOpen": false })).await).unwrap());
     assert_eq!(updated["existed"], true);
     assert!(updated["note"].as_str().unwrap().contains("keepOpen is now off"), "{updated}");
+    eventually("the keepOpen off command", || seen.commands("tabs.keepOpen").len() == 2).await;
+    assert_eq!(seen.commands("tabs.keepOpen")[1]["params"], json!({ "tabId": kept, "keepOpen": false }));
     let closed = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "close", "tab": "keep-me", "idleMinutes": 0 })).await).unwrap());
     assert_eq!(closed["closed"], json!([kept]), "with keepOpen off, idle cleanup closes it again: {closed}");
+}
+
+/// The Chrome Web Store 0.0.17 extension speaks protocol 3 but announces no capabilities: keepOpen is the relay's
+/// alone, and the agent is told the extension still closes the tab when idle.
+#[tokio::test]
+async fn keep_open_on_an_older_extension_warns_and_keeps_the_tab() {
+    let (h, seen, _events) = connected_with_capabilities("profile-keep-open-old", 440, &[]).await;
+    let relay = h.handle.relay.clone();
+    let opened = tool(&relay, "tabs", json!({ "action": "new", "id": "keep-me", "keepOpen": true })).await;
+    assert!(!opened.is_error, "{}", tool_text(&opened));
+    let kept = text(&serde_json::to_value(&opened).unwrap())["tab"].as_i64().unwrap();
+    assert!(seen.commands("tabs.create")[0]["params"].get("keepOpen").is_none(), "an old extension isn't sent a keepOpen it ignores: {:?}", seen.commands("tabs.create"));
+    assert!(
+        tool_text(&opened).contains("The connected browse extension (9.9.9) can't keep tabs open yet, so this tab still closes when idle. Update the extension to keep it open."),
+        "{}",
+        tool_text(&opened)
+    );
+    settled(&seen, kept).await;
+    assert!(seen.commands("tabs.keepOpen").is_empty(), "an old extension never gets tabs.keepOpen: {:?}", seen.commands("tabs.keepOpen"));
+    {
+        let mut st = relay.st();
+        st.tabs.get_mut(&kept).unwrap().last_used = std::time::Instant::now() - Duration::from_secs(3_600);
+    }
+    assert!(!relay.idle_tabs(Duration::from_secs(60)).iter().any(|(tab, _)| *tab == kept), "the relay's own exemption still keeps it");
+
+    // Turning it on for an existing chosen-id tab warns too, and sends nothing.
+    let plain = tool(&relay, "tabs", json!({ "action": "new", "id": "later" })).await;
+    assert!(!tool_text(&plain).contains("can't keep tabs open"), "no warning without keepOpen: {}", tool_text(&plain));
+    let toggled = tool(&relay, "tabs", json!({ "action": "new", "id": "later", "keepOpen": true })).await;
+    assert!(tool_text(&toggled).contains("can't keep tabs open yet, so this tab still closes when idle"), "{}", tool_text(&toggled));
+    let later = text(&serde_json::to_value(&toggled).unwrap())["tab"].as_i64().unwrap();
+    assert!(relay.st().tabs.get(&later).is_some_and(|t| t.options.keep_open), "the relay keeps it anyway");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(seen.commands("tabs.keepOpen").is_empty(), "the toggle sends nothing to an old extension: {:?}", seen.commands("tabs.keepOpen"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
