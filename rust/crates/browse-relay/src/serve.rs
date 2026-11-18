@@ -12,8 +12,8 @@ use anyhow::Context;
 use browse_core::{Content, Tool, ToolCallRequest, ToolContext, ToolOutput};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
-use hyper::body::Incoming;
-use hyper::header::{HeaderValue, UPGRADE};
+use hyper::body::{Body as _, Incoming};
+use hyper::header::{CONNECTION, EXPECT, HeaderValue, UPGRADE};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
@@ -32,8 +32,10 @@ use crate::relay::{AutoUpdateStatus, InFlight, Relay, RelayConfig};
 use crate::rlog;
 use crate::util::secrets_equal;
 
-const MAX_BODY: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_BODY: usize = 16 * 1024 * 1024;
 const MAX_MESSAGE: usize = 256 * 1024 * 1024;
+/// How long a turned-away request may keep the relay reading its body before the connection closes instead.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct ServeOptions {
@@ -282,44 +284,106 @@ fn header<'a>(request: &'a Request<Incoming>, name: &str) -> Option<&'a str> {
 
 /// Reads and drops what is left of a request body before the answer goes out: closing a connection with body bytes
 /// still unread makes the kernel send a reset instead of a clean close, and a macOS client then loses the answer it
-/// hasn't read yet. Frames are dropped as they arrive, up to MAX_BODY, so a huge upload can't hold the relay open.
-async fn discard_body(mut body: Incoming) {
-    let mut left = MAX_BODY;
-    while let Some(frame) = body.frame().await {
-        let Ok(frame) = frame else { return };
-        let Ok(data) = frame.into_data() else { continue };
-        let Some(remaining) = left.checked_sub(data.len()) else { return };
-        left = remaining;
-    }
+/// hasn't read yet. Frames are dropped as they arrive; MAX_BODY and DRAIN_TIMEOUT bound the bytes and the time one
+/// request can keep the relay reading. True means the body ended within both, so the connection can be reused.
+async fn discard_body(mut body: Incoming) -> bool {
+    let drain = async {
+        let mut left = MAX_BODY;
+        while let Some(frame) = body.frame().await {
+            let Ok(frame) = frame else { return false };
+            let Ok(data) = frame.into_data() else { continue };
+            let Some(remaining) = left.checked_sub(data.len()) else { return false };
+            left = remaining;
+        }
+        true
+    };
+    tokio::time::timeout(DRAIN_TIMEOUT, drain).await.unwrap_or(false)
 }
 
-/// Answers a request, reading whatever is left of its body first: every response goes through here, so an early one
-/// (a turned-away request, the version probe) can't leave body bytes unread.
-async fn route(relay: Arc<Relay>, peer: SocketAddr, mut request: Request<Incoming>) -> Response<Full<Bytes>> {
-    let response = answer(relay, peer, &mut request).await;
-    // The extension's upgrade hands the connection over; what follows on it is WebSocket frames, not a body.
-    if response.status() != StatusCode::SWITCHING_PROTOCOLS {
-        discard_body(request.into_body()).await;
-    }
+/// What a route did with the request body, which decides the drain.
+#[derive(Clone, Copy)]
+enum Body {
+    /// It read the body (a POST body), so nothing is left.
+    Taken,
+    /// It answered without touching the body: drain it before the answer.
+    Untouched,
+    /// It refused the body unread (413): polling it would read the upload it already turned away.
+    Refused,
+}
+
+/// The answer to a request, and what it did with the body.
+struct Answer {
+    response: Response<Full<Bytes>>,
+    body: Body,
+}
+
+fn untouched(response: Response<Full<Bytes>>) -> Answer {
+    Answer { response, body: Body::Untouched }
+}
+
+fn too_large() -> Answer {
+    let error = json!({ "error": format!("Request body exceeds {MAX_BODY} bytes"), "code": "invalid-request" });
+    Answer { response: json_response(StatusCode::PAYLOAD_TOO_LARGE, &error), body: Body::Refused }
+}
+
+/// A client announcing `Expect: 100-continue` waits for it before sending the body: polling the body would send
+/// `100 Continue`, inviting an upload to a request already turned away, and waiting for a body it may never send.
+fn expects_continue(request: &Request<Incoming>) -> bool {
+    request.headers().get_all(EXPECT).iter().any(|value| value.to_str().is_ok_and(|v| v.eq_ignore_ascii_case("100-continue")))
+}
+
+/// Tells hyper not to reuse the connection: the body was left unread, or the drain couldn't finish, so it can't carry
+/// another request.
+fn close(mut response: Response<Full<Bytes>>) -> Response<Full<Bytes>> {
+    response.headers_mut().insert(CONNECTION, HeaderValue::from_static("close"));
     response
 }
 
-async fn answer(relay: Arc<Relay>, peer: SocketAddr, request: &mut Request<Incoming>) -> Response<Full<Bytes>> {
+/// Answers a request, settling whatever is left of its body first: every response goes through here, so an early one
+/// (a turned-away request, the version probe) can't leave body bytes unread.
+async fn route(relay: Arc<Relay>, peer: SocketAddr, mut request: Request<Incoming>) -> Response<Full<Bytes>> {
+    let local = crate::origins::is_local_peer(&peer);
+    let Answer { response, body } = answer(relay, peer, &mut request).await;
+    // The extension's upgrade hands the connection over; what follows on it is WebSocket frames, not a body.
+    if response.status() == StatusCode::SWITCHING_PROTOCOLS {
+        return response;
+    }
+    match body {
+        Body::Taken => return response,
+        Body::Refused => return close(response),
+        Body::Untouched => {}
+    }
+    // A remote peer has no route that takes a body: /extension is its only one, and that is the upgrade above.
+    if !local {
+        return close(response);
+    }
+    // Polling this body would send the 100 Continue it is waiting on; hyper closes a connection it never read instead.
+    if expects_continue(&request) {
+        return close(response);
+    }
+    if discard_body(request.into_body()).await {
+        response
+    } else {
+        close(response)
+    }
+}
+
+async fn answer(relay: Arc<Relay>, peer: SocketAddr, request: &mut Request<Incoming>) -> Answer {
     let local = crate::origins::is_local_peer(&peer);
     let path = request.uri().path().trim_end_matches('/').to_string();
     let path = if path.is_empty() { "/".to_string() } else { path };
     if !local && path != "/extension" {
-        return json_response(StatusCode::NOT_FOUND, &json!({}));
+        return untouched(json_response(StatusCode::NOT_FOUND, &json!({})));
     }
     if !relay.ready.load(Ordering::SeqCst) {
-        return json_response(StatusCode::SERVICE_UNAVAILABLE, &json!({ "error": "browse relay is starting", "code": "relay-starting" }));
+        return untouched(json_response(StatusCode::SERVICE_UNAVAILABLE, &json!({ "error": "browse relay is starting", "code": "relay-starting" })));
     }
     if local
         && let Err(error) = crate::origins::validate_host_header(header(request, "host"), &relay.host, relay.port) {
-            return json_response(StatusCode::FORBIDDEN, &json!({ "error": error }));
+            return untouched(json_response(StatusCode::FORBIDDEN, &json!({ "error": error })));
         }
     if path == "/extension" {
-        return upgrade_extension(relay, peer, request);
+        return untouched(upgrade_extension(relay, peer, request));
     }
     let probing = header(request, "x-browse-install") == Some("probe") && relay.st().install_waiting_until.is_some_and(|until| Instant::now() < until);
     let compatibility = json!({ "extensionProtocol": { "min": MIN_EXTENSION_PROTOCOL_VERSION, "version": EXTENSION_PROTOCOL_VERSION }, "pairing": PAIRING_SCHEME });
@@ -332,7 +396,7 @@ async fn answer(relay: Arc<Relay>, peer: SocketAddr, request: &mut Request<Incom
                 body["installWaiting"] = true.into();
             }
         }
-        return json_response(StatusCode::FORBIDDEN, &body);
+        return untouched(json_response(StatusCode::FORBIDDEN, &body));
     }
     if path == "/" || path == "/version" {
         let mut body = json!({
@@ -351,12 +415,12 @@ async fn answer(relay: Arc<Relay>, peer: SocketAddr, request: &mut Request<Incom
         if probing {
             body["installWaiting"] = true.into();
         }
-        return json_response(StatusCode::OK, &body);
+        return untouched(json_response(StatusCode::OK, &body));
     }
     // A relay that is stopping for an update must not start new work: answer before the tool would wait on a browser
     // that is already going away. The client retries this (the request never ran) once a restarted relay answers.
     if relay.is_stopping() {
-        return json_response(StatusCode::SERVICE_UNAVAILABLE, &json!({ "error": "browse relay is restarting; try again in a moment", "code": "relay-restarting" }));
+        return untouched(json_response(StatusCode::SERVICE_UNAVAILABLE, &json!({ "error": "browse relay is restarting; try again in a moment", "code": "relay-restarting" })));
     }
     let mut authorized = header(request, "authorization").and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer "))).map(str::trim).map(str::to_string);
     // The TypeScript relay's /json/version handed connectOverCDP clients a WebSocket URL with the token in its query.
@@ -364,7 +428,7 @@ async fn answer(relay: Arc<Relay>, peer: SocketAddr, request: &mut Request<Incom
         authorized = url::form_urlencoded::parse(request.uri().query().unwrap_or_default().as_bytes()).find(|(k, _)| k == LEGACY_TOKEN_PARAM).map(|(_, v)| v.into_owned());
     }
     if !secrets_equal(&relay.token, authorized.as_deref()) {
-        return json_response(StatusCode::UNAUTHORIZED, &json!({ "error": "Missing or invalid browse relay token", "code": "unauthorized" }));
+        return untouched(json_response(StatusCode::UNAUTHORIZED, &json!({ "error": "Missing or invalid browse relay token", "code": "unauthorized" })));
     }
     let method = request.method().clone();
     let waiting = header(request, "x-browse-install") == Some("waiting");
@@ -374,22 +438,27 @@ async fn answer(relay: Arc<Relay>, peer: SocketAddr, request: &mut Request<Incom
     // The TypeScript client's HTTP client (Effect's) sends trace headers on every request; this build's never does.
     let typescript_client = header(request, "b3").is_some();
     // A route that reads the body takes it here, under the size limit; anything else is discarded before the answer
-    // (route). Only POST carries one.
+    // (route). Only POST carries one, and one announced over the limit is refused without reading a byte.
     let body = if method == hyper::Method::POST {
+        if request.body().size_hint().lower() > MAX_BODY as u64 {
+            return too_large();
+        }
         match Limited::new(request.body_mut(), MAX_BODY).collect().await {
             Ok(collected) => collected.to_bytes(),
-            Err(_) => return json_response(StatusCode::PAYLOAD_TOO_LARGE, &json!({ "error": format!("Request body exceeds {MAX_BODY} bytes"), "code": "invalid-request" })),
+            Err(_) => return too_large(),
         }
     } else {
         Bytes::new()
     };
+    let taken = if method == hyper::Method::POST { Body::Taken } else { Body::Untouched };
+    let finish = |response: Response<Full<Bytes>>| Answer { response, body: taken };
     let parsed = || -> Result<Value, Box<Response<Full<Bytes>>>> {
         if body.is_empty() {
             return Ok(json!({}));
         }
         serde_json::from_slice(&body).map_err(|_| Box::new(json_response(StatusCode::BAD_REQUEST, &json!({ "error": "Invalid JSON body", "code": "invalid-request" }))))
     };
-    match (method.as_str(), path.as_str()) {
+    finish(match (method.as_str(), path.as_str()) {
         ("GET", "/tools") => {
             let specs: Vec<_> = relay.tools.read().unwrap_or_else(|poisoned| poisoned.into_inner()).iter().map(|t| t.spec()).collect();
             let specs = crate::surface::tools(client.as_deref(), specs);
@@ -399,8 +468,8 @@ async fn answer(relay: Arc<Relay>, peer: SocketAddr, request: &mut Request<Incom
         ("POST", "/tools/call") => {
             let request: ToolCallRequest = match parsed().map(serde_json::from_value) {
                 Ok(Ok(request)) => request,
-                Ok(Err(error)) => return json_response(StatusCode::BAD_REQUEST, &json!({ "error": format!("Invalid tool call: {error}"), "code": "invalid-request" })),
-                Err(response) => return *response,
+                Ok(Err(error)) => return finish(json_response(StatusCode::BAD_REQUEST, &json!({ "error": format!("Invalid tool call: {error}"), "code": "invalid-request" }))),
+                Err(response) => return finish(*response),
             };
             match call_tool_keyed(&relay, request, client_pid, call_key).await {
                 Ok(output) => json_response(StatusCode::OK, &serde_json::to_value(output).unwrap_or_default()),
@@ -408,9 +477,9 @@ async fn answer(relay: Arc<Relay>, peer: SocketAddr, request: &mut Request<Incom
             }
         }
         ("POST", "/tools/cancel") => {
-            let Ok(body) = parsed() else { return json_response(StatusCode::BAD_REQUEST, &json!({ "error": "Invalid JSON body" })) };
+            let Ok(body) = parsed() else { return finish(json_response(StatusCode::BAD_REQUEST, &json!({ "error": "Invalid JSON body" }))) };
             let Some(key) = body["call"].as_str().filter(|k| !k.is_empty()) else {
-                return json_response(StatusCode::BAD_REQUEST, &json!({ "error": "call is required", "code": "invalid-request" }));
+                return finish(json_response(StatusCode::BAD_REQUEST, &json!({ "error": "call is required", "code": "invalid-request" })));
             };
             let stopped = relay.cancel_call(key);
             rlog!("tool.cancel", stopped = stopped);
@@ -427,8 +496,8 @@ async fn answer(relay: Arc<Relay>, peer: SocketAddr, request: &mut Request<Incom
             json_response(StatusCode::OK, &status)
         }
         ("POST", "/extension/revoke") => {
-            let Ok(body) = parsed() else { return json_response(StatusCode::BAD_REQUEST, &json!({ "error": "Invalid JSON body" })) };
-            let Some(key) = body["key"].as_str() else { return json_response(StatusCode::BAD_REQUEST, &json!({ "error": "key is required", "code": "invalid-request" })) };
+            let Ok(body) = parsed() else { return finish(json_response(StatusCode::BAD_REQUEST, &json!({ "error": "Invalid JSON body" }))) };
+            let Some(key) = body["key"].as_str() else { return finish(json_response(StatusCode::BAD_REQUEST, &json!({ "error": "key is required", "code": "invalid-request" }))) };
             let links: Vec<_> = relay.st().links.iter().filter(|l| l.key == key).cloned().collect();
             for link in &links {
                 link.close(4006, "Pairing revoked: run `pair` and enter the code to pair again");
@@ -450,7 +519,7 @@ async fn answer(relay: Arc<Relay>, peer: SocketAddr, request: &mut Request<Incom
         // tool's error text as is.
         (_, path) if legacy_route(path) => json_response(StatusCode::GONE, &json!({ "error": LEGACY_CLIENT })),
         _ => json_response(StatusCode::NOT_FOUND, &json!({ "error": "Not found", "code": "not-found" })),
-    }
+    })
 }
 
 /// What a client of the TypeScript browse (0.0.17 and earlier) gets from this relay: an MCP server OpenCode started
