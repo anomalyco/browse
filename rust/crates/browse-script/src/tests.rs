@@ -51,9 +51,10 @@ impl Tool for Fake {
             "echo" => ToolOutput::text(args.to_string()),
             "fail" => ToolOutput::error(args["message"].as_str().unwrap_or("failed").to_string()),
             "picture" => ToolOutput { content: vec![Content::Image { data: "iVBORw0KGgo=".into(), mime_type: "image/png".into() }], is_error: false },
-            // A JSON value an agent-facing cap cut, and a tool whose result is text, not JSON.
+            // A JSON value an agent-facing cap cut, and a tool whose result is text, not JSON, that happens to
+            // contain the start of the cut marker.
             "cut" => ToolOutput::text("{\"value\":\"abc\"}\n… [truncated: the result is 200000 characters; return less, or pick the fields you need]"),
-            "outline" => ToolOutput::text("- heading \"Save\" [ref=e1]"),
+            "outline" => ToolOutput::text("- heading \"Save\" [ref=e1]\n… [truncated: the result is 5 characters; the page said this"),
             // Without a tab, navigate opens tab 7.
             "navigate" => ToolOutput::text(json!({ "tab": args.get("tab").cloned().unwrap_or(json!(7)), "url": args["url"], "title": "T", "status": 200, "navigated": true }).to_string()),
             "handoff" => {
@@ -125,13 +126,13 @@ async fn tools_and_errors() {
     assert!(fetched.contains("page.evaluate"), "{fetched}");
 }
 
-/// A tool result cut by the agent-facing cap must not come back as text that looks like a value; text results
-/// (a snapshot outline) still do.
+/// A tool result cut by the agent-facing cap must not come back as text that looks like a value. Text results (a
+/// snapshot outline) still do, even one that mentions the start of the marker: only the full marker at the end counts.
 #[tokio::test]
 async fn a_cut_tool_result_throws_and_plain_text_stays_text() {
     let caught = ok("try { await browse.cut() } catch (e) { return e.message }").await;
     assert!(caught.contains("cut this result off") && caught.contains("200000"), "{caught}");
-    assert_eq!(ok("return await browse.outline()").await, "- heading \"Save\" [ref=e1]");
+    assert_eq!(ok("return await browse.outline()").await, "- heading \"Save\" [ref=e1]\n… [truncated: the result is 5 characters; the page said this");
 }
 
 #[tokio::test]
