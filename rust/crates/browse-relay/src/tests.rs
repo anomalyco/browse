@@ -709,6 +709,25 @@ async fn reads_a_body_announced_on_a_get() {
     assert!(raw.starts_with("HTTP/1.1 410"), "{raw}");
 }
 
+/// A request the relay turns away (this one without a token) still gets its body read before the answer: closing with
+/// body bytes still unread makes the kernel send a reset instead of a clean close, and a macOS client then loses the
+/// 401 it hasn't read yet.
+#[tokio::test]
+async fn reads_a_body_before_turning_a_request_away() {
+    let h = harness().await;
+    let port = h.handle.port();
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let head = format!("POST /tools/cancel HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n");
+    stream.write_all(head.as_bytes()).await.unwrap();
+    let mut first = [0u8; 64];
+    assert!(tokio::time::timeout(Duration::from_millis(250), stream.read(&mut first)).await.is_err(), "the relay answered before the body it was promised");
+    stream.write_all(b"{}").await.unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.unwrap();
+    let raw = String::from_utf8_lossy(&raw);
+    assert!(raw.starts_with("HTTP/1.1 401"), "{raw}");
+}
+
 #[tokio::test]
 async fn version_reports_every_relay_as_managed() {
     let paths = Paths::rooted(std::env::temp_dir().join(format!("browse-relay-test-{}", crate::util::random_hex(6))));

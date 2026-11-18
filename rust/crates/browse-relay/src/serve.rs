@@ -280,7 +280,31 @@ fn header<'a>(request: &'a Request<Incoming>, name: &str) -> Option<&'a str> {
     request.headers().get(name).and_then(|v| v.to_str().ok())
 }
 
-async fn route(relay: Arc<Relay>, peer: SocketAddr, request: Request<Incoming>) -> Response<Full<Bytes>> {
+/// Reads and drops what is left of a request body before the answer goes out: closing a connection with body bytes
+/// still unread makes the kernel send a reset instead of a clean close, and a macOS client then loses the answer it
+/// hasn't read yet. Frames are dropped as they arrive, up to MAX_BODY, so a huge upload can't hold the relay open.
+async fn discard_body(mut body: Incoming) {
+    let mut left = MAX_BODY;
+    while let Some(frame) = body.frame().await {
+        let Ok(frame) = frame else { return };
+        let Ok(data) = frame.into_data() else { continue };
+        let Some(remaining) = left.checked_sub(data.len()) else { return };
+        left = remaining;
+    }
+}
+
+/// Answers a request, reading whatever is left of its body first: every response goes through here, so an early one
+/// (a turned-away request, the version probe) can't leave body bytes unread.
+async fn route(relay: Arc<Relay>, peer: SocketAddr, mut request: Request<Incoming>) -> Response<Full<Bytes>> {
+    let response = answer(relay, peer, &mut request).await;
+    // The extension's upgrade hands the connection over; what follows on it is WebSocket frames, not a body.
+    if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+        discard_body(request.into_body()).await;
+    }
+    response
+}
+
+async fn answer(relay: Arc<Relay>, peer: SocketAddr, request: &mut Request<Incoming>) -> Response<Full<Bytes>> {
     let local = crate::origins::is_local_peer(&peer);
     let path = request.uri().path().trim_end_matches('/').to_string();
     let path = if path.is_empty() { "/".to_string() } else { path };
@@ -291,15 +315,15 @@ async fn route(relay: Arc<Relay>, peer: SocketAddr, request: Request<Incoming>) 
         return json_response(StatusCode::SERVICE_UNAVAILABLE, &json!({ "error": "browse relay is starting", "code": "relay-starting" }));
     }
     if local
-        && let Err(error) = crate::origins::validate_host_header(header(&request, "host"), &relay.host, relay.port) {
+        && let Err(error) = crate::origins::validate_host_header(header(request, "host"), &relay.host, relay.port) {
             return json_response(StatusCode::FORBIDDEN, &json!({ "error": error }));
         }
     if path == "/extension" {
         return upgrade_extension(relay, peer, request);
     }
-    let probing = header(&request, "x-browse-install") == Some("probe") && relay.st().install_waiting_until.is_some_and(|until| Instant::now() < until);
+    let probing = header(request, "x-browse-install") == Some("probe") && relay.st().install_waiting_until.is_some_and(|until| Instant::now() < until);
     let compatibility = json!({ "extensionProtocol": { "min": MIN_EXTENSION_PROTOCOL_VERSION, "version": EXTENSION_PROTOCOL_VERSION }, "pairing": PAIRING_SCHEME });
-    if let Err(error) = crate::origins::validate_fetch_site(header(&request, "sec-fetch-site")) {
+    if let Err(error) = crate::origins::validate_fetch_site(header(request, "sec-fetch-site")) {
         let mut body = json!({ "error": error });
         if request.method() == hyper::Method::GET && path == "/version" {
             body["extensionProtocol"] = compatibility["extensionProtocol"].clone();
@@ -334,7 +358,7 @@ async fn route(relay: Arc<Relay>, peer: SocketAddr, request: Request<Incoming>) 
     if relay.is_stopping() {
         return json_response(StatusCode::SERVICE_UNAVAILABLE, &json!({ "error": "browse relay is restarting; try again in a moment", "code": "relay-restarting" }));
     }
-    let mut authorized = header(&request, "authorization").and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer "))).map(str::trim).map(str::to_string);
+    let mut authorized = header(request, "authorization").and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer "))).map(str::trim).map(str::to_string);
     // The TypeScript relay's /json/version handed connectOverCDP clients a WebSocket URL with the token in its query.
     if authorized.is_none() && path.starts_with("/devtools/") {
         authorized = url::form_urlencoded::parse(request.uri().query().unwrap_or_default().as_bytes()).find(|(k, _)| k == LEGACY_TOKEN_PARAM).map(|(_, v)| v.into_owned());
@@ -343,20 +367,22 @@ async fn route(relay: Arc<Relay>, peer: SocketAddr, request: Request<Incoming>) 
         return json_response(StatusCode::UNAUTHORIZED, &json!({ "error": "Missing or invalid browse relay token", "code": "unauthorized" }));
     }
     let method = request.method().clone();
-    let waiting = header(&request, "x-browse-install") == Some("waiting");
-    let client_pid = header(&request, "opencode-browser-client-pid").and_then(|v| v.parse::<u32>().ok()).filter(|p| *p > 0);
-    let client = header(&request, &browse_core::CLIENT_HEADER.to_ascii_lowercase()).map(str::to_string);
-    let call_key = header(&request, &browse_core::CALL_HEADER.to_ascii_lowercase()).filter(|k| !k.is_empty() && k.len() <= 128).map(str::to_string);
+    let waiting = header(request, "x-browse-install") == Some("waiting");
+    let client_pid = header(request, "opencode-browser-client-pid").and_then(|v| v.parse::<u32>().ok()).filter(|p| *p > 0);
+    let client = header(request, &browse_core::CLIENT_HEADER.to_ascii_lowercase()).map(str::to_string);
+    let call_key = header(request, &browse_core::CALL_HEADER.to_ascii_lowercase()).filter(|k| !k.is_empty() && k.len() <= 128).map(str::to_string);
     // The TypeScript client's HTTP client (Effect's) sends trace headers on every request; this build's never does.
-    let typescript_client = header(&request, "b3").is_some();
-    // Read the body whatever the method: closing a connection with body bytes still unread makes our kernel send a
-    // reset instead of a clean close, and a macOS client then loses the answer it hasn't read yet. Only POST's body is
-    // used; every other method's is drained and dropped, under the same size limit.
-    let sent = match Limited::new(request.into_body(), MAX_BODY).collect().await {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => return json_response(StatusCode::PAYLOAD_TOO_LARGE, &json!({ "error": format!("Request body exceeds {MAX_BODY} bytes"), "code": "invalid-request" })),
+    let typescript_client = header(request, "b3").is_some();
+    // A route that reads the body takes it here, under the size limit; anything else is discarded before the answer
+    // (route). Only POST carries one.
+    let body = if method == hyper::Method::POST {
+        match Limited::new(request.body_mut(), MAX_BODY).collect().await {
+            Ok(collected) => collected.to_bytes(),
+            Err(_) => return json_response(StatusCode::PAYLOAD_TOO_LARGE, &json!({ "error": format!("Request body exceeds {MAX_BODY} bytes"), "code": "invalid-request" })),
+        }
+    } else {
+        Bytes::new()
     };
-    let body = if method == hyper::Method::POST { sent } else { Bytes::new() };
     let parsed = || -> Result<Value, Box<Response<Full<Bytes>>>> {
         if body.is_empty() {
             return Ok(json!({}));
@@ -440,17 +466,17 @@ fn legacy_route(path: &str) -> bool {
         || matches!(path, "/json" | "/tabs/cleanup" | "/settings")
 }
 
-fn upgrade_extension(relay: Arc<Relay>, peer: SocketAddr, mut request: Request<Incoming>) -> Response<Full<Bytes>> {
-    let origin = header(&request, "origin").map(str::to_string);
+fn upgrade_extension(relay: Arc<Relay>, peer: SocketAddr, request: &mut Request<Incoming>) -> Response<Full<Bytes>> {
+    let origin = header(request, "origin").map(str::to_string);
     if let Err(error) = crate::origins::validate_extension_origin(origin.as_deref(), &relay.origins) {
         rlog!("extension.rejected", reason = error, origin = origin);
         return json_response(StatusCode::FORBIDDEN, &json!({ "error": error }));
     }
-    let websocket = header(&request, "upgrade").is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
-    let Some(key) = header(&request, "sec-websocket-key").filter(|_| websocket).map(|k| derive_accept_key(k.as_bytes())) else {
+    let websocket = header(request, "upgrade").is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
+    let Some(key) = header(request, "sec-websocket-key").filter(|_| websocket).map(|k| derive_accept_key(k.as_bytes())) else {
         return json_response(StatusCode::BAD_REQUEST, &json!({ "error": "Expected a WebSocket upgrade" }));
     };
-    let upgrade = hyper::upgrade::on(&mut request);
+    let upgrade = hyper::upgrade::on(request);
     tokio::spawn(async move {
         let Ok(upgraded) = upgrade.await else { return };
         let config = WebSocketConfig::default().max_message_size(Some(MAX_MESSAGE)).max_frame_size(Some(MAX_MESSAGE));
