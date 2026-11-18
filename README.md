@@ -214,8 +214,8 @@ extension from your browser to finish.
 - **Settings** (the extension's options page, applied right away): where agent tabs open (your window or their own),
   grouping (one shared group, one per task, or none), whether browse collapses agent groups by itself or leaves them
   as you set them (a handoff still opens its group so you can find the tab), when idle tabs close (10, 30, 60 minutes
-  or never), human-like input, and handoff notifications. Agents can read and change these with the `settings` tool
-  when you ask them to.
+  or never), whether agent tabs open muted, human-like input, and handoff notifications. Agents can read and change
+  these with the `settings` tool when you ask them to.
 
 ## Tools
 

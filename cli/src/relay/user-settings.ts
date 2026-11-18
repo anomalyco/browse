@@ -1,14 +1,14 @@
 // The user's browse settings: the same ones as the extension's options page (where agent tabs open, how
-// they're grouped, when idle ones close, human-like input, handoff notifications). The extension
-// owns them (chrome.storage.local); the relay reads and writes them through it (`settings.get`, `settings.set`) for the
-// `settings` MCP tool and CLI command, so the options page updates live and the relay hears of input changes
+// they're grouped, when idle ones close, whether their tabs are muted, human-like input, handoff notifications). The
+// extension owns them (chrome.storage.local); the relay reads and writes them through it (`settings.get`, `settings.set`)
+// for the `settings` MCP tool and CLI command, so the options page updates live and the relay hears of input changes
 // the way it does for changes made on the page. Environment variables on the relay override some of them; security
 // switches are environment-only and never settable here. autoUpdate is the relay's own (auto-update.ts keeps it in the
 // state root, so it works without the extension); the relay merges it in and never sends it to the extension.
 import type { JsonObject } from "../protocol.ts"
 import { cliCommand } from "../paths.ts"
 
-export const settingKeys = ["window", "grouping", "groupCollapse", "idleMinutes", "humanInput", "handoffNotifications", "autoUpdate"] as const
+export const settingKeys = ["window", "grouping", "groupCollapse", "idleMinutes", "humanInput", "muteTabs", "handoffNotifications", "autoUpdate"] as const
 /** Settings the relay stores itself rather than in the extension. */
 export const relaySettingKeys: readonly SettingKey[] = ["autoUpdate"]
 export type SettingKey = (typeof settingKeys)[number]
@@ -23,6 +23,7 @@ export const settingSpecs: Record<SettingKey, { readonly label: string; readonly
   groupCollapse: { label: "Whether browse collapses agent groups by itself (auto: fold them away unless the user is on one; off: leave each group as the user set it)", values: ["auto", "off"] },
   idleMinutes: { label: "Close agent tabs untouched for this many minutes", values: [10, 30, 60, "never"] },
   humanInput: { label: "Human-like input (off is faster, but easier for sites to flag)", values: ["on", "off"], variable: "OPENCODE_BROWSER_HUMAN_INPUT" },
+  muteTabs: { label: "Mute the tabs agents open (on keeps them quiet)", values: ["on", "off"] },
   handoffNotifications: { label: "System notification on a handoff (only while recorded, or every handoff)", values: ["recording", "always"] },
   autoUpdate: { label: "installs: install updates automatically when idle, only notify, or never check", values: ["on", "notify", "off"], variable: "OPENCODE_BROWSER_AUTO_UPDATE" },
 }
@@ -85,6 +86,8 @@ export function settingsFromExtension(wire: JsonObject | undefined): Settings {
     const value = values[key]
     if (relaySettingKeys.includes(key)) settings[key] = String(settingSpecs[key].values[0])
     else if (key === "idleMinutes") settings[key] = value === 0 ? "never" : typeof value === "number" ? value : 10
+    // Older extensions don't send muteTabs; its default is off, not its first listed value.
+    else if (key === "muteTabs") settings[key] = value === "on" ? "on" : "off"
     else settings[key] = typeof value === "string" ? value : String(settingSpecs[key].values[0])
   }
   return settings

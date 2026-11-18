@@ -6,7 +6,7 @@ import {
   type JsonObject,
   type PageStatus,
 } from "../../agent-relay/protocol"
-import type { AgentRelayUpdate, RelayAutoUpdate, RelayOverrides } from "../../shared/protocol"
+import { MUTE_TABS_KEY, muteTabs, type AgentRelayUpdate, type RelayAutoUpdate, type RelayOverrides } from "../../shared/protocol"
 import { AgentGroups } from "./groups"
 import { AgentWindow } from "./window"
 import { DebuggerHub } from "../debugger-hub"
@@ -159,6 +159,8 @@ export function createRelayCommands(deps: {
         deps.log.add("tabs.create.start", { blank: url === "about:blank", active })
         const deadline = Date.now() + CREATE_BUDGET_MS
         const creating = await TabCleanup.beginCreate(url, keepOpen)
+        // Read once, before the tab exists: the mute agent tabs setting decides whether this one opens quiet.
+        const muted = muteTabs((await chrome.storage.local.get(MUTE_TABS_KEY))[MUTE_TABS_KEY]) === "on"
         const opened = await AgentWindow.open(url, {
           active,
           ...(AgentWindow.isPlacement(params?.window) ? { override: params.window } : {}),
@@ -180,9 +182,9 @@ export function createRelayCommands(deps: {
           normalWindows: opened.normalWindows,
         })
         TabCleanup.track(tab.id, { keepOpen })
-        // A discarded tab loses the debugger and the agent's page. Issued now but not awaited: the answer must not
-        // wait on it.
-        void chrome.tabs.update(tab.id, { autoDiscardable: false }).catch(() => undefined)
+        // A discarded tab loses the debugger and the agent's page, and the mute agent tabs setting mutes it. Not
+        // awaited: a Chrome call that hangs must not hold the answer.
+        void chrome.tabs.update(tab.id, { autoDiscardable: false, ...(muted ? { muted: true } : {}) }).catch(() => undefined)
         // The tab is tracked in memory; clearing the creation marker must not hold the answer past the budget.
         await withTimeout(TabCleanup.endCreate(creating), deadline - Date.now())
         if (url === "about:blank") await waitUntilLoaded(tab.id, deps.log, deadline)

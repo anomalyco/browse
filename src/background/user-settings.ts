@@ -7,12 +7,14 @@ import {
   HANDOFF_NOTIFICATIONS_KEY,
   HUMAN_INPUT_KEY,
   IDLE_MINUTES_KEY,
+  MUTE_TABS_KEY,
   agentGroupCollapse,
   agentGrouping,
   agentWindowPlacement,
   handoffNotifications,
   humanInput,
   idleMinutesSetting,
+  muteTabs,
 } from "../shared/protocol"
 
 // The status page's settings for the relay's settings tool (`settings.get`, `settings.set`; cli/src/user-settings.ts).
@@ -25,6 +27,7 @@ const keys = {
   groupCollapse: AGENT_GROUP_COLLAPSE_KEY,
   idleMinutes: IDLE_MINUTES_KEY,
   humanInput: HUMAN_INPUT_KEY,
+  muteTabs: MUTE_TABS_KEY,
   handoffNotifications: HANDOFF_NOTIFICATIONS_KEY,
 } as const
 type Key = keyof typeof keys
@@ -36,6 +39,7 @@ const values: Record<Key, readonly (string | number)[]> = {
   groupCollapse: ["auto", "off"],
   idleMinutes: [10, 30, 60, 0],
   humanInput: ["on", "off"],
+  muteTabs: ["on", "off"],
   handoffNotifications: ["recording", "always"],
 }
 
@@ -49,6 +53,7 @@ export async function read(): Promise<JsonObject> {
       groupCollapse: agentGroupCollapse(stored[AGENT_GROUP_COLLAPSE_KEY]),
       idleMinutes: idleMinutesSetting(stored[IDLE_MINUTES_KEY]),
       humanInput: humanInput(stored[HUMAN_INPUT_KEY]),
+      muteTabs: muteTabs(stored[MUTE_TABS_KEY]),
       handoffNotifications: handoffNotifications(stored[HANDOFF_NOTIFICATIONS_KEY]),
     },
   }

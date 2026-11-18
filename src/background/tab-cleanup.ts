@@ -64,8 +64,26 @@ export function touch(tabId: number) {
   save({ soon: true })
 }
 
+/**
+ * A tab the user took back, or an agent gave back: idle cleanup no longer has it, and the sound browse muted it with
+ * comes back. A mute the user set stays theirs.
+ */
 export function forget(tabId: number) {
-  if (tracked.delete(tabId)) save()
+  if (!tracked.delete(tabId)) return
+  save()
+  void unmuteIfOurs(tabId)
+}
+
+/** Whether browse's own mute is what keeps this tab quiet; a mute the user set is theirs. */
+function mutedByUs(tab: chrome.tabs.Tab) {
+  const mute = tab.mutedInfo
+  return mute?.muted === true && mute.reason === "extension" && mute.extensionId === chrome.runtime.id
+}
+
+/** Unmutes a tab only if browse muted it. */
+async function unmuteIfOurs(tabId: number) {
+  const tab = await chrome.tabs.get(tabId).catch(() => undefined)
+  if (tab && mutedByUs(tab)) await chrome.tabs.update(tabId, { muted: false }).catch(() => undefined)
 }
 
 /**
@@ -89,6 +107,30 @@ export async function relayUngroup<T>(tabId: number, ungroup: () => Promise<T>):
 export async function isTracked(tabId: number) {
   await restore()
   return tracked.has(tabId)
+}
+
+/** A mute toggle waits for each tab's Chrome calls, but not forever: one hung call must not hold the toggles behind it. */
+const MUTE_TIMEOUT_MS = 2_000
+/** Mute toggles run one at a time: an on followed at once by an off must end unmuted, not half applied. */
+const muteSerially = serialQueue()
+
+/** Mutes every tab agents opened (the mute agent tabs setting turned on), or unmutes the ones browse muted. */
+export function setMuted(muted: boolean): Promise<void> {
+  return muteSerially(async () => {
+    await restore()
+    for (const tabId of tracked.keys()) await withTimeout(setTabMuted(tabId, muted), MUTE_TIMEOUT_MS)
+  })
+}
+
+/** Mutes a tab, or unmutes it only if browse muted it. */
+async function setTabMuted(tabId: number, muted: boolean) {
+  if (!muted) {
+    await unmuteIfOurs(tabId)
+    return
+  }
+  // A tab the user already muted keeps their mute, so turning the setting off again leaves it quiet.
+  const tab = await chrome.tabs.get(tabId).catch(() => undefined)
+  if (tab && tab.mutedInfo?.muted !== true) await chrome.tabs.update(tabId, { muted: true }).catch(() => undefined)
 }
 
 /** Registers a check that keeps a tab open while it returns true. */
@@ -215,7 +257,8 @@ export async function cleanup(options: { minutes?: number; own?: { tabIds: reado
       continue
     }
     if (tab.pinned) {
-      tracked.delete(tabId)
+      // Pinning takes the tab back: it is the user's now, sound included.
+      forget(tabId)
       continue
     }
     if (tab.active && tab.windowId === focused?.id && focused?.focused) continue
@@ -276,9 +319,15 @@ function restore() {
     const open = new Map(tabs.filter((tab) => tab.id !== undefined).map((tab) => [tab.id!, tab]))
     const ownedGroups = new Set(groups.filter((group) => ownedGroup(group.title)).map((group) => group.id))
     const kept: Record<string, Tracked> = {}
+    /** Stored tabs that are still open but no longer tracked: the sound browse muted them with comes back. */
+    const dropped: number[] = []
     for (const [tabId, entry] of Object.entries(saved)) {
       const tab = open.get(Number(tabId))
-      if (!tab || tab.pinned || !ownedGroups.has(tab.groupId)) continue
+      if (!tab || tab.pinned || !ownedGroups.has(tab.groupId)) {
+        // A closed tab needs nothing.
+        if (tab) dropped.push(Number(tabId))
+        continue
+      }
       kept[tabId] = entry
     }
     if (mine !== generation) return
@@ -291,6 +340,7 @@ function restore() {
     }
     for (const [tabId, entry] of Object.entries(kept))
       if (!tracked.has(Number(tabId))) tracked.set(Number(tabId), entry)
+    for (const tabId of dropped) void unmuteIfOurs(tabId)
   })()
   return restored
 }
@@ -400,8 +450,12 @@ export async function closeUnattached(attached: (tabId: number) => boolean): Pro
     if (tracked.get(tabId)?.keepOpen) continue
     const tab = await chrome.tabs.get(tabId).catch(() => undefined)
     tracked.delete(tabId)
-    if (!tab || tab.pinned) continue
-    if (await closeAgentTab(tabId).then(() => true, () => false)) closed.push({ tabId, title: tab.title || tab.url || "Untitled", idleMinutes: 0 })
+    if (tab && !tab.pinned && (await closeAgentTab(tabId).then(() => true, () => false))) {
+      closed.push({ tabId, title: tab.title || tab.url || "Untitled", idleMinutes: 0 })
+      continue
+    }
+    // A tab that stays open (pinned, or its close failed) comes back with its sound.
+    if (tab) void unmuteIfOurs(tabId)
   }
   save()
   return closed
@@ -431,7 +485,8 @@ chrome.tabs.onActivated.addListener(({ tabId }) => touch(tabId))
 chrome.tabs.onRemoved.addListener((tabId) => {
   closing.delete(tabId)
   relayUngrouping.delete(tabId)
-  forget(tabId)
+  // The tab is gone: dropping it here skips the unmute forget() makes for a tab the user took back.
+  if (tracked.delete(tabId)) save()
 })
 chrome.tabs.onUpdated.addListener((tabId, change) => {
   if (change.pinned) forget(tabId)

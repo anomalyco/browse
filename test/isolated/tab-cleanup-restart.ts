@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { installChrome } from "../chrome-stub"
+import { installChrome, settle } from "../chrome-stub"
 
 // An extension reload keeps tab ids but clears session storage, so a missing marker keeps only entries whose tab is
 // still in a browse-owned group. Run by ../isolated.test.ts in a process of its own, so the module's listener and first
@@ -31,6 +31,9 @@ test("an extension reload keeps stored ids only while their tab is still in a br
   await stub.chrome.tabGroups.update(pinnedGroup, { title: `Pinned${MARKER}` })
   await stub.chrome.tabs.update(pinned.id!, { pinned: true })
 
+  // Browse muted these before the reload, as the mute agent tabs setting left them.
+  for (const tab of [owned, ungrouped, userGrouped, pinned]) await stub.chrome.tabs.update(tab.id!, { muted: true })
+
   const touched = Date.now()
   await stub.chrome.storage.session.remove("tabCleanupSession")
   await stub.chrome.storage.local.set({
@@ -53,6 +56,11 @@ test("an extension reload keeps stored ids only while their tab is still in a br
   const filtered = (await stub.chrome.storage.local.get("tabCleanup")).tabCleanup as Record<string, unknown>
   expect(Object.keys(filtered)).toEqual([String(owned.id!)])
   expect((await stub.chrome.storage.local.get("tabCleanupCreating")).tabCleanupCreating).toBeUndefined()
+
+  // A stored tab it drops but leaves open comes back with its sound; the one it keeps stays as browse left it.
+  for (let i = 0; i < 20; i++) await settle()
+  for (const tab of [ungrouped, userGrouped, pinned]) expect(stub.state.tabs.get(tab.id!)!.muted).toBe(false)
+  expect(stub.state.tabs.get(owned.id!)!.muted).toBe(true)
 
   expect((await TabCleanup.cleanup({ minutes: 0 })).map((tab) => tab.tabId)).toEqual([owned.id!])
   expect(stub.state.tabs.has(owned.id!)).toBe(false)

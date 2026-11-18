@@ -380,6 +380,25 @@ describe("a tab the relay ungroups itself", () => {
   })
 })
 
+describe("a tab the user takes back", () => {
+  test("comes back with its sound when browse muted it, and keeps a mute the user set", async () => {
+    const ours = await agentTab(0)
+    const theirs = await agentTab(0)
+    await stub.chrome.tabs.group({ tabIds: [ours, theirs] })
+    for (const tabId of [ours, theirs]) await stub.chrome.tabs.update(tabId, { muted: true })
+    // The user muted this one themselves: that mute stays after the tab is theirs again.
+    stub.state.tabs.get(theirs)!.mutedInfo = { muted: true, reason: "user" }
+    // Dragging both out of the agent group hands them to the user.
+    await stub.chrome.tabs.ungroup(ours)
+    await stub.chrome.tabs.ungroup(theirs)
+    for (let i = 0; i < 20; i++) await settle()
+    expect(await TabCleanup.isTracked(ours)).toBe(false)
+    expect(await TabCleanup.isTracked(theirs)).toBe(false)
+    expect(stub.state.tabs.get(ours)!.muted).toBe(false)
+    expect(stub.state.tabs.get(theirs)!.muted).toBe(true)
+  })
+})
+
 describe("a tab that fails to close", () => {
   test("is put back in its group, stays tracked and is retried by the next cleanup", async () => {
     const tabId = await agentTab(60)
@@ -437,13 +456,18 @@ describe("a tab the worker was opening when it stopped", () => {
 })
 
 describe("tracked tabs the relay doesn't have after a worker restart", () => {
-  test("are closed; attached ones stay", async () => {
+  test("are closed; attached and pinned ones stay, and a pinned one comes back with its sound", async () => {
     const kept = await agentTab(0)
     const lost = await agentTab(0)
+    const pinned = await agentTab(0)
+    await stub.chrome.tabs.update(pinned, { pinned: true, muted: true })
     const closed = await TabCleanup.closeUnattached((tabId) => tabId === kept)
     expect(closed.map((tab) => tab.tabId)).toEqual([lost])
     expect(open(kept)).toBe(true)
     expect(await TabCleanup.isTracked(lost)).toBe(false)
+    // The pinned tab stays open, so the mute browse set is undone.
+    for (let i = 0; i < 20; i++) await settle()
+    expect(stub.state.tabs.get(pinned)!.muted).toBe(false)
   })
 })
 
