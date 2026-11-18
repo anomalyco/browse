@@ -195,7 +195,8 @@ extension from your browser to finish.
   The id lasts while the tab stays open: a relay restart or extension reload keeps it, and a browser restart loses it
   (opening that id again is a fresh tab). `tabs` lists each tab's id, url, title, group, last use and whether a call is
   running in it. A tab opened with `keepOpen: true` stays until an agent or you close it; every other tab closes when
-  idle like the rest.
+  idle like the rest. `keepOpen` needs an up-to-date extension: an older one can't hold a tab open, so it still closes
+  when idle and browse warns you instead.
 - **Agents open their own tabs** in the background of the window you last used, grouped together and collapsed unless
   you're looking at one (you can turn that off). Agents can't switch you to their tabs or bring a window to the front.
   Tabs nobody touches for 10 minutes close by themselves (never while something runs on them). Closing agent tabs never

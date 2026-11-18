@@ -79,6 +79,10 @@ impl Tool for TabsTool {
                     let existing = relay.st().tab_by_chosen(id);
                     if let Some(tab) = existing {
                         let changed = args.get("keepOpen").is_some_and(|v| !v.is_null()) && relay.set_keep_open(tab, options.keep_open);
+                        if changed {
+                            // The call touched the tab: a warning from changing keepOpen comes back in its result.
+                            relay.note_call_tab(tab);
+                        }
                         let st = relay.st();
                         let info = relay.tab_info(&st, tab).context("The tab went away")?;
                         let mut value = serde_json::to_value(info)?;
