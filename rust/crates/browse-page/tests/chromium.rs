@@ -2,7 +2,7 @@
 
 mod support;
 
-use serde_json::json;
+use serde_json::{Value, json};
 use support::Harness;
 
 macro_rules! harness {
@@ -567,6 +567,27 @@ async fn eval_scoping_serialization_errors_and_timeouts() {
     assert!(h.err("emulate", json!({ "timezone": "Europe/Paris" })).await.contains("timezone"));
     assert!(h.err("emulate", json!({ "viewport": { "width": 0, "height": 10 } })).await.contains("1 to 10000"));
     assert!(h.err("emulate", json!({ "viewport": { "width": 100000, "height": 10 } })).await.contains("1 to 10000"));
+}
+
+/// A direct eval is capped for an agent's context; the same call from an execute script gets the whole JSON value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn eval_is_capped_for_agents_and_whole_for_execute() {
+    let h = harness!(false);
+    let url = h.server.page("/eval-size", "<!doctype html><title>Eval size</title>");
+    h.json("navigate", json!({ "url": url })).await;
+    let expression = "'x'.repeat(150000)";
+
+    let cut = h.ok("eval", json!({ "expression": expression })).await;
+    assert!(cut.ends_with("… [truncated: the result is 150002 characters; return less, or pick the fields you need]"), "{cut}");
+    assert!(serde_json::from_str::<Value>(&cut).is_err(), "a cut value is not JSON");
+
+    let eval = h.tools.iter().find(|tool| tool.spec().name == "eval").unwrap().clone();
+    let mut ctx = h.ctx.clone();
+    ctx.in_script = true;
+    let output = eval.call(ctx, json!({ "tab": 1, "expression": expression })).await.unwrap();
+    assert!(!output.is_error, "{}", support::text_of(&output));
+    let value: Value = serde_json::from_str(&support::text_of(&output)).expect("the whole value is JSON");
+    assert_eq!(value.as_str().map(str::len), Some(150_000));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

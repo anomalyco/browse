@@ -1680,7 +1680,7 @@ async fn a_read_only_tab_away_from_its_browser_still_refuses_input() {
     assert!(browser.read_only(tab).await, "a reconnecting tab keeps its read-only options");
 
     let select = browse_page::tools().into_iter().find(|tool| tool.spec().name == "select").unwrap();
-    let ctx = ToolContext { browser: Arc::new(browser), file_roots: Vec::new() };
+    let ctx = ToolContext { browser: Arc::new(browser), file_roots: Vec::new(), in_script: false };
     let output = select.call(ctx, json!({ "tab": tab, "selector": "#plan", "values": ["pro"] })).await.unwrap();
     let refused = tool_text(&output);
     assert!(output.is_error && refused.contains("browse blocked select") && refused.contains("read-only"), "{refused}");

@@ -997,8 +997,10 @@ async fn eval(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
         return Ok(json_output(json!({ "result": null, "hint": hint })));
     }
     let text = serde_json::to_string(&value).unwrap_or_else(|_| "null".into());
+    // The cap keeps a direct call from filling an agent's context. In a script the value belongs to the script: it
+    // may write it to a file or return part of it, and a cut value is not JSON anymore, so it gets all of it.
     let chars = text.chars().count();
-    if chars > MAX_EVAL_CHARS {
+    if chars > MAX_EVAL_CHARS && !ctx.in_script {
         let cut: String = text.chars().take(MAX_EVAL_CHARS).collect();
         return Ok(ToolOutput::text(format!("{cut}\n… [truncated: the result is {chars} characters; return less, or pick the fields you need]", )));
     }
@@ -1708,7 +1710,7 @@ fn scroll_schema() -> Value {
     )
 }
 
-const EVAL: &str = "Run JavaScript in the page and return its result as JSON. An expression's value is returned (promises are awaited, await works). Statements (const/let, loops, several lines) return the value of their last expression statement, like a console (`const a = 3; a` gives 3), or what they `return`. Declarations stay local to the call and never leak into the page. DOM nodes come back as \"<tag#id.class>\", Map as an object, Set as an array, Date as an ISO string, Errors as {name, message}, cycles as \"[Circular]\". A script still running at the timeout is stopped. By default it runs in browse's isolated world: it sees the DOM but not the page's own JS globals, and the page can't see it. world \"main\" runs in the page's own world (window variables, frameworks) and is visible to it. With ref/selector or arg, expression must be a function, called as (element, arg) => ...; e.g. expression \"(el) => el.href\" with ref \"e5\". Without them, a function written as the whole expression is called with no arguments, so \"() => document.title\" works like \"document.title\". frame (a selector of an <iframe>) runs in that frame. Results over 100k characters are cut. Results are returned as-is, without secret redaction.";
+const EVAL: &str = "Run JavaScript in the page and return its result as JSON. An expression's value is returned (promises are awaited, await works). Statements (const/let, loops, several lines) return the value of their last expression statement, like a console (`const a = 3; a` gives 3), or what they `return`. Declarations stay local to the call and never leak into the page. DOM nodes come back as \"<tag#id.class>\", Map as an object, Set as an array, Date as an ISO string, Errors as {name, message}, cycles as \"[Circular]\". A script still running at the timeout is stopped. By default it runs in browse's isolated world: it sees the DOM but not the page's own JS globals, and the page can't see it. world \"main\" runs in the page's own world (window variables, frameworks) and is visible to it. With ref/selector or arg, expression must be a function, called as (element, arg) => ...; e.g. expression \"(el) => el.href\" with ref \"e5\". Without them, a function written as the whole expression is called with no arguments, so \"() => document.title\" works like \"document.title\". frame (a selector of an <iframe>) runs in that frame. Results over 100k characters are cut, except inside an execute script, which gets the whole value. Results are returned as-is, without secret redaction.";
 
 fn eval_schema() -> Value {
     object(
@@ -1861,7 +1863,7 @@ mod tests {
     #[tokio::test]
     async fn input_tools_refuse_a_read_only_tab_before_cdp() {
         let browser = Arc::new(ReadOnlyBrowser::default());
-        let ctx = ToolContext { browser: browser.clone(), file_roots: Vec::new() };
+        let ctx = ToolContext { browser: browser.clone(), file_roots: Vec::new(), in_script: false };
         let list = tools();
         for tool in &list {
             let name = tool.spec().name;

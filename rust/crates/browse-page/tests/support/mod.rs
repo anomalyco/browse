@@ -298,7 +298,7 @@ impl Harness {
         let tab = TabCdp::open(&connection).await;
         let files = TempDir::new("files");
         let state = Arc::new(TabState::default());
-        let ctx = ToolContext { browser: Arc::new(FakeBrowser { tab: tab.clone(), human, read_only, state: state.clone() }), file_roots: vec![files.0.clone()] };
+        let ctx = ToolContext { browser: Arc::new(FakeBrowser { tab: tab.clone(), human, read_only, state: state.clone() }), file_roots: vec![files.0.clone()], in_script: false };
         let server = Server::start().await;
         Some(Harness { chrome, tab, ctx, tools: browse_page::tools(), state, server, files })
     }

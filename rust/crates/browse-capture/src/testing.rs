@@ -96,7 +96,7 @@ fn tab() -> TabInfo {
 }
 
 pub(crate) fn context(cdp: Arc<FakeCdp>, roots: Vec<std::path::PathBuf>) -> ToolContext {
-    ToolContext { browser: Arc::new(FakeBrowser { cdp, state: Arc::new(TabState::default()) }), file_roots: roots }
+    ToolContext { browser: Arc::new(FakeBrowser { cdp, state: Arc::new(TabState::default()) }), file_roots: roots, in_script: false }
 }
 
 /// Calls a tool in the fake's one tab (`tab` 1 unless the arguments name one; `"tab": null` leaves it out).

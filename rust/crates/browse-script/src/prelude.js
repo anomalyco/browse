@@ -60,10 +60,18 @@
     toJSON() { return { type: "image", mimeType: this.mimeType, size: this.size } }
   }
 
+  // The eval tool cuts a value that is too big for an agent's context and marks the cut. A script gets the whole
+  // value, but if it ever gets a marked one, say so: half JSON parsed into text silently is worse than an error.
+  const cutOff = /\n… \[truncated: the result is (\d+) characters; return less, or pick the fields you need\]$/
   function toolValue(result) {
     let value = result.text
     if (typeof value === "string" && value.length) {
-      try { value = JSON.parse(value) } catch {}
+      try {
+        value = JSON.parse(value)
+      } catch {
+        const cut = value.match(cutOff)
+        if (cut) throw makeError(`browse cut this result off before the script could read it: it is ${cut[1]} characters, and only part of it arrived`)
+      }
     } else value = undefined
     const images = (result.images || []).map((info) => new BrowseImage(info))
     if (!images.length) return value
