@@ -616,6 +616,13 @@ pub async fn call_tool_keyed(relay: &Arc<Relay>, request: ToolCallRequest, clien
     let context = ToolContext { browser: Arc::new(RelayBrowser(relay.clone())), file_roots: relay.file_roots.clone() };
     let id = relay.next_call.fetch_add(1, Ordering::SeqCst);
     let mut arguments = if request.arguments.is_null() { json!({}) } else { request.arguments };
+    // Wrong types and values fail before the tool runs; arguments the tool doesn't take are named if the call fails.
+    let schema = tool.spec().input_schema;
+    let problems = crate::validate::issues(&schema, &arguments);
+    if !problems.is_empty() {
+        return Ok(ToolOutput::error(crate::validate::invalid(&request.name, &problems, &schema, &arguments)));
+    }
+    let ignored = crate::validate::ignored(&request.name, &schema, &arguments);
     // `tab` takes a numeric id or a chosen id (`work-mail`); tools below this line see the numeric one.
     let chosen = match resolve_tab_arguments(relay, &mut arguments) {
         Ok(chosen) => chosen,
@@ -648,6 +655,7 @@ pub async fn call_tool_keyed(relay: &Arc<Relay>, request: ToolCallRequest, clien
     let used = relay.call_finished(id);
     relay.inflight.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&id);
     let ms = started.elapsed().as_millis() as u64;
+    let cancelled = matches!(&outcome, Err(join) if join.is_cancelled());
     let mut output = match outcome {
         Ok(Ok(output)) => output,
         Ok(Err(error)) => ToolOutput::error(format!("{error:#}")),
@@ -669,7 +677,16 @@ pub async fn call_tool_keyed(relay: &Arc<Relay>, request: ToolCallRequest, clien
             .and_then(|v| v["outcome"].as_str().map(str::to_string));
         match outcome {
             Some(outcome) => rlog!("tool.outcome", tool = name.clone(), tabId = tab, ms = ms, outcome = outcome),
-            None => rlog!("tool.error", tool = name.clone(), tabId = tab, ms = ms, error = text.chars().take(500).collect::<String>()),
+            None => {
+                rlog!("tool.error", tool = name.clone(), tabId = tab, ms = ms, error = text.chars().take(500).collect::<String>());
+                // The call failed: an argument it ignored is often the one it needed under another name.
+                if let Some(note) = ignored.filter(|_| !cancelled) {
+                    match output.content.iter_mut().rev().find_map(|c| if let Content::Text { text } = c { Some(text) } else { None }) {
+                        Some(text) => text.push_str(&format!("\n{note}")),
+                        None => output.content.push(Content::Text { text: note }),
+                    }
+                }
+            }
         }
     } else if ms >= 20_000 {
         rlog!("tool.slow", tool = name.clone(), tabId = tab, ms = ms);
