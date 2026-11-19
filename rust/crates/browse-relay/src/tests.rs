@@ -1487,6 +1487,29 @@ async fn a_chosen_id_is_get_or_create_and_listed_with_the_callers_id() {
     assert_eq!(seen.commands("tabs.create").len(), 1, "a refused id opens nothing");
 }
 
+#[tokio::test]
+async fn a_numeric_tab_id_sent_as_a_string_is_the_tab() {
+    let (h, _seen, _events) = connected("profile-numeric-string", 350).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let first = browser.open_tab(None, &TabOptions::default()).await.unwrap().tab;
+    let second = browser.open_tab(None, &TabOptions::default()).await.unwrap().tab;
+
+    // Some MCP clients send the numeric id as a JSON string: every tool takes it as the number it spells.
+    let closed = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "close", "tab": first.to_string() })).await).unwrap());
+    assert_eq!(closed["closed"], json!([first]), "{closed}");
+    // `tabs` entries too.
+    let closed = text(&serde_json::to_value(tool(&relay, "tabs", json!({ "action": "close", "tabs": [second.to_string()] })).await).unwrap());
+    assert_eq!(closed["closed"], json!([second]), "{closed}");
+
+    // A string that only looks a little like a number is still refused, with an error that names both forms.
+    for (bad, expected) in [("12a".to_string(), "numeric tab id"), (format!("{first}-a"), "numeric tab id"), (" 12 ".to_string(), "spaces around it"), ("-5".to_string(), "numeric tab id")] {
+        let refused = tool(&relay, "tabs", json!({ "action": "close", "tab": bad })).await;
+        assert!(refused.is_error, "{bad}: {}", tool_text(&refused));
+        assert!(tool_text(&refused).contains(expected), "{bad}: {}", tool_text(&refused));
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_chosen_id_survives_a_relay_restart() {
     let paths = Paths::rooted(std::env::temp_dir().join(format!("browse-relay-stable-{}", crate::util::random_hex(6))));
