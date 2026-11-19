@@ -22,6 +22,10 @@ pub(crate) struct Viewport {
     /// Full document size in CSS pixels.
     pub content_width: f64,
     pub content_height: f64,
+    /// Full document size in DIP from the physical content size, which keeps the right/bottom edge that a floored
+    /// `cssContentSize` loses at page zoom.
+    pub content_width_dip: f64,
+    pub content_height_dip: f64,
     /// Device pixels per device independent pixel (the screen's scale, without page zoom). Screenshots divide by it,
     /// and by `page_zoom`, so one image pixel is one CSS pixel by default.
     pub device_pixel_ratio: f64,
@@ -41,16 +45,29 @@ pub(crate) async fn viewport(cdp: &dyn Cdp) -> anyhow::Result<Viewport> {
     let device_width = number(metrics.get("visualViewport"), "clientWidth");
     let page_zoom = number(css, "zoom").filter(|zoom| zoom.is_finite() && *zoom > 0.0).unwrap_or(1.0);
     let device_pixel_ratio = match (device_width, metrics.get("cssVisualViewport")) {
-        (Some(device), Some(_)) if width > 0.0 => (device / width / page_zoom.max(f64::EPSILON)).max(0.1),
+        (Some(device), Some(_)) if width > 0.0 => (device / width / page_zoom).max(0.1),
         _ => 1.0,
+    };
+    let content_width = number(content, "width").unwrap_or(width);
+    let content_height = number(content, "height").unwrap_or(height);
+    // cssContentSize is floored to whole CSS pixels. contentSize is the physical size in current Chrome, where
+    // cssVisualViewport is present, and DIP in older Chrome.
+    let content_dip = match (metrics.get("contentSize"), metrics.get("cssVisualViewport")) {
+        (Some(physical), Some(_)) if width > 0.0 => (
+            number(Some(physical), "width").map_or(content_width * page_zoom, |value| value / device_pixel_ratio),
+            number(Some(physical), "height").map_or(content_height * page_zoom, |value| value / device_pixel_ratio),
+        ),
+        _ => (content_width, content_height),
     };
     Ok(Viewport {
         page_x: number(css, "pageX").unwrap_or(0.0),
         page_y: number(css, "pageY").unwrap_or(0.0),
         width,
         height,
-        content_width: number(content, "width").unwrap_or(width),
-        content_height: number(content, "height").unwrap_or(height),
+        content_width,
+        content_height,
+        content_width_dip: content_dip.0,
+        content_height_dip: content_dip.1,
         device_pixel_ratio: (device_pixel_ratio * 1000.0).round() / 1000.0,
         page_zoom,
     })
@@ -128,6 +145,7 @@ mod tests {
                 "cssVisualViewport": { "pageX": 5.0, "pageY": 6.0, "clientWidth": 960.0, "clientHeight": 525.6, "zoom": 1.25 },
                 "visualViewport": { "clientWidth": 2400.0 },
                 "cssContentSize": { "width": 960.0, "height": 2400.0 },
+                "contentSize": { "width": 2400.0, "height": 6002.0 },
             }),
         );
         let viewport = viewport(cdp.as_ref()).await.unwrap();
@@ -137,6 +155,8 @@ mod tests {
         assert_eq!((viewport.page_x, viewport.page_y), (5.0, 6.0));
         assert_eq!((viewport.width, viewport.height), (960.0, 525.6));
         assert_eq!((viewport.content_width, viewport.content_height), (960.0, 2400.0));
+        // The physical content keeps the edge the floored CSS size loses: 6002 device px is 3001 DIP, not 2400 * 1.25.
+        assert_eq!((viewport.content_width_dip, viewport.content_height_dip), (1200.0, 3001.0));
     }
 
     #[tokio::test]

@@ -179,6 +179,16 @@ fn dip_clip((x, y, width, height): (f64, f64, f64, f64), zoom: f64) -> (f64, f64
     whole_clip((x * zoom, y * zoom, width * zoom, height * zoom))
 }
 
+/// The DIP width and height of a full-page clip. Chrome floors `cssContentSize` to whole CSS pixels, so multiplying it
+/// by page zoom can miss the physical right/bottom edge (3001 physical px -> 2400 CSS -> 3000 DIP). The physical content
+/// size keeps that edge; at 100% zoom the rounded CSS size stays exactly what it was.
+fn full_page_size(rounded: (f64, f64), physical: (f64, f64), zoom: f64) -> (f64, f64) {
+    if zoom == 1.0 {
+        return rounded;
+    }
+    (rounded.0.max(physical.0.ceil()).max(1.0), rounded.1.max(physical.1.ceil()).max(1.0))
+}
+
 /// Keeps a whole-pixel clip inside the rounded viewport, in page coordinates, moving it rather than shrinking it where
 /// possible. A clip that doesn't reach beyond the viewport is captured with captureBeyondViewport off, so an overhang
 /// would come back unpainted.
@@ -241,7 +251,8 @@ async fn capture(
     // Page.captureScreenshot's clip is in DIP, and clip.scale then applies device pixels on top. One image pixel per
     // CSS pixel therefore divides by both the screen scale and the page zoom.
     let mut clip_scale = if css_scale { 1.0 / (dpr * zoom) } else { 1.0 };
-    // The viewport's own clip keeps its size, so screenshot_diff baselines of the same viewport still match.
+    // A viewport clip is the rounded DIP viewport, unchanged at 100% zoom, so screenshot_diff baselines of the same
+    // viewport still match.
     let (x, y, width, height, beyond) = match region {
         Region::Viewport => (viewport.page_x, viewport.page_y, viewport.width, viewport.height, false),
         Region::FullPage => {
@@ -252,6 +263,10 @@ async fn capture(
         Region::Element { .. } => bail_user!("resolve the element first"),
     };
     let (x, y, width, height) = dip_clip((x, y, width, height), zoom);
+    let (width, height) = match region {
+        Region::FullPage => full_page_size((width, height), (viewport.content_width_dip, viewport.content_height_dip), zoom),
+        _ => (width, height),
+    };
     let viewport_clip = dip_clip((viewport.page_x, viewport.page_y, viewport.width, viewport.height), zoom);
     let (x, y, width, height) = if beyond {
         (x, y, width, height)
@@ -614,12 +629,43 @@ mod tests {
         device_scale: f64,
         zoom: f64,
     ) {
+        zoomed_layout_with_content(
+            cdp,
+            page_x,
+            page_y,
+            width,
+            height,
+            content_width,
+            content_height,
+            content_width * device_scale * zoom,
+            content_height * device_scale * zoom,
+            device_scale,
+            zoom,
+        );
+    }
+
+    /// `physical_width` and `physical_height` are what Chrome puts in `contentSize`: device pixels in current Chrome.
+    #[allow(clippy::too_many_arguments)]
+    fn zoomed_layout_with_content(
+        cdp: &FakeCdp,
+        page_x: f64,
+        page_y: f64,
+        width: f64,
+        height: f64,
+        content_width: f64,
+        content_height: f64,
+        physical_width: f64,
+        physical_height: f64,
+        device_scale: f64,
+        zoom: f64,
+    ) {
         cdp.reply(
             "Page.getLayoutMetrics",
             json!({
                 "cssVisualViewport": { "pageX": page_x, "pageY": page_y, "clientWidth": width, "clientHeight": height, "zoom": zoom },
                 "visualViewport": { "clientWidth": width * device_scale * zoom },
                 "cssContentSize": { "width": content_width, "height": content_height },
+                "contentSize": { "width": physical_width, "height": physical_height },
             }),
         );
     }
@@ -695,6 +741,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_scrolled_zoomed_viewport_uses_the_page_offset() {
+        let cdp = fake();
+        zoomed_layout(&cdp, 120.5, 300.25, 960.0, 525.6, 960.0, 2400.0, 1.0, 1.25);
+
+        capture(cdp.as_ref(), &Region::Viewport, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+        let (params, clip) = last_clip(&cdp);
+        assert_eq!(clip, (151.0, 375.0, 1200.0, 657.0));
+        assert_eq!(params["captureBeyondViewport"], json!(false), "{params}");
+    }
+
+    #[tokio::test]
     async fn a_zoomed_screenshot_reports_image_pixels_per_css_pixel() {
         // What Chrome returns for the CSS-size viewport at 125% zoom on a 1x screen.
         let cdp = fake_sized(960, 526);
@@ -719,6 +776,47 @@ mod tests {
         let (params, clip) = last_clip(&cdp);
         assert_eq!(clip, (0.0, 0.0, 1200.0, 3000.0));
         assert_eq!(params["captureBeyondViewport"], json!(true), "{params}");
+    }
+
+    #[test]
+    fn a_full_page_keeps_the_physical_edge_only_when_zoomed() {
+        // 2400 CSS floored from 3001 physical px is 3000 DIP at 125%; the physical size adds the missing pixel.
+        assert_eq!(full_page_size((3000.0, 3000.0), (3001.0, 3001.0), 1.25), (3001.0, 3001.0));
+        // At 100% zoom the rounded CSS size is unchanged, even when the physical content is a fraction larger.
+        assert_eq!(full_page_size((1200.0, 2400.0), (1200.5, 2400.5), 1.0), (1200.0, 2400.0));
+    }
+
+    #[tokio::test]
+    async fn a_zoomed_full_page_keeps_the_floored_edge() {
+        let cdp = fake();
+        // Chrome floors 3001 physical px to 2400 CSS at 125% zoom; 2400 * 1.25 is 3000, one DIP short.
+        zoomed_layout_with_content(&cdp, 0.0, 0.0, 960.0, 525.6, 2400.0, 2400.0, 3001.0, 3001.0, 1.0, 1.25);
+
+        capture(cdp.as_ref(), &Region::FullPage, Format::Png, None, false, MAX_SAVED_SIDE).await.unwrap();
+        let (params, clip) = last_clip(&cdp);
+        assert_eq!(clip, (0.0, 0.0, 3001.0, 3001.0));
+        assert_eq!(params["captureBeyondViewport"], json!(true), "{params}");
+
+        // At 100% zoom the clip is still the rounded CSS content size.
+        let cdp = fake();
+        zoomed_layout_with_content(&cdp, 0.0, 0.0, 1200.0, 657.0, 1200.4, 2400.6, 1201.0, 2401.0, 1.0, 1.0);
+        capture(cdp.as_ref(), &Region::FullPage, Format::Png, None, false, MAX_SAVED_SIDE).await.unwrap();
+        let (_, clip) = last_clip(&cdp);
+        assert_eq!(clip, (0.0, 0.0, 1200.0, 2401.0));
+    }
+
+    #[tokio::test]
+    async fn a_zoomed_full_page_reports_the_downscale_note() {
+        let cdp = fake();
+        zoomed_layout(&cdp, 0.0, 0.0, 960.0, 525.6, 960.0, 2400.0, 1.0, 1.25);
+
+        let shot = capture(cdp.as_ref(), &Region::FullPage, Format::Png, None, true, 600.0).await.unwrap();
+        let (params, clip) = last_clip(&cdp);
+        assert_eq!(clip, (0.0, 0.0, 1200.0, 3000.0));
+        assert_eq!(params["clip"]["scale"], json!(0.2), "{params}");
+        let note = shot.note.expect("a downscale note");
+        assert!(note.contains("scaled down to 25%"), "{note}");
+        assert!(note.contains("960×2400 px"), "{note}");
     }
 
     #[tokio::test]
