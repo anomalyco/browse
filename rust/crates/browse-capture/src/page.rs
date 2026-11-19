@@ -51,13 +51,13 @@ pub(crate) async fn viewport(cdp: &dyn Cdp) -> anyhow::Result<Viewport> {
     let content_width = number(content, "width").unwrap_or(width);
     let content_height = number(content, "height").unwrap_or(height);
     // cssContentSize is floored to whole CSS pixels. contentSize is the physical size in current Chrome, where
-    // cssVisualViewport is present, and DIP in older Chrome.
+    // cssVisualViewport is present; without it its units are unknown, so treat the content as CSS.
     let content_dip = match (metrics.get("contentSize"), metrics.get("cssVisualViewport")) {
         (Some(physical), Some(_)) if width > 0.0 => (
             number(Some(physical), "width").map_or(content_width * page_zoom, |value| value / device_pixel_ratio),
             number(Some(physical), "height").map_or(content_height * page_zoom, |value| value / device_pixel_ratio),
         ),
-        _ => (content_width, content_height),
+        _ => (content_width * page_zoom, content_height * page_zoom),
     };
     Ok(Viewport {
         page_x: number(css, "pageX").unwrap_or(0.0),
@@ -173,5 +173,21 @@ mod tests {
         let viewport = viewport(cdp.as_ref()).await.unwrap();
         assert_eq!(viewport.page_zoom, 1.0);
         assert_eq!(viewport.device_pixel_ratio, 2.0);
+    }
+
+    #[tokio::test]
+    async fn without_css_metrics_the_content_is_treated_as_css() {
+        let cdp = FakeCdp::new();
+        cdp.reply(
+            "Page.getLayoutMetrics",
+            json!({
+                "visualViewport": { "clientWidth": 1200.0, "clientHeight": 657.0 },
+                "contentSize": { "width": 1200.0, "height": 2400.0 },
+            }),
+        );
+        let viewport = viewport(cdp.as_ref()).await.unwrap();
+        assert_eq!(viewport.page_zoom, 1.0);
+        assert_eq!((viewport.content_width, viewport.content_height), (1200.0, 2400.0));
+        assert_eq!((viewport.content_width_dip, viewport.content_height_dip), (1200.0, 2400.0));
     }
 }

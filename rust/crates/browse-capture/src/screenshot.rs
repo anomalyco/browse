@@ -179,6 +179,14 @@ fn dip_clip((x, y, width, height): (f64, f64, f64, f64), zoom: f64) -> (f64, f64
     whole_clip((x * zoom, y * zoom, width * zoom, height * zoom))
 }
 
+/// A physical DIP value within a hundredth of a whole DIP is that whole DIP: Chrome computes the CSS viewport and page
+/// zoom in 32-bit floats, so `contentSize / device_pixel_ratio` can land just above an integer (3000.0000364), and
+/// ceiling that would reach one DIP past the document.
+fn whole_dip(value: f64) -> f64 {
+    let rounded = value.round();
+    if (value - rounded).abs() < 0.01 { rounded } else { value.ceil() }
+}
+
 /// The DIP width and height of a full-page clip. Chrome floors `cssContentSize` to whole CSS pixels, so multiplying it
 /// by page zoom can miss the physical right/bottom edge (3001 physical px -> 2400 CSS -> 3000 DIP). The physical content
 /// size keeps that edge; at 100% zoom the rounded CSS size stays exactly what it was.
@@ -186,7 +194,7 @@ fn full_page_size(rounded: (f64, f64), physical: (f64, f64), zoom: f64) -> (f64,
     if zoom == 1.0 {
         return rounded;
     }
-    (rounded.0.max(physical.0.ceil()).max(1.0), rounded.1.max(physical.1.ceil()).max(1.0))
+    (rounded.0.max(whole_dip(physical.0)).max(1.0), rounded.1.max(whole_dip(physical.1)).max(1.0))
 }
 
 /// Keeps a whole-pixel clip inside the rounded viewport, in page coordinates, moving it rather than shrinking it where
@@ -782,6 +790,8 @@ mod tests {
     fn a_full_page_keeps_the_physical_edge_only_when_zoomed() {
         // 2400 CSS floored from 3001 physical px is 3000 DIP at 125%; the physical size adds the missing pixel.
         assert_eq!(full_page_size((3000.0, 3000.0), (3001.0, 3001.0), 1.25), (3001.0, 3001.0));
+        // Chrome's 32-bit CSS metrics put the physical DIP a hair above a whole pixel; that is not another pixel.
+        assert_eq!(full_page_size((1279.0, 3300.0), (1280.0000155362216, 3300.000040054321), 1.1), (1280.0, 3300.0));
         // At 100% zoom the rounded CSS size is unchanged, even when the physical content is a fraction larger.
         assert_eq!(full_page_size((1200.0, 2400.0), (1200.5, 2400.5), 1.0), (1200.0, 2400.0));
     }
@@ -803,6 +813,26 @@ mod tests {
         capture(cdp.as_ref(), &Region::FullPage, Format::Png, None, false, MAX_SAVED_SIDE).await.unwrap();
         let (_, clip) = last_clip(&cdp);
         assert_eq!(clip, (0.0, 0.0, 1200.0, 2401.0));
+    }
+
+    #[tokio::test]
+    async fn a_zoomed_full_page_snaps_32_bit_metric_noise() {
+        let cdp = fake();
+        // 1280px at 110%: Chrome's 32-bit viewport and zoom make the ratio land just under 1, so the physical content
+        // divides to 1280.0000155 x 3300.0000401 DIP. Neither edge is a real extra pixel.
+        cdp.reply(
+            "Page.getLayoutMetrics",
+            json!({
+                "cssVisualViewport": { "pageX": 0.0, "pageY": 0.0, "clientWidth": 1163.6363525390625, "clientHeight": 700.0, "zoom": 1.100000023841858 },
+                "visualViewport": { "clientWidth": 1280.0 },
+                "cssContentSize": { "width": 1163.0, "height": 3000.0 },
+                "contentSize": { "width": 1280.0, "height": 3300.0 },
+            }),
+        );
+
+        capture(cdp.as_ref(), &Region::FullPage, Format::Png, None, false, MAX_SAVED_SIDE).await.unwrap();
+        let (_, clip) = last_clip(&cdp);
+        assert_eq!(clip, (0.0, 0.0, 1280.0, 3300.0));
     }
 
     #[tokio::test]
