@@ -133,14 +133,11 @@ async fn refresh_titles(relay: &Arc<Relay>) {
     }
 }
 
-/// A `tab` or `tabs` entry: the numeric id, or a chosen id like `work-mail`.
+/// A `tab` or `tabs` entry: the numeric id (possibly sent as a digit string), or a chosen id like `work-mail`.
 fn picked_tab(relay: &Arc<Relay>, value: &Value) -> anyhow::Result<i64> {
-    if let Some(tab) = value.as_i64() {
-        return Ok(tab);
-    }
-    match value.as_str() {
-        Some(chosen) => relay.resolve_chosen_tab(chosen.trim()),
-        None => bail!("tab ids are integers or chosen ids like `work-mail`, not {value}"),
+    match browse_core::tab_argument(value)? {
+        browse_core::TabArg::Id(tab) => Ok(tab),
+        browse_core::TabArg::Chosen(chosen) => relay.resolve_chosen_tab(&chosen),
     }
 }
 

@@ -458,13 +458,10 @@ impl Browser for RelayBrowser {
 
     /// A numeric tab id, or a caller-chosen id like `work-mail`.
     fn resolve_tab(&self, value: &Value) -> anyhow::Result<TabId> {
-        if let Some(tab) = value.as_i64() {
-            return Ok(tab);
+        match browse_core::tab_argument(value)? {
+            browse_core::TabArg::Id(tab) => Ok(tab),
+            browse_core::TabArg::Chosen(chosen) => self.0.resolve_chosen_tab(&chosen),
         }
-        let Some(chosen) = value.as_str().map(str::trim).filter(|id| !id.is_empty()) else {
-            bail!("tab must be an integer tab id or a chosen id like `work-mail`, not {value}");
-        };
-        self.0.resolve_chosen_tab(chosen)
     }
 }
 
@@ -472,7 +469,7 @@ impl Relay {
     /// The tab a caller-chosen id like `work-mail` stands for, or why it can't be used.
     pub fn resolve_chosen_tab(&self, chosen: &str) -> anyhow::Result<TabId> {
         if !browse_core::valid_chosen_id(chosen) {
-            bail!("tab ids you choose are lowercase slugs like `work-mail` (letters, digits and dashes, starting with a letter), not {chosen:?}");
+            bail!("tab must be a numeric tab id (from navigate or tabs) or a chosen id like `work-mail` (lowercase letters, digits and dashes, starting with a letter), not {chosen:?}");
         }
         let st = self.st();
         if let Some(tab) = st.tab_by_chosen(chosen) {

@@ -579,30 +579,29 @@ pub async fn call_tool(relay: &Arc<Relay>, request: ToolCallRequest, client_pid:
 }
 
 /// Rewrites `tab` (and every entry of `tabs`) from a caller-chosen id like `work-mail` to the relay's numeric id, and
-/// says which chosen id `tab` named. Arguments every tool shares pass through here once.
+/// says which chosen id `tab` named. A numeric id sent as a string (some MCP clients do that) becomes the number.
+/// Arguments every tool shares pass through here once.
 fn resolve_tab_arguments(relay: &Arc<Relay>, arguments: &mut Value) -> Result<Option<String>, String> {
     let Some(map) = arguments.as_object_mut() else { return Ok(None) };
     let mut chosen = None;
-    if let Some(value) = map.get_mut("tab") {
-        match value {
-            Value::String(name) => {
-                let name = name.trim().to_string();
+    if let Some(value) = map.get_mut("tab").filter(|value| !value.is_null()) {
+        match browse_core::tab_argument(value).map_err(|error| format!("{error:#}"))? {
+            browse_core::TabArg::Id(tab) => *value = json!(tab),
+            browse_core::TabArg::Chosen(name) => {
                 let tab = relay.resolve_chosen_tab(&name).map_err(|error| format!("{error:#}"))?;
                 *value = json!(tab);
                 chosen = Some(name);
             }
-            Value::Null => {}
-            other if other.as_i64().is_some() => {}
-            other => return Err(format!("tab must be an integer tab id or a chosen id like `work-mail`, not {other}")),
         }
     }
     if let Some(Value::Array(list)) = map.get_mut("tabs") {
-        for value in list.iter_mut() {
-            if let Value::String(name) = value {
-                let tab = relay.resolve_chosen_tab(name.trim()).map_err(|error| format!("{error:#}"))?;
-                *value = json!(tab);
-            } else if !value.is_null() && value.as_i64().is_none() {
-                return Err(format!("tabs must be integer tab ids or chosen ids like `work-mail`, not {value}"));
+        for value in list.iter_mut().filter(|value| !value.is_null()) {
+            match browse_core::tab_argument(value).map_err(|error| format!("{error:#}"))? {
+                browse_core::TabArg::Id(tab) => *value = json!(tab),
+                browse_core::TabArg::Chosen(name) => {
+                    let tab = relay.resolve_chosen_tab(&name).map_err(|error| format!("{error:#}"))?;
+                    *value = json!(tab);
+                }
             }
         }
     }

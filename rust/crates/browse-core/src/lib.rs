@@ -232,10 +232,54 @@ pub fn require_tab(args: &Value) -> anyhow::Result<TabId> {
     }
 }
 
+/// A `tab` argument (or an entry of `tabs`): the relay's numeric tab id, or a caller-chosen id like `work-mail`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TabArg {
+    Id(TabId),
+    Chosen(String),
+}
+
+/// What a `tab` argument means. Some MCP clients send numbers as JSON strings, so a string of ASCII digits and
+/// nothing else is the number it spells; a chosen id always starts with a letter, so the two can't be confused.
+/// Whitespace is never accepted around a numeric id, and a digit string too large for `TabId` is refused.
+pub fn tab_argument(value: &Value) -> anyhow::Result<TabArg> {
+    match value {
+        Value::Number(_) => match value.as_i64() {
+            Some(tab) if tab >= 0 => Ok(TabArg::Id(tab)),
+            _ => Err(invalid_tab_id(value)),
+        },
+        Value::String(text) => {
+            if !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) {
+                let tab = text.parse::<TabId>().map_err(|_| anyhow::anyhow!("tab id {text} is too large; browse's tab ids are 64-bit integers"))?;
+                return Ok(TabArg::Id(tab));
+            }
+            let chosen = text.trim();
+            if chosen.is_empty() {
+                return Err(invalid_tab_id(value));
+            }
+            if chosen != text && chosen.bytes().all(|byte| byte.is_ascii_digit()) {
+                anyhow::bail!("tab id {text:?} has spaces around it; pass the digits only");
+            }
+            if !valid_chosen_id(chosen) {
+                anyhow::bail!("tab must be a numeric tab id (from navigate or tabs) or a chosen id like `work-mail` (lowercase letters, digits and dashes, starting with a letter), not {text:?}");
+            }
+            Ok(TabArg::Chosen(chosen.to_string()))
+        }
+        other => Err(invalid_tab_id(other)),
+    }
+}
+
+fn invalid_tab_id(value: &Value) -> anyhow::Error {
+    anyhow::anyhow!("tab must be a numeric tab id (from navigate or tabs) or a chosen id like `work-mail`, not {value}")
+}
+
 /// A numeric tab id argument. A chosen id is resolved against the relay before tools run
 /// (`Browser::resolve_tab`), and by the `tabs` tool itself.
 pub fn tab_arg(value: &Value) -> anyhow::Result<TabId> {
-    value.as_i64().ok_or_else(|| anyhow::anyhow!("tab must be an integer tab id (from navigate or tabs) or a chosen id like `work-mail`, not {value}"))
+    match tab_argument(value)? {
+        TabArg::Id(tab) => Ok(tab),
+        TabArg::Chosen(chosen) => anyhow::bail!("`{chosen}` is a chosen tab id, and only the relay can resolve it to a tab; pass the numeric id navigate or tabs returned"),
+    }
 }
 
 /// A caller-chosen tab id: a lowercase slug, `^[a-z][a-z0-9-]{0,63}$`, so it can never be mistaken for a number.
@@ -251,7 +295,7 @@ pub fn valid_chosen_id(value: &str) -> bool {
 pub fn tab_schema() -> Value {
     serde_json::json!({
         "type": ["integer", "string"],
-        "description": "The tab to act on: the id navigate or tabs new returned (or a lent tab's id from tabs list), or a chosen id like `work-mail` given to tabs new."
+        "description": "The tab to act on: the id navigate or tabs new returned (or a lent tab's id from tabs list), as a number or a string of digits, or a chosen id like `work-mail` given to tabs new."
     })
 }
 
@@ -306,3 +350,35 @@ pub const CLIENT_HEADER: &str = "OpenCode-Browser-Client";
 /// A key the caller picks for one POST /tools/call, so POST /tools/cancel can stop that call (an MCP client's
 /// `notifications/cancelled`).
 pub const CALL_HEADER: &str = "OpenCode-Browser-Call";
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn a_digit_only_string_is_the_number_it_spells() {
+        assert_eq!(tab_argument(&json!("633559866")).unwrap(), TabArg::Id(633559866));
+        assert_eq!(tab_argument(&json!(633559866)).unwrap(), TabArg::Id(633559866));
+        assert_eq!(tab_arg(&json!("633559866")).unwrap(), 633559866);
+        // A digit string still names a tab; the relay decides whether that tab exists.
+        assert_eq!(tab_argument(&json!("007")).unwrap(), TabArg::Id(7));
+    }
+
+    #[test]
+    fn a_chosen_id_stays_a_chosen_id() {
+        assert_eq!(tab_argument(&json!("work-mail")).unwrap(), TabArg::Chosen("work-mail".into()));
+        assert_eq!(tab_argument(&json!("  work-mail  ")).unwrap(), TabArg::Chosen("work-mail".into()));
+        assert_eq!(tab_argument(&json!("b2")).unwrap(), TabArg::Chosen("b2".into()));
+        assert!(tab_arg(&json!("work-mail")).is_err(), "only the relay resolves chosen ids");
+    }
+
+    #[test]
+    fn invalid_tab_ids_are_refused() {
+        for value in [json!(""), json!("   "), json!("12a"), json!("-5"), json!("+5"), json!(" 12 "), json!("1.5"), json!("99999999999999999999"), json!(1.5), json!(-5), json!(true), json!({}), json!([])] {
+            assert!(tab_argument(&value).is_err(), "{value} must not be a tab id");
+        }
+        assert!(tab_argument(&json!("99999999999999999999")).unwrap_err().to_string().contains("too large"));
+    }
+}

@@ -171,7 +171,10 @@ fn tab_id(value: &str) -> anyhow::Result<Value> {
     if value.is_empty() {
         bail!("--tab takes a tab id (a number from `browse navigate` or `browse tabs`) or a chosen id like `work-mail`, not {value:?}");
     }
-    Ok(value.parse::<i64>().map_or_else(|_| Value::String(value.to_owned()), Value::from))
+    Ok(match browse_core::tab_argument(&Value::String(value.to_owned()))? {
+        browse_core::TabArg::Id(tab) => Value::from(tab),
+        browse_core::TabArg::Chosen(chosen) => Value::String(chosen),
+    })
 }
 
 /// A command-line value for an option with `schema`: JSON when that fits the schema, else the raw string when a
@@ -670,8 +673,13 @@ mod tests {
     #[test]
     fn tab_flag_keeps_numbers_and_passes_chosen_ids() {
         assert_eq!(tab_id("12").unwrap(), json!(12));
+        assert_eq!(tab_id("633559866").unwrap(), json!(633559866));
         assert_eq!(tab_id("work-mail").unwrap(), json!("work-mail"));
         assert!(tab_id("").is_err());
+        assert!(tab_id("12a").is_err(), "not a number, and not a chosen id either");
+        assert!(tab_id("-5").is_err(), "tab ids aren't negative");
+        assert!(tab_id(" 12 ").is_err(), "no whitespace tolerance");
+        assert!(tab_id("99999999999999999999").is_err(), "too large for a tab id");
     }
 
     #[test]
