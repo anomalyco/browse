@@ -22,8 +22,12 @@ pub(crate) struct Viewport {
     /// Full document size in CSS pixels.
     pub content_width: f64,
     pub content_height: f64,
-    /// Device pixels per CSS pixel; screenshots are scaled by its inverse so their pixels match click coordinates.
+    /// Device pixels per device independent pixel (the screen's scale, without page zoom). Screenshots divide by it,
+    /// and by `page_zoom`, so one image pixel is one CSS pixel by default.
     pub device_pixel_ratio: f64,
+    /// Page zoom: how many device independent pixels one CSS pixel spans. `Page.captureScreenshot` clips are in DIP,
+    /// so page geometry has to be multiplied by this to cover the whole visible page.
+    pub page_zoom: f64,
 }
 
 pub(crate) async fn viewport(cdp: &dyn Cdp) -> anyhow::Result<Viewport> {
@@ -35,9 +39,9 @@ pub(crate) async fn viewport(cdp: &dyn Cdp) -> anyhow::Result<Viewport> {
     let content = metrics.get("cssContentSize").or_else(|| metrics.get("contentSize"));
     // visualViewport is in device pixels in current Chrome, cssVisualViewport in CSS pixels.
     let device_width = number(metrics.get("visualViewport"), "clientWidth");
-    let zoom = number(css, "zoom").unwrap_or(1.0);
+    let page_zoom = number(css, "zoom").filter(|zoom| zoom.is_finite() && *zoom > 0.0).unwrap_or(1.0);
     let device_pixel_ratio = match (device_width, metrics.get("cssVisualViewport")) {
-        (Some(device), Some(_)) if width > 0.0 => (device / width / zoom.max(f64::EPSILON)).max(0.1),
+        (Some(device), Some(_)) if width > 0.0 => (device / width / page_zoom.max(f64::EPSILON)).max(0.1),
         _ => 1.0,
     };
     Ok(Viewport {
@@ -48,6 +52,7 @@ pub(crate) async fn viewport(cdp: &dyn Cdp) -> anyhow::Result<Viewport> {
         content_width: number(content, "width").unwrap_or(width),
         content_height: number(content, "height").unwrap_or(height),
         device_pixel_ratio: (device_pixel_ratio * 1000.0).round() / 1000.0,
+        page_zoom,
     })
 }
 
@@ -106,5 +111,47 @@ pub(crate) async fn evaluate(cdp: &dyn Cdp, worlds: &mut Worlds, tab: TabId, exp
             Err(browse_core::CdpError::Protocol(message)) if !fresh && message.contains("context") => fresh = true,
             Err(error) => return Err(error.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::FakeCdp;
+
+    #[tokio::test]
+    async fn reads_page_zoom_apart_from_the_device_scale() {
+        let cdp = FakeCdp::new();
+        cdp.reply(
+            "Page.getLayoutMetrics",
+            json!({
+                "cssVisualViewport": { "pageX": 5.0, "pageY": 6.0, "clientWidth": 960.0, "clientHeight": 525.6, "zoom": 1.25 },
+                "visualViewport": { "clientWidth": 2400.0 },
+                "cssContentSize": { "width": 960.0, "height": 2400.0 },
+            }),
+        );
+        let viewport = viewport(cdp.as_ref()).await.unwrap();
+        assert_eq!(viewport.page_zoom, 1.25);
+        // 2400 device pixels over 960 CSS pixels is 2x at 125% zoom, not 2.5x.
+        assert_eq!(viewport.device_pixel_ratio, 2.0);
+        assert_eq!((viewport.page_x, viewport.page_y), (5.0, 6.0));
+        assert_eq!((viewport.width, viewport.height), (960.0, 525.6));
+        assert_eq!((viewport.content_width, viewport.content_height), (960.0, 2400.0));
+    }
+
+    #[tokio::test]
+    async fn a_chrome_without_the_zoom_field_is_not_zoomed() {
+        let cdp = FakeCdp::new();
+        cdp.reply(
+            "Page.getLayoutMetrics",
+            json!({
+                "cssVisualViewport": { "clientWidth": 1200.0, "clientHeight": 657.0 },
+                "visualViewport": { "clientWidth": 2400.0 },
+                "cssContentSize": { "width": 1200.0, "height": 657.0 },
+            }),
+        );
+        let viewport = viewport(cdp.as_ref()).await.unwrap();
+        assert_eq!(viewport.page_zoom, 1.0);
+        assert_eq!(viewport.device_pixel_ratio, 2.0);
     }
 }

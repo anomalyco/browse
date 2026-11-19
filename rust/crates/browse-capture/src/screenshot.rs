@@ -171,6 +171,14 @@ fn whole_clip((x, y, width, height): (f64, f64, f64, f64)) -> (f64, f64, f64, f6
     (x.round(), y.round(), width.round().max(1.0), height.round().max(1.0))
 }
 
+/// Converts page geometry from CSS pixels to the device independent pixels a screenshot clip is in. Page zoom makes one
+/// CSS pixel span `zoom` DIP, so a clip left in CSS pixels covers only 1/zoom of the visible page (80% of each side at
+/// 125% zoom).
+fn dip_clip((x, y, width, height): (f64, f64, f64, f64), zoom: f64) -> (f64, f64, f64, f64) {
+    let zoom = if zoom.is_finite() && zoom > 0.0 { zoom } else { 1.0 };
+    whole_clip((x * zoom, y * zoom, width * zoom, height * zoom))
+}
+
 /// Keeps a whole-pixel clip inside the rounded viewport, in page coordinates, moving it rather than shrinking it where
 /// possible. A clip that doesn't reach beyond the viewport is captured with captureBeyondViewport off, so an overhang
 /// would come back unpainted.
@@ -229,11 +237,13 @@ async fn capture(
 ) -> anyhow::Result<Shot> {
     let viewport = page::viewport(cdp).await?;
     let dpr = viewport.device_pixel_ratio;
-    let mut clip_scale = if css_scale { 1.0 / dpr } else { 1.0 };
+    let zoom = viewport.page_zoom;
+    // Page.captureScreenshot's clip is in DIP, and clip.scale then applies device pixels on top. One image pixel per
+    // CSS pixel therefore divides by both the screen scale and the page zoom.
+    let mut clip_scale = if css_scale { 1.0 / (dpr * zoom) } else { 1.0 };
     // The viewport's own clip keeps its size, so screenshot_diff baselines of the same viewport still match.
-    let viewport_rect = (viewport.page_x.round(), viewport.page_y.round(), viewport.width.round(), viewport.height.round());
     let (x, y, width, height, beyond) = match region {
-        Region::Viewport => (viewport_rect.0, viewport_rect.1, viewport_rect.2, viewport_rect.3, false),
+        Region::Viewport => (viewport.page_x, viewport.page_y, viewport.width, viewport.height, false),
         Region::FullPage => {
             let (width, height) = (viewport.content_width.max(1.0), viewport.content_height.max(1.0));
             (0.0, 0.0, width, height, outside(&viewport, (-viewport.page_x, -viewport.page_y, width, height)))
@@ -241,14 +251,15 @@ async fn capture(
         Region::Clip(x, y, w, h) => (viewport.page_x + x, viewport.page_y + y, *w, *h, outside(&viewport, (*x, *y, *w, *h))),
         Region::Element { .. } => bail_user!("resolve the element first"),
     };
-    let (x, y, width, height) = whole_clip((x, y, width, height));
+    let (x, y, width, height) = dip_clip((x, y, width, height), zoom);
+    let viewport_clip = dip_clip((viewport.page_x, viewport.page_y, viewport.width, viewport.height), zoom);
     let (x, y, width, height) = if beyond {
         (x, y, width, height)
     } else {
-        if viewport_rect.2 < 1.0 || viewport_rect.3 < 1.0 {
+        if viewport.width.round() < 1.0 || viewport.height.round() < 1.0 {
             bail_user!("the tab has no visible area to capture");
         }
-        clamp_clip((x, y, width, height), viewport_rect)
+        clamp_clip((x, y, width, height), viewport_clip)
     };
     let mut note = None;
     let longest = width.max(height) * clip_scale * dpr;
@@ -292,19 +303,19 @@ async fn capture(
         Err(error) => return Err(error.into()),
     };
     let (image_width, image_height) = image_size(&bytes).ok_or_else(|| anyhow::anyhow!("Chrome returned an unreadable image"))?;
-    Ok(Shot { bytes, format, width: image_width, height: image_height, scale: image_width as f64 / width, note })
+    Ok(Shot { bytes, format, width: image_width, height: image_height, scale: image_width as f64 * zoom / width, note })
 }
 
-/// Captures a large area in horizontal strips and stitches them into one PNG.
+/// Captures a large area in horizontal strips and stitches them into one PNG. `(x, y, width, height)` is in DIP.
 async fn tiles(cdp: &dyn Cdp, (x, y, width, height): (f64, f64, f64, f64), clip_scale: f64) -> anyhow::Result<Vec<u8>> {
-    let dpr = page::viewport(cdp).await?.device_pixel_ratio;
-    let per_css = clip_scale * dpr;
-    let total_width = (width * per_css).round() as u64;
-    let total_height = (height * per_css).round() as u64;
+    let viewport = page::viewport(cdp).await?;
+    let per_dip = clip_scale * viewport.device_pixel_ratio;
+    let total_width = (width * per_dip).round() as u64;
+    let total_height = (height * per_dip).round() as u64;
     if total_width * total_height > pixeldiff::MAX_IMAGE_PIXELS {
         bail_user!("too large to stitch (over 16 megapixels)");
     }
-    let strip = (TILE_SIDE / per_css).floor().max(1.0);
+    let strip = (TILE_SIDE / per_dip).floor().max(1.0);
     let mut image = pixeldiff::Rgba { width: total_width as u32, height: 0, data: Vec::new() };
     let mut offset = 0.0;
     while offset < height {
@@ -574,8 +585,12 @@ mod tests {
     use base64::Engine;
 
     fn fake() -> std::sync::Arc<FakeCdp> {
+        fake_sized(1, 1)
+    }
+
+    fn fake_sized(width: u32, height: u32) -> std::sync::Arc<FakeCdp> {
         let cdp = FakeCdp::new();
-        let image = crate::pixeldiff::Rgba { width: 1, height: 1, data: vec![0, 0, 0, 255] };
+        let image = crate::pixeldiff::Rgba { width, height, data: [0, 0, 0, 255].repeat(width as usize * height as usize) };
         cdp.reply(
             "Page.captureScreenshot",
             json!({ "data": base64::engine::general_purpose::STANDARD.encode(crate::pixeldiff::encode_png(&image).unwrap()) }),
@@ -584,11 +599,26 @@ mod tests {
     }
 
     fn layout(cdp: &FakeCdp, page_x: f64, page_y: f64, width: f64, height: f64, content_width: f64, content_height: f64) {
+        zoomed_layout(cdp, page_x, page_y, width, height, content_width, content_height, 1.0, 1.0);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn zoomed_layout(
+        cdp: &FakeCdp,
+        page_x: f64,
+        page_y: f64,
+        width: f64,
+        height: f64,
+        content_width: f64,
+        content_height: f64,
+        device_scale: f64,
+        zoom: f64,
+    ) {
         cdp.reply(
             "Page.getLayoutMetrics",
             json!({
-                "cssVisualViewport": { "pageX": page_x, "pageY": page_y, "clientWidth": width, "clientHeight": height, "zoom": 1.0 },
-                "visualViewport": { "clientWidth": width },
+                "cssVisualViewport": { "pageX": page_x, "pageY": page_y, "clientWidth": width, "clientHeight": height, "zoom": zoom },
+                "visualViewport": { "clientWidth": width * device_scale * zoom },
                 "cssContentSize": { "width": content_width, "height": content_height },
             }),
         );
@@ -624,6 +654,82 @@ mod tests {
     #[test]
     fn clamp_keeps_a_one_pixel_viewport_inside() {
         assert_eq!(clamp_clip((10.0, 10.0, 20.0, 20.0), (5.0, 5.0, 1.0, 1.0)), (5.0, 5.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn page_zoom_scales_css_geometry_into_the_clip_space() {
+        // CSS pixels are converted to the DIP a screenshot clip is in, and rounded once there.
+        assert_eq!(dip_clip((10.0, 20.0, 100.0, 50.0), 1.25), (13.0, 25.0, 125.0, 63.0));
+        assert_eq!(dip_clip((10.0, 20.0, 100.0, 50.0), 1.1), (11.0, 22.0, 110.0, 55.0));
+        assert_eq!(dip_clip((10.0, 20.0, 100.0, 50.0), 2.0), (20.0, 40.0, 200.0, 100.0));
+        assert_eq!(dip_clip((10.0, 20.0, 100.0, 50.0), 0.5), (5.0, 10.0, 50.0, 25.0));
+        assert_eq!(dip_clip((10.0, 20.0, 100.0, 50.0), 1.0), (10.0, 20.0, 100.0, 50.0));
+        // A missing or broken zoom leaves the geometry as it was.
+        for zoom in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(dip_clip((10.0, 20.0, 100.0, 50.0), zoom), (10.0, 20.0, 100.0, 50.0), "{zoom}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_zoomed_viewport_covers_the_whole_visible_page() {
+        let cdp = fake();
+        // 125% page zoom: the visible page is 1200x657 DIP while the CSS viewport is 960x525.6.
+        zoomed_layout(&cdp, 0.0, 0.0, 960.0, 525.6, 960.0, 525.6, 1.0, 1.25);
+
+        capture(cdp.as_ref(), &Region::Viewport, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+        let (params, clip) = last_clip(&cdp);
+        assert_eq!(clip, (0.0, 0.0, 1200.0, 657.0));
+        assert_eq!(params["captureBeyondViewport"], json!(false), "{params}");
+        // css output: 1200 DIP times 1/(screen scale * zoom) times the screen scale is one pixel per CSS pixel.
+        assert_eq!(params["clip"]["scale"], json!(0.8), "{params}");
+
+        // 2x screen: the same page, one image pixel per CSS pixel and per device pixel.
+        let cdp = fake();
+        zoomed_layout(&cdp, 0.0, 0.0, 960.0, 525.6, 960.0, 525.6, 2.0, 1.25);
+        for (css, scale) in [(true, 0.4), (false, 1.0)] {
+            capture(cdp.as_ref(), &Region::Viewport, Format::Png, None, css, MAX_SAVED_SIDE).await.unwrap();
+            let (params, clip) = last_clip(&cdp);
+            assert_eq!(clip, (0.0, 0.0, 1200.0, 657.0));
+            assert_eq!(params["clip"]["scale"], json!(scale), "{params}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_zoomed_screenshot_reports_image_pixels_per_css_pixel() {
+        // What Chrome returns for the CSS-size viewport at 125% zoom on a 1x screen.
+        let cdp = fake_sized(960, 526);
+        zoomed_layout(&cdp, 0.0, 0.0, 960.0, 525.6, 960.0, 525.6, 1.0, 1.25);
+        let shot = capture(cdp.as_ref(), &Region::Viewport, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+        assert_eq!((shot.width, shot.height), (960, 526));
+        assert!((shot.scale - 1.0).abs() < 1e-9, "{}", shot.scale);
+
+        // Device output on a 2x screen: 2.5 image pixels per CSS pixel (2x screen at 125% zoom).
+        let cdp = fake_sized(2400, 1314);
+        zoomed_layout(&cdp, 0.0, 0.0, 960.0, 525.6, 960.0, 525.6, 2.0, 1.25);
+        let shot = capture(cdp.as_ref(), &Region::Viewport, Format::Png, None, false, MAX_SAVED_SIDE).await.unwrap();
+        assert!((shot.scale - 2.5).abs() < 1e-9, "{}", shot.scale);
+    }
+
+    #[tokio::test]
+    async fn a_zoomed_full_page_is_scaled_by_the_page_zoom() {
+        let cdp = fake();
+        zoomed_layout(&cdp, 0.0, 0.0, 960.0, 525.6, 960.0, 2400.0, 1.0, 1.25);
+
+        capture(cdp.as_ref(), &Region::FullPage, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+        let (params, clip) = last_clip(&cdp);
+        assert_eq!(clip, (0.0, 0.0, 1200.0, 3000.0));
+        assert_eq!(params["captureBeyondViewport"], json!(true), "{params}");
+    }
+
+    #[tokio::test]
+    async fn a_zoomed_clip_is_scaled_like_the_viewport() {
+        let cdp = fake();
+        zoomed_layout(&cdp, 10.0, 100.0, 960.0, 525.6, 960.0, 2400.0, 1.0, 1.25);
+
+        capture(cdp.as_ref(), &Region::Clip(20.0, 40.0, 100.0, 50.0), Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+        let (params, clip) = last_clip(&cdp);
+        assert_eq!(clip, (38.0, 175.0, 125.0, 63.0));
+        assert_eq!(params["captureBeyondViewport"], json!(false), "{params}");
     }
 
     #[tokio::test]
