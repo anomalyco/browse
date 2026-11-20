@@ -430,6 +430,45 @@ async fn upload_falls_back_to_copy_when_the_browser_sees_other_files() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_falls_back_to_copy_when_the_probe_sees_another_file() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
+    let h = harness!(false);
+    let url = h.server.page("/upload-other-file", r#"<!doctype html><input id="file" type="file" multiple>"#);
+    h.ok("navigate", json!({ "url": url })).await;
+    h.ok("eval", json!({ "expression": "window.uploadChanges = 0; document.getElementById('file').addEventListener('change', () => window.uploadChanges++)" })).await;
+    let real = h.files.0.join("real.txt");
+    let other = h.files.0.join("other.txt");
+    std::fs::write(&real, "the real bytes").unwrap();
+    std::fs::write(&other, "a different file").unwrap();
+    // The sentinel reads correctly, but the real path resolves to another file: size and mtime differ.
+    h.tab.rewrite_files_except_sentinel_to(&other.display().to_string());
+    let uploaded = h.json("upload", json!({ "selector": "#file", "files": [real.display().to_string()] })).await;
+    assert_eq!(uploaded["via"], "copy", "{uploaded}");
+    assert_eq!(h.ok("eval", json!({ "expression": "window.uploadChanges" })).await, "1");
+    let content = h.ok("eval", json!({ "expression": "document.getElementById('file').files[0].text()" })).await;
+    assert_eq!(content, "\"the real bytes\"");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_copies_files_from_a_group_writable_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    let _upload = support::UPLOAD_LOCK.lock().await;
+    let h = harness!(false);
+    let url = h.server.page("/upload-group-writable", r#"<!doctype html><input id="file" type="file" multiple>"#);
+    h.ok("navigate", json!({ "url": url })).await;
+    // check_upload skips the file root itself, so a file directly in it is accepted; private_for_paths still refuses
+    // the group-writable folder, and the upload copies instead of handing Chrome a path it may reopen.
+    std::fs::set_permissions(&h.files.0, std::fs::Permissions::from_mode(0o775)).unwrap();
+    let file = h.files.0.join("group.txt");
+    std::fs::write(&file, "group bytes").unwrap();
+    let uploaded = h.json("upload", json!({ "selector": "#file", "files": [file.display().to_string()] })).await;
+    assert_eq!(uploaded["via"], "copy", "{uploaded}");
+    let content = h.ok("eval", json!({ "expression": "document.getElementById('file').files[0].text()" })).await;
+    assert_eq!(content, "\"group bytes\"");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn upload_paths_refuses_two_files_without_multiple() {
     let _upload = support::UPLOAD_LOCK.lock().await;
     let h = harness!(false);

@@ -178,7 +178,7 @@ pub struct TabCdp {
     /// Methods that answer with a protocol error, like an extension without file URL access does.
     refusing: Mutex<HashSet<String>>,
     /// A path that replaces every DOM.setFileInputFiles path, for a browser that sees another filesystem.
-    rewrite_files: Mutex<Option<String>>,
+    rewrite_files: Mutex<Option<(String, bool)>>,
 }
 
 impl TabCdp {
@@ -224,7 +224,12 @@ impl TabCdp {
     /// Makes DOM.setFileInputFiles set this path instead of the ones it was given, for a browser whose filesystem
     /// doesn't have them.
     pub fn rewrite_files_to(&self, path: &str) {
-        *self.rewrite_files.lock().unwrap() = Some(path.to_string());
+        *self.rewrite_files.lock().unwrap() = Some((path.to_string(), false));
+    }
+
+    /// The same, but the sentinel file the probe writes keeps its path, so only the real files look wrong.
+    pub fn rewrite_files_except_sentinel_to(&self, path: &str) {
+        *self.rewrite_files.lock().unwrap() = Some((path.to_string(), true));
     }
 }
 
@@ -236,8 +241,11 @@ impl Cdp for TabCdp {
             return Err(CdpError::Protocol(format!("{method}: Not allowed")));
         }
         if method == "DOM.setFileInputFiles"
-            && let Some(path) = self.rewrite_files.lock().unwrap().clone() {
-                params["files"] = json!([path]);
+            && let Some((path, keep_sentinel)) = self.rewrite_files.lock().unwrap().clone() {
+                let sentinel = params["files"][0].as_str().is_some_and(|file| std::path::Path::new(file).file_name().is_some_and(|name| name == std::ffi::OsStr::new("sentinel")));
+                if !(keep_sentinel && sentinel) {
+                    params["files"] = json!([path]);
+                }
             }
         let session = session_id.unwrap_or(&self.session);
         self.connection.send(method, params, Some(session)).await.map_err(CdpError::Protocol)

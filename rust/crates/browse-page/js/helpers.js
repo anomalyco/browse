@@ -448,9 +448,19 @@
       if (input.disabled) return "disabled"
       return "ok"
     },
-    // What a file input holds now, to check the browser read the files at the paths browse gave it.
-    uploadFiles(input) {
-      return Array.from(input.files || [], (file) => ({ name: file.name, size: file.size, lastModified: file.lastModified }))
+    // What a probe input holds now, and proof each file opens: the caller awaits this promise. null when a file can't
+    // be read (a path on another filesystem), so browse copies instead.
+    async uploadFiles(input) {
+      const files = []
+      for (const file of Array.from(input.files || [])) {
+        try {
+          await file.slice(0, 1).arrayBuffer()
+        } catch {
+          return null
+        }
+        files.push({ name: file.name, size: file.size, lastModified: file.lastModified })
+      }
+      return files
     },
     // The text of a file input's first file: the page reading a nonce browse just wrote proves it sees this filesystem.
     async uploadText(input) {
