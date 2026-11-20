@@ -442,6 +442,16 @@
       if (target instanceof HTMLInputElement && target.type.toLowerCase() === "file") return target
       return "not-file-input"
     },
+    // Checks a file input before browse hands it paths on disk; the same statuses uploadFinish returns.
+    uploadCheck(input, count) {
+      if (count > 1 && !input.multiple) return "not-multiple"
+      if (input.disabled) return "disabled"
+      return "ok"
+    },
+    // What a file input holds now, to check the browser read the files at the paths browse gave it.
+    uploadFiles(input) {
+      return Array.from(input.files || [], (file) => ({ name: file.name, size: file.size }))
+    },
     // Uploads as in-memory files (like Playwright's setInputFiles with buffers): the bytes arrive in base64 chunks,
     // then become File objects assigned through a DataTransfer, with input and change events.
     uploadChunk(id, base64) {
@@ -455,8 +465,8 @@
     uploadFinish(input, files) {
       const uploads = this.uploads || new Map()
       try {
-        if (files.length > 1 && !input.multiple) return "not-multiple"
-        if (input.disabled) return "disabled"
+        const check = this.uploadCheck(input, files.length)
+        if (check !== "ok") return check
         const transfer = new DataTransfer()
         for (const file of files) {
           transfer.items.add(new File(uploads.get(file.id) || [], file.name, { type: file.mime, lastModified: file.lastModified }))

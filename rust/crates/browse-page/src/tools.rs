@@ -1091,20 +1091,30 @@ async fn upload(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
                 ElementOr::Element(element) => element,
                 ElementOr::Status(_) => bail!("{} is not a file input (input[type=file]) or its label", target_label(&spec, &resolved.label)),
             };
-            set_files(&c.page, &input, &checked).await?;
+            let via = set_files(&c.page, &input, &checked, c.ctx.browser.same_machine(c.page.tab()).await).await?;
             let mut out = Map::new();
             out.insert("target".into(), target_label(&spec, &resolved.label));
             out.insert("files".into(), json!(checked.iter().map(|p| std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()).collect::<Vec<_>>()));
+            out.insert("via".into(), json!(via));
             Ok(out)
         })
     })
     .await
 }
 
-/// The most bytes one upload sends into the page.
+/// The most bytes one upload sends into the page when it copies files in (the paths route has no limit).
 const MAX_UPLOAD_BYTES: u64 = 50 * 1024 * 1024;
 /// Raw bytes per chunk sent to the page (base64 makes each call about a third larger).
 const UPLOAD_CHUNK: usize = 768 * 1024;
+
+fn upload_status(status: Option<&str>) -> Result<()> {
+    match status {
+        Some("ok") => Ok(()),
+        Some("not-multiple") => bail!("upload: the file input takes a single file (it has no `multiple` attribute); pass one file"),
+        Some("disabled") => bail!("upload: the file input is disabled"),
+        _ => bail!("upload: the page did not accept the files"),
+    }
+}
 
 fn mime_type(path: &std::path::Path) -> &'static str {
     let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
@@ -1138,9 +1148,36 @@ fn mime_type(path: &std::path::Path) -> &'static str {
     }
 }
 
-/// Puts files into a file input as in-memory File objects: browse reads them where it runs and sends the bytes,
-/// so it works when the browser is on another machine and without the extension's file URL access.
-async fn set_files(page: &Arc<TabPage>, input: &crate::page::Element, paths: &[String]) -> Result<()> {
+/// Puts files into a file input: on the same machine Chrome reads them from disk itself, else browse reads them and
+/// sends the bytes, so it works when the browser is on another machine and without the extension's file URL access.
+async fn set_files(page: &Arc<TabPage>, input: &crate::page::Element, paths: &[String], same_machine: bool) -> Result<&'static str> {
+    if same_machine && set_files_from_paths(page, input, paths).await? {
+        return Ok("paths");
+    }
+    set_files_by_copy(page, input, paths).await?;
+    Ok("copy")
+}
+
+/// Lets Chrome set the input's files from their paths: real input and change events, no size limit. False when the
+/// browser refuses (an extension without file URL access does) or the input doesn't end up with the files on disk.
+async fn set_files_from_paths(page: &Arc<TabPage>, input: &crate::page::Element, paths: &[String]) -> Result<bool> {
+    upload_status(page.call_element(input, "uploadCheck", vec![v(paths.len())], false).await?.as_str())?;
+    if page.send("DOM.setFileInputFiles", json!({ "objectId": input.object_id, "files": paths }), input.session.as_deref()).await.is_err() {
+        return Ok(false);
+    }
+    let Ok(read) = page.call_element(input, "uploadFiles", vec![], false).await else { return Ok(false) };
+    let Some(files) = read.as_array().filter(|files| files.len() == paths.len()) else { return Ok(false) };
+    for (file, path) in files.iter().zip(paths) {
+        let Ok(metadata) = std::fs::metadata(path) else { return Ok(false) };
+        if file.get("size").and_then(Value::as_u64) != Some(metadata.len()) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Puts files into a file input as in-memory File objects: browse reads them where it runs and sends the bytes.
+async fn set_files_by_copy(page: &Arc<TabPage>, input: &crate::page::Element, paths: &[String]) -> Result<()> {
     use base64::Engine;
     let mut total = 0u64;
     for path in paths {
@@ -1172,12 +1209,7 @@ async fn set_files(page: &Arc<TabPage>, input: &crate::page::Element, paths: &[S
     }
     .await;
     match sent {
-        Ok(status) => match status.as_str() {
-            Some("ok") => Ok(()),
-            Some("not-multiple") => bail!("upload: the file input takes a single file (it has no `multiple` attribute); pass one file"),
-            Some("disabled") => bail!("upload: the file input is disabled"),
-            _ => bail!("upload: the page did not accept the files"),
-        },
+        Ok(status) => upload_status(status.as_str()),
         Err(error) => {
             let _ = page.call_value(&input.frame, "uploadAbort", vec![v(&ids)], false).await;
             Err(error)
@@ -1756,7 +1788,7 @@ fn dialog_schema() -> Value {
     )
 }
 
-const UPLOAD: &str = "Set the files of a file input (input[type=file], or its label) without opening the file chooser. files are absolute paths inside browse's file roots, on the machine browse runs on; browse reads them and hands the page in-memory copies (with input and change events), so the browser may be elsewhere. At most 50 MB per call.";
+const UPLOAD: &str = "Set the files of a file input (input[type=file], or its label) without opening the file chooser. files are absolute paths inside browse's file roots, on the machine browse runs on. When the browser is on that machine and can read the files, it takes them straight from disk (no size limit, real input and change events); otherwise browse copies them in, at most 50 MB per call.";
 
 fn upload_schema() -> Value {
     object(

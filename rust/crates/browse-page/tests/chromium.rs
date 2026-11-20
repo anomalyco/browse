@@ -315,8 +315,11 @@ async fn fill_uploads_keys_scroll_and_waits() {
     std::fs::write(&file, "hello").unwrap();
     let uploaded = h.json("upload", json!({ "selector": "#file", "files": [file.display().to_string()] })).await;
     assert_eq!(uploaded["files"][0], "upload.txt");
+    assert_eq!(uploaded["via"], "paths", "{uploaded}");
     let names = h.ok("eval", json!({ "expression": "document.getElementById('file').files[0].name" })).await;
     assert_eq!(names, "\"upload.txt\"");
+    let size = h.ok("eval", json!({ "expression": "document.getElementById('file').files[0].size" })).await;
+    assert_eq!(size, "5");
     h.err("upload", json!({ "selector": "#file", "files": ["/etc/passwd"] })).await;
 
     h.ok("type", json!({ "selector": "#q", "text": "rust lang", "submit": true })).await;
@@ -353,6 +356,58 @@ async fn fill_uploads_keys_scroll_and_waits() {
     assert_eq!(h.ok("eval", json!({ "expression": fetch })).await, "\"online\"");
     let flag = h.state.inner().lock().await.get("browse.network.offline").and_then(|v| v.downcast_ref::<bool>()).copied();
     assert_eq!(flag, Some(false));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_copies_files_when_the_browser_is_elsewhere() {
+    let h = match Harness::start_elsewhere(false).await {
+        Some(h) => h,
+        None => {
+            eprintln!("no Chromium found; skipping");
+            return;
+        }
+    };
+    let url = h.server.page("/upload-copy", r#"<!doctype html><input id="file" type="file" multiple>"#);
+    h.ok("navigate", json!({ "url": url })).await;
+    let file = h.files.0.join("copied.txt");
+    std::fs::write(&file, "copied bytes").unwrap();
+    let uploaded = h.json("upload", json!({ "selector": "#file", "files": [file.display().to_string()] })).await;
+    assert_eq!(uploaded["via"], "copy", "{uploaded}");
+    let name = h.ok("eval", json!({ "expression": "document.getElementById('file').files[0].name" })).await;
+    assert_eq!(name, "\"copied.txt\"");
+    let content = h.ok("eval", json!({ "expression": "document.getElementById('file').files[0].text()" })).await;
+    assert_eq!(content, "\"copied bytes\"");
+    assert!(!h.tab.methods().iter().any(|m| m == "DOM.setFileInputFiles"), "{:?}", h.tab.methods());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_falls_back_to_copy_when_the_browser_refuses_paths() {
+    let h = harness!(false);
+    let url = h.server.page("/upload-refused", r#"<!doctype html><input id="file" type="file" multiple>"#);
+    h.ok("navigate", json!({ "url": url })).await;
+    // An extension without "Allow access to file URLs" answers DOM.setFileInputFiles with a CDP error.
+    h.tab.refuse("DOM.setFileInputFiles");
+    let file = h.files.0.join("refused.txt");
+    std::fs::write(&file, "read anyway").unwrap();
+    let uploaded = h.json("upload", json!({ "selector": "#file", "files": [file.display().to_string()] })).await;
+    assert_eq!(uploaded["via"], "copy", "{uploaded}");
+    assert!(h.tab.methods().iter().any(|m| m == "DOM.setFileInputFiles"), "{:?}", h.tab.methods());
+    let content = h.ok("eval", json!({ "expression": "document.getElementById('file').files[0].text()" })).await;
+    assert_eq!(content, "\"read anyway\"");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_paths_refuses_two_files_without_multiple() {
+    let h = harness!(false);
+    let url = h.server.page("/upload-single", r#"<!doctype html><input id="file" type="file">"#);
+    h.ok("navigate", json!({ "url": url })).await;
+    let one = h.files.0.join("one.txt");
+    let two = h.files.0.join("two.txt");
+    std::fs::write(&one, "one").unwrap();
+    std::fs::write(&two, "two").unwrap();
+    let refused = h.err("upload", json!({ "selector": "#file", "files": [one.display().to_string(), two.display().to_string()] })).await;
+    assert!(refused.contains("takes a single file") && refused.contains("multiple"), "{refused}");
+    assert!(!h.tab.methods().iter().any(|m| m == "DOM.setFileInputFiles"), "{:?}", h.tab.methods());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
