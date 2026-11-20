@@ -5,6 +5,7 @@ use serde_json::Value;
 pub const EXTENSION_PROTOCOL_VERSION: i64 = 3;
 pub const MIN_EXTENSION_PROTOCOL_VERSION: i64 = 3;
 pub const CAPABILITY_TAB_RELEASE: &str = "tab-release";
+pub const CAPABILITY_KEEP_OPEN: &str = "keep-open";
 pub const PAIRING_SCHEME: &str = "opencode-browser-pairing-v3";
 
 pub const UNPACKED_EXTENSION_ID: &str = "afeafocngkodbmaipcngoamamfmekgfo";

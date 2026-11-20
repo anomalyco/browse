@@ -14,7 +14,7 @@ use tokio::sync::broadcast;
 use crate::domain;
 use crate::guardrails::is_restricted_url;
 use crate::link::{Link, RpcError};
-use crate::protocol::CAPABILITY_TAB_RELEASE;
+use crate::protocol::{CAPABILITY_KEEP_OPEN, CAPABILITY_TAB_RELEASE};
 use crate::relay::{KnownOwner, Owner, Relay, Tab};
 use crate::rlog;
 use crate::util::short_url;
@@ -217,8 +217,15 @@ impl Relay {
         }
         self.schedule_persist();
         self.ext_best_effort(tab, "action.setAttached", json!({ "attached": true }));
-        // The extension runs its own idle cleanup, so it needs the same exemption the relay has.
-        self.ext_best_effort(tab, "tabs.keepOpen", json!({ "keepOpen": keep_open }));
+        // The extension runs its own idle cleanup, so it needs the same exemption the relay has. Always send the
+        // current value to an extension that knows keep-open: it keeps the flag per tracked tab, and a tab it released
+        // stays tracked, so a stale true would otherwise never be cleared (sending false is harmless when untracked).
+        // An extension that can't hold a tab gets a warning instead: the tab still opens, and only the relay keeps it.
+        if link.supports(CAPABILITY_KEEP_OPEN) {
+            self.ext_best_effort(tab, "tabs.keepOpen", json!({ "keepOpen": keep_open }));
+        } else if keep_open {
+            self.warn_keep_open_unavailable(tab, &link);
+        }
         self.refresh_presentation(tab, true);
         rlog!("target.attached", tabId = tab, owner = owner.name());
         Ok(tab)
@@ -320,7 +327,7 @@ impl Relay {
         };
         options.browser = None;
         let mut params = json!({ "url": "about:blank", "active": false });
-        if options.keep_open {
+        if options.keep_open && link.supports(CAPABILITY_KEEP_OPEN) {
             params["keepOpen"] = true.into();
         }
         if let Some(window) = crate::settings::agent_window_override() {
