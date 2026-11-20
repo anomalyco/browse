@@ -209,6 +209,10 @@ extension from your browser to finish.
   tab lends it again. Chrome's own pages, the Web Store included, can't be lent.
 - **Handoffs:** the page shows a small card with the site's origin. Do the human part, then click **Continue** on the
   card or the toolbar button. While a tab is recorded you get a system notification instead of the card.
+- **Uploads.** Large files, or sites that reject copied files, work when the browser is on the same computer and the
+  extension has "Allow access to file URLs" turned on in the browser's extensions page (browse → Details): that lets
+  the extension read files on this computer, and browse only hands it files from its file roots. Otherwise browse
+  copies the files in, up to 50 MB per call.
 - **Several browsers at once.** Each connected browser has an id (like `chrome-macbook`); `status` lists them, and new
   tabs open in the default browser unless `browser` names another.
 - **Settings** (the extension's options page, applied right away): where agent tabs open (your window or their own),

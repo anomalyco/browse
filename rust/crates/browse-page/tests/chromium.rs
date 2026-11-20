@@ -297,6 +297,7 @@ async fn iframes_same_and_cross_origin() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fill_uploads_keys_scroll_and_waits() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
     let h = harness!(true);
     let url = h.server.page(
         "/misc",
@@ -305,6 +306,7 @@ async fn fill_uploads_keys_scroll_and_waits() {
 <div style="height:3000px"></div><button id="far" onclick="setTimeout(() => { const p = document.createElement('p'); p.textContent = 'Loaded later'; document.body.append(p) }, 300)">Far away</button>"#,
     );
     h.ok("navigate", json!({ "url": url })).await;
+    h.ok("eval", json!({ "expression": "window.uploadChanges = []; document.getElementById('file').addEventListener('change', (event) => window.uploadChanges.push(event.isTrusted))" })).await;
     h.ok("fill", json!({ "selector": "#pw", "value": "pw-123" })).await;
     let value = h.ok("eval", json!({ "expression": "document.getElementById('pw').value" })).await;
     assert_eq!(value, "\"pw-123\"");
@@ -315,8 +317,21 @@ async fn fill_uploads_keys_scroll_and_waits() {
     std::fs::write(&file, "hello").unwrap();
     let uploaded = h.json("upload", json!({ "selector": "#file", "files": [file.display().to_string()] })).await;
     assert_eq!(uploaded["files"][0], "upload.txt");
+    assert_eq!(uploaded["via"], "paths", "{uploaded}");
     let names = h.ok("eval", json!({ "expression": "document.getElementById('file').files[0].name" })).await;
     assert_eq!(names, "\"upload.txt\"");
+    let size = h.ok("eval", json!({ "expression": "document.getElementById('file').files[0].size" })).await;
+    assert_eq!(size, "5");
+    let changes = h.ok("eval", json!({ "expression": "window.uploadChanges" })).await;
+    assert_eq!(changes, "[true]", "one trusted change event");
+    let prefix = format!("browse-upload-probe-{}-", std::process::id());
+    let leftovers: Vec<String> = std::fs::read_dir(std::env::temp_dir())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .filter(|name| name.starts_with(&prefix))
+        .collect();
+    assert!(leftovers.is_empty(), "the sentinel folders were removed: {leftovers:?}");
     h.err("upload", json!({ "selector": "#file", "files": ["/etc/passwd"] })).await;
 
     h.ok("type", json!({ "selector": "#q", "text": "rust lang", "submit": true })).await;
@@ -353,6 +368,121 @@ async fn fill_uploads_keys_scroll_and_waits() {
     assert_eq!(h.ok("eval", json!({ "expression": fetch })).await, "\"online\"");
     let flag = h.state.inner().lock().await.get("browse.network.offline").and_then(|v| v.downcast_ref::<bool>()).copied();
     assert_eq!(flag, Some(false));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_copies_files_when_the_browser_is_elsewhere() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
+    let h = match Harness::start_elsewhere(false).await {
+        Some(h) => h,
+        None => {
+            eprintln!("no Chromium found; skipping");
+            return;
+        }
+    };
+    let url = h.server.page("/upload-copy", r#"<!doctype html><input id="file" type="file" multiple>"#);
+    h.ok("navigate", json!({ "url": url })).await;
+    let file = h.files.0.join("copied.txt");
+    std::fs::write(&file, "copied bytes").unwrap();
+    let uploaded = h.json("upload", json!({ "selector": "#file", "files": [file.display().to_string()] })).await;
+    assert_eq!(uploaded["via"], "copy", "{uploaded}");
+    let name = h.ok("eval", json!({ "expression": "document.getElementById('file').files[0].name" })).await;
+    assert_eq!(name, "\"copied.txt\"");
+    let content = h.ok("eval", json!({ "expression": "document.getElementById('file').files[0].text()" })).await;
+    assert_eq!(content, "\"copied bytes\"");
+    assert!(!h.tab.methods().iter().any(|m| m == "DOM.setFileInputFiles"), "{:?}", h.tab.methods());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_falls_back_to_copy_when_the_browser_refuses_paths() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
+    let h = harness!(false);
+    let url = h.server.page("/upload-refused", r#"<!doctype html><input id="file" type="file" multiple>"#);
+    h.ok("navigate", json!({ "url": url })).await;
+    // An extension without "Allow access to file URLs" answers DOM.setFileInputFiles with a CDP error.
+    h.tab.refuse("DOM.setFileInputFiles");
+    let file = h.files.0.join("refused.txt");
+    std::fs::write(&file, "read anyway").unwrap();
+    let uploaded = h.json("upload", json!({ "selector": "#file", "files": [file.display().to_string()] })).await;
+    assert_eq!(uploaded["via"], "copy", "{uploaded}");
+    assert!(h.tab.methods().iter().any(|m| m == "DOM.setFileInputFiles"), "{:?}", h.tab.methods());
+    let content = h.ok("eval", json!({ "expression": "document.getElementById('file').files[0].text()" })).await;
+    assert_eq!(content, "\"read anyway\"");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_falls_back_to_copy_when_the_browser_sees_other_files() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
+    let h = harness!(false);
+    let url = h.server.page("/upload-mismatch", r#"<!doctype html><input id="file" type="file" multiple>"#);
+    h.ok("navigate", json!({ "url": url })).await;
+    h.ok("eval", json!({ "expression": "window.uploadChanges = 0; document.getElementById('file').addEventListener('change', () => window.uploadChanges++)" })).await;
+    // A browser on another filesystem resolves the sentinel and the real paths to a missing file: the probe sees
+    // different bytes and sizes, so browse copies instead.
+    h.tab.rewrite_files_to(&h.files.0.join("missing.txt").display().to_string());
+    let file = h.files.0.join("here.txt");
+    std::fs::write(&file, "real bytes").unwrap();
+    let uploaded = h.json("upload", json!({ "selector": "#file", "files": [file.display().to_string()] })).await;
+    assert_eq!(uploaded["via"], "copy", "{uploaded}");
+    assert_eq!(h.ok("eval", json!({ "expression": "window.uploadChanges" })).await, "1");
+    let content = h.ok("eval", json!({ "expression": "document.getElementById('file').files[0].text()" })).await;
+    assert_eq!(content, "\"real bytes\"");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_falls_back_to_copy_when_the_probe_sees_another_file() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
+    let h = harness!(false);
+    let url = h.server.page("/upload-other-file", r#"<!doctype html><input id="file" type="file" multiple>"#);
+    h.ok("navigate", json!({ "url": url })).await;
+    h.ok("eval", json!({ "expression": "window.uploadChanges = 0; document.getElementById('file').addEventListener('change', () => window.uploadChanges++)" })).await;
+    let real = h.files.0.join("real.txt");
+    let other = h.files.0.join("other.txt");
+    std::fs::write(&real, "the real bytes").unwrap();
+    std::fs::write(&other, "a different file").unwrap();
+    // The sentinel reads correctly, but the real path resolves to another file: size and mtime differ.
+    h.tab.rewrite_files_except_sentinel_to(&other.display().to_string());
+    let uploaded = h.json("upload", json!({ "selector": "#file", "files": [real.display().to_string()] })).await;
+    assert_eq!(uploaded["via"], "copy", "{uploaded}");
+    assert_eq!(h.ok("eval", json!({ "expression": "window.uploadChanges" })).await, "1");
+    let content = h.ok("eval", json!({ "expression": "document.getElementById('file').files[0].text()" })).await;
+    assert_eq!(content, "\"the real bytes\"");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_copies_files_from_a_group_writable_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    let _upload = support::UPLOAD_LOCK.lock().await;
+    let h = harness!(false);
+    let url = h.server.page("/upload-group-writable", r#"<!doctype html><input id="file" type="file" multiple>"#);
+    h.ok("navigate", json!({ "url": url })).await;
+    // check_upload skips the file root itself, so a file directly in it is accepted; private_for_paths still refuses
+    // the group-writable folder, and the upload copies instead of handing Chrome a path it may reopen.
+    std::fs::set_permissions(&h.files.0, std::fs::Permissions::from_mode(0o775)).unwrap();
+    let file = h.files.0.join("group.txt");
+    std::fs::write(&file, "group bytes").unwrap();
+    let uploaded = h.json("upload", json!({ "selector": "#file", "files": [file.display().to_string()] })).await;
+    assert_eq!(uploaded["via"], "copy", "{uploaded}");
+    let content = h.ok("eval", json!({ "expression": "document.getElementById('file').files[0].text()" })).await;
+    assert_eq!(content, "\"group bytes\"");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_paths_refuses_two_files_without_multiple() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
+    let h = harness!(false);
+    let url = h.server.page("/upload-single", r#"<!doctype html><input id="file" type="file">"#);
+    h.ok("navigate", json!({ "url": url })).await;
+    h.ok("eval", json!({ "expression": "window.uploadChanges = 0; document.getElementById('file').addEventListener('change', () => window.uploadChanges++)" })).await;
+    let one = h.files.0.join("one.txt");
+    let two = h.files.0.join("two.txt");
+    std::fs::write(&one, "one").unwrap();
+    std::fs::write(&two, "two").unwrap();
+    let refused = h.err("upload", json!({ "selector": "#file", "files": [one.display().to_string(), two.display().to_string()] })).await;
+    assert!(refused.contains("takes a single file") && refused.contains("multiple"), "{refused}");
+    assert_eq!(h.ok("eval", json!({ "expression": "document.getElementById('file').files.length" })).await, "0");
+    assert_eq!(h.ok("eval", json!({ "expression": "window.uploadChanges" })).await, "0");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

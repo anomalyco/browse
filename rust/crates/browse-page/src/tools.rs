@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
-use browse_core::{TabOptions, TabState, Tool, ToolContext, ToolOutput, ToolSpec};
+use browse_core::{CdpError, TabOptions, TabState, Tool, ToolContext, ToolOutput, ToolSpec};
 use serde_json::{Map, Value, json};
 
 use crate::actions::{self, PointerOptions};
@@ -1091,20 +1091,30 @@ async fn upload(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
                 ElementOr::Element(element) => element,
                 ElementOr::Status(_) => bail!("{} is not a file input (input[type=file]) or its label", target_label(&spec, &resolved.label)),
             };
-            set_files(&c.page, &input, &checked).await?;
+            let via = set_files(c, &c.page, &input, &checked, c.ctx.browser.connected_locally(c.page.tab()).await).await?;
             let mut out = Map::new();
             out.insert("target".into(), target_label(&spec, &resolved.label));
             out.insert("files".into(), json!(checked.iter().map(|p| std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()).collect::<Vec<_>>()));
+            out.insert("via".into(), json!(via));
             Ok(out)
         })
     })
     .await
 }
 
-/// The most bytes one upload sends into the page.
+/// The most bytes one upload sends into the page when it copies files in (the paths route has no limit).
 const MAX_UPLOAD_BYTES: u64 = 50 * 1024 * 1024;
 /// Raw bytes per chunk sent to the page (base64 makes each call about a third larger).
 const UPLOAD_CHUNK: usize = 768 * 1024;
+
+fn upload_status(status: Option<&str>) -> Result<()> {
+    match status {
+        Some("ok") => Ok(()),
+        Some("not-multiple") => bail!("upload: the file input takes a single file (it has no `multiple` attribute); pass one file"),
+        Some("disabled") => bail!("upload: the file input is disabled"),
+        _ => bail!("upload: the page did not accept the files"),
+    }
+}
 
 fn mime_type(path: &std::path::Path) -> &'static str {
     let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
@@ -1138,9 +1148,160 @@ fn mime_type(path: &std::path::Path) -> &'static str {
     }
 }
 
-/// Puts files into a file input as in-memory File objects: browse reads them where it runs and sends the bytes,
-/// so it works when the browser is on another machine and without the extension's file URL access.
-async fn set_files(page: &Arc<TabPage>, input: &crate::page::Element, paths: &[String]) -> Result<()> {
+/// Puts files into a file input: when the browser reads this filesystem Chrome takes them from disk, else browse reads
+/// them and sends the bytes, so it works when the browser is on another machine and without the extension's file URL
+/// access.
+async fn set_files(c: &Ctx, page: &Arc<TabPage>, input: &crate::page::Element, paths: &[String], connected_locally: bool) -> Result<&'static str> {
+    // The target may have taken a while to resolve since the first check: check every path again, for both routes.
+    let checked: Vec<String> = paths.iter().map(|path| crate::files::check_upload(path, &c.ctx.file_roots).map(|p| p.display().to_string())).collect::<Result<_>>()?;
+    upload_status(page.call_element(input, "uploadCheck", vec![v(checked.len())], false).await?.as_str())?;
+    if connected_locally
+        && checked.iter().all(|path| crate::files::private_for_paths(path))
+        && probe_paths(c, page, input, &checked).await? {
+        page.send("DOM.setFileInputFiles", json!({ "objectId": input.object_id, "files": checked }), input.session.as_deref()).await?;
+        return Ok("paths");
+    }
+    set_files_by_copy(page, input, &checked).await?;
+    Ok("copy")
+}
+
+/// Proves the browser reads this filesystem before the real input is touched: a detached input gets a sentinel file
+/// browse just wrote, then the real paths, and the page must open and match every file's size and mtime. False means
+/// copy instead (the browser refused, can't read a file, or sees another filesystem); connection failures are errors.
+async fn probe_paths(c: &Ctx, page: &Arc<TabPage>, input: &crate::page::Element, paths: &[String]) -> Result<bool> {
+    let Some(sentinel) = Sentinel::create() else { return Ok(false) };
+    let cdp = c.ctx.browser.cdp(page.tab()).await?;
+    let probe = match page.call_element_result(&input.frame, "uploadProbeInput", vec![], false).await? {
+        ElementOr::Element(element) => element,
+        ElementOr::Status(_) => bail!("upload: the page did not give browse a file input to check"),
+    };
+    let result = probe_files(page, &cdp, &probe, &sentinel, paths).await;
+    let _ = cdp.send("Runtime.releaseObject", json!({ "objectId": probe.object_id }), probe.session.as_deref()).await;
+    result
+}
+
+/// The probe itself, split out so [probe_paths] releases the detached input's object however it ends.
+async fn probe_files(page: &Arc<TabPage>, cdp: &Arc<dyn browse_core::Cdp>, probe: &crate::page::Element, sentinel: &Sentinel, paths: &[String]) -> Result<bool> {
+    if !set_probe_files(page, cdp, probe, &[sentinel.path.display().to_string()]).await? {
+        return Ok(false);
+    }
+    let read = page.call_element(probe, "uploadFiles", vec![], false).await?;
+    let one = read.as_array().is_some_and(|files| files.len() == 1);
+    if !one || page.call_element(probe, "uploadText", vec![], false).await?.as_str() != Some(sentinel.nonce.as_str()) {
+        return Ok(false);
+    }
+    if !set_probe_files(page, cdp, probe, paths).await? {
+        return Ok(false);
+    }
+    let read = page.call_element(probe, "uploadFiles", vec![], false).await?;
+    let Some(files) = read.as_array().filter(|files| files.len() == paths.len()) else { return Ok(false) };
+    for (file, path) in files.iter().zip(paths) {
+        let Ok(metadata) = std::fs::symlink_metadata(path) else { return Ok(false) };
+        if !metadata.is_file() {
+            return Ok(false);
+        }
+        let modified = metadata.modified().ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64);
+        if file.get("size").and_then(Value::as_u64) != Some(metadata.len()) || file.get("lastModified").and_then(Value::as_u64) != modified {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Sets files on the probe input, false on a protocol refusal (an extension without file URL access answers one).
+/// TabPage::send does this, but turns every CdpError into one anyhow message; the probe must tell a refusal from a
+/// disconnect, so this repeats its dialog check and race around the raw command.
+async fn set_probe_files(page: &Arc<TabPage>, cdp: &Arc<dyn browse_core::Cdp>, probe: &crate::page::Element, paths: &[String]) -> Result<bool> {
+    page.ensure_no_dialog()?;
+    let sent = tokio::select! {
+        result = cdp.send("DOM.setFileInputFiles", json!({ "objectId": probe.object_id, "files": paths }), probe.session.as_deref()) => result,
+        _ = page.dialog_opened() => {
+            return Err(page.ensure_no_dialog().err().unwrap_or_else(|| anyhow!("The page opened a dialog while browse checked the file paths; answer it with the dialog tool and try again")));
+        }
+    };
+    match sent {
+        Ok(_) => Ok(true),
+        Err(CdpError::Protocol(_)) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// A private file browse writes for a probe; the page reading its nonce proves both sides share a filesystem. The
+/// nonce is not a secret: it only proves the file is the one browse just wrote on that filesystem.
+struct Sentinel {
+    dir: std::path::PathBuf,
+    path: std::path::PathBuf,
+    nonce: String,
+}
+
+impl Sentinel {
+    /// None when a private folder or file can't be made or written; the upload then copies instead.
+    fn create() -> Option<Sentinel> {
+        for _ in 0..4 {
+            let suffix = random_hex(8)?;
+            let nonce = random_hex(32)?;
+            let dir = std::env::temp_dir().join(format!("browse-upload-probe-{}-{suffix}", std::process::id()));
+            match create_private_dir(&dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return None,
+            }
+            let sentinel = Sentinel { path: dir.join("sentinel"), dir, nonce };
+            sentinel.write().ok()?;
+            return Some(sentinel);
+        }
+        None
+    }
+
+    fn write(&self) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&self.path)?;
+        file.write_all(self.nonce.as_bytes())
+    }
+}
+
+impl Drop for Sentinel {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        builder.create(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir(dir)
+    }
+}
+
+/// Hex from the system random source (the same getrandom browse-relay uses); None when it isn't available.
+fn random_hex(bytes: usize) -> Option<String> {
+    let mut buffer = vec![0u8; bytes];
+    getrandom::fill(&mut buffer).ok()?;
+    let digits = b"0123456789abcdef";
+    let mut hex = String::with_capacity(bytes * 2);
+    for byte in buffer {
+        hex.push(digits[(byte >> 4) as usize] as char);
+        hex.push(digits[(byte & 0xf) as usize] as char);
+    }
+    Some(hex)
+}
+
+/// Puts files into a file input as in-memory File objects: browse reads them where it runs and sends the bytes.
+async fn set_files_by_copy(page: &Arc<TabPage>, input: &crate::page::Element, paths: &[String]) -> Result<()> {
     use base64::Engine;
     let mut total = 0u64;
     for path in paths {
@@ -1172,12 +1333,7 @@ async fn set_files(page: &Arc<TabPage>, input: &crate::page::Element, paths: &[S
     }
     .await;
     match sent {
-        Ok(status) => match status.as_str() {
-            Some("ok") => Ok(()),
-            Some("not-multiple") => bail!("upload: the file input takes a single file (it has no `multiple` attribute); pass one file"),
-            Some("disabled") => bail!("upload: the file input is disabled"),
-            _ => bail!("upload: the page did not accept the files"),
-        },
+        Ok(status) => upload_status(status.as_str()),
         Err(error) => {
             let _ = page.call_value(&input.frame, "uploadAbort", vec![v(&ids)], false).await;
             Err(error)
@@ -1756,7 +1912,7 @@ fn dialog_schema() -> Value {
     )
 }
 
-const UPLOAD: &str = "Set the files of a file input (input[type=file], or its label) without opening the file chooser. files are absolute paths inside browse's file roots, on the machine browse runs on; browse reads them and hands the page in-memory copies (with input and change events), so the browser may be elsewhere. At most 50 MB per call.";
+const UPLOAD: &str = "Set the files of a file input (input[type=file], or its label) without opening the file chooser. files are absolute paths inside browse's file roots, on the machine browse runs on. When the browser is on that machine and can read the files, it takes them straight from disk (no size limit, real input and change events); otherwise browse copies them in, at most 50 MB per call. The reply's via says whether the browser read them from disk (paths) or browse copied them in (copy).";
 
 fn upload_schema() -> Value {
     object(

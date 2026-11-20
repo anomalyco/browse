@@ -442,6 +442,43 @@
       if (target instanceof HTMLInputElement && target.type.toLowerCase() === "file") return target
       return "not-file-input"
     },
+    // Checks a file input before browse hands it paths on disk; the same statuses uploadFinish returns.
+    uploadCheck(input, count) {
+      if (count > 1 && !input.multiple) return "not-multiple"
+      if (input.disabled) return "disabled"
+      return "ok"
+    },
+    // What a probe input holds now, and proof each file opens: the caller awaits this promise. null when a file can't
+    // be read (a path on another filesystem), so browse copies instead.
+    async uploadFiles(input) {
+      const files = []
+      for (const file of Array.from(input.files || [])) {
+        try {
+          await file.slice(0, 1).arrayBuffer()
+        } catch {
+          return null
+        }
+        files.push({ name: file.name, size: file.size, lastModified: file.lastModified })
+      }
+      return files
+    },
+    // The text of a file input's first file: the page reading a nonce browse just wrote proves it sees this filesystem.
+    async uploadText(input) {
+      const file = input.files && input.files[0]
+      if (!file) return null
+      try {
+        return await file.text()
+      } catch {
+        return null
+      }
+    },
+    // A detached file input for probing paths; browse never inserts it into the page.
+    uploadProbeInput() {
+      const input = document.createElement("input")
+      input.type = "file"
+      input.multiple = true
+      return input
+    },
     // Uploads as in-memory files (like Playwright's setInputFiles with buffers): the bytes arrive in base64 chunks,
     // then become File objects assigned through a DataTransfer, with input and change events.
     uploadChunk(id, base64) {
@@ -455,8 +492,8 @@
     uploadFinish(input, files) {
       const uploads = this.uploads || new Map()
       try {
-        if (files.length > 1 && !input.multiple) return "not-multiple"
-        if (input.disabled) return "disabled"
+        const check = this.uploadCheck(input, files.length)
+        if (check !== "ok") return check
         const transfer = new DataTransfer()
         for (const file of files) {
           transfer.items.add(new File(uploads.get(file.id) || [], file.name, { type: file.mime, lastModified: file.lastModified }))

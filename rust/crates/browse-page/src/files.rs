@@ -80,6 +80,22 @@ pub fn check_upload(path: &str, roots: &[PathBuf]) -> Result<PathBuf> {
     Ok(real)
 }
 
+/// Whether the folder holding an upload path is private enough for Chrome to reopen the file later: its parent is a
+/// folder only this user can write. True where there are no Unix modes to check (Chrome reads the same handles).
+pub fn private_for_paths(path: &str) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let Some(parent) = Path::new(path).parent() else { return false };
+        std::fs::symlink_metadata(parent).map(|meta| meta.is_dir() && meta.uid() == current_uid() && meta.mode() & 0o022 == 0).unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        true
+    }
+}
+
 #[cfg(unix)]
 fn current_uid() -> u32 {
     use std::os::unix::fs::MetadataExt;

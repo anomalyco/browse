@@ -446,6 +446,10 @@ impl Browser for RelayBrowser {
         }
     }
 
+    async fn connected_locally(&self, tab: TabId) -> bool {
+        self.0.st().browser_tab(tab).map(|(link, _)| link.local).unwrap_or(false)
+    }
+
     async fn read_only(&self, tab: TabId) -> bool {
         if tab_read_only(&self.0.st(), tab) == Some(true) {
             return true;

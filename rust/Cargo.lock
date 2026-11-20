@@ -150,6 +150,7 @@ dependencies = [
  "base64 0.22.1",
  "browse-core",
  "futures-util",
+ "getrandom 0.3.4",
  "regex-lite",
  "serde",
  "serde_json",

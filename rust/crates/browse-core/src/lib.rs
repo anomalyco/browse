@@ -170,6 +170,11 @@ pub trait Browser: Send + Sync {
     async fn human_input(&self, _tab: TabId) -> bool {
         true
     }
+    /// Whether the browser connected to the relay over loopback. That is only a hint: each upload still proves the
+    /// browser reads this filesystem before browse hands it paths, by reading a file browse just wrote.
+    async fn connected_locally(&self, _tab: TabId) -> bool {
+        false
+    }
     /// Whether the tab was opened with `readOnly`. The page tools refuse input on such a tab before any CDP work
     /// (the CDP methods they'd use go through Runtime, which read-only tabs allow for snapshots). An implementation
     /// that can't see the tab right now (a browser reconnecting, a relay restart) waits for it and then answers;
