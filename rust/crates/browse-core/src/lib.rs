@@ -170,9 +170,9 @@ pub trait Browser: Send + Sync {
     async fn human_input(&self, _tab: TabId) -> bool {
         true
     }
-    /// Whether the browser that has the tab runs on the machine browse runs on, so it can read files at paths browse
-    /// checked. False when it can't or nothing knows the tab; callers then send the bytes instead.
-    async fn same_machine(&self, _tab: TabId) -> bool {
+    /// Whether the browser connected to the relay over loopback. That is only a hint: each upload still proves the
+    /// browser reads this filesystem before browse hands it paths, by reading a file browse just wrote.
+    async fn connected_locally(&self, _tab: TabId) -> bool {
         false
     }
     /// Whether the tab was opened with `readOnly`. The page tools refuse input on such a tab before any CDP work

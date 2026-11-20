@@ -297,6 +297,7 @@ async fn iframes_same_and_cross_origin() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fill_uploads_keys_scroll_and_waits() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
     let h = harness!(true);
     let url = h.server.page(
         "/misc",
@@ -305,6 +306,7 @@ async fn fill_uploads_keys_scroll_and_waits() {
 <div style="height:3000px"></div><button id="far" onclick="setTimeout(() => { const p = document.createElement('p'); p.textContent = 'Loaded later'; document.body.append(p) }, 300)">Far away</button>"#,
     );
     h.ok("navigate", json!({ "url": url })).await;
+    h.ok("eval", json!({ "expression": "window.uploadChanges = []; document.getElementById('file').addEventListener('change', (event) => window.uploadChanges.push(event.isTrusted))" })).await;
     h.ok("fill", json!({ "selector": "#pw", "value": "pw-123" })).await;
     let value = h.ok("eval", json!({ "expression": "document.getElementById('pw').value" })).await;
     assert_eq!(value, "\"pw-123\"");
@@ -320,6 +322,16 @@ async fn fill_uploads_keys_scroll_and_waits() {
     assert_eq!(names, "\"upload.txt\"");
     let size = h.ok("eval", json!({ "expression": "document.getElementById('file').files[0].size" })).await;
     assert_eq!(size, "5");
+    let changes = h.ok("eval", json!({ "expression": "window.uploadChanges" })).await;
+    assert_eq!(changes, "[true]", "one trusted change event");
+    let prefix = format!("browse-upload-probe-{}-", std::process::id());
+    let leftovers: Vec<String> = std::fs::read_dir(std::env::temp_dir())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .filter(|name| name.starts_with(&prefix))
+        .collect();
+    assert!(leftovers.is_empty(), "the sentinel folders were removed: {leftovers:?}");
     h.err("upload", json!({ "selector": "#file", "files": ["/etc/passwd"] })).await;
 
     h.ok("type", json!({ "selector": "#q", "text": "rust lang", "submit": true })).await;
@@ -360,6 +372,7 @@ async fn fill_uploads_keys_scroll_and_waits() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn upload_copies_files_when_the_browser_is_elsewhere() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
     let h = match Harness::start_elsewhere(false).await {
         Some(h) => h,
         None => {
@@ -382,6 +395,7 @@ async fn upload_copies_files_when_the_browser_is_elsewhere() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn upload_falls_back_to_copy_when_the_browser_refuses_paths() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
     let h = harness!(false);
     let url = h.server.page("/upload-refused", r#"<!doctype html><input id="file" type="file" multiple>"#);
     h.ok("navigate", json!({ "url": url })).await;
@@ -397,17 +411,39 @@ async fn upload_falls_back_to_copy_when_the_browser_refuses_paths() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_falls_back_to_copy_when_the_browser_sees_other_files() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
+    let h = harness!(false);
+    let url = h.server.page("/upload-mismatch", r#"<!doctype html><input id="file" type="file" multiple>"#);
+    h.ok("navigate", json!({ "url": url })).await;
+    h.ok("eval", json!({ "expression": "window.uploadChanges = 0; document.getElementById('file').addEventListener('change', () => window.uploadChanges++)" })).await;
+    // A browser on another filesystem resolves the sentinel and the real paths to a missing file: the probe sees
+    // different bytes and sizes, so browse copies instead.
+    h.tab.rewrite_files_to(&h.files.0.join("missing.txt").display().to_string());
+    let file = h.files.0.join("here.txt");
+    std::fs::write(&file, "real bytes").unwrap();
+    let uploaded = h.json("upload", json!({ "selector": "#file", "files": [file.display().to_string()] })).await;
+    assert_eq!(uploaded["via"], "copy", "{uploaded}");
+    assert_eq!(h.ok("eval", json!({ "expression": "window.uploadChanges" })).await, "1");
+    let content = h.ok("eval", json!({ "expression": "document.getElementById('file').files[0].text()" })).await;
+    assert_eq!(content, "\"real bytes\"");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn upload_paths_refuses_two_files_without_multiple() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
     let h = harness!(false);
     let url = h.server.page("/upload-single", r#"<!doctype html><input id="file" type="file">"#);
     h.ok("navigate", json!({ "url": url })).await;
+    h.ok("eval", json!({ "expression": "window.uploadChanges = 0; document.getElementById('file').addEventListener('change', () => window.uploadChanges++)" })).await;
     let one = h.files.0.join("one.txt");
     let two = h.files.0.join("two.txt");
     std::fs::write(&one, "one").unwrap();
     std::fs::write(&two, "two").unwrap();
     let refused = h.err("upload", json!({ "selector": "#file", "files": [one.display().to_string(), two.display().to_string()] })).await;
     assert!(refused.contains("takes a single file") && refused.contains("multiple"), "{refused}");
-    assert!(!h.tab.methods().iter().any(|m| m == "DOM.setFileInputFiles"), "{:?}", h.tab.methods());
+    assert_eq!(h.ok("eval", json!({ "expression": "document.getElementById('file').files.length" })).await, "0");
+    assert_eq!(h.ok("eval", json!({ "expression": "window.uploadChanges" })).await, "0");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

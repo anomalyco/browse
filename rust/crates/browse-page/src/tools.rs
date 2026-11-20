@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
-use browse_core::{TabOptions, TabState, Tool, ToolContext, ToolOutput, ToolSpec};
+use browse_core::{CdpError, TabOptions, TabState, Tool, ToolContext, ToolOutput, ToolSpec};
 use serde_json::{Map, Value, json};
 
 use crate::actions::{self, PointerOptions};
@@ -1091,7 +1091,7 @@ async fn upload(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
                 ElementOr::Element(element) => element,
                 ElementOr::Status(_) => bail!("{} is not a file input (input[type=file]) or its label", target_label(&spec, &resolved.label)),
             };
-            let via = set_files(&c.page, &input, &checked, c.ctx.browser.same_machine(c.page.tab()).await).await?;
+            let via = set_files(c, &c.page, &input, &checked, c.ctx.browser.connected_locally(c.page.tab()).await).await?;
             let mut out = Map::new();
             out.insert("target".into(), target_label(&spec, &resolved.label));
             out.insert("files".into(), json!(checked.iter().map(|p| std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()).collect::<Vec<_>>()));
@@ -1148,32 +1148,118 @@ fn mime_type(path: &std::path::Path) -> &'static str {
     }
 }
 
-/// Puts files into a file input: on the same machine Chrome reads them from disk itself, else browse reads them and
-/// sends the bytes, so it works when the browser is on another machine and without the extension's file URL access.
-async fn set_files(page: &Arc<TabPage>, input: &crate::page::Element, paths: &[String], same_machine: bool) -> Result<&'static str> {
-    if same_machine && set_files_from_paths(page, input, paths).await? {
+/// Puts files into a file input: when the browser reads this filesystem Chrome takes them from disk, else browse reads
+/// them and sends the bytes, so it works when the browser is on another machine and without the extension's file URL
+/// access.
+async fn set_files(c: &Ctx, page: &Arc<TabPage>, input: &crate::page::Element, paths: &[String], connected_locally: bool) -> Result<&'static str> {
+    if connected_locally && probe_paths(c, page, input, paths).await? {
+        // The target may have taken a while to resolve since the first check; check again right before handing over
+        // the paths. Once the real input is touched, errors are the caller's, never a copy.
+        let checked: Vec<String> = paths.iter().map(|path| crate::files::check_upload(path, &c.ctx.file_roots).map(|p| p.display().to_string())).collect::<Result<_>>()?;
+        upload_status(page.call_element(input, "uploadCheck", vec![v(checked.len())], false).await?.as_str())?;
+        page.send("DOM.setFileInputFiles", json!({ "objectId": input.object_id, "files": checked }), input.session.as_deref()).await?;
         return Ok("paths");
     }
     set_files_by_copy(page, input, paths).await?;
     Ok("copy")
 }
 
-/// Lets Chrome set the input's files from their paths: real input and change events, no size limit. False when the
-/// browser refuses (an extension without file URL access does) or the input doesn't end up with the files on disk.
-async fn set_files_from_paths(page: &Arc<TabPage>, input: &crate::page::Element, paths: &[String]) -> Result<bool> {
-    upload_status(page.call_element(input, "uploadCheck", vec![v(paths.len())], false).await?.as_str())?;
-    if page.send("DOM.setFileInputFiles", json!({ "objectId": input.object_id, "files": paths }), input.session.as_deref()).await.is_err() {
+/// Proves the browser reads this filesystem before the real input is touched: a detached input gets a sentinel file
+/// browse just wrote, then the real paths, and the page must read the nonce and match every file's size and mtime.
+/// False means copy instead (the browser refused or sees another filesystem); connection failures are errors.
+async fn probe_paths(c: &Ctx, page: &Arc<TabPage>, input: &crate::page::Element, paths: &[String]) -> Result<bool> {
+    let sentinel = Sentinel::create()?;
+    let probe = match page.call_element_result(&input.frame, "uploadProbeInput", vec![], false).await? {
+        ElementOr::Element(element) => element,
+        ElementOr::Status(_) => bail!("upload: the page did not give browse a file input to check"),
+    };
+    let cdp = c.ctx.browser.cdp(page.tab()).await?;
+    if !set_probe_files(&cdp, &probe, &[sentinel.path.display().to_string()]).await? {
         return Ok(false);
     }
-    let Ok(read) = page.call_element(input, "uploadFiles", vec![], false).await else { return Ok(false) };
+    let read = page.call_element(&probe, "uploadFiles", vec![], false).await?;
+    let one = read.as_array().is_some_and(|files| files.len() == 1);
+    if !one || page.call_element(&probe, "uploadText", vec![], false).await?.as_str() != Some(sentinel.nonce.as_str()) {
+        return Ok(false);
+    }
+    if !set_probe_files(&cdp, &probe, paths).await? {
+        return Ok(false);
+    }
+    let read = page.call_element(&probe, "uploadFiles", vec![], false).await?;
     let Some(files) = read.as_array().filter(|files| files.len() == paths.len()) else { return Ok(false) };
     for (file, path) in files.iter().zip(paths) {
-        let Ok(metadata) = std::fs::metadata(path) else { return Ok(false) };
-        if file.get("size").and_then(Value::as_u64) != Some(metadata.len()) {
+        let Ok(metadata) = std::fs::symlink_metadata(path) else { return Ok(false) };
+        let modified = metadata.modified().ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64);
+        if file.get("size").and_then(Value::as_u64) != Some(metadata.len()) || file.get("lastModified").and_then(Value::as_u64) != modified {
             return Ok(false);
         }
     }
     Ok(true)
+}
+
+/// Sets files on the probe input, false on a protocol refusal (an extension without file URL access answers one).
+async fn set_probe_files(cdp: &Arc<dyn browse_core::Cdp>, probe: &crate::page::Element, paths: &[String]) -> Result<bool> {
+    match cdp.send("DOM.setFileInputFiles", json!({ "objectId": probe.object_id, "files": paths }), probe.session.as_deref()).await {
+        Ok(_) => Ok(true),
+        Err(CdpError::Protocol(_)) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// A private file browse writes for a probe; the page reading its nonce proves both sides share a filesystem.
+struct Sentinel {
+    dir: std::path::PathBuf,
+    path: std::path::PathBuf,
+    nonce: String,
+}
+
+impl Sentinel {
+    fn create() -> Result<Sentinel> {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("browse-upload-probe-{}-{nanos:x}", std::process::id()));
+        create_private_dir(&dir)?;
+        let sentinel = Sentinel { path: dir.join("sentinel"), dir, nonce: upload_nonce() };
+        sentinel.write()?;
+        Ok(sentinel)
+    }
+
+    fn write(&self) -> Result<()> {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&self.path).map_err(|e| anyhow!("upload: could not write the check file: {e}"))?;
+        file.write_all(self.nonce.as_bytes()).map_err(|e| anyhow!("upload: could not write the check file: {e}"))
+    }
+}
+
+impl Drop for Sentinel {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn create_private_dir(dir: &std::path::Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        builder.create(dir).map_err(|e| anyhow!("upload: could not make a private folder for the check: {e}"))
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir(dir).map_err(|e| anyhow!("upload: could not make a private folder for the check: {e}"))
+    }
+}
+
+/// A fresh nonce from the crate's own randomness (no extra dependency).
+fn upload_nonce() -> String {
+    (0..4).map(|_| format!("{:016x}", (crate::human::unit() * (u64::MAX as f64)) as u64)).collect()
 }
 
 /// Puts files into a file input as in-memory File objects: browse reads them where it runs and sends the bytes.
@@ -1788,7 +1874,7 @@ fn dialog_schema() -> Value {
     )
 }
 
-const UPLOAD: &str = "Set the files of a file input (input[type=file], or its label) without opening the file chooser. files are absolute paths inside browse's file roots, on the machine browse runs on. When the browser is on that machine and can read the files, it takes them straight from disk (no size limit, real input and change events); otherwise browse copies them in, at most 50 MB per call.";
+const UPLOAD: &str = "Set the files of a file input (input[type=file], or its label) without opening the file chooser. files are absolute paths inside browse's file roots, on the machine browse runs on. When the browser is on that machine and can read the files, it takes them straight from disk (no size limit, real input and change events); otherwise browse copies them in, at most 50 MB per call. The reply's via says whether the browser read them from disk (paths) or browse copied them in (copy).";
 
 fn upload_schema() -> Value {
     object(

@@ -450,7 +450,24 @@
     },
     // What a file input holds now, to check the browser read the files at the paths browse gave it.
     uploadFiles(input) {
-      return Array.from(input.files || [], (file) => ({ name: file.name, size: file.size }))
+      return Array.from(input.files || [], (file) => ({ name: file.name, size: file.size, lastModified: file.lastModified }))
+    },
+    // The text of a file input's first file: the page reading a nonce browse just wrote proves it sees this filesystem.
+    async uploadText(input) {
+      const file = input.files && input.files[0]
+      if (!file) return null
+      try {
+        return await file.text()
+      } catch {
+        return null
+      }
+    },
+    // A detached file input for probing paths; browse never inserts it into the page.
+    uploadProbeInput() {
+      const input = document.createElement("input")
+      input.type = "file"
+      input.multiple = true
+      return input
     },
     // Uploads as in-memory files (like Playwright's setInputFiles with buffers): the bytes arrive in base64 chunks,
     // then become File objects assigned through a DataTransfer, with input and change events.

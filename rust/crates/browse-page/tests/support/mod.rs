@@ -177,6 +177,8 @@ pub struct TabCdp {
     pub sent: Mutex<Vec<String>>,
     /// Methods that answer with a protocol error, like an extension without file URL access does.
     refusing: Mutex<HashSet<String>>,
+    /// A path that replaces every DOM.setFileInputFiles path, for a browser that sees another filesystem.
+    rewrite_files: Mutex<Option<String>>,
 }
 
 impl TabCdp {
@@ -186,7 +188,7 @@ impl TabCdp {
         let attached = connection.send("Target.attachToTarget", json!({ "targetId": target, "flatten": true }), None).await.unwrap();
         let session = attached["sessionId"].as_str().unwrap().to_string();
         let (events, _) = broadcast::channel(4096);
-        let tab = Arc::new(TabCdp { connection: connection.clone(), session: session.clone(), target, events, sent: Mutex::new(Vec::new()), refusing: Mutex::new(HashSet::new()) });
+        let tab = Arc::new(TabCdp { connection: connection.clone(), session: session.clone(), target, events, sent: Mutex::new(Vec::new()), refusing: Mutex::new(HashSet::new()), rewrite_files: Mutex::new(None) });
         let mut rx = connection.events.subscribe();
         let forward = tab.events.clone();
         let root = session.clone();
@@ -218,15 +220,25 @@ impl TabCdp {
     pub fn refuse(&self, method: &str) {
         self.refusing.lock().unwrap().insert(method.to_string());
     }
+
+    /// Makes DOM.setFileInputFiles set this path instead of the ones it was given, for a browser whose filesystem
+    /// doesn't have them.
+    pub fn rewrite_files_to(&self, path: &str) {
+        *self.rewrite_files.lock().unwrap() = Some(path.to_string());
+    }
 }
 
 #[async_trait]
 impl Cdp for TabCdp {
-    async fn send(&self, method: &str, params: Value, session_id: Option<&str>) -> Result<Value, CdpError> {
+    async fn send(&self, method: &str, mut params: Value, session_id: Option<&str>) -> Result<Value, CdpError> {
         self.sent.lock().unwrap().push(method.to_string());
         if self.refusing.lock().unwrap().contains(method) {
             return Err(CdpError::Protocol(format!("{method}: Not allowed")));
         }
+        if method == "DOM.setFileInputFiles"
+            && let Some(path) = self.rewrite_files.lock().unwrap().clone() {
+                params["files"] = json!([path]);
+            }
         let session = session_id.unwrap_or(&self.session);
         self.connection.send(method, params, Some(session)).await.map_err(CdpError::Protocol)
     }
@@ -241,7 +253,7 @@ pub struct FakeBrowser {
     pub tab: Arc<TabCdp>,
     pub human: bool,
     pub read_only: bool,
-    pub same_machine: bool,
+    pub connected_locally: bool,
     pub state: Arc<TabState>,
 }
 
@@ -278,8 +290,8 @@ impl Browser for FakeBrowser {
     async fn human_input(&self, _tab: TabId) -> bool {
         self.human
     }
-    async fn same_machine(&self, _tab: TabId) -> bool {
-        self.same_machine
+    async fn connected_locally(&self, _tab: TabId) -> bool {
+        self.connected_locally
     }
     async fn read_only(&self, _tab: TabId) -> bool {
         self.read_only
@@ -297,6 +309,9 @@ pub struct Harness {
     pub files: TempDir,
 }
 
+/// Serializes tests that upload, so a test can check the probe's temporary folders left nothing behind.
+pub static UPLOAD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 impl Harness {
     pub async fn start(human: bool) -> Option<Harness> {
         Self::start_with(human, false, true).await
@@ -312,13 +327,13 @@ impl Harness {
         Self::start_with(human, true, true).await
     }
 
-    async fn start_with(human: bool, read_only: bool, same_machine: bool) -> Option<Harness> {
+    async fn start_with(human: bool, read_only: bool, connected_locally: bool) -> Option<Harness> {
         let chrome = launch().await?;
         let connection = Connection::connect(&chrome.ws).await;
         let tab = TabCdp::open(&connection).await;
         let files = TempDir::new("files");
         let state = Arc::new(TabState::default());
-        let ctx = ToolContext { browser: Arc::new(FakeBrowser { tab: tab.clone(), human, read_only, same_machine, state: state.clone() }), file_roots: vec![files.0.clone()] };
+        let ctx = ToolContext { browser: Arc::new(FakeBrowser { tab: tab.clone(), human, read_only, connected_locally, state: state.clone() }), file_roots: vec![files.0.clone()] };
         let server = Server::start().await;
         Some(Harness { chrome, tab, ctx, tools: browse_page::tools(), state, server, files })
     }
