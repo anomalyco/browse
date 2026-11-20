@@ -4,13 +4,41 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use browse_core::{Browser, Cdp, Content, HandoffResult, TabId, TabInfo, TabOptions, TabState, Tool, ToolContext, ToolOutput, ToolSpec};
+use browse_core::{Browser, Cdp, CdpError, CdpEvent, Content, HandoffResult, TabId, TabInfo, TabOptions, TabState, Tool, ToolContext, ToolOutput, ToolSpec};
 use serde_json::{Value, json};
+
+/// The CDP commands the fake sent, and the refusal it should answer with.
+#[derive(Default)]
+struct Recorder {
+    sends: std::sync::Mutex<Vec<(TabId, String)>>,
+    refusal: std::sync::Mutex<Option<String>>,
+}
+
+struct FakeCdp {
+    tab: TabId,
+    recorder: Arc<Recorder>,
+}
+
+#[async_trait]
+impl Cdp for FakeCdp {
+    async fn send(&self, method: &str, _params: Value, _session_id: Option<&str>) -> Result<Value, CdpError> {
+        self.recorder.sends.lock().unwrap().push((self.tab, method.to_string()));
+        match self.recorder.refusal.lock().unwrap().clone() {
+            Some(refusal) => Err(CdpError::Protocol(refusal)),
+            None => Ok(json!({})),
+        }
+    }
+    fn events(&self) -> tokio::sync::broadcast::Receiver<CdpEvent> {
+        tokio::sync::broadcast::channel(1).1
+    }
+}
 
 /// Tab 7 shows example.com; every tab id has its own state.
 #[derive(Default)]
 struct FakeBrowser {
     states: std::sync::Mutex<std::collections::HashMap<TabId, Arc<TabState>>>,
+    /// Some for a test that needs CDP; the plain context refuses it as before.
+    recorder: Option<Arc<Recorder>>,
 }
 
 #[async_trait]
@@ -24,8 +52,9 @@ impl Browser for FakeBrowser {
     async fn close_tab(&self, _: TabId) -> anyhow::Result<()> {
         Ok(())
     }
-    async fn cdp(&self, _: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
-        anyhow::bail!("no cdp here")
+    async fn cdp(&self, tab: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
+        let Some(recorder) = &self.recorder else { anyhow::bail!("no cdp here") };
+        Ok(Arc::new(FakeCdp { tab, recorder: recorder.clone() }))
     }
     async fn state(&self, tab: TabId) -> anyhow::Result<Arc<TabState>> {
         Ok(self.states.lock().unwrap().entry(tab).or_default().clone())
@@ -64,6 +93,12 @@ impl Tool for Fake {
 
 fn context() -> ToolContext {
     ToolContext { browser: Arc::new(FakeBrowser::default()), file_roots: vec![] }
+}
+
+fn recorded_context() -> (ToolContext, Arc<Recorder>) {
+    let recorder = Arc::new(Recorder::default());
+    let browser = FakeBrowser { recorder: Some(recorder.clone()), ..Default::default() };
+    (ToolContext { browser: Arc::new(browser), file_roots: vec![] }, recorder)
 }
 
 fn execute() -> Arc<dyn Tool> {
@@ -176,6 +211,33 @@ async fn timers_state_and_limits() {
     assert!(memory.contains("out of memory"), "{memory}");
     let deep = err("const f = (n) => f(n + 1); f(0)").await;
     assert!(deep.contains("stack") || deep.contains("RangeError") || deep.contains("InternalError"), "{deep}");
+}
+
+#[tokio::test]
+async fn bring_to_front_sends_cdp_and_reports_refusal_as_a_warning() {
+    let (ctx, recorder) = recorded_context();
+    let (text, output) = run_in(&ctx, json!({ "code": "await page.bringToFront(); return 'raised'", "tab": 7 })).await;
+    assert!(!output.is_error, "{text}");
+    assert!(text.contains("raised"), "{text}");
+    assert_eq!(*recorder.sends.lock().unwrap(), vec![(7, "Page.bringToFront".to_string())], "the page's tab is used");
+
+    *recorder.refusal.lock().unwrap() = Some(
+        "browse blocked Page.bringToFront: it raises the user's browser window over their work; set OPENCODE_BROWSER_ALLOW_FOREGROUND=1 on the relay to allow it.".into(),
+    );
+    let (text, output) = run_in(&ctx, json!({ "code": "await page.bringToFront(); return 'completed'", "tab": 7 })).await;
+    assert!(!output.is_error, "a refusal is a warning, not a script error: {text}");
+    assert!(text.contains("completed"), "{text}");
+    assert!(
+        text.contains("Warnings:") && text.contains("page.bringToFront(): browse blocked Page.bringToFront") && text.contains("OPENCODE_BROWSER_ALLOW_FOREGROUND=1"),
+        "{text}"
+    );
+    assert_eq!(recorder.sends.lock().unwrap().len(), 2, "the refused call was still attempted");
+
+    let (ctx, recorder) = recorded_context();
+    let (text, output) = run_in(&ctx, json!({ "code": "await page.bringToFront(); return 'no tab'", "tab": null })).await;
+    assert!(!output.is_error, "{text}");
+    assert!(text.contains("no tab") && !text.contains("Warnings:"), "{text}");
+    assert!(recorder.sends.lock().unwrap().is_empty(), "a page with no tab sends nothing");
 }
 
 #[tokio::test]

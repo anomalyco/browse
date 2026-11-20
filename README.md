@@ -197,9 +197,10 @@ extension from your browser to finish.
   running in it. A tab opened with `keepOpen: true` stays until an agent or you close it; every other tab closes when
   idle like the rest.
 - **Agents open their own tabs** in the background of the window you last used, grouped together and collapsed unless
-  you're looking at one (you can turn that off). Agents can't switch you to their tabs or bring a window to the front.
-  Tabs nobody touches for 10 minutes close by themselves (never while something runs on them). Closing agent tabs never
-  quits the browser: on Windows and Linux, browse leaves a new tab (or window) behind when it would close the last one.
+  you're looking at one (you can turn that off). Agents can't switch you to their tabs or bring a window to the front
+  (set `OPENCODE_BROWSER_ALLOW_FOREGROUND=1` on the relay to allow it). Tabs nobody touches for 10 minutes close by
+  themselves (never while something runs on them). Closing agent tabs never quits the browser: on Windows and Linux,
+  browse leaves a new tab (or window) behind when it would close the last one.
 - **Relay restarts keep agent tabs.** The relay saves the tabs agents opened and their options, and takes them back
   when it starts again (after an update, say).
 - **Hand an agent one of your tabs** by clicking the toolbar button on it. The badge shows **ON**; click again to take
@@ -319,7 +320,7 @@ when it starts: it stops after 30 minutes without use, or run `browse restart` f
 | --- | --- |
 | `OPENCODE_BROWSER_ALLOW_ALL_COOKIES=1` | Let tabs read and write every cookie in the profile |
 | `OPENCODE_BROWSER_ALLOW_ALL_STORAGE=1` | Let tabs use every site's storage, and load resources from any host with your credentials |
-| `OPENCODE_BROWSER_ALLOW_FOREGROUND=1` | Allow bringing a tab's window to the front |
+| `OPENCODE_BROWSER_ALLOW_FOREGROUND=1` | Let `page.bringToFront()` in `execute` raise the tab and its window |
 | `OPENCODE_BROWSER_ALLOW_FILE_URLS=1` | Allow `file:` URLs |
 | `OPENCODE_BROWSER_FILE_ROOTS` | More folders tools may read and write (path-list separated) |
 | `OPENCODE_BROWSER_AGENT_WINDOW=separate` | Open agent tabs in a separate window (`current`: in yours), overriding the options page |
