@@ -66,7 +66,8 @@ describe("relay port fallback", () => {
           authorization: header(request, "authorization"),
           pid: header(request, "opencode-browser-client-pid"),
         })
-        return Response.json({ name: "playwriter" })
+        // Playwriter 0.12.0's relay: version, pid and instanceId, but not browse's buildId or startedAt.
+        return Response.json({ version: "0.12.0", pid: 75049, instanceId: "6f1c2a44-3b5d-4d6e-9a8f-0c1d2e3f4a5b", activeExecutes: 0 })
       },
     })
     expect(await probeRelayPort(held)).toBe("other")
@@ -98,6 +99,26 @@ describe("relay port fallback", () => {
     expect(readRelayState()).toBeUndefined()
   }, 30_000)
 
+  test("only browse's /version shape counts, not a foreign relay with version and instanceId", async () => {
+    const port = await freePortOutsideBrowseRange()
+    let reply: Record<string, unknown> = {
+      version: "0.0.17",
+      buildId: "build",
+      instanceId: "instance",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      shutdownProtocol: 2,
+    }
+    using fake = Bun.serve({ hostname: "127.0.0.1", port, fetch: () => Response.json(reply) })
+    expect(await probeRelayPort(port)).toBe("browse")
+    // Playwriter 0.12.0 answers these; none is browse's own build or start time.
+    reply = { version: "0.12.0", pid: 75049, instanceId: "6f1c2a44-3b5d-4d6e-9a8f-0c1d2e3f4a5b", activeExecutes: 0 }
+    expect(await probeRelayPort(port)).toBe("other")
+    reply = { version: "0.12.0", instanceId: "6f1c2a44-3b5d-4d6e-9a8f-0c1d2e3f4a5b" }
+    expect(await probeRelayPort(port)).toBe("other")
+    reply = { version: "0.12.0" }
+    expect(await probeRelayPort(port)).toBe("other")
+  })
+
   test("the version probe carries neither the relay token nor the client pid", async () => {
     relayToken(home)
     const port = await freePortOutsideBrowseRange()
@@ -113,7 +134,7 @@ describe("relay port fallback", () => {
           pid: header(request, "opencode-browser-client-pid"),
         })
         return pathname === "/version"
-          ? Response.json({ version: "9.9.9", instanceId: "fake-relay" })
+          ? Response.json({ version: "9.9.9", buildId: "fake-build", instanceId: "fake-relay", startedAt: "2026-01-01T00:00:00.000Z", shutdownProtocol: 2 })
           : Response.json({ sessions: [] })
       },
     })
@@ -130,17 +151,19 @@ describe("relay port fallback", () => {
     expect(sessions?.pid).toBe(String(process.pid))
   }, 30_000)
 
-  test("a version-only listener is another program: version() rejects it and ensureRelay starts past it", async () => {
+  test("a Playwriter-shaped listener is another program: version() rejects it and ensureRelay starts past it", async () => {
     const held = await freePortOutsideBrowseRange()
     const fallback = await freePortOutsideBrowseRange()
     let mine = false
     const instanceId = "browse-after-start"
-    // Playwriter's relay answers GET /version with just `{ version }`.
+    // Playwriter 0.12.0 answers with a version and an instanceId, but not a browse build or start time.
     using other = Bun.serve({
       hostname: "127.0.0.1",
       port: held,
       fetch: (request) => new URL(request.url).pathname === "/version"
-        ? Response.json(mine ? { version: "9.9.9", instanceId } : { version: "0.10.0" })
+        ? Response.json(mine
+            ? { version: "9.9.9", buildId: "browse-build", instanceId, startedAt: "2026-01-01T00:00:00.000Z", shutdownProtocol: 2 }
+            : { version: "0.12.0", pid: 75049, instanceId: "6f1c2a44-3b5d-4d6e-9a8f-0c1d2e3f4a5b", activeExecutes: 0 })
         : Response.json({ error: "unauthorized" }, { status: 401 }),
     })
     // A definite non-browse reply is what lets the relay move to a fallback port.
@@ -175,7 +198,7 @@ describe("relay port fallback", () => {
     using live = Bun.serve({
       hostname: "127.0.0.1",
       port: actualPort,
-      fetch: () => Response.json({ version: "9.9.9", instanceId: "recorded-instance" }),
+      fetch: () => Response.json({ version: "9.9.9", buildId: "recorded-build", instanceId: "recorded-instance", startedAt: "2026-01-01T00:00:00.000Z", shutdownProtocol: 2 }),
     })
     try {
       writeRelayState({
@@ -345,7 +368,7 @@ describe("relay port fallback", () => {
       expect(sent.every((value) => value === undefined)).toBe(true)
 
       // relay.json names the port but a different instance: still not this install's relay, so no token.
-      versionReply = { version: "9.9.9", instanceId: "answered-instance" }
+      versionReply = { version: "9.9.9", buildId: "answered-build", instanceId: "answered-instance", startedAt: "2026-01-01T00:00:00.000Z", shutdownProtocol: 2 }
       sent.length = 0
       writeRelayState({
         port,
@@ -830,7 +853,7 @@ describe("relay port fallback", () => {
     using live = Bun.serve({
       hostname: "127.0.0.1",
       port,
-      fetch: () => Response.json({ version: "9.9.9", instanceId: "live-relay" }),
+      fetch: () => Response.json({ version: "9.9.9", buildId: "live-build", instanceId: "live-relay", startedAt: "2026-01-01T00:00:00.000Z", shutdownProtocol: 2 }),
     })
     try {
       expect(await liveRelayPort({ root })).toBeUndefined()
@@ -902,7 +925,7 @@ describe("relay port fallback", () => {
       fetch: (request) => {
         sent.push(header(request, "authorization"))
         return new URL(request.url).pathname === "/version"
-          ? Response.json({ version: "9.9.9", instanceId: "lookalike" })
+          ? Response.json({ version: "9.9.9", buildId: "lookalike-build", instanceId: "lookalike", startedAt: "2026-01-01T00:00:00.000Z", shutdownProtocol: 2 })
           : Response.json({ connected: true })
       },
     })

@@ -3,6 +3,7 @@ import { defaultPort } from "./helpers.ts"
 import {
   configuredRelayPort,
   endpointForPort,
+  isBrowseVersion,
   processAlive,
   readRelayState,
   resolveRelayPort,
@@ -320,11 +321,7 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
               code: "relay-starting",
             }))
           }
-          if (
-            response.status !== 200 ||
-            typeof reply?.version !== "string" ||
-            typeof reply.instanceId !== "string"
-          ) return Effect.fail(notBrowse(endpoint, body))
+          if (response.status !== 200 || !isBrowseVersion(reply)) return Effect.fail(notBrowse(endpoint, body))
           // A live relay.json for this install is authoritative: the verified port and instance must be exactly its.
           const after = liveRelayState()
           if (state !== undefined && after === undefined) return Effect.fail(transportError("/version", endpoint)(body))
@@ -451,8 +448,8 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
     version: Effect.suspend(() => {
       const state = liveRelayState()
       const probed = currentEndpoint()
-      // Map transport/decode/404 failures only: a parsed body without instanceId or with a mismatched instance below is
-      // another program, whatever relay.json did.
+      // Map transport/decode/404 failures only: a parsed body without browse's /version shape, or with a mismatched
+      // instance below, is another program, whatever relay.json did.
       const probe = requestJson("/version", RelayVersion).pipe(
         Effect.mapError((error) => {
           if (!(error instanceof RelayDecodeFailed || (error instanceof RelayRejected && !error.code && error.status === 404))) return error
@@ -464,11 +461,11 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: {
         }),
       )
       return probe.pipe(
-        // Another product on the port (Playwriter answers `{ version }` alone): without browse's instanceId this is not
-        // a browse relay, and must never be mistaken for one. Same path as any other foreign listener.
+        // Another product on the port (Playwriter 0.12.0 answers version, pid, instanceId and activeExecutes): without
+        // browse's buildId and startedAt this is not a browse relay, and must never be mistaken for one.
         Effect.flatMap(({ value: version, endpoint }): Effect.Effect<RelayVersion, RelayClientError> => {
+          if (!isBrowseVersion(version)) return Effect.fail(notBrowse(endpoint, version))
           const instanceId = version.instanceId
-          if (typeof instanceId !== "string") return Effect.fail(notBrowse(endpoint, version))
           const after = liveRelayState()
           if (state !== undefined && after === undefined) return Effect.fail(transportError("/version", endpoint)(version))
           if (state !== undefined && !sameLiveState(state, after)) return Effect.fail(notBrowse(endpoint, version))

@@ -1743,3 +1743,30 @@ async fn chosen_ids_are_unique_across_two_browsers_and_new_takes_the_browser_opt
     assert_ne!(other["tab"], named);
     assert_eq!(second_seen.commands("tabs.create").len(), 1);
 }
+
+/// Playwriter 0.12.0's relay answers /version with version, pid, instanceId and activeExecutes. It holds a port but is
+/// not browse: a start must step to the next candidate instead of refusing the port as a relay's.
+#[tokio::test]
+async fn a_playwriter_version_reply_is_skipped_for_the_next_port() {
+    let server = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let held = server.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = server.accept().await else { break };
+            tokio::spawn(async move {
+                let mut request = [0u8; 2048];
+                let _ = stream.read(&mut request).await;
+                let body = br#"{"version":"0.12.0","pid":75049,"instanceId":"6f1c2a44-3b5d-4d6e-9a8f-0c1d2e3f4a5b","activeExecutes":0}"#;
+                let head = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len());
+                let _ = stream.write_all(head.as_bytes()).await;
+                let _ = stream.write_all(body).await;
+            });
+        }
+    });
+    let fallback = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap().local_addr().unwrap().port();
+    assert_eq!(crate::port::probe(held, Duration::from_millis(500)).await, crate::port::PortOwner::Other);
+    let paths = Paths::rooted(std::env::temp_dir().join(format!("browse-relay-port-{}", crate::util::random_hex(6))));
+    let chosen = crate::port::choose_port(&paths, crate::protocol::DEFAULT_PORT, false, std::net::IpAddr::from([127, 0, 0, 1]), Some(vec![held, fallback])).await.unwrap();
+    assert_eq!(chosen, fallback, "a Playwriter-shaped holder leaves its port to itself");
+    let _ = std::fs::remove_dir_all(&paths.data);
+}

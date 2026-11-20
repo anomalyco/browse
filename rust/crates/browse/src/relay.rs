@@ -17,16 +17,34 @@ pub enum Probe {
     Foreign(String),
 }
 
+/// What one `/version` answer means.
+enum Answer {
+    Browse(Value),
+    Starting,
+    Other,
+}
+
+/// What one `/version` answer means for `probe`. A browse relay sends `buildId` and `startedAt` beside `version`,
+/// `instanceId` and `shutdownProtocol`; another product's server (Playwriter 0.12.0 answers `version`, `pid`,
+/// `instanceId`, `activeExecutes`) does not, and must read as foreign so a relay can take a fallback port.
+fn answer(status: u16, body: &[u8]) -> Answer {
+    match serde_json::from_slice::<Value>(body) {
+        Ok(version) if status == 200 && browse_relay::client::is_relay_version(&version) => Answer::Browse(version),
+        // A relay still starting up answers 503 with this code; any other 503 is another program.
+        Ok(version) if status == 503 && version["code"].as_str() == Some("relay-starting") => Answer::Starting,
+        _ => Answer::Other,
+    }
+}
+
 pub fn probe() -> Probe {
     let endpoint = relay_api::endpoint();
     match http::request(&endpoint, "GET", "/version", &[], None, Some(Duration::from_secs(5))) {
         Err(http::Error::Unreachable(_)) => Probe::Absent,
         Err(error) => Probe::Foreign(format!("{endpoint} didn't answer /version: {error}")),
-        Ok(response) => match serde_json::from_slice::<Value>(&response.body) {
-            Ok(version) if response.status == 200 && version.get("version").is_some_and(Value::is_string) => Probe::Running(version),
-            // A relay still starting up answers 503.
-            _ if response.status == 503 => Probe::Absent,
-            _ => Probe::Foreign(format!(
+        Ok(response) => match answer(response.status, &response.body) {
+            Answer::Browse(version) => Probe::Running(version),
+            Answer::Starting => Probe::Absent,
+            Answer::Other => Probe::Foreign(format!(
                 "port {} is in use by another program, so the browse relay can't start there. Stop that program, or pick another port for browse with OPENCODE_BROWSER_PORT (set it where your agent starts, then restart the agent)",
                 endpoint.rsplit(':').next().unwrap_or("")
             )),
@@ -327,3 +345,45 @@ pub fn specs(client: Option<&str>) -> Vec<ToolSpec> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Playwriter 0.12.0's `GET /version`: version, pid and instanceId, but no buildId or startedAt. Reading it as a
+    /// relay made an unpinned start exit "an older browse relay (0.12.0)" instead of taking a fallback port.
+    const PLAYWRITER: &[u8] = br#"{"version":"0.12.0","pid":75049,"instanceId":"6f1c2a44-3b5d-4d6e-9a8f-0c1d2e3f4a5b","activeExecutes":0}"#;
+    /// A TypeScript browse relay (0.0.17, which legacy.rs takes over from): no `runtime`, but browse's own shape.
+    const OLD_BROWSE: &[u8] = br#"{"version":"0.0.17","buildId":"3f2a1c9d","instanceId":"b1d0c7f0-2f6a-4f43-9d0b-6a1d0f5e8c11","startedAt":"2026-11-01T12:00:00.000Z","pid":4242,"managed":true,"shutdownProtocol":2}"#;
+    /// This build's relay.
+    const RUST_BROWSE: &[u8] = br#"{"version":"0.1.3","buildId":"9e8d7c6b","instanceId":"0f4a2c11-8b7e-4b4d-9c1e-1a2b3c4d5e6f","startedAt":"2026-11-17T09:30:00.000Z","pid":5150,"managed":true,"shutdownProtocol":2,"runtime":"rust"}"#;
+
+    fn browse(body: &[u8]) -> bool {
+        matches!(answer(200, body), Answer::Browse(_))
+    }
+
+    #[test]
+    fn a_foreign_version_reply_is_not_a_browse_relay() {
+        assert!(!browse(PLAYWRITER));
+        assert!(matches!(answer(200, PLAYWRITER), Answer::Other));
+        // version + instanceId alone is not enough either: every browse relay also sends its build and start time.
+        assert!(!browse(br#"{"version":"0.12.0","instanceId":"6f1c2a44-3b5d-4d6e-9a8f-0c1d2e3f4a5b"}"#));
+        assert!(!browse(br#"{"version":"0.0.9"}"#));
+    }
+
+    #[test]
+    fn an_older_browse_relay_is_still_recognised() {
+        assert!(browse(OLD_BROWSE));
+        assert!(crate::legacy::is_legacy(&serde_json::from_slice(OLD_BROWSE).unwrap()));
+        assert!(browse(RUST_BROWSE));
+        assert!(!crate::legacy::is_legacy(&serde_json::from_slice(RUST_BROWSE).unwrap()));
+    }
+
+    #[test]
+    fn only_a_starting_relay_reads_as_absent() {
+        // This build's answer, and the TypeScript relay's from the first relay commit (cli/src/relay.ts, 3eb1f8e).
+        assert!(matches!(answer(503, br#"{"error":"browse relay is starting","code":"relay-starting"}"#), Answer::Starting));
+        assert!(matches!(answer(503, br#"{"error":"OpenCode Browser relay is starting","code":"relay-starting"}"#), Answer::Starting));
+        // Another program's 503 is foreign: it holds the port, so an unpinned relay moves on rather than waiting.
+        assert!(matches!(answer(503, br#"{"error":"unavailable"}"#), Answer::Other));
+    }
+}

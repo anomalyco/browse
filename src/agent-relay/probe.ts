@@ -6,13 +6,26 @@
 export type RelayProbe = "unknown" | "absent" | "found" | "install-waiting"
 
 /**
- * What a GET of the relay's /version answered: found for browse's own reply (`{ version, instanceId }`), or for the
- * relay's refusal of a cross-site browser request; absent for anything else, or no answer.
+ * Whether a /version answer is a browse relay's. Every browse relay has sent `buildId`, `startedAt` and a numeric
+ * `shutdownProtocol` beside `version` and `instanceId`; another product's relay (Playwriter 0.12.0 answers `version`,
+ * `pid`, `instanceId`, `activeExecutes`) does not.
+ */
+function isBrowseRelay(reply: Record<string, unknown>): boolean {
+  return typeof reply.version === "string" &&
+    typeof reply.instanceId === "string" &&
+    typeof reply.buildId === "string" &&
+    typeof reply.startedAt === "string" &&
+    typeof reply.shutdownProtocol === "number"
+}
+
+/**
+ * What a GET of the relay's /version answered: found for browse's own reply, or for the relay's refusal of a
+ * cross-site browser request; absent for anything else, or no answer.
  */
 export function relayProbeResult(status: number | undefined, body: unknown): Exclude<RelayProbe, "unknown"> {
   if (status === undefined || typeof body !== "object" || body === null) return "absent"
   const reply = body as Record<string, unknown>
-  if ((status === 200 && typeof reply.version === "string" && typeof reply.instanceId === "string") ||
+  if ((status === 200 && isBrowseRelay(reply)) ||
       (status === 403 && typeof reply.error === "string" && /Cross-origin browser requests/.test(reply.error)))
     return reply.installWaiting === true ? "install-waiting" : "found"
   return "absent"
