@@ -111,6 +111,13 @@ export function browsers(): Browser[] {
         defaultIDs: ["VivaldiHTM"],
         executables: installs("Vivaldi\\Application\\vivaldi.exe"),
       },
+      {
+        name: "Helium",
+        userData: path.join(local, "imput", "Helium", "User Data"),
+        manifests: [],
+        defaultIDs: ["HeliumHTM"],
+        executables: installs("imput\\Helium\\Application\\chrome.exe"),
+      },
     ]
   }
   // Chrome-family builds honor CHROME_CONFIG_HOME before XDG_CONFIG_HOME.
