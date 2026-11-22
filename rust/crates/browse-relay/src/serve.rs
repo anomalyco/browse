@@ -192,6 +192,7 @@ pub async fn start(options: ServeOptions, tools: Vec<Arc<dyn Tool>>) -> anyhow::
     rlog!(
         "relay.ready",
         url = format!("http://127.0.0.1:{}", addr.port()),
+        listen = addr.to_string(),
         version = relay.version.clone(),
         pid = std::process::id(),
     );
@@ -536,6 +537,9 @@ fn legacy_route(path: &str) -> bool {
 }
 
 fn upgrade_extension(relay: Arc<Relay>, peer: SocketAddr, request: &mut Request<Incoming>) -> Response<Full<Bytes>> {
+    if !crate::origins::is_local_peer(&peer) {
+        rlog!("extension.remote_upgrade", peer = peer.to_string());
+    }
     let origin = header(request, "origin").map(str::to_string);
     if let Err(error) = crate::origins::validate_extension_origin(origin.as_deref(), &relay.origins) {
         rlog!("extension.rejected", reason = error, origin = origin);

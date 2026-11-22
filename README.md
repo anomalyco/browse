@@ -144,6 +144,12 @@ and the extension connects to it across the network:
 The connection isn't encrypted by browse; use a network that is (Tailscale or WireGuard), not the open internet.
 `browse set hostname 127.0.0.1` goes back to this computer only.
 
+**Containers and WSL**: in a container, the container's own address usually can't be reached from outside it.
+Forward the port to the same port on the browser's computer (a devcontainer's `"forwardPorts": [19988]`, or
+`docker run -p 127.0.0.1:19988:19988`) and enter `localhost:19988` there. Under WSL2 without a container, a browser
+on Windows can use `localhost`. Remote is a direct connection between the two computers over your network, not over
+the internet. A pairing is tied to the address you enter, so pair once with the address you'll keep using.
+
 ### Updates
 
 **Updates are automatic.** Every relay checks at launch and then hourly, whatever the update setting, and installs the
