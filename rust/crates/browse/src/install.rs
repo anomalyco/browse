@@ -314,6 +314,9 @@ pub fn install(args: &[String]) -> anyhow::Result<i32> {
     }
     let entry = place(&flags)?;
     let command = vec![entry.to_string_lossy().into_owned(), "mcp".to_owned()];
+    // A pinned relay port goes in every entry, so an agent that starts the server with a bare environment still dials
+    // the relay the extension is paired with.
+    let port = browse_relay::port::env_port();
     restart_outdated_relay();
 
     let opencode = flags.opencode.clone().or_else(|| std::env::var_os("OPENCODE_BIN").map(PathBuf::from)).or_else(|| browsers::on_path("opencode"));
@@ -350,7 +353,7 @@ pub fn install(args: &[String]) -> anyhow::Result<i32> {
         let label = agents::label(location.name);
         let file = tilde(&location.file);
         if location.name == "opencode" {
-            match setup::configure_opencode(&location.file, &entry) {
+            match setup::configure_opencode(&location.file, &entry, port) {
                 Ok(McpEdit::Added) => println!("✓ Added browse to {label} ({file})"),
                 Ok(McpEdit::Updated) => println!("✓ Updated browse in {label} ({file})"),
                 Ok(McpEdit::UpToDate) => println!("✓ {label} already has browse"),
@@ -368,7 +371,7 @@ pub fn install(args: &[String]) -> anyhow::Result<i32> {
             }
             continue;
         }
-        match agents::edit(location, &command, false) {
+        match agents::edit(location, &command, false, port) {
             Ok(Edit::Added) => println!("✓ Added browse to {label} ({file})"),
             Ok(Edit::Updated) => println!("✓ Updated browse in {label} ({file})"),
             Ok(Edit::Unchanged | Edit::Removed) => println!("✓ {label} already has browse"),
@@ -387,7 +390,7 @@ pub fn install(args: &[String]) -> anyhow::Result<i32> {
     if selected.is_empty() {
         let intro = if flags.none || ask { "Add browse to your agent as an MCP server (stdio):" } else { "No agent was set up: couldn't tell which agent is running this, and OpenCode isn't installed. Add browse to your agent as an MCP server (stdio):" };
         println!("\n{intro}");
-        for line in agents::manual_entry(&command).lines() {
+        for line in agents::manual_entry(&command, port).lines() {
             println!("  {line}");
         }
         if !flags.none && !ask {
@@ -469,7 +472,7 @@ pub fn uninstall(args: &[String]) -> anyhow::Result<i32> {
     let placeholder = ["browse".to_owned(), "mcp".to_owned()];
     for location in &locations {
         let label = agents::label(location.name);
-        match agents::edit(location, &placeholder, true) {
+        match agents::edit(location, &placeholder, true, None) {
             Ok(Edit::Removed) => println!("✓ Removed browse from {label} ({})", tilde(&location.file)),
             Ok(Edit::Conflict) => println!("! {} has a server named browse that browse didn't write; left it unchanged.", tilde(&location.file)),
             Ok(_) => {}

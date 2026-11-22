@@ -248,9 +248,21 @@ fn format(name: &str) -> Format {
     }
 }
 
-/// The browse server as `name`'s config expects it, running `command args...`.
-pub fn definition(name: &str, command: &str, args: &[String]) -> Value {
+/// The key `name`'s entry keeps its environment under. dsh's and vibe's env schemas aren't known well enough to
+/// write one, so they go without.
+fn env_key(name: &str) -> Option<&'static str> {
     match name {
+        "dsh" | "vibe" => None,
+        "opencode" | "kilo" => Some("environment"),
+        "goose" => Some("envs"),
+        _ => Some("env"),
+    }
+}
+
+/// The browse server as `name`'s config expects it, running `command args...`. A pinned relay `port` goes in the entry's
+/// environment, so the agent's `browse mcp` dials the same relay the extension is paired with.
+pub fn definition(name: &str, command: &str, args: &[String], port: Option<u16>) -> Value {
+    let mut server = match name {
         "kilo" => json!({ "type": "local", "command": std::iter::once(command.to_owned()).chain(args.iter().cloned()).collect::<Vec<_>>() }),
         "goose" => json!({ "type": "stdio", "name": "browse", "enabled": true, "cmd": command, "args": args }),
         "copilot" => json!({ "type": "local", "command": command, "args": args, "tools": ["*"] }),
@@ -258,7 +270,11 @@ pub fn definition(name: &str, command: &str, args: &[String]) -> Value {
         "dsh" => json!({ "serverName": "browse", "transport": "stdio", "command": command, "args": args }),
         "claude" | "vscode" | "cortex" | "droid" | "codebuddy" => json!({ "type": "stdio", "command": command, "args": args }),
         _ => json!({ "command": command, "args": args }),
+    };
+    if let (Some(port), Some(key)) = (port, env_key(name)) {
+        server[key] = json!({ "OPENCODE_BROWSER_PORT": port.to_string() });
     }
+    server
 }
 
 /// The command line an MCP server entry runs: `command` as an array, or `command`/`cmd` plus `args`.
@@ -295,8 +311,8 @@ pub enum Edit {
 }
 
 /// Adds browse (running `command`) to the agent's config, updates an entry an earlier install wrote, or with `remove`
-/// takes it out again. Settings the user added to the entry stay.
-pub fn edit(location: &Location, command: &[String], remove: bool) -> anyhow::Result<Edit> {
+/// takes it out again. Settings the user added to the entry stay; a pinned `port` is written to its environment.
+pub fn edit(location: &Location, command: &[String], remove: bool, port: Option<u16>) -> anyhow::Result<Edit> {
     let file = &location.file;
     let exists = file.is_file();
     if !exists && remove {
@@ -304,7 +320,7 @@ pub fn edit(location: &Location, command: &[String], remove: bool) -> anyhow::Re
     }
     let before = if exists { std::fs::read_to_string(file).with_context(|| format!("can't read {}", file.display()))? } else { String::new() };
     let (program, args) = command.split_first().context("empty command")?;
-    let expected = definition(location.name, program, args);
+    let expected = definition(location.name, program, args, port);
     let invalid = || anyhow::anyhow!("{} isn't valid {}; left unchanged", file.display(), kind(location.name));
     let (after, outcome) = match format(location.name) {
         Format::Json(key) => edit_json(&before, key, &expected, remove).map_err(|_| invalid())?,
@@ -334,11 +350,18 @@ fn kind(name: &str) -> &'static str {
     }
 }
 
-/// The entry with browse's fields set over what's there.
+/// The entry with browse's fields set over what's there. An environment gains browse's variables and keeps the user's.
 fn merged(current: Option<&Value>, expected: &Value) -> Value {
     let mut server = current.filter(|c| c.is_object()).cloned().unwrap_or_else(|| json!({}));
     for (key, value) in expected.as_object().into_iter().flatten() {
-        server[key] = value.clone();
+        let merge = matches!((server.get(key), value), (Some(Value::Object(_)), Value::Object(_)));
+        if merge {
+            if let (Some(Value::Object(existing)), Value::Object(added)) = (server.get_mut(key), value) {
+                existing.extend(added.clone());
+            }
+        } else {
+            server[key] = value.clone();
+        }
     }
     // An entry that ran `[command, args...]` in one array and now takes `command` plus `args`, or the other way round.
     if expected.get("args").is_none()
@@ -418,10 +441,22 @@ fn json_to_toml(value: &Value) -> toml_edit::Value {
     }
 }
 
-/// Sets browse's fields in a TOML table (keeping the user's other keys), or a new table with just them.
+/// Sets browse's fields in a TOML table (keeping the user's other keys), or a new table with just them. An
+/// environment is its own `[<server>.env]` section, the way the clients' docs show it.
 fn fill(table: &mut toml_edit::Table, server: &Value) {
     for (key, value) in server.as_object().into_iter().flatten() {
-        table.insert(key, toml_edit::Item::Value(json_to_toml(value)));
+        match value {
+            Value::Object(entries) => {
+                let mut section = table.get(key).and_then(toml_edit::Item::as_table).cloned().unwrap_or_else(toml_edit::Table::new);
+                for (name, value) in entries {
+                    section.insert(name, toml_edit::Item::Value(json_to_toml(value)));
+                }
+                table.insert(key, toml_edit::Item::Table(section));
+            }
+            _ => {
+                table.insert(key, toml_edit::Item::Value(json_to_toml(value)));
+            }
+        }
     }
 }
 
@@ -638,9 +673,12 @@ pub fn current(location: &Location) -> Option<Value> {
 }
 
 /// The MCP entry most stdio clients take, for an agent install doesn't know.
-pub fn manual_entry(command: &[String]) -> String {
+pub fn manual_entry(command: &[String], port: Option<u16>) -> String {
     let (program, args) = command.split_first().map_or(("browse", &[][..]), |(p, a)| (p.as_str(), a));
-    let server = json!({ "command": program, "args": args });
+    let mut server = json!({ "command": program, "args": args });
+    if let Some(port) = port {
+        server["env"] = json!({ "OPENCODE_BROWSER_PORT": port.to_string() });
+    }
     format!("{{\n  \"mcpServers\": {{\n    \"browse\": {}\n  }}\n}}", serde_json::to_string(&server).unwrap_or_default())
 }
 
@@ -676,32 +714,32 @@ mod tests {
         let file = dir.join("settings.json");
         std::fs::write(&file, "{\n  // mine\n  \"amp.mcpServers\": { \"other\": { \"command\": \"x\" } }\n}\n").unwrap();
         let amp = loc("amp", file.clone());
-        assert_eq!(edit(&amp, &command("/bin/browse"), false).unwrap(), Edit::Added);
+        assert_eq!(edit(&amp, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(text.contains("// mine"));
         let parsed = jsonc::parse(&text).unwrap();
         assert_eq!(parsed["amp.mcpServers"]["browse"], json!({ "command": "/bin/browse", "args": ["mcp"] }));
-        assert_eq!(edit(&amp, &command("/bin/browse"), false).unwrap(), Edit::Unchanged);
+        assert_eq!(edit(&amp, &command("/bin/browse"), false, None).unwrap(), Edit::Unchanged);
         // Another install's path is updated; the user's own keys stay.
         let with_env = text.replace("\"args\": [", "\"env\": { \"A\": \"1\" },\n      \"args\": [");
         std::fs::write(&file, with_env).unwrap();
-        assert_eq!(edit(&amp, &command("/home/u/.bun/bin/browse"), false).unwrap(), Edit::Updated);
+        assert_eq!(edit(&amp, &command("/home/u/.bun/bin/browse"), false, None).unwrap(), Edit::Updated);
         let parsed = jsonc::parse(&std::fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!(parsed["amp.mcpServers"]["browse"]["command"], "/home/u/.bun/bin/browse");
         assert_eq!(parsed["amp.mcpServers"]["browse"]["env"]["A"], "1");
-        assert_eq!(edit(&amp, &command("x"), true).unwrap(), Edit::Removed);
+        assert_eq!(edit(&amp, &command("x"), true, None).unwrap(), Edit::Removed);
         let parsed = jsonc::parse(&std::fs::read_to_string(&file).unwrap()).unwrap();
         assert!(parsed["amp.mcpServers"].get("browse").is_none() && parsed["amp.mcpServers"]["other"].is_object());
         // Someone else's server called browse is left alone.
         std::fs::write(&file, r#"{"mcpServers":{"browse":{"command":"other-tool","args":["serve"]}}}"#).unwrap();
-        assert_eq!(edit(&loc("claude", file.clone()), &command("/bin/browse"), false).unwrap(), Edit::Conflict);
-        assert_eq!(edit(&loc("claude", file.clone()), &command("/bin/browse"), true).unwrap(), Edit::Conflict);
+        assert_eq!(edit(&loc("claude", file.clone()), &command("/bin/browse"), false, None).unwrap(), Edit::Conflict);
+        assert_eq!(edit(&loc("claude", file.clone()), &command("/bin/browse"), true, None).unwrap(), Edit::Conflict);
         // A new file, a new entry; claude's has a type.
         let new = dir.join("new/.claude.json");
-        assert_eq!(edit(&loc("claude", new.clone()), &command("/bin/browse"), false).unwrap(), Edit::Added);
+        assert_eq!(edit(&loc("claude", new.clone()), &command("/bin/browse"), false, None).unwrap(), Edit::Added);
         assert_eq!(jsonc::parse(&std::fs::read_to_string(&new).unwrap()).unwrap()["mcpServers"]["browse"]["type"], "stdio");
         std::fs::write(&file, "{ not json").unwrap();
-        assert!(edit(&loc("claude", file), &command("/bin/browse"), false).is_err());
+        assert!(edit(&loc("claude", file), &command("/bin/browse"), false, None).is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -711,25 +749,25 @@ mod tests {
         let file = dir.join("config.toml");
         std::fs::write(&file, "# my codex\nmodel = \"o3\"\n\n[mcp_servers.other]\ncommand = \"x\" # keep\n").unwrap();
         let codex = loc("codex", file.clone());
-        assert_eq!(edit(&codex, &command("/bin/browse"), false).unwrap(), Edit::Added);
+        assert_eq!(edit(&codex, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(text.contains("# my codex") && text.contains("# keep") && text.contains("[mcp_servers.browse]"), "{text}");
-        assert_eq!(edit(&codex, &command("/bin/browse"), false).unwrap(), Edit::Unchanged);
-        assert_eq!(edit(&codex, &command("/usr/bin/browse"), false).unwrap(), Edit::Updated);
+        assert_eq!(edit(&codex, &command("/bin/browse"), false, None).unwrap(), Edit::Unchanged);
+        assert_eq!(edit(&codex, &command("/usr/bin/browse"), false, None).unwrap(), Edit::Updated);
         assert!(std::fs::read_to_string(&file).unwrap().contains("command = \"/usr/bin/browse\""));
-        assert_eq!(edit(&codex, &command("x"), true).unwrap(), Edit::Removed);
+        assert_eq!(edit(&codex, &command("x"), true, None).unwrap(), Edit::Removed);
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(!text.contains("browse") && text.contains("[mcp_servers.other]"), "{text}");
         // A fresh file.
         let fresh = loc("codex", dir.join("fresh/config.toml"));
-        edit(&fresh, &command("/bin/browse"), false).unwrap();
+        edit(&fresh, &command("/bin/browse"), false, None).unwrap();
         assert_eq!(std::fs::read_to_string(&fresh.file).unwrap(), "[mcp_servers.browse]\ncommand = \"/bin/browse\"\nargs = [\"mcp\"]\n");
         // Vibe's list of servers.
         let vibe = loc("vibe", dir.join("vibe.toml"));
         std::fs::write(&vibe.file, "[[mcp_servers]]\nname = \"other\"\ntransport = \"stdio\"\ncommand = \"x\"\n").unwrap();
-        assert_eq!(edit(&vibe, &command("/bin/browse"), false).unwrap(), Edit::Added);
-        assert_eq!(edit(&vibe, &command("/bin/browse"), false).unwrap(), Edit::Unchanged);
-        assert_eq!(edit(&vibe, &command("/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(edit(&vibe, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
+        assert_eq!(edit(&vibe, &command("/bin/browse"), false, None).unwrap(), Edit::Unchanged);
+        assert_eq!(edit(&vibe, &command("/bin/browse"), true, None).unwrap(), Edit::Removed);
         assert!(!std::fs::read_to_string(&vibe.file).unwrap().contains("browse"));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -741,26 +779,26 @@ mod tests {
         let original = "# goose\nGOOSE_MODEL: x # keep\nextensions:\n  developer:\n    enabled: true\n    type: builtin\nother: 1\n";
         std::fs::write(&file, original).unwrap();
         let goose = loc("goose", file.clone());
-        assert_eq!(edit(&goose, &command("/bin/browse"), false).unwrap(), Edit::Added);
+        assert_eq!(edit(&goose, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(text.contains("# goose") && text.contains("# keep"), "{text}");
         let parsed: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
         assert_eq!(parsed["extensions"]["browse"]["cmd"].as_str(), Some("/bin/browse"));
         assert_eq!(parsed["extensions"]["developer"]["type"].as_str(), Some("builtin"));
-        assert_eq!(edit(&goose, &command("/bin/browse"), false).unwrap(), Edit::Unchanged);
-        assert_eq!(edit(&goose, &command("/usr/bin/browse"), false).unwrap(), Edit::Updated);
+        assert_eq!(edit(&goose, &command("/bin/browse"), false, None).unwrap(), Edit::Unchanged);
+        assert_eq!(edit(&goose, &command("/usr/bin/browse"), false, None).unwrap(), Edit::Updated);
         let parsed: serde_yaml::Value = serde_yaml::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!(parsed["extensions"]["browse"]["cmd"].as_str(), Some("/usr/bin/browse"));
-        assert_eq!(edit(&goose, &command("x"), true).unwrap(), Edit::Removed);
+        assert_eq!(edit(&goose, &command("x"), true, None).unwrap(), Edit::Removed);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
         // No key yet, an empty mapping, a new file.
         let hermes = loc("hermes", dir.join("hermes.yaml"));
         std::fs::write(&hermes.file, "model: x\n").unwrap();
-        assert_eq!(edit(&hermes, &command("/bin/browse"), false).unwrap(), Edit::Added);
+        assert_eq!(edit(&hermes, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
         std::fs::write(&hermes.file, "mcp_servers: {}\n").unwrap();
-        assert_eq!(edit(&hermes, &command("/bin/browse"), false).unwrap(), Edit::Added);
+        assert_eq!(edit(&hermes, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
         let fresh = loc("hermes", dir.join("fresh/config.yaml"));
-        assert_eq!(edit(&fresh, &command("/bin/browse"), false).unwrap(), Edit::Added);
+        assert_eq!(edit(&fresh, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
         let parsed: serde_yaml::Value = serde_yaml::from_str(&std::fs::read_to_string(&fresh.file).unwrap()).unwrap();
         assert_eq!(parsed["mcp_servers"]["browse"]["args"][0].as_str(), Some("mcp"));
         let _ = std::fs::remove_dir_all(dir);
@@ -773,11 +811,11 @@ mod tests {
         std::fs::write(&file, "{\n  \"mcpServers\": {\n    \"other\": { \"command\": \"x\", \"disabled\": true }\n  }\n}\n").unwrap();
         for name in ["workbuddy", "trae-cn"] {
             let agent = loc(name, file.clone());
-            assert_eq!(edit(&agent, &command("/bin/browse"), false).unwrap(), Edit::Added, "{name}");
+            assert_eq!(edit(&agent, &command("/bin/browse"), false, None).unwrap(), Edit::Added, "{name}");
             let parsed = jsonc::parse(&std::fs::read_to_string(&file).unwrap()).unwrap();
             assert_eq!(parsed["mcpServers"]["browse"], json!({ "command": "/bin/browse", "args": ["mcp"] }), "{name}");
             assert_eq!(parsed["mcpServers"]["other"], json!({ "command": "x", "disabled": true }), "{name}");
-            assert_eq!(edit(&agent, &command("/bin/browse"), true).unwrap(), Edit::Removed, "{name}");
+            assert_eq!(edit(&agent, &command("/bin/browse"), true, None).unwrap(), Edit::Removed, "{name}");
             let parsed = jsonc::parse(&std::fs::read_to_string(&file).unwrap()).unwrap();
             assert!(parsed["mcpServers"].get("browse").is_none(), "{name}");
             assert_eq!(parsed["mcpServers"]["other"], json!({ "command": "x", "disabled": true }), "{name}");
@@ -793,6 +831,66 @@ mod tests {
         assert!(file("trae-cn").ends_with("Trae CN/User/mcp.json"), "{:?}", file("trae-cn"));
         assert_eq!(agent_name("workbuddy"), Some("workbuddy"));
         assert_eq!(agent_name("trae-cn"), Some("trae-cn"));
+    }
+
+    #[test]
+    fn a_pinned_port_goes_in_each_agents_environment() {
+        let dir = temp("pinned-port");
+        // Codex's TOML gets its own [mcp_servers.browse.env] section.
+        let codex = loc("codex", dir.join("codex/config.toml"));
+        assert_eq!(edit(&codex, &command("/bin/browse"), false, Some(20000)).unwrap(), Edit::Added);
+        let text = std::fs::read_to_string(&codex.file).unwrap();
+        assert_eq!(text, "[mcp_servers.browse]\ncommand = \"/bin/browse\"\nargs = [\"mcp\"]\n\n[mcp_servers.browse.env]\nOPENCODE_BROWSER_PORT = \"20000\"\n");
+        // The same port again changes nothing; a different one updates it; no port leaves it.
+        assert_eq!(edit(&codex, &command("/bin/browse"), false, Some(20000)).unwrap(), Edit::Unchanged);
+        assert_eq!(edit(&codex, &command("/bin/browse"), false, Some(20001)).unwrap(), Edit::Updated);
+        assert!(std::fs::read_to_string(&codex.file).unwrap().contains("OPENCODE_BROWSER_PORT = \"20001\""));
+        assert_eq!(edit(&codex, &command("/bin/browse"), false, None).unwrap(), Edit::Unchanged);
+
+        // A JSON entry with the user's own env keeps it and gains the port.
+        let claude = loc("claude", dir.join("claude.json"));
+        std::fs::write(&claude.file, r#"{"mcpServers":{"browse":{"type":"stdio","command":"/bin/browse","args":["mcp"],"env":{"MINE":"1"}}}}"#).unwrap();
+        assert_eq!(edit(&claude, &command("/bin/browse"), false, Some(20000)).unwrap(), Edit::Updated);
+        let parsed = jsonc::parse(&std::fs::read_to_string(&claude.file).unwrap()).unwrap();
+        assert_eq!(parsed["mcpServers"]["browse"]["env"], json!({ "MINE": "1", "OPENCODE_BROWSER_PORT": "20000" }));
+        assert_eq!(edit(&claude, &command("/bin/browse"), false, Some(20000)).unwrap(), Edit::Unchanged);
+
+        // Goose's envs, Kilo's environment.
+        let goose = loc("goose", dir.join("goose.yaml"));
+        assert_eq!(edit(&goose, &command("/bin/browse"), false, Some(20000)).unwrap(), Edit::Added);
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&std::fs::read_to_string(&goose.file).unwrap()).unwrap();
+        assert_eq!(parsed["extensions"]["browse"]["envs"]["OPENCODE_BROWSER_PORT"].as_str(), Some("20000"));
+        let kilo = loc("kilo", dir.join("kilo.json"));
+        assert_eq!(edit(&kilo, &command("/bin/browse"), false, Some(20000)).unwrap(), Edit::Added);
+        let parsed = jsonc::parse(&std::fs::read_to_string(&kilo.file).unwrap()).unwrap();
+        assert_eq!(parsed["mcp"]["browse"]["environment"], json!({ "OPENCODE_BROWSER_PORT": "20000" }));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_unpinned_install_writes_no_environment() {
+        let dir = temp("unpinned");
+        let claude = loc("claude", dir.join("claude.json"));
+        assert_eq!(edit(&claude, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
+        let parsed = jsonc::parse(&std::fs::read_to_string(&claude.file).unwrap()).unwrap();
+        assert!(parsed["mcpServers"]["browse"].get("env").is_none(), "{parsed}");
+        let codex = loc("codex", dir.join("codex/config.toml"));
+        assert_eq!(edit(&codex, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
+        assert!(!std::fs::read_to_string(&codex.file).unwrap().contains(".env]"));
+        // An env the user wrote is left exactly as it was.
+        std::fs::write(&claude.file, r#"{"mcpServers":{"browse":{"type":"stdio","command":"/bin/browse","args":["mcp"],"env":{"MINE":"1"}}}}"#).unwrap();
+        assert_eq!(edit(&claude, &command("/bin/browse"), false, None).unwrap(), Edit::Unchanged);
+        assert_eq!(jsonc::parse(&std::fs::read_to_string(&claude.file).unwrap()).unwrap()["mcpServers"]["browse"]["env"]["MINE"], "1");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn manual_entry_carries_a_pinned_port() {
+        let entry = manual_entry(&command("/home/u/.local/bin/browse"), Some(20000));
+        let parsed = jsonc::parse(&entry).unwrap();
+        assert_eq!(parsed["mcpServers"]["browse"]["env"], json!({ "OPENCODE_BROWSER_PORT": "20000" }));
+        let parsed = jsonc::parse(&manual_entry(&command("/bin/browse"), None)).unwrap();
+        assert!(parsed["mcpServers"]["browse"].get("env").is_none());
     }
 
     #[test]
