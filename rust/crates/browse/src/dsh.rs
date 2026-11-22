@@ -478,24 +478,24 @@ mod tests {
         let dir = temp("dsh");
         let file = dir.join("dsh/cordis.patch.yml");
         let dsh = loc("dsh", file.clone());
-        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Added);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), row("/bin/browse"));
         let text = std::fs::read_to_string(&file).unwrap();
-        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Unchanged);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false, None).unwrap(), Edit::Unchanged);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
         assert_eq!(current(&dsh).unwrap()["serverName"], "browse");
         assert!(owned(&current(&dsh).unwrap()));
-        assert_eq!(edit(&dsh, &command("/usr/bin/browse"), false).unwrap(), Edit::Updated);
+        assert_eq!(edit(&dsh, &command("/usr/bin/browse"), false, None).unwrap(), Edit::Updated);
         assert_eq!(current(&dsh).unwrap()["command"], "/usr/bin/browse");
         // Settings the user added to our row stay across an update.
         let with_env = std::fs::read_to_string(&file).unwrap().replace("        args: [mcp]\n", "        args: [mcp]\n        env:\n          KEEP: '1'\n");
         std::fs::write(&file, &with_env).unwrap();
-        assert_eq!(edit(&dsh, &command("/opt/browse"), false).unwrap(), Edit::Updated);
+        assert_eq!(edit(&dsh, &command("/opt/browse"), false, None).unwrap(), Edit::Updated);
         let parsed = current(&dsh).unwrap();
         assert_eq!(parsed["command"], "/opt/browse");
         assert_eq!(parsed["env"]["KEEP"], "1");
         // A file that only had our row is removed: dsh treats a missing layer as no layer.
-        assert_eq!(edit(&dsh, &command("/opt/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(edit(&dsh, &command("/opt/browse"), true, None).unwrap(), Edit::Removed);
         assert!(!file.exists());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -508,19 +508,19 @@ mod tests {
         std::fs::write(&file, original).unwrap();
         assert_eq!(patch_list(original).unwrap().len(), 1);
         let dsh = loc("dsh", file.clone());
-        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Added);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
         let text = std::fs::read_to_string(&file).unwrap();
         assert_eq!(text.strip_prefix(original).unwrap(), format!("\n{}", row("/bin/browse")));
         assert!(text.contains("        cwd: !!js process.cwd()\n"), "{text}");
-        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Unchanged);
-        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false, None).unwrap(), Edit::Unchanged);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true, None).unwrap(), Edit::Removed);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
         // Removal doesn't care about tags in our own row: dropping lines is safe.
         let tagged = dir.join("tagged.yml");
         let original = "- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: /bin/browse\n        args: [mcp]\n        cwd: !!js process.cwd()\n";
         std::fs::write(&tagged, original).unwrap();
         let dsh = loc("dsh", tagged.clone());
-        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true, None).unwrap(), Edit::Removed);
         assert!(!tagged.exists());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -531,25 +531,25 @@ mod tests {
         // A missing file is created, then removed again.
         let missing = dir.join("missing/cordis.patch.yml");
         let dsh = loc("dsh", missing.clone());
-        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Added);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
         assert!(current(&dsh).is_some());
-        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true, None).unwrap(), Edit::Removed);
         assert!(!missing.exists());
         // So is an empty one.
         let empty = dir.join("empty/cordis.patch.yml");
         std::fs::create_dir_all(empty.parent().unwrap()).unwrap();
         std::fs::write(&empty, "").unwrap();
         let dsh = loc("dsh", empty.clone());
-        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Added);
-        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true, None).unwrap(), Edit::Removed);
         assert!(!empty.exists());
         // Leftover comments keep an empty list so dsh can still load the file.
         let comments = dir.join("comments/cordis.patch.yml");
         std::fs::create_dir_all(comments.parent().unwrap()).unwrap();
         std::fs::write(&comments, "# only comments\n").unwrap();
         let dsh = loc("dsh", comments.clone());
-        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Added);
-        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true, None).unwrap(), Edit::Removed);
         let text = std::fs::read_to_string(&comments).unwrap();
         assert_eq!(text, "# only comments\n[]\n");
         assert_eq!(patch_list(&text).unwrap().len(), 0);
@@ -558,16 +558,16 @@ mod tests {
         std::fs::create_dir_all(listed.parent().unwrap()).unwrap();
         std::fs::write(&listed, "# mine\n[]\n").unwrap();
         let dsh = loc("dsh", listed.clone());
-        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Added);
-        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true, None).unwrap(), Edit::Removed);
         assert_eq!(std::fs::read_to_string(&listed).unwrap(), "# mine\n[]\n");
         // An empty list with nothing else is replaced, then the file is removed.
         let only = dir.join("only/cordis.patch.yml");
         std::fs::create_dir_all(only.parent().unwrap()).unwrap();
         std::fs::write(&only, "[]\n").unwrap();
         let dsh = loc("dsh", only.clone());
-        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Added);
-        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true, None).unwrap(), Edit::Removed);
         assert!(!only.exists());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -581,8 +581,8 @@ mod tests {
         let original = "--- # c\n[]\n";
         std::fs::write(&listed, original).unwrap();
         let dsh = loc("dsh", listed.clone());
-        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Added);
-        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true, None).unwrap(), Edit::Removed);
         assert_eq!(std::fs::read_to_string(&listed).unwrap(), original);
         assert_eq!(patch_list(&std::fs::read_to_string(&listed).unwrap()).unwrap().len(), 0);
         // `--- # c` plus our row uninstalls to a loadable empty list.
@@ -590,7 +590,7 @@ mod tests {
         std::fs::create_dir_all(named.parent().unwrap()).unwrap();
         std::fs::write(&named, format!("--- # c\n{}", row("/bin/browse"))).unwrap();
         let dsh = loc("dsh", named.clone());
-        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true, None).unwrap(), Edit::Removed);
         let text = std::fs::read_to_string(&named).unwrap();
         assert_eq!(text, "--- # c\n[]\n");
         assert_eq!(sequence(&text).unwrap().map(|rows| rows.len()), Some(0));
@@ -605,9 +605,9 @@ mod tests {
         std::fs::create_dir_all(comment.parent().unwrap()).unwrap();
         std::fs::write(&comment, "\u{feff}# c\n").unwrap();
         let dsh = loc("dsh", comment.clone());
-        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Added);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
         assert!(std::fs::read_to_string(&comment).unwrap().starts_with("\u{feff}# c\n"), "{:?}", std::fs::read_to_string(&comment).unwrap());
-        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true, None).unwrap(), Edit::Removed);
         let text = std::fs::read_to_string(&comment).unwrap();
         assert_eq!(text, "\u{feff}# c\n[]\n");
         assert_eq!(patch_list(&text).unwrap().len(), 0);
@@ -616,9 +616,9 @@ mod tests {
         std::fs::create_dir_all(only.parent().unwrap()).unwrap();
         std::fs::write(&only, "\u{feff}").unwrap();
         let dsh = loc("dsh", only.clone());
-        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Added);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
         assert!(std::fs::read_to_string(&only).unwrap().starts_with('\u{feff}'));
-        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true, None).unwrap(), Edit::Removed);
         assert!(!only.exists());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -630,7 +630,7 @@ mod tests {
         let original = "# top\n- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      # row comment\n      disabled: true\n      note: keep me\n      config:\n        serverName: browse\n        transport: stdio\n        command: /bin/browse\n        args: [mcp]\n        env:\n          A: '1'\n";
         std::fs::write(&file, original).unwrap();
         let dsh = loc("dsh", file.clone());
-        assert_eq!(edit(&dsh, &command("/usr/bin/browse"), false).unwrap(), Edit::Updated);
+        assert_eq!(edit(&dsh, &command("/usr/bin/browse"), false, None).unwrap(), Edit::Updated);
         let text = std::fs::read_to_string(&file).unwrap();
         assert_eq!(text, original.replace("command: /bin/browse", "command: /usr/bin/browse"));
         let before: Vec<&str> = original.lines().collect();
@@ -643,7 +643,7 @@ mod tests {
         let original = "- insert:\n    - id: my-browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: /bin/browse\n        args: [mcp]\n";
         std::fs::write(&custom, original).unwrap();
         let dsh = loc("dsh", custom.clone());
-        assert_eq!(edit(&dsh, &command("/usr/bin/browse"), false).unwrap(), Edit::Updated);
+        assert_eq!(edit(&dsh, &command("/usr/bin/browse"), false, None).unwrap(), Edit::Updated);
         let text = std::fs::read_to_string(&custom).unwrap();
         assert!(text.contains("    - id: my-browse\n"), "{text}");
         assert!(text.contains("command: /usr/bin/browse\n"), "{text}");
@@ -657,7 +657,7 @@ mod tests {
         let original = row("\"/tmp/with#hash/browse\"");
         std::fs::write(&file, &original).unwrap();
         let dsh = loc("dsh", file.clone());
-        assert_eq!(edit(&dsh, &command("/tmp/with#hash/browse2"), false).unwrap(), Edit::Updated);
+        assert_eq!(edit(&dsh, &command("/tmp/with#hash/browse2"), false, None).unwrap(), Edit::Updated);
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(text.contains("command: \"/tmp/with#hash/browse2\"\n") || text.contains("command: /tmp/with#hash/browse2\n"), "{text}");
         assert_eq!(current(&dsh).unwrap()["command"], "/tmp/with#hash/browse2");
@@ -665,13 +665,13 @@ mod tests {
         let plain = dir.join("plain.yml");
         std::fs::write(&plain, row("/home/o'b/browse")).unwrap();
         let dsh = loc("dsh", plain.clone());
-        assert_eq!(edit(&dsh, &command("/home/o'b/browse2"), false).unwrap(), Edit::Updated);
+        assert_eq!(edit(&dsh, &command("/home/o'b/browse2"), false, None).unwrap(), Edit::Updated);
         assert_eq!(current(&dsh).unwrap()["command"], "/home/o'b/browse2");
         // A quoted path may contain an escaped quote.
         let quoted = dir.join("quoted.yml");
         std::fs::write(&quoted, row("'/bin/o''b/browse'")).unwrap();
         let dsh = loc("dsh", quoted.clone());
-        assert_eq!(edit(&dsh, &command("/usr/bin/browse"), false).unwrap(), Edit::Updated);
+        assert_eq!(edit(&dsh, &command("/usr/bin/browse"), false, None).unwrap(), Edit::Updated);
         assert_eq!(current(&dsh).unwrap()["command"], "/usr/bin/browse");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -705,7 +705,7 @@ mod tests {
             let file = dir.join(format!("{name}.yml"));
             std::fs::write(&file, original).unwrap();
             let dsh = loc("dsh", file.clone());
-            assert_eq!(edit(&dsh, &command("/usr/bin/browse"), false).unwrap(), Edit::Conflict, "{name}");
+            assert_eq!(edit(&dsh, &command("/usr/bin/browse"), false, None).unwrap(), Edit::Conflict, "{name}");
             assert_eq!(std::fs::read_to_string(&file).unwrap(), original, "{name}");
         }
         let _ = std::fs::remove_dir_all(dir);
@@ -718,21 +718,21 @@ mod tests {
         let original = "- insert:\n    - id: browse\n      name: '@deepseek-ai/some-other-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: other-tool\n        args: [serve]\n";
         std::fs::write(&file, original).unwrap();
         let dsh = loc("dsh", file.clone());
-        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Conflict);
-        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Conflict);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false, None).unwrap(), Edit::Conflict);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true, None).unwrap(), Edit::Conflict);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
         // Our id and plugin, but someone else's command: not ours to change.
         let second = dir.join("ours-other-command.yml");
         std::fs::write(&second, "- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: other-tool\n        args: [serve]\n").unwrap();
         let dsh = loc("dsh", second.clone());
-        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Conflict);
-        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Conflict);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false, None).unwrap(), Edit::Conflict);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true, None).unwrap(), Edit::Conflict);
         // A nested serverName: browse the finder can't edit must not gain a second row.
         let nested = dir.join("nested.yml");
         let original = "- insert:\n    - id: group\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        - id: nested\n          name: '@deepseek-ai/dsh-mcp-client'\n          config:\n            serverName: browse\n            transport: stdio\n            command: /bin/browse\n            args: [mcp]\n";
         std::fs::write(&nested, original).unwrap();
         let dsh = loc("dsh", nested.clone());
-        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Conflict);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false, None).unwrap(), Edit::Conflict);
         assert_eq!(std::fs::read_to_string(&nested).unwrap(), original);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -744,17 +744,17 @@ mod tests {
         let original = "- id: grp\n  insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: /bin/browse\n        args: [mcp]\n";
         std::fs::write(&file, original).unwrap();
         let dsh = loc("dsh", file.clone());
-        assert_eq!(edit(&dsh, &command("/usr/bin/browse"), false).unwrap(), Edit::Updated);
+        assert_eq!(edit(&dsh, &command("/usr/bin/browse"), false, None).unwrap(), Edit::Updated);
         assert!(std::fs::read_to_string(&file).unwrap().contains("command: /usr/bin/browse\n"));
-        assert_eq!(edit(&dsh, &command("/usr/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(edit(&dsh, &command("/usr/bin/browse"), true, None).unwrap(), Edit::Removed);
         assert!(!file.exists());
         // Installing beside a named patch adds a separate top-level patch, and uninstall removes only that.
         let other = dir.join("other.yml");
         let original = "- id: grp\n  insert:\n    - id: memory\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: memory\n        transport: stdio\n        command: engram\n        args: [mcp]\n";
         std::fs::write(&other, original).unwrap();
         let dsh = loc("dsh", other.clone());
-        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Added);
-        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true, None).unwrap(), Edit::Removed);
         assert_eq!(std::fs::read_to_string(&other).unwrap(), original);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -767,9 +767,9 @@ mod tests {
         let ours = row("/bin/browse");
         std::fs::write(&file, format!("{ours}{other}")).unwrap();
         let dsh = loc("dsh", file.clone());
-        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true, None).unwrap(), Edit::Removed);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), other);
-        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Added);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), format!("{other}\n{ours}"));
         // Our row can share an insert list with another plugin's row.
         let shared = dir.join("shared.yml");
@@ -777,9 +777,9 @@ mod tests {
         let ours = ours.strip_prefix("- insert:\n").unwrap();
         std::fs::write(&shared, format!("- insert:\n{memory}{ours}")).unwrap();
         let dsh = loc("dsh", shared.clone());
-        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Unchanged);
-        assert_eq!(edit(&dsh, &command("/usr/bin/browse"), false).unwrap(), Edit::Updated);
-        assert_eq!(edit(&dsh, &command("/usr/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false, None).unwrap(), Edit::Unchanged);
+        assert_eq!(edit(&dsh, &command("/usr/bin/browse"), false, None).unwrap(), Edit::Updated);
+        assert_eq!(edit(&dsh, &command("/usr/bin/browse"), true, None).unwrap(), Edit::Removed);
         assert_eq!(std::fs::read_to_string(&shared).unwrap(), format!("- insert:\n{memory}"));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -793,11 +793,11 @@ mod tests {
         let original = "# c\r\n- insert:\r\n    - id: memory\r\n      name: '@deepseek-ai/dsh-mcp-client'\r\n      config:\r\n        serverName: memory\r\n        transport: stdio\r\n        command: engram\r\n        args: [mcp]\r\n";
         std::fs::write(&crlf, original).unwrap();
         let dsh = loc("dsh", crlf.clone());
-        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Added);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
         let text = std::fs::read_to_string(&crlf).unwrap();
         assert!(!text.replace("\r\n", "").contains('\n'), "{text:?}");
         assert!(text.contains("\r\n\r\n- insert:\r\n    - id: browse\r\n"), "{text:?}");
-        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true, None).unwrap(), Edit::Removed);
         assert_eq!(std::fs::read_to_string(&crlf).unwrap().as_bytes(), original.as_bytes());
         // A file without a trailing newline keeps that too.
         let bare = dir.join("bare/cordis.patch.yml");
@@ -805,10 +805,10 @@ mod tests {
         let original = "# c\n- insert:\n    - id: memory\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: memory\n        transport: stdio\n        command: engram\n        args: [mcp]";
         std::fs::write(&bare, original).unwrap();
         let dsh = loc("dsh", bare.clone());
-        assert_eq!(edit(&dsh, &command("/bin/browse"), false).unwrap(), Edit::Added);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
         let text = std::fs::read_to_string(&bare).unwrap();
         assert_eq!(text.strip_prefix(original).unwrap(), format!("\n{}", row("/bin/browse")));
-        assert_eq!(edit(&dsh, &command("/bin/browse"), true).unwrap(), Edit::Removed);
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true, None).unwrap(), Edit::Removed);
         assert_eq!(std::fs::read_to_string(&bare).unwrap().as_bytes(), original.as_bytes());
         let _ = std::fs::remove_dir_all(dir);
     }

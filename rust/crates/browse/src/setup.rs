@@ -112,8 +112,9 @@ fn mcp_cwd() -> String {
 }
 
 /// Writes (or updates) the browse MCP server so it runs `entry`, keeping settings the user added. One pooled server
-/// with a fixed cwd serves every OpenCode session; each agent works in the tabs it opens, by their ids.
-pub fn configure_opencode(file: &Path, entry: &Path) -> anyhow::Result<McpEdit> {
+/// with a fixed cwd serves every OpenCode session; each agent works in the tabs it opens, by their ids. A pinned relay
+/// `port` goes in its environment, so the server dials the relay the extension is paired with.
+pub fn configure_opencode(file: &Path, entry: &Path, port: Option<u16>) -> anyhow::Result<McpEdit> {
     let (mut text, servers) = mcp_servers(file)?;
     let existing = servers.get(MCP_NAME);
     if existing.is_some_and(|s| !owned(s, entry)) {
@@ -130,6 +131,9 @@ pub fn configure_opencode(file: &Path, entry: &Path) -> anyhow::Result<McpEdit> 
     server["pool"] = json!(true);
     server["environment"] = environment;
     server["environment"]["OPENCODE_BROWSER_RUNTIME"] = json!("auto-update");
+    if let Some(port) = port {
+        server["environment"]["OPENCODE_BROWSER_PORT"] = json!(port.to_string());
+    }
     if existing == Some(&server) {
         return Ok(McpEdit::UpToDate);
     }
@@ -578,11 +582,11 @@ mod tests {
         let file = dir.join("opencode.json");
         let original = b"{ \"theme\": \"caf\xe9\" }".to_vec();
         std::fs::write(&file, &original).unwrap();
-        let error = configure_opencode(&file, Path::new("/usr/bin/browse")).err().expect("a file that isn't UTF-8 is refused");
+        let error = configure_opencode(&file, Path::new("/usr/bin/browse"), None).err().expect("a file that isn't UTF-8 is refused");
         assert!(error.to_string().contains("left unchanged"), "{error}");
         assert_eq!(std::fs::read(&file).unwrap(), original);
         let missing = dir.join("missing/opencode.json");
-        assert!(matches!(configure_opencode(&missing, Path::new("/usr/bin/browse")).unwrap(), McpEdit::Added));
+        assert!(matches!(configure_opencode(&missing, Path::new("/usr/bin/browse"), None).unwrap(), McpEdit::Added));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -590,7 +594,7 @@ mod tests {
     fn opencode_gets_one_pooled_server_with_an_absolute_home_cwd() {
         let dir = scratch("pool");
         let file = dir.join("opencode.json");
-        assert!(matches!(configure_opencode(&file, Path::new("/usr/bin/browse")).unwrap(), McpEdit::Added));
+        assert!(matches!(configure_opencode(&file, Path::new("/usr/bin/browse"), None).unwrap(), McpEdit::Added));
         let config = jsonc::parse(&std::fs::read_to_string(&file).unwrap()).unwrap();
         let server = &config["mcp"]["servers"]["browse"];
         assert_eq!(server["type"], "local");
@@ -601,7 +605,7 @@ mod tests {
         let cwd = server["cwd"].as_str().unwrap();
         assert!(cwd != "~" && Path::new(cwd).is_absolute(), "cwd should be an absolute path: {cwd}");
         assert_eq!(server["pool"], true);
-        assert!(matches!(configure_opencode(&file, Path::new("/usr/bin/browse")).unwrap(), McpEdit::UpToDate));
+        assert!(matches!(configure_opencode(&file, Path::new("/usr/bin/browse"), None).unwrap(), McpEdit::UpToDate));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -617,12 +621,31 @@ mod tests {
             "environment": { "OPENCODE_BROWSER_RUNTIME": "auto-update" },
         } } } });
         std::fs::write(&file, serde_json::to_string_pretty(&stale).unwrap()).unwrap();
-        assert!(matches!(configure_opencode(&file, Path::new("/usr/bin/browse")).unwrap(), McpEdit::Updated));
+        assert!(matches!(configure_opencode(&file, Path::new("/usr/bin/browse"), None).unwrap(), McpEdit::Updated));
         let config = jsonc::parse(&std::fs::read_to_string(&file).unwrap()).unwrap();
         let cwd = config["mcp"]["servers"]["browse"]["cwd"].as_str().unwrap();
         assert!(cwd != "~" && Path::new(cwd).is_absolute(), "the stale ~ is rewritten to the home directory: {cwd}");
         assert_eq!(cwd, home().display().to_string());
-        assert!(matches!(configure_opencode(&file, Path::new("/usr/bin/browse")).unwrap(), McpEdit::UpToDate));
+        assert!(matches!(configure_opencode(&file, Path::new("/usr/bin/browse"), None).unwrap(), McpEdit::UpToDate));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn opencode_environment_keeps_the_runtime_and_gains_a_pinned_port() {
+        let dir = scratch("port");
+        let file = dir.join("opencode.json");
+        std::fs::write(&file, r#"{"mcp":{"servers":{"browse":{"type":"local","command":["/usr/bin/browse","mcp"],"environment":{"MINE":"1","OPENCODE_BROWSER_RUNTIME":"auto-update"}}}}}"#).unwrap();
+        assert!(matches!(configure_opencode(&file, Path::new("/usr/bin/browse"), Some(20000)).unwrap(), McpEdit::Updated));
+        let config = jsonc::parse(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let environment = &config["mcp"]["servers"]["browse"]["environment"];
+        assert_eq!(environment["MINE"], "1");
+        assert_eq!(environment["OPENCODE_BROWSER_RUNTIME"], "auto-update");
+        assert_eq!(environment["OPENCODE_BROWSER_PORT"], "20000");
+        assert!(matches!(configure_opencode(&file, Path::new("/usr/bin/browse"), Some(20000)).unwrap(), McpEdit::UpToDate));
+        // An install without the variable set leaves the port an earlier one wrote.
+        assert!(matches!(configure_opencode(&file, Path::new("/usr/bin/browse"), None).unwrap(), McpEdit::UpToDate));
+        let config = jsonc::parse(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(config["mcp"]["servers"]["browse"]["environment"]["OPENCODE_BROWSER_PORT"], "20000");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -631,7 +654,7 @@ mod tests {
         let dir = scratch("bom");
         let file = dir.join("opencode.json");
         std::fs::write(&file, "\u{feff}{\n  // mine\n  \"theme\": \"x\"\n}\n").unwrap();
-        assert!(matches!(configure_opencode(&file, Path::new("/usr/bin/browse")).unwrap(), McpEdit::Added));
+        assert!(matches!(configure_opencode(&file, Path::new("/usr/bin/browse"), None).unwrap(), McpEdit::Added));
         let after = std::fs::read_to_string(&file).unwrap();
         assert!(after.starts_with('\u{feff}') && after.contains("// mine"), "{after}");
         assert_eq!(jsonc::parse(&after).unwrap()["mcp"]["servers"]["browse"]["command"][0], "/usr/bin/browse");
