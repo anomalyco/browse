@@ -69,6 +69,7 @@ pub fn browsers() -> Vec<Browser> {
             Browser { name: "Brave", user_data: local.join("BraveSoftware/Brave-Browser/User Data"), launch: installs("BraveSoftware\\Brave-Browser\\Application\\brave.exe") },
             Browser { name: "Opera", user_data: roaming.join("Opera Software/Opera Stable"), launch: installs("Programs\\Opera\\opera.exe") },
             Browser { name: "Vivaldi", user_data: local.join("Vivaldi/User Data"), launch: installs("Vivaldi\\Application\\vivaldi.exe") },
+            Browser { name: "Helium", user_data: local.join("imput/Helium/User Data"), launch: installs("imput\\Helium\\Application\\chrome.exe") },
         ];
     }
     let config = crate::setup::config_home();
