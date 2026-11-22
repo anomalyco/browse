@@ -144,11 +144,11 @@ and the extension connects to it across the network:
 The connection isn't encrypted by browse; use a network that is (Tailscale or WireGuard), not the open internet.
 `browse set hostname 127.0.0.1` goes back to this computer only.
 
-**Containers and WSL**: in a container, browse prints the container's own address, which a browser outside it can't
-reach. Forward the port (a devcontainer's `"forwardPorts": [19988]`, or `docker run -p 19988:19988`) and enter
-`localhost:19988` in the browser on the computer you forwarded it to. Under WSL2 without a container, a browser on
-Windows can use `localhost` as it is. Remote is a direct connection over your network, not a tunnel over the
-internet, and a pairing is tied to the address you enter, so pair once with the address you'll keep using.
+**Containers and WSL**: in a container, the container's own address usually can't be reached from outside it.
+Forward the port to the same port on the browser's computer (a devcontainer's `"forwardPorts": [19988]`, or
+`docker run -p 127.0.0.1:19988:19988`) and enter `localhost:19988` there. Under WSL2 without a container, a browser
+on Windows can use `localhost`. Remote is a direct connection between the two computers over your network, not over
+the internet. A pairing is tied to the address you enter, so pair once with the address you'll keep using.
 
 ### Updates
 

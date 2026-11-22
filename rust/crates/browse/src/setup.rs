@@ -259,11 +259,21 @@ fn mint_code(receipt: &str) -> anyhow::Result<String> {
     Ok(pairing::mint_pairing_code(&relay_api::paths(), pairing::PAIRING_CODE_TTL_MS, Some(receipt))?)
 }
 
-fn manual_pair(code: &str) -> String {
-    let listen = relay_api::port();
-    let address = if remote::hostname() == "0.0.0.0" {
-        " and the relay address above".to_owned()
-    } else if listen == relay_api::DEFAULT_PORT {
+fn manual_pair(code: &str, remote: bool) -> String {
+    pair_instructions(code, relay_api::port(), remote)
+}
+
+/// The sentence for entering a pairing code by hand. `remote` adds where the relay address comes from, for `browse
+/// pair`, which can't tell whether the browser is on this computer.
+fn pair_instructions(code: &str, listen: u16, remote: bool) -> String {
+    let local = if listen == relay_api::DEFAULT_PORT { String::new() } else { format!("localhost:{listen}") };
+    let address = if remote {
+        if local.is_empty() {
+            " and, from another computer, the relay address above (from this computer, leave it empty)".to_owned()
+        } else {
+            format!(" and the relay address (from this computer {local}, from another computer the address above)")
+        }
+    } else if local.is_empty() {
         String::new()
     } else {
         format!(" and localhost:{listen} as the relay address")
@@ -287,10 +297,7 @@ fn pair_in_browser(browser: &Browser, profile: &str, open: bool) -> anyhow::Resu
         println!("✓ Opened browse in {} to connect it", browser.name);
         return Ok(true);
     }
-    if remote::hostname() == "0.0.0.0" {
-        remote::print_relay_addresses();
-    }
-    println!("To connect browse in {}: {}", browser.name, manual_pair(&code));
+    println!("To connect browse in {}: {}", browser.name, manual_pair(&code, false));
     Ok(false)
 }
 
@@ -326,7 +333,7 @@ pub fn connect_extension(open: bool, wait: bool, timeout: Duration) -> anyhow::R
     offered |= offer(&all)?;
     if !offered && needs_pairing {
         println!("browse is installed in a browser but isn't paired with this relay yet.");
-        println!("{}", manual_pair(&mint_code("install")?));
+        println!("{}", manual_pair(&mint_code("install")?, false));
         offered = true;
     }
     if !offered {
@@ -424,10 +431,11 @@ pub fn pair(args: &[String]) -> anyhow::Result<i32> {
     let receipt = format!("{:016x}", session::random_u64());
     let code = mint_code(&receipt)?;
     println!("Pairing code: {}", pairing::format_pairing_code(&code));
-    if remote::hostname() == "0.0.0.0" {
+    let remote = remote::is_open();
+    if remote {
         remote::print_relay_addresses();
     }
-    println!("{} It works once, within 10 minutes.", manual_pair(&code));
+    println!("{} It works once, within 10 minutes.", manual_pair(&code, remote));
     println!("Waiting up to {seconds}s for that browser. Later, `browse pair --list` shows paired browsers.");
     let deadline = Instant::now() + Duration::from_secs(seconds);
     while Instant::now() < deadline {
@@ -525,8 +533,7 @@ pub fn status(args: &[String]) -> anyhow::Result<i32> {
     println!();
     match running {
         Some(status) => {
-            let open = if remote::hostname() == "0.0.0.0" { format!(", open to other computers on port {}", relay_api::port()) } else { String::new() };
-            println!("Relay:     running at {}{open}", relay_api::endpoint());
+            println!("Relay:     running at {}", relay_api::endpoint());
             let relay_version = match relay::probe() {
                 relay::Probe::Running(version) => version.get("version").and_then(Value::as_str).map(str::to_owned),
                 _ => None,
@@ -673,5 +680,17 @@ mod tests {
         assert_eq!(jsonc::parse(&after).unwrap()["mcp"]["servers"]["browse"]["command"][0], "/usr/bin/browse");
         assert_eq!(jsonc::parse(&after).unwrap()["theme"], "x");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn manual_pairing_names_the_local_address_only_for_this_computer() {
+        let local = pair_instructions("abcd", relay_api::DEFAULT_PORT, false);
+        assert!(!local.contains("another computer") && !local.contains("relay address"), "{local}");
+        let local_port = pair_instructions("abcd", 20000, false);
+        assert!(local_port.contains(" and localhost:20000 as the relay address,"), "{local_port}");
+        let remote = pair_instructions("abcd", relay_api::DEFAULT_PORT, true);
+        assert!(remote.contains(" and, from another computer, the relay address above (from this computer, leave it empty),"), "{remote}");
+        let remote_port = pair_instructions("abcd", 20000, true);
+        assert!(remote_port.contains(" and the relay address (from this computer localhost:20000, from another computer the address above),"), "{remote_port}");
     }
 }

@@ -537,8 +537,8 @@ fn legacy_route(path: &str) -> bool {
 }
 
 fn upgrade_extension(relay: Arc<Relay>, peer: SocketAddr, request: &mut Request<Incoming>) -> Response<Full<Bytes>> {
-    if !peer.ip().is_loopback() {
-        rlog!("extension.remote_attempt", peer = peer.to_string());
+    if !crate::origins::is_local_peer(&peer) {
+        rlog!("extension.remote_upgrade", peer = peer.to_string());
     }
     let origin = header(request, "origin").map(str::to_string);
     if let Err(error) = crate::origins::validate_extension_origin(origin.as_deref(), &relay.origins) {

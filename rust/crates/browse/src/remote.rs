@@ -16,7 +16,12 @@ fn config_file() -> PathBuf {
 }
 
 pub fn hostname() -> String {
-    std::fs::read(config_file()).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).and_then(|v| v["hostname"].as_str().map(str::to_owned)).unwrap_or_else(|| "127.0.0.1".into())
+    std::fs::read(config_file()).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).and_then(|v| v["hostname"].as_str().map(|hostname| hostname.trim().to_owned())).unwrap_or_else(|| "127.0.0.1".into())
+}
+
+/// Whether the relay listens on every network, so browsers on other computers can pair with it.
+pub fn is_open() -> bool {
+    hostname() == "0.0.0.0"
 }
 
 /// Saves where the relay listens and restarts a running relay so it takes effect. Returns false when a running relay
@@ -89,7 +94,13 @@ fn in_container() -> bool {
 }
 
 fn in_wsl() -> bool {
-    cfg!(target_os = "linux") && wsl_marker(std::env::var("WSL_DISTRO_NAME").ok().as_deref(), &std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default())
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
+    match std::env::var("WSL_DISTRO_NAME") {
+        Ok(distro) => wsl_marker(Some(&distro), ""),
+        Err(_) => wsl_marker(None, &std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default()),
+    }
 }
 
 /// `host` with the port appended when it isn't the default one.
@@ -97,15 +108,15 @@ fn with_port(host: &str, port: u16) -> String {
     if port == relay_api::DEFAULT_PORT { host.to_owned() } else { format!("{host}:{port}") }
 }
 
-/// The addresses to offer, first the one most likely to work. In a container the container's own address is
-/// unreachable from outside, so `localhost:<port>` (the forwarded port) comes first and the container's addresses
-/// follow. In WSL, Windows reaches the listener on `localhost`, so it comes first there too. Otherwise the addresses
-/// stand as they are.
-fn ordered(hosts: Vec<String>, port: u16, container: bool, wsl: bool) -> Vec<String> {
+/// The addresses to offer, first the one most likely to work. On a tailnet its MagicDNS name or addresses are
+/// reachable as they are. In a container the container's own address usually can't be reached from outside it, so
+/// `localhost:<port>` (the forwarded port) comes first and the container's addresses follow. In WSL, Windows reaches
+/// the listener on `localhost`, so it comes first there too. Otherwise the addresses stand as they are.
+fn ordered(hosts: Vec<String>, port: u16, container: bool, wsl: bool, on_tailnet: bool) -> Vec<String> {
     let hosts: Vec<String> = hosts.into_iter().map(|host| with_port(&host, port)).collect();
-    if container {
-        std::iter::once(format!("localhost:{port}")).chain(hosts).collect()
-    } else if wsl {
+    if on_tailnet {
+        hosts
+    } else if container || wsl {
         std::iter::once(with_port("localhost", port)).chain(hosts).collect()
     } else {
         hosts
@@ -123,11 +134,12 @@ fn magic_dns() -> Option<String> {
 
 /// Where a browser on another computer reaches this relay: on a tailnet its MagicDNS name and Tailscale addresses,
 /// otherwise the LAN addresses; with the port when it isn't the default.
-fn addresses() -> (Vec<String>, bool) {
+fn addresses(port: u16, container: bool, wsl: bool) -> (Vec<String>, bool) {
     let ips = interfaces();
     let tail: Vec<&Ipv4Addr> = ips.iter().filter(|ip| tailnet(ip)).collect();
-    let hosts: Vec<String> = if tail.is_empty() { ips.iter().map(ToString::to_string).collect() } else { magic_dns().into_iter().chain(tail.iter().map(|ip| ip.to_string())).collect() };
-    (ordered(hosts, relay_api::port(), in_container(), in_wsl()), !tail.is_empty())
+    let on_tailnet = !tail.is_empty();
+    let hosts: Vec<String> = if on_tailnet { magic_dns().into_iter().chain(tail.iter().map(|ip| ip.to_string())).collect() } else { ips.iter().map(ToString::to_string).collect() };
+    (ordered(hosts, port, container, wsl, on_tailnet), on_tailnet)
 }
 
 /// The lines that show the addresses to enter in browse on another computer, first the one most likely to work, and
@@ -136,15 +148,17 @@ fn address_lines(hosts: &[String], port: u16, container: bool) -> Vec<String> {
     let mut lines = vec![format!("  Relay address  {}", hosts.first().map_or("this computer's IP address", String::as_str))];
     lines.extend(hosts.iter().skip(1).map(|host| format!("             or  {host}")));
     if container {
-        lines.push(format!("! browse is running in a container, so a browser outside it can't reach the container's own address. Forward port {port} to the browser's computer (devcontainer \"forwardPorts\": [{port}], or docker run -p {port}:{port}), then enter localhost:{port} there if the browser is on that computer, or that computer's address if it isn't."));
+        lines.push(format!("! browse is running in a container, so its own address above may not be reachable from outside it. Forward port {port} to the same port on the browser's computer (devcontainer \"forwardPorts\": [{port}], or docker run -p 127.0.0.1:{port}:{port}), then enter localhost:{port} there."));
     }
     lines
 }
 
 /// Prints where a browser on another computer reaches this relay. Returns whether the addresses are on a tailnet.
 pub fn print_relay_addresses() -> bool {
-    let (hosts, on_tailnet) = addresses();
-    for line in address_lines(&hosts, relay_api::port(), in_container()) {
+    let port = relay_api::port();
+    let container = in_container();
+    let (hosts, on_tailnet) = addresses(port, container, in_wsl());
+    for line in address_lines(&hosts, port, container && !on_tailnet) {
         println!("{line}");
     }
     on_tailnet
@@ -172,7 +186,7 @@ fn print_pairing(agent: bool) -> anyhow::Result<()> {
 /// The rest of `browse install --remote`: opens the relay to other computers and prints the address and a code.
 pub fn install(agent: bool) -> anyhow::Result<i32> {
     let mut status = 0;
-    if hostname() == "0.0.0.0" {
+    if is_open() {
         println!("✓ The relay is open to other computers");
     } else if set("0.0.0.0")? {
         println!("✓ Opened the relay to other computers");
@@ -217,33 +231,64 @@ mod tests {
 
     #[test]
     fn a_container_offers_the_forwarded_port_before_its_own_address() {
-        assert_eq!(ordered(vec!["172.17.0.3".into()], relay_api::DEFAULT_PORT, true, false), ["localhost:19988", "172.17.0.3"]);
-        assert_eq!(ordered(vec!["172.17.0.3".into()], 20000, true, false), ["localhost:20000", "172.17.0.3:20000"]);
+        assert_eq!(ordered(vec!["172.17.0.3".into()], relay_api::DEFAULT_PORT, true, false, false), ["localhost", "172.17.0.3"]);
+        assert_eq!(ordered(vec!["172.17.0.3".into()], 20000, true, false, false), ["localhost:20000", "172.17.0.3:20000"]);
+    }
+
+    #[test]
+    fn a_container_on_a_tailnet_offers_the_reachable_tailnet_addresses() {
+        assert_eq!(ordered(vec!["dev.tailnet.ts.net".into(), "100.64.0.5".into()], relay_api::DEFAULT_PORT, true, false, true), ["dev.tailnet.ts.net", "100.64.0.5"]);
+        assert_eq!(ordered(vec!["dev.tailnet.ts.net".into()], 20000, true, false, true), ["dev.tailnet.ts.net:20000"]);
     }
 
     #[test]
     fn wsl_offers_localhost_before_the_linux_addresses() {
-        assert_eq!(ordered(vec!["172.20.0.1".into()], relay_api::DEFAULT_PORT, false, true), ["localhost", "172.20.0.1"]);
-        assert_eq!(ordered(vec!["172.20.0.1".into()], 20000, false, true), ["localhost:20000", "172.20.0.1:20000"]);
+        assert_eq!(ordered(vec!["172.20.0.1".into()], relay_api::DEFAULT_PORT, false, true, false), ["localhost", "172.20.0.1"]);
+        assert_eq!(ordered(vec!["172.20.0.1".into()], 20000, false, true, false), ["localhost:20000", "172.20.0.1:20000"]);
     }
 
     #[test]
     fn a_plain_computer_keeps_its_addresses_in_order() {
-        assert_eq!(ordered(vec!["192.168.1.5".into(), "10.0.0.2".into()], relay_api::DEFAULT_PORT, false, false), ["192.168.1.5", "10.0.0.2"]);
-        assert_eq!(ordered(vec!["192.168.1.5".into()], 20000, false, false), ["192.168.1.5:20000"]);
+        assert_eq!(ordered(vec!["192.168.1.5".into(), "10.0.0.2".into()], relay_api::DEFAULT_PORT, false, false, false), ["192.168.1.5", "10.0.0.2"]);
+        assert_eq!(ordered(vec!["192.168.1.5".into()], 20000, false, false, false), ["192.168.1.5:20000"]);
     }
 
     #[test]
     fn a_container_prints_the_forwarded_address_then_its_own_with_what_to_do() {
-        let lines = address_lines(&ordered(vec!["172.17.0.3".into()], relay_api::DEFAULT_PORT, true, false), relay_api::DEFAULT_PORT, true);
+        let lines = address_lines(&ordered(vec!["172.17.0.3".into()], relay_api::DEFAULT_PORT, true, false, false), relay_api::DEFAULT_PORT, true);
         assert_eq!(
             lines,
             [
-                "  Relay address  localhost:19988",
+                "  Relay address  localhost",
                 "             or  172.17.0.3",
-                "! browse is running in a container, so a browser outside it can't reach the container's own address. Forward port 19988 to the browser's computer (devcontainer \"forwardPorts\": [19988], or docker run -p 19988:19988), then enter localhost:19988 there if the browser is on that computer, or that computer's address if it isn't.",
+                "! browse is running in a container, so its own address above may not be reachable from outside it. Forward port 19988 to the same port on the browser's computer (devcontainer \"forwardPorts\": [19988], or docker run -p 127.0.0.1:19988:19988), then enter localhost:19988 there.",
             ]
         );
+    }
+
+    #[test]
+    fn a_container_off_the_default_port_prints_its_port_everywhere() {
+        let lines = address_lines(&ordered(vec!["172.17.0.3".into()], 20000, true, false, false), 20000, true);
+        assert_eq!(
+            lines,
+            [
+                "  Relay address  localhost:20000",
+                "             or  172.17.0.3:20000",
+                "! browse is running in a container, so its own address above may not be reachable from outside it. Forward port 20000 to the same port on the browser's computer (devcontainer \"forwardPorts\": [20000], or docker run -p 127.0.0.1:20000:20000), then enter localhost:20000 there.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_container_on_a_tailnet_prints_no_forwarding_hint() {
+        let hosts = ordered(vec!["dev.tailnet.ts.net".into(), "100.64.0.5".into()], relay_api::DEFAULT_PORT, true, false, true);
+        assert_eq!(address_lines(&hosts, relay_api::DEFAULT_PORT, false), ["  Relay address  dev.tailnet.ts.net", "             or  100.64.0.5"]);
+    }
+
+    #[test]
+    fn a_wsl_install_prints_no_forwarding_hint() {
+        let hosts = ordered(vec!["172.20.0.1".into()], relay_api::DEFAULT_PORT, false, true, false);
+        assert_eq!(address_lines(&hosts, relay_api::DEFAULT_PORT, false), ["  Relay address  localhost", "             or  172.20.0.1"]);
     }
 
     #[test]
