@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use crate::browsers::{self, Browser};
 use crate::relay_api::{self, bin_root};
 use browse_relay::pairing;
-use crate::{VERSION, jsonc, relay, session, update};
+use crate::{VERSION, jsonc, relay, remote, session, update};
 
 const MCP_NAME: &str = "browse";
 const LEGACY_MCP_NAME: &str = "opencode-browser";
@@ -261,7 +261,13 @@ fn mint_code(receipt: &str) -> anyhow::Result<String> {
 
 fn manual_pair(code: &str) -> String {
     let listen = relay_api::port();
-    let address = if listen == relay_api::DEFAULT_PORT { String::new() } else { format!(" and localhost:{listen} as the relay address") };
+    let address = if remote::hostname() == "0.0.0.0" {
+        " and the relay address above".to_owned()
+    } else if listen == relay_api::DEFAULT_PORT {
+        String::new()
+    } else {
+        format!(" and localhost:{listen} as the relay address")
+    };
     format!(
         "Open the Extensions menu → browse → Options, expand advanced (or click Pair with a code), enter {} as the pairing code{address}, then click Connect.",
         pairing::format_pairing_code(code)
@@ -280,6 +286,9 @@ fn pair_in_browser(browser: &Browser, profile: &str, open: bool) -> anyhow::Resu
     if open && known && browsers::open_in(browser, &url, Some(profile)) {
         println!("✓ Opened browse in {} to connect it", browser.name);
         return Ok(true);
+    }
+    if remote::hostname() == "0.0.0.0" {
+        remote::print_relay_addresses();
     }
     println!("To connect browse in {}: {}", browser.name, manual_pair(&code));
     Ok(false)
@@ -415,6 +424,9 @@ pub fn pair(args: &[String]) -> anyhow::Result<i32> {
     let receipt = format!("{:016x}", session::random_u64());
     let code = mint_code(&receipt)?;
     println!("Pairing code: {}", pairing::format_pairing_code(&code));
+    if remote::hostname() == "0.0.0.0" {
+        remote::print_relay_addresses();
+    }
     println!("{} It works once, within 10 minutes.", manual_pair(&code));
     println!("Waiting up to {seconds}s for that browser. Later, `browse pair --list` shows paired browsers.");
     let deadline = Instant::now() + Duration::from_secs(seconds);
@@ -513,7 +525,8 @@ pub fn status(args: &[String]) -> anyhow::Result<i32> {
     println!();
     match running {
         Some(status) => {
-            println!("Relay:     running at {}", relay_api::endpoint());
+            let open = if remote::hostname() == "0.0.0.0" { format!(", open to other computers on port {}", relay_api::port()) } else { String::new() };
+            println!("Relay:     running at {}{open}", relay_api::endpoint());
             let relay_version = match relay::probe() {
                 relay::Probe::Running(version) => version.get("version").and_then(Value::as_str).map(str::to_owned),
                 _ => None,
