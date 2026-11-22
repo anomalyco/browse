@@ -269,7 +269,7 @@ fn pair_instructions(code: &str, listen: u16, remote: bool) -> String {
     let local = if listen == relay_api::DEFAULT_PORT { String::new() } else { format!("localhost:{listen}") };
     let address = if remote {
         if local.is_empty() {
-            " and, from another computer, the relay address above (from this computer, leave it empty)".to_owned()
+            " and, from another computer, the relay address above (from this computer, localhost)".to_owned()
         } else {
             format!(" and the relay address (from this computer {local}, from another computer the address above)")
         }
@@ -689,7 +689,7 @@ mod tests {
         let local_port = pair_instructions("abcd", 20000, false);
         assert!(local_port.contains(" and localhost:20000 as the relay address,"), "{local_port}");
         let remote = pair_instructions("abcd", relay_api::DEFAULT_PORT, true);
-        assert!(remote.contains(" and, from another computer, the relay address above (from this computer, leave it empty),"), "{remote}");
+        assert!(remote.contains(" and, from another computer, the relay address above (from this computer, localhost),"), "{remote}");
         let remote_port = pair_instructions("abcd", 20000, true);
         assert!(remote_port.contains(" and the relay address (from this computer localhost:20000, from another computer the address above),"), "{remote_port}");
     }
