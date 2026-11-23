@@ -394,6 +394,51 @@ async fn upload_copies_files_when_the_browser_is_elsewhere() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_accepts_inline_files_and_mixes_them_with_paths() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
+    let h = harness!(false);
+    let url = h.server.page("/upload-inline", r#"<!doctype html><input id="file" type="file" multiple>"#);
+    h.ok("navigate", json!({ "url": url })).await;
+    let local = h.files.0.join("local.txt");
+    std::fs::write(&local, "local bytes").unwrap();
+    // Inline bytes always copy in, even with the browser on this machine, and a mix with paths copies those too.
+    let uploaded = h.json(
+        "upload",
+        json!({
+            "selector": "#file",
+            "files": [
+                { "name": "notes.txt", "data": "aGVsbG8gaW5saW5l", "mimeType": "text/plain", "lastModified": 1_700_000_000_000u64 },
+                { "name": "extra.json", "data": "e30=" },
+                local.display().to_string(),
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(uploaded["via"], "copy", "{uploaded}");
+    assert_eq!(uploaded["files"], json!(["notes.txt", "extra.json", "local.txt"]));
+    assert!(!h.tab.methods().iter().any(|m| m == "DOM.setFileInputFiles"), "{:?}", h.tab.methods());
+    let read = h
+        .ok(
+            "eval",
+            json!({ "expression": "Promise.all(Array.from(document.getElementById('file').files).map(async (file) => ({ name: file.name, size: file.size, type: file.type, lastModified: file.lastModified, content: await file.text() })))" }),
+        )
+        .await;
+    let files: serde_json::Value = serde_json::from_str(&read).unwrap();
+    assert_eq!(files[0]["name"], "notes.txt");
+    assert_eq!(files[0]["size"], 12);
+    assert_eq!(files[0]["type"], "text/plain");
+    assert_eq!(files[0]["lastModified"], 1_700_000_000_000u64);
+    assert_eq!(files[0]["content"], "hello inline");
+    // Without mimeType the name's extension picks it, like the paths route.
+    assert_eq!(files[1]["name"], "extra.json");
+    assert_eq!(files[1]["size"], 2);
+    assert_eq!(files[1]["type"], "application/json");
+    assert_eq!(files[1]["content"], "{}");
+    assert_eq!(files[2]["name"], "local.txt");
+    assert_eq!(files[2]["content"], "local bytes");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn upload_falls_back_to_copy_when_the_browser_refuses_paths() {
     let _upload = support::UPLOAD_LOCK.lock().await;
     let h = harness!(false);

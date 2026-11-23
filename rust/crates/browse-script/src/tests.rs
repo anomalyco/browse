@@ -53,6 +53,8 @@ impl Tool for Fake {
             "picture" => ToolOutput { content: vec![Content::Image { data: "iVBORw0KGgo=".into(), mime_type: "image/png".into() }], is_error: false },
             // Without a tab, navigate opens tab 7.
             "navigate" => ToolOutput::text(json!({ "tab": args.get("tab").cloned().unwrap_or(json!(7)), "url": args["url"], "title": "T", "status": 200, "navigated": true }).to_string()),
+            // Echo the upload args so a test can see what setInputFiles hands the tool.
+            "upload" => ToolOutput::text(args.to_string()),
             "handoff" => {
                 tokio::time::sleep(Duration::from_millis(args["ms"].as_u64().unwrap_or(0))).await;
                 ToolOutput::text(json!({ "outcome": "continued" }).to_string())
@@ -67,7 +69,7 @@ fn context() -> ToolContext {
 }
 
 fn execute() -> Arc<dyn Tool> {
-    let fakes: Vec<Arc<dyn Tool>> = ["echo", "fail", "picture", "navigate", "handoff"].into_iter().map(|n| Arc::new(Fake(n)) as Arc<dyn Tool>).collect();
+    let fakes: Vec<Arc<dyn Tool>> = ["echo", "fail", "picture", "navigate", "handoff", "upload"].into_iter().map(|n| Arc::new(Fake(n)) as Arc<dyn Tool>).collect();
     crate::tools(&fakes).remove(0)
 }
 
@@ -134,6 +136,34 @@ async fn navigation_and_images() {
     let (_, output) = run_in(&context(), json!({ "code": "await browse.picture(); return 1" })).await;
     assert_eq!(output.content.len(), 1);
     assert_eq!(ok("(await browse.picture()).toString('base64')").await, "iVBORw0KGgo=");
+}
+
+#[tokio::test]
+async fn set_input_files_sends_paths_and_inline_bytes() {
+    let code = r##"
+      const strip = (result) => result.files.map((file) => {
+        if (typeof file === "string") return file
+        const { lastModified, ...rest } = file
+        return rest
+      })
+      const one = await page.setInputFiles("#file", { name: "a.txt", mimeType: "text/plain", buffer: new Uint8Array([104, 105]) })
+      const two = await page.setInputFiles("#file", [
+        { name: "b.bin", buffer: new Uint8Array([0, 1, 2]).buffer },
+        { name: "c.txt", data: "aGVsbG8=" },
+        { name: "d.bin", buffer: "AAEC" },
+        "local.txt",
+      ])
+      const three = await page.locator("#file").setInputFiles({ name: "e.txt", data: "IQ==" })
+      return { one: strip(one), two: strip(two), three: strip(three) }
+    "##;
+    let (text, output) = run_in(&context(), json!({ "code": code, "tab": 7 })).await;
+    assert!(!output.is_error, "{text}");
+    let expected = r#"{"one":[{"name":"a.txt","data":"aGk=","mimeType":"text/plain"}],"two":[{"name":"b.bin","data":"AAEC"},{"name":"c.txt","data":"aGVsbG8="},{"name":"d.bin","data":"AAEC"},"local.txt"],"three":[{"name":"e.txt","data":"IQ=="}]}"#;
+    assert!(text.contains(expected), "{text}");
+
+    let (message, output) = run_in(&context(), json!({ "code": "try { await page.setInputFiles('#file', { name: 'x.txt' }) } catch (e) { return e.message }", "tab": 7 })).await;
+    assert!(!output.is_error, "{message}");
+    assert!(message.contains("Uint8Array") && message.contains("base64"), "{message}");
 }
 
 #[tokio::test]
