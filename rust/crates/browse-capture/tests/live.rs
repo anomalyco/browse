@@ -5,7 +5,7 @@ mod support;
 
 use std::time::Duration;
 
-use browse_core::Cdp;
+use browse_cdp::Cdp;
 use serde_json::{Value, json};
 use support::*;
 

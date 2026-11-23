@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
-use browse_core::{Browser, Cdp, HandoffResult, TabId, TabInfo, TabOptions, TabState};
+use browse_cdp::Cdp;
+use browse_core::{Browser, GuardedTabDriver, HandoffResult, TabDriver, TabId, TabInfo, TabOptions, TabPolicy, TabState};
 use serde_json::{Value, json};
 
 use crate::link::Link;
@@ -318,6 +319,8 @@ impl Relay {
                 let mut value = json!({
                     "id": link.id,
                     "name": link.name,
+                    "driver": "cdp-extension",
+                    "protocol": "cdp",
                     "default": default.as_ref().is_some_and(|d| Arc::ptr_eq(d, link)),
                     "connected": link.connected(),
                     "version": link.version,
@@ -360,9 +363,56 @@ fn tab_read_only(st: &crate::relay::State, tab: TabId) -> Option<bool> {
         .or_else(|| st.restorable.values().find(|held| held.tab == tab).map(|held| held.options.read_only))
 }
 
+/// Semantic policy enforced at the `TabDriver` boundary for every protocol the relay hosts.
+struct RelayTabPolicy {
+    relay: Arc<Relay>,
+    tab: TabId,
+}
+
+impl TabPolicy for RelayTabPolicy {
+    fn is_read_only(&self) -> bool {
+        tab_read_only(&self.relay.st(), self.tab).unwrap_or(false)
+    }
+
+    fn check_navigation(&self, url: &str) -> Result<(), String> {
+        let st = self.relay.st();
+        let allowed = st
+            .tabs
+            .get(&self.tab)
+            .and_then(|t| t.options.allowed_origins.as_deref());
+        if let Some(allowed) = allowed
+            && let Ok(rules) = crate::domain::parse_origin_patterns(allowed)
+            && !crate::domain::check_url(url, &rules, false).allowed()
+        {
+            return Err(format!(
+                "browse blocked navigation to {url}: not in allowedOrigins ({})",
+                allowed.join(", ")
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// The relay as `browse_core::Browser`, handed to every tool.
 #[derive(Clone)]
 pub struct RelayBrowser(pub Arc<Relay>);
+
+impl RelayBrowser {
+    /// Raw CDP handle for a tab (used by relay-internal CDP guardrail tests and `tab_driver`).
+    pub async fn cdp(&self, tab: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
+        self.0.await_tab(tab).await;
+        self.0.usable_tab(tab)?;
+        self.0.note_call_tab(tab);
+        let mut st = self.0.st();
+        let entry = st.tabs.get_mut(&tab).context("The tab went away")?;
+        if let Some(cdp) = &entry.cdp {
+            return Ok(cdp.clone());
+        }
+        let cdp = Arc::new(crate::cdp::TabCdp { relay: self.0.clone(), tab, events: entry.events.downgrade() });
+        entry.cdp = Some(cdp.clone());
+        Ok(cdp)
+    }
+}
 
 #[async_trait]
 impl Browser for RelayBrowser {
@@ -384,18 +434,28 @@ impl Browser for RelayBrowser {
         Ok(())
     }
 
-    async fn cdp(&self, tab: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
+    async fn tab_driver(&self, tab: TabId) -> anyhow::Result<Arc<dyn TabDriver>> {
         self.0.await_tab(tab).await;
         self.0.usable_tab(tab)?;
         self.0.note_call_tab(tab);
         let mut st = self.0.st();
         let entry = st.tabs.get_mut(&tab).context("The tab went away")?;
-        if let Some(cdp) = &entry.cdp {
-            return Ok(cdp.clone());
+        if let Some(driver) = &entry.driver {
+            return Ok(driver.clone());
         }
-        let cdp = Arc::new(crate::cdp::TabCdp { relay: self.0.clone(), tab, events: entry.events.downgrade() });
-        entry.cdp = Some(cdp.clone());
-        Ok(cdp)
+        let cdp = match &entry.cdp {
+            Some(cdp) => cdp.clone(),
+            None => {
+                let cdp = Arc::new(crate::cdp::TabCdp { relay: self.0.clone(), tab, events: entry.events.downgrade() });
+                entry.cdp = Some(cdp.clone());
+                cdp
+            }
+        };
+        let raw: Arc<dyn TabDriver> = browse_cdp::CdpTabDriver::new(cdp);
+        let policy = Arc::new(RelayTabPolicy { relay: self.0.clone(), tab });
+        let driver: Arc<dyn TabDriver> = GuardedTabDriver::new(raw, policy);
+        entry.driver = Some(driver.clone());
+        Ok(driver)
     }
 
     async fn state(&self, tab: TabId) -> anyhow::Result<Arc<TabState>> {

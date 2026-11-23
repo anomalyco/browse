@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex as SyncMutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use browse_core::{Cdp, TabId, Tool, ToolContext, ToolOutput, ToolSpec};
+use browse_core::{PageEvent, TabDriver, TabId, Tool, ToolContext, ToolOutput, ToolSpec};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
@@ -30,7 +30,7 @@ pub(crate) struct RecordingState {
 
 struct Recording {
     tab: TabId,
-    cdp: Arc<dyn Cdp>,
+    driver: Arc<dyn TabDriver>,
     roots: Vec<PathBuf>,
     path: PathBuf,
     partial: PathBuf,
@@ -160,7 +160,7 @@ async fn finish(mut recording: Recording) -> anyhow::Result<Value> {
     let last = recording.sink.lock().unwrap().last.take();
     let last = match last {
         Some(last) => Some(last),
-        None => screencast::still(recording.cdp.as_ref(), recording.quality)
+        None => screencast::still(recording.driver.as_ref(), recording.quality)
             .await
             .ok()
             .map(|jpeg| Last { jpeg: Arc::new(jpeg), frame_number: 0 }),
@@ -237,18 +237,11 @@ async fn cancel(mut recording: Recording) {
     files::remove_created(&recording.created);
 }
 
-/// Why a recording's tab can no longer be recorded, from its CDP event stream.
-pub(crate) async fn tab_gone(events: &mut broadcast::Receiver<browse_core::CdpEvent>) -> String {
+/// Why a recording's tab can no longer be recorded, from its page event stream.
+pub(crate) async fn tab_gone(events: &mut broadcast::Receiver<PageEvent>) -> String {
     loop {
         match events.recv().await {
-            Ok(event) if event.session_id.is_none() => match event.method.as_str() {
-                "Inspector.detached" => {
-                    let reason = event.params.get("reason").and_then(Value::as_str).unwrap_or("detached");
-                    return format!("the tab went away ({reason})");
-                }
-                "Inspector.targetCrashed" | "Target.targetCrashed" => return "the tab crashed".into(),
-                _ => {}
-            },
+            Ok(PageEvent::Closed(reason)) => return reason.to_string(),
             Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
             Err(broadcast::error::RecvError::Closed) => return "the tab closed or browse was detached from it".into(),
         }
@@ -270,8 +263,8 @@ async fn start(ctx: &ToolContext, args: &Value) -> anyhow::Result<ToolOutput> {
     if recording_state.active.is_some() {
         bail_user!("a recording is already running in tab {tab}; stop or cancel it first");
     }
-    let cdp = ctx.browser.cdp(tab).await?;
-    let viewport = crate::page::viewport(cdp.as_ref()).await?;
+    let driver = ctx.browser.tab_driver(tab).await?;
+    let viewport = crate::page::viewport(driver.as_ref()).await?;
     let size = screencast::recording_size(&viewport);
     let created = files::prepare(&ctx.file_roots, &path, operation)?;
     let partial = files::partial_path(&path, "mkv");
@@ -298,8 +291,8 @@ async fn start(ctx: &ToolContext, args: &Value) -> anyhow::Result<ToolOutput> {
         surface_width: None,
         source_size: None,
     }));
-    let mut events = cdp.events();
-    let screencast = match Screencast::start(cdp.clone(), frame_rate, quality, sink.clone()).await {
+    let mut events = driver.events();
+    let screencast = match Screencast::start(driver.clone(), frame_rate, quality, sink.clone()).await {
         Ok(screencast) => screencast,
         Err(error) => {
             sink.lock().unwrap().tx = None;
@@ -334,7 +327,7 @@ async fn start(ctx: &ToolContext, args: &Value) -> anyhow::Result<ToolOutput> {
     };
     let recording = Recording {
         tab,
-        cdp,
+        driver,
         roots: ctx.file_roots.clone(),
         path,
         partial,

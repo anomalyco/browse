@@ -20,5 +20,6 @@ libc = "0.2"
 
 [dev-dependencies]
 browse-capture.workspace = true
+browse-cdp.workspace = true
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 tokio-tungstenite = "0.24"

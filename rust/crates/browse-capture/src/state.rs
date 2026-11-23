@@ -3,7 +3,7 @@ use std::sync::Arc;
 use browse_core::{TabId, ToolContext};
 use tokio::sync::Mutex;
 
-use crate::{console, network, page, recording};
+use crate::{console, network, recording};
 
 const KEY: &str = "browse-capture";
 
@@ -13,7 +13,6 @@ pub(crate) struct CaptureState {
     pub network: Mutex<network::NetworkState>,
     pub console: Mutex<console::ConsoleState>,
     pub recording: Arc<Mutex<recording::RecordingState>>,
-    pub worlds: Mutex<page::Worlds>,
 }
 
 /// browse-capture's state of the tab.
@@ -27,12 +26,6 @@ pub(crate) struct TaskGuard(Option<tokio::task::AbortHandle>);
 impl TaskGuard {
     pub fn new(handle: tokio::task::AbortHandle) -> Self {
         Self(Some(handle))
-    }
-
-    pub fn abort(&mut self) {
-        if let Some(handle) = self.0.take() {
-            handle.abort();
-        }
     }
 
     /// Lets the task run on; for a task that is itself finishing what the guard belongs to.

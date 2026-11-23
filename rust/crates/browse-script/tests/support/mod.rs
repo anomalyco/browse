@@ -10,7 +10,8 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use browse_core::{Browser, Cdp, CdpError, CdpEvent, HandoffResult, TabId, TabInfo, TabOptions, TabState, ToolContext, ToolOutput};
+use browse_cdp::{Cdp, CdpError, CdpEvent};
+use browse_core::{Browser, HandoffResult, TabDriver, TabId, TabInfo, TabOptions, TabState, ToolContext, ToolOutput};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -225,8 +226,8 @@ impl Cdp for TabCdp {
     }
 }
 
-/// A tab of the fake browser: its id, CDP and state.
-type FakeTab = (TabId, Arc<TabCdp>, Arc<TabState>);
+/// A tab of the fake browser: its id, CDP, driver, and state.
+type FakeTab = (TabId, Arc<TabCdp>, Arc<dyn TabDriver>, Arc<TabState>);
 
 /// Several tabs over one Chromium, as the relay's agent tabs; `tabs` is the fake of the relay's tabs tool.
 pub struct FakeBrowser {
@@ -244,9 +245,9 @@ impl FakeBrowser {
         TabInfo { tab: id, url, title, lent: false, opener: None, chosen: None, last_used: None, busy: false, handoff: None, options: TabOptions::default() }
     }
 
-    fn find(&self, tab: TabId) -> anyhow::Result<(Arc<TabCdp>, Arc<TabState>)> {
+    fn find(&self, tab: TabId) -> anyhow::Result<(Arc<dyn TabDriver>, Arc<TabState>)> {
         match self.tabs.lock().unwrap().iter().find(|(id, ..)| *id == tab) {
-            Some((_, cdp, state)) => Ok((cdp.clone(), state.clone())),
+            Some((_, _, driver, state)) => Ok((driver.clone(), state.clone())),
             None => anyhow::bail!("Tab {tab} isn't a browse tab"),
         }
     }
@@ -261,13 +262,14 @@ impl Browser for FakeBrowser {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         }
         let id = self.next.fetch_add(1, Ordering::Relaxed);
-        self.tabs.lock().unwrap().push((id, tab.clone(), Arc::new(TabState::default())));
+        let driver: Arc<dyn TabDriver> = browse_cdp::CdpTabDriver::new(tab.clone());
+        self.tabs.lock().unwrap().push((id, tab.clone(), driver, Arc::new(TabState::default())));
         Ok(self.info(id, &tab).await)
     }
     async fn tabs(&self) -> anyhow::Result<Vec<TabInfo>> {
         let tabs = self.tabs.lock().unwrap().clone();
         let mut out = Vec::new();
-        for (id, tab, _) in &tabs {
+        for (id, tab, _, _) in &tabs {
             out.push(self.info(*id, tab).await);
         }
         Ok(out)
@@ -278,12 +280,12 @@ impl Browser for FakeBrowser {
             let index = tabs.iter().position(|(id, ..)| *id == tab);
             index.map(|i| tabs.remove(i))
         };
-        if let Some((_, cdp, _)) = removed {
+        if let Some((_, cdp, _, _)) = removed {
             let _ = self.connection.send("Target.closeTarget", json!({ "targetId": cdp.target }), None).await;
         }
         Ok(())
     }
-    async fn cdp(&self, tab: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
+    async fn tab_driver(&self, tab: TabId) -> anyhow::Result<Arc<dyn TabDriver>> {
         Ok(self.find(tab)?.0)
     }
     async fn state(&self, tab: TabId) -> anyhow::Result<Arc<TabState>> {
@@ -345,7 +347,8 @@ impl Harness {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&files.0, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        let browser = FakeBrowser { connection: connection.clone(), tabs: Mutex::new(vec![(1, tab.clone(), Arc::new(TabState::default()))]), next: AtomicI64::new(2), human };
+        let driver: Arc<dyn TabDriver> = browse_cdp::CdpTabDriver::new(tab.clone());
+        let browser = FakeBrowser { connection: connection.clone(), tabs: Mutex::new(vec![(1, tab.clone(), driver, Arc::new(TabState::default()))]), next: AtomicI64::new(2), human };
         let ctx = ToolContext { browser: Arc::new(browser), file_roots: vec![std::fs::canonicalize(&files.0).unwrap()] };
         let server = Server::start().await;
         let mut tools: Vec<Arc<dyn browse_core::Tool>> = browse_page::tools();

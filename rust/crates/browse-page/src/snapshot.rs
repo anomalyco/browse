@@ -10,7 +10,8 @@ use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::page::{Element, ElementOr, TabPage, is_context_lost, v};
+use browse_core::LoadState;
+use crate::page::{Element, ElementOr, TabPage, is_stale, v};
 use crate::state::{AriaRefs, Baseline, PageTab, RefTarget};
 use crate::target;
 
@@ -358,7 +359,7 @@ fn frame_skip_note(count: usize, reason: &str) -> String {
 }
 
 fn frame_failure_note(error: &str) -> &'static str {
-    if is_context_lost(error) || error.contains("navigated or re-rendered") || error.contains("frame is gone") || error.contains("tab is gone") {
+    if error.contains("navigated or re-rendered") || error.contains("frame is gone") || error.contains("tab is gone") {
         "the frame changed while capturing"
     } else if error.contains("timed out") || error.contains("Timeout") {
         "the frame did not answer in time"
@@ -570,7 +571,7 @@ async fn capture_main(page: &Arc<TabPage>, scope: &Scope, settings: &Settings, d
                     }
                     return serde_json::from_value::<Capture>(value).map_err(|e| anyhow!("unexpected capture result: {e}"));
                 }
-                if (is_context_lost(&message) || message.contains("navigated or re-rendered")) && !diff && Instant::now() + RETRY_DELAY < deadline {
+                if (is_stale(&error) || message.contains("navigated or re-rendered")) && !diff && Instant::now() + RETRY_DELAY < deadline {
                     tokio::time::sleep(RETRY_DELAY).await;
                     continue;
                 }
@@ -590,14 +591,14 @@ async fn settle_recent_navigation(page: &Arc<TabPage>, deadline: Instant) {
     let main = page.main_frame();
     let Some(frame) = page.frame(&main) else { return };
     let recent = frame.committed_at.map(|at| at.elapsed() < Duration::from_secs(5)).unwrap_or(false);
-    if !recent || frame.lifecycle.is_empty() || frame.lifecycle.contains("networkAlmostIdle") || frame.lifecycle.contains("networkIdle") || page.dialog().is_some() {
+    if !recent || frame.lifecycle.is_empty() || frame.lifecycle.contains(&LoadState::NetworkIdle) || page.dialog().is_some() {
         return;
     }
     let left = deadline.saturating_duration_since(Instant::now());
     let cap = (left / 2).min(Duration::from_millis(1_000));
     let started = Instant::now();
     page.wait_until(cap, Duration::from_millis(100), |page| {
-        page.lifecycle_has(&main, "networkAlmostIdle") || page.lifecycle_has(&main, "networkIdle") || page.dialog().is_some()
+        page.lifecycle_has(&main, LoadState::NetworkIdle) || page.dialog().is_some()
     })
     .await;
     let quiet_max = cap.saturating_sub(started.elapsed()).max(Duration::from_millis(150)).min(Duration::from_millis(400)).as_millis() as u64;

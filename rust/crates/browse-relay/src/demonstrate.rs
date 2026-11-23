@@ -2,11 +2,11 @@
 //! run in an isolated world of each frame, so the page sees no globals or patched functions; each frame's steps come
 //! back through a pending evaluate that resolves as soon as a step is recorded, before a navigation can drop them.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use browse_core::{Browser, Cdp};
+use browse_core::{Browser, CallOptions, Evaluated, FrameId, PageEvent, Realm, Returns, TabDriver, World};
 use serde_json::{Value, json};
 
 use crate::browser::RelayBrowser;
@@ -145,39 +145,32 @@ pub fn describe_step(step: &Value) -> String {
     }
 }
 
-fn frame_ids(tree: &Value, out: &mut Vec<String>) {
-    if let Some(id) = tree["frame"]["id"].as_str() {
-        out.push(id.to_string());
-    }
-    for child in tree["childFrames"].as_array().into_iter().flatten() {
-        frame_ids(child, out);
-    }
-}
-
 struct Recorder {
-    cdp: Arc<dyn Cdp>,
+    driver: Arc<dyn TabDriver>,
     id: String,
-    world: String,
     steps: Arc<Mutex<Vec<Value>>>,
-    contexts: Mutex<HashMap<String, i64>>,
+    frames: Mutex<HashSet<FrameId>>,
     pumps: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl Recorder {
-    async fn install(self: &Arc<Self>, frame: &str) {
-        let Ok(world) = self.cdp.send("Page.createIsolatedWorld", json!({ "frameId": frame, "worldName": self.world, "grantUniveralAccess": false }), None).await else { return };
-        let Some(context) = world["executionContextId"].as_i64() else { return };
-        let install = json!({ "expression": format!("({INSTALL})({})", json!(self.id)), "contextId": context, "returnByValue": true });
-        if self.cdp.send("Runtime.evaluate", install, None).await.is_err() {
+    async fn install(self: &Arc<Self>, frame: FrameId) {
+        let realm = Realm { frame: frame.clone(), world: World::Isolated };
+        let expr = format!("({INSTALL})({})", json!(self.id));
+        let opts = CallOptions { returns: Returns::Json, await_promise: false, user_activation: false };
+        if self.driver.evaluate(&realm, &expr, opts).await.is_err() {
             return;
         }
-        self.contexts.lock().unwrap().insert(frame.to_string(), context);
+        self.frames.lock().unwrap().insert(frame);
         let recorder = self.clone();
         let pump = tokio::spawn(async move {
+            let take_opts = CallOptions { returns: Returns::Json, await_promise: true, user_activation: false };
             loop {
-                let take = json!({ "expression": format!("({TAKE})({}, 15000)", json!(recorder.id)), "contextId": context, "awaitPromise": true, "returnByValue": true });
-                let Ok(result) = recorder.cdp.send("Runtime.evaluate", take, None).await else { return };
-                let Some(steps) = result["result"]["value"].as_array() else { return };
+                let take = format!("({TAKE})({}, 15000)", json!(recorder.id));
+                let Ok(Ok(Evaluated::Json(value))) = recorder.driver.evaluate(&realm, &take, take_opts).await else {
+                    return;
+                };
+                let Some(steps) = value.as_array() else { return };
                 let mut recorded = recorder.steps.lock().unwrap();
                 for step in steps.iter().filter(|s| valid_step(s)) {
                     append_step(&mut recorded, step.clone());
@@ -188,10 +181,12 @@ impl Recorder {
     }
 
     async fn stop(&self) {
-        let contexts: Vec<i64> = self.contexts.lock().unwrap().values().copied().collect();
-        for context in contexts {
-            let remove = json!({ "expression": format!("({REMOVE})({})", json!(self.id)), "contextId": context });
-            let _ = self.cdp.send("Runtime.evaluate", remove, None).await;
+        let frames: Vec<FrameId> = self.frames.lock().unwrap().iter().cloned().collect();
+        let remove = format!("({REMOVE})({})", json!(self.id));
+        let opts = CallOptions { returns: Returns::Json, await_promise: false, user_activation: false };
+        for frame in frames {
+            let realm = Realm { frame, world: World::Isolated };
+            let _ = self.driver.evaluate(&realm, &remove, opts).await;
         }
         let mut pumps: Vec<_> = std::mem::take(&mut *self.pumps.lock().unwrap());
         let _ = tokio::time::timeout(Duration::from_secs(2), futures_util::future::join_all(pumps.iter_mut())).await;
@@ -204,38 +199,32 @@ impl Recorder {
 /// Asks the user to show a flow in the tab, recording their clicks, fills and navigations until they continue.
 pub async fn demonstrate(relay: &Arc<Relay>, tab: i64, message: &str, timeout: Duration) -> anyhow::Result<Value> {
     let browser = RelayBrowser(relay.clone());
-    let cdp = browser.cdp(tab).await?;
+    let driver = browser.tab_driver(tab).await?;
     let started_url = relay.st().tabs.get(&tab).map(|t| t.url.clone()).unwrap_or_default();
     let recorder = Arc::new(Recorder {
-        cdp: cdp.clone(),
+        driver: driver.clone(),
         id: format!("demo-{}", crate::util::random_hex(6)),
-        world: format!("w{}", crate::util::random_hex(6)),
         steps: Arc::new(Mutex::new(Vec::new())),
-        contexts: Mutex::new(HashMap::new()),
+        frames: Mutex::new(HashSet::new()),
         pumps: Mutex::new(Vec::new()),
     });
-    let mut events = cdp.events();
-    let tree = cdp.send("Page.getFrameTree", json!({}), None).await?;
-    let mut frames = Vec::new();
-    frame_ids(&tree["frameTree"], &mut frames);
+    let mut events = driver.events();
+    let frames = driver.frames().await?;
+    let main_frame = frames.first().map(|f| f.id.clone());
     for frame in &frames {
-        recorder.install(frame).await;
+        recorder.install(frame.id.clone()).await;
     }
     let watcher = {
         let recorder = recorder.clone();
         tokio::spawn(async move {
             while let Ok(event) = events.recv().await {
-                if event.session_id.is_some() || event.method != "Page.frameNavigated" {
+                let PageEvent::Committed { frame, url, .. } = event else {
                     continue;
+                };
+                if main_frame.as_ref() == Some(&frame) {
+                    append_step(&mut recorder.steps.lock().unwrap(), json!({ "kind": "navigation", "url": url }));
                 }
-                let frame = &event.params["frame"];
-                let Some(id) = frame["id"].as_str() else { continue };
-                if frame.get("parentId").is_none()
-                    && let Some(url) = frame["url"].as_str() {
-                        append_step(&mut recorder.steps.lock().unwrap(), json!({ "kind": "navigation", "url": url }));
-                    }
-                recorder.contexts.lock().unwrap().remove(id);
-                recorder.install(id).await;
+                recorder.install(frame).await;
             }
         })
     };

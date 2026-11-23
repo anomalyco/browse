@@ -84,7 +84,7 @@ pub async fn after(ctx: &ToolContext, page: &Arc<TabPage>, before: &Before, opti
         if committed {
             let main = page.main_frame();
             let remaining = options.navigation_timeout.saturating_sub(before.started.elapsed()).max(Duration::from_millis(500));
-            page.wait_until(remaining, Duration::from_millis(100), |page| page.lifecycle_has(&main, "DOMContentLoaded") || page.dialog().is_some()).await;
+            page.wait_until(remaining, Duration::from_millis(100), |page| page.lifecycle_has(&main, browse_core::LoadState::DomContentLoaded) || page.dialog().is_some()).await;
         }
     }
     describe(ctx, page, before, options).await

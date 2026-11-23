@@ -7,7 +7,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
-use browse_core::{CdpEvent, TabOptions, TabState};
+use browse_cdp::CdpEvent;
+use browse_core::{TabOptions, TabState};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
@@ -172,10 +173,10 @@ impl Relay {
                 handoff.done.take().map(|done| done.send("closed"));
             }
             let kept_chosen = previous.as_ref().and_then(|t| t.chosen.clone());
-            // The same page attached again (a renewed debugger) keeps its event stream, CDP handle and state.
-            let (events, cdp, state, busy_keys, warnings) = match previous.filter(|p| p.target_id == target_id) {
-                Some(previous) => (previous.events, previous.cdp, previous.state, previous.busy_keys, previous.warnings),
-                None => (broadcast::channel(EVENT_BUFFER).0, None, state.unwrap_or_default(), HashSet::new(), Vec::new()),
+            // The same page attached again (a renewed debugger) keeps its event stream, driver/CDP handle and state.
+            let (events, cdp, driver, state, busy_keys, warnings) = match previous.filter(|p| p.target_id == target_id) {
+                Some(previous) => (previous.events, previous.cdp, previous.driver, previous.state, previous.busy_keys, previous.warnings),
+                None => (broadcast::channel(EVENT_BUFFER).0, None, None, state.unwrap_or_default(), HashSet::new(), Vec::new()),
             };
             st.tabs.insert(
                 tab,
@@ -210,6 +211,7 @@ impl Relay {
                     protected_frames: HashSet::new(),
                     child_frames: HashSet::new(),
                     cdp,
+                    driver,
                 },
             );
             st.reconnect_owners.remove(&target_id);

@@ -1,9 +1,12 @@
-//! Mouse and keyboard over `Input.dispatch*`, human-like when the setting is on.
+//! Mouse and keyboard over `browse_core::TabDriver`, human-like when the setting is on.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
-use serde_json::{Value, json};
+use browse_core::{
+    DragOutcome, DriverError, KeyEvent, Modifiers, MouseButton, PointerEvent, PointerStep, TabDriver,
+};
 use tokio::sync::MutexGuard;
 
 use crate::human::{self, InputState, Point};
@@ -21,65 +24,63 @@ impl std::fmt::Display for Interrupted {
 
 impl std::error::Error for Interrupted {}
 
-pub const ALT: i64 = 1;
-pub const CONTROL: i64 = 2;
-pub const META: i64 = 4;
-pub const SHIFT: i64 = 8;
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct KeyDef {
     pub key: String,
     pub code: String,
-    pub key_code: i64,
     pub text: String,
-    pub location: i64,
 }
 
-fn def(key: &str, code: &str, key_code: i64, text: &str) -> KeyDef {
-    KeyDef { key: key.into(), code: code.into(), key_code, text: text.into(), location: 0 }
+fn def(key: &str, code: &str, text: &str) -> KeyDef {
+    KeyDef { key: key.into(), code: code.into(), text: text.into() }
 }
 
-/// A US keyboard layout key. `shift` gives the shifted key for characters typed with Shift.
+/// A US keyboard layout key (pure DOM key/code/text).
 pub fn key_definition(name: &str) -> Option<KeyDef> {
     let named = match name {
-        "Enter" | "Return" => Some(def("Enter", "Enter", 13, "\r")),
-        "Tab" => Some(def("Tab", "Tab", 9, "")),
-        "Backspace" => Some(def("Backspace", "Backspace", 8, "")),
-        "Escape" | "Esc" => Some(def("Escape", "Escape", 27, "")),
-        "Delete" => Some(def("Delete", "Delete", 46, "")),
-        "Insert" => Some(def("Insert", "Insert", 45, "")),
-        "Home" => Some(def("Home", "Home", 36, "")),
-        "End" => Some(def("End", "End", 35, "")),
-        "PageUp" => Some(def("PageUp", "PageUp", 33, "")),
-        "PageDown" => Some(def("PageDown", "PageDown", 34, "")),
-        "ArrowLeft" => Some(def("ArrowLeft", "ArrowLeft", 37, "")),
-        "ArrowUp" => Some(def("ArrowUp", "ArrowUp", 38, "")),
-        "ArrowRight" => Some(def("ArrowRight", "ArrowRight", 39, "")),
-        "ArrowDown" => Some(def("ArrowDown", "ArrowDown", 40, "")),
-        "Space" | " " => Some(def(" ", "Space", 32, " ")),
-        "CapsLock" => Some(def("CapsLock", "CapsLock", 20, "")),
-        "ContextMenu" => Some(def("ContextMenu", "ContextMenu", 93, "")),
-        "Shift" => Some(KeyDef { location: 1, ..def("Shift", "ShiftLeft", 16, "") }),
-        "Control" => Some(KeyDef { location: 1, ..def("Control", "ControlLeft", 17, "") }),
-        "Alt" => Some(KeyDef { location: 1, ..def("Alt", "AltLeft", 18, "") }),
-        "Meta" => Some(KeyDef { location: 1, ..def("Meta", "MetaLeft", 91, "") }),
+        "Enter" | "Return" => Some(def("Enter", "Enter", "\r")),
+        "Tab" => Some(def("Tab", "Tab", "")),
+        "Backspace" => Some(def("Backspace", "Backspace", "")),
+        "Escape" | "Esc" => Some(def("Escape", "Escape", "")),
+        "Delete" => Some(def("Delete", "Delete", "")),
+        "Insert" => Some(def("Insert", "Insert", "")),
+        "Home" => Some(def("Home", "Home", "")),
+        "End" => Some(def("End", "End", "")),
+        "PageUp" => Some(def("PageUp", "PageUp", "")),
+        "PageDown" => Some(def("PageDown", "PageDown", "")),
+        "ArrowLeft" => Some(def("ArrowLeft", "ArrowLeft", "")),
+        "ArrowUp" => Some(def("ArrowUp", "ArrowUp", "")),
+        "ArrowRight" => Some(def("ArrowRight", "ArrowRight", "")),
+        "ArrowDown" => Some(def("ArrowDown", "ArrowDown", "")),
+        "Space" | " " => Some(def(" ", "Space", " ")),
+        "CapsLock" => Some(def("CapsLock", "CapsLock", "")),
+        "ContextMenu" => Some(def("ContextMenu", "ContextMenu", "")),
+        "Shift" => Some(def("Shift", "ShiftLeft", "")),
+        "Control" => Some(def("Control", "ControlLeft", "")),
+        "Alt" => Some(def("Alt", "AltLeft", "")),
+        "Meta" => Some(def("Meta", "MetaLeft", "")),
         _ => None,
     };
     if named.is_some() {
         return named;
     }
     if let Some(number) = name.strip_prefix('F').and_then(|n| n.parse::<i64>().ok())
-        && (1..=12).contains(&number) {
-            return Some(def(name, name, 111 + number, ""));
-        }
+        && (1..=12).contains(&number)
+    {
+        return Some(def(name, name, ""));
+    }
     if let Some(rest) = name.strip_prefix("Key")
-        && rest.len() == 1 && rest.chars().all(|c| c.is_ascii_uppercase()) {
-            return key_definition(&rest.to_ascii_lowercase());
-        }
+        && rest.len() == 1
+        && rest.chars().all(|c| c.is_ascii_uppercase())
+    {
+        return key_definition(&rest.to_ascii_lowercase());
+    }
     if let Some(rest) = name.strip_prefix("Digit")
-        && rest.len() == 1 && rest.chars().all(|c| c.is_ascii_digit()) {
-            return key_definition(rest);
-        }
+        && rest.len() == 1
+        && rest.chars().all(|c| c.is_ascii_digit())
+    {
+        return key_definition(rest);
+    }
     let mut chars = name.chars();
     let c = chars.next()?;
     if chars.next().is_some() {
@@ -93,54 +94,54 @@ pub fn char_definition(c: char) -> Option<(KeyDef, bool)> {
     let s = c.to_string();
     if c.is_ascii_lowercase() {
         let upper = c.to_ascii_uppercase();
-        return Some((def(&s, &format!("Key{upper}"), upper as i64, &s), false));
+        return Some((def(&s, &format!("Key{upper}"), &s), false));
     }
     if c.is_ascii_uppercase() {
-        return Some((def(&s, &format!("Key{c}"), c as i64, &s), true));
+        return Some((def(&s, &format!("Key{c}"), &s), true));
     }
     if c.is_ascii_digit() {
-        return Some((def(&s, &format!("Digit{c}"), c as i64, &s), false));
+        return Some((def(&s, &format!("Digit{c}"), &s), false));
     }
     let shifted_digits = [(')', '0'), ('!', '1'), ('@', '2'), ('#', '3'), ('$', '4'), ('%', '5'), ('^', '6'), ('&', '7'), ('*', '8'), ('(', '9')];
     if let Some((_, digit)) = shifted_digits.iter().find(|(symbol, _)| *symbol == c) {
-        return Some((def(&s, &format!("Digit{digit}"), *digit as i64, &s), true));
+        return Some((def(&s, &format!("Digit{digit}"), &s), true));
     }
-    let punctuation: [(char, char, &str, i64); 11] = [
-        ('`', '~', "Backquote", 192),
-        ('-', '_', "Minus", 189),
-        ('=', '+', "Equal", 187),
-        ('[', '{', "BracketLeft", 219),
-        (']', '}', "BracketRight", 221),
-        ('\\', '|', "Backslash", 220),
-        (';', ':', "Semicolon", 186),
-        ('\'', '"', "Quote", 222),
-        (',', '<', "Comma", 188),
-        ('.', '>', "Period", 190),
-        ('/', '?', "Slash", 191),
+    let punctuation: [(char, char, &str); 11] = [
+        ('`', '~', "Backquote"),
+        ('-', '_', "Minus"),
+        ('=', '+', "Equal"),
+        ('[', '{', "BracketLeft"),
+        (']', '}', "BracketRight"),
+        ('\\', '|', "Backslash"),
+        (';', ':', "Semicolon"),
+        ('\'', '"', "Quote"),
+        (',', '<', "Comma"),
+        ('.', '>', "Period"),
+        ('/', '?', "Slash"),
     ];
-    for (plain, shifted, code, key_code) in punctuation {
+    for (plain, shifted, code) in punctuation {
         if c == plain {
-            return Some((def(&s, code, key_code, &s), false));
+            return Some((def(&s, code, &s), false));
         }
         if c == shifted {
-            return Some((def(&s, code, key_code, &s), true));
+            return Some((def(&s, code, &s), true));
         }
     }
     match c {
-        ' ' => Some((def(" ", "Space", 32, " "), false)),
-        '\n' | '\r' => Some((def("Enter", "Enter", 13, "\r"), false)),
-        '\t' => Some((def("Tab", "Tab", 9, ""), false)),
+        ' ' => Some((def(" ", "Space", " "), false)),
+        '\n' | '\r' => Some((def("Enter", "Enter", "\r"), false)),
+        '\t' => Some((def("Tab", "Tab", ""), false)),
         _ => None,
     }
 }
 
-pub fn modifier_bit(key: &str) -> i64 {
+pub fn modifier_flag(key: &str) -> Modifiers {
     match key {
-        "Alt" => ALT,
-        "Control" => CONTROL,
-        "Meta" => META,
-        "Shift" => SHIFT,
-        _ => 0,
+        "Alt" => Modifiers::ALT,
+        "Control" => Modifiers::CONTROL,
+        "Meta" => Modifiers::META,
+        "Shift" => Modifiers::SHIFT,
+        _ => Modifiers::NONE,
     }
 }
 
@@ -152,16 +153,12 @@ pub fn parse_combo(combo: &str, mac: bool) -> Result<(Vec<String>, String)> {
     }
     let mut parts: Vec<String> = Vec::new();
     let mut current = String::new();
-    let chars: Vec<char> = combo.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
+    for c in combo.chars() {
         if c == '+' && !current.is_empty() {
             parts.push(std::mem::take(&mut current));
         } else {
             current.push(c);
         }
-        i += 1;
     }
     if !current.is_empty() {
         parts.push(current);
@@ -176,7 +173,7 @@ pub fn parse_combo(combo: &str, mac: bool) -> Result<(Vec<String>, String)> {
             "Option" => "Alt",
             other => other,
         };
-        if modifier_bit(name) == 0 {
+        if modifier_flag(name) == Modifiers::NONE {
             bail!("Unknown modifier {part:?} in {combo:?}; use Shift, Control, Alt, Meta or ControlOrMeta");
         }
         modifiers.push(name.to_string());
@@ -191,32 +188,6 @@ pub fn parse_combo(combo: &str, mac: bool) -> Result<(Vec<String>, String)> {
     Ok((modifiers, key))
 }
 
-/// macOS editing commands Chrome needs alongside key events for shortcuts to act on text fields.
-fn mac_command(modifiers: i64, code: &str) -> Option<&'static str> {
-    let shift = modifiers & SHIFT != 0;
-    let meta = modifiers & META != 0;
-    let alt = modifiers & ALT != 0;
-    Some(match (meta, alt, shift, code) {
-        (true, false, false, "KeyA") => "selectAll",
-        (true, false, false, "KeyC") => "copy",
-        (true, false, false, "KeyX") => "cut",
-        (true, false, false, "KeyV") => "paste",
-        (true, false, false, "KeyZ") => "undo",
-        (true, false, true, "KeyZ") => "redo",
-        (true, false, false, "Backspace") => "deleteToBeginningOfLine",
-        (false, true, false, "Backspace") => "deleteWordBackward",
-        (true, false, false, "ArrowLeft") => "moveToBeginningOfLine",
-        (true, false, false, "ArrowRight") => "moveToEndOfLine",
-        (true, false, true, "ArrowLeft") => "moveToBeginningOfLineAndModifySelection",
-        (true, false, true, "ArrowRight") => "moveToEndOfLineAndModifySelection",
-        (true, false, false, "ArrowUp") => "moveToBeginningOfDocument",
-        (true, false, false, "ArrowDown") => "moveToEndOfDocument",
-        (false, true, false, "ArrowLeft") => "moveWordLeft",
-        (false, true, false, "ArrowRight") => "moveWordRight",
-        _ => return None,
-    })
-}
-
 /// Input on one tab; holding it serializes input, so a press never overtakes the movement before it.
 pub struct Input<'a> {
     page: &'a Arc<TabPage>,
@@ -224,20 +195,20 @@ pub struct Input<'a> {
     human: bool,
     mac: bool,
     viewport: Option<(f64, f64)>,
-    pub modifiers: i64,
-    /// Set after a click that may open a new tab (modifiers or the middle button): Chrome can hold replies to input
-    /// for the tab that lost focus, so later events don't wait for theirs.
+    pub modifiers: Modifiers,
     bounded: bool,
 }
 
-/// How long an input event waits for Chrome's reply once replies may be held.
 const BOUNDED_REPLY: std::time::Duration = std::time::Duration::from_millis(800);
 
 impl<'a> Input<'a> {
     pub async fn new(page: &'a Arc<TabPage>, human: bool) -> Input<'a> {
         let state = page.input.lock().await;
-        let mac = page.platform().map(|p| p.to_ascii_lowercase().contains("mac")).unwrap_or(false);
-        Input { page, state, human, mac, viewport: None, modifiers: 0, bounded: false }
+        let mac = page
+            .platform()
+            .map(|p| p.to_ascii_lowercase().contains("mac"))
+            .unwrap_or(false);
+        Input { page, state, human, mac, viewport: None, modifiers: Modifiers::NONE, bounded: false }
     }
 
     pub fn human(&self) -> bool {
@@ -252,14 +223,16 @@ impl<'a> Input<'a> {
         self.state.pointer
     }
 
-    /// Sends an input command; a dialog opening while it waits interrupts it.
-    async fn dispatch(&self, method: &str, params: Value) -> Result<()> {
+    async fn dispatch<F, Fut>(&self, send: F) -> Result<()>
+    where
+        F: FnOnce(Arc<dyn TabDriver>) -> Fut + Send + 'static,
+        Fut: Future<Output = std::result::Result<(), DriverError>> + Send + 'static,
+    {
         if self.page.dialog().is_some() {
             return Err(Interrupted.into());
         }
-        let page = self.page.clone();
-        let method_owned = method.to_string();
-        let task = tokio::spawn(async move { page.send_raw(&method_owned, params, None).await });
+        let driver = self.page.driver().clone();
+        let task = tokio::spawn(async move { send(driver).await.map_err(crate::page::driver_error) });
         let bounded = self.bounded;
         let held = async move {
             if bounded {
@@ -269,10 +242,9 @@ impl<'a> Input<'a> {
             }
         };
         tokio::select! {
-            // The event was delivered; only its reply is late.
             _ = held => Ok(()),
             result = task => match result {
-                Ok(Ok(_)) => Ok(()),
+                Ok(Ok(())) => Ok(()),
                 Ok(Err(error)) => Err(error),
                 Err(error) => Err(anyhow!("input task failed: {error}")),
             },
@@ -280,16 +252,17 @@ impl<'a> Input<'a> {
         }
     }
 
-    /// Sends one sample of a gesture and waits until the next is due, never longer than the gap: Chrome can hold the
-    /// reply to a pointer event for a background tab until its next frame.
-    async fn pace(&self, gap_ms: f64, method: &str, params: Value) -> Result<()> {
+    async fn pace<F, Fut>(&self, gap_ms: f64, send: F) -> Result<()>
+    where
+        F: FnOnce(Arc<dyn TabDriver>) -> Fut + Send + 'static,
+        Fut: Future<Output = std::result::Result<(), DriverError>> + Send + 'static,
+    {
         if self.page.dialog().is_some() {
             return Err(Interrupted.into());
         }
         let started = std::time::Instant::now();
-        let page = self.page.clone();
-        let method = method.to_string();
-        let task = tokio::spawn(async move { page.send_raw(&method, params, None).await });
+        let driver = self.page.driver().clone();
+        let task = tokio::spawn(async move { send(driver).await });
         let gap = std::time::Duration::from_micros((gap_ms * 1000.0) as u64);
         let _ = tokio::time::timeout(gap, task).await;
         let elapsed = started.elapsed().as_secs_f64() * 1000.0;
@@ -297,20 +270,19 @@ impl<'a> Input<'a> {
         Ok(())
     }
 
-    /// The layout viewport in CSS pixels.
     pub async fn viewport_size(&mut self) -> Option<(f64, f64)> {
         self.viewport().await
     }
 
     async fn viewport(&mut self) -> Option<(f64, f64)> {
         if self.viewport.is_none()
-            && let Ok(metrics) = self.page.send_raw("Page.getLayoutMetrics", json!({}), None).await {
-                let layout = &metrics["cssLayoutViewport"];
-                if let (Some(w), Some(h)) = (layout["clientWidth"].as_f64(), layout["clientHeight"].as_f64())
-                    && w > 0.0 && h > 0.0 {
-                        self.viewport = Some((w, h));
-                    }
-            }
+            && let Ok(metrics) = self.page.driver().viewport().await
+            && let (Some(w), Some(h)) = (metrics.layout_width, metrics.layout_height)
+            && w > 0.0
+            && h > 0.0
+        {
+            self.viewport = Some((w, h));
+        }
         self.viewport
     }
 
@@ -325,28 +297,32 @@ impl<'a> Input<'a> {
         }
     }
 
-    /// Moves the pointer to `to` (page coordinates), along a human path when human input is on.
     pub async fn move_to(&mut self, to: Point, steps: usize) -> Result<Point> {
         let target = if self.human { self.state.aim(to) } else { to };
-        let buttons = self.state.buttons;
-        let pressed = if buttons & 1 != 0 { "left" } else if buttons & 2 != 0 { "right" } else if buttons & 4 != 0 { "middle" } else { "none" };
+        let modifiers = self.modifiers;
         if self.human {
             let bounds = self.viewport().await;
             let from = self.state.start_point(target, bounds);
             for (point, delay) in human::trajectory(from, target) {
-                let point = human::clamp_point(point, bounds);
-                self.pace(delay, "Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": point.x, "y": point.y, "button": pressed, "buttons": buttons, "modifiers": self.modifiers })).await?;
+                let p = human::clamp_point(point, bounds);
+                let event = PointerEvent::Move { x: p.x, y: p.y, modifiers };
+                self.pace(delay, move |d| async move { d.pointer(event).await }).await?;
             }
             self.state.arrived();
         } else if steps > 1 {
             let from = self.state.pointer.unwrap_or(target);
             for i in 1..steps {
                 let t = i as f64 / steps as f64;
-                let point = Point { x: from.x + (target.x - from.x) * t, y: from.y + (target.y - from.y) * t };
-                self.dispatch("Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": point.x, "y": point.y, "button": pressed, "buttons": buttons, "modifiers": self.modifiers })).await?;
+                let event = PointerEvent::Move {
+                    x: from.x + (target.x - from.x) * t,
+                    y: from.y + (target.y - from.y) * t,
+                    modifiers,
+                };
+                self.dispatch(move |d| async move { d.pointer(event).await }).await?;
             }
         }
-        self.dispatch("Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": target.x, "y": target.y, "button": pressed, "buttons": buttons, "modifiers": self.modifiers })).await?;
+        let event = PointerEvent::Move { x: target.x, y: target.y, modifiers };
+        self.dispatch(move |d| async move { d.pointer(event).await }).await?;
         self.state.pointer = Some(target);
         Ok(target)
     }
@@ -357,11 +333,14 @@ impl<'a> Input<'a> {
             self.state.before_press().await;
         }
         self.state.buttons |= Self::button_bit(button);
-        self.dispatch(
-            "Input.dispatchMouseEvent",
-            json!({ "type": "mousePressed", "x": at.x, "y": at.y, "button": button, "buttons": self.state.buttons, "clickCount": click_count, "modifiers": self.modifiers }),
-        )
-        .await
+        let event = PointerEvent::Down {
+            x: at.x,
+            y: at.y,
+            button: MouseButton::from_name(button).unwrap_or(MouseButton::Left),
+            click_count: click_count.max(1) as u32,
+            modifiers: self.modifiers,
+        };
+        self.dispatch(move |d| async move { d.pointer(event).await }).await
     }
 
     pub async fn up(&mut self, button: &str, click_count: i64) -> Result<()> {
@@ -370,16 +349,22 @@ impl<'a> Input<'a> {
             self.state.before_release().await;
         }
         self.state.buttons &= !Self::button_bit(button);
-        self.dispatch(
-            "Input.dispatchMouseEvent",
-            json!({ "type": "mouseReleased", "x": at.x, "y": at.y, "button": button, "buttons": self.state.buttons, "clickCount": click_count, "modifiers": self.modifiers }),
-        )
-        .await
+        let event = PointerEvent::Up {
+            x: at.x,
+            y: at.y,
+            button: MouseButton::from_name(button).unwrap_or(MouseButton::Left),
+            click_count: click_count.max(1) as u32,
+            modifiers: self.modifiers,
+        };
+        self.dispatch(move |d| async move { d.pointer(event).await }).await
     }
 
     pub async fn click(&mut self, at: Point, button: &str, count: i64) -> Result<()> {
         self.move_to(at, 1).await?;
-        let new_tab = button == "middle" || self.modifiers & (CONTROL | META | SHIFT) != 0;
+        let new_tab = button == "middle"
+            || self.modifiers.contains(Modifiers::CONTROL)
+            || self.modifiers.contains(Modifiers::META)
+            || self.modifiers.contains(Modifiers::SHIFT);
         for n in 1..=count.max(1) {
             self.down(button, n).await?;
             self.bounded |= new_tab;
@@ -391,80 +376,77 @@ impl<'a> Input<'a> {
         Ok(())
     }
 
-    /// A wheel scroll at `at`; with human input it glides in eased ~60 Hz frames.
     pub async fn wheel(&mut self, at: Point, dx: f64, dy: f64) -> Result<()> {
-        // Always move first: the remembered pointer may belong to a previous document, which Chrome no longer
-        // hit-tests the wheel against.
         let at = self.move_to(at, 1).await?;
+        let modifiers = self.modifiers;
         if self.human {
             for frame in human::glide(dx, dy) {
-                self.pace(
-                    human::random(15.5, 18.0),
-                    "Input.dispatchMouseEvent",
-                    json!({ "type": "mouseWheel", "x": at.x, "y": at.y, "deltaX": (frame.x * 100.0).round() / 100.0, "deltaY": (frame.y * 100.0).round() / 100.0, "modifiers": self.modifiers }),
-                )
-                .await?;
+                let event = PointerEvent::Wheel {
+                    x: at.x,
+                    y: at.y,
+                    delta_x: (frame.x * 100.0).round() / 100.0,
+                    delta_y: (frame.y * 100.0).round() / 100.0,
+                    modifiers,
+                };
+                self.pace(human::random(15.5, 18.0), move |d| async move { d.pointer(event).await })
+                    .await?;
             }
             Ok(())
         } else {
-            self.dispatch("Input.dispatchMouseEvent", json!({ "type": "mouseWheel", "x": at.x, "y": at.y, "deltaX": dx, "deltaY": dy, "modifiers": self.modifiers })).await
+            let event = PointerEvent::Wheel { x: at.x, y: at.y, delta_x: dx, delta_y: dy, modifiers };
+            self.dispatch(move |d| async move { d.pointer(event).await }).await
         }
     }
 
-    /// One plain wheel event at `at`, human input or not.
     pub async fn wheel_direct(&mut self, at: Point, dx: f64, dy: f64) -> Result<()> {
-        self.dispatch("Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": at.x, "y": at.y, "button": "none", "buttons": self.state.buttons, "modifiers": self.modifiers })).await?;
+        let modifiers = self.modifiers;
+        let mv = PointerEvent::Move { x: at.x, y: at.y, modifiers };
+        self.dispatch(move |d| async move { d.pointer(mv).await }).await?;
         self.state.pointer = Some(at);
-        self.dispatch("Input.dispatchMouseEvent", json!({ "type": "mouseWheel", "x": at.x, "y": at.y, "deltaX": dx, "deltaY": dy, "modifiers": self.modifiers })).await
+        let wh = PointerEvent::Wheel { x: at.x, y: at.y, delta_x: dx, delta_y: dy, modifiers };
+        self.dispatch(move |d| async move { d.pointer(wh).await }).await
     }
 
     pub async fn key_down(&mut self, key: &KeyDef) -> Result<()> {
         if self.human {
             self.state.before_key().await;
         }
-        self.modifiers |= modifier_bit(&key.key);
-        // Shortcuts send no text; Shift alone still types.
-        let text = if self.modifiers & (CONTROL | ALT | META) != 0 { "" } else { key.text.as_str() };
-        let mut params = json!({
-            "type": if text.is_empty() { "rawKeyDown" } else { "keyDown" },
-            "modifiers": self.modifiers,
-            "windowsVirtualKeyCode": key.key_code,
-            "nativeVirtualKeyCode": key.key_code,
-            "code": key.code,
-            "key": key.key,
-            "text": text,
-            "unmodifiedText": text,
-            "location": key.location,
-            "autoRepeat": false,
-            "isKeypad": false,
-        });
-        if self.mac
-            && let Some(command) = mac_command(self.modifiers, &key.code) {
-                params["commands"] = json!([command]);
-            }
-        self.dispatch("Input.dispatchKeyEvent", params).await
+        self.modifiers.insert(modifier_flag(&key.key));
+        let event = KeyEvent {
+            down: true,
+            key: key.key.clone(),
+            code: key.code.clone(),
+            text: key.text.clone(),
+            modifiers: self.modifiers,
+            mac: self.mac,
+        };
+        self.dispatch(move |d| async move { d.key(event).await }).await
     }
 
     pub async fn key_up(&mut self, key: &KeyDef) -> Result<()> {
-        self.modifiers &= !modifier_bit(&key.key);
-        self.dispatch(
-            "Input.dispatchKeyEvent",
-            json!({ "type": "keyUp", "modifiers": self.modifiers, "key": key.key, "windowsVirtualKeyCode": key.key_code, "nativeVirtualKeyCode": key.key_code, "code": key.code, "location": key.location }),
-        )
-        .await
+        self.modifiers.remove(modifier_flag(&key.key));
+        let event = KeyEvent {
+            down: false,
+            key: key.key.clone(),
+            code: key.code.clone(),
+            text: String::new(),
+            modifiers: self.modifiers,
+            mac: self.mac,
+        };
+        self.dispatch(move |d| async move { d.key(event).await }).await
     }
 
-    /// Presses a combination like "Enter", "Control+A" or "ControlOrMeta+Shift+K". A single character with no US
-    /// key (é, ß, 你) is inserted as text.
     pub async fn press(&mut self, combo: &str) -> Result<()> {
         let mut chars = combo.chars();
         if let (Some(c), None) = (chars.next(), chars.next())
-            && char_definition(c).is_none() && key_definition(combo).is_none() {
-                if self.human {
-                    self.state.before_key().await;
-                }
-                return self.insert_text(combo).await;
+            && char_definition(c).is_none()
+            && key_definition(combo).is_none()
+        {
+            if self.human {
+                self.state.before_key().await;
             }
+            return self.insert_text(combo).await;
+        }
         let (modifiers, key) = parse_combo(combo, self.mac)?;
         let mut held = Vec::new();
         for modifier in &modifiers {
@@ -473,12 +455,13 @@ impl<'a> Input<'a> {
             held.push(def);
         }
         let mut def = key_definition(&key).unwrap();
-        // "Shift+a" types "A", as a real keyboard does.
-        if self.modifiers & SHIFT != 0 && def.key.chars().count() == 1
-            && let Some(upper) = shifted(&def.key) {
-                def.key = upper.clone();
-                def.text = upper;
-            }
+        if self.modifiers.contains(Modifiers::SHIFT)
+            && def.key.chars().count() == 1
+            && let Some(upper) = shifted(&def.key)
+        {
+            def.key = upper.clone();
+            def.text = upper;
+        }
         self.key_down(&def).await?;
         self.key_up(&def).await?;
         for def in held.iter().rev() {
@@ -487,13 +470,12 @@ impl<'a> Input<'a> {
         Ok(())
     }
 
-    /// Types text key by key; characters without a US key are inserted as text.
     pub async fn type_text(&mut self, text: &str, delay_ms: f64) -> Result<()> {
         for c in text.chars() {
             match char_definition(c) {
                 Some((def, needs_shift)) => {
                     let shift = key_definition("Shift").unwrap();
-                    if needs_shift && self.modifiers & SHIFT == 0 {
+                    if needs_shift && !self.modifiers.contains(Modifiers::SHIFT) {
                         self.key_down(&shift).await?;
                         self.key_down(&def).await?;
                         self.key_up(&def).await?;
@@ -518,13 +500,51 @@ impl<'a> Input<'a> {
     }
 
     pub async fn insert_text(&mut self, text: &str) -> Result<()> {
-        self.dispatch("Input.insertText", json!({ "text": text })).await
+        let text = text.to_string();
+        self.dispatch(move |d| async move { d.insert_text(&text).await }).await
     }
 
-    /// Releases held modifiers and buttons after a failed action, so the page is not left with keys down.
+    /// Performs a drag from `from` to `to`, delegating HTML5 drag interception to the driver.
+    pub async fn drag(&mut self, from: Point, to: Point, steps: usize) -> Result<DragOutcome> {
+        let path: Vec<PointerStep> = if self.human {
+            let bounds = self.viewport().await;
+            human::trajectory(from, to)
+                .into_iter()
+                .map(|(p, delay_ms)| {
+                    let p = human::clamp_point(p, bounds);
+                    PointerStep { x: p.x, y: p.y, delay_ms }
+                })
+                .collect()
+        } else if steps > 1 {
+            (1..steps)
+                .map(|i| {
+                    let t = i as f64 / steps as f64;
+                    PointerStep {
+                        x: from.x + (to.x - from.x) * t,
+                        y: from.y + (to.y - from.y) * t,
+                        delay_ms: 0.0,
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if self.page.dialog().is_some() {
+            return Err(Interrupted.into());
+        }
+        let outcome = tokio::select! {
+            result = self.page.driver().drag((from.x, from.y), (to.x, to.y), &path, self.modifiers) => {
+                result.map_err(crate::page::driver_error)?
+            }
+            _ = self.page.dialog_opened() => return Err(Interrupted.into()),
+        };
+        self.state.pointer = Some(to);
+        Ok(outcome)
+    }
+
     pub async fn reset(&mut self) {
         for name in ["Shift", "Control", "Alt", "Meta"] {
-            if self.modifiers & modifier_bit(name) != 0 {
+            if self.modifiers.contains(modifier_flag(name)) {
                 let def = key_definition(name).unwrap();
                 let _ = self.key_up(&def).await;
             }
@@ -534,14 +554,6 @@ impl<'a> Input<'a> {
                 let _ = self.up(button, 1).await;
             }
         }
-    }
-
-    pub async fn dispatch_drag(&self, kind: &str, at: Point, data: &Value) -> Result<()> {
-        self.dispatch("Input.dispatchDragEvent", json!({ "type": kind, "x": at.x, "y": at.y, "data": data, "modifiers": self.modifiers })).await
-    }
-
-    pub async fn set_intercept_drags(&self, enabled: bool) {
-        let _ = self.page.send_raw("Input.setInterceptDrags", json!({ "enabled": enabled }), None).await;
     }
 
     pub fn set_pointer(&mut self, point: Point) {
@@ -582,7 +594,7 @@ mod tests {
         assert!(char_definition('A').unwrap().1);
         assert_eq!(char_definition('?').unwrap().0.code, "Slash");
         assert_eq!(char_definition('é'), None);
-        assert_eq!(key_definition("F5").unwrap().key_code, 116);
+        assert_eq!(key_definition("F5").unwrap().code, "F5");
         assert_eq!(key_definition("Enter").unwrap().text, "\r");
     }
 }

@@ -1,5 +1,19 @@
-//! Shared contracts between the browse crates. Nothing here talks to a browser: the relay implements `Browser` and
-//! `Cdp`, the page and capture crates implement `Tool`s on top of them, and the binary wires everything together.
+//! Shared contracts between the browse crates. Nothing here talks to a browser or mentions any specific browser
+//! protocol: protocol crates (`browse-cdp`, `browse-bidi`, ...) implement `BrowserDriver`, `TabDriver`, and
+//! `CaptureDriver`; the relay implements `Browser`; the page, capture, and script crates implement `Tool`s on top
+//! of them; and the binary wires everything together.
+
+pub mod driver;
+
+pub use driver::{
+    Arg, BodyKind, BrowserDriver, BrowserEvent, CallOptions, CaptureDriver, CloseReason, ConsoleEntry, ConsoleEvent,
+    Dialog, DialogKind, DocumentId, DragOutcome, DriverError, DriverInfo, DriverResult, Emulation, Eval, Evaluated,
+    Frame, FrameId, Geolocation, GuardedTabDriver, Image, ImageFormat, JsError, KeyEvent, LoadState, MediaFeature,
+    MediaOverride, Modifiers, MouseButton, NavigationError, NavigationErrorKind, NavigationId, NetworkEvent,
+    NetworkOptions, NetworkRequest, PageEvent, PointerEvent, PointerStep, Realm, Receiver, Rect, RemoteRef, RequestId,
+    ResponseHead, Returns, Screencast, ScreencastFrame, ScreencastOptions, Screenshot, ScreenshotArea, Subscription,
+    TabDriver, TabPolicy, TargetId, UserPresence, Viewport, ViewportOverride, World,
+};
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -8,43 +22,16 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::Mutex;
 
 pub type TabId = i64;
-
-#[derive(Debug, thiserror::Error)]
-pub enum CdpError {
-    #[error("{0}")]
-    Protocol(String),
-    #[error("the tab is gone")]
-    TargetClosed,
-    #[error("the browser isn't connected")]
-    Disconnected,
-    #[error("timed out after {0} ms")]
-    Timeout(u64),
-}
-
-#[derive(Debug, Clone)]
-pub struct CdpEvent {
-    pub method: String,
-    pub params: Value,
-    /// The child target session the event came from (an out-of-process iframe, a worker); None for the tab itself.
-    pub session_id: Option<String>,
-}
-
-/// One tab's Chrome DevTools Protocol connection, routed through the extension's chrome.debugger.
-#[async_trait]
-pub trait Cdp: Send + Sync {
-    async fn send(&self, method: &str, params: Value, session_id: Option<&str>) -> Result<Value, CdpError>;
-    fn events(&self) -> broadcast::Receiver<CdpEvent>;
-}
 
 /// How an agent tab is opened, kept with it for its life (and across relay restarts). Popups a tab opens inherit
 /// these.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TabOptions {
-    /// A free-form label: the Chrome tab group's title, and a handle for closing several tabs at once.
+    /// A free-form label: the browser tab group's title, and a handle for closing several tabs at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     /// Hosts or origins the tab may load; None for no allowlist.
@@ -83,16 +70,33 @@ impl TabOptions {
         let allowed_origins = match args.get("allowedOrigins") {
             None | Some(Value::Null) => None,
             Some(Value::Array(items)) => Some(
-                items.iter().map(|v| v.as_str().map(str::to_string).ok_or_else(|| anyhow::anyhow!("allowedOrigins must be an array of strings"))).collect::<anyhow::Result<Vec<_>>>()?,
+                items
+                    .iter()
+                    .map(|v| {
+                        v.as_str()
+                            .map(str::to_string)
+                            .ok_or_else(|| anyhow::anyhow!("allowedOrigins must be an array of strings"))
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?,
             ),
             Some(_) => anyhow::bail!("allowedOrigins must be an array of strings"),
         };
-        Ok(Self { group: text("group")?, allowed_origins, read_only: flag("readOnly")?, keep_visible: flag("keepVisible")?, keep_open: flag("keepOpen")?, browser: text("browser")? })
+        Ok(Self {
+            group: text("group")?,
+            allowed_origins,
+            read_only: flag("readOnly")?,
+            keep_visible: flag("keepVisible")?,
+            keep_open: flag("keepOpen")?,
+            browser: text("browser")?,
+        })
     }
 
     /// The option arguments `from_args` reads that the call gave, to refuse them where they don't apply.
     pub fn given(args: &Value) -> Vec<&'static str> {
-        ["group", "allowedOrigins", "readOnly", "keepVisible", "keepOpen", "browser"].into_iter().filter(|key| args.get(*key).is_some_and(|v| !v.is_null())).collect()
+        ["group", "allowedOrigins", "readOnly", "keepVisible", "keepOpen", "browser"]
+            .into_iter()
+            .filter(|key| args.get(*key).is_some_and(|v| !v.is_null()))
+            .collect()
     }
 
     /// The JSON schema properties of the options for opening a tab.
@@ -116,34 +120,25 @@ pub struct TabInfo {
     pub tab: TabId,
     pub url: String,
     pub title: String,
-    /// A tab the user lent browse (the toolbar button), rather than one browse opened.
     #[serde(default)]
     pub lent: bool,
-    /// The caller-chosen id (`work-mail`), when the tab was opened with `tabs new` and an `id`.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "id")]
     pub chosen: Option<String>,
-    /// The tab whose page opened this one (a popup, target=_blank).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opener: Option<TabId>,
-    /// When an agent command last used the tab, ISO 8601.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "lastUsed")]
     pub last_used: Option<String>,
-    /// A call is running in the tab (or it is being opened for one).
     #[serde(default)]
     pub busy: bool,
-    /// A handoff waiting on the user in the tab: the call that asked is waiting for them to continue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<HandoffInfo>,
     #[serde(flatten)]
     pub options: TabOptions,
 }
 
-/// A handoff waiting on the user in a tab, with what it asked for.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandoffInfo {
-    /// What the agent asked the user to do in the tab.
     pub message: String,
-    /// When it started waiting, ISO 8601.
     #[serde(rename = "startedAt")]
     pub started_at: String,
 }
@@ -155,51 +150,30 @@ pub struct HandoffResult {
     pub note: Option<String>,
 }
 
-/// Why an action is refused on a tab opened with `readOnly`, shared by the CDP guardrails and the page tools.
-/// `command` is the CDP method or the tool name that was refused.
+/// Why an action is refused on a tab opened with `readOnly`.
 pub fn read_only_refusal(command: &str) -> String {
     format!(
         "browse blocked {command}: this tab is read-only. Read-only tabs can take snapshots and screenshots, read page information and subscribe to events. Open a tab without readOnly to interact with pages."
     )
 }
 
-/// What the relay offers tools: the tabs agents opened or the user lent, and the user-facing pieces only the
-/// extension can do. Every tab is addressed by its id; there is no current tab.
+/// What the harness host (relay) offers tools: tab registry, per-tab drivers, per-tab state, and user handoff.
 #[async_trait]
 pub trait Browser: Send + Sync {
-    /// Opens a background agent tab (at `url`, else about:blank) and waits for it to load.
     async fn open_tab(&self, url: Option<&str>, options: &TabOptions) -> anyhow::Result<TabInfo>;
-    /// The agent tabs and the tabs the user lent, as last seen (no browser round trip).
     async fn tabs(&self) -> anyhow::Result<Vec<TabInfo>>;
-    /// Closes an agent tab; a lent tab is given back to the user instead.
     async fn close_tab(&self, tab: TabId) -> anyhow::Result<()>;
-    async fn cdp(&self, tab: TabId) -> anyhow::Result<Arc<dyn Cdp>>;
-    /// The state tools keep for the tab. A tab that went away keeps it a little while, so a capture that ended with
-    /// it can still be collected.
+    async fn tab_driver(&self, tab: TabId) -> anyhow::Result<Arc<dyn TabDriver>>;
     async fn state(&self, tab: TabId) -> anyhow::Result<Arc<TabState>>;
     async fn handoff(&self, tab: TabId, message: &str) -> anyhow::Result<HandoffResult>;
-    /// The extension's "Human-like input" setting for the tab's browser (curved mouse paths, paced keys). On by
-    /// default; OPENCODE_BROWSER_HUMAN_INPUT overrides it in the page tools.
     async fn human_input(&self, _tab: TabId) -> bool {
         true
     }
-    /// Whether the browser connected to the relay over loopback. That is only a hint: each upload still proves the
-    /// browser reads this filesystem before browse hands it paths, by reading a file browse just wrote.
     async fn connected_locally(&self, _tab: TabId) -> bool {
         false
     }
-    /// Whether the tab was opened with `readOnly`. The page tools refuse input on such a tab before any CDP work
-    /// (the CDP methods they'd use go through Runtime, which read-only tabs allow for snapshots). An implementation
-    /// that can't see the tab right now (a browser reconnecting, a relay restart) waits for it and then answers;
-    /// false when nothing knows the tab.
     async fn read_only(&self, tab: TabId) -> bool;
-    /// A background activity in the tab started (`busy`) or ended: a network capture ("network") or a recording
-    /// ("recording"), keyed per kind. While any key is busy the tab counts as busy, so idle shutdown, idle tab cleanup
-    /// and relay restarts wait for it. Called again with `false` when the activity ends for any reason.
     fn set_busy(&self, _tab: TabId, _key: &str, _busy: bool) {}
-
-    /// The tab a tool argument names: a numeric id, or (in a relay that supports them) a caller-chosen id like
-    /// `work-mail`. Browsers without chosen ids accept integers only.
     fn resolve_tab(&self, value: &Value) -> anyhow::Result<TabId> {
         tab_arg(value)
     }
@@ -214,7 +188,6 @@ impl TabState {
         &self.0
     }
 
-    /// The value under `key`, made with `make` the first time.
     pub async fn get_or_insert<T: Clone + Send + 'static>(&self, key: &str, make: impl FnOnce() -> T) -> T {
         let mut map = self.0.lock().await;
         if let Some(value) = map.get(key).and_then(|v| v.downcast_ref::<T>()) {
@@ -229,7 +202,6 @@ impl TabState {
 #[derive(Clone)]
 pub struct ToolContext {
     pub browser: Arc<dyn Browser>,
-    /// Folders tools may read or write files in (uploads, screenshots, downloads, HAR files).
     pub file_roots: Vec<std::path::PathBuf>,
 }
 
@@ -239,10 +211,8 @@ impl ToolContext {
     }
 }
 
-/// What a tool says when a call needs a tab and names none.
 pub const MISSING_TAB: &str = "Pass `tab`: the id navigate (or tabs new) returned, or a chosen id like `work-mail`. To open a tab, call navigate with a url; tabs lists the tabs you can use.";
 
-/// The `tab` argument a tool needs, or the error telling the agent where to get one.
 pub fn require_tab(args: &Value) -> anyhow::Result<TabId> {
     match args.get("tab") {
         None | Some(Value::Null) => anyhow::bail!(MISSING_TAB),
@@ -250,16 +220,12 @@ pub fn require_tab(args: &Value) -> anyhow::Result<TabId> {
     }
 }
 
-/// A `tab` argument (or an entry of `tabs`): the relay's numeric tab id, or a caller-chosen id like `work-mail`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TabArg {
     Id(TabId),
     Chosen(String),
 }
 
-/// What a `tab` argument means. Some MCP clients send numbers as JSON strings, so a string of ASCII digits and
-/// nothing else is the number it spells; a chosen id always starts with a letter, so the two can't be confused.
-/// Whitespace is never accepted around a numeric id, and a digit string too large for `TabId` is refused.
 pub fn tab_argument(value: &Value) -> anyhow::Result<TabArg> {
     match value {
         Value::Number(_) => match value.as_i64() {
@@ -268,7 +234,9 @@ pub fn tab_argument(value: &Value) -> anyhow::Result<TabArg> {
         },
         Value::String(text) => {
             if !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) {
-                let tab = text.parse::<TabId>().map_err(|_| anyhow::anyhow!("tab id {text} is too large; browse's tab ids are 64-bit integers"))?;
+                let tab = text
+                    .parse::<TabId>()
+                    .map_err(|_| anyhow::anyhow!("tab id {text} is too large; browse's tab ids are 64-bit integers"))?;
                 return Ok(TabArg::Id(tab));
             }
             let chosen = text.trim();
@@ -291,8 +259,6 @@ fn invalid_tab_id(value: &Value) -> anyhow::Error {
     anyhow::anyhow!("tab must be a numeric tab id (from navigate or tabs) or a chosen id like `work-mail`, not {value}")
 }
 
-/// A numeric tab id argument. A chosen id is resolved against the relay before tools run
-/// (`Browser::resolve_tab`), and by the `tabs` tool itself.
 pub fn tab_arg(value: &Value) -> anyhow::Result<TabId> {
     match tab_argument(value)? {
         TabArg::Id(tab) => Ok(tab),
@@ -300,16 +266,16 @@ pub fn tab_arg(value: &Value) -> anyhow::Result<TabId> {
     }
 }
 
-/// A caller-chosen tab id: a lowercase slug, `^[a-z][a-z0-9-]{0,63}$`, so it can never be mistaken for a number.
 pub fn valid_chosen_id(value: &str) -> bool {
     let bytes = value.as_bytes();
     let Some(first) = bytes.first() else { return false };
     bytes.len() <= 64
         && first.is_ascii_lowercase()
-        && bytes[1..].iter().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+        && bytes[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
 }
 
-/// The schema of a required `tab` argument.
 pub fn tab_schema() -> Value {
     serde_json::json!({
         "type": ["integer", "string"],
@@ -354,19 +320,13 @@ pub trait Tool: Send + Sync {
     async fn call(&self, ctx: ToolContext, args: Value) -> anyhow::Result<ToolOutput>;
 }
 
-/// `browse mcp` → relay: POST /tools/call. `GET /tools` returns `Vec<ToolSpec>`. Both take the MCP client's name in
-/// the `OpenCode-Browser-Client` header (CLIENT_HEADER), which decides the tools and instructions it gets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallRequest {
     pub name: String,
     pub arguments: Value,
 }
 
-/// The header naming the MCP client (its `clientInfo.name`) on /tools, /instructions and /tools/call.
 pub const CLIENT_HEADER: &str = "OpenCode-Browser-Client";
-
-/// A key the caller picks for one POST /tools/call, so POST /tools/cancel can stop that call (an MCP client's
-/// `notifications/cancelled`).
 pub const CALL_HEADER: &str = "OpenCode-Browser-Call";
 
 #[cfg(test)]
@@ -380,7 +340,6 @@ mod tests {
         assert_eq!(tab_argument(&json!("633559866")).unwrap(), TabArg::Id(633559866));
         assert_eq!(tab_argument(&json!(633559866)).unwrap(), TabArg::Id(633559866));
         assert_eq!(tab_arg(&json!("633559866")).unwrap(), 633559866);
-        // A digit string still names a tab; the relay decides whether that tab exists.
         assert_eq!(tab_argument(&json!("007")).unwrap(), TabArg::Id(7));
     }
 
@@ -394,7 +353,21 @@ mod tests {
 
     #[test]
     fn invalid_tab_ids_are_refused() {
-        for value in [json!(""), json!("   "), json!("12a"), json!("-5"), json!("+5"), json!(" 12 "), json!("1.5"), json!("99999999999999999999"), json!(1.5), json!(-5), json!(true), json!({}), json!([])] {
+        for value in [
+            json!(""),
+            json!("   "),
+            json!("12a"),
+            json!("-5"),
+            json!("+5"),
+            json!(" 12 "),
+            json!("1.5"),
+            json!("99999999999999999999"),
+            json!(1.5),
+            json!(-5),
+            json!(true),
+            json!({}),
+            json!([]),
+        ] {
             assert!(tab_argument(&value).is_err(), "{value} must not be a tab id");
         }
         assert!(tab_argument(&json!("99999999999999999999")).unwrap_err().to_string().contains("too large"));

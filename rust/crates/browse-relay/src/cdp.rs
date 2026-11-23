@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use browse_core::{Cdp, CdpError, CdpEvent, TabId};
+use browse_cdp::{Cdp, CdpError, CdpEvent};
+use browse_core::TabId;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 

@@ -17,5 +17,6 @@ tracing.workspace = true
 regex-lite = "0.1"
 
 [dev-dependencies]
+browse-cdp.workspace = true
 tokio-tungstenite = "0.24"
 futures-util = "0.3"

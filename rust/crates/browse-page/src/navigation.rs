@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
-use serde_json::{Value, json};
+use browse_core::{DriverError, LoadState, NavigationErrorKind, NavigationId};
+use serde_json::Value;
 
 use crate::page::{TabEvent, TabPage, v};
 use crate::state::PageTab;
@@ -94,17 +95,22 @@ pub fn normalize_url(url: &str) -> Result<String> {
     Ok(format!("https://{url}"))
 }
 
-fn ready_state_matches(state: &str, name: &str) -> bool {
-    match name {
-        "load" => state == "complete",
-        "DOMContentLoaded" => state == "interactive" || state == "complete",
-        _ => false,
+fn ready_state_matches(state: &str, target: LoadState) -> bool {
+    match target {
+        LoadState::Load => state == "complete",
+        LoadState::DomContentLoaded => state == "interactive" || state == "complete",
+        LoadState::NetworkIdle => false,
     }
 }
 
-/// Waits for a lifecycle state of the main frame's current document (`loader` when known), falling back to
+/// Waits for a lifecycle state of the main frame's current document (`navigation` when known), falling back to
 /// document.readyState for documents restored from the back/forward cache, which fire no lifecycle events.
-pub async fn wait_lifecycle(page: &Arc<TabPage>, name: &str, loader: Option<&str>, deadline: Instant) -> bool {
+pub async fn wait_lifecycle(
+    page: &Arc<TabPage>,
+    target: LoadState,
+    navigation: Option<&NavigationId>,
+    deadline: Instant,
+) -> bool {
     let mut last_probe = Instant::now();
     loop {
         if page.blocking_dialog().is_some() {
@@ -112,14 +118,14 @@ pub async fn wait_lifecycle(page: &Arc<TabPage>, name: &str, loader: Option<&str
         }
         let main = page.main_frame();
         if let Some(frame) = page.frame(&main) {
-            let right_document = loader.map(|l| frame.loader_id == l).unwrap_or(true);
-            if right_document && frame.lifecycle.contains(name) {
+            let right_document = navigation.map(|id| frame.navigation.as_ref() == Some(id)).unwrap_or(true);
+            if right_document && frame.lifecycle.contains(&target) {
                 return true;
             }
             if right_document && last_probe.elapsed() >= Duration::from_millis(400) {
                 last_probe = Instant::now();
                 if let Ok(Ok(info)) = tokio::time::timeout(Duration::from_millis(500), page.call_value(&main, "frameInfo", vec![], false)).await
-                    && ready_state_matches(info["readyState"].as_str().unwrap_or(""), name) {
+                    && ready_state_matches(info["readyState"].as_str().unwrap_or(""), target) {
                         return true;
                     }
             }
@@ -132,12 +138,12 @@ pub async fn wait_lifecycle(page: &Arc<TabPage>, name: &str, loader: Option<&str
     }
 }
 
-/// After load: the network goes quiet (Chrome's networkAlmostIdle) and the DOM stops changing, within a cap.
+/// After load: the network goes quiet and the DOM stops changing, within a cap.
 pub async fn settle(page: &Arc<TabPage>, deadline: Instant) {
     let cap = deadline.min(Instant::now() + Duration::from_secs(5));
     let main = page.main_frame();
     page.wait_until(cap.saturating_duration_since(Instant::now()), Duration::from_millis(100), |page| {
-        page.lifecycle_has(&main, "networkAlmostIdle") || page.lifecycle_has(&main, "networkIdle") || page.blocking_dialog().is_some()
+        page.lifecycle_has(&main, LoadState::NetworkIdle) || page.blocking_dialog().is_some()
     })
     .await;
     if page.dialog().is_none() {
@@ -148,20 +154,20 @@ pub async fn settle(page: &Arc<TabPage>, deadline: Instant) {
     }
 }
 
-async fn wait_for_state(page: &Arc<TabPage>, wait: WaitUntil, loader: Option<&str>, deadline: Instant) -> bool {
+async fn wait_for_state(page: &Arc<TabPage>, wait: WaitUntil, navigation: Option<&NavigationId>, deadline: Instant) -> bool {
     match wait {
         WaitUntil::None => true,
         WaitUntil::Commit => {
-            let Some(loader) = loader else { return true };
+            let Some(navigation) = navigation else { return true };
             page.wait_until(deadline.saturating_duration_since(Instant::now()), Duration::from_millis(50), |page| {
-                page.frame(&page.main_frame()).map(|f| f.loader_id == loader).unwrap_or(false) || page.blocking_dialog().is_some()
+                page.frame(&page.main_frame()).map(|f| f.navigation.as_ref() == Some(navigation)).unwrap_or(false) || page.blocking_dialog().is_some()
             })
             .await
         }
-        WaitUntil::DomContentLoaded => wait_lifecycle(page, "DOMContentLoaded", loader, deadline).await,
-        WaitUntil::Load => wait_lifecycle(page, "load", loader, deadline).await,
+        WaitUntil::DomContentLoaded => wait_lifecycle(page, LoadState::DomContentLoaded, navigation, deadline).await,
+        WaitUntil::Load => wait_lifecycle(page, LoadState::Load, navigation, deadline).await,
         WaitUntil::Settle => {
-            let loaded = wait_lifecycle(page, "load", loader, deadline).await;
+            let loaded = wait_lifecycle(page, LoadState::Load, navigation, deadline).await;
             if loaded {
                 settle(page, deadline).await;
             }
@@ -190,31 +196,28 @@ async fn blocking_dialog(page: &Arc<TabPage>) {
 
 pub async fn goto(page: &Arc<TabPage>, url: &str, wait: WaitUntil, timeout: Duration, referrer: Option<&str>) -> Result<NavResult> {
     let deadline = Instant::now() + timeout;
-    let mut params = json!({ "url": url });
-    if let Some(referrer) = referrer {
-        params["referrer"] = json!(referrer);
-    }
     let seq = page.event_seq();
-    // Page.navigate answers once the server responds, so a slow server would hold it past the timeout.
     let result = tokio::select! {
-        result = page.send_raw("Page.navigate", params, None) => result?,
+        result = page.driver().navigate(url, referrer) => result,
         _ = tokio::time::sleep_until(deadline.into()) => return Ok(NavResult { timed_out: true, pending: Some(url.to_string()) }),
         _ = blocking_dialog(page) => return Ok(NavResult::default()),
     };
-    if let Some(error) = result["errorText"].as_str().filter(|e| !e.is_empty()) {
-        // An HTTP error status with an empty body: Chrome shows its error page, but the server did answer.
-        if error != "net::ERR_HTTP_RESPONSE_CODE_FAILURE" {
-            let scheme = url.split(':').next().unwrap_or("").to_ascii_lowercase();
-            if scheme == "data" {
-                bail!("Navigation to the data: URL failed ({error}): Chrome blocks some top-level data: URL navigations. Serve the content from a real URL, or set it with eval (document.body.innerHTML = …)");
-            }
-            if error.contains("ERR_ABORTED") {
-                bail!("Navigation to {url} was aborted ({error}): the response may be a download (check downloads), or the page cancelled it");
-            }
-            bail!("Navigation to {url} failed: {error}");
-        }
-    }
-    let Some(loader) = result["loaderId"].as_str().map(str::to_string) else {
+    let navigation = match result {
+        Ok(nav) => nav,
+        Err(DriverError::Navigation(nav_err)) => match nav_err.kind {
+            NavigationErrorKind::Blocked => bail!(
+                "Navigation to the data: URL failed ({}): browsers block some top-level data: URL navigations. Serve the content from a real URL, or set it with eval (document.body.innerHTML = …)",
+                nav_err.detail
+            ),
+            NavigationErrorKind::Aborted => bail!(
+                "Navigation to {url} was aborted ({}): the response may be a download (check downloads), or the page cancelled it",
+                nav_err.detail
+            ),
+            NavigationErrorKind::Failed => bail!("Navigation to {url} failed: {}", nav_err.detail),
+        },
+        Err(error) => return Err(crate::page::driver_error(error)),
+    };
+    let Some(navigation) = navigation else {
         // A same-document navigation (only the fragment changed): wait for the URL change to be seen.
         page.wait_until(deadline.saturating_duration_since(Instant::now()).min(Duration::from_millis(1_000)), Duration::from_millis(20), |page| {
             page.events_since(seq).iter().any(|e| matches!(e, TabEvent::Navigated { .. }))
@@ -222,21 +225,18 @@ pub async fn goto(page: &Arc<TabPage>, url: &str, wait: WaitUntil, timeout: Dura
         .await;
         return Ok(NavResult::default());
     };
-    let ok = wait_for_state(page, wait, Some(&loader), deadline).await;
-    let committed = page.frame(&page.main_frame()).map(|f| f.loader_id == loader).unwrap_or(false);
+    let ok = wait_for_state(page, wait, Some(&navigation), deadline).await;
+    let committed = page.frame(&page.main_frame()).map(|f| f.navigation.as_ref() == Some(&navigation)).unwrap_or(false);
     Ok(NavResult { timed_out: !ok, pending: (!committed && !ok).then(|| url.to_string()) })
 }
 
 pub async fn history(page: &Arc<TabPage>, delta: i64, wait: WaitUntil, timeout: Duration) -> Result<Option<NavResult>> {
     let deadline = Instant::now() + timeout;
-    let history = page.send("Page.getNavigationHistory", json!({}), None).await?;
-    let index = history["currentIndex"].as_i64().unwrap_or(0) + delta;
-    let entries = history["entries"].as_array().cloned().unwrap_or_default();
-    let Some(entry) = usize::try_from(index).ok().and_then(|i| entries.get(i)) else {
-        return Ok(None);
-    };
     let seq = page.event_seq();
-    page.send_raw("Page.navigateToHistoryEntry", json!({ "entryId": entry["id"] }), None).await?;
+    let moved = page.guard_dialog(page.driver().traverse_history(delta as i32)).await?;
+    if !moved {
+        return Ok(None);
+    }
     let committed = page
         .wait_until(deadline.saturating_duration_since(Instant::now()), Duration::from_millis(50), |page| {
             page.events_since(seq).iter().any(|e| matches!(e, TabEvent::Navigated { .. })) || page.blocking_dialog().is_some()
@@ -253,7 +253,7 @@ pub async fn history(page: &Arc<TabPage>, delta: i64, wait: WaitUntil, timeout: 
 pub async fn reload(page: &Arc<TabPage>, wait: WaitUntil, timeout: Duration, ignore_cache: bool) -> Result<NavResult> {
     let deadline = Instant::now() + timeout;
     let seq = page.event_seq();
-    page.send_raw("Page.reload", json!({ "ignoreCache": ignore_cache }), None).await?;
+    page.driver().reload(ignore_cache).await.map_err(crate::page::driver_error)?;
     let committed = page
         .wait_until(deadline.saturating_duration_since(Instant::now()), Duration::from_millis(50), |page| {
             page.events_since(seq).iter().any(|e| matches!(e, TabEvent::Navigated { same_document: false, .. })) || page.blocking_dialog().is_some()
@@ -262,8 +262,8 @@ pub async fn reload(page: &Arc<TabPage>, wait: WaitUntil, timeout: Duration, ign
     if !committed {
         return Ok(NavResult { timed_out: true, pending: page.pending_navigation() });
     }
-    let loader = page.frame(&page.main_frame()).map(|f| f.loader_id);
-    let ok = wait_for_state(page, wait, loader.as_deref(), deadline).await;
+    let navigation = page.frame(&page.main_frame()).and_then(|f| f.navigation);
+    let ok = wait_for_state(page, wait, navigation.as_ref(), deadline).await;
     Ok(NavResult { timed_out: !ok, pending: None })
 }
 
@@ -378,9 +378,9 @@ pub async fn wait_for(page: &Arc<TabPage>, tab_state: &PageTab, conditions: &Wai
                 bail!("Timed out after {} ms waiting for {load}: the navigation to {pending} has not committed yet", timeout.as_millis());
             }
         }
-        let loader = page.frame(&page.main_frame()).map(|f| f.loader_id).filter(|l| !l.is_empty());
+        let navigation = page.frame(&page.main_frame()).and_then(|f| f.navigation);
         let load = if load == WaitUntil::None { WaitUntil::Commit } else { load };
-        if !wait_for_state(page, load, loader.as_deref(), deadline).await {
+        if !wait_for_state(page, load, navigation.as_ref(), deadline).await {
             bail!("Timed out after {} ms waiting for the page to reach {load} (it is at {})", timeout.as_millis(), page.main_url());
         }
     }
