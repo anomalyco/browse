@@ -217,7 +217,7 @@ extension from your browser to finish.
   extension has "Allow access to file URLs" turned on in the browser's extensions page (browse → Details): that lets
   the extension read files on this computer, and browse only hands it files from its file roots. Otherwise browse
   copies the files in, up to 50 MB per call. Files that aren't on the relay's machine can be passed inline as base64
-  (`{ name, data }`), which always copies them in.
+  (`{ name, data }`); those are always copied in and fit about 12 MB per call.
 - **Several browsers at once.** Each connected browser has an id (like `chrome-macbook`); `status` lists them, and new
   tabs open in the default browser unless `browser` names another.
 - **Settings** (the extension's options page, applied right away): where agent tabs open (your window or their own),

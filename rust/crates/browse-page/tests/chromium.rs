@@ -434,6 +434,8 @@ async fn upload_accepts_inline_files_and_mixes_them_with_paths() {
     assert_eq!(files[1]["size"], 2);
     assert_eq!(files[1]["type"], "application/json");
     assert_eq!(files[1]["content"], "{}");
+    // No lastModified given: browse stamps it now rather than 1970.
+    assert!(files[1]["lastModified"].as_u64().unwrap() > 1_704_067_200_000, "{}", files[1]);
     assert_eq!(files[2]["name"], "local.txt");
     assert_eq!(files[2]["content"], "local bytes");
 }

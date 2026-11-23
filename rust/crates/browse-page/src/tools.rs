@@ -1318,7 +1318,9 @@ async fn set_files_by_copy(page: &Arc<TabPage>, input: &crate::page::Element, fi
     if total > MAX_UPLOAD_BYTES {
         bail!("upload: the files are {:.1} MB together; browse uploads at most {} MB per call", total as f64 / 1_048_576.0, MAX_UPLOAD_BYTES / 1_048_576);
     }
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok();
+    let stamp = now.map(|d| d.as_nanos()).unwrap_or(0);
+    let now_ms = now.map(|d| d.as_millis() as u64).unwrap_or(0);
     let mut sent_files = Vec::new();
     let ids: Vec<String> = (0..files.len()).map(|i| format!("{stamp:x}-{i}")).collect();
     let sent = async {
@@ -1331,7 +1333,7 @@ async fn set_files_by_copy(page: &Arc<TabPage>, input: &crate::page::Element, fi
                 }
                 UploadFile::Inline(file) => {
                     let mime = file.mime_type.clone().filter(|mime| !mime.is_empty()).unwrap_or_else(|| mime_type(std::path::Path::new(&file.name)).to_string());
-                    (file.name.clone(), mime, file.last_modified.unwrap_or(0))
+                    (file.name.clone(), mime, file.last_modified.unwrap_or(now_ms))
                 }
             };
             match file {
@@ -1941,7 +1943,7 @@ fn dialog_schema() -> Value {
     )
 }
 
-const UPLOAD: &str = "Set the files of a file input (input[type=file], or its label) without opening the file chooser. files are absolute paths inside browse's file roots, on the machine browse runs on, or inline { name, data } objects whose data is the file's bytes as base64 (for files on another machine). When the browser is on that machine and can read the paths, it takes them straight from disk (no size limit, real input and change events); otherwise browse copies them in, at most 50 MB per call, and any inline file always copies in. The reply's via says whether the browser read them from disk (paths) or browse copied them in (copy).";
+const UPLOAD: &str = "Set the files of a file input (input[type=file], or its label) without opening the file chooser. files are absolute paths inside browse's file roots, on the machine browse runs on, or inline { name, data } objects whose data is the file's bytes as base64 (for files on another machine). When the browser is on that machine and can read the paths, it takes them straight from disk (no size limit, real input and change events); otherwise browse copies them in, at most 50 MB per call. Inline files always copy in and fit about 12 MB per call. The reply's via says whether the browser read them from disk (paths) or browse copied them in (copy).";
 
 fn upload_schema() -> Value {
     let inline = json!({
