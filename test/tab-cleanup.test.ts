@@ -147,12 +147,6 @@ describe("closing a tab in an agent group", () => {
 })
 
 describe("closing the last tab of the last window", () => {
-  /** A browser start reads the platform again, so tests can switch between macOS and the rest. */
-  function usePlatform(os: string) {
-    stub.chrome.runtime.getPlatformInfo = async () => ({ os, arch: "x64", nacl_arch: "x64" })
-    ;(stub.chrome.runtime as unknown as { onStartup: StubEvent }).onStartup.emit()
-  }
-
   /** `count` agent tabs left as their window's only tabs. */
   async function onlyTabsInWindow(count: number, windowId = window) {
     const tabIds: number[] = []
@@ -167,7 +161,6 @@ describe("closing the last tab of the last window", () => {
   }
 
   test("opens a plain new tab in the window before closing it", async () => {
-    usePlatform("linux")
     const [tabId] = await onlyTabsInWindow(1)
     const created: Array<{ windowId?: number; url?: string }> = []
     const order: string[] = []
@@ -198,7 +191,6 @@ describe("closing the last tab of the last window", () => {
   })
 
   test("with another normal window open, closes it without a new tab", async () => {
-    usePlatform("linux")
     const [tabId] = await onlyTabsInWindow(1)
     await stub.chrome.windows.create({ url: "https://other.example/", focused: true })
     const created: Array<{ windowId?: number; url?: string }> = []
@@ -218,7 +210,6 @@ describe("closing the last tab of the last window", () => {
   })
 
   test("two closes at once leave one plain new tab", async () => {
-    usePlatform("linux")
     const [first, second] = await onlyTabsInWindow(2)
     const created: Array<{ windowId?: number; url?: string }> = []
     const create = stub.chrome.tabs.create
@@ -241,7 +232,6 @@ describe("closing the last tab of the last window", () => {
   })
 
   test("a replacement that can't be created keeps the tab, its group and its tracking", async () => {
-    usePlatform("linux")
     const [tabId] = await onlyTabsInWindow(1)
     const groupId = await stub.chrome.tabs.group({ tabIds: [tabId] })
     await stub.chrome.tabGroups.update(groupId, { title: `github${MARKER}` })
@@ -261,7 +251,6 @@ describe("closing the last tab of the last window", () => {
   })
 
   test("a hung Chrome call fails its close and the queue moves on", async () => {
-    usePlatform("linux")
     const [hung, other] = await onlyTabsInWindow(2)
     const get = stub.chrome.tabs.get
     stub.chrome.tabs.get = async (id) => {
@@ -281,7 +270,6 @@ describe("closing the last tab of the last window", () => {
   }, 20_000)
 
   test("a window lookup that hangs counts as the last window, so a new tab is created", async () => {
-    usePlatform("linux")
     const [tabId] = await onlyTabsInWindow(1)
     stub.state.getAllHangs = true
     const created: Array<{ windowId?: number }> = []
@@ -301,7 +289,6 @@ describe("closing the last tab of the last window", () => {
   }, 10_000)
 
   test("a popup as the last window gets a normal window instead of a tab in the popup", async () => {
-    usePlatform("linux")
     const popup = (await stub.chrome.windows.create({ type: "popup", url: "https://popup.example/", focused: false })).id
     const [tabId] = await onlyTabsInWindow(1, popup)
     await stub.chrome.windows.remove(window)
@@ -339,21 +326,33 @@ describe("closing the last tab of the last window", () => {
     }
   })
 
-  test("on macOS closing the last tab needs no replacement", async () => {
-    usePlatform("mac")
+  test("closing the last tab directly also leaves a plain tab first", async () => {
     const [tabId] = await onlyTabsInWindow(1)
-    const created: unknown[] = []
+    const created: Array<{ windowId?: number; url?: string }> = []
+    const order: string[] = []
     const create = stub.chrome.tabs.create
+    const remove = stub.chrome.tabs.remove
     stub.chrome.tabs.create = async (options) => {
+      order.push("create")
       created.push(options)
       return create(options)
     }
+    stub.chrome.tabs.remove = async (ids) => {
+      order.push("remove")
+      return remove(ids)
+    }
     try {
       await TabCleanup.closeAgentTab(tabId)
-      expect(created).toEqual([])
+      expect(order).toEqual(["create", "remove"])
+      // No url: the browser's new-tab page, not another agent page.
+      expect(created).toEqual([{ windowId: window }])
       expect(open(tabId)).toBe(false)
+      const [replacement] = await stub.chrome.tabs.query({ windowId: window })
+      expect(replacement!.groupId).toBe(-1)
+      expect(await TabCleanup.isTracked(replacement!.id!)).toBe(false)
     } finally {
       stub.chrome.tabs.create = create
+      stub.chrome.tabs.remove = remove
     }
   })
 })
