@@ -561,8 +561,15 @@ pub fn status(args: &[String]) -> anyhow::Result<i32> {
                 let text = |k: &str| browser.get(k).and_then(Value::as_str).unwrap_or("?").to_owned();
                 println!("Browser:   {} ({}){}", text("name"), text("id"), if browser["default"] == true { ", default" } else { "" });
             }
-            let tabs = status.get("targets").and_then(Value::as_array).map_or(0, Vec::len);
-            println!("Tabs:      {tabs} (`browse status --json` or `browse tabs` for details)");
+            let tabs = status.get("targets").and_then(Value::as_array);
+            println!("Tabs:      {} (`browse status --json` or `browse tabs` for details)", tabs.map_or(0, Vec::len));
+            for target in tabs.into_iter().flatten() {
+                let Some(handoff) = target.get("handoff") else { continue };
+                let tab = target.get("tab").and_then(Value::as_i64).unwrap_or_default();
+                let url = target.get("url").and_then(Value::as_str).unwrap_or_default();
+                let message = handoff.get("message").and_then(Value::as_str).unwrap_or_default();
+                println!("Waiting:   tab {tab} ({url}) waiting on you: {message}");
+            }
         }
         None => println!("Relay:     not running at {} (it starts when an agent uses browse)", relay_api::endpoint()),
     }

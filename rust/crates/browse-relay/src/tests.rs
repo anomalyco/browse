@@ -1544,6 +1544,41 @@ async fn a_chosen_id_is_get_or_create_and_listed_with_the_callers_id() {
     assert_eq!(seen.commands("tabs.create").len(), 1, "a refused id opens nothing");
 }
 
+/// A tab with a handoff waits on the user: `tabs` and `status` say so, with the message and since when, and
+/// stop saying so once it finishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_waiting_handoff_is_listed_with_its_message_and_clears_after() {
+    let (h, _seen, _events) = connected("profile-handoff-listing", 310).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let waiting = browser.open_tab(None, &TabOptions::default()).await.unwrap().tab;
+    let quiet = browser.open_tab(None, &TabOptions::default()).await.unwrap().tab;
+    let call = {
+        let relay = relay.clone();
+        tokio::spawn(async move { tool(&relay, "handoff", json!({ "message": "finish the checkout", "tab": waiting, "timeoutSeconds": 30 })).await })
+    };
+    eventually("the handoff", || relay.st().handoffs.contains_key(&waiting)).await;
+
+    let entry = |listed: &Value, tab: i64| listed["tabs"].as_array().unwrap().iter().find(|t| t["tab"] == tab).cloned().unwrap();
+    let listed = text(&serde_json::to_value(tool(&relay, "tabs", json!({})).await).unwrap());
+    let on = entry(&listed, waiting);
+    assert_eq!(on["handoff"]["message"], "finish the checkout", "{on}");
+    assert!(on["handoff"]["startedAt"].as_str().is_some_and(|time| time.ends_with('Z')), "ISO 8601 UTC like lastUsed: {on}");
+    assert_eq!(on["busy"], true, "{on}");
+    assert!(entry(&listed, quiet).get("handoff").is_none(), "a tab with no handoff says nothing about one: {listed}");
+
+    // `status` lists the same shape from the same state.
+    let status = text(&serde_json::to_value(tool(&relay, "status", json!({})).await).unwrap());
+    assert_eq!(entry(&status, waiting)["handoff"], on["handoff"], "{status}");
+    assert!(entry(&status, quiet).get("handoff").is_none(), "{status}");
+
+    // It clears with the handoff, not by being copied into the listing.
+    relay.finish_handoff(waiting, "continued");
+    tokio::time::timeout(Duration::from_secs(5), call).await.unwrap().unwrap();
+    let listed = text(&serde_json::to_value(tool(&relay, "tabs", json!({})).await).unwrap());
+    assert!(entry(&listed, waiting).get("handoff").is_none(), "the handoff finished: {listed}");
+}
+
 #[tokio::test]
 async fn a_numeric_tab_id_sent_as_a_string_is_the_tab() {
     let (h, _seen, _events) = connected("profile-numeric-string", 350).await;

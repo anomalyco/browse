@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, Weak};
 use std::time::{Duration, Instant};
 
-use browse_core::{CdpEvent, TabOptions, TabState, Tool};
+use browse_core::{CdpEvent, HandoffInfo, TabOptions, TabState, Tool};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{Notify, broadcast, oneshot};
@@ -144,6 +144,13 @@ pub struct Handoff {
     /// The process whose call waits for it.
     pub pid: Option<u32>,
     pub done: Option<oneshot::Sender<&'static str>>,
+}
+
+impl Handoff {
+    /// How a tab's info shows it: what the user is asked to do, and since when.
+    pub fn info(&self) -> HandoffInfo {
+        HandoffInfo { message: self.message.clone(), started_at: self.started_at.clone() }
+    }
 }
 
 #[derive(Default)]
