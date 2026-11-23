@@ -502,6 +502,43 @@ async fn navigation_respects_the_tab_allowlist() {
     assert!(relay.st().tabs[&9].warnings[0].contains("Domain allowlist"), "the tab carries the news to its next call");
 }
 
+/// A navigate call whose page the allowlist sends back ends with the allowlist's error right away; other calls keep
+/// getting it as a warning.
+#[tokio::test]
+async fn an_allowlist_block_ends_the_navigate_call_that_caused_it() {
+    let (h, _seen, events) = connected("profile-allow-nav", 300).await;
+    let relay = h.handle.relay.clone();
+    let strict = TabOptions { allowed_origins: Some(vec!["example.com".into()]), ..TabOptions::default() };
+    let tab = h.handle.browser().open_tab(None, &strict).await.unwrap().tab;
+    let running = |id: u64, tool: &str| {
+        let task = tokio::spawn(async { std::future::pending::<()>().await });
+        relay.inflight.lock().unwrap().insert(id, crate::relay::InFlight { tool: tool.into(), tab: Some(tab), since: std::time::Instant::now() });
+        relay.call_started(id, task.abort_handle(), None, None);
+        relay.st().calls.get_mut(&id).unwrap().tabs.insert(tab);
+        task
+    };
+    let leave = |url: &str| {
+        let main = relay.st().tabs[&tab].main_frame.clone().unwrap_or_else(|| relay.st().tabs[&tab].target_id.clone());
+        events.send(json!({ "method": "debugger.event", "params": { "tabId": tab, "method": "Page.frameNavigated", "params": { "frame": { "id": main, "url": url } } } })).unwrap();
+    };
+
+    let navigate = running(1, "navigate");
+    leave("https://evil.test/");
+    eventually("the navigate call to stop", || navigate.is_finished()).await;
+    let error = relay.st().stopped.get(&1).cloned().unwrap_or_default();
+    assert!(error.starts_with(&format!("Domain allowlist: tab {tab} went to https://evil.test/")), "{error}");
+    assert!(relay.st().tabs[&tab].warnings.is_empty(), "the error carries the news, not a warning as well");
+    relay.call_finished(1);
+    relay.inflight.lock().unwrap().remove(&1);
+
+    let click = running(2, "click");
+    leave("https://evil.test/again");
+    eventually("the warning", || !relay.st().tabs[&tab].warnings.is_empty()).await;
+    assert!(!click.is_finished(), "only navigate calls end early");
+    relay.call_finished(2);
+    click.abort();
+}
+
 #[tokio::test]
 async fn background_work_keeps_a_tab_busy() {
     let (h, _seen, _events) = connected("profile-busy", 200).await;

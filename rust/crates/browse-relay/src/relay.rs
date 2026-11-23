@@ -215,6 +215,16 @@ pub struct State {
 }
 
 impl State {
+    /// Ends the running calls among `ids` that work in `tab`, with `message` as their error; returns how many.
+    pub fn stop_calls_with_ids(&mut self, ids: &[u64], tab: i64, message: &str) -> usize {
+        let picked: Vec<u64> = ids.iter().copied().filter(|id| self.calls.get(id).is_some_and(|call| call.tabs.contains(&tab))).collect();
+        for id in &picked {
+            self.stopped.insert(*id, message.to_string());
+            self.calls[id].abort.abort();
+        }
+        picked.len()
+    }
+
     pub fn link(&self, key: &str) -> Option<Arc<Link>> {
         self.links.iter().find(|l| l.key == key).cloned()
     }
