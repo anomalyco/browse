@@ -1584,9 +1584,9 @@ fn parse_eval_result(
     world: World,
     doc: DocumentId,
     return_by_value: bool,
-) -> Result<Evaluated, JsError> {
+) -> Result<Evaluated, Box<JsError>> {
     if let Some(details) = value.get("exceptionDetails") {
-        return Err(parse_js_error(details));
+        return Err(Box::new(parse_js_error(details)));
     }
     let result = &value["result"];
     if !return_by_value
@@ -1666,15 +1666,15 @@ fn decode_png_rgba(bytes: &[u8]) -> DriverResult<(u32, u32, Vec<u8>)> {
         png::ColorType::Rgba => raw.to_vec(),
         png::ColorType::Rgb => {
             let mut out = Vec::with_capacity((info.width * info.height * 4) as usize);
-            for px in raw.chunks_exact(3) {
-                out.extend_from_slice(&[px[0], px[1], px[2], 255]);
+            for &[r, g, b] in raw.as_chunks::<3>().0 {
+                out.extend_from_slice(&[r, g, b, 255]);
             }
             out
         }
         png::ColorType::GrayscaleAlpha => {
             let mut out = Vec::with_capacity((info.width * info.height * 4) as usize);
-            for px in raw.chunks_exact(2) {
-                out.extend_from_slice(&[px[0], px[0], px[0], px[1]]);
+            for &[g, a] in raw.as_chunks::<2>().0 {
+                out.extend_from_slice(&[g, g, g, a]);
             }
             out
         }

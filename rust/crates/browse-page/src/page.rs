@@ -527,7 +527,7 @@ impl TabPage {
         declaration: &str,
         args: &[DriverArg],
         opts: CallOptions,
-    ) -> Result<std::result::Result<Evaluated, JsError>> {
+    ) -> Result<std::result::Result<Evaluated, Box<JsError>>> {
         self.guard_dialog(self.shared.driver.call(receiver, declaration, args, opts))
             .await
     }

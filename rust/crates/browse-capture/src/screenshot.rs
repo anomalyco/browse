@@ -173,10 +173,12 @@ async fn resolve(ctx: &ToolContext, args: &Value, region: Region) -> anyhow::Res
                 browse_page::resolve_element(ctx, target_tab(args)?, reference.as_deref(), selector.as_deref(), timeout).await?;
             let mut rect = element_rect(&page, &element).await?;
             let viewport = page::viewport(page.driver().as_ref()).await?;
-            if outside(&viewport, rect) && rect.2 <= viewport.width && rect.3 <= viewport.height {
-                if page.call_element(&element, "scrollIntoView", vec![], false).await.is_ok() {
-                    rect = element_rect(&page, &element).await?;
-                }
+            if outside(&viewport, rect)
+                && rect.2 <= viewport.width
+                && rect.3 <= viewport.height
+                && page.call_element(&element, "scrollIntoView", vec![], false).await.is_ok()
+            {
+                rect = element_rect(&page, &element).await?;
             }
             let (x, y, w, h) = rect;
             Ok((page.tab(), page.driver().clone(), Region::Clip(x, y, w, h)))

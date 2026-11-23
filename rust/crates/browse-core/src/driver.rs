@@ -390,7 +390,7 @@ pub struct JsError {
     pub is_compile_syntax_error: bool,
 }
 
-pub type Eval = std::result::Result<std::result::Result<Evaluated, JsError>, DriverError>;
+pub type Eval = std::result::Result<std::result::Result<Evaluated, Box<JsError>>, DriverError>;
 
 // ---------------------------------------------------------------------------
 // Input (pure DOM semantics; no platform virtual key codes or wire bitmasks)
