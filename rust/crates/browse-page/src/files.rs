@@ -77,7 +77,13 @@ fn parse_upload_file(value: &Value) -> Result<UploadFile> {
     let Some(data) = object.get("data").and_then(Value::as_str) else {
         bail!("upload: {name}: an inline file needs data as base64");
     };
-    // Refuse a file over the cap before decoding it, from the encoded length alone.
+    // Refuse far oversized data before copying it to strip whitespace. Base64 is mostly payload: only a string that
+    // is more than half whitespace could come back under the cap, which line-wrapped base64 never is, so this refuses
+    // it early without rejecting a file that would fit. The exact check after stripping stays.
+    let bound = data.len() as u64 / 4 * 3;
+    if bound > MAX_UPLOAD_BYTES * 2 {
+        bail!("upload: {name}: too much data to decode; browse uploads at most {} MB per call", MAX_UPLOAD_BYTES / 1_048_576);
+    }
     let encoded: Vec<u8> = data.bytes().filter(|byte| !byte.is_ascii_whitespace()).collect();
     let padding = encoded.iter().rev().take_while(|byte| **byte == b'=').count() as u64;
     let decoded = (encoded.len() as u64).saturating_sub(padding) * 3 / 4;
@@ -272,6 +278,10 @@ mod tests {
         let oversized = "A".repeat((MAX_UPLOAD_BYTES as usize / 3 + 1) * 4);
         let error = parse_upload_files(Some(&json!([{ "name": "big.bin", "data": oversized }]))).unwrap_err().to_string();
         assert!(error.contains("uploads at most 50 MB per call"), "{error}");
+        // Far over the cap is refused before the whitespace copy, from the raw length.
+        let huge = "A".repeat(MAX_UPLOAD_BYTES as usize * 3);
+        let error = parse_upload_files(Some(&json!([{ "name": "huge.bin", "data": huge }]))).unwrap_err().to_string();
+        assert!(error.contains("too much data to decode"), "{error}");
         let error = parse_upload_files(Some(&json!([{ "name": "a.txt" }]))).unwrap_err().to_string();
         assert!(error.contains("needs data as base64"), "{error}");
         let error = parse_upload_files(Some(&json!([{ "data": "aGVsbG8=" }]))).unwrap_err().to_string();

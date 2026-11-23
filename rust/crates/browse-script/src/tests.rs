@@ -154,15 +154,22 @@ async fn set_input_files_sends_paths_and_inline_bytes() {
         "local.txt",
       ])
       const three = await page.locator("#file").setInputFiles({ name: "e.txt", data: "IQ==" })
-      return { one: strip(one), two: strip(two), three: strip(three), lastModified: one.files[0].lastModified }
+      return { one: strip(one), two: strip(two), three: strip(three) }
     "##;
     let (text, output) = run_in(&context(), json!({ "code": code, "tab": 7 })).await;
     assert!(!output.is_error, "{text}");
-    let expected = r#"{"one":[{"name":"a.txt","data":"aGk=","mimeType":"text/plain"}],"two":[{"name":"b.bin","data":"AAEC"},{"name":"c.txt","data":"aGVsbG8="},{"name":"d.txt","data":"aGk="},"local.txt"],"three":[{"name":"e.txt","data":"IQ=="}]"#;
+    let expected = r#"{"one":[{"name":"a.txt","data":"aGk=","mimeType":"text/plain"}],"two":[{"name":"b.bin","data":"AAEC"},{"name":"c.txt","data":"aGVsbG8="},{"name":"d.txt","data":"aGk="},"local.txt"],"three":[{"name":"e.txt","data":"IQ=="}]}"#;
     assert!(text.contains(expected), "{text}");
+
     // A buffer without lastModified gets now, like Playwright's in-memory files.
-    let result: Value = serde_json::from_str(text.split_once("\n\n").map(|(_, rest)| rest).unwrap_or(&text)).unwrap();
-    assert!(result["lastModified"].as_u64().unwrap() > 1_704_067_200_000, "{text}");
+    let (last_modified, output) = run_in(
+        &context(),
+        json!({ "code": "const r = await page.setInputFiles('#file', { name: 'stamp.txt', buffer: new Uint8Array([1]) }); return r.files[0].lastModified", "tab": 7 }),
+    )
+    .await;
+    assert!(!output.is_error, "{last_modified}");
+    let last_modified: u64 = last_modified.lines().last().unwrap().parse().unwrap();
+    assert!(last_modified > 1_704_067_200_000, "{last_modified}");
 
     let (message, output) = run_in(&context(), json!({ "code": "try { await page.setInputFiles('#file', { name: 'x.txt' }) } catch (e) { return e.message }", "tab": 7 })).await;
     assert!(!output.is_error, "{message}");

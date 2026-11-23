@@ -1941,7 +1941,7 @@ fn dialog_schema() -> Value {
     )
 }
 
-const UPLOAD: &str = "Set the files of a file input (input[type=file], or its label) without opening the file chooser. files are absolute paths inside browse's file roots, on the machine browse runs on, or inline { name, data } objects whose data is the file's bytes as base64 (for files on another machine). When the browser is on that machine and can read the paths, it takes them straight from disk (no size limit, real input and change events); otherwise browse copies them in, at most 50 MB per call. Inline files always copy in, up to about 12 MB per tool call (in execute, 50 MB), and mixing them with paths copies the paths in too. The reply's via says whether the browser read them from disk (paths) or browse copied them in (copy).";
+const UPLOAD: &str = "Set the files of a file input (input[type=file], or its label) without opening the file chooser. files are absolute paths inside browse's file roots, on the machine browse runs on, or inline { name, data } objects whose data is the file's bytes as base64 (for files on another machine). When the browser is on that machine and can read the paths, it takes them straight from disk (no size limit, real input and change events); otherwise browse copies them in, at most 50 MB per call (the limit is for paths copied in). Inline files always copy in and fit about 10 MB per call, and mixing them with paths copies the paths in too. The reply's via says whether the browser read them from disk (paths) or browse copied them in (copy).";
 
 fn upload_schema() -> Value {
     let inline = json!({
