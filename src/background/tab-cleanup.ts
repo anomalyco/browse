@@ -145,15 +145,15 @@ export async function idleMinutes() {
 
 /** Agent tabs close one at a time: two closes must not each see the other's tab and leave their window empty. */
 const closeSerially = serialQueue()
-/** Whether this is macOS, where closing the last window doesn't quit the browser. Cached for this browser session. */
-let platform: Promise<boolean> | undefined
 
 /**
  * Closes an agent's tab. The last tab of the last window leaves a plain tab (or a normal window, when its own is a
- * popup) behind first: closing it would close the window, and with it the browser on Windows and Linux. It does that
- * before ungrouping, so a failed replacement leaves the tab and its group alone. A tab in an agent group is ungrouped
- * before closing: Chrome keeps a saved group when its last tab is the window's last tab (closing the window keeps its
- * groups saved), while emptying a group by ungrouping always deletes it.
+ * popup) behind first, on every platform: closing it would close the window, and with it the browser on Windows and
+ * Linux, while on macOS the browser stays running with no window and the extension loses its link to the relay, which
+ * it doesn't get back by itself. It does that before ungrouping, so a failed replacement leaves the tab and its group
+ * alone. A tab in an agent group is ungrouped before closing: Chrome keeps a saved group when its last tab is the
+ * window's last tab (closing the window keeps its groups saved), while emptying a group by ungrouping always deletes
+ * it.
  */
 export function closeAgentTab(tabId: number): Promise<void> {
   return closeSerially(async () => {
@@ -193,12 +193,13 @@ async function closeAgentTabNow(tabId: number): Promise<void> {
 type LastTab = "none" | "tab" | "window"
 
 /**
- * Leaves the browser something open if closing `tab` would quit it: a plain tab in its own normal window, or a new
- * normal window when its own is a popup, where Chrome doesn't reliably open a tab.
+ * Leaves the browser something open if closing `tab` would empty the last window: a plain tab in that window, or a
+ * new normal window when its own is a popup, where Chrome doesn't reliably open a tab. Every platform needs it: macOS
+ * keeps running without a window, but the extension then loses its link to the relay.
  */
 async function leaveLastWindowOpen(tab: chrome.tabs.Tab): Promise<void> {
   const replacement = await lastTabReplacement(tab)
-  if (replacement === "none" || (await macos())) return
+  if (replacement === "none") return
   if (replacement === "tab") await chrome.tabs.create({ windowId: tab.windowId })
   else await chrome.windows.create({ focused: false, type: "normal" })
 }
@@ -222,11 +223,6 @@ async function lastTabReplacement(tab: chrome.tabs.Tab): Promise<LastTab> {
   }
   const own = await withTimeout(chrome.windows.get(tab.windowId), RESTORE_QUERY_MS).catch((): typeof TIMED_OUT => TIMED_OUT)
   return own === TIMED_OUT || own.type === "normal" ? "tab" : "window"
-}
-
-function macos(): Promise<boolean> {
-  platform ??= chrome.runtime.getPlatformInfo().then((info) => info.os === "mac", () => false)
-  return platform
 }
 
 /**
@@ -478,7 +474,6 @@ chrome.runtime.onStartup.addListener(() => {
   tracked.clear()
   closing.clear()
   relayUngrouping.clear()
-  platform = undefined
   void chrome.storage.local.remove([STORAGE_KEY, CREATING_KEY])
 })
 chrome.tabs.onActivated.addListener(({ tabId }) => touch(tabId))

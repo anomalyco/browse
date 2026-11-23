@@ -147,10 +147,9 @@ describe("closing a tab in an agent group", () => {
 })
 
 describe("closing the last tab of the last window", () => {
-  /** A browser start reads the platform again, so tests can switch between macOS and the rest. */
+  /** The platform the browser reports. The last-window guard applies on every platform; each test still names its own. */
   function usePlatform(os: string) {
     stub.chrome.runtime.getPlatformInfo = async () => ({ os, arch: "x64", nacl_arch: "x64" })
-    ;(stub.chrome.runtime as unknown as { onStartup: StubEvent }).onStartup.emit()
   }
 
   /** `count` agent tabs left as their window's only tabs. */
@@ -339,21 +338,34 @@ describe("closing the last tab of the last window", () => {
     }
   })
 
-  test("on macOS closing the last tab needs no replacement", async () => {
+  test("on macOS, also opens a plain new tab in the window before closing it", async () => {
     usePlatform("mac")
     const [tabId] = await onlyTabsInWindow(1)
-    const created: unknown[] = []
+    const created: Array<{ windowId?: number; url?: string }> = []
+    const order: string[] = []
     const create = stub.chrome.tabs.create
+    const remove = stub.chrome.tabs.remove
     stub.chrome.tabs.create = async (options) => {
+      order.push("create")
       created.push(options)
       return create(options)
     }
+    stub.chrome.tabs.remove = async (ids) => {
+      order.push("remove")
+      return remove(ids)
+    }
     try {
       await TabCleanup.closeAgentTab(tabId)
-      expect(created).toEqual([])
+      expect(order).toEqual(["create", "remove"])
+      // No url: the browser's new-tab page, not another agent page.
+      expect(created).toEqual([{ windowId: window }])
       expect(open(tabId)).toBe(false)
+      const [replacement] = await stub.chrome.tabs.query({ windowId: window })
+      expect(replacement!.groupId).toBe(-1)
+      expect(await TabCleanup.isTracked(replacement!.id!)).toBe(false)
     } finally {
       stub.chrome.tabs.create = create
+      stub.chrome.tabs.remove = remove
     }
   })
 })
