@@ -407,11 +407,11 @@ mod tests {
     use serde_json::json;
 
     fn spec(schema: Value) -> ToolSpec {
-        ToolSpec { name: "t".into(), description: String::new(), input_schema: schema }
+        ToolSpec { name: "t".into(), description: String::new(), input_schema: schema, output_schema: None }
     }
 
     fn named(name: &str, schema: Value) -> ToolSpec {
-        ToolSpec { name: name.into(), description: String::new(), input_schema: schema }
+        ToolSpec { name: name.into(), description: String::new(), input_schema: schema, output_schema: None }
     }
 
     fn parse_arguments(spec: &ToolSpec, words: &[&str]) -> anyhow::Result<Map<String, Value>> {

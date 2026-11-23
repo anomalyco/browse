@@ -378,6 +378,7 @@ impl Tool for ConsoleTool {
                 "required": ["tab", "action"],
                 "additionalProperties": false
             }),
+            output_schema: None,
         }
     }
 

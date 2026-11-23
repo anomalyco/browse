@@ -59,6 +59,7 @@ impl Tool for TabsTool {
             name: "tabs".into(),
             description: "List, open or close tabs. Tabs are the handle every other tool takes as `tab`. `list` returns every agent tab and every tab the user lent (tab id, id when one was chosen, url, title, group, options, lent, lastUsed, busy, handoff and browser). `handoff` is there while a call in that tab waits on the user: it has the message shown to them and when it started (`startedAt`). An id or group from that list tells you which tabs you opened; use only those unless the user asks you to touch another. `new` opens a background tab (at `url`, else about:blank), waits for it to load and returns its `tab` id; `navigate` without `tab` does the same. Give it an `id` like `work-mail` to name the tab yourself: opening that id again returns the tab it already names, without navigating it, and the id lasts while the tab is open (a relay restart or extension reload keeps it; a browser restart loses it, and opening the id again is a fresh tab). Use it as `tab` in every tool. `keepOpen: true` keeps the tab until an agent or the user closes it, instead of idle cleanup. `close` needs explicit tabs: `tab`, `tabs` or a whole `group`; a lent tab is given back to the user instead of closed. Tabs open in the background and never take focus from the user; close the ones you opened when you're done.".into(),
             input_schema: object(Value::Object(properties), &[]),
+            output_schema: None,
         }
     }
 
@@ -266,6 +267,7 @@ impl Tool for HandoffTool {
             name: "handoff".into(),
             description: "Ask the user to do something in a tab only a person can do (sign in, 2FA, a captcha, a payment confirmation) and wait until they finish. The tab shows a card with your message and a Continue button (the browse toolbar button also continues). Returns `outcome`: continued, timeout, closed (the tab went away) or cancelled. Never solve a captcha yourself; hand it off. Re-read the page afterwards: it has probably changed.".into(),
             input_schema: handoff_schema("What the user should do, in one or two plain sentences, e.g. \"Sign in to GitHub, then click Continue.\""),
+            output_schema: None,
         }
     }
 
@@ -289,6 +291,7 @@ impl Tool for DemonstrateTool {
             name: "demonstrate".into(),
             description: "Ask the user to show you a flow in a tab, recording what they do until they click Continue: clicks (with a CSS selector, role and name), fills (password values are never recorded), checkbox and select changes, and navigations. Use it when you can't find how to do something and the user can show you. Returns `steps` (structured) and `summary` (one line each) to repeat with the page tools.".into(),
             input_schema: handoff_schema("What the user should demonstrate, e.g. \"Show me how to export the report, then click Continue.\""),
+            output_schema: None,
         }
     }
 
@@ -312,6 +315,7 @@ impl Tool for StatusTool {
             name: "status".into(),
             description: "Report the relay, the connected browsers (ids to pass as `browser` when opening a tab), pairing state and what to do when no browser is connected (`nextStep`), and the tabs you can use.".into(),
             input_schema: object(json!({}), &[]),
+            output_schema: None,
         }
     }
 
@@ -358,6 +362,7 @@ impl Tool for SettingsTool {
                 crate::settings::SECURITY_VARIABLES.join(", ")
             ),
             input_schema: object(json!({ "set": { "type": "object", "description": "Settings to change; omit to only read them.", "properties": properties, "additionalProperties": false } }), &[]),
+            output_schema: None,
         }
     }
 

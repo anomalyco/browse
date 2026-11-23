@@ -393,6 +393,7 @@ impl Tool for RecordingTool {
                 "required": ["tab", "action"],
                 "additionalProperties": false
             }),
+            output_schema: None,
         }
     }
 

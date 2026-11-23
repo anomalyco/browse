@@ -44,13 +44,13 @@ struct Fake(&'static str);
 #[async_trait]
 impl Tool for Fake {
     fn spec(&self) -> ToolSpec {
-        ToolSpec { name: self.0.into(), description: String::new(), input_schema: json!({ "type": "object" }) }
+        ToolSpec { name: self.0.into(), description: String::new(), input_schema: json!({ "type": "object" }), output_schema: None }
     }
     async fn call(&self, _ctx: ToolContext, args: Value) -> anyhow::Result<ToolOutput> {
         Ok(match self.0 {
             "echo" => ToolOutput::text(args.to_string()),
             "fail" => ToolOutput::error(args["message"].as_str().unwrap_or("failed").to_string()),
-            "picture" => ToolOutput { content: vec![Content::Image { data: "iVBORw0KGgo=".into(), mime_type: "image/png".into() }], is_error: false },
+            "picture" => ToolOutput { content: vec![Content::Image { data: "iVBORw0KGgo=".into(), mime_type: "image/png".into() }], is_error: false, structured_content: None },
             // Without a tab, navigate opens tab 7.
             "navigate" => ToolOutput::text(json!({ "tab": args.get("tab").cloned().unwrap_or(json!(7)), "url": args["url"], "title": "T", "status": 200, "navigated": true }).to_string()),
             // Echo the upload args so a test can see what setInputFiles hands the tool.

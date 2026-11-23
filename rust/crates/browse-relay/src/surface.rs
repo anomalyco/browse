@@ -56,7 +56,7 @@ mod tests {
     use serde_json::json;
 
     fn spec(name: &str) -> ToolSpec {
-        ToolSpec { name: name.into(), description: String::new(), input_schema: json!({}) }
+        ToolSpec { name: name.into(), description: String::new(), input_schema: json!({}), output_schema: None }
     }
 
     #[test]
