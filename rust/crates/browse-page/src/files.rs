@@ -6,8 +6,16 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
-use base64::Engine;
+use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+use base64::{Engine, alphabet};
 use serde_json::Value;
+
+/// The most bytes one upload sends into the page when it copies files in (paths the browser can read have no limit).
+pub const MAX_UPLOAD_BYTES: u64 = 50 * 1024 * 1024;
+
+/// Inline data may be line-wrapped and may have lost its padding on the way, so decode it as such (not URL-safe).
+const INLINE_BASE64: GeneralPurpose =
+    GeneralPurpose::new(&alphabet::STANDARD, GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent));
 
 /// One entry of the upload tool's `files`: a path this machine can read, or bytes passed inline.
 #[derive(Clone, Debug)]
@@ -43,10 +51,10 @@ impl UploadFile {
     }
 }
 
-/// Reads the upload tool's `files` argument: a path, or an array mixing paths and inline `{ name, data }` objects.
+/// Reads the upload tool's `files` argument: a path or inline `{ name, data }` object, or an array mixing both.
 pub fn parse_upload_files(value: Option<&Value>) -> Result<Vec<UploadFile>> {
     let entries: Vec<&Value> = match value {
-        Some(value @ Value::String(_)) => vec![value],
+        Some(value @ (Value::String(_) | Value::Object(_))) => vec![value],
         Some(Value::Array(files)) => files.iter().collect(),
         _ => bail!("upload needs files: absolute paths inside the file roots, or inline files as {{ name, data }} with base64 data"),
     };
@@ -69,9 +77,18 @@ fn parse_upload_file(value: &Value) -> Result<UploadFile> {
     let Some(data) = object.get("data").and_then(Value::as_str) else {
         bail!("upload: {name}: an inline file needs data as base64");
     };
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(data)
-        .map_err(|_| anyhow::anyhow!("upload: {name}: data is not valid base64"))?;
+    // Refuse a file over the cap before decoding it, from the encoded length alone.
+    let encoded: Vec<u8> = data.bytes().filter(|byte| !byte.is_ascii_whitespace()).collect();
+    let padding = encoded.iter().rev().take_while(|byte| **byte == b'=').count() as u64;
+    let decoded = (encoded.len() as u64).saturating_sub(padding) * 3 / 4;
+    if decoded > MAX_UPLOAD_BYTES {
+        bail!(
+            "upload: {name} is {:.1} MB; browse uploads at most {} MB per call",
+            decoded as f64 / 1_048_576.0,
+            MAX_UPLOAD_BYTES / 1_048_576
+        );
+    }
+    let bytes = INLINE_BASE64.decode(&encoded).map_err(|_| anyhow::anyhow!("upload: {name}: data is not valid base64"))?;
     let mime_type = match object.get("mimeType") {
         None | Some(Value::Null) => None,
         Some(Value::String(mime)) => Some(mime.clone()),
@@ -223,6 +240,22 @@ mod tests {
         assert_eq!(&*inline.bytes, &[0, 1, 2]);
         assert_eq!(inline.mime_type, None);
         assert_eq!(inline.last_modified, None);
+
+        // A single object is one file, like a single path (the schema allows files: { name, data }).
+        let files = parse_upload_files(Some(&json!({ "name": "only.txt", "data": "aGVsbG8=" }))).unwrap();
+        assert_eq!(files.len(), 1);
+        let UploadFile::Inline(inline) = &files[0] else { panic!("expected an inline file") };
+        assert_eq!(&*inline.bytes, b"hello");
+
+        // Line-wrapped data and base64 that lost its padding both decode.
+        let files = parse_upload_files(Some(&json!({ "name": "wrapped.txt", "data": "aGVs\nbG8" }))).unwrap();
+        let UploadFile::Inline(inline) = &files[0] else { panic!("expected an inline file") };
+        assert_eq!(&*inline.bytes, b"hello");
+
+        // An empty file is a file too.
+        let files = parse_upload_files(Some(&json!([{ "name": "empty.txt", "data": "" }]))).unwrap();
+        let UploadFile::Inline(inline) = &files[0] else { panic!("expected an inline file") };
+        assert!(inline.bytes.is_empty());
     }
 
     #[test]
@@ -231,10 +264,14 @@ mod tests {
             let error = parse_upload_files(Some(&json!([{ "name": name, "data": "aGVsbG8=" }]))).unwrap_err().to_string();
             assert!(error.contains("plain file name"), "{name:?}: {error}");
         }
-        for data in ["not base64!", "aGVsbG8"] {
+        for data in ["not base64!", "aGVsbG8==="] {
             let error = parse_upload_files(Some(&json!([{ "name": "a.txt", "data": data }]))).unwrap_err().to_string();
             assert!(error.contains("valid base64"), "{data:?}: {error}");
         }
+        // Refused from the encoded length alone, before decoding.
+        let oversized = "A".repeat((MAX_UPLOAD_BYTES as usize / 3 + 1) * 4);
+        let error = parse_upload_files(Some(&json!([{ "name": "big.bin", "data": oversized }]))).unwrap_err().to_string();
+        assert!(error.contains("uploads at most 50 MB per call"), "{error}");
         let error = parse_upload_files(Some(&json!([{ "name": "a.txt" }]))).unwrap_err().to_string();
         assert!(error.contains("needs data as base64"), "{error}");
         let error = parse_upload_files(Some(&json!([{ "data": "aGVsbG8=" }]))).unwrap_err().to_string();

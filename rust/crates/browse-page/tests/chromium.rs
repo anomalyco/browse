@@ -441,6 +441,26 @@ async fn upload_accepts_inline_files_and_mixes_them_with_paths() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_accepts_a_single_inline_object_and_an_empty_file() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
+    let h = harness!(false);
+    let url = h.server.page("/upload-inline-single", r#"<!doctype html><input id="file" type="file" multiple>"#);
+    h.ok("navigate", json!({ "url": url })).await;
+    // files may be one inline object, not only an array of them.
+    let uploaded = h.json("upload", json!({ "selector": "#file", "files": { "name": "one.txt", "data": "aGVsbG8=" } })).await;
+    assert_eq!(uploaded["via"], "copy", "{uploaded}");
+    assert_eq!(uploaded["files"], json!(["one.txt"]));
+    assert!(!h.tab.methods().iter().any(|m| m == "DOM.setFileInputFiles"), "{:?}", h.tab.methods());
+    let content = h.ok("eval", json!({ "expression": "document.getElementById('file').files[0].text()" })).await;
+    assert_eq!(content, "\"hello\"");
+
+    let uploaded = h.json("upload", json!({ "selector": "#file", "files": { "name": "empty.txt", "data": "" } })).await;
+    assert_eq!(uploaded["files"], json!(["empty.txt"]));
+    let size = h.ok("eval", json!({ "expression": "document.getElementById('file').files[0].size" })).await;
+    assert_eq!(size, "0");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn upload_falls_back_to_copy_when_the_browser_refuses_paths() {
     let _upload = support::UPLOAD_LOCK.lock().await;
     let h = harness!(false);

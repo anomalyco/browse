@@ -215,10 +215,10 @@
   /** One setInputFiles entry as the upload tool takes it: a path, or { name, data } with base64 data. */
   function uploadPayload(file) {
     if (typeof file === "string") return file
-    const takes = "setInputFiles takes file paths, { name, buffer } with a Uint8Array, ArrayBuffer or base64 string, or { name, data } with base64 data"
+    const takes = "setInputFiles takes file paths, { name, buffer } with a Uint8Array or ArrayBuffer, or { name, data } with base64 data"
     if (!file || typeof file !== "object" || typeof file.name !== "string" || !file.name) throw new Error(takes)
     let data
-    if (typeof file.buffer === "string") data = file.buffer
+    if (typeof file.buffer === "string") throw new Error("setInputFiles: buffer must be bytes; pass base64 as data instead")
     else if (file.buffer instanceof ArrayBuffer) data = bytesToBase64(new Uint8Array(file.buffer))
     else if (ArrayBuffer.isView(file.buffer)) data = bytesToBase64(new Uint8Array(file.buffer.buffer, file.buffer.byteOffset, file.buffer.byteLength))
     else if (typeof file.data === "string") data = file.data

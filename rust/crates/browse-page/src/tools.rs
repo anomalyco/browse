@@ -15,7 +15,7 @@ use crate::aftermath::{self, AfterOptions};
 use crate::human::Point;
 use crate::input::{Input, Interrupted};
 use crate::eval;
-use crate::files::UploadFile;
+use crate::files::{MAX_UPLOAD_BYTES, UploadFile};
 use crate::navigation::{self, NavResult, WaitUntil};
 use crate::page::{Arg, DialogPolicy, ElementOr, TabPage, truncate, v};
 use crate::snapshot;
@@ -1099,8 +1099,6 @@ async fn upload(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     .await
 }
 
-/// The most bytes one upload sends into the page when it copies files in (the paths route has no limit).
-const MAX_UPLOAD_BYTES: u64 = 50 * 1024 * 1024;
 /// Raw bytes per chunk sent to the page (base64 makes each call about a third larger).
 const UPLOAD_CHUNK: usize = 768 * 1024;
 
@@ -1943,7 +1941,7 @@ fn dialog_schema() -> Value {
     )
 }
 
-const UPLOAD: &str = "Set the files of a file input (input[type=file], or its label) without opening the file chooser. files are absolute paths inside browse's file roots, on the machine browse runs on, or inline { name, data } objects whose data is the file's bytes as base64 (for files on another machine). When the browser is on that machine and can read the paths, it takes them straight from disk (no size limit, real input and change events); otherwise browse copies them in, at most 50 MB per call. Inline files always copy in and fit about 12 MB per call. The reply's via says whether the browser read them from disk (paths) or browse copied them in (copy).";
+const UPLOAD: &str = "Set the files of a file input (input[type=file], or its label) without opening the file chooser. files are absolute paths inside browse's file roots, on the machine browse runs on, or inline { name, data } objects whose data is the file's bytes as base64 (for files on another machine). When the browser is on that machine and can read the paths, it takes them straight from disk (no size limit, real input and change events); otherwise browse copies them in, at most 50 MB per call. Inline files always copy in, up to about 12 MB per tool call (in execute, 50 MB), and mixing them with paths copies the paths in too. The reply's via says whether the browser read them from disk (paths) or browse copied them in (copy).";
 
 fn upload_schema() -> Value {
     let inline = json!({
