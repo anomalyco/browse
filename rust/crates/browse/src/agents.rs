@@ -334,7 +334,13 @@ pub fn edit(location: &Location, command: &[String], remove: bool, port: Option<
             bail!("{} changed while browse was editing it; try again", file.display());
         }
         if location.name == "dsh" && after.is_empty() {
-            std::fs::remove_file(file).with_context(|| format!("can't remove {}", file.display()))?;
+            if file.is_symlink() {
+                // Keep the link, and leave dsh a patch layer it can load: deleting the path would only drop the link,
+                // leaving browse's row in the file it points at.
+                crate::setup::write_keeping_mode(file, b"[]\n")?;
+            } else {
+                std::fs::remove_file(file).with_context(|| format!("can't remove {}", file.display()))?;
+            }
         } else {
             crate::setup::write_keeping_mode(file, after.as_bytes())?;
         }
@@ -902,5 +908,72 @@ mod tests {
         assert!(owned(&json!({ "cmd": "browse", "args": ["mcp"] })));
         assert!(!owned(&json!({ "command": "playwright-mcp", "args": [] })));
         assert!(!owned(&json!({ "command": "browse", "args": ["serve"] })));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_agent_config_keeps_its_link() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp("symlink-json");
+        let target = dir.join("dotfiles/mcp.json");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "{\n  // mine\n  \"mcpServers\": {}\n}\n").unwrap();
+        let file = dir.join("pi/mcp.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        symlink("../dotfiles/mcp.json", &file).unwrap();
+        let pi = loc("pi", file.clone());
+
+        assert_eq!(edit(&pi, &command("/bin/browse"), false, None).unwrap(), Edit::Added);
+        assert!(std::fs::symlink_metadata(&file).unwrap().file_type().is_symlink(), "the link stays a link");
+        let text = std::fs::read_to_string(&target).unwrap();
+        assert!(text.contains("// mine"), "{text}");
+        assert_eq!(current(&pi).unwrap()["command"], "/bin/browse");
+        assert_eq!(edit(&pi, &command("/bin/browse"), true, None).unwrap(), Edit::Removed);
+        assert!(std::fs::symlink_metadata(&file).unwrap().file_type().is_symlink(), "uninstall keeps it too");
+        assert!(!std::fs::read_to_string(&target).unwrap().contains("browse"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_config_link_is_refused() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp("symlink-dangling");
+        let file = dir.join("pi/mcp.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        symlink("../dotfiles/missing.json", &file).unwrap();
+        let pi = loc("pi", file.clone());
+
+        let error = edit(&pi, &command("/bin/browse"), false, None).expect_err("a dangling link isn't written through");
+        assert!(error.to_string().contains("doesn't exist"), "{error}");
+        assert!(std::fs::symlink_metadata(&file).unwrap().file_type().is_symlink(), "the dangling link stays where it was");
+        assert!(!dir.join("dotfiles/missing.json").exists());
+        assert_eq!(edit(&pi, &command("/bin/browse"), true, None).unwrap(), Edit::Unchanged);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dsh_uninstall_through_a_symlink_clears_the_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp("symlink-dsh");
+        let target = dir.join("dotfiles/cordis.patch.yml");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        let row = "- insert:\n    - id: browse\n      name: '@deepseek-ai/dsh-mcp-client'\n      config:\n        serverName: browse\n        transport: stdio\n        command: /bin/browse\n        args: [mcp]\n";
+        std::fs::write(&target, row).unwrap();
+        let file = dir.join("dsh/cordis.patch.yml");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        symlink("../dotfiles/cordis.patch.yml", &file).unwrap();
+        let dsh = loc("dsh", file.clone());
+
+        assert_eq!(edit(&dsh, &command("/bin/browse"), true, None).unwrap(), Edit::Removed);
+        assert!(std::fs::symlink_metadata(&file).unwrap().file_type().is_symlink(), "the link stays a link");
+        // An empty layer dsh can still load, rather than a deleted file.
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "[]\n");
+        assert!(current(&dsh).is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
