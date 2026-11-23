@@ -15,6 +15,7 @@ use crate::aftermath::{self, AfterOptions};
 use crate::human::Point;
 use crate::input::{Input, Interrupted};
 use crate::eval;
+use crate::files::{MAX_UPLOAD_BYTES, UploadFile};
 use crate::navigation::{self, NavResult, WaitUntil};
 use crate::page::{Arg, DialogPolicy, ElementOr, TabPage, truncate, v};
 use crate::snapshot;
@@ -1077,12 +1078,8 @@ async fn dialog(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
 async fn upload(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     let c = open_input(&ctx, &args, "upload").await?;
     let spec = Spec::from_args(&args).ok_or_else(|| anyhow!("upload needs a ref or selector for the file input (or its label)"))?;
-    let files: Vec<String> = match args.get("files") {
-        Some(Value::String(file)) => vec![file.clone()],
-        Some(Value::Array(files)) => files.iter().filter_map(|f| f.as_str().map(str::to_string)).collect(),
-        _ => bail!("upload needs files: absolute paths inside the file roots"),
-    };
-    let checked: Vec<String> = files.iter().map(|f| crate::files::check_upload(f, &c.ctx.file_roots).map(|p| p.display().to_string())).collect::<Result<_>>()?;
+    let files = crate::files::parse_upload_files(args.get("files"))?;
+    let files: Vec<UploadFile> = files.iter().map(|file| file.checked(&c.ctx.file_roots)).collect::<Result<_>>()?;
     let timeout = timeout_arg(&args, ACTION_TIMEOUT_MS);
     run_action(&c, AfterOptions { expect_navigation: false, ..AfterOptions::default() }, move |c, _input| {
         Box::pin(async move {
@@ -1091,10 +1088,10 @@ async fn upload(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
                 ElementOr::Element(element) => element,
                 ElementOr::Status(_) => bail!("{} is not a file input (input[type=file]) or its label", target_label(&spec, &resolved.label)),
             };
-            let via = set_files(c, &c.page, &input, &checked, c.ctx.browser.connected_locally(c.page.tab()).await).await?;
+            let via = set_files(c, &c.page, &input, &files, c.ctx.browser.connected_locally(c.page.tab()).await).await?;
             let mut out = Map::new();
             out.insert("target".into(), target_label(&spec, &resolved.label));
-            out.insert("files".into(), json!(checked.iter().map(|p| std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()).collect::<Vec<_>>()));
+            out.insert("files".into(), json!(files.iter().map(UploadFile::name).collect::<Vec<_>>()));
             out.insert("via".into(), json!(via));
             Ok(out)
         })
@@ -1102,8 +1099,6 @@ async fn upload(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     .await
 }
 
-/// The most bytes one upload sends into the page when it copies files in (the paths route has no limit).
-const MAX_UPLOAD_BYTES: u64 = 50 * 1024 * 1024;
 /// Raw bytes per chunk sent to the page (base64 makes each call about a third larger).
 const UPLOAD_CHUNK: usize = 768 * 1024;
 
@@ -1151,14 +1146,23 @@ fn mime_type(path: &std::path::Path) -> &'static str {
 /// Puts files into a file input: when the browser reads this filesystem Chrome takes them from disk, else browse reads
 /// them and sends the bytes, so it works when the browser is on another machine and without the extension's file URL
 /// access.
-async fn set_files(c: &Ctx, page: &Arc<TabPage>, input: &crate::page::Element, paths: &[String], connected_locally: bool) -> Result<&'static str> {
+async fn set_files(c: &Ctx, page: &Arc<TabPage>, input: &crate::page::Element, files: &[UploadFile], connected_locally: bool) -> Result<&'static str> {
     // The target may have taken a while to resolve since the first check: check every path again, for both routes.
-    let checked: Vec<String> = paths.iter().map(|path| crate::files::check_upload(path, &c.ctx.file_roots).map(|p| p.display().to_string())).collect::<Result<_>>()?;
+    let checked: Vec<UploadFile> = files.iter().map(|file| file.checked(&c.ctx.file_roots)).collect::<Result<_>>()?;
     upload_status(page.call_element(input, "uploadCheck", vec![v(checked.len())], false).await?.as_str())?;
+    // Inline bytes only exist here, so a mix with paths still has to copy everything in.
+    let paths: Option<Vec<String>> = checked
+        .iter()
+        .map(|file| match file {
+            UploadFile::Path(path) => Some(path.clone()),
+            UploadFile::Inline(_) => None,
+        })
+        .collect();
     if connected_locally
-        && checked.iter().all(|path| crate::files::private_for_paths(path))
-        && probe_paths(c, page, input, &checked).await? {
-        page.send("DOM.setFileInputFiles", json!({ "objectId": input.object_id, "files": checked }), input.session.as_deref()).await?;
+        && let Some(paths) = paths
+        && paths.iter().all(|path| crate::files::private_for_paths(path))
+        && probe_paths(c, page, input, &paths).await? {
+        page.send("DOM.setFileInputFiles", json!({ "objectId": input.object_id, "files": paths }), input.session.as_deref()).await?;
         return Ok("paths");
     }
     set_files_by_copy(page, input, &checked).await?;
@@ -1301,35 +1305,50 @@ fn random_hex(bytes: usize) -> Option<String> {
 }
 
 /// Puts files into a file input as in-memory File objects: browse reads them where it runs and sends the bytes.
-async fn set_files_by_copy(page: &Arc<TabPage>, input: &crate::page::Element, paths: &[String]) -> Result<()> {
-    use base64::Engine;
+async fn set_files_by_copy(page: &Arc<TabPage>, input: &crate::page::Element, files: &[UploadFile]) -> Result<()> {
     let mut total = 0u64;
-    for path in paths {
-        total += std::fs::metadata(path).map(|m| m.len()).map_err(|e| anyhow!("upload: {path}: {e}"))?;
+    for file in files {
+        total += match file {
+            UploadFile::Path(path) => std::fs::metadata(path).map(|m| m.len()).map_err(|e| anyhow!("upload: {path}: {e}"))?,
+            UploadFile::Inline(file) => file.bytes.len() as u64,
+        };
     }
     if total > MAX_UPLOAD_BYTES {
         bail!("upload: the files are {:.1} MB together; browse uploads at most {} MB per call", total as f64 / 1_048_576.0, MAX_UPLOAD_BYTES / 1_048_576);
     }
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let mut files = Vec::new();
-    let ids: Vec<String> = (0..paths.len()).map(|i| format!("{stamp:x}-{i}")).collect();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok();
+    let stamp = now.map(|d| d.as_nanos()).unwrap_or(0);
+    let now_ms = now.map(|d| d.as_millis() as u64).unwrap_or(0);
+    let mut sent_files = Vec::new();
+    let ids: Vec<String> = (0..files.len()).map(|i| format!("{stamp:x}-{i}")).collect();
     let sent = async {
-        for (path, id) in paths.iter().zip(&ids) {
-            let bytes = tokio::fs::read(path).await.map_err(|e| anyhow!("upload: {path}: {e}"))?;
-            for chunk in bytes.chunks(UPLOAD_CHUNK) {
-                let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
-                page.call_value(&input.frame, "uploadChunk", vec![v(id), v(encoded)], false).await?;
+        for (file, id) in files.iter().zip(&ids) {
+            let (name, mime, last_modified) = match file {
+                UploadFile::Path(path) => {
+                    let path = std::path::Path::new(path);
+                    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0);
+                    (path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), mime_type(path).to_string(), modified)
+                }
+                UploadFile::Inline(file) => {
+                    let mime = file.mime_type.clone().filter(|mime| !mime.is_empty()).unwrap_or_else(|| mime_type(std::path::Path::new(&file.name)).to_string());
+                    (file.name.clone(), mime, file.last_modified.unwrap_or(now_ms))
+                }
+            };
+            match file {
+                UploadFile::Path(path) => {
+                    let bytes = tokio::fs::read(path).await.map_err(|e| anyhow!("upload: {path}: {e}"))?;
+                    send_upload_chunks(page, &input.frame, id, &bytes).await?;
+                }
+                UploadFile::Inline(file) => send_upload_chunks(page, &input.frame, id, &file.bytes).await?,
             }
-            let path = std::path::Path::new(path);
-            let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0);
-            files.push(json!({
+            sent_files.push(json!({
                 "id": id,
-                "name": path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                "mime": mime_type(path),
-                "lastModified": modified,
+                "name": name,
+                "mime": mime,
+                "lastModified": last_modified,
             }));
         }
-        page.call_element(input, "uploadFinish", vec![v(&files)], false).await
+        page.call_element(input, "uploadFinish", vec![v(&sent_files)], false).await
     }
     .await;
     match sent {
@@ -1339,6 +1358,16 @@ async fn set_files_by_copy(page: &Arc<TabPage>, input: &crate::page::Element, pa
             Err(error)
         }
     }
+}
+
+/// Sends one file's bytes to the page as base64 chunks; uploadFinish assembles them into a File.
+async fn send_upload_chunks(page: &Arc<TabPage>, frame: &str, id: &str, bytes: &[u8]) -> Result<()> {
+    use base64::Engine;
+    for chunk in bytes.chunks(UPLOAD_CHUNK) {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
+        page.call_value(frame, "uploadChunk", vec![v(id), v(encoded)], false).await?;
+    }
+    Ok(())
 }
 
 // emulate
@@ -1912,12 +1941,23 @@ fn dialog_schema() -> Value {
     )
 }
 
-const UPLOAD: &str = "Set the files of a file input (input[type=file], or its label) without opening the file chooser. files are absolute paths inside browse's file roots, on the machine browse runs on. When the browser is on that machine and can read the files, it takes them straight from disk (no size limit, real input and change events); otherwise browse copies them in, at most 50 MB per call. The reply's via says whether the browser read them from disk (paths) or browse copied them in (copy).";
+const UPLOAD: &str = "Set the files of a file input (input[type=file], or its label) without opening the file chooser. files are absolute paths inside browse's file roots, on the machine browse runs on, or inline { name, data } objects whose data is the file's bytes as base64 (for files on another machine). When the browser is on that machine and can read the paths, it takes them straight from disk (no size limit, real input and change events); otherwise browse copies them in, at most 50 MB per call (the limit is for paths copied in). Inline files always copy in and fit about 10 MB per call, and mixing them with paths copies the paths in too. The reply's via says whether the browser read them from disk (paths) or browse copied them in (copy).";
 
 fn upload_schema() -> Value {
+    let inline = json!({
+        "type": "object",
+        "properties": {
+            "name": { "type": "string", "description": "A plain file name, with no folders." },
+            "data": { "type": "string", "description": "The file's bytes, base64." },
+            "mimeType": { "type": "string" },
+            "lastModified": { "type": "integer", "description": "Milliseconds since the epoch." },
+        },
+        "required": ["name", "data"],
+    });
+    let item = json!({ "anyOf": [{ "type": "string" }, inline.clone()] });
     object(
         target_props(props(json!({
-            "files": { "anyOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }] },
+            "files": { "anyOf": [{ "type": "string" }, inline, { "type": "array", "items": item }] },
             "timeout": { "type": "integer" },
         }))),
         &["files"],
