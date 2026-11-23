@@ -203,7 +203,8 @@ extension from your browser to finish.
 - **Agents open their own tabs** in the background of the window you last used, grouped together and collapsed unless
   you're looking at one (you can turn that off). Agents can't switch you to their tabs or bring a window to the front.
   Tabs nobody touches for 10 minutes close by themselves (never while something runs on them). Closing agent tabs never
-  quits the browser: on Windows and Linux, browse leaves a new tab (or window) behind when it would close the last one.
+  quits the browser or leaves it without a window: browse leaves a new tab (or window) behind when it would close the
+  last one.
 - **Relay restarts keep agent tabs.** The relay saves the tabs agents opened and their options, and takes them back
   when it starts again (after an update, say).
 - **Hand an agent one of your tabs** by clicking the toolbar button on it. The badge shows **ON**; click again to take

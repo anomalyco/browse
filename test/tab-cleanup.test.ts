@@ -147,11 +147,6 @@ describe("closing a tab in an agent group", () => {
 })
 
 describe("closing the last tab of the last window", () => {
-  /** The platform the browser reports. The last-window guard applies on every platform; each test still names its own. */
-  function usePlatform(os: string) {
-    stub.chrome.runtime.getPlatformInfo = async () => ({ os, arch: "x64", nacl_arch: "x64" })
-  }
-
   /** `count` agent tabs left as their window's only tabs. */
   async function onlyTabsInWindow(count: number, windowId = window) {
     const tabIds: number[] = []
@@ -166,7 +161,6 @@ describe("closing the last tab of the last window", () => {
   }
 
   test("opens a plain new tab in the window before closing it", async () => {
-    usePlatform("linux")
     const [tabId] = await onlyTabsInWindow(1)
     const created: Array<{ windowId?: number; url?: string }> = []
     const order: string[] = []
@@ -197,7 +191,6 @@ describe("closing the last tab of the last window", () => {
   })
 
   test("with another normal window open, closes it without a new tab", async () => {
-    usePlatform("linux")
     const [tabId] = await onlyTabsInWindow(1)
     await stub.chrome.windows.create({ url: "https://other.example/", focused: true })
     const created: Array<{ windowId?: number; url?: string }> = []
@@ -217,7 +210,6 @@ describe("closing the last tab of the last window", () => {
   })
 
   test("two closes at once leave one plain new tab", async () => {
-    usePlatform("linux")
     const [first, second] = await onlyTabsInWindow(2)
     const created: Array<{ windowId?: number; url?: string }> = []
     const create = stub.chrome.tabs.create
@@ -240,7 +232,6 @@ describe("closing the last tab of the last window", () => {
   })
 
   test("a replacement that can't be created keeps the tab, its group and its tracking", async () => {
-    usePlatform("linux")
     const [tabId] = await onlyTabsInWindow(1)
     const groupId = await stub.chrome.tabs.group({ tabIds: [tabId] })
     await stub.chrome.tabGroups.update(groupId, { title: `github${MARKER}` })
@@ -260,7 +251,6 @@ describe("closing the last tab of the last window", () => {
   })
 
   test("a hung Chrome call fails its close and the queue moves on", async () => {
-    usePlatform("linux")
     const [hung, other] = await onlyTabsInWindow(2)
     const get = stub.chrome.tabs.get
     stub.chrome.tabs.get = async (id) => {
@@ -280,7 +270,6 @@ describe("closing the last tab of the last window", () => {
   }, 20_000)
 
   test("a window lookup that hangs counts as the last window, so a new tab is created", async () => {
-    usePlatform("linux")
     const [tabId] = await onlyTabsInWindow(1)
     stub.state.getAllHangs = true
     const created: Array<{ windowId?: number }> = []
@@ -300,7 +289,6 @@ describe("closing the last tab of the last window", () => {
   }, 10_000)
 
   test("a popup as the last window gets a normal window instead of a tab in the popup", async () => {
-    usePlatform("linux")
     const popup = (await stub.chrome.windows.create({ type: "popup", url: "https://popup.example/", focused: false })).id
     const [tabId] = await onlyTabsInWindow(1, popup)
     await stub.chrome.windows.remove(window)
@@ -338,8 +326,7 @@ describe("closing the last tab of the last window", () => {
     }
   })
 
-  test("on macOS, also opens a plain new tab in the window before closing it", async () => {
-    usePlatform("mac")
+  test("closing the last tab directly also leaves a plain tab first", async () => {
     const [tabId] = await onlyTabsInWindow(1)
     const created: Array<{ windowId?: number; url?: string }> = []
     const order: string[] = []
