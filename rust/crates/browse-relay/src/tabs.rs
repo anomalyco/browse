@@ -1161,7 +1161,7 @@ fn lost_reason(reason: &str) -> &'static str {
         "released-by-user" => "the user dismissed the browser's debugging bar",
         "taken-back-by-user" => "the user took it back with the browse toolbar button",
         "target-missing" => "Chrome no longer has it",
-        "debugger-detached" | "renew-failed" => "Chrome detached browse from it",
+        "debugger-detached" => "Chrome detached browse from it",
         "idle" => "it was idle, so browse closed it",
         _ => "browse lost it",
     }

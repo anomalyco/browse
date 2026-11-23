@@ -859,7 +859,6 @@ async fn a_renewed_debugger_blocked_by_another_extension_keeps_the_tab() {
     let tab = browser.open_tab(None, &TabOptions::default()).await.unwrap().tab;
     answers.lock().unwrap().refuse = Some("Cannot access a chrome-extension:// URL of different extension".into());
     events.send(json!({ "method": "debugger.detached", "params": { "tabId": tab, "reason": "target_closed", "reattached": true } })).unwrap();
-    eventually("the tab to stay", || relay.st().tabs.contains_key(&tab)).await;
     eventually("the tab to be marked blocked", || relay.st().tabs.get(&tab).is_some_and(|t| t.protected_ui)).await;
 
     let enables = seen.cdp("Page.enable").len();
@@ -872,17 +871,17 @@ async fn a_renewed_debugger_blocked_by_another_extension_keeps_the_tab() {
 }
 
 #[tokio::test]
-async fn a_renewed_debugger_whose_tab_is_gone_still_drops_it() {
+async fn a_renewed_debugger_that_fails_for_another_reason_drops_the_tab() {
     let answers = TargetUrls::default();
-    let (h, _seen, events) = connected_with_urls("profile-renew-gone", 56, answers.clone()).await;
+    let (h, _seen, events) = connected_with_urls("profile-renew-failed", 56, answers.clone()).await;
     let relay = h.handle.relay.clone();
     let browser = h.handle.browser();
     let tab = browser.open_tab(None, &TabOptions::default()).await.unwrap().tab;
-    answers.lock().unwrap().refuse = Some(format!("No tab with given id {tab}."));
+    answers.lock().unwrap().refuse = Some("Internal error".into());
     events.send(json!({ "method": "debugger.detached", "params": { "tabId": tab, "reason": "target_closed", "reattached": true } })).unwrap();
     eventually("the tab to go", || !relay.st().tabs.contains_key(&tab)).await;
     let error = browser.cdp(tab).await.err().unwrap().to_string();
-    assert!(error.contains("gone (Chrome no longer has it)"), "{error}");
+    assert!(error.contains("gone (Chrome detached browse from it)"), "{error}");
 }
 
 #[tokio::test]
