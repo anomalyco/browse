@@ -974,16 +974,28 @@ impl Relay {
                 let Some(url) = params.get("url").and_then(Value::as_str) else { return };
                 if let domain::UrlDecision::Refused(reason) = domain::check_url(url, &rules, false) {
                     self.debugger_best_effort(tab, None, "Page.stopLoading", json!({}));
-                    if let Some(entry) = self.st().tabs.get_mut(&tab) {
-                        entry.add_warning(format!(
-                            "Domain allowlist: tab {tab} started to navigate to {}, but {reason}; browse stopped it. Ask the user before going elsewhere.",
-                            short_url(url)
-                        ));
+                    let warning = format!(
+                        "Domain allowlist: tab {tab} started to navigate to {}, but {reason}; browse stopped it. Ask the user before going elsewhere.",
+                        short_url(url)
+                    );
+                    if self.stop_navigate_calls(tab, &warning) == 0
+                        && let Some(entry) = self.st().tabs.get_mut(&tab)
+                    {
+                        entry.add_warning(warning);
                     }
                     rlog!("allowlist.stopped", tabId = tab, method = method, reason = reason);
                 }
             }
         }
+    }
+
+    /// Ends the navigate calls running in `tab` with `message` as their error; returns how many.
+    fn stop_navigate_calls(&self, tab: i64, message: &str) -> usize {
+        let navigating = navigate_calls(&self.inflight);
+        if navigating.is_empty() {
+            return 0;
+        }
+        self.st().stop_calls_with_ids(&navigating, tab, message)
     }
 
     /// The tab's rules and main frame, when it has an allowlist.
@@ -1020,21 +1032,31 @@ impl Relay {
     }
 
     fn allowlist_violation(self: &Arc<Self>, tab: i64, url: &str, reason: &str) {
+        let navigating = navigate_calls(&self.inflight);
         let popup = {
             let mut st = self.st();
             let Some(entry) = st.tabs.get_mut(&tab) else { return };
             let popup = entry.fresh_popup && entry.owner == Owner::Relay;
             entry.fresh_popup = false;
+            let opener = entry.opener.filter(|_| popup);
             let action = if popup { "closed the popup" } else { "sent the tab back to about:blank" };
             let warning = format!("Domain allowlist: tab {tab} went to {}, but {reason}; browse {action}. Ask the user before going elsewhere.", short_url(url));
+            // A navigate call that led there ends now with this as its error, instead of reporting a load that didn't
+            // happen (or waiting out its timeout).
+            let stopped = !popup && st.stop_calls_with_ids(&navigating, tab, &warning) > 0;
             // A closed popup can't carry the news: its opener does.
-            match entry.opener.filter(|_| popup) {
+            match opener {
+                _ if stopped => {}
                 Some(opener) => {
                     if let Some(opener) = st.tabs.get_mut(&opener) {
                         opener.add_warning(warning);
                     }
                 }
-                None => entry.add_warning(warning),
+                None => {
+                    if let Some(entry) = st.tabs.get_mut(&tab) {
+                        entry.add_warning(warning);
+                    }
+                }
             }
             popup
         };
@@ -1078,6 +1100,11 @@ impl Relay {
             let _ = relay.close_or_release(tab).await;
         });
     }
+}
+
+/// The ids of the running `navigate` calls.
+fn navigate_calls(inflight: &std::sync::Mutex<std::collections::HashMap<u64, crate::relay::InFlight>>) -> Vec<u64> {
+    inflight.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).iter().filter(|(_, call)| call.tool == "navigate").map(|(id, _)| *id).collect()
 }
 
 /// The tab's allowlist rules, when it has one.
