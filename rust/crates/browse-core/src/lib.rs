@@ -131,8 +131,21 @@ pub struct TabInfo {
     /// A call is running in the tab (or it is being opened for one).
     #[serde(default)]
     pub busy: bool,
+    /// A handoff waiting on the user in the tab: the call that asked is waiting for them to continue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<HandoffInfo>,
     #[serde(flatten)]
     pub options: TabOptions,
+}
+
+/// A handoff waiting on the user in a tab, with what it asked for.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandoffInfo {
+    /// What the agent asked the user to do in the tab.
+    pub message: String,
+    /// When it started waiting, ISO 8601.
+    #[serde(rename = "startedAt")]
+    pub started_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

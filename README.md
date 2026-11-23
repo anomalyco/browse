@@ -197,9 +197,9 @@ extension from your browser to finish.
 - **Tabs keep their ids, and an agent can name one.** `tabs` with `action: "new"` and an `id` like `work-mail` opens
   that tab once: asking again returns the same tab without navigating it, and every tool takes `work-mail` as `tab`.
   The id lasts while the tab stays open: a relay restart or extension reload keeps it, and a browser restart loses it
-  (opening that id again is a fresh tab). `tabs` lists each tab's id, url, title, group, last use and whether a call is
-  running in it. A tab opened with `keepOpen: true` stays until an agent or you close it; every other tab closes when
-  idle like the rest.
+  (opening that id again is a fresh tab). `tabs` lists each tab's id, url, title, group, last use, whether a call is
+  running in it, and a waiting handoff's message. A tab opened with `keepOpen: true` stays until an agent or you close
+  it; every other tab closes when idle like the rest.
 - **Agents open their own tabs** in the background of the window you last used, grouped together and collapsed unless
   you're looking at one (you can turn that off). Agents can't switch you to their tabs or bring a window to the front.
   Tabs nobody touches for 10 minutes close by themselves (never while something runs on them). Closing agent tabs never
@@ -341,8 +341,9 @@ when it starts: it stops after 30 minutes without use, or run `browse restart` f
 ## Troubleshooting
 
 - `browse status` shows the install, the agents browse is set up in, updates, the relay, the extension and agent tabs,
-  and says what to do when the extension is missing, unpaired, closed or out of date. Agents get the same from the
-  `status` tool.
+  and says what to do when the extension is missing, unpaired, closed or out of date. A tab waiting on you is marked
+  `waiting on you: <message>`, and `browse status --json` or `browse tabs` gives the message and when the handoff
+  started (`handoff.message`, `handoff.startedAt`). Agents get the same from the `status` and `tabs` tools.
 - After the relay restarts, the extension reconnects by itself within about half a minute; calls made in the meantime
   wait for it.
 - An agent says browse's tools are missing: restart the agent (or reload its MCP servers) after `browse install`.

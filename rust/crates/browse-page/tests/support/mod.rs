@@ -280,6 +280,7 @@ impl Browser for FakeBrowser {
             chosen: None,
             last_used: None,
             busy: false,
+            handoff: None,
             options: TabOptions { read_only: self.read_only, ..TabOptions::default() },
         }])
     }

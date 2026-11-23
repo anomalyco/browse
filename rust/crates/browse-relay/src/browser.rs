@@ -59,6 +59,7 @@ impl Relay {
             opener: entry.opener,
             last_used: Some(entry.last_used_at.clone()),
             busy: st.tab_busy(tab),
+            handoff: st.handoff_for_tab(tab).map(crate::relay::Handoff::info),
             options,
         })
     }
@@ -243,6 +244,9 @@ impl Relay {
                 }
                 if t.crashed {
                     value["crashed"] = true.into();
+                }
+                if let Some(handoff) = st.handoff_for_tab(t.id) {
+                    value["handoff"] = json!({ "message": handoff.message, "startedAt": handoff.started_at });
                 }
                 value
             })
