@@ -122,6 +122,8 @@ impl Seen {
 struct TargetAnswers {
     queued: HashMap<i64, VecDeque<String>>,
     held: HashMap<i64, Arc<Notify>>,
+    /// What `Page.enable` answers instead of succeeding, until the test clears it.
+    refuse: Option<String>,
 }
 
 type TargetUrls = Arc<Mutex<TargetAnswers>>;
@@ -185,6 +187,14 @@ fn fake_extension_with_urls(socket: Socket, next_tab: i64, urls: TargetUrls) -> 
                         }
                         json!({ "targetInfo": { "targetId": format!("T{tab}"), "type": "page", "url": url, "title": "", "attached": true } })
                     }
+                    "Page.enable" => {
+                        let refusal = urls.lock().unwrap().refuse.clone();
+                        if let Some(message) = refusal {
+                            let _ = replies.send(json!({ "id": id, "error": message }));
+                            continue;
+                        }
+                        json!({})
+                    }
                     "Runtime.evaluate" => json!({ "result": { "type": "number", "value": 42 } }),
                     "Network.getCookies" => json!({ "cookies": [{ "domain": "example.com" }, { "domain": "bank.com" }] }),
                     "Big.method" => json!({ "result": { "type": "string", "value": "x".repeat(params["params"]["bytes"].as_u64().unwrap_or(0) as usize) } }),
@@ -216,6 +226,17 @@ async fn eventually(what: &str, check: impl Fn() -> bool) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+async fn eventually_within(what: &str, limit: Duration, check: impl Fn() -> bool) {
+    let deadline = tokio::time::Instant::now() + limit;
+    while tokio::time::Instant::now() < deadline {
+        if check() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("timed out waiting for {what}");
 }
@@ -825,6 +846,43 @@ async fn another_extensions_popup_blocks_the_tab_without_dropping_it() {
 
     events.send(page("Page.frameDetached", json!({ "frameId": "PM" }))).unwrap();
     eventually("the block to lift", || relay.st().tabs.get(&tab).is_some_and(|t| !t.protected_ui)).await;
+}
+
+/// Chrome reports a foreign extension frame taking over as target_closed and the extension attaches again. The relay
+/// sets the tab up again, which the same foreign frame can refuse: the tab stays, blocked, and is set up once it goes.
+#[tokio::test]
+async fn a_renewed_debugger_blocked_by_another_extension_keeps_the_tab() {
+    let answers = TargetUrls::default();
+    let (h, seen, events) = connected_with_urls("profile-renew-blocked", 55, answers.clone()).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let tab = browser.open_tab(None, &TabOptions::default()).await.unwrap().tab;
+    answers.lock().unwrap().refuse = Some("Cannot access a chrome-extension:// URL of different extension".into());
+    events.send(json!({ "method": "debugger.detached", "params": { "tabId": tab, "reason": "target_closed", "reattached": true } })).unwrap();
+    eventually("the tab to stay", || relay.st().tabs.contains_key(&tab)).await;
+    eventually("the tab to be marked blocked", || relay.st().tabs.get(&tab).is_some_and(|t| t.protected_ui)).await;
+
+    let enables = seen.cdp("Page.enable").len();
+    answers.lock().unwrap().refuse = None;
+    eventually_within("the tab to be set up again", Duration::from_secs(5), || {
+        seen.cdp("Page.enable").len() > enables && relay.st().tabs.get(&tab).is_some_and(|t| !t.protected_ui)
+    })
+    .await;
+    assert!(relay.st().tabs.contains_key(&tab), "the tab stays the agent's");
+}
+
+#[tokio::test]
+async fn a_renewed_debugger_whose_tab_is_gone_still_drops_it() {
+    let answers = TargetUrls::default();
+    let (h, _seen, events) = connected_with_urls("profile-renew-gone", 56, answers.clone()).await;
+    let relay = h.handle.relay.clone();
+    let browser = h.handle.browser();
+    let tab = browser.open_tab(None, &TabOptions::default()).await.unwrap().tab;
+    answers.lock().unwrap().refuse = Some(format!("No tab with given id {tab}."));
+    events.send(json!({ "method": "debugger.detached", "params": { "tabId": tab, "reason": "target_closed", "reattached": true } })).unwrap();
+    eventually("the tab to go", || !relay.st().tabs.contains_key(&tab)).await;
+    let error = browser.cdp(tab).await.err().unwrap().to_string();
+    assert!(error.contains("gone (Chrome no longer has it)"), "{error}");
 }
 
 #[tokio::test]

@@ -743,9 +743,7 @@ impl Relay {
                     rlog!("debugger.renewed", tabId = tab);
                     let mut attach = again;
                     attach.already_attached = true;
-                    if self.setup_tab(attach).await.is_err() {
-                        self.remove_tab(tab, Release { update_extension: true, ..Release::default() }, "renew-failed");
-                    }
+                    self.reattach(attach).await;
                     return;
                 }
                 // Chrome detaches for many reasons that leave the page in place (another extension's popup in it, a
