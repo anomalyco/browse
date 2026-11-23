@@ -929,6 +929,9 @@ mod tests {
         let text = std::fs::read_to_string(&target).unwrap();
         assert!(text.contains("// mine"), "{text}");
         assert_eq!(current(&pi).unwrap()["command"], "/bin/browse");
+        // The temporary file is staged beside the target, not beside the link, and is gone.
+        assert_eq!(std::fs::read_dir(target.parent().unwrap()).unwrap().count(), 1, "no temporary file is left behind in the target's folder");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2, "only the pi and dotfiles folders are here");
         assert_eq!(edit(&pi, &command("/bin/browse"), true, None).unwrap(), Edit::Removed);
         assert!(std::fs::symlink_metadata(&file).unwrap().file_type().is_symlink(), "uninstall keeps it too");
         assert!(!std::fs::read_to_string(&target).unwrap().contains("browse"));
@@ -948,8 +951,10 @@ mod tests {
 
         let error = edit(&pi, &command("/bin/browse"), false, None).expect_err("a dangling link isn't written through");
         assert!(error.to_string().contains("doesn't exist"), "{error}");
+        assert!(error.to_string().contains("missing.json"), "the missing target is named: {error}");
         assert!(std::fs::symlink_metadata(&file).unwrap().file_type().is_symlink(), "the dangling link stays where it was");
         assert!(!dir.join("dotfiles/missing.json").exists());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "nothing was created");
         assert_eq!(edit(&pi, &command("/bin/browse"), true, None).unwrap(), Edit::Unchanged);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -974,6 +979,8 @@ mod tests {
         // An empty layer dsh can still load, rather than a deleted file.
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "[]\n");
         assert!(current(&dsh).is_none());
+        assert_eq!(std::fs::read_dir(target.parent().unwrap()).unwrap().count(), 1, "no temporary file is left behind in the target's folder");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2, "only the dsh and dotfiles folders are here");
         let _ = std::fs::remove_dir_all(dir);
     }
 }
