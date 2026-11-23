@@ -143,6 +143,28 @@ pub fn configure_opencode(file: &Path, entry: &Path, port: Option<u16>) -> anyho
 }
 
 pub fn write_keeping_mode(file: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    // Agent configs are often symlinks into a dotfiles repo, put there by GNU Stow or Nix Home Manager. A link is
+    // followed and its target written: staging beside the link and renaming would replace the link itself.
+    let link = std::fs::symlink_metadata(file).ok().filter(|meta| meta.file_type().is_symlink());
+    let target = match &link {
+        Some(_) => match std::fs::canonicalize(file) {
+            Ok(target) => target,
+            Err(_) => {
+                let missing = std::fs::read_link(file).unwrap_or_default();
+                bail!("{} is a link to {}, which doesn't exist; create it there, then run install again", file.display(), missing.display());
+            }
+        },
+        None => file.to_path_buf(),
+    };
+    match write_beside(&target, bytes) {
+        Ok(()) => Ok(()),
+        Err(error) if link.is_some() => bail!("{} is a link to {}, which can't be written: {error}", file.display(), target.display()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Writes `bytes` to a temporary file beside `file`, keeps `file`'s mode, and renames the temporary over it.
+fn write_beside(file: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     let dir = file.parent().context("no parent folder")?;
     std::fs::create_dir_all(dir)?;
     let temporary = dir.join(format!(".{}.{}.tmp", file.file_name().unwrap_or_default().to_string_lossy(), std::process::id()));
@@ -659,6 +681,70 @@ mod tests {
         assert!(after.starts_with('\u{feff}') && after.contains("// mine"), "{after}");
         assert_eq!(jsonc::parse(&after).unwrap()["mcp"]["servers"]["browse"]["command"][0], "/usr/bin/browse");
         assert_eq!(jsonc::parse(&after).unwrap()["theme"], "x");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_config_is_written_through_its_link() {
+        use std::os::unix::fs::symlink;
+
+        let dir = scratch("symlink");
+        let target = dir.join("dotfiles/opencode.json");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "{\n  // mine\n}\n").unwrap();
+        let link = dir.join("config/opencode.json");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        symlink("../dotfiles/opencode.json", &link).unwrap();
+
+        write_keeping_mode(&link, b"{\"mcp\":{}}\n").unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link stays a link");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"mcp\":{}}\n");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_is_refused_and_left_alone() {
+        use std::os::unix::fs::symlink;
+
+        let dir = scratch("dangling");
+        let link = dir.join("config/mcp.json");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        symlink("../dotfiles/missing.json", &link).unwrap();
+
+        let error = write_keeping_mode(&link, b"{}\n").expect_err("a dangling link isn't written through");
+        assert!(error.to_string().contains("doesn't exist"), "{error}");
+        assert!(!dir.join("dotfiles/missing.json").exists());
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the dangling link stays where it was");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_into_a_read_only_folder_is_refused() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = scratch("read-only");
+        let store = dir.join("nix/store/abc");
+        std::fs::create_dir_all(&store).unwrap();
+        let target = store.join("opencode.json");
+        std::fs::write(&target, "{\"mcp\":{}}\n").unwrap();
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // root writes anyway; there's nothing to check there.
+        if std::fs::write(store.join("probe"), b"").is_ok() {
+            std::fs::remove_dir_all(dir).unwrap();
+            return;
+        }
+        let link = dir.join("config/opencode.json");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        symlink(&target, &link).unwrap();
+
+        let error = write_keeping_mode(&link, b"{\"theme\":\"x\"}\n").expect_err("a read-only target isn't replaced");
+        assert!(error.to_string().contains("which can't be written"), "{error}");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link survives");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"mcp\":{}}\n");
+        std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
