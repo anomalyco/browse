@@ -74,6 +74,43 @@ struct Shared {
     pending: RefCell<HashSet<u64>>,
     slice: Rc<Cell<Instant>>,
     report: RefCell<Option<Value>>,
+    /// Rejections the tracker reported without a handler, by their text. QuickJS reports when the promise is
+    /// rejected, before the await or catch in the same turn attaches, then reports again once a handler does: an
+    /// entry left when the run ends is a rejection nothing ever handled.
+    unhandled: RefCell<Vec<(String, usize)>>,
+}
+
+impl Shared {
+    fn rejection(&self, reason: &JsValue<'_>, handled: bool) {
+        let text = describe(reason);
+        let mut unhandled = self.unhandled.borrow_mut();
+        if handled {
+            if let Some(entry) = unhandled.iter_mut().find(|entry| entry.0 == text && entry.1 > 0) {
+                entry.1 -= 1;
+            }
+            unhandled.retain(|entry| entry.1 > 0);
+            return;
+        }
+        match unhandled.iter_mut().find(|entry| entry.0 == text) {
+            Some(entry) => entry.1 += 1,
+            None => unhandled.push((text, 1)),
+        }
+    }
+
+    fn report_unhandled(&self) {
+        for (text, _) in self.unhandled.borrow().iter() {
+            let _ = self.host.send(ToHost::Log { level: "unhandled".into(), text: text.clone() });
+        }
+    }
+}
+
+/// Reports the rejections still unhandled when the run ends, before the host is told the run is done.
+struct UnhandledOnDrop(Rc<Shared>);
+
+impl Drop for UnhandledOnDrop {
+    fn drop(&mut self) {
+        self.0.report_unhandled();
+    }
 }
 
 fn stopped(message: impl Into<String>) -> Finished {
@@ -109,16 +146,14 @@ fn run(job: Job, host: &UnboundedSender<ToHost>, settles: mpsc::Receiver<Settle>
         pending: RefCell::new(HashSet::new()),
         slice: slice.clone(),
         report: RefCell::new(None),
+        unhandled: RefCell::new(Vec::new()),
     });
     {
         let shared = shared.clone();
-        runtime.set_host_promise_rejection_tracker(Some(Box::new(move |_ctx, _promise, reason, handled| {
-            if !handled {
-                let text = describe(&reason);
-                let _ = shared.host.send(ToHost::Log { level: "unhandled".into(), text });
-            }
-        })));
+        runtime.set_host_promise_rejection_tracker(Some(Box::new(move |_ctx, _promise, reason, handled| shared.rejection(&reason, handled))));
     }
+    // Every way out of the run goes through this drop, so a rejection left unhandled is reported before `Done`.
+    let _unhandled = UnhandledOnDrop(shared.clone());
 
     // Set up the prelude and the code; `settle` and `state` stay reachable for the loop below.
     let setup = context.with(|ctx| -> Result<(Persistent<Function<'static>>, Persistent<Function<'static>>), String> {

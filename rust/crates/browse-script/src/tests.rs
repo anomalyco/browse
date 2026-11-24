@@ -125,6 +125,23 @@ async fn tools_and_errors() {
 }
 
 #[tokio::test]
+async fn handled_rejections_do_not_warn() {
+    // page.title() rejects before the await attaches (the page has no tab), and the catch still handles it.
+    let caught = ok(r#"try { await page.title() } catch (e) { return "caught: " + e.message.slice(0, 24) }"#).await;
+    assert!(caught.starts_with("caught: page has no tab yet"), "{caught}");
+    assert!(!caught.contains("Warnings:"), "a caught rejection is not a warning: {caught}");
+    let chained = ok(r#"return await page.title().catch((e) => "caught: " + e.message.slice(0, 8))"#).await;
+    assert!(chained.starts_with("caught: page has"), "{chained}");
+    assert!(!chained.contains("Warnings:"), "{chained}");
+
+    // A rejection nothing ever awaits is still reported.
+    let dropped = ok("page.title(); return 'done'").await;
+    assert!(dropped.contains("Unhandled promise rejection: page has no tab yet"), "{dropped}");
+    let rejected = ok("Promise.reject(new Error('boom')); return 'done'").await;
+    assert!(rejected.contains("Unhandled promise rejection: boom"), "{rejected}");
+}
+
+#[tokio::test]
 async fn navigation_and_images() {
     let (text, output) = run_in(&context(), json!({ "code": "const r = await page.goto('https://example.com/a'); return { status: r.status(), ok: r.ok(), shot: await browse.picture() }" })).await;
     assert!(!output.is_error, "{text}");
