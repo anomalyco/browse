@@ -1105,7 +1105,12 @@ impl ChooserInterception {
         let arm = driver.prepare_file_chooser_interception();
         // The guard exists before enabling, so a dropped enable still disarms this generation.
         let guard = Self { driver: driver.clone(), arm, lock: Some(lock) };
-        driver.arm_file_chooser_interception(arm).await.map_err(crate::page::driver_error)?;
+        driver.arm_file_chooser_interception(arm).await.map_err(|error| match error {
+            DriverError::Unsupported(_) => anyhow!(
+                r#"uploading by clicking a button that opens a file chooser is not supported by this browser; target the underlying <input type="file"> directly instead"#,
+            ),
+            other => crate::page::driver_error(other),
+        })?;
         Ok(guard)
     }
 

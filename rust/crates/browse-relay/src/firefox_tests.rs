@@ -381,7 +381,7 @@ fn the_next_step_hint_names_firefox_only_when_it_is_installed() {
     let applications = mkdir(&s.0.join("Applications"));
     touch(&applications.join("Zen.app/Contents/MacOS/zen"));
     let mut discovery = Discovery { app_dirs: vec![applications.clone()], ..Discovery::none() };
-    assert!(next_step_hint(Some(&discovery), &[], &[]).unwrap().contains("browse firefox --app zen"));
+    assert_eq!(next_step_hint(Some(&discovery), &[], &[]).unwrap(), " Or run `browse firefox` to connect Zen.");
     touch(&applications.join("Firefox.app/Contents/MacOS/firefox"));
     assert_eq!(next_step_hint(Some(&discovery), &[], &[]).unwrap(), " Or run `browse firefox` to connect Firefox.");
     discovery.app_dirs.clear();

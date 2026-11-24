@@ -51,7 +51,7 @@ fn asked_for_help(command: &str, args: &[String]) -> bool {
 }
 
 const HELP: &str = "browse lets your AI agents use your real browser: Chrome-family browsers through the browse extension, and
-Firefox or Zen through WebDriver BiDi.
+Firefox-family browsers through WebDriver BiDi.
 
 SETUP
   install                     Install browse, add it to your agents and connect the extension
@@ -64,9 +64,9 @@ SETUP
     --no-wait                 Don't wait for the extension to connect
     --wait-seconds <seconds>  How long to wait (default 180 in a terminal, 90 otherwise)
     --no-modify-path          Don't add browse to PATH
-    --firefox, --zen          Connect Firefox or Zen instead of the Chrome extension
+    --firefox                 Connect a Firefox-family browser instead of the Chrome extension
   extension                   Where to get the extension
-  firefox                     Connect Firefox (or Zen) directly, starting it with remote control when needed
+  firefox                     Connect a Firefox-family browser directly, starting it with remote control when needed
     --app <firefox|dev|nightly|zen|path>
                               Which app (default: the one connected before, else the first installed)
     --profile <name|dir>      Which profile (default: the one connected before, else the running or default one)
@@ -74,7 +74,7 @@ SETUP
     --dedicated               Use a separate browse profile instead of yours
     --headless                A dedicated profile with no window (browse disconnect quits it)
     --url <ws://...>          Connect a WebDriver BiDi endpoint that's already listening
-  disconnect [browser]        Let a directly connected browser (Firefox, Zen) go; browse stops reconnecting it
+  disconnect [browser]        Let a directly connected browser go; browse stops reconnecting it
   pair [--wait-seconds <s>]   Print a one-time pairing code and wait for the browser that redeems it
     --list                    Show paired browsers
     --revoke <browser>        Unpair a browser (its id, name or profile)
@@ -214,6 +214,6 @@ mod tests {
             assert!(super::HELP.contains(&format!("\n  {command} ")), "{command} is in the help");
         }
         assert!(super::HELP.lines().next().unwrap().contains("Chrome-family"));
-        assert!(super::HELP.contains("Firefox or Zen"));
+        assert!(super::HELP.contains("Firefox-family"));
     }
 }

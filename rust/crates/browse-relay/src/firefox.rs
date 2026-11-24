@@ -812,13 +812,7 @@ pub fn next_step_hint(discovery: Option<&Discovery>, recorded: &[RecordedFirefox
         }
     }
     let apps = discovery?.apps();
-    if apps.iter().any(|a| !a.kind.zen()) {
-        Some(" Or run `browse firefox` to connect Firefox.".into())
-    } else if !apps.is_empty() {
-        Some(" Or run `browse firefox --app zen` to connect Zen.".into())
-    } else {
-        None
-    }
+    apps.first().map(|app| format!(" Or run `browse firefox` to connect {}.", app.name))
 }
 
 #[cfg(test)]
