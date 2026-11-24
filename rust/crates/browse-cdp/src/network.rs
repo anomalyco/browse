@@ -36,35 +36,46 @@ pub(crate) struct NetworkDomain {
 
 #[derive(Default)]
 pub(crate) struct NetworkBodyMap {
-    /// `request_id` -> `(request_session, response_body_session)`
-    sessions: HashMap<String, (Option<String>, Option<String>)>,
+    /// reported `request_id` -> `(CDP request id, request_session, response_body_session)`
+    sessions: HashMap<String, (String, Option<String>, Option<String>)>,
 }
 
 impl NetworkBodyMap {
-    pub(crate) fn record_request(&mut self, request_id: &str, session: Option<String>) {
+    pub(crate) fn record_request(&mut self, request_id: &str, cdp_id: &str, session: Option<String>) {
         if self.sessions.len() > 2_000 {
             self.sessions.clear();
         }
         self.sessions
-            .insert(request_id.to_string(), (session.clone(), session));
+            .insert(request_id.to_string(), (cdp_id.to_string(), session.clone(), session));
     }
 
     pub(crate) fn record_body_session(&mut self, request_id: &str, session: Option<String>) {
         if let Some(entry) = self.sessions.get_mut(request_id) {
-            entry.1 = session;
+            entry.2 = session;
         }
     }
 
     pub(crate) fn session_for(&self, request_id: &str, kind: BodyKind) -> Option<String> {
-        self.sessions.get(request_id).and_then(|(req, resp)| match kind {
+        self.sessions.get(request_id).and_then(|(_, req, resp)| match kind {
             BodyKind::Request => req.clone(),
             BodyKind::Response => resp.clone(),
         })
     }
+
+    /// The CDP id to send with `Network.getRequestPostData` / `Network.getResponseBody`: one id covers every hop of
+    /// a redirect chain, while each hop is reported under its own id.
+    pub(crate) fn cdp_id_for(&self, request_id: &str) -> Option<String> {
+        self.sessions.get(request_id).map(|(cdp_id, _, _)| cdp_id.clone())
+    }
 }
 
 struct Pending {
+    /// The id this hop is reported under; unique for every hop of a redirect chain.
+    id: String,
+    /// CDP's request id, shared by every hop of a redirect chain.
     request_id: String,
+    /// This hop's index in the chain (0 for the first).
+    hop: usize,
     url: String,
     resource_type: String,
     frame_id: Option<String>,
@@ -72,11 +83,23 @@ struct Pending {
     response: Option<ResponseHead>,
     /// `responseReceived` said extra-info events (the headers as sent, cookies included) come for it.
     has_extra_info: bool,
+    /// An HTTP request sent over the network gets a `requestWillBeSentExtraInfo`; a failed one waits for it.
+    expects_request_extra: bool,
 }
 
-/// A finished request whose extra info hasn't arrived yet: CDP may send it after `loadingFinished`.
+/// A hop that has ended but whose extra info hasn't arrived yet: CDP may send it after `loadingFinished` /
+/// `loadingFailed` / the next redirect hop.
 struct Finishing {
-    body_size: usize,
+    /// CDP's request id of the chain.
+    request_id: String,
+    ending: Ending,
+    expects_request: bool,
+    expects_response: bool,
+}
+
+enum Ending {
+    Finished { body_size: usize },
+    Failed { error: String },
 }
 
 /// How long a finished request waits for its extra info before it is reported without it.
@@ -87,12 +110,41 @@ struct ExtraResponse {
     status: Option<i64>,
 }
 
+/// Every hop of one CDP request id. CDP reuses the id across redirects and sends each hop's extra info in order, so
+/// the k-th `requestWillBeSentExtraInfo` belongs to hop k and the k-th `responseReceivedExtraInfo` to the k-th hop
+/// that got a response. `hops` maps those indexes to the ids the hops are reported under.
+#[derive(Default)]
+struct Chain {
+    hops: Vec<String>,
+    /// Hop indexes that got a response, in the order they got one.
+    responded: Vec<usize>,
+    /// How many `requestWillBeSentExtraInfo` events arrived; the next belongs to this hop.
+    request_extras: usize,
+    /// How many `responseReceivedExtraInfo` events arrived; the next belongs to `responded` at this index.
+    response_extras: usize,
+    /// Request extra info that arrived before its hop's `requestWillBeSent`, by hop index.
+    early_request_extra: HashMap<usize, Vec<(String, String)>>,
+}
+
+impl Chain {
+    fn record_response(&mut self, hop: usize) {
+        if !self.responded.contains(&hop) {
+            self.responded.push(hop);
+        }
+    }
+}
+
 #[derive(Default)]
 struct State {
     pending: HashMap<(Option<String>, String), Pending>,
+    /// CDP request id -> its redirect chain.
+    chains: HashMap<String, Chain>,
+    /// The reported hop id -> the headers the request went out with.
     request_extra: HashMap<String, Vec<(String, String)>>,
+    /// The reported hop id -> the headers the response came with.
     response_extra: HashMap<String, ExtraResponse>,
     children: HashMap<String, String>,
+    /// The reported hop id -> an ended hop waiting for its extra info.
     finishing: HashMap<String, Finishing>,
 }
 
@@ -109,9 +161,68 @@ impl State {
         self.pending.remove(&key)
     }
 
+    /// Appends a hop to `request_id`'s chain and returns its index, reported id, and any extra info that arrived
+    /// before its `requestWillBeSent`.
+    fn next_hop(&mut self, request_id: &str) -> (usize, String, Option<Vec<(String, String)>>) {
+        let chain = self.chains.entry(request_id.to_string()).or_default();
+        let hop = chain.hops.len();
+        let id = if hop == 0 { request_id.to_string() } else { format!("{request_id}@{hop}") };
+        chain.hops.push(id.clone());
+        let early = chain.early_request_extra.remove(&hop);
+        (hop, id, early)
+    }
+
+    fn record_response(&mut self, request_id: &str, hop: usize) {
+        if let Some(chain) = self.chains.get_mut(request_id) {
+            chain.record_response(hop);
+        }
+    }
+
+    /// Files a `requestWillBeSentExtraInfo` under the hop it belongs to (CDP sends them in hop order), which may
+    /// not have been announced yet. Returns the hop's reported id when it exists.
+    fn set_request_extra(&mut self, request_id: &str, headers: Vec<(String, String)>) -> Option<String> {
+        let chain = self.chains.entry(request_id.to_string()).or_default();
+        let hop = chain.request_extras;
+        chain.request_extras += 1;
+        match chain.hops.get(hop).cloned() {
+            Some(id) => {
+                self.request_extra.insert(id.clone(), headers);
+                Some(id)
+            }
+            None => {
+                chain.early_request_extra.insert(hop, headers);
+                None
+            }
+        }
+    }
+
+    fn response_extra_hop(&mut self, request_id: &str) -> Option<String> {
+        let chain = self.chains.get_mut(request_id)?;
+        let index = chain.response_extras;
+        chain.response_extras += 1;
+        // A response extra can arrive before `responseReceived`; it then belongs to the hop just created.
+        let hop = chain.responded.get(index).copied().unwrap_or_else(|| chain.hops.len().saturating_sub(1));
+        chain.hops.get(hop).cloned()
+    }
+
+    /// Drops a chain once no hop of it is pending or waiting for extra info.
+    fn finish_chain(&mut self, request_id: &str) {
+        if self.pending.values().any(|pending| pending.request_id == request_id)
+            || self.finishing.values().any(|finishing| finishing.request_id == request_id)
+        {
+            return;
+        }
+        if let Some(chain) = self.chains.remove(request_id) {
+            for id in chain.hops {
+                self.request_extra.remove(&id);
+                self.response_extra.remove(&id);
+            }
+        }
+    }
+
     fn synth_response_from_extra(&self, pending: &mut Pending) -> bool {
         if pending.response.is_none()
-            && let Some(extra) = self.response_extra.get(&pending.request_id)
+            && let Some(extra) = self.response_extra.get(&pending.id)
             && let Some(status) = extra.status
         {
             let mime_type = extra
@@ -210,13 +321,17 @@ pub(crate) async fn fetch_body(
     request_id: &RequestId,
     kind: BodyKind,
 ) -> DriverResult<Option<Vec<u8>>> {
-    let scope = bodies.lock().unwrap().session_for(request_id.as_str(), kind);
+    let (cdp_id, scope) = {
+        let bodies = bodies.lock().unwrap();
+        let cdp_id = bodies.cdp_id_for(request_id.as_str()).unwrap_or_else(|| request_id.as_str().to_string());
+        (cdp_id, bodies.session_for(request_id.as_str(), kind))
+    };
     match kind {
         BodyKind::Request => {
             let value = cdp
                 .send(
                     "Network.getRequestPostData",
-                    json!({ "requestId": request_id.as_str() }),
+                    json!({ "requestId": cdp_id }),
                     scope.as_deref(),
                 )
                 .await
@@ -230,7 +345,7 @@ pub(crate) async fn fetch_body(
             let value = cdp
                 .send(
                     "Network.getResponseBody",
-                    json!({ "requestId": request_id.as_str() }),
+                    json!({ "requestId": cdp_id }),
                     scope.as_deref(),
                 )
                 .await
@@ -291,17 +406,32 @@ fn handle_event(
             if let Some(redirect) = params.get("redirectResponse")
                 && let Some(previous) = st.take_pending(&key)
             {
-                let req_extra = st.request_extra.remove(&previous.request_id).filter(|h| !h.is_empty());
-                let resp_extra = st.response_extra.remove(&previous.request_id).map(|e| e.headers).filter(|h| !h.is_empty());
+                // `redirectHasExtraInfo` says whether this hop's extra info was or will be emitted; when it wasn't
+                // (a cached redirect), its response head from `redirectResponse` is all there is.
+                let has_extra_info = params.get("redirectHasExtraInfo").and_then(Value::as_bool).unwrap_or(false);
+                st.record_response(&previous.request_id, previous.hop);
                 let head = response_head(redirect);
-                let prev_id = RequestId::from(previous.request_id.clone());
-                let _ = tx.send(NetworkEvent::Response { id: prev_id.clone(), head, committed: false });
-                let _ = tx.send(NetworkEvent::Finished {
-                    id: prev_id,
-                    body_size: previous.data_length,
-                    request_headers: req_extra,
-                    response_headers: resp_extra,
+                let _ = tx.send(NetworkEvent::Response {
+                    id: RequestId::from(previous.id.clone()),
+                    head,
+                    committed: false,
                 });
+                st.finishing.insert(
+                    previous.id.clone(),
+                    Finishing {
+                        request_id: previous.request_id.clone(),
+                        ending: Ending::Finished { body_size: previous.data_length },
+                        expects_request: has_extra_info,
+                        expects_response: has_extra_info,
+                    },
+                );
+                if has_extra_info {
+                    if !flush_finishing(&mut st, tx, &previous.id, false) {
+                        flush_after_grace(state, tx, &previous.id);
+                    }
+                } else {
+                    flush_finishing(&mut st, tx, &previous.id, true);
+                }
                 redirect_of = Some(previous.url);
             }
             let request = params.get("request").cloned().unwrap_or(Value::Null);
@@ -312,22 +442,31 @@ fn handle_event(
             let headers = headers_from(request.get("headers"));
             let post_data = request.get("postData").and_then(Value::as_str).map(str::to_string);
             let has_body = request.get("hasPostData").and_then(Value::as_bool).unwrap_or(false);
-            bodies.lock().unwrap().record_request(&request_id, event.session_id.clone());
+            // Each redirect hop is a request of its own, reported under its own id; CDP's request id is shared.
+            let (hop, id, early_request_extra) = st.next_hop(&request_id);
+            if let Some(headers) = early_request_extra {
+                st.request_extra.insert(id.clone(), headers);
+            }
+            let expects_request_extra = url.starts_with("http://") || url.starts_with("https://");
+            bodies.lock().unwrap().record_request(&id, &request_id, event.session_id.clone());
             st.pending.insert(
                 key,
                 Pending {
+                    id: id.clone(),
                     request_id: request_id.clone(),
+                    hop,
                     url: url.clone(),
                     resource_type: resource_type.clone(),
                     frame_id: frame_id.clone(),
                     data_length: 0,
                     response: None,
                     has_extra_info: false,
+                    expects_request_extra,
                 },
             );
             drop(st);
             let _ = tx.send(NetworkEvent::Request(NetworkRequest {
-                id: RequestId::from(request_id),
+                id: RequestId::from(id),
                 redirect_of,
                 frame: frame_id.map(FrameId::from),
                 url,
@@ -343,42 +482,48 @@ fn handle_event(
             if st.request_extra.len() > MAX_EXTRA_CACHE {
                 st.request_extra.clear();
             }
-            st.request_extra.insert(request_id.clone(), headers_from(params.get("headers")));
-            flush_finishing(&mut st, tx, &request_id, false);
+            if let Some(id) = st.set_request_extra(&request_id, headers_from(params.get("headers"))) {
+                flush_finishing(&mut st, tx, &id, false);
+            }
         }
         "Network.responseReceivedExtraInfo" => {
             let mut st = state.lock().unwrap();
             if st.response_extra.len() > MAX_EXTRA_CACHE {
                 st.response_extra.clear();
             }
-            st.response_extra.insert(
-                request_id.clone(),
-                ExtraResponse {
-                    headers: headers_from(params.get("headers")),
-                    status: params.get("statusCode").and_then(Value::as_i64),
-                },
-            );
-            flush_finishing(&mut st, tx, &request_id, false);
+            if let Some(id) = st.response_extra_hop(&request_id) {
+                st.response_extra.insert(
+                    id.clone(),
+                    ExtraResponse {
+                        headers: headers_from(params.get("headers")),
+                        status: params.get("statusCode").and_then(Value::as_i64),
+                    },
+                );
+                flush_finishing(&mut st, tx, &id, false);
+            }
         }
         "Network.responseReceived" => {
             let Some(head) = params.get("response").map(response_head) else { return };
-            bodies.lock().unwrap().record_body_session(&request_id, event.session_id.clone());
             let mut st = state.lock().unwrap();
             if let Some(found) = st.pending_key(&key) {
-                let (id, resource_type, frame_id) = {
+                let (id, request_id, hop, resource_type, frame_id) = {
                     let Some(pending) = st.pending.get_mut(&found) else { return };
                     pending.response = Some(head.clone());
                     pending.has_extra_info = params.get("hasExtraInfo").and_then(Value::as_bool).unwrap_or(false);
                     (
-                        RequestId::from(pending.request_id.clone()),
+                        pending.id.clone(),
+                        pending.request_id.clone(),
+                        pending.hop,
                         pending.resource_type.clone(),
                         pending.frame_id.clone(),
                     )
                 };
+                st.record_response(&request_id, hop);
+                bodies.lock().unwrap().record_body_session(&id, event.session_id.clone());
                 let committed = resource_type == "Document"
                     && frame_id.as_ref().is_some_and(|f| st.children.contains_key(f));
                 drop(st);
-                let _ = tx.send(NetworkEvent::Response { id, head, committed });
+                let _ = tx.send(NetworkEvent::Response { id: RequestId::from(id), head, committed });
             }
         }
         "Network.dataReceived" => {
@@ -390,22 +535,25 @@ fn handle_event(
             }
         }
         "Network.loadingFinished" => {
-            bodies.lock().unwrap().record_body_session(&request_id, event.session_id.clone());
             let mut st = state.lock().unwrap();
             if let Some(pending) = st.take_pending(&key) {
-                let request_id = pending.request_id.clone();
-                st.finishing.insert(request_id.clone(), Finishing { body_size: pending.data_length });
-                let waiting = pending.has_extra_info
-                    && !(st.request_extra.contains_key(&request_id) && st.response_extra.contains_key(&request_id));
-                if waiting {
-                    let state = state.clone();
-                    let tx = tx.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(EXTRA_INFO_GRACE).await;
-                        flush_finishing(&mut state.lock().unwrap(), &tx, &request_id, true);
-                    });
+                bodies.lock().unwrap().record_body_session(&pending.id, event.session_id.clone());
+                let id = pending.id.clone();
+                st.finishing.insert(
+                    id.clone(),
+                    Finishing {
+                        request_id: pending.request_id.clone(),
+                        ending: Ending::Finished { body_size: pending.data_length },
+                        expects_request: pending.has_extra_info,
+                        expects_response: pending.has_extra_info,
+                    },
+                );
+                if pending.has_extra_info {
+                    if !flush_finishing(&mut st, tx, &id, false) {
+                        flush_after_grace(state, tx, &id);
+                    }
                 } else {
-                    flush_finishing(&mut st, tx, &request_id, true);
+                    flush_finishing(&mut st, tx, &id, true);
                 }
             }
         }
@@ -413,18 +561,30 @@ fn handle_event(
             let mut st = state.lock().unwrap();
             if let Some(pending) = st.take_pending(&key) {
                 // A request that reached the network and failed later (aborted, reset) still went out with the
-                // headers its extra info reported.
-                let request_headers = st.request_extra.remove(&pending.request_id).filter(|h| !h.is_empty());
-                st.response_extra.remove(&pending.request_id);
+                // headers its extra info reported; wait for that extra info as a finish does.
                 let error = params
                     .get("errorText")
                     .and_then(Value::as_str)
                     .filter(|text| !text.is_empty())
                     .unwrap_or("Request failed")
                     .to_string();
-                let id = RequestId::from(pending.request_id);
-                drop(st);
-                let _ = tx.send(NetworkEvent::Failed { id, error, request_headers });
+                let id = pending.id.clone();
+                st.finishing.insert(
+                    id.clone(),
+                    Finishing {
+                        request_id: pending.request_id.clone(),
+                        ending: Ending::Failed { error },
+                        expects_request: pending.expects_request_extra,
+                        expects_response: false,
+                    },
+                );
+                if pending.expects_request_extra {
+                    if !flush_finishing(&mut st, tx, &id, false) {
+                        flush_after_grace(state, tx, &id);
+                    }
+                } else {
+                    flush_finishing(&mut st, tx, &id, true);
+                }
             }
         }
         "Target.attachedToTarget" => {
@@ -451,7 +611,7 @@ fn handle_event(
                                 && let Some(head) = p.response.clone()
                             {
                                 committed_events.push(NetworkEvent::Response {
-                                    id: RequestId::from(p.request_id.clone()),
+                                    id: RequestId::from(p.id.clone()),
                                     head,
                                     committed: true,
                                 });
@@ -485,23 +645,49 @@ fn handle_event(
     }
 }
 
-/// Reports a finished request once both its extra infos are in (or, with `anyway`, with what there is).
-fn flush_finishing(st: &mut State, tx: &mpsc::UnboundedSender<NetworkEvent>, request_id: &str, anyway: bool) {
-    if !st.finishing.contains_key(request_id) {
-        return;
-    }
-    let complete = st.request_extra.contains_key(request_id) && st.response_extra.contains_key(request_id);
+/// Reports an ended hop once its expected extra info is in (or, with `anyway`, with what there is).
+fn flush_finishing(st: &mut State, tx: &mpsc::UnboundedSender<NetworkEvent>, id: &str, anyway: bool) -> bool {
+    let Some(finishing) = st.finishing.get(id) else { return false };
+    let complete = (!finishing.expects_request || st.request_extra.contains_key(id))
+        && (!finishing.expects_response || st.response_extra.contains_key(id));
     if !anyway && !complete {
-        return;
+        return false;
     }
-    let Some(finishing) = st.finishing.remove(request_id) else { return };
-    let request_headers = st.request_extra.remove(request_id).filter(|h| !h.is_empty());
-    let response_headers = st.response_extra.remove(request_id).map(|e| e.headers).filter(|h| !h.is_empty());
-    let _ = tx.send(NetworkEvent::Finished {
-        id: RequestId::from(request_id.to_string()),
-        body_size: finishing.body_size,
-        request_headers,
-        response_headers,
+    let Some(finishing) = st.finishing.remove(id) else { return false };
+    let request_headers = st.request_extra.remove(id).filter(|h| !h.is_empty());
+    let request_id = finishing.request_id.clone();
+    match finishing.ending {
+        Ending::Finished { body_size } => {
+            let response_headers = st.response_extra.remove(id).map(|e| e.headers).filter(|h| !h.is_empty());
+            let _ = tx.send(NetworkEvent::Finished {
+                id: RequestId::from(id.to_string()),
+                body_size,
+                request_headers,
+                response_headers,
+            });
+        }
+        Ending::Failed { error } => {
+            st.response_extra.remove(id);
+            let _ = tx.send(NetworkEvent::Failed {
+                id: RequestId::from(id.to_string()),
+                error,
+                request_headers,
+            });
+        }
+    }
+    st.finish_chain(&request_id);
+    true
+}
+
+/// Reports a hop after the grace period with whatever extra info has arrived, so a missing event can't hold it
+/// forever.
+fn flush_after_grace(state: &Arc<Mutex<State>>, tx: &mpsc::UnboundedSender<NetworkEvent>, id: &str) {
+    let state = state.clone();
+    let tx = tx.clone();
+    let id = id.to_string();
+    tokio::spawn(async move {
+        tokio::time::sleep(EXTRA_INFO_GRACE).await;
+        flush_finishing(&mut state.lock().unwrap(), &tx, &id, true);
     });
 }
 
@@ -522,13 +708,10 @@ fn complete_child_documents(
         for key in keys {
             let Some(mut pending) = st.pending.remove(&key) else { continue };
             if st.synth_response_from_extra(&mut pending) {
-                let req_extra = st.request_extra.remove(&pending.request_id).filter(|h| !h.is_empty());
-                let resp_extra = st
-                    .response_extra
-                    .remove(&pending.request_id)
-                    .map(|e| e.headers)
-                    .filter(|h| !h.is_empty());
-                let id = RequestId::from(pending.request_id);
+                let req_extra = st.request_extra.remove(&pending.id).filter(|h| !h.is_empty());
+                let resp_extra = st.response_extra.remove(&pending.id).map(|e| e.headers).filter(|h| !h.is_empty());
+                let request_id = pending.request_id.clone();
+                let id = RequestId::from(pending.id);
                 if let Some(head) = pending.response {
                     events_to_send.push(NetworkEvent::Response { id: id.clone(), head, committed: true });
                 }
@@ -538,6 +721,7 @@ fn complete_child_documents(
                     request_headers: req_extra,
                     response_headers: resp_extra,
                 });
+                st.finish_chain(&request_id);
             } else {
                 st.pending.insert(key, pending);
             }
@@ -589,6 +773,173 @@ mod tests {
         let (request_headers, response_headers) = finished.expect("a finished event");
         assert_eq!(request_headers, Some(vec![("Cookie".to_string(), "sid=1".to_string())]));
         assert_eq!(response_headers, Some(vec![("Set-Cookie".to_string(), "a=1".to_string())]));
+    }
+
+    async fn take_endings(rx: &mut mpsc::UnboundedReceiver<NetworkEvent>, count: usize) -> Vec<NetworkEvent> {
+        let mut events = Vec::new();
+        let mut endings = 0;
+        while endings < count {
+            let Ok(Some(event)) = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await else {
+                break;
+            };
+            if matches!(event, NetworkEvent::Finished { .. } | NetworkEvent::Failed { .. }) {
+                endings += 1;
+            }
+            events.push(event);
+        }
+        events
+    }
+
+    type Headers = Option<Vec<(String, String)>>;
+
+    fn finished(events: &[NetworkEvent], id: &str) -> Option<(Headers, Headers)> {
+        events.iter().find_map(|event| match event {
+            NetworkEvent::Finished { id: found, request_headers, response_headers, .. } if found.as_str() == id => {
+                Some((request_headers.clone(), response_headers.clone()))
+            }
+            _ => None,
+        })
+    }
+
+    fn response(events: &[NetworkEvent], id: &str) -> Option<ResponseHead> {
+        events.iter().find_map(|event| match event {
+            NetworkEvent::Response { id: found, head, .. } if found.as_str() == id => Some(head.clone()),
+            _ => None,
+        })
+    }
+
+    fn sorted(headers: Headers) -> Headers {
+        headers.map(|mut headers| {
+            headers.sort();
+            headers
+        })
+    }
+
+    /// CDP doesn't guarantee `requestWillBeSent` comes before its `requestWillBeSentExtraInfo`.
+    #[tokio::test]
+    async fn early_request_extra_info_reaches_the_request() {
+        struct Silent;
+        #[async_trait::async_trait]
+        impl Cdp for Silent {
+            async fn send(&self, _: &str, _: Value, _: Option<&str>) -> Result<Value, crate::CdpError> {
+                Ok(json!({}))
+            }
+            fn events(&self) -> tokio::sync::broadcast::Receiver<CdpEvent> {
+                tokio::sync::broadcast::channel(1).1
+            }
+        }
+        let cdp: Arc<dyn Cdp> = Arc::new(Silent);
+        let state = Arc::new(Mutex::new(State::default()));
+        let bodies = Arc::new(Mutex::new(NetworkBodyMap::default()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let send = |e: CdpEvent| handle_event(&cdp, &state, &bodies, &tx, e);
+        send(event("Network.requestWillBeSentExtraInfo", json!({ "requestId": "1", "headers": { "Cookie": "sid=1" } })));
+        send(event("Network.requestWillBeSent", json!({ "requestId": "1", "type": "Fetch", "request": { "url": "http://a/x", "method": "GET", "headers": {} } })));
+        send(event("Network.responseReceived", json!({ "requestId": "1", "response": { "status": 200, "headers": {} } })));
+        send(event("Network.loadingFinished", json!({ "requestId": "1" })));
+        let events = take_endings(&mut rx, 1).await;
+        let (request_headers, _) = finished(&events, "1").expect("the finished request");
+        assert_eq!(sorted(request_headers), Some(vec![("Cookie".to_string(), "sid=1".to_string())]));
+    }
+
+    /// CDP reuses one request id for every hop of a redirect. Extra info for the redirect hop can arrive after the
+    /// next hop's `requestWillBeSent`; it must stay with the hop it describes.
+    #[tokio::test]
+    async fn redirect_hops_keep_their_own_extra_info() {
+        struct Silent;
+        #[async_trait::async_trait]
+        impl Cdp for Silent {
+            async fn send(&self, _: &str, _: Value, _: Option<&str>) -> Result<Value, crate::CdpError> {
+                Ok(json!({}))
+            }
+            fn events(&self) -> tokio::sync::broadcast::Receiver<CdpEvent> {
+                tokio::sync::broadcast::channel(1).1
+            }
+        }
+        let cdp: Arc<dyn Cdp> = Arc::new(Silent);
+        let state = Arc::new(Mutex::new(State::default()));
+        let bodies = Arc::new(Mutex::new(NetworkBodyMap::default()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let send = |e: CdpEvent| handle_event(&cdp, &state, &bodies, &tx, e);
+        send(event("Network.requestWillBeSent", json!({ "requestId": "1", "type": "Fetch", "request": { "url": "http://a/api/hop", "method": "GET", "headers": {} } })));
+        send(event(
+            "Network.requestWillBeSent",
+            json!({
+                "requestId": "1",
+                "type": "Fetch",
+                "redirectHasExtraInfo": true,
+                "redirectResponse": { "status": 302, "statusText": "Found", "headers": { "Location": "/api/landed", "Content-Type": "text/plain", "Content-Length": "0" } },
+                "request": { "url": "http://a/api/landed", "method": "GET", "headers": {} },
+            }),
+        ));
+        // The hop's extra info lands after the redirect made the landed request the current one.
+        send(event("Network.requestWillBeSentExtraInfo", json!({ "requestId": "1", "headers": { "Cookie": "sid=hop" } })));
+        send(event(
+            "Network.responseReceivedExtraInfo",
+            json!({ "requestId": "1", "statusCode": 302, "headers": { "Location": "/api/landed", "Content-Type": "text/plain", "Content-Length": "0" } }),
+        ));
+        send(event("Network.responseReceived", json!({ "requestId": "1", "hasExtraInfo": true, "response": { "status": 200, "statusText": "OK", "headers": {} } })));
+        send(event("Network.requestWillBeSentExtraInfo", json!({ "requestId": "1", "headers": { "Cookie": "sid=landed" } })));
+        send(event(
+            "Network.responseReceivedExtraInfo",
+            json!({ "requestId": "1", "statusCode": 200, "headers": { "Content-Type": "application/json", "Content-Length": "15" } }),
+        ));
+        send(event("Network.loadingFinished", json!({ "requestId": "1" })));
+        let events = take_endings(&mut rx, 2).await;
+        assert_eq!(response(&events, "1").map(|head| head.status), Some(302));
+        assert_eq!(response(&events, "1@1").map(|head| head.status), Some(200));
+        let (request_headers, response_headers) = finished(&events, "1").expect("the redirect hop's finish");
+        assert_eq!(sorted(request_headers), Some(vec![("Cookie".to_string(), "sid=hop".to_string())]));
+        assert_eq!(
+            sorted(response_headers),
+            Some(vec![
+                ("Content-Length".to_string(), "0".to_string()),
+                ("Content-Type".to_string(), "text/plain".to_string()),
+                ("Location".to_string(), "/api/landed".to_string()),
+            ])
+        );
+        let (request_headers, response_headers) = finished(&events, "1@1").expect("the landed request's finish");
+        assert_eq!(sorted(request_headers), Some(vec![("Cookie".to_string(), "sid=landed".to_string())]));
+        assert_eq!(
+            sorted(response_headers),
+            Some(vec![
+                ("Content-Length".to_string(), "15".to_string()),
+                ("Content-Type".to_string(), "application/json".to_string()),
+            ])
+        );
+    }
+
+    /// A request can fail before its request extra info arrives; the failure still reports the headers it went out
+    /// with.
+    #[tokio::test]
+    async fn late_request_extra_info_still_reaches_the_failed_request() {
+        struct Silent;
+        #[async_trait::async_trait]
+        impl Cdp for Silent {
+            async fn send(&self, _: &str, _: Value, _: Option<&str>) -> Result<Value, crate::CdpError> {
+                Ok(json!({}))
+            }
+            fn events(&self) -> tokio::sync::broadcast::Receiver<CdpEvent> {
+                tokio::sync::broadcast::channel(1).1
+            }
+        }
+        let cdp: Arc<dyn Cdp> = Arc::new(Silent);
+        let state = Arc::new(Mutex::new(State::default()));
+        let bodies = Arc::new(Mutex::new(NetworkBodyMap::default()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let send = |e: CdpEvent| handle_event(&cdp, &state, &bodies, &tx, e);
+        send(event("Network.requestWillBeSent", json!({ "requestId": "1", "type": "Fetch", "request": { "url": "http://a/api/slow", "method": "GET", "headers": {} } })));
+        send(event("Network.loadingFailed", json!({ "requestId": "1", "errorText": "net::ERR_ABORTED" })));
+        send(event("Network.requestWillBeSentExtraInfo", json!({ "requestId": "1", "headers": { "Cookie": "sid=1" } })));
+        let events = take_endings(&mut rx, 1).await;
+        let (request_headers, _) = events
+            .iter()
+            .find_map(|event| match event {
+                NetworkEvent::Failed { id, request_headers, .. } if id.as_str() == "1" => Some((request_headers.clone(), ())),
+                _ => None,
+            })
+            .expect("the failed request");
+        assert_eq!(sorted(request_headers), Some(vec![("Cookie".to_string(), "sid=1".to_string())]));
     }
 
     #[test]
