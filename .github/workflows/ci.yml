@@ -22,6 +22,7 @@ env:
   ZIG_VERSION: "0.16.0"
   ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
   CARGO_ZIGBUILD_VERSION: "0.24.1"
+  CARGO_ZIGBUILD_SHA256: 32581c8e13f27a807bb244aaaac870522f5b51263c766cf77b1a99771ce9fa5c
 
 # The CLI ships from rust/; cli/ (the TypeScript CLI) stays in the repository as the reference the Rust one follows, and
 # CI no longer builds or tests it.
@@ -35,38 +36,41 @@ jobs:
         with:
           persist-credentials: false
 
-      # Bun from package.json's packageManager field.
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version-file: package.json
+      - parallel:
+          # Bun from package.json's packageManager field.
+          - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+            with:
+              bun-version-file: package.json
 
-      # npm packs and installs the npm package in the release checks; its launcher runs under Node.
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24
-          package-manager-cache: false
+          # npm packs and installs the npm package in the release checks; its launcher runs under Node.
+          - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+            with:
+              node-version: 24
+              package-manager-cache: false
 
       - name: Install (extension)
         run: bun install --frozen-lockfile
 
-      - name: Typecheck (extension and scripts)
-        run: bun run typecheck
+      # release:check rebuilds dist/, so it runs after this group.
+      - parallel:
+          - name: Typecheck (extension and scripts)
+            run: bun run typecheck
 
-      - name: Build (extension)
-        run: bun run build
+          - name: Build (extension)
+            run: bun run build
 
-      - name: Test (extension)
-        run: bun test ./test
+          - name: Test (extension)
+            run: bun test ./test
+
+          # The scripts the release jobs that hold secrets run (.github/release/); shellcheck comes with the runner image.
+          - name: Shellcheck release scripts
+            run: shellcheck -x .github/release/*.sh
 
       # The extension zip and npm tarball the release workflow would build, with its artifact checks (permission
       # allowlist, no key, pairing code, source maps or test hooks; the npm launcher's package), and the versions agreeing
       # across package.json, the manifest and rust/, so a problem shows up on the PR rather than at release time.
       - name: Release artifacts check
         run: bun run release:check
-
-      # The scripts the release jobs that hold secrets run (.github/release/); shellcheck comes with the runner image.
-      - name: Shellcheck release scripts
-        run: shellcheck -x .github/release/*.sh
 
   rust:
     name: Rust (clippy, test, linux-x64 package)
@@ -77,50 +81,70 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version-file: package.json
-
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24
-          package-manager-cache: false
-
-      - name: Install Rust
-        run: |
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
-          rustup default "$RUST_TOOLCHAIN"
-
-      - name: Clippy
-        working-directory: rust
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: Test
-        working-directory: rust
-        run: cargo test --workspace --locked
-
       - name: Install zig and cargo-zigbuild
+        id: zig
+        background: true
         run: |
           curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/zig.tar.xz" "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz"
           echo "$ZIG_SHA256  $RUNNER_TEMP/zig.tar.xz" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/zig"
           tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP/zig" --strip-components=1
           echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
-          cargo install --locked "cargo-zigbuild@$CARGO_ZIGBUILD_VERSION"
+          curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/cargo-zigbuild.tar.xz" "https://github.com/rust-cross/cargo-zigbuild/releases/download/v$CARGO_ZIGBUILD_VERSION/cargo-zigbuild-x86_64-unknown-linux-gnu.tar.xz"
+          echo "$CARGO_ZIGBUILD_SHA256  $RUNNER_TEMP/cargo-zigbuild.tar.xz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/cargo-zigbuild"
+          tar -xJf "$RUNNER_TEMP/cargo-zigbuild.tar.xz" -C "$RUNNER_TEMP/cargo-zigbuild" --strip-components=1
+          "$RUNNER_TEMP/cargo-zigbuild/cargo-zigbuild" --version
+          echo "$RUNNER_TEMP/cargo-zigbuild" >> "$GITHUB_PATH"
+
+      - parallel:
+          - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+            with:
+              bun-version-file: package.json
+
+          - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+            with:
+              node-version: 24
+              package-manager-cache: false
+
+          - name: Install Rust
+            run: |
+              rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
+              rustup default "$RUST_TOOLCHAIN"
+
+      - name: Clippy
+        working-directory: rust
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Compile tests
+        working-directory: rust
+        run: cargo test --workspace --locked --no-run
+
+      - name: Test
+        id: test
+        background: true
+        working-directory: rust
+        run: cargo test --workspace --locked
+
+      - wait: zig
 
       # The linux-x64 release binary built as the release builds it (glibc 2.17), packed as the release packs it
       # (scripts/npm-package.ts), then installed with npm next to @opencode/browse and run through its launcher: relay
-      # and MCP server.
+      # and MCP server. Separate CARGO_TARGET_DIR avoids lock contention with the background test run.
       - name: Build, pack and install the linux-x64 package
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/target-zigbuild
         run: |
           version=$(node -p 'require("./cli/package.json").version')
           (cd rust && BROWSE_VERSION="$version" cargo zigbuild --release --locked -p browse --target x86_64-unknown-linux-gnu.2.17)
           mkdir -p "$RUNNER_TEMP/rust/linux-x64"
-          cp rust/target/x86_64-unknown-linux-gnu/release/browse "$RUNNER_TEMP/rust/linux-x64/browse"
+          cp "$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release/browse" "$RUNNER_TEMP/rust/linux-x64/browse"
           bun scripts/npm-package.ts platforms --binaries "$RUNNER_TEMP/rust" --out "$RUNNER_TEMP/npm" --target linux-x64
           bun scripts/npm-package.ts main --out "$RUNNER_TEMP/npm"
           bun scripts/check-artifacts.ts --version "$version" --tarball "$RUNNER_TEMP/npm/opencode-browse-$version.tgz" \
             --platform-tarball "$RUNNER_TEMP/npm/opencode-browse-linux-x64-$version.tgz"
+
+      - wait: test
 
   rust-windows:
     name: Rust on Windows
