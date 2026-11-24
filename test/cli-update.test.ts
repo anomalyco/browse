@@ -146,6 +146,7 @@ describe("relayAutoUpdate", () => {
         latestAt: iso(NOW - minutes(5)),
         checkedAt: iso(NOW),
         lastError: { message: "npm failed", at: iso(NOW), version: "0.0.17", attempts: 2 },
+        checkFailed: "couldn't get https://anoma.ly/release/browse/cli/stable.json: invalid peer certificate: UnknownIssuer",
       }),
     ).toEqual({
       install: "npx",
@@ -157,7 +158,9 @@ describe("relayAutoUpdate", () => {
       latestAt: iso(NOW - minutes(5)),
       checkedAt: iso(NOW),
       lastError: { message: "npm failed", at: iso(NOW), version: "0.0.17", attempts: 2 },
+      checkFailed: "couldn't get https://anoma.ly/release/browse/cli/stable.json: invalid peer certificate: UnknownIssuer",
     })
+    expect(relayAutoUpdate({ install: "binary", mode: "on", effective: "on", checkFailed: "x".repeat(301) })?.checkFailed).toBe("x".repeat(300))
   })
 
   test("drops malformed failures and unknown installs from an older or newer relay", () => {

@@ -23,6 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, bail};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use ureq::tls::{RootCerts, TlsConfig};
 
 pub use crate::method::{Global, Install, Manager, dist_tag, install};
 use crate::method::{PACKAGE, Runner};
@@ -100,6 +101,12 @@ fn state_path() -> PathBuf {
 
 pub fn state() -> Value {
     std::fs::read(state_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).filter(Value::is_object).unwrap_or_else(|| json!({}))
+}
+
+/// The message from the last background check that failed (`auto-update.json` `failed`), cleared by the next check
+/// that works. Unlike `lastError`, which is about installing a release, this is about reaching the release service.
+fn check_failure(state: &Value) -> Option<&str> {
+    state.get("failed").and_then(Value::as_str)
 }
 
 pub fn update_state(change: impl FnOnce(&mut Value)) -> anyhow::Result<()> {
@@ -229,11 +236,58 @@ fn service() -> String {
     std::env::var("OPENCODE_BROWSER_RELEASE_SERVICE").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| RELEASE_SERVICE.into()).trim_end_matches('/').to_owned()
 }
 
-/// GETs `url` with this install's User-Agent, failing on an error status, a body over `limit` bytes or `timeout`.
+/// The client every update request uses: this install's User-Agent, `timeout`, and the given roots. The platform
+/// store (and `SSL_CERT_FILE`/`SSL_CERT_DIR` on Linux) is what lets updates work behind a TLS-inspecting proxy whose
+/// root isn't one of the bundled ones.
+fn agent(kind: Kind, timeout: Duration, roots: RootCerts) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .user_agent(kind.user_agent())
+        .tls_config(TlsConfig::builder().root_certs(roots).build())
+        .build()
+        .into()
+}
+
+/// Whether a failed request is worth retrying with the bundled roots: the system has no CA bundle (a slim container, an
+/// empty `SSL_CERT_FILE`) or its chain rejected the certificate. A handshake rejection arrives wrapped as
+/// `Io(InvalidData, rustls::Error::InvalidCertificate)`, not `Error::Rustls`. Timeouts, DNS, connections, HTTP
+/// statuses and other IO errors never retry, so a broken download isn't restarted.
+fn should_fall_back(error: &ureq::Error) -> bool {
+    match error {
+        ureq::Error::Rustls(_) | ureq::Error::Tls(_) => true,
+        ureq::Error::Io(error) => matches!(
+            error.get_ref().and_then(|inner| inner.downcast_ref::<rustls::Error>()),
+            Some(rustls::Error::InvalidCertificate(_))
+        ),
+        _ => false,
+    }
+}
+
+/// One request with `agent`, failing on an error status, a body over `limit` bytes or `timeout`.
+fn fetch(agent: &ureq::Agent, url: &str, limit: u64) -> Result<Vec<u8>, ureq::Error> {
+    let mut response = agent.get(url).call()?;
+    response.body_mut().with_config().limit(limit).read_to_vec()
+}
+
+/// GETs `url`, first against this computer's trusted certificates, then against the bundled roots (the trust the
+/// updater had before it used the platform store) when the system has none or rejects the chain. If the fallback fails
+/// too, the error that explains it wins: the fallback's for a machine with no roots, the platform's for a rejection.
 fn get(kind: Kind, url: &str, timeout: Duration, limit: u64) -> anyhow::Result<Vec<u8>> {
-    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(timeout)).user_agent(kind.user_agent()).build().into();
-    let mut response = agent.get(url).call().with_context(|| format!("couldn't get {url}"))?;
-    Ok(response.body_mut().with_config().limit(limit).read_to_vec()?)
+    let error = match fetch(&agent(kind, timeout, RootCerts::PlatformVerifier), url, limit) {
+        Ok(body) => return Ok(body),
+        Err(error) => error,
+    };
+    if should_fall_back(&error) {
+        match fetch(&agent(kind, timeout, RootCerts::WebPki), url, limit) {
+            Ok(body) => return Ok(body),
+            // No platform roots at all: the fallback's error (network, chain) is the real cause.
+            Err(fallback) if matches!(error, ureq::Error::Rustls(_)) => {
+                return Err(anyhow::Error::new(fallback).context(format!("couldn't get {url}")));
+            }
+            Err(_) => {}
+        }
+    }
+    Err(anyhow::Error::new(error).context(format!("couldn't get {url}")))
 }
 
 /// The channel's manifest, through the release protocol's client rules (protocol.rs). A binary install takes the
@@ -575,7 +629,16 @@ pub fn command(args: &[String]) -> anyhow::Result<()> {
         Install::Binary(binary) => Some(binary.clone()),
         Install::Checkout => None,
     };
-    match check(&install)? {
+    let checked = check(&install)?;
+    // A manual check that reached the service clears a stale `failed` from the background loop, as the package manager
+    // path does. A checkout build doesn't check in.
+    if !matches!(install, Install::Checkout) {
+        let _ = record_check(match &checked {
+            Check::Available(release) => Some(release.version.as_str()),
+            Check::UpToDate(_) | Check::Deferred(_) => None,
+        });
+    }
+    match checked {
         Check::UpToDate(version) if version == VERSION => println!("browse {VERSION} is up to date ({} channel).", channel()),
         Check::UpToDate(version) => println!("browse {VERSION} is up to date ({} channel's latest release is {version}).", channel()),
         Check::Deferred(version) => println!("browse {version} is out, but not for this install yet. Running {VERSION}."),
@@ -659,6 +722,9 @@ pub fn status_json() -> Value {
     if let Some(error) = state.get("lastError") {
         status["lastError"] = error.clone();
     }
+    if let Some(failed) = check_failure(&state) {
+        status["checkFailed"] = json!(failed);
+    }
     status
 }
 
@@ -715,6 +781,8 @@ pub fn describe() -> String {
     }
     if let Some(error) = state.get("lastError").and_then(|e| e.get("message")).and_then(Value::as_str) {
         line.push_str(&format!(", last attempt failed: {error}"));
+    } else if let Some(failed) = check_failure(&state) {
+        line.push_str(&format!(", last check failed: {failed}"));
     }
     line
 }
@@ -805,42 +873,50 @@ impl Worker {
         // Package manager installs wait for an idle moment, so look more often than the channel is checked.
         let tick = self.interval.min(Duration::from_secs(300));
         loop {
-            if let Err(error) = self.tick(effective_mode()) {
-                let _ = update_state(|s| s["failed"] = json!(error.to_string()));
-            }
+            self.tick(effective_mode());
             std::thread::sleep(tick);
         }
     }
 
-    fn tick(&mut self, mode: Mode) -> anyhow::Result<()> {
+    fn tick(&mut self, mode: Mode) {
         if self.checked.is_none_or(|at| at.elapsed() >= self.interval) {
             // A failed check (no network yet) is tried again on the next tick, not an hour later.
-            let checked = check(&self.install)?;
+            let checked = match check(&self.install) {
+                Ok(checked) => checked,
+                Err(error) => {
+                    // Only reaching the release service is a check failure; installs write `lastError` instead.
+                    let _ = update_state(|s| s["failed"] = json!(format!("{error:#}")));
+                    return;
+                }
+            };
             self.checked = Some(Instant::now());
             let found = match checked {
                 Check::Available(release) if matches!(&self.install, Install::Binary(_)) => Some(Found::Binary(release)),
                 Check::Available(release) => Some(Found::Package(release.version)),
                 Check::UpToDate(_) | Check::Deferred(_) => None,
             };
-            record_check(found.as_ref().map(|f| match f {
+            let _ = record_check(found.as_ref().map(|f| match f {
                 Found::Binary(release) => release.version.as_str(),
                 Found::Package(version) => version.as_str(),
-            }))?;
+            }));
             if mode == Mode::On
                 && self.updates
                 && let (Some(Found::Binary(release)), Install::Binary(binary)) = (&found, &self.install)
             {
-                install_binary(release, binary).inspect_err(|error| record_failure(&release.version, error))?;
-                record_install(&release.version)?;
+                match install_binary(release, binary) {
+                    Ok(()) => {
+                        let _ = record_install(&release.version);
+                    }
+                    Err(error) => record_failure(&release.version, &error),
+                }
             }
         }
         if mode == Mode::On
             && self.updates
             && let Install::Global(global) = self.install.clone()
         {
-            self.package_tick(&global)?;
+            let _ = self.package_tick(&global);
         }
-        Ok(())
     }
 
     /// Installs the release a check found with the package manager, once nothing is using the browser.
@@ -963,6 +1039,49 @@ mod tests {
             };
             assert_eq!(Kind::of(&install).user_agent(), expected, "{}", install.name());
         }
+    }
+
+    /// A proxy's root is in this computer's store, not among the bundled roots: update requests must trust the platform
+    /// verifier or they fail with "invalid peer certificate: UnknownIssuer" behind TLS inspection.
+    #[test]
+    fn update_requests_trust_the_platform_certificate_store() {
+        let timeout = std::time::Duration::from_secs(1);
+        let platform = super::agent(Kind::Binary, timeout, ureq::tls::RootCerts::PlatformVerifier);
+        assert!(matches!(platform.config().tls_config().root_certs(), ureq::tls::RootCerts::PlatformVerifier));
+        let bundled = super::agent(Kind::Binary, timeout, ureq::tls::RootCerts::WebPki);
+        assert!(matches!(bundled.config().tls_config().root_certs(), ureq::tls::RootCerts::WebPki));
+    }
+
+    /// Only certificate problems fall back to the bundled roots; a timeout, a 500 or any other IO error won't.
+    #[test]
+    fn only_certificate_problems_fall_back_to_the_bundled_roots() {
+        assert!(super::should_fall_back(&ureq::Error::Tls("no platform verifier")));
+        assert!(super::should_fall_back(&ureq::Error::Rustls(rustls::Error::General("no CA certificates".into()))));
+        // A rejected chain comes wrapped: rustls returns InvalidData around InvalidCertificate, and ureq hands that
+        // through as Error::Io rather than Error::Rustls.
+        assert!(super::should_fall_back(&ureq::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer),
+        ))));
+        assert!(!super::should_fall_back(&ureq::Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "not a certificate"))));
+        assert!(!super::should_fall_back(&ureq::Error::Timeout(ureq::Timeout::Global)));
+        assert!(!super::should_fall_back(&ureq::Error::HostNotFound));
+        assert!(!super::should_fall_back(&ureq::Error::ConnectionFailed));
+        assert!(!super::should_fall_back(&ureq::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionRefused))));
+        assert!(!super::should_fall_back(&ureq::Error::StatusCode(500)));
+        assert!(!super::should_fall_back(&ureq::Error::BodyExceedsLimit(1)));
+    }
+
+    /// A check that can't reach the release service is reported from `auto-update.json`'s `failed`, separately from an
+    /// install's `lastError`.
+    #[test]
+    fn a_failed_check_is_read_from_the_state() {
+        let state = serde_json::json!({ "failed": "couldn't get https://anoma.ly/release/browse/cli/stable.json: invalid peer certificate: UnknownIssuer" });
+        assert_eq!(
+            super::check_failure(&state),
+            Some("couldn't get https://anoma.ly/release/browse/cli/stable.json: invalid peer certificate: UnknownIssuer")
+        );
+        assert_eq!(super::check_failure(&serde_json::json!({ "lastError": { "message": "npm failed" } })), None);
     }
 
     /// Only a checkout build skips the updater; a global install whose binary can't be found still checks in, and

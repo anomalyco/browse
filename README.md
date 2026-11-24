@@ -161,6 +161,11 @@ channel's release when it isn't the one running (a rollback reaches everyone too
 - `npx`, `bunx`, `pnpm dlx` and `yarn dlx` runs resolve the package themselves: they only tell you another release is
   out.
 
+Update checks and downloads use this computer's trusted certificates — the system store on macOS, Windows and Linux; on
+Linux `SSL_CERT_FILE`/`SSL_CERT_DIR` replace the system bundle, as with `curl` — and fall back to the bundled
+certificates when the system has none or doesn't trust the chain. A check that fails says why in `browse status` and
+on the extension's options page.
+
 A relay browse started restarts on the new version when it's idle (one you run with `browse serve` in a terminal keeps
 running until you restart it); agent tabs stay open and come back. A running MCP server keeps
 working with the newer relay until the agent restarts it. `browse update` updates now and `browse update --check` only
