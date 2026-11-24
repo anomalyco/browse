@@ -239,7 +239,7 @@ OpenCode, which composes tools in code mode, gets the plain tools. Every other M
 | `navigate` | Open a page: without `tab`, in a new background tab whose id it returns |
 | `snapshot` | A compact outline of the page with refs (`e12`) for the other tools, iframes included; scopes to the page's main area when there's exactly one and says what it left out |
 | `click`, `fill`, `type`, `press`, `select`, `hover`, `drag`, `scroll` | Act on a ref, selector or point, with human-like input |
-| `wait_for`, `dialog`, `upload`, `eval` | Wait for text, a URL or an element; answer dialogs; set files; run JavaScript in the page |
+| `wait_for`, `dialog`, `upload`, `eval` | Wait for text, a URL or an element; answer dialogs; set files on an input or a button that opens the file chooser; run JavaScript in the page |
 | `screenshot`, `screenshot_diff` | The viewport, full page, an element or a rectangle; compare with a baseline |
 | `network`, `console` | Capture a tab's traffic (credentials redacted) or its console messages and errors |
 | `recording` | Record a tab to a video file |

@@ -8,13 +8,14 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine;
 use browse_core::{
     Arg, BodyKind, BrowserDriver, BrowserEvent, CallOptions, CaptureDriver, ConsoleEvent, DragOutcome, DriverError,
-    DriverInfo, DriverResult, Emulation, Eval, Frame, FrameId, Image, KeyEvent, Modifiers, NavigationId, NetworkEvent,
-    NetworkOptions, PageEvent, PointerEvent, PointerStep, Realm, Receiver, RemoteRef, RequestId, Screencast,
+    DriverInfo, DriverResult, Emulation, Eval, FileChooser, Frame, FrameId, Image, KeyEvent, Modifiers, NavigationId,
+    NetworkEvent, NetworkOptions, PageEvent, PointerEvent, PointerStep, Realm, Receiver, RemoteRef, RequestId, Screencast,
     Screenshot, Subscription, TabDriver, TabOptions, TargetId, Viewport, World,
 };
 use serde_json::{Value, json};
@@ -200,6 +201,14 @@ impl TabDriver for BiDiTabDriver {
 
     async fn content_frame(&self, _node: &RemoteRef) -> DriverResult<Option<FrameId>> {
         Err(DriverError::Unsupported("bidi content_frame pending"))
+    }
+
+    async fn set_file_chooser_interception(&self, _enabled: bool) -> DriverResult<()> {
+        Err(DriverError::Unsupported("bidi file chooser interception"))
+    }
+
+    async fn take_file_chooser(&self, _timeout: Duration) -> DriverResult<Option<FileChooser>> {
+        Err(DriverError::Unsupported("bidi file chooser interception"))
     }
 
     async fn set_files(&self, input: &RemoteRef, paths: &[PathBuf]) -> DriverResult<()> {

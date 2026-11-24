@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use browse_core::{
-    Arg as DriverArg, CallOptions, DragOutcome, DriverError, Emulation, Evaluated, FrameId, Geolocation,
-    MediaFeature, MediaOverride, Realm, Receiver, Returns, TabOptions, Tool, ToolContext, ToolOutput,
+    Arg as DriverArg, CallOptions, DragOutcome, DriverError, Emulation, Evaluated, FileChooser, FrameId, Geolocation,
+    MediaFeature, MediaOverride, Realm, Receiver, Returns, TabDriver, TabOptions, Tool, ToolContext, ToolOutput,
     ToolSpec, ViewportOverride, World,
 };
 use serde_json::{Map, Value, json};
@@ -1065,18 +1065,30 @@ async fn dialog(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
 
 async fn upload(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     let c = open_input(&ctx, &args, "upload").await?;
-    let spec = Spec::from_args(&args).ok_or_else(|| anyhow!("upload needs a ref or selector for the file input (or its label)"))?;
+    let spec = Spec::from_args(&args).ok_or_else(|| anyhow!("upload needs a ref or selector for the file input, or for the button that opens its file chooser"))?;
     let files = crate::files::parse_upload_files(args.get("files"))?;
     let files: Vec<UploadFile> = files.iter().map(|file| file.checked(&c.ctx.file_roots)).collect::<Result<_>>()?;
     let timeout = timeout_arg(&args, ACTION_TIMEOUT_MS);
-    run_action(&c, AfterOptions { expect_navigation: false, ..AfterOptions::default() }, move |c, _input| {
+    run_action(&c, AfterOptions { expect_navigation: false, ..AfterOptions::default() }, move |c, input| {
         Box::pin(async move {
             let resolved = target::resolve(&c.page, &c.tab_state, &spec, ResolveOptions { timeout, act: true }).await?;
-            let input = match c.page.call_element_result(&resolved.element.frame, "fileInput", vec![Arg::Element(resolved.element.clone())], true).await? {
-                ElementOr::Element(element) => element,
-                ElementOr::Status(_) => bail!("{} is not a file input (input[type=file]) or its label", target_label(&spec, &resolved.label)),
+            let name = if resolved.label.is_empty() { spec.label() } else { resolved.label.clone() };
+            let (target, interception, lock) = match c.page.call_element_result(&resolved.element.frame, "fileInput", vec![Arg::Element(resolved.element.clone())], true).await? {
+                ElementOr::Element(element) => (element, None, None),
+                ElementOr::Status(_) => {
+                    let lock = tokio::time::timeout(timeout, c.page.file_chooser.lock())
+                        .await
+                        .map_err(|_| anyhow!("upload: another upload is already using this tab's file chooser; try again"))?;
+                    let (target, interception) = upload_through_file_chooser(c, input, &spec, &name, timeout).await?;
+                    (target, Some(interception), Some(lock))
+                }
             };
-            let via = set_files(c, &c.page, &input, &files, c.ctx.browser.connected_locally(c.page.tab()).await).await?;
+            let sent = set_files(c, &c.page, &target, &files, c.ctx.browser.connected_locally(c.page.tab()).await).await;
+            if let Some(interception) = interception {
+                interception.disarm().await;
+            }
+            drop(lock);
+            let via = sent?;
             let mut out = Map::new();
             out.insert("target".into(), target_label(&spec, &resolved.label));
             out.insert("files".into(), json!(files.iter().map(UploadFile::name).collect::<Vec<_>>()));
@@ -1085,6 +1097,82 @@ async fn upload(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
         })
     })
     .await
+}
+
+/// Keeps native file chooser interception off after the upload, however it ends.
+struct ChooserInterception {
+    driver: Option<Arc<dyn TabDriver>>,
+}
+
+impl ChooserInterception {
+    async fn arm(page: &Arc<TabPage>) -> Result<Self> {
+        let driver = page.driver().clone();
+        // The guard exists before enabling, so a dropped enable still gets a disable.
+        let guard = Self { driver: Some(driver.clone()) };
+        driver.set_file_chooser_interception(true).await.map_err(crate::page::driver_error)?;
+        Ok(guard)
+    }
+
+    async fn disarm(mut self) {
+        if let Some(driver) = self.driver.clone() {
+            let _ = driver.set_file_chooser_interception(false).await;
+            // If this future is dropped while disabling, Drop spawns the disable again.
+            self.driver = None;
+        }
+    }
+}
+
+impl Drop for ChooserInterception {
+    fn drop(&mut self) {
+        let Some(driver) = self.driver.take() else { return };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _ = driver.set_file_chooser_interception(false).await;
+            });
+        }
+    }
+}
+
+/// Clicks a target that opens a native file chooser and returns the input Chrome says it would fill, with
+/// interception still on so the files can be set before it is turned off.
+async fn upload_through_file_chooser(
+    c: &Ctx,
+    input: &mut Input<'_>,
+    spec: &Spec,
+    name: &str,
+    timeout: Duration,
+) -> Result<(crate::page::Element, ChooserInterception)> {
+    let interception = ChooserInterception::arm(&c.page).await?;
+    let started = Instant::now();
+    let clicked = async {
+        let (_, at) = actions::locate(
+            &c.page,
+            &c.tab_state,
+            input,
+            spec,
+            PointerOptions { timeout, force: false, position: None, hit_test: true, enabled: true },
+        )
+        .await?;
+        input.click(at, "left", 1).await?;
+        let remaining = timeout.saturating_sub(started.elapsed()).max(Duration::from_millis(1));
+        match c.page.driver().take_file_chooser(remaining).await.map_err(crate::page::driver_error)? {
+            Some(FileChooser { input: Some(handle), .. }) => Ok(crate::page::Element {
+                frame: handle.frame.as_str().to_string(),
+                generation: handle.document.0,
+                handle,
+            }),
+            Some(_) => bail!("the file chooser opened from {name}, but browse could not find the file input it would fill"),
+            None => bail!("clicked {name} but no file chooser opened"),
+        }
+    }
+    .await;
+    match clicked {
+        Ok(target) => Ok((target, interception)),
+        Err(error) => {
+            interception.disarm().await;
+            Err(error)
+        }
+    }
 }
 
 /// Raw bytes per chunk sent to the page (base64 makes each call about a third larger).
@@ -1927,7 +2015,7 @@ fn dialog_schema() -> Value {
     )
 }
 
-const UPLOAD: &str = "Set the files of a file input (input[type=file], or its label) without opening the file chooser. files are absolute paths inside browse's file roots, on the machine browse runs on, or inline { name, data } objects whose data is the file's bytes as base64 (for files on another machine). When the browser is on that machine and can read the paths, it takes them straight from disk (no size limit, real input and change events); otherwise browse copies them in, at most 50 MB per call (the limit is for paths copied in). Inline files always copy in and fit about 10 MB per call, and mixing them with paths copies the paths in too. The reply's via says whether the browser read them from disk (paths) or browse copied them in (copy).";
+const UPLOAD: &str = "Set the files of a file input (input[type=file], or its label) without opening the file chooser. It also accepts a button or element that opens a file chooser: browse clicks it, then sets the files on the input the chooser would fill. files are absolute paths inside browse's file roots, on the machine browse runs on, or inline { name, data } objects whose data is the file's bytes as base64 (for files on another machine). When the browser is on that machine and can read the paths, it takes them straight from disk (no size limit, real input and change events); otherwise browse copies them in, at most 50 MB per call (the limit is for paths copied in). Inline files always copy in and fit about 10 MB per call, and mixing them with paths copies the paths in too. The reply's via says whether the browser read them from disk (paths) or browse copied them in (copy).";
 
 fn upload_schema() -> Value {
     let inline = json!({
@@ -1941,13 +2029,12 @@ fn upload_schema() -> Value {
         "required": ["name", "data"],
     });
     let item = json!({ "anyOf": [{ "type": "string" }, inline.clone()] });
-    object(
-        target_props(props(json!({
-            "files": { "anyOf": [{ "type": "string" }, inline, { "type": "array", "items": item }] },
-            "timeout": { "type": "integer" },
-        }))),
-        &["files"],
-    )
+    let mut p = target_props(props(json!({
+        "files": { "anyOf": [{ "type": "string" }, inline, { "type": "array", "items": item }] },
+        "timeout": { "type": "integer" },
+    })));
+    p.insert("selector".into(), json!({ "type": "string", "description": "CSS or Playwright selector for the file input, its label, or the button or element that opens its file chooser. Must match exactly one element." }));
+    object(p, &["files"])
 }
 
 const EMULATE: &str = "Change how the tab presents itself: viewport { width, height, deviceScaleFactor, mobile } (or \"reset\"), colorScheme, reducedMotion, forcedColors, contrast, media (\"print\"), userAgent, geolocation { latitude, longitude } (the site still needs the user's permission), touch, offline. \"reset\" restores a setting. Permissions can't be granted.";

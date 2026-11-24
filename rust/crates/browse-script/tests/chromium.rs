@@ -215,6 +215,39 @@ return r
     assert!(output.is_error && text.contains("not supported") && text.contains("cookies"), "{text}");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_through_a_button_and_filechooser_events() {
+    let h = harness!();
+    let url = h.server.page(
+        "/attach",
+        r###"<!doctype html><button id="attach" onclick="document.getElementById('file').click()">Attach</button>
+<input id="file" type="file" style="display:none" onchange="document.body.dataset.changes = (Number(document.body.dataset.changes) || 0) + 1">"###,
+    );
+    let result = h
+        .value(&format!(
+            r###"
+await page.goto({url:?});
+const path = await files.write("attach.txt", "attached through a button");
+await page.locator("#attach").setInputFiles(path);
+return {{
+  name: await page.evaluate(() => document.getElementById("file").files[0].name),
+  content: await page.evaluate(async () => document.getElementById("file").files[0].text()),
+  changes: await page.evaluate(() => Number(document.body.dataset.changes) || 0),
+}}
+"###
+        ))
+        .await;
+    assert_eq!(result["name"], "attach.txt", "{result}");
+    assert_eq!(result["content"], "attached through a button", "{result}");
+    assert_eq!(result["changes"], 1, "{result}");
+
+    let (text, output) = h.run(r###"await page.waitForEvent("filechooser")"###).await;
+    assert!(output.is_error, "{text}");
+    assert!(text.contains("not supported") && text.contains("setInputFiles"), "{text}");
+    let (text, output) = h.run(r###"page.on("filechooser", () => {})"###).await;
+    assert!(output.is_error && text.contains("setInputFiles"), "{text}");
+}
+
 const COUNTER: &str = r###"<!doctype html><html><body><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="315" height="100">
 <defs><image id="0" href="data:,"/><image id="2" href="data:,"/><image id="6" href="data:,"/></defs>
 <use x="270" xlink:href="#6"/><use x="0" xlink:href="#0"/><use x="45" xlink:href="#0"/><use x="90" xlink:href="#0"/><use x="135" xlink:href="#0"/><use x="180" xlink:href="#2"/><use x="225" xlink:href="#2"/>

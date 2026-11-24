@@ -6,6 +6,7 @@
 //! - Typed `DriverError` mapping (no Chrome error strings leaking upward)
 //! - `Network.enable` refcounting shared between network capture and offline emulation
 //! - HTML5 drag interception (`Input.setInterceptDrags` / `Input.dragIntercepted` / `Input.dispatchDragEvent`)
+//! - Native file chooser interception across the tab and its out-of-process iframes
 //! - Dialog scope tracking, DOM key-to-CDP translation, and tiled fallback for oversized screenshots
 
 mod console;
@@ -20,14 +21,14 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use base64::Engine;
 use browse_core::{
     Arg, BodyKind, CallOptions, CaptureDriver, CloseReason, ConsoleEvent, Dialog, DialogKind, DocumentId, DragOutcome,
-    DriverError, DriverResult, Emulation, Eval, Evaluated, Frame, FrameId, Image, ImageFormat, JsError, KeyEvent,
-    LoadState, Modifiers, MouseButton, NavigationError, NavigationErrorKind, NavigationId, NetworkEvent,
+    DriverError, DriverResult, Emulation, Eval, Evaluated, FileChooser, Frame, FrameId, Image, ImageFormat,
+    JsError, KeyEvent, LoadState, Modifiers, MouseButton, NavigationError, NavigationErrorKind, NavigationId, NetworkEvent,
     NetworkOptions, PageEvent, PointerEvent, PointerStep, Realm, Receiver, RemoteRef, RequestId, Returns, Screencast,
     ScreencastFrame, ScreencastOptions, Screenshot, ScreenshotArea, Subscription, TabDriver, Viewport, World,
 };
@@ -63,6 +64,11 @@ fn is_fragment_change(current: &str, next: &str) -> bool {
     next.contains('#') && !current.is_empty() && cur_base == next_base
 }
 
+struct PendingFileChooser {
+    frame: FrameId,
+    backend_node_id: Option<i64>,
+}
+
 #[derive(Clone)]
 struct FrameEntry {
     frame: Frame,
@@ -84,6 +90,10 @@ struct DriverState {
     buttons: i64,
     /// Captured HTML5 drag payload from `Input.dragIntercepted`.
     drag_data: Option<Value>,
+    /// The latest native file chooser seen while interception was armed.
+    file_chooser: Option<PendingFileChooser>,
+    /// Whether file chooser interception is enabled on the tab and every attached child session.
+    intercept_file_chooser: bool,
     /// Whether `Closed` terminal event has already been emitted.
     closed: bool,
 }
@@ -94,6 +104,7 @@ struct Shared {
     state: Mutex<DriverState>,
     events: Mutex<Option<broadcast::Sender<PageEvent>>>,
     drag_watch: watch::Sender<u64>,
+    file_chooser_watch: watch::Sender<u64>,
     page_init: tokio::sync::OnceCell<()>,
     world_lock: tokio::sync::Mutex<()>,
     network_domain: Arc<Mutex<NetworkDomain>>,
@@ -383,6 +394,25 @@ impl Shared {
         Ok((object_id, doc, session))
     }
 
+    /// The element behind a file chooser, as a handle in its frame's isolated world.
+    async fn resolve_backend_node(&self, frame: &FrameId, backend_node_id: i64) -> DriverResult<RemoteRef> {
+        let (context, document, session) = self.isolated_context(frame).await?;
+        let resolved = self
+            .cdp
+            .send(
+                "DOM.resolveNode",
+                json!({ "backendNodeId": backend_node_id, "executionContextId": context }),
+                session.as_deref(),
+            )
+            .await
+            .map_err(map_cdp_error)?;
+        let object_id = str_of(&resolved["object"], "objectId");
+        if object_id.is_empty() {
+            return Err(DriverError::Protocol("Chrome could not resolve the file input behind the file chooser".into()));
+        }
+        Ok(RemoteRef::new(frame.clone(), World::Isolated, document, object_id))
+    }
+
     fn handle_cdp_event(self: &Arc<Self>, event: CdpEvent) {
         let session = event.session_id.clone();
         let params = &event.params;
@@ -589,6 +619,25 @@ impl Shared {
             "Page.windowOpen" => {
                 self.emit(PageEvent::PopupOpened { url: str_of(params, "url") });
             }
+            "Page.fileChooserOpened" => {
+                let mut st = self.state.lock().unwrap();
+                if !st.intercept_file_chooser {
+                    return;
+                }
+                let named = FrameId::from(str_of(params, "frameId"));
+                let frame = if named.as_str().is_empty() {
+                    session.as_ref().and_then(|session| st.sessions.get(session).cloned())
+                } else {
+                    Some(named)
+                };
+                let Some(frame) = frame else { return };
+                st.file_chooser = Some(PendingFileChooser {
+                    frame,
+                    backend_node_id: params.get("backendNodeId").and_then(Value::as_i64),
+                });
+                drop(st);
+                self.file_chooser_watch.send_modify(|n| *n += 1);
+            }
             "Input.dragIntercepted" => {
                 self.state.lock().unwrap().drag_data = Some(params["data"].clone());
                 self.drag_watch.send_modify(|n| *n += 1);
@@ -663,6 +712,12 @@ impl Shared {
     ) {
         let s = Some(session.as_str());
         let _ = self.cdp.send("Page.enable", json!({}), s).await;
+        if self.state.lock().unwrap().intercept_file_chooser {
+            let _ = self
+                .cdp
+                .send("Page.setInterceptFileChooserDialog", json!({ "enabled": true }), s)
+                .await;
+        }
         let _ = self
             .cdp
             .send("Page.setLifecycleEventsEnabled", json!({ "enabled": true }), s)
@@ -707,12 +762,14 @@ impl CdpTabDriver {
         let mut raw_events = cdp.events();
         let (events, _) = broadcast::channel(2048);
         let (drag_watch, _) = watch::channel(0u64);
+        let (file_chooser_watch, _) = watch::channel(0u64);
         let shared = Arc::new(Shared {
             cdp,
             world_name: world_name(),
             state: Mutex::new(DriverState::default()),
             events: Mutex::new(Some(events)),
             drag_watch,
+            file_chooser_watch,
             page_init: tokio::sync::OnceCell::new(),
             world_lock: tokio::sync::Mutex::new(()),
             network_domain: Arc::new(Mutex::new(NetworkDomain::default())),
@@ -1157,6 +1214,63 @@ impl TabDriver for CdpTabDriver {
             .await
             .map_err(map_cdp_error)?;
         Ok(())
+    }
+
+    async fn set_file_chooser_interception(&self, enabled: bool) -> DriverResult<()> {
+        let children: Vec<String> = {
+            let mut st = self.shared.state.lock().unwrap();
+            st.intercept_file_chooser = enabled;
+            if !enabled {
+                st.file_chooser = None;
+            }
+            st.sessions.keys().cloned().collect()
+        };
+        let params = json!({ "enabled": enabled });
+        let root = self
+            .shared
+            .cdp
+            .send("Page.setInterceptFileChooserDialog", params.clone(), None)
+            .await;
+        if let Err(error) = root
+            && enabled
+        {
+            let mut st = self.shared.state.lock().unwrap();
+            st.intercept_file_chooser = false;
+            st.file_chooser = None;
+            return Err(map_cdp_error(error));
+        }
+        // A child session can go away between listing and sending; that one can no longer open a chooser.
+        for child in children {
+            let _ = self
+                .shared
+                .cdp
+                .send("Page.setInterceptFileChooserDialog", params.clone(), Some(&child))
+                .await;
+        }
+        Ok(())
+    }
+
+    async fn take_file_chooser(&self, timeout: Duration) -> DriverResult<Option<FileChooser>> {
+        let deadline = Instant::now() + timeout;
+        let mut changed = self.shared.file_chooser_watch.subscribe();
+        loop {
+            let pending = self.shared.state.lock().unwrap().file_chooser.take();
+            if let Some(pending) = pending {
+                let input = match pending.backend_node_id {
+                    Some(backend_node_id) => Some(self.shared.resolve_backend_node(&pending.frame, backend_node_id).await?),
+                    None => None,
+                };
+                return Ok(Some(FileChooser { frame: pending.frame, input }));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            match tokio::time::timeout(remaining, changed.changed()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) | Err(_) => return Ok(None),
+            }
+        }
     }
 
     async fn pointer(&self, event: PointerEvent) -> DriverResult<()> {

@@ -263,6 +263,14 @@ pub struct Dialog {
     pub url: String,
 }
 
+/// A native file chooser that opened while interception was armed.
+#[derive(Debug, Clone)]
+pub struct FileChooser {
+    pub frame: FrameId,
+    /// The file input the chooser would have filled; None when the browser didn't name one.
+    pub input: Option<RemoteRef>,
+}
+
 /// Normalized per-tab events emitted by a `TabDriver`.
 #[derive(Debug, Clone)]
 pub enum PageEvent {
@@ -768,6 +776,10 @@ pub trait TabDriver: Send + Sync {
     /// The child frame shown by an `<iframe>` element, if attached.
     async fn content_frame(&self, node: &RemoteRef) -> DriverResult<Option<FrameId>>;
     async fn set_files(&self, input: &RemoteRef, paths: &[PathBuf]) -> DriverResult<()>;
+    /// Enables or disables interception of native file choosers on the tab and every attached child frame.
+    async fn set_file_chooser_interception(&self, enabled: bool) -> DriverResult<()>;
+    /// The file chooser opened since interception was enabled, waiting up to `timeout` for one.
+    async fn take_file_chooser(&self, timeout: Duration) -> DriverResult<Option<FileChooser>>;
 
     // --- Input & dialogs ---
 
@@ -907,6 +919,15 @@ impl TabDriver for GuardedTabDriver {
     async fn set_files(&self, input: &RemoteRef, paths: &[PathBuf]) -> DriverResult<()> {
         self.check_write("upload")?;
         self.inner.set_files(input, paths).await
+    }
+
+    async fn set_file_chooser_interception(&self, enabled: bool) -> DriverResult<()> {
+        self.check_write("upload")?;
+        self.inner.set_file_chooser_interception(enabled).await
+    }
+
+    async fn take_file_chooser(&self, timeout: Duration) -> DriverResult<Option<FileChooser>> {
+        self.inner.take_file_chooser(timeout).await
     }
 
     async fn pointer(&self, event: PointerEvent) -> DriverResult<()> {

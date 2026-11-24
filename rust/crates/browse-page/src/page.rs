@@ -117,6 +117,8 @@ pub struct TabPage {
     world_lock: tokio::sync::Mutex<()>,
     /// Serializes input on the tab and holds the pointer's human-input state.
     pub input: tokio::sync::Mutex<crate::human::InputState>,
+    /// Serializes uploads that click a file chooser, so they don't fight over interception.
+    pub file_chooser: tokio::sync::Mutex<()>,
     pump: tokio::task::JoinHandle<()>,
 }
 
@@ -160,6 +162,7 @@ impl TabPage {
             shared: shared.clone(),
             world_lock: tokio::sync::Mutex::new(()),
             input: tokio::sync::Mutex::new(crate::human::InputState::default()),
+            file_chooser: tokio::sync::Mutex::new(()),
             pump,
         });
         let frames = driver.frames().await.map_err(driver_error)?;

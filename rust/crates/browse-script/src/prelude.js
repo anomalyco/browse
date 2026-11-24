@@ -542,7 +542,10 @@
         await sleep(interval)
       }
     }
-    waitForEvent(event) { unsupported(`page.waitForEvent(${JSON.stringify(event)})`, "wait for what the event changes instead (page.waitForURL, locator.waitFor, browse.wait_for)") }
+    waitForEvent(event) {
+      if (event === "filechooser") unsupported(`page.waitForEvent(${JSON.stringify(event)})`, `call setInputFiles on the button that opens the chooser instead (page.locator("#attach").setInputFiles(path) or browse.upload({ selector, files }))`)
+      unsupported(`page.waitForEvent(${JSON.stringify(event)})`, "wait for what the event changes instead (page.waitForURL, locator.waitFor, browse.wait_for)")
+    }
     waitForResponse() { unsupported("page.waitForResponse", "use network.start() before the action and network.stop() after it") }
     waitForRequest() { unsupported("page.waitForRequest", "use network.start() before the action and network.stop() after it") }
 
@@ -559,6 +562,7 @@
         warn(`page.on("dialog") handlers aren't called in execute: dialogs on the tab are now ${answer}ed automatically (browse.dialog({ auto: "off" }) stops it)`)
         return this
       }
+      if (event === "filechooser") unsupported(`page.on(${JSON.stringify(event)})`, `call setInputFiles on the button that opens the chooser instead (page.locator("#attach").setInputFiles(path) or browse.upload({ selector, files }))`)
       if (event === "console" || event === "pageerror") unsupported(`page.on(${JSON.stringify(event)})`, "use pageConsole.start(), then pageConsole.read()")
       if (event === "request" || event === "response" || event === "requestfinished") unsupported(`page.on(${JSON.stringify(event)})`, "use network.start() and network.stop()")
       unsupported(`page.on(${JSON.stringify(event)})`, "events aren't available; poll for the change instead")
@@ -650,7 +654,10 @@
     setOffline(offline) { return tool("emulate", defaultPage._args({ offline: !!offline })) },
     route() { unsupported("context.route()", "requests can't be intercepted; use network.start() to observe them") },
     on(event) { unsupported(`context.on(${JSON.stringify(event)})`, "events aren't available; list tabs with context.pages()") },
-    waitForEvent(event) { unsupported(`context.waitForEvent(${JSON.stringify(event)})`, "poll context.pages() instead") },
+    waitForEvent(event) {
+      if (event === "filechooser") unsupported(`context.waitForEvent(${JSON.stringify(event)})`, `call setInputFiles on the button that opens the chooser instead (page.locator("#attach").setInputFiles(path) or browse.upload({ selector, files }))`)
+      unsupported(`context.waitForEvent(${JSON.stringify(event)})`, "poll context.pages() instead")
+    },
     setDefaultTimeout(ms) { defaultPage._timeout = ms },
     setDefaultNavigationTimeout(ms) { defaultPage._navigationTimeout = ms },
     addInitScript() { unsupported("context.addInitScript()", "pages could see it; run page.evaluate() after navigating instead") },

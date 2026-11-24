@@ -2,7 +2,7 @@
 
 mod support;
 
-use serde_json::json;
+use serde_json::{Value, json};
 use support::Harness;
 
 macro_rules! harness {
@@ -509,6 +509,151 @@ async fn fill_uploads_keys_scroll_and_waits() {
     assert_eq!(h.ok("eval", json!({ "expression": fetch })).await, "\"online\"");
     let flag = h.state.inner().lock().await.get("browse.network.offline").and_then(|v| v.downcast_ref::<bool>()).copied();
     assert_eq!(flag, Some(false));
+}
+
+/// The values `Page.setInterceptFileChooserDialog` was sent, in order.
+fn chooser_states(calls: &[(String, Value)]) -> Vec<bool> {
+    calls
+        .iter()
+        .filter(|(method, _)| method == "Page.setInterceptFileChooserDialog")
+        .map(|(_, params)| params["enabled"].as_bool().unwrap_or(false))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_clicks_a_button_that_opens_a_file_chooser() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
+    let h = harness!(false);
+    let url = h.server.page(
+        "/chooser",
+        r#"<!doctype html><button id="attach" onclick="document.getElementById('file').click()">Attach a file</button>
+<input id="file" type="file" style="display:none">"#,
+    );
+    h.ok("navigate", json!({ "url": url })).await;
+    h.ok("eval", json!({ "expression": "window.uploadChanges = 0; window.uploadTrusted = null; document.getElementById('file').addEventListener('change', (event) => { window.uploadChanges += 1; window.uploadTrusted = event.isTrusted })" })).await;
+    let file = h.files.0.join("chooser.txt");
+    std::fs::write(&file, "through the chooser").unwrap();
+
+    let uploaded = h
+        .json(
+            "upload",
+            json!({ "selector": "#attach", "files": [file.display().to_string()] }),
+        )
+        .await;
+    assert_eq!(uploaded["files"][0], "chooser.txt");
+    assert_eq!(uploaded["via"], "paths", "{uploaded}");
+    assert_eq!(
+        h.ok(
+            "eval",
+            json!({ "expression": "document.getElementById('file').files[0].name" })
+        )
+        .await,
+        "\"chooser.txt\""
+    );
+    assert_eq!(
+        h.ok(
+            "eval",
+            json!({ "expression": "document.getElementById('file').files[0].text()" })
+        )
+        .await,
+        "\"through the chooser\""
+    );
+    assert_eq!(
+        h.ok("eval", json!({ "expression": "window.uploadChanges" }))
+            .await,
+        "1"
+    );
+    assert_eq!(
+        h.ok("eval", json!({ "expression": "window.uploadTrusted" }))
+            .await,
+        "true",
+        "the change event is trusted"
+    );
+    assert_eq!(
+        chooser_states(&h.tab.calls()),
+        vec![true, false],
+        "interception is enabled before the click and disabled after"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_clicks_a_button_that_creates_the_input_while_clicking() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
+    let h = harness!(false);
+    let url = h.server.page(
+        "/chooser-dynamic",
+        r#"<!doctype html><button id="attach" onclick="const input = document.createElement('input'); input.type = 'file'; input.addEventListener('change', (event) => { document.body.dataset.name = input.files[0].name; document.body.dataset.trusted = event.isTrusted }); document.body.append(input); input.click()">Attach</button>"#,
+    );
+    h.ok("navigate", json!({ "url": url })).await;
+    let file = h.files.0.join("dynamic.txt");
+    std::fs::write(&file, "made while clicking").unwrap();
+
+    let uploaded = h
+        .json(
+            "upload",
+            json!({ "selector": "#attach", "files": [file.display().to_string()] }),
+        )
+        .await;
+    assert_eq!(uploaded["files"][0], "dynamic.txt", "{uploaded}");
+    assert_eq!(h.ok("eval", json!({ "expression": "document.body.dataset.name" })).await, "\"dynamic.txt\"");
+    assert_eq!(h.ok("eval", json!({ "expression": "document.body.dataset.trusted" })).await, "\"true\"");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_reports_a_button_that_opens_no_file_chooser() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
+    let h = harness!(false);
+    let url = h.server.page("/chooser-none", r#"<!doctype html><button id="plain" onclick="document.title = 'clicked'">Nothing</button>"#);
+    h.ok("navigate", json!({ "url": url })).await;
+    let file = h.files.0.join("unused.txt");
+    std::fs::write(&file, "never uploaded").unwrap();
+
+    let error = h
+        .err(
+            "upload",
+            json!({ "selector": "#plain", "files": [file.display().to_string()], "timeout": 1000 }),
+        )
+        .await;
+    assert!(
+        error.contains("clicked") && error.contains("no file chooser opened"),
+        "{error}"
+    );
+    assert_eq!(
+        chooser_states(&h.tab.calls()),
+        vec![true, false],
+        "interception is disabled after the error"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_clicks_into_a_cross_origin_iframe() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
+    let h = harness!(false);
+    let inner = h.server.other_origin("/chooser-inner");
+    h.server.page(
+        "/chooser-inner",
+        r#"<!doctype html><button id="attach" onclick="document.getElementById('file').click()">Attach</button>
+<input id="file" type="file" onchange="document.body.dataset.changes = (Number(document.body.dataset.changes) || 0) + 1">"#,
+    );
+    let url = h.server.page("/chooser-outer", &format!(r#"<!doctype html><iframe title="Cross" src="{inner}" style="width:400px;height:300px"></iframe>"#));
+    h.ok("navigate", json!({ "url": url })).await;
+    h.ok("wait_for", json!({ "selector": "iframe[title=Cross]" }))
+        .await;
+    let file = h.files.0.join("frame.txt");
+    std::fs::write(&file, "inside the frame").unwrap();
+
+    let uploaded = h.json("upload", json!({ "selector": "iframe[title=Cross] >> frame >> #attach", "files": [file.display().to_string()] })).await;
+    assert_eq!(uploaded["files"][0], "frame.txt", "{uploaded}");
+    let name = h.ok("eval", json!({ "expression": "document.getElementById('file').files[0].name", "frame": "iframe[title=Cross]" })).await;
+    assert_eq!(name, "\"frame.txt\"");
+    let changes = h.ok("eval", json!({ "expression": "document.body.dataset.changes", "frame": "iframe[title=Cross]" })).await;
+    assert_eq!(changes, "\"1\"");
+    let states = chooser_states(&h.tab.calls());
+    assert_eq!(
+        states,
+        vec![true, true, false, false],
+        "the root and the cross-origin child session were armed and disarmed: {states:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
