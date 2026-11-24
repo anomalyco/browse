@@ -87,6 +87,12 @@ fn browse_firefox_connects_reports_disconnects_and_uninstalls_a_headless_firefox
     let home = std::env::temp_dir().join(format!("browse-firefox-cli-{}-{unique}", std::process::id()));
     std::fs::create_dir_all(&home).unwrap();
     let home = std::fs::canonicalize(&home).unwrap();
+    #[cfg(windows)]
+    let home = home
+        .to_str()
+        .and_then(|s| s.strip_prefix("\\\\?\\"))
+        .map(PathBuf::from)
+        .unwrap_or(home);
     let mut guard = Guard(Vec::new(), home.clone());
     let paths = Paths::rooted(home.join("browse-home"));
     let port = free_port();

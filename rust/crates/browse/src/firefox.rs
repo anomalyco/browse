@@ -284,9 +284,18 @@ fn launch_and_attach(target: &Target, prefs_added: bool) -> anyhow::Result<i32> 
     }
 }
 
+/// Strips the Windows `\\?\` verbatim path prefix before passing a profile path to Firefox.
+fn launch_profile_path(profile: &Path) -> OsString {
+    #[cfg(windows)]
+    if let Some(stripped) = profile.to_str().and_then(|s| s.strip_prefix("\\\\?\\")) {
+        return OsString::from(stripped);
+    }
+    profile.as_os_str().to_os_string()
+}
+
 /// The arguments a browser starts with.
 fn launch_args(target: &Target) -> Vec<OsString> {
-    let mut args: Vec<OsString> = vec!["--profile".into(), target.profile.clone().into(), "--remote-debugging-port".into(), "0".into()];
+    let mut args: Vec<OsString> = vec!["--profile".into(), launch_profile_path(&target.profile), "--remote-debugging-port".into(), "0".into()];
     if target.dedicated {
         args.push("--no-remote".into());
     }
@@ -331,9 +340,36 @@ fn detach(command: &mut Command) {
 
 #[cfg(windows)]
 fn detach(command: &mut Command) {
+    use std::ffi::c_void;
     use std::os::windows::process::CommandExt;
+
     const DETACHED_PROCESS: u32 = 0x8;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x200;
+    const STD_INPUT_HANDLE: u32 = 0xFFFF_FFF6;
+    const STD_OUTPUT_HANDLE: u32 = 0xFFFF_FFF5;
+    const STD_ERROR_HANDLE: u32 = 0xFFFF_FFF4;
+    const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetStdHandle(n_std_handle: u32) -> *mut c_void;
+        fn SetHandleInformation(h_object: *mut c_void, dw_mask: u32, dw_flags: u32) -> i32;
+    }
+
+    // Rust's Command::spawn passes bInheritHandles = TRUE on Windows when stdio is redirected to Stdio::null(),
+    // which otherwise leaks browse's parent stdout/stderr pipe handles into the detached Firefox process and hangs
+    // piped callers (Command::output, PowerShell, Node/Bun) until Firefox exits.
+    for std_handle in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: GetStdHandle returns NULL or INVALID_HANDLE_VALUE (-1) on failure; SetHandleInformation only
+        // clears HANDLE_FLAG_INHERIT for child processes without affecting browse's own I/O.
+        unsafe {
+            let handle = GetStdHandle(std_handle);
+            if !handle.is_null() && handle as isize != -1 {
+                let _ = SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
+
     command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
 }
 
