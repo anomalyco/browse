@@ -32,6 +32,8 @@ struct Flags {
     wait_seconds: Option<u64>,
     no_modify_path: bool,
     remote: bool,
+    /// Connect this Firefox-family app (`firefox`, `zen`) instead of the Chrome extension.
+    firefox: Option<&'static str>,
     opencode: Option<PathBuf>,
 }
 
@@ -74,6 +76,8 @@ fn parse(args: &[String]) -> anyhow::Result<Flags> {
             "--no-wait" => flags.no_wait = true,
             "--no-modify-path" => flags.no_modify_path = true,
             "--remote" => flags.remote = true,
+            "--firefox" => flags.firefox = Some("firefox"),
+            "--zen" => flags.firefox = Some("zen"),
             "--wait-seconds" => {
                 let seconds = value(arg)?.parse::<u64>().ok().filter(|s| (1..=3600).contains(s)).context("--wait-seconds must be between 1 and 3600")?;
                 flags.wait_seconds = Some(seconds);
@@ -84,6 +88,9 @@ fn parse(args: &[String]) -> anyhow::Result<Flags> {
     }
     if flags.none && (flags.all || !flags.requested.is_empty()) {
         bail!("--agent none can't be combined with agent names");
+    }
+    if flags.remote && flags.firefox.is_some() {
+        bail!("--remote pairs a browser on another computer; --firefox and --zen connect one on this computer. Pick one.");
     }
     Ok(flags)
 }
@@ -421,8 +428,17 @@ pub fn install(args: &[String]) -> anyhow::Result<i32> {
     if flags.remote {
         return Ok(status.max(remote::install(agent)?));
     }
-    let seconds = flags.wait_seconds.unwrap_or(if tty { 180 } else { 90 });
-    let connected = setup::connect_extension(!flags.no_open, !flags.no_wait, Duration::from_secs(seconds))?;
+    let firefox = match flags.firefox {
+        Some(app) => Some(app),
+        None => choose_browser(tty)?,
+    };
+    let connected = match firefox {
+        Some(app) => crate::firefox::connect(&crate::firefox::Options { app: Some(app.into()), ..Default::default() })?,
+        None => {
+            let seconds = flags.wait_seconds.unwrap_or(if tty { 180 } else { 90 });
+            setup::connect_extension(!flags.no_open, !flags.no_wait, Duration::from_secs(seconds))?
+        }
+    };
     if tty && !selected.is_empty() && connected == 0 {
         match selected.as_slice() {
             [one] => println!("If {} was already running, restart it so it loads browse.", agents::label(one)),
@@ -433,13 +449,40 @@ pub fn install(args: &[String]) -> anyhow::Result<i32> {
     Ok(status.max(connected))
 }
 
+/// With no Chromium browser that has the extension and Firefox or Zen installed, a person at a terminal picks which to
+/// connect; anyone else gets the Chrome flow and a pointer to `browse firefox`.
+fn choose_browser(tty: bool) -> anyhow::Result<Option<&'static str>> {
+    let apps = browse_relay::firefox::apps();
+    if apps.is_empty() || relay::extension_status(false).is_some_and(|s| s["connected"] == true || s["pairingState"] == "paired-offline") {
+        return Ok(None);
+    }
+    if !browsers::detect(&browsers::browsers()).is_empty() {
+        return Ok(None);
+    }
+    let firefox = apps.iter().find(|a| a.kind != browse_relay::firefox::AppKind::Zen).map(|_| "firefox").unwrap_or("zen");
+    let names = crate::firefox::installed_names().join(", ");
+    if !tty {
+        println!("{names} is installed too: `browse firefox{}` connects it instead of the Chrome extension.", if firefox == "zen" { " --app zen" } else { "" });
+        return Ok(None);
+    }
+    print!("Connect which browser? [c]hrome-family browser with the browse extension / [f]irefox or Zen ({names}): ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut line)?;
+    Ok(line.trim().to_lowercase().starts_with('f').then_some(firefox))
+}
+
 /// `browse uninstall`: removes browse from every agent config where an install put it, stops the relay, and deletes
 /// the executable this install placed and browse's files. A package manager's install is left to that manager.
 pub fn uninstall(args: &[String]) -> anyhow::Result<i32> {
     if let Some(other) = args.first() {
         bail!("Unknown option {other} for uninstall. Run `browse --help`.");
     }
-    let mut status = 0;
+    let paths = relay_api::paths();
+    // Only a browser that was paired (or connected through the extension) has an extension to remove.
+    let paired = !browse_relay::pairing::read_browser_pairings(&paths).is_empty()
+        || browse_relay::paths::read_json::<serde_json::Map<String, Value>>(&paths.browsers()).is_some_and(|known| known.keys().any(|key| !key.starts_with("driver:")));
+    let mut status = crate::firefox::uninstall();
     match relay::stop() {
         Ok(true) => println!("✓ Stopped the relay"),
         Ok(false) => {}
@@ -522,7 +565,9 @@ pub fn uninstall(args: &[String]) -> anyhow::Result<i32> {
         };
         println!("browse itself is still installed with {}: run `{words}` to remove it.", global.manager.name());
     }
-    println!("Remove the browse extension from your browser to finish (chrome://extensions).");
+    if paired {
+        println!("Remove the browse extension from your browser to finish (chrome://extensions).");
+    }
     Ok(status)
 }
 
@@ -549,6 +594,10 @@ mod tests {
         assert!(parse(&args(&["--agent", "*"])).unwrap().all);
         assert!(parse(&args(&["--agent", "none"])).unwrap().none);
         assert_eq!(parse(&args(&["--wait-seconds", "5"])).unwrap().wait_seconds, Some(5));
+        assert_eq!(parse(&args(&["--firefox"])).unwrap().firefox, Some("firefox"));
+        assert_eq!(parse(&args(&["--zen", "-y"])).unwrap().firefox, Some("zen"));
+        assert!(parse(&args(&["--firefox", "--remote"])).is_err());
+        assert!(parse(&args(&["--remote", "--zen"])).is_err());
     }
 
     #[test]

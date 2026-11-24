@@ -177,6 +177,10 @@ impl Relay {
     /// direct driver, else the extension wait. Unnamed: the extension when it's connected or expected back (paired in
     /// the cold-start window, a link not ready yet, connected in the last two minutes), else the first direct driver.
     pub async fn target_for(self: &Arc<Self>, browser: Option<&str>) -> anyhow::Result<BrowserRef> {
+        let nothing = !self.st().any_connected();
+        if nothing {
+            self.auto_attach_firefox().await;
+        }
         if let Some(name) = browser.map(str::trim).filter(|n| !n.is_empty()) {
             {
                 let st = self.st();
@@ -190,7 +194,7 @@ impl Relay {
                 let wanted = name.to_lowercase();
                 let direct = st.known.iter().any(|(key, k)| key.starts_with("driver:") && (k.id == wanted || k.name.to_lowercase() == wanted));
                 if direct && st.link_by_name(name).is_none() {
-                    bail!("Browser '{name}' isn't connected to browse right now. Connect it again (browse connects a running Firefox with POST /drivers/connect), then retry.");
+                    bail!("Browser '{name}' isn't connected to browse right now. Ask the user to run `browse firefox` to connect it again, then retry.");
                 }
             }
             return self.link_for(Some(name)).await.map(BrowserRef::Extension);
@@ -329,6 +333,16 @@ impl Relay {
     }
 
     pub fn extension_status(&self) -> Value {
+        // Firefox's part of `nextStep`, read from disk before the state lock is taken.
+        let hint = if self.st().any_connected() {
+            None
+        } else {
+            self.me().auto_attach_soon();
+            let recorded = crate::firefox::read_recorded(&self.paths);
+            let busy = self.firefox_busy.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+            let unpaired = crate::pairing::read_browser_pairings(&self.paths).is_empty();
+            crate::firefox::next_step_hint(self.firefox.as_ref().filter(|_| unpaired), &recorded, &busy)
+        };
         let st = self.st();
         let default = st.default_link();
         let now = Instant::now();
@@ -407,6 +421,7 @@ impl Relay {
                 "transport": entry.transport,
                 "endpoint": entry.endpoint,
                 "local": entry.local,
+                "key": entry.key,
                 "default": default_direct.as_ref().is_some_and(|d| Arc::ptr_eq(d, entry)),
                 "connected": entry.connected(),
                 "version": entry.version,
@@ -430,7 +445,7 @@ impl Relay {
             "activeTargets": st.tabs.len(),
         });
         if let Some(next) = next.filter(|_| !any) {
-            status["nextStep"] = next.into();
+            status["nextStep"] = format!("{next}{}", hint.unwrap_or_default()).into();
         }
         status
     }

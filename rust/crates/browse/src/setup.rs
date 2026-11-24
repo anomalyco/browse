@@ -559,7 +559,12 @@ pub fn status(args: &[String]) -> anyhow::Result<i32> {
             }
             for browser in status.get("browsers").and_then(Value::as_array).into_iter().flatten() {
                 let text = |k: &str| browser.get(k).and_then(Value::as_str).unwrap_or("?").to_owned();
-                println!("Browser:   {} ({}){}", text("name"), text("id"), if browser["default"] == true { ", default" } else { "" });
+                let default = if browser["default"] == true { ", default" } else { "" };
+                if browser["driver"] == "cdp-extension" {
+                    println!("Browser:   {} ({}){default}", text("name"), text("id"));
+                } else {
+                    println!("Browser:   {}{default}", direct_line(browser));
+                }
             }
             let tabs = status.get("targets").and_then(Value::as_array);
             println!("Tabs:      {} (`browse status --json` or `browse tabs` for details)", tabs.map_or(0, Vec::len));
@@ -576,9 +581,25 @@ pub fn status(args: &[String]) -> anyhow::Result<i32> {
     Ok(0)
 }
 
+/// A directly driven browser, as `status` shows it: `✓ Firefox 160 (firefox) · webdriver-bidi · 127.0.0.1:59834 · 2 tabs`.
+fn direct_line(browser: &Value) -> String {
+    let text = |k: &str| browser.get(k).and_then(Value::as_str).unwrap_or("?").to_owned();
+    let major = browser.get("version").and_then(Value::as_str).and_then(|v| v.split('.').next()).map(|v| format!(" {v}")).unwrap_or_default();
+    let endpoint = browser.get("endpoint").and_then(Value::as_str).map(|e| e.trim_start_matches("ws://").split('/').next().unwrap_or(e).to_owned()).unwrap_or_else(|| "?".into());
+    let tabs = browser.get("tabs").and_then(Value::as_u64).unwrap_or(0);
+    let mark = if browser["connected"] == true { "✓" } else { "!" };
+    format!("{mark} {}{major} ({}) · {} · {endpoint} · {tabs} tab{}", text("name"), text("id"), text("protocol"), if tabs == 1 { "" } else { "s" })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_direct_browser_shows_its_protocol_endpoint_and_tabs() {
+        let browser = json!({ "id": "firefox", "name": "Firefox", "driver": "webdriver-bidi", "protocol": "webdriver-bidi", "endpoint": "ws://127.0.0.1:59834/session", "version": "160.0.1", "tabs": 2, "connected": true });
+        assert_eq!(direct_line(&browser), "✓ Firefox 160 (firefox) · webdriver-bidi · 127.0.0.1:59834 · 2 tabs");
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("browse-setup-{name}-{}", crate::session::random_u64()));

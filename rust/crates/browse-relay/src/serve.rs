@@ -48,6 +48,14 @@ pub struct ServeOptions {
     pub auto_update: Option<AutoUpdateStatus>,
     /// Test-only: the ports an unpinned relay tries.
     pub port_candidates: Option<Vec<u16>>,
+    /// Where to look for Firefox-family apps, for `nextStep`. The default looks at this computer, except in this
+    /// crate's tests and with OPENCODE_BROWSER_FIREFOX_DISCOVERY=0.
+    pub firefox: Option<crate::firefox::Discovery>,
+}
+
+fn default_firefox() -> Option<crate::firefox::Discovery> {
+    let off = matches!(std::env::var("OPENCODE_BROWSER_FIREFOX_DISCOVERY").as_deref().map(str::trim), Ok("0" | "false" | "off"));
+    (!cfg!(test) && !off).then(crate::firefox::Discovery::system)
 }
 
 impl Default for ServeOptions {
@@ -59,6 +67,7 @@ impl Default for ServeOptions {
             build_id: String::new(),
             auto_update: None,
             port_candidates: None,
+            firefox: default_firefox(),
         }
     }
 }
@@ -173,6 +182,7 @@ pub async fn start(options: ServeOptions, tools: Vec<Arc<dyn Tool>>) -> anyhow::
         version: options.version.clone(),
         build_id: options.build_id.clone(),
         auto_update: options.auto_update.clone(),
+        firefox: options.firefox.clone(),
     })?;
     *relay.tools.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = tools;
     let state = RelayState { port: addr.port(), configured_port: configured, pid: std::process::id(), instance_id: relay.instance_id.clone(), started_at: relay.started_at.clone() };
@@ -197,6 +207,9 @@ pub async fn start(options: ServeOptions, tools: Vec<Arc<dyn Tool>>) -> anyhow::
     );
     crate::watchdog::spawn(&relay);
     let task = tokio::spawn(run(relay.clone(), listener));
+    // The Firefox profiles `browse firefox` connected come back by themselves while they listen.
+    let attaching = relay.clone();
+    tokio::spawn(async move { attaching.auto_attach_firefox().await });
     Ok(RelayHandle { relay, addr, task })
 }
 

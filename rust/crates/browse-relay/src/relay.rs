@@ -589,6 +589,12 @@ pub struct Relay {
     pub heartbeat: AtomicU64,
     /// The relay's tasks ended (it closed, or its runtime is gone): the watchdog stops watching.
     pub finished: AtomicBool,
+    /// Where to look for Firefox-family apps for `nextStep`; None looks nowhere (tests).
+    pub firefox: Option<crate::firefox::Discovery>,
+    /// When the relay last tried to attach the recorded Firefox profiles.
+    pub(crate) auto_attached: Mutex<Option<Instant>>,
+    /// Driver keys of recorded profiles whose WebDriver BiDi session another client holds.
+    pub(crate) firefox_busy: Mutex<Vec<String>>,
 }
 
 pub struct RelayConfig {
@@ -599,6 +605,8 @@ pub struct RelayConfig {
     pub version: String,
     pub build_id: String,
     pub auto_update: Option<AutoUpdateStatus>,
+    /// Where to look for Firefox-family apps (`crate::firefox::Discovery::system()`); None looks nowhere.
+    pub firefox: Option<crate::firefox::Discovery>,
 }
 
 fn env_ms(variable: &str, fallback: u64) -> Option<Duration> {
@@ -672,6 +680,9 @@ impl Relay {
             inflight: Mutex::new(HashMap::new()),
             heartbeat: AtomicU64::new(0),
             finished: AtomicBool::new(false),
+            firefox: config.firefox,
+            auto_attached: Mutex::new(None),
+            firefox_busy: Mutex::new(Vec::new()),
         }))
     }
 
