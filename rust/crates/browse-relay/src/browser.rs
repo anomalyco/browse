@@ -369,12 +369,13 @@ struct RelayTabPolicy {
     tab: TabId,
 }
 
+#[async_trait]
 impl TabPolicy for RelayTabPolicy {
     fn is_read_only(&self) -> bool {
         tab_read_only(&self.relay.st(), self.tab).unwrap_or(false)
     }
 
-    fn check_navigation(&self, url: &str) -> Result<(), String> {
+    async fn check_navigation(&self, url: &str) -> Result<(), String> {
         let st = self.relay.st();
         let allowed = st
             .tabs

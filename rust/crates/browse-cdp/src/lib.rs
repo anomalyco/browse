@@ -939,12 +939,32 @@ impl CdpTabDriver {
         if format != ImageFormat::Png {
             params["quality"] = json!(quality.unwrap_or(80));
         }
-        let result = self
-            .shared
-            .cdp
-            .send("Page.captureScreenshot", params, None)
-            .await
-            .map_err(map_cdp_error)?;
+        // A background/occluded tab's screenshot can wait for a compositor frame that never comes; tiny JPEG
+        // screenshots nudge Chromium to paint one (same mechanism as browse-relay's TabCdp::screenshot).
+        let mut nudge = params.clone();
+        nudge["format"] = json!("jpeg");
+        nudge["quality"] = json!(1);
+        if nudge.get("clip").is_some()
+            && let Some(object) = nudge.as_object_mut()
+        {
+            object.remove("captureBeyondViewport");
+        }
+        let cdp = self.shared.cdp.clone();
+        let nudges = async move {
+            for delay in [600u64, 1_000, 1_500, 2_000, 3_000, 5_000, 8_000] {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                let cdp = cdp.clone();
+                let nudge = nudge.clone();
+                tokio::spawn(async move {
+                    let _ = cdp.send("Page.captureScreenshot", nudge, None).await;
+                });
+            }
+            std::future::pending::<()>().await;
+        };
+        let result = tokio::select! {
+            res = self.shared.cdp.send("Page.captureScreenshot", params, None) => res.map_err(map_cdp_error)?,
+            _ = nudges => unreachable!(),
+        };
         let data = result
             .get("data")
             .and_then(Value::as_str)

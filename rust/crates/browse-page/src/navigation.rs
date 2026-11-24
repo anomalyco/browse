@@ -213,7 +213,15 @@ pub async fn goto(page: &Arc<TabPage>, url: &str, wait: WaitUntil, timeout: Dura
                 "Navigation to {url} was aborted ({}): the response may be a download (check downloads), or the page cancelled it",
                 nav_err.detail
             ),
-            NavigationErrorKind::Failed => bail!("Navigation to {url} failed: {}", nav_err.detail),
+            NavigationErrorKind::Failed => {
+                // Chrome still commits its error page for a failed navigation, a moment after the failure: wait for
+                // it, so its commit isn't taken for a navigation (or a redirect) of the next command.
+                page.wait_until(deadline.saturating_duration_since(Instant::now()).min(Duration::from_millis(1_000)), Duration::from_millis(20), |page| {
+                    page.events_since(seq).iter().any(|e| matches!(e, TabEvent::Navigated { same_document: false, .. }))
+                })
+                .await;
+                bail!("Navigation to {url} failed: {}", nav_err.detail)
+            }
         },
         Err(error) => return Err(crate::page::driver_error(error)),
     };

@@ -133,7 +133,7 @@ pub async fn describe(ctx: &ToolContext, page: &Arc<TabPage>, before: &Before, o
             }
             if info["errorPage"].as_bool() == Some(true) && info["status"].as_u64().is_none() {
                 let error = info["netError"].as_str().unwrap_or("a network error");
-                out.insert("warning".into(), json!(format!("Chrome could not load {url} ({error}) and shows its error page instead.")));
+                out.insert("warning".into(), json!(format!("The browser could not load {url} ({error}) and shows its error page instead.")));
             }
         }
     }
