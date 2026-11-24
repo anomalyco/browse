@@ -602,7 +602,11 @@ impl Shared {
                 Some(tag) => tag == document.0,
                 None => href == current && href != url,
             };
-            if !href.is_empty() && !old {
+            // While Firefox swaps in a new document for a non-blank navigation, the initial transient window briefly
+            // reports "about:blank" with no tag; never synthesize a commit for it (doing so would suppress the real
+            // navigationCommitted event that follows).
+            let transient_blank = href == "about:blank" && url != "about:blank";
+            if !href.is_empty() && !old && !transient_blank {
                 break (href, ready);
             }
         };

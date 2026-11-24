@@ -295,3 +295,47 @@ async fn closing_the_last_tab_blanks_it_instead() {
     BrowserDriver::shutdown(driver.as_ref()).await;
     assert_eq!(fake.sent("session.unsubscribe").len(), 1);
 }
+
+#[tokio::test]
+async fn watchdog_ignores_transient_about_blank_during_non_blank_navigation() {
+    let fake = Fake::new(|method, params| {
+        if method == "script.evaluate"
+            && params["expression"].as_str().is_some_and(|expr| expr.contains("__browseDocument"))
+        {
+            return Some(Ok(json!({
+                "type": "success",
+                "result": {
+                    "type": "array",
+                    "value": [
+                        { "type": "string", "value": "about:blank" },
+                        { "type": "string", "value": "complete" },
+                        { "type": "null" }
+                    ]
+                }
+            })));
+        }
+        Some(Ok(json!({})))
+    });
+    let tab = attach(&fake).await;
+    let mut events = tab.events();
+
+    fake.emit("browsingContext.navigationStarted", json!({ "context": "top", "navigation": "n-gate", "url": "http://c/gate" }));
+    assert!(matches!(next(&mut events).await, PageEvent::NavigationStarted { .. }));
+
+    // Let the bfcache watchdog fire at least once while the document swap transiently reports about:blank.
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert!(
+        !fake.sent("script.evaluate").is_empty(),
+        "watchdog should have probed the pending navigation"
+    );
+    assert!(
+        matches!(events.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
+        "transient about:blank must not synthesize a commit"
+    );
+
+    // The real navigationCommitted must still be honored (not suppressed as synthesized).
+    fake.emit("browsingContext.navigationCommitted", json!({ "context": "top", "navigation": "n-gate", "url": "http://c/gate" }));
+    assert!(matches!(next(&mut events).await, PageEvent::FrameDetached(f) if f.as_str() == "child"));
+    assert!(matches!(next(&mut events).await, PageEvent::Committed { url, .. } if url == "http://c/gate"));
+    assert_eq!(tab.frames().await.unwrap()[0].url, "http://c/gate");
+}
