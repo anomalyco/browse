@@ -200,6 +200,8 @@ pub struct Input<'a> {
 }
 
 const BOUNDED_REPLY: std::time::Duration = std::time::Duration::from_millis(800);
+/// How long input waits for a dialog browse answers itself to close before treating it as paused.
+const AUTO_DIALOG_CLOSE: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl<'a> Input<'a> {
     pub async fn new(page: &'a Arc<TabPage>, human: bool) -> Input<'a> {
@@ -223,12 +225,27 @@ impl<'a> Input<'a> {
         self.state.pointer
     }
 
+    /// Resolves once a dialog opens that stops input. One browse answers itself (an auto policy, a beforeunload)
+    /// is not the caller's to answer and closes on its own: wait for that and keep going, so the action finishes
+    /// and reports what it did. A dialog the caller must answer stops input; so does one that never closes.
+    async fn dialog_pauses(&self) {
+        loop {
+            self.page.dialog_opened().await;
+            if self.page.blocking_dialog().is_some() {
+                return;
+            }
+            if !self.page.wait_until(AUTO_DIALOG_CLOSE, std::time::Duration::from_millis(25), |page| page.dialog().is_none()).await {
+                return;
+            }
+        }
+    }
+
     async fn dispatch<F, Fut>(&self, send: F) -> Result<()>
     where
         F: FnOnce(Arc<dyn TabDriver>) -> Fut + Send + 'static,
         Fut: Future<Output = std::result::Result<(), DriverError>> + Send + 'static,
     {
-        if self.page.dialog().is_some() {
+        if self.page.blocking_dialog().is_some() {
             return Err(Interrupted.into());
         }
         let driver = self.page.driver().clone();
@@ -248,7 +265,7 @@ impl<'a> Input<'a> {
                 Ok(Err(error)) => Err(error),
                 Err(error) => Err(anyhow!("input task failed: {error}")),
             },
-            _ = self.page.dialog_opened() => Err(Interrupted.into()),
+            _ = self.dialog_pauses() => Err(Interrupted.into()),
         }
     }
 
@@ -257,7 +274,7 @@ impl<'a> Input<'a> {
         F: FnOnce(Arc<dyn TabDriver>) -> Fut + Send + 'static,
         Fut: Future<Output = std::result::Result<(), DriverError>> + Send + 'static,
     {
-        if self.page.dialog().is_some() {
+        if self.page.blocking_dialog().is_some() {
             return Err(Interrupted.into());
         }
         let started = std::time::Instant::now();
@@ -544,14 +561,14 @@ impl<'a> Input<'a> {
         } else {
             Vec::new()
         };
-        if self.page.dialog().is_some() {
+        if self.page.blocking_dialog().is_some() {
             return Err(Interrupted.into());
         }
         let outcome = tokio::select! {
             result = self.page.driver().drag((from.x, from.y), (to.x, to.y), &path, self.modifiers) => {
                 result.map_err(crate::page::driver_error)?
             }
-            _ = self.page.dialog_opened() => return Err(Interrupted.into()),
+            _ = self.dialog_pauses() => return Err(Interrupted.into()),
         };
         self.state.pointer = Some(to);
         Ok(outcome)

@@ -316,6 +316,24 @@ async fn covered_elements_fail_fast_and_dialogs_pause() {
     assert_eq!(title, "\"false\"");
 }
 
+/// A dialog browse answers itself doesn't stop the rest of an input action: the keys after the one that opened
+/// it are still typed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_auto_answered_dialog_does_not_stop_typing() {
+    let h = harness!(false);
+    let url = h.server.page(
+        "/auto-dialog-typing",
+        r#"<!doctype html><title>Typing</title>
+<input id="field" onkeydown="if (event.key === 'b' && !window.asked) { window.asked = true; document.title = String(confirm('Proceed?')) }">"#,
+    );
+    h.ok("navigate", json!({ "url": url })).await;
+    h.ok("dialog", json!({ "auto": "accept" })).await;
+    let typed = h.json("type", json!({ "selector": "#field", "text": "abcde" })).await;
+    let value = h.ok("eval", json!({ "expression": "document.getElementById('field').value" })).await;
+    assert_eq!(value, "\"abcde\"", "{typed}");
+    assert_eq!(typed["typed"], 5, "{typed}");
+}
+
 /// fill checks what a click checks on text fields: one under an overlay fails without force and is left untouched,
 /// and a fields list stops at the covered one, keeping what it already filled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
