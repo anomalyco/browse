@@ -6,6 +6,7 @@
 
 pub mod client;
 pub mod domain;
+pub mod firefox;
 pub mod guardrails;
 pub mod log;
 pub mod origins;

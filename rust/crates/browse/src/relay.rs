@@ -296,6 +296,16 @@ pub fn extension_status(waiting: bool) -> Option<Value> {
     authorized("GET", "/extension/status", extra, None, Some(Duration::from_secs(10))).ok()
 }
 
+/// `POST /drivers/<action>` (connect, disconnect) on the running relay (started when none is): the HTTP status and the
+/// JSON answer, errors included, so the caller can tell a busy browser from a refused one.
+pub fn drivers(action: &str, body: &Value) -> anyhow::Result<(u16, Value)> {
+    ensure()?;
+    let bytes = serde_json::to_vec(body)?;
+    let response = send("POST", &format!("/drivers/{action}"), &[], Some(&bytes), Some(Duration::from_secs(90)))
+        .map_err(|error| anyhow!("the browse relay at {} failed: {error}", relay_api::endpoint()))?;
+    Ok((response.status, serde_json::from_slice(&response.body).unwrap_or(Value::Null)))
+}
+
 /// Drops a revoked browser's connection right away.
 pub fn drop_browser(key: &str) {
     if let Probe::Running(_) = probe() {

@@ -659,3 +659,120 @@ async fn drivers_connect_refuses_bad_and_remote_endpoints() {
     assert_eq!(http(port, "POST", "/drivers/connect", None, Some(json!({ "protocol": "webdriver-bidi", "url": "ws://127.0.0.1:9222" }))).await.0, 401);
     assert!(h.handle.relay.st().drivers.is_empty() && h.handle.relay.st().connecting.is_empty());
 }
+
+
+/// A relay that looks for Firefox-family apps where `discovery` says.
+async fn harness_with_firefox(discovery: crate::firefox::Discovery) -> super::Harness {
+    let paths = crate::paths::Paths::rooted(std::env::temp_dir().join(format!("browse-relay-test-{}", crate::util::random_hex(6))));
+    let options = crate::serve::ServeOptions { port: Some(0), paths: paths.clone(), version: "0.0.0-test".into(), firefox: Some(discovery), ..crate::serve::ServeOptions::default() };
+    let handle = crate::serve::start(options, crate::tools()).await.unwrap();
+    super::Harness { handle, paths }
+}
+
+#[tokio::test]
+async fn next_step_points_at_browse_firefox_only_when_firefox_is_installed_and_nothing_is_paired() {
+    let apps = crate::firefox::tests::Scratch::new("relay-apps");
+    let plain = harness().await;
+    let next = plain.handle.relay.extension_status()["nextStep"].as_str().unwrap().to_string();
+    assert!(!next.contains("browse firefox"), "the default test relay looks for no Firefox: {next}");
+
+    let empty = harness_with_firefox(crate::firefox::Discovery { app_dirs: vec![apps.0.clone()], ..crate::firefox::Discovery::none() }).await;
+    let next = empty.handle.relay.extension_status()["nextStep"].as_str().unwrap().to_string();
+    assert!(!next.contains("browse firefox"), "no Firefox installed: {next}");
+
+    let bundle = apps.0.join("Firefox.app/Contents/MacOS");
+    std::fs::create_dir_all(&bundle).unwrap();
+    std::fs::write(bundle.join("firefox"), b"").unwrap();
+    let h = harness_with_firefox(crate::firefox::Discovery { app_dirs: vec![apps.0.clone()], ..crate::firefox::Discovery::none() }).await;
+    let status = h.handle.relay.extension_status();
+    assert_eq!(status["pairingState"], "not-seen");
+    let next = status["nextStep"].as_str().unwrap();
+    assert!(next.starts_with("No browser has connected to browse yet."), "{next}");
+    assert!(next.ends_with(" Or run `browse firefox` to connect Firefox."), "{next}");
+    let error = h.handle.relay.link_for(None).await.err().unwrap().to_string();
+    assert!(error.contains("browse firefox"), "{error}");
+
+    crate::pairing::issue_browser_token(&h.paths, "profile-ff-hint", None, None).unwrap();
+    let next = h.handle.relay.extension_status()["nextStep"].as_str().unwrap().to_string();
+    assert!(!next.contains("browse firefox"), "a paired Chrome is the one to open: {next}");
+
+    let fake = FakeBrowser::new();
+    register(&h.handle.relay, &fake).await;
+    assert!(h.handle.relay.extension_status().get("nextStep").is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_relay_attaches_a_recorded_profile_while_it_listens() {
+    use crate::firefox::{self, RecordedFirefox};
+    let h = harness().await;
+    let relay = h.handle.relay.clone();
+    let scratch = firefox::tests::Scratch::new("relay-attach");
+    let profile = scratch.0.join("profile");
+    let stranger = scratch.0.join("stranger");
+    std::fs::create_dir_all(&profile).unwrap();
+    std::fs::create_dir_all(&stranger).unwrap();
+    let (port, seen) = fake_bidi(None).await;
+    let server = format!("{{\"ws_host\":\"127.0.0.1\",\"ws_port\":{port}}}");
+    std::fs::write(profile.join("WebDriverBiDiServer.json"), &server).unwrap();
+    std::fs::write(stranger.join("WebDriverBiDiServer.json"), &server).unwrap();
+    let record = RecordedFirefox { app: "zen".into(), exe: "/x/zen".into(), profile: profile.clone(), dedicated: false, headless: false, name: Some("Zen".into()), prefs_added: false };
+    firefox::record(&h.paths, record).unwrap();
+
+    // Not running: a stale server file is nothing to connect to.
+    *relay.auto_attached.lock().unwrap() = None;
+    relay.auto_attach_firefox().await;
+    assert!(relay.st().drivers.is_empty());
+
+    let holder = firefox::tests::Holder::start(&profile);
+    let _stranger = firefox::tests::Holder::start(&stranger);
+    relay.auto_attach_firefox().await;
+    assert!(relay.st().drivers.is_empty(), "at most one try every 2 s");
+    *relay.auto_attached.lock().unwrap() = None;
+    let target = relay.target_for(None).await.unwrap();
+    let BrowserRef::Direct(entry) = target else { panic!("the recorded profile is the browser") };
+    assert_eq!(entry.key, firefox::driver_key(&profile));
+    assert_eq!(entry.name, "Zen");
+    assert_eq!(relay.st().drivers.len(), 1, "an unrecorded profile is never taken");
+    assert_eq!(seen.lock().unwrap().iter().filter(|m| *m == "session.new").count(), 1);
+    *relay.auto_attached.lock().unwrap() = None;
+    relay.auto_attach_firefox().await;
+    assert_eq!(seen.lock().unwrap().iter().filter(|m| *m == "session.new").count(), 1, "a connected profile is left alone");
+    relay.disconnect_driver(&entry, false).await;
+    holder.release();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_recorded_profile_held_by_another_client_says_so_in_next_step() {
+    use crate::firefox::{self, RecordedFirefox};
+    let h = harness().await;
+    let relay = h.handle.relay.clone();
+    let scratch = firefox::tests::Scratch::new("relay-busy");
+    let profile = scratch.0.join("profile");
+    std::fs::create_dir_all(&profile).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let Ok(socket) = tokio_tungstenite::accept_async(stream).await else { return };
+                let (mut sink, mut stream) = socket.split();
+                while let Some(Ok(Message::Text(text))) = stream.next().await {
+                    let command: Value = serde_json::from_str(&text).unwrap();
+                    let reply = json!({ "type": "error", "id": command["id"], "error": "session not created", "message": "Maximum number of active sessions" });
+                    let _ = sink.send(Message::Text(reply.to_string().into())).await;
+                }
+            });
+        }
+    });
+    std::fs::write(profile.join("WebDriverBiDiServer.json"), format!("{{\"ws_host\":\"127.0.0.1\",\"ws_port\":{port}}}")).unwrap();
+    firefox::record(&h.paths, RecordedFirefox { app: "firefox".into(), exe: "/x".into(), profile: profile.clone(), dedicated: false, headless: false, name: None, prefs_added: false }).unwrap();
+    let holder = firefox::tests::Holder::start(&profile);
+    *relay.auto_attached.lock().unwrap() = None;
+    relay.auto_attach_firefox().await;
+    assert!(relay.st().drivers.is_empty());
+    let next = relay.extension_status()["nextStep"].as_str().unwrap().to_string();
+    assert!(next.contains("Firefox already has another WebDriver BiDi client"), "{next}");
+    holder.release();
+}

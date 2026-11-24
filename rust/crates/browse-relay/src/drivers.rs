@@ -24,6 +24,8 @@ use crate::tabs::{Release, real_url, url_allowed};
 pub const MAX_DRIVERS: usize = 8;
 /// How long relay shutdown spends closing a driver's tabs, and then ending its session.
 const TEARDOWN_STEP: Duration = Duration::from_millis(700);
+/// How often the relay may try to attach the recorded Firefox profiles.
+const AUTO_ATTACH_EVERY: Duration = Duration::from_secs(2);
 
 /// A javascript: URL (Firefox never answers a navigation to one).
 pub fn is_javascript(url: &str) -> bool {
@@ -407,6 +409,58 @@ impl Relay {
             let _ = tokio::time::timeout(Duration::from_secs(3), entry.driver.shutdown()).await;
         }
         self.driver_gone(entry, "driver-disconnected");
+    }
+
+    /// Connects the Firefox profiles `browse firefox` recorded (`<data>/firefox.json`) that listen for WebDriver BiDi,
+    /// and OPENCODE_BROWSER_BIDI_URL, unless connected already. At most every 2 s. It never scans profiles nobody
+    /// recorded (another tool's session isn't browse's to take), and never launches or quits a browser.
+    pub async fn auto_attach_firefox(self: &Arc<Self>) {
+        {
+            let mut last = self.auto_attached.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if self.is_stopping() || last.is_some_and(|at| at.elapsed() < AUTO_ATTACH_EVERY) {
+                return;
+            }
+            *last = Some(Instant::now());
+        }
+        let mut bodies = Vec::new();
+        if let Some(url) = std::env::var("OPENCODE_BROWSER_BIDI_URL").ok().map(|u| u.trim().to_string()).filter(|u| !u.is_empty()) {
+            bodies.push((None, json!({ "protocol": "webdriver-bidi", "url": url })));
+        }
+        for record in crate::firefox::read_recorded(&self.paths) {
+            let key = crate::firefox::driver_key(&record.profile);
+            let skip = {
+                let st = self.st();
+                st.connecting.contains(&key) || st.drivers.iter().any(|d| d.key == key && d.connected())
+            };
+            if skip {
+                continue;
+            }
+            if let crate::firefox::ProfileState::Listening { url, .. } = crate::firefox::state(&record.profile) {
+                bodies.push((Some(key.clone()), json!({ "protocol": "webdriver-bidi", "url": url, "key": key, "name": record.display_name() })));
+            }
+        }
+        for (key, body) in bodies {
+            let (status, value) = connect(self, &body).await;
+            let busy = status == StatusCode::CONFLICT && value["code"] == "driver-session-busy";
+            if let Some(key) = key {
+                let mut held = self.firefox_busy.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                held.retain(|k| *k != key);
+                if busy {
+                    held.push(key);
+                }
+            }
+            if status != StatusCode::OK {
+                rlog!("driver.auto_attach_failed", status = status.as_u16(), code = value["code"].as_str().unwrap_or("").to_string());
+            }
+        }
+    }
+
+    /// Spawns `auto_attach_firefox` when a runtime is there to run it.
+    pub(crate) fn auto_attach_soon(self: &Arc<Self>) {
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let relay = self.clone();
+            runtime.spawn(async move { relay.auto_attach_firefox().await });
+        }
     }
 
     /// Relay shutdown: every driver's agent tabs close and its session ends, all at once and briefly, so the shutdown's
