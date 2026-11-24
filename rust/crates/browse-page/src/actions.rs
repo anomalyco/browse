@@ -36,7 +36,7 @@ enum Prepare {
 impl From<anyhow::Error> for Prepare {
     fn from(error: anyhow::Error) -> Self {
         let message = error.to_string();
-        if message.contains("document changed") || message.contains("Could not find object") || message.contains("navigated or re-rendered") {
+        if crate::page::is_stale(&error) || message.contains("document changed") || message.contains("navigated or re-rendered") {
             Prepare::Detached
         } else {
             Prepare::Failed(error)
@@ -172,10 +172,7 @@ pub async fn scroll_into_view(page: &Arc<TabPage>, input: &mut Input<'_>, elemen
     if input.human() && element.frame == page.main_frame() {
         human_scroll(page, input, element).await?;
     }
-    let scrolled = page.send("DOM.scrollIntoViewIfNeeded", json!({ "objectId": element.object_id }), element.session.as_deref()).await;
-    if scrolled.is_err() {
-        page.call_element(element, "scrollIntoView", vec![], false).await?;
-    }
+    page.call_element(element, "scrollIntoView", vec![], false).await?;
     Ok(())
 }
 
@@ -230,7 +227,7 @@ pub async fn with_modifiers(input: &mut Input<'_>, modifiers: &[String]) -> Resu
             "ControlOrMeta" => if input.mac() { "Meta" } else { "Control" },
             other => other,
         };
-        let def = crate::input::key_definition(name).filter(|_| crate::input::modifier_bit(name) != 0).ok_or_else(|| anyhow!("Unknown modifier {name:?}; use Shift, Control, Alt, Meta or ControlOrMeta"))?;
+        let def = crate::input::key_definition(name).filter(|_| crate::input::modifier_flag(name) != browse_core::Modifiers::NONE).ok_or_else(|| anyhow!("Unknown modifier {name:?}; use Shift, Control, Alt, Meta or ControlOrMeta"))?;
         input.key_down(&def).await?;
         held.push(def);
     }

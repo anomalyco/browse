@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use browse_core::{Browser, Cdp, CdpError, CdpEvent, HandoffResult, TabId, TabInfo, TabOptions, TabState, ToolContext};
+use browse_cdp::{Cdp, CdpError, CdpEvent};
+use browse_core::{Browser, HandoffResult, TabDriver, TabId, TabInfo, TabOptions, TabState, ToolContext};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
@@ -62,7 +63,7 @@ impl Cdp for FakeCdp {
 }
 
 pub(crate) struct FakeBrowser {
-    cdp: Arc<FakeCdp>,
+    driver: Arc<dyn TabDriver>,
     state: Arc<TabState>,
 }
 
@@ -77,8 +78,8 @@ impl Browser for FakeBrowser {
     async fn close_tab(&self, _: TabId) -> anyhow::Result<()> {
         Ok(())
     }
-    async fn cdp(&self, _: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
-        Ok(self.cdp.clone())
+    async fn tab_driver(&self, _: TabId) -> anyhow::Result<Arc<dyn TabDriver>> {
+        Ok(self.driver.clone())
     }
     async fn state(&self, _: TabId) -> anyhow::Result<Arc<TabState>> {
         Ok(self.state.clone())
@@ -96,7 +97,8 @@ fn tab() -> TabInfo {
 }
 
 pub(crate) fn context(cdp: Arc<FakeCdp>, roots: Vec<std::path::PathBuf>) -> ToolContext {
-    ToolContext { browser: Arc::new(FakeBrowser { cdp, state: Arc::new(TabState::default()) }), file_roots: roots }
+    let driver: Arc<dyn TabDriver> = browse_cdp::CdpTabDriver::new(cdp);
+    ToolContext { browser: Arc::new(FakeBrowser { driver, state: Arc::new(TabState::default()) }), file_roots: roots }
 }
 
 /// Calls a tool in the fake's one tab (`tab` 1 unless the arguments name one; `"tab": null` leaves it out).

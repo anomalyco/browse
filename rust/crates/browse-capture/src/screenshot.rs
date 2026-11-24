@@ -3,7 +3,10 @@
 
 use async_trait::async_trait;
 use base64::Engine;
-use browse_core::{Cdp, Content, TabId, Tool, ToolContext, ToolOutput, ToolSpec};
+use browse_core::{
+    CallOptions, Content, Evaluated, ImageFormat, Receiver, Rect, Returns, Screenshot, ScreenshotArea, TabDriver,
+    TabId, Tool, ToolContext, ToolOutput, ToolSpec,
+};
 use serde_json::{Value, json};
 
 use crate::page;
@@ -13,31 +16,9 @@ use std::time::Duration;
 
 use browse_page::{Element, TabPage};
 
-use crate::{arg_bool, arg_f64, arg_int, arg_str, bail_user, files, labels, respond, state, tab_schema, target_tab};
+use crate::{arg_bool, arg_f64, arg_int, arg_str, bail_user, files, labels, respond, tab_schema, target_tab};
 
-#[derive(Clone, Copy, PartialEq)]
-enum Format {
-    Png,
-    Jpeg,
-    Webp,
-}
-
-impl Format {
-    fn name(self) -> &'static str {
-        match self {
-            Format::Png => "png",
-            Format::Jpeg => "jpeg",
-            Format::Webp => "webp",
-        }
-    }
-    fn mime(self) -> &'static str {
-        match self {
-            Format::Png => "image/png",
-            Format::Jpeg => "image/jpeg",
-            Format::Webp => "image/webp",
-        }
-    }
-}
+type Format = ImageFormat;
 
 enum Region {
     Viewport,
@@ -64,8 +45,7 @@ struct Shot {
 const MAX_INLINE_SIDE: f64 = 8_000.0;
 /// Longest side of a saved image; Chrome can't capture larger surfaces.
 const MAX_SAVED_SIDE: f64 = 16_384.0;
-/// Height in image pixels of each tile when a large capture has to be taken in pieces.
-const TILE_SIDE: f64 = 4_096.0;
+
 
 /// Width and height of a PNG, JPEG or WebP image.
 pub(crate) fn image_size(bytes: &[u8]) -> Option<(u32, u32)> {
@@ -127,18 +107,20 @@ async fn element_rect(page: &Arc<TabPage>, element: &Element) -> anyhow::Result<
         // Inside an iframe only what its own viewport shows is painted.
         let _ = page.call_element(element, "scrollIntoView", vec![], true).await;
     }
-    let rect = page
-        .send(
-            "Runtime.callFunctionOn",
-            json!({
-                "functionDeclaration": "function () { const r = this.getBoundingClientRect(); return [r.left, r.top, r.width, r.height] }",
-                "objectId": element.object_id,
-                "returnByValue": true,
-            }),
-            element.session.as_deref(),
+    let rect_value = match page
+        .call_driver(
+            &Receiver::Ref(element.handle.clone()),
+            "function () { const r = this.getBoundingClientRect(); return [r.left, r.top, r.width, r.height] }",
+            &[],
+            CallOptions { returns: Returns::Json, await_promise: false, user_activation: false },
         )
-        .await?;
-    let rect: Vec<f64> = serde_json::from_value(rect.pointer("/result/value").cloned().unwrap_or_default()).unwrap_or_default();
+        .await?
+    {
+        Ok(Evaluated::Json(value)) => value,
+        Ok(_) => Value::Null,
+        Err(details) => anyhow::bail!("{}", details.message),
+    };
+    let rect: Vec<f64> = serde_json::from_value(rect_value).unwrap_or_default();
     let [mut x, mut y, width, height] = rect[..] else { bail_user!("the element has no box") };
     if width <= 0.0 || height <= 0.0 {
         bail_user!("the element has no visible size");
@@ -181,53 +163,45 @@ fn clamp_clip((x, y, width, height): (f64, f64, f64, f64), (vx, vy, vw, vh): (f6
     (left, top, width, height)
 }
 
-/// The tab and CDP connection a capture uses; element regions are resolved here into viewport clips. An element
+/// The tab and driver a capture uses; element regions are resolved here into viewport clips. An element
 /// outside the viewport that would fit is scrolled into view first, so capturing it doesn't resize the page.
-async fn resolve(ctx: &ToolContext, args: &Value, region: Region) -> anyhow::Result<(TabId, Arc<dyn Cdp>, Region)> {
+async fn resolve(ctx: &ToolContext, args: &Value, region: Region) -> anyhow::Result<(TabId, Arc<dyn TabDriver>, Region)> {
     match region {
         Region::Element { reference, selector } => {
             let timeout = Duration::from_millis(arg_int(args, "timeoutMs", 0, 60_000)?.unwrap_or(5_000) as u64);
             let (page, element, _) =
                 browse_page::resolve_element(ctx, target_tab(args)?, reference.as_deref(), selector.as_deref(), timeout).await?;
             let mut rect = element_rect(&page, &element).await?;
-            let viewport = page::viewport(page.cdp().as_ref()).await?;
-            if outside(&viewport, rect) && rect.2 <= viewport.width && rect.3 <= viewport.height {
-                let scrolled = page
-                    .send("DOM.scrollIntoViewIfNeeded", json!({ "objectId": element.object_id }), element.session.as_deref())
-                    .await;
-                if scrolled.is_ok() {
-                    rect = element_rect(&page, &element).await?;
-                }
+            let viewport = page::viewport(page.driver().as_ref()).await?;
+            if outside(&viewport, rect)
+                && rect.2 <= viewport.width
+                && rect.3 <= viewport.height
+                && page.call_element(&element, "scrollIntoView", vec![], false).await.is_ok()
+            {
+                rect = element_rect(&page, &element).await?;
             }
             let (x, y, w, h) = rect;
-            Ok((page.tab(), page.cdp().clone(), Region::Clip(x, y, w, h)))
+            Ok((page.tab(), page.driver().clone(), Region::Clip(x, y, w, h)))
         }
         region => {
             let tab = target_tab(args)?;
-            Ok((tab, ctx.browser.cdp(tab).await?, region))
+            Ok((tab, ctx.browser.tab_driver(tab).await?, region))
         }
     }
 }
 
-fn decode(result: &Value) -> anyhow::Result<Vec<u8>> {
-    let data = result.get("data").and_then(Value::as_str).ok_or_else(|| anyhow::anyhow!("Chrome returned no image"))?;
-    Ok(base64::engine::general_purpose::STANDARD.decode(data)?)
-}
-
 /// Captures `region`. Clips inside the viewport are taken as they are on screen; only full pages and clips that reach
-/// beyond the viewport use captureBeyondViewport, which makes Chrome resize the page while it captures (pages see
-/// resize events), as Playwright does. Captures whose longest side would exceed `max_side` image pixels are scaled
-/// down; ones Chrome can't take in one piece are taken in tiles and returned as PNG. Chrome restores any device
-/// metrics override (from emulate) itself afterwards, so nothing is re-applied here.
+/// beyond the viewport use captureBeyondViewport. Captures whose longest side would exceed `max_side` image pixels are
+/// scaled down; ones the browser can't take in one piece are taken in tiles and returned as PNG.
 async fn capture(
-    cdp: &dyn Cdp,
+    driver: &dyn TabDriver,
     region: &Region,
     format: Format,
     quality: Option<i64>,
     css_scale: bool,
     max_side: f64,
 ) -> anyhow::Result<Shot> {
-    let viewport = page::viewport(cdp).await?;
+    let viewport = page::viewport(driver).await?;
     let dpr = viewport.device_pixel_ratio;
     let mut clip_scale = if css_scale { 1.0 / dpr } else { 1.0 };
     // The viewport's own clip keeps its size, so screenshot_diff baselines of the same viewport still match.
@@ -263,68 +237,28 @@ async fn capture(
             if max_side < MAX_SAVED_SIDE { ", or save to a path for up to 16384 px" } else { "" },
         ));
     }
-    let mut params = json!({
-        "format": format.name(),
-        "clip": { "x": x, "y": y, "width": width, "height": height, "scale": clip_scale },
-        "captureBeyondViewport": beyond,
-        "fromSurface": true,
-    });
-    if format != Format::Png {
-        params["quality"] = json!(quality.unwrap_or(80));
-    }
-    let result = cdp.send("Page.captureScreenshot", params, None).await;
-    let (bytes, format) = match result {
-        Ok(result) => (decode(&result)?, format),
-        Err(browse_core::CdpError::Protocol(message)) if beyond && message.contains("Unable to capture screenshot") => {
-            let stitched = tiles(cdp, (x, y, width, height), clip_scale).await.map_err(|error| {
-                anyhow::Error::new(crate::UserError(format!(
-                    "Chrome couldn't capture this {:.0}×{:.0} px screenshot ({message}; in tiles: {error:#}). Capture a clip or an element instead.",
-                    width * clip_scale * dpr,
-                    height * clip_scale * dpr
-                )))
-            })?;
-            if format != Format::Png {
-                let text = format!("taken in tiles and returned as PNG (asked for {})", format.name());
-                note = Some(note.map_or(text.clone(), |note| format!("{note}; {text}")));
-            }
-            (stitched, Format::Png)
-        }
-        Err(error) => return Err(error.into()),
+    let shot = Screenshot {
+        format,
+        quality: (format != Format::Png).then(|| quality.unwrap_or(80)),
+        area: ScreenshotArea::Clip {
+            rect: Rect { x, y, width, height },
+            beyond_viewport: beyond,
+        },
+        scale: clip_scale,
     };
-    let (image_width, image_height) = image_size(&bytes).ok_or_else(|| anyhow::anyhow!("Chrome returned an unreadable image"))?;
-    Ok(Shot { bytes, format, width: image_width, height: image_height, scale: image_width as f64 / width, note })
-}
-
-/// Captures a large area in horizontal strips and stitches them into one PNG.
-async fn tiles(cdp: &dyn Cdp, (x, y, width, height): (f64, f64, f64, f64), clip_scale: f64) -> anyhow::Result<Vec<u8>> {
-    let dpr = page::viewport(cdp).await?.device_pixel_ratio;
-    let per_css = clip_scale * dpr;
-    let total_width = (width * per_css).round() as u64;
-    let total_height = (height * per_css).round() as u64;
-    if total_width * total_height > pixeldiff::MAX_IMAGE_PIXELS {
-        bail_user!("too large to stitch (over 16 megapixels)");
+    let image = driver.screenshot(shot).await?;
+    if let Some(driver_note) = image.note {
+        note = Some(note.map_or(driver_note.clone(), |existing| format!("{existing}; {driver_note}")));
     }
-    let strip = (TILE_SIDE / per_css).floor().max(1.0);
-    let mut image = pixeldiff::Rgba { width: total_width as u32, height: 0, data: Vec::new() };
-    let mut offset = 0.0;
-    while offset < height {
-        let part = strip.min(height - offset);
-        let (left, top, tile_width, tile_height) = whole_clip((x, y + offset, width, part));
-        let params = json!({
-            "format": "png",
-            "clip": { "x": left, "y": top, "width": tile_width, "height": tile_height, "scale": clip_scale },
-            "captureBeyondViewport": true,
-            "fromSurface": true,
-        });
-        let tile = decode_png(&decode(&cdp.send("Page.captureScreenshot", params, None).await?)?)?;
-        if tile.width != image.width {
-            bail_user!("tiles came back with different widths");
-        }
-        image.height += tile.height;
-        image.data.extend_from_slice(&tile.data);
-        offset += part;
-    }
-    encode_png(&image)
+    let (image_width, image_height) = image_size(&image.bytes).ok_or_else(|| anyhow::anyhow!("browser returned an unreadable image"))?;
+    Ok(Shot {
+        bytes: image.bytes,
+        format: image.format,
+        width: image_width,
+        height: image_height,
+        scale: image_width as f64 / width,
+        note,
+    })
 }
 
 fn image_content(bytes: &[u8], mime: &str) -> Content {
@@ -403,17 +337,15 @@ impl Tool for ScreenshotTool {
                     bail_user!("labels work on viewport PNG screenshots only");
                 }
                 let path = arg_str(&args, "path")?.map(|raw| files::output_path(&ctx.file_roots, raw, "screenshot path")).transpose()?;
-                let (tab, cdp, region) = resolve(&ctx, &args, region).await?;
+                let (_tab, driver, region) = resolve(&ctx, &args, region).await?;
                 let mut found = None;
                 if with_labels {
                     let max = arg_int(&args, "maxLabels", 1, 300)?.unwrap_or(80) as u32;
-                    let capture_state = state::get(&ctx, tab).await?;
-                    let mut worlds = capture_state.worlds.lock().await;
-                    let value = page::evaluate(cdp.as_ref(), &mut worlds, tab, &labels::script(max)).await?;
+                    let value = page::evaluate(driver.as_ref(), &labels::script(max)).await?;
                     found = Some(serde_json::from_value::<labels::Found>(value)?.labels);
                 }
                 let max_side = if path.is_some() { MAX_SAVED_SIDE } else { MAX_INLINE_SIDE };
-                let mut shot = capture(cdp.as_ref(), &region, format, quality, css_scale, max_side).await?;
+                let mut shot = capture(driver.as_ref(), &region, format, quality, css_scale, max_side).await?;
                 if let Some(found) = &found {
                     let mut image = decode_png(&shot.bytes)?;
                     labels::draw(&mut image, found, shot.scale);
@@ -527,8 +459,8 @@ impl Tool for ScreenshotDiffTool {
                     .transpose()?;
                 let region = region(&args)?;
                 let before = decode_png(&bytes)?;
-                let (_, cdp, region) = resolve(&ctx, &args, region).await?;
-                let shot = capture(cdp.as_ref(), &region, Format::Png, None, css_scale, MAX_SAVED_SIDE).await?;
+                let (_, driver, region) = resolve(&ctx, &args, region).await?;
+                let shot = capture(driver.as_ref(), &region, Format::Png, None, css_scale, MAX_SAVED_SIDE).await?;
                 if let Some(path) = &current_path {
                     files::write(&ctx.file_roots, path, &shot.bytes, "currentPath")?;
                 }
@@ -576,6 +508,10 @@ mod tests {
     use super::*;
     use crate::testing::FakeCdp;
     use base64::Engine;
+
+    fn driver_of(cdp: &std::sync::Arc<FakeCdp>) -> std::sync::Arc<browse_cdp::CdpTabDriver> {
+        browse_cdp::CdpTabDriver::new(cdp.clone())
+    }
 
     fn fake() -> std::sync::Arc<FakeCdp> {
         let cdp = FakeCdp::new();
@@ -635,10 +571,10 @@ mod tests {
         let cdp = fake();
         layout(&cdp, 10.3, 100.5, 800.0, 600.0, 1600.4, 2400.6);
 
-        let shot = capture(cdp.as_ref(), &Region::Viewport, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+        let shot = capture(driver_of(&cdp).as_ref(), &Region::Viewport, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
         assert_eq!((shot.width, shot.height), (1, 1));
         for region in [Region::Clip(50.4, 30.6, 100.2, 50.3), Region::Clip(700.4, 550.0, 100.0, 50.0)] {
-            capture(cdp.as_ref(), &region, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+            capture(driver_of(&cdp).as_ref(), &region, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
         }
 
         let calls = cdp.calls("Page.captureScreenshot");
@@ -659,7 +595,7 @@ mod tests {
         let region = Region::Clip(40.0, 30.0, 100.0, 50.0);
         for page_y in [100.0, 100.5] {
             layout(&cdp, 10.3, page_y, 800.0, 600.0, 1600.4, 2400.6);
-            capture(cdp.as_ref(), &region, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+            capture(driver_of(&cdp).as_ref(), &region, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
         }
 
         let calls = cdp.calls("Page.captureScreenshot");
@@ -677,7 +613,7 @@ mod tests {
     async fn full_page_inside_the_viewport_keeps_its_size() {
         let cdp = fake();
         layout(&cdp, 0.0, 0.0, 1280.0, 720.0, 1280.4, 720.3);
-        capture(cdp.as_ref(), &Region::FullPage, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+        capture(driver_of(&cdp).as_ref(), &Region::FullPage, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
 
         let (params, clip) = last_clip(&cdp);
         assert_eq!(clip, (0.0, 0.0, 1280.0, 720.0));
@@ -688,7 +624,7 @@ mod tests {
     async fn full_page_beyond_the_viewport_is_taken_whole() {
         let cdp = fake();
         layout(&cdp, 0.0, 0.0, 1280.0, 720.0, 1280.4, 2400.7);
-        capture(cdp.as_ref(), &Region::FullPage, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+        capture(driver_of(&cdp).as_ref(), &Region::FullPage, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
 
         let (params, clip) = last_clip(&cdp);
         assert_eq!(clip, (0.0, 0.0, 1280.0, 2401.0));
@@ -699,7 +635,7 @@ mod tests {
     async fn a_zero_width_viewport_still_captures_beyond_it() {
         let cdp = fake();
         layout(&cdp, 0.0, 0.0, 0.4, 720.0, 1280.4, 2400.7);
-        capture(cdp.as_ref(), &Region::FullPage, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+        capture(driver_of(&cdp).as_ref(), &Region::FullPage, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
 
         let (params, clip) = last_clip(&cdp);
         assert_eq!(clip, (0.0, 0.0, 1280.0, 2401.0));
@@ -710,7 +646,7 @@ mod tests {
     async fn a_clip_above_the_viewport_is_clamped_to_its_origin() {
         let cdp = fake();
         layout(&cdp, 10.3, 100.5, 800.0, 600.0, 1600.4, 2400.6);
-        capture(cdp.as_ref(), &Region::Clip(-0.3, -0.2, 100.0, 50.0), Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+        capture(driver_of(&cdp).as_ref(), &Region::Clip(-0.3, -0.2, 100.0, 50.0), Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
 
         let (params, clip) = last_clip(&cdp);
         assert_eq!(clip, (10.0, 101.0, 100.0, 50.0));
@@ -723,7 +659,7 @@ mod tests {
         let region = Region::Clip(0.0, 0.4, 100.0, 600.0);
         for page_y in [100.4, 100.6] {
             layout(&cdp, 10.0, page_y, 800.0, 600.0, 1600.0, 2400.0);
-            capture(cdp.as_ref(), &region, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
+            capture(driver_of(&cdp).as_ref(), &region, Format::Png, None, true, MAX_SAVED_SIDE).await.unwrap();
         }
 
         let calls = cdp.calls("Page.captureScreenshot");
@@ -738,7 +674,7 @@ mod tests {
     async fn scaling_down_keeps_the_clip_whole() {
         let cdp = fake();
         layout(&cdp, 10.0, 100.0, 800.0, 600.0, 800.0, 600.0);
-        capture(cdp.as_ref(), &Region::Clip(20.2, 30.7, 100.0, 50.0), Format::Png, None, true, 50.0).await.unwrap();
+        capture(driver_of(&cdp).as_ref(), &Region::Clip(20.2, 30.7, 100.0, 50.0), Format::Png, None, true, 50.0).await.unwrap();
 
         let (params, clip) = last_clip(&cdp);
         assert_eq!(clip, (30.0, 131.0, 100.0, 50.0));
@@ -750,7 +686,7 @@ mod tests {
     async fn a_viewport_without_a_visible_area_is_a_user_error() {
         let cdp = fake();
         layout(&cdp, 0.0, 0.0, 0.4, 720.0, 1280.0, 720.0);
-        let error = capture(cdp.as_ref(), &Region::Viewport, Format::Png, None, true, MAX_SAVED_SIDE).await.err().expect("the capture must fail");
+        let error = capture(driver_of(&cdp).as_ref(), &Region::Viewport, Format::Png, None, true, MAX_SAVED_SIDE).await.err().expect("the capture must fail");
         assert!(error.to_string().contains("no visible area"), "{error}");
         assert!(cdp.calls("Page.captureScreenshot").is_empty());
     }

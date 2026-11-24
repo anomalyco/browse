@@ -460,7 +460,13 @@ async fn answer(relay: Arc<Relay>, peer: SocketAddr, request: &mut Request<Incom
     };
     finish(match (method.as_str(), path.as_str()) {
         ("GET", "/tools") => {
-            let specs: Vec<_> = relay.tools.read().unwrap_or_else(|poisoned| poisoned.into_inner()).iter().map(|t| t.spec()).collect();
+            let specs: Vec<_> = relay
+                .tools
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .map(|t| t.spec())
+                .collect();
             let specs = crate::surface::tools(client.as_deref(), specs);
             json_response(StatusCode::OK, &serde_json::to_value(specs).unwrap_or_default())
         }

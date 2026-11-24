@@ -109,12 +109,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "browse-bidi"
+version = "0.1.5"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "browse-core",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "browse-capture"
 version = "0.1.5"
 dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
+ "browse-cdp",
  "browse-core",
  "browse-page",
  "futures-util",
@@ -126,6 +140,21 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite 0.27.0",
+]
+
+[[package]]
+name = "browse-cdp"
+version = "0.1.5"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "browse-core",
+ "png",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
@@ -148,6 +177,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
+ "browse-cdp",
  "browse-core",
  "futures-util",
  "getrandom 0.3.4",
@@ -166,6 +196,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
+ "browse-cdp",
  "browse-core",
  "browse-page",
  "bytes",
@@ -196,6 +227,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "browse-capture",
+ "browse-cdp",
  "browse-core",
  "browse-page",
  "futures-util",

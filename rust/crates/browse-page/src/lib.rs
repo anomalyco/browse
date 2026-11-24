@@ -1,15 +1,9 @@
-//! Page interaction over CDP for browse: frames and out-of-process iframes, browse's isolated world per frame with
-//! Playwright's InjectedScript, snapshot refs, actionability, human-like input, navigation, dialogs, uploads,
-//! emulation, challenge detection and WebMCP. No `Runtime.enable`, no page-visible globals, bindings or sourceURLs.
+//! Protocol-agnostic page interaction for browse: frames and out-of-process iframes, browse's isolated world per
+//! frame with Playwright's InjectedScript, snapshot refs, actionability, human-like input, navigation, dialogs,
+//! uploads, emulation, challenge detection and WebMCP.
 //!
-//! What the `Cdp` of a tab must do for this crate:
-//! - Return the same `Arc` from `Browser::cdp` for a tab while its debugger attachment lives (the page model, its
-//!   isolated worlds and dialog state hang off it; a different `Arc` rebuilds them), and close the event stream when
-//!   the attachment ends.
-//! - Pass `Target.setAutoAttach { flatten: true }` through and deliver `Target.attachedToTarget` for out-of-process
-//!   iframes, then accept commands on and deliver events from those child sessions (`session_id` set).
-//! - Deliver `Page.*` events (`Page.enable` is sent by this crate), including `Page.javascriptDialogOpening`.
-//! - Refuse disallowed navigations (`Page.navigate`) with a readable error; this crate shows it as is.
+//! Programs strictly against `browse_core::TabDriver` and its typed optional sub-interfaces (`FileUploadDriver`,
+//! `EmulationDriver`), with no direct protocol dependencies.
 
 mod actions;
 mod aftermath;

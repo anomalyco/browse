@@ -5,9 +5,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
-use serde_json::{Value, json};
+use browse_core::{Arg as DriverArg, CallOptions, Evaluated, FrameId, JsError, Realm, Receiver, RemoteRef, Returns, World};
+use serde_json::Value;
 
-use crate::page::{Element, TabPage, TRANSIENT_GROUP, is_context_lost};
+use crate::page::{Element, TabPage, is_stale};
 
 /// Turns any value into JSON-safe data in the page: Map → object, Set → array, Date → ISO string, Error →
 /// {name, message, stack}, DOM nodes → "<tag#id.class>", circular references → "[Circular]", BigInt → "10n",
@@ -163,61 +164,43 @@ pub fn has_return(code: &str) -> bool {
 
 /// What an eval call needs to run: where and against what.
 pub enum Target {
-    /// An element (in its world); `this` stays the global object and the element is the function's first argument.
-    Element { object_id: String, session: Option<String> },
-    /// An execution context (browse's isolated world of a frame).
-    Context { context_id: i64, session: Option<String> },
-    /// The page's main world of a frame, reached through its document object.
-    Object { object_id: String, session: Option<String> },
+    Element { handle: RemoteRef },
+    Realm(Realm),
 }
 
 impl Target {
-    fn session(&self) -> Option<&str> {
+    pub fn frame_id(&self) -> &str {
         match self {
-            Target::Element { session, .. } | Target::Context { session, .. } | Target::Object { session, .. } => session.as_deref(),
+            Target::Element { handle } => handle.frame.as_str(),
+            Target::Realm(realm) => realm.frame.as_str(),
         }
+    }
+
+    fn receiver(&self) -> Receiver {
+        match self {
+            Target::Element { handle } => Receiver::Ref(handle.clone()),
+            Target::Realm(realm) => Receiver::Global(realm.clone()),
+        }
+    }
+
+    fn args(&self, arg: Option<&Value>) -> Vec<DriverArg> {
+        let second = match arg {
+            Some(a) => DriverArg::Json(Value::String(a.to_string())),
+            None => DriverArg::Undefined,
+        };
+        let first = match self {
+            Target::Element { handle } => DriverArg::Ref(handle.clone()),
+            Target::Realm(_) => DriverArg::Undefined,
+        };
+        vec![first, second]
     }
 }
 
 pub enum Outcome {
     Value(Value),
-    /// The code ran as statements and gave nothing back.
     Undefined { block: bool },
 }
 
-fn params(target: &Target, declaration: String, arg: Option<&Value>) -> Value {
-    let arg = match arg {
-        Some(a) => json!({ "value": a.to_string() }),
-        None => json!({}),
-    };
-    let mut params = json!({
-        "functionDeclaration": declaration,
-        "returnByValue": true,
-        "awaitPromise": true,
-        "generatePreview": true,
-        "userGesture": true,
-        "objectGroup": TRANSIENT_GROUP,
-    });
-    match target {
-        Target::Element { object_id, .. } => {
-            params["objectId"] = json!(object_id);
-            params["arguments"] = json!([{ "objectId": object_id }, arg]);
-        }
-        Target::Context { context_id, .. } => {
-            params["executionContextId"] = json!(context_id);
-            params["arguments"] = json!([{}, arg]);
-        }
-        Target::Object { object_id, .. } => {
-            params["objectId"] = json!(object_id);
-            params["arguments"] = json!([{}, arg]);
-        }
-    }
-    params
-}
-
-/// Runs the code as an expression when it parses as one; else as statements, returning the last statement's value
-/// when it is an expression (like a console), or what the code `return`s.
-/// `compile` is the frame to check the syntax in.
 pub async fn run(page: &Arc<TabPage>, target: &Target, compile: Option<String>, expression: &str, arg: Option<&Value>, callable: bool) -> Result<Outcome> {
     let expression = expression.trim().trim_end_matches(';').trim_end();
     let known = compiles(page, &compile, &expression_body(expression)).await;
@@ -231,23 +214,35 @@ pub async fn run(page: &Arc<TabPage>, target: &Target, compile: Option<String>, 
         expression_body(expression)
     };
     let element = matches!(target, Target::Element { .. });
+    let receiver = target.receiver();
+    let args = target.args(arg);
     loop {
-        let result = page.send("Runtime.callFunctionOn", params(target, declaration(&body, callable, expression), arg), target.session()).await?;
-        if let Some(details) = result.get("exceptionDetails") {
-            // Without a syntax check, a SyntaxError means the code is statements; only then is a retry safe, since
-            // a compile error runs nothing.
-            let syntax = details["exception"]["className"] == "SyntaxError" && details["stackTrace"].is_null();
-            if known.is_none() && syntax && !block {
-                block = true;
-                body = statements_body(expression);
-                continue;
+        let outcome = page
+            .call_driver(
+                &receiver,
+                &declaration(&body, callable, expression),
+                &args,
+                CallOptions { returns: Returns::Json, await_promise: true, user_activation: true },
+            )
+            .await?;
+        let value = match outcome {
+            Err(details) => {
+                if known.is_none() && details.is_compile_syntax_error && !block {
+                    block = true;
+                    body = statements_body(expression);
+                    continue;
+                }
+                if element && details.name.as_deref() == Some("ReferenceError") {
+                    bail!(
+                        "{}. With ref or selector, expression must be a function called with the element, e.g. \"(el) => el.textContent\" or \"(el, arg) => …\"",
+                        exception_text(&details, expression)
+                    );
+                }
+                bail!("{}", exception_text(&details, expression));
             }
-            if element && details["exception"]["className"] == "ReferenceError" {
-                bail!("{}. With ref or selector, expression must be a function called with the element, e.g. \"(el) => el.textContent\" or \"(el, arg) => …\"", exception_text(details, expression));
-            }
-            bail!("{}", exception_text(details, expression));
-        }
-        let value = &result["result"]["value"];
+            Ok(Evaluated::Json(value)) => value,
+            Ok(_) => Value::Null,
+        };
         if value["function"] == true {
             bail!("The expression evaluated to a function it doesn't define, which browse never calls on its own; call it yourself: (fn)(), or pass arg (or a ref/selector) to call it with them");
         }
@@ -261,27 +256,9 @@ pub async fn run(page: &Arc<TabPage>, target: &Target, compile: Option<String>, 
     }
 }
 
-/// The message of a thrown exception: Errors as `Name: message`, other values as JSON, with the line:column in the
-/// eval code when the throw happened there.
-pub fn exception_text(details: &Value, expression: &str) -> String {
-    let exception = &details["exception"];
-    let mut message = if exception["subtype"] == "error" || exception["className"].as_str().map(|c| c.ends_with("Error")).unwrap_or(false) {
-        crate::page::exception_message(details)
-    } else if let Some(value) = exception.get("value") {
-        format!("threw {}", serde_json::to_string(value).unwrap_or_default())
-    } else if let Some(unserializable) = exception["unserializableValue"].as_str() {
-        format!("threw {unserializable}")
-    } else if exception["type"] == "undefined" {
-        "threw undefined".into()
-    } else if let Some(preview) = exception["preview"]["properties"].as_array() {
-        let fields: Vec<String> = preview.iter().map(|p| format!("{}: {}", p["name"].as_str().unwrap_or(""), p["value"].as_str().unwrap_or(""))).collect();
-        format!("threw {} {{ {} }}", exception["className"].as_str().unwrap_or("Object"), fields.join(", "))
-    } else {
-        format!("threw {}", exception["description"].as_str().unwrap_or("a value"))
-    };
-    // The throw site: the stack's first frame when it is the eval code itself (an anonymous script), else the
-    // details' position (synchronous throws).
-    let description = exception["description"].as_str().unwrap_or("");
+pub fn exception_text(details: &JsError, expression: &str) -> String {
+    let mut message = details.message.clone();
+    let description = details.stack.as_deref().unwrap_or("");
     let first_frame = description.lines().map(str::trim).find(|line| line.starts_with("at "));
     let position = match first_frame {
         Some(frame) => {
@@ -292,76 +269,56 @@ pub fn exception_text(details: &Value, expression: &str) -> String {
             let script = parts.next().unwrap_or("");
             (script == "<anonymous>").then_some(()).and(line.zip(column)).map(|(l, c)| (l - PREFIX_LINES, c))
         }
-        None if details["url"].as_str().map(str::is_empty).unwrap_or(true) && details["lineNumber"].as_i64().unwrap_or(0) > 0 => {
-            Some((details["lineNumber"].as_i64().unwrap_or(0) - PREFIX_LINES + 1, details["columnNumber"].as_i64().unwrap_or(0) + 1))
+        None if details.url.as_deref().map(str::is_empty).unwrap_or(true) && details.line.unwrap_or(0) > 0 => {
+            Some((details.line.unwrap_or(0) - PREFIX_LINES + 1, details.column.unwrap_or(0) + 1))
         }
         None => None,
     };
     let lines = expression.lines().count() as i64;
     if let Some((line, column)) = position
-        && line >= 1 && line <= lines {
-            message = format!("{message} (at line {line}:{column} of the eval code)");
-        }
+        && line >= 1 && line <= lines
+    {
+        message = format!("{message} (at line {line}:{column} of the eval code)");
+    }
     message
 }
 
 #[derive(Debug, PartialEq)]
 pub enum Stop {
-    /// The page answers: the code is only waiting (on a promise), nothing to stop.
     Idle,
-    /// The running script was terminated and the page answers again.
     Stopped,
-    /// The page still doesn't answer.
     Stuck,
 }
 
-async fn answers(page: &Arc<TabPage>, session: Option<&str>, within: Duration) -> bool {
-    let probe = page.send_raw("Runtime.evaluate", json!({ "expression": "0", "returnByValue": true }), session);
-    matches!(tokio::time::timeout(within, probe).await, Ok(Ok(_)))
+async fn answers(page: &Arc<TabPage>, frame_id: &str, within: Duration) -> bool {
+    matches!(tokio::time::timeout(within, page.probe_responsive(frame_id)).await, Ok(true))
 }
 
-/// After a timeout: when the page no longer answers (a busy loop), terminate the running script. Chrome handles
-/// Runtime.terminateExecution on its IO thread even while JavaScript is busy; it goes to the tab's root session and
-/// the frame's own session (an out-of-process iframe) at once, each without waiting on the other or on the stuck
-/// call, and is repeated until the page answers.
-pub async fn stop(page: &Arc<TabPage>, session: Option<&str>) -> Stop {
-    if answers(page, session, Duration::from_millis(150)).await {
+pub async fn stop(page: &Arc<TabPage>, frame_id: &str) -> Stop {
+    if answers(page, frame_id, Duration::from_millis(150)).await {
         return Stop::Idle;
     }
     for _ in 0..3 {
-        let root = page.send_raw("Runtime.terminateExecution", json!({}), None);
-        let frame = async {
-            match session {
-                Some(session) => page.send_raw("Runtime.terminateExecution", json!({}), Some(session)).await,
-                None => Ok(Value::Null),
-            }
-        };
-        let _ = tokio::time::timeout(Duration::from_millis(1_000), async { tokio::join!(root, frame) }).await;
-        if answers(page, session, Duration::from_millis(1_000)).await {
+        if !page.interrupt(Some(frame_id)).await {
+            return Stop::Stuck;
+        }
+        if answers(page, frame_id, Duration::from_millis(1_000)).await {
             return Stop::Stopped;
         }
     }
     Stop::Stuck
 }
 
-/// An element target in the main world, or in browse's world.
 pub async fn element_target(page: &Arc<TabPage>, element: &Element, main_world: bool) -> Result<Target> {
-    let object_id = if main_world { page.main_world_object(element).await? } else { element.object_id.clone() };
-    Ok(Target::Element { object_id, session: element.session.clone() })
+    let handle = if main_world { page.adopt_main_world(element).await? } else { element.handle.clone() };
+    Ok(Target::Element { handle })
 }
 
-/// A frame target: browse's isolated world, or the page's main world through the frame's document.
-pub async fn frame_target(page: &Arc<TabPage>, frame: &str, main_world: bool) -> Result<Target> {
-    if main_world {
-        let document = page.document(frame).await?;
-        let object_id = page.main_world_object(&document).await?;
-        return Ok(Target::Object { object_id, session: document.session });
-    }
-    let world = page.world(frame).await?;
-    Ok(Target::Context { context_id: world.context_id, session: world.session })
+pub async fn frame_target(_page: &Arc<TabPage>, frame: &str, main_world: bool) -> Result<Target> {
+    let world = if main_world { World::Main } else { World::Isolated };
+    Ok(Target::Realm(Realm { frame: FrameId::from(frame), world }))
 }
 
-/// A context or navigation error, phrased for the user.
 pub fn lost_context(page: &TabPage, navigated: bool) -> anyhow::Error {
     if navigated {
         let to = page.pending_navigation().unwrap_or_else(|| page.main_url());
@@ -372,5 +329,5 @@ pub fn lost_context(page: &TabPage, navigated: bool) -> anyhow::Error {
 }
 
 pub fn is_lost(error: &anyhow::Error) -> bool {
-    is_context_lost(&error.to_string())
+    is_stale(error)
 }

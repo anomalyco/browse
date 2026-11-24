@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use browse_core::{Browser, Cdp, Content, HandoffResult, TabId, TabInfo, TabOptions, TabState, Tool, ToolContext, ToolOutput, ToolSpec};
+use browse_core::{Browser, Content, HandoffResult, TabDriver, TabId, TabInfo, TabOptions, TabState, Tool, ToolContext, ToolOutput, ToolSpec};
 use serde_json::{Value, json};
 
 /// Tab 7 shows example.com; every tab id has its own state.
@@ -24,8 +24,8 @@ impl Browser for FakeBrowser {
     async fn close_tab(&self, _: TabId) -> anyhow::Result<()> {
         Ok(())
     }
-    async fn cdp(&self, _: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
-        anyhow::bail!("no cdp here")
+    async fn tab_driver(&self, _: TabId) -> anyhow::Result<Arc<dyn TabDriver>> {
+        anyhow::bail!("no driver here")
     }
     async fn state(&self, tab: TabId) -> anyhow::Result<Arc<TabState>> {
         Ok(self.states.lock().unwrap().entry(tab).or_default().clone())

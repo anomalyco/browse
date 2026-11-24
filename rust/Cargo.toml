@@ -17,6 +17,8 @@ thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 browse-core = { path = "crates/browse-core" }
+browse-cdp = { path = "crates/browse-cdp" }
+browse-bidi = { path = "crates/browse-bidi" }
 browse-relay = { path = "crates/browse-relay" }
 browse-page = { path = "crates/browse-page" }
 browse-capture = { path = "crates/browse-capture" }

@@ -21,6 +21,7 @@ regex = { version = "1", default-features = false, features = ["std", "perf"] }
 libc = "0.2"
 
 [dev-dependencies]
+browse-cdp.workspace = true
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 jpeg-encoder = "0.6"
 tokio-tungstenite = "0.27"

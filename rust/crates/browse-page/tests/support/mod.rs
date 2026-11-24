@@ -10,7 +10,8 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use browse_core::{Browser, Cdp, CdpError, CdpEvent, HandoffResult, TabId, TabInfo, TabOptions, TabState, ToolContext, ToolOutput};
+use browse_cdp::{Cdp, CdpError, CdpEvent};
+use browse_core::{Browser, HandoffResult, TabDriver, TabId, TabInfo, TabOptions, TabState, ToolContext, ToolOutput};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -259,6 +260,7 @@ impl Cdp for TabCdp {
 /// One Chromium tab as the browser: tab 1.
 pub struct FakeBrowser {
     pub tab: Arc<TabCdp>,
+    pub driver: Arc<dyn TabDriver>,
     pub human: bool,
     pub read_only: bool,
     pub connected_locally: bool,
@@ -287,8 +289,8 @@ impl Browser for FakeBrowser {
     async fn close_tab(&self, _tab: TabId) -> anyhow::Result<()> {
         Ok(())
     }
-    async fn cdp(&self, _tab: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
-        Ok(self.tab.clone())
+    async fn tab_driver(&self, _tab: TabId) -> anyhow::Result<Arc<dyn TabDriver>> {
+        Ok(self.driver.clone())
     }
     async fn state(&self, _tab: TabId) -> anyhow::Result<Arc<TabState>> {
         Ok(self.state.clone())
@@ -342,7 +344,8 @@ impl Harness {
         let tab = TabCdp::open(&connection).await;
         let files = TempDir::new("files");
         let state = Arc::new(TabState::default());
-        let ctx = ToolContext { browser: Arc::new(FakeBrowser { tab: tab.clone(), human, read_only, connected_locally, state: state.clone() }), file_roots: vec![files.0.clone()] };
+        let driver: Arc<dyn TabDriver> = browse_cdp::CdpTabDriver::new(tab.clone());
+        let ctx = ToolContext { browser: Arc::new(FakeBrowser { tab: tab.clone(), driver, human, read_only, connected_locally, state: state.clone() }), file_roots: vec![files.0.clone()] };
         let server = Server::start().await;
         Some(Harness { chrome, tab, ctx, tools: browse_page::tools(), state, server, files })
     }

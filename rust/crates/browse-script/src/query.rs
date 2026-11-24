@@ -4,9 +4,9 @@
 
 use std::time::Duration;
 
-use anyhow::{Result, bail};
-use browse_core::ToolContext;
-use serde_json::{Value, json};
+use anyhow::Result;
+use browse_core::{Arg, ToolContext};
+use serde_json::Value;
 
 /// Turns the function's result into JSON: elements become "<tag#id.class>", cycles and functions are dropped.
 const SERIALIZE: &str = r##"(value) => {
@@ -45,34 +45,12 @@ pub async fn run(ctx: &ToolContext, payload: &Value) -> Result<Value> {
     let declaration = format!(
         "async function (selector, argJson) {{\nconst elements = this.queryAll(selector);\nconst inj = this.inj;\nconst helpers = {{ visible: (el) => inj.elementState(el, 'visible').matches }};\nconst value = await ({function})(elements, JSON.parse(argJson), helpers);\nreturn ({SERIALIZE})(value) ?? null;\n}}"
     );
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        let world = page.ensure_injected(&frame).await?;
-        let result = page
-            .send(
-                "Runtime.callFunctionOn",
-                json!({
-                    "functionDeclaration": declaration,
-                    "objectId": world.helpers,
-                    "arguments": [{ "value": rest }, { "value": arg.to_string() }],
-                    "returnByValue": true,
-                    "awaitPromise": true,
-                }),
-                world.session.as_deref(),
-            )
-            .await;
-        let result = match result {
-            Err(error) if browse_page::page::is_context_lost(&error.to_string()) && attempt < 3 => {
-                page.forget_world(&frame, world.context_id);
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                continue;
-            }
-            other => other?,
-        };
-        if let Some(details) = result.get("exceptionDetails") {
-            bail!("{}", browse_page::page::exception_message(details));
-        }
-        return Ok(result["result"].get("value").cloned().unwrap_or(Value::Null));
-    }
+    page.call_helpers_fn(
+        &frame,
+        &declaration,
+        &[Arg::Json(Value::String(rest)), Arg::Json(Value::String(arg.to_string()))],
+        true,
+        true,
+    )
+    .await
 }

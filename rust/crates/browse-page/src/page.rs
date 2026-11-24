@@ -1,75 +1,65 @@
-//! One tab's page model over CDP: the frame tree (including out-of-process iframes on child target sessions),
-//! browse's isolated world per frame, lifecycle state, dialogs and a short log of what happened, all kept without
-//! `Runtime.enable` so the page never sees an attached debugger's execution-context bookkeeping.
+//! Protocol-agnostic per-tab page model built directly on `browse_core::TabDriver`.
+//!
+//! Tracks the driver's normalized frame tree and `DocumentId`s, caches browse's `helpers.js` / Playwright
+//! `InjectedScript` inside each frame's `World::Isolated`, manages blocking JS dialogs, and collects transient
+//! `RemoteRef`s for release at the end of a tool call.
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
-use browse_core::{Cdp, CdpError, CdpEvent, TabId};
+use browse_core::{
+    Arg as DriverArg, CallOptions, Dialog, DialogKind, DocumentId, DriverError, DriverResult, Evaluated, Frame,
+    FrameId, JsError, LoadState, NavigationId, PageEvent, Realm, Receiver, RemoteRef, Returns, TabDriver, TabId,
+    World,
+};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, watch};
 
 use crate::scripts;
 
-/// Remote objects browse creates while a tool runs; released when the tool finishes.
-pub const TRANSIENT_GROUP: &str = "browse-transient";
-const WORLD_GROUP: &str = "browse-world";
 const MAX_EVENTS: usize = 200;
+
+/// Marker error indicating a frame, world, or handle was invalidated by a navigation or re-render.
+#[derive(Debug)]
+pub struct StaleContext;
+
+impl std::fmt::Display for StaleContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "The page navigated or re-rendered while browse was using it; try again")
+    }
+}
+
+impl std::error::Error for StaleContext {}
 
 #[derive(Debug, Clone)]
 pub struct FrameInfo {
     pub id: String,
     pub parent: Option<String>,
-    /// The child target session for an out-of-process iframe; None when the tab's own session owns it.
-    pub session: Option<String>,
     pub url: String,
     pub name: String,
-    pub loader_id: String,
-    pub lifecycle: HashSet<String>,
-    /// Bumped on every cross-document navigation; refs captured under an older generation are stale.
+    pub navigation: Option<NavigationId>,
+    pub lifecycle: HashSet<LoadState>,
+    /// Matches the driver's `DocumentId` for this frame; bumped on every cross-document commit.
     pub generation: u64,
-    /// When browse saw the current document commit; None for documents loaded before browse attached.
     pub committed_at: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone)]
-struct World {
-    context_id: i64,
-    helpers: String,
+struct WorldCache {
+    helpers: RemoteRef,
     injected: bool,
-    generation: u64,
+    document: DocumentId,
 }
 
-/// A frame's isolated world: its execution context and the helpers object (js/helpers.js) living in it.
-#[derive(Debug, Clone)]
-pub struct WorldRef {
-    pub frame: String,
-    pub session: Option<String>,
-    pub context_id: i64,
-    pub helpers: String,
-    pub generation: u64,
-}
-
-/// An element in browse's isolated world of a frame.
+/// An element handle in browse's isolated world of a frame.
 #[derive(Debug, Clone)]
 pub struct Element {
     pub frame: String,
-    pub session: Option<String>,
-    pub object_id: String,
-    pub context_id: i64,
+    pub handle: RemoteRef,
     pub generation: u64,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct Dialog {
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub message: String,
-    #[serde(rename = "defaultPrompt", skip_serializing_if = "String::is_empty")]
-    pub default_prompt: String,
-    pub url: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,12 +71,9 @@ pub enum DialogPolicy {
 
 #[derive(Debug, Clone)]
 pub enum TabEvent {
-    /// The main frame committed a navigation.
     Navigated { url: String, same_document: bool },
-    /// The main frame started loading a new document.
     NavigationStarted { url: String },
     Dialog(Dialog),
-    /// A dialog was handled, by browse's policy or the user.
     DialogClosed { accepted: bool, auto: bool },
     Popup { url: String },
     Crashed,
@@ -96,23 +83,19 @@ pub enum TabEvent {
 struct TabState {
     main_frame: String,
     frames: HashMap<String, FrameInfo>,
-    worlds: HashMap<String, World>,
+    worlds: HashMap<String, WorldCache>,
     frame_seq: HashMap<String, u32>,
     next_seq: u32,
-    /// Child target sessions: session id to target id.
-    sessions: HashMap<String, String>,
     dialog: Option<Dialog>,
     dialog_policy: Option<DialogPolicy>,
-    /// What an auto-accepted prompt() answers (its default value when unset).
     auto_prompt_text: Option<String>,
     events: Vec<(u64, TabEvent)>,
     seq: u64,
-    drag: Option<Value>,
     platform: Option<String>,
-    /// The URL of a main-frame cross-document navigation that started and has not committed or stopped yet.
     pending_navigation: Option<String>,
-    /// Emulated media type and features: Chrome replaces the whole set on every setEmulatedMedia.
     media: MediaEmulation,
+    transient: Vec<RemoteRef>,
+    closed: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -123,7 +106,7 @@ pub struct MediaEmulation {
 
 struct Shared {
     tab: TabId,
-    cdp: Arc<dyn Cdp>,
+    driver: Arc<dyn TabDriver>,
     state: Mutex<TabState>,
     changed: watch::Sender<u64>,
     dialog_open: watch::Sender<bool>,
@@ -132,7 +115,6 @@ struct Shared {
 pub struct TabPage {
     shared: Arc<Shared>,
     world_lock: tokio::sync::Mutex<()>,
-    world_name: String,
     /// Serializes input on the tab and holds the pointer's human-input state.
     pub input: tokio::sync::Mutex<crate::human::InputState>,
     pump: tokio::task::JoinHandle<()>,
@@ -144,73 +126,44 @@ impl Drop for TabPage {
     }
 }
 
-pub fn cdp_error(error: CdpError) -> anyhow::Error {
-    let message = error.to_string();
-    if message.contains("Detached while handling command") || message.contains("Target closed") || message.contains("No target with given id") {
-        return anyhow!("The tab closed, or browse lost its connection to it, while the command ran ({message}); check the tab list and try again");
+pub fn driver_error(error: DriverError) -> anyhow::Error {
+    match error {
+        DriverError::Stale => anyhow::Error::new(StaleContext),
+        DriverError::Closed(reason) => anyhow!(
+            "The tab closed, or browse lost its connection to it, while the command ran ({reason}); check the tab list and try again"
+        ),
+        other => anyhow!(other),
     }
-    // Callers that can retry recognize these by the original text, which stays in the message.
-    if is_context_lost(&message) {
-        return anyhow!("The page navigated or re-rendered while browse was using it; try again ({message})");
-    }
-    anyhow!(message)
 }
 
-/// Errors that mean the world (or the document) the call ran in is gone; the call can run again in a new one.
-pub fn is_context_lost(message: &str) -> bool {
-    [
-        "Cannot find context with specified id",
-        "Execution context was destroyed",
-        "Cannot find default execution context",
-        "Inspected target navigated or closed",
-        "Could not find object with given id",
-        "No frame with given id",
-        "Frame with the given id was not found",
-        "Cannot find object with id",
-    ]
-    .iter()
-    .any(|needle| message.contains(needle))
-}
-
-fn str_of(value: &Value, key: &str) -> String {
-    value.get(key).and_then(Value::as_str).unwrap_or_default().to_string()
-}
-
-/// Frame generations are unique across tab pages, so a ref can never match a rebuilt page's frame by accident.
-fn next_generation() -> u64 {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-}
-
-fn world_name() -> String {
-    // Unique per process; only visible to CDP clients, never to the page.
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    format!("__b{:x}", (nanos as u64) ^ (std::process::id() as u64).rotate_left(17))
+pub fn is_stale(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<StaleContext>().is_some()
+        || error
+            .downcast_ref::<DriverError>()
+            .is_some_and(|e| matches!(e, DriverError::Stale))
 }
 
 impl TabPage {
-    pub async fn attach(tab: TabId, cdp: Arc<dyn Cdp>) -> Result<Arc<TabPage>> {
-        let events = cdp.events();
+    pub async fn attach(tab: TabId, driver: Arc<dyn TabDriver>) -> Result<Arc<TabPage>> {
+        let events = driver.events();
         let (changed, _) = watch::channel(0u64);
         let (dialog_open, _) = watch::channel(false);
-        let shared = Arc::new(Shared { tab, cdp: cdp.clone(), state: Mutex::new(TabState::default()), changed, dialog_open });
+        let shared = Arc::new(Shared {
+            tab,
+            driver: driver.clone(),
+            state: Mutex::new(TabState::default()),
+            changed,
+            dialog_open,
+        });
         let pump = tokio::spawn(pump(shared.clone(), events));
         let page = Arc::new(TabPage {
             shared: shared.clone(),
             world_lock: tokio::sync::Mutex::new(()),
-            world_name: world_name(),
             input: tokio::sync::Mutex::new(crate::human::InputState::default()),
             pump,
         });
-        cdp.send("Page.enable", json!({}), None).await.map_err(cdp_error)?;
-        let _ = cdp.send("Page.setLifecycleEventsEnabled", json!({ "enabled": true }), None).await;
-        let tree = cdp.send("Page.getFrameTree", json!({}), None).await.map_err(cdp_error)?;
-        shared.merge_tree(&tree["frameTree"], None, true);
-        let _ = cdp
-            .send("Target.setAutoAttach", json!({ "autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true }), None)
-            .await;
-        // Keeps a background tab focused and rendering; the relay may normalize it to the tab's real focus.
-        let _ = cdp.send("Emulation.setFocusEmulationEnabled", json!({ "enabled": true }), None).await;
+        let frames = driver.frames().await.map_err(driver_error)?;
+        shared.sync_frames(&frames);
         Ok(page)
     }
 
@@ -218,13 +171,12 @@ impl TabPage {
         self.shared.tab
     }
 
-    pub fn cdp(&self) -> &Arc<dyn Cdp> {
-        &self.shared.cdp
+    pub fn driver(&self) -> &Arc<dyn TabDriver> {
+        &self.shared.driver
     }
 
-    /// Whether the event pump still runs (the Cdp's event stream is open).
     pub fn alive(&self) -> bool {
-        !self.pump.is_finished()
+        !self.pump.is_finished() && !self.shared.state.lock().unwrap().closed
     }
 
     pub fn main_frame(&self) -> String {
@@ -237,7 +189,6 @@ impl TabPage {
 
     pub fn frames(&self) -> Vec<FrameInfo> {
         let state = self.shared.state.lock().unwrap();
-        // Document order is not known; parents before children, main frame first.
         let mut out = Vec::new();
         let mut queue = vec![state.main_frame.clone()];
         let mut seen = HashSet::new();
@@ -247,7 +198,12 @@ impl TabPage {
             }
             if let Some(frame) = state.frames.get(&id) {
                 out.push(frame.clone());
-                let mut children: Vec<_> = state.frames.values().filter(|f| f.parent.as_deref() == Some(id.as_str())).map(|f| f.id.clone()).collect();
+                let mut children: Vec<_> = state
+                    .frames
+                    .values()
+                    .filter(|f| f.parent.as_deref() == Some(id.as_str()))
+                    .map(|f| f.id.clone())
+                    .collect();
                 children.sort();
                 children.reverse();
                 queue.extend(children);
@@ -258,10 +214,13 @@ impl TabPage {
 
     pub fn main_url(&self) -> String {
         let state = self.shared.state.lock().unwrap();
-        state.frames.get(&state.main_frame).map(|f| f.url.clone()).unwrap_or_default()
+        state
+            .frames
+            .get(&state.main_frame)
+            .map(|f| f.url.clone())
+            .unwrap_or_default()
     }
 
-    /// The stable sequence number of a frame, used as Playwright's aria-ref prefix ("f3e12"). The main frame is 0.
     pub fn frame_seq(&self, frame: &str) -> u32 {
         let mut state = self.shared.state.lock().unwrap();
         if state.main_frame == frame {
@@ -281,7 +240,11 @@ impl TabPage {
         if seq == 0 {
             return Some(state.main_frame.clone());
         }
-        state.frame_seq.iter().find(|(_, s)| **s == seq).map(|(f, _)| f.clone())
+        state
+            .frame_seq
+            .iter()
+            .find(|(_, s)| **s == seq)
+            .map(|(f, _)| f.clone())
     }
 
     // Events, dialogs and waiting.
@@ -292,7 +255,12 @@ impl TabPage {
 
     pub fn events_since(&self, seq: u64) -> Vec<TabEvent> {
         let state = self.shared.state.lock().unwrap();
-        state.events.iter().filter(|(s, _)| *s > seq).map(|(_, e)| e.clone()).collect()
+        state
+            .events
+            .iter()
+            .filter(|(s, _)| *s > seq)
+            .map(|(_, e)| e.clone())
+            .collect()
     }
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
@@ -303,11 +271,10 @@ impl TabPage {
         self.shared.state.lock().unwrap().dialog.clone()
     }
 
-    /// The open dialog, unless browse answers it by itself (a beforeunload dialog, or an auto policy is set).
     pub fn blocking_dialog(&self) -> Option<Dialog> {
         let state = self.shared.state.lock().unwrap();
         let dialog = state.dialog.clone()?;
-        (state.dialog_policy.is_none() && dialog.kind != "beforeunload").then_some(dialog)
+        (state.dialog_policy.is_none() && dialog.kind != DialogKind::BeforeUnload).then_some(dialog)
     }
 
     pub fn set_dialog_policy(&self, policy: Option<DialogPolicy>, prompt_text: Option<String>) {
@@ -320,20 +287,12 @@ impl TabPage {
         self.shared.state.lock().unwrap().dialog_policy
     }
 
-    pub fn take_drag(&self) -> Option<Value> {
-        self.shared.state.lock().unwrap().drag.take()
-    }
-
-    pub fn clear_drag(&self) {
-        self.shared.state.lock().unwrap().drag = None;
-    }
-
-    pub fn has_drag(&self) -> bool {
-        self.shared.state.lock().unwrap().drag.is_some()
-    }
-
     fn dialog_error(dialog: &Dialog) -> anyhow::Error {
-        let article = if dialog.kind.starts_with(['a', 'e', 'i', 'o', 'u']) { "An" } else { "A" };
+        let article = if dialog.kind.as_str().starts_with(['a', 'e', 'i', 'o', 'u']) {
+            "An"
+        } else {
+            "A"
+        };
         anyhow!(
             "{article} {} dialog is open: {:?}. The page is paused until it is answered: call dialog with action \"accept\" or \"dismiss\".",
             dialog.kind,
@@ -341,7 +300,6 @@ impl TabPage {
         )
     }
 
-    /// Fails while a JavaScript dialog blocks the page: every evaluation would hang until it is answered.
     pub fn ensure_no_dialog(&self) -> Result<()> {
         match self.dialog() {
             Some(dialog) => Err(Self::dialog_error(&dialog)),
@@ -349,39 +307,40 @@ impl TabPage {
         }
     }
 
-    /// Resolves when a dialog opens.
     pub async fn dialog_opened(&self) {
         let mut rx = self.shared.dialog_open.subscribe();
         let _ = rx.wait_for(|open| *open).await;
     }
 
-    /// Sends a command, failing instead of hanging when a dialog opens while it runs.
-    pub async fn send(&self, method: &str, params: Value, session: Option<&str>) -> Result<Value> {
+    pub async fn guard_dialog<T, F>(&self, fut: F) -> Result<T>
+    where
+        F: Future<Output = DriverResult<T>>,
+    {
         self.ensure_no_dialog()?;
-        let cdp = self.shared.cdp.clone();
         tokio::select! {
-            result = cdp.send(method, params, session) => result.map_err(cdp_error),
-            _ = self.dialog_opened() => Err(Self::dialog_error(&self.dialog().unwrap_or(Dialog { kind: "dialog".into(), message: String::new(), default_prompt: String::new(), url: String::new() }))),
+            result = fut => result.map_err(driver_error),
+            _ = self.dialog_opened() => Err(Self::dialog_error(&self.dialog().unwrap_or(Dialog {
+                kind: DialogKind::Alert,
+                message: String::new(),
+                default_prompt: String::new(),
+                url: String::new(),
+            }))),
         }
-    }
-
-    /// Sends a command whether or not a dialog is open (input, dialog handling).
-    pub async fn send_raw(&self, method: &str, params: Value, session: Option<&str>) -> Result<Value> {
-        self.shared.cdp.send(method, params, session).await.map_err(cdp_error)
     }
 
     pub async fn handle_dialog(&self, accept: bool, prompt_text: Option<&str>) -> Result<Dialog> {
-        let dialog = self.dialog().ok_or_else(|| anyhow!("No dialog is open on this tab."))?;
-        let mut params = json!({ "accept": accept });
-        if let Some(text) = prompt_text {
-            params["promptText"] = json!(text);
-        }
-        self.send_raw("Page.handleJavaScriptDialog", params, None).await?;
+        let dialog = self
+            .dialog()
+            .ok_or_else(|| anyhow!("No dialog is open on this tab."))?;
+        self.shared
+            .driver
+            .answer_dialog(accept, prompt_text)
+            .await
+            .map_err(driver_error)?;
         self.shared.clear_dialog(Some(accept), false);
         Ok(dialog)
     }
 
-    /// Waits until `check` passes, re-checking on every page event and at least every `poll`.
     pub async fn wait_until<F>(&self, timeout: Duration, poll: Duration, mut check: F) -> bool
     where
         F: FnMut(&TabPage) -> bool,
@@ -401,281 +360,334 @@ impl TabPage {
         }
     }
 
-    /// A main-frame navigation that started and has neither committed nor stopped.
     pub fn pending_navigation(&self) -> Option<String> {
         self.shared.state.lock().unwrap().pending_navigation.clone()
     }
 
-    pub fn lifecycle_has(&self, frame: &str, name: &str) -> bool {
-        self.frame(frame).map(|f| f.lifecycle.contains(name)).unwrap_or(false)
+    pub fn lifecycle_has(&self, frame: &str, state: LoadState) -> bool {
+        self.frame(frame)
+            .map(|f| f.lifecycle.contains(&state))
+            .unwrap_or(false)
     }
 
-    // Worlds.
+    pub fn track_transient(&self, handle: RemoteRef) {
+        self.shared.state.lock().unwrap().transient.push(handle);
+    }
 
-    pub async fn world(&self, frame: &str) -> Result<WorldRef> {
-        if let Some(world) = self.cached_world(frame) {
-            return Ok(world);
+    // Isolated worlds and helpers.
+
+    async fn helpers(&self, frame: &str) -> Result<RemoteRef> {
+        if let Some(cached) = self.cached_helpers(frame) {
+            return Ok(cached);
         }
         let _guard = self.world_lock.lock().await;
-        if let Some(world) = self.cached_world(frame) {
-            return Ok(world);
+        if let Some(cached) = self.cached_helpers(frame) {
+            return Ok(cached);
         }
-        let info = self.frame(frame).ok_or_else(|| anyhow!("The frame is gone (it navigated away or was removed)."))?;
-        let session = info.session.clone();
-        // Bounded: the lock is per tab, so a frame that doesn't answer must not hold up every other frame.
-        let setup = async {
-            let created = self
-                .send(
-                    "Page.createIsolatedWorld",
-                    json!({ "frameId": frame, "worldName": self.world_name, "grantUniveralAccess": true }),
-                    session.as_deref(),
-                )
-                .await?;
-            let context_id = created["executionContextId"].as_i64().ok_or_else(|| anyhow!("Chrome did not create an isolated world for the frame"))?;
-            let evaluated = self
-                .send(
-                    "Runtime.evaluate",
-                    json!({ "expression": scripts::helpers(), "contextId": context_id, "returnByValue": false, "objectGroup": WORLD_GROUP }),
-                    session.as_deref(),
-                )
-                .await?;
-            Ok::<_, anyhow::Error>((context_id, evaluated))
+        let info = self
+            .frame(frame)
+            .ok_or_else(|| anyhow!("The frame is gone (it navigated away or was removed)."))?;
+        let realm = Realm { frame: FrameId::from(frame), world: World::Isolated };
+        let eval_res = tokio::time::timeout(
+            Duration::from_secs(10),
+            self.guard_dialog(self.shared.driver.evaluate(
+                &realm,
+                scripts::helpers(),
+                CallOptions { returns: Returns::Ref, await_promise: false, user_activation: false },
+            )),
+        )
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "The page did not answer within 10 s while browse set up its helpers (it may be busy or still navigating)"
+            )
+        })??;
+        let helpers = match eval_res {
+            Err(err) => bail!("browse could not set up its page helpers: {}", err.message),
+            Ok(Evaluated::Object(handle) | Evaluated::Node(handle)) => handle,
+            Ok(Evaluated::Json(_)) => bail!("browse could not set up its page helpers in the frame"),
         };
-        let (context_id, evaluated) = tokio::time::timeout(Duration::from_secs(10), setup)
-            .await
-            .map_err(|_| anyhow!("The page did not answer within 10 s while browse set up its helpers (it may be busy or still navigating)"))??;
-        if let Some(details) = evaluated.get("exceptionDetails") {
-            bail!("browse could not set up its page helpers: {}", exception_message(details));
-        }
-        let helpers = str_of(&evaluated["result"], "objectId");
-        if helpers.is_empty() {
-            bail!("browse could not set up its page helpers in the frame");
-        }
         let mut state = self.shared.state.lock().unwrap();
         let current = state.frames.get(frame).map(|f| f.generation);
         if current != Some(info.generation) {
-            bail!("Execution context was destroyed: the frame navigated while browse was attaching");
+            return Err(anyhow::Error::new(StaleContext));
         }
-        state.worlds.insert(frame.to_string(), World { context_id, helpers: helpers.clone(), injected: false, generation: info.generation });
-        Ok(WorldRef { frame: frame.to_string(), session, context_id, helpers, generation: info.generation })
+        state.worlds.insert(
+            frame.to_string(),
+            WorldCache {
+                helpers: helpers.clone(),
+                injected: false,
+                document: DocumentId(info.generation),
+            },
+        );
+        Ok(helpers)
     }
 
-    fn cached_world(&self, frame: &str) -> Option<WorldRef> {
+    fn cached_helpers(&self, frame: &str) -> Option<RemoteRef> {
         let state = self.shared.state.lock().unwrap();
         let info = state.frames.get(frame)?;
         let world = state.worlds.get(frame)?;
-        if world.generation != info.generation {
+        if world.document.0 != info.generation {
             return None;
         }
-        Some(WorldRef { frame: frame.to_string(), session: info.session.clone(), context_id: world.context_id, helpers: world.helpers.clone(), generation: world.generation })
+        Some(world.helpers.clone())
     }
 
-    pub fn forget_world(&self, frame: &str, context_id: i64) {
+    pub fn forget_world(&self, frame: &str, document: DocumentId) {
         let mut state = self.shared.state.lock().unwrap();
-        if state.worlds.get(frame).map(|w| w.context_id) == Some(context_id) {
+        if state.worlds.get(frame).map(|w| w.document) == Some(document) {
             state.worlds.remove(frame);
         }
     }
 
-    /// Makes Playwright's InjectedScript available as `this.inj` in the frame's world.
-    pub async fn ensure_injected(&self, frame: &str) -> Result<WorldRef> {
-        let world = self.world(frame).await?;
-        let injected = self.shared.state.lock().unwrap().worlds.get(frame).map(|w| w.injected && w.context_id == world.context_id).unwrap_or(false);
+    async fn ensure_injected(&self, frame: &str) -> Result<RemoteRef> {
+        let helpers = self.helpers(frame).await?;
+        let injected = self
+            .shared
+            .state
+            .lock()
+            .unwrap()
+            .worlds
+            .get(frame)
+            .map(|w| w.injected && w.document == helpers.document)
+            .unwrap_or(false);
         if injected {
-            return Ok(world);
+            return Ok(helpers);
         }
         let seq = self.frame_seq(frame);
         let result = self
-            .send(
-                "Runtime.callFunctionOn",
-                json!({ "functionDeclaration": scripts::install_injected(seq), "objectId": world.helpers, "returnByValue": true, "awaitPromise": false }),
-                world.session.as_deref(),
-            )
+            .guard_dialog(self.shared.driver.call(
+                &Receiver::Ref(helpers.clone()),
+                &scripts::install_injected(seq),
+                &[],
+                CallOptions { returns: Returns::Json, await_promise: false, user_activation: false },
+            ))
             .await;
-        let result = match result {
-            Ok(result) => result,
+        let eval_res = match result {
+            Ok(outcome) => outcome,
             Err(error) => {
-                if is_context_lost(&error.to_string()) {
-                    self.forget_world(frame, world.context_id);
+                if is_stale(&error) {
+                    self.forget_world(frame, helpers.document);
                 }
                 return Err(error);
             }
         };
-        if let Some(details) = result.get("exceptionDetails") {
-            bail!("browse could not load its selector engine: {}", exception_message(details));
+        if let Err(err) = eval_res {
+            bail!("browse could not load its selector engine: {}", err.message);
         }
         if let Some(w) = self.shared.state.lock().unwrap().worlds.get_mut(frame)
-            && w.context_id == world.context_id {
-                w.injected = true;
-            }
-        Ok(world)
+            && w.document == helpers.document
+        {
+            w.injected = true;
+        }
+        Ok(helpers)
     }
 
-    /// Calls `helpers[method](...args)` in the frame's world. Retries once in a fresh world when the old one is gone
-    /// and no element handles are involved.
-    pub async fn call(&self, frame: &str, method: &str, args: Vec<Arg>, by_value: bool, injected: bool) -> Result<Value> {
+    /// Calls a custom function bound to the frame's helpers object (`this`), retrying on stale context.
+    pub async fn call_helpers_fn(
+        &self,
+        frame: &str,
+        declaration: &str,
+        args: &[DriverArg],
+        await_promise: bool,
+        injected: bool,
+    ) -> Result<Value> {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let helpers = if injected {
+                self.ensure_injected(frame).await?
+            } else {
+                self.helpers(frame).await?
+            };
+            let result = self
+                .guard_dialog(self.shared.driver.call(
+                    &Receiver::Ref(helpers.clone()),
+                    declaration,
+                    args,
+                    CallOptions { returns: Returns::Json, await_promise, user_activation: false },
+                ))
+                .await;
+            match result {
+                Err(error) if is_stale(&error) && attempt < 3 => {
+                    self.forget_world(frame, helpers.document);
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(error) => return Err(error),
+                Ok(Err(err)) => bail!("{}", err.message),
+                Ok(Ok(Evaluated::Json(value))) => return Ok(value),
+                Ok(Ok(_)) => return Ok(Value::Null),
+            }
+        }
+    }
+
+    pub async fn call_driver(
+        &self,
+        receiver: &Receiver,
+        declaration: &str,
+        args: &[DriverArg],
+        opts: CallOptions,
+    ) -> Result<std::result::Result<Evaluated, Box<JsError>>> {
+        self.guard_dialog(self.shared.driver.call(receiver, declaration, args, opts))
+            .await
+    }
+
+    pub async fn call(
+        &self,
+        frame: &str,
+        method: &str,
+        args: Vec<Arg>,
+        by_value: bool,
+        injected: bool,
+    ) -> Result<Evaluated> {
         let has_handles = args.iter().any(|a| matches!(a, Arg::Element(_)));
         let mut attempt = 0;
         loop {
             attempt += 1;
-            let world = if injected { self.ensure_injected(frame).await? } else { self.world(frame).await? };
+            let helpers = if injected {
+                self.ensure_injected(frame).await?
+            } else {
+                self.helpers(frame).await?
+            };
             for arg in &args {
                 if let Arg::Element(element) = arg
-                    && element.context_id != world.context_id {
-                        bail!("The element's document changed (the frame navigated or re-rendered); resolve it again.");
-                    }
+                    && element.handle.document != helpers.document
+                {
+                    bail!("The element's document changed (the frame navigated or re-rendered); resolve it again.");
+                }
             }
-            let result = self.call_on(&world, method, &args, by_value).await;
+            let (encoded_args, declaration) = encode_call(method, &args);
+            let result = self
+                .guard_dialog(self.shared.driver.call(
+                    &Receiver::Ref(helpers.clone()),
+                    &declaration,
+                    &encoded_args,
+                    CallOptions {
+                        returns: if by_value { Returns::Json } else { Returns::Ref },
+                        await_promise: true,
+                        user_activation: false,
+                    },
+                ))
+                .await;
             match result {
-                Err(error) if is_context_lost(&error.to_string()) => {
-                    self.forget_world(frame, world.context_id);
+                Err(error) if is_stale(&error) => {
+                    self.forget_world(frame, helpers.document);
                     if has_handles || attempt >= 3 {
-                        bail!("The page navigated or re-rendered while browse was reading it; try again. ({error})");
+                        bail!("The page navigated or re-rendered while browse was reading it; try again.");
                     }
                     tokio::time::sleep(Duration::from_millis(30)).await;
                 }
-                other => return other,
+                Err(error) => return Err(error),
+                Ok(Err(err)) => bail!("{}", err.message),
+                Ok(Ok(evaluated)) => {
+                    if let Evaluated::Node(ref h) | Evaluated::Object(ref h) = evaluated {
+                        self.track_transient(h.clone());
+                    }
+                    return Ok(evaluated);
+                }
             }
         }
     }
 
-    async fn call_on(&self, world: &WorldRef, method: &str, args: &[Arg], by_value: bool) -> Result<Value> {
-        let (arguments, declaration) = encode_call(method, args);
-        let result = self
-            .send(
-                "Runtime.callFunctionOn",
-                json!({
-                    "functionDeclaration": declaration,
-                    "objectId": world.helpers,
-                    "arguments": arguments,
-                    "returnByValue": by_value,
-                    "awaitPromise": true,
-                    "objectGroup": TRANSIENT_GROUP,
-                }),
-                world.session.as_deref(),
-            )
-            .await?;
-        if let Some(details) = result.get("exceptionDetails") {
-            bail!("{}", exception_message(details));
-        }
-        Ok(result["result"].clone())
-    }
-
-    /// `call` returning the JSON value.
     pub async fn call_value(&self, frame: &str, method: &str, args: Vec<Arg>, injected: bool) -> Result<Value> {
-        let result = self.call(frame, method, args, true, injected).await?;
-        Ok(result.get("value").cloned().unwrap_or(Value::Null))
+        match self.call(frame, method, args, true, injected).await? {
+            Evaluated::Json(value) => Ok(value),
+            _ => Ok(Value::Null),
+        }
     }
 
-    /// `call` on an element's frame, with the element first.
-    pub async fn call_element(&self, element: &Element, method: &str, mut args: Vec<Arg>, injected: bool) -> Result<Value> {
+    pub async fn call_element(
+        &self,
+        element: &Element,
+        method: &str,
+        mut args: Vec<Arg>,
+        injected: bool,
+    ) -> Result<Value> {
         args.insert(0, Arg::Element(element.clone()));
         self.call_value(&element.frame, method, args, injected).await
     }
 
-    /// `call` whose result is an element (or a string status such as "none").
-    pub async fn call_element_result(&self, frame: &str, method: &str, args: Vec<Arg>, injected: bool) -> Result<ElementOr> {
-        let world = if injected { self.ensure_injected(frame).await? } else { self.world(frame).await? };
-        let result = self.call(frame, method, args, false, injected).await?;
-        if result.get("subtype").and_then(Value::as_str) == Some("node") {
-            let object_id = str_of(&result, "objectId");
-            // The call may have run in a fresh world; read the context back from the cache.
-            let current = self.cached_world(frame).unwrap_or(world);
-            return Ok(ElementOr::Element(Element { frame: frame.to_string(), session: current.session, object_id, context_id: current.context_id, generation: current.generation }));
+    pub async fn call_element_result(
+        &self,
+        frame: &str,
+        method: &str,
+        args: Vec<Arg>,
+        injected: bool,
+    ) -> Result<ElementOr> {
+        match self.call(frame, method, args, false, injected).await? {
+            Evaluated::Node(handle) => Ok(ElementOr::Element(Element {
+                frame: frame.to_string(),
+                generation: handle.document.0,
+                handle,
+            })),
+            Evaluated::Json(Value::String(status)) => Ok(ElementOr::Status(status)),
+            _ => Ok(ElementOr::Status("none".into())),
         }
-        if let Some(status) = result.get("value").and_then(Value::as_str) {
-            return Ok(ElementOr::Status(status.to_string()));
-        }
-        Ok(ElementOr::Status("none".into()))
     }
 
-    /// The frame an `<iframe>` element shows, once its document is attached.
     pub async fn content_frame(&self, element: &Element, timeout: Duration) -> Result<String> {
-        let described = self.send("DOM.describeNode", json!({ "objectId": element.object_id }), element.session.as_deref()).await?;
-        let frame_id = str_of(&described["node"], "frameId");
-        if frame_id.is_empty() {
+        let Some(frame_id) = self
+            .guard_dialog(self.shared.driver.content_frame(&element.handle))
+            .await?
+        else {
             bail!("The element is not an iframe, or its frame is not attached yet.");
-        }
-        let found = self.wait_until(timeout, Duration::from_millis(50), |page| page.frame(&frame_id).is_some()).await;
+        };
+        let id = frame_id.as_str().to_string();
+        let found = self
+            .wait_until(timeout, Duration::from_millis(50), |page| page.frame(&id).is_some())
+            .await;
         if !found {
             bail!("The iframe's document is not available (it may still be loading, or be cross-origin and not attached).");
         }
-        Ok(frame_id)
+        Ok(id)
     }
 
-    /// The `<iframe>` element showing `frame`, in its parent frame's world.
     pub async fn frame_owner(&self, frame: &str) -> Result<Element> {
-        let info = self.frame(frame).ok_or_else(|| anyhow!("The frame is gone."))?;
-        let parent = info.parent.clone().ok_or_else(|| anyhow!("The main frame has no owner element."))?;
-        let parent_info = self.frame(&parent).ok_or_else(|| anyhow!("The parent frame is gone."))?;
-        let owner = self.send("DOM.getFrameOwner", json!({ "frameId": frame }), parent_info.session.as_deref()).await?;
-        let backend = owner["backendNodeId"].as_i64().ok_or_else(|| anyhow!("Chrome did not report the iframe element"))?;
-        let world = self.world(&parent).await?;
-        let resolved = self
-            .send(
-                "DOM.resolveNode",
-                json!({ "backendNodeId": backend, "executionContextId": world.context_id, "objectGroup": TRANSIENT_GROUP }),
-                world.session.as_deref(),
-            )
+        let handle = self
+            .guard_dialog(self.shared.driver.frame_element(&FrameId::from(frame)))
             .await?;
-        let object_id = str_of(&resolved["object"], "objectId");
-        if object_id.is_empty() {
-            bail!("Chrome could not resolve the iframe element");
-        }
-        Ok(Element { frame: parent, session: world.session, object_id, context_id: world.context_id, generation: world.generation })
+        self.track_transient(handle.clone());
+        Ok(Element {
+            frame: handle.frame.as_str().to_string(),
+            generation: handle.document.0,
+            handle,
+        })
     }
 
-    /// The same node as a main-world object (for eval in the page's own world).
-    pub async fn main_world_object(&self, element: &Element) -> Result<String> {
-        let described = self.send("DOM.describeNode", json!({ "objectId": element.object_id }), element.session.as_deref()).await?;
-        let backend = described["node"]["backendNodeId"].as_i64().ok_or_else(|| anyhow!("Chrome did not describe the node"))?;
-        let resolved = self
-            .send("DOM.resolveNode", json!({ "backendNodeId": backend, "objectGroup": TRANSIENT_GROUP }), element.session.as_deref())
+    pub async fn adopt_main_world(&self, element: &Element) -> Result<RemoteRef> {
+        let handle = self
+            .guard_dialog(self.shared.driver.adopt(&element.handle, World::Main))
             .await?;
-        let object_id = str_of(&resolved["object"], "objectId");
-        if object_id.is_empty() {
-            bail!("Chrome could not resolve the node in the page's world");
-        }
-        Ok(object_id)
+        self.track_transient(handle.clone());
+        Ok(handle)
     }
 
-    /// The frame's `document` as an isolated-world element.
-    pub async fn document(&self, frame: &str) -> Result<Element> {
-        let world = self.world(frame).await?;
-        let result = self
-            .send(
-                "Runtime.evaluate",
-                json!({ "expression": "document", "contextId": world.context_id, "objectGroup": TRANSIENT_GROUP }),
-                world.session.as_deref(),
-            )
-            .await?;
-        let object_id = str_of(&result["result"], "objectId");
-        if object_id.is_empty() {
-            bail!("The frame has no document");
-        }
-        Ok(Element { frame: frame.to_string(), session: world.session, object_id, context_id: world.context_id, generation: world.generation })
+    pub async fn release_object(&self, element: &Element) {
+        self.shared.driver.release(vec![element.handle.clone()]).await;
     }
 
-    /// Releases the transient objects of every session this tab uses.
     pub async fn release(&self) {
-        let sessions: Vec<Option<String>> = {
-            let state = self.shared.state.lock().unwrap();
-            std::iter::once(None).chain(state.sessions.keys().cloned().map(Some)).collect()
-        };
-        // A dialog blocks the call; a pending navigation holds it until commit and replaces the document anyway.
         if self.dialog().is_some() || self.pending_navigation().is_some() {
             return;
         }
-        // All sessions at once, briefly: a frame session that doesn't answer must not hold up the result.
-        let mut releases = tokio::task::JoinSet::new();
-        for session in sessions {
-            let cdp = self.shared.cdp.clone();
-            releases.spawn(async move {
-                let _ = cdp.send("Runtime.releaseObjectGroup", json!({ "objectGroup": TRANSIENT_GROUP }), session.as_deref()).await;
-            });
+        let handles = std::mem::take(&mut self.shared.state.lock().unwrap().transient);
+        if !handles.is_empty() {
+            self.shared.driver.release(handles).await;
         }
-        let _ = tokio::time::timeout(Duration::from_millis(400), async { while releases.join_next().await.is_some() {} }).await;
-        releases.detach_all();
+    }
+
+    pub async fn probe_responsive(&self, frame_id: &str) -> bool {
+        let realm = Realm { frame: FrameId::from(frame_id), world: World::Isolated };
+        self.shared
+            .driver
+            .evaluate(&realm, "0", CallOptions { returns: Returns::Json, await_promise: false, user_activation: false })
+            .await
+            .is_ok()
+    }
+
+    pub async fn interrupt(&self, frame_id: Option<&str>) -> bool {
+        let frame = frame_id.map(FrameId::from);
+        self.shared.driver.interrupt(frame.as_ref()).await.is_ok()
     }
 
     pub fn media_emulation(&self) -> MediaEmulation {
@@ -702,23 +714,21 @@ pub enum Arg {
     Undefined,
 }
 
-/// The CDP arguments and function declaration for `helpers[method](...args)`. JSON values travel as one JSON string
-/// parsed in the page, because CDP drops `null` call arguments (and nulls nested in objects) on the way in; element
-/// handles follow it as object ids.
-pub fn encode_call(method: &str, args: &[Arg]) -> (Vec<Value>, String) {
+/// Encodes arguments for `helpers[method](...args)` as a JSON string + remote handles so nulls survive every protocol.
+pub fn encode_call(method: &str, args: &[Arg]) -> (Vec<DriverArg>, String) {
     let mut handles = Vec::new();
     let spec: Vec<Value> = args
         .iter()
         .map(|arg| match arg {
             Arg::Value(value) => json!({ "v": value }),
             Arg::Element(element) => {
-                handles.push(json!({ "objectId": element.object_id }));
+                handles.push(DriverArg::Ref(element.handle.clone()));
                 json!({ "h": handles.len() - 1 })
             }
             Arg::Undefined => json!({ "u": 1 }),
         })
         .collect();
-    let mut arguments = vec![json!({ "value": Value::Array(spec).to_string() })];
+    let mut arguments = vec![DriverArg::Json(Value::String(Value::Array(spec).to_string()))];
     arguments.extend(handles);
     let declaration = format!(
         "function (spec, ...handles) {{ const args = JSON.parse(spec).map((a) => \"h\" in a ? handles[a.h] : \"u\" in a ? undefined : a.v); return this.{method}(...args) }}"
@@ -736,19 +746,6 @@ pub enum ElementOr {
     Status(String),
 }
 
-/// The message of a CDP exceptionDetails, without the stack frames.
-pub fn exception_message(details: &Value) -> String {
-    let description = details["exception"]["description"].as_str().map(str::to_string).or_else(|| {
-        details["exception"]["value"].as_str().map(str::to_string)
-    });
-    let text = description.unwrap_or_else(|| str_of(details, "text"));
-    let lines: Vec<&str> = text.lines().filter(|line| !line.trim_start().starts_with("at ")).collect();
-    let message = lines.join("\n");
-    let message = message.strip_prefix("Uncaught ").unwrap_or(&message).to_string();
-    if message.is_empty() { "the page threw an exception".into() } else { message }
-}
-
-/// Whether `next` is `current` with only a different fragment (`#…`), which navigates within the document.
 pub fn is_fragment_change(current: &str, next: &str) -> bool {
     let base = |url: &str| url.split('#').next().unwrap_or("").to_string();
     next.contains('#') && !current.is_empty() && base(current) == base(next)
@@ -777,68 +774,57 @@ impl Shared {
         }
     }
 
-    fn merge_tree(&self, node: &Value, session: Option<&str>, root: bool) {
+    fn sync_frames(&self, frames: &[Frame]) {
         let mut state = self.state.lock().unwrap();
-        let frame = &node["frame"];
-        let id = str_of(frame, "id");
-        if id.is_empty() {
-            return;
+        let present: HashSet<String> = frames.iter().map(|f| f.id.as_str().to_string()).collect();
+        if let Some(first) = frames.first() {
+            state.main_frame = first.id.as_str().to_string();
         }
-        if root && session.is_none() {
-            state.main_frame = id.clone();
-        }
-        Self::merge_frames(&mut state, node, session);
-        drop(state);
-        self.bump();
-    }
-
-    fn merge_frames(state: &mut TabState, node: &Value, session: Option<&str>) {
-        let frame = &node["frame"];
-        let id = str_of(frame, "id");
-        let parent = frame.get("parentId").and_then(Value::as_str).map(str::to_string);
-        let generation = next_generation();
-        let entry = state.frames.entry(id.clone()).or_insert_with(|| FrameInfo {
-            id: id.clone(),
-            parent: parent.clone(),
-            session: session.map(str::to_string),
-            url: String::new(),
-            name: String::new(),
-            loader_id: String::new(),
-            lifecycle: HashSet::new(),
-            generation,
-            committed_at: None,
-        });
-        entry.session = session.map(str::to_string);
-        if parent.is_some() {
-            entry.parent = parent;
-        }
-        let loader = str_of(frame, "loaderId");
-        if entry.loader_id != loader {
-            entry.loader_id = loader;
-            entry.generation = generation;
-        }
-        entry.url = format!("{}{}", str_of(frame, "url"), str_of(frame, "urlFragment"));
-        entry.name = str_of(frame, "name");
-        if let Some(children) = node["childFrames"].as_array() {
-            for child in children {
-                Self::merge_frames(state, child, session);
+        state.frames.retain(|id, _| present.contains(id));
+        state.worlds.retain(|id, _| present.contains(id));
+        for frame in frames {
+            let id = frame.id.as_str().to_string();
+            let entry = state.frames.entry(id.clone()).or_insert_with(|| FrameInfo {
+                id,
+                parent: frame.parent.as_ref().map(|p| p.as_str().to_string()),
+                url: frame.url.clone(),
+                name: frame.name.clone(),
+                navigation: None,
+                lifecycle: HashSet::new(),
+                generation: frame.document.0,
+                committed_at: None,
+            });
+            entry.parent = frame.parent.as_ref().map(|p| p.as_str().to_string());
+            entry.url = frame.url.clone();
+            entry.name = frame.name.clone();
+            if entry.generation != frame.document.0 {
+                entry.generation = frame.document.0;
+                entry.lifecycle.clear();
             }
         }
+        drop(state);
+        self.bump();
     }
 
     fn clear_dialog(&self, accepted: Option<bool>, auto: bool) {
         let mut state = self.state.lock().unwrap();
         if state.dialog.take().is_some()
-            && let Some(accepted) = accepted {
-                self.push(&mut state, TabEvent::DialogClosed { accepted, auto });
-            }
+            && let Some(accepted) = accepted
+        {
+            self.push(&mut state, TabEvent::DialogClosed { accepted, auto });
+        }
         drop(state);
         self.dialog_open.send_replace(false);
         self.bump();
     }
 
     fn remove_frame_tree(state: &mut TabState, id: &str) {
-        let children: Vec<String> = state.frames.values().filter(|f| f.parent.as_deref() == Some(id)).map(|f| f.id.clone()).collect();
+        let children: Vec<String> = state
+            .frames
+            .values()
+            .filter(|f| f.parent.as_deref() == Some(id))
+            .map(|f| f.id.clone())
+            .collect();
         for child in children {
             Self::remove_frame_tree(state, &child);
         }
@@ -846,272 +832,165 @@ impl Shared {
         state.worlds.remove(id);
     }
 
-    fn handle(self: &Arc<Self>, event: CdpEvent) {
-        let session = event.session_id.clone();
-        let params = &event.params;
-        match event.method.as_str() {
-            "Page.frameAttached" => {
+    fn handle(self: &Arc<Self>, event: PageEvent) {
+        match event {
+            PageEvent::FrameAttached(frame) => {
                 let mut state = self.state.lock().unwrap();
-                let id = str_of(params, "frameId");
-                let generation = next_generation();
-                let parent = params.get("parentFrameId").and_then(Value::as_str).map(str::to_string);
-                state.frames.entry(id.clone()).or_insert_with(|| FrameInfo {
+                let id = frame.id.as_str().to_string();
+                let parent = frame.parent.as_ref().map(|p| p.as_str().to_string());
+                let entry = state.frames.entry(id.clone()).or_insert_with(|| FrameInfo {
                     id,
-                    parent,
-                    session: session.clone(),
-                    url: String::new(),
-                    name: String::new(),
-                    loader_id: String::new(),
+                    parent: parent.clone(),
+                    url: frame.url.clone(),
+                    name: frame.name.clone(),
+                    navigation: None,
                     lifecycle: HashSet::new(),
-                    generation,
+                    generation: frame.document.0,
                     committed_at: None,
                 });
+                if parent.is_some() {
+                    entry.parent = parent;
+                }
+                if !frame.url.is_empty() {
+                    entry.url = frame.url;
+                }
+                if !frame.name.is_empty() {
+                    entry.name = frame.name;
+                }
+                if entry.generation != frame.document.0 {
+                    entry.generation = frame.document.0;
+                    entry.lifecycle.clear();
+                }
             }
-            "Page.frameNavigated" => {
-                let frame = &params["frame"];
-                let id = str_of(frame, "id");
-                // Chrome's error page (chrome-error://chromewebdata/) stands in for the URL it could not load.
-                let unreachable = str_of(frame, "unreachableUrl");
-                let url = if unreachable.is_empty() { format!("{}{}", str_of(frame, "url"), str_of(frame, "urlFragment")) } else { unreachable };
+            PageEvent::FrameDetached(frame_id) => {
                 let mut state = self.state.lock().unwrap();
-                let generation = next_generation();
-                let parent = frame.get("parentId").and_then(Value::as_str).map(str::to_string);
-                let is_main = parent.is_none() && session.is_none();
+                Self::remove_frame_tree(&mut state, frame_id.as_str());
+            }
+            PageEvent::Committed { frame, document, navigation, url, name } => {
+                let id = frame.as_str().to_string();
+                let mut state = self.state.lock().unwrap();
+                let is_main = state.main_frame == id || state.main_frame.is_empty();
                 if is_main {
                     state.main_frame = id.clone();
                 }
                 let entry = state.frames.entry(id.clone()).or_insert_with(|| FrameInfo {
                     id: id.clone(),
-                    parent: parent.clone(),
-                    session: session.clone(),
+                    parent: None,
                     url: String::new(),
                     name: String::new(),
-                    loader_id: String::new(),
+                    navigation: None,
                     lifecycle: HashSet::new(),
-                    generation,
+                    generation: document.0,
                     committed_at: None,
                 });
                 entry.url = url.clone();
-                entry.name = str_of(frame, "name");
-                entry.session = session.clone();
-                if parent.is_some() {
-                    entry.parent = parent;
-                }
-                let loader = str_of(frame, "loaderId");
-                if entry.loader_id != loader {
-                    entry.loader_id = loader;
-                    entry.generation = generation;
+                entry.name = name;
+                entry.navigation = navigation;
+                if entry.generation != document.0 {
+                    entry.generation = document.0;
                     entry.lifecycle.clear();
                     entry.committed_at = Some(std::time::Instant::now());
                 }
                 state.worlds.remove(&id);
-                // A new document's child frames attach again.
-                let children: Vec<String> = state.frames.values().filter(|f| f.parent.as_deref() == Some(id.as_str()) && f.session == session).map(|f| f.id.clone()).collect();
-                for child in children {
-                    Self::remove_frame_tree(&mut state, &child);
-                }
                 if is_main {
                     state.pending_navigation = None;
                     self.push(&mut state, TabEvent::Navigated { url, same_document: false });
                 }
             }
-            "Page.navigatedWithinDocument" => {
-                let id = str_of(params, "frameId");
-                let url = str_of(params, "url");
+            PageEvent::UrlChanged { frame, url } => {
+                let id = frame.as_str().to_string();
                 let mut state = self.state.lock().unwrap();
                 let is_main = state.main_frame == id;
-                if let Some(frame) = state.frames.get_mut(&id) {
-                    frame.url = url.clone();
+                if let Some(entry) = state.frames.get_mut(&id) {
+                    entry.url = url.clone();
                 }
                 if is_main {
                     self.push(&mut state, TabEvent::Navigated { url, same_document: true });
                 }
             }
-            "Page.frameRequestedNavigation" | "Page.frameStartedNavigating" => {
-                let id = str_of(params, "frameId");
+            PageEvent::NavigationStarted { frame, url, .. } => {
                 let mut state = self.state.lock().unwrap();
-                if state.main_frame == id && session.is_none() {
-                    let url = str_of(params, "url");
-                    let kind = str_of(params, "navigationType");
-                    // frameRequestedNavigation has no navigationType: a URL that only changes the fragment stays in
-                    // the document.
-                    let current = state.frames.get(&id).map(|f| f.url.clone()).unwrap_or_default();
-                    let same_document = kind == "sameDocument" || kind == "historySameDocument" || (kind.is_empty() && is_fragment_change(&current, &url));
-                    let disposition = str_of(params, "disposition");
-                    let elsewhere = !disposition.is_empty() && disposition != "currentTab";
-                    if !same_document && !elsewhere {
-                        state.pending_navigation = Some(url.clone());
-                        self.push(&mut state, TabEvent::NavigationStarted { url });
-                    }
+                if state.main_frame == frame.as_str() {
+                    state.pending_navigation = Some(url.clone());
+                    self.push(&mut state, TabEvent::NavigationStarted { url });
                 }
             }
-            "Page.frameStoppedLoading" => {
-                let id = str_of(params, "frameId");
+            PageEvent::NavigationAborted { frame } => {
                 let mut state = self.state.lock().unwrap();
-                if state.main_frame == id && session.is_none() {
+                if state.main_frame == frame.as_str() {
                     state.pending_navigation = None;
                 }
             }
-            "Page.frameDetached" => {
-                let id = str_of(params, "frameId");
-                let reason = str_of(params, "reason");
+            PageEvent::Loaded { frame, document, state: load_state } => {
                 let mut state = self.state.lock().unwrap();
-                if reason == "swap" {
-                    // The frame moves to its own process; its child target attaches next and takes it over.
-                    state.worlds.remove(&id);
-                } else {
-                    Self::remove_frame_tree(&mut state, &id);
-                }
-            }
-            "Page.lifecycleEvent" => {
-                let id = str_of(params, "frameId");
-                let name = str_of(params, "name");
-                let loader = str_of(params, "loaderId");
-                let mut state = self.state.lock().unwrap();
-                let generation = next_generation();
-                if let Some(frame) = state.frames.get_mut(&id) {
-                    if name == "init" {
-                        frame.lifecycle.clear();
-                        if !loader.is_empty() && frame.loader_id != loader {
-                            frame.loader_id = loader;
-                            frame.generation = generation;
-                        }
+                if let Some(entry) = state.frames.get_mut(frame.as_str()) {
+                    if entry.generation != document.0 {
+                        entry.generation = document.0;
+                        entry.lifecycle.clear();
                     }
-                    frame.lifecycle.insert(name);
+                    entry.lifecycle.insert(load_state);
                 }
             }
-            "Page.domContentEventFired" | "Page.loadEventFired" => {
-                if session.is_none() {
-                    let mut state = self.state.lock().unwrap();
-                    let main = state.main_frame.clone();
-                    let name = if event.method == "Page.loadEventFired" { "load" } else { "DOMContentLoaded" };
-                    if let Some(frame) = state.frames.get_mut(&main) {
-                        frame.lifecycle.insert(name.into());
-                    }
-                }
-            }
-            "Page.javascriptDialogOpening" => {
-                let dialog = Dialog {
-                    kind: str_of(params, "type"),
-                    message: str_of(params, "message"),
-                    default_prompt: str_of(params, "defaultPrompt"),
-                    url: str_of(params, "url"),
-                };
+            PageEvent::DialogOpened(dialog) => {
                 let mut state = self.state.lock().unwrap();
                 state.dialog = Some(dialog.clone());
                 let policy = state.dialog_policy;
-                let prompt_text = state.auto_prompt_text.clone().unwrap_or_else(|| dialog.default_prompt.clone());
+                let prompt_text = state
+                    .auto_prompt_text
+                    .clone()
+                    .unwrap_or_else(|| dialog.default_prompt.clone());
                 self.push(&mut state, TabEvent::Dialog(dialog.clone()));
                 drop(state);
                 self.dialog_open.send_replace(true);
                 let auto = match policy {
                     Some(DialogPolicy::Accept) => Some(true),
                     Some(DialogPolicy::Dismiss) => Some(false),
-                    _ if dialog.kind == "beforeunload" => Some(true),
+                    _ if dialog.kind == DialogKind::BeforeUnload => Some(true),
                     _ => None,
                 };
                 if let Some(accept) = auto {
                     let shared = self.clone();
-                    let session = session.clone();
                     tokio::spawn(async move {
-                        let params = if accept && dialog.kind == "prompt" {
-                            json!({ "accept": true, "promptText": prompt_text })
-                        } else {
-                            json!({ "accept": accept })
-                        };
-                        if shared.cdp.send("Page.handleJavaScriptDialog", params, session.as_deref()).await.is_ok() {
+                        let prompt = (accept && dialog.kind == DialogKind::Prompt).then_some(prompt_text.as_str());
+                        if shared.driver.answer_dialog(accept, prompt).await.is_ok() {
                             shared.clear_dialog(Some(accept), true);
                         }
                     });
                 }
             }
-            "Page.javascriptDialogClosed" => {
-                let accepted = params["result"].as_bool().unwrap_or(false);
+            PageEvent::DialogClosed { accepted } => {
                 self.clear_dialog(Some(accepted), false);
                 return;
             }
-            "Page.windowOpen" => {
+            PageEvent::PopupOpened { url } => {
                 let mut state = self.state.lock().unwrap();
-                let url = str_of(params, "url");
                 self.push(&mut state, TabEvent::Popup { url });
             }
-            "Input.dragIntercepted" => {
-                self.state.lock().unwrap().drag = Some(params["data"].clone());
-            }
-            "Inspector.targetCrashed" => {
-                if session.is_none() {
-                    let mut state = self.state.lock().unwrap();
+            PageEvent::Closed(reason) => {
+                let mut state = self.state.lock().unwrap();
+                state.closed = true;
+                if matches!(reason, browse_core::CloseReason::Crashed) {
                     self.push(&mut state, TabEvent::Crashed);
                 }
             }
-            "Target.attachedToTarget" => {
-                let child = str_of(params, "sessionId");
-                let info = &params["targetInfo"];
-                let kind = str_of(info, "type");
-                let target_id = str_of(info, "targetId");
-                let waiting = params["waitingForDebugger"].as_bool().unwrap_or(false);
-                let shared = self.clone();
-                if kind == "iframe" {
-                    let parent_frame = info.get("parentFrameId").and_then(Value::as_str).map(str::to_string);
-                    self.state.lock().unwrap().sessions.insert(child.clone(), target_id.clone());
-                    tokio::spawn(async move { shared.attach_child(child, target_id, parent_frame, waiting).await });
-                } else if waiting {
-                    tokio::spawn(async move {
-                        let _ = shared.cdp.send("Runtime.runIfWaitingForDebugger", json!({}), Some(&child)).await;
-                    });
-                }
-            }
-            "Target.detachedFromTarget" => {
-                let child = str_of(params, "sessionId");
-                let mut state = self.state.lock().unwrap();
-                if state.sessions.remove(&child).is_some() {
-                    let ids: Vec<String> = state.frames.values().filter(|f| f.session.as_deref() == Some(child.as_str())).map(|f| f.id.clone()).collect();
-                    for id in ids {
-                        state.frames.remove(&id);
-                        state.worlds.remove(&id);
-                    }
-                }
-            }
-            _ => return,
         }
         self.bump();
     }
-
-    async fn attach_child(self: Arc<Self>, session: String, target_id: String, parent_frame: Option<String>, waiting: bool) {
-        let cdp = self.cdp.clone();
-        let s = Some(session.as_str());
-        let _ = cdp.send("Page.enable", json!({}), s).await;
-        let _ = cdp.send("Page.setLifecycleEventsEnabled", json!({ "enabled": true }), s).await;
-        let tree = cdp.send("Page.getFrameTree", json!({}), s).await;
-        let _ = cdp.send("Target.setAutoAttach", json!({ "autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true }), s).await;
-        if waiting {
-            let _ = cdp.send("Runtime.runIfWaitingForDebugger", json!({}), s).await;
-        }
-        if let Ok(tree) = tree {
-            let mut state = self.state.lock().unwrap();
-            if !state.sessions.contains_key(&session) {
-                return;
-            }
-            let previous_parent = state.frames.get(&target_id).and_then(|f| f.parent.clone());
-            Self::merge_frames(&mut state, &tree["frameTree"], Some(&session));
-            if let Some(frame) = state.frames.get_mut(&target_id)
-                && frame.parent.is_none() {
-                    frame.parent = parent_frame.or(previous_parent);
-                }
-            drop(state);
-            self.bump();
-        }
-    }
 }
 
-async fn pump(shared: Arc<Shared>, mut events: broadcast::Receiver<CdpEvent>) {
+async fn pump(shared: Arc<Shared>, mut events: broadcast::Receiver<PageEvent>) {
     loop {
         match events.recv().await {
             Ok(event) => shared.handle(event),
-            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Lagged(_)) => {
+                if let Ok(frames) = shared.driver.frames().await {
+                    shared.sync_frames(&frames);
+                }
+            }
             Err(broadcast::error::RecvError::Closed) => break,
         }
     }
+    shared.state.lock().unwrap().closed = true;
     shared.bump();
 }
 
@@ -1121,9 +1000,15 @@ mod tests {
 
     #[test]
     fn call_arguments_keep_nulls() {
-        let (arguments, declaration) = encode_call("refResolve", &[Arg::Value(Value::Null), v(json!({ "a": null })), Arg::Undefined]);
+        let (arguments, declaration) = encode_call(
+            "refResolve",
+            &[Arg::Value(Value::Null), v(json!({ "a": null })), Arg::Undefined],
+        );
         assert_eq!(arguments.len(), 1);
-        let spec: Value = serde_json::from_str(arguments[0]["value"].as_str().unwrap()).unwrap();
+        let DriverArg::Json(Value::String(raw)) = &arguments[0] else {
+            panic!("expected encoded JSON string");
+        };
+        let spec: Value = serde_json::from_str(raw).unwrap();
         assert_eq!(spec, json!([{ "v": null }, { "v": { "a": null } }, { "u": 1 }]));
         assert!(declaration.contains("this.refResolve(...args)"));
     }

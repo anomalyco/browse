@@ -7,7 +7,11 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
-use browse_core::{CdpError, TabOptions, TabState, Tool, ToolContext, ToolOutput, ToolSpec};
+use browse_core::{
+    Arg as DriverArg, CallOptions, DragOutcome, DriverError, Emulation, Evaluated, FrameId, Geolocation,
+    MediaFeature, MediaOverride, Realm, Receiver, Returns, TabOptions, Tool, ToolContext, ToolOutput,
+    ToolSpec, ViewportOverride, World,
+};
 use serde_json::{Map, Value, json};
 
 use crate::actions::{self, PointerOptions};
@@ -133,8 +137,7 @@ const ACTION_TIMEOUT_MS: u64 = 10_000;
 
 struct Ctx {
     ctx: ToolContext,
-    /// The tab's state, and browse-page's part of it (refs).
-    state: Arc<TabState>,
+    /// browse-page's part of the tab's state (refs).
     tab_state: Arc<PageTab>,
     page: Arc<TabPage>,
 }
@@ -156,10 +159,9 @@ async fn open_input(ctx: &ToolContext, args: &Value, name: &str) -> Result<Ctx> 
 }
 
 async fn open_tab(ctx: &ToolContext, tab: i64) -> Result<Ctx> {
-    let state = ctx.state(tab).await?;
     let tab_state = state::tab(ctx, tab).await?;
     let page = tab_state.page(ctx).await?;
-    Ok(Ctx { ctx: ctx.clone(), state, tab_state, page })
+    Ok(Ctx { ctx: ctx.clone(), tab_state, page })
 }
 
 async fn human_enabled(ctx: &ToolContext, page: &TabPage) -> bool {
@@ -736,10 +738,6 @@ async fn drag(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
                 }
                 None => from_point.unwrap(),
             };
-            input.move_to(from, 1).await?;
-            c.page.clear_drag();
-            input.set_intercept_drags(true).await;
-            input.down("left", 1).await?;
             let to = match &to_spec {
                 Some(spec) => {
                     let (resolved, at) = actions::locate(&c.page, &c.tab_state, input, spec, PointerOptions { hit_test: false, ..options }).await?;
@@ -748,21 +746,9 @@ async fn drag(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
                 }
                 None => to_point.unwrap(),
             };
-            // A first small move starts an HTML5 drag, which Chrome hands back as Input.dragIntercepted.
-            let nudge = Point { x: from.x + (to.x - from.x).signum() * 5.0, y: from.y + (to.y - from.y).signum() * 5.0 };
-            input.move_to(nudge, 1).await?;
-            c.page.wait_until(Duration::from_millis(150), Duration::from_millis(25), |page| page.has_drag()).await;
-            input.set_intercept_drags(false).await;
-            if let Some(data) = c.page.take_drag() {
-                input.move_to(to, steps).await?;
-                input.dispatch_drag("dragEnter", to, &data).await?;
-                input.dispatch_drag("dragOver", to, &data).await?;
-                input.dispatch_drag("drop", to, &data).await?;
-                input.up("left", 1).await?;
+            let outcome = input.drag(from, to, steps).await?;
+            if outcome == DragOutcome::Dropped {
                 out.insert("html5".into(), json!(true));
-            } else {
-                input.move_to(to, steps).await?;
-                input.up("left", 1).await?;
             }
             Ok(out)
         })
@@ -956,13 +942,11 @@ async fn eval(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
                 return Err(error);
             }
         };
-        let session_used = match &target {
-            eval::Target::Element { session, .. } | eval::Target::Context { session, .. } | eval::Target::Object { session, .. } => session.clone(),
-        };
+        let frame_used = target.frame_id().to_string();
         let result = tokio::time::timeout(timeout, eval::run(&page, &target, compile, &expression, arg.as_ref(), callable)).await;
         match result {
             Err(_) => {
-                let stopped = eval::stop(&page, session_used.as_deref()).await;
+                let stopped = eval::stop(&page, &frame_used).await;
                 c.page.release().await;
                 match stopped {
                     eval::Stop::Stopped => bail!("eval timed out after {} ms; the script was still running, so browse stopped it", timeout.as_millis()),
@@ -970,7 +954,7 @@ async fn eval(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
                     eval::Stop::Stuck => bail!("eval timed out after {} ms and browse could not stop the script: the tab is not responding. Close or reload the tab", timeout.as_millis()),
                 }
             }
-            Ok(Err(error)) if eval::is_lost(&error) || error.to_string().contains("Inspected target navigated") => {
+            Ok(Err(error)) if eval::is_lost(&error) => {
                 // The navigation's events can trail the error: give them a moment.
                 page.wait_until(Duration::from_millis(1_000), Duration::from_millis(50), |page| generation(page) != started_generation || page.pending_navigation().is_some()).await;
                 let navigated = generation(&page) != started_generation || page.pending_navigation().is_some();
@@ -1162,8 +1146,10 @@ async fn set_files(c: &Ctx, page: &Arc<TabPage>, input: &crate::page::Element, f
     if connected_locally
         && let Some(paths) = paths
         && paths.iter().all(|path| crate::files::private_for_paths(path))
-        && probe_paths(c, page, input, &paths).await? {
-        page.send("DOM.setFileInputFiles", json!({ "objectId": input.object_id, "files": paths }), input.session.as_deref()).await?;
+        && probe_paths(page, input, &paths).await?
+    {
+        let bufs: Vec<std::path::PathBuf> = paths.iter().map(std::path::PathBuf::from).collect();
+        page.guard_dialog(page.driver().set_files(&input.handle, &bufs)).await?;
         return Ok("paths");
     }
     set_files_by_copy(page, input, &checked).await?;
@@ -1173,21 +1159,19 @@ async fn set_files(c: &Ctx, page: &Arc<TabPage>, input: &crate::page::Element, f
 /// Proves the browser reads this filesystem before the real input is touched: a detached input gets a sentinel file
 /// browse just wrote, then the real paths, and the page must open and match every file's size and mtime. False means
 /// copy instead (the browser refused, can't read a file, or sees another filesystem); connection failures are errors.
-async fn probe_paths(c: &Ctx, page: &Arc<TabPage>, input: &crate::page::Element, paths: &[String]) -> Result<bool> {
+async fn probe_paths(page: &Arc<TabPage>, input: &crate::page::Element, paths: &[String]) -> Result<bool> {
     let Some(sentinel) = Sentinel::create() else { return Ok(false) };
-    let cdp = c.ctx.browser.cdp(page.tab()).await?;
     let probe = match page.call_element_result(&input.frame, "uploadProbeInput", vec![], false).await? {
         ElementOr::Element(element) => element,
         ElementOr::Status(_) => bail!("upload: the page did not give browse a file input to check"),
     };
-    let result = probe_files(page, &cdp, &probe, &sentinel, paths).await;
-    let _ = cdp.send("Runtime.releaseObject", json!({ "objectId": probe.object_id }), probe.session.as_deref()).await;
+    let result = probe_files(page, &probe, &sentinel, paths).await;
+    page.release_object(&probe).await;
     result
 }
 
-/// The probe itself, split out so [probe_paths] releases the detached input's object however it ends.
-async fn probe_files(page: &Arc<TabPage>, cdp: &Arc<dyn browse_core::Cdp>, probe: &crate::page::Element, sentinel: &Sentinel, paths: &[String]) -> Result<bool> {
-    if !set_probe_files(page, cdp, probe, &[sentinel.path.display().to_string()]).await? {
+async fn probe_files(page: &Arc<TabPage>, probe: &crate::page::Element, sentinel: &Sentinel, paths: &[String]) -> Result<bool> {
+    if !set_probe_files(page, probe, std::slice::from_ref(&sentinel.path)).await? {
         return Ok(false);
     }
     let read = page.call_element(probe, "uploadFiles", vec![], false).await?;
@@ -1195,7 +1179,8 @@ async fn probe_files(page: &Arc<TabPage>, cdp: &Arc<dyn browse_core::Cdp>, probe
     if !one || page.call_element(probe, "uploadText", vec![], false).await?.as_str() != Some(sentinel.nonce.as_str()) {
         return Ok(false);
     }
-    if !set_probe_files(page, cdp, probe, paths).await? {
+    let bufs: Vec<std::path::PathBuf> = paths.iter().map(std::path::PathBuf::from).collect();
+    if !set_probe_files(page, probe, &bufs).await? {
         return Ok(false);
     }
     let read = page.call_element(probe, "uploadFiles", vec![], false).await?;
@@ -1213,20 +1198,17 @@ async fn probe_files(page: &Arc<TabPage>, cdp: &Arc<dyn browse_core::Cdp>, probe
     Ok(true)
 }
 
-/// Sets files on the probe input, false on a protocol refusal (an extension without file URL access answers one).
-/// TabPage::send does this, but turns every CdpError into one anyhow message; the probe must tell a refusal from a
-/// disconnect, so this repeats its dialog check and race around the raw command.
-async fn set_probe_files(page: &Arc<TabPage>, cdp: &Arc<dyn browse_core::Cdp>, probe: &crate::page::Element, paths: &[String]) -> Result<bool> {
+async fn set_probe_files(page: &Arc<TabPage>, probe: &crate::page::Element, paths: &[std::path::PathBuf]) -> Result<bool> {
     page.ensure_no_dialog()?;
     let sent = tokio::select! {
-        result = cdp.send("DOM.setFileInputFiles", json!({ "objectId": probe.object_id, "files": paths }), probe.session.as_deref()) => result,
+        result = page.driver().set_files(&probe.handle, paths) => result,
         _ = page.dialog_opened() => {
             return Err(page.ensure_no_dialog().err().unwrap_or_else(|| anyhow!("The page opened a dialog while browse checked the file paths; answer it with the dialog tool and try again")));
         }
     };
     match sent {
         Ok(_) => Ok(true),
-        Err(CdpError::Protocol(_)) => Ok(false),
+        Err(DriverError::Protocol(_) | DriverError::Refused(_) | DriverError::Unsupported(_)) => Ok(false),
         Err(error) => Err(error.into()),
     }
 }
@@ -1463,14 +1445,7 @@ async fn emulate(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     };
     match args.get("viewport") {
         Some(Value::String(_)) => {
-            let result = async {
-                page.send("Emulation.clearDeviceMetricsOverride", json!({}), None).await?;
-                // Chrome can drop a single clear that lands while the previous size is still settling.
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                page.send("Emulation.clearDeviceMetricsOverride", json!({}), None).await?;
-                Ok(json!("reset"))
-            }
-            .await;
+            let result = page.guard_dialog(page.driver().emulate(Emulation::Viewport(None))).await.map(|_| json!("reset"));
             record("viewport", result);
         }
         Some(Value::Object(viewport)) => {
@@ -1479,14 +1454,16 @@ async fn emulate(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
             let scale = viewport.get("deviceScaleFactor").and_then(Value::as_f64).unwrap_or(0.0);
             let mobile = viewport.get("mobile").and_then(Value::as_bool).unwrap_or(false);
             let settings = json!({ "width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile });
-            let result = page.send("Emulation.setDeviceMetricsOverride", settings.clone(), None).await.map(|_| settings);
+            let result = page
+                .guard_dialog(page.driver().emulate(Emulation::Viewport(Some(ViewportOverride { width, height, device_scale_factor: scale, mobile }))))
+                .await
+                .map(|_| settings);
             record("viewport", result);
         }
         _ => {}
     }
     let media_keys = [("colorScheme", "prefers-color-scheme"), ("reducedMotion", "prefers-reduced-motion"), ("forcedColors", "forced-colors"), ("contrast", "prefers-contrast")];
     if media_keys.iter().any(|(key, _)| args.get(*key).is_some()) || args.get("media").is_some() {
-        // Chrome replaces every emulated media feature on each call: merge with what this tab already has.
         let mut state = page.media_emulation();
         let mut changed = Vec::new();
         for (key, feature) in media_keys {
@@ -1503,8 +1480,15 @@ async fn emulate(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
             state.media = if media == "reset" { String::new() } else { media.into() };
             changed.push(("media", media));
         }
-        let features: Vec<Value> = state.features.iter().map(|(name, value)| json!({ "name": name, "value": value })).collect();
-        match page.send("Emulation.setEmulatedMedia", json!({ "media": state.media, "features": features }), None).await {
+        let features: Vec<MediaFeature> = state
+            .features
+            .iter()
+            .map(|(name, value)| MediaFeature { name: name.clone(), value: value.clone() })
+            .collect();
+        match page
+            .guard_dialog(page.driver().emulate(Emulation::Media(MediaOverride { media: state.media.clone(), features })))
+            .await
+        {
             Ok(_) => {
                 page.set_media_emulation(state);
                 for (key, value) in changed {
@@ -1519,13 +1503,13 @@ async fn emulate(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
         }
     }
     if let Some(agent) = str_arg(&args, "userAgent") {
-        let value = if agent == "reset" { "" } else { agent };
-        let result = page.send("Emulation.setUserAgentOverride", json!({ "userAgent": value }), None).await.map(|_| json!(agent));
+        let value = (agent != "reset").then(|| agent.to_string());
+        let result = page.guard_dialog(page.driver().emulate(Emulation::UserAgent(value))).await.map(|_| json!(agent));
         record("userAgent", result);
     }
     match args.get("geolocation") {
         Some(Value::String(_)) => {
-            let result = page.send("Emulation.clearGeolocationOverride", json!({}), None).await.map(|_| json!("reset"));
+            let result = page.guard_dialog(page.driver().emulate(Emulation::Geolocation(None))).await.map(|_| json!("reset"));
             record("geolocation", result);
         }
         Some(Value::Object(geo)) => {
@@ -1533,7 +1517,7 @@ async fn emulate(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
             let longitude = geo["longitude"].as_f64().unwrap_or(0.0);
             let accuracy = geo.get("accuracy").and_then(Value::as_f64).unwrap_or(50.0);
             let result = page
-                .send("Emulation.setGeolocationOverride", json!({ "latitude": latitude, "longitude": longitude, "accuracy": accuracy }), None)
+                .guard_dialog(page.driver().emulate(Emulation::Geolocation(Some(Geolocation { latitude, longitude, accuracy }))))
                 .await
                 .map(|_| json!({ "latitude": latitude, "longitude": longitude, "accuracy": accuracy, "note": "the site still needs the user's location permission" }));
             record("geolocation", result);
@@ -1541,31 +1525,14 @@ async fn emulate(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
         _ => {}
     }
     if let Some(touch) = args.get("touch").and_then(Value::as_bool) {
-        let result = page.send("Emulation.setTouchEmulationEnabled", json!({ "enabled": touch, "maxTouchPoints": if touch { 5 } else { 1 } }), None).await.map(|_| json!(touch));
+        let result = page
+            .guard_dialog(page.driver().emulate(Emulation::Touch(touch.then_some(5))))
+            .await
+            .map(|_| json!(touch));
         record("touch", result);
     }
     if let Some(offline) = args.get("offline").and_then(Value::as_bool) {
-        let conditions = json!({ "offline": offline, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1 });
-        let result = if offline {
-            // Chrome applies network emulation only while the Network domain is enabled; enabling it again is
-            // harmless, and the conditions are sent after it so they hold even if a disable reset them.
-            let result = async {
-                page.send("Network.enable", json!({}), None).await?;
-                page.send("Network.emulateNetworkConditions", conditions, None).await
-            }
-            .await;
-            if result.is_ok() {
-                state::set_offline(&c.state, true).await;
-            }
-            result
-        } else {
-            let _ = page.send("Network.emulateNetworkConditions", conditions, None).await;
-            state::set_offline(&c.state, false).await;
-            if !state::network_capture_active(&c.state).await {
-                let _ = page.send("Network.disable", json!({}), None).await;
-            }
-            Ok(Value::Null)
-        };
+        let result = page.guard_dialog(page.driver().emulate(Emulation::Offline(offline))).await;
         record("offline", result.map(|_| json!(offline)));
     }
     if applied.is_empty() && failed.is_empty() {
@@ -1683,20 +1650,21 @@ async fn webmcp(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
 async fn webmcp_main_world(page: &Arc<TabPage>, frame: &str, method: &str, args: Vec<Value>) -> Result<Value> {
     let source = page.call_value(frame, "methodSource", vec![v(method)], false).await?;
     let source = source.as_str().ok_or_else(|| anyhow!("browse could not read its WebMCP helper"))?;
-    let document = page.document(frame).await?;
-    let object = page.main_world_object(&document).await?;
     let declaration = format!("function (spec) {{ return ({{ {source} }}).{method}(...JSON.parse(spec)) }}");
-    let result = page
-        .send(
-            "Runtime.callFunctionOn",
-            json!({ "functionDeclaration": declaration, "objectId": object, "arguments": [{ "value": Value::Array(args).to_string() }], "returnByValue": true, "awaitPromise": true, "objectGroup": crate::page::TRANSIENT_GROUP }),
-            document.session.as_deref(),
+    let realm = Realm { frame: FrameId::from(frame), world: World::Main };
+    let outcome = page
+        .call_driver(
+            &Receiver::Global(realm),
+            &declaration,
+            &[DriverArg::Json(Value::String(Value::Array(args).to_string()))],
+            CallOptions { returns: Returns::Json, await_promise: true, user_activation: false },
         )
         .await?;
-    if let Some(details) = result.get("exceptionDetails") {
-        bail!("{}", crate::page::exception_message(details));
+    match outcome {
+        Err(details) => bail!("{}", details.message),
+        Ok(Evaluated::Json(value)) => Ok(value),
+        Ok(_) => Ok(Value::Null),
     }
-    Ok(result["result"].get("value").cloned().unwrap_or(Value::Null))
 }
 
 // Schemas and descriptions.
@@ -2021,7 +1989,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use browse_core::{Browser, Cdp, HandoffResult, TabId, TabInfo};
+    use browse_core::{Browser, HandoffResult, TabDriver, TabId, TabInfo, TabState};
 
     /// A browser whose only tab is read-only; CDP work is counted, so a refusal can be shown to come before it.
     #[derive(Default)]
@@ -2040,9 +2008,9 @@ mod tests {
         async fn close_tab(&self, _tab: TabId) -> anyhow::Result<()> {
             Ok(())
         }
-        async fn cdp(&self, _tab: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
+        async fn tab_driver(&self, _tab: TabId) -> anyhow::Result<Arc<dyn TabDriver>> {
             self.cdp_calls.fetch_add(1, Ordering::SeqCst);
-            anyhow::bail!("CDP was used")
+            anyhow::bail!("driver was used")
         }
         async fn state(&self, _tab: TabId) -> anyhow::Result<Arc<TabState>> {
             self.cdp_calls.fetch_add(1, Ordering::SeqCst);

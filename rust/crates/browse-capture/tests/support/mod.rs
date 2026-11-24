@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine;
+use browse_cdp::{Cdp, CdpError, CdpEvent};
 use browse_core::{
-    Browser, Cdp, CdpError, CdpEvent, Content, HandoffResult, TabId, TabInfo, TabOptions, TabState, Tool, ToolContext,
-    ToolOutput,
+    Browser, Content, HandoffResult, TabDriver, TabId, TabInfo, TabOptions, TabState, Tool, ToolContext, ToolOutput,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -194,8 +194,8 @@ pub fn rand_suffix() -> u32 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos().wrapping_add(NEXT.fetch_add(1, Ordering::Relaxed) as u32 * 7919)
 }
 
-/// The one live tab (id 1) as a browser: its CDP, its state, and the busy flags tools report.
-pub struct TestBrowser(pub Arc<WsCdp>, pub Arc<Mutex<HashMap<String, bool>>>, pub Arc<TabState>);
+/// The one live tab (id 1) as a browser: its driver, its state, and the busy flags tools report.
+pub struct TestBrowser(pub Arc<dyn TabDriver>, pub Arc<Mutex<HashMap<String, bool>>>, pub Arc<TabState>);
 
 #[async_trait]
 impl Browser for TestBrowser {
@@ -208,7 +208,7 @@ impl Browser for TestBrowser {
     async fn close_tab(&self, _: TabId) -> anyhow::Result<()> {
         Ok(())
     }
-    async fn cdp(&self, _: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
+    async fn tab_driver(&self, _: TabId) -> anyhow::Result<Arc<dyn TabDriver>> {
         Ok(self.0.clone())
     }
     async fn state(&self, _: TabId) -> anyhow::Result<Arc<TabState>> {
@@ -371,7 +371,8 @@ pub fn context(cdp: &Arc<WsCdp>) -> (ToolContext, PathBuf, Arc<Mutex<HashMap<Str
     }
     let root = std::fs::canonicalize(&root).unwrap();
     let busy: Arc<Mutex<HashMap<String, bool>>> = Arc::default();
-    let ctx = ToolContext { browser: Arc::new(TestBrowser(cdp.clone(), busy.clone(), Arc::new(TabState::default()))), file_roots: vec![root.clone()] };
+    let driver: Arc<dyn TabDriver> = browse_cdp::CdpTabDriver::new(cdp.clone());
+    let ctx = ToolContext { browser: Arc::new(TestBrowser(driver, busy.clone(), Arc::new(TabState::default()))), file_roots: vec![root.clone()] };
     (ctx, root, busy)
 }
 
