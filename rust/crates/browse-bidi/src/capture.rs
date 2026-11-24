@@ -71,14 +71,67 @@ fn console_entry(shared: &Shared, params: &Value) -> Option<ConsoleEntry> {
         (_, method) => method.to_string(),
     };
     let frame = params.pointer("/stackTrace/callFrames/0");
+    let text = params
+        .get("args")
+        .and_then(Value::as_array)
+        .and_then(|args| console_text(args))
+        .unwrap_or_else(|| str_of(params, "text").to_string());
     Some(ConsoleEntry {
         kind,
-        text: str_of(params, "text").to_string(),
+        text,
         source: None,
-        target: None,
+        // As CDP reports a message from an out-of-process (cross-site) iframe's target.
+        target: cross_origin_frame(shared, context).then(|| "iframe".to_string()),
         url: frame.and_then(|f| f.get("url")).and_then(Value::as_str).filter(|u| !u.is_empty()).map(str::to_string),
         line: frame.and_then(|f| f.get("lineNumber")).and_then(Value::as_i64).map(|n| n + 1),
     })
+}
+
+/// Whether `context` is a child frame showing another origin than the tab's top document.
+fn cross_origin_frame(shared: &Shared, context: &str) -> bool {
+    if context == shared.top.as_str() {
+        return false;
+    }
+    let origin = |url: &str| url.split_once("://").map(|(scheme, rest)| format!("{scheme}://{}", rest.split(['/', '?', '#']).next().unwrap_or("")));
+    let state = shared.state.lock().unwrap();
+    let url = |id: &str| state.frames.get(&FrameId::from(id)).map(|entry| entry.frame.url.clone());
+    match (url(context), url(shared.top.as_str())) {
+        (Some(frame), Some(top)) => origin(&frame) != origin(&top),
+        _ => false,
+    }
+}
+
+/// A console call's arguments as text, the way the CDP driver words them (DevTools' one-line descriptions:
+/// `Object`, `Array(2)`, `Map(1)`); None when an argument has no such description here (errors, functions, nodes),
+/// so Firefox's own rendering of the message is used.
+pub(crate) fn console_text(args: &[Value]) -> Option<String> {
+    let mut parts = Vec::new();
+    for arg in args {
+        let value = arg.get("value");
+        let count = || value.and_then(Value::as_array).map(Vec::len);
+        let part = match str_of(arg, "type") {
+            "string" => value.and_then(Value::as_str)?.to_string(),
+            "number" => match value? {
+                Value::String(special) => special.clone(),
+                other => other.to_string(),
+            },
+            "boolean" => value?.to_string(),
+            "bigint" => format!("{}n", value.and_then(Value::as_str)?),
+            "null" => "null".into(),
+            "undefined" => "undefined".into(),
+            "object" => "Object".into(),
+            "array" => count().map_or_else(|| "Array".into(), |n| format!("Array({n})")),
+            "map" => count().map_or_else(|| "Map".into(), |n| format!("Map({n})")),
+            "set" => count().map_or_else(|| "Set".into(), |n| format!("Set({n})")),
+            "regexp" => {
+                let regexp = value?;
+                format!("/{}/{}", str_of(regexp, "pattern"), str_of(regexp, "flags"))
+            }
+            _ => return None,
+        };
+        parts.push(part);
+    }
+    Some(parts.join(" "))
 }
 
 fn headers(value: Option<&Value>) -> Vec<(String, String)> {
@@ -191,7 +244,7 @@ fn network_events(shared: &Shared, event: &BiDiEvent, previous: &mut HashMap<Str
         }
         "network.fetchError" => {
             let error = Some(str_of(params, "errorText")).filter(|e| !e.is_empty()).unwrap_or("Request failed");
-            vec![NetworkEvent::Failed { id: RequestId::from(id), error: error.to_string() }]
+            vec![NetworkEvent::Failed { id: RequestId::from(id), error: error.to_string(), request_headers: None }]
         }
         _ => Vec::new(),
     }
@@ -382,6 +435,34 @@ mod tests {
         assert_eq!(kind(json!({ "destination": "" }), json!({ "type": "fetch" })), "Fetch");
         assert_eq!(kind(json!({ "destination": "", "initiatorType": "xmlhttprequest" }), json!({})), "XHR");
         assert_eq!(kind(json!({ "destination": "" }), json!({})), "Other");
+    }
+
+    #[test]
+    fn console_arguments_read_like_devtools() {
+        let text = |args: Value| console_text(args.as_array().unwrap());
+        assert_eq!(
+            text(json!([
+                { "type": "string", "value": "plain" },
+                { "type": "number", "value": 42 },
+                { "type": "boolean", "value": true },
+                { "type": "null" },
+                { "type": "undefined" },
+                { "type": "number", "value": "NaN" },
+                { "type": "bigint", "value": "10" },
+            ])),
+            Some("plain 42 true null undefined NaN 10n".into())
+        );
+        assert_eq!(
+            text(json!([
+                { "type": "string", "value": "warned" },
+                { "type": "object", "value": [["a", { "type": "number", "value": 1 }]] },
+                { "type": "array", "value": [{ "type": "number", "value": 1 }, { "type": "number", "value": 2 }] },
+                { "type": "map", "value": [] },
+                { "type": "regexp", "value": { "pattern": "a+", "flags": "g" } },
+            ])),
+            Some("warned Object Array(2) Map(0) /a+/g".into())
+        );
+        assert_eq!(text(json!([{ "type": "string", "value": "x" }, { "type": "error" }])), None, "errors keep Firefox's text");
     }
 
     #[test]

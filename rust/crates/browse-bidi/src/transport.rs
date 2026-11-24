@@ -118,11 +118,35 @@ impl BiDiClient {
     /// user prompts open for browse to answer.
     pub async fn connect(url: &str) -> DriverResult<Arc<BiDiClient>> {
         let url = session_url(url);
+        let stream = tokio::time::timeout(CONNECT_TIMEOUT, open_stream(&url))
+            .await
+            .map_err(|_| DriverError::Timeout(CONNECT_TIMEOUT))??;
+        Self::connect_stream(&url, stream).await
+    }
+
+    /// Like `connect`, but only to a loopback address unless `allow_remote`: the peer is checked on the open TCP
+    /// connection, before the WebSocket handshake. Returns the client and whether its peer is loopback.
+    pub async fn connect_loopback_checked(url: &str, allow_remote: bool) -> DriverResult<(Arc<BiDiClient>, bool)> {
+        let url = session_url(url);
+        let stream = tokio::time::timeout(CONNECT_TIMEOUT, open_stream(&url))
+            .await
+            .map_err(|_| DriverError::Timeout(CONNECT_TIMEOUT))??;
+        let local = stream.peer_addr().map(|peer| peer.ip().is_loopback()).unwrap_or(false);
+        if !local && !allow_remote {
+            return Err(DriverError::Refused(format!("the WebDriver BiDi endpoint at {url} is not on this computer")));
+        }
+        Ok((Self::connect_stream(&url, stream).await?, local))
+    }
+
+    /// Starts a session over a TCP connection the caller already opened to `url`'s host (so it could check the peer).
+    /// No `Origin` header is sent: Firefox refuses a WebSocket upgrade that has one.
+    pub async fn connect_stream(url: &str, stream: tokio::net::TcpStream) -> DriverResult<Arc<BiDiClient>> {
+        let url = session_url(url);
         let config = WebSocketConfig::default()
             .max_message_size(Some(MAX_MESSAGE))
             .max_frame_size(Some(MAX_MESSAGE));
         let (socket, _) =
-            tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async_with_config(&url, Some(config), false))
+            tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::client_async_with_config(url.as_str(), stream, Some(config)))
                 .await
                 .map_err(|_| DriverError::Timeout(CONNECT_TIMEOUT))?
                 .map_err(|error| {
@@ -218,6 +242,19 @@ impl BiDiClient {
         }
         let _ = tokio::time::timeout(Duration::from_secs(2), self.send("session.end", json!({}))).await;
     }
+}
+
+/// Opens the TCP connection a `ws://host:port/...` URL names.
+async fn open_stream(url: &str) -> DriverResult<tokio::net::TcpStream> {
+    let refused = |detail: String| DriverError::Refused(format!("could not connect to the WebDriver BiDi endpoint at {url}: {detail}"));
+    let uri: tokio_tungstenite::tungstenite::http::Uri = url.parse().map_err(|error| refused(format!("{error}")))?;
+    if uri.scheme_str() != Some("ws") {
+        return Err(refused("only ws:// endpoints are supported".into()));
+    }
+    let host = uri.host().ok_or_else(|| refused("the URL has no host".into()))?;
+    let port = uri.port_u16().unwrap_or(80);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    tokio::net::TcpStream::connect((host, port)).await.map_err(|error| refused(error.to_string()))
 }
 
 impl Drop for BiDiClient {

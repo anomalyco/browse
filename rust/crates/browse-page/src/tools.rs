@@ -1361,7 +1361,7 @@ fn validate_emulate(args: &Value) -> Result<()> {
     }
     for key in ["timezone", "locale"] {
         if args.get(key).is_some() {
-            bail!("emulate can't set {key}: Chrome only allows timezone and locale overrides for trusted clients, not the browser extension browse drives it through.");
+            bail!("emulate can't set {key}: browsers only allow timezone and locale overrides for trusted clients, not the browser extension browse drives them through.");
         }
     }
     let enums: [(&str, &[&str]); 5] = [
@@ -1539,7 +1539,7 @@ async fn emulate(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     }
     if applied.is_empty() {
         let reasons: Vec<String> = failed.iter().map(|(k, v)| format!("{k}: {}", v.as_str().unwrap_or(""))).collect();
-        bail!("Chrome rejected every setting: {}", reasons.join("; "));
+        bail!("The browser rejected every setting: {}", reasons.join("; "));
     }
     let mut out = json!({ "applied": applied });
     if !failed.is_empty() {

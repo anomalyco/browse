@@ -341,8 +341,8 @@ pub(crate) fn key_value(event: &KeyEvent) -> DriverResult<String> {
         "Control" => Some(if code == "ControlRight" { '\u{E051}' } else { '\u{E009}' }),
         "Alt" => Some(if code == "AltRight" { '\u{E052}' } else { '\u{E00A}' }),
         "Meta" => Some(if code == "MetaRight" { '\u{E053}' } else { '\u{E03D}' }),
-        // U+E006 is the keypad Enter in Firefox.
-        "Enter" => Some(if code == "NumpadEnter" { '\u{E006}' } else { '\u{E007}' }),
+        // WebDriver's U+E006 is Return (code "Enter"); U+E007 is the keypad's Enter (code "NumpadEnter").
+        "Enter" => Some(if code == "NumpadEnter" { '\u{E007}' } else { '\u{E006}' }),
         "Cancel" => Some('\u{E001}'),
         "Help" => Some('\u{E002}'),
         "Backspace" => Some('\u{E003}'),
@@ -397,7 +397,7 @@ pub(crate) async fn insert_text(shared: &Arc<Shared>, text: &str) -> DriverResul
     let mut actions = Vec::new();
     for c in text.chars() {
         let value = match c {
-            '\n' | '\r' => '\u{E007}'.to_string(),
+            '\n' | '\r' => '\u{E006}'.to_string(),
             '\t' => '\u{E004}'.to_string(),
             c => c.to_string(),
         };
@@ -468,8 +468,8 @@ mod tests {
         assert_eq!(value("A", "KeyA"), "A");
         assert_eq!(value(" ", "Space"), " ");
         assert_eq!(value("é", ""), "é");
-        assert_eq!(value("Enter", "Enter"), "\u{E007}");
-        assert_eq!(value("Enter", "NumpadEnter"), "\u{E006}");
+        assert_eq!(value("Enter", "Enter"), "\u{E006}");
+        assert_eq!(value("Enter", "NumpadEnter"), "\u{E007}");
         assert_eq!(value("Shift", "ShiftLeft"), "\u{E008}");
         assert_eq!(value("Shift", "ShiftRight"), "\u{E050}");
         assert_eq!(value("Meta", "MetaLeft"), "\u{E03D}");

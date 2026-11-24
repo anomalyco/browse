@@ -641,3 +641,33 @@ async fn sessions_end_so_the_next_client_can_connect() {
     let third = browse_bidi::BiDiBrowserDriver::connect(&firefox.ws).await.expect("a dropped client ends its session");
     third.shutdown().await;
 }
+
+
+/// A real profile `browse firefox` connected keeps Firefox's own defaults (`remote.prefs.recommended` off): the tools
+/// work the same there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tools_work_with_a_real_profiles_prefs() {
+    let h = harness!(Harness::start_with_prefs("// browse\nuser_pref(\"remote.prefs.recommended\", false);\n"));
+    assert_eq!(h.eval_main("navigator.webdriver").await, true);
+    let url = h.server.page("/real", FORM);
+    let nav = h.json("navigate", json!({ "url": url })).await;
+    assert_eq!(nav["title"], "Form", "{nav}");
+    let snapshot = h.ok("snapshot", json!({})).await;
+    assert!(snapshot.contains("- heading \"Sign up\" [level=1]"), "{snapshot}");
+    let email = ref_of(&snapshot, "textbox \"Email\"");
+    h.json("fill", json!({ "fields": [ { "ref": email, "value": "real@profile.co" } ] })).await;
+    h.json("click", json!({ "ref": ref_of(&snapshot, "button \"Save\"") })).await;
+    assert_eq!(h.eval("document.getElementById('out').textContent").await, "saved real@profile.co");
+    let (png, _) = h.image("screenshot", json!({})).await;
+    assert!(png.starts_with(b"\x89PNG"), "a PNG");
+    assert_eq!(h.eval_main("typeof Services").await, "undefined", "pages still can't reach chrome privileges");
+    h.finish().await;
+}
+
+/// `quit` closes the browser itself (`browser.close`), not just the session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quit_closes_firefox() {
+    let mut h = harness!();
+    h.driver.quit().await.expect("browser.close");
+    assert!(h.firefox.exited_within(Duration::from_secs(30)).await, "Firefox exits after quit");
+}

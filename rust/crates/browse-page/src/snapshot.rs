@@ -826,7 +826,7 @@ pub async fn snapshot(page: &Arc<TabPage>, tab_state: &PageTab, options: &Option
     if !use_diff {
         let mut notes = capture.notes.clone();
         if is_pdf {
-            notes.push("- ... this tab shows Chrome's PDF viewer: the document's text is not in the page and can't be snapshotted. Use a screenshot to read it, or fetch the PDF and extract its text another way.".into());
+            notes.push("- ... this tab shows the browser's PDF viewer: the document's text is not in the page and can't be snapshotted. Use a screenshot to read it, or fetch the PDF and extract its text another way.".into());
         }
         let lines: Vec<String> = rendered.iter().map(|e| format_line(e, e.ref_id.as_deref())).collect();
         let found = match &options.find {

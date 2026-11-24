@@ -65,10 +65,12 @@ impl Screencast {
                                 scale: 1.0,
                             };
                             if let Ok(image) = driver.screenshot(shot).await {
+                                // The screenshot is at device resolution, like a screencast frame's surface.
+                                let size = jpeg_size(&image.bytes);
                                 sink.lock().unwrap().frame(ScreencastFrame {
                                     jpeg: Arc::new(image.bytes),
-                                    device_width: None,
-                                    device_height: None,
+                                    device_width: size.map(|(w, _)| w as f64),
+                                    device_height: size.map(|(_, h)| h as f64),
                                     at: Instant::now(),
                                     fallback: true,
                                 });
@@ -262,3 +264,4 @@ pub(crate) async fn finalize_output(
         }
     }
 }
+
