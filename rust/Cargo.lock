@@ -115,10 +115,14 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
+ "browse-capture",
  "browse-core",
- "serde",
+ "browse-page",
+ "futures-util",
+ "png",
  "serde_json",
  "tokio",
+ "tokio-tungstenite 0.27.0",
 ]
 
 [[package]]

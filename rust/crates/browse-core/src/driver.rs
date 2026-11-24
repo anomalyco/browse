@@ -551,6 +551,8 @@ pub struct Screenshot {
     pub format: ImageFormat,
     pub quality: Option<i64>,
     pub area: ScreenshotArea,
+    /// Image pixels per device pixel (1.0 = the browser's native resolution). Drivers that can't capture at another
+    /// scale resample the image, returning PNG and saying so in `Image::note`.
     pub scale: f64,
 }
 
@@ -752,7 +754,11 @@ pub trait TabDriver: Send + Sync {
     // --- Navigation ---
 
     /// Navigate the main frame. Returns `None` for same-document navigations (e.g. fragment change).
+    ///
+    /// Returns once the navigation has started; some protocols (WebDriver BiDi in Firefox) only answer when the
+    /// response starts, so callers bound it with their own timeout. Commit and load arrive as `PageEvent`s.
     async fn navigate(&self, url: &str, referrer: Option<&str>) -> DriverResult<Option<NavigationId>>;
+    /// Reload the main frame. Returns once the reload has started, not when it commits or loads.
     async fn reload(&self, bypass_cache: bool) -> DriverResult<()>;
     /// Step backward (`delta < 0`) or forward (`delta > 0`) in session history; `false` if no such entry exists.
     async fn traverse_history(&self, delta: i32) -> DriverResult<bool>;
@@ -804,7 +810,8 @@ pub trait TabDriver: Send + Sync {
 /// Live capture surface for a tab (console, network, optional native screencast).
 #[async_trait]
 pub trait CaptureDriver: Send + Sync {
-    /// Page-world console messages and uncaught errors (driver filters out browse's isolated world).
+    /// Page-world console messages and uncaught errors. Drivers filter out browse's isolated world where the
+    /// protocol tells them apart (best effort: WebDriver BiDi attributes sandbox messages to the page).
     async fn console(&self) -> DriverResult<Subscription<ConsoleEvent>>;
     async fn network(&self, opts: NetworkOptions) -> DriverResult<Subscription<NetworkEvent>>;
     async fn body(&self, request: &RequestId, kind: BodyKind) -> DriverResult<Option<Vec<u8>>>;
