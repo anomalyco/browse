@@ -246,6 +246,8 @@ return {{
     assert!(text.contains("not supported") && text.contains("setInputFiles"), "{text}");
     let (text, output) = h.run(r###"page.on("filechooser", () => {})"###).await;
     assert!(output.is_error && text.contains("setInputFiles"), "{text}");
+    let (text, output) = h.run(r###"await context.waitForEvent("filechooser")"###).await;
+    assert!(output.is_error && text.contains("setInputFiles"), "{text}");
 }
 
 const COUNTER: &str = r###"<!doctype html><html><body><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="315" height="100">

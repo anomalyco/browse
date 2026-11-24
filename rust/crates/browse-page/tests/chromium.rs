@@ -511,13 +511,17 @@ async fn fill_uploads_keys_scroll_and_waits() {
     assert_eq!(flag, Some(false));
 }
 
-/// The values `Page.setInterceptFileChooserDialog` was sent, in order.
-fn chooser_states(calls: &[(String, Value)]) -> Vec<bool> {
+/// The session and value of every `Page.setInterceptFileChooserDialog`, in order.
+fn chooser_calls(calls: &[(String, String, Value)]) -> Vec<(String, bool)> {
     calls
         .iter()
-        .filter(|(method, _)| method == "Page.setInterceptFileChooserDialog")
-        .map(|(_, params)| params["enabled"].as_bool().unwrap_or(false))
+        .filter(|(method, _, _)| method == "Page.setInterceptFileChooserDialog")
+        .map(|(_, session, params)| (session.clone(), params["enabled"].as_bool().unwrap_or(false)))
         .collect()
+}
+
+fn chooser_states(calls: &[(String, String, Value)]) -> Vec<bool> {
+    chooser_calls(calls).into_iter().map(|(_, enabled)| enabled).collect()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -615,7 +619,7 @@ async fn upload_reports_a_button_that_opens_no_file_chooser() {
         )
         .await;
     assert!(
-        error.contains("clicked") && error.contains("no file chooser opened"),
+        error.contains("clicked") && error.contains("it isn't a file input or its label") && error.contains("opened no file chooser"),
         "{error}"
     );
     assert_eq!(
@@ -623,6 +627,47 @@ async fn upload_reports_a_button_that_opens_no_file_chooser() {
         vec![true, false],
         "interception is disabled after the error"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_by_button_respects_multiple_and_disarms_on_failure() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
+    let h = harness!(false);
+    let url = h.server.page(
+        "/chooser-multiple",
+        r#"<!doctype html><button id="attach" onclick="document.getElementById('file').click()">Attach</button><input id="file" type="file">"#,
+    );
+    h.ok("navigate", json!({ "url": url })).await;
+    let one = h.files.0.join("one.txt");
+    let two = h.files.0.join("two.txt");
+    std::fs::write(&one, "one").unwrap();
+    std::fs::write(&two, "two").unwrap();
+
+    let error = h
+        .err(
+            "upload",
+            json!({ "selector": "#attach", "files": [one.display().to_string(), two.display().to_string()] }),
+        )
+        .await;
+    assert!(error.contains("takes a single file"), "{error}");
+    assert_eq!(chooser_states(&h.tab.calls()), vec![true, false], "interception is disabled after the failure");
+    assert_eq!(h.ok("eval", json!({ "expression": "document.getElementById('file').files.length" })).await, "0");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stale_file_chooser_disarm_leaves_a_newer_arm_alone() {
+    let h = harness!(false);
+    let driver = h.ctx.browser.tab_driver(1).await.unwrap();
+    let first = driver.prepare_file_chooser_interception();
+    driver.arm_file_chooser_interception(first).await.unwrap();
+    let second = driver.prepare_file_chooser_interception();
+    driver.arm_file_chooser_interception(second).await.unwrap();
+
+    // A delayed disable from the first upload must not turn off the second arm.
+    driver.disarm_file_chooser_interception(first).await;
+    assert_eq!(chooser_states(&h.tab.calls()), vec![true, true]);
+    driver.disarm_file_chooser_interception(second).await;
+    assert_eq!(chooser_states(&h.tab.calls()), vec![true, true, false]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -648,12 +693,13 @@ async fn upload_clicks_into_a_cross_origin_iframe() {
     assert_eq!(name, "\"frame.txt\"");
     let changes = h.ok("eval", json!({ "expression": "document.body.dataset.changes", "frame": "iframe[title=Cross]" })).await;
     assert_eq!(changes, "\"1\"");
-    let states = chooser_states(&h.tab.calls());
-    assert_eq!(
-        states,
-        vec![true, true, false, false],
-        "the root and the cross-origin child session were armed and disarmed: {states:?}"
-    );
+    let calls = chooser_calls(&h.tab.calls());
+    let sessions: std::collections::HashSet<&str> = calls.iter().map(|(session, _)| session.as_str()).collect();
+    assert_eq!(sessions.len(), 2, "the root and the cross-origin child session were armed: {calls:?}");
+    for session in sessions {
+        let states: Vec<bool> = calls.iter().filter(|(call_session, _)| call_session == session).map(|(_, enabled)| *enabled).collect();
+        assert_eq!(states, vec![true, false], "session {session} was armed then disarmed: {calls:?}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1104,6 +1150,8 @@ async fn read_only_tabs_refuse_input_tools() {
     let refused = h.err("fill", json!({ "selector": "#start", "value": "2026-01-02" })).await;
     assert!(refused.contains("browse blocked fill") && refused.contains("read-only"), "{refused}");
     let refused = h.err("upload", json!({ "selector": "#file", "files": ["/tmp/browse-read-only-upload.png"] })).await;
+    assert!(refused.contains("browse blocked upload") && refused.contains("read-only"), "{refused}");
+    let refused = h.err("upload", json!({ "selector": "#save", "files": ["/tmp/browse-read-only-upload.png"] })).await;
     assert!(refused.contains("browse blocked upload") && refused.contains("read-only"), "{refused}");
     let refused = h.err("click", json!({ "selector": "#save" })).await;
     assert!(refused.contains("browse blocked click") && refused.contains("read-only"), "{refused}");

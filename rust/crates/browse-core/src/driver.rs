@@ -263,6 +263,10 @@ pub struct Dialog {
     pub url: String,
 }
 
+/// One upload's arm of file chooser interception; disabling with it only acts while it is current.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileChooserArm(pub u64);
+
 /// A native file chooser that opened while interception was armed.
 #[derive(Debug, Clone)]
 pub struct FileChooser {
@@ -776,9 +780,13 @@ pub trait TabDriver: Send + Sync {
     /// The child frame shown by an `<iframe>` element, if attached.
     async fn content_frame(&self, node: &RemoteRef) -> DriverResult<Option<FrameId>>;
     async fn set_files(&self, input: &RemoteRef, paths: &[PathBuf]) -> DriverResult<()>;
-    /// Enables or disables interception of native file choosers on the tab and every attached child frame.
-    async fn set_file_chooser_interception(&self, enabled: bool) -> DriverResult<()>;
-    /// The file chooser opened since interception was enabled, waiting up to `timeout` for one.
+    /// Reserves the generation for the next arm of file chooser interception.
+    fn prepare_file_chooser_interception(&self) -> FileChooserArm;
+    /// Enables interception for `arm` on the tab and every attached child frame.
+    async fn arm_file_chooser_interception(&self, arm: FileChooserArm) -> DriverResult<()>;
+    /// Disables interception for `arm`, unless a newer arm has replaced it.
+    async fn disarm_file_chooser_interception(&self, arm: FileChooserArm);
+    /// The file chooser opened since interception was armed, waiting up to `timeout` for one.
     async fn take_file_chooser(&self, timeout: Duration) -> DriverResult<Option<FileChooser>>;
 
     // --- Input & dialogs ---
@@ -921,12 +929,22 @@ impl TabDriver for GuardedTabDriver {
         self.inner.set_files(input, paths).await
     }
 
-    async fn set_file_chooser_interception(&self, enabled: bool) -> DriverResult<()> {
+    fn prepare_file_chooser_interception(&self) -> FileChooserArm {
+        self.inner.prepare_file_chooser_interception()
+    }
+
+    async fn arm_file_chooser_interception(&self, arm: FileChooserArm) -> DriverResult<()> {
         self.check_write("upload")?;
-        self.inner.set_file_chooser_interception(enabled).await
+        self.inner.arm_file_chooser_interception(arm).await
+    }
+
+    async fn disarm_file_chooser_interception(&self, arm: FileChooserArm) {
+        // Turning interception off is cleanup, never input: a read-only tab must still be able to do it.
+        self.inner.disarm_file_chooser_interception(arm).await
     }
 
     async fn take_file_chooser(&self, timeout: Duration) -> DriverResult<Option<FileChooser>> {
+        self.check_write("upload")?;
         self.inner.take_file_chooser(timeout).await
     }
 

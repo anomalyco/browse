@@ -8,9 +8,10 @@ pub mod driver;
 pub use driver::{
     Arg, BodyKind, BrowserDriver, BrowserEvent, CallOptions, CaptureDriver, CloseReason, ConsoleEntry, ConsoleEvent,
     Dialog, DialogKind, DocumentId, DragOutcome, DriverError, DriverInfo, DriverResult, Emulation, Eval, Evaluated,
-    FileChooser, Frame, FrameId, Geolocation, GuardedTabDriver, Image, ImageFormat, JsError, KeyEvent, LoadState,
-    MediaFeature, MediaOverride, Modifiers, MouseButton, NavigationError, NavigationErrorKind, NavigationId, NetworkEvent,
-    NetworkOptions, NetworkRequest, PageEvent, PointerEvent, PointerStep, Realm, Receiver, Rect, RemoteRef, RequestId,
+    FileChooser, FileChooserArm, Frame, FrameId, Geolocation, GuardedTabDriver, Image, ImageFormat, JsError, KeyEvent,
+    LoadState, MediaFeature, MediaOverride, Modifiers, MouseButton, NavigationError, NavigationErrorKind, NavigationId,
+    NetworkEvent, NetworkOptions, NetworkRequest, PageEvent, PointerEvent, PointerStep, Realm, Receiver, Rect, RemoteRef,
+    RequestId,
     ResponseHead, Returns, Screencast, ScreencastFrame, ScreencastOptions, Screenshot, ScreenshotArea, Subscription,
     TabDriver, TabPolicy, TargetId, UserPresence, Viewport, ViewportOverride, World,
 };

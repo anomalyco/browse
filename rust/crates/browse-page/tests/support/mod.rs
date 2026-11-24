@@ -176,7 +176,7 @@ pub struct TabCdp {
     pub target: String,
     events: broadcast::Sender<CdpEvent>,
     pub sent: Mutex<Vec<String>>,
-    calls: Mutex<Vec<(String, Value)>>,
+    calls: Mutex<Vec<(String, String, Value)>>,
     /// Methods that answer with a protocol error, like an extension without file URL access does.
     refusing: Mutex<HashSet<String>>,
     /// A path that replaces every DOM.setFileInputFiles path, for a browser that sees another filesystem.
@@ -217,8 +217,8 @@ impl TabCdp {
         self.sent.lock().unwrap().clone()
     }
 
-    /// Every command with the parameters it was sent, in order.
-    pub fn calls(&self) -> Vec<(String, Value)> {
+    /// Every command with the session it went to and the parameters it was sent, in order.
+    pub fn calls(&self) -> Vec<(String, String, Value)> {
         self.calls.lock().unwrap().clone()
     }
 
@@ -254,8 +254,8 @@ impl Cdp for TabCdp {
                     params["files"] = json!([path]);
                 }
             }
-        self.calls.lock().unwrap().push((method.to_string(), params.clone()));
         let session = session_id.unwrap_or(&self.session);
+        self.calls.lock().unwrap().push((method.to_string(), session.to_string(), params.clone()));
         self.connection.send(method, params, Some(session)).await.map_err(CdpError::Protocol)
     }
 

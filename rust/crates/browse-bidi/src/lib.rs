@@ -14,9 +14,9 @@ use async_trait::async_trait;
 use base64::Engine;
 use browse_core::{
     Arg, BodyKind, BrowserDriver, BrowserEvent, CallOptions, CaptureDriver, ConsoleEvent, DragOutcome, DriverError,
-    DriverInfo, DriverResult, Emulation, Eval, FileChooser, Frame, FrameId, Image, KeyEvent, Modifiers, NavigationId,
-    NetworkEvent, NetworkOptions, PageEvent, PointerEvent, PointerStep, Realm, Receiver, RemoteRef, RequestId, Screencast,
-    Screenshot, Subscription, TabDriver, TabOptions, TargetId, Viewport, World,
+    DriverInfo, DriverResult, Emulation, Eval, FileChooser, FileChooserArm, Frame, FrameId, Image, KeyEvent, Modifiers,
+    NavigationId, NetworkEvent, NetworkOptions, PageEvent, PointerEvent, PointerStep, Realm, Receiver, RemoteRef,
+    RequestId, Screencast, Screenshot, Subscription, TabDriver, TabOptions, TargetId, Viewport, World,
 };
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
@@ -203,9 +203,15 @@ impl TabDriver for BiDiTabDriver {
         Err(DriverError::Unsupported("bidi content_frame pending"))
     }
 
-    async fn set_file_chooser_interception(&self, _enabled: bool) -> DriverResult<()> {
+    fn prepare_file_chooser_interception(&self) -> FileChooserArm {
+        FileChooserArm(0)
+    }
+
+    async fn arm_file_chooser_interception(&self, _arm: FileChooserArm) -> DriverResult<()> {
         Err(DriverError::Unsupported("bidi file chooser interception"))
     }
+
+    async fn disarm_file_chooser_interception(&self, _arm: FileChooserArm) {}
 
     async fn take_file_chooser(&self, _timeout: Duration) -> DriverResult<Option<FileChooser>> {
         Err(DriverError::Unsupported("bidi file chooser interception"))
