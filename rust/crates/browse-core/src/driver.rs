@@ -627,12 +627,14 @@ pub enum Emulation {
 // ---------------------------------------------------------------------------
 
 type CleanupFn = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send>;
+type FlushFn = Box<dyn Fn() + Send + Sync>;
 
 /// A live driver stream that cleanly stops the underlying browser subscription on `stop()` or `Drop`.
 pub struct Subscription<T> {
     rx: mpsc::UnboundedReceiver<T>,
     abort: Option<tokio::task::AbortHandle>,
     cleanup: Option<CleanupFn>,
+    flush: Option<FlushFn>,
 }
 
 impl<T> Subscription<T> {
@@ -641,11 +643,29 @@ impl<T> Subscription<T> {
         abort: Option<tokio::task::AbortHandle>,
         cleanup: Option<CleanupFn>,
     ) -> Self {
-        Self { rx, abort, cleanup }
+        Self { rx, abort, cleanup, flush: None }
+    }
+
+    /// Reports anything the driver is holding for late protocol data before a stop drains the stream.
+    pub fn with_flush(mut self, flush: impl Fn() + Send + Sync + 'static) -> Self {
+        self.flush = Some(Box::new(flush));
+        self
+    }
+
+    /// Asks the driver to report held events. A driver without a flush hook does nothing.
+    pub fn flush(&self) {
+        if let Some(flush) = &self.flush {
+            flush();
+        }
     }
 
     pub async fn recv(&mut self) -> Option<T> {
         self.rx.recv().await
+    }
+
+    /// Takes an event without waiting. `None` means none is queued now.
+    pub fn try_recv(&mut self) -> Option<T> {
+        self.rx.try_recv().ok()
     }
 
     /// Stops the subscription and awaits its cleanup hook.

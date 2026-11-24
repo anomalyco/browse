@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use browse_core::{
-    BodyKind, NetworkEvent, NetworkOptions, RequestId, ResponseHead, TabDriver, TabId, Tool, ToolContext, ToolOutput,
-    ToolSpec,
+    BodyKind, NetworkEvent, NetworkOptions, RequestId, ResponseHead, Subscription, TabDriver, TabId, Tool, ToolContext,
+    ToolOutput, ToolSpec,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -428,6 +428,19 @@ impl Shared {
     }
 }
 
+/// Takes the events a driver reported for its held hops, dropping Requests (they began after stop). No timer: the
+/// driver's flush is synchronous and everything it reports is queued by the time it returns.
+fn drain_after_flush(shared: &Arc<Shared>, sub: &mut Subscription<NetworkEvent>) {
+    sub.flush();
+    while let Some(event) = sub.try_recv() {
+        match event {
+            NetworkEvent::Request(_) => {}
+            NetworkEvent::Closed(_) => break,
+            event => shared.handle(event),
+        }
+    }
+}
+
 async fn start(ctx: &ToolContext, args: &Value) -> anyhow::Result<ToolOutput> {
     let tab = target_tab(args)?;
     let strings = |name: &str| -> anyhow::Result<Vec<String>> {
@@ -468,6 +481,7 @@ async fn start(ctx: &ToolContext, args: &Value) -> anyhow::Result<ToolOutput> {
         let reason = loop {
             tokio::select! {
                 _ = &mut stopped => {
+                    drain_after_flush(&listener, &mut sub);
                     sub.stop().await;
                     return;
                 }
@@ -626,5 +640,126 @@ impl Tool for NetworkTool {
             .await,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::{FakeCdp, call, context, settle};
+
+    fn network_tool() -> std::sync::Arc<dyn browse_core::Tool> {
+        crate::tools().into_iter().find(|tool| tool.spec().name == "network").unwrap()
+    }
+
+    fn sent(cdp: &FakeCdp, request_id: &str, url: &str) {
+        cdp.emit(
+            "Network.requestWillBeSent",
+            json!({
+                "requestId": request_id, "type": "Fetch",
+                "request": { "url": url, "method": "GET", "headers": {} }
+            }),
+            None,
+        );
+    }
+
+    /// A stop while a driver holds a failed hop reports its real error immediately, with whatever headers it has.
+    #[tokio::test]
+    async fn stop_flushes_a_parked_failure() {
+        let cdp = FakeCdp::new();
+        let ctx = context(cdp.clone(), vec![]);
+        let network = network_tool();
+        assert!(!call(&ctx, network.as_ref(), json!({ "action": "start" })).await.0);
+        sent(&cdp, "1", "http://a/api/slow");
+        cdp.emit("Network.loadingFailed", json!({ "requestId": "1", "errorText": "net::ERR_ABORTED" }), None);
+        settle().await;
+        let started = std::time::Instant::now();
+        let (error, stopped) = call(&ctx, network.as_ref(), json!({ "action": "stop" })).await;
+        assert!(!error, "{stopped}");
+        assert!(started.elapsed() < Duration::from_millis(100), "stop waited {}", started.elapsed().as_millis());
+        assert_eq!(stopped["exchanges"][0]["failure"], json!("net::ERR_ABORTED"), "{stopped}");
+    }
+
+    /// An unfinished request must not make stop wait for the driver's extra-info grace.
+    #[tokio::test]
+    async fn stop_with_a_never_finishing_request_is_prompt() {
+        let cdp = FakeCdp::new();
+        let ctx = context(cdp.clone(), vec![]);
+        let network = network_tool();
+        assert!(!call(&ctx, network.as_ref(), json!({ "action": "start" })).await.0);
+        sent(&cdp, "1", "http://a/hang");
+        settle().await;
+        let started = std::time::Instant::now();
+        let (error, stopped) = call(&ctx, network.as_ref(), json!({ "action": "stop" })).await;
+        assert!(!error, "{stopped}");
+        assert!(started.elapsed() < Duration::from_millis(100), "stop waited {}", started.elapsed().as_millis());
+        assert_eq!(stopped["exchanges"][0]["request"]["url"], json!("http://a/hang"), "{stopped}");
+    }
+
+    /// A request that starts after the stop must not be part of the result.
+    #[tokio::test]
+    async fn stop_drops_a_request_delivered_by_flush() {
+        let ctx = context(FakeCdp::new(), vec![]);
+        let driver = ctx.browser.tab_driver(1).await.unwrap();
+        let shared = Arc::new(Shared {
+            driver,
+            filters: Filters { url: None, resource_types: Vec::new(), methods: Vec::new(), bodies: false },
+            inner: SyncMutex::new(Inner::default()),
+            finalizers: Semaphore::new(MAX_FINALIZERS),
+            in_flight: tokio::sync::watch::channel(0).0,
+        });
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut sub = Subscription::new(rx, None, None).with_flush(move || {
+            let _ = tx.send(NetworkEvent::Request(browse_core::NetworkRequest {
+                id: RequestId::from("late"),
+                redirect_of: None,
+                frame: None,
+                url: "http://a/late".into(),
+                method: "GET".into(),
+                headers: Vec::new(),
+                resource_type: "Fetch".into(),
+                post_data: None,
+                has_body: false,
+            }));
+            let _ = tx.send(NetworkEvent::Lagged(1));
+        });
+        drain_after_flush(&shared, &mut sub);
+        let inner = shared.inner.lock().unwrap();
+        assert_eq!(inner.missed_event_count, 1, "the flush ran");
+        assert!(inner.pending.is_empty());
+        assert!(inner.entries.is_empty());
+    }
+
+    /// A parked redirect reports its 302 even though stop arrives before its trailing finish.
+    #[tokio::test]
+    async fn stop_keeps_a_parked_redirect_response() {
+        let cdp = FakeCdp::new();
+        let ctx = context(cdp.clone(), vec![]);
+        let network = network_tool();
+        assert!(!call(&ctx, network.as_ref(), json!({ "action": "start" })).await.0);
+        sent(&cdp, "1", "http://a/hop");
+        cdp.emit(
+            "Network.requestWillBeSent",
+            json!({
+                "requestId": "1", "type": "Fetch", "redirectHasExtraInfo": true,
+                "redirectResponse": {
+                    "status": 302, "statusText": "Found",
+                    "headers": { "Location": "/landed", "Content-Type": "text/plain" }
+                },
+                "request": { "url": "http://a/landed", "method": "GET", "headers": {} }
+            }),
+            None,
+        );
+        settle().await;
+        let (error, stopped) = call(&ctx, network.as_ref(), json!({ "action": "stop" })).await;
+        assert!(!error, "{stopped}");
+        let hop = stopped["exchanges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|exchange| exchange["request"]["url"] == "http://a/hop")
+            .expect("the redirect hop");
+        assert_eq!(hop["response"]["status"], json!(302), "{stopped}");
+        assert!(hop.get("failure").is_none(), "{stopped}");
     }
 }
