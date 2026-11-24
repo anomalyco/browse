@@ -500,11 +500,18 @@ pub fn disconnect(args: &[String]) -> anyhow::Result<i32> {
         return Ok(1);
     };
     let key = text(&browser, "key");
-    let recorded = firefox::read_recorded(&paths).into_iter().find(|r| firefox::driver_key(&r.profile) == key);
-    let quit = recorded.as_ref().is_some_and(|r| r.dedicated && r.headless);
+    let ff_recorded = firefox::read_recorded(&paths).into_iter().find(|r| firefox::driver_key(&r.profile) == key);
+    let chrome_recorded = browse_relay::chrome::read_recorded(&paths)
+        .into_iter()
+        .find(|r| browse_relay::chrome::driver_key(&r.profile) == key);
+    let quit = ff_recorded.as_ref().is_some_and(|r| r.dedicated && r.headless)
+        || chrome_recorded.as_ref().is_some_and(|r| r.headless);
     // Forgotten first, so the relay doesn't attach it again the moment it's let go.
-    if let Some(record) = &recorded {
+    if let Some(record) = &ff_recorded {
         firefox::forget(&paths, &record.profile)?;
+    }
+    if let Some(record) = &chrome_recorded {
+        browse_relay::chrome::forget(&paths, &record.profile)?;
     }
     let (status, answer) = relay::drivers("disconnect", &json!({ "browser": text(&browser, "id"), "quit": quit }))?;
     if status != 200 || answer["disconnected"] != true {

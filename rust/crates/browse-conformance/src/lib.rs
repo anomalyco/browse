@@ -9,7 +9,6 @@
 //! Nothing here is used by the shipped crates.
 
 pub mod browser;
-pub mod cdp_ws;
 pub mod compare;
 pub mod divergences;
 pub mod launch;

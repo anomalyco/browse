@@ -476,7 +476,7 @@ pub fn uninstall(args: &[String]) -> anyhow::Result<i32> {
     // Only a browser that was paired (or connected through the extension) has an extension to remove.
     let paired = !browse_relay::pairing::read_browser_pairings(&paths).is_empty()
         || browse_relay::paths::read_json::<serde_json::Map<String, Value>>(&paths.browsers()).is_some_and(|known| known.keys().any(|key| !key.starts_with("driver:")));
-    let mut status = crate::firefox::uninstall();
+    let mut status = crate::firefox::uninstall().max(crate::chrome::uninstall());
     match relay::stop() {
         Ok(true) => println!("✓ Stopped the relay"),
         Ok(false) => {}

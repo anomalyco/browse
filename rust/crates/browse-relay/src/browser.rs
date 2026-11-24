@@ -192,9 +192,12 @@ impl Relay {
                 }
                 // A browser browse drove directly doesn't reconnect by itself: no point waiting for it.
                 let wanted = name.to_lowercase();
-                let direct = st.known.iter().any(|(key, k)| key.starts_with("driver:") && (k.id == wanted || k.name.to_lowercase() == wanted));
-                if direct && st.link_by_name(name).is_none() {
-                    bail!("Browser '{name}' isn't connected to browse right now. Ask the user to run `browse firefox` to connect it again, then retry.");
+                let direct = st.known.iter().find(|(key, k)| key.starts_with("driver:") && (k.id == wanted || k.name.to_lowercase() == wanted));
+                if let Some((key, _)) = direct
+                    && st.link_by_name(name).is_none()
+                {
+                    let cmd = if key.starts_with("driver:cdp:") { "browse chrome" } else { "browse firefox" };
+                    bail!("Browser '{name}' isn't connected to browse right now. Ask the user to run `{cmd}` to connect it again, then retry.");
                 }
             }
             return self.link_for(Some(name)).await.map(BrowserRef::Extension);

@@ -28,6 +28,12 @@ pub struct Browser {
     launch: Vec<String>,
 }
 
+impl Browser {
+    pub fn launch_names(&self) -> &[String] {
+        &self.launch
+    }
+}
+
 pub struct Match {
     pub browser: usize,
     pub profile: String,

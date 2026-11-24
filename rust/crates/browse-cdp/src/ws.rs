@@ -1,26 +1,49 @@
 //! `CdpWsBrowserDriver`: a `BrowserDriver` for a Chromium started with `--remote-debugging-port`.
 //!
 //! The browser-level WebSocket creates, closes and discovers targets (popups arrive as `Target.targetCreated` with an
-//! opener). Every attached tab gets its own WebSocket to `/devtools/page/<target>`, wrapped in
-//! `browse_cdp::CdpTabDriver`, so no two tabs ever share a session or each other's events.
+//! opener). Every attached tab gets its own WebSocket to `/devtools/page/<target>` over the pinned peer address,
+//! wrapped in `CdpTabDriver`, so no two tabs ever share a session or each other's events.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use browse_cdp::{Cdp, CdpError, CdpEvent, CdpTabDriver};
 use browse_core::{
     BrowserDriver, BrowserEvent, CloseReason, DriverError, DriverInfo, DriverResult, TabDriver, TabOptions, TargetId,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
+use crate::{Cdp, CdpError, CdpEvent, CdpTabDriver};
+
 type Pending = HashMap<i64, oneshot::Sender<Result<Value, CdpError>>>;
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn ws_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(512 << 20))
+        .max_frame_size(Some(512 << 20))
+}
+
+/// Parses Chrome's `<user-data-dir>/DevToolsActivePort` file (line 1: port, line 2: `/devtools/browser/...`)
+/// into a loopback WebSocket URL.
+pub fn parse_devtools_active_port(text: &str) -> Option<String> {
+    let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+    let port: u16 = lines.next()?.parse().ok().filter(|p| *p > 0)?;
+    let path = lines.next()?;
+    if !path.starts_with("/devtools/browser/") || path.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return None;
+    }
+    Some(format!("ws://127.0.0.1:{port}{path}"))
+}
 
 /// One DevTools WebSocket: requests matched to answers by id, everything else broadcast as events.
 pub struct WsConnection {
@@ -36,14 +59,39 @@ pub struct WsConnection {
 }
 
 impl WsConnection {
-    pub async fn connect(url: &str, closed_error: fn() -> CdpError) -> anyhow::Result<Arc<WsConnection>> {
-        let config = WebSocketConfig::default().max_message_size(Some(512 << 20)).max_frame_size(Some(512 << 20));
+    /// Connects a DevTools WebSocket over an already-connected `TcpStream` (no `Origin` header, no second DNS lookup).
+    pub async fn connect_stream(
+        url: &str,
+        stream: TcpStream,
+        closed_error: fn() -> CdpError,
+    ) -> anyhow::Result<Arc<WsConnection>> {
+        let _ = stream.set_nodelay(true);
         let (socket, _) = tokio::time::timeout(
-            Duration::from_secs(10),
-            tokio_tungstenite::connect_async_with_config(url, Some(config), true),
+            CONNECT_TIMEOUT,
+            tokio_tungstenite::client_async_with_config(url, stream, Some(ws_config())),
         )
         .await
         .map_err(|_| anyhow::anyhow!("connecting to {url} timed out"))??;
+        Ok(Self::from_socket(socket, closed_error))
+    }
+
+    pub async fn connect(url: &str, closed_error: fn() -> CdpError) -> anyhow::Result<Arc<WsConnection>> {
+        let (socket, _) = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            tokio_tungstenite::connect_async_with_config(url, Some(ws_config()), true),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("connecting to {url} timed out"))??;
+        Ok(Self::from_socket(socket, closed_error))
+    }
+
+    fn from_socket<S>(
+        socket: tokio_tungstenite::WebSocketStream<S>,
+        closed_error: fn() -> CdpError,
+    ) -> Arc<WsConnection>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
         let (mut write, mut read) = socket.split();
         let (out, mut rx) = mpsc::unbounded_channel::<Message>();
         let (events, _) = broadcast::channel(8192);
@@ -80,7 +128,7 @@ impl WsConnection {
             reader.finish();
         });
         *connection.reader.lock().unwrap() = Some(task.abort_handle());
-        Ok(connection)
+        connection
     }
 
     fn dispatch(&self, value: Value) {
@@ -180,6 +228,8 @@ pub struct CdpWsBrowserDriver {
     info: DriverInfo,
     /// `host:port` of the DevTools server.
     endpoint: String,
+    /// Pinned peer address when connected via `connect_stream`, so per-tab sockets never re-resolve DNS.
+    peer: Option<SocketAddr>,
     browser: Arc<WsConnection>,
     events: broadcast::Sender<BrowserEvent>,
     pages: Mutex<HashMap<TargetId, Arc<WsConnection>>>,
@@ -188,15 +238,29 @@ pub struct CdpWsBrowserDriver {
 }
 
 impl CdpWsBrowserDriver {
+    /// Connects over an already-verified `TcpStream` (loopback / SSRF checks already performed by the caller).
+    pub async fn connect_stream(browser_url: &str, stream: TcpStream) -> anyhow::Result<Arc<CdpWsBrowserDriver>> {
+        let endpoint = parse_endpoint(browser_url)?;
+        let peer = stream.peer_addr()?;
+        let browser = WsConnection::connect_stream(browser_url, stream, || CdpError::Disconnected).await?;
+        Self::finish_connect(endpoint, Some(peer), browser).await
+    }
+
     /// Connects to the browser endpoint `ws://host:port/devtools/browser/<id>`.
     pub async fn connect(browser_url: &str) -> anyhow::Result<Arc<CdpWsBrowserDriver>> {
-        let endpoint = browser_url
-            .strip_prefix("ws://")
-            .and_then(|rest| rest.split('/').next())
-            .ok_or_else(|| anyhow::anyhow!("not a DevTools browser URL: {browser_url}"))?
-            .to_string();
+        let endpoint = parse_endpoint(browser_url)?;
         let browser = WsConnection::connect(browser_url, || CdpError::Disconnected).await?;
-        let version = browser.send("Browser.getVersion", json!({}), None).await?;
+        Self::finish_connect(endpoint, None, browser).await
+    }
+
+    async fn finish_connect(
+        endpoint: String,
+        peer: Option<SocketAddr>,
+        browser: Arc<WsConnection>,
+    ) -> anyhow::Result<Arc<CdpWsBrowserDriver>> {
+        let version = tokio::time::timeout(Duration::from_secs(5), browser.send("Browser.getVersion", json!({}), None))
+            .await
+            .map_err(|_| anyhow::anyhow!("Browser.getVersion timed out"))??;
         let product = version.get("product").and_then(Value::as_str).unwrap_or("Chromium").to_string();
         let mut raw = browser.subscribe();
         let (events, _) = broadcast::channel(256);
@@ -226,6 +290,7 @@ impl CdpWsBrowserDriver {
         Ok(Arc::new(CdpWsBrowserDriver {
             info,
             endpoint,
+            peer,
             browser,
             events,
             pages: Mutex::new(HashMap::new()),
@@ -237,6 +302,20 @@ impl CdpWsBrowserDriver {
     /// `Browser.getVersion`'s product, e.g. `HeadlessChrome/148.0.7778.96`.
     pub fn product(&self) -> &str {
         &self.product
+    }
+
+    /// Normalized browser display name derived from `product`, e.g. `"HeadlessChrome/148.0"` -> `"Chrome"`.
+    pub fn browser_name(&self) -> String {
+        let raw = self.product.split('/').next().unwrap_or("Chrome");
+        match raw {
+            "HeadlessChrome" | "Chrome" => "Chrome".into(),
+            other => other.to_string(),
+        }
+    }
+
+    /// Version portion of `product`, e.g. `"148.0.7778.96"`.
+    pub fn browser_version(&self) -> Option<String> {
+        self.product.split_once('/').map(|(_, v)| v.to_string()).filter(|v| !v.is_empty())
     }
 
     /// A browser-level command (outside any tab).
@@ -259,6 +338,15 @@ impl CdpWsBrowserDriver {
             })
             .unwrap_or_default())
     }
+}
+
+fn parse_endpoint(browser_url: &str) -> anyhow::Result<String> {
+    browser_url
+        .strip_prefix("ws://")
+        .and_then(|rest| rest.split('/').next())
+        .filter(|ep| !ep.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("not a DevTools browser URL: {browser_url}"))
 }
 
 impl Drop for CdpWsBrowserDriver {
@@ -304,10 +392,6 @@ impl BrowserDriver for CdpWsBrowserDriver {
         self.events.subscribe()
     }
 
-    /// Tabs open in the foreground: from Chromium 156, headless stops producing frames for a background tab once it
-    /// takes input, so the next `Page.captureScreenshot` never answers. Background tabs were a workaround for
-    /// a foreground tab ignoring selection-changing keys on macOS (Chromium 148); launch.rs now passes
-    /// `--disable-renderer-accessibility` for that renderer deadlock.
     async fn open(&self, url: Option<&str>, _opts: &TabOptions) -> DriverResult<TargetId> {
         // On macOS, headless Chromium 148 foreground tabs trigger an AppKit key-selection deadlock and shrink the
         // screencast surface by the browser chrome height; on Linux/Windows Chromium 156+, foreground avoids stalled
@@ -327,6 +411,17 @@ impl BrowserDriver for CdpWsBrowserDriver {
 
     async fn close(&self, target: &TargetId) -> DriverResult<()> {
         let page = self.pages.lock().unwrap().remove(target);
+        // On Linux and Windows, closing the last page target exits Chrome. Keep a blank placeholder tab open when
+        // closing the final tab so `tabs close` doesn't kill a dedicated browser session.
+        if let Ok(targets) = self.page_targets().await
+            && targets.len() == 1
+            && targets[0] == *target
+        {
+            let _ = self
+                .browser
+                .send("Target.createTarget", json!({ "url": "about:blank", "background": true }), None)
+                .await;
+        }
         let closed = self.browser.send("Target.closeTarget", json!({ "targetId": target.as_str() }), None).await;
         if let Some(page) = page {
             page.close();
@@ -340,9 +435,20 @@ impl BrowserDriver for CdpWsBrowserDriver {
 
     async fn attach(&self, target: &TargetId) -> DriverResult<Arc<dyn TabDriver>> {
         let url = format!("ws://{}/devtools/page/{}", self.endpoint, target.as_str());
-        let connection = WsConnection::connect(&url, || CdpError::TargetClosed)
-            .await
-            .map_err(|error| DriverError::Protocol(format!("attaching to {target}: {error}")))?;
+        let connection = match self.peer {
+            Some(peer) => {
+                let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(peer))
+                    .await
+                    .map_err(|_| DriverError::Timeout(CONNECT_TIMEOUT))?
+                    .map_err(|error| DriverError::Protocol(format!("attaching to {target}: {error}")))?;
+                WsConnection::connect_stream(&url, stream, || CdpError::TargetClosed)
+                    .await
+                    .map_err(|error| DriverError::Protocol(format!("attaching to {target}: {error}")))?
+            }
+            None => WsConnection::connect(&url, || CdpError::TargetClosed)
+                .await
+                .map_err(|error| DriverError::Protocol(format!("attaching to {target}: {error}")))?,
+        };
         if let Some(previous) = self.pages.lock().unwrap().insert(target.clone(), connection.clone()) {
             previous.close();
         }
@@ -359,12 +465,29 @@ impl BrowserDriver for CdpWsBrowserDriver {
     }
 
     async fn quit(&self) -> DriverResult<()> {
-        let closed = tokio::time::timeout(Duration::from_secs(3), self.browser.send("Browser.close", json!({}), None)).await;
+        let closed = tokio::time::timeout(Duration::from_secs(2), self.browser.send("Browser.close", json!({}), None)).await;
         self.shutdown().await;
         match closed {
             Ok(Ok(_)) | Ok(Err(CdpError::Disconnected)) => Ok(()),
             Ok(Err(error)) => Err(map(error)),
-            Err(_) => Err(DriverError::Timeout(Duration::from_secs(3))),
+            Err(_) => Err(DriverError::Timeout(Duration::from_secs(2))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_devtools_active_port() {
+        assert_eq!(
+            parse_devtools_active_port("9222\n/devtools/browser/abc-123\n"),
+            Some("ws://127.0.0.1:9222/devtools/browser/abc-123".to_string())
+        );
+        assert_eq!(parse_devtools_active_port("0\n/devtools/browser/abc\n"), None);
+        assert_eq!(parse_devtools_active_port("9222\n/not-devtools\n"), None);
+        assert_eq!(parse_devtools_active_port("9222\n/devtools/browser/bad path\n"), None);
+        assert_eq!(parse_devtools_active_port(""), None);
     }
 }

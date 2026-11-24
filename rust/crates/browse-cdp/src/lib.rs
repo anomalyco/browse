@@ -14,8 +14,10 @@ mod input;
 mod network;
 mod screencast;
 pub mod wire;
+pub mod ws;
 
 pub use wire::{Cdp, CdpError, CdpEvent};
+pub use ws::CdpWsBrowserDriver;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

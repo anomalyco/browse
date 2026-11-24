@@ -426,6 +426,9 @@ impl Relay {
         if let Some(url) = std::env::var("OPENCODE_BROWSER_BIDI_URL").ok().map(|u| u.trim().to_string()).filter(|u| !u.is_empty()) {
             bodies.push((None, json!({ "protocol": "webdriver-bidi", "url": url })));
         }
+        if let Some(url) = std::env::var("OPENCODE_BROWSER_CDP_URL").ok().map(|u| u.trim().to_string()).filter(|u| !u.is_empty()) {
+            bodies.push((None, json!({ "protocol": "cdp", "url": url })));
+        }
         for record in crate::firefox::read_recorded(&self.paths) {
             let key = crate::firefox::driver_key(&record.profile);
             let skip = {
@@ -437,6 +440,19 @@ impl Relay {
             }
             if let crate::firefox::ProfileState::Listening { url, .. } = crate::firefox::state(&record.profile) {
                 bodies.push((Some(key.clone()), json!({ "protocol": "webdriver-bidi", "url": url, "key": key, "name": record.display_name() })));
+            }
+        }
+        for record in crate::chrome::read_recorded(&self.paths) {
+            let key = crate::chrome::driver_key(&record.profile);
+            let skip = {
+                let st = self.st();
+                st.connecting.contains(&key) || st.drivers.iter().any(|d| d.key == key && d.connected())
+            };
+            if skip {
+                continue;
+            }
+            if let Some(url) = crate::chrome::live_url(&record.profile) {
+                bodies.push((Some(key.clone()), json!({ "protocol": "cdp", "url": url, "key": key, "name": record.display_name() })));
             }
         }
         for (key, body) in bodies {
@@ -590,43 +606,75 @@ fn failure(status: StatusCode, code: &str, error: String) -> (StatusCode, Value)
     (status, json!({ "error": error, "code": code }))
 }
 
-/// The endpoint a `/drivers/connect` body names, checked: its session URL, host and port.
-fn endpoint(raw: &str) -> Result<(String, String, u16), String> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Protocol {
+    BiDi,
+    Cdp,
+}
+
+impl Protocol {
+    fn parse(raw: &str) -> Result<Self, String> {
+        match raw {
+            "webdriver-bidi" => Ok(Protocol::BiDi),
+            "cdp" => Ok(Protocol::Cdp),
+            other => Err(format!("protocol must be \"webdriver-bidi\" or \"cdp\", not {other:?}")),
+        }
+    }
+
+    fn key_prefix(self) -> &'static str {
+        match self {
+            Protocol::BiDi => "driver:bidi",
+            Protocol::Cdp => "driver:cdp",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Protocol::BiDi => "WebDriver BiDi",
+            Protocol::Cdp => "CDP",
+        }
+    }
+}
+
+/// The endpoint a `/drivers/connect` body names, checked: its WebSocket URL, host and port.
+fn endpoint(protocol: Protocol, raw: &str) -> Result<(String, String, u16), String> {
     let url = url::Url::parse(raw.trim()).map_err(|error| format!("url is not a valid URL ({error})"))?;
     if url.scheme() != "ws" {
-        return Err("url must be a ws:// URL (a WebDriver BiDi endpoint, like ws://127.0.0.1:9222)".into());
+        return Err(format!("url must be a ws:// URL (a {} endpoint, like ws://127.0.0.1:9222)", protocol.label()));
     }
     if !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
         return Err("url must not have credentials, a query or a fragment".into());
     }
     let host = url.host_str().filter(|h| !h.is_empty()).ok_or("url has no host")?.to_string();
     let port = url.port_or_known_default().ok_or("url has no port")?;
-    let path = match url.path() {
-        "" | "/" => "/session",
-        path => path,
+    let path = match (protocol, url.path()) {
+        (Protocol::BiDi, "" | "/") => "/session",
+        (Protocol::Cdp, "" | "/") => return Err("CDP url must include a DevTools browser path (like ws://127.0.0.1:9222/devtools/browser/...)".into()),
+        (_, path) => path,
     };
     Ok((format!("ws://{host}:{port}{path}"), host, port))
 }
 
-/// `POST /drivers/connect`: connects a WebDriver BiDi browser and registers it. The connection and its session run in
-/// a task of their own, so a client that gives up never leaves a session behind in the browser.
+/// `POST /drivers/connect`: connects a direct browser driver (`webdriver-bidi` or `cdp`) and registers it. The
+/// connection and its session run in a task of their own, so a client that gives up never leaves a session behind.
 pub(crate) async fn connect(relay: &Arc<Relay>, body: &Value) -> (StatusCode, Value) {
-    let protocol = body.get("protocol").and_then(Value::as_str).unwrap_or("");
-    if protocol != "webdriver-bidi" {
-        return failure(StatusCode::BAD_REQUEST, "invalid-request", format!("protocol must be \"webdriver-bidi\", not {protocol:?}"));
-    }
+    let protocol = match Protocol::parse(body.get("protocol").and_then(Value::as_str).unwrap_or("")) {
+        Ok(protocol) => protocol,
+        Err(error) => return failure(StatusCode::BAD_REQUEST, "invalid-request", error),
+    };
     let Some(raw) = body.get("url").and_then(Value::as_str) else {
         return failure(StatusCode::BAD_REQUEST, "invalid-request", "url is required".into());
     };
-    let (url, host, port) = match endpoint(raw) {
+    let (url, host, port) = match endpoint(protocol, raw) {
         Ok(parts) => parts,
         Err(error) => return failure(StatusCode::BAD_REQUEST, "invalid-request", error),
     };
+    let prefix = protocol.key_prefix();
     let key = match body.get("key") {
-        None | Some(Value::Null) => format!("driver:bidi:{host}:{port}"),
+        None | Some(Value::Null) => format!("{prefix}:{host}:{port}"),
         Some(Value::String(key)) if !key.trim().is_empty() && key.len() <= 512 && !key.chars().any(char::is_control) => {
             let key = key.trim();
-            if key.starts_with("driver:") { key.to_string() } else { format!("driver:bidi:{key}") }
+            if key.starts_with("driver:") { key.to_string() } else { format!("{prefix}:{key}") }
         }
         Some(_) => return failure(StatusCode::BAD_REQUEST, "invalid-request", "key must be a non-empty string of at most 512 characters".into()),
     };
@@ -645,24 +693,36 @@ pub(crate) async fn connect(relay: &Arc<Relay>, body: &Value) -> (StatusCode, Va
         }
         st.connecting.insert(key.clone());
     }
+    let spec = ConnectSpec { protocol, url, host, port, key: key.clone(), name, allow_remote };
     let (done, answer) = oneshot::channel();
     let task_relay = relay.clone();
     tokio::spawn(async move {
         let relay = task_relay;
-        let outcome = connect_now(&relay, &url, &host, port, key.clone(), name, allow_remote).await;
+        let outcome = connect_now(&relay, spec).await;
         relay.st().connecting.remove(&key);
         let _ = done.send(outcome);
     });
     answer.await.unwrap_or_else(|_| failure(StatusCode::INTERNAL_SERVER_ERROR, "driver-connect-failed", "the connection task ended".into()))
 }
 
+struct ConnectSpec {
+    protocol: Protocol,
+    url: String,
+    host: String,
+    port: u16,
+    key: String,
+    name: Option<String>,
+    allow_remote: bool,
+}
+
 /// Resolves, checks the peer is loopback (before any WebSocket byte), starts the session and registers it.
-async fn connect_now(relay: &Arc<Relay>, url: &str, host: &str, port: u16, key: String, name: Option<String>, allow_remote: bool) -> (StatusCode, Value) {
+async fn connect_now(relay: &Arc<Relay>, spec: ConnectSpec) -> (StatusCode, Value) {
+    let ConnectSpec { protocol, url, host, port, key, name, allow_remote } = spec;
     let not_local = || {
         failure(
             StatusCode::FORBIDDEN,
             "driver-not-local",
-            format!("{url} is not on this computer: browse connects only to loopback WebDriver BiDi endpoints unless the relay runs with OPENCODE_BROWSER_ALLOW_REMOTE_DRIVERS=1"),
+            format!("{url} is not on this computer: browse connects only to loopback {} endpoints unless the relay runs with OPENCODE_BROWSER_ALLOW_REMOTE_DRIVERS=1", protocol.label()),
         )
     };
     let lookup = tokio::time::timeout(Duration::from_secs(5), tokio::net::lookup_host(format!("{host}:{port}"))).await;
@@ -685,26 +745,37 @@ async fn connect_now(relay: &Arc<Relay>, url: &str, host: &str, port: u16, key: 
     if !local && !allow_remote {
         return not_local();
     }
-    let driver = match browse_bidi::BiDiBrowserDriver::connect_stream(url, stream).await {
-        Ok(driver) => driver,
-        Err(error) => {
-            let message = error.to_string();
-            let busy = message.contains("Maximum number of active sessions") || message.contains("is busy") || message.contains("refused a WebDriver BiDi session");
-            return if busy {
-                failure(
-                    StatusCode::CONFLICT,
-                    "driver-session-busy",
-                    format!("The browser at {url} already has a WebDriver BiDi session (another client holds it, or one wasn't ended). Close that client or restart Firefox, then connect again. ({message})"),
-                )
-            } else {
-                failure(StatusCode::BAD_GATEWAY, "driver-connect-failed", message)
-            };
-        }
+    let (driver, name, version): (Arc<dyn BrowserDriver>, String, Option<String>) = match protocol {
+        Protocol::BiDi => match browse_bidi::BiDiBrowserDriver::connect_stream(&url, stream).await {
+            Ok(driver) => {
+                let capabilities = driver.capabilities();
+                let name = name.unwrap_or_else(|| browser_name(capabilities.get("browserName").and_then(Value::as_str).unwrap_or("Firefox")));
+                let version = capabilities.get("browserVersion").and_then(Value::as_str).map(str::to_string);
+                (driver, name, version)
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let busy = message.contains("Maximum number of active sessions") || message.contains("is busy") || message.contains("refused a WebDriver BiDi session");
+                return if busy {
+                    failure(
+                        StatusCode::CONFLICT,
+                        "driver-session-busy",
+                        format!("The browser at {url} already has a WebDriver BiDi session (another client holds it, or one wasn't ended). Close that client or restart Firefox, then connect again. ({message})"),
+                    )
+                } else {
+                    failure(StatusCode::BAD_GATEWAY, "driver-connect-failed", message)
+                };
+            }
+        },
+        Protocol::Cdp => match browse_cdp::CdpWsBrowserDriver::connect_stream(&url, stream).await {
+            Ok(driver) => {
+                let name = name.unwrap_or_else(|| browser_name(&driver.browser_name()));
+                let version = driver.browser_version();
+                (driver, name, version)
+            }
+            Err(error) => return failure(StatusCode::BAD_GATEWAY, "driver-connect-failed", error.to_string()),
+        },
     };
-    let capabilities = driver.capabilities();
-    let name = name.unwrap_or_else(|| browser_name(capabilities.get("browserName").and_then(Value::as_str).unwrap_or("Firefox")));
-    let version = capabilities.get("browserVersion").and_then(Value::as_str).map(str::to_string);
-    let driver: Arc<dyn BrowserDriver> = driver;
     match relay.register_driver(driver, key, name, version, Some(url.to_string()), local).await {
         Ok(entry) => (StatusCode::OK, json!({ "connected": true, "browser": entry_json(&entry) })),
         Err(error) if relay.is_stopping() => failure(StatusCode::SERVICE_UNAVAILABLE, "relay-restarting", error.to_string()),

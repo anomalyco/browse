@@ -776,3 +776,52 @@ async fn a_recorded_profile_held_by_another_client_says_so_in_next_step() {
     assert!(next.contains("Firefox already has another WebDriver BiDi client"), "{next}");
     holder.release();
 }
+
+#[tokio::test]
+async fn connects_a_loopback_cdp_endpoint_and_quits_via_browser_close() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let cdp_port = listener.local_addr().unwrap().port();
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let server_seen = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let server_seen = server_seen.clone();
+            tokio::spawn(async move {
+                let Ok(socket) = tokio_tungstenite::accept_async(stream).await else { return };
+                let (mut sink, mut stream) = socket.split();
+                while let Some(Ok(Message::Text(text))) = stream.next().await {
+                    let command: Value = serde_json::from_str(&text).unwrap();
+                    let method = command["method"].as_str().unwrap_or("").to_string();
+                    server_seen.lock().unwrap().push(method.clone());
+                    let result = match method.as_str() {
+                        "Browser.getVersion" => json!({ "product": "HeadlessChrome/158.0.0.0" }),
+                        _ => json!({}),
+                    };
+                    let reply = json!({ "id": command["id"], "result": result });
+                    let _ = sink.send(Message::Text(reply.to_string().into())).await;
+                }
+            });
+        }
+    });
+
+    let h = harness().await;
+    let port = h.handle.port();
+    let token = h.handle.token().to_string();
+    let url = format!("ws://127.0.0.1:{cdp_port}/devtools/browser/test-id");
+    // Missing DevTools path is refused.
+    let (bad, _) = http(port, "POST", "/drivers/connect", Some(&token), Some(json!({ "protocol": "cdp", "url": format!("ws://127.0.0.1:{cdp_port}") }))).await;
+    assert_eq!(bad, 400);
+
+    let (status, connected) = http(port, "POST", "/drivers/connect", Some(&token), Some(json!({ "protocol": "cdp", "url": url }))).await;
+    assert_eq!(status, 200, "{connected}");
+    assert_eq!(connected["connected"], true);
+    assert_eq!(connected["browser"]["name"], "Chrome");
+    assert_eq!(connected["browser"]["version"], "158.0.0.0");
+    assert_eq!(connected["browser"]["protocol"], "cdp");
+
+    let (status, disconnected) = http(port, "POST", "/drivers/disconnect", Some(&token), Some(json!({ "browser": connected["browser"]["id"], "quit": true }))).await;
+    assert_eq!(status, 200, "{disconnected}");
+    assert_eq!(disconnected["disconnected"], true);
+    assert_eq!(disconnected["quit"], true);
+    assert!(seen.lock().unwrap().iter().any(|m| m == "Browser.close"), "quit sends Browser.close: {:?}", seen.lock().unwrap());
+}

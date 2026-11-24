@@ -1,5 +1,6 @@
 mod agents;
 mod browsers;
+mod chrome;
 mod cli;
 mod dsh;
 mod firefox;
@@ -36,6 +37,7 @@ const COMMANDS: &[&str] = &[
     "restart",
     "pair",
     "extension",
+    "chrome",
     "firefox",
     "disconnect",
     "update",
@@ -66,6 +68,10 @@ SETUP
     --no-modify-path          Don't add browse to PATH
     --firefox                 Connect a Firefox-family browser instead of the Chrome extension
   extension                   Where to get the extension
+  chrome                      Connect a standalone Chrome-family browser over CDP (no extension required)
+    --app <name|path>         Which browser (default: the one connected before, else the first installed)
+    --headless                Run headless (browse disconnect quits it)
+    --url <ws://...>          Connect a CDP endpoint that's already listening
   firefox                     Connect a Firefox-family browser directly, starting it with remote control when needed
     --app <firefox|dev|nightly|zen|path>
                               Which app (default: the one connected before, else the first installed)
@@ -154,6 +160,7 @@ fn main() {
         }),
         "pair" => setup::pair(rest),
         "extension" => Ok(setup::extension()),
+        "chrome" => chrome::command(rest),
         "firefox" => firefox::command(rest),
         "disconnect" => firefox::disconnect(rest),
         "update" => update::command(rest).map(|_| 0),

@@ -17,7 +17,7 @@ use browse_core::BrowserDriver;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use crate::cdp_ws::CdpWsBrowserDriver;
+use browse_cdp::CdpWsBrowserDriver;
 
 pub const CHROMIUM: &str = "chromium-cdp";
 pub const FIREFOX: &str = "firefox-bidi";
