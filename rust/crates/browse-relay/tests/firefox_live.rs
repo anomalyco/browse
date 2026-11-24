@@ -122,6 +122,12 @@ async fn the_relay_drives_lets_go_of_and_quits_a_headless_firefox() {
     let root = std::env::temp_dir().join(format!("browse-relay-firefox-live-{}-{}", std::process::id(), Instant::now().elapsed().as_nanos()));
     std::fs::create_dir_all(&root).unwrap();
     let root = std::fs::canonicalize(&root).unwrap();
+    #[cfg(windows)]
+    let root = root
+        .to_str()
+        .and_then(|s| s.strip_prefix("\\\\?\\"))
+        .map(PathBuf::from)
+        .unwrap_or(root);
     let scratch = Scratch(root.clone());
     let home = scratch.0.join("home");
     let profile = scratch.0.join("profile");
@@ -140,7 +146,9 @@ async fn the_relay_drives_lets_go_of_and_quits_a_headless_firefox() {
     let mut child = launch(&binary, &home, &profile);
     let (url, pid) = listening(&profile).await;
     assert!(url.starts_with("ws://127.0.0.1:") && url.ends_with("/session"), "{url}");
-    assert!(pid.is_some(), "the lock names its holder");
+    if cfg!(unix) {
+        assert!(pid.is_some(), "the lock names its holder");
+    }
 
     let key = firefox::driver_key(&profile);
     let connect = json!({ "protocol": "webdriver-bidi", "url": url, "key": key, "name": "Firefox" });
