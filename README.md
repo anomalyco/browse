@@ -249,6 +249,8 @@ OpenCode, which composes tools in code mode, gets the plain tools. Every other M
 | `settings`, `status` | Read or change your settings when you ask; the relay, browsers, pairing state and what to do next |
 | `execute` | For other clients: JavaScript with a Playwright-style `page`, `snapshot()`, `ref()`, `handoff()`, `state` and `browse.<tool>()`. Each result starts with the tab it ended in, to pass back as `tab` |
 
+`click`, `fill` and `select` fail when something covers the target, naming what is on top, unless you pass `force: true`.
+
 Everything is a CLI too: `browse navigate https://example.com` prints the new tab's id, then `browse snapshot --tab
 <id>`, `browse click e12 --tab <id>`, `browse execute --file script.js`. `browse tools` lists them and `browse <tool>
 --help` shows a tool's options.

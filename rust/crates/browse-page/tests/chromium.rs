@@ -315,6 +315,58 @@ async fn covered_elements_fail_fast_and_dialogs_pause() {
     assert_eq!(title, "\"false\"");
 }
 
+/// fill and select check what a click checks: a field under an overlay fails without force and is left untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fill_and_select_fail_when_something_covers_them() {
+    let h = harness!(false);
+    let url = h.server.page(
+        "/covered-form",
+        r#"<!doctype html><style>#overlay { position: fixed; inset: 0; background: rgba(0,0,0,.3) }</style>
+<input id="name"><select id="plan"><option value="free">Free</option><option value="pro">Pro</option></select>
+<div id="overlay"></div>"#,
+    );
+    h.ok("navigate", json!({ "url": url })).await;
+
+    let error = h.err("fill", json!({ "selector": "#name", "value": "x" })).await;
+    assert!(error.contains("div id=\"overlay\""), "{error}");
+    assert!(error.contains("force: true"), "{error}");
+    let value = h.ok("eval", json!({ "expression": "document.getElementById('name').value" })).await;
+    assert_eq!(value, "\"\"", "a covered field is left empty");
+
+    h.ok("fill", json!({ "selector": "#name", "value": "x", "force": true })).await;
+    let value = h.ok("eval", json!({ "expression": "document.getElementById('name').value" })).await;
+    assert_eq!(value, "\"x\"");
+
+    let error = h.err("fill", json!({ "selector": "#plan", "value": "Pro" })).await;
+    assert!(error.contains("div id=\"overlay\""), "{error}");
+    let value = h.ok("eval", json!({ "expression": "document.getElementById('plan').value" })).await;
+    assert_eq!(value, "\"free\"", "a covered select stays unchanged");
+
+    let error = h.err("select", json!({ "selector": "#plan", "values": ["Pro"] })).await;
+    assert!(error.contains("div id=\"overlay\""), "{error}");
+    let value = h.ok("eval", json!({ "expression": "document.getElementById('plan').value" })).await;
+    assert_eq!(value, "\"free\"");
+    let selected = h.json("select", json!({ "selector": "#plan", "values": ["Pro"], "force": true })).await;
+    assert_eq!(selected["selected"][0], "pro", "{selected}");
+
+    // A floating label over its own field is not a cover: clicking it focuses the field, so both work.
+    let url = h.server.page(
+        "/floating-label",
+        r#"<!doctype html><style>
+input { position: absolute; left: 20px; top: 20px; width: 200px; height: 40px }
+label { position: absolute; left: 100px; top: 30px; width: 60px; height: 20px; z-index: 2; background: #fff }
+</style>
+<label for="city">City</label><input id="city">"#,
+    );
+    h.ok("navigate", json!({ "url": url })).await;
+    h.ok("fill", json!({ "selector": "#city", "value": "Paris" })).await;
+    let value = h.ok("eval", json!({ "expression": "document.getElementById('city').value" })).await;
+    assert_eq!(value, "\"Paris\"");
+    h.ok("click", json!({ "selector": "#city" })).await;
+    let focused = h.ok("eval", json!({ "expression": "document.activeElement.id" })).await;
+    assert_eq!(focused, "\"city\"");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn iframes_same_and_cross_origin() {
     let h = harness!(false);

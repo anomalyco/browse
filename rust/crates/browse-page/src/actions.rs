@@ -66,6 +66,24 @@ fn describe(resolved: &Resolved, spec: &Spec) -> String {
     if resolved.label.is_empty() { spec.label() } else { format!("{} ({})", resolved.label, spec.label()) }
 }
 
+/// Fails when input at the element's click point would reach something else: the same checks and "Can't reach"
+/// message as click, for callers that already resolved the element and don't click it (fill, select). force skips
+/// the check entirely, so forced behaviour is unchanged.
+pub async fn ensure_reachable(page: &Arc<TabPage>, input: &mut Input<'_>, resolved: &Resolved, timeout: Duration, force: bool) -> Result<()> {
+    if force {
+        return Ok(());
+    }
+    let options = PointerOptions { timeout, force, position: None, hit_test: true, enabled: true };
+    match prepare(page, input, resolved, Instant::now() + timeout, options).await {
+        Ok(_) => Ok(()),
+        Err(Prepare::Detached) => {
+            let name = if resolved.label.is_empty() { "the field" } else { &resolved.label };
+            bail!("{name} kept re-rendering or detaching from the page; take a new snapshot and retry")
+        }
+        Err(Prepare::Failed(error)) => Err(error),
+    }
+}
+
 async fn prepare(page: &Arc<TabPage>, input: &mut Input<'_>, resolved: &Resolved, deadline: Instant, options: PointerOptions) -> std::result::Result<Point, Prepare> {
     let element = &resolved.element;
     let name = if resolved.label.is_empty() { "the element".to_string() } else { resolved.label.clone() };

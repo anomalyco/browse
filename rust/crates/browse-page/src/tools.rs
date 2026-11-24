@@ -516,6 +516,7 @@ async fn fill_one(c: &Ctx, input: &mut Input<'_>, field: &Field, timeout: Durati
         }
         "select" | "select-multiple" => {
             let value = field.value.as_ref().ok_or_else(|| anyhow!("{} is a select; pass the option's value or label as value", label))?;
+            actions::ensure_reachable(&c.page, input, &resolved, timeout, force).await?;
             let selected = select_options(c, &resolved.element, &[json!({ "valueOrLabel": value })], timeout).await?;
             Ok(json!({ "target": label, "selected": selected }))
         }
@@ -525,6 +526,7 @@ async fn fill_one(c: &Ctx, input: &mut Input<'_>, field: &Field, timeout: Durati
                 bail!("{} is not a checkbox; pass value instead of checked", label);
             }
             actions::wait_editable(&c.page, &resolved, timeout, force).await?;
+            actions::ensure_reachable(&c.page, input, &resolved, timeout, force).await?;
             let text = field.value.clone().unwrap_or_default();
             let state = c.page.call_element(&resolved.element, "fill", vec![v(&text)], true).await?;
             match state.as_str() {
@@ -693,9 +695,11 @@ async fn select(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
         })
         .collect::<Result<_>>()?;
     let timeout = timeout_arg(&args, ACTION_TIMEOUT_MS);
-    run_action(&c, AfterOptions::default(), move |c, _input| {
+    let force = bool_arg(&args, "force");
+    run_action(&c, AfterOptions::default(), move |c, input| {
         Box::pin(async move {
             let resolved = target::resolve(&c.page, &c.tab_state, &spec, ResolveOptions { timeout, act: true }).await?;
+            actions::ensure_reachable(&c.page, input, &resolved, timeout, force).await?;
             let selected = select_options(c, &resolved.element, &options, timeout).await?;
             let mut out = Map::new();
             out.insert("target".into(), target_label(&spec, &resolved.label));
@@ -1751,7 +1755,7 @@ fn click_schema() -> Value {
     object(p, &[])
 }
 
-const FILL: &str = "Fill form fields with trusted input, replacing what is there: text inputs, textareas and contenteditable get the value typed in; selects pick the option by value or label; checkboxes/radios/switches take checked. Fill one field with ref/selector + value|checked, or many with fields: [...]. submit presses Enter after the last field. Returns JSON: filled (per field) and what changed.";
+const FILL: &str = "Fill form fields with trusted input, replacing what is there: text inputs, textareas and contenteditable get the value typed in; selects pick the option by value or label; checkboxes/radios/switches take checked. Checks nothing covers the field first: a covered field fails fast naming the element on top (dismiss it, or pass force). Fill one field with ref/selector + value|checked, or many with fields: [...]. submit presses Enter after the last field. Returns JSON: filled (per field) and what changed.";
 
 fn fill_schema() -> Value {
     let field = json!({
@@ -1769,7 +1773,7 @@ fn fill_schema() -> Value {
         "checked": { "type": "boolean", "description": "For a checkbox, radio or switch." },
         "fields": { "type": "array", "items": field, "description": "Several fields in order, instead of ref/selector + value." },
         "submit": { "type": "boolean", "description": "Press Enter after filling." },
-        "force": { "type": "boolean" },
+        "force": { "type": "boolean", "description": "Skip the visible/enabled/covered checks." },
         "timeout": { "type": "integer" },
     })));
     p.insert("ref".into(), json!({ "type": "string", "description": TARGET_DOC }));
@@ -1803,13 +1807,14 @@ fn press_schema() -> Value {
     )
 }
 
-const SELECT: &str = "Select option(s) of a <select> by value or label (by: \"value\", \"label\" or \"index\" to be strict). Several values for a multiple select. Returns the selected values. For custom dropdowns (role=combobox/listbox), click the control and then the option instead.";
+const SELECT: &str = "Select option(s) of a <select> by value or label (by: \"value\", \"label\" or \"index\" to be strict). Several values for a multiple select. Checks nothing covers the select first: a covered select fails fast naming the element on top (dismiss it, or pass force). Returns the selected values. For custom dropdowns (role=combobox/listbox), click the control and then the option instead.";
 
 fn select_schema() -> Value {
     object(
         target_props(props(json!({
             "values": { "anyOf": [{ "type": "string" }, { "type": "array", "items": { "type": ["string", "integer"] } }] },
             "by": { "type": "string", "enum": ["valueOrLabel", "value", "label", "index"] },
+            "force": { "type": "boolean", "description": "Skip the covered check." },
             "timeout": { "type": "integer" },
         }))),
         &["values"],

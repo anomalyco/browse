@@ -285,7 +285,7 @@
         if (item && item.index !== undefined) { by = by || "index"; return String(item.index) }
         throw new Error("selectOption takes strings or { value } / { label } / { index }")
       })
-      const result = await tool("select", this._target({ values: plain, by, timeout: this._timeout(options) }))
+      const result = await tool("select", this._target({ values: plain, by, force: options.force, timeout: this._timeout(options) }))
       return result && Array.isArray(result.selected) ? result.selected : result
     }
     setInputFiles(files, options = {}) {

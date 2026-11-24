@@ -365,7 +365,14 @@
       const target = this.inj.retarget(element, "button-link")
       if (!target || !target.isConnected) return "notconnected"
       const result = this.inj.expectHitTarget({ x, y }, target)
-      return result === "done" ? "done" : result.hitTargetDescription
+      if (result === "done") return "done"
+      // A <label> for this control placed over it (a floating label): clicking the label focuses or activates the
+      // control, so it is not covering it. Look in the element's own root, shadow DOM included.
+      const root = element.getRootNode()
+      const hit = root && typeof root.elementFromPoint === "function" ? root.elementFromPoint(x, y) : null
+      const label = hit && typeof hit.closest === "function" ? hit.closest("label") : null
+      if (label && label.control && (label.control === target || label.control === element)) return "done"
+      return result.hitTargetDescription
     },
     // Where an iframe's document starts, in its parent's viewport.
     frameOffset(element) {
