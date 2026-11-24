@@ -118,7 +118,8 @@ impl Tool for TabsTool {
 
 /// Brings the tabs' URLs and titles up to date from the browser, briefly.
 async fn refresh_titles(relay: &Arc<Relay>) {
-    let tabs: Vec<i64> = relay.st().tabs.keys().copied().collect();
+    crate::drivers::refresh_direct_titles(relay).await;
+    let tabs: Vec<i64> = relay.st().tabs.values().filter(|t| !t.backend.is_direct()).map(|t| t.id).collect();
     let lookups = tabs.into_iter().map(|tab| async move { (tab, relay.debugger(tab, None, "Target.getTargetInfo", json!({}), Some(Duration::from_secs(2))).await) });
     for (tab, result) in futures_util::future::join_all(lookups).await {
         if let Ok(result) = result
@@ -323,7 +324,8 @@ impl Tool for StatusTool {
         let relay = relay()?;
         let extension = relay.extension_status();
         Ok(json_output(json!({
-            "connected": extension["connected"],
+            // Any browser, the extension or one driven directly; `extension.connected` is the extension's alone.
+            "connected": extension["browserConnected"],
             "pairingState": extension["pairingState"],
             "nextStep": extension.get("nextStep"),
             "relay": {
@@ -368,6 +370,14 @@ impl Tool for SettingsTool {
 
     async fn call(&self, _ctx: ToolContext, args: Value) -> anyhow::Result<ToolOutput> {
         let relay = relay()?;
+        let direct: Vec<String> = relay.st().drivers.iter().filter(|d| d.connected()).map(|d| d.name.clone()).collect();
+        if relay.st().default_link().filter(|l| l.connected()).is_none() && !direct.is_empty() {
+            bail!(
+                "These settings belong to the browse Chrome extension, which isn't connected; the connected browser ({}) is driven directly and has no settings page. For it, set the relay's environment instead: OPENCODE_BROWSER_HUMAN_INPUT (human-like input on/off), OPENCODE_BROWSER_IDLE_TAB_TTL_MS (idle tab cleanup), and the security switches ({}).",
+                direct.join(", "),
+                crate::settings::SECURITY_VARIABLES.join(", ")
+            );
+        }
         let link = relay.st().default_link().filter(|l| l.connected()).ok_or_else(|| {
             anyhow!("The browse extension isn't connected, so its settings can't be read or changed. Ask the user to open the browser with the extension; its options page shows whether it's connected.")
         })?;

@@ -11,7 +11,14 @@ use serde_json::{Value, json};
 
 use crate::link::Link;
 use crate::protocol;
-use crate::relay::{Owner, Relay, State};
+use crate::relay::{DIRECT_TAB_BASE, DriverEntry, Owner, Relay, State};
+
+/// The browser a new tab opens in: an extension link, or a directly driven browser.
+#[derive(Clone)]
+pub enum BrowserRef {
+    Extension(Arc<Link>),
+    Direct(Arc<DriverEntry>),
+}
 
 /// How long a call waits for a browser that is reconnecting (a worker or relay restart) before failing.
 const RECONNECT_WAIT: Duration = Duration::from_secs(12);
@@ -50,7 +57,7 @@ impl Relay {
     pub fn tab_info(&self, st: &State, tab: i64) -> Option<TabInfo> {
         let entry = st.tabs.get(&tab)?;
         let mut options = entry.options.clone();
-        options.browser = st.link(&entry.link_key).map(|l| l.id.clone());
+        options.browser = st.browser_id_of(entry);
         Some(TabInfo {
             tab,
             url: entry.url.clone(),
@@ -76,6 +83,10 @@ impl Relay {
     /// A tab a call names that isn't attached yet comes back with a reconnecting browser's inventory (after a relay
     /// or worker restart): wait for that, briefly, instead of failing at once.
     pub async fn await_tab(&self, tab: i64) {
+        // A direct tab never comes back with an extension's inventory.
+        if tab >= DIRECT_TAB_BASE {
+            return;
+        }
         let reconnecting = {
             let st = self.st();
             if st.tabs.contains_key(&tab) {
@@ -162,6 +173,58 @@ impl Relay {
         changed
     }
 
+    /// The browser to open a tab in, extension or direct. A named one: a connected extension link, else a connected
+    /// direct driver, else the extension wait. Unnamed: the extension when it's connected or expected back (paired in
+    /// the cold-start window, a link not ready yet, connected in the last two minutes), else the first direct driver.
+    pub async fn target_for(self: &Arc<Self>, browser: Option<&str>) -> anyhow::Result<BrowserRef> {
+        if let Some(name) = browser.map(str::trim).filter(|n| !n.is_empty()) {
+            {
+                let st = self.st();
+                if let Some(link) = st.link_by_name(name).filter(|l| l.connected()) {
+                    return Ok(BrowserRef::Extension(link));
+                }
+                if let Some(entry) = st.driver_by_name(name).filter(|d| d.connected()) {
+                    return Ok(BrowserRef::Direct(entry));
+                }
+                // A browser browse drove directly doesn't reconnect by itself: no point waiting for it.
+                let wanted = name.to_lowercase();
+                let direct = st.known.iter().any(|(key, k)| key.starts_with("driver:") && (k.id == wanted || k.name.to_lowercase() == wanted));
+                if direct && st.link_by_name(name).is_none() {
+                    bail!("Browser '{name}' isn't connected to browse right now. Connect it again (browse connects a running Firefox with POST /drivers/connect), then retry.");
+                }
+            }
+            return self.link_for(Some(name)).await.map(BrowserRef::Extension);
+        }
+        let direct = |st: &State| st.drivers.iter().find(|d| d.connected()).cloned();
+        let wait = {
+            let st = self.st();
+            if let Some(link) = st.links.iter().find(|l| l.connected()) {
+                return Ok(BrowserRef::Extension(link.clone()));
+            }
+            if direct(&st).is_none() {
+                None
+            } else {
+                let paired = !crate::pairing::read_browser_pairings(&self.paths).is_empty();
+                if paired && self.age() < COLD_START_WAIT {
+                    Some(self.cold_start_wait())
+                } else if !st.links.is_empty() || st.last_connected.is_some_and(|at| at.elapsed() < RECENT_CONNECTION) {
+                    Some(RECONNECT_WAIT)
+                } else {
+                    Some(Duration::ZERO)
+                }
+            }
+        };
+        let Some(wait) = wait else { return self.link_for(None).await.map(BrowserRef::Extension) };
+        if !wait.is_zero() {
+            self.wait_until(wait, State::connected).await;
+        }
+        let st = self.st();
+        if let Some(link) = st.links.iter().find(|l| l.connected()) {
+            return Ok(BrowserRef::Extension(link.clone()));
+        }
+        direct(&st).map(BrowserRef::Direct).ok_or_else(|| anyhow!("No browser is connected. Open the browser with the browse extension."))
+    }
+
     /// The browser to open a tab in: the one named (waiting briefly while it reconnects), else the first connected.
     pub async fn link_for(self: &Arc<Self>, browser: Option<&str>) -> anyhow::Result<Arc<Link>> {
         if let Some(name) = browser.map(str::trim).filter(|n| !n.is_empty()) {
@@ -225,7 +288,7 @@ impl Relay {
         tabs.sort_by_key(|t| t.id);
         tabs.iter()
             .map(|t| {
-                let browser = st.link(&t.link_key).map(|l| l.id.clone());
+                let browser = st.browser_id_of(t);
                 let mut value = json!({
                     "tab": t.id,
                     "targetId": t.target_id,
@@ -273,6 +336,7 @@ impl Relay {
         let unpaired = st.handshake.last_unpaired.is_some_and(|at| now - at < crate::handshake::UNPAIRED_PRESENCE_TTL);
         let mismatch = if default.is_none() { st.handshake.mismatch.clone() } else { None };
         let paired = !crate::pairing::read_browser_pairings(&self.paths).is_empty();
+        let any = st.any_connected();
         let state = if st.connected() {
             "connected"
         } else if mismatch.is_some() {
@@ -312,7 +376,8 @@ impl Relay {
                 protocol::store_id()
             )),
         };
-        let browsers: Vec<Value> = st
+        let default_direct = if default.as_ref().is_some_and(|l| l.connected()) { None } else { st.drivers.iter().find(|d| d.connected()).cloned() };
+        let mut browsers: Vec<Value> = st
             .links
             .iter()
             .map(|link| {
@@ -321,6 +386,7 @@ impl Relay {
                     "name": link.name,
                     "driver": "cdp-extension",
                     "protocol": "cdp",
+                    "transport": "extension",
                     "default": default.as_ref().is_some_and(|d| Arc::ptr_eq(d, link)),
                     "connected": link.connected(),
                     "version": link.version,
@@ -332,8 +398,25 @@ impl Relay {
                 value
             })
             .collect();
+        browsers.extend(st.drivers.iter().map(|entry| {
+            json!({
+                "id": entry.id,
+                "name": entry.name,
+                "driver": entry.protocol,
+                "protocol": entry.protocol,
+                "transport": entry.transport,
+                "endpoint": entry.endpoint,
+                "local": entry.local,
+                "default": default_direct.as_ref().is_some_and(|d| Arc::ptr_eq(d, entry)),
+                "connected": entry.connected(),
+                "version": entry.version,
+                "tabs": st.tabs.values().filter(|t| t.link_key == entry.key).count(),
+            })
+        }));
         let mut status = json!({
+            // The extension's alone: `browse install` polls it to see the extension pair.
             "connected": st.connected(),
+            "browserConnected": any,
             "pairingState": state,
             "version": default.as_ref().and_then(|l| l.version.clone()),
             "build": default.as_ref().and_then(|l| l.build.clone()),
@@ -346,7 +429,7 @@ impl Relay {
             "pairingFailures": st.handshake.pairing_failures,
             "activeTargets": st.tabs.len(),
         });
-        if let Some(next) = next {
+        if let Some(next) = next.filter(|_| !any) {
             status["nextStep"] = next.into();
         }
         status
@@ -355,7 +438,7 @@ impl Relay {
 
 /// The read-only flag the relay knows for a tab, whether it is attached, remembered for a reconnecting browser
 /// (`reconnect_owners`), or held across a relay restart (`restorable`). None when nothing knows the tab.
-fn tab_read_only(st: &crate::relay::State, tab: TabId) -> Option<bool> {
+pub(crate) fn tab_read_only(st: &crate::relay::State, tab: TabId) -> Option<bool> {
     st.tabs
         .get(&tab)
         .map(|entry| entry.options.read_only)
@@ -403,6 +486,9 @@ impl RelayBrowser {
     pub async fn cdp(&self, tab: TabId) -> anyhow::Result<Arc<dyn Cdp>> {
         self.0.await_tab(tab).await;
         self.0.usable_tab(tab)?;
+        if self.0.is_direct_tab(tab) {
+            bail!("Tab {tab} is not a CDP extension tab");
+        }
         self.0.note_call_tab(tab);
         let mut st = self.0.st();
         let entry = st.tabs.get_mut(&tab).context("The tab went away")?;
@@ -443,6 +529,9 @@ impl Browser for RelayBrowser {
         let entry = st.tabs.get_mut(&tab).context("The tab went away")?;
         if let Some(driver) = &entry.driver {
             return Ok(driver.clone());
+        }
+        if entry.backend.is_direct() {
+            bail!("Tab {tab} lost its browser driver");
         }
         let cdp = match &entry.cdp {
             Some(cdp) => cdp.clone(),
@@ -512,7 +601,11 @@ impl Browser for RelayBrowser {
     }
 
     async fn connected_locally(&self, tab: TabId) -> bool {
-        self.0.st().browser_tab(tab).map(|(link, _)| link.local).unwrap_or(false)
+        let st = self.0.st();
+        if let Some(entry) = st.tabs.get(&tab).and_then(|t| t.backend.direct()) {
+            return entry.local;
+        }
+        st.browser_tab(tab).map(|(link, _)| link.local).unwrap_or(false)
     }
 
     async fn read_only(&self, tab: TabId) -> bool {

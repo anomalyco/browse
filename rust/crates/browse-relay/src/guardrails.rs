@@ -102,7 +102,7 @@ const RESTRICTED_SCHEMES: &[&str] = &[
     "filesystem",
 ];
 
-fn env_on(name: &str) -> bool {
+pub(crate) fn env_on(name: &str) -> bool {
     std::env::var(name).is_ok_and(|v| v == "1")
 }
 

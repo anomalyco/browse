@@ -1,4 +1,4 @@
-browse drives the user's real Chrome-family browser through the browse extension, so logins, extensions and open tabs are already there and the user can watch or take over. Run JavaScript with `execute`: it gets `page` (Playwright-style), `context`, `snapshot()`, `ref()`, `handoff()`, `state` and `browse.<tool>()` for every browse tool. `return` a value to get it back; one script can do many steps.
+browse drives the user's real browser (Chrome-family via the browse extension, or Firefox/Zen directly), so logins, extensions and open tabs are already there and the user can watch or take over. Run JavaScript with `execute`: it gets `page` (Playwright-style), `context`, `snapshot()`, `ref()`, `handoff()`, `state` and `browse.<tool>()` for every browse tool. `return` a value to get it back; one script can do many steps.
 
 Tabs are the handle. Without `tab`, `page` has no tab until its first `page.goto(url)`, which opens a new background tab. Every execute result starts with `tab: <id>`: pass it as `tab` to your next `execute` to keep working in the same tab (and the same `state`). Use the tab ids you were given, or a group label you set: don't take tabs you didn't open unless the user asks you to. `context.newPage()` opens another tab; popups a page opens are yours to use. `tabs` lists every agent tab and the ones the user lent.
 
@@ -15,4 +15,4 @@ The code runs in a small sandboxed engine on the relay, not Node: no require/imp
 
 When finished, close the tabs you opened (`await page.close()`, or the `tabs` tool with action `close`). `status` reports the relay and the connected browsers.
 
-If a call fails because no browser is connected (the extension isn't added, paired or open), `status` says why in `nextStep`: pass that step to the user and wait for them instead of retrying.
+If a call fails because no browser is connected, `status` says why in `nextStep`: pass that step to the user and wait for them instead of retrying.
