@@ -1,4 +1,4 @@
-browse drives the user's real browser (Chrome-family via the browse extension, or Firefox/Zen directly), so logins, extensions and open tabs are already there and the user can watch or take over.
+browse drives the user's real browser (Chrome-family via the browse extension, or Firefox-family directly), so logins, extensions and open tabs are already there and the user can watch or take over.
 
 Tabs are the handle. `navigate` with a `url` and no `tab` opens a new background tab and returns its id as `tab`; keep it and pass `tab` to every other call (snapshot, click, fill, screenshot, ...). `navigate` with `tab` goes to a URL in that tab. Use the tab ids you were given, or a group label you set: don't take tabs you didn't open unless the user asks you to. Popups a page opens show up as `newTabs` in a result and are yours to use. `tabs` lists every agent tab and any tabs the user lent (with the Chrome extension, they click the browse toolbar button on a tab; use it by its id).
 
