@@ -183,24 +183,13 @@ pub struct NavResult {
     pub pending: Option<String>,
 }
 
-/// Resolves when a dialog opens that browse won't answer by itself (beforeunload dialogs and an auto policy are
-/// answered in the background, so a navigation just continues past them).
-async fn blocking_dialog(page: &Arc<TabPage>) {
-    let mut rx = page.subscribe();
-    while page.blocking_dialog().is_none() {
-        if rx.changed().await.is_err() {
-            std::future::pending::<()>().await;
-        }
-    }
-}
-
 pub async fn goto(page: &Arc<TabPage>, url: &str, wait: WaitUntil, timeout: Duration, referrer: Option<&str>) -> Result<NavResult> {
     let deadline = Instant::now() + timeout;
     let seq = page.event_seq();
     let result = tokio::select! {
         result = page.driver().navigate(url, referrer) => result,
         _ = tokio::time::sleep_until(deadline.into()) => return Ok(NavResult { timed_out: true, pending: Some(url.to_string()) }),
-        _ = blocking_dialog(page) => return Ok(NavResult::default()),
+        _ = page.blocking_dialog_opened() => return Ok(NavResult::default()),
     };
     let navigation = match result {
         Ok(nav) => nav,

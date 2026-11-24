@@ -228,7 +228,7 @@ impl<'a> Input<'a> {
         F: FnOnce(Arc<dyn TabDriver>) -> Fut + Send + 'static,
         Fut: Future<Output = std::result::Result<(), DriverError>> + Send + 'static,
     {
-        if self.page.dialog().is_some() {
+        if self.page.blocking_dialog().is_some() {
             return Err(Interrupted.into());
         }
         let driver = self.page.driver().clone();
@@ -248,7 +248,7 @@ impl<'a> Input<'a> {
                 Ok(Err(error)) => Err(error),
                 Err(error) => Err(anyhow!("input task failed: {error}")),
             },
-            _ = self.page.dialog_opened() => Err(Interrupted.into()),
+            _ = self.page.blocking_dialog_opened() => Err(Interrupted.into()),
         }
     }
 
@@ -257,7 +257,7 @@ impl<'a> Input<'a> {
         F: FnOnce(Arc<dyn TabDriver>) -> Fut + Send + 'static,
         Fut: Future<Output = std::result::Result<(), DriverError>> + Send + 'static,
     {
-        if self.page.dialog().is_some() {
+        if self.page.blocking_dialog().is_some() {
             return Err(Interrupted.into());
         }
         let started = std::time::Instant::now();
@@ -544,14 +544,14 @@ impl<'a> Input<'a> {
         } else {
             Vec::new()
         };
-        if self.page.dialog().is_some() {
+        if self.page.blocking_dialog().is_some() {
             return Err(Interrupted.into());
         }
         let outcome = tokio::select! {
             result = self.page.driver().drag((from.x, from.y), (to.x, to.y), &path, self.modifiers) => {
                 result.map_err(crate::page::driver_error)?
             }
-            _ = self.page.dialog_opened() => return Err(Interrupted.into()),
+            _ = self.page.blocking_dialog_opened() => return Err(Interrupted.into()),
         };
         self.state.pointer = Some(to);
         Ok(outcome)

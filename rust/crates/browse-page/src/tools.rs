@@ -1311,7 +1311,7 @@ async fn set_probe_files(page: &Arc<TabPage>, probe: &crate::page::Element, path
     page.ensure_no_dialog()?;
     let sent = tokio::select! {
         result = page.driver().set_files(&probe.handle, paths) => result,
-        _ = page.dialog_opened() => {
+        _ = page.blocking_dialog_opened() => {
             return Err(page.ensure_no_dialog().err().unwrap_or_else(|| anyhow!("The page opened a dialog while browse checked the file paths; answer it with the dialog tool and try again")));
         }
     };

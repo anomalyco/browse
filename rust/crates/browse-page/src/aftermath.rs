@@ -65,18 +65,18 @@ fn started_navigation(events: &[TabEvent]) -> (bool, bool) {
 
 pub async fn after(ctx: &ToolContext, page: &Arc<TabPage>, before: &Before, options: AfterOptions) -> Map<String, Value> {
     let seq = before.seq;
-    if options.expect_navigation && page.dialog().is_none() {
+    if options.expect_navigation && page.blocking_dialog().is_none() {
         // A navigation the input started synchronously is announced before Chrome answers the input event, so it
         // is already queued; this short wait catches it and ones started a frame later.
         page.wait_until(Duration::from_millis(75), Duration::from_millis(50), |page| {
             let (started, _) = started_navigation(&page.events_since(seq));
-            started || page.dialog().is_some()
+            started || page.blocking_dialog().is_some()
         })
         .await;
         let (started, committed) = started_navigation(&page.events_since(seq));
         if started && !committed {
             page.wait_until(options.navigation_timeout, Duration::from_millis(100), |page| {
-                started_navigation(&page.events_since(seq)).1 || page.dialog().is_some()
+                started_navigation(&page.events_since(seq)).1 || page.blocking_dialog().is_some()
             })
             .await;
         }
@@ -84,7 +84,7 @@ pub async fn after(ctx: &ToolContext, page: &Arc<TabPage>, before: &Before, opti
         if committed {
             let main = page.main_frame();
             let remaining = options.navigation_timeout.saturating_sub(before.started.elapsed()).max(Duration::from_millis(500));
-            page.wait_until(remaining, Duration::from_millis(100), |page| page.lifecycle_has(&main, browse_core::LoadState::DomContentLoaded) || page.dialog().is_some()).await;
+            page.wait_until(remaining, Duration::from_millis(100), |page| page.lifecycle_has(&main, browse_core::LoadState::DomContentLoaded) || page.blocking_dialog().is_some()).await;
         }
     }
     describe(ctx, page, before, options).await

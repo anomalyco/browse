@@ -80,18 +80,47 @@ pub enum TabEvent {
 }
 
 #[derive(Default)]
+enum DialogState {
+    #[default]
+    None,
+    /// Open and being answered in the background by the auto policy (or as a `beforeunload`): does not pause for the
+    /// user and does not interrupt in-flight actions. Its close is reported as `auto` even when the browser reports
+    /// the close before answering the command (as Firefox does).
+    AutoAnswering(Dialog),
+    /// Open and pausing the page until the user/agent calls the `dialog` tool.
+    Blocking(Dialog),
+}
+
+impl DialogState {
+    fn any(&self) -> Option<&Dialog> {
+        match self {
+            DialogState::None => None,
+            DialogState::AutoAnswering(dialog) | DialogState::Blocking(dialog) => Some(dialog),
+        }
+    }
+
+    fn blocking(&self) -> Option<&Dialog> {
+        match self {
+            DialogState::Blocking(dialog) => Some(dialog),
+            DialogState::None | DialogState::AutoAnswering(_) => None,
+        }
+    }
+
+    fn is_auto(&self) -> bool {
+        matches!(self, DialogState::AutoAnswering(_))
+    }
+}
+
+#[derive(Default)]
 struct TabState {
     main_frame: String,
     frames: HashMap<String, FrameInfo>,
     worlds: HashMap<String, WorldCache>,
     frame_seq: HashMap<String, u32>,
     next_seq: u32,
-    dialog: Option<Dialog>,
+    dialog: DialogState,
     dialog_policy: Option<DialogPolicy>,
     auto_prompt_text: Option<String>,
-    /// The open dialog is being answered by the auto policy (or as a beforeunload); its close is the policy's even
-    /// when the browser reports the close before it answers the command (as Firefox does).
-    answering_auto: bool,
     /// Bumped for every dialog that opens, so answering one never clears the next.
     dialog_seq: u64,
     /// How many dialog closes the browser reported: the next one is for dialog `close_events + 1`.
@@ -116,7 +145,7 @@ struct Shared {
     driver: Arc<dyn TabDriver>,
     state: Mutex<TabState>,
     changed: watch::Sender<u64>,
-    dialog_open: watch::Sender<bool>,
+    blocking_dialog_open: watch::Sender<bool>,
 }
 
 pub struct TabPage {
@@ -156,13 +185,13 @@ impl TabPage {
     pub async fn attach(tab: TabId, driver: Arc<dyn TabDriver>) -> Result<Arc<TabPage>> {
         let events = driver.events();
         let (changed, _) = watch::channel(0u64);
-        let (dialog_open, _) = watch::channel(false);
+        let (blocking_dialog_open, _) = watch::channel(false);
         let shared = Arc::new(Shared {
             tab,
             driver: driver.clone(),
             state: Mutex::new(TabState::default()),
             changed,
-            dialog_open,
+            blocking_dialog_open,
         });
         let pump = tokio::spawn(pump(shared.clone(), events));
         let page = Arc::new(TabPage {
@@ -278,13 +307,11 @@ impl TabPage {
     }
 
     pub fn dialog(&self) -> Option<Dialog> {
-        self.shared.state.lock().unwrap().dialog.clone()
+        self.shared.state.lock().unwrap().dialog.any().cloned()
     }
 
     pub fn blocking_dialog(&self) -> Option<Dialog> {
-        let state = self.shared.state.lock().unwrap();
-        let dialog = state.dialog.clone()?;
-        (state.dialog_policy.is_none() && dialog.kind != DialogKind::BeforeUnload).then_some(dialog)
+        self.shared.state.lock().unwrap().dialog.blocking().cloned()
     }
 
     pub fn set_dialog_policy(&self, policy: Option<DialogPolicy>, prompt_text: Option<String>) {
@@ -311,14 +338,15 @@ impl TabPage {
     }
 
     pub fn ensure_no_dialog(&self) -> Result<()> {
-        match self.dialog() {
+        match self.blocking_dialog() {
             Some(dialog) => Err(Self::dialog_error(&dialog)),
             None => Ok(()),
         }
     }
 
-    pub async fn dialog_opened(&self) {
-        let mut rx = self.shared.dialog_open.subscribe();
+    /// Resolves when a blocking dialog (one browse is not auto-answering) is open.
+    pub async fn blocking_dialog_opened(&self) {
+        let mut rx = self.shared.blocking_dialog_open.subscribe();
         let _ = rx.wait_for(|open| *open).await;
     }
 
@@ -329,7 +357,7 @@ impl TabPage {
         self.ensure_no_dialog()?;
         tokio::select! {
             result = fut => result.map_err(driver_error),
-            _ = self.dialog_opened() => Err(Self::dialog_error(&self.dialog().unwrap_or(Dialog {
+            _ = self.blocking_dialog_opened() => Err(Self::dialog_error(&self.blocking_dialog().unwrap_or(Dialog {
                 kind: DialogKind::Alert,
                 message: String::new(),
                 default_prompt: String::new(),
@@ -341,7 +369,7 @@ impl TabPage {
     pub async fn handle_dialog(&self, accept: bool, prompt_text: Option<&str>) -> Result<Dialog> {
         let (dialog, seq) = {
             let state = self.shared.state.lock().unwrap();
-            (state.dialog.clone(), state.dialog_seq)
+            (state.dialog.any().cloned(), state.dialog_seq)
         };
         let dialog = dialog.ok_or_else(|| anyhow!("No dialog is open on this tab."))?;
         self.shared
@@ -820,24 +848,29 @@ impl Shared {
         self.bump();
     }
 
-    /// browse answered dialog `seq`: it closes if it is still the open one.
-    fn answered(&self, seq: u64, accepted: bool, auto: bool) {
-        let current = self.state.lock().unwrap().dialog_seq == seq;
-        if current {
-            self.clear_dialog(Some(accepted), auto);
+    /// The only place `state.dialog` changes, so `blocking_dialog_open` can never disagree with it.
+    fn set_dialog(&self, state: &mut TabState, next: DialogState) -> DialogState {
+        let prev = std::mem::replace(&mut state.dialog, next);
+        self.blocking_dialog_open.send_replace(state.dialog.blocking().is_some());
+        prev
+    }
+
+    fn close_dialog(&self, state: &mut TabState, accepted: bool, auto: bool) {
+        let prev = self.set_dialog(state, DialogState::None);
+        let auto = auto || prev.is_auto();
+        if prev.any().is_some() {
+            self.push(state, TabEvent::DialogClosed { accepted, auto });
         }
     }
 
-    fn clear_dialog(&self, accepted: Option<bool>, auto: bool) {
+    /// browse answered dialog `seq`: it closes if it is still the open one.
+    fn answered(&self, seq: u64, accepted: bool, auto: bool) {
         let mut state = self.state.lock().unwrap();
-        let auto = auto || std::mem::take(&mut state.answering_auto);
-        if state.dialog.take().is_some()
-            && let Some(accepted) = accepted
-        {
-            self.push(&mut state, TabEvent::DialogClosed { accepted, auto });
+        if state.dialog_seq != seq {
+            return;
         }
+        self.close_dialog(&mut state, accepted, auto);
         drop(state);
-        self.dialog_open.send_replace(false);
         self.bump();
     }
 
@@ -956,30 +989,45 @@ impl Shared {
             }
             PageEvent::DialogOpened(dialog) => {
                 let mut state = self.state.lock().unwrap();
-                state.dialog = Some(dialog.clone());
-                state.dialog_seq += 1;
-                let seq = state.dialog_seq;
                 let policy = state.dialog_policy;
-                let prompt_text = state
-                    .auto_prompt_text
-                    .clone()
-                    .unwrap_or_else(|| dialog.default_prompt.clone());
-                self.push(&mut state, TabEvent::Dialog(dialog.clone()));
-                drop(state);
-                self.dialog_open.send_replace(true);
                 let auto = match policy {
                     Some(DialogPolicy::Accept) => Some(true),
                     Some(DialogPolicy::Dismiss) => Some(false),
                     _ if dialog.kind == DialogKind::BeforeUnload => Some(true),
                     _ => None,
                 };
-                self.state.lock().unwrap().answering_auto = auto.is_some();
+                let next = if auto.is_some() {
+                    DialogState::AutoAnswering(dialog.clone())
+                } else {
+                    DialogState::Blocking(dialog.clone())
+                };
+                self.set_dialog(&mut state, next);
+                state.dialog_seq += 1;
+                let seq = state.dialog_seq;
+                let prompt_text = state
+                    .auto_prompt_text
+                    .clone()
+                    .unwrap_or_else(|| dialog.default_prompt.clone());
+                self.push(&mut state, TabEvent::Dialog(dialog.clone()));
+                drop(state);
                 if let Some(accept) = auto {
+                    // Auto-answered dialogs (auto policy, beforeunload) don't pause the page for the user, so don't
+                    // interrupt an in-flight action unless auto-answering itself fails.
                     let shared = self.clone();
                     tokio::spawn(async move {
                         let prompt = (accept && dialog.kind == DialogKind::Prompt).then_some(prompt_text.as_str());
                         if shared.driver.answer_dialog(accept, prompt).await.is_ok() {
                             shared.answered(seq, accept, true);
+                        } else {
+                            let mut state = shared.state.lock().unwrap();
+                            if state.dialog_seq == seq
+                                && let DialogState::AutoAnswering(d) = &state.dialog
+                            {
+                                let d = d.clone();
+                                shared.set_dialog(&mut state, DialogState::Blocking(d));
+                                drop(state);
+                                shared.bump();
+                            }
                         }
                     });
                 }
@@ -987,13 +1035,12 @@ impl Shared {
             PageEvent::DialogClosed { accepted } => {
                 // A close names no dialog: closes come in order, one per dialog. Chrome can report a dialog's close
                 // after the page already opened the next one, which must stay open.
-                let current = {
-                    let mut state = self.state.lock().unwrap();
-                    state.close_events += 1;
-                    state.close_events == state.dialog_seq
-                };
-                if current {
-                    self.clear_dialog(Some(accepted), false);
+                let mut state = self.state.lock().unwrap();
+                state.close_events += 1;
+                if state.close_events == state.dialog_seq {
+                    self.close_dialog(&mut state, accepted, false);
+                    drop(state);
+                    self.bump();
                 }
                 return;
             }
@@ -1054,6 +1101,9 @@ mod tests {
         /// A dialog the page opens as soon as the current one is answered.
         next: Mutex<Option<Dialog>>,
         late: bool,
+        fail_answer: bool,
+        /// Optional gate that holds `answer_dialog` open so tests can inspect the `AutoAnswering` state.
+        gate: Option<tokio::sync::watch::Receiver<bool>>,
     }
 
     #[async_trait::async_trait]
@@ -1128,6 +1178,13 @@ mod tests {
             Ok(browse_core::DragOutcome::NotDraggable)
         }
         async fn answer_dialog(&self, accept: bool, _: Option<&str>) -> browse_core::DriverResult<()> {
+            if let Some(gate) = &self.gate {
+                let mut rx = gate.clone();
+                let _ = rx.wait_for(|open| *open).await;
+            }
+            if self.fail_answer {
+                return Err(DriverError::Protocol("dialog answer rejected".into()));
+            }
             if self.late {
                 // As Chrome can: answered at once, then the next dialog opens before the first one's close arrives.
                 let events = self.events.clone();
@@ -1161,7 +1218,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_auto_answered_dialog_is_reported_as_auto_even_when_its_close_comes_first() {
-        let tab = Arc::new(EarlyCloseTab { events: broadcast::channel(16).0, next: Mutex::new(None), late: false });
+        let tab = Arc::new(EarlyCloseTab { events: broadcast::channel(16).0, next: Mutex::new(None), late: false, fail_answer: false, gate: None });
         let page = TabPage::attach(1, tab.clone()).await.unwrap();
         page.set_dialog_policy(Some(DialogPolicy::Accept), None);
         let dialog = Dialog { kind: DialogKind::Confirm, message: "Proceed?".into(), default_prompt: String::new(), url: "about:blank".into() };
@@ -1192,7 +1249,7 @@ mod tests {
 
     async fn answer_then_next(late: bool) {
         let confirm = Dialog { kind: DialogKind::Confirm, message: "second".into(), default_prompt: String::new(), url: "about:blank".into() };
-        let tab = Arc::new(EarlyCloseTab { events: broadcast::channel(16).0, next: Mutex::new(Some(confirm)), late });
+        let tab = Arc::new(EarlyCloseTab { events: broadcast::channel(16).0, next: Mutex::new(Some(confirm)), late, fail_answer: false, gate: None });
         let page = TabPage::attach(1, tab.clone()).await.unwrap();
         let alert = Dialog { kind: DialogKind::Alert, message: "first".into(), default_prompt: String::new(), url: "about:blank".into() };
         tab.events.send(PageEvent::DialogOpened(alert)).unwrap();
@@ -1202,6 +1259,102 @@ mod tests {
         assert!(page.wait_until(Duration::from_secs(5), Duration::from_millis(10), |p| p.dialog().is_some_and(|d| d.message == "second")).await);
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(page.dialog().map(|d| d.message), Some("second".to_string()), "the second dialog is still open (late: {late})");
+    }
+
+    #[tokio::test]
+    async fn auto_answered_dialog_does_not_interrupt_in_flight_actions() {
+        let (gate_tx, gate_rx) = watch::channel(false);
+        let tab = Arc::new(EarlyCloseTab { events: broadcast::channel(16).0, next: Mutex::new(None), late: false, fail_answer: false, gate: Some(gate_rx) });
+        let page = TabPage::attach(1, tab.clone()).await.unwrap();
+        page.set_dialog_policy(Some(DialogPolicy::Accept), None);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let guarded = tokio::spawn({
+            let page = page.clone();
+            async move {
+                page.guard_dialog(async move {
+                    let _ = done_rx.await;
+                    Ok(42)
+                })
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        let confirm = Dialog { kind: DialogKind::Confirm, message: "Proceed?".into(), default_prompt: String::new(), url: "about:blank".into() };
+        tab.events.send(PageEvent::DialogOpened(confirm)).unwrap();
+        // Wait until the pump has actually entered AutoAnswering (gate holds answer_dialog open).
+        assert!(page.wait_until(Duration::from_secs(2), Duration::from_millis(10), |p| p.dialog().is_some()).await);
+        assert!(page.blocking_dialog().is_none());
+        assert!(page.ensure_no_dialog().is_ok(), "ensure_no_dialog must allow AutoAnswering");
+        assert!(!guarded.is_finished(), "in-flight guard_dialog must not be interrupted by AutoAnswering");
+        // A new guard_dialog started mid-AutoAnswering must also succeed.
+        assert_eq!(page.guard_dialog(async { Ok(7) }).await.unwrap(), 7);
+        let _ = gate_tx.send(true);
+        assert!(page.wait_until(Duration::from_secs(5), Duration::from_millis(10), |p| {
+            p.events_since(0).iter().any(|e| matches!(e, TabEvent::DialogClosed { accepted: true, auto: true }))
+        }).await);
+        let _ = done_tx.send(());
+        assert_eq!(guarded.await.unwrap().unwrap(), 42);
+
+        // Two back-to-back auto-answered dialogs both close as auto and leave the watch false.
+        let second = Dialog { kind: DialogKind::Confirm, message: "Two".into(), default_prompt: String::new(), url: "about:blank".into() };
+        let tab2 = Arc::new(EarlyCloseTab { events: broadcast::channel(16).0, next: Mutex::new(Some(second)), late: true, fail_answer: false, gate: None });
+        let page2 = TabPage::attach(2, tab2.clone()).await.unwrap();
+        page2.set_dialog_policy(Some(DialogPolicy::Accept), None);
+        let first = Dialog { kind: DialogKind::Alert, message: "One".into(), default_prompt: String::new(), url: "about:blank".into() };
+        tab2.events.send(PageEvent::DialogOpened(first)).unwrap();
+        assert!(page2.wait_until(Duration::from_secs(5), Duration::from_millis(10), |p| {
+            p.events_since(0).iter().filter(|e| matches!(e, TabEvent::DialogClosed { accepted: true, auto: true })).count() == 2
+                && p.dialog().is_none()
+        }).await);
+        assert!(!*page2.shared.blocking_dialog_open.borrow());
+    }
+
+    #[tokio::test]
+    async fn beforeunload_and_mid_dialog_policy_changes_keep_dialog_state_consistent() {
+        let tab = Arc::new(EarlyCloseTab { events: broadcast::channel(16).0, next: Mutex::new(None), late: false, fail_answer: false, gate: None });
+        let page = TabPage::attach(1, tab.clone()).await.unwrap();
+        // beforeunload with policy off is auto-answered without waking blocking_dialog_opened().
+        let waiter = tokio::spawn({
+            let page = page.clone();
+            async move { page.blocking_dialog_opened().await }
+        });
+        tokio::task::yield_now().await;
+        let beforeunload = Dialog { kind: DialogKind::BeforeUnload, message: String::new(), default_prompt: String::new(), url: "about:blank".into() };
+        tab.events.send(PageEvent::DialogOpened(beforeunload)).unwrap();
+        assert!(page.wait_until(Duration::from_secs(5), Duration::from_millis(10), |p| {
+            p.events_since(0).iter().any(|e| matches!(e, TabEvent::DialogClosed { accepted: true, auto: true }))
+        }).await);
+        assert!(!waiter.is_finished(), "beforeunload must not wake blocking_dialog_opened()");
+        waiter.abort();
+
+        // Turning auto on while a blocking alert is already open does not retroactively reclassify it.
+        let alert = Dialog { kind: DialogKind::Alert, message: "Manual".into(), default_prompt: String::new(), url: "about:blank".into() };
+        tab.events.send(PageEvent::DialogOpened(alert)).unwrap();
+        assert!(page.wait_until(Duration::from_secs(5), Duration::from_millis(10), |p| p.blocking_dialog().is_some()).await);
+        page.set_dialog_policy(Some(DialogPolicy::Accept), None);
+        assert_eq!(page.blocking_dialog().map(|d| d.message), Some("Manual".to_string()));
+        assert!(page.ensure_no_dialog().is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_auto_answer_becomes_a_blocking_dialog_and_clears_on_close() {
+        let tab = Arc::new(EarlyCloseTab { events: broadcast::channel(16).0, next: Mutex::new(None), late: false, fail_answer: true, gate: None });
+        let page = TabPage::attach(1, tab.clone()).await.unwrap();
+        page.set_dialog_policy(Some(DialogPolicy::Accept), None);
+        let dialog = Dialog { kind: DialogKind::Confirm, message: "Stuck?".into(), default_prompt: String::new(), url: "about:blank".into() };
+        let opened = tokio::spawn({
+            let page = page.clone();
+            async move { page.blocking_dialog_opened().await }
+        });
+        tokio::task::yield_now().await;
+        tab.events.send(PageEvent::DialogOpened(dialog)).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), opened).await.expect("blocking_dialog_opened should fire").unwrap();
+        assert_eq!(page.blocking_dialog().map(|d| d.message), Some("Stuck?".to_string()));
+        // When the browser later closes it, it clears cleanly as non-auto and resets the watch.
+        tab.events.send(PageEvent::DialogClosed { accepted: false }).unwrap();
+        assert!(page.wait_until(Duration::from_secs(2), Duration::from_millis(10), |p| p.dialog().is_none()).await);
+        assert!(!*page.shared.blocking_dialog_open.borrow());
+        assert!(page.events_since(0).iter().any(|e| matches!(e, TabEvent::DialogClosed { accepted: false, auto: false })));
     }
 
     #[test]
