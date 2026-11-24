@@ -11,7 +11,7 @@ Use one loop: inspect, act, verify.
 
 In code mode, compose these tools in one script: navigate, call `snapshot`, pick refs from its text, act, then snapshot again to check, all in one run instead of one tool call per turn.
 
-When only a person can proceed — login, 2FA, passkey, captcha or payment confirmation — call `handoff` with the `tab` and what the user should do, and wait. Never solve a captcha yourself and never retry-loop a blocked site.
+When only a person can proceed — login, 2FA, passkey, captcha or payment confirmation — call `handoff` with the `tab` and what the user should do, and wait. Hand captchas to the user by default; try one yourself only when the user explicitly asked you to, and hand off if that attempt fails. Never retry-loop a blocked site.
 
 When finished, close the tabs you opened (`tabs` with action `close`; `group` closes every tab you opened with that group label). `status` reports the relay and the connected browsers.
 

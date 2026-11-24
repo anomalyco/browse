@@ -271,7 +271,7 @@ pub fn warning(outcome: &Outcome) -> Option<String> {
     if outcome.recommendation == "handoff" {
         let still = if outcome.waited_ms > 0 { format!(", still there after {} s", (outcome.waited_ms as f64 / 1000.0).round()) } else { String::new() };
         return Some(format!(
-            "Blocked by a {} {} challenge on {origin} ({}{still}). Don't retry, reload or try to solve it: call handoff(\"Solve the security check on {origin}, then click Continue\") so the user does it, or stop.",
+            "Blocked by a {} {} challenge on {origin} ({}{still}). Don't retry or reload it. Unless the user asked you to solve it, call handoff(\"Solve the security check on {origin}, then click Continue\") so the user does it, or stop; if they asked, try it once and hand off if it doesn't clear.",
             outcome.vendor, outcome.kind, outcome.signal
         ));
     }

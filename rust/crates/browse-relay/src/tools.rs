@@ -265,7 +265,7 @@ impl Tool for HandoffTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "handoff".into(),
-            description: "Ask the user to do something in a tab only a person can do (sign in, 2FA, a captcha, a payment confirmation) and wait until they finish. The tab shows a card with your message and a Continue button (the browse toolbar button also continues). Returns `outcome`: continued, timeout, closed (the tab went away) or cancelled. Never solve a captcha yourself; hand it off. Re-read the page afterwards: it has probably changed.".into(),
+            description: "Ask the user to do something in a tab only a person can do (sign in, 2FA, a captcha, a payment confirmation) and wait until they finish. The tab shows a card with your message and a Continue button (the browse toolbar button also continues). Returns `outcome`: continued, timeout, closed (the tab went away) or cancelled. Hand captchas off unless the user asked you to solve them. Re-read the page afterwards: it has probably changed.".into(),
             input_schema: handoff_schema("What the user should do, in one or two plain sentences, e.g. \"Sign in to GitHub, then click Continue.\""),
             output_schema: None,
         }

@@ -317,7 +317,7 @@ to steer it, and that other programs on your computer may try to use the relay.
   whatever a page supplies; browse doesn't verify them, and an annotation like `readOnly` is only the page's word. Treat
   them like any other page text, not as instructions from the user.
 - **Bot challenges.** After a navigation browse reports Cloudflare, captcha walls and "access denied" pages and tells
-  the agent to hand interactive ones to you. It never solves them.
+  the agent to hand interactive ones to you. The agent tries one itself only when you ask it to.
 - **Your tabs stay yours.** Agents use only tabs they opened or you lent them. Only a real click on the card or the
   toolbar button finishes a handoff, so a page can't fake it.
 
