@@ -220,6 +220,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64 0.22.1",
+ "browse-bidi",
  "browse-cdp",
  "browse-core",
  "browse-page",

@@ -116,7 +116,7 @@ fn target_info(result: &Value) -> Option<(String, String, String, String)> {
 }
 
 /// A URL that is a real document: not empty (nothing navigated yet) and not an about: page.
-fn real_url(url: &str) -> bool {
+pub(crate) fn real_url(url: &str) -> bool {
     !url.is_empty() && !url.starts_with("about:")
 }
 
@@ -212,6 +212,9 @@ impl Relay {
                     child_frames: HashSet::new(),
                     cdp,
                     driver,
+                    backend: crate::relay::Backend::Extension,
+                    raw_driver: None,
+                    observer: None,
                 },
             );
             st.reconnect_owners.remove(&target_id);
@@ -257,6 +260,12 @@ impl Relay {
             let mut st = self.st();
             let removed = st.tabs.remove(&tab);
             st.presented.remove(&tab);
+            if let Some(removed) = removed.as_ref().filter(|t| t.backend.is_direct()) {
+                if let Some(observer) = &removed.observer {
+                    observer.abort();
+                }
+                st.release_direct_tab_id(tab);
+            }
             if let Some(mut handoff) = st.handoffs.remove(&tab) {
                 handoff.done.take().map(|done| done.send("closed"));
             }
@@ -316,9 +325,16 @@ impl Relay {
         if let Some(refusal) = self.navigation_refusal(&options, None, "Target.createTarget", url).await {
             bail!(refusal);
         }
+        let direct_opener = opener.and_then(|o| self.st().tabs.get(&o).and_then(|t| t.backend.direct().cloned()));
+        if let Some(entry) = direct_opener {
+            return self.create_tab_direct(entry, Some(url), &options, opener, chosen).await;
+        }
         let link = match opener.and_then(|o| self.st().browser_tab(o)) {
             Some((link, _)) => link,
-            None => self.link_for(options.browser.as_deref()).await?,
+            None => match self.target_for(options.browser.as_deref()).await? {
+                crate::browser::BrowserRef::Extension(link) => link,
+                crate::browser::BrowserRef::Direct(entry) => return self.create_tab_direct(entry, Some(url), &options, opener, chosen).await,
+            },
         };
         options.browser = None;
         let mut params = json!({ "url": "about:blank", "active": false });
@@ -381,12 +397,38 @@ impl Relay {
 
     /// Closes an agent's tab; a tab the user lent is released to them instead.
     pub async fn close_or_release(self: &Arc<Self>, tab: i64) -> anyhow::Result<&'static str> {
-        let owner = {
+        self.close_or_release_why(tab, "target-closed").await
+    }
+
+    /// `close_or_release`, remembering `reason` as why the tab went (`idle` for idle cleanup).
+    pub async fn close_or_release_why(self: &Arc<Self>, tab: i64, reason: &str) -> anyhow::Result<&'static str> {
+        let (owner, backend, target_id) = {
             let mut st = self.st();
             let entry = st.tabs.get_mut(&tab).context("That tab isn't attached")?;
             entry.closing = true;
-            entry.owner
+            (entry.owner, entry.backend.clone(), entry.target_id.clone())
         };
+        if let crate::relay::Backend::Direct(entry) = backend {
+            let target = browse_core::TargetId::from(target_id);
+            let closed = tokio::time::timeout(Duration::from_secs(10), entry.driver.close(&target)).await;
+            match closed {
+                Ok(Ok(())) | Ok(Err(browse_core::DriverError::Closed(_) | browse_core::DriverError::Stale)) => {}
+                Ok(Err(error)) => {
+                    if let Some(entry) = self.st().tabs.get_mut(&tab) {
+                        entry.closing = false;
+                    }
+                    bail!("Couldn't close tab {tab}: {error}");
+                }
+                Err(_) => {
+                    if let Some(entry) = self.st().tabs.get_mut(&tab) {
+                        entry.closing = false;
+                    }
+                    bail!("The browser didn't close tab {tab} within 10 s");
+                }
+            }
+            self.remove_tab(tab, Release { gone: true, ..Release::default() }, reason);
+            return Ok("closed");
+        }
         let failed = |relay: &Self| {
             if let Some(entry) = relay.st().tabs.get_mut(&tab) {
                 entry.closing = false;
@@ -407,7 +449,7 @@ impl Relay {
                 return Err(error.into());
             }
         }
-        self.remove_tab(tab, Release { gone: true, ..Release::default() }, "target-closed");
+        self.remove_tab(tab, Release { gone: true, ..Release::default() }, reason);
         Ok("closed")
     }
 
@@ -1001,7 +1043,7 @@ impl Relay {
     }
 
     /// The tab's rules and main frame, when it has an allowlist.
-    fn enforced(&self, tab: i64) -> Option<(Vec<domain::OriginRule>, String)> {
+    pub(crate) fn enforced(&self, tab: i64) -> Option<(Vec<domain::OriginRule>, String)> {
         let st = self.st();
         let entry = st.tabs.get(&tab)?;
         Some((rules(&entry.options)?, entry.main_frame.clone().unwrap_or_else(|| entry.target_id.clone())))
@@ -1033,7 +1075,7 @@ impl Relay {
             }
     }
 
-    fn allowlist_violation(self: &Arc<Self>, tab: i64, url: &str, reason: &str) {
+    pub(crate) fn allowlist_violation(self: &Arc<Self>, tab: i64, url: &str, reason: &str) {
         let navigating = navigate_calls(&self.inflight);
         let popup = {
             let mut st = self.st();
@@ -1069,6 +1111,14 @@ impl Relay {
                 let _ = relay.close_or_release(tab).await;
                 return;
             }
+            // A direct tab is blanked through its unguarded driver, so even a read-only tab leaves the page.
+            let raw = relay.st().tabs.get(&tab).filter(|t| t.backend.is_direct()).map(|t| t.raw_driver.clone());
+            if let Some(raw) = raw {
+                if let Some(raw) = raw {
+                    let _ = tokio::time::timeout(Duration::from_secs(10), raw.navigate("about:blank", None)).await;
+                }
+                return;
+            }
             let _ = relay.debugger(tab, None, "Page.stopLoading", json!({}), Some(Duration::from_secs(3))).await;
             let _ = relay.debugger(tab, None, "Page.navigate", json!({ "url": "about:blank" }), Some(Duration::from_secs(10))).await;
         });
@@ -1077,7 +1127,7 @@ impl Relay {
     /// A fresh popup whose URL couldn't be asked again is unverified: close it, leaving the news with its opener the
     /// way `allowlist_violation` does. Fresh and still open means no document of it passed a check, whatever its
     /// stored URL says.
-    fn close_unverified_popup(self: &Arc<Self>, tab: i64, error: &str) {
+    pub(crate) fn close_unverified_popup(self: &Arc<Self>, tab: i64, error: &str) {
         {
             let mut st = self.st();
             let Some(entry) = st.tabs.get_mut(&tab) else { return };
@@ -1192,6 +1242,8 @@ fn lost_reason(reason: &str) -> &'static str {
         "target-missing" => "Chrome no longer has it",
         "debugger-detached" => "Chrome detached browse from it",
         "idle" => "it was idle, so browse closed it",
+        "browser-disconnected" => "its browser disconnected",
+        "driver-disconnected" => "its browser was disconnected from browse",
         _ => "browse lost it",
     }
 }

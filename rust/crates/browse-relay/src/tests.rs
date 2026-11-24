@@ -25,6 +25,9 @@ use crate::util::{b64url, from_b64url, random_bytes};
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+#[path = "drivers_tests.rs"]
+mod drivers_tests;
+
 struct Harness {
     handle: RelayHandle,
     paths: Paths,
