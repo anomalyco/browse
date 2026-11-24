@@ -116,6 +116,15 @@ function isReadOnlyAllowed(method: string): boolean {
   return readOnlySubscriptionDomains.some((domain) => method.startsWith(domain))
 }
 
+/** Turning file chooser interception off is cleanup, never input. */
+function isFileChooserCleanup(context: GuardContext): boolean {
+  if (context.method !== "Page.setInterceptFileChooserDialog") return false
+  const params = context.params
+  if (!params) return false
+  const keys = Object.keys(params)
+  return keys.length === 1 && keys[0] === "enabled" && params.enabled === false
+}
+
 export type GuardContext = {
   readonly method: string
   readonly readOnly: boolean
@@ -301,7 +310,7 @@ export function guardCdpMethod(context: GuardContext): string | null {
     // A virtual authenticator would let a script register or answer passkey ceremonies as the user.
     return `browse blocked ${context.method}: agents can't drive WebAuthn or add virtual authenticators. This command is always blocked by the relay.`
   }
-  if (context.readOnly && !isReadOnlyAllowed(context.method)) {
+  if (context.readOnly && !isReadOnlyAllowed(context.method) && !isFileChooserCleanup(context)) {
     const session = context.sessionId ? `Session ${context.sessionId}` : "This session"
     return `${session} is read-only: ${context.method} is blocked because this tab is read-only. Read-only sessions can take snapshots and screenshots, read page information and subscribe to events. Use a session created without --read-only to interact with pages.`
   }

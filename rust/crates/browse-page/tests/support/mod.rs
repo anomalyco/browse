@@ -176,6 +176,7 @@ pub struct TabCdp {
     pub target: String,
     events: broadcast::Sender<CdpEvent>,
     pub sent: Mutex<Vec<String>>,
+    calls: Mutex<Vec<(String, String, Value)>>,
     /// Methods that answer with a protocol error, like an extension without file URL access does.
     refusing: Mutex<HashSet<String>>,
     /// A path that replaces every DOM.setFileInputFiles path, for a browser that sees another filesystem.
@@ -189,7 +190,7 @@ impl TabCdp {
         let attached = connection.send("Target.attachToTarget", json!({ "targetId": target, "flatten": true }), None).await.unwrap();
         let session = attached["sessionId"].as_str().unwrap().to_string();
         let (events, _) = broadcast::channel(4096);
-        let tab = Arc::new(TabCdp { connection: connection.clone(), session: session.clone(), target, events, sent: Mutex::new(Vec::new()), refusing: Mutex::new(HashSet::new()), rewrite_files: Mutex::new(None) });
+        let tab = Arc::new(TabCdp { connection: connection.clone(), session: session.clone(), target, events, sent: Mutex::new(Vec::new()), calls: Mutex::new(Vec::new()), refusing: Mutex::new(HashSet::new()), rewrite_files: Mutex::new(None) });
         let mut rx = connection.events.subscribe();
         let forward = tab.events.clone();
         let root = session.clone();
@@ -214,6 +215,11 @@ impl TabCdp {
 
     pub fn methods(&self) -> Vec<String> {
         self.sent.lock().unwrap().clone()
+    }
+
+    /// Every command with the session it went to and the parameters it was sent, in order.
+    pub fn calls(&self) -> Vec<(String, String, Value)> {
+        self.calls.lock().unwrap().clone()
     }
 
     /// Makes `method` answer with a protocol error, as an extension without file URL access does for
@@ -249,6 +255,7 @@ impl Cdp for TabCdp {
                 }
             }
         let session = session_id.unwrap_or(&self.session);
+        self.calls.lock().unwrap().push((method.to_string(), session.to_string(), params.clone()));
         self.connection.send(method, params, Some(session)).await.map_err(CdpError::Protocol)
     }
 

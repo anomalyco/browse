@@ -168,7 +168,10 @@ pub fn guard(method: &str, params: &Value, read_only: bool, page_urls: &dyn Fn()
             "browse blocked {method}: agents can't drive WebAuthn or add virtual authenticators. This command is always blocked by the relay."
         ));
     }
-    if read_only && !read_only_allowed(method) {
+    // Turning file chooser interception off is cleanup, never input: a read-only tab must still do it.
+    let file_chooser_cleanup = method == "Page.setInterceptFileChooserDialog"
+        && matches!(params.as_object(), Some(map) if map.len() == 1 && map.get("enabled") == Some(&Value::Bool(false)));
+    if read_only && !read_only_allowed(method) && !file_chooser_cleanup {
         return Some(browse_core::read_only_refusal(method));
     }
     if method == "Page.bringToFront" && !env_on("OPENCODE_BROWSER_ALLOW_FOREGROUND") {
@@ -273,6 +276,11 @@ mod tests {
         assert!(guard("Runtime.evaluate", &json!({}), true, &urls).is_none());
         assert!(guard("Runtime.terminateExecution", &json!({}), true, &urls).is_none());
         assert!(guard("Page.enable", &json!({}), true, &urls).is_none());
+        assert!(guard("Page.setInterceptFileChooserDialog", &json!({"enabled": true}), true, &urls).is_some());
+        assert!(guard("Page.setInterceptFileChooserDialog", &json!({"enabled": false}), true, &urls).is_none());
+        assert!(guard("Page.setInterceptFileChooserDialog", &json!({}), true, &urls).is_some());
+        assert!(guard("Page.setInterceptFileChooserDialog", &json!({"enabled": "false"}), true, &urls).is_some());
+        assert!(guard("Page.setInterceptFileChooserDialog", &json!({"enabled": false, "cancel": true}), true, &urls).is_some());
         assert!(guard("Page.navigate", &json!({"url": "chrome://settings"}), false, &urls).is_some());
         assert!(guard("Page.navigate", &json!({"url": "https://x.com"}), false, &urls).is_none());
         assert!(guard("Page.navigate", &json!({"url": "about:version"}), false, &urls).is_some());

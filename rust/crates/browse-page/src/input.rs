@@ -361,6 +361,11 @@ impl<'a> Input<'a> {
 
     pub async fn click(&mut self, at: Point, button: &str, count: i64) -> Result<()> {
         self.move_to(at, 1).await?;
+        self.click_after_move(button, count).await
+    }
+
+    /// Presses and releases at the pointer's current position, after a caller has moved it there.
+    pub async fn click_after_move(&mut self, button: &str, count: i64) -> Result<()> {
         let new_tab = button == "middle"
             || self.modifiers.contains(Modifiers::CONTROL)
             || self.modifiers.contains(Modifiers::META)

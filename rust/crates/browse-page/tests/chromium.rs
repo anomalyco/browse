@@ -2,7 +2,7 @@
 
 mod support;
 
-use serde_json::json;
+use serde_json::{Value, json};
 use support::Harness;
 
 macro_rules! harness {
@@ -511,6 +511,218 @@ async fn fill_uploads_keys_scroll_and_waits() {
     assert_eq!(flag, Some(false));
 }
 
+/// The session and value of every `Page.setInterceptFileChooserDialog`, in order.
+fn chooser_calls(calls: &[(String, String, Value)]) -> Vec<(String, bool)> {
+    calls
+        .iter()
+        .filter(|(method, _, _)| method == "Page.setInterceptFileChooserDialog")
+        .map(|(_, session, params)| (session.clone(), params["enabled"].as_bool().unwrap_or(false)))
+        .collect()
+}
+
+fn chooser_states(calls: &[(String, String, Value)]) -> Vec<bool> {
+    chooser_calls(calls).into_iter().map(|(_, enabled)| enabled).collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_clicks_a_button_that_opens_a_file_chooser() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
+    let h = harness!(false);
+    let url = h.server.page(
+        "/chooser",
+        r#"<!doctype html><button id="attach" onclick="document.getElementById('file').click()">Attach a file</button>
+<input id="file" type="file" style="display:none">"#,
+    );
+    h.ok("navigate", json!({ "url": url })).await;
+    h.ok("eval", json!({ "expression": "window.uploadChanges = 0; window.uploadTrusted = null; document.getElementById('file').addEventListener('change', (event) => { window.uploadChanges += 1; window.uploadTrusted = event.isTrusted })" })).await;
+    let file = h.files.0.join("chooser.txt");
+    std::fs::write(&file, "through the chooser").unwrap();
+
+    let uploaded = h
+        .json(
+            "upload",
+            json!({ "selector": "#attach", "files": [file.display().to_string()] }),
+        )
+        .await;
+    assert_eq!(uploaded["files"][0], "chooser.txt");
+    assert_eq!(uploaded["via"], "paths", "{uploaded}");
+    assert_eq!(
+        h.ok(
+            "eval",
+            json!({ "expression": "document.getElementById('file').files[0].name" })
+        )
+        .await,
+        "\"chooser.txt\""
+    );
+    assert_eq!(
+        h.ok(
+            "eval",
+            json!({ "expression": "document.getElementById('file').files[0].text()" })
+        )
+        .await,
+        "\"through the chooser\""
+    );
+    assert_eq!(
+        h.ok("eval", json!({ "expression": "window.uploadChanges" }))
+            .await,
+        "1"
+    );
+    assert_eq!(
+        h.ok("eval", json!({ "expression": "window.uploadTrusted" }))
+            .await,
+        "true",
+        "the change event is trusted"
+    );
+    assert_eq!(
+        chooser_states(&h.tab.calls()),
+        vec![true, false],
+        "interception is enabled before the click and disabled after"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_clicks_a_button_that_creates_the_input_while_clicking() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
+    let h = harness!(false);
+    let url = h.server.page(
+        "/chooser-dynamic",
+        r#"<!doctype html><button id="attach" onclick="const input = document.createElement('input'); input.type = 'file'; input.addEventListener('change', (event) => { document.body.dataset.name = input.files[0].name; document.body.dataset.trusted = event.isTrusted }); document.body.append(input); input.click()">Attach</button>"#,
+    );
+    h.ok("navigate", json!({ "url": url })).await;
+    let file = h.files.0.join("dynamic.txt");
+    std::fs::write(&file, "made while clicking").unwrap();
+
+    let uploaded = h
+        .json(
+            "upload",
+            json!({ "selector": "#attach", "files": [file.display().to_string()] }),
+        )
+        .await;
+    assert_eq!(uploaded["files"][0], "dynamic.txt", "{uploaded}");
+    assert_eq!(h.ok("eval", json!({ "expression": "document.body.dataset.name" })).await, "\"dynamic.txt\"");
+    assert_eq!(h.ok("eval", json!({ "expression": "document.body.dataset.trusted" })).await, "\"true\"");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_reports_a_button_that_opens_no_file_chooser() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
+    let h = harness!(false);
+    let url = h.server.page("/chooser-none", r#"<!doctype html><button id="plain" onclick="document.title = 'clicked'">Nothing</button>"#);
+    h.ok("navigate", json!({ "url": url })).await;
+    let file = h.files.0.join("unused.txt");
+    std::fs::write(&file, "never uploaded").unwrap();
+
+    let error = h
+        .err(
+            "upload",
+            json!({ "selector": "#plain", "files": [file.display().to_string()], "timeout": 1000 }),
+        )
+        .await;
+    assert!(
+        error.contains("clicked") && error.contains("it isn't a file input or its label") && error.contains("opened no file chooser"),
+        "{error}"
+    );
+    assert_eq!(
+        chooser_states(&h.tab.calls()),
+        vec![true, false],
+        "interception is disabled after the error"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_by_button_respects_multiple_and_disarms_on_failure() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
+    let h = harness!(false);
+    let url = h.server.page(
+        "/chooser-multiple",
+        r#"<!doctype html><button id="attach" onclick="document.getElementById('file').click()">Attach</button><input id="file" type="file">"#,
+    );
+    h.ok("navigate", json!({ "url": url })).await;
+    let one = h.files.0.join("one.txt");
+    let two = h.files.0.join("two.txt");
+    std::fs::write(&one, "one").unwrap();
+    std::fs::write(&two, "two").unwrap();
+
+    let error = h
+        .err(
+            "upload",
+            json!({ "selector": "#attach", "files": [one.display().to_string(), two.display().to_string()] }),
+        )
+        .await;
+    assert!(error.contains("takes a single file"), "{error}");
+    assert_eq!(chooser_states(&h.tab.calls()), vec![true, false], "interception is disabled after the failure");
+    assert_eq!(h.ok("eval", json!({ "expression": "document.getElementById('file').files.length" })).await, "0");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stale_file_chooser_disarm_leaves_a_newer_arm_alone() {
+    let h = harness!(false);
+    let driver = h.ctx.browser.tab_driver(1).await.unwrap();
+    let first = driver.prepare_file_chooser_interception();
+    driver.arm_file_chooser_interception(first).await.unwrap();
+    let second = driver.prepare_file_chooser_interception();
+    driver.arm_file_chooser_interception(second).await.unwrap();
+
+    // A delayed disable from the first upload must not turn off the second arm.
+    driver.disarm_file_chooser_interception(first).await;
+    assert_eq!(chooser_states(&h.tab.calls()), vec![true, true]);
+    driver.disarm_file_chooser_interception(second).await;
+    assert_eq!(chooser_states(&h.tab.calls()), vec![true, true, false]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_file_chooser_from_a_previous_document_is_stale() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
+    let h = harness!(false);
+    let url = h.server.page(
+        "/chooser-stale",
+        r#"<!doctype html><button id="attach" onclick="document.getElementById('file').click()">Attach</button><input id="file" type="file">"#,
+    );
+    h.server.page("/chooser-next", "<!doctype html><title>Next</title>");
+    h.ok("navigate", json!({ "url": url })).await;
+
+    let driver = h.ctx.browser.tab_driver(1).await.unwrap();
+    let arm = driver.prepare_file_chooser_interception();
+    driver.arm_file_chooser_interception(arm).await.unwrap();
+    h.ok("click", json!({ "selector": "#attach" })).await;
+    h.ok("navigate", json!({ "url": h.server.page("/nowhere", "") })).await;
+    let result = driver.take_file_chooser(std::time::Duration::from_secs(1)).await;
+    assert!(matches!(&result, Err(browse_core::DriverError::Stale)), "{result:?}");
+    driver.disarm_file_chooser_interception(arm).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_clicks_into_a_cross_origin_iframe() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
+    let h = harness!(false);
+    let inner = h.server.other_origin("/chooser-inner");
+    h.server.page(
+        "/chooser-inner",
+        r#"<!doctype html><button id="attach" onclick="document.getElementById('file').click()">Attach</button>
+<input id="file" type="file" onchange="document.body.dataset.changes = (Number(document.body.dataset.changes) || 0) + 1">"#,
+    );
+    let url = h.server.page("/chooser-outer", &format!(r#"<!doctype html><iframe title="Cross" src="{inner}" style="width:400px;height:300px"></iframe>"#));
+    h.ok("navigate", json!({ "url": url })).await;
+    h.ok("wait_for", json!({ "selector": "iframe[title=Cross]" }))
+        .await;
+    let file = h.files.0.join("frame.txt");
+    std::fs::write(&file, "inside the frame").unwrap();
+
+    let uploaded = h.json("upload", json!({ "selector": "iframe[title=Cross] >> frame >> #attach", "files": [file.display().to_string()] })).await;
+    assert_eq!(uploaded["files"][0], "frame.txt", "{uploaded}");
+    let name = h.ok("eval", json!({ "expression": "document.getElementById('file').files[0].name", "frame": "iframe[title=Cross]" })).await;
+    assert_eq!(name, "\"frame.txt\"");
+    let changes = h.ok("eval", json!({ "expression": "document.body.dataset.changes", "frame": "iframe[title=Cross]" })).await;
+    assert_eq!(changes, "\"1\"");
+    let calls = chooser_calls(&h.tab.calls());
+    let sessions: std::collections::HashSet<&str> = calls.iter().map(|(session, _)| session.as_str()).collect();
+    assert_eq!(sessions.len(), 2, "the root and the cross-origin child session were armed: {calls:?}");
+    for session in sessions {
+        let states: Vec<bool> = calls.iter().filter(|(call_session, _)| call_session == session).map(|(_, enabled)| *enabled).collect();
+        assert_eq!(states, vec![true, false], "session {session} was armed then disarmed: {calls:?}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn upload_copies_files_when_the_browser_is_elsewhere() {
     let _upload = support::UPLOAD_LOCK.lock().await;
@@ -959,6 +1171,8 @@ async fn read_only_tabs_refuse_input_tools() {
     let refused = h.err("fill", json!({ "selector": "#start", "value": "2026-01-02" })).await;
     assert!(refused.contains("browse blocked fill") && refused.contains("read-only"), "{refused}");
     let refused = h.err("upload", json!({ "selector": "#file", "files": ["/tmp/browse-read-only-upload.png"] })).await;
+    assert!(refused.contains("browse blocked upload") && refused.contains("read-only"), "{refused}");
+    let refused = h.err("upload", json!({ "selector": "#save", "files": ["/tmp/browse-read-only-upload.png"] })).await;
     assert!(refused.contains("browse blocked upload") && refused.contains("read-only"), "{refused}");
     let refused = h.err("click", json!({ "selector": "#save" })).await;
     assert!(refused.contains("browse blocked click") && refused.contains("read-only"), "{refused}");
