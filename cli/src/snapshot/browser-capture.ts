@@ -147,7 +147,9 @@ const captureSnapshotInBrowser = (
           return items.length > 0 && !items.some((item) => item.getAttribute("role") === "option" && item.querySelector?.("a[href], button"))
         }
         const portalMenus = Array.from(document.querySelectorAll("[role='listbox'], [role='menu']")).filter(isOpenListboxOrMenu)
-        const mains = Array.from(document.querySelectorAll("main")).filter(isVisible)
+        // A main the page switched off (inert or aria-hidden, e.g. behind a full-screen game or app) isn't what the
+        // user is looking at, so it doesn't scope the snapshot.
+        const mains = Array.from(document.querySelectorAll("main")).filter((main) => isVisible(main) && !main.closest?.("[inert], [aria-hidden='true']"))
         if (dialogs.length > 0 || (mains.length === 1 && portalMenus.some((menu) => !mains[0]!.contains?.(menu)))) {
           return fallbackRoot
         }
@@ -665,6 +667,7 @@ const captureSnapshotInBrowser = (
     }
     const landmarks = new Set<Element>()
     let controls = 0
+    let frames = 0
     let capped = false
     const skipsToMain = (element: Element): boolean => {
       if (element.localName !== "a") return false
@@ -703,6 +706,7 @@ const captureSnapshotInBrowser = (
     const walk = (node: Element | ShadowRoot | Document): boolean => {
       for (let child = node.firstElementChild; child; child = child.nextElementSibling) {
         if (child === root) continue
+        if (child.localName === "iframe" && isVisible(child)) frames++
         if (child.matches(controlSelector) && !countControl(child)) return false
         if (child.shadowRoot && !walk(child.shadowRoot)) return false
         if (child.firstElementChild && !walk(child)) return false
@@ -711,14 +715,17 @@ const captureSnapshotInBrowser = (
     }
     if (scope.shadowRoot) walk(scope.shadowRoot)
     if (!capped) walk(scope)
-    if (controls === 0) return undefined
+    if (controls === 0 && frames === 0) return undefined
     const count = capped ? `${controls}+` : String(controls)
     const landmarkCount = capped ? `${landmarks.size}+` : String(landmarks.size)
-    const landmarkPart = landmarks.size > 0
-      ? `${landmarkCount} ${landmarks.size === 1 ? "landmark" : "landmarks"} and `
-      : ""
-    const omitted = landmarks.size + controls
-    return `scoped to <main>; ${landmarkPart}${count} ${controls === 1 && !capped ? "control" : "controls"} outside it ${omitted === 1 && !capped ? "is" : "are"} not shown (within: "body" to include them)`
+    const parts = [
+      ...(landmarks.size > 0 ? [`${landmarkCount} ${landmarks.size === 1 ? "landmark" : "landmarks"}`] : []),
+      // An iframe outside main can be the whole app (a game or editor over the page), so it's always named.
+      ...(frames > 0 ? [`${frames} ${frames === 1 ? "iframe" : "iframes"}`] : []),
+      ...(controls > 0 ? [`${count} ${controls === 1 && !capped ? "control" : "controls"}`] : []),
+    ]
+    const omitted = landmarks.size + frames + controls
+    return `scoped to <main>; ${parts.join(" and ")} outside it ${omitted === 1 && !capped ? "is" : "are"} not shown (within: "body" to include them)`
   })()
 
   function* iterateCandidates(scope: Element): Generator<Element> {

@@ -191,6 +191,35 @@ async fn snapshot_main_scope_note() {
     );
 }
 
+/// An app or game in an iframe over the page, outside <main>: a main the page switched off doesn't scope the snapshot,
+/// and an iframe left outside a scoped main is named in the note.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn snapshot_main_scope_and_iframes_outside_it() {
+    let h = harness!(false);
+    h.server.page("/game", "<!doctype html><h1>Backstab</h1><button>Shoot</button>");
+    let overlay = r#"<div style="position:fixed;inset:0"><iframe title="Backstab" src="/game" style="width:100%;height:100%;border:0"></iframe></div>"#;
+    let switched_off = h.server.page("/inert-main", &format!(r#"<!doctype html><main inert><a href="/a">01 Blackout</a></main>{overlay}"#));
+    h.ok("navigate", json!({ "url": switched_off })).await;
+    let snapshot = h.ok("snapshot", json!({})).await;
+    assert!(!snapshot.contains("scoped to <main>"), "{snapshot}");
+    assert!(snapshot.contains("iframe \"Backstab\"") && snapshot.contains("button \"Shoot\""), "{snapshot}");
+
+    let hidden = h.server.page("/hidden-main", &format!(r#"<!doctype html><main aria-hidden="true"><a href="/a">01 Blackout</a></main>{overlay}"#));
+    h.ok("navigate", json!({ "url": hidden })).await;
+    let snapshot = h.ok("snapshot", json!({})).await;
+    assert!(snapshot.contains("button \"Shoot\""), "{snapshot}");
+
+    let live = h.server.page("/live-main", &format!(r#"<!doctype html><main><a href="/a">01 Blackout</a></main>{overlay}"#));
+    h.ok("navigate", json!({ "url": live })).await;
+    let snapshot = h.ok("snapshot", json!({})).await;
+    assert!(
+        snapshot.starts_with("scoped to <main>; 1 iframe outside it is not shown (within: \"body\" to include them)\n"),
+        "{snapshot}"
+    );
+    let whole = h.ok("snapshot", json!({ "within": "body" })).await;
+    assert!(whole.contains("button \"Shoot\""), "{whole}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn refs_carry_through_find_snapshots() {
     let h = harness!(false);
