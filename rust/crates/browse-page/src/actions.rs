@@ -47,8 +47,15 @@ impl From<anyhow::Error> for Prepare {
 /// Resolves the target and returns it with the page point to send input to.
 pub async fn locate(page: &Arc<TabPage>, tab_state: &PageTab, input: &mut Input<'_>, spec: &Spec, options: PointerOptions) -> Result<(Resolved, Point)> {
     let deadline = Instant::now() + options.timeout;
+    let mut first = true;
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(100));
+        // The first attempt gets the whole timeout, so a failure reports the timeout the caller gave (not the
+        // microseconds-shorter remainder, which reads as "waited 499 ms").
+        let remaining = if std::mem::take(&mut first) {
+            options.timeout
+        } else {
+            deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(100))
+        };
         let resolved = target::resolve(page, tab_state, spec, ResolveOptions { timeout: remaining, act: true }).await?;
         match prepare(page, input, &resolved, deadline, options).await {
             Ok(point) => return Ok((resolved, point)),

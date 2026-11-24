@@ -70,7 +70,17 @@ struct Pending {
     frame_id: Option<String>,
     data_length: usize,
     response: Option<ResponseHead>,
+    /// `responseReceived` said extra-info events (the headers as sent, cookies included) come for it.
+    has_extra_info: bool,
 }
+
+/// A finished request whose extra info hasn't arrived yet: CDP may send it after `loadingFinished`.
+struct Finishing {
+    body_size: usize,
+}
+
+/// How long a finished request waits for its extra info before it is reported without it.
+const EXTRA_INFO_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 
 struct ExtraResponse {
     headers: Vec<(String, String)>,
@@ -83,6 +93,7 @@ struct State {
     request_extra: HashMap<String, Vec<(String, String)>>,
     response_extra: HashMap<String, ExtraResponse>,
     children: HashMap<String, String>,
+    finishing: HashMap<String, Finishing>,
 }
 
 impl State {
@@ -234,13 +245,16 @@ pub(crate) async fn fetch_body(
     }
 }
 
+/// A CDP headers object as a list. CDP joins a header sent more than once (`Set-Cookie`, above all) into one value
+/// with newlines; each becomes its own header again, as the other drivers report them.
 fn headers_from(value: Option<&Value>) -> Vec<(String, String)> {
     value
         .and_then(Value::as_object)
         .map(|map| {
             map.iter()
-                .map(|(name, value)| {
-                    (name.clone(), value.as_str().map_or_else(|| value.to_string(), str::to_string))
+                .flat_map(|(name, value)| {
+                    let value = value.as_str().map_or_else(|| value.to_string(), str::to_string);
+                    value.split('\n').map(|part| (name.clone(), part.to_string())).collect::<Vec<_>>()
                 })
                 .collect()
         })
@@ -308,6 +322,7 @@ fn handle_event(
                     frame_id: frame_id.clone(),
                     data_length: 0,
                     response: None,
+                    has_extra_info: false,
                 },
             );
             drop(st);
@@ -328,7 +343,8 @@ fn handle_event(
             if st.request_extra.len() > MAX_EXTRA_CACHE {
                 st.request_extra.clear();
             }
-            st.request_extra.insert(request_id, headers_from(params.get("headers")));
+            st.request_extra.insert(request_id.clone(), headers_from(params.get("headers")));
+            flush_finishing(&mut st, tx, &request_id, false);
         }
         "Network.responseReceivedExtraInfo" => {
             let mut st = state.lock().unwrap();
@@ -336,12 +352,13 @@ fn handle_event(
                 st.response_extra.clear();
             }
             st.response_extra.insert(
-                request_id,
+                request_id.clone(),
                 ExtraResponse {
                     headers: headers_from(params.get("headers")),
                     status: params.get("statusCode").and_then(Value::as_i64),
                 },
             );
+            flush_finishing(&mut st, tx, &request_id, false);
         }
         "Network.responseReceived" => {
             let Some(head) = params.get("response").map(response_head) else { return };
@@ -351,6 +368,7 @@ fn handle_event(
                 let (id, resource_type, frame_id) = {
                     let Some(pending) = st.pending.get_mut(&found) else { return };
                     pending.response = Some(head.clone());
+                    pending.has_extra_info = params.get("hasExtraInfo").and_then(Value::as_bool).unwrap_or(false);
                     (
                         RequestId::from(pending.request_id.clone()),
                         pending.resource_type.clone(),
@@ -375,27 +393,28 @@ fn handle_event(
             bodies.lock().unwrap().record_body_session(&request_id, event.session_id.clone());
             let mut st = state.lock().unwrap();
             if let Some(pending) = st.take_pending(&key) {
-                let req_extra = st.request_extra.remove(&pending.request_id).filter(|h| !h.is_empty());
-                let resp_extra = st
-                    .response_extra
-                    .remove(&pending.request_id)
-                    .map(|e| e.headers)
-                    .filter(|h| !h.is_empty());
-                let id = RequestId::from(pending.request_id);
-                let body_size = pending.data_length;
-                drop(st);
-                let _ = tx.send(NetworkEvent::Finished {
-                    id,
-                    body_size,
-                    request_headers: req_extra,
-                    response_headers: resp_extra,
-                });
+                let request_id = pending.request_id.clone();
+                st.finishing.insert(request_id.clone(), Finishing { body_size: pending.data_length });
+                let waiting = pending.has_extra_info
+                    && !(st.request_extra.contains_key(&request_id) && st.response_extra.contains_key(&request_id));
+                if waiting {
+                    let state = state.clone();
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(EXTRA_INFO_GRACE).await;
+                        flush_finishing(&mut state.lock().unwrap(), &tx, &request_id, true);
+                    });
+                } else {
+                    flush_finishing(&mut st, tx, &request_id, true);
+                }
             }
         }
         "Network.loadingFailed" => {
             let mut st = state.lock().unwrap();
             if let Some(pending) = st.take_pending(&key) {
-                st.request_extra.remove(&pending.request_id);
+                // A request that reached the network and failed later (aborted, reset) still went out with the
+                // headers its extra info reported.
+                let request_headers = st.request_extra.remove(&pending.request_id).filter(|h| !h.is_empty());
                 st.response_extra.remove(&pending.request_id);
                 let error = params
                     .get("errorText")
@@ -405,7 +424,7 @@ fn handle_event(
                     .to_string();
                 let id = RequestId::from(pending.request_id);
                 drop(st);
-                let _ = tx.send(NetworkEvent::Failed { id, error });
+                let _ = tx.send(NetworkEvent::Failed { id, error, request_headers });
             }
         }
         "Target.attachedToTarget" => {
@@ -466,6 +485,26 @@ fn handle_event(
     }
 }
 
+/// Reports a finished request once both its extra infos are in (or, with `anyway`, with what there is).
+fn flush_finishing(st: &mut State, tx: &mpsc::UnboundedSender<NetworkEvent>, request_id: &str, anyway: bool) {
+    if !st.finishing.contains_key(request_id) {
+        return;
+    }
+    let complete = st.request_extra.contains_key(request_id) && st.response_extra.contains_key(request_id);
+    if !anyway && !complete {
+        return;
+    }
+    let Some(finishing) = st.finishing.remove(request_id) else { return };
+    let request_headers = st.request_extra.remove(request_id).filter(|h| !h.is_empty());
+    let response_headers = st.response_extra.remove(request_id).map(|e| e.headers).filter(|h| !h.is_empty());
+    let _ = tx.send(NetworkEvent::Finished {
+        id: RequestId::from(request_id.to_string()),
+        body_size: finishing.body_size,
+        request_headers,
+        response_headers,
+    });
+}
+
 fn complete_child_documents(
     state: &Arc<Mutex<State>>,
     tx: &mpsc::UnboundedSender<NetworkEvent>,
@@ -506,5 +545,66 @@ fn complete_child_documents(
     }
     for ev in events_to_send {
         let _ = tx.send(ev);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(method: &str, params: Value) -> CdpEvent {
+        CdpEvent { method: method.into(), params, session_id: None }
+    }
+
+    /// CDP may send a request's extra info (the headers as sent, cookies included) after its `loadingFinished`.
+    #[tokio::test]
+    async fn late_extra_info_still_reaches_the_finished_request() {
+        struct Silent;
+        #[async_trait::async_trait]
+        impl Cdp for Silent {
+            async fn send(&self, _: &str, _: Value, _: Option<&str>) -> Result<Value, crate::CdpError> {
+                Ok(json!({}))
+            }
+            fn events(&self) -> tokio::sync::broadcast::Receiver<CdpEvent> {
+                tokio::sync::broadcast::channel(1).1
+            }
+        }
+        let cdp: Arc<dyn Cdp> = Arc::new(Silent);
+        let state = Arc::new(Mutex::new(State::default()));
+        let bodies = Arc::new(Mutex::new(NetworkBodyMap::default()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let send = |e: CdpEvent| handle_event(&cdp, &state, &bodies, &tx, e);
+        send(event("Network.requestWillBeSent", json!({ "requestId": "1", "type": "Fetch", "request": { "url": "http://a/x", "method": "GET", "headers": {} } })));
+        send(event("Network.responseReceived", json!({ "requestId": "1", "hasExtraInfo": true, "response": { "status": 200, "headers": {} } })));
+        send(event("Network.loadingFinished", json!({ "requestId": "1" })));
+        send(event("Network.requestWillBeSentExtraInfo", json!({ "requestId": "1", "headers": { "Cookie": "sid=1" } })));
+        send(event("Network.responseReceivedExtraInfo", json!({ "requestId": "1", "statusCode": 200, "headers": { "Set-Cookie": "a=1" } })));
+        let mut finished = None;
+        while let Ok(Some(event)) = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await {
+            if let NetworkEvent::Finished { request_headers, response_headers, .. } = event {
+                finished = Some((request_headers, response_headers));
+                break;
+            }
+        }
+        let (request_headers, response_headers) = finished.expect("a finished event");
+        assert_eq!(request_headers, Some(vec![("Cookie".to_string(), "sid=1".to_string())]));
+        assert_eq!(response_headers, Some(vec![("Set-Cookie".to_string(), "a=1".to_string())]));
+    }
+
+    #[test]
+    fn repeated_headers_are_split_again() {
+        let mut headers = headers_from(Some(&json!({
+            "Set-Cookie": "sid=1; Path=/\ntheme=dark; Path=/",
+            "Content-Type": "application/json",
+        })));
+        headers.sort();
+        assert_eq!(
+            headers,
+            vec![
+                ("Content-Type".to_string(), "application/json".to_string()),
+                ("Set-Cookie".to_string(), "sid=1; Path=/".to_string()),
+                ("Set-Cookie".to_string(), "theme=dark; Path=/".to_string()),
+            ]
+        );
     }
 }

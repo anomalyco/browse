@@ -263,9 +263,12 @@ impl Shared {
                     self.finalize(pending);
                 }
             }
-            NetworkEvent::Failed { id, error } => {
+            NetworkEvent::Failed { id, error, request_headers } => {
                 if let Some(mut pending) = inner.pending.remove(&id) {
                     pending.failure = Some(error);
+                    if let Some(headers) = request_headers {
+                        pending.headers = to_headers(headers);
+                    }
                     drop(inner);
                     self.finalize(pending);
                 }

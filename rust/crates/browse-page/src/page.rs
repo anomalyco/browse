@@ -89,6 +89,13 @@ struct TabState {
     dialog: Option<Dialog>,
     dialog_policy: Option<DialogPolicy>,
     auto_prompt_text: Option<String>,
+    /// The open dialog is being answered by the auto policy (or as a beforeunload); its close is the policy's even
+    /// when the browser reports the close before it answers the command (as Firefox does).
+    answering_auto: bool,
+    /// Bumped for every dialog that opens, so answering one never clears the next.
+    dialog_seq: u64,
+    /// How many dialog closes the browser reported: the next one is for dialog `close_events + 1`.
+    close_events: u64,
     events: Vec<(u64, TabEvent)>,
     seq: u64,
     platform: Option<String>,
@@ -332,15 +339,19 @@ impl TabPage {
     }
 
     pub async fn handle_dialog(&self, accept: bool, prompt_text: Option<&str>) -> Result<Dialog> {
-        let dialog = self
-            .dialog()
-            .ok_or_else(|| anyhow!("No dialog is open on this tab."))?;
+        let (dialog, seq) = {
+            let state = self.shared.state.lock().unwrap();
+            (state.dialog.clone(), state.dialog_seq)
+        };
+        let dialog = dialog.ok_or_else(|| anyhow!("No dialog is open on this tab."))?;
         self.shared
             .driver
             .answer_dialog(accept, prompt_text)
             .await
             .map_err(driver_error)?;
-        self.shared.clear_dialog(Some(accept), false);
+        // The page may already have opened its next dialog (Firefox answers only once the script went on): that one
+        // stays open.
+        self.shared.answered(seq, accept, false);
         Ok(dialog)
     }
 
@@ -809,8 +820,17 @@ impl Shared {
         self.bump();
     }
 
+    /// browse answered dialog `seq`: it closes if it is still the open one.
+    fn answered(&self, seq: u64, accepted: bool, auto: bool) {
+        let current = self.state.lock().unwrap().dialog_seq == seq;
+        if current {
+            self.clear_dialog(Some(accepted), auto);
+        }
+    }
+
     fn clear_dialog(&self, accepted: Option<bool>, auto: bool) {
         let mut state = self.state.lock().unwrap();
+        let auto = auto || std::mem::take(&mut state.answering_auto);
         if state.dialog.take().is_some()
             && let Some(accepted) = accepted
         {
@@ -937,6 +957,8 @@ impl Shared {
             PageEvent::DialogOpened(dialog) => {
                 let mut state = self.state.lock().unwrap();
                 state.dialog = Some(dialog.clone());
+                state.dialog_seq += 1;
+                let seq = state.dialog_seq;
                 let policy = state.dialog_policy;
                 let prompt_text = state
                     .auto_prompt_text
@@ -951,18 +973,28 @@ impl Shared {
                     _ if dialog.kind == DialogKind::BeforeUnload => Some(true),
                     _ => None,
                 };
+                self.state.lock().unwrap().answering_auto = auto.is_some();
                 if let Some(accept) = auto {
                     let shared = self.clone();
                     tokio::spawn(async move {
                         let prompt = (accept && dialog.kind == DialogKind::Prompt).then_some(prompt_text.as_str());
                         if shared.driver.answer_dialog(accept, prompt).await.is_ok() {
-                            shared.clear_dialog(Some(accept), true);
+                            shared.answered(seq, accept, true);
                         }
                     });
                 }
             }
             PageEvent::DialogClosed { accepted } => {
-                self.clear_dialog(Some(accepted), false);
+                // A close names no dialog: closes come in order, one per dialog. Chrome can report a dialog's close
+                // after the page already opened the next one, which must stay open.
+                let current = {
+                    let mut state = self.state.lock().unwrap();
+                    state.close_events += 1;
+                    state.close_events == state.dialog_seq
+                };
+                if current {
+                    self.clear_dialog(Some(accepted), false);
+                }
                 return;
             }
             PageEvent::PopupOpened { url } => {
@@ -1014,6 +1046,162 @@ mod tests {
         let spec: Value = serde_json::from_str(raw).unwrap();
         assert_eq!(spec, json!([{ "v": null }, { "v": { "a": null } }, { "u": 1 }]));
         assert!(declaration.contains("this.refResolve(...args)"));
+    }
+
+    /// A tab whose browser reports a dialog closed before it answers the command that closed it, as Firefox does.
+    struct EarlyCloseTab {
+        events: broadcast::Sender<PageEvent>,
+        /// A dialog the page opens as soon as the current one is answered.
+        next: Mutex<Option<Dialog>>,
+        late: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl browse_core::CaptureDriver for EarlyCloseTab {
+        async fn console(&self) -> browse_core::DriverResult<browse_core::Subscription<browse_core::ConsoleEvent>> {
+            Err(DriverError::Unsupported("console"))
+        }
+        async fn network(&self, _: browse_core::NetworkOptions) -> browse_core::DriverResult<browse_core::Subscription<browse_core::NetworkEvent>> {
+            Err(DriverError::Unsupported("network"))
+        }
+        async fn body(&self, _: &browse_core::RequestId, _: browse_core::BodyKind) -> browse_core::DriverResult<Option<Vec<u8>>> {
+            Ok(None)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TabDriver for EarlyCloseTab {
+        fn events(&self) -> broadcast::Receiver<PageEvent> {
+            self.events.subscribe()
+        }
+        async fn frames(&self) -> browse_core::DriverResult<Vec<browse_core::Frame>> {
+            Ok(vec![browse_core::Frame { id: FrameId::from("top"), parent: None, url: "about:blank".into(), name: String::new(), document: browse_core::DocumentId(1) }])
+        }
+        async fn navigate(&self, _: &str, _: Option<&str>) -> browse_core::DriverResult<Option<browse_core::NavigationId>> {
+            Err(DriverError::Unsupported("navigate"))
+        }
+        async fn reload(&self, _: bool) -> browse_core::DriverResult<()> {
+            Err(DriverError::Unsupported("reload"))
+        }
+        async fn traverse_history(&self, _: i32) -> browse_core::DriverResult<bool> {
+            Ok(false)
+        }
+        async fn evaluate(&self, _: &Realm, _: &str, _: CallOptions) -> browse_core::Eval {
+            Err(DriverError::Unsupported("evaluate"))
+        }
+        async fn call(&self, _: &Receiver, _: &str, _: &[DriverArg], _: CallOptions) -> browse_core::Eval {
+            Err(DriverError::Unsupported("call"))
+        }
+        async fn release(&self, _: Vec<RemoteRef>) {}
+        async fn adopt(&self, _: &RemoteRef, _: World) -> browse_core::DriverResult<RemoteRef> {
+            Err(DriverError::Unsupported("adopt"))
+        }
+        async fn frame_element(&self, _: &FrameId) -> browse_core::DriverResult<RemoteRef> {
+            Err(DriverError::Unsupported("frame_element"))
+        }
+        async fn content_frame(&self, _: &RemoteRef) -> browse_core::DriverResult<Option<FrameId>> {
+            Ok(None)
+        }
+        async fn set_files(&self, _: &RemoteRef, _: &[std::path::PathBuf]) -> browse_core::DriverResult<()> {
+            Err(DriverError::Unsupported("set_files"))
+        }
+        fn prepare_file_chooser_interception(&self) -> browse_core::FileChooserArm {
+            browse_core::FileChooserArm(0)
+        }
+        async fn arm_file_chooser_interception(&self, _: browse_core::FileChooserArm) -> browse_core::DriverResult<()> {
+            Err(DriverError::Unsupported("file chooser"))
+        }
+        async fn disarm_file_chooser_interception(&self, _: browse_core::FileChooserArm) {}
+        async fn take_file_chooser(&self, _: Duration) -> browse_core::DriverResult<Option<browse_core::FileChooser>> {
+            Err(DriverError::Unsupported("file chooser"))
+        }
+        async fn pointer(&self, _: browse_core::PointerEvent) -> browse_core::DriverResult<()> {
+            Ok(())
+        }
+        async fn key(&self, _: browse_core::KeyEvent) -> browse_core::DriverResult<()> {
+            Ok(())
+        }
+        async fn insert_text(&self, _: &str) -> browse_core::DriverResult<()> {
+            Ok(())
+        }
+        async fn drag(&self, _: (f64, f64), _: (f64, f64), _: &[browse_core::PointerStep], _: browse_core::Modifiers) -> browse_core::DriverResult<browse_core::DragOutcome> {
+            Ok(browse_core::DragOutcome::NotDraggable)
+        }
+        async fn answer_dialog(&self, accept: bool, _: Option<&str>) -> browse_core::DriverResult<()> {
+            if self.late {
+                // As Chrome can: answered at once, then the next dialog opens before the first one's close arrives.
+                let events = self.events.clone();
+                let next = self.next.lock().unwrap().take();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    if let Some(next) = next {
+                        let _ = events.send(PageEvent::DialogOpened(next));
+                    }
+                    let _ = events.send(PageEvent::DialogClosed { accepted: accept });
+                });
+                return Ok(());
+            }
+            let _ = self.events.send(PageEvent::DialogClosed { accepted: accept });
+            if let Some(next) = self.next.lock().unwrap().take() {
+                let _ = self.events.send(PageEvent::DialogOpened(next));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            Ok(())
+        }
+        async fn viewport(&self) -> browse_core::DriverResult<browse_core::Viewport> {
+            Err(DriverError::Unsupported("viewport"))
+        }
+        async fn screenshot(&self, _: browse_core::Screenshot) -> browse_core::DriverResult<browse_core::Image> {
+            Err(DriverError::Unsupported("screenshot"))
+        }
+        fn capture(&self) -> &dyn browse_core::CaptureDriver {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn an_auto_answered_dialog_is_reported_as_auto_even_when_its_close_comes_first() {
+        let tab = Arc::new(EarlyCloseTab { events: broadcast::channel(16).0, next: Mutex::new(None), late: false });
+        let page = TabPage::attach(1, tab.clone()).await.unwrap();
+        page.set_dialog_policy(Some(DialogPolicy::Accept), None);
+        let dialog = Dialog { kind: DialogKind::Confirm, message: "Proceed?".into(), default_prompt: String::new(), url: "about:blank".into() };
+        tab.events.send(PageEvent::DialogOpened(dialog)).unwrap();
+        let started = std::time::Instant::now();
+        while page.events_since(0).iter().all(|e| !matches!(e, TabEvent::DialogClosed { .. })) {
+            assert!(started.elapsed() < Duration::from_secs(5), "the dialog never closed");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let closes: Vec<(bool, bool)> = page
+            .events_since(0)
+            .iter()
+            .filter_map(|e| match e {
+                TabEvent::DialogClosed { accepted, auto } => Some((*accepted, *auto)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(closes, vec![(true, true)]);
+    }
+
+    #[tokio::test]
+    async fn answering_a_dialog_keeps_the_one_the_page_opened_next() {
+        for late in [false, true] {
+            answer_then_next(late).await;
+        }
+    }
+
+    async fn answer_then_next(late: bool) {
+        let confirm = Dialog { kind: DialogKind::Confirm, message: "second".into(), default_prompt: String::new(), url: "about:blank".into() };
+        let tab = Arc::new(EarlyCloseTab { events: broadcast::channel(16).0, next: Mutex::new(Some(confirm)), late });
+        let page = TabPage::attach(1, tab.clone()).await.unwrap();
+        let alert = Dialog { kind: DialogKind::Alert, message: "first".into(), default_prompt: String::new(), url: "about:blank".into() };
+        tab.events.send(PageEvent::DialogOpened(alert)).unwrap();
+        assert!(page.wait_until(Duration::from_secs(5), Duration::from_millis(10), |p| p.dialog().is_some()).await);
+        let answered = page.handle_dialog(true, None).await.unwrap();
+        assert_eq!(answered.message, "first");
+        assert!(page.wait_until(Duration::from_secs(5), Duration::from_millis(10), |p| p.dialog().is_some_and(|d| d.message == "second")).await);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(page.dialog().map(|d| d.message), Some("second".to_string()), "the second dialog is still open (late: {late})");
     }
 
     #[test]

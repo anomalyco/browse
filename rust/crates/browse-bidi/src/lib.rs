@@ -1,50 +1,188 @@
 //! W3C WebDriver BiDi implementation of `browse_core::{BrowserDriver, TabDriver, CaptureDriver}`.
 //!
-//! Targets browsers that speak WebDriver BiDi natively (Firefox / Zen via `--remote-debugging-port`, headless
-//! Firefox) or through a BiDi endpoint (Chromium via `chromium-bidi`).
+//! Targets browsers that speak WebDriver BiDi natively (Firefox, and Firefox-based browsers such as Zen, started with
+//! `--remote-debugging-port`, headless or not). Verified against Firefox 159.
 //!
-//! Depends ONLY on `browse-core` — never on `browse-cdp` — validating that the core driver seam is genuinely
-//! protocol-agnostic.
+//! Depends only on `browse-core` (never on `browse-cdp`), which keeps the core driver seam protocol-agnostic. All
+//! BiDi- and Firefox-specific reconciliation lives here:
+//! - one session per browser, ended on shutdown so the browser accepts the next client
+//! - frame ids are browsing context ids, documents are numbered on `navigationCommitted` (and on back/forward cache
+//!   restores, which Firefox doesn't report as commits)
+//! - browse's isolated world is the `__browse` sandbox; refs are `sharedId`s and handles, no table kept
+//! - script calls give up with `Stale` when their document goes away, since Firefox never answers them
+//! - pointer input is routed into cross-origin iframes, clicks are sent whole so double clicks count
+//! - errors are mapped by WebDriver error code, never by message
 
-use std::path::PathBuf;
-use std::sync::Arc;
+mod capture;
+mod image;
+mod input;
+mod tab;
+mod transport;
+mod value;
+
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use base64::Engine;
 use browse_core::{
-    Arg, BodyKind, BrowserDriver, BrowserEvent, CallOptions, CaptureDriver, ConsoleEvent, DragOutcome, DriverError,
-    DriverInfo, DriverResult, Emulation, Eval, FileChooser, FileChooserArm, Frame, FrameId, Image, KeyEvent, Modifiers,
-    NavigationId, NetworkEvent, NetworkOptions, PageEvent, PointerEvent, PointerStep, Realm, Receiver, RemoteRef,
-    RequestId, Screencast, Screenshot, Subscription, TabDriver, TabOptions, TargetId, Viewport, World,
+    BrowserDriver, BrowserEvent, DriverError, DriverInfo, DriverResult, TabDriver, TabOptions, TargetId,
 };
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
-/// Transport abstraction for a WebDriver BiDi JSON-RPC WebSocket (`ws://127.0.0.1:<port>/session`).
-#[async_trait]
-pub trait BiDiTransport: Send + Sync {
-    async fn send(&self, method: &str, params: Value) -> DriverResult<Value>;
-    fn events(&self) -> broadcast::Receiver<BiDiEvent>;
-}
+pub use tab::BiDiTabDriver;
+pub use transport::{BiDiClient, BiDiError, BiDiEvent, BiDiTransport, map_error, session_url};
 
-#[derive(Debug, Clone)]
-pub struct BiDiEvent {
-    pub method: String,
-    pub params: Value,
-}
+/// The sandbox browse's isolated world lives in.
+pub const SANDBOX: &str = "__browse";
+
+/// How long opening a visible tab waits for Firefox to activate it.
+const ACTIVATE_WAIT: Duration = Duration::from_secs(3);
+
+/// Browser-wide events: tabs opening and closing. `fragmentNavigated` only reaches Firefox clients through a
+/// subscription that isn't scoped to contexts, so it is here too (tabs pick it up from the shared event stream).
+const BROWSER_EVENTS: &[&str] = &[
+    "browsingContext.contextCreated",
+    "browsingContext.contextDestroyed",
+    "browsingContext.fragmentNavigated",
+];
 
 /// Browser-level WebDriver BiDi driver (`protocol: "webdriver-bidi"`, `transport: "ws"`).
 pub struct BiDiBrowserDriver {
     info: DriverInfo,
     transport: Arc<dyn BiDiTransport>,
+    client: Option<Arc<BiDiClient>>,
     events: broadcast::Sender<BrowserEvent>,
+    subscription: Mutex<Option<String>>,
+    pump: tokio::task::AbortHandle,
 }
 
 impl BiDiBrowserDriver {
-    pub fn new(info: DriverInfo, transport: Arc<dyn BiDiTransport>) -> Arc<Self> {
+    /// Connects to a browser's WebDriver BiDi endpoint (`ws://127.0.0.1:<port>` as Firefox prints it, or its
+    /// `/session` URL) and starts a session.
+    pub async fn connect(url: &str) -> DriverResult<Arc<BiDiBrowserDriver>> {
+        Self::from_client(BiDiClient::connect(url).await?).await
+    }
+
+    /// `connect` over a TCP connection the caller opened (and checked) itself.
+    pub async fn connect_stream(url: &str, stream: tokio::net::TcpStream) -> DriverResult<Arc<BiDiBrowserDriver>> {
+        Self::from_client(BiDiClient::connect_stream(url, stream).await?).await
+    }
+
+    /// `connect`, refusing a non-loopback peer unless `allow_remote`; also says whether the peer is loopback.
+    pub async fn connect_loopback_checked(url: &str, allow_remote: bool) -> DriverResult<(Arc<BiDiBrowserDriver>, bool)> {
+        let (client, local) = BiDiClient::connect_loopback_checked(url, allow_remote).await?;
+        Ok((Self::from_client(client).await?, local))
+    }
+
+    async fn from_client(client: Arc<BiDiClient>) -> DriverResult<Arc<BiDiBrowserDriver>> {
+        let capabilities = client.capabilities();
+        let name = capabilities.get("browserName").and_then(Value::as_str).unwrap_or("browser");
+        let version = capabilities.get("browserVersion").and_then(Value::as_str).unwrap_or("");
+        let info = DriverInfo {
+            id: "bidi+ws".into(),
+            name: "WebDriver BiDi".into(),
+            protocol: "webdriver-bidi".into(),
+            transport: "ws".into(),
+            browser: format!("{name} {version}").trim().to_string(),
+        };
+        let transport: Arc<dyn BiDiTransport> = client.clone();
+        match Self::start(info, transport, Some(client.clone())).await {
+            Ok(driver) => Ok(driver),
+            Err(error) => {
+                client.shutdown().await;
+                Err(error)
+            }
+        }
+    }
+
+    /// A driver over an existing session (a test double, or a transport the caller manages).
+    pub async fn new(info: DriverInfo, transport: Arc<dyn BiDiTransport>) -> DriverResult<Arc<BiDiBrowserDriver>> {
+        Self::start(info, transport, None).await
+    }
+
+    async fn start(
+        info: DriverInfo,
+        transport: Arc<dyn BiDiTransport>,
+        client: Option<Arc<BiDiClient>>,
+    ) -> DriverResult<Arc<BiDiBrowserDriver>> {
+        let mut raw = transport.events();
+        let subscribed = transport
+            .send("session.subscribe", json!({ "events": BROWSER_EVENTS }))
+            .await
+            .map_err(map_error)?;
+        let subscription = subscribed.get("subscription").and_then(Value::as_str).map(str::to_string);
         let (events, _) = broadcast::channel(256);
-        Arc::new(Self { info, transport, events })
+        let sender = events.clone();
+        let pump = tokio::spawn(async move {
+            loop {
+                match raw.recv().await {
+                    Ok(event) => {
+                        if let Some(mapped) = browser_event(&event) {
+                            let _ = sender.send(mapped);
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            let _ = sender.send(BrowserEvent::Disconnected);
+        });
+        Ok(Arc::new(BiDiBrowserDriver {
+            info,
+            transport,
+            client,
+            events,
+            subscription: Mutex::new(subscription),
+            pump: pump.abort_handle(),
+        }))
+    }
+
+    pub fn transport(&self) -> &Arc<dyn BiDiTransport> {
+        &self.transport
+    }
+
+    /// The capabilities the session started with (`browserName`, `browserVersion`, ...), when this driver started it.
+    pub fn capabilities(&self) -> Value {
+        self.client.as_ref().map(|client| client.capabilities().clone()).unwrap_or(Value::Null)
+    }
+
+    /// Ends the session (when this driver started it), so the browser accepts another client.
+    pub async fn shutdown(&self) {
+        let subscription = self.subscription.lock().unwrap().take();
+        if let Some(id) = subscription {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(2),
+                self.transport.send("session.unsubscribe", json!({ "subscriptions": [id] })),
+            )
+            .await;
+        }
+        if let Some(client) = &self.client {
+            client.shutdown().await;
+        }
+    }
+}
+
+impl Drop for BiDiBrowserDriver {
+    fn drop(&mut self) {
+        self.pump.abort();
+    }
+}
+
+fn browser_event(event: &BiDiEvent) -> Option<BrowserEvent> {
+    let params = &event.params;
+    if !params.get("parent").is_none_or(Value::is_null) {
+        return None;
+    }
+    let context = params.get("context").and_then(Value::as_str)?;
+    match event.method.as_str() {
+        "browsingContext.contextCreated" => Some(BrowserEvent::TabOpened {
+            target: TargetId::from(context),
+            opener: params.get("originalOpener").and_then(Value::as_str).map(TargetId::from),
+            url: params.get("url").and_then(Value::as_str).unwrap_or("").to_string(),
+        }),
+        "browsingContext.contextDestroyed" => Some(BrowserEvent::TabClosed { target: TargetId::from(context) }),
+        _ => None,
     }
 }
 
@@ -58,306 +196,85 @@ impl BrowserDriver for BiDiBrowserDriver {
         self.events.subscribe()
     }
 
-    async fn open(&self, url: Option<&str>, _opts: &TabOptions) -> DriverResult<TargetId> {
+    async fn open(&self, url: Option<&str>, opts: &TabOptions) -> DriverResult<TargetId> {
+        // Created in the background, then activated (briefly): a foreground create waits for the window to take focus,
+        // which a Firefox without the recommended remote prefs (a real profile, remote.prefs.recommended off) may never
+        // report while headless.
         let created = self
             .transport
             .send("browsingContext.create", json!({ "type": "tab", "background": true }))
-            .await?;
-        let context = created["context"]
-            .as_str()
-            .ok_or_else(|| DriverError::Protocol("browsingContext.create returned no context id".into()))?;
+            .await
+            .map_err(map_error)?;
+        let context = created
+            .get("context")
+            .and_then(Value::as_str)
+            .ok_or_else(|| DriverError::Protocol("browsingContext.create returned no context".into()))?
+            .to_string();
+        if opts.keep_visible {
+            let _ = tokio::time::timeout(ACTIVATE_WAIT, self.transport.send("browsingContext.activate", json!({ "context": context }))).await;
+        }
         if let Some(url) = url {
-            self.transport
-                .send("browsingContext.navigate", json!({ "context": context, "url": url, "wait": "none" }))
-                .await?;
+            // Firefox answers navigate only once the response starts; the tab is usable before that.
+            let transport = self.transport.clone();
+            let params = json!({ "context": context, "url": url, "wait": "none" });
+            tokio::spawn(async move {
+                let _ = transport.send("browsingContext.navigate", params).await;
+            });
         }
         Ok(TargetId::from(context))
     }
 
     async fn close(&self, target: &TargetId) -> DriverResult<()> {
-        self.transport
-            .send("browsingContext.close", json!({ "context": target.as_str() }))
-            .await?;
-        Ok(())
+        // Closing the last tab quits Firefox on Linux and Windows: leave that one blank instead.
+        let tree = self.transport.send("browsingContext.getTree", json!({ "maxDepth": 0 })).await.map_err(map_error)?;
+        let contexts = tree.get("contexts").and_then(Value::as_array).cloned().unwrap_or_default();
+        let listed = contexts.iter().any(|c| c.get("context").and_then(Value::as_str) == Some(target.as_str()));
+        if !listed {
+            return Ok(());
+        }
+        if contexts.len() <= 1 {
+            return match self
+                .transport
+                .send("browsingContext.navigate", json!({ "context": target.as_str(), "url": "about:blank", "wait": "none" }))
+                .await
+            {
+                Ok(_) => Ok(()),
+                Err(error) if error.code() == Some("no such frame") => Ok(()),
+                Err(error) => Err(map_error(error)),
+            };
+        }
+        match self
+            .transport
+            .send("browsingContext.close", json!({ "context": target.as_str(), "promptUnload": false }))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) if error.code() == Some("no such frame") => Ok(()),
+            Err(error) => Err(map_error(error)),
+        }
     }
 
     async fn attach(&self, target: &TargetId) -> DriverResult<Arc<dyn TabDriver>> {
-        Ok(BiDiTabDriver::new(target.clone(), self.transport.clone()))
-    }
-}
-
-/// Per-tab WebDriver BiDi driver.
-///
-/// Maps every core `TabDriver` and `CaptureDriver` operation directly onto W3C WebDriver BiDi modules
-/// (`browsingContext`, `script`, `input`, `network`, `log`, `emulation`), returning `DriverError::Unsupported`
-/// only where the BiDi specification genuinely lacks an equivalent (`Emulation::Touch`, `interrupt`).
-pub struct BiDiTabDriver {
-    context: TargetId,
-    transport: Arc<dyn BiDiTransport>,
-    events: broadcast::Sender<PageEvent>,
-}
-
-impl BiDiTabDriver {
-    pub const SANDBOX_NAME: &'static str = "__browse";
-
-    pub fn new(context: TargetId, transport: Arc<dyn BiDiTransport>) -> Arc<Self> {
-        let (events, _) = broadcast::channel(512);
-        Arc::new(Self { context, transport, events })
+        let tab: Arc<dyn TabDriver> = BiDiTabDriver::attach(self.transport.clone(), target.clone()).await?;
+        Ok(tab)
     }
 
-    fn script_target(realm: &Realm) -> Value {
-        match realm.world {
-            World::Main => json!({ "context": realm.frame.as_str() }),
-            World::Isolated => json!({ "context": realm.frame.as_str(), "sandbox": Self::SANDBOX_NAME }),
+    async fn shutdown(&self) {
+        BiDiBrowserDriver::shutdown(self).await;
+    }
+
+    /// `browser.close` (Firefox closes every window and exits; it may drop the connection before answering), then
+    /// the session ends.
+    async fn quit(&self) -> DriverResult<()> {
+        let closed = tokio::time::timeout(Duration::from_secs(2), self.transport.send("browser.close", json!({}))).await;
+        self.shutdown().await;
+        match closed {
+            Ok(Ok(_)) | Ok(Err(BiDiError::Closed)) => Ok(()),
+            Ok(Err(error)) => Err(map_error(error)),
+            Err(_) => Err(DriverError::Timeout(Duration::from_secs(2))),
         }
     }
 }
 
-#[async_trait]
-impl TabDriver for BiDiTabDriver {
-    fn events(&self) -> broadcast::Receiver<PageEvent> {
-        self.events.subscribe()
-    }
-
-    async fn frames(&self) -> DriverResult<Vec<Frame>> {
-        let _tree = self
-            .transport
-            .send("browsingContext.getTree", json!({ "root": self.context.as_str() }))
-            .await?;
-        Err(DriverError::Unsupported("bidi frame tree parser pending"))
-    }
-
-    async fn navigate(&self, url: &str, _referrer: Option<&str>) -> DriverResult<Option<NavigationId>> {
-        let res = self
-            .transport
-            .send(
-                "browsingContext.navigate",
-                json!({ "context": self.context.as_str(), "url": url, "wait": "none" }),
-            )
-            .await?;
-        Ok(res["navigation"].as_str().map(NavigationId::from))
-    }
-
-    async fn reload(&self, bypass_cache: bool) -> DriverResult<()> {
-        self.transport
-            .send(
-                "browsingContext.reload",
-                json!({ "context": self.context.as_str(), "ignoreCache": bypass_cache, "wait": "none" }),
-            )
-            .await?;
-        Ok(())
-    }
-
-    async fn traverse_history(&self, delta: i32) -> DriverResult<bool> {
-        match self
-            .transport
-            .send(
-                "browsingContext.traverseHistory",
-                json!({ "context": self.context.as_str(), "delta": delta }),
-            )
-            .await
-        {
-            Ok(_) => Ok(true),
-            Err(DriverError::Protocol(msg)) if msg.contains("no such history entry") => Ok(false),
-            Err(error) => Err(error),
-        }
-    }
-
-    async fn evaluate(&self, realm: &Realm, expression: &str, opts: CallOptions) -> Eval {
-        let _params = json!({
-            "expression": expression,
-            "target": Self::script_target(realm),
-            "awaitPromise": opts.await_promise,
-            "userActivation": opts.user_activation,
-        });
-        Err(DriverError::Unsupported("bidi script.evaluate serializer pending"))
-    }
-
-    async fn call(&self, _on: &Receiver, _function: &str, _args: &[Arg], _opts: CallOptions) -> Eval {
-        Err(DriverError::Unsupported("bidi script.callFunction serializer pending"))
-    }
-
-    async fn release(&self, refs: Vec<RemoteRef>) {
-        if refs.is_empty() {
-            return;
-        }
-        let handles: Vec<&str> = refs.iter().map(RemoteRef::token).collect();
-        let _ = self
-            .transport
-            .send(
-                "script.disown",
-                json!({ "handles": handles, "target": { "context": self.context.as_str() } }),
-            )
-            .await;
-    }
-
-    async fn adopt(&self, _node: &RemoteRef, _world: World) -> DriverResult<RemoteRef> {
-        Err(DriverError::Unsupported("bidi sharedId adoption pending"))
-    }
-
-    async fn frame_element(&self, _frame: &FrameId) -> DriverResult<RemoteRef> {
-        Err(DriverError::Unsupported("bidi frame_element pending"))
-    }
-
-    async fn content_frame(&self, _node: &RemoteRef) -> DriverResult<Option<FrameId>> {
-        Err(DriverError::Unsupported("bidi content_frame pending"))
-    }
-
-    fn prepare_file_chooser_interception(&self) -> FileChooserArm {
-        FileChooserArm(0)
-    }
-
-    async fn arm_file_chooser_interception(&self, _arm: FileChooserArm) -> DriverResult<()> {
-        Err(DriverError::Unsupported("bidi file chooser interception"))
-    }
-
-    async fn disarm_file_chooser_interception(&self, _arm: FileChooserArm) {}
-
-    async fn take_file_chooser(&self, _timeout: Duration) -> DriverResult<Option<FileChooser>> {
-        Err(DriverError::Unsupported("bidi file chooser interception"))
-    }
-
-    async fn set_files(&self, input: &RemoteRef, paths: &[PathBuf]) -> DriverResult<()> {
-        let files: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
-        self.transport
-            .send(
-                "input.setFiles",
-                json!({
-                    "context": input.frame.as_str(),
-                    "element": { "sharedId": input.token() },
-                    "files": files,
-                }),
-            )
-            .await?;
-        Ok(())
-    }
-
-    async fn pointer(&self, _event: PointerEvent) -> DriverResult<()> {
-        Err(DriverError::Unsupported("bidi input.performActions pointer pending"))
-    }
-
-    async fn key(&self, _event: KeyEvent) -> DriverResult<()> {
-        Err(DriverError::Unsupported("bidi input.performActions key pending"))
-    }
-
-    async fn insert_text(&self, _text: &str) -> DriverResult<()> {
-        Err(DriverError::Unsupported("bidi input.performActions text pending"))
-    }
-
-    async fn drag(
-        &self,
-        _from: (f64, f64),
-        _to: (f64, f64),
-        _steps: &[PointerStep],
-        _modifiers: Modifiers,
-    ) -> DriverResult<DragOutcome> {
-        Err(DriverError::Unsupported("bidi input.performActions drag pending"))
-    }
-
-    async fn answer_dialog(&self, accept: bool, text: Option<&str>) -> DriverResult<()> {
-        let mut params = json!({ "context": self.context.as_str(), "accept": accept });
-        if let Some(text) = text {
-            params["userText"] = json!(text);
-        }
-        self.transport.send("browsingContext.handleUserPrompt", params).await?;
-        Ok(())
-    }
-
-    async fn viewport(&self) -> DriverResult<Viewport> {
-        Err(DriverError::Unsupported("bidi viewport metrics pending"))
-    }
-
-    async fn screenshot(&self, _shot: Screenshot) -> DriverResult<Image> {
-        Err(DriverError::Unsupported("bidi browsingContext.captureScreenshot pending"))
-    }
-
-    async fn emulate(&self, change: Emulation) -> DriverResult<()> {
-        match change {
-            Emulation::Viewport(v) => {
-                let viewport = v.map(|v| json!({ "width": v.width, "height": v.height }));
-                let dpr = v.map(|v| v.device_scale_factor).filter(|d| *d > 0.0);
-                self.transport
-                    .send(
-                        "browsingContext.setViewport",
-                        json!({ "context": self.context.as_str(), "viewport": viewport, "devicePixelRatio": dpr }),
-                    )
-                    .await?;
-                Ok(())
-            }
-            Emulation::UserAgent(agent) => {
-                self.transport
-                    .send(
-                        "emulation.setUserAgentOverride",
-                        json!({ "contexts": [self.context.as_str()], "userAgent": agent }),
-                    )
-                    .await?;
-                Ok(())
-            }
-            Emulation::Geolocation(geo) => {
-                let coordinates = geo.map(|g| json!({ "latitude": g.latitude, "longitude": g.longitude, "accuracy": g.accuracy }));
-                self.transport
-                    .send(
-                        "emulation.setGeolocationOverride",
-                        json!({ "contexts": [self.context.as_str()], "coordinates": coordinates }),
-                    )
-                    .await?;
-                Ok(())
-            }
-            Emulation::Offline(offline) => {
-                let conditions = if offline { json!({ "type": "offline" }) } else { Value::Null };
-                self.transport
-                    .send(
-                        "emulation.setNetworkConditions",
-                        json!({ "contexts": [self.context.as_str()], "networkConditions": conditions }),
-                    )
-                    .await?;
-                Ok(())
-            }
-            Emulation::Media(_) => Err(DriverError::Unsupported("bidi media emulation pending")),
-            Emulation::Touch(_) => Err(DriverError::Unsupported("touch emulation")),
-        }
-    }
-
-    async fn interrupt(&self, _frame: Option<&FrameId>) -> DriverResult<()> {
-        Err(DriverError::Unsupported("interrupt"))
-    }
-
-    fn capture(&self) -> &dyn CaptureDriver {
-        self
-    }
-}
-
-#[async_trait]
-impl CaptureDriver for BiDiTabDriver {
-    async fn console(&self) -> DriverResult<Subscription<ConsoleEvent>> {
-        Err(DriverError::Unsupported("bidi log.entryAdded pending"))
-    }
-
-    async fn network(&self, _opts: NetworkOptions) -> DriverResult<Subscription<NetworkEvent>> {
-        Err(DriverError::Unsupported("bidi network subscription pending"))
-    }
-
-    async fn body(&self, request: &RequestId, kind: BodyKind) -> DriverResult<Option<Vec<u8>>> {
-        let data_type = match kind {
-            BodyKind::Request => "request",
-            BodyKind::Response => "response",
-        };
-        let res = self
-            .transport
-            .send("network.getData", json!({ "request": request.as_str(), "dataType": data_type }))
-            .await?;
-        let Some(bytes) = res.get("bytes") else { return Ok(None) };
-        match bytes["type"].as_str() {
-            Some("string") => Ok(bytes["value"].as_str().map(|s| s.as_bytes().to_vec())),
-            Some("base64") => Ok(bytes["value"]
-                .as_str()
-                .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())),
-            _ => Ok(None),
-        }
-    }
-
-    fn screencast(&self) -> Option<&dyn Screencast> {
-        // Harness automatically falls back to screenshot polling until Firefox 154+ startScreencast is wired.
-        None
-    }
-}
+#[cfg(test)]
+mod tests;
