@@ -304,12 +304,14 @@ impl BrowserDriver for CdpWsBrowserDriver {
         self.events.subscribe()
     }
 
-    /// Tabs open in the background even with `keepVisible`: headless Chromium keeps every page visible and running
-    /// anyway, and a foreground one can stop answering key input that changes a selection (Chromium 148 on macOS).
+    /// Tabs open in the foreground: from Chromium 156, headless stops producing frames for a background tab once it
+    /// takes input, so the next `Page.captureScreenshot` never answers. Background tabs were a workaround for
+    /// a foreground tab ignoring selection-changing keys on macOS (Chromium 148); launch.rs now passes
+    /// `--disable-renderer-accessibility` for that renderer deadlock.
     async fn open(&self, url: Option<&str>, _opts: &TabOptions) -> DriverResult<TargetId> {
         let created = self
             .browser
-            .send("Target.createTarget", json!({ "url": url.unwrap_or("about:blank"), "background": true }), None)
+            .send("Target.createTarget", json!({ "url": url.unwrap_or("about:blank"), "background": false }), None)
             .await
             .map_err(map)?;
         created

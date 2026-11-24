@@ -421,6 +421,7 @@ header{position:sticky;top:0;height:40px;background:#ddd;z-index:5}
 main{padding:8px;height:2300px;box-sizing:border-box;position:relative}
 #bottom{position:absolute;top:2200px;left:8px;margin:0;height:20px;line-height:20px}
 #wrap{position:relative;width:160px;height:30px}
+#covered{width:120px}
 #overlay{position:absolute;left:0;top:0;width:160px;height:30px;background:rgba(0,0,0,.2)}
 #scroller{height:100px;width:300px;overflow:auto;scroll-behavior:smooth}
 #tall{height:2000px}
