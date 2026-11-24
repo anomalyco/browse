@@ -232,6 +232,30 @@ async fn stealth_isolated_world_and_main_world() {
     assert_eq!(with_el, "\"Go!\"");
 }
 
+/// eval's value comes back as structured content too, so clients that read it get the value, not JSON text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn eval_returns_its_value_as_structured_content() {
+    let h = harness!(false);
+    let url = h.server.page("/v", "<!doctype html><title>Values</title>");
+    h.ok("navigate", json!({ "url": url })).await;
+    let structured = |output: browse_core::ToolOutput| output.structured_content.unwrap_or_default();
+    let title = h.call("eval", json!({ "expression": "document.title" })).await;
+    assert_eq!(support::text_of(&title), "\"Values\"", "the text stays JSON");
+    assert_eq!(structured(title), json!({ "value": "Values" }));
+    assert_eq!(structured(h.call("eval", json!({ "expression": "1 + 1" })).await), json!({ "value": 2 }));
+    assert_eq!(structured(h.call("eval", json!({ "expression": "JSON.stringify([1])" })).await), json!({ "value": "[1]" }));
+    assert_eq!(structured(h.call("eval", json!({ "expression": "({ a: [1] })" })).await), json!({ "value": { "a": [1] } }));
+    assert_eq!(structured(h.call("eval", json!({ "expression": "undefined" })).await), json!({ "value": null }));
+    let nothing = structured(h.call("eval", json!({ "expression": "const t = document.title;" })).await);
+    assert_eq!(nothing["value"], serde_json::Value::Null);
+    assert!(nothing["hint"].as_str().unwrap_or_default().contains("return"), "{nothing}");
+    let big = structured(h.call("eval", json!({ "expression": "'x'.repeat(200000)" })).await);
+    assert_eq!(big["value"], serde_json::Value::Null);
+    assert!(big["truncated"].as_str().unwrap_or_default().contains("characters"), "{big}");
+    let failed = h.call("eval", json!({ "expression": "null.x" })).await;
+    assert!(failed.is_error && failed.structured_content.is_none());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn covered_elements_fail_fast_and_dialogs_pause() {
     let h = harness!(false);

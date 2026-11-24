@@ -695,11 +695,23 @@ pub async fn call_tool_keyed(relay: &Arc<Relay>, request: ToolCallRequest, clien
         }
         warnings
     };
-    for warning in warnings {
+    for warning in &warnings {
         rlog!("tool.warning", tool = name.clone(), tabId = tab, warning = warning.chars().take(500).collect::<String>());
-        output.content.push(Content::Text { text: format!("Warning: {warning}") });
     }
+    add_warnings(&mut output, warnings);
     Ok(output)
+}
+
+/// Warnings go after the output as text, and into its structured content when it has some: clients that read that
+/// would never see the text.
+fn add_warnings(output: &mut ToolOutput, warnings: Vec<String>) {
+    if warnings.is_empty() {
+        return;
+    }
+    if let Some(Value::Object(structured)) = output.structured_content.as_mut() {
+        structured.insert("warnings".into(), json!(warnings));
+    }
+    output.content.extend(warnings.into_iter().map(|warning| Content::Text { text: format!("Warning: {warning}") }));
 }
 
 /// An output this big (a large eval result, a full-page screenshot) leaves freed memory worth handing back.
@@ -793,5 +805,27 @@ async fn housekeeping(relay: Arc<Relay>) {
                 rlog!("relay.memory", rssMb = bytes / (1024 * 1024), tabs = tabs);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod warning_tests {
+    use super::*;
+
+    #[test]
+    fn warnings_reach_text_and_structured_content() {
+        let mut plain = ToolOutput::text("{}");
+        add_warnings(&mut plain, vec!["went elsewhere".into()]);
+        assert!(matches!(&plain.content[1], Content::Text { text } if text == "Warning: went elsewhere"));
+        assert!(plain.structured_content.is_none());
+
+        let mut structured = ToolOutput { structured_content: Some(json!({ "value": 1 })), ..ToolOutput::text("1") };
+        add_warnings(&mut structured, vec!["went elsewhere".into()]);
+        assert_eq!(structured.structured_content, Some(json!({ "value": 1, "warnings": ["went elsewhere"] })));
+        assert_eq!(structured.content.len(), 2);
+
+        let mut quiet = ToolOutput { structured_content: Some(json!({ "value": 1 })), ..ToolOutput::text("1") };
+        add_warnings(&mut quiet, Vec::new());
+        assert_eq!(quiet.structured_content, Some(json!({ "value": 1 })));
     }
 }

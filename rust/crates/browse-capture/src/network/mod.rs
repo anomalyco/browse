@@ -790,6 +790,7 @@ impl Tool for NetworkTool {
                 "required": ["tab", "action"],
                 "additionalProperties": false
             }),
+            output_schema: None,
         }
     }
 

@@ -306,7 +306,7 @@ pub struct TabsTool;
 #[async_trait]
 impl browse_core::Tool for TabsTool {
     fn spec(&self) -> browse_core::ToolSpec {
-        browse_core::ToolSpec { name: "tabs".into(), description: String::new(), input_schema: json!({ "type": "object" }) }
+        browse_core::ToolSpec { name: "tabs".into(), description: String::new(), input_schema: json!({ "type": "object" }), output_schema: None }
     }
     async fn call(&self, ctx: ToolContext, args: Value) -> anyhow::Result<ToolOutput> {
         let out = match args.get("action").and_then(Value::as_str).unwrap_or("list") {

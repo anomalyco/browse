@@ -82,6 +82,7 @@ impl Tool for ExecuteTool {
                 "required": ["code"],
                 "additionalProperties": false,
             }),
+            output_schema: None,
         }
     }
 
@@ -232,7 +233,7 @@ fn render(outcome: host::Outcome, mut warnings: Vec<String>, tab: Option<TabId>,
             attached += 1;
         }
     }
-    ToolOutput { content, is_error }
+    ToolOutput { content, is_error, structured_content: None }
 }
 
 fn aftermath_line(after: &host::Aftermath) -> Option<String> {

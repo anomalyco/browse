@@ -329,14 +329,17 @@ pub struct ToolOutput {
     pub content: Vec<Content>,
     #[serde(rename = "isError", default, skip_serializing_if = "std::ops::Not::not")]
     pub is_error: bool,
+    /// MCP `structuredContent`: the result as an object, for tools that declare an `outputSchema`.
+    #[serde(rename = "structuredContent", default, skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<Value>,
 }
 
 impl ToolOutput {
     pub fn text(text: impl Into<String>) -> Self {
-        Self { content: vec![Content::Text { text: text.into() }], is_error: false }
+        Self { content: vec![Content::Text { text: text.into() }], is_error: false, structured_content: None }
     }
     pub fn error(text: impl Into<String>) -> Self {
-        Self { content: vec![Content::Text { text: text.into() }], is_error: true }
+        Self { content: vec![Content::Text { text: text.into() }], is_error: true, structured_content: None }
     }
 }
 
@@ -346,6 +349,9 @@ pub struct ToolSpec {
     pub description: String,
     #[serde(rename = "inputSchema")]
     pub input_schema: Value,
+    /// MCP `outputSchema`: a tool with one returns `structuredContent` matching it on every successful call.
+    #[serde(rename = "outputSchema", default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
 }
 
 #[async_trait]

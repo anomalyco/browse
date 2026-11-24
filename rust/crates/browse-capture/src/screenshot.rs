@@ -377,6 +377,7 @@ impl Tool for ScreenshotTool {
                 "required": ["tab"],
                 "additionalProperties": false
             }),
+            output_schema: None,
         }
     }
 
@@ -449,6 +450,7 @@ impl Tool for ScreenshotTool {
                             Content::Text { text: serde_json::to_string(&summary)? },
                         ],
                         is_error: false,
+                        structured_content: None,
                     }),
                 }
             }
@@ -493,6 +495,7 @@ impl Tool for ScreenshotDiffTool {
                 "required": ["tab", "baseline"],
                 "additionalProperties": false
             }),
+            output_schema: None,
         }
     }
 
@@ -557,6 +560,7 @@ impl Tool for ScreenshotDiffTool {
                     None if diff.changed_pixels > 0 => Ok(ToolOutput {
                         content: vec![Content::Text { text: serde_json::to_string(&result)? }, image_content(&encode_png(&diff.image)?, "image/png")],
                         is_error: false,
+                        structured_content: None,
                     }),
                     None => crate::json_output(&result),
                 }

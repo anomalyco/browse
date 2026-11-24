@@ -40,7 +40,7 @@ const INPUT_TOOLS: &[&str] = &["click", "fill", "type", "press", "select", "hove
 #[async_trait]
 impl Tool for PageTool {
     fn spec(&self) -> ToolSpec {
-        ToolSpec { name: self.name.into(), description: self.description.into(), input_schema: (self.schema)() }
+        ToolSpec { name: self.name.into(), description: self.description.into(), input_schema: (self.schema)(), output_schema: (self.name == "eval").then(eval_output_schema) }
     }
 
     async fn call(&self, ctx: ToolContext, args: Value) -> Result<ToolOutput> {
@@ -995,15 +995,16 @@ async fn eval(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
         }
     };
     if let Some(hint) = hint {
-        return Ok(json_output(json!({ "result": null, "hint": hint })));
+        return Ok(ToolOutput { structured_content: Some(json!({ "value": null, "hint": hint })), ..json_output(json!({ "result": null, "hint": hint })) });
     }
     let text = serde_json::to_string(&value).unwrap_or_else(|_| "null".into());
     let chars = text.chars().count();
     if chars > MAX_EVAL_CHARS {
         let cut: String = text.chars().take(MAX_EVAL_CHARS).collect();
-        return Ok(ToolOutput::text(format!("{cut}\n… [truncated: the result is {chars} characters; return less, or pick the fields you need]", )));
+        let note = format!("the result is {chars} characters; return less, or pick the fields you need");
+        return Ok(ToolOutput { structured_content: Some(json!({ "value": null, "truncated": note })), ..ToolOutput::text(format!("{cut}\n… [truncated: {note}]")) });
     }
-    Ok(ToolOutput::text(text))
+    Ok(ToolOutput { structured_content: Some(json!({ "value": value })), ..ToolOutput::text(text) })
 }
 
 // wait_for
@@ -1893,7 +1894,21 @@ fn scroll_schema() -> Value {
     )
 }
 
-const EVAL: &str = "Run JavaScript in the page and return its result as JSON. An expression's value is returned (promises are awaited, await works). Statements (const/let, loops, several lines) return the value of their last expression statement, like a console (`const a = 3; a` gives 3), or what they `return`. Declarations stay local to the call and never leak into the page. DOM nodes come back as \"<tag#id.class>\", Map as an object, Set as an array, Date as an ISO string, Errors as {name, message}, cycles as \"[Circular]\". A script still running at the timeout is stopped. By default it runs in browse's isolated world: it sees the DOM but not the page's own JS globals, and the page can't see it. world \"main\" runs in the page's own world (window variables, frameworks) and is visible to it. With ref/selector or arg, expression must be a function, called as (element, arg) => ...; e.g. expression \"(el) => el.href\" with ref \"e5\". Without them, a function written as the whole expression is called with no arguments, so \"() => document.title\" works like \"document.title\". frame (a selector of an <iframe>) runs in that frame. Results over 100k characters are cut. Results are returned as-is, without secret redaction.";
+const EVAL: &str = "Run JavaScript in the page and return its result as { value } (JSON). An expression's value is returned (promises are awaited, await works). Statements (const/let, loops, several lines) return the value of their last expression statement, like a console (`const a = 3; a` gives 3), or what they `return`. Declarations stay local to the call and never leak into the page. DOM nodes come back as \"<tag#id.class>\", Map as an object, Set as an array, Date as an ISO string, Errors as {name, message}, cycles as \"[Circular]\". A script still running at the timeout is stopped. By default it runs in browse's isolated world: it sees the DOM but not the page's own JS globals, and the page can't see it. world \"main\" runs in the page's own world (window variables, frameworks) and is visible to it. With ref/selector or arg, expression must be a function, called as (element, arg) => ...; e.g. expression \"(el) => el.href\" with ref \"e5\". Without them, a function written as the whole expression is called with no arguments, so \"() => document.title\" works like \"document.title\". frame (a selector of an <iframe>) runs in that frame. Results over 100k characters are cut (value is then null and truncated says why). Results are returned as-is, without secret redaction.";
+
+/// What eval returns as structured content (MCP outputSchema): clients that read it get the value itself, not JSON text.
+fn eval_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "value": { "description": "The result as a JSON value; null when there is none." },
+            "hint": { "type": "string", "description": "Why there is no value, when the code returned nothing." },
+            "truncated": { "type": "string", "description": "Set when the result was too large to return." },
+            "warnings": { "type": "array", "items": { "type": "string" }, "description": "What browse noticed while the call ran, e.g. a blocked navigation." },
+        },
+        "required": ["value"],
+    })
+}
 
 fn eval_schema() -> Value {
     object(
