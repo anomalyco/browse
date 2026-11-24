@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
@@ -524,7 +524,10 @@ async fn fill_one(c: &Ctx, input: &mut Input<'_>, field: &Field, timeout: Durati
             if field.checked.is_some() {
                 bail!("{} is not a checkbox; pass value instead of checked", label);
             }
-            actions::wait_editable(&c.page, &resolved, timeout, force).await?;
+            let deadline = Instant::now() + timeout;
+            actions::wait_editable(&c.page, &resolved, deadline, force).await?;
+            let resolved = actions::ensure_reachable(&c.page, &c.tab_state, input, &field.spec, deadline, force).await?;
+            let label = target_label(&field.spec, &resolved.label);
             let text = field.value.clone().unwrap_or_default();
             let state = c.page.call_element(&resolved.element, "fill", vec![v(&text)], true).await?;
             match state.as_str() {
@@ -1751,7 +1754,7 @@ fn click_schema() -> Value {
     object(p, &[])
 }
 
-const FILL: &str = "Fill form fields with trusted input, replacing what is there: text inputs, textareas and contenteditable get the value typed in; selects pick the option by value or label; checkboxes/radios/switches take checked. Fill one field with ref/selector + value|checked, or many with fields: [...]. submit presses Enter after the last field. Returns JSON: filled (per field) and what changed.";
+const FILL: &str = "Fill form fields with trusted input, replacing what is there: text inputs, textareas and contenteditable get the value typed in; selects pick the option by value or label; checkboxes/radios/switches take checked. A text field under something else fails fast, naming what is on top (dismiss it, or pass force). Fill one field with ref/selector + value|checked, or many with fields: [...]. submit presses Enter after the last field. Returns JSON: filled (per field) and what changed.";
 
 fn fill_schema() -> Value {
     let field = json!({
@@ -1769,7 +1772,7 @@ fn fill_schema() -> Value {
         "checked": { "type": "boolean", "description": "For a checkbox, radio or switch." },
         "fields": { "type": "array", "items": field, "description": "Several fields in order, instead of ref/selector + value." },
         "submit": { "type": "boolean", "description": "Press Enter after filling." },
-        "force": { "type": "boolean" },
+        "force": { "type": "boolean", "description": "Skip the visible/enabled/editable wait and, for text fields, the covered check; checkboxes get the same checks as click." },
         "timeout": { "type": "integer" },
     })));
     p.insert("ref".into(), json!({ "type": "string", "description": TARGET_DOC }));

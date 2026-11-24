@@ -731,11 +731,11 @@
     if (value && (value.ref || value.selector)) return { ref: value.ref, selector: value.selector }
     throw new TypeError("expected a locator, a selector or a ref")
   }
-  const fillInput = (targetValue, value) => tool("fill", defaultPage._args({ ...inputTarget(targetValue), value: String(value) }))
-  const fillInputs = (page, fields) => {
-    if (Array.isArray(page)) { fields = page; page = defaultPage }
+  const fillInput = (targetValue, value, options = {}) => tool("fill", defaultPage._args({ ...inputTarget(targetValue), value: String(value), force: options.force }))
+  const fillInputs = (page, fields, options = {}) => {
+    if (Array.isArray(page)) { options = fields || {}; fields = page; page = defaultPage }
     const list = fields.map((field) => clean({ ...inputTarget(field.target ?? field.locator ?? field), value: field.value === undefined ? undefined : String(field.value), checked: field.checked }))
-    return tool("fill", (page instanceof Page ? page : defaultPage)._args({ fields: list }))
+    return tool("fill", (page instanceof Page ? page : defaultPage)._args({ fields: list, force: options.force }))
   }
 
   const fileInfo = () => hostSync("files", { op: "info" })
