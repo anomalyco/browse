@@ -435,7 +435,7 @@ function updateFacts(autoUpdate: NonNullable<AgentRelayState["autoUpdate"]>) {
     autoUpdate.version ? `Installed: ${autoUpdate.version}${autoUpdate.channel === "dev" ? " (dev channel)" : ""}.` : "",
     autoUpdate.pending ? `${autoUpdate.pending} is ready and switches in once no agent is using the browser.` : "",
     !autoUpdate.pending && autoUpdate.latest && autoUpdate.latest !== autoUpdate.version ? `Newest: ${autoUpdate.latest}.` : "",
-    autoUpdate.checkFailed ? `Last update check failed: ${autoUpdate.checkFailed}.` : "",
+    autoUpdate.checkFailed ? `Last update check failed: ${autoUpdate.checkFailed.replace(/[.!?]+$/, "")}.` : "",
   ]
     .filter(Boolean)
     .join(" ")

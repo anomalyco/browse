@@ -55,6 +55,7 @@ pub fn run() -> anyhow::Result<i32> {
         let relay = handle.relay.clone();
         let mut updater = update::Updater::spawn(Arc::new(move || relay.idle(quiet)));
         let mut notice = None;
+        let mut auto_update = update::status_json();
         let mut restart = None;
         let mut tick = tokio::time::interval(Duration::from_secs(5));
         let stop = signalled();
@@ -78,6 +79,12 @@ pub fn run() -> anyhow::Result<i32> {
             if pending != notice {
                 notice = pending;
                 handle.update_notice(notice.clone());
+            }
+            // The background check's state reaches connected options pages as it changes, not only on handshake.
+            let status = update::status_json();
+            if status != auto_update {
+                auto_update = status;
+                handle.relay.send_relay_settings(None);
             }
             if spawned
                 && handle.idle(quiet)
