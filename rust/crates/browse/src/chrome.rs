@@ -219,15 +219,25 @@ pub fn connect(options: &Options) -> anyhow::Result<i32> {
         return attach(&app, &profile, &url, options.headless);
     }
     std::fs::create_dir_all(&profile).with_context(|| format!("creating {}", profile.display()))?;
-    // Remove any stale DevToolsActivePort before starting so wait_listening only sees the fresh one.
+    // Remove stale discovery files before starting so wait_listening only sees this launch.
     let _ = std::fs::remove_file(profile.join("DevToolsActivePort"));
+    let log_path = profile.join("devtools.log");
+    let _ = std::fs::remove_file(&log_path);
     let mode = if options.headless { " headless" } else { "" };
     println!("Starting {}{mode} with a standalone profile at {}…", app.name, tilde(&profile));
-    launch(&app.exe, &profile, options.headless)?;
-    match wait_listening(&profile) {
+    launch(&app.exe, &profile, &log_path, options.headless)?;
+    match wait_listening(&profile, &log_path) {
         Some(url) => attach(&app, &profile, &url, options.headless),
         None => {
-            eprintln!("! {} didn't open a DevTools port within {} s. Close it and run `browse chrome` again.", app.name, WAIT.as_secs());
+            let tail = std::fs::read_to_string(&log_path)
+                .ok()
+                .map(|s| s.lines().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join(" | "))
+                .filter(|s| !s.is_empty());
+            if let Some(tail) = tail {
+                eprintln!("! {} didn't open a DevTools port within {} s ({tail}). Close it and run `browse chrome` again.", app.name, WAIT.as_secs());
+            } else {
+                eprintln!("! {} didn't open a DevTools port within {} s. Close it and run `browse chrome` again.", app.name, WAIT.as_secs());
+            }
             Ok(1)
         }
     }
@@ -251,8 +261,14 @@ fn launch_args(profile: &Path, headless: bool) -> Vec<OsString> {
         "--disable-renderer-backgrounding".into(),
         "--disable-backgrounding-occluded-windows".into(),
     ];
+    #[cfg(target_os = "macos")]
+    {
+        args.push("--use-mock-keychain".into());
+        args.push("--password-store=basic".into());
+    }
     if headless {
         args.push("--headless=new".into());
+        args.push("--disable-gpu".into());
         #[cfg(target_os = "macos")]
         args.push("--disable-renderer-accessibility".into());
     }
@@ -260,13 +276,14 @@ fn launch_args(profile: &Path, headless: bool) -> Vec<OsString> {
     args
 }
 
-fn launch(exe: &Path, profile: &Path, headless: bool) -> anyhow::Result<()> {
+fn launch(exe: &Path, profile: &Path, log_path: &Path, headless: bool) -> anyhow::Result<()> {
+    let stderr = std::fs::File::create(log_path).map(Stdio::from).unwrap_or_else(|_| Stdio::null());
     let mut command = Command::new(exe);
     command
         .args(launch_args(profile, headless))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(stderr);
     detach(&mut command);
     command.spawn().with_context(|| format!("couldn't start {}", exe.display()))?;
     Ok(())
@@ -315,11 +332,40 @@ fn detach(command: &mut Command) {
     command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
 }
 
-fn wait_listening(profile: &Path) -> Option<String> {
+fn parse_devtools_log(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let url = line.trim().strip_prefix("DevTools listening on ")?.trim();
+        let rest = url.strip_prefix("ws://")?;
+        let (host_port, path) = rest.split_once('/')?;
+        let (host, port) = host_port.rsplit_once(':')?;
+        if !matches!(host, "127.0.0.1" | "localhost" | "[::1]") || port.parse::<u16>().ok().filter(|p| *p > 0).is_none() {
+            return None;
+        }
+        if !path.starts_with("devtools/browser/") || path.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            return None;
+        }
+        Some(format!("ws://127.0.0.1:{port}/{path}"))
+    })
+}
+
+fn wait_listening(profile: &Path, log_path: &Path) -> Option<String> {
     let deadline = Instant::now() + WAIT;
     while Instant::now() < deadline {
         if let Some(url) = chrome::live_url(profile) {
             return Some(url);
+        }
+        if let Ok(text) = std::fs::read_to_string(log_path)
+            && let Some(url) = parse_devtools_log(&text)
+        {
+            // Persist DevToolsActivePort when Chrome only announced the endpoint on stderr (e.g. headless Windows).
+            if let Some(rest) = url.strip_prefix("ws://127.0.0.1:")
+                && let Some((port, path)) = rest.split_once('/')
+            {
+                let _ = std::fs::write(profile.join("DevToolsActivePort"), format!("{port}\n/{path}\n"));
+            }
+            if chrome::live_url(profile).is_some() {
+                return Some(url);
+            }
         }
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -436,5 +482,15 @@ mod tests {
         assert!(!headed.contains(&OsString::from("--headless=new")));
         let headless = launch_args(Path::new("/tmp/p"), true);
         assert!(headless.contains(&OsString::from("--headless=new")));
+        assert!(headless.contains(&OsString::from("--disable-gpu")));
+    }
+
+    #[test]
+    fn parses_devtools_stderr_log() {
+        assert_eq!(
+            parse_devtools_log("noise\nDevTools listening on ws://127.0.0.1:54321/devtools/browser/abc-123\n"),
+            Some("ws://127.0.0.1:54321/devtools/browser/abc-123".to_string())
+        );
+        assert_eq!(parse_devtools_log("DevTools listening on ws://evil.com:9222/devtools/browser/abc"), None);
     }
 }
