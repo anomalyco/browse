@@ -162,6 +162,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "browse-conformance"
+version = "0.1.5"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "browse-bidi",
+ "browse-capture",
+ "browse-cdp",
+ "browse-core",
+ "browse-page",
+ "browse-script",
+ "futures-util",
+ "png",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.27.0",
+]
+
+[[package]]
 name = "browse-core"
 version = "0.1.5"
 dependencies = [

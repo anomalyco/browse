@@ -84,13 +84,28 @@ user_pref("browser.startup.homepage_override.mstone", "ignore");
 user_pref("browser.tabs.warnOnClose", false);
 "#;
 
+impl Firefox {
+    /// Waits for Firefox to exit by itself; whether it did within `limit`.
+    pub async fn exited_within(&mut self, limit: Duration) -> bool {
+        tokio::time::timeout(limit, self.child.wait()).await.is_ok()
+    }
+}
+
 /// Launches a headless Firefox; None when there is none (a panic when BROWSE_TEST_FIREFOX names a broken one).
 pub async fn launch() -> Option<Firefox> {
+    launch_with_prefs("").await
+}
+
+/// `launch` with extra prefs.js lines in the profile (as `browse firefox` writes to a real profile).
+pub async fn launch_with_prefs(extra: &str) -> Option<Firefox> {
     let binary = firefox_binary()?;
     let required = std::env::var("BROWSE_TEST_FIREFOX").is_ok();
     let slot = SLOTS.acquire().await.unwrap();
     let profile = TempDir::new("profile");
     std::fs::write(profile.0.join("user.js"), PREFS).unwrap();
+    if !extra.is_empty() {
+        std::fs::write(profile.0.join("prefs.js"), extra).unwrap();
+    }
     let spawned = tokio::process::Command::new(&binary)
         .args(["--headless", "--no-remote", "--profile"])
         .arg(&profile.0)
@@ -213,7 +228,15 @@ impl Harness {
     }
 
     pub async fn start_with(human: bool, connected_locally: bool) -> Option<Harness> {
-        let firefox = launch().await?;
+        Self::start_in(launch().await?, human, connected_locally).await
+    }
+
+    /// A harness whose profile's prefs.js has `prefs`.
+    pub async fn start_with_prefs(prefs: &str) -> Option<Harness> {
+        Self::start_in(launch_with_prefs(prefs).await?, false, true).await
+    }
+
+    async fn start_in(firefox: Firefox, human: bool, connected_locally: bool) -> Option<Harness> {
         let driver = BiDiBrowserDriver::connect(&firefox.ws).await.expect("a WebDriver BiDi session");
         let target = driver.open(None, &TabOptions { keep_visible: true, ..TabOptions::default() }).await.unwrap();
         let tab = driver.attach(&target).await.unwrap();

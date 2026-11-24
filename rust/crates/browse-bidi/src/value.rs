@@ -5,6 +5,8 @@
 //! - `o:<handle>` for any other object (valid in the realm that returned it)
 
 use browse_core::{DocumentId, DriverError, DriverResult, Evaluated, FrameId, JsError, RemoteRef, Returns, World};
+use std::collections::HashMap;
+
 use serde_json::{Map, Value, json};
 
 /// A decoded `RemoteRef` token.
@@ -109,8 +111,29 @@ fn is_skipped(value: &Value) -> bool {
 /// A BiDi `RemoteValue` as JSON, close to what `JSON.stringify` keeps: `undefined`, `NaN` and infinities become
 /// null; `-0` is 0; bigints, dates and regexps become strings; arrays, sets and node lists become arrays; maps
 /// become objects when every key is a string (otherwise `[key, value]` pairs). Values serialized without their
-/// contents (nodes, windows, errors, promises, ...) become `{}`.
+/// contents (nodes, windows, errors, promises, ...) become `{}`. An object or array the result holds more than once is
+/// serialized in full only the first time (later ones carry just its `internalId`): every reference gets the full
+/// value, as `JSON.stringify` would give it; only a reference back into itself (a cycle) stays `{}`.
 pub(crate) fn to_json(value: &Value) -> Value {
+    decode(value, &mut HashMap::new())
+}
+
+fn decode(value: &Value, seen: &mut HashMap<String, Value>) -> Value {
+    let id = value.get("internalId").and_then(Value::as_str);
+    let inner = value.get("value");
+    if let Some(id) = id
+        && inner.is_none()
+    {
+        return seen.get(id).cloned().unwrap_or_else(|| json!({}));
+    }
+    let decoded = decode_inner(value, seen);
+    if let Some(id) = id {
+        seen.insert(id.to_string(), decoded.clone());
+    }
+    decoded
+}
+
+fn decode_inner(value: &Value, seen: &mut HashMap<String, Value>) -> Value {
     let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
     let inner = value.get("value");
     match kind {
@@ -128,7 +151,7 @@ pub(crate) fn to_json(value: &Value) -> Value {
             None => Value::Null,
         },
         "array" | "set" | "nodelist" | "htmlcollection" => match inner.and_then(Value::as_array) {
-            Some(items) => Value::Array(items.iter().map(to_json).collect()),
+            Some(items) => Value::Array(items.iter().map(|item| decode(item, seen)).collect()),
             None => json!({}),
         },
         "object" => match inner.and_then(Value::as_array) {
@@ -141,12 +164,13 @@ pub(crate) fn to_json(value: &Value) -> Value {
                     }
                     let key = match key {
                         Value::String(key) => key.clone(),
-                        other => match to_json(other) {
+                        other => match decode(other, seen) {
                             Value::String(key) => key,
                             other => other.to_string(),
                         },
                     };
-                    out.insert(key, to_json(item));
+                    let item = decode(item, seen);
+                    out.insert(key, item);
                 }
                 Value::Object(out)
             }
@@ -165,13 +189,18 @@ pub(crate) fn to_json(value: &Value) -> Value {
                     let mut out = Map::new();
                     for (key, item) in pairs {
                         if !is_skipped(item) {
-                            out.insert(key.as_str().unwrap_or_default().to_string(), to_json(item));
+                            let item = decode(item, seen);
+                            out.insert(key.as_str().unwrap_or_default().to_string(), item);
                         }
                     }
                     Value::Object(out)
                 } else {
-                    let key_json = |key: &Value| if key.is_string() { key.clone() } else { to_json(key) };
-                    Value::Array(pairs.into_iter().map(|(key, item)| json!([key_json(key), to_json(item)])).collect())
+                    let mut out = Vec::new();
+                    for (key, item) in pairs {
+                        let key = if key.is_string() { key.clone() } else { decode(key, seen) };
+                        out.push(json!([key, decode(item, seen)]));
+                    }
+                    Value::Array(out)
                 }
             }
             None => json!({}),
@@ -326,6 +355,11 @@ mod tests {
         assert_eq!(
             decode(r#"{"type":"object","internalId":"1","value":[["n",{"type":"number","value":1}],["self",{"type":"object","internalId":"1"}]]}"#),
             json!({ "n": 1, "self": {} })
+        );
+        // The same array twice: Firefox serializes it in full once, then only by its internalId.
+        assert_eq!(
+            decode(r#"{"type":"array","value":[{"type":"object","internalId":"7","value":[["keys",{"type":"array","internalId":"8","value":[{"type":"string","value":"a"}]}]]},{"type":"object","value":[["keys",{"type":"array","internalId":"8"}]]},{"type":"object","internalId":"7"}]}"#),
+            json!([{ "keys": ["a"] }, { "keys": ["a"] }, { "keys": ["a"] }])
         );
         assert_eq!(
             decode(r#"{"type":"object","value":[["el",{"type":"node","sharedId":"x","value":{"nodeType":1}}],["list",{"type":"nodelist","value":[{"type":"node","sharedId":"y"}]}]]}"#),

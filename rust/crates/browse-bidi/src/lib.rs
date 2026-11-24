@@ -36,6 +36,9 @@ pub use transport::{BiDiClient, BiDiError, BiDiEvent, BiDiTransport, map_error, 
 /// The sandbox browse's isolated world lives in.
 pub const SANDBOX: &str = "__browse";
 
+/// How long opening a visible tab waits for Firefox to activate it.
+const ACTIVATE_WAIT: Duration = Duration::from_secs(3);
+
 /// Browser-wide events: tabs opening and closing. `fragmentNavigated` only reaches Firefox clients through a
 /// subscription that isn't scoped to contexts, so it is here too (tabs pick it up from the shared event stream).
 const BROWSER_EVENTS: &[&str] = &[
@@ -58,7 +61,21 @@ impl BiDiBrowserDriver {
     /// Connects to a browser's WebDriver BiDi endpoint (`ws://127.0.0.1:<port>` as Firefox prints it, or its
     /// `/session` URL) and starts a session.
     pub async fn connect(url: &str) -> DriverResult<Arc<BiDiBrowserDriver>> {
-        let client = BiDiClient::connect(url).await?;
+        Self::from_client(BiDiClient::connect(url).await?).await
+    }
+
+    /// `connect` over a TCP connection the caller opened (and checked) itself.
+    pub async fn connect_stream(url: &str, stream: tokio::net::TcpStream) -> DriverResult<Arc<BiDiBrowserDriver>> {
+        Self::from_client(BiDiClient::connect_stream(url, stream).await?).await
+    }
+
+    /// `connect`, refusing a non-loopback peer unless `allow_remote`; also says whether the peer is loopback.
+    pub async fn connect_loopback_checked(url: &str, allow_remote: bool) -> DriverResult<(Arc<BiDiBrowserDriver>, bool)> {
+        let (client, local) = BiDiClient::connect_loopback_checked(url, allow_remote).await?;
+        Ok((Self::from_client(client).await?, local))
+    }
+
+    async fn from_client(client: Arc<BiDiClient>) -> DriverResult<Arc<BiDiBrowserDriver>> {
         let capabilities = client.capabilities();
         let name = capabilities.get("browserName").and_then(Value::as_str).unwrap_or("browser");
         let version = capabilities.get("browserVersion").and_then(Value::as_str).unwrap_or("");
@@ -125,6 +142,11 @@ impl BiDiBrowserDriver {
         &self.transport
     }
 
+    /// The capabilities the session started with (`browserName`, `browserVersion`, ...), when this driver started it.
+    pub fn capabilities(&self) -> Value {
+        self.client.as_ref().map(|client| client.capabilities().clone()).unwrap_or(Value::Null)
+    }
+
     /// Ends the session (when this driver started it), so the browser accepts another client.
     pub async fn shutdown(&self) {
         let subscription = self.subscription.lock().unwrap().take();
@@ -175,9 +197,12 @@ impl BrowserDriver for BiDiBrowserDriver {
     }
 
     async fn open(&self, url: Option<&str>, opts: &TabOptions) -> DriverResult<TargetId> {
+        // Created in the background, then activated (briefly): a foreground create waits for the window to take focus,
+        // which a Firefox without the recommended remote prefs (a real profile, remote.prefs.recommended off) may never
+        // report while headless.
         let created = self
             .transport
-            .send("browsingContext.create", json!({ "type": "tab", "background": !opts.keep_visible }))
+            .send("browsingContext.create", json!({ "type": "tab", "background": true }))
             .await
             .map_err(map_error)?;
         let context = created
@@ -186,7 +211,7 @@ impl BrowserDriver for BiDiBrowserDriver {
             .ok_or_else(|| DriverError::Protocol("browsingContext.create returned no context".into()))?
             .to_string();
         if opts.keep_visible {
-            let _ = self.transport.send("browsingContext.activate", json!({ "context": context })).await;
+            let _ = tokio::time::timeout(ACTIVATE_WAIT, self.transport.send("browsingContext.activate", json!({ "context": context }))).await;
         }
         if let Some(url) = url {
             // Firefox answers navigate only once the response starts; the tab is usable before that.
@@ -200,6 +225,24 @@ impl BrowserDriver for BiDiBrowserDriver {
     }
 
     async fn close(&self, target: &TargetId) -> DriverResult<()> {
+        // Closing the last tab quits Firefox on Linux and Windows: leave that one blank instead.
+        let tree = self.transport.send("browsingContext.getTree", json!({ "maxDepth": 0 })).await.map_err(map_error)?;
+        let contexts = tree.get("contexts").and_then(Value::as_array).cloned().unwrap_or_default();
+        let listed = contexts.iter().any(|c| c.get("context").and_then(Value::as_str) == Some(target.as_str()));
+        if !listed {
+            return Ok(());
+        }
+        if contexts.len() <= 1 {
+            return match self
+                .transport
+                .send("browsingContext.navigate", json!({ "context": target.as_str(), "url": "about:blank", "wait": "none" }))
+                .await
+            {
+                Ok(_) => Ok(()),
+                Err(error) if error.code() == Some("no such frame") => Ok(()),
+                Err(error) => Err(map_error(error)),
+            };
+        }
         match self
             .transport
             .send("browsingContext.close", json!({ "context": target.as_str(), "promptUnload": false }))
@@ -214,6 +257,22 @@ impl BrowserDriver for BiDiBrowserDriver {
     async fn attach(&self, target: &TargetId) -> DriverResult<Arc<dyn TabDriver>> {
         let tab: Arc<dyn TabDriver> = BiDiTabDriver::attach(self.transport.clone(), target.clone()).await?;
         Ok(tab)
+    }
+
+    async fn shutdown(&self) {
+        BiDiBrowserDriver::shutdown(self).await;
+    }
+
+    /// `browser.close` (Firefox closes every window and exits; it may drop the connection before answering), then
+    /// the session ends.
+    async fn quit(&self) -> DriverResult<()> {
+        let closed = tokio::time::timeout(Duration::from_secs(2), self.transport.send("browser.close", json!({}))).await;
+        self.shutdown().await;
+        match closed {
+            Ok(Ok(_)) | Ok(Err(BiDiError::Closed)) => Ok(()),
+            Ok(Err(error)) => Err(map_error(error)),
+            Err(_) => Err(DriverError::Timeout(Duration::from_secs(2))),
+        }
     }
 }
 

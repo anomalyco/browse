@@ -864,6 +864,10 @@ impl TabDriver for BiDiTabDriver {
         if let Some(reason) = self.shared.closed() {
             return Err(DriverError::Closed(reason));
         }
+        // Firefox never answers browsingContext.navigate to a javascript: URL.
+        if url.trim_start().get(..11).is_some_and(|scheme| scheme.eq_ignore_ascii_case("javascript:")) {
+            return Err(DriverError::Refused("browse blocked navigate to a javascript: URL: run script with the evaluate tool instead".into()));
+        }
         let fragment = is_fragment_change(&self.shared.top_url(), url);
         let mut events = self.shared.transport.events();
         let result = self

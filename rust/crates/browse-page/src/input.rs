@@ -356,7 +356,17 @@ impl<'a> Input<'a> {
             click_count: click_count.max(1) as u32,
             modifiers: self.modifiers,
         };
-        self.dispatch(move |d| async move { d.pointer(event).await }).await
+        match self.dispatch(move |d| async move { d.pointer(event).await }).await {
+            // The release was delivered and the page closed its own tab in response (`window.close()` in a click
+            // handler): the click happened. Chrome drops the command's answer with the tab; Firefox answers first.
+            Err(error)
+                if error.downcast_ref::<Interrupted>().is_none()
+                    && self.page.wait_until(std::time::Duration::from_millis(500), std::time::Duration::from_millis(25), |page| !page.alive()).await =>
+            {
+                Ok(())
+            }
+            other => other,
+        }
     }
 
     pub async fn click(&mut self, at: Point, button: &str, count: i64) -> Result<()> {

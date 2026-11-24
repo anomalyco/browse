@@ -33,7 +33,7 @@ pub const NOT_RETURNED: &str =
     "not returned: only JSON, form and multipart bodies are, since other kinds can't be checked for credentials";
 pub const TOO_LARGE: &str = "larger than the 1 MB per-body limit";
 pub const BUDGET_USED: &str = "the capture's 25 MB body budget was used up";
-pub const UNAVAILABLE: &str = "Chrome no longer had the body";
+pub const UNAVAILABLE: &str = "the browser no longer had the body";
 pub const UNSUPPORTED_ENCODING: &str = "its content-encoding can't be decoded";
 pub const UNREDACTABLE: &str = "it couldn't be parsed to check it for credentials";
 

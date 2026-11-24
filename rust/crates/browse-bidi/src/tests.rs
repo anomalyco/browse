@@ -261,3 +261,37 @@ async fn a_closed_connection_closes_the_tab() {
     fake.close();
     assert!(matches!(next(&mut events).await, PageEvent::Closed(CloseReason::BrowserDisconnected)));
 }
+
+
+#[tokio::test]
+async fn a_javascript_url_is_refused_without_asking_the_browser() {
+    let fake = Fake::new(|_, _| Some(Ok(json!({}))));
+    let tab = attach(&fake).await;
+    assert!(matches!(tab.navigate("  JavaScript:alert(1)", None).await, Err(DriverError::Refused(_))));
+    assert!(fake.sent("browsingContext.navigate").is_empty(), "Firefox never answers it");
+}
+
+#[tokio::test]
+async fn closing_the_last_tab_blanks_it_instead() {
+    use browse_core::BrowserDriver;
+    let fake = Fake::new(|_, _| Some(Ok(json!({}))));
+    let info = browse_core::DriverInfo {
+        id: "bidi+ws".into(),
+        name: "WebDriver BiDi".into(),
+        protocol: "webdriver-bidi".into(),
+        transport: "ws".into(),
+        browser: "firefox".into(),
+    };
+    let driver = crate::BiDiBrowserDriver::new(info, fake.clone()).await.unwrap();
+    driver.close(&TargetId::from("top")).await.unwrap();
+    assert!(fake.sent("browsingContext.close").is_empty(), "closing the last tab would quit Firefox");
+    let navigated = fake.sent("browsingContext.navigate");
+    assert_eq!(navigated.len(), 1);
+    assert_eq!(navigated[0]["url"], "about:blank");
+    assert_eq!(fake.sent("browsingContext.getTree")[0]["maxDepth"], 0);
+    // A tab that is already gone has nothing to close.
+    driver.close(&TargetId::from("gone")).await.unwrap();
+    assert!(fake.sent("browsingContext.close").is_empty());
+    BrowserDriver::shutdown(driver.as_ref()).await;
+    assert_eq!(fake.sent("session.unsubscribe").len(), 1);
+}

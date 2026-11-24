@@ -196,6 +196,15 @@ pub trait BrowserDriver: Send + Sync {
     fn presence(&self) -> Option<&dyn UserPresence> {
         None
     }
+    /// Ends the protocol session and closes the transport, leaving the browser's tabs alone. Idempotent and
+    /// infallible: a browser that already went away has nothing left to end.
+    async fn shutdown(&self) {}
+    /// Quits the browser itself (one browse launched for itself), then ends the session. Drivers that can't quit the
+    /// browser only end the session.
+    async fn quit(&self) -> DriverResult<()> {
+        self.shutdown().await;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -716,7 +725,13 @@ pub enum NetworkEvent {
         request_headers: Option<Vec<(String, String)>>,
         response_headers: Option<Vec<(String, String)>>,
     },
-    Failed { id: RequestId, error: String },
+    Failed {
+        id: RequestId,
+        error: String,
+        /// The headers the request went out with, when they differ from the ones `Request` reported (cookies added
+        /// by the network stack, as for `Finished`).
+        request_headers: Option<Vec<(String, String)>>,
+    },
     Lagged(u64),
     Closed(CloseReason),
 }
@@ -830,12 +845,19 @@ pub trait Screencast: Send + Sync {
 // Semantic policy decorator (works identically for every protocol)
 // ---------------------------------------------------------------------------
 
-/// Policy checked at the semantic `TabDriver` boundary (read-only tabs, origin allowlist).
+/// Policy checked at the semantic `TabDriver` boundary (read-only tabs, origin allowlist, input held back while
+/// the user is asked to act).
+#[async_trait]
 pub trait TabPolicy: Send + Sync {
     fn is_read_only(&self) -> bool {
         false
     }
-    fn check_navigation(&self, _url: &str) -> Result<(), String> {
+    /// May run async checks (DNS for an allowlist's private-address rule).
+    async fn check_navigation(&self, _url: &str) -> Result<(), String> {
+        Ok(())
+    }
+    /// Checked for every write after the read-only check (`action`: "navigate", "pointer", "key", ...).
+    fn check_input(&self, _action: &str) -> Result<(), String> {
         Ok(())
     }
 }
@@ -855,7 +877,7 @@ impl GuardedTabDriver {
         if self.policy.is_read_only() {
             return Err(DriverError::Refused(crate::read_only_refusal(action)));
         }
-        Ok(())
+        self.policy.check_input(action).map_err(DriverError::Refused)
     }
 }
 
@@ -871,7 +893,7 @@ impl TabDriver for GuardedTabDriver {
 
     async fn navigate(&self, url: &str, referrer: Option<&str>) -> DriverResult<Option<NavigationId>> {
         self.check_write("navigate")?;
-        if let Err(reason) = self.policy.check_navigation(url) {
+        if let Err(reason) = self.policy.check_navigation(url).await {
             return Err(DriverError::Refused(reason));
         }
         self.inner.navigate(url, referrer).await
