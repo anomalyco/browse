@@ -7,7 +7,7 @@
 //! - `DataReceived` byte accumulation and `CHILD_DOCUMENT_GRACE` completion
 //! - Per-request CDP session lookup for `getRequestPostData` and `getResponseBody`
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,7 +17,7 @@ use browse_core::{
     ResponseHead, Subscription,
 };
 use serde_json::{Value, json};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::wire::{Cdp, CdpEvent, map_cdp_error};
 
@@ -28,43 +28,65 @@ pub(crate) fn enable_params() -> Value {
     json!({ "maxPostDataSize": 65_536 })
 }
 
-#[derive(Default)]
 pub(crate) struct NetworkDomain {
     pub capture: bool,
     pub offline: bool,
+    /// Child sessions whose `Network.enable` finished, so `CdpTabDriver` does not resume a paused child target before
+    /// capture is listening on it.
+    pub enabled_sessions: HashSet<String>,
+    pub session_ready: watch::Sender<u64>,
+}
+
+impl Default for NetworkDomain {
+    fn default() -> Self {
+        Self {
+            capture: false,
+            offline: false,
+            enabled_sessions: HashSet::new(),
+            session_ready: watch::channel(0).0,
+        }
+    }
 }
 
 #[derive(Default)]
 pub(crate) struct NetworkBodyMap {
-    /// `request_id` -> `(request_session, response_body_session)`
-    sessions: HashMap<String, (Option<String>, Option<String>)>,
+    /// `event_id` -> `(cdp_request_id, request_session, response_body_session)`
+    sessions: HashMap<String, (String, Option<String>, Option<String>)>,
 }
 
 impl NetworkBodyMap {
-    pub(crate) fn record_request(&mut self, request_id: &str, session: Option<String>) {
+    pub(crate) fn record_request(&mut self, event_id: &str, cdp_request_id: &str, session: Option<String>) {
         if self.sessions.len() > 2_000 {
             self.sessions.clear();
         }
         self.sessions
-            .insert(request_id.to_string(), (session.clone(), session));
+            .insert(event_id.to_string(), (cdp_request_id.to_string(), session.clone(), session));
     }
 
-    pub(crate) fn record_body_session(&mut self, request_id: &str, session: Option<String>) {
-        if let Some(entry) = self.sessions.get_mut(request_id) {
-            entry.1 = session;
+    pub(crate) fn record_body_session(&mut self, event_id: &str, session: Option<String>) {
+        if let Some(entry) = self.sessions.get_mut(event_id) {
+            entry.2 = session;
         }
     }
 
-    pub(crate) fn session_for(&self, request_id: &str, kind: BodyKind) -> Option<String> {
-        self.sessions.get(request_id).and_then(|(req, resp)| match kind {
-            BodyKind::Request => req.clone(),
-            BodyKind::Response => resp.clone(),
-        })
+    pub(crate) fn lookup(&self, event_id: &str, kind: BodyKind) -> (String, Option<String>) {
+        match self.sessions.get(event_id) {
+            Some((cdp_id, req, resp)) => {
+                let session = match kind {
+                    BodyKind::Request => req.clone(),
+                    BodyKind::Response => resp.clone(),
+                };
+                (cdp_id.clone(), session)
+            }
+            None => (event_id.to_string(), None),
+        }
     }
 }
 
 struct Pending {
-    request_id: String,
+    /// Unique per redirect hop (equals `cdp_request_id` on hop 0, `{cdp_request_id}#redirect-{n}` on later hops).
+    event_id: String,
+    cdp_request_id: String,
     url: String,
     resource_type: String,
     frame_id: Option<String>,
@@ -74,9 +96,16 @@ struct Pending {
     has_extra_info: bool,
 }
 
-/// A finished request whose extra info hasn't arrived yet: CDP may send it after `loadingFinished`.
+enum FinishingOutcome {
+    Finished { body_size: usize, want_response_extra: bool },
+    Failed { error: String },
+}
+
+/// A finished or failed hop whose extra info hasn't arrived yet: CDP may send it after `loadingFinished`,
+/// `loadingFailed`, or `requestWillBeSent(redirectResponse)`.
 struct Finishing {
-    body_size: usize,
+    event_id: String,
+    outcome: FinishingOutcome,
 }
 
 /// How long a finished request waits for its extra info before it is reported without it.
@@ -90,10 +119,13 @@ struct ExtraResponse {
 #[derive(Default)]
 struct State {
     pending: HashMap<(Option<String>, String), Pending>,
-    request_extra: HashMap<String, Vec<(String, String)>>,
-    response_extra: HashMap<String, ExtraResponse>,
+    /// Number of redirects observed per CDP `requestId`, used to mint distinct per-hop event ids.
+    redirect_count: HashMap<String, usize>,
+    /// Per-CDP-`requestId` FIFO queues of extra-info events (redirect hops share one CDP `requestId`).
+    request_extra: HashMap<String, VecDeque<Vec<(String, String)>>>,
+    response_extra: HashMap<String, VecDeque<ExtraResponse>>,
     children: HashMap<String, String>,
-    finishing: HashMap<String, Finishing>,
+    finishing: HashMap<String, VecDeque<Finishing>>,
 }
 
 impl State {
@@ -109,9 +141,31 @@ impl State {
         self.pending.remove(&key)
     }
 
+    fn pop_request_extra(&mut self, cdp_request_id: &str) -> Option<Vec<(String, String)>> {
+        let item = self.request_extra.get_mut(cdp_request_id)?.pop_front();
+        if self.request_extra.get(cdp_request_id).is_some_and(VecDeque::is_empty) {
+            self.request_extra.remove(cdp_request_id);
+        }
+        item
+    }
+
+    fn pop_response_extra(&mut self, cdp_request_id: &str) -> Option<ExtraResponse> {
+        let item = self.response_extra.get_mut(cdp_request_id)?.pop_front();
+        if self.response_extra.get(cdp_request_id).is_some_and(VecDeque::is_empty) {
+            self.response_extra.remove(cdp_request_id);
+        }
+        item
+    }
+
+    fn has_finishing(&self, cdp_request_id: &str, event_id: &str) -> bool {
+        self.finishing
+            .get(cdp_request_id)
+            .is_some_and(|queue| queue.iter().any(|item| item.event_id == event_id))
+    }
+
     fn synth_response_from_extra(&self, pending: &mut Pending) -> bool {
         if pending.response.is_none()
-            && let Some(extra) = self.response_extra.get(&pending.request_id)
+            && let Some(extra) = self.response_extra.get(&pending.cdp_request_id).and_then(VecDeque::front)
             && let Some(status) = extra.status
         {
             let mime_type = extra
@@ -141,11 +195,16 @@ pub(crate) async fn start(
     cdp.send("Network.enable", enable_params(), None)
         .await
         .map_err(map_cdp_error)?;
-    domain.lock().unwrap().capture = true;
+    {
+        let mut guard = domain.lock().unwrap();
+        guard.capture = true;
+        guard.enabled_sessions.clear();
+    }
 
     let (tx, rx) = mpsc::unbounded_channel::<NetworkEvent>();
     let state = Arc::new(Mutex::new(State::default()));
     let task_cdp = cdp.clone();
+    let task_domain = domain.clone();
     let task_state = state.clone();
     let task_bodies = bodies.clone();
     let task_tx = tx.clone();
@@ -169,7 +228,7 @@ pub(crate) async fn start(
                             _ => {}
                         }
                     }
-                    handle_event(&task_cdp, &task_state, &task_bodies, &task_tx, event);
+                    handle_event(&task_cdp, &task_domain, &task_state, &task_bodies, &task_tx, event);
                 }
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
                     let _ = task_tx.send(NetworkEvent::Lagged(missed));
@@ -180,10 +239,13 @@ pub(crate) async fn start(
         let _ = task_tx.send(NetworkEvent::Closed(reason));
     });
 
+    // Pause newly attached OOPIFs and workers until `Network.enable` runs on them, so immediate subresource fetches
+    // in a fresh child target cannot race ahead of capture. `CdpTabDriver` waits on `NetworkDomain::session_ready`
+    // before sending `Runtime.runIfWaitingForDebugger`.
     let _ = cdp
         .send(
             "Target.setAutoAttach",
-            json!({ "autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true }),
+            json!({ "autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true }),
             None,
         )
         .await;
@@ -193,8 +255,17 @@ pub(crate) async fn start(
             let should_disable = {
                 let mut guard = domain.lock().unwrap();
                 guard.capture = false;
+                guard.enabled_sessions.clear();
+                guard.session_ready.send_modify(|n| *n += 1);
                 !guard.offline
             };
+            let _ = cdp
+                .send(
+                    "Target.setAutoAttach",
+                    json!({ "autoAttach": true, "waitForDebuggerOnStart": false, "flatten": true }),
+                    None,
+                )
+                .await;
             if should_disable {
                 let _ = cdp.send("Network.disable", json!({}), None).await;
             }
@@ -210,13 +281,13 @@ pub(crate) async fn fetch_body(
     request_id: &RequestId,
     kind: BodyKind,
 ) -> DriverResult<Option<Vec<u8>>> {
-    let scope = bodies.lock().unwrap().session_for(request_id.as_str(), kind);
+    let (cdp_id, scope) = bodies.lock().unwrap().lookup(request_id.as_str(), kind);
     match kind {
         BodyKind::Request => {
             let value = cdp
                 .send(
                     "Network.getRequestPostData",
-                    json!({ "requestId": request_id.as_str() }),
+                    json!({ "requestId": cdp_id }),
                     scope.as_deref(),
                 )
                 .await
@@ -230,7 +301,7 @@ pub(crate) async fn fetch_body(
             let value = cdp
                 .send(
                     "Network.getResponseBody",
-                    json!({ "requestId": request_id.as_str() }),
+                    json!({ "requestId": cdp_id }),
                     scope.as_deref(),
                 )
                 .await
@@ -274,8 +345,23 @@ fn response_head(value: &Value) -> ResponseHead {
     }
 }
 
+fn schedule_extra_grace(
+    state: &Arc<Mutex<State>>,
+    tx: &mpsc::UnboundedSender<NetworkEvent>,
+    cdp_request_id: String,
+    event_id: String,
+) {
+    let state = state.clone();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(EXTRA_INFO_GRACE).await;
+        flush_finishing(&mut state.lock().unwrap(), &tx, &cdp_request_id, Some(&event_id));
+    });
+}
+
 fn handle_event(
     cdp: &Arc<dyn Cdp>,
+    domain: &Arc<Mutex<NetworkDomain>>,
     state: &Arc<Mutex<State>>,
     bodies: &Arc<Mutex<NetworkBodyMap>>,
     tx: &mpsc::UnboundedSender<NetworkEvent>,
@@ -288,22 +374,45 @@ fn handle_event(
         "Network.requestWillBeSent" => {
             let mut st = state.lock().unwrap();
             let mut redirect_of = None;
-            if let Some(redirect) = params.get("redirectResponse")
+            let event_id = if let Some(redirect) = params.get("redirectResponse")
                 && let Some(previous) = st.take_pending(&key)
             {
-                let req_extra = st.request_extra.remove(&previous.request_id).filter(|h| !h.is_empty());
-                let resp_extra = st.response_extra.remove(&previous.request_id).map(|e| e.headers).filter(|h| !h.is_empty());
                 let head = response_head(redirect);
-                let prev_id = RequestId::from(previous.request_id.clone());
-                let _ = tx.send(NetworkEvent::Response { id: prev_id.clone(), head, committed: false });
-                let _ = tx.send(NetworkEvent::Finished {
-                    id: prev_id,
-                    body_size: previous.data_length,
-                    request_headers: req_extra,
-                    response_headers: resp_extra,
+                let prev_id = previous.event_id.clone();
+                let redirect_has_extra = params
+                    .get("redirectHasExtraInfo")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let _ = tx.send(NetworkEvent::Response {
+                    id: RequestId::from(prev_id.clone()),
+                    head,
+                    committed: false,
                 });
+                st.finishing.entry(previous.cdp_request_id.clone()).or_default().push_back(Finishing {
+                    event_id: prev_id.clone(),
+                    outcome: FinishingOutcome::Finished {
+                        body_size: previous.data_length,
+                        want_response_extra: redirect_has_extra,
+                    },
+                });
+                if redirect_has_extra {
+                    flush_finishing(&mut st, tx, &previous.cdp_request_id, None);
+                    if st.has_finishing(&previous.cdp_request_id, &prev_id) {
+                        schedule_extra_grace(state, tx, previous.cdp_request_id.clone(), prev_id);
+                    }
+                } else {
+                    flush_finishing(&mut st, tx, &previous.cdp_request_id, Some(&prev_id));
+                }
                 redirect_of = Some(previous.url);
-            }
+                if st.redirect_count.len() > MAX_EXTRA_CACHE {
+                    st.redirect_count.clear();
+                }
+                let hop = st.redirect_count.entry(request_id.clone()).or_insert(0);
+                *hop += 1;
+                format!("{request_id}#redirect-{hop}")
+            } else {
+                request_id.clone()
+            };
             let request = params.get("request").cloned().unwrap_or(Value::Null);
             let url = request.get("url").and_then(Value::as_str).unwrap_or("").to_string();
             let method = request.get("method").and_then(Value::as_str).unwrap_or("GET").to_string();
@@ -312,11 +421,15 @@ fn handle_event(
             let headers = headers_from(request.get("headers"));
             let post_data = request.get("postData").and_then(Value::as_str).map(str::to_string);
             let has_body = request.get("hasPostData").and_then(Value::as_bool).unwrap_or(false);
-            bodies.lock().unwrap().record_request(&request_id, event.session_id.clone());
+            bodies
+                .lock()
+                .unwrap()
+                .record_request(&event_id, &request_id, event.session_id.clone());
             st.pending.insert(
                 key,
                 Pending {
-                    request_id: request_id.clone(),
+                    event_id: event_id.clone(),
+                    cdp_request_id: request_id,
                     url: url.clone(),
                     resource_type: resource_type.clone(),
                     frame_id: frame_id.clone(),
@@ -327,7 +440,7 @@ fn handle_event(
             );
             drop(st);
             let _ = tx.send(NetworkEvent::Request(NetworkRequest {
-                id: RequestId::from(request_id),
+                id: RequestId::from(event_id),
                 redirect_of,
                 frame: frame_id.map(FrameId::from),
                 url,
@@ -343,42 +456,45 @@ fn handle_event(
             if st.request_extra.len() > MAX_EXTRA_CACHE {
                 st.request_extra.clear();
             }
-            st.request_extra.insert(request_id.clone(), headers_from(params.get("headers")));
-            flush_finishing(&mut st, tx, &request_id, false);
+            st.request_extra
+                .entry(request_id.clone())
+                .or_default()
+                .push_back(headers_from(params.get("headers")));
+            flush_finishing(&mut st, tx, &request_id, None);
         }
         "Network.responseReceivedExtraInfo" => {
             let mut st = state.lock().unwrap();
             if st.response_extra.len() > MAX_EXTRA_CACHE {
                 st.response_extra.clear();
             }
-            st.response_extra.insert(
-                request_id.clone(),
-                ExtraResponse {
-                    headers: headers_from(params.get("headers")),
-                    status: params.get("statusCode").and_then(Value::as_i64),
-                },
-            );
-            flush_finishing(&mut st, tx, &request_id, false);
+            st.response_extra.entry(request_id.clone()).or_default().push_back(ExtraResponse {
+                headers: headers_from(params.get("headers")),
+                status: params.get("statusCode").and_then(Value::as_i64),
+            });
+            flush_finishing(&mut st, tx, &request_id, None);
         }
         "Network.responseReceived" => {
             let Some(head) = params.get("response").map(response_head) else { return };
-            bodies.lock().unwrap().record_body_session(&request_id, event.session_id.clone());
             let mut st = state.lock().unwrap();
             if let Some(found) = st.pending_key(&key) {
-                let (id, resource_type, frame_id) = {
+                let (event_id, resource_type, frame_id) = {
                     let Some(pending) = st.pending.get_mut(&found) else { return };
                     pending.response = Some(head.clone());
                     pending.has_extra_info = params.get("hasExtraInfo").and_then(Value::as_bool).unwrap_or(false);
                     (
-                        RequestId::from(pending.request_id.clone()),
+                        pending.event_id.clone(),
                         pending.resource_type.clone(),
                         pending.frame_id.clone(),
                     )
                 };
+                bodies
+                    .lock()
+                    .unwrap()
+                    .record_body_session(&event_id, event.session_id.clone());
                 let committed = resource_type == "Document"
                     && frame_id.as_ref().is_some_and(|f| st.children.contains_key(f));
                 drop(st);
-                let _ = tx.send(NetworkEvent::Response { id, head, committed });
+                let _ = tx.send(NetworkEvent::Response { id: RequestId::from(event_id), head, committed });
             }
         }
         "Network.dataReceived" => {
@@ -390,41 +506,59 @@ fn handle_event(
             }
         }
         "Network.loadingFinished" => {
-            bodies.lock().unwrap().record_body_session(&request_id, event.session_id.clone());
             let mut st = state.lock().unwrap();
             if let Some(pending) = st.take_pending(&key) {
-                let request_id = pending.request_id.clone();
-                st.finishing.insert(request_id.clone(), Finishing { body_size: pending.data_length });
-                let waiting = pending.has_extra_info
-                    && !(st.request_extra.contains_key(&request_id) && st.response_extra.contains_key(&request_id));
-                if waiting {
-                    let state = state.clone();
-                    let tx = tx.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(EXTRA_INFO_GRACE).await;
-                        flush_finishing(&mut state.lock().unwrap(), &tx, &request_id, true);
-                    });
+                bodies
+                    .lock()
+                    .unwrap()
+                    .record_body_session(&pending.event_id, event.session_id.clone());
+                let cdp_id = pending.cdp_request_id.clone();
+                let event_id = pending.event_id.clone();
+                let queue_had_earlier = st.finishing.get(&cdp_id).is_some_and(|q| !q.is_empty());
+                st.finishing.entry(cdp_id.clone()).or_default().push_back(Finishing {
+                    event_id: event_id.clone(),
+                    outcome: FinishingOutcome::Finished {
+                        body_size: pending.data_length,
+                        want_response_extra: pending.has_extra_info,
+                    },
+                });
+                if pending.has_extra_info || queue_had_earlier {
+                    flush_finishing(&mut st, tx, &cdp_id, None);
+                    if st.has_finishing(&cdp_id, &event_id) {
+                        schedule_extra_grace(state, tx, cdp_id, event_id);
+                    }
                 } else {
-                    flush_finishing(&mut st, tx, &request_id, true);
+                    flush_finishing(&mut st, tx, &cdp_id, Some(&event_id));
                 }
             }
         }
         "Network.loadingFailed" => {
             let mut st = state.lock().unwrap();
             if let Some(pending) = st.take_pending(&key) {
-                // A request that reached the network and failed later (aborted, reset) still went out with the
-                // headers its extra info reported.
-                let request_headers = st.request_extra.remove(&pending.request_id).filter(|h| !h.is_empty());
-                st.response_extra.remove(&pending.request_id);
                 let error = params
                     .get("errorText")
                     .and_then(Value::as_str)
                     .filter(|text| !text.is_empty())
                     .unwrap_or("Request failed")
                     .to_string();
-                let id = RequestId::from(pending.request_id);
-                drop(st);
-                let _ = tx.send(NetworkEvent::Failed { id, error, request_headers });
+                // A request that reached the network and failed later (aborted, reset) still went out with the
+                // headers its extra info reported — which CDP may deliver slightly after `loadingFailed`.
+                let expect_extra = params.get("blockedReason").is_none() && pending.url.starts_with("http");
+                let cdp_id = pending.cdp_request_id.clone();
+                let event_id = pending.event_id.clone();
+                let queue_had_earlier = st.finishing.get(&cdp_id).is_some_and(|q| !q.is_empty());
+                st.finishing.entry(cdp_id.clone()).or_default().push_back(Finishing {
+                    event_id: event_id.clone(),
+                    outcome: FinishingOutcome::Failed { error },
+                });
+                if expect_extra || queue_had_earlier {
+                    flush_finishing(&mut st, tx, &cdp_id, None);
+                    if st.has_finishing(&cdp_id, &event_id) {
+                        schedule_extra_grace(state, tx, cdp_id, event_id);
+                    }
+                } else {
+                    flush_finishing(&mut st, tx, &cdp_id, Some(&event_id));
+                }
             }
         }
         "Target.attachedToTarget" => {
@@ -451,7 +585,7 @@ fn handle_event(
                                 && let Some(head) = p.response.clone()
                             {
                                 committed_events.push(NetworkEvent::Response {
-                                    id: RequestId::from(p.request_id.clone()),
+                                    id: RequestId::from(p.event_id.clone()),
                                     head,
                                     committed: true,
                                 });
@@ -465,10 +599,18 @@ fn handle_event(
                     }
                 }
                 let cdp = cdp.clone();
+                let domain = domain.clone();
                 let state = state.clone();
                 let tx = tx.clone();
                 tokio::spawn(async move {
                     let _ = cdp.send("Network.enable", enable_params(), Some(&session)).await;
+                    {
+                        let mut guard = domain.lock().unwrap();
+                        if guard.capture {
+                            guard.enabled_sessions.insert(session);
+                            guard.session_ready.send_modify(|n| *n += 1);
+                        }
+                    }
                     tokio::time::sleep(CHILD_DOCUMENT_GRACE).await;
                     if let Some(target_id) = target {
                         complete_child_documents(&state, &tx, &target_id);
@@ -479,30 +621,82 @@ fn handle_event(
         "Target.detachedFromTarget" => {
             if let Some(session) = params.get("sessionId").and_then(Value::as_str) {
                 state.lock().unwrap().children.retain(|_, child| child != session);
+                domain.lock().unwrap().enabled_sessions.remove(session);
             }
         }
         _ => {}
     }
 }
 
-/// Reports a finished request once both its extra infos are in (or, with `anyway`, with what there is).
-fn flush_finishing(st: &mut State, tx: &mpsc::UnboundedSender<NetworkEvent>, request_id: &str, anyway: bool) {
-    if !st.finishing.contains_key(request_id) {
-        return;
+/// Reports queued hops in FIFO order once their extra infos are in (or up through `force_up_to` when the grace timer
+/// expires or no extra info is expected).
+fn flush_finishing(
+    st: &mut State,
+    tx: &mpsc::UnboundedSender<NetworkEvent>,
+    cdp_request_id: &str,
+    force_up_to: Option<&str>,
+) {
+    let mut forcing = force_up_to.is_some_and(|target| st.has_finishing(cdp_request_id, target));
+    loop {
+        let (complete, is_target) = {
+            let Some(front) = st.finishing.get(cdp_request_id).and_then(VecDeque::front) else {
+                st.finishing.remove(cdp_request_id);
+                return;
+            };
+            let has_req = st.request_extra.get(cdp_request_id).is_some_and(|q| !q.is_empty());
+            let has_resp = st.response_extra.get(cdp_request_id).is_some_and(|q| !q.is_empty());
+            let complete = match &front.outcome {
+                FinishingOutcome::Finished { want_response_extra, .. } => {
+                    has_req && (!*want_response_extra || has_resp)
+                }
+                FinishingOutcome::Failed { .. } => has_req,
+            };
+            let is_target = force_up_to == Some(front.event_id.as_str());
+            (complete, is_target)
+        };
+        if !complete && !forcing {
+            return;
+        }
+        let Some(finishing) = st.finishing.get_mut(cdp_request_id).and_then(VecDeque::pop_front) else {
+            return;
+        };
+        if st.finishing.get(cdp_request_id).is_some_and(VecDeque::is_empty) {
+            st.finishing.remove(cdp_request_id);
+        }
+        let request_headers = st.pop_request_extra(cdp_request_id).filter(|h| !h.is_empty());
+        match finishing.outcome {
+            FinishingOutcome::Finished { body_size, want_response_extra } => {
+                let response_headers = if want_response_extra || st.response_extra.contains_key(cdp_request_id) {
+                    st.pop_response_extra(cdp_request_id)
+                        .map(|e| e.headers)
+                        .filter(|h| !h.is_empty())
+                } else {
+                    None
+                };
+                let _ = tx.send(NetworkEvent::Finished {
+                    id: RequestId::from(finishing.event_id),
+                    body_size,
+                    request_headers,
+                    response_headers,
+                });
+            }
+            FinishingOutcome::Failed { error } => {
+                if !st.finishing.contains_key(cdp_request_id)
+                    && !st.pending.keys().any(|(_, id)| id == cdp_request_id)
+                {
+                    st.response_extra.remove(cdp_request_id);
+                }
+                let _ = tx.send(NetworkEvent::Failed {
+                    id: RequestId::from(finishing.event_id),
+                    error,
+                    request_headers,
+                });
+            }
+        }
+        if is_target {
+            forcing = false;
+        }
     }
-    let complete = st.request_extra.contains_key(request_id) && st.response_extra.contains_key(request_id);
-    if !anyway && !complete {
-        return;
-    }
-    let Some(finishing) = st.finishing.remove(request_id) else { return };
-    let request_headers = st.request_extra.remove(request_id).filter(|h| !h.is_empty());
-    let response_headers = st.response_extra.remove(request_id).map(|e| e.headers).filter(|h| !h.is_empty());
-    let _ = tx.send(NetworkEvent::Finished {
-        id: RequestId::from(request_id.to_string()),
-        body_size: finishing.body_size,
-        request_headers,
-        response_headers,
-    });
 }
 
 fn complete_child_documents(
@@ -522,13 +716,12 @@ fn complete_child_documents(
         for key in keys {
             let Some(mut pending) = st.pending.remove(&key) else { continue };
             if st.synth_response_from_extra(&mut pending) {
-                let req_extra = st.request_extra.remove(&pending.request_id).filter(|h| !h.is_empty());
+                let req_extra = st.pop_request_extra(&pending.cdp_request_id).filter(|h| !h.is_empty());
                 let resp_extra = st
-                    .response_extra
-                    .remove(&pending.request_id)
+                    .pop_response_extra(&pending.cdp_request_id)
                     .map(|e| e.headers)
                     .filter(|h| !h.is_empty());
-                let id = RequestId::from(pending.request_id);
+                let id = RequestId::from(pending.event_id);
                 if let Some(head) = pending.response {
                     events_to_send.push(NetworkEvent::Response { id: id.clone(), head, committed: true });
                 }
@@ -570,10 +763,11 @@ mod tests {
             }
         }
         let cdp: Arc<dyn Cdp> = Arc::new(Silent);
+        let domain = Arc::new(Mutex::new(NetworkDomain::default()));
         let state = Arc::new(Mutex::new(State::default()));
         let bodies = Arc::new(Mutex::new(NetworkBodyMap::default()));
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let send = |e: CdpEvent| handle_event(&cdp, &state, &bodies, &tx, e);
+        let send = |e: CdpEvent| handle_event(&cdp, &domain, &state, &bodies, &tx, e);
         send(event("Network.requestWillBeSent", json!({ "requestId": "1", "type": "Fetch", "request": { "url": "http://a/x", "method": "GET", "headers": {} } })));
         send(event("Network.responseReceived", json!({ "requestId": "1", "hasExtraInfo": true, "response": { "status": 200, "headers": {} } })));
         send(event("Network.loadingFinished", json!({ "requestId": "1" })));
@@ -589,6 +783,109 @@ mod tests {
         let (request_headers, response_headers) = finished.expect("a finished event");
         assert_eq!(request_headers, Some(vec![("Cookie".to_string(), "sid=1".to_string())]));
         assert_eq!(response_headers, Some(vec![("Set-Cookie".to_string(), "a=1".to_string())]));
+    }
+
+    /// Redirect hops share one CDP `requestId`. Delayed extra info from the 302 hop must attach to the 302 hop
+    /// and never bleed onto the redirected destination.
+    #[tokio::test]
+    async fn redirect_extra_info_stays_on_its_own_hop() {
+        struct Silent;
+        #[async_trait::async_trait]
+        impl Cdp for Silent {
+            async fn send(&self, _: &str, _: Value, _: Option<&str>) -> Result<Value, crate::CdpError> {
+                Ok(json!({}))
+            }
+            fn events(&self) -> tokio::sync::broadcast::Receiver<CdpEvent> {
+                tokio::sync::broadcast::channel(1).1
+            }
+        }
+        let cdp: Arc<dyn Cdp> = Arc::new(Silent);
+        let domain = Arc::new(Mutex::new(NetworkDomain::default()));
+        let state = Arc::new(Mutex::new(State::default()));
+        let bodies = Arc::new(Mutex::new(NetworkBodyMap::default()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let send = |e: CdpEvent| handle_event(&cdp, &domain, &state, &bodies, &tx, e);
+
+        send(event("Network.requestWillBeSent", json!({
+            "requestId": "R", "type": "Fetch",
+            "request": { "url": "http://a/api/hop", "method": "GET", "headers": {} }
+        })));
+        // Redirect arrives before the 302 hop's extra info.
+        send(event("Network.requestWillBeSent", json!({
+            "requestId": "R", "type": "Fetch",
+            "redirectHasExtraInfo": true,
+            "redirectResponse": { "status": 302, "statusText": "Found", "headers": { "location": "/api/landed", "content-type": "text/plain" }, "mimeType": "text/plain" },
+            "request": { "url": "http://a/api/landed", "method": "GET", "headers": {} }
+        })));
+        send(event("Network.responseReceived", json!({
+            "requestId": "R", "hasExtraInfo": true,
+            "response": { "status": 200, "statusText": "OK", "headers": { "content-type": "application/json" }, "mimeType": "application/json" }
+        })));
+        send(event("Network.loadingFinished", json!({ "requestId": "R" })));
+
+        // Extra info for hop 0 (302) arrives now, followed by hop 1 (200).
+        send(event("Network.requestWillBeSentExtraInfo", json!({ "requestId": "R", "headers": { "cookie": "sid=hop" } })));
+        send(event("Network.responseReceivedExtraInfo", json!({ "requestId": "R", "statusCode": 302, "headers": { "location": "/api/landed", "content-type": "text/plain" } })));
+        send(event("Network.requestWillBeSentExtraInfo", json!({ "requestId": "R", "headers": { "cookie": "sid=landed" } })));
+        send(event("Network.responseReceivedExtraInfo", json!({ "requestId": "R", "statusCode": 200, "headers": { "content-type": "application/json" } })));
+
+        let mut finished = Vec::new();
+        while finished.len() < 2 {
+            let ev = tokio::time::timeout(Duration::from_secs(1), rx.recv()).await.unwrap().unwrap();
+            if let NetworkEvent::Finished { id, request_headers, response_headers, .. } = ev {
+                finished.push((id.as_str().to_string(), request_headers, response_headers));
+            }
+        }
+        assert_eq!(finished[0].0, "R");
+        assert_eq!(finished[0].1, Some(vec![("cookie".to_string(), "sid=hop".to_string())]));
+        assert!(finished[0].2.as_ref().unwrap().iter().any(|(k, v)| k == "location" && v == "/api/landed"));
+
+        assert_eq!(finished[1].0, "R#redirect-1");
+        assert_eq!(finished[1].1, Some(vec![("cookie".to_string(), "sid=landed".to_string())]));
+        assert_eq!(finished[1].2, Some(vec![("content-type".to_string(), "application/json".to_string())]));
+
+        // Body lookup for the redirected hop maps back to the real CDP requestId.
+        let (cdp_id, _) = bodies.lock().unwrap().lookup("R#redirect-1", BodyKind::Response);
+        assert_eq!(cdp_id, "R");
+    }
+
+    /// CDP may send `requestWillBeSentExtraInfo` slightly after `loadingFailed` for an aborted request.
+    #[tokio::test]
+    async fn late_extra_info_still_reaches_the_failed_request() {
+        struct Silent;
+        #[async_trait::async_trait]
+        impl Cdp for Silent {
+            async fn send(&self, _: &str, _: Value, _: Option<&str>) -> Result<Value, crate::CdpError> {
+                Ok(json!({}))
+            }
+            fn events(&self) -> tokio::sync::broadcast::Receiver<CdpEvent> {
+                tokio::sync::broadcast::channel(1).1
+            }
+        }
+        let cdp: Arc<dyn Cdp> = Arc::new(Silent);
+        let domain = Arc::new(Mutex::new(NetworkDomain::default()));
+        let state = Arc::new(Mutex::new(State::default()));
+        let bodies = Arc::new(Mutex::new(NetworkBodyMap::default()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let send = |e: CdpEvent| handle_event(&cdp, &domain, &state, &bodies, &tx, e);
+
+        send(event("Network.requestWillBeSent", json!({
+            "requestId": "9", "type": "Fetch",
+            "request": { "url": "http://a/api/slow", "method": "GET", "headers": {} }
+        })));
+        send(event("Network.loadingFailed", json!({ "requestId": "9", "errorText": "net::ERR_ABORTED", "canceled": true })));
+        send(event("Network.requestWillBeSentExtraInfo", json!({ "requestId": "9", "headers": { "cookie": "sid=1" } })));
+
+        let mut failed = None;
+        while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(1), rx.recv()).await {
+            if let NetworkEvent::Failed { error, request_headers, .. } = ev {
+                failed = Some((error, request_headers));
+                break;
+            }
+        }
+        let (error, request_headers) = failed.expect("a failed event");
+        assert_eq!(error, "net::ERR_ABORTED");
+        assert_eq!(request_headers, Some(vec![("cookie".to_string(), "sid=1".to_string())]));
     }
 
     #[test]
