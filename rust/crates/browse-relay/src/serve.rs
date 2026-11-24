@@ -665,6 +665,7 @@ pub async fn call_tool_keyed(relay: &Arc<Relay>, request: ToolCallRequest, clien
     let name = request.name.clone();
     let started = Instant::now();
     relay.inflight.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(id, InFlight { tool: name.clone(), tab, since: started });
+    let declares_output = tool.spec().output_schema.is_some();
     let task = tokio::spawn(RELAY.scope(relay.clone(), CALL.scope(id, TOOL.scope(name.clone(), CLIENT.scope(client_pid, async move { tool.call(context, arguments).await })))));
     relay.call_started(id, task.abort_handle(), client_pid, key);
     let outcome = task.await;
@@ -722,8 +723,23 @@ pub async fn call_tool_keyed(relay: &Arc<Relay>, request: ToolCallRequest, clien
     for warning in &warnings {
         rlog!("tool.warning", tool = name.clone(), tabId = tab, warning = warning.chars().take(500).collect::<String>());
     }
+    if declares_output {
+        structure(&mut output);
+    }
     add_warnings(&mut output, warnings);
     Ok(output)
+}
+
+/// A tool with an outputSchema returns its JSON object as structured content too: clients that read it (OpenCode's
+/// Code Mode) get the object itself instead of text, which a warning appended after it would make unparseable.
+fn structure(output: &mut ToolOutput) {
+    if output.is_error || output.structured_content.is_some() {
+        return;
+    }
+    let Some(Content::Text { text }) = output.content.first() else { return };
+    if let Ok(value @ Value::Object(_)) = serde_json::from_str::<Value>(text) {
+        output.structured_content = Some(value);
+    }
 }
 
 /// Warnings go after the output as text, and into its structured content when it has some: clients that read that
@@ -841,6 +857,26 @@ async fn housekeeping(relay: Arc<Relay>) {
 #[cfg(test)]
 mod warning_tests {
     use super::*;
+
+    #[test]
+    fn json_objects_become_structured_content() {
+        let mut object = ToolOutput::text("{\"tab\": 3, \"url\": \"https://example.com/\"}");
+        structure(&mut object);
+        assert_eq!(object.structured_content, Some(json!({ "tab": 3, "url": "https://example.com/" })));
+        add_warnings(&mut object, vec!["went elsewhere".into()]);
+        assert_eq!(object.structured_content.as_ref().unwrap()["warnings"], json!(["went elsewhere"]));
+        for text in ["- button \"Go\" [ref=e1]", "[1, 2]", "\"x\""] {
+            let mut other = ToolOutput::text(text);
+            structure(&mut other);
+            assert!(other.structured_content.is_none(), "{text}");
+        }
+        let mut failed = ToolOutput::error("{\"outcome\": \"timeout\"}");
+        structure(&mut failed);
+        assert!(failed.structured_content.is_none());
+        let mut kept = ToolOutput { structured_content: Some(json!({ "value": 1 })), ..ToolOutput::text("1") };
+        structure(&mut kept);
+        assert_eq!(kept.structured_content, Some(json!({ "value": 1 })));
+    }
 
     #[test]
     fn warnings_reach_text_and_structured_content() {

@@ -44,7 +44,7 @@ const INPUT_TOOLS: &[&str] = &["click", "fill", "type", "press", "select", "hove
 #[async_trait]
 impl Tool for PageTool {
     fn spec(&self) -> ToolSpec {
-        ToolSpec { name: self.name.into(), description: self.description.into(), input_schema: (self.schema)(), output_schema: (self.name == "eval").then(eval_output_schema) }
+        ToolSpec { name: self.name.into(), description: self.description.into(), input_schema: (self.schema)(), output_schema: output_schema(self.name) }
     }
 
     async fn call(&self, ctx: ToolContext, args: Value) -> Result<ToolOutput> {
@@ -1964,6 +1964,55 @@ fn scroll_schema() -> Value {
 }
 
 const EVAL: &str = "Run JavaScript in the page and return its result as { value } (JSON). An expression's value is returned (promises are awaited, await works). Statements (const/let, loops, several lines) return the value of their last expression statement, like a console (`const a = 3; a` gives 3), or what they `return`. Declarations stay local to the call and never leak into the page. DOM nodes come back as \"<tag#id.class>\", Map as an object, Set as an array, Date as an ISO string, Errors as {name, message}, cycles as \"[Circular]\". A script still running at the timeout is stopped. By default it runs in browse's isolated world: it sees the DOM but not the page's own JS globals, and the page can't see it. world \"main\" runs in the page's own world (window variables, frameworks) and is visible to it. With ref/selector or arg, expression must be a function, called as (element, arg) => ...; e.g. expression \"(el) => el.href\" with ref \"e5\". Without them, a function written as the whole expression is called with no arguments, so \"() => document.title\" works like \"document.title\". frame (a selector of an <iframe>) runs in that frame. Results over 100k characters are cut (value is then null and truncated says why). Results are returned as-is, without secret redaction.";
+
+/// What a page tool returns, as an MCP outputSchema. snapshot (text) and webmcp (whatever the page's tool returns) have
+/// none. Actions share what changed on the page (`aftermath`).
+fn output_schema(name: &str) -> Option<Value> {
+    let string = || json!({ "type": "string" });
+    let after = || {
+        json!({
+            "url": string(),
+            "title": string(),
+            "navigated": { "type": "boolean" },
+            "urlChanged": { "type": "boolean" },
+            "from": string(),
+            "status": { "type": "integer" },
+            "redirects": { "type": "integer" },
+            "pending": {},
+            "dialog": { "type": "object", "description": "A dialog the page opened; it is paused until you call dialog" },
+            "newTabs": { "type": "array" },
+            "warning": string(),
+        })
+    };
+    let with = |extra: Value| {
+        let mut properties = after();
+        if let (Some(all), Value::Object(extra)) = (properties.as_object_mut(), extra) {
+            all.extend(extra);
+        }
+        properties
+    };
+    let tab = json!({ "type": "integer", "description": "The tab id: pass it as `tab` to every other tool" });
+    Some(match name {
+        "eval" => return Some(eval_output_schema()),
+        "navigate" => browse_core::output_schema(with(json!({ "tab": tab, "note": string() })), &["tab", "url"]),
+        "click" => browse_core::output_schema(with(json!({ "clicked": string() })), &[]),
+        "fill" => browse_core::output_schema(with(json!({ "filled": { "type": "array", "items": { "type": "object" } }, "submitted": { "type": "boolean" } })), &["filled"]),
+        "type" => browse_core::output_schema(with(json!({ "target": string(), "typed": { "type": "integer" } })), &[]),
+        "press" => browse_core::output_schema(with(json!({ "pressed": { "type": "array", "items": string() }, "target": string() })), &["pressed"]),
+        "select" => browse_core::output_schema(with(json!({ "target": string(), "selected": { "type": "array" } })), &["selected"]),
+        "hover" => browse_core::output_schema(with(json!({ "hovered": string() })), &[]),
+        "drag" => browse_core::output_schema(with(json!({ "from": {}, "to": {}, "html5": { "type": "boolean" } })), &[]),
+        "scroll" => browse_core::output_schema(
+            with(json!({ "scrollY": { "type": "number" }, "scrollHeight": { "type": "number" }, "viewportHeight": { "type": "number" }, "atBottom": { "type": "boolean" }, "target": string() })),
+            &[],
+        ),
+        "wait_for" => browse_core::output_schema(json!({ "ok": { "type": "boolean" }, "waitedFor": string(), "waitedMs": { "type": "integer" }, "url": string(), "dialog": { "type": "object" } }), &["ok"]),
+        "dialog" => browse_core::output_schema(json!({ "dialog": { "description": "The open dialog (type, message), or null" }, "handled": {}, "autoPolicy": string() }), &[]),
+        "upload" => browse_core::output_schema(with(json!({ "target": string(), "files": { "type": "array" } })), &[]),
+        "emulate" => browse_core::output_schema(json!({ "applied": { "type": "object" }, "note": string() }), &["applied"]),
+        _ => return None,
+    })
+}
 
 /// What eval returns as structured content (MCP outputSchema): clients that read it get the value itself, not JSON text.
 fn eval_output_schema() -> Value {

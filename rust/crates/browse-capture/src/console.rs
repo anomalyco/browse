@@ -207,7 +207,7 @@ impl Tool for ConsoleTool {
                 "required": ["tab", "action"],
                 "additionalProperties": false
             }),
-            output_schema: None,
+            output_schema: Some(browse_core::output_schema(serde_json::json!({ "tab": { "type": "integer" }, "capturing": { "type": "boolean" }, "entries": { "type": "array", "description": "Console messages and errors, oldest first" }, "lastSeq": { "type": "integer", "description": "Pass as since to read only newer entries" } }), &[])),
         }
     }
 

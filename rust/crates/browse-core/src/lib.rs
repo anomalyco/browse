@@ -152,6 +152,16 @@ pub struct HandoffResult {
 }
 
 /// Why an action is refused on a tab opened with `readOnly`.
+/// An MCP outputSchema for a tool's JSON object result. Kept loose on purpose: it tells agents what comes back, while
+/// results may carry more keys than it lists.
+pub fn output_schema(properties: Value, required: &[&str]) -> Value {
+    let mut schema = serde_json::json!({ "type": "object", "properties": properties });
+    if !required.is_empty() {
+        schema["required"] = serde_json::json!(required);
+    }
+    schema
+}
+
 pub fn read_only_refusal(command: &str) -> String {
     format!(
         "browse blocked {command}: this tab is read-only. Read-only tabs can take snapshots and screenshots, read page information and subscribe to events. Open a tab without readOnly to interact with pages."
