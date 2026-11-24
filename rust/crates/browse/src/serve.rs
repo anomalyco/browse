@@ -52,10 +52,10 @@ pub fn run() -> anyhow::Result<i32> {
         if !spawned {
             eprintln!("browse relay listening at http://127.0.0.1:{}", handle.port());
         }
+        let mut auto_update = update::status_json();
         let relay = handle.relay.clone();
         let mut updater = update::Updater::spawn(Arc::new(move || relay.idle(quiet)));
         let mut notice = None;
-        let mut auto_update = update::status_json();
         let mut restart = None;
         let mut tick = tokio::time::interval(Duration::from_secs(5));
         let stop = signalled();

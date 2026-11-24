@@ -248,11 +248,19 @@ fn agent(kind: Kind, timeout: Duration, roots: RootCerts) -> ureq::Agent {
         .into()
 }
 
-/// Whether a failed request is worth retrying with the bundled roots. Only TLS and certificate errors are: a machine
-/// with no CA bundle (a slim container, an empty `SSL_CERT_FILE`) has no platform roots, but Mozilla's still reach the
-/// release service. Timeouts, DNS, connections, HTTP statuses and body limits aren't certificate problems.
+/// Whether a failed request is worth retrying with the bundled roots: the system has no CA bundle (a slim container, an
+/// empty `SSL_CERT_FILE`) or its chain rejected the certificate. A handshake rejection arrives wrapped as
+/// `Io(InvalidData, rustls::Error::InvalidCertificate)`, not `Error::Rustls`. Timeouts, DNS, connections, HTTP
+/// statuses and other IO errors never retry, so a broken download isn't restarted.
 fn should_fall_back(error: &ureq::Error) -> bool {
-    matches!(error, ureq::Error::Rustls(_) | ureq::Error::Tls(_))
+    match error {
+        ureq::Error::Rustls(_) | ureq::Error::Tls(_) => true,
+        ureq::Error::Io(error) => matches!(
+            error.get_ref().and_then(|inner| inner.downcast_ref::<rustls::Error>()),
+            Some(rustls::Error::InvalidCertificate(_))
+        ),
+        _ => false,
+    }
 }
 
 /// One request with `agent`, failing on an error status, a body over `limit` bytes or `timeout`.
@@ -261,17 +269,23 @@ fn fetch(agent: &ureq::Agent, url: &str, limit: u64) -> Result<Vec<u8>, ureq::Er
     response.body_mut().with_config().limit(limit).read_to_vec()
 }
 
-/// GETs `url`, first against this computer's trusted certificates, then against the bundled roots when that has none
-/// (or rejects the chain). If the fallback doesn't work either, the platform error is returned: it says more.
+/// GETs `url`, first against this computer's trusted certificates, then against the bundled roots (the trust the
+/// updater had before it used the platform store) when the system has none or rejects the chain. If the fallback fails
+/// too, the error that explains it wins: the fallback's for a machine with no roots, the platform's for a rejection.
 fn get(kind: Kind, url: &str, timeout: Duration, limit: u64) -> anyhow::Result<Vec<u8>> {
     let error = match fetch(&agent(kind, timeout, RootCerts::PlatformVerifier), url, limit) {
         Ok(body) => return Ok(body),
         Err(error) => error,
     };
-    if should_fall_back(&error)
-        && let Ok(body) = fetch(&agent(kind, timeout, RootCerts::WebPki), url, limit)
-    {
-        return Ok(body);
+    if should_fall_back(&error) {
+        match fetch(&agent(kind, timeout, RootCerts::WebPki), url, limit) {
+            Ok(body) => return Ok(body),
+            // No platform roots at all: the fallback's error (network, chain) is the real cause.
+            Err(fallback) if matches!(error, ureq::Error::Rustls(_)) => {
+                return Err(anyhow::Error::new(fallback).context(format!("couldn't get {url}")));
+            }
+            Err(_) => {}
+        }
     }
     Err(anyhow::Error::new(error).context(format!("couldn't get {url}")))
 }
@@ -619,10 +633,10 @@ pub fn command(args: &[String]) -> anyhow::Result<()> {
     // A manual check that reached the service clears a stale `failed` from the background loop, as the package manager
     // path does. A checkout build doesn't check in.
     if !matches!(install, Install::Checkout) {
-        record_check(match &checked {
+        let _ = record_check(match &checked {
             Check::Available(release) => Some(release.version.as_str()),
             Check::UpToDate(_) | Check::Deferred(_) => None,
-        })?;
+        });
     }
     match checked {
         Check::UpToDate(version) if version == VERSION => println!("browse {VERSION} is up to date ({} channel).", channel()),
@@ -1038,11 +1052,18 @@ mod tests {
         assert!(matches!(bundled.config().tls_config().root_certs(), ureq::tls::RootCerts::WebPki));
     }
 
-    /// Only TLS and certificate errors fall back to the bundled roots; a timeout or a 500 won't be fixed by another
-    /// set of roots.
+    /// Only certificate problems fall back to the bundled roots; a timeout, a 500 or any other IO error won't.
     #[test]
     fn only_certificate_problems_fall_back_to_the_bundled_roots() {
         assert!(super::should_fall_back(&ureq::Error::Tls("no platform verifier")));
+        assert!(super::should_fall_back(&ureq::Error::Rustls(rustls::Error::General("no CA certificates".into()))));
+        // A rejected chain comes wrapped: rustls returns InvalidData around InvalidCertificate, and ureq hands that
+        // through as Error::Io rather than Error::Rustls.
+        assert!(super::should_fall_back(&ureq::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer),
+        ))));
+        assert!(!super::should_fall_back(&ureq::Error::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "not a certificate"))));
         assert!(!super::should_fall_back(&ureq::Error::Timeout(ureq::Timeout::Global)));
         assert!(!super::should_fall_back(&ureq::Error::HostNotFound));
         assert!(!super::should_fall_back(&ureq::Error::ConnectionFailed));

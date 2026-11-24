@@ -99,6 +99,7 @@ dependencies = [
  "crossterm",
  "futures-util",
  "libc",
+ "rustls",
  "serde_json",
  "serde_yaml",
  "sha2",
