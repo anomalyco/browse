@@ -191,27 +191,28 @@ fn map(value: Value) -> Map<String, Value> {
 /// Runs an input action, then reports what it changed. A dialog that opens mid-action ends the action normally.
 async fn run_action<F>(c: &Ctx, options: AfterOptions, action: F) -> Result<ToolOutput>
 where
-    F: for<'a, 'b> FnOnce(&'a Ctx, &'a mut Input<'b>) -> Pin<Box<dyn Future<Output = Result<Map<String, Value>>> + Send + 'a>>,
+    F: for<'a, 'b> FnOnce(&'a Ctx, &'a mut Input<'b>, &'a mut Map<String, Value>) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>,
 {
     c.page.ensure_no_dialog()?;
     let before = aftermath::before(&c.ctx, &c.page).await;
     let human = human_enabled(&c.ctx, &c.page).await;
+    let mut base = Map::new();
     let outcome = {
         let mut input = Input::new(&c.page, human).await;
-        let outcome = action(c, &mut input).await;
+        let outcome = action(c, &mut input, &mut base).await;
         if outcome.as_ref().err().map(|e| e.downcast_ref::<Interrupted>().is_none()).unwrap_or(false) {
             input.reset().await;
         }
         outcome
     };
-    let base = match outcome {
-        Ok(base) => base,
-        Err(error) if error.downcast_ref::<Interrupted>().is_some() => Map::new(),
+    match outcome {
+        Ok(()) => {}
+        Err(error) if error.downcast_ref::<Interrupted>().is_some() => {}
         Err(error) => {
             c.page.release().await;
             return Err(error);
         }
-    };
+    }
     let extra = aftermath::after(&c.ctx, &c.page, &before, options).await;
     c.page.release().await;
     Ok(result(base, extra))
@@ -369,9 +370,8 @@ async fn click(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     let count = args.get("clickCount").and_then(Value::as_i64).unwrap_or(if bool_arg(&args, "double") { 2 } else { 1 }).clamp(1, 3);
     let modifiers = modifiers_arg(&args);
     let options = pointer_options(&args, true);
-    run_action(&c, AfterOptions::default(), move |c, input| {
+    run_action(&c, AfterOptions::default(), move |c, input, out| {
         Box::pin(async move {
-            let mut out = Map::new();
             let at = match (&spec, point) {
                 (Some(spec), _) => {
                     let (resolved, at) = actions::locate(&c.page, &c.tab_state, input, spec, options).await?;
@@ -391,7 +391,7 @@ async fn click(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
             let held = actions::with_modifiers(input, &modifiers).await?;
             input.click(at, &button, count).await?;
             actions::release_modifiers(input, &held).await?;
-            Ok(out)
+            Ok(())
         })
     })
     .await
@@ -405,9 +405,8 @@ async fn hover(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
         bail!("hover needs a ref, a selector, or x and y");
     }
     let options = pointer_options(&args, false);
-    run_action(&c, AfterOptions { expect_navigation: false, ..AfterOptions::default() }, move |c, input| {
+    run_action(&c, AfterOptions { expect_navigation: false, ..AfterOptions::default() }, move |c, input, out| {
         Box::pin(async move {
-            let mut out = Map::new();
             let at = match (&spec, point) {
                 (Some(spec), _) => {
                     let (resolved, at) = actions::locate(&c.page, &c.tab_state, input, spec, options).await?;
@@ -418,7 +417,7 @@ async fn hover(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
                 (None, None) => unreachable!(),
             };
             input.move_to(at, 1).await?;
-            Ok(out)
+            Ok(())
         })
     })
     .await
@@ -460,7 +459,7 @@ async fn fill(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     let timeout = timeout_arg(&args, ACTION_TIMEOUT_MS);
     let force = bool_arg(&args, "force");
     let submit = bool_arg(&args, "submit");
-    run_action(&c, AfterOptions::default(), move |c, input| {
+    run_action(&c, AfterOptions::default(), move |c, input, out| {
         Box::pin(async move {
             let mut filled: Vec<Value> = Vec::new();
             for field in &fields {
@@ -477,12 +476,11 @@ async fn fill(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
             if submit {
                 input.press("Enter").await?;
             }
-            let mut out = Map::new();
             out.insert("filled".into(), json!(filled));
             if submit {
                 out.insert("submitted".into(), json!(true));
             }
-            Ok(out)
+            Ok(())
         })
     })
     .await
@@ -600,9 +598,8 @@ async fn type_tool(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     let text = str_arg(&args, "text").ok_or_else(|| anyhow!("type needs text"))?.to_string();
     let delay = args.get("delay").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 2_000.0);
     let submit = bool_arg(&args, "submit");
-    run_action(&c, AfterOptions::default(), move |c, input| {
+    run_action(&c, AfterOptions::default(), move |c, input, out| {
         Box::pin(async move {
-            let mut out = Map::new();
             if let Some(target) = focus_target(c, input, &args).await? {
                 out.insert("target".into(), target);
             }
@@ -611,7 +608,7 @@ async fn type_tool(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
                 input.press("Enter").await?;
             }
             out.insert("typed".into(), json!(text.chars().count()));
-            Ok(out)
+            Ok(())
         })
     })
     .await
@@ -625,9 +622,8 @@ async fn press(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
         _ => bail!("press needs a key, like \"Enter\", \"Control+A\" or [\"Tab\", \"Tab\", \"Enter\"]"),
     };
     let count = args.get("count").and_then(Value::as_u64).unwrap_or(1).clamp(1, 100);
-    run_action(&c, AfterOptions::default(), move |c, input| {
+    run_action(&c, AfterOptions::default(), move |c, input, out| {
         Box::pin(async move {
-            let mut out = Map::new();
             if let Some(target) = focus_target(c, input, &args).await? {
                 out.insert("target".into(), target);
             }
@@ -637,7 +633,7 @@ async fn press(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
                 }
             }
             out.insert("pressed".into(), json!(keys));
-            Ok(out)
+            Ok(())
         })
     })
     .await
@@ -696,14 +692,13 @@ async fn select(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
         })
         .collect::<Result<_>>()?;
     let timeout = timeout_arg(&args, ACTION_TIMEOUT_MS);
-    run_action(&c, AfterOptions::default(), move |c, _input| {
+    run_action(&c, AfterOptions::default(), move |c, _input, out| {
         Box::pin(async move {
             let resolved = target::resolve(&c.page, &c.tab_state, &spec, ResolveOptions { timeout, act: true }).await?;
             let selected = select_options(c, &resolved.element, &options, timeout).await?;
-            let mut out = Map::new();
             out.insert("target".into(), target_label(&spec, &resolved.label));
             out.insert("selected".into(), selected);
-            Ok(out)
+            Ok(())
         })
     })
     .await
@@ -730,9 +725,8 @@ async fn drag(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     let (to_spec, to_point) = endpoint(args.get("to"), "to")?;
     let steps = args.get("steps").and_then(Value::as_u64).unwrap_or(10).clamp(1, 100) as usize;
     let options = pointer_options(&args, true);
-    run_action(&c, AfterOptions::default(), move |c, input| {
+    run_action(&c, AfterOptions::default(), move |c, input, out| {
         Box::pin(async move {
-            let mut out = Map::new();
             let from = match &from_spec {
                 Some(spec) => {
                     let (resolved, at) = actions::locate(&c.page, &c.tab_state, input, spec, options).await?;
@@ -753,7 +747,7 @@ async fn drag(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
             if outcome == DragOutcome::Dropped {
                 out.insert("html5".into(), json!(true));
             }
-            Ok(out)
+            Ok(())
         })
     })
     .await
@@ -772,9 +766,8 @@ async fn scroll(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
             bail!("to must be top, bottom, left or right");
         }
     let timeout = timeout_arg(&args, ACTION_TIMEOUT_MS);
-    run_action(&c, AfterOptions { expect_navigation: false, ..AfterOptions::default() }, move |c, input| {
+    run_action(&c, AfterOptions { expect_navigation: false, ..AfterOptions::default() }, move |c, input, out| {
         Box::pin(async move {
-            let mut out = Map::new();
             let main = c.page.main_frame();
             let element = match &spec {
                 Some(spec) => Some(target::resolve(&c.page, &c.tab_state, spec, ResolveOptions { timeout, act: true }).await?),
@@ -854,7 +847,7 @@ async fn scroll(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
             out.insert("scrollHeight".into(), json!(height));
             out.insert("viewportHeight".into(), json!(client));
             out.insert("atBottom".into(), json!(y + client >= height - 2.0));
-            Ok(out)
+            Ok(())
         })
     })
     .await
@@ -1070,7 +1063,7 @@ async fn upload(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     let files: Vec<UploadFile> = files.iter().map(|file| file.checked(&c.ctx.file_roots)).collect::<Result<_>>()?;
     let timeout = timeout_arg(&args, ACTION_TIMEOUT_MS);
     let explicit_timeout = args.get("timeout").and_then(Value::as_u64).is_some();
-    run_action(&c, AfterOptions { expect_navigation: false, ..AfterOptions::default() }, move |c, input| {
+    run_action(&c, AfterOptions { expect_navigation: false, ..AfterOptions::default() }, move |c, input, out| {
         Box::pin(async move {
             let resolved = target::resolve(&c.page, &c.tab_state, &spec, ResolveOptions { timeout, act: true }).await?;
             let name = if resolved.label.is_empty() { spec.label() } else { resolved.label.clone() };
@@ -1086,11 +1079,10 @@ async fn upload(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
                 interception.disarm().await;
             }
             let via = sent?;
-            let mut out = Map::new();
             out.insert("target".into(), target_label(&spec, &resolved.label));
             out.insert("files".into(), json!(files.iter().map(UploadFile::name).collect::<Vec<_>>()));
             out.insert("via".into(), json!(via));
-            Ok(out)
+            Ok(())
         })
     })
     .await

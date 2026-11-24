@@ -302,6 +302,7 @@ async fn covered_elements_fail_fast_and_dialogs_pause() {
 
     let clicked = h.json("click", json!({ "selector": "#alert" })).await;
     assert_eq!(clicked["dialog"]["type"], "confirm", "{clicked}");
+    assert!(clicked["clicked"].as_str().is_some_and(|label| label.contains("button \"Ask\"")), "{clicked}");
     let blocked = h.err("snapshot", json!({})).await;
     assert!(blocked.contains("dialog is open"), "{blocked}");
     let status = h.json("dialog", json!({})).await;
