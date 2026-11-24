@@ -613,7 +613,7 @@ impl Tool for NetworkTool {
                 "required": ["tab", "action"],
                 "additionalProperties": false
             }),
-            output_schema: None,
+            output_schema: Some(browse_core::output_schema(serde_json::json!({ "tab": { "type": "integer" }, "active": { "type": "boolean" }, "entryCount": { "type": "integer" }, "responseCount": { "type": "integer" }, "failureCount": { "type": "integer" }, "exchanges": { "type": "array", "description": "The captured requests and responses, on stop" }, "cancelled": { "type": "boolean" } }), &[])),
         }
     }
 

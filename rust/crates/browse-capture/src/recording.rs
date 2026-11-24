@@ -386,7 +386,7 @@ impl Tool for RecordingTool {
                 "required": ["tab", "action"],
                 "additionalProperties": false
             }),
-            output_schema: None,
+            output_schema: Some(browse_core::output_schema(serde_json::json!({ "recording": { "type": "boolean" }, "path": { "type": "string", "description": "The video file, once stopped" }, "durationMs": { "type": "integer" }, "frameCount": { "type": "integer" }, "format": { "type": "string" } }), &[])),
         }
     }
 
