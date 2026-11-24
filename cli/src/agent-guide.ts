@@ -9,7 +9,7 @@ export const inspectActVerify = `Use one loop: inspect, act, verify.
 - Act with the narrowest stable control, and keep dependent steps in one \`execute\` while transient UI is open.
 - Verify with a fresh page read (\`page.url()\`, a heading, or a new snapshot). A click that returned, or a handoff the user acknowledged, is not proof the task succeeded.`
 
-export const handoffAdvice = `When only a person can proceed — login, 2FA, passkey, captcha or payment confirmation — call \`handoff("what the user should do")\` and wait. Pass \`start\` for an action that itself blocks. Never solve a captcha yourself and never retry-loop a blocked site; if a challenge is interactive or the site refuses the visit, hand off or stop and tell the user.`
+export const handoffAdvice = `When only a person can proceed — login, 2FA, passkey or payment confirmation — call \`handoff("what the user should do")\` and wait. Pass \`start\` for an action that itself blocks. For a captcha or interactive challenge, try solving it first on the user's behalf, and hand it off if it doesn't clear. Never retry-loop a blocked site; if the site refuses the visit, stop and tell the user.`
 
 export const sessionAdvice = `Each agent has its own current session when the client names the agent (OpenCode does), so bare calls don't land on another agent's page. When the client doesn't name agents, \`status\` reports \`sharedSession: true\` and all agents on this server share one current session, so when several (such as subagents) use it each should \`session_new\` its own and pass \`session\` on every call. When finished, \`session_reset\` (or \`session_delete\`) your own session; keep a session only when follow-up work is expected.`
 
@@ -31,8 +31,8 @@ export const agentHelp = `AGENT GUIDE
   - Verify with a fresh page read (\`page.url()\`, a heading, a new snapshot); a click that returned
     proves nothing.
 
-  When only a person can proceed (login, 2FA, passkey, captcha, payment), call
-  \`handoff("what to do")\` and wait. Never solve a captcha yourself.
+  When only a person can proceed (login, 2FA, passkey, payment), call
+  \`handoff("what to do")\` and wait. For a captcha, try solving it first and hand off if it doesn't clear.
 
   Pass \`--session\` to keep one session across calls. \`browse session reset\` or \`browse session delete\`
   it when done; keep a session only for follow-up work.`

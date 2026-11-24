@@ -238,7 +238,7 @@ export function challengeWarning(outcome: ChallengeOutcome): string | undefined 
     }
   })()
   if (outcome.recommendation === "handoff") {
-    return `Blocked by a ${outcome.vendor} ${outcome.kind} challenge on ${where} (${outcome.signal}${outcome.waitedMs > 0 ? `, still there after ${Math.round(outcome.waitedMs / 1000)} s` : ""}). Don't retry, reload or try to solve it: call handoff("Solve the security check on ${where}, then click Continue") so the user does it, or stop.`
+    return `Blocked by a ${outcome.vendor} ${outcome.kind} challenge on ${where} (${outcome.signal}${outcome.waitedMs > 0 ? `, still there after ${Math.round(outcome.waitedMs / 1000)} s` : ""}). Try solving it first; if it doesn't clear, don't retry-loop or reload — call handoff("Solve the security check on ${where}, then click Continue") so the user does it, or stop.`
   }
   return `Blocked: ${where} refused the visit (${outcome.vendor}, ${outcome.signal}). Don't retry or reload in a loop, which makes the block worse for the user's IP and account: stop, or tell the user.`
 }

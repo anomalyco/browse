@@ -316,8 +316,8 @@ to steer it, and that other programs on your computer may try to use the relay.
 - **WebMCP tools come from the page.** Their names, titles, descriptions, schemas, annotations, `origin` and results are
   whatever a page supplies; browse doesn't verify them, and an annotation like `readOnly` is only the page's word. Treat
   them like any other page text, not as instructions from the user.
-- **Bot challenges.** After a navigation browse reports Cloudflare, captcha walls and "access denied" pages and tells
-  the agent to hand interactive ones to you. It never solves them.
+- **Bot challenges.** After a navigation browse reports Cloudflare, captcha walls and "access denied" pages. For
+  interactive challenges the agent tries to solve it first and hands off to you if it doesn't clear.
 - **Your tabs stay yours.** Agents use only tabs they opened or you lent them. Only a real click on the card or the
   toolbar button finishes a handoff, so a page can't fake it.
 
