@@ -1,18 +1,11 @@
-browse drives the user's real browser (Chrome-family via the browse extension, or Firefox-family directly), so logins, extensions and open tabs are already there and the user can watch or take over.
+browse controls the user's real browser (Chrome-family through the browse extension, or Firefox-family directly). Logins, extensions and open tabs are real, and the user can watch or take over.
 
-Tabs are the handle. `navigate` with a `url` and no `tab` opens a new background tab and returns its id as `tab`; keep it and pass `tab` to every other call (snapshot, click, fill, screenshot, ...). `navigate` with `tab` goes to a URL in that tab. Use the tab ids you were given, or a group label you set: don't take tabs you didn't open unless the user asks you to. Popups a page opens show up as `newTabs` in a result and are yours to use. `tabs` lists every agent tab and any tabs the user lent (with the Chrome extension, they click the browse toolbar button on a tab; use it by its id).
-
-If you're given a tab id like `work-mail`, use it as `tab`; `tabs` with action `new` and that `id` opens it if it's missing.
-
-Use one loop: inspect, act, verify.
-- Inspect with `snapshot` before choosing anything. It returns an accessibility tree with refs like `e12`; pass a ref (with the same `tab`) to `click`, `fill`, `type`, `select`, `hover` or `drag`. Refs go stale after the page changes: snapshot again.
-- Act with the narrowest stable control. Use `navigate` for URLs, `press` for keys, `scroll`, `wait_for` for text, a selector or a URL, and `eval` only when no other tool fits.
-- Verify with a fresh read (`snapshot`, `screenshot`, or `eval` of the URL). A click that returned is not proof the task succeeded.
-
-In code mode, compose these tools in one script: navigate, call `snapshot`, pick refs from its text, act, then snapshot again to check, all in one run instead of one tool call per turn.
-
-When only a person can proceed — login, 2FA, passkey or payment confirmation — call `handoff` with the `tab` and what the user should do, and wait. For a captcha or interactive challenge, try solving it first on the user's behalf, and hand it off if it doesn't clear. Never retry-loop a blocked site.
-
-When finished, close the tabs you opened (`tabs` with action `close`; `group` closes every tab you opened with that group label). `status` reports the relay and the connected browsers.
-
-If a call fails because no browser is connected, `status` says why in `nextStep`: pass that step to the user and wait for them instead of retrying.
+- `navigate` with a `url` and no `tab` opens a background tab and returns its id as `tab`. Pass that `tab` to every other tool. `navigate` with `tab` loads a URL in that tab.
+- Use only tabs you opened, tabs you were given (an id, or a name like `work-mail`), and tabs the user lent (`tabs` lists them). Popups a page opens arrive as `newTabs` and are yours.
+- Call `snapshot` before acting. Act on its refs (like `e12`) with `click`, `fill`, `type`, `select`, `hover` or `drag`. Refs expire when the page changes: snapshot again.
+- Use the most specific tool: `navigate` for URLs, `press` for keys, `scroll`, `wait_for`. Use `eval` only when nothing else fits.
+- Verify each step with a fresh `snapshot`, `screenshot` or `eval`. A click that returned is not proof.
+- In code mode, run navigate, snapshot, act and snapshot in one script.
+- Logins, 2FA, passkeys, captchas and payment confirmations are for the user: call `handoff` with the `tab` and what to do, and wait. Never solve a captcha. Never retry a blocked site in a loop.
+- When finished, close the tabs you opened: `tabs` with action `close` and the `tab`, or a `group`.
+- If no browser is connected, `status` explains why in `nextStep`. Tell the user and wait.
