@@ -232,7 +232,7 @@ fn mcp_speaks_both_eras_and_shares_tabs_across_connections() {
         json!({ "protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": { "name": "opencode", "version": "test" } }),
     );
     assert_eq!(init["protocolVersion"], "2025-11-25");
-    assert!(init["instructions"].as_str().unwrap_or_default().contains("Tabs are the handle"), "{init}");
+    assert!(init["instructions"].as_str().unwrap_or_default().contains("Pass that `tab` to every other tool"), "{init}");
     legacy.send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
     let listed = legacy.request("tools/list", json!({}));
     assert!(listed["tools"].as_array().is_some_and(|tools| !tools.is_empty()), "{listed}");

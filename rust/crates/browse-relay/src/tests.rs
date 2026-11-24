@@ -478,7 +478,7 @@ async fn the_client_name_decides_tools_and_instructions() {
     assert_eq!(names(get("/tools", "claude-code").await), ["status", "tabs"]);
     assert!(names(get("/tools", "opencode").await).contains(&"handoff".to_string()));
     let plain = get("/instructions", "opencode").await;
-    assert!(plain["instructions"].as_str().unwrap().contains("Tabs are the handle"), "{plain}");
+    assert!(plain["instructions"].as_str().unwrap().contains("Pass that `tab` to every other tool"), "{plain}");
     let scripted = get("/instructions", "cursor").await;
     assert!(scripted["instructions"].as_str().unwrap().contains("execute"), "{scripted}");
 }
