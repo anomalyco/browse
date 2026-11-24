@@ -89,6 +89,14 @@ describe("guardCdpMethod", () => {
     }
   })
 
+  test("read-only sessions may only turn file chooser interception off", () => {
+    const guard = (params: Record<string, unknown>) => guardCdpMethod({ method: "Page.setInterceptFileChooserDialog", readOnly: true, sessionId: "look", params })
+    expect(guard({ enabled: false })).toBeNull()
+    for (const params of [{ enabled: true }, { enabled: "false" }, {}, { enabled: false, cancel: true }]) {
+      expect(guard(params)).toContain("this tab is read-only")
+    }
+  })
+
   test("read-only sessions cannot navigate, click or write cookies", () => {
     const refused = [
       { method: "Page.navigate", params: { url: "https://example.com/" } },

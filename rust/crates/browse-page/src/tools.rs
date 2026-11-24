@@ -1069,6 +1069,7 @@ async fn upload(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
     let files = crate::files::parse_upload_files(args.get("files"))?;
     let files: Vec<UploadFile> = files.iter().map(|file| file.checked(&c.ctx.file_roots)).collect::<Result<_>>()?;
     let timeout = timeout_arg(&args, ACTION_TIMEOUT_MS);
+    let explicit_timeout = args.get("timeout").and_then(Value::as_u64).is_some();
     run_action(&c, AfterOptions { expect_navigation: false, ..AfterOptions::default() }, move |c, input| {
         Box::pin(async move {
             let resolved = target::resolve(&c.page, &c.tab_state, &spec, ResolveOptions { timeout, act: true }).await?;
@@ -1076,7 +1077,7 @@ async fn upload(ctx: ToolContext, args: Value) -> Result<ToolOutput> {
             let (target, interception) = match c.page.call_element_result(&resolved.element.frame, "fileInput", vec![Arg::Element(resolved.element.clone())], true).await? {
                 ElementOr::Element(element) => (element, None),
                 ElementOr::Status(_) => {
-                    let (target, interception) = upload_through_file_chooser(c, input, &spec, &name, timeout).await?;
+                    let (target, interception) = upload_through_file_chooser(c, input, &spec, &name, timeout, explicit_timeout).await?;
                     (target, Some(interception))
                 }
             };
@@ -1104,8 +1105,10 @@ struct ChooserInterception {
 }
 
 impl ChooserInterception {
-    async fn arm(page: &Arc<TabPage>) -> Result<Self> {
-        let lock = page.file_chooser.clone().lock_owned().await;
+    async fn arm(page: &Arc<TabPage>, timeout: Duration) -> Result<Self> {
+        let lock = tokio::time::timeout(timeout, page.file_chooser.clone().lock_owned())
+            .await
+            .map_err(|_| anyhow!("upload timed out waiting for the tab's file chooser"))?;
         let driver = page.driver().clone();
         let arm = driver.prepare_file_chooser_interception();
         // The guard exists before enabling, so a dropped enable still disarms this generation.
@@ -1143,6 +1146,7 @@ async fn upload_through_file_chooser(
     spec: &Spec,
     name: &str,
     timeout: Duration,
+    explicit_timeout: bool,
 ) -> Result<(crate::page::Element, ChooserInterception)> {
     let (resolved, at) = actions::locate(
         &c.page,
@@ -1152,17 +1156,21 @@ async fn upload_through_file_chooser(
         PointerOptions { timeout, force: false, position: None, hit_test: true, enabled: true },
     )
     .await?;
-    // Arm as late as possible, after the click point is settled and immediately before the press.
-    let interception = ChooserInterception::arm(&c.page).await?;
+    // Move first, so only the press that follows arming can open the chooser.
+    input.move_to(at, 1).await?;
+    let interception = ChooserInterception::arm(&c.page, timeout).await?;
     let started = Instant::now();
     let clicked = async {
-        input.click(at, "left", 1).await?;
+        input.click_after_move("left", 1).await?;
         let remaining = timeout.saturating_sub(started.elapsed()).max(Duration::from_millis(1));
-        let wait = remaining.min(Duration::from_secs(2));
+        let wait = if explicit_timeout { remaining } else { remaining.min(Duration::from_secs(2)) };
         match c.page.driver().take_file_chooser(wait).await.map_err(crate::page::driver_error)? {
             Some(FileChooser { frame, input: Some(handle) }) => {
                 if frame.as_str() != resolved.element.frame {
                     bail!("the file chooser opened in a different frame than {name}");
+                }
+                if handle.document.0 != resolved.element.generation {
+                    bail!("the frame navigated before the file chooser opened");
                 }
                 c.page.track_transient(handle.clone());
                 Ok(crate::page::Element {

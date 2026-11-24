@@ -65,6 +65,20 @@ fn is_fragment_change(current: &str, next: &str) -> bool {
     next.contains('#') && !current.is_empty() && cur_base == next_base
 }
 
+/// The frame a chooser event belongs to, but only when the event came from that frame's own session.
+fn file_chooser_frame(st: &DriverState, named: &str, session: &Option<String>) -> Option<(FrameId, DocumentId)> {
+    let named = FrameId::from(named);
+    let frame = if !named.as_str().is_empty() {
+        Some(named)
+    } else if let Some(session) = session.as_ref() {
+        st.sessions.get(session).cloned()
+    } else {
+        st.main_frame.clone()
+    }?;
+    let entry = st.frames.get(&frame)?;
+    (entry.session.as_deref() == session.as_deref()).then(|| (frame.clone(), entry.frame.document))
+}
+
 /// Errors that just mean the child session went away while it was being armed.
 fn file_chooser_session_gone(error: &CdpError) -> bool {
     match error {
@@ -102,6 +116,8 @@ struct DriverState {
     frames: HashMap<FrameId, FrameEntry>,
     /// Active child target sessions (`session_id` -> `target_id`).
     sessions: HashMap<String, FrameId>,
+    /// Child sessions whose `Page.enable` finished, so chooser interception can be armed on them.
+    ready_sessions: HashSet<String>,
     /// Cached isolated world CDP `executionContextId` per `(frame_id, document_id)`.
     isolated_worlds: HashMap<(FrameId, DocumentId), i64>,
     /// Active CDP session scope that opened the current JS dialog.
@@ -661,16 +677,8 @@ impl Shared {
                 if !st.intercept_file_chooser {
                     return;
                 }
-                let named = FrameId::from(str_of(params, "frameId"));
-                let frame = if !named.as_str().is_empty() {
-                    Some(named)
-                } else if let Some(session) = session.as_ref() {
-                    st.sessions.get(session).cloned()
-                } else {
-                    st.main_frame.clone()
-                };
-                let Some(frame) = frame else { return };
-                let Some(document) = st.frames.get(&frame).map(|entry| entry.frame.document) else { return };
+                let named = str_of(params, "frameId");
+                let Some((frame, document)) = file_chooser_frame(&st, &named, &session) else { return };
                 st.file_chooser = Some(PendingFileChooser {
                     frame,
                     document,
@@ -720,6 +728,7 @@ impl Shared {
                 let child = str_of(params, "sessionId");
                 let removed = {
                     let mut st = self.state.lock().unwrap();
+                    st.ready_sessions.remove(&child);
                     if st.sessions.remove(&child).is_some() {
                         let ids: Vec<FrameId> = st
                             .frames
@@ -752,12 +761,18 @@ impl Shared {
         waiting: bool,
     ) {
         let s = Some(session.as_str());
-        let _ = self.cdp.send("Page.enable", json!({}), s).await;
-        {
+        if self.cdp.send("Page.enable", json!({}), s).await.is_ok() {
+            self.state.lock().unwrap().ready_sessions.insert(session.clone());
+        }
+        let may_be_armed = {
+            let st = self.state.lock().unwrap();
+            st.intercept_file_chooser
+        };
+        if may_be_armed {
             let _transition = self.file_chooser_lock.lock().await;
             let generation = {
                 let st = self.state.lock().unwrap();
-                st.intercept_file_chooser.then_some(st.file_chooser_generation)
+                (st.intercept_file_chooser && st.ready_sessions.contains(&session)).then_some(st.file_chooser_generation)
             };
             if let Some(generation) = generation {
                 if let Err(error) = self
@@ -890,6 +905,19 @@ impl CdpTabDriver {
             if let Err(error) = self.set_chooser_dialog(false, None).await {
                 eprintln!("browse: turning off file chooser interception failed again ({error})");
             }
+        }
+    }
+
+    async fn disable_chooser_child(&self, session: &str) {
+        let Err(error) = self.set_chooser_dialog(false, Some(session)).await else { return };
+        if file_chooser_session_gone(&error) {
+            return;
+        }
+        eprintln!("browse: turning off file chooser interception in a child frame failed ({error}); retrying once");
+        if let Err(error) = self.set_chooser_dialog(false, Some(session)).await
+            && !file_chooser_session_gone(&error)
+        {
+            eprintln!("browse: turning off file chooser interception in a child frame failed again ({error})");
         }
     }
 
@@ -1329,7 +1357,10 @@ impl TabDriver for CdpTabDriver {
             self.reset_file_chooser_arm(arm);
             return Err(map_cdp_error(error));
         }
-        let children: Vec<String> = self.shared.state.lock().unwrap().sessions.keys().cloned().collect();
+        let children: Vec<String> = {
+            let st = self.shared.state.lock().unwrap();
+            st.sessions.keys().filter(|session| st.ready_sessions.contains(*session)).cloned().collect()
+        };
         let mut armed = Vec::new();
         for child in children {
             match self.set_chooser_dialog(true, Some(&child)).await {
@@ -1339,7 +1370,7 @@ impl TabDriver for CdpTabDriver {
                 Err(error) => {
                     self.disable_chooser_root().await;
                     for child in &armed {
-                        let _ = self.set_chooser_dialog(false, Some(child)).await;
+                        self.disable_chooser_child(child).await;
                     }
                     self.reset_file_chooser_arm(arm);
                     return Err(map_cdp_error(error));
@@ -1363,7 +1394,7 @@ impl TabDriver for CdpTabDriver {
         };
         self.disable_chooser_root().await;
         for child in children {
-            let _ = self.set_chooser_dialog(false, Some(&child)).await;
+            self.disable_chooser_child(&child).await;
         }
         // Bump only after the disables went out, so a dropped disarm can be retried with the same arm; a newer
         // prepare during the sends keeps its own generation.
@@ -1941,4 +1972,38 @@ fn encode_png_rgba(width: u32, height: u32, rgba: &[u8]) -> DriverResult<Vec<u8>
             .map_err(|e| DriverError::Protocol(format!("PNG encode failed: {e}")))?;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(id: &str, session: Option<&str>, document: u64) -> FrameEntry {
+        FrameEntry {
+            frame: Frame {
+                id: FrameId::from(id),
+                parent: None,
+                url: String::new(),
+                name: String::new(),
+                document: DocumentId(document),
+            },
+            loader_id: String::new(),
+            session: session.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn chooser_events_only_match_their_own_session() {
+        let mut st = DriverState { main_frame: Some(FrameId::from("main")), ..DriverState::default() };
+        st.frames.insert(FrameId::from("main"), entry("main", None, 1));
+        st.frames.insert(FrameId::from("child"), entry("child", Some("s1"), 2));
+        st.sessions.insert("s1".into(), FrameId::from("child"));
+
+        assert_eq!(file_chooser_frame(&st, "", &None), Some((FrameId::from("main"), DocumentId(1))));
+        assert_eq!(file_chooser_frame(&st, "", &Some("s1".into())), Some((FrameId::from("child"), DocumentId(2))));
+        assert_eq!(file_chooser_frame(&st, "child", &Some("s1".into())), Some((FrameId::from("child"), DocumentId(2))));
+        // An OOPIF frame id reported on the root session belongs to another session's DOM: ignore it.
+        assert_eq!(file_chooser_frame(&st, "child", &None), None);
+        assert_eq!(file_chooser_frame(&st, "", &Some("gone".into())), None);
+    }
 }

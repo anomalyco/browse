@@ -671,6 +671,27 @@ async fn a_stale_file_chooser_disarm_leaves_a_newer_arm_alone() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_file_chooser_from_a_previous_document_is_stale() {
+    let _upload = support::UPLOAD_LOCK.lock().await;
+    let h = harness!(false);
+    let url = h.server.page(
+        "/chooser-stale",
+        r#"<!doctype html><button id="attach" onclick="document.getElementById('file').click()">Attach</button><input id="file" type="file">"#,
+    );
+    h.server.page("/chooser-next", "<!doctype html><title>Next</title>");
+    h.ok("navigate", json!({ "url": url })).await;
+
+    let driver = h.ctx.browser.tab_driver(1).await.unwrap();
+    let arm = driver.prepare_file_chooser_interception();
+    driver.arm_file_chooser_interception(arm).await.unwrap();
+    h.ok("click", json!({ "selector": "#attach" })).await;
+    h.ok("navigate", json!({ "url": h.server.page("/nowhere", "") })).await;
+    let result = driver.take_file_chooser(std::time::Duration::from_secs(1)).await;
+    assert!(matches!(&result, Err(browse_core::DriverError::Stale)), "{result:?}");
+    driver.disarm_file_chooser_interception(arm).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn upload_clicks_into_a_cross_origin_iframe() {
     let _upload = support::UPLOAD_LOCK.lock().await;
     let h = harness!(false);
