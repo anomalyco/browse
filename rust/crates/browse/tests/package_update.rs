@@ -81,7 +81,9 @@ fn release_service_with(tarball: Option<Vec<u8>>) -> (String, Arc<Mutex<Vec<Requ
             let mut reader = BufReader::new(stream);
             let mut line = String::new();
             let _ = reader.read_line(&mut line);
-            let path = line.split_whitespace().nth(1).unwrap_or_default().to_owned();
+            // A connection that closes without a request line (the updater connecting as its relay exits to restart on
+            // the new binary, say) isn't a request: skip it rather than record an empty path.
+            let Some(path) = line.split_whitespace().nth(1).map(str::to_owned) else { continue };
             let mut user_agent = String::new();
             let mut header = String::new();
             while reader.read_line(&mut header).is_ok_and(|n| n > 2) {
