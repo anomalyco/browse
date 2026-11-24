@@ -23,6 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, bail};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use ureq::tls::{RootCerts, TlsConfig};
 
 pub use crate::method::{Global, Install, Manager, dist_tag, install};
 use crate::method::{PACKAGE, Runner};
@@ -100,6 +101,12 @@ fn state_path() -> PathBuf {
 
 pub fn state() -> Value {
     std::fs::read(state_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).filter(Value::is_object).unwrap_or_else(|| json!({}))
+}
+
+/// The message from the last background check that failed (`auto-update.json` `failed`), cleared by the next check
+/// that works. Unlike `lastError`, which is about installing a release, this is about reaching the release service.
+fn check_failure(state: &Value) -> Option<&str> {
+    state.get("failed").and_then(Value::as_str)
 }
 
 pub fn update_state(change: impl FnOnce(&mut Value)) -> anyhow::Result<()> {
@@ -229,10 +236,21 @@ fn service() -> String {
     std::env::var("OPENCODE_BROWSER_RELEASE_SERVICE").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| RELEASE_SERVICE.into()).trim_end_matches('/').to_owned()
 }
 
+/// The client every update request uses: this install's User-Agent, `timeout`, and this computer's trusted
+/// certificates. Trusting the platform store (and `SSL_CERT_FILE`/`SSL_CERT_DIR` on Linux) is what lets updates work
+/// behind a TLS-inspecting proxy whose root isn't one of the bundled ones.
+fn agent(kind: Kind, timeout: Duration) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .user_agent(kind.user_agent())
+        .tls_config(TlsConfig::builder().root_certs(RootCerts::PlatformVerifier).build())
+        .build()
+        .into()
+}
+
 /// GETs `url` with this install's User-Agent, failing on an error status, a body over `limit` bytes or `timeout`.
 fn get(kind: Kind, url: &str, timeout: Duration, limit: u64) -> anyhow::Result<Vec<u8>> {
-    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(timeout)).user_agent(kind.user_agent()).build().into();
-    let mut response = agent.get(url).call().with_context(|| format!("couldn't get {url}"))?;
+    let mut response = agent(kind, timeout).get(url).call().with_context(|| format!("couldn't get {url}"))?;
     Ok(response.body_mut().with_config().limit(limit).read_to_vec()?)
 }
 
@@ -659,6 +677,9 @@ pub fn status_json() -> Value {
     if let Some(error) = state.get("lastError") {
         status["lastError"] = error.clone();
     }
+    if let Some(failed) = check_failure(&state) {
+        status["checkFailed"] = json!(failed);
+    }
     status
 }
 
@@ -715,6 +736,8 @@ pub fn describe() -> String {
     }
     if let Some(error) = state.get("lastError").and_then(|e| e.get("message")).and_then(Value::as_str) {
         line.push_str(&format!(", last attempt failed: {error}"));
+    } else if let Some(failed) = check_failure(&state) {
+        line.push_str(&format!(", last check failed: {failed}"));
     }
     line
 }
@@ -806,7 +829,7 @@ impl Worker {
         let tick = self.interval.min(Duration::from_secs(300));
         loop {
             if let Err(error) = self.tick(effective_mode()) {
-                let _ = update_state(|s| s["failed"] = json!(error.to_string()));
+                let _ = update_state(|s| s["failed"] = json!(format!("{error:#}")));
             }
             std::thread::sleep(tick);
         }
@@ -963,6 +986,26 @@ mod tests {
             };
             assert_eq!(Kind::of(&install).user_agent(), expected, "{}", install.name());
         }
+    }
+
+    /// A proxy's root is in this computer's store, not among the bundled roots: update requests must trust the platform
+    /// verifier or they fail with "invalid peer certificate: UnknownIssuer" behind TLS inspection.
+    #[test]
+    fn update_requests_trust_the_platform_certificate_store() {
+        let agent = super::agent(Kind::Binary, std::time::Duration::from_secs(1));
+        assert!(matches!(agent.config().tls_config().root_certs(), ureq::tls::RootCerts::PlatformVerifier));
+    }
+
+    /// A check that can't reach the release service is reported from `auto-update.json`'s `failed`, separately from an
+    /// install's `lastError`.
+    #[test]
+    fn a_failed_check_is_read_from_the_state() {
+        let state = serde_json::json!({ "failed": "couldn't get https://anoma.ly/release/browse/cli/stable.json: invalid peer certificate: UnknownIssuer" });
+        assert_eq!(
+            super::check_failure(&state),
+            Some("couldn't get https://anoma.ly/release/browse/cli/stable.json: invalid peer certificate: UnknownIssuer")
+        );
+        assert_eq!(super::check_failure(&serde_json::json!({ "lastError": { "message": "npm failed" } })), None);
     }
 
     /// Only a checkout build skips the updater; a global install whose binary can't be found still checks in, and

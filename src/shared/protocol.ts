@@ -138,6 +138,8 @@ export type RelayAutoUpdate = {
   pending?: string
   previous?: string
   lastError?: RelayUpdateFailure
+  /** The last background check that failed (no network, a proxy's certificate), cleared by the next check that works. */
+  checkFailed?: string
 }
 
 /** An optional update that stayed pending this long is told to the user rather than waited on quietly. */

@@ -224,6 +224,7 @@ export function relayAutoUpdate(input: unknown): RelayAutoUpdate | undefined {
     checkedAt: short(input.checkedAt),
     pending: short(input.pending),
     previous: short(input.previous),
+    checkFailed: short(input.checkFailed, 300),
   }
   const lastError = relayUpdateFailure(input.lastError)
   return {
