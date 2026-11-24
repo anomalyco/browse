@@ -315,14 +315,20 @@ async fn covered_elements_fail_fast_and_dialogs_pause() {
     assert_eq!(title, "\"false\"");
 }
 
-/// fill and select check what a click checks: a field under an overlay fails without force and is left untouched.
+/// fill checks what a click checks on text fields: one under an overlay fails without force and is left untouched,
+/// and a fields list stops at the covered one, keeping what it already filled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn fill_and_select_fail_when_something_covers_them() {
+async fn fill_fails_when_something_covers_the_field() {
     let h = harness!(false);
     let url = h.server.page(
         "/covered-form",
-        r#"<!doctype html><style>#overlay { position: fixed; inset: 0; background: rgba(0,0,0,.3) }</style>
-<input id="name"><select id="plan"><option value="free">Free</option><option value="pro">Pro</option></select>
+        r#"<!doctype html><style>
+#first, #name { position: absolute; left: 10px; width: 200px }
+#first { top: 10px }
+#name { top: 160px }
+#overlay { position: fixed; left: 0; top: 100px; width: 100%; height: 300px; background: rgba(0,0,0,.3) }
+</style>
+<input id="first"><input id="name">
 <div id="overlay"></div>"#,
     );
     h.ok("navigate", json!({ "url": url })).await;
@@ -333,21 +339,18 @@ async fn fill_and_select_fail_when_something_covers_them() {
     let value = h.ok("eval", json!({ "expression": "document.getElementById('name').value" })).await;
     assert_eq!(value, "\"\"", "a covered field is left empty");
 
+    // Each field is filled in order: the ones before the covered one keep their value.
+    let error = h.err("fill", json!({ "fields": [ { "selector": "#first", "value": "one" }, { "selector": "#name", "value": "two" } ] })).await;
+    assert!(error.contains("div id=\"overlay\""), "{error}");
+    assert!(error.contains("Filled") && error.contains("then"), "{error}");
+    let value = h.ok("eval", json!({ "expression": "document.getElementById('first').value" })).await;
+    assert_eq!(value, "\"one\"", "the field before the covered one was filled");
+    let value = h.ok("eval", json!({ "expression": "document.getElementById('name').value" })).await;
+    assert_eq!(value, "\"\"", "the covered field is left empty");
+
     h.ok("fill", json!({ "selector": "#name", "value": "x", "force": true })).await;
     let value = h.ok("eval", json!({ "expression": "document.getElementById('name').value" })).await;
     assert_eq!(value, "\"x\"");
-
-    let error = h.err("fill", json!({ "selector": "#plan", "value": "Pro" })).await;
-    assert!(error.contains("div id=\"overlay\""), "{error}");
-    let value = h.ok("eval", json!({ "expression": "document.getElementById('plan').value" })).await;
-    assert_eq!(value, "\"free\"", "a covered select stays unchanged");
-
-    let error = h.err("select", json!({ "selector": "#plan", "values": ["Pro"] })).await;
-    assert!(error.contains("div id=\"overlay\""), "{error}");
-    let value = h.ok("eval", json!({ "expression": "document.getElementById('plan').value" })).await;
-    assert_eq!(value, "\"free\"");
-    let selected = h.json("select", json!({ "selector": "#plan", "values": ["Pro"], "force": true })).await;
-    assert_eq!(selected["selected"][0], "pro", "{selected}");
 
     // A floating label over its own field is not a cover: clicking it focuses the field, so both work.
     let url = h.server.page(
@@ -365,6 +368,39 @@ label { position: absolute; left: 100px; top: 30px; width: 60px; height: 20px; z
     h.ok("click", json!({ "selector": "#city" })).await;
     let focused = h.ok("eval", json!({ "expression": "document.activeElement.id" })).await;
     assert_eq!(focused, "\"city\"");
+}
+
+/// Native <select>s are often hidden under custom dropdowns (Select2 and the like) and driven by setting their
+/// value, so fill and select set them without checking what is on top.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hidden_or_covered_selects_are_still_set() {
+    let h = harness!(false);
+    let url = h.server.page(
+        "/styled-selects",
+        r#"<!doctype html><style>
+.select2 { position: relative; display: inline-block }
+.select2 select { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; clip: rect(0 0 0 0); overflow: hidden }
+.select2 span { display: block; padding: 4px 8px; border: 1px solid #ccc; background: #fff }
+.covered { position: relative; width: 120px; height: 30px }
+.covered button { position: absolute; inset: 0; width: 120px; height: 30px; z-index: 2 }
+.covered select { opacity: 0; width: 120px; height: 30px }
+</style>
+<label class="select2"><span>Free</span><select id="custom"><option value="free">Free</option><option value="pro">Pro</option></select></label>
+<div class="covered"><button type="button">Choose</button><select id="invisible"><option value="free">Free</option><option value="pro">Pro</option></select></div>
+<select id="none" style="display:none"><option value="free">Free</option><option value="pro">Pro</option></select>"#,
+    );
+    h.ok("navigate", json!({ "url": url })).await;
+
+    let started = std::time::Instant::now();
+    for id in ["custom", "invisible", "none"] {
+        h.ok("fill", json!({ "selector": format!("#{id}"), "value": "Pro" })).await;
+        let value = h.ok("eval", json!({ "expression": format!("document.getElementById('{id}').value") })).await;
+        assert_eq!(value, "\"pro\"", "fill sets #{id}");
+        h.ok("select", json!({ "selector": format!("#{id}"), "values": ["Free"] })).await;
+        let value = h.ok("eval", json!({ "expression": format!("document.getElementById('{id}').value") })).await;
+        assert_eq!(value, "\"free\"", "select sets #{id}");
+    }
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "hidden selects are set without waiting; took {:?}", started.elapsed());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
